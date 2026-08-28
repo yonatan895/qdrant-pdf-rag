@@ -23,3 +23,6 @@ oc-mirror
 vendor
 NOTICE.qdrant-skills
 LICENSE.qdrant-skills
+# CI-only mock server: must never ship inside a prod image (runs from a
+# ConfigMap in the rehearsal instead).
+scripts/mock_vllm.py

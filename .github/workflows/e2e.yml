@@ -50,7 +50,7 @@ jobs:
       ingest_image: ${{ steps.refs.outputs.ingest }}
       agent_image: ${{ steps.refs.outputs.agent }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (pin does not cover runtime-fetched oc/skopeo below)
 
       # cp314 wheels require a 3.14 interpreter for the wheelhouse build.
       - uses: actions/setup-python@v5
@@ -125,12 +125,12 @@ jobs:
       OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
       SHA: ${{ needs.build.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (pin does not cover runtime-fetched oc/skopeo below)
 
       - name: Install helm + oc
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
       - name: Install oc
-        uses: redhat-actions/openshift-tools-installer@v1
+        uses: redhat-actions/openshift-tools-installer@144527c7d98999f2652264c048c7a9bd103f8a82 # v1 (the installer fetches oc at run time — supply-chain surface, see AGENTS.md §6)
         with:
           oc: "4"
 
@@ -203,6 +203,16 @@ jobs:
             python /app/scripts/smoke_search.py \
               --url http://rag-agent:8080 --query "torque the widget screws" --expect "torque"
 
+      - name: Failure diagnostics (pods, events, logs)
+        if: failure()
+        run: |
+          kubectl -n "$NS" get pods,pvc,svc,jobs -o wide || true
+          kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -40 || true
+          kubectl -n "$NS" describe statefulset/qdrant deploy/rag-agent 2>/dev/null | tail -60 || true
+          kubectl -n "$NS" logs statefulset/qdrant --all-containers --tail=50 || true
+          kubectl -n "$NS" logs deploy/rag-agent --all-containers --tail=100 || true
+          kubectl -n "$NS" logs job/ingest --tail=100 || true
+
       - name: Delete ephemeral namespace
         if: always()
         run: |
@@ -222,8 +232,11 @@ jobs:
   #   - scripts/mock_vllm.py plays the owning team's vLLM endpoint: same API
   #     shape, deterministic vectors — the airgap scripts refuse
   #     EMBED_MODE=hash, so the prod embed path stays honest.
-  #   - QDRANT_STORAGE_SIZE / QDRANT_EXTRA_VALUES / INGEST_WORK_SIZE shrink
-  #     PVCs and pod resources for lab quota.
+  #   - QDRANT_STORAGE_SIZE / QDRANT_EXTRA_VALUES / INGEST_WORK_SIZE /
+  #     INGEST_EXTRA_PATCH shrink PVCs and resources for lab quota.
+  #   - PULL_SECRET (ghcr-pull) is wired into deploy/ingest: load pushes the
+  #     qdrant image to a fresh (private) GHCR package, so anonymous pull
+  #     would ImagePullBackoff.
   airgap-rehearsal:
     needs: [build, e2e-secrets-check]
     if: >-
@@ -239,11 +252,16 @@ jobs:
       AGENT_IMAGE: ${{ needs.build.outputs.agent_image }}
       INGEST_IMAGE: ${{ needs.build.outputs.ingest_image }}
     steps:
-      - uses: actions/checkout@v4
+      # Full history: airgap-pack bundles the repo with `git bundle create
+      # ... HEAD --all`, and a --depth 1 clone produces a bundle whose clone
+      # fails to traverse parents — CI would certify an unclonable artifact.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (pin does not cover runtime-fetched oc/skopeo below)
+        with:
+          fetch-depth: 0
 
       - name: Install helm, oc, skopeo
-        uses: azure/setup-helm@v4
-      - uses: redhat-actions/openshift-tools-installer@v1
+        uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
+      - uses: redhat-actions/openshift-tools-installer@144527c7d98999f2652264c048c7a9bd103f8a82 # v1 (the installer fetches oc at run time — supply-chain surface, see AGENTS.md §6)
         with:
           oc: "4"
       - name: Install skopeo (pack/load)
@@ -262,10 +280,24 @@ jobs:
           oc new-project "$NS"
           oc label namespace "$NS" app.kubernetes.io/managed-by=e2e-workflow ephemeral=true
 
+      - name: Create GHCR pull secret (rehearsal loads private packages)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          kubectl -n "$NS" create secret docker-registry ghcr-pull \
+            --docker-server=ghcr.io \
+            --docker-username="${{ github.actor }}" \
+            --docker-password="$GITHUB_TOKEN"
+          echo "PULL_SECRET=ghcr-pull" >> "$GITHUB_ENV"
+
+      # The mock ships as a ConfigMap: scripts/mock_vllm.py is excluded from
+      # the images (.dockerignore) so a CI-only HTTP server never ships in a
+      # prod image.
       - name: Deploy mock vLLM (deterministic embeddings stand-in)
         run: |
           OWNER_LC="$(echo "${{ github.repository_owner }}" | tr 'A-Z' 'a-z')"
           echo "OWNER_LC=$OWNER_LC" >> "$GITHUB_ENV"
+          kubectl -n "$NS" create configmap mock-vllm --from-file=mock_vllm.py=scripts/mock_vllm.py
           kubectl apply -n "$NS" -f - <<EOF
           apiVersion: apps/v1
           kind: Deployment
@@ -281,7 +313,7 @@ jobs:
                 containers:
                   - name: mock
                     image: ${AGENT_IMAGE}
-                    command: ["python3", "/app/scripts/mock_vllm.py"]
+                    command: ["python3", "/cm/mock_vllm.py"]
                     env:
                       - {name: MOCK_DIM, value: "64"}
                       - {name: PORT, value: "8000"}
@@ -292,6 +324,10 @@ jobs:
                     resources:
                       requests: {cpu: "50m", memory: 128Mi}
                       limits: {cpu: "500m", memory: 256Mi}
+                    volumeMounts: [{name: mock, mountPath: /cm}]
+                volumes:
+                  - name: mock
+                    configMap: {name: mock-vllm}
           ---
           apiVersion: v1
           kind: Service
@@ -318,6 +354,14 @@ jobs:
             requests: {cpu: "100m", memory: 256Mi}
             limits: {cpu: "1", memory: 1Gi}
           EOF
+          echo "QDRANT_EXTRA_VALUES=$RUNNER_TEMP/qdrant-ci-scale.yaml" >> "$GITHUB_ENV"
+
+      - name: Write CI-scale ingest patch (same quota; prod Job asks 4cpu/8Gi)
+        run: |
+          cat > "$RUNNER_TEMP/ingest-ci-scale.json" <<'EOF'
+          {"spec":{"template":{"spec":{"containers":[{"name":"ingest","resources":{"requests":{"cpu":"250m","memory":"512Mi"},"limits":{"cpu":"1","memory":"1Gi"}}}]}}}}
+          EOF
+          echo "INGEST_EXTRA_PATCH=$RUNNER_TEMP/ingest-ci-scale.json" >> "$GITHUB_ENV"
 
       - name: airgap-pack (real sneakernet bundle at this SHA)
         env:
@@ -326,6 +370,10 @@ jobs:
           make airgap-pack
           ls -la dist/
           cat dist/MANIFEST.txt
+          # Rehearse the runbook's first operator step: the bundle must clone.
+          rm -rf "$RUNNER_TEMP/bundle-clone"
+          git clone --quiet dist/repo.bundle "$RUNNER_TEMP/bundle-clone"
+          git -C "$RUNNER_TEMP/bundle-clone" log --oneline -1
 
       - name: airgap-load (GHCR stands in for INTERNAL_REGISTRY)
         env:

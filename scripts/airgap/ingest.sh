@@ -74,6 +74,16 @@ fi
 if grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml; then
     die "unsubstituted placeholder left in rendered ingest manifest (check airgap.env)"
 fi
+# CI-rehearsal knob (never set in the air gap): strategic-merge a patch into
+# the rendered Job — e.g. lab-quota resources — without touching the prod
+# overlay in git. Client-side only; the cluster is not contacted.
+INGEST_EXTRA_PATCH=${INGEST_EXTRA_PATCH:-}
+if [ -n "$INGEST_EXTRA_PATCH" ]; then
+    [ -f "$INGEST_EXTRA_PATCH" ] || die "INGEST_EXTRA_PATCH file not found: $INGEST_EXTRA_PATCH"
+    $KC patch --local -f dist/ingest-rendered.yaml \
+        -p "$(cat "$INGEST_EXTRA_PATCH")" -o yaml > dist/ingest-rendered-patched.yaml
+    mv dist/ingest-rendered-patched.yaml dist/ingest-rendered.yaml
+fi
 # Jobs are immutable: remove a previous run so re-ingest works.
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE delete job ingest --ignore-not-found"

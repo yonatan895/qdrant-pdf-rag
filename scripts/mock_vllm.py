@@ -47,13 +47,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def do_GET(self) -> None:  # noqa: N802 — http.server API
+    def do_GET(self) -> None:  # http.server API requires this camelCase name
         if self.path in ("/healthz", "/health"):
             self._send(200, {"status": "ok"})
         else:
             self._send(404, {"error": {"message": f"unknown path {self.path}"}})
 
-    def do_POST(self) -> None:  # noqa: N802 — http.server API
+    def do_POST(self) -> None:  # http.server API requires this camelCase name
         if not self.path.endswith("/embeddings"):
             self._send(404, {"error": {"message": f"unknown path {self.path}"}})
             return
