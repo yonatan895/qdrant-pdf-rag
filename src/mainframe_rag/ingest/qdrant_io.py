@@ -124,7 +124,12 @@ def upsert_chunks(
     vectors: list[tuple[list[float], SparseVector]],
 ) -> int:
     """Upsert chunk points in settings.batch_size batches (Qdrant skill
-    64-256 band, bounded in Settings). Returns point count."""
+    64-256 band, bounded in Settings). Returns point count.
+
+    Upserts are idempotent by construction — point ids are UUID5 of the chunk
+    key — so a connection-level retry/replay of a batch is safe. There is no
+    application-level retry loop; the client timeout bounds each call
+    (issue #20 PR C)."""
     collection = settings.qdrant_collection
     points: list[models.PointStruct] = []
     for chunk, (dense, (sparse_idx, sparse_val)) in zip(chunks, vectors):

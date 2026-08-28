@@ -51,9 +51,14 @@ class MagicMockSearch:
 
 
 class FakeLLM:
-    """LLMClient double: asserts the reasoning prompt shape."""
+    """LLMClient double: asserts the reasoning prompt shape and records calls
+    so tests can prove /v1/search never reaches it."""
+
+    def __init__(self):
+        self.calls = 0
 
     def chat(self, messages):
+        self.calls += 1
         assert messages[0]["role"] == "system"
         return (
             "Reissue the command after initialization completes.\n\n"
@@ -64,6 +69,19 @@ class FakeLLM:
         )
 
 
+class FabricatingBodyLLM:
+    """Quotes a full citation line that is not in the hit set, mid-answer."""
+
+    def chat(self, messages):
+        return (
+            "Answer text.\n"
+            "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
+            "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n\n"
+            "Citations:\n"
+            "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+        )
+
+
 def test_search_returns_cite_fields(client):
     resp = client.post("/v1/search", json={"query": "IEA500I", "product": "z/OS"})
     assert resp.status_code == 200
@@ -71,6 +89,14 @@ def test_search_returns_cite_fields(client):
     assert body["query_kind"] == "identifier"
     assert body["hits"][0]["cite"] == _hit().cite
     assert body["hits"][0]["heading"] == "Chapter 2 > IEA500I"
+
+
+def test_search_never_calls_llm(client):
+    """Issue #20 PR C: /v1/search is lexical+dense retrieval only."""
+    assert app_mod.llm.calls == 0  # type: ignore[attr-defined]
+    resp = client.post("/v1/search", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+    assert app_mod.llm.calls == 0  # type: ignore[attr-defined]
 
 
 def test_answer_validates_citations_and_script(client):
@@ -93,7 +119,42 @@ def test_answer_refuses_without_reasoning_model(monkeypatch, synthetic_pdf):
     with TestClient(app_mod.app) as c:
         resp = c.post("/v1/answer", json={"query": "IEA500I"})
     assert resp.status_code == 503
-    assert "reasoning" in resp.json()["detail"].lower()
+    body = resp.json()
+    assert body["code"] == "not_configured"
+    assert "reasoning" in body["message"].lower()
+
+
+def test_answer_strips_fabricated_body_citation(client, monkeypatch):
+    """No cite outside the hit set may reach the client — including ones the
+    model quotes mid-answer (issue #20 PR C)."""
+    monkeypatch.setattr(app_mod, "llm", FabricatingBodyLLM())
+    resp = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+    body = resp.json()
+    fabricated = "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9"
+    assert fabricated not in body["answer"]
+    assert _hit().cite in body["answer"]  # retrieved cite survives mid-answer
+    assert body["citations"] == [_hit().cite]
+
+
+def test_error_shape_is_structured(client, monkeypatch):
+    """Stable {"code", "message"} JSON — no stack traces to the client."""
+
+    def boom(*_a, **_k):
+        raise RuntimeError("qdrant exploded: select * from secrets")
+
+    monkeypatch.setattr(app_mod, "retrieve_search", boom)
+    resp = client.post("/v1/search", json={"query": "IEA500I"})
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body == {"code": "upstream_error", "message": "retrieval failed"}
+    assert "explode" not in resp.text and "secrets" not in resp.text
+
+    resp = client.post("/v1/search", json={})  # missing query
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == "invalid_request"
+    assert set(body) == {"code", "message"}
 
 
 def test_parse_answer_shape():
@@ -115,3 +176,18 @@ def test_citation_validation():
     )
     assert lines == [_hit().cite, "bad"]
     assert valid_citations("Citations:\n- " + _hit().cite, {_hit().cite}) == [_hit().cite]
+
+
+def test_strip_unauthorized_body_citations():
+    from mainframe_rag.agent.cites import strip_unauthorized_citations
+
+    allowed = {_hit().cite}
+    fabricated = "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9"
+    text = f"lead in\n{fabricated}\nkeep this\n- {_hit().cite}\n1. {fabricated}\ntail"
+    out = strip_unauthorized_citations(text, allowed)
+    assert fabricated not in out
+    assert "lead in" in out and "keep this" in out and "tail" in out
+    assert _hit().cite in out
+    # Non-citation lines that merely mention a doc number survive untouched.
+    out2 = strip_unauthorized_citations("refer to SA22-9999-99 for details", allowed)
+    assert out2 == "refer to SA22-9999-99 for details"

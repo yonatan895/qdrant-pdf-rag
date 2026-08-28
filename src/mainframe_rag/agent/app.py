@@ -2,7 +2,9 @@
 
 /v1/search never calls an LLM. /v1/answer retrieves, then calls the reasoning
 model with retrieved chunks and validates its citations against the hit set.
-Logs: request_id, query_kind, hit count, timings. Never the query text.
+Errors return a stable JSON shape {"code", "message"} — never a stack trace
+(issue #20 PR C). Logs: request_id, query_kind, hit count, timings. Never the
+query text.
 """
 
 from __future__ import annotations
@@ -15,7 +17,9 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from mainframe_rag.agent.answer import HttpxLLMClient, build_messages, parse_answer
@@ -36,11 +40,26 @@ embedder: Embedder
 llm: LLMClient
 
 
+class AppError(Exception):
+    """Operator-facing API error: stable code + message, no internals."""
+
+    def __init__(self, status: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global settings, http, qdrant, embedder, llm
     settings = load_settings()
-    http = httpx.Client(timeout=settings.embed_timeout_s)
+    # Bounded connection retries only fire when the request was never sent
+    # (DNS/refused) — safe for any method. No request-level retries exist.
+    http = httpx.Client(
+        timeout=settings.embed_timeout_s,
+        transport=httpx.HTTPTransport(retries=settings.http_connect_retries),
+    )
     # One dispatch point for embed_mode; the reasoning-model client owns its
     # own connection pool with its own (long) timeout — env resolution stays
     # lazy until first use (startup fail-fast is PR D).
@@ -48,7 +67,11 @@ async def lifespan(_app: FastAPI):
     llm = HttpxLLMClient(settings)
     from qdrant_client import QdrantClient
 
-    qdrant = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key, timeout=30)
+    qdrant = QdrantClient(
+        url=settings.qdrant_url,
+        api_key=settings.qdrant_api_key,
+        timeout=settings.qdrant_timeout_s,
+    )
     yield
     http.close()
     qdrant.close()
@@ -84,6 +107,35 @@ class AnswerResponse(BaseModel):
     script: str | None
 
 
+@app.exception_handler(AppError)
+async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status, content={"code": exc.code, "message": exc.message})
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+    detail = exc.detail if isinstance(exc.detail, str) else "request failed"
+    return JSONResponse(status_code=exc.status_code, content={"code": "http_error", "message": detail})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={"code": "invalid_request", "message": "request body failed validation"},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    # Full trace stays in server logs; the client never sees internals.
+    request_id = getattr(request.state, "request_id", None)
+    log.exception(json_log(str(request_id or "unknown"), "unhandled", error=str(exc)[:200]))
+    return JSONResponse(
+        status_code=500, content={"code": "internal", "message": "internal error"}
+    )
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     detail: dict = {"qdrant": False, "embed": None}
@@ -95,7 +147,8 @@ def healthz() -> dict:
             detail["qdrant_detail"] = resp.text[:120]
     except Exception as exc:
         detail["qdrant_detail"] = str(exc)[:120]
-        raise HTTPException(status_code=503, detail=detail) from exc
+        log.warning(json_log("healthz", "health", error=str(exc)[:200]))
+        raise AppError(503, "qdrant_unready", "qdrant is not ready") from exc
 
     if settings.embed_base_url and settings.embed_model:
         try:
@@ -122,7 +175,7 @@ def v1_search(req: SearchRequest) -> SearchResponse:
         )
     except Exception as exc:
         log.error(json_log(request_id, "search", error=str(exc)[:200]))
-        raise HTTPException(status_code=502, detail="retrieval failed") from exc
+        raise AppError(502, "upstream_error", "retrieval failed") from exc
     log.info(
         json_log(
             request_id, "search", query_kind=kind, hits=len(hits),
@@ -178,10 +231,11 @@ def v1_answer(req: AnswerRequest) -> AnswerResponse:
             script=parsed["script"],
         )
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # Unset LLM_MODEL_REASONING / LLM_BASE_URL: fail closed, no LLM call.
+        raise AppError(503, "not_configured", str(exc)) from exc
     except Exception as exc:
         log.error(json_log(request_id, "answer", error=str(exc)[:200]))
-        raise HTTPException(status_code=502, detail="answer failed") from exc
+        raise AppError(502, "upstream_error", "answer failed") from exc
 
 
 def json_log(request_id: str, action: str, **fields) -> str:

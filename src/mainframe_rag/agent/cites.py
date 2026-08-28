@@ -51,4 +51,28 @@ def valid_citations(text: str, allowed: set[str]) -> list[str]:
     return result
 
 
-__all__ = ["CITATION_LINE_RE", "extract_citation_lines", "format_citation", "valid_citations"]
+def strip_unauthorized_citations(text: str, allowed: set[str]) -> str:
+    """Remove citation-shaped lines from the answer body that are not in the
+    retrieved hit set. The trailing Citations: list is validated separately;
+    this closes the same hole for a fabricated cite quoted mid-answer. Same
+    exact-match rule as valid_citations: normalization stays out of scope."""
+    kept: list[str] = []
+    for line in text.splitlines():
+        candidate = line.strip()
+        if candidate.startswith(("-", "*", "•")):
+            candidate = candidate.lstrip("-*• ").strip()
+        elif len(candidate) > 2 and candidate[0].isdigit() and candidate[1] in ".)":
+            candidate = candidate[2:].strip()
+        if CITATION_LINE_RE.match(candidate) and candidate not in allowed:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+__all__ = [
+    "CITATION_LINE_RE",
+    "extract_citation_lines",
+    "format_citation",
+    "strip_unauthorized_citations",
+    "valid_citations",
+]

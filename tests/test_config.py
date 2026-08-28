@@ -28,3 +28,13 @@ def test_env_loads(monkeypatch):
     s = Settings(_env_file=None)
     assert s.require_dense_dim() == 768
     assert s.qdrant_collection == "mainframe_manuals"
+
+
+def test_outbound_timeout_defaults_bounded():
+    """Every outbound call has a bounded timeout (issue #20 PR C)."""
+    s = Settings(_env_file=None)
+    assert s.qdrant_timeout_s > 0
+    assert s.qdrant_ingest_timeout_s > 0
+    assert s.embed_timeout_s > 0
+    assert s.answer_timeout_s > 0
+    assert 0 <= s.http_connect_retries <= 5
