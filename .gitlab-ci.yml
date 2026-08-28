@@ -7,6 +7,11 @@
 # refuse committed binaries, then pytest. If you change one CI, change the
 # other in the same PR (AGENTS.md).
 #
+# Trigger difference (deliberate): on GitHub, markdown-only changes run only
+# .github/workflows/markdown.yml (markdownlint-cli2) and skip the jobs here;
+# GitLab has no markdownlint, so these jobs run on every MR — fine, they are
+# cheap and the hygiene gate must never silently skip.
+#
 # GitLab admin setup (Settings > CI/CD > Variables) — names only, no secrets:
 #   CI_PYTHON_IMAGE  (recommended)  mirrored UBI/Python 3.14 image (issue #5:
 #                                   3.14 GIL, no 3.14t), e.g.

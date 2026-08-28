@@ -2,7 +2,13 @@ name: ci
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.markdown"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.markdown"
 jobs:
   test:
     runs-on: ubuntu-latest
