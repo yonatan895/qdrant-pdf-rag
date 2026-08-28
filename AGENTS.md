@@ -134,7 +134,7 @@ Standing rules from the #20 hardening (PRs A–D):
 - Layer ports: embed / Qdrant points / LLM are `Protocol`s in `ports.py`; `EMBED_MODE=hash` is a CI-only implementer and the agent refuses it without `ALLOW_HASH_MODE=true`.
 - Upserts are batched (`Settings.batch_size`); payload indexes exist before load; point ids are UUID5.
 - Every outbound call has a `Settings` timeout. `/v1/search` never calls an LLM; `/v1/answer` uses the reasoning model only and never retries.
-- Logs are one JSON object per line via `logs.configure_logging` — ids, counts, `elapsed_ms`; never secrets or PDF text.
+- Logs are one JSON object per line via `logs.configure_logging` — ids, counts, `elapsed_ms`; never secrets or PDF text. Ingest parse workers (spawn) return records for the parent to log; they never inherit the handler.
 
 ## Security and air-gap
 

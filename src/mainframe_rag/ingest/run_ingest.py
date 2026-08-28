@@ -191,17 +191,7 @@ def run(
     )
     if not tasks:
         # Nothing to do (all skipped): still emit the run summary.
-        log.info(
-            json.dumps(
-                {
-                    "action": "done",
-                    "files_ok": files_ok,
-                    "files_failed": files_failed,
-                    "chunks_upserted": chunks_upserted,
-                    "elapsed_ms": int((time.monotonic() - started) * 1000),
-                }
-            )
-        )
+        _log_summary(started, files_ok, files_failed, chunks_upserted, failures=0)
         return 0
 
     workers = resolve_workers(workers, settings)
@@ -291,12 +281,24 @@ def run(
                             }
                         )
                     )
-                if record.status == "upserted":
+                if record.status in ("upserted", "skipped"):
+                    # "skipped" = Qdrant already holds doc_id at this sha256
+                    # (fresh inventory, warm Qdrant) — still an ok outcome.
                     files_ok += 1
+                if record.status == "upserted":
                     chunks_upserted += record.chunks
                 append_record(progress, record)
 
-    summary = {
+    _log_summary(started, files_ok, files_failed, chunks_upserted, failures)
+    return 1 if failures else 0
+
+
+def _log_summary(
+    started: float, files_ok: int, files_failed: int, chunks_upserted: int, failures: int
+) -> None:
+    """One 'done' summary per run (issue #20 PR D): files ok / failed /
+    chunks upserted / elapsed_ms. Warning level when anything failed."""
+    payload = {
         "action": "done",
         "files_ok": files_ok,
         "files_failed": files_failed,
@@ -304,10 +306,9 @@ def run(
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
     if failures:
-        log.warning(json.dumps(summary))
+        log.warning(json.dumps(payload))
     else:
-        log.info(json.dumps(summary))
-    return 1 if failures else 0
+        log.info(json.dumps(payload))
 
 
 def main(argv: list[str] | None = None) -> int:

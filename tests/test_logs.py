@@ -28,6 +28,22 @@ def test_plain_message_is_wrapped():
     assert payload["message"] == "plain text"
 
 
+def test_envelope_wins_over_event_fields():
+    payload = json.loads(
+        JsonFormatter().format(_record('{"ts": "fake", "level": "BOGUS", "doc_id": "d"}'))
+    )
+    assert payload["ts"] != "fake"
+    assert payload["level"] == "INFO"
+    assert payload["doc_id"] == "d"
+
+
+def test_invalid_level_fails_with_clear_message():
+    import pytest
+
+    with pytest.raises(ValueError, match="LOG_LEVEL"):
+        configure_logging("bogus")
+
+
 def test_exception_goes_into_payload_one_line():
     try:
         raise ValueError("boom")

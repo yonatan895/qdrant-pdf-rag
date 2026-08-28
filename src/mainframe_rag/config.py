@@ -10,7 +10,7 @@ feature hashing, no network, no model weights. Never the default in prod.
 
 import multiprocessing
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Dense dimension of the hashed embedder. Fixed so CI never depends on the
@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     embed_model: str | None = None
     dense_dim: int | None = None
     embed_timeout_s: float = 60.0
+
+    @field_validator("embed_mode")
+    @classmethod
+    def _normalize_embed_mode(cls, v: str) -> str:
+        """Case/whitespace normalization so an operator writing
+        EMBED_MODE=VLLM gets vllm behavior everywhere (dispatch, fail-fast,
+        air-gap validation), instead of a confusing startup crash."""
+        return v.strip().lower()
 
     # Reasoning LLM (LiteLLM / vLLM)
     llm_base_url: str | None = None

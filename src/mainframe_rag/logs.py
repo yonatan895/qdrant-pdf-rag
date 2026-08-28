@@ -27,7 +27,9 @@ class JsonFormatter(logging.Formatter):
         except ValueError:
             parsed = None
         if isinstance(parsed, dict):
-            payload.update(parsed)
+            # Event fields first, envelope on top: ts/level/logger can never
+            # be shadowed by an event dict.
+            payload = {**parsed, **payload}
         else:
             payload["message"] = message
         if record.exc_info:
@@ -42,8 +44,14 @@ class JsonFormatter(logging.Formatter):
 
 def configure_logging(level: str = "INFO") -> None:
     """Install the JSON handler on the root logger (idempotent)."""
+    try:
+        resolved = logging.getLevelNamesMapping()[level.upper()]
+    except KeyError:
+        raise ValueError(
+            f"LOG_LEVEL must be a standard level name, got {level!r}"
+        ) from None
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
     root.handlers = [handler]
-    root.setLevel(level.upper())
+    root.setLevel(resolved)
