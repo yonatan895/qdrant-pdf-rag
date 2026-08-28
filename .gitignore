@@ -3,7 +3,6 @@
 *.PDF
 *.pdx
 *.idx
-!tests/fixtures/synthetic/*.pdf
 zOS*/
 *Organized/
 *Indexed-PDF-package*/
