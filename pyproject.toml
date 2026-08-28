@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "mypy", "ruff", "types-httpx"]
+dev = ["pytest", "pytest-cov", "mypy", "ruff"]
 
 [build-system]
 requires = ["setuptools>=75"]
