@@ -129,8 +129,12 @@ async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
-    detail = exc.detail if isinstance(exc.detail, str) else "request failed"
-    return JSONResponse(status_code=exc.status_code, content={"code": "http_error", "message": detail})
+    # Fixed message on purpose: nothing in src/ raises HTTPException, this
+    # only fires from framework internals, and exc.detail must never reach a
+    # client body (the "no internals" rule is structural, not incidental).
+    return JSONResponse(
+        status_code=exc.status_code, content={"code": "http_error", "message": "request failed"}
+    )
 
 
 @app.exception_handler(RequestValidationError)

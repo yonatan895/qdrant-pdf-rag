@@ -35,11 +35,11 @@ _WRAP_CHARS = "`\"'*_"
 def _normalize_citation_line(line: str) -> str:
     """One normalizer for both citation paths (the Citations: list parser and
     the answer-body scanner) so a wrapped fabricated cite can never be clean
-    in one path and leaked by the other: peels list markers, blockquote '>',
-    and enclosing matching pairs (** __ * ` " ') cleanly — a bolded cite
-    normalizes to the bare citation, never a half-peeled leftover. Only
-    CITATION_LINE_RE matches act, and the body scanner keeps the original
-    line in the output."""
+    in one path and leaked by the other. Supported wrappers, each peeled
+    cleanly to the bare citation: list markers (bullet or number + [.)]),
+    blockquote '>', enclosing pairs (** __ * ` " '), angle brackets <...>,
+    markdown links [x](url), and parentheses. Only CITATION_LINE_RE matches
+    act, and the body scanner keeps the original line in the output."""
     candidate = line.strip()
     for _ in range(6):  # bounded: '> "11. cite"' style nesting is shallow
         before = candidate
@@ -47,6 +47,12 @@ def _normalize_citation_line(line: str) -> str:
         if candidate.startswith(">"):
             candidate = candidate.lstrip(">").strip()
         if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in _WRAP_CHARS:
+            candidate = candidate[1:-1].strip()
+        if candidate.startswith("[") and candidate.endswith(")"):
+            idx = candidate.find("](")
+            if idx != -1:
+                candidate = candidate[1:idx]
+        if candidate.startswith("<") and candidate.endswith(">"):
             candidate = candidate[1:-1].strip()
         if candidate.startswith("(") and candidate.endswith(")"):
             candidate = candidate[1:-1].strip()

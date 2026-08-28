@@ -226,6 +226,31 @@ def test_strip_enclosing_markup_and_inline_mentions():
     assert strip_unauthorized_citations(prose, allowed) == prose
 
 
+def test_strip_angle_bracket_and_markdown_link_wrapping():
+    """Round 8: markdown-link and angle-bracket wrapping are wrapping, so
+    they strip; prefix/suffix prose stays under the standalone-line rule."""
+    from mainframe_rag.agent.cites import strip_unauthorized_citations
+
+    allowed = {_hit().cite}
+    fabricated = "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9"
+    body = "\n".join(
+        [
+            f"[<{fabricated}>](http://x)",
+            f"[{fabricated}](http://x)",
+            f"<<{fabricated}>>",
+            f"<{fabricated}>",
+            _hit().cite,
+        ]
+    )
+    out = strip_unauthorized_citations(body, allowed)
+    assert fabricated not in out
+    assert _hit().cite in out
+
+    # Prefix/suffix prose is not wrapping: the standalone-line rule applies.
+    prose = "\n".join([f"| <{fabricated}> |", f"Cited: <{fabricated}>"])
+    assert strip_unauthorized_citations(prose, allowed) == prose
+
+
 def test_answer_script_block_passes_through_unvalidated(client, monkeypatch):
     """script is code: citation-shaped lines inside the fence are returned
     verbatim (documented behavior, issue #20 PR C)."""
@@ -280,16 +305,17 @@ def test_healthz_degraded_paths_leak_no_upstream_text(client, monkeypatch):
 
 
 def test_http_exception_handler_shape(client):
-    """Round-7 item 4: the HTTPException handler forwards developer-supplied
-    text, so pin its shape."""
+    """The HTTPException handler must use a fixed message — developer text in
+    exc.detail never reaches a client body (round 8)."""
 
     @app_mod.app.get("/teapot")
     def teapot():
-        raise HTTPException(status_code=418, detail="I'm a teapot")
+        raise HTTPException(status_code=418, detail="I'm a teapot with secrets")
 
     resp = client.get("/teapot")
     assert resp.status_code == 418
-    assert resp.json() == {"code": "http_error", "message": "I'm a teapot"}
+    assert resp.json() == {"code": "http_error", "message": "request failed"}
+    assert "teapot with secrets" not in resp.text
 
 
 def test_request_id_flows_from_middleware(client):
