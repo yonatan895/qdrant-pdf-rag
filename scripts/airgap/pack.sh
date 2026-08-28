@@ -56,7 +56,9 @@ rm -f "$DIST"/repo.bundle "$DIST"/qdrant-image.tar "$DIST"/app-*.tar \
       "$DIST"/MANIFEST.txt "$DIST"/SHA256SUMS "$OUT_TARBALL"
 
 echo "==> Git bundle of the checked-out commit"
-git bundle create "$DIST/repo.bundle" --all
+# HEAD must be an explicit ref: without it, `git clone repo.bundle` on the
+# air-gap side falls back to a default branch instead of the packed SHA.
+git bundle create "$DIST/repo.bundle" HEAD --all
 git bundle verify "$DIST/repo.bundle" >/dev/null
 
 echo "==> Pulling images (fail closed on missing GHCR tags)"

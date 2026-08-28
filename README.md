@@ -111,7 +111,12 @@ Three commands, one env file. **The air-gap never builds** — connected `main` 
    make airgap-pack            # -> dist/qdrant-pdf-rag-<sha>.tar + SHA256SUMS
    ```
 
-2. **Transfer** `dist/qdrant-pdf-rag-<sha>.tar` + `dist/SHA256SUMS` to the bastion (USB / approved drop), verify the tarball checksum, then `tar xf`.
+2. **Transfer** `dist/qdrant-pdf-rag-<sha>.tar` + `dist/SHA256SUMS` to the bastion (USB / approved drop), verify the tarball checksum, then unpack and clone from the bundle (the bundle's HEAD is the packed SHA):
+
+   ```bash
+   tar xf qdrant-pdf-rag-<sha>.tar
+   git clone repo.bundle qdrant-pdf-rag && cd qdrant-pdf-rag
+   ```
 
 3. **Air-gapped bastion** (`oc`, `helm`, `skopeo`; no internet):
 
