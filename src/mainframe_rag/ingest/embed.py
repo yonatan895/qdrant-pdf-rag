@@ -126,7 +126,12 @@ class VllmEmbedder:
 
     def _http(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=self._settings.embed_timeout_s)
+            # Bounded connect retries (fire only if the request was never
+            # sent); no request-level retries on POST /embeddings.
+            self._client = httpx.Client(
+                timeout=self._settings.embed_timeout_s,
+                transport=httpx.HTTPTransport(retries=self._settings.http_connect_retries),
+            )
         return self._client
 
     def dense(self, texts: list[str]) -> list[list[float]]:

@@ -111,7 +111,9 @@ def _get_qdrant(settings: Settings):
     global _worker_qdrant
     if _worker_qdrant is None:
         _worker_qdrant = QdrantClient(
-            url=settings.qdrant_url, api_key=settings.qdrant_api_key, timeout=120
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key,
+            timeout=settings.qdrant_ingest_timeout_s,
         )
     return _worker_qdrant
 

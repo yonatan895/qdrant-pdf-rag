@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None
     qdrant_collection: str = "mainframe_manuals"
+    # Agent query path vs ingest upsert path: different worst-case call shapes,
+    # so each gets its own bounded timeout (issue #20 PR C). Whole seconds —
+    # qdrant-client's stub types timeout as int.
+    qdrant_timeout_s: int = 30
+    qdrant_ingest_timeout_s: int = 120
 
     # Embeddings. mode "vllm" = internal vLLM (prod, OpenAI-compatible);
     # mode "hash" = local deterministic hashing (CI/dev only, issue #8).
@@ -37,6 +42,19 @@ class Settings(BaseSettings):
     # Reasoning LLM (LiteLLM / vLLM)
     llm_base_url: str | None = None
     llm_model_reasoning: str | None = None
+    # Reasoning models think; the long timeout is the retry policy — /v1/answer
+    # never retries (issue #20 PR C).
+    answer_timeout_s: float = 300.0
+
+    # Bounded httpx connection-establishment retries (0-5). These fire only
+    # when the request was never sent (DNS/refused), so they are safe for any
+    # method. There is deliberately no request-level retry anywhere.
+    http_connect_retries: int = Field(default=2, ge=0, le=5)
+
+    # /healthz probes keep separate budgets: /readyz is a local GET, while a
+    # cold vLLM can legitimately take ~10s to answer the embed ping.
+    health_qdrant_timeout_s: float = 5.0
+    health_embed_timeout_s: float = 10.0
 
     # Ingest. batch_size follows the Qdrant skill's 64-256 upsert band
     # (.agents/skills/qdrant-performance-optimization) — bounds enforced here

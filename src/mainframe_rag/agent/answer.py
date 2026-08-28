@@ -71,15 +71,14 @@ def assert_reasoning_model(settings: Settings) -> str:
     return settings.require_reasoning_model()
 
 
-ANSWER_TIMEOUT_S = 300.0  # reasoning models think; keep the long timeout until PR C makes it a setting
-
-
 class HttpxLLMClient:
     """LLMClient implementation: the reasoning model only — deliberately no
     other model knob (architecture.md 4.6). Fails closed at call time when
     LLM_BASE_URL / LLM_MODEL_REASONING are unset; startup fail-fast is PR D.
     Owns its own connection pool with the long answer timeout (do NOT share
-    the embed client's short timeout)."""
+    the embed client's short timeout). No retries: /v1/answer is a single
+    shot — a retry would re-ask a reasoning model that may already be
+    thinking, and answers are not idempotent (issue #20 PR C)."""
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
         self._settings = settings
@@ -87,13 +86,18 @@ class HttpxLLMClient:
 
     def _http(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=ANSWER_TIMEOUT_S)
+            # retries=0: connection blips surface as errors, never re-issued.
+            self._client = httpx.Client(
+                timeout=self._settings.answer_timeout_s,
+                transport=httpx.HTTPTransport(retries=0),
+            )
         return self._client
 
     def close(self) -> None:
+        # Deliberately does not null the client: a post-shutdown chat() must
+        # fail loudly on the closed pool, never silently rebuild one.
         if self._client is not None:
             self._client.close()
-            self._client = None
 
     def chat(self, messages: list[dict[str, str]]) -> str:
         model = assert_reasoning_model(self._settings)
@@ -123,8 +127,16 @@ def call_reasoning_model(
 
 
 def parse_answer(content: str, allowed_citations: set[str]) -> dict:
-    """Split model output into answer, validated citations, optional script."""
-    from mainframe_rag.agent.cites import valid_citations
+    """Split model output into answer, validated citations, optional script.
+
+    The `citations` list and the answer body are filtered to the hit set.
+    `script` (fenced block) is code and deliberately passes through
+    unvalidated — stripping citation-looking lines would corrupt examples.
+    Documented behavior, pinned by test (issue #20 PR C)."""
+    from mainframe_rag.agent.cites import (
+        strip_unauthorized_citations,
+        valid_citations,
+    )
 
     fence = FENCE_RE.search(content)
     script = fence.group(1).strip() if fence else None
@@ -135,6 +147,9 @@ def parse_answer(content: str, allowed_citations: set[str]) -> dict:
     body = content.split("Citations:")[0] if "Citations:" in content else content
     if fence and fence.group(0) in body:
         body = body.replace(fence.group(0), "")
+    # A fabricated full-format cite quoted mid-answer must not reach the
+    # client either (issue #20 PR C: no cite outside the hit set).
+    body = strip_unauthorized_citations(body, allowed_citations)
     return {
         "answer": body.strip(),
         "citations": citations,
