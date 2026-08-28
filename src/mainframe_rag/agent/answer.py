@@ -71,10 +71,15 @@ def assert_reasoning_model(settings: Settings) -> str:
     return settings.require_reasoning_model()
 
 
+ANSWER_TIMEOUT_S = 300.0  # reasoning models think; keep the long timeout until PR C makes it a setting
+
+
 class HttpxLLMClient:
     """LLMClient implementation: the reasoning model only — deliberately no
     other model knob (architecture.md 4.6). Fails closed at call time when
-    LLM_BASE_URL / LLM_MODEL_REASONING are unset; startup fail-fast is PR D."""
+    LLM_BASE_URL / LLM_MODEL_REASONING are unset; startup fail-fast is PR D.
+    Owns its own connection pool with the long answer timeout (do NOT share
+    the embed client's short timeout)."""
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
         self._settings = settings
@@ -82,8 +87,13 @@ class HttpxLLMClient:
 
     def _http(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=300.0)
+            self._client = httpx.Client(timeout=ANSWER_TIMEOUT_S)
         return self._client
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
 
     def chat(self, messages: list[dict[str, str]]) -> str:
         model = assert_reasoning_model(self._settings)
@@ -101,8 +111,15 @@ def call_reasoning_model(
     messages: list[dict[str, str]], settings: Settings, client: httpx.Client | None = None
 ) -> str:
     """Thin wrapper kept for callers without an injected LLMClient; prefer
-    building HttpxLLMClient once and calling .chat() (issue #20 PR A)."""
-    return HttpxLLMClient(settings, client).chat(messages)
+    building HttpxLLMClient once and calling .chat() (issue #20 PR A).
+    Creates and closes its own pool when none is injected."""
+    llm = HttpxLLMClient(settings, client)
+    if client is not None:
+        return llm.chat(messages)
+    try:
+        return llm.chat(messages)
+    finally:
+        llm.close()
 
 
 def parse_answer(content: str, allowed_citations: set[str]) -> dict:

@@ -25,13 +25,13 @@ from mainframe_rag.ports import Embedder, LLMClient
 from mainframe_rag.retrieve.query import search as retrieve_search
 
 if TYPE_CHECKING:
-    from qdrant_client import QdrantClient
+    from mainframe_rag.ports import QdrantPoints
 
 log = logging.getLogger("agent")
 
 settings: Settings
 http: httpx.Client
-qdrant: QdrantClient  # type: ignore[valid-type]
+qdrant: QdrantPoints
 embedder: Embedder
 llm: LLMClient
 
@@ -41,10 +41,11 @@ async def lifespan(_app: FastAPI):
     global settings, http, qdrant, embedder, llm
     settings = load_settings()
     http = httpx.Client(timeout=settings.embed_timeout_s)
-    # One dispatch point for embed_mode; one reasoning-model client (fail
-    # fast at startup when LLM_MODEL_REASONING is missing).
+    # One dispatch point for embed_mode; the reasoning-model client owns its
+    # own connection pool with its own (long) timeout — env resolution stays
+    # lazy until first use (startup fail-fast is PR D).
     embedder = build_embedder(settings, http)
-    llm = HttpxLLMClient(settings, http)
+    llm = HttpxLLMClient(settings)
     from qdrant_client import QdrantClient
 
     qdrant = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key, timeout=30)
