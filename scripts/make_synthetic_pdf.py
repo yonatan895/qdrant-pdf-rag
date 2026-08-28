@@ -85,8 +85,7 @@ def build_plain(out_path: Path) -> Path:
     ]
     for text in pages:
         page = doc.new_page()
-        w, h = page.rect.width, page.rect.height
-        page.insert_textbox(pymupdf.Rect(72, 72, w - 72, h - 90), text, fontsize=11)
+        page.insert_text((72, 72), text, fontsize=11)
     doc.set_metadata({"title": "Acme Widget Controller Guide", "author": "pdf-rag test fixture"})
     doc.save(out_path)
     doc.close()
