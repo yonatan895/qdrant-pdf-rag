@@ -12,15 +12,24 @@
 enforce_product_rules
 require_env INTERNAL_REGISTRY IMAGE_SHA
 command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the air-gap bastion"
-[ -f dist/SHA256SUMS ] || die "dist/SHA256SUMS missing — unpack the sneakernet tarball first (tar xf dist/qdrant-pdf-rag-<sha>.tar)"
-[ -f dist/repo.bundle ] || die "dist/repo.bundle missing — unpack the sneakernet tarball first"
+
+# Packed artifacts: unpacked in the current directory or the parent (the docs
+# flow unpacks next to the clone). Either works.
+ARTDIR=""
+if [ -f dist/SHA256SUMS ] && [ -f dist/repo.bundle ]; then
+    ARTDIR=dist
+elif [ -f ../SHA256SUMS ] && [ -f ../repo.bundle ]; then
+    ARTDIR=..
+else
+    die "packed artifacts not found — unpack the sneakernet tarball next to this clone (tar xf qdrant-pdf-rag-<sha>.tar)"
+fi
 
 echo "==> Verify member checksums"
-(cd dist && sha256sum -c SHA256SUMS)
+(cd "$ARTDIR" && sha256sum -c SHA256SUMS)
 
 echo "==> Clone the repo from the bundle (same tree as the packed SHA)"
 if [ ! -d qdrant-pdf-rag ]; then
-    run git clone dist/repo.bundle qdrant-pdf-rag
+    run git clone "$ARTDIR/repo.bundle" qdrant-pdf-rag
     if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
         git -C qdrant-pdf-rag checkout --detach "$IMAGE_SHA" 2>/dev/null || true
     fi
@@ -30,7 +39,7 @@ load() {
     src=$1
     dst=$2
     echo "==> $src -> $dst"
-    run skopeo copy "docker-archive:dist/$src" "docker://$dst"
+    run skopeo copy "docker-archive:$ARTDIR/$src" "docker://$dst"
 }
 
 load qdrant-image.tar "$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged"
