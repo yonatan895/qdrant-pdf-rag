@@ -22,13 +22,41 @@ def _settings(**kw) -> Settings:
     )
 
 
-def test_answer_client_uses_setting_and_never_retries():
+def _spy_transport(monkeypatch) -> dict:
+    """Capture HTTPTransport kwargs without reaching into httpx internals
+    (round-7 nit 7: `_pool._retries` is private and bump-brittle)."""
+    captured: dict = {}
+    real = httpx.HTTPTransport
+
+    def spy(**kw):
+        captured.update(kw)
+        return real(**kw)
+
+    monkeypatch.setattr(httpx, "HTTPTransport", spy)
+    return captured
+
+
+def test_answer_client_uses_setting_and_never_retries(monkeypatch):
+    captured = _spy_transport(monkeypatch)
     s = _settings(answer_timeout_s=12.5)
     llm = HttpxLLMClient(s)
     client = llm._http()
     assert client.timeout.read == 12.5
     # /v1/answer is single shot: connection retries are off.
-    assert client._transport._pool._retries == 0
+    assert captured["retries"] == 0
+
+
+def test_chat_after_close_fails_loudly(monkeypatch):
+    """Round-7 nit 9: close() must not null the client — a post-shutdown
+    chat() hits the closed pool and raises, never silently rebuilds."""
+    captured = _spy_transport(monkeypatch)
+    llm = HttpxLLMClient(_settings())
+    client = llm._http()
+    client.close()
+    llm.close()
+    assert captured["retries"] == 0
+    with pytest.raises(RuntimeError, match="closed"):
+        llm.chat([{"role": "user", "content": "q"}])
 
 
 def test_answer_chat_retries_nothing_on_connect_error():
@@ -60,6 +88,7 @@ def test_agent_lifespan_timeouts_and_retries(monkeypatch):
     monkeypatch.setenv("HTTP_CONNECT_RETRIES", "3")
 
     captured: dict = {}
+    transport_kw = _spy_transport(monkeypatch)
 
     class FakeQdrantClient:
         def __init__(self, **kw):
@@ -72,7 +101,7 @@ def test_agent_lifespan_timeouts_and_retries(monkeypatch):
     with TestClient(app_mod.app):
         assert captured["timeout"] == 11.0
         assert app_mod.http.timeout.read == 7.0
-        assert app_mod.http._transport._pool._retries == 3
+        assert transport_kw["retries"] == 3
 
 
 def test_ingest_qdrant_timeout_from_settings(monkeypatch):

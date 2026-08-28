@@ -51,8 +51,10 @@ class Settings(BaseSettings):
     # method. There is deliberately no request-level retry anywhere.
     http_connect_retries: int = Field(default=2, ge=0, le=5)
 
-    # /healthz probe budget: qdrant /readyz GET and the embed endpoint ping.
-    health_timeout_s: float = 5.0
+    # /healthz probes keep separate budgets: /readyz is a local GET, while a
+    # cold vLLM can legitimately take ~10s to answer the embed ping.
+    health_qdrant_timeout_s: float = 5.0
+    health_embed_timeout_s: float = 10.0
 
     # Ingest. batch_size follows the Qdrant skill's 64-256 upsert band
     # (.agents/skills/qdrant-performance-optimization) — bounds enforced here

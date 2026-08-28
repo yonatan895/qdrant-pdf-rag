@@ -94,9 +94,10 @@ class HttpxLLMClient:
         return self._client
 
     def close(self) -> None:
+        # Deliberately does not null the client: a post-shutdown chat() must
+        # fail loudly on the closed pool, never silently rebuild one.
         if self._client is not None:
             self._client.close()
-            self._client = None
 
     def chat(self, messages: list[dict[str, str]]) -> str:
         model = assert_reasoning_model(self._settings)

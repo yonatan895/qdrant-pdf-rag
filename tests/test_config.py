@@ -37,4 +37,6 @@ def test_outbound_timeout_defaults_bounded():
     assert s.qdrant_ingest_timeout_s > 0
     assert s.embed_timeout_s > 0
     assert s.answer_timeout_s > 0
+    assert s.health_qdrant_timeout_s > 0
+    assert s.health_embed_timeout_s > 0
     assert 0 <= s.http_connect_retries <= 5

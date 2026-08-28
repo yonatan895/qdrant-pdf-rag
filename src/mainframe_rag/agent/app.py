@@ -114,6 +114,14 @@ class AnswerResponse(BaseModel):
     script: str | None
 
 
+@app.middleware("http")
+async def attach_request_id(request: Request, call_next):
+    """One request id per request, shared by every log line including the
+    unhandled-error handler (round-7 review)."""
+    request.state.request_id = uuid.uuid4().hex[:12]
+    return await call_next(request)
+
+
 @app.exception_handler(AppError)
 async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
     return JSONResponse(status_code=exc.status, content={"code": exc.code, "message": exc.message})
@@ -134,9 +142,10 @@ async def validation_error_handler(_request: Request, exc: RequestValidationErro
 
 
 @app.exception_handler(Exception)
-async def unhandled_error_handler(_request: Request, exc: Exception) -> JSONResponse:
+async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
     # Full trace stays in server logs; the client never sees internals.
-    log.exception(json_log("unknown", "unhandled", error=str(exc)[:200]))
+    request_id = getattr(request.state, "request_id", "unknown")
+    log.exception(json_log(request_id, "unhandled", error=str(exc)[:200]))
     return JSONResponse(
         status_code=500, content={"code": "internal", "message": "internal error"}
     )
@@ -164,13 +173,12 @@ def healthz() -> dict:
     detail: dict = {"qdrant": False, "embed": None}
     try:
         base = settings.qdrant_url.rstrip("/")
-        resp = httpx.get(f"{base}/readyz", timeout=settings.health_timeout_s)
+        resp = httpx.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
         detail["qdrant"] = resp.status_code == 200 and resp.text.strip().lower() == "all shards are ready"
         if not detail["qdrant"]:
-            detail["qdrant_detail"] = resp.text[:120]
+            # Upstream response bodies go to the log, never the client body.
             log.warning(json_log("healthz", "health", qdrant_detail=resp.text[:200]))
     except Exception as exc:
-        # Diagnostics go to the log; the client gets the stable shape only.
         log.warning(json_log("healthz", "health", error=str(exc)[:200]))
         raise AppError(503, "qdrant_unready", "qdrant is not ready") from exc
 
@@ -179,19 +187,19 @@ def healthz() -> dict:
             resp = http.post(
                 f"{settings.embed_base_url.rstrip('/')}/embeddings",
                 json={"model": settings.embed_model, "input": ["ping"]},
-                timeout=settings.health_timeout_s,
+                timeout=settings.health_embed_timeout_s,
             )
             detail["embed"] = resp.status_code == 200
         except Exception as exc:  # noqa: BLE001
             detail["embed"] = False
-            detail["embed_detail"] = str(exc)[:120]
+            log.warning(json_log("healthz", "health", embed_error=str(exc)[:200]))
 
     return {"status": "ok", **detail}
 
 
 @app.post("/v1/search", response_model=SearchResponse)
-def v1_search(req: SearchRequest) -> SearchResponse:
-    request_id = uuid.uuid4().hex[:12]
+def v1_search(request: Request, req: SearchRequest) -> SearchResponse:
+    request_id = request.state.request_id
     try:
         hits, kind, timings = retrieve_search(
             qdrant, embedder, settings.qdrant_collection, req.query,
@@ -214,8 +222,8 @@ def v1_search(req: SearchRequest) -> SearchResponse:
 
 
 @app.post("/v1/answer", response_model=AnswerResponse)
-def v1_answer(req: AnswerRequest) -> AnswerResponse:
-    request_id = uuid.uuid4().hex[:12]
+def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
+    request_id = request.state.request_id
     # Fail fast before any retrieval: the reasoning model (and its endpoint)
     # must be configured; nothing else is callable. Config errors get a fixed
     # client message — the exception text stays in the log.
