@@ -38,6 +38,10 @@ variables:
 
 default:
   image: $CI_PYTHON_IMAGE
+  # Variable expansion in tags: requires GitLab >= 14.1 (standard support at
+  # time of writing). If jobs queue forever on the air-gap runner, the tag did
+  # not expand: pin the literal runner tag here as a documented fallback
+  # (e.g. tags: [airgap]). Do not hardcode an internal hostname anywhere.
   tags: [$CI_RUNNER_TAG]
 
 # Shared install: wheelhouse first, then internal index, else fail closed.
@@ -78,6 +82,7 @@ hygiene:
       fi
 
 test:
+  extends: .py-base
   stage: test
   script:
     - pytest -q
