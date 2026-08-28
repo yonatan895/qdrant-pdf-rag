@@ -18,8 +18,14 @@ name: e2e
 
 on:
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.markdown"
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.markdown"
   workflow_dispatch:
 
 permissions:

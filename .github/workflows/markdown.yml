@@ -1,8 +1,11 @@
 # Markdown-only lint (markdownlint-cli2). Runs ONLY when a change is exclusively
 # markdown (and not vendored .agents/ or vendor/ docs): full CI (hygiene +
-# pytest) is skipped for those via paths-ignore in ci.yml. Mixed changes run
-# the full suite WITHOUT this job — linting docs is not allowed to block code
-# PRs. Vendored-only markdown bumps run nothing at all.
+# pytest, via paths-ignore in ci.yml) AND the GHCR image build (paths-ignore in
+# e2e.yml) are skipped for those. Mixed changes run ci + e2e WITHOUT this job —
+# linting docs is not allowed to block code PRs. Vendored-only markdown bumps
+# run nothing at all. Root-level files need explicit '*.md' globs in the
+# filters below (dorny/paths-filter v3 + picomatch: '**/*.md' alone does not
+# reliably match repo-root files — issue #18).
 name: markdown-lint
 
 on:
@@ -24,14 +27,21 @@ jobs:
         id: filter
         with:
           filters: |
+            # micromatch's '**/*.md' does not match repo-root files
+            # (AGENTS.md, README.md) — list '*.md' explicitly, here and in the
+            # code exclusions, or exclusive-root-markdown PRs run no lint.
             markdown:
+              - '*.md'
               - '**/*.md'
+              - '*.markdown'
               - '**/*.markdown'
               - '!.agents/**'
               - '!vendor/**'
             code:
               - '**'
+              - '!*.md'
               - '!**/*.md'
+              - '!*.markdown'
               - '!**/*.markdown'
       - id: decide
         env:
