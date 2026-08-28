@@ -1,0 +1,61 @@
+# One-shot prod ingest Job (issue #15). Included only by airgap-ingest — the
+# CI demo Job in overlays/ci is never used here. Corpus comes from a
+# caller-supplied PVC mounted read-only; no demo PDFs, no EMBED_MODE=hash.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ingest
+  labels:
+    app: ingest
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 86400
+  template:
+    metadata:
+      labels:
+        app: ingest
+    spec:
+      restartPolicy: Never
+      # [] by default; scripts/airgap/ingest.sh substitutes the PULL_SECRET
+      # from airgap.env when the namespace cannot pull anonymously.
+      imagePullSecrets: []
+      containers:
+        - name: ingest
+          image: __INTERNAL_REGISTRY__/qdrant-pdf-rag-ingest:__IMAGE_SHA__
+          imagePullPolicy: IfNotPresent
+          args: ["--src", "/corpus", "--progress", "/work/inventory.jsonl"]
+          env:
+            - name: QDRANT_URL
+              value: __QDRANT_URL__
+            - name: QDRANT_COLLECTION
+              value: mainframe_manuals
+            - name: QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __QDRANT_RELEASE__-apikey
+                  key: api-key
+            - name: EMBED_BASE_URL
+              value: __EMBED_BASE_URL__
+            - name: EMBED_MODEL
+              value: __EMBED_MODEL__
+            - name: DENSE_DIM
+              value: __DENSE_DIM__
+            - name: INGEST_WORKERS
+              value: "4"
+          resources:
+            requests: { cpu: "4", memory: 8Gi }
+            limits: { cpu: "16", memory: 32Gi }
+          volumeMounts:
+            - name: corpus
+              mountPath: /corpus
+              readOnly: true
+            - name: work
+              mountPath: /work
+      volumes:
+        - name: corpus
+          persistentVolumeClaim:
+            claimName: __CORPUS_PVC__
+            readOnly: true
+        - name: work
+          persistentVolumeClaim:
+            claimName: ingest-work

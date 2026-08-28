@@ -1,0 +1,7 @@
+# Prod ingest overlay — used only by `make airgap-ingest` (issue #15).
+# Requires Qdrant from `make airgap-deploy` (chart secret __QDRANT_RELEASE__-apikey).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mainframe-rag
+resources:
+  - ingest-job.yaml

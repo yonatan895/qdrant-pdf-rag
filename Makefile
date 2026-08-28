@@ -113,7 +113,20 @@ push-images:
 	docker push $(REGISTRY)/$(INGEST_IMAGE_NAME):$(IMAGE_TAG)
 	docker push $(REGISTRY)/$(AGENT_IMAGE_NAME):$(IMAGE_TAG)
 
-# ---------------------------------------------------------------- air-gap pack / load
+# ---------------------------------------------------------------- air-gap happy path (issue #15)
+.PHONY: airgap-pack airgap-load airgap-deploy airgap-ingest airgap-smoke
+airgap-pack:
+	sh scripts/airgap/pack.sh
+airgap-load:
+	sh scripts/airgap/load.sh
+airgap-deploy:
+	sh scripts/airgap/deploy.sh
+airgap-ingest:
+	sh scripts/airgap/ingest.sh
+airgap-smoke:
+	sh scripts/airgap/smoke.sh
+
+# ---------------------------------------------------------------- legacy/manual air-gap steps
 .PHONY: pack
 pack: chart wheelhouse bm25-weights
 	@mkdir -p $(BUNDLE_DIR)
@@ -155,6 +168,7 @@ clean:
 .PHONY: help
 help:
 	@echo "Connected host : venv wheelhouse bm25-weights pull-chart helm-lint helm-template build-images push-images pull-images"
-	@echo "Air-gap        : pack load-images helm-apply"
+	@echo "Air-gap happy path : airgap-pack (connected) | airgap-load airgap-deploy airgap-ingest airgap-smoke (inside the gap)"
+	@echo "Air-gap legacy/manual : pack load-images helm-apply (or oc-mirror; see docs)"
 	@echo "Quality        : test lint typecheck check"
-	@echo "See docs/architecture.md for the full workflow."
+	@echo "See README 'Air-gap' section and docs/architecture.md."

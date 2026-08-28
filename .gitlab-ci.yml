@@ -31,6 +31,9 @@
 # lives ONLY in .github/workflows/e2e.yml on public GitHub. Air-gap GitLab has
 # no GHCR and no lab cluster access; a follow-up issue would add an
 # internal-registry E2E if wanted. Do not add deploy jobs here.
+# Same for the sneakernet path (issue #15): airgap-pack runs on a connected
+# clone; airgap-load / airgap-deploy / airgap-ingest run by hand on the
+# air-gap bastion (scripts/airgap/*.sh) — never as GitLab jobs.
 # ==============================================================================
 
 workflow:
