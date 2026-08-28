@@ -5,8 +5,7 @@
 Process pool, one PDF per worker (workers = CPU-1). Skip rules:
 - inventory says this sha256 already upserted
 - Qdrant already holds this doc_id with the same sha256
-If Qdrant holds the doc_id with a different sha256 (revised edition), delete
-by doc_id then re-upsert. OCR stays off for born-digital pages.
+If Qdrant holds the doc_id with a different sha256, delete by doc_id then re-upsert.
 """
 
 from __future__ import annotations
@@ -45,15 +44,22 @@ _worker_settings: Settings | None = None
 _worker_qdrant = None
 
 
-def _parse_one(args: tuple[str, str]) -> tuple[InventoryRecord, ParsedDoc, list[Chunk]]:
-    """Parse + chrome strip + chunk. Runs in the worker process."""
+def _parse_one(
+    args: tuple[str, str | None, str | None, str | None, str],
+) -> tuple[InventoryRecord, ParsedDoc, list[Chunk]]:
     import pymupdf
 
-    path_str, vendor = args
+    path_str, vendor, product, version, corpus_root = args
     path = Path(path_str)
     started = time.monotonic()
     sha = sha256_file(path)
-    parsed = parse_pdf(path, vendor)
+    parsed = parse_pdf(
+        path,
+        vendor=vendor,
+        product=product,
+        version=version,
+        corpus_root=Path(corpus_root) if corpus_root else None,
+    )
     doc = pymupdf.open(path)
     try:
         page_texts = [page.get_text() for page in doc]
@@ -76,7 +82,7 @@ def _parse_one(args: tuple[str, str]) -> tuple[InventoryRecord, ParsedDoc, list[
 def _init_worker() -> None:
     global _worker_settings, _worker_qdrant
     _worker_settings = load_settings()
-    _worker_qdrant = None  # created lazily; dry-run workers never need it
+    _worker_qdrant = None
 
 
 def _get_qdrant(settings: Settings):
@@ -91,11 +97,7 @@ def _get_qdrant(settings: Settings):
 
 
 def _upsert_one(parsed: ParsedDoc, chunks: list[Chunk], settings: Settings) -> str:
-    """Embed + upsert one document in the current process. Returns final status."""
-    if not parsed.doc_id:
-        return "error-no-doc-id"
     client = _get_qdrant(settings)
-
     stored_sha = doc_sha256(client, settings, parsed.doc_id)
     if stored_sha == parsed.sha256:
         return "skipped"
@@ -124,22 +126,31 @@ def _upsert_one(parsed: ParsedDoc, chunks: list[Chunk], settings: Settings) -> s
     return "upserted"
 
 
-def run(src: Path, progress: Path, workers: int, limit: int | None, dry_run: bool) -> int:
+def run(
+    src: Path,
+    progress: Path,
+    workers: int,
+    limit: int | None,
+    dry_run: bool,
+    vendor: str | None = None,
+    product: str | None = None,
+    version: str | None = None,
+) -> int:
     settings = load_settings()
     if not dry_run:
-        ensure_collection(_get_qdrant(settings), settings)  # fail fast on DENSE_DIM
+        ensure_collection(_get_qdrant(settings), settings)
     pdfs = walk_pdfs(src)
     if limit:
         pdfs = pdfs[:limit]
     inventory = load_inventory(progress)
 
-    tasks: list[tuple[str, str]] = []
+    tasks: list[tuple[str, str | None, str | None, str | None, str]] = []
     for path in pdfs:
         record = inventory.get(str(path))
         if record and should_skip(record, sha256_file(path), allow_dry=dry_run):
             log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
             continue
-        tasks.append((str(path), detect_vendor(path)))
+        tasks.append((str(path), vendor or detect_vendor(path), product, version, str(src)))
 
     log.info(
         json.dumps({"action": "start", "pdfs": len(pdfs), "todo": len(tasks), "workers": workers})
@@ -155,7 +166,7 @@ def run(src: Path, progress: Path, workers: int, limit: int | None, dry_run: boo
             path_str = futures[future]
             try:
                 record, parsed, chunks = future.result()
-            except Exception as exc:  # noqa: BLE001 — per-file failure must not kill the run
+            except Exception as exc:
                 failures += 1
                 append_record(
                     progress,
@@ -176,7 +187,7 @@ def run(src: Path, progress: Path, workers: int, limit: int | None, dry_run: boo
 
             try:
                 record.status = _upsert_one(parsed, chunks, settings)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 failures += 1
                 record.status = "error"
                 record.error = str(exc)[:500]
@@ -193,11 +204,14 @@ def run(src: Path, progress: Path, workers: int, limit: int | None, dry_run: boo
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Mainframe manuals ingest")
+    parser = argparse.ArgumentParser(description="PDF ingest into Qdrant")
     parser.add_argument("--src", required=True, type=Path, help="Corpus root (read-only)")
     parser.add_argument("--progress", required=True, type=Path, help="Inventory JSONL path")
     parser.add_argument("--workers", type=int, default=None, help="Default CPU-1")
-    parser.add_argument("--limit", type=int, default=None, help="Process at most N PDFs (pilot)")
+    parser.add_argument("--limit", type=int, default=None, help="Process at most N PDFs")
+    parser.add_argument("--vendor", default=None)
+    parser.add_argument("--product", default=None)
+    parser.add_argument("--version", default=None)
     parser.add_argument(
         "--dry-run", action="store_true", help="Parse + chunk only; no Qdrant, no embeddings"
     )
@@ -206,7 +220,16 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=args.log_level.upper(), format="%(message)s")
     workers = args.workers or load_settings().ingest_workers
-    return run(args.src, args.progress, workers, args.limit, args.dry_run)
+    return run(
+        args.src,
+        args.progress,
+        workers,
+        args.limit,
+        args.dry_run,
+        vendor=args.vendor,
+        product=args.product,
+        version=args.version,
+    )
 
 
 if __name__ == "__main__":
