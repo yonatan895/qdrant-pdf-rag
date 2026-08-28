@@ -34,6 +34,9 @@ def _hit(cite_suffix: str = "p. 1-6") -> SearchHit:
 @pytest.fixture
 def client(monkeypatch, synthetic_pdf):
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    # CI/dev embed profile: hash mode, explicitly allowed (PR D fail-fast)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
     monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
     monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
     monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
@@ -131,6 +134,9 @@ def test_answer_validates_citations_and_script(client):
 def test_answer_refuses_without_reasoning_model(monkeypatch, synthetic_pdf):
     monkeypatch.delenv("LLM_MODEL_REASONING", raising=False)
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    # CI/dev embed profile: hash mode, explicitly allowed (PR D fail-fast)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
     with TestClient(app_mod.app) as c:
         resp = c.post("/v1/answer", json={"query": "IEA500I"})
     assert resp.status_code == 503
@@ -346,6 +352,9 @@ def test_unhandled_error_returns_internal_shape(monkeypatch):
         raise RuntimeError("serializer down")
 
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    # CI/dev embed profile: hash mode, explicitly allowed (PR D fail-fast)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
     monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
     monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
     monkeypatch.setattr(

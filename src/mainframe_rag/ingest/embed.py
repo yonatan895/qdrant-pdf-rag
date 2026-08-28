@@ -107,9 +107,9 @@ def _bm25_model(model_name: str, cache_dir: str | None):
 
 class VllmEmbedder:
     """Prod implementer: dense from the internal vLLM endpoint, sparse from
-    local BM25. One shared httpx.Client per instance. Endpoint/model are
-    resolved lazily (first dense call) via require_embed — construction never
-    blocks startup; PR D adds the startup fail-fast."""
+    local BM25. One shared httpx.Client per instance. Endpoint/model resolve
+    lazily via require_embed — the agent's startup fail-fast (PR D) validates
+    them before listening; ingest workers validate on first use."""
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
         self._settings = settings

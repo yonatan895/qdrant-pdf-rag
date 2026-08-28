@@ -39,6 +39,7 @@ from mainframe_rag.ingest.qdrant_io import (
     upsert_chunks,
 )
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
+from mainframe_rag.logs import configure_logging
 
 log = logging.getLogger("ingest")
 
@@ -163,6 +164,12 @@ def run(
     version: str | None = None,
 ) -> int:
     settings = load_settings()
+    started = time.monotonic()
+    # Progress counters (issue #20 PR D): files ok / failed / chunks upserted,
+    # logged once per run. Logs carry ids and counts, never PDF text.
+    files_ok = 0
+    files_failed = 0
+    chunks_upserted = 0
     if not dry_run:
         ensure_collection(_get_qdrant(settings), settings)
     pdfs = walk_pdfs(src)
@@ -174,6 +181,7 @@ def run(
     for path in pdfs:
         record = inventory.get(str(path))
         if record and should_skip(record, sha256_file(path), allow_dry=dry_run):
+            files_ok += 1  # already ingested — an ok outcome
             log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
             continue
         tasks.append((str(path), vendor or detect_vendor(path), product, version, str(src)))
@@ -182,6 +190,8 @@ def run(
         json.dumps({"action": "start", "pdfs": len(pdfs), "todo": len(tasks), "workers": workers})
     )
     if not tasks:
+        # Nothing to do (all skipped): still emit the run summary.
+        _log_summary(started, files_ok, files_failed, chunks_upserted, failures=0)
         return 0
 
     workers = resolve_workers(workers, settings)
@@ -213,6 +223,7 @@ def run(
                     record, parsed, chunks = future.result()
                 except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
                     failures += 1
+                    files_failed += 1
                     append_record(
                         progress,
                         InventoryRecord(
@@ -238,6 +249,7 @@ def run(
                 if dry_run:
                     record.status = "dry"
                     append_record(progress, record)
+                    files_ok += 1
                     log.info(
                         json.dumps(
                             {
@@ -254,6 +266,7 @@ def run(
                     record.status = _upsert_one(parsed, chunks, settings)
                 except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
                     failures += 1
+                    files_failed += 1
                     record.status = "error"
                     record.error = str(exc)[:500]
                     record.error_type = type(exc).__name__
@@ -268,11 +281,34 @@ def run(
                             }
                         )
                     )
+                if record.status in ("upserted", "skipped"):
+                    # "skipped" = Qdrant already holds doc_id at this sha256
+                    # (fresh inventory, warm Qdrant) — still an ok outcome.
+                    files_ok += 1
+                if record.status == "upserted":
+                    chunks_upserted += record.chunks
                 append_record(progress, record)
 
-    if failures:
-        log.warning(json.dumps({"action": "done", "failures": failures}))
+    _log_summary(started, files_ok, files_failed, chunks_upserted, failures)
     return 1 if failures else 0
+
+
+def _log_summary(
+    started: float, files_ok: int, files_failed: int, chunks_upserted: int, failures: int
+) -> None:
+    """One 'done' summary per run (issue #20 PR D): files ok / failed /
+    chunks upserted / elapsed_ms. Warning level when anything failed."""
+    payload = {
+        "action": "done",
+        "files_ok": files_ok,
+        "files_failed": files_failed,
+        "chunks_upserted": chunks_upserted,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+    }
+    if failures:
+        log.warning(json.dumps(payload))
+    else:
+        log.info(json.dumps(payload))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -290,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=args.log_level.upper(), format="%(message)s")
+    configure_logging(args.log_level)
     workers = args.workers or load_settings().ingest_workers
     return run(
         args.src,

@@ -10,7 +10,7 @@ feature hashing, no network, no model weights. Never the default in prod.
 
 import multiprocessing
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Dense dimension of the hashed embedder. Fixed so CI never depends on the
@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     dense_dim: int | None = None
     embed_timeout_s: float = 60.0
 
+    @field_validator("embed_mode")
+    @classmethod
+    def _normalize_embed_mode(cls, v: str) -> str:
+        """Case/whitespace normalization so an operator writing
+        EMBED_MODE=VLLM gets vllm behavior everywhere (dispatch, fail-fast,
+        air-gap validation), instead of a confusing startup crash."""
+        return v.strip().lower()
+
     # Reasoning LLM (LiteLLM / vLLM)
     llm_base_url: str | None = None
     llm_model_reasoning: str | None = None
@@ -55,6 +63,13 @@ class Settings(BaseSettings):
     # cold vLLM can legitimately take ~10s to answer the embed ping.
     health_qdrant_timeout_s: float = 5.0
     health_embed_timeout_s: float = 10.0
+
+    # Agent startup fail-fast (issue #20 PR D): embed_mode=hash is CI/dev only
+    # and must be explicitly allowed (CI overlay sets ALLOW_HASH_MODE=true).
+    # Prod (vllm) is validated eagerly at startup: DENSE_DIM / EMBED_* must
+    # resolve before the agent listens.
+    allow_hash_mode: bool = False
+    log_level: str = "INFO"
 
     # Ingest. batch_size follows the Qdrant skill's 64-256 upsert band
     # (.agents/skills/qdrant-performance-optimization) — bounds enforced here

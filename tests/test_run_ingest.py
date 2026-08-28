@@ -58,3 +58,133 @@ def test_corrupt_pdf_writes_typed_error_record(tmp_path, synthetic_pdf):
     err = [r for r in records if r["status"] == "error"]
     assert err and err[0]["path"] == str(bad)
     assert err[0]["error_type"]
+
+
+def _stderr_json(capsys) -> list[dict]:
+    out = capsys.readouterr().err
+    lines = []
+    for line in out.splitlines():
+        if line.strip():
+            try:
+                parsed = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                lines.append(parsed)
+    return lines
+
+
+def test_summary_counters_ok_run(tmp_path, synthetic_pdf, capsys):
+    """PR D: files ok / failed / chunks upserted, one summary line per run."""
+    progress = tmp_path / "inventory.jsonl"
+    rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress),
+               "--workers", "1", "--dry-run"])
+    assert rc == 0
+    # Second run: the file is skipped — still an ok outcome. (One capsys
+    # read at the end: the StreamHandler binds stderr at creation.)
+    rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress),
+               "--workers", "1", "--dry-run"])
+    assert rc == 0
+    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
+    assert len(done) == 2
+    for summary in done:
+        assert summary["files_ok"] == 1
+        assert summary["files_failed"] == 0
+        assert summary["chunks_upserted"] == 0  # dry run: parsed, not upserted
+        assert summary["elapsed_ms"] >= 0
+
+
+def test_summary_counters_failed_run(tmp_path, synthetic_pdf, capsys):
+    (tmp_path / "corrupt.pdf").write_bytes(b"not a pdf")
+    progress = tmp_path / "inventory.jsonl"
+    rc = main(["--src", str(tmp_path), "--progress", str(progress),
+               "--workers", "1", "--dry-run"])
+    assert rc == 1
+    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
+    assert len(done) == 1
+    assert done[0]["files_failed"] == 1
+
+
+class _FakeQdrant:
+    """QdrantPoints double for the parent-side run() path (review round on
+    PR D: the non-dry upsert branch had no coverage)."""
+
+    def __init__(self, stored_sha: str | None = None):
+        self.stored_sha = stored_sha
+        self.upserts: list[int] = []
+        self.deletes = 0
+
+    def collection_exists(self, collection_name):
+        return True
+
+    def get_collection(self, collection_name):
+        from types import SimpleNamespace
+
+        from mainframe_rag.config import HASH_EMBED_DIM
+
+        return SimpleNamespace(
+            config=SimpleNamespace(
+                params=SimpleNamespace(vectors={"dense": SimpleNamespace(size=HASH_EMBED_DIM)})
+            )
+        )
+
+    def create_payload_index(self, *a, **k):
+        from types import SimpleNamespace
+
+        return SimpleNamespace()
+
+    def scroll(self, collection_name, *, scroll_filter, limit, with_payload):
+        from types import SimpleNamespace
+
+        if self.stored_sha is None:
+            return [], None
+        return [SimpleNamespace(payload={"sha256": self.stored_sha})], None
+
+    def upsert(self, collection_name, *, points, wait=True):
+        self.upserts.append(len(points))
+        from types import SimpleNamespace
+
+        return SimpleNamespace()
+
+    def delete(self, collection_name, *, points_selector, wait=True):
+        self.deletes += 1
+        from types import SimpleNamespace
+
+        return SimpleNamespace()
+
+
+def test_upsert_path_counters_with_fake_qdrant(tmp_path, synthetic_pdf, capsys, monkeypatch):
+    """Non-dry run with a fake port: files_ok counts the upsert and
+    chunks_upserted matches the points actually sent."""
+    from mainframe_rag.ingest import run_ingest
+
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    progress = tmp_path / "inventory.jsonl"
+    rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"])
+    assert rc == 0
+    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
+    assert done[0]["files_ok"] == 1
+    assert done[0]["chunks_upserted"] > 0
+    assert sum(fake.upserts) == done[0]["chunks_upserted"]
+
+
+def test_qdrant_level_skip_counts_as_ok(tmp_path, synthetic_pdf, capsys, monkeypatch):
+    """Qdrant already holds doc_id at this sha256 (fresh inventory, warm
+    Qdrant): files_ok counts it, nothing is upserted or deleted."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    fake = _FakeQdrant(stored_sha=sha256_file(synthetic_pdf))
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    progress = tmp_path / "inventory.jsonl"
+    rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"])
+    assert rc == 0
+    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
+    assert done[0]["files_ok"] == 1
+    assert done[0]["chunks_upserted"] == 0
+    assert fake.upserts == [] and fake.deletes == 0

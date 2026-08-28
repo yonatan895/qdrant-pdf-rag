@@ -30,6 +30,7 @@ from mainframe_rag.agent.answer import (
 )
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
+from mainframe_rag.logs import configure_logging
 from mainframe_rag.ports import Embedder, LLMClient
 from mainframe_rag.retrieve.query import search as retrieve_search
 
@@ -59,6 +60,21 @@ class AppError(Exception):
 async def lifespan(_app: FastAPI):
     global settings, http, qdrant, embedder, llm
     settings = load_settings()
+    configure_logging(settings.log_level)
+    # Startup fail-fast (issue #20 PR D): the agent refuses to listen on a
+    # misconfigured embed path rather than failing per-request. Hash mode is
+    # CI/dev only and must be explicitly allowed.
+    if settings.embed_mode not in ("hash", "vllm"):
+        raise RuntimeError(
+            f"EMBED_MODE={settings.embed_mode!r} is not one of hash|vllm"
+        )
+    if settings.embed_mode == "hash" and not settings.allow_hash_mode:
+        raise RuntimeError(
+            "EMBED_MODE=hash is CI/dev only; set ALLOW_HASH_MODE=true (CI overlay) to allow it"
+        )
+    if settings.embed_mode == "vllm":
+        settings.require_dense_dim()
+        settings.require_embed()
     # Bounded connection retries only fire when the request was never sent
     # (DNS/refused) — safe for any method. No request-level retries exist.
     http = httpx.Client(
@@ -66,8 +82,8 @@ async def lifespan(_app: FastAPI):
         transport=httpx.HTTPTransport(retries=settings.http_connect_retries),
     )
     # One dispatch point for embed_mode; the reasoning-model client owns its
-    # own connection pool with its own (long) timeout — env resolution stays
-    # lazy until first use (startup fail-fast is PR D).
+    # own connection pool with its own (long) timeout. LLM env stays
+    # request-time fail-fast (assert_reasoning_model in /v1/answer).
     embedder = build_embedder(settings, http)
     llm_client = HttpxLLMClient(settings)
     llm = llm_client
@@ -204,6 +220,7 @@ def healthz() -> dict:
 @app.post("/v1/search", response_model=SearchResponse)
 def v1_search(request: Request, req: SearchRequest) -> SearchResponse:
     request_id = request.state.request_id
+    started = time.monotonic()
     try:
         hits, kind, timings = retrieve_search(
             qdrant, embedder, settings.qdrant_collection, req.query,
@@ -216,6 +233,7 @@ def v1_search(request: Request, req: SearchRequest) -> SearchResponse:
         json_log(
             request_id, "search", query_kind=kind, hits=len(hits),
             embed_ms=timings.get("embed_ms"), qdrant_ms=timings.get("qdrant_ms"),
+            elapsed_ms=int((time.monotonic() - started) * 1000),
         )
     )
     return SearchResponse(
@@ -228,6 +246,7 @@ def v1_search(request: Request, req: SearchRequest) -> SearchResponse:
 @app.post("/v1/answer", response_model=AnswerResponse)
 def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
     request_id = request.state.request_id
+    started = time.monotonic()
     # Fail fast before any retrieval: the reasoning model (and its endpoint)
     # must be configured; nothing else is callable. Config errors get a fixed
     # client message — the exception text stays in the log.
@@ -265,6 +284,7 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
                 request_id, "answer", query_kind=kind, hits=len(hits),
                 embed_ms=timings.get("embed_ms"), qdrant_ms=timings.get("qdrant_ms"),
                 llm_ms=llm_ms, citations=len(parsed["citations"]),
+                elapsed_ms=int((time.monotonic() - started) * 1000),
             )
         )
         return AnswerResponse(

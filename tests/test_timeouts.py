@@ -82,6 +82,9 @@ def test_answer_chat_retries_nothing_on_connect_error():
 
 def test_agent_lifespan_timeouts_and_retries(monkeypatch):
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    # CI/dev embed profile: hash mode, explicitly allowed (PR D fail-fast)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
     monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
     monkeypatch.setenv("QDRANT_TIMEOUT_S", "11")
     monkeypatch.setenv("EMBED_TIMEOUT_S", "7")
