@@ -28,14 +28,14 @@ FRONT_MATTER_MIN_PAGES = 2
 _BLANK_SPLIT_RE = re.compile(r"\n\s*\n")
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Section:
     heading_path: str
     page_start: int
     page_end: int
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Chunk:
     chunk_id: str
     doc_id: str

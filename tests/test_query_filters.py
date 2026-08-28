@@ -6,7 +6,7 @@ import pytest
 from qdrant_client import models
 
 from mainframe_rag.config import Settings
-from mainframe_rag.retrieve import query as query_mod
+from mainframe_rag.ports import Embedder
 from mainframe_rag.retrieve.filters import build_filter, parse_query
 from mainframe_rag.retrieve.query import format_citation, rrf_fuse, search
 
@@ -82,17 +82,24 @@ class FakeQdrant:
         return SimpleNamespace(points=list(points))
 
 
+class FakeEmbedder:
+    """Embedder protocol double: deterministic vectors, no network."""
+
+    def dense(self, texts):
+        return [[0.1] * 4 for _ in texts]
+
+    def sparse(self, texts):
+        return [([3], [1.0]) for _ in texts]
+
+
 @pytest.fixture
-def patched_embed(monkeypatch):
-    monkeypatch.setattr(query_mod, "dense_embed", lambda texts, s, client=None: [[0.1] * 4])
-    monkeypatch.setattr(
-        query_mod, "sparse_embed", lambda texts, s: [([3], [1.0])]
-    )
+def embedder() -> Embedder:
+    return FakeEmbedder()
 
 
-def test_search_applies_message_ids_filter_in_prefetch(patched_embed):
+def test_search_applies_message_ids_filter_in_prefetch(embedder):
     fake = FakeQdrant(dense=[_point("a")], sparse=[_point("b")])
-    hits, kind, timings = search(fake, _settings(), "IEA500I rejected", limit=5)
+    hits, kind, timings = search(fake, embedder, "mainframe_manuals", "IEA500I rejected", limit=5)
     assert kind == "identifier"
     for q in fake.queries:
         assert q["filter"] is not None
@@ -104,16 +111,16 @@ def test_search_applies_message_ids_filter_in_prefetch(patched_embed):
     assert {h.chunk_id for h in hits} == {"a", "b"}
 
 
-def test_search_identifier_weights_favor_bm25(patched_embed):
+def test_search_identifier_weights_favor_bm25(embedder):
     fake = FakeQdrant(dense=[_point("dense-only")], sparse=[_point("sparse-only")])
-    hits, kind, _ = search(fake, _settings(), "IEA500I", limit=5)
+    hits, kind, _ = search(fake, embedder, "mainframe_manuals", "IEA500I", limit=5)
     assert kind == "identifier"
     assert hits[0].chunk_id == "sparse-only"
 
 
-def test_search_nl_weights_equal(patched_embed):
+def test_search_nl_weights_equal(embedder):
     fake = FakeQdrant(dense=[_point("dense-only")], sparse=[_point("sparse-only")])
-    hits, kind, _ = search(fake, _settings(), "sizing lookaside", limit=5)
+    hits, kind, _ = search(fake, embedder, "mainframe_manuals", "sizing lookaside", limit=5)
     assert kind == "nl"
     # Equal weights, equal ranks -> tie; dense list order wins stably.
     assert [h.chunk_id for h in hits] == ["dense-only", "sparse-only"]

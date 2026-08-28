@@ -22,7 +22,7 @@ from pathlib import Path
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import Chunk, make_chunks
-from mainframe_rag.ingest.embed import embed_batch
+from mainframe_rag.ingest.embed import build_embedder, embed_batch
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc, parse_pdf, sha256_file
 from mainframe_rag.ingest.inventory import (
     InventoryRecord,
@@ -42,6 +42,7 @@ log = logging.getLogger("ingest")
 
 _worker_settings: Settings | None = None
 _worker_qdrant = None
+_worker_embedder = None
 
 
 def _parse_one(
@@ -86,6 +87,13 @@ def _init_worker() -> None:
     _worker_qdrant = None
 
 
+def _get_embedder(settings: Settings):
+    global _worker_embedder
+    if _worker_embedder is None:
+        _worker_embedder = build_embedder(settings)
+    return _worker_embedder
+
+
 def _get_qdrant(settings: Settings):
     from qdrant_client import QdrantClient
 
@@ -110,7 +118,11 @@ def _upsert_one(parsed: ParsedDoc, chunks: list[Chunk], settings: Settings) -> s
     batch = settings.batch_size
     for i in range(0, len(chunks), batch):
         vecs = embed_batch(
-            chunks[i : i + batch], parsed.product, parsed.version, parsed.title, settings
+            chunks[i : i + batch],
+            parsed.product,
+            parsed.version,
+            parsed.title,
+            _get_embedder(settings),
         )
         upserted += upsert_chunks(client, settings, parsed, chunks[i : i + batch], vecs)
     log.info(

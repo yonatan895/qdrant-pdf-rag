@@ -71,23 +71,38 @@ def assert_reasoning_model(settings: Settings) -> str:
     return settings.require_reasoning_model()
 
 
-def call_reasoning_model(
-    messages: list[dict[str, str]], settings: Settings, client: httpx.Client | None = None
-) -> str:
-    model = assert_reasoning_model(settings)
-    assert settings.llm_base_url  # guaranteed by assert_reasoning_model
-    own_client = client is None
-    client = client or httpx.Client(timeout=300.0)
-    try:
-        resp = client.post(
-            f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+class HttpxLLMClient:
+    """LLMClient implementation: the reasoning model only — deliberately no
+    other model knob (architecture.md 4.6). Fails closed at call time when
+    LLM_BASE_URL / LLM_MODEL_REASONING are unset; startup fail-fast is PR D."""
+
+    def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
+        self._settings = settings
+        self._client = client
+
+    def _http(self) -> httpx.Client:
+        if self._client is None:
+            self._client = httpx.Client(timeout=300.0)
+        return self._client
+
+    def chat(self, messages: list[dict[str, str]]) -> str:
+        model = assert_reasoning_model(self._settings)
+        base_url = self._settings.llm_base_url
+        assert base_url  # guaranteed by assert_reasoning_model
+        resp = self._http().post(
+            f"{base_url.rstrip('/')}/chat/completions",
             json={"model": model, "messages": messages},
         )
         resp.raise_for_status()
         return str(resp.json()["choices"][0]["message"]["content"])
-    finally:
-        if own_client:
-            client.close()
+
+
+def call_reasoning_model(
+    messages: list[dict[str, str]], settings: Settings, client: httpx.Client | None = None
+) -> str:
+    """Thin wrapper kept for callers without an injected LLMClient; prefer
+    building HttpxLLMClient once and calling .chat() (issue #20 PR A)."""
+    return HttpxLLMClient(settings, client).chat(messages)
 
 
 def parse_answer(content: str, allowed_citations: set[str]) -> dict:

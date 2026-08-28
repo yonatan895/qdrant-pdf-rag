@@ -12,10 +12,9 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 
-from qdrant_client import QdrantClient, models
+from qdrant_client import models
 
-from mainframe_rag.config import Settings
-from mainframe_rag.ingest.embed import dense_embed, sparse_embed
+from mainframe_rag.ports import Embedder, QdrantPoints
 from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
 
 PREFETCH_LIMIT = 40
@@ -24,7 +23,25 @@ RRF_WEIGHTS_IDENTIFIER = (1.0, 3.0)  # (dense, bm25): identifiers favor exact te
 RRF_WEIGHTS_NL = (1.0, 1.0)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
+class Cite:
+    """Citation triple rendered as:
+    SA22-7592-05 z/OS MVS Init..., IEASYSxx > LFAREA, p. 1-17"""
+
+    doc_id: str
+    title: str
+    heading_path: str
+    page_label: str
+
+    def render(self) -> str:
+        parts = [f"{self.doc_id} {self.title}".strip(), self.heading_path]
+        cite = ", ".join(p for p in parts if p)
+        if self.page_label:
+            cite += f", p. {self.page_label}"
+        return cite
+
+
+@dataclass(frozen=True, slots=True)
 class SearchHit:
     chunk_id: str
     score: float
@@ -37,18 +54,16 @@ class SearchHit:
     chunk_type: str
     product: str | None
     version: str | None
-    message_ids: list[str]
+    message_ids: tuple[str, ...]
 
 
 def format_citation(
     doc_id: str, title: str, heading_path: str, page_label: str
 ) -> str:
     """SA22-7592-05 z/OS MVS Init..., IEASYSxx > LFAREA, p. 1-17"""
-    parts = [f"{doc_id} {title}".strip(), heading_path]
-    cite = ", ".join(p for p in parts if p)
-    if page_label:
-        cite += f", p. {page_label}"
-    return cite
+    return Cite(
+        doc_id=doc_id, title=title, heading_path=heading_path, page_label=page_label
+    ).render()
 
 
 def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:
@@ -69,12 +84,12 @@ def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:
         chunk_type=str(payload.get("chunk_type") or "narrative"),
         product=payload.get("product"),
         version=payload.get("version"),
-        message_ids=list(payload.get("message_ids") or []),
+        message_ids=tuple(payload.get("message_ids") or []),
     )
 
 
 def _prefetch_one(
-    client: QdrantClient,
+    client: QdrantPoints,
     collection: str,
     query_vec,
     using: str,
@@ -113,8 +128,9 @@ def rrf_fuse(
 
 
 def search(
-    client: QdrantClient,
-    settings: Settings,
+    client: QdrantPoints,
+    embedder: Embedder,
+    collection: str,
     query: str,
     product: str | None = None,
     version: str | None = None,
@@ -123,13 +139,12 @@ def search(
     """Returns (hits, query_kind, timing_ms). Filters applied inside prefetch."""
     identifiers = parse_query(query)
     flt = build_filter(identifiers, product=product, version=version)
-    collection = settings.qdrant_collection
 
     timings: dict[str, int] = {}
 
     t0 = time.monotonic()
-    dense_vec = dense_embed([query], settings)[0]
-    sparse_idx, sparse_val = sparse_embed([query], settings)[0]
+    dense_vec = embedder.dense([query])[0]
+    sparse_idx, sparse_val = embedder.sparse([query])[0]
     timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 
     t0 = time.monotonic()

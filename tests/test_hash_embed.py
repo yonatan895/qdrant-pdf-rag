@@ -3,12 +3,8 @@
 import math
 
 from mainframe_rag.config import HASH_EMBED_DIM, Settings
-from mainframe_rag.ingest.embed import (
-    dense_embed,
-    hash_dense_embed,
-    hash_sparse_embed,
-    sparse_embed,
-)
+from mainframe_rag.ingest.embed import build_embedder, hash_dense_embed, hash_sparse_embed
+from mainframe_rag.ports import Embedder
 
 
 def _hash_settings() -> Settings:
@@ -43,9 +39,11 @@ def test_sparse_shape_and_determinism():
 
 def test_dispatch_uses_hash_without_network():
     s = _hash_settings()
-    dense = dense_embed(["IEA500I"], s)  # must not require EMBED_BASE_URL
+    embedder = build_embedder(s)  # must not require EMBED_BASE_URL
+    assert isinstance(embedder, Embedder)
+    dense = embedder.dense(["IEA500I"])
     assert len(dense[0]) == HASH_EMBED_DIM
-    assert sparse_embed(["IEA500I"], s)[0][0] == sorted(sparse_embed(["IEA500I"], s)[0][0])
+    assert embedder.sparse(["IEA500I"])[0][0] == sorted(embedder.sparse(["IEA500I"])[0][0])
 
 
 def test_hash_mode_needs_no_dense_dim_env():
