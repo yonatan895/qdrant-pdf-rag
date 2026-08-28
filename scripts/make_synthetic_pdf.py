@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the synthetic IBM-shaped test PDF (NOT a real manual).
-
-Fixture contract (architecture.md section 5.3):
-- doc number SA22-0000-00 on page 1
-- outline (bookmarks) with front matter + mid-book sections
-- a fake IEA500I message section (invented text, no IBM content)
-- printed page labels "1-1", "1-2", ...
-Output is committed under tests/fixtures/synthetic/ and is regenerated if missing.
-"""
+"""Generate original test PDFs (NOT vendor manuals). Never commit the output."""
 
 from __future__ import annotations
 
@@ -20,7 +12,6 @@ HEADER = "SA22-0000-00 Synthetic Operating System Reference"
 FOOTER = "(c) Synthetic Corp 2026 - Fixture for testing only"
 
 PAGES = [
-    # (chapter/section bookmark structure is expressed via TOC below)
     "Synthetic Operating System Reference\nz/OS V9R9\nSA22-0000-00\n\n"
     "This fixture was generated for tests. It contains no real vendor content.",
     "Contents\n\nChapter 1 System parameters ........ 3\n"
@@ -83,12 +74,31 @@ def build(out_path: Path) -> Path:
     return out_path
 
 
+def build_plain(out_path: Path) -> Path:
+    """Generic PDF: no form number, no outline. Original test prose."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc = pymupdf.open()
+    pages = [
+        "Acme Widget Controller Guide\nThis guide describes the Acme Widget Controller.\nWidgets store torque in a buffer.",
+        "Installation\nMount the widget on a 19-inch rack.\nTorque the screws to 5 Nm.",
+        "Messages\nWDG001I BUFFER FULL\nThe torque buffer reached capacity. Drain it before retry.",
+    ]
+    for text in pages:
+        page = doc.new_page()
+        w, h = page.rect.width, page.rect.height
+        page.insert_textbox(pymupdf.Rect(72, 72, w - 72, h - 90), text, fontsize=11)
+    doc.set_metadata({"title": "Acme Widget Controller Guide", "author": "pdf-rag test fixture"})
+    doc.save(out_path)
+    doc.close()
+    return out_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    default = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "synthetic" / "SA22-0000-00_outline.pdf"
-    parser.add_argument("--out", type=Path, default=default)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--plain", action="store_true")
     args = parser.parse_args()
-    print(build(args.out))
+    print(build_plain(args.out) if args.plain else build(args.out))
 
 
 if __name__ == "__main__":
