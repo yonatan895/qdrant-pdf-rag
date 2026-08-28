@@ -15,8 +15,13 @@ on:
 
 jobs:
   gate:
+    if: >-
+      github.event_name == 'pull_request' ||
+      contains(github.event.comment.body, '/oc') ||
+      contains(github.event.comment.body, '/opencode')
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions: {}
     outputs:
       ok: ${{ steps.check.outputs.ok }}
     steps:
@@ -39,12 +44,11 @@ jobs:
 
   opencode:
     needs: gate
-    if: |
+    if: >-
       needs.gate.outputs.ok == 'true' &&
-      (contains(github.event.comment.body, '/oc') ||
-      contains(github.event.comment.body, '/opencode'))
+      github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     concurrency:
       group: opencode-comment-${{ github.event.comment.id || github.run_id }}
       cancel-in-progress: true
@@ -68,14 +72,16 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         with:
           model: opencode-go/hy4-preview
+          share: false
 
   review:
     needs: gate
     if: >-
       needs.gate.outputs.ok == 'true' &&
-      github.event_name == 'pull_request'
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     concurrency:
       group: opencode-review-${{ github.event.pull_request.number || github.run_id }}
       cancel-in-progress: true
