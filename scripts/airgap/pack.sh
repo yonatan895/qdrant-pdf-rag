@@ -49,7 +49,7 @@ if [ -n "$QDRANT_DIGEST" ]; then
     QDRANT_REF="${QDRANT_REF%@*}@${QDRANT_DIGEST}"
 fi
 
-DIST=dist
+DIST="$REPO_ROOT/dist"
 OUT_TARBALL="$DIST/qdrant-pdf-rag-${IMAGE_SHA}.tar"
 mkdir -p "$DIST"
 rm -f "$DIST"/repo.bundle "$DIST"/qdrant-image.tar "$DIST"/app-*.tar \
@@ -78,10 +78,11 @@ CHART_VERSION=$(basename charts/qdrant-*.tgz .tgz)
 cat "$DIST/MANIFEST.txt"
 
 echo "==> Checksums (members)"
-cd "$DIST"
-sha256sum repo.bundle qdrant-image.tar app-ingest-"$IMAGE_SHA".tar \
-          app-agent-"$IMAGE_SHA".tar MANIFEST.txt > SHA256SUMS
-cd ..
+(
+    cd "$DIST"
+    sha256sum repo.bundle qdrant-image.tar app-ingest-"$IMAGE_SHA".tar \
+              app-agent-"$IMAGE_SHA".tar MANIFEST.txt > SHA256SUMS
+)
 
 echo "==> Tarball"
 tar -C "$DIST" -cf "$OUT_TARBALL" repo.bundle qdrant-image.tar \
