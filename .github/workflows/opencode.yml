@@ -17,8 +17,13 @@ jobs:
   gate:
     if: >-
       github.event_name == 'pull_request' ||
-      contains(github.event.comment.body, '/oc') ||
-      contains(github.event.comment.body, '/opencode')
+      (
+        github.event.comment.user.type != 'Bot' &&
+        (
+          contains(github.event.comment.body, '/oc') ||
+          contains(github.event.comment.body, '/opencode')
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -72,6 +77,7 @@ jobs:
       # break them. CLI pinned to release v1.18.25, sha256-verified; bump
       # deliberately in BOTH jobs.
       - name: Cache opencode
+        id: cache
         uses: actions/cache@v4
         with:
           path: ~/.opencode/bin
@@ -120,6 +126,7 @@ jobs:
 
       # See the comment on the /oc job: inlined on purpose, not a composite.
       - name: Cache opencode
+        id: cache
         uses: actions/cache@v4
         with:
           path: ~/.opencode/bin
