@@ -1,6 +1,0 @@
-{
-  "dependencies": {
-    "micromatch": "^4.0.8",
-    "picomatch": "^2.3.1"
-  }
-}

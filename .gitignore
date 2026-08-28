@@ -37,6 +37,11 @@ coverage.xml
 *-secret.yaml
 secrets/
 
+# --- Node toolchain (no Node code in this repo; markdownlint runs in CI action) ---
+node_modules/
+package.json
+package-lock.json
+
 # --- Editors / OS ---
 .vscode/
 .idea/
