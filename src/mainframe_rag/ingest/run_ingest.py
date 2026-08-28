@@ -166,7 +166,7 @@ def run(
             path_str = futures[future]
             try:
                 record, parsed, chunks = future.result()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
                 failures += 1
                 append_record(
                     progress,
@@ -187,7 +187,7 @@ def run(
 
             try:
                 record.status = _upsert_one(parsed, chunks, settings)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
                 failures += 1
                 record.status = "error"
                 record.error = str(exc)[:500]

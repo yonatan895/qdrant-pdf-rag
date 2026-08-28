@@ -1,13 +1,11 @@
 # Agent image: FastAPI retrieval + reasoning-model glue. No GPU.
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.5
-
-ARG PYV=3.12
-
-RUN microdnf install -y python${PYV} python${PYV}-pip && microdnf clean all
+# Python 3.14 GIL (issue #5): ubi9/python-314-minimal ships python3.14 + pip.
+# Exact image pinned in images.txt.
+FROM registry.access.redhat.com/ubi9/python-314-minimal:9.8
 
 COPY requirements.lock.txt /wheelhouse/requirements.lock.txt
 COPY --from=wheelhouse / /wheelhouse/
-RUN pip${PYV} install --no-index --find-links /wheelhouse -r /wheelhouse/requirements.lock.txt \
+RUN pip install --no-index --find-links /wheelhouse -r /wheelhouse/requirements.lock.txt \
     && rm -rf /root/.cache
 
 # BM25 weights are needed for query-side sparse vectors (no runtime download).

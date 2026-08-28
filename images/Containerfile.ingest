@@ -1,18 +1,15 @@
 # Ingest image: UBI, non-root, wheelhouse + BM25 weights baked in.
 # Build on the connected host (make build-images); BM25 weights must never be
 # downloaded at runtime (air-gap rule, architecture.md section 3.1).
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.5
-
-ARG PYV=3.12
-
-RUN microdnf install -y python${PYV} python${PYV}-pip python${PYV}-devel && \
-    microdnf clean all
+# Python 3.14 GIL (issue #5): ubi9/python-314-minimal ships python3.14 + pip;
+# no microdnf python install needed. Exact image pinned in images.txt.
+FROM registry.access.redhat.com/ubi9/python-314-minimal:9.8
 
 # Wheels: built on the connected host (make wheelhouse), installed offline.
 # Named build contexts (see Makefile build-images): wheelhouse=, bm25=
 COPY requirements.lock.txt /wheelhouse/requirements.lock.txt
 COPY --from=wheelhouse / /wheelhouse/
-RUN pip${PYV} install --no-index --find-links /wheelhouse -r /wheelhouse/requirements.lock.txt \
+RUN pip install --no-index --find-links /wheelhouse -r /wheelhouse/requirements.lock.txt \
     && rm -rf /root/.cache
 
 # BM25 sparse weights (FastEmbed Qdrant/bm25) — no network at run time.

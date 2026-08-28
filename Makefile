@@ -19,7 +19,7 @@ INGEST_IMAGE_NAME ?= mainframe-rag/ingest
 AGENT_IMAGE_NAME ?= mainframe-rag/agent
 IMAGE_TAG ?= latest
 
-PY ?= python3
+PY ?= $(shell command -v python3.14 2>/dev/null || command -v python3)
 PIP ?= $(PY) -m pip
 
 .DEFAULT_GOAL := help

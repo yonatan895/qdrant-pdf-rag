@@ -8,8 +8,9 @@
 # other in the same PR (AGENTS.md).
 #
 # GitLab admin setup (Settings > CI/CD > Variables) — names only, no secrets:
-#   CI_PYTHON_IMAGE  (recommended)  mirrored UBI/Python 3.12 image, e.g.
-#                                   "${CI_REGISTRY}/ci/python:3.12". The default
+#   CI_PYTHON_IMAGE  (recommended)  mirrored UBI/Python 3.14 image (issue #5:
+#                                   3.14 GIL, no 3.14t), e.g.
+#                                   "${CI_REGISTRY}/ci/python:3.14". The default
 #                                   below is a placeholder for that mirror; the
 #                                   image must contain git, python3, pip.
 #   CI_RUNNER_TAG   (optional)      runner tag, default "airgap"
@@ -33,7 +34,7 @@ variables:
   # Placeholder default; overridden by the project-level CI_PYTHON_IMAGE
   # variable pointing at the mirrored internal image (YAML vars have the
   # lowest precedence in GitLab).
-  CI_PYTHON_IMAGE: "$CI_REGISTRY/ci/python:3.12"
+  CI_PYTHON_IMAGE: "$CI_REGISTRY/ci/python:3.14"
   CI_RUNNER_TAG: "airgap"
 
 default:

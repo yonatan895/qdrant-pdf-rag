@@ -1,4 +1,4 @@
-# Python 3.12 pins. Lock file for the ingest and agent images.
+# Python 3.14 pins. Lock file for the ingest and agent images.
 # Air-gap images install with: pip install --no-index --find-links /wheelhouse -r requirements.lock.txt
 pymupdf==1.26.3
 qdrant-client==1.16.2
