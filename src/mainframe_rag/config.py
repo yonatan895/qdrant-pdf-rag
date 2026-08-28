@@ -38,11 +38,13 @@ class Settings(BaseSettings):
     llm_base_url: str | None = None
     llm_model_reasoning: str | None = None
 
-    # Ingest
+    # Ingest. batch_size follows the Qdrant skill's 64-256 upsert band
+    # (.agents/skills/qdrant-performance-optimization) — bounds enforced here
+    # so no call site can grow a magic number outside it.
     ingest_workers: int = Field(
         default_factory=lambda: max(1, (multiprocessing.cpu_count() or 2) - 1)
     )
-    batch_size: int = 64
+    batch_size: int = Field(default=64, ge=16, le=256)
     bm25_model: str = "Qdrant/bm25"
     bm25_cache_dir: str | None = None
 
