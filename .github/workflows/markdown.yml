@@ -3,9 +3,16 @@
 # pytest, via paths-ignore in ci.yml) AND the GHCR image build (paths-ignore in
 # e2e.yml) are skipped for those. Mixed changes run ci + e2e WITHOUT this job —
 # linting docs is not allowed to block code PRs. Vendored-only markdown bumps
-# run nothing at all. Root-level files need explicit '*.md' globs in the
-# filters below (dorny/paths-filter v3 + picomatch: '**/*.md' alone does not
-# reliably match repo-root files — issue #18).
+# run nothing at all.
+#
+# Why git diff instead of dorny/paths-filter: dorny's default
+# `predicate-quantifier: some` makes negation rules inert — a file matches if
+# ANY predicate matches, so the `code` filter's `**` + `!*.md` matched
+# AGENTS.md and `markdown_only` was always false (run 33215512307: markdownlint
+# never fired for root-markdown PRs). `every` would fix negations but breaks
+# the markdown filter's positive list. Plain `git diff --name-only` + a case
+# statement implements the documented contract exactly and drops the
+# third-party action.
 name: markdown-lint
 
 on:
@@ -19,36 +26,42 @@ permissions:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       markdown_only: ${{ steps.decide.outputs.markdown_only }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
         with:
-          filters: |
-            # micromatch's '**/*.md' does not match repo-root files
-            # (AGENTS.md, README.md) — list '*.md' explicitly, here and in the
-            # code exclusions, or exclusive-root-markdown PRs run no lint.
-            markdown:
-              - '*.md'
-              - '**/*.md'
-              - '*.markdown'
-              - '**/*.markdown'
-              - '!.agents/**'
-              - '!vendor/**'
-            code:
-              - '**'
-              - '!*.md'
-              - '!**/*.md'
-              - '!*.markdown'
-              - '!**/*.markdown'
+          fetch-depth: 0
       - id: decide
         env:
-          MARKDOWN: ${{ steps.filter.outputs.markdown }}
-          CODE: ${{ steps.filter.outputs.code }}
+          BEFORE: ${{ github.event.before }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD: ${{ github.sha }}
         run: |
-          if [ "$MARKDOWN" = "true" ] && [ "$CODE" != "true" ]; then
+          set -eu
+          if [ -n "$BASE_REF" ]; then
+            base="$(git merge-base "origin/$BASE_REF" "$HEAD")"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            base="$BEFORE"
+          else
+            # First push of a branch: nothing to diff against; lint nothing.
+            echo "markdown_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files="$(git diff --name-only "$base" "$HEAD")"
+          md=0; other=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              .agents/*|vendor/*) ;;               # vendored docs: never counted
+              *.md|*.markdown) md=$((md + 1)) ;;
+              *) other=$((other + 1)) ;;
+            esac
+          done <<EOF
+          $files
+          EOF
+          if [ "$md" -gt 0 ] && [ "$other" -eq 0 ]; then
             echo "markdown_only=true" >> "$GITHUB_OUTPUT"
           else
             echo "markdown_only=false" >> "$GITHUB_OUTPUT"
