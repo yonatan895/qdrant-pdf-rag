@@ -92,6 +92,14 @@ New behavior belongs in the layer that already owns that decision. Do not thread
 - Classify `message` if `XXXnnnY` appears in the first few lines, not only line 1 (headings precede IDs).
 - Qdrant ids: UUID5, not sha256 hex.
 
+## Qdrant skills (vendored)
+
+`qdrant/skills` is vendored (pinned, no submodule) under `.agents/skills/`; pin record in `vendor/qdrant-skills.sha`.
+
+- **Before** changing collections, hybrid search, quantization, HNSW, Qdrant Helm/deploy, or `qdrant-client` usage, read the matching skill under `.agents/skills/` (search quality, performance, deployment options, clients SDK, monitoring, …).
+- **This repository still wins on product constraints** wherever a skill says otherwise: unprivileged `*-unprivileged` image, prod 3-replica/500Gi vs CI 1-replica overlay, no NFS for Qdrant data, `EMBED_MODE=hash` never in prod, no Qdrant Cloud, no `3.14t`.
+- Do not install skills only on a developer machine (`npx skills add` etc.) — they live in this tree so GitHub, GitLab clones, and air-gap bundles all see them. Updates: bump the pinned SHA in a dedicated PR, never drive-by.
+
 ## When you change this file
 
 Same PR as the work that taught the rule. Keep it short. Delete advice that is no longer true.

@@ -1,0 +1,7 @@
+NOTICE for .agents/skills/ — vendored from https://github.com/qdrant/skills
+at commit bcca2c2da1c00992038e83038e01791d468f943d (2026-08-27), Apache-2.0.
+
+These skills are Qdrant project documentation, not part of this project's
+product code. This repository's own rules (AGENTS.md) win wherever they
+disagree — e.g. unprivileged image pin, RWO block storage only, no Qdrant
+Cloud, EMBED_MODE=hash never in prod. Full license: LICENSE.qdrant-skills.

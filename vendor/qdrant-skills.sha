@@ -1,0 +1,28 @@
+# Vendored Qdrant skills — pin record
+
+- **Source:** https://github.com/qdrant/skills (Apache-2.0)
+- **Vendored at:** commit `bcca2c2da1c00992038e83038e01791d468f943d`
+  (latest main on 2026-08-28; the last release tag `v0.1.0`, 2026-03-30,
+  predates significant skill updates, so the SHA is the pin)
+- **Vendored date:** 2026-08-28
+- **Copied into:** `.agents/skills/` (upstream `skills/` only — `index.md`
+  plus the skill directories; no `evals/`, `webapp/`, blog assets, or CI)
+- **License:** Apache-2.0, kept verbatim in `LICENSE.qdrant-skills`
+
+## Updating
+
+Bump the pinned SHA in a dedicated PR (not drive-by):
+
+    git clone --quiet https://github.com/qdrant/skills.git /tmp/qdrant-skills
+    git -C /tmp/qdrant-skills checkout <new-sha>
+    rm -rf .agents/skills && mkdir -p .agents/skills
+    cp -r /tmp/qdrant-skills/skills/* .agents/skills/
+    cp /tmp/qdrant-skills/LICENSE LICENSE.qdrant-skills
+    # update the SHA/date lines above, then one PR
+
+Commands used for this vendoring (connected host):
+
+    git clone --quiet https://github.com/qdrant/skills.git /tmp/qdrant-skills
+    cp -r /tmp/qdrant-skills/skills/* .agents/skills/
+    cp /tmp/qdrant-skills/LICENSE LICENSE.qdrant-skills
+    git -C /tmp/qdrant-skills rev-parse HEAD   # -> recorded SHA above

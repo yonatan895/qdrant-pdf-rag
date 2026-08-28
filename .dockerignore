@@ -19,3 +19,7 @@ overlays
 charts
 oc-mirror
 .github
+.agents
+vendor
+NOTICE.qdrant-skills
+LICENSE.qdrant-skills
