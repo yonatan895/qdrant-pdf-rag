@@ -1,0 +1,95 @@
+# ==============================================================================
+# GitLab CI — air-gap entrypoint (issue #3)
+#
+# This file is committed to the public GitHub mirror and imported AS-IS into the
+# enterprise air-gapped GitLab (git bundle / sneaker-net), so a clone can run
+# pipelines with no rewrite. Job meaning mirrors .github/workflows/ci.yml:
+# refuse committed binaries, then pytest. If you change one CI, change the
+# other in the same PR (AGENTS.md).
+#
+# GitLab admin setup (Settings > CI/CD > Variables) — names only, no secrets:
+#   CI_PYTHON_IMAGE  (recommended)  mirrored UBI/Python 3.12 image, e.g.
+#                                   "${CI_REGISTRY}/ci/python:3.12". The default
+#                                   below is a placeholder for that mirror; the
+#                                   image must contain git, python3, pip.
+#   CI_RUNNER_TAG   (optional)      runner tag, default "airgap"
+#   PIP_FIND_LINKS  (recommended)   path to a wheelhouse directory on the runner
+#                                   (e.g. /wheelhouse) built from requirements.lock.txt
+#   PIP_INDEX_URL   (alternative)   internal PyPI-compatible index
+#
+# Air-gap contract: runners must not reach pypi.org, Docker Hub, or GitHub.
+# If neither PIP_FIND_LINKS nor PIP_INDEX_URL is set, jobs FAIL CLOSED.
+# Do not put internal registry hostnames, URLs, or tokens in this file or in git.
+# ==============================================================================
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+stages: [hygiene, test]
+
+variables:
+  # Placeholder default; overridden by the project-level CI_PYTHON_IMAGE
+  # variable pointing at the mirrored internal image (YAML vars have the
+  # lowest precedence in GitLab).
+  CI_PYTHON_IMAGE: "$CI_REGISTRY/ci/python:3.12"
+  CI_RUNNER_TAG: "airgap"
+
+default:
+  image: $CI_PYTHON_IMAGE
+  # Variable expansion in tags: requires GitLab >= 14.1 (standard support at
+  # time of writing). If jobs queue forever on the air-gap runner, the tag did
+  # not expand: pin the literal runner tag here as a documented fallback
+  # (e.g. tags: [airgap]). Do not hardcode an internal hostname anywhere.
+  tags: [$CI_RUNNER_TAG]
+
+# Shared install: wheelhouse first, then internal index, else fail closed.
+# Never install from the default (public) index: the container must not be
+# able to reach pypi.org, and if it could, we still refuse to depend on it.
+.py-base:
+  before_script:
+    - |
+      set -eu
+      if [ -n "${PIP_FIND_LINKS:-}" ]; then
+        echo "Installing pinned deps from wheelhouse: ${PIP_FIND_LINKS}"
+        pip install --no-cache-dir --no-index --find-links "${PIP_FIND_LINKS}" \
+          -r requirements.lock.txt -e ".[dev]"
+      elif [ -n "${PIP_INDEX_URL:-}" ]; then
+        echo "Installing pinned deps from internal index (PIP_INDEX_URL)"
+        pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" \
+          -r requirements.lock.txt -e ".[dev]"
+      else
+        echo "FAIL: no package source configured." >&2
+        echo "Set PIP_FIND_LINKS (wheelhouse path) or PIP_INDEX_URL (internal mirror)" >&2
+        echo "as project CI/CD variables. This pipeline never installs from pypi.org." >&2
+        exit 1
+      fi
+
+hygiene:
+  stage: hygiene
+  script:
+    - |
+      set -eu
+      echo "Refusing committed binaries: .pdf / .pdx / .idx"
+      if git ls-files | grep -Ei '\.(pdf|pdx|idx)$'; then
+        echo "" >&2
+        echo "FAIL: binaries are tracked in git. PDFs and Adobe catalogs (.pdx/.idx)" >&2
+        echo "must never be committed (copyright + enterprise boundary, AGENTS.md)." >&2
+        echo "Remove them from the tree and history; tests generate synthetic PDFs" >&2
+        echo "at runtime via scripts/make_synthetic_pdf.py." >&2
+        exit 1
+      fi
+
+test:
+  extends: .py-base
+  stage: test
+  script:
+    - pytest -q
+  # Tests generate synthetic PDFs at runtime; no artifacts are cached or
+  # uploaded anywhere (deliberately no artifacts: section).
+
+# lint is intentionally omitted (issue #3): ruff is a dev extra but is not in
+# requirements.lock.txt, so a lint job would pull an unpinned package outside
+# the lockfile. If ruff is ever pinned into the lock, add a `lint` job using
+# the same .py-base install path.
