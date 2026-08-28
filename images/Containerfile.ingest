@@ -22,7 +22,12 @@ ENV PYTHONPATH=/app/src \
     BM25_CACHE_DIR=/opt/bm25 \
     HF_HOME=/opt/bm25/hf
 
-RUN useradd -u 1000 -M -s /sbin/nologin rag && mkdir -p /work && chown -R rag:rag /work
+# The python-314-minimal base defaults to a non-root user; setup needs root.
+USER root
+RUN useradd -u 1000 -M -s /sbin/nologin rag \
+    && mkdir -p /work \
+    && chown -R rag:rag /work \
+    && chown -R rag:rag /opt/bm25
 USER 1000
 WORKDIR /work
 
