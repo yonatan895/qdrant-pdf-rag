@@ -16,6 +16,9 @@ spec:
         app: ingest
     spec:
       restartPolicy: Never
+      # [] by default; scripts/airgap/ingest.sh substitutes the PULL_SECRET
+      # from airgap.env when the namespace cannot pull anonymously.
+      imagePullSecrets: []
       containers:
         - name: ingest
           image: __INTERNAL_REGISTRY__/qdrant-pdf-rag-ingest:__IMAGE_SHA__

@@ -9,6 +9,9 @@ spec:
   replicas: 2
   template:
     spec:
+      # [] by default; scripts/airgap/deploy.sh substitutes the PULL_SECRET
+      # from airgap.env when the namespace cannot pull anonymously.
+      imagePullSecrets: []
       containers:
         - name: agent
           env:

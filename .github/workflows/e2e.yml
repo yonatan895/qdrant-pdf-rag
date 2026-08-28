@@ -56,11 +56,11 @@ jobs:
           PYBIN="$(command -v python3.14 || command -v python)"
           echo "Using python: $PYBIN"
           make wheelhouse bm25-weights PY="$PYBIN"
-          make build-images IMAGE_TAG="${GITHUB_SHA::7}"
+          make build-images IMAGE_TAG="$GITHUB_SHA"
 
       - id: refs
         run: |
-          SHA="${GITHUB_SHA::7}"
+          SHA="$GITHUB_SHA"
           # Issue #8 scheme: ghcr.io/<owner-lowercase>/qdrant-pdf-rag-<name>:<sha>.
           # This exact string is used for docker tag, docker push, and the
           # kustomize sed — keep them identical.

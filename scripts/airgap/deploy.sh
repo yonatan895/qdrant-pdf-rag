@@ -27,11 +27,12 @@ fi
 [ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || die "oc is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
 command -v helm >/dev/null 2>&1 || die "helm is required on the air-gap bastion"
 
-case "$STORAGE_CLASS" in
-    *[Nn][Ff][Ss]*) die "STORAGE_CLASS='$STORAGE_CLASS' looks like NFS — Qdrant data requires RWO block storage" ;;
-esac
+refuse_nfs_storage
 EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed 's:/*$::')/v1}
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
+# Chart appends "-unprivileged" to the tag when useUnprivilegedImage=true;
+# values.yaml pins v1.19.0 — set it explicitly so it always matches load.sh.
+QDRANT_TAG=${QDRANT_TAG:-$(echo "${QDRANT_IMAGE:-docker.io/qdrant/qdrant:v1.19.0-unprivileged}" | sed "s/.*://")}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 
 if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi
@@ -56,6 +57,7 @@ set -- helm upgrade -i "$QDRANT_RELEASE" "$CHART" \
     -n "$NAMESPACE" \
     -f overlays/openshift/values.yaml \
     --set "image.repository=$INTERNAL_REGISTRY/qdrant/qdrant" \
+    --set "image.tag=$QDRANT_TAG" \
     --set "persistence.storageClassName=$STORAGE_CLASS" \
     --set "snapshotPersistence.storageClassName=$SNAPSHOT_STORAGE_CLASS"
 if [ -n "${PULL_SECRET:-}" ]; then

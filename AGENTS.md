@@ -109,7 +109,7 @@ New behavior belongs in the layer that already owns that decision. Do not thread
 
 ## Air-gap path (issue #15)
 
-- **The air-gap never builds images.** `make airgap-pack` runs on a connected clone of public `main` at the SHA whose GHCR tags exist; `make airgap-load` / `airgap-deploy` run inside the gap against `airgap.env` (`INTERNAL_REGISTRY`, `NAMESPACE`, `STORAGE_CLASS`, `VLLM_BASE_URL`, …). Scripts are POSIX sh under `scripts/airgap/` and fail closed.
+- **The air-gap never builds images.** `make airgap-pack` runs on a connected clone of public `main` at the SHA whose GHCR tags exist (`IMAGE_SHA` = full git SHA = GHCR tag; `make airgap-load` / `airgap-deploy` run inside the gap against `airgap.env` (`INTERNAL_REGISTRY`, `NAMESPACE`, `STORAGE_CLASS`, `VLLM_BASE_URL`, …). Scripts are POSIX sh under `scripts/airgap/` and fail closed.
 - Scripts refuse `EMBED_MODE=hash`, NFS-looking `STORAGE_CLASS`, missing `VLLM_BASE_URL`/`EMBED_MODEL`/`DENSE_DIM`, and SHA-tag mismatches. Prod agent runs `embed_mode=vllm` — never add `EMBED_MODE` to prod manifests.
 - GitLab CI still does **not** deploy or pull GHCR: clone-and-pytest only. Pack output (`dist/`) is gitignored; no PDFs, kubeconfigs, tokens, or internal hostnames in git or in the tarball.
 - Prod overlays: `deploy/kustomize/overlays/openshift` (agent) and `overlays/openshift-ingest` (one-shot Job, caller-supplied corpus PVC). Do not shrink `overlays/openshift/values.yaml` (3/500Gi) to CI sizes; Qdrant stays unprivileged, no NFS, no Qdrant Cloud, no `3.14t`.

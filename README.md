@@ -111,9 +111,10 @@ Three commands, one env file. **The air-gap never builds** — connected `main` 
    make airgap-pack            # -> dist/qdrant-pdf-rag-<sha>.tar + SHA256SUMS
    ```
 
-2. **Transfer** `dist/qdrant-pdf-rag-<sha>.tar` + `dist/SHA256SUMS` to the bastion (USB / approved drop), verify the tarball checksum, then unpack and clone from the bundle (the bundle's HEAD is the packed SHA):
+2. **Transfer** `dist/qdrant-pdf-rag-<sha>.tar` + `dist/qdrant-pdf-rag-<sha>.tar.sha256` to the bastion (USB / approved drop), verify the tarball digest, then unpack and clone from the bundle (the bundle's HEAD is the packed SHA):
 
    ```bash
+   sha256sum -c qdrant-pdf-rag-<sha>.tar.sha256
    tar xf qdrant-pdf-rag-<sha>.tar
    git clone repo.bundle qdrant-pdf-rag && cd qdrant-pdf-rag
    ```
@@ -130,7 +131,7 @@ Three commands, one env file. **The air-gap never builds** — connected `main` 
 
 4. Optional, once a corpus PVC exists (no PDFs in git): `make airgap-ingest CORPUS_PVC=<pvc>`, then `make airgap-smoke`.
 
-Details: prod Qdrant stays 3 replicas / 500Gi / unprivileged (never shrunk); refs stay `...:{ingest,agent}:<sha>` across pack/load/apply; scripts refuse `EMBED_MODE=hash` and NFS storage classes; `AGENT_ROUTE=true` opts into an edge Route to the agent. `oc-mirror/imageset-config.yaml` remains the optional way to refresh base/Qdrant pins — not the happy path.
+Details: prod Qdrant stays 3 replicas / 500Gi / unprivileged (never shrunk); refs stay `qdrant-pdf-rag-{ingest,agent}:<full-git-sha>` across pack/load/apply — `IMAGE_SHA` must be exactly the GHCR tag e2e.yml pushed; scripts refuse `EMBED_MODE=hash` and NFS storage classes; `AGENT_ROUTE=true` opts into an edge Route to the agent. `oc-mirror/imageset-config.yaml` remains the optional way to refresh base/Qdrant pins — not the happy path.
 
 ## For agents
 

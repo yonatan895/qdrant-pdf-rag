@@ -11,7 +11,7 @@
 
 enforce_product_rules
 resolve_aliases
-require_env INTERNAL_REGISTRY NAMESPACE IMAGE_SHA CORPUS_PVC EMBED_MODEL DENSE_DIM VLLM_BASE_URL
+require_env INTERNAL_REGISTRY NAMESPACE IMAGE_SHA CORPUS_PVC EMBED_MODEL DENSE_DIM VLLM_BASE_URL STORAGE_CLASS
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -26,6 +26,7 @@ if [ -n "$MANIFEST" ]; then
 fi
 [ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || die "oc is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
 if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi
+refuse_nfs_storage
 
 EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed 's:/*$::')/v1}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
@@ -68,6 +69,12 @@ $render | sed \
     > dist/ingest-rendered.yaml
 if grep -q "__" dist/ingest-rendered.yaml; then
     die "unsubstituted placeholder left in rendered ingest manifest (check airgap.env)"
+fi
+# Jobs are immutable: remove a previous run so re-ingest works.
+if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
+    echo "[dryrun] $KC -n $NAMESPACE delete job ingest --ignore-not-found"
+else
+    $KC -n "$NAMESPACE" delete job ingest --ignore-not-found
 fi
 run $KC apply -f dist/ingest-rendered.yaml
 

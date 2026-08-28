@@ -1,11 +1,14 @@
 #!/bin/sh
-# AIR-GAP SIDE (issue #15): verify checksums, load the packed images, push to
-# the internal registry under the SAME names and SHA tags.
+# AIR-GAP SIDE (issue #15): verify member checksums, load the packed images,
+# push to the internal registry under the SAME names and SHA tags.
 #
 #   make airgap-load
 #
-# Registry credentials: `skopeo login $INTERNAL_REGISTRY` (or a logged-in podman
-# credential store) before running. No tokens in git, ever.
+# Run from inside the clone of repo.bundle (see README). The packed artifacts
+# may sit in ./dist or the unpack directory (parent). No cloning happens here:
+# clone is the operator's step. Registry credentials: `skopeo login
+# $INTERNAL_REGISTRY` (or a logged-in podman credential store) before running.
+# No tokens in git, ever.
 
 . "$(dirname -- "$0")/common.sh"
 
@@ -32,13 +35,10 @@ esac
 echo "==> Verify member checksums"
 (cd "$ARTDIR" && sha256sum -c SHA256SUMS)
 
-echo "==> Clone the repo from the bundle (same tree as the packed SHA)"
-if [ ! -d qdrant-pdf-rag ]; then
-    run git clone "$ARTDIR/repo.bundle" qdrant-pdf-rag
-    if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
-        git -C qdrant-pdf-rag checkout --detach "$IMAGE_SHA" 2>/dev/null || true
-    fi
-fi
+# Cross-check IMAGE_SHA against the packed MANIFEST.
+packed_sha=$(awk '/^sha: /{print $2}' "$ARTDIR/MANIFEST.txt")
+[ "$IMAGE_SHA" = "$packed_sha" ] || \
+    die "IMAGE_SHA=$IMAGE_SHA does not match the packed MANIFEST sha ($packed_sha) — wrong SHA for this sneakernet bundle"
 
 load() {
     src=$1

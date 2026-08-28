@@ -40,10 +40,19 @@ resolve_aliases() {
     IMAGE_SHA=${IMAGE_SHA:-}
     if [ -z "$IMAGE_SHA" ]; then
         if git rev-parse HEAD >/dev/null 2>&1; then
-            IMAGE_SHA=$(git rev-parse --short=7 HEAD)
+            IMAGE_SHA=$(git rev-parse HEAD)  # full SHA: must equal the GHCR tag
         fi
     fi
     EMBED_BASE_URL=${EMBED_BASE_URL:-${VLLM_BASE_URL:+$(echo "$VLLM_BASE_URL" | sed 's:/*$::')/v1}}
+}
+
+# Qdrant data scratch and snapshots live on block storage; NFS is refused.
+refuse_nfs_storage() {
+    case "${STORAGE_CLASS:-}" in
+        *[Nn][Ff][Ss]*)
+            die "STORAGE_CLASS='${STORAGE_CLASS}' looks like NFS — Qdrant-adjacent volumes require RWO block storage"
+            ;;
+    esac
 }
 
 # Run a command, or only print it under AIRGAP_DRYRUN=1.

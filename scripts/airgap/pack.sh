@@ -1,19 +1,23 @@
 #!/bin/sh
 # CONNECTED SIDE (issue #15): pack a green public-main SHA into one sneakernet
-# tarball: git bundle + 3 image archives + MANIFEST + checksums.
+# tarball: git bundle + 3 image archives + MANIFEST + member checksums.
 #
 #   make airgap-pack              # or: sh scripts/airgap/pack.sh
 #
-# Fails closed if any GHCR image 404s (main build not finished / wrong SHA).
-# Air-gap does not build: connected main is the only image factory.
+# IMAGE_SHA defaults to the full SHA of the checked-out commit and MUST equal
+# the GHCR tag that e2e.yml pushed for that SHA. Fails closed if any image
+# pull 404s (main build not finished / wrong SHA). Air-gap does not build:
+# connected main is the only image factory.
 
 . "$(dirname -- "$0")/common.sh"
 
 enforce_product_rules
 resolve_aliases
-require_env IMAGE_SHA
 command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the connected pack host"
 [ -d .git ] || die "run from a git clone of the repository"
+[ -n "$IMAGE_SHA" ] || die "IMAGE_SHA could not be resolved from git"
+[ "$IMAGE_SHA" = "$(git rev-parse HEAD)" ] || \
+    die "IMAGE_SHA=$IMAGE_SHA is not the checked-out commit ($(git rev-parse HEAD)). Pack at the SHA whose GHCR tags exist; the bundle is always of HEAD."
 
 GHCR_OWNER=${GHCR_OWNER:-}
 APP_REGISTRY=${AIRGAP_APP_REGISTRY:-}
@@ -54,7 +58,7 @@ DIST="$REPO_ROOT/dist"
 OUT_TARBALL="$DIST/qdrant-pdf-rag-${IMAGE_SHA}.tar"
 mkdir -p "$DIST"
 rm -f "$DIST"/repo.bundle "$DIST"/qdrant-image.tar "$DIST"/app-*.tar \
-      "$DIST"/MANIFEST.txt "$DIST"/SHA256SUMS "$OUT_TARBALL"
+      "$DIST"/MANIFEST.txt "$DIST"/SHA256SUMS "$OUT_TARBALL" "$OUT_TARBALL.sha256"
 
 echo "==> Git bundle of the checked-out commit"
 # HEAD must be an explicit ref: without it, `git clone repo.bundle` on the
@@ -80,20 +84,22 @@ CHART_VERSION=$(basename charts/qdrant-*.tgz .tgz)
 } > "$DIST/MANIFEST.txt"
 cat "$DIST/MANIFEST.txt"
 
-echo "==> Checksums (members)"
+echo "==> Member checksums (verified again inside the air-gap after unpack)"
 (
     cd "$DIST"
     sha256sum repo.bundle qdrant-image.tar app-ingest-"$IMAGE_SHA".tar \
               app-agent-"$IMAGE_SHA".tar MANIFEST.txt > SHA256SUMS
 )
 
-echo "==> Tarball"
+echo "==> Tarball + tarball digest"
 tar -C "$DIST" -cf "$OUT_TARBALL" repo.bundle qdrant-image.tar \
     app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar MANIFEST.txt SHA256SUMS
+# shellcheck disable=SC2016
+( cd "$DIST" && sha256sum "$(basename "$OUT_TARBALL")" ) > "$OUT_TARBALL.sha256"
 
 echo ""
 echo "Packed: $OUT_TARBALL"
-echo "Tarball SHA256 (verify before unpack):"
-sha256sum "$OUT_TARBALL"
-echo "Transfer dist/$(basename "$OUT_TARBALL") and dist/SHA256SUMS to the air-gap bastion."
-next_step "sha256sum -c SHA256SUMS && tar xf qdrant-pdf-rag-${IMAGE_SHA}.tar && make airgap-load"
+echo "Transfer $OUT_TARBALL and $OUT_TARBALL.sha256 to the air-gap bastion."
+echo "On the bastion: sha256sum -c $(basename "$OUT_TARBALL").sha256, then unpack,"
+echo "clone from repo.bundle, and run make airgap-load inside the clone."
+next_step "sha256sum -c qdrant-pdf-rag-${IMAGE_SHA}.tar.sha256 && tar xf qdrant-pdf-rag-${IMAGE_SHA}.tar && git clone repo.bundle qdrant-pdf-rag && cd qdrant-pdf-rag && make airgap-load"
