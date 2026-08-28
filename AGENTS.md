@@ -34,7 +34,6 @@ If a review comment conflicts with this file, follow this file and note the conf
 - One concern per PR. Rebase on `main` before asking for review; no merge commits unless the reviewer asks.
 - Commits: imperative, present tense, say *why* if not obvious (`Fix chrome threshold so 3-page PDFs are not wiped`).
 - PR / MR description: issue number, what changed, how tested, air-gap / copyright impact if any.
-- Automation/workflow PRs: update the PR body in the same push as the code it describes — the opencode reviewer re-reviews on every push and reads a stale body as a blocker (three re-review rounds on PR #23).
 - Do not force-push `main`. Force-push feature branches only after rebase, before review comments exist.
 - Never commit: `.env`, `airgap.env`, secrets, tokens, `*.tar`, wheelhouses. `airgap.env.example` is allowed. Pack output lives in `dist/` (gitignored).
 
@@ -110,6 +109,57 @@ If a review comment conflicts with this file, follow this file and note the conf
 - Do not call live Qdrant, vLLM, or the internet in unit tests. Fake the client. Ingest tests use `--dry-run`.
 - `test_chrome_strip` must keep using a **long** synthetic page list (≥8 pages). Chrome is disabled on short docs on purpose.
 - Prefer tests that would have caught the last CI failure.
+
+## 1. Definition of done — before every push
+
+A change is not ready to push until ALL of the following hold:
+
+- `python3 -m pytest`, `python3 -m mypy src`, and `python3 -m ruff check src tests` are clean locally. (The reviewer runs exactly these on every round.)
+- Every new behavior was probed adversarially through the real runtime path — not only via unit tests. For input-handling code, probe at minimum: empty input, multi-digit variants, wrapped variants (`> `, backticks, quotes, parens, `**bold**`, `[links](url)`, `<angle>`), and inline/non-anchored variants. (PR #24 rounds 5–9: the citation stripper survived four rounds because tests pinned only `1.`; the bot probed the rest.)
+- Every new handler, branch, and error shape has a test that proves reachability — a handler no test can fire is dead code. (PR #24 round 5: `http_exception_handler` and `unhandled_error_handler` had no tests; `/healthz` was entirely uncovered.)
+- `git status` shows no untracked toolchain or dependency artifacts (`node_modules/`, `package.json`, `package-lock.json`, venvs, caches). Experiments run outside the repo tree. (PR #19: 8k lines of npm artifacts were committed.)
+- The PR body has been re-read against the final diff and every claim in it is true of the code being pushed *now*. (PR #23 rounds 2–5.)
+
+## 2. Error contract
+
+- Client response bodies never contain exception text, upstream response bodies, or internal detail — on ANY status code, including 200/degraded responses. Fixed message + stable `code` client-side; `str(exc)` and upstream text go to logs only. (PR #24 round 5 blocker 1; round 7 blocker 2: the 200 `/healthz` path leaked `resp.text[:120]` for two rounds because only the error path was audited.)
+- Catch the narrowest exception around the smallest possible call. A broad `except` that wraps retrieval mislabels unrelated faults; the same fault must produce the same error code on every endpoint. (PR #24 round 5: `except RuntimeError` turned an embed misconfiguration into `503 not_configured` on `/v1/answer` but `502 upstream_error` on `/v1/search`.)
+- If the contract claims a stable error shape, register and pin handlers for 404/405/500 explicitly — do not leave the framework default shape in place. (PR #24 round 5 item 3.)
+
+## 3. One rule per concept; fix the whole class
+
+- When two code paths interpret the same data (validate vs strip, parse vs render, allow vs deny), they MUST share a single normalizer/helper. Two regexes or char-sets for one concept will diverge, and the divergence is the bug. (PR #24 rounds 5–7: `strip_unauthorized_citations` vs `extract_citation_lines` diverged three times.)
+- When a review flags one instance of a pattern, sweep ALL sibling sites in the same push: every branch of the function, every job in the workflow, every call site of the helper. (PR #23 round 3: `share: false` was applied to one of two jobs; PR #24 round 6: the 503 path was cleaned while the 200 path kept leaking.)
+- After any fix, re-scan the touched file for variants of the same bug class before pushing. Do not fix only the exact line the reviewer quoted.
+
+## 4. No silent deltas; the body lands with the code
+
+- Every change to a default, constant, timeout, retry count, or limit is called out explicitly in the PR body. (PR #24 round 7: embed ping 10s→5s shipped while the body claimed "defaults to the previous hardcoded values"; round 9: `http_connect_retries: 2` was new prod behavior the body denied.)
+- Absolute claims in PR bodies — "no magic constants", "all outbound calls bounded", "no runtime change", "defaults unchanged" — must be verifiably true. Grep for the counterexample before writing the sentence.
+- A refactor labeled "no runtime change" must not share clients, pools, or mutable state across features; sharing a pool IS a runtime change. (PR #21: sharing the embed client's pool silently changed `/v1/answer`.)
+- The PR body is updated in the SAME push as the code it describes — for all changes, not only workflows. A stale body is a blocker. (Generalizes the Git-section rule it replaces; the failure recurred on PR #23 rounds 2–5 and on code PRs.)
+
+## 5. Settings, lifecycle, dead code
+
+- All timeouts, retries, batch sizes, and limits come from Settings with bounded defaults; no magic numbers in call sites. Each new setting gets a default assertion in `test_config.py`. (PR #24 round 5 item 9; round 7 item 6.)
+- Split a setting when it would cover two different call shapes — the same reasoning that justified `qdrant_timeout_s` / `qdrant_ingest_timeout_s` applies to health pings vs embeddings. (PR #24 round 7 blocker 3.)
+- Everything opened in lifespan is closed in lifespan. `close()` must not alter semantics — no nulling a pool such that the next call silently rebuilds one. (PR #24 round 5 item 10; round 7 item 9.)
+- No dead state: never read a `request.state` field nothing sets, never keep a handler nothing can raise. Wire it or delete it. (PR #24 round 7 item 5: `request_id` logged `"unknown"` on the lines that most needed correlation.)
+
+## 6. Workflow and supply-chain rules (.github/workflows)
+
+- Pin third-party actions to a full commit SHA, and state in a comment what the pin does NOT cover (runtime-fetched installers, `releases/latest` binaries). Artifacts fetched at run time are pinned by version AND verified against a sha256 recorded in-repo. Never `curl | bash` an unpinned installer in a job that holds secrets or `id-token: write`. (PR #23 rounds 1, 2, 4.)
+- Invoke pinned binaries by absolute path; `$GITHUB_PATH` appends, so PATH order can silently bypass the pin. (PR #23 round 4.)
+- Every job declares least-privilege `permissions`, `timeout-minutes`, and a `concurrency` group with a fallback (`|| github.run_id`). Jobs that need a secret gate on its presence and fail closed; PR jobs guard forks. (PR #23 rounds 1–3.)
+- Third-party session/share flags default to OFF on every job (`SHARE: "false"` on all of them, not one). This repo is the public mirror. (PR #23 rounds 1, 3.)
+- Workflow triggers mirror the documented paths-ignore split (`**/*.md`, `**/*.markdown`, `.agents/**`, `vendor/**`); vendored-only bumps run nothing. (PR #23 round 1 blocker 1.)
+
+## 7. Test quality
+
+- Pin public contracts, not private internals — asserting on `client._transport._pool._retries` breaks on the next lock-file bump. (PR #24 round 7 nit 7.)
+- Tests must not mutate module-global state (e.g. registering routes on the global app) that later tests inherit. (PR #24 round 9 nit 6.)
+- Regression tests cover the adversarial variants of the input class, not only the simplest case; a strip/validate feature is tested on both sides of the pair for symmetry. (PR #24 rounds 5–8.)
+- Remove unused fixtures and parameters when touching a test. (PR #24 round 5 item 4.)
 
 ## Abstractions
 
