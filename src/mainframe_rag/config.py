@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     health_qdrant_timeout_s: float = 5.0
     health_embed_timeout_s: float = 10.0
 
+    # Agent startup fail-fast (issue #20 PR D): embed_mode=hash is CI/dev only
+    # and must be explicitly allowed (CI overlay sets ALLOW_HASH_MODE=true).
+    # Prod (vllm) is validated eagerly at startup: DENSE_DIM / EMBED_* must
+    # resolve before the agent listens.
+    allow_hash_mode: bool = False
+    log_level: str = "INFO"
+
     # Ingest. batch_size follows the Qdrant skill's 64-256 upsert band
     # (.agents/skills/qdrant-performance-optimization) — bounds enforced here
     # so no call site can grow a magic number outside it.

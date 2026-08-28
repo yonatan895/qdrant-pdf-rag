@@ -58,3 +58,48 @@ def test_corrupt_pdf_writes_typed_error_record(tmp_path, synthetic_pdf):
     err = [r for r in records if r["status"] == "error"]
     assert err and err[0]["path"] == str(bad)
     assert err[0]["error_type"]
+
+
+def _stderr_json(capsys) -> list[dict]:
+    out = capsys.readouterr().err
+    lines = []
+    for line in out.splitlines():
+        if line.strip():
+            try:
+                parsed = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                lines.append(parsed)
+    return lines
+
+
+def test_summary_counters_ok_run(tmp_path, synthetic_pdf, capsys):
+    """PR D: files ok / failed / chunks upserted, one summary line per run."""
+    progress = tmp_path / "inventory.jsonl"
+    rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress),
+               "--workers", "1", "--dry-run"])
+    assert rc == 0
+    # Second run: the file is skipped — still an ok outcome. (One capsys
+    # read at the end: the StreamHandler binds stderr at creation.)
+    rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress),
+               "--workers", "1", "--dry-run"])
+    assert rc == 0
+    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
+    assert len(done) == 2
+    for summary in done:
+        assert summary["files_ok"] == 1
+        assert summary["files_failed"] == 0
+        assert summary["chunks_upserted"] == 0  # dry run: parsed, not upserted
+        assert summary["elapsed_ms"] >= 0
+
+
+def test_summary_counters_failed_run(tmp_path, synthetic_pdf, capsys):
+    (tmp_path / "corrupt.pdf").write_bytes(b"not a pdf")
+    progress = tmp_path / "inventory.jsonl"
+    rc = main(["--src", str(tmp_path), "--progress", str(progress),
+               "--workers", "1", "--dry-run"])
+    assert rc == 1
+    done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
+    assert len(done) == 1
+    assert done[0]["files_failed"] == 1

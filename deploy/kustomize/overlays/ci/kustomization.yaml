@@ -31,3 +31,8 @@ patches:
         value:
           name: EMBED_MODE
           value: hash
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: ALLOW_HASH_MODE
+          value: "true"

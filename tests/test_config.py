@@ -40,3 +40,10 @@ def test_outbound_timeout_defaults_bounded():
     assert s.health_qdrant_timeout_s > 0
     assert s.health_embed_timeout_s > 0
     assert 0 <= s.http_connect_retries <= 5
+
+
+def test_hash_mode_requires_explicit_allow():
+    """PR D: hash embed mode is CI/dev only and opt-in at startup."""
+    s = Settings(_env_file=None)
+    assert s.allow_hash_mode is False
+    assert s.log_level == "INFO"

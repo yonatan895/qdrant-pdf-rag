@@ -73,8 +73,9 @@ def assert_reasoning_model(settings: Settings) -> str:
 
 class HttpxLLMClient:
     """LLMClient implementation: the reasoning model only — deliberately no
-    other model knob (architecture.md 4.6). Fails closed at call time when
-    LLM_BASE_URL / LLM_MODEL_REASONING are unset; startup fail-fast is PR D.
+    other model knob (architecture.md 4.6). LLM env fails closed at request
+    time (assert_reasoning_model, called by /v1/answer before retrieval);
+    startup fail-fast covers the embed path (PR D).
     Owns its own connection pool with the long answer timeout (do NOT share
     the embed client's short timeout). No retries: /v1/answer is a single
     shot — a retry would re-ask a reasoning model that may already be
