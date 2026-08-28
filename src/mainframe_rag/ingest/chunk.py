@@ -1,17 +1,14 @@
 """Section outline + chunk contract.
 
-One Qdrant point = one chunk:
-    chunk_id = sha256(f"{doc_id}|{heading_path}|{page_start}|{ordinal}")
-
-Sections come from the bookmark tree: each bookmark owns
-[start_page, next_same_or_higher). Long sections (> 6000 chars) are split on
-blank lines with a 400-char overlap. architecture.md sections 4.2 / 4.1.
+One Qdrant point = one chunk. Point id is UUID5 of
+    f"{doc_id}|{heading_path}|{page_start}|{ordinal}"
+(Qdrant accepts UUID or unsigned int only; sha256 hex is invalid.)
 """
 
 from __future__ import annotations
 
-import hashlib
 import re
+import uuid
 from dataclasses import dataclass
 
 from mainframe_rag.ingest.classify import classify
@@ -34,8 +31,8 @@ _BLANK_SPLIT_RE = re.compile(r"\n\s*\n")
 @dataclass
 class Section:
     heading_path: str
-    page_start: int  # 0-based PDF index
-    page_end: int  # exclusive
+    page_start: int
+    page_end: int
 
 
 @dataclass
@@ -52,12 +49,16 @@ class Chunk:
     ordinal: int
 
 
+def make_chunk_id(doc_id: str, heading_path: str, page_start: int, ordinal: int) -> str:
+    key = f"{doc_id}|{heading_path}|{page_start}|{ordinal}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+
 def _clean_title(title: str) -> str:
     return re.sub(r"\s+", " ", title).strip()
 
 
 def outline_sections(parsed: ParsedDoc) -> list[Section]:
-    """Map each useful bookmark to [start, next_same_or_higher) page range."""
     if not parsed.toc:
         return [Section(heading_path=parsed.title, page_start=0, page_end=parsed.page_count)]
 
@@ -97,11 +98,6 @@ def outline_sections(parsed: ParsedDoc) -> list[Section]:
 
 
 def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, str]]:
-    """Pack (page_idx, paragraph) items into <=6000-char blocks.
-
-    When a block fills, start a new one whose head carries the previous tail
-    (up to 400 chars) as overlap.
-    """
     blocks: list[tuple[int, str]] = []
     current: list[tuple[int, str]] = []
     current_len = 0
@@ -135,17 +131,12 @@ def _page_label_range(labels: list[str | None]) -> str:
     if len(present) == 1:
         return present[0]
     first, last = present[0], present[-1]
-    return first if first == last else f"{first}–{last}"
+    return first if first == last else f"{first}\u2013{last}"
 
 
 def make_chunks(
     parsed: ParsedDoc, page_texts: list[str], page_labels: list[str | None] | None = None
 ) -> list[Chunk]:
-    """Build chunks for one parsed document. Idempotent via chunk_id.
-
-    page_texts: stripped text per PDF page (chrome.apply already applied).
-    page_labels: printed page labels per PDF page (page.get_label()).
-    """
     doc_id = parsed.doc_id or parsed.path.stem
     labels = page_labels or [None] * parsed.page_count
     chunks: list[Chunk] = []
@@ -162,9 +153,7 @@ def make_chunks(
             continue
 
         for ordinal, (page_idx, text) in enumerate(_split_blocks(paras)):
-            chunk_id = hashlib.sha256(
-                f"{doc_id}|{section.heading_path}|{page_idx}|{ordinal}".encode()
-            ).hexdigest()
+            chunk_id = make_chunk_id(doc_id, section.heading_path, page_idx, ordinal)
             label = _page_label_range([labels[page_idx]]) if page_idx < len(labels) else ""
             chunks.append(
                 Chunk(

@@ -1,5 +1,4 @@
-"""Recursive PDF walk. Collects *.pdf only; ignores .pdx/.idx catalogs (they are
-Adobe Reader search indexes, not a RAG source). Vendor is inferred from the path."""
+"""Recursive PDF walk. Collects *.pdf only; ignores .pdx/.idx catalogs."""
 
 from __future__ import annotations
 
@@ -11,21 +10,35 @@ VENDOR_MARKERS = {
     "/ca/": "Broadcom",
     "bmc": "BMC",
     "precisely": "Precisely",
+    "ibm": "IBM",
+    "red-hat": "Red Hat",
+    "redhat": "Red Hat",
 }
 
 _IGNORED_DIRS = {".", "..", "__MACOSX", "lost+found"}
 
 
+def infer_from_path(pdf: Path, root: Path) -> tuple[str, str, str]:
+    """If corpus is root/vendor/product/version/*.pdf, use that. Else unknown."""
+    try:
+        rel = pdf.resolve().relative_to(root.resolve())
+    except ValueError:
+        return "unknown", "unknown", ""
+    parts = rel.parts
+    if len(parts) >= 4:
+        return parts[0], parts[1], parts[2]
+    return "unknown", "unknown", ""
+
+
 def detect_vendor(path: Path) -> str:
-    p = str(path).lower()
+    p = str(path).lower().replace("\\", "/")
     for marker, vendor in VENDOR_MARKERS.items():
         if marker in p:
             return vendor
-    return "IBM"
+    return "unknown"
 
 
 def walk_pdfs(root: Path) -> list[Path]:
-    """Return sorted .pdf files under root. Skips hidden dirs and macOS metadata."""
     pdfs: list[Path] = []
     for path in sorted(root.rglob("*")):
         if not path.is_file():
@@ -33,6 +46,6 @@ def walk_pdfs(root: Path) -> list[Path]:
         if any(part.startswith(".") or part in _IGNORED_DIRS for part in path.parts):
             continue
         if path.suffix.lower() != ".pdf":
-            continue  # .pdx / .idx / everything else: not our input
+            continue
         pdfs.append(path)
     return pdfs

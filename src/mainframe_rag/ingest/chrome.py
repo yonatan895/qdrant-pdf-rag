@@ -1,8 +1,7 @@
 """Running header/footer stripping by line frequency.
 
-A line that appears (normalized) on >= 35% of sampled pages is page chrome
-("© Copyright IBM Corp. 1994, 2025", chapter titles, page numbers) and would
-otherwise pollute embeddings. architecture.md section 4.1.
+A line that appears (normalized) on >= 35% of sampled pages is page chrome.
+Short documents must not use a threshold of 1 (that would delete every line).
 """
 
 from __future__ import annotations
@@ -12,6 +11,8 @@ from collections import Counter
 
 FREQUENCY_THRESHOLD = 0.35
 SAMPLE_TARGET = 64
+MIN_PAGES_FOR_CHROME = 8
+MIN_HITS = 3
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$|^[ivxlcdm]{1,8}$|^\d+[-.]?\d*$", re.IGNORECASE)
@@ -35,13 +36,13 @@ def _sample_indices(page_count: int) -> list[int]:
 def chrome_lines(page_texts: list[str]) -> set[str]:
     """Normalized lines that appear on >= 35% of sampled pages."""
     pages = [page_texts[i] for i in _sample_indices(len(page_texts))]
-    if not pages:
+    if len(pages) < MIN_PAGES_FOR_CHROME:
         return set()
     counts: Counter[str] = Counter()
     for text in pages:
         lines = {ln for ln in (_normalize(l) for l in text.splitlines()) if ln}
         counts.update(lines)
-    threshold = max(1, int(FREQUENCY_THRESHOLD * len(pages)))
+    threshold = max(MIN_HITS, int(FREQUENCY_THRESHOLD * len(pages)))
     return {line for line, n in counts.items() if n >= threshold}
 
 

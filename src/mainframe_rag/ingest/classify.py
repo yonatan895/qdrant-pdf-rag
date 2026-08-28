@@ -1,16 +1,15 @@
 """Chunk classification: message | syntax | table | narrative.
 
-Message sections start with an MVS-style message ID (XXXnnnY). Syntax sections
-use IBM syntax diagrams (>>-, box drawing, ::=, <parm>). Tables are column-
-aligned lines. Everything else is narrative. architecture.md section 4.2.
+Message sections start with an MVS-style message ID (XXXnnnY), possibly after a
+short heading. Syntax sections use diagrams (>>-, box drawing, ::=, <parm>).
 """
 
 from __future__ import annotations
 
 import re
 
-_BOX_CHARS = set("─│┌┐└┘├┤┬┴┼━┃┏┓┗┛")
-_SYNTAX_RE = re.compile(r"(::=|>>-|>>\+|<--|--\+|-\+-|--\-)")
+_BOX_CHARS = set("\u2500\u2502\u250c\u2510\u2514\u2518\u251c\u2524\u252c\u2534\u253c\u2501\u2503\u250f\u2513\u2517\u251b")
+_SYNTAX_RE = re.compile(r"(::=|>>-|>>\+|<--|--\+|-\+-|--\\-)")
 _PARM_RE = re.compile(r"<[a-zA-Z][\w-]*>")
 _COLUMN_RE = re.compile(r"\S(?:.*\S)?(?:\s{2,}\S)+")
 
@@ -22,9 +21,9 @@ def classify(text: str) -> str:
     if not lines:
         return "narrative"
 
-    first = lines[0].strip()
-    if MESSAGE_LINE_RE.match(first):
-        return "message"
+    for line in lines[:4]:
+        if MESSAGE_LINE_RE.match(line.strip()):
+            return "message"
 
     box_lines = sum(1 for ln in lines if set(ln) & _BOX_CHARS)
     syntax_lines = sum(1 for ln in lines if _SYNTAX_RE.search(ln))

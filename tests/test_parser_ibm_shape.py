@@ -1,4 +1,4 @@
-"""Parser tests on the synthetic IBM-shaped fixture (architecture.md 5.3)."""
+"""Parser tests on the synthetic IBM-shaped fixture (generated at runtime)."""
 
 from mainframe_rag.ingest.ibm_pdf import parse_pdf
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
@@ -53,5 +53,5 @@ def test_walker_ignores_pdx_and_idx(tmp_path, synthetic_pdf):
     found = walk_pdfs(tmp_path)
     names = [p.name for p in found]
     assert names == [dest.name]
-    assert detect_vendor(dest) == "IBM"
+    assert detect_vendor(dest) == "unknown"
     assert detect_vendor(tmp_path / "Broadcom" / "x.pdf") == "Broadcom"

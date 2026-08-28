@@ -1,6 +1,6 @@
-"""IBM-style manual opening: doc number, product/version, TOC, page labels.
+"""PDF opening: doc number when present, otherwise filename stem.
 
-Uses PyMuPDF directly (architecture.md section 4.4). No framework.
+Works for IBM-style manuals and any other text-layer PDF. PyMuPDF only.
 """
 
 from __future__ import annotations
@@ -12,14 +12,14 @@ from pathlib import Path
 
 import pymupdf
 
+from mainframe_rag.ingest.walk import detect_vendor, infer_from_path
 from mainframe_rag.regexes import DOCNO_RE
 
-# z/OS V2R5 -> 2.5 ; z/OS 3.1 -> 3.1 ; generic VnRn for other products.
-PRODUCT_VERSION_RE = re.compile(r"\b(z/?OS|z/?VM|z/?VSE|z/?TPF)\s+(?:V(\d+)\s*R(\d+)|(\d+\.\d+))", re.IGNORECASE)
+PRODUCT_VERSION_RE = re.compile(
+    r"\b(z/?OS|z/?VM|z/?VSE|z/?TPF)\s+(?:V(\d+)\s*R(\d+)|(\d+\.\d+))",
+    re.IGNORECASE,
+)
 GENERIC_VR_RE = re.compile(r"\bV(\d+)\s*\.?\s*R(\d+)\b")
-
-# Filenames like SA22-7592-05.pdf or SA22-0000-00_outline.pdf; the (?![\d-])
-# lookahead stops the optional edition suffix from being cut by a trailing \b.
 FILENAME_DOCNO_RE = re.compile(r"^([A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?)(?![\d-])")
 
 
@@ -27,12 +27,12 @@ FILENAME_DOCNO_RE = re.compile(r"^([A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?)(?![\d-])")
 class ParsedDoc:
     path: Path
     sha256: str
-    doc_id: str | None
+    doc_id: str
     title: str
     product: str | None
     version: str | None
     vendor: str
-    toc: list[tuple[int, str, int]] = field(default_factory=list)  # (level, title, 1-based page)
+    toc: list[tuple[int, str, int]] = field(default_factory=list)
     page_count: int = 0
 
 
@@ -48,12 +48,10 @@ def _doc_id_from_text(text: str) -> str | None:
     matches = DOCNO_RE.findall(text)
     if not matches:
         return None
-    # Most common match wins (title pages repeat the form number).
     return max(set(matches), key=matches.count)
 
 
 def extract_doc_id(doc: pymupdf.Document, path: Path) -> str | None:
-    """Form number from filename, then title pages (first 4)."""
     m = FILENAME_DOCNO_RE.match(path.stem.upper())
     if m:
         return m.group(1)
@@ -62,7 +60,6 @@ def extract_doc_id(doc: pymupdf.Document, path: Path) -> str | None:
 
 
 def extract_product_version(doc: pymupdf.Document) -> tuple[str | None, str | None]:
-    """Product and version from the first 4 pages (z/OS V2R5 -> ('z/OS', '2.5'))."""
     text = "\n".join(doc[i].get_text() for i in range(min(4, doc.page_count)))
     m = PRODUCT_VERSION_RE.search(text)
     if m:
@@ -86,19 +83,32 @@ def extract_title(doc: pymupdf.Document, doc_id: str | None) -> str:
     return doc_id or "Untitled"
 
 
-def parse_pdf(path: Path, vendor: str = "IBM") -> ParsedDoc:
+def parse_pdf(
+    path: Path,
+    vendor: str | None = None,
+    product: str | None = None,
+    version: str | None = None,
+    corpus_root: Path | None = None,
+) -> ParsedDoc:
+    path = Path(path)
     doc = pymupdf.open(path)
     try:
-        doc_id = extract_doc_id(doc, path)
-        product, version = extract_product_version(doc)
+        doc_id = extract_doc_id(doc, path) or path.stem
+        text_product, text_version = extract_product_version(doc)
+        lv, lp, lver = ("unknown", "unknown", "")
+        if corpus_root is not None:
+            lv, lp, lver = infer_from_path(path, corpus_root)
+        vendor_f = vendor or (lv if lv != "unknown" else detect_vendor(path))
+        product_f = product or (lp if lp != "unknown" else text_product)
+        version_f = version or lver or text_version
         return ParsedDoc(
             path=path,
             sha256=sha256_file(path),
             doc_id=doc_id,
             title=extract_title(doc, doc_id),
-            product=product,
-            version=version,
-            vendor=vendor,
+            product=product_f,
+            version=version_f or None,
+            vendor=vendor_f or "unknown",
             toc=doc.get_toc(simple=True),
             page_count=doc.page_count,
         )
