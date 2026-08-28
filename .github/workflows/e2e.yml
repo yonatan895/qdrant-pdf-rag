@@ -2,6 +2,16 @@
 # main, and smoke-test synthetic demo PDFs against a lab OpenShift namespace.
 # Synthetic PDFs only — generated in-cluster by the ingest Job. Never upload
 # them as artifacts, never commit them (hygiene job enforces that).
+#
+# Image scheme (single source of truth, issue #8):
+#   ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<shortsha>
+# built via `docker tag` from the Makefile's local tags, pushed on
+# main/dispatch, and applied via the kustomize `ghcr.io/OWNER` sed.
+#
+# Prereqs (README "Connected E2E"): GHCR packages public (anonymous pull from
+# the lab cluster), OPENSHIFT_SERVER/OPENSHIFT_TOKEN secrets. curlimages/curl
+# is pulled from Docker Hub — allowed on the connected lab cluster only.
+#
 # Air-gapped GitLab deliberately has no equivalent of this workflow: no GHCR,
 # no lab cluster from the air-gap (see .gitlab-ci.yml comment).
 name: e2e
@@ -51,21 +61,31 @@ jobs:
       - id: refs
         run: |
           SHA="${GITHUB_SHA::7}"
+          # Issue #8 scheme: ghcr.io/<owner-lowercase>/qdrant-pdf-rag-<name>:<sha>.
+          # This exact string is used for docker tag, docker push, and the
+          # kustomize sed — keep them identical.
+          OWNER_LC="$(echo "${{ github.repository_owner }}" | tr 'A-Z' 'a-z')"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "ingest=ghcr.io/${GITHUB_REPOSITORY}-ingest:$SHA" >> "$GITHUB_OUTPUT"
-          echo "agent=ghcr.io/${GITHUB_REPOSITORY}-agent:$SHA" >> "$GITHUB_OUTPUT"
+          echo "ingest=ghcr.io/${OWNER_LC}/qdrant-pdf-rag-ingest:$SHA" >> "$GITHUB_OUTPUT"
+          echo "agent=ghcr.io/${OWNER_LC}/qdrant-pdf-rag-agent:$SHA" >> "$GITHUB_OUTPUT"
 
-      # PRs: build without push (no GHCR write from forks). main/dispatch: push.
+      # Retag local build outputs to the GHCR refs BEFORE pushing. PRs: build
+      # without push (no GHCR write from forks). main/dispatch: tag + push.
       - name: Push to GHCR
         if: >-
           github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'push' && github.ref == 'refs/heads/main')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.refs.outputs.sha }}
+          INGEST_IMAGE: ${{ steps.refs.outputs.ingest }}
+          AGENT_IMAGE: ${{ steps.refs.outputs.agent }}
         run: |
+          docker tag "${INGEST_IMAGE_LOCAL}:${SHA}" "$INGEST_IMAGE"
+          docker tag "${AGENT_IMAGE_LOCAL}:${SHA}" "$AGENT_IMAGE"
           echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push "${{ steps.refs.outputs.ingest }}"
-          docker push "${{ steps.refs.outputs.agent }}"
+          docker push "$INGEST_IMAGE"
+          docker push "$AGENT_IMAGE"
 
   # ------------------------------------------------- secret gate (fork-safe)
   e2e-secrets-check:
@@ -98,10 +118,6 @@ jobs:
       OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
       OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
       SHA: ${{ needs.build.outputs.sha }}
-      # kustomize overlay placeholders (deploy/kustomize/overlays/ci):
-      KUSTOMIZE_OWNER_PLACEHOLDER: ghcr.io/OWNER
-      KUSTOMIZE_TAG_PLACEHOLDER: ":ci"
-      KUSTOMIZE_NS_PLACEHOLDER: "namespace: rag-ci"
     steps:
       - uses: actions/checkout@v4
 
@@ -139,11 +155,18 @@ jobs:
             sleep 10
           done
 
+      # GHCR packages must be PUBLIC (repo Settings -> Packages) so the lab
+      # cluster can pull anonymously; alternatively create an imagePullSecret
+      # from a fine-grained PAT with oc create secret (token never in git).
       - name: Apply agent + ingest Job (kustomize overlay, sha-tagged GHCR images)
+        env:
+          KUSTOMIZE_OWNER_PLACEHOLDER: ghcr.io/OWNER
+          KUSTOMIZE_TAG_PLACEHOLDER: ":ci"
+          KUSTOMIZE_NS_PLACEHOLDER: "namespace: rag-ci"
         run: |
           OWNER_LC="$(echo "${{ github.repository_owner }}" | tr 'A-Z' 'a-z')"
           kubectl kustomize deploy/kustomize/overlays/ci \
-            | sed -e "s|$KUSTOMIZE_OWNER_PLACEHOLDER|ghcr.io/${GITHUB_REPOSITORY,,}|g" \
+            | sed -e "s|$KUSTOMIZE_OWNER_PLACEHOLDER|ghcr.io/${OWNER_LC}|g" \
                   -e "s|$KUSTOMIZE_TAG_PLACEHOLDER|:${SHA}|g" \
                   -e "s|$KUSTOMIZE_NS_PLACEHOLDER|namespace: rag-ci-${SHA}|g" \
             | kubectl apply -f -

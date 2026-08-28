@@ -1,9 +1,13 @@
 # CI overlay (issue #8): lab OpenShift, synthetic demo data only.
 # Placeholders in git, rewritten by .github/workflows/e2e.yml at apply time:
-#   OWNER  -> github.repository_owner       (image paths)
-#   rag-ci -> rag-ci-<shortsha>             (namespace)
-#   :ci    -> :<shortsha>                   (image tags)
-# Never put a real registry path, token, or kubeconfig in git.
+#   ghcr.io/OWNER -> ghcr.io/<repository_owner lowercase>   (image paths)
+#   rag-ci        -> rag-ci-<shortsha>                      (namespace)
+#   :ci           -> :<shortsha>                            (image tags)
+# The final image string must equal the workflow's pushed refs exactly:
+#   ghcr.io/<owner>/qdrant-pdf-rag-{ingest,agent}:<shortsha>
+# GHCR packages must be public for anonymous pull from the lab cluster
+# (or mount an imagePullSecret — token never in git). No real registry
+# paths, tokens, or kubeconfigs here.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: rag-ci

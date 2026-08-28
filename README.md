@@ -86,6 +86,19 @@ Secrets (create in GitHub repo settings; values never in git):
 
 Unset secrets → the e2e job is skipped (fork PRs only build images, no push).
 
+Notes:
+
+- **GHCR packages must be public** (repo → Packages → package settings →
+  change visibility) so the lab cluster can pull anonymously. Alternative:
+  create an `imagePullSecret` from a fine-grained PAT via `oc create secret`
+  in the workflow (token stays in the cluster, never in git).
+- The workflow logs in with `--insecure-skip-tls-verify=true` — **lab only**;
+  a production cluster would use a trusted CA.
+- The readyz probe pod uses `curlimages/curl` from Docker Hub — allowed on the
+  connected lab cluster only, never in the air-gap.
+- Image refs are exactly `ghcr.io/<owner>/qdrant-pdf-rag-{ingest,agent}:<sha>`
+  across `docker tag`, `docker push`, and the kustomize overlay sed.
+
 ## Library scope
 
 `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx`, `fastapi`,
