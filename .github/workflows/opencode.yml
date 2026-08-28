@@ -108,7 +108,9 @@ jobs:
       github.event_name == 'pull_request' &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Observed reviews: 1.5-7.5 min, with variance up to ~2x. 20 min bounds a
+    # stuck run without clipping a normal review.
+    timeout-minutes: 20
     concurrency:
       group: opencode-review-${{ github.event.pull_request.number || github.run_id }}
       cancel-in-progress: true
@@ -123,6 +125,16 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      # Review latency: most of the wall clock is model turns. Give the
+      # reviewer working pytest/mypy/ruff up front so it does not spend a
+      # turn (plus ~30s of venv + pip install) bootstrapping them every run.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Preinstall dev tools for the reviewer
+        run: pip install -e ".[dev]"
 
       # See the comment on the /oc job: inlined on purpose, not a composite.
       - name: Cache opencode
@@ -148,3 +160,12 @@ jobs:
           MODEL: opencode-go/hy4-preview
           SHARE: "false"
           USE_GITHUB_TOKEN: "false"
+          PROMPT: |
+            Review this pull request against AGENTS.md and the diff:
+            - Real bugs first, then layering violations, then style nits.
+            - Probe claims when cheap, but keep tool calls lean — one pass.
+            - pytest, mypy, and ruff are ALREADY installed in the system
+              Python: use `python3 -m pytest`, `python3 -m mypy src`,
+              `python3 -m ruff check src tests`. Never create virtualenvs,
+              never pip install anything.
+            - Post exactly one review with findings and a clear verdict.
