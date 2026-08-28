@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     # method. There is deliberately no request-level retry anywhere.
     http_connect_retries: int = Field(default=2, ge=0, le=5)
 
+    # /healthz probe budget: qdrant /readyz GET and the embed endpoint ping.
+    health_timeout_s: float = 5.0
+
     # Ingest. batch_size follows the Qdrant skill's 64-256 upsert band
     # (.agents/skills/qdrant-performance-optimization) — bounds enforced here
     # so no call site can grow a magic number outside it.

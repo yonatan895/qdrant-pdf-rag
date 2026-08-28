@@ -52,7 +52,7 @@ def test_answer_chat_retries_nothing_on_connect_error():
     assert rc.posts == 1
 
 
-def test_agent_lifespan_timeouts_and_retries(monkeypatch, synthetic_pdf):
+def test_agent_lifespan_timeouts_and_retries(monkeypatch):
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
     monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
     monkeypatch.setenv("QDRANT_TIMEOUT_S", "11")

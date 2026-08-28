@@ -33,6 +33,7 @@ def _hit(cite_suffix: str = "p. 1-6") -> SearchHit:
 @pytest.fixture
 def client(monkeypatch, synthetic_pdf):
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
     monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
     monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
     # patch the LLM client AFTER lifespan built it (module global exists then)
@@ -77,6 +78,19 @@ class FabricatingBodyLLM:
             "Answer text.\n"
             "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
             "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n\n"
+            "Citations:\n"
+            "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+        )
+
+
+class FabricatingScriptLLM:
+    """Puts a fabricated citation inside the fenced script block."""
+
+    def chat(self, messages):
+        return (
+            "Answer text.\n\n"
+            "```\n// see SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
+            "IOSCMDS LIST\n```\n\n"
             "Citations:\n"
             "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
         )
@@ -135,6 +149,79 @@ def test_answer_strips_fabricated_body_citation(client, monkeypatch):
     assert fabricated not in body["answer"]
     assert _hit().cite in body["answer"]  # retrieved cite survives mid-answer
     assert body["citations"] == [_hit().cite]
+
+
+def test_strip_unauthorized_handles_multi_digit_markers():
+    """Regression: '11.' / '12)' list markers must not smuggle a fabricated
+    cite through the body strip (issue #20 PR C review round 5)."""
+    from mainframe_rag.agent.cites import strip_unauthorized_citations
+
+    allowed = {_hit().cite}
+    fabricated = "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9"
+    body = "\n".join(
+        [f"{i}. filler line {i}" for i in range(1, 11)]
+        + [f"11. {fabricated}", f"12) {fabricated}", _hit().cite]
+    )
+    out = strip_unauthorized_citations(body, allowed)
+    assert fabricated not in out
+    assert _hit().cite in out
+    assert "filler line 5" in out  # numbered prose lines survive
+
+
+def test_answer_script_block_passes_through_unvalidated(client, monkeypatch):
+    """script is code: citation-shaped lines inside the fence are returned
+    verbatim (documented behavior, issue #20 PR C)."""
+    monkeypatch.setattr(app_mod, "llm", FabricatingScriptLLM())
+    resp = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "SA22-9999-99" in body["script"]
+    assert body["citations"] == [_hit().cite]
+    assert "SA22-9999-99" not in body["answer"]
+
+
+def test_404_405_use_structured_shape(client):
+    """Router-level 404/405 must use the stable shape too (round 5, item 3)."""
+    resp = client.get("/nope")
+    assert resp.status_code == 404
+    assert resp.json() == {"code": "not_found", "message": "not found"}
+    resp = client.post("/healthz")
+    assert resp.status_code == 405
+    assert resp.json() == {"code": "method_not_allowed", "message": "method not allowed"}
+
+
+def test_unhandled_error_returns_internal_shape(monkeypatch):
+    """An exception escaping the handler logs server-side; client sees only
+    {"code": "internal"}. asdict runs after the handler's try, so breaking it
+    yields a genuinely unhandled exception."""
+
+    def boom_asdict(_x):
+        raise RuntimeError("serializer down")
+
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    monkeypatch.setattr(
+        app_mod, "retrieve_search",
+        lambda *a, **k: ([_hit()], "identifier", {"embed_ms": 1, "qdrant_ms": 1}),
+    )
+    monkeypatch.setattr(app_mod, "asdict", boom_asdict)
+    # ServerErrorMiddleware re-raises after sending the 500; the client must
+    # not surface that re-raise.
+    with TestClient(app_mod.app, raise_server_exceptions=False) as c:
+        resp = c.post("/v1/search", json={"query": "IEA500I"})
+    assert resp.status_code == 500
+    assert resp.json() == {"code": "internal", "message": "internal error"}
+    assert "serializer" not in resp.text
+
+
+def test_healthz_qdrant_unready_structured(client, monkeypatch):
+    monkeypatch.setattr(app_mod.settings, "qdrant_url", "http://127.0.0.1:1")
+    resp = client.get("/healthz")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body == {"code": "qdrant_unready", "message": "qdrant is not ready"}
+    assert "refused" not in resp.text  # diagnostics stay in logs
 
 
 def test_error_shape_is_structured(client, monkeypatch):

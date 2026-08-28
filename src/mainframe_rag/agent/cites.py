@@ -20,6 +20,18 @@ CITATION_LINE_RE = re.compile(
 
 CITATIONS_HEADER_RE = re.compile(r"^\s*Citations?:\s*$", re.IGNORECASE | re.MULTILINE)
 
+# Bullet/dash/numbered-list markers, including multi-digit ("11.") and
+# bracketed ("12)") forms.
+_LIST_MARKER_CHARS = "-*•0123456789. )("
+
+
+def _strip_list_marker(line: str) -> str:
+    """One marker-stripper for both the Citations: list parser and the answer
+    body scanner, so the two can never diverge."""
+    if line.startswith(("-", "*", "•")) or line[:1].isdigit():
+        return line.lstrip(_LIST_MARKER_CHARS)
+    return line
+
 
 def extract_citation_lines(text: str) -> list[str]:
     """Citation-shaped lines from the model output (after the Citations: header)."""
@@ -30,13 +42,12 @@ def extract_citation_lines(text: str) -> list[str]:
             in_citations = True
             continue
         if in_citations:
-            stripped = line.strip()
-            if not stripped:
+            raw = line.strip()
+            if not raw:
                 if lines:
                     break  # blank line after the list ends it
                 continue
-            if stripped.startswith(("-", "*", "•", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9")):
-                stripped = stripped.lstrip("-*•0123456789. ")
+            stripped = _strip_list_marker(raw)
             if stripped:
                 lines.append(stripped)
     return lines
@@ -55,14 +66,10 @@ def strip_unauthorized_citations(text: str, allowed: set[str]) -> str:
     """Remove citation-shaped lines from the answer body that are not in the
     retrieved hit set. The trailing Citations: list is validated separately;
     this closes the same hole for a fabricated cite quoted mid-answer. Same
-    exact-match rule as valid_citations: normalization stays out of scope."""
+    exact-match rule and the same list-marker handling as valid_citations."""
     kept: list[str] = []
     for line in text.splitlines():
-        candidate = line.strip()
-        if candidate.startswith(("-", "*", "•")):
-            candidate = candidate.lstrip("-*• ").strip()
-        elif len(candidate) > 2 and candidate[0].isdigit() and candidate[1] in ".)":
-            candidate = candidate[2:].strip()
+        candidate = _strip_list_marker(line.strip())
         if CITATION_LINE_RE.match(candidate) and candidate not in allowed:
             continue
         kept.append(line)

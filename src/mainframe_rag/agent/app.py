@@ -22,7 +22,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from mainframe_rag.agent.answer import HttpxLLMClient, build_messages, parse_answer
+from mainframe_rag.agent.answer import (
+    HttpxLLMClient,
+    assert_reasoning_model,
+    build_messages,
+    parse_answer,
+)
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.ports import Embedder, LLMClient
@@ -64,7 +69,8 @@ async def lifespan(_app: FastAPI):
     # own connection pool with its own (long) timeout — env resolution stays
     # lazy until first use (startup fail-fast is PR D).
     embedder = build_embedder(settings, http)
-    llm = HttpxLLMClient(settings)
+    llm_client = HttpxLLMClient(settings)
+    llm = llm_client
     from qdrant_client import QdrantClient
 
     qdrant = QdrantClient(
@@ -74,6 +80,7 @@ async def lifespan(_app: FastAPI):
     )
     yield
     http.close()
+    llm_client.close()
     qdrant.close()
 
 
@@ -127,12 +134,28 @@ async def validation_error_handler(_request: Request, exc: RequestValidationErro
 
 
 @app.exception_handler(Exception)
-async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+async def unhandled_error_handler(_request: Request, exc: Exception) -> JSONResponse:
     # Full trace stays in server logs; the client never sees internals.
-    request_id = getattr(request.state, "request_id", None)
-    log.exception(json_log(str(request_id or "unknown"), "unhandled", error=str(exc)[:200]))
+    log.exception(json_log("unknown", "unhandled", error=str(exc)[:200]))
     return JSONResponse(
         status_code=500, content={"code": "internal", "message": "internal error"}
+    )
+
+
+# Router-level 404/405 raise Starlette's HTTPException, which the FastAPI
+# subclass handler does not cover — key these by status code.
+@app.exception_handler(404)
+async def not_found_handler(_request: Request, _exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=404, content={"code": "not_found", "message": "not found"}
+    )
+
+
+@app.exception_handler(405)
+async def method_not_allowed_handler(_request: Request, _exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=405,
+        content={"code": "method_not_allowed", "message": "method not allowed"},
     )
 
 
@@ -141,12 +164,13 @@ def healthz() -> dict:
     detail: dict = {"qdrant": False, "embed": None}
     try:
         base = settings.qdrant_url.rstrip("/")
-        resp = httpx.get(f"{base}/readyz", timeout=5)
+        resp = httpx.get(f"{base}/readyz", timeout=settings.health_timeout_s)
         detail["qdrant"] = resp.status_code == 200 and resp.text.strip().lower() == "all shards are ready"
         if not detail["qdrant"]:
             detail["qdrant_detail"] = resp.text[:120]
+            log.warning(json_log("healthz", "health", qdrant_detail=resp.text[:200]))
     except Exception as exc:
-        detail["qdrant_detail"] = str(exc)[:120]
+        # Diagnostics go to the log; the client gets the stable shape only.
         log.warning(json_log("healthz", "health", error=str(exc)[:200]))
         raise AppError(503, "qdrant_unready", "qdrant is not ready") from exc
 
@@ -155,7 +179,7 @@ def healthz() -> dict:
             resp = http.post(
                 f"{settings.embed_base_url.rstrip('/')}/embeddings",
                 json={"model": settings.embed_model, "input": ["ping"]},
-                timeout=10,
+                timeout=settings.health_timeout_s,
             )
             detail["embed"] = resp.status_code == 200
         except Exception as exc:  # noqa: BLE001
@@ -192,9 +216,16 @@ def v1_search(req: SearchRequest) -> SearchResponse:
 @app.post("/v1/answer", response_model=AnswerResponse)
 def v1_answer(req: AnswerRequest) -> AnswerResponse:
     request_id = uuid.uuid4().hex[:12]
+    # Fail fast before any retrieval: the reasoning model (and its endpoint)
+    # must be configured; nothing else is callable. Config errors get a fixed
+    # client message — the exception text stays in the log.
     try:
-        # Fail fast: reasoning model must be configured; nothing else is callable.
-        settings.require_reasoning_model()
+        assert_reasoning_model(settings)
+    except RuntimeError as exc:
+        log.warning(json_log(request_id, "answer", error=str(exc)[:200]))
+        raise AppError(503, "not_configured", "reasoning model is not configured") from exc
+
+    try:
         hits, kind, timings = retrieve_search(
             qdrant, embedder, settings.qdrant_collection, req.query,
             product=req.product, version=req.version, limit=8,
@@ -230,9 +261,6 @@ def v1_answer(req: AnswerRequest) -> AnswerResponse:
             citations=parsed["citations"],
             script=parsed["script"],
         )
-    except RuntimeError as exc:
-        # Unset LLM_MODEL_REASONING / LLM_BASE_URL: fail closed, no LLM call.
-        raise AppError(503, "not_configured", str(exc)) from exc
     except Exception as exc:
         log.error(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "answer failed") from exc

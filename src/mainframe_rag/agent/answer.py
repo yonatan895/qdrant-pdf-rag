@@ -126,7 +126,12 @@ def call_reasoning_model(
 
 
 def parse_answer(content: str, allowed_citations: set[str]) -> dict:
-    """Split model output into answer, validated citations, optional script."""
+    """Split model output into answer, validated citations, optional script.
+
+    The `citations` list and the answer body are filtered to the hit set.
+    `script` (fenced block) is code and deliberately passes through
+    unvalidated — stripping citation-looking lines would corrupt examples.
+    Documented behavior, pinned by test (issue #20 PR C)."""
     from mainframe_rag.agent.cites import (
         strip_unauthorized_citations,
         valid_citations,
