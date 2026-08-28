@@ -14,12 +14,40 @@ on:
       - "vendor/**"
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
+    steps:
+      - id: check
+        env:
+          KEY: ${{ secrets.OPENCODE_API_KEY }}
+          EVENT: ${{ github.event_name }}
+          HEAD: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT" = "pull_request" ] && [ "$HEAD" != "$REPO" ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
   opencode:
+    needs: gate
     if: |
-      github.event_name != 'pull_request' &&
+      needs.gate.outputs.ok == 'true' &&
       (contains(github.event.comment.body, '/oc') ||
       contains(github.event.comment.body, '/opencode'))
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: opencode-comment-${{ github.event.comment.id || github.run_id }}
+      cancel-in-progress: true
     permissions:
       id-token: write
       contents: read
@@ -33,7 +61,8 @@ jobs:
           persist-credentials: false
 
       - name: Run opencode
-        # anomalyco/opencode tag `latest` (commit 77fc88c, 2026-03-25); bump the pin deliberately
+        # pinned to commit 77fc88c (2026-03-25); the action installs the latest
+        # opencode release at run time - bump the pin deliberately
         uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
@@ -41,13 +70,14 @@ jobs:
           model: opencode-go/hy4-preview
 
   review:
+    needs: gate
     if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      needs.gate.outputs.ok == 'true' &&
+      github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
-      group: opencode-review-${{ github.event.pull_request.number }}
+      group: opencode-review-${{ github.event.pull_request.number || github.run_id }}
       cancel-in-progress: true
     permissions:
       id-token: write
@@ -62,7 +92,8 @@ jobs:
           persist-credentials: false
 
       - name: Run opencode review
-        # anomalyco/opencode tag `latest` (commit 77fc88c, 2026-03-25); bump the pin deliberately
+        # pinned to commit 77fc88c (2026-03-25); the action installs the latest
+        # opencode release at run time - bump the pin deliberately
         uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
