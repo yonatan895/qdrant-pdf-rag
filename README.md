@@ -69,6 +69,36 @@ Copy `airgap.env.example` → `airgap.env`. `DENSE_DIM`, `EMBED_MODEL`,
 (open questions in `docs/architecture.md` §5.7 — none block steps 1–8).
 The agent fails fast if `DENSE_DIM` is unset or disagrees with the collection.
 
+`EMBED_MODE=hash` selects a deterministic in-process embedder (no network, no
+weights, lexical-only retrieval). **CI/dev only** — connected E2E uses it;
+never set it in production.
+
+## Connected E2E (GitHub Actions)
+
+`.github/workflows/e2e.yml` builds both Containerfiles, pushes `ghcr.io/<owner>/qdrant-pdf-rag-{ingest,agent}:<sha>` on `main`/dispatch, deploys a 1-replica Qdrant (`overlays/ci/values.yaml`) plus agent and one-shot ingest Job into an ephemeral `rag-ci-<sha>` lab-OpenShift namespace, ingests **generated demo PDFs only** (`EMBED_MODE=hash`), runs two search smokes, and deletes the namespace `if: always()`.
+
+Secrets (create in GitHub repo settings; values never in git):
+
+| Secret | Purpose |
+|---|---|
+| `OPENSHIFT_SERVER` | Lab OpenShift API URL |
+| `OPENSHIFT_TOKEN` | Namespace-scoped, short-lived service-account token |
+
+Unset secrets → the e2e job is skipped (fork PRs only build images, no push).
+
+Notes:
+
+- **GHCR packages must be public** (repo → Packages → package settings →
+  change visibility) so the lab cluster can pull anonymously. Alternative:
+  create an `imagePullSecret` from a fine-grained PAT via `oc create secret`
+  in the workflow (token stays in the cluster, never in git).
+- The workflow logs in with `--insecure-skip-tls-verify=true` — **lab only**;
+  a production cluster would use a trusted CA.
+- The readyz probe pod uses `curlimages/curl` from Docker Hub — allowed on the
+  connected lab cluster only, never in the air-gap.
+- Image refs are exactly `ghcr.io/<owner>/qdrant-pdf-rag-{ingest,agent}:<sha>`
+  across `docker tag`, `docker push`, and the kustomize overlay sed.
+
 ## Library scope
 
 `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx`, `fastapi`,

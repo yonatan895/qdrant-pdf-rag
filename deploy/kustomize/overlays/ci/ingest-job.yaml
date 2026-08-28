@@ -1,0 +1,56 @@
+# One-shot ingest Job for the connected CI lab (issue #8). Generates the two
+# demo PDFs in-cluster (synthetic, gitignored by design) and ingests them with
+# EMBED_MODE=hash — never the vLLM endpoint, never real corpora.
+# OpenShift restricted-v2 injects fsGroup for the emptyDir volumes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ingest
+  labels:
+    app: ingest
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: ingest
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ingest
+          image: qdrant-pdf-rag-ingest:ci
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              python /app/scripts/make_synthetic_pdf.py --out /corpus/SA22-0000-00_outline.pdf
+              python /app/scripts/make_synthetic_pdf.py --plain --out /corpus/plain-widget-notes.pdf
+              python -m mainframe_rag.ingest.run_ingest --src /corpus --progress /work/inventory.jsonl --workers 1
+          env:
+            - name: QDRANT_URL
+              value: http://qdrant:6333
+            - name: QDRANT_COLLECTION
+              value: mainframe_manuals
+            - name: QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: qdrant-apikey
+                  key: api-key
+            - name: EMBED_MODE
+              value: hash
+            - name: INGEST_WORKERS
+              value: "1"
+          resources:
+            requests: { cpu: "250m", memory: 512Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          volumeMounts:
+            - name: corpus
+              mountPath: /corpus
+            - name: work
+              mountPath: /work
+      volumes:
+        - name: corpus
+          emptyDir: {}
+        - name: work
+          emptyDir: {}

@@ -88,7 +88,7 @@ def _prefetch_one(
         query=query_vec,
         using=using,
         limit=limit,
-        filter=flt,
+        query_filter=flt,
         with_payload=True,
     )
     return result.points

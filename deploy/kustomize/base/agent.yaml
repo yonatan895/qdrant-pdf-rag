@@ -1,0 +1,57 @@
+# Base agent (issue #8). Image name is rewritten by kustomize overlays
+# (newName/newTag); never bake a registry or sha tag here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-agent
+  labels:
+    app: rag-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rag-agent
+  template:
+    metadata:
+      labels:
+        app: rag-agent
+    spec:
+      containers:
+        - name: agent
+          image: qdrant-pdf-rag-agent:ci
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: QDRANT_URL
+              value: http://qdrant:6333
+            - name: QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: qdrant-apikey   # created by the vendored chart (apiKey: true)
+                  key: api-key
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "100m", memory: 256Mi }
+            limits: { cpu: "500m", memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-agent
+  labels:
+    app: rag-agent
+spec:
+  type: ClusterIP
+  selector:
+    app: rag-agent
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

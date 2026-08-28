@@ -21,6 +21,11 @@
 # Air-gap contract: runners must not reach pypi.org, Docker Hub, or GitHub.
 # If neither PIP_FIND_LINKS nor PIP_INDEX_URL is set, jobs FAIL CLOSED.
 # Do not put internal registry hostnames, URLs, or tokens in this file or in git.
+#
+# The connected-path E2E (image build to GHCR + lab OpenShift smoke, issue #8)
+# lives ONLY in .github/workflows/e2e.yml on public GitHub. Air-gap GitLab has
+# no GHCR and no lab cluster access; a follow-up issue would add an
+# internal-registry E2E if wanted. Do not add deploy jobs here.
 # ==============================================================================
 
 workflow:

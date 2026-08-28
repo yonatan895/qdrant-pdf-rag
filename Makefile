@@ -25,10 +25,13 @@ PIP ?= $(PY) -m pip
 .DEFAULT_GOAL := help
 
 # ---------------------------------------------------------------- venv / deps
+# Install with the venv's own interpreter/pip ($(PIP) points at the base
+# python — the wheelhouse build deliberately runs there), never into .venv's
+# parent.
 .venv:
 	$(PY) -m venv .venv
-	$(PIP) install --upgrade pip
-	$(PIP) install -r requirements.lock.txt -e ".[dev]"
+	.venv/bin/python -m pip install --upgrade pip
+	.venv/bin/python -m pip install -r requirements.lock.txt -e ".[dev]"
 
 .PHONY: venv
 venv: .venv
@@ -36,10 +39,11 @@ venv: .venv
 .PHONY: wheelhouse
 wheelhouse: $(WHEELHOUSE)
 
-$(WHEELHOUSE): requirements.lock.txt
+# Built from the venv so the wheel tags always match the runtime interpreter
+# (cp314), regardless of whether the base python ships pip.
+$(WHEELHOUSE): requirements.lock.txt | .venv
 	rm -rf $@ && mkdir -p $@
-	$(PIP) wheel -r requirements.lock.txt -w $@ --no-deps
-	$(PIP) wheel -r requirements.lock.txt -w $@
+	.venv/bin/python -m pip wheel -r requirements.lock.txt -w $@
 
 # BM25 sparse weights must be baked into images; no runtime download in the air-gap.
 .PHONY: bm25-weights
@@ -136,10 +140,17 @@ helm-apply: chart
 	  -n $(OPENSHIFT_NAMESPACE) -f $(VALUES_FILE) \
 	  --set image.repository=$(REGISTRY)/qdrant/qdrant
 
+# ---------------------------------------------------------------- e2e demo
+.PHONY: e2e-demo-pdfs
+e2e-demo-pdfs: | .venv
+	mkdir -p output/demo-pdfs
+	.venv/bin/python scripts/make_synthetic_pdf.py --out output/demo-pdfs/SA22-0000-00_outline.pdf
+	.venv/bin/python scripts/make_synthetic_pdf.py --plain --out output/demo-pdfs/plain-widget-notes.pdf
+
 # ---------------------------------------------------------------- clean
 .PHONY: clean
 clean:
-	rm -rf .venv .pytest_cache .mypy_cache .ruff_cache $(BUNDLE_DIR)
+	rm -rf .venv .pytest_cache .mypy_cache .ruff_cache $(BUNDLE_DIR) output
 
 .PHONY: help
 help:
