@@ -31,6 +31,7 @@ if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi
 EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed 's:/*$::')/v1}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 INGEST_TIMEOUT=${INGEST_TIMEOUT:-3600}
+INGEST_WORK_SIZE=${INGEST_WORK_SIZE:-100Gi}   # CI-rehearsal knob; default = prod size
 mkdir -p dist
 
 if [ "${AIRGAP_DRYRUN:-0}" != "1" ] && ! $KC -n "$NAMESPACE" get pvc ingest-work >/dev/null 2>&1; then
@@ -45,7 +46,7 @@ spec:
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
-      storage: 100Gi
+      storage: $INGEST_WORK_SIZE
   storageClassName: $STORAGE_CLASS
 EOF
 fi
@@ -72,6 +73,16 @@ if [ -n "${PULL_SECRET:-}" ]; then
 fi
 if grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml; then
     die "unsubstituted placeholder left in rendered ingest manifest (check airgap.env)"
+fi
+# CI-rehearsal knob (never set in the air gap): strategic-merge a patch into
+# the rendered Job — e.g. lab-quota resources — without touching the prod
+# overlay in git. Client-side only; the cluster is not contacted.
+INGEST_EXTRA_PATCH=${INGEST_EXTRA_PATCH:-}
+if [ -n "$INGEST_EXTRA_PATCH" ]; then
+    [ -f "$INGEST_EXTRA_PATCH" ] || die "INGEST_EXTRA_PATCH file not found: $INGEST_EXTRA_PATCH"
+    $KC patch --local -f dist/ingest-rendered.yaml \
+        -p "$(cat "$INGEST_EXTRA_PATCH")" -o yaml > dist/ingest-rendered-patched.yaml
+    mv dist/ingest-rendered-patched.yaml dist/ingest-rendered.yaml
 fi
 # Jobs are immutable: remove a previous run so re-ingest works.
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then

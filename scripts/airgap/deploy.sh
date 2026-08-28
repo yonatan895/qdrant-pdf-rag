@@ -53,6 +53,14 @@ fi
 CHART=$(ls charts/qdrant-*.tgz | head -1)
 [ -n "$CHART" ] || die "vendored chart missing (charts/qdrant-*.tgz)"
 
+# CI-rehearsal knobs (never set in the air gap): shrink PVCs / resources for
+# the lab run WITHOUT touching the prod values in git. Empty = git values.
+QDRANT_STORAGE_SIZE=${QDRANT_STORAGE_SIZE:-}
+QDRANT_EXTRA_VALUES=${QDRANT_EXTRA_VALUES:-}
+if [ -n "$QDRANT_EXTRA_VALUES" ] && [ ! -f "$QDRANT_EXTRA_VALUES" ]; then
+    die "QDRANT_EXTRA_VALUES file not found: $QDRANT_EXTRA_VALUES"
+fi
+
 echo "==> Helm: Qdrant from the vendored chart with PROD values"
 set -- helm upgrade -i "$QDRANT_RELEASE" "$CHART" \
     -n "$NAMESPACE" \
@@ -61,8 +69,19 @@ set -- helm upgrade -i "$QDRANT_RELEASE" "$CHART" \
     --set "image.tag=$QDRANT_TAG" \
     --set "persistence.storageClassName=$STORAGE_CLASS" \
     --set "snapshotPersistence.storageClassName=$SNAPSHOT_STORAGE_CLASS"
+if [ -n "$QDRANT_STORAGE_SIZE" ]; then
+    set -- "$@" --set "persistence.size=$QDRANT_STORAGE_SIZE" \
+        --set "snapshotPersistence.size=$QDRANT_STORAGE_SIZE"
+fi
+if [ -n "$QDRANT_EXTRA_VALUES" ]; then
+    set -- "$@" -f "$QDRANT_EXTRA_VALUES"
+fi
 if [ -n "${PULL_SECRET:-}" ]; then
     set -- "$@" --set "imagePullSecrets[0].name=$PULL_SECRET"
+else
+    # values.yaml ships a placeholder pull-secret name; without a real secret
+    # that placeholder must never reach the cluster (fail closed, not open).
+    set -- "$@" --set "imagePullSecrets=null"
 fi
 run "$@"
 

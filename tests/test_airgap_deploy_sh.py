@@ -1,0 +1,134 @@
+"""scripts/airgap/deploy.sh fail-close + knob regressions (issue #15 / PR #32).
+
+Runs deploy.sh with AIRGAP_DRYRUN=1 against a stubbed bin dir and a copied
+tree — no cluster, no helm, no network. The PULL_SECRET fail-close is the
+regression the rehearsal build surfaced: values.yaml's placeholder pull-secret
+name must never reach a cluster.
+"""
+
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+IMAGE_SHA = "a" * 40  # full-sha shaped; deploy.sh only rejects "" / "HEAD"
+
+# Minimal manifest the stub kustomize prints (sed substitutes these).
+STUB_KUSTOMIZE = """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-agent
+  namespace: mainframe-rag
+spec:
+  template:
+    spec:
+      imagePullSecrets: []
+      containers:
+        - name: agent
+          image: __INTERNAL_REGISTRY__/qdrant-pdf-rag-agent:__IMAGE_SHA__
+          env:
+            - name: EMBED_MODEL
+              value: __EMBED_MODEL__
+"""
+
+STUB_BIN = """#!/bin/sh
+if [ "$1" = "kustomize" ]; then
+  cat {stub_yaml}
+  exit 0
+fi
+printf '%s\\n' "$@" >> "$HELM_LOG"
+exit 0
+"""
+
+
+@pytest.fixture
+def tree(tmp_path):
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "charts").mkdir()
+    (tmp_path / "overlays" / "openshift").mkdir(parents=True)
+    (tmp_path / "scripts" / "airgap").mkdir(parents=True)
+    for f in ("common.sh", "deploy.sh"):
+        shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
+    shutil.copy(next(REPO.glob("charts/qdrant-*.tgz")), tmp_path / "charts")
+    shutil.copy(REPO / "overlays" / "openshift" / "values.yaml", tmp_path / "overlays" / "openshift")
+    stub_yaml = tmp_path / "stub-kustomize.yaml"
+    stub_yaml.write_text(STUB_KUSTOMIZE)
+    helm_log = tmp_path / "helm-args.log"
+    for name in ("helm", "kubectl", "oc"):
+        p = tmp_path / "bin" / name
+        p.write_text(STUB_BIN.format(stub_yaml=stub_yaml))
+        p.chmod(0o755)
+    return tmp_path, helm_log
+
+
+def _run(tree, *extra_env):
+    tmp_path, _ = tree
+    env = {
+        "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
+        "HELM_LOG": str(tmp_path / "helm-args.log"),
+        "IMAGE_SHA": IMAGE_SHA,
+        "INTERNAL_REGISTRY": "reg.internal",
+        "NAMESPACE": "ns",
+        "STORAGE_CLASS": "standard",
+        "EMBED_MODEL": "embed",
+        "DENSE_DIM": "64",
+        "VLLM_BASE_URL": "http://vllm:8000",
+    }
+    for k, v in extra_env:
+        env[k] = v
+    return subprocess.run(
+        ["sh", str(tmp_path / "scripts" / "airgap" / "deploy.sh")],
+        capture_output=True, text=True, env=env, cwd=tmp_path, check=False,
+    )
+
+
+def _helm_log(tree):
+    return (tree[1]).read_text()
+
+
+def test_no_pull_secret_never_renders_placeholder_name(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    log = _helm_log(tree)
+    assert "imagePullSecrets=null" in log
+    assert "PLACEHOLDER" not in log
+
+
+def test_pull_secret_wired_when_set(tree):
+    _run(tree, ("PULL_SECRET", "ghcr-pull"))
+    log = _helm_log(tree)
+    assert "imagePullSecrets[0].name=ghcr-pull" in log
+    assert "imagePullSecrets=null" not in log
+
+
+def test_storage_size_knob_covers_persistence_and_snapshot(tree):
+    _run(tree, ("QDRANT_STORAGE_SIZE", "1Gi"))
+    log = _helm_log(tree)
+    assert "persistence.size=1Gi" in log
+    assert "snapshotPersistence.size=1Gi" in log
+
+
+def test_missing_extra_values_file_fails_closed(tree):
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", "/nonexistent/vals.yaml"))
+    assert r.returncode == 1
+    assert "QDRANT_EXTRA_VALUES file not found" in r.stderr
+
+
+def test_extra_values_file_reaches_helm(tree):
+    vals = tree[0] / "vals.yaml"
+    vals.write_text("resources: {}\n")
+    r = _run(tree, ("QDRANT_EXTRA_VALUES", str(vals)))
+    assert r.returncode == 0, r.stderr
+    args = _helm_log(tree).splitlines()
+    assert str(vals) in args
+    assert args[args.index(str(vals)) - 1] == "-f"
+
+
+def test_rendered_manifest_substituted_and_written(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert "reg.internal/qdrant-pdf-rag-agent" in rendered
+    assert "__" not in rendered
