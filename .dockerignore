@@ -1,0 +1,21 @@
+# Keep build contexts small; wheels and BM25 weights come in via named
+# build contexts (see Makefile build-images), never from the repo tree.
+.git
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+output
+bundles
+dist
+build
+tests
+docs
+deploy
+overlays
+charts
+oc-mirror
+.github

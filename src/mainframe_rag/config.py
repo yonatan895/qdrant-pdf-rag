@@ -1,14 +1,21 @@
 """Environment configuration. All values come from env / airgap.env (section 5.2).
 
 Fail fast rules: DENSE_DIM is required before any Qdrant collection or embed
-call; EMBED_MODEL / EMBED_BASE_URL before embeddings; LLM_MODEL_REASONING
-before /v1/answer (reasoning model only).
+call in vLLM mode; EMBED_MODEL / EMBED_BASE_URL before vLLM embeddings;
+LLM_MODEL_REASONING before /v1/answer (reasoning model only).
+
+EMBED_MODE=hash is a CI/dev-only in-process embedder (issue #8): deterministic
+feature hashing, no network, no model weights. Never the default in prod.
 """
 
 import multiprocessing
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Dense dimension of the hashed embedder. Fixed so CI never depends on the
+# vLLM team's DENSE_DIM; prod always overrides via embed_mode=vllm + DENSE_DIM.
+HASH_EMBED_DIM = 256
 
 
 class Settings(BaseSettings):
@@ -19,7 +26,9 @@ class Settings(BaseSettings):
     qdrant_api_key: str | None = None
     qdrant_collection: str = "mainframe_manuals"
 
-    # Embeddings (internal vLLM, OpenAI-compatible)
+    # Embeddings. mode "vllm" = internal vLLM (prod, OpenAI-compatible);
+    # mode "hash" = local deterministic hashing (CI/dev only, issue #8).
+    embed_mode: str = "vllm"
     embed_base_url: str | None = None
     embed_model: str | None = None
     dense_dim: int | None = None
@@ -38,6 +47,8 @@ class Settings(BaseSettings):
     bm25_cache_dir: str | None = None
 
     def require_dense_dim(self) -> int:
+        if self.embed_mode == "hash":
+            return HASH_EMBED_DIM
         if not self.dense_dim or self.dense_dim <= 0:
             raise RuntimeError(
                 "DENSE_DIM is unset; it must match the vLLM embedding model. "
@@ -46,6 +57,9 @@ class Settings(BaseSettings):
         return self.dense_dim
 
     def require_embed(self) -> tuple[str, str]:
+        if self.embed_mode == "hash":
+            # Hash mode never contacts an embedding endpoint.
+            raise RuntimeError("require_embed() is vLLM-only; hash mode embeds locally.")
         if not self.embed_base_url or not self.embed_model:
             raise RuntimeError(
                 "EMBED_BASE_URL and EMBED_MODEL must be set (owned by the vLLM team)."

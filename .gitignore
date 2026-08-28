@@ -16,6 +16,7 @@ wheelhouse/
 bundles/
 dist/
 build/
+output/
 
 # --- Python ---
 __pycache__/

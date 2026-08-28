@@ -69,6 +69,23 @@ Copy `airgap.env.example` → `airgap.env`. `DENSE_DIM`, `EMBED_MODEL`,
 (open questions in `docs/architecture.md` §5.7 — none block steps 1–8).
 The agent fails fast if `DENSE_DIM` is unset or disagrees with the collection.
 
+`EMBED_MODE=hash` selects a deterministic in-process embedder (no network, no
+weights, lexical-only retrieval). **CI/dev only** — connected E2E uses it;
+never set it in production.
+
+## Connected E2E (GitHub Actions)
+
+`.github/workflows/e2e.yml` builds both Containerfiles, pushes `ghcr.io/<owner>/qdrant-pdf-rag-{ingest,agent}:<sha>` on `main`/dispatch, deploys a 1-replica Qdrant (`overlays/ci/values.yaml`) plus agent and one-shot ingest Job into an ephemeral `rag-ci-<sha>` lab-OpenShift namespace, ingests **generated demo PDFs only** (`EMBED_MODE=hash`), runs two search smokes, and deletes the namespace `if: always()`.
+
+Secrets (create in GitHub repo settings; values never in git):
+
+| Secret | Purpose |
+|---|---|
+| `OPENSHIFT_SERVER` | Lab OpenShift API URL |
+| `OPENSHIFT_TOKEN` | Namespace-scoped, short-lived service-account token |
+
+Unset secrets → the e2e job is skipped (fork PRs only build images, no push).
+
 ## Library scope
 
 `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx`, `fastapi`,

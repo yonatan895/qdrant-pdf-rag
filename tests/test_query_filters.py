@@ -76,8 +76,8 @@ class FakeQdrant:
         self._dense, self._sparse = dense, sparse
         self.queries = []
 
-    def query_points(self, collection, query, using, limit, filter, with_payload, **_):
-        self.queries.append({"using": using, "filter": filter})
+    def query_points(self, collection, query, using, limit, query_filter, with_payload, **_):
+        self.queries.append({"using": using, "filter": query_filter})
         points = self._dense if using == "dense" else self._sparse
         return SimpleNamespace(points=list(points))
 

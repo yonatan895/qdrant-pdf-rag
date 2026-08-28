@@ -72,6 +72,13 @@ def test_ensure_collection_fails_fast_on_dim_mismatch():
         ensure_collection(client, _settings(768))
 
 
+def test_ensure_collection_hash_mode_uses_fixed_dim():
+    client = RecordingClient(exists=False)
+    s = Settings(embed_mode="hash", dense_dim=None, _env_file=None)
+    ensure_collection(client, s)
+    assert client.created["vectors_config"]["dense"].size == 256
+
+
 def test_ensure_collection_requires_dense_dim():
     client = RecordingClient(exists=False)
     with pytest.raises(RuntimeError, match="DENSE_DIM"):

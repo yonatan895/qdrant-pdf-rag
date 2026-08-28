@@ -12,33 +12,33 @@ HEADER = "SA22-0000-00 Synthetic Operating System Reference"
 FOOTER = "(c) Synthetic Corp 2026 - Fixture for testing only"
 
 PAGES = [
-    "Synthetic Operating System Reference\nz/OS V9R9\nSA22-0000-00\n\n"
-    "This fixture was generated for tests. It contains no real vendor content.",
-    "Contents\n\nChapter 1 System parameters ........ 3\n"
-    "Chapter 2 Operator messages ....... 5\nAppendix A Notices .............. 7",
+    ("Synthetic Operating System Reference\nz/OS V9R9\nSA22-0000-00\n\n"
+    "This fixture was generated for tests. It contains no real vendor content."),
+    ("Contents\n\nChapter 1 System parameters ........ 3\n"
+    "Chapter 2 Operator messages ....... 5\nAppendix A Notices .............. 7"),
     "Figures\n\nFigure 1. Layout ................ 5",
-    "Chapter 1 System parameters\n\n"
+    ("Chapter 1 System parameters\n\n"
     "IEASYSxx contains system initialization parameters. The synthetic LFAREA "
     "parameter defines the size of the invented lookaside facility.\n\n"
     "PROGxx controls the synthetic program authorization list. APF entries are "
-    "described here for testing only.",
-    "Chapter 1 System parameters\n\n"
+    "described here for testing only."),
+    ("Chapter 1 System parameters\n\n"
     "Table 1. Synthetic parameters\n\n"
     "Parameter   Meaning\n"
     "LFAREA      Lookaside facility size\n"
-    "PROGxx      Program authorization",
-    "Chapter 2 Operator messages\n\n"
+    "PROGxx      Program authorization"),
+    ("Chapter 2 Operator messages\n\n"
     "IEA500I\n\n"
     "IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy\n\n"
     "Explanation: A synthetic IOSCMDS command was rejected by the fixture "
     "before IOS initialization completed. yy is a two digit reason code.\n\n"
     "System action: The system ignores the synthetic command.\n\n"
-    "Operator response: Reissue the command after initialization completes.",
-    "Chapter 2 Operator messages\n\n"
+    "Operator response: Reissue the command after initialization completes."),
+    ("Chapter 2 Operator messages\n\n"
     "Syntax diagrams for the synthetic IOSCMDS command:\n\n"
     ">>-IOSCMDS--+-APPLY-+--parameter-name-------------------------><\n"
     "            +-LIST--+\n\n"
-    "::= describes the invented command grammar for testing.",
+    "::= describes the invented command grammar for testing."),
     "Appendix A Notices\n\nThis is synthetic back matter used to test skip rules.",
 ]
 

@@ -136,10 +136,17 @@ helm-apply: chart
 	  -n $(OPENSHIFT_NAMESPACE) -f $(VALUES_FILE) \
 	  --set image.repository=$(REGISTRY)/qdrant/qdrant
 
+# ---------------------------------------------------------------- e2e demo
+.PHONY: e2e-demo-pdfs
+e2e-demo-pdfs: | .venv
+	mkdir -p output/demo-pdfs
+	.venv/bin/python scripts/make_synthetic_pdf.py --out output/demo-pdfs/SA22-0000-00_outline.pdf
+	.venv/bin/python scripts/make_synthetic_pdf.py --plain --out output/demo-pdfs/plain-widget-notes.pdf
+
 # ---------------------------------------------------------------- clean
 .PHONY: clean
 clean:
-	rm -rf .venv .pytest_cache .mypy_cache .ruff_cache $(BUNDLE_DIR)
+	rm -rf .venv .pytest_cache .mypy_cache .ruff_cache $(BUNDLE_DIR) output
 
 .PHONY: help
 help:

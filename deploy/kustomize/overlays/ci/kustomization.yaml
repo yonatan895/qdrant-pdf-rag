@@ -1,0 +1,29 @@
+# CI overlay (issue #8): lab OpenShift, synthetic demo data only.
+# Placeholders in git, rewritten by .github/workflows/e2e.yml at apply time:
+#   OWNER  -> github.repository_owner       (image paths)
+#   rag-ci -> rag-ci-<shortsha>             (namespace)
+#   :ci    -> :<shortsha>                   (image tags)
+# Never put a real registry path, token, or kubeconfig in git.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: rag-ci
+resources:
+  - ../../base
+  - ingest-job.yaml
+images:
+  - name: qdrant-pdf-rag-agent
+    newName: ghcr.io/OWNER/qdrant-pdf-rag-agent
+    newTag: ci
+  - name: qdrant-pdf-rag-ingest
+    newName: ghcr.io/OWNER/qdrant-pdf-rag-ingest
+    newTag: ci
+patches:
+  - target:
+      kind: Deployment
+      name: rag-agent
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: EMBED_MODE
+          value: hash

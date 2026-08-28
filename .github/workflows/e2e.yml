@@ -1,0 +1,181 @@
+# Connected-path E2E (issue #8): build the real Containerfiles, push to GHCR on
+# main, and smoke-test synthetic demo PDFs against a lab OpenShift namespace.
+# Synthetic PDFs only — generated in-cluster by the ingest Job. Never upload
+# them as artifacts, never commit them (hygiene job enforces that).
+# Air-gapped GitLab deliberately has no equivalent of this workflow: no GHCR,
+# no lab cluster from the air-gap (see .gitlab-ci.yml comment).
+name: e2e
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  INGEST_IMAGE_LOCAL: mainframe-rag/ingest
+  AGENT_IMAGE_LOCAL: mainframe-rag/agent
+
+jobs:
+  # ---------------------------------------------------------------- build
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.refs.outputs.sha }}
+      ingest_image: ${{ steps.refs.outputs.ingest }}
+      agent_image: ${{ steps.refs.outputs.agent }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # cp314 wheels require a 3.14 interpreter for the wheelhouse build.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Build wheelhouse + BM25 weights + images (same Containerfiles as air-gap)
+        run: |
+          PYBIN="$(command -v python3.14 || command -v python)"
+          echo "Using python: $PYBIN"
+          make wheelhouse bm25-weights PY="$PYBIN"
+          make build-images IMAGE_TAG="${GITHUB_SHA::7}"
+
+      - id: refs
+        run: |
+          SHA="${GITHUB_SHA::7}"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "ingest=ghcr.io/${GITHUB_REPOSITORY}-ingest:$SHA" >> "$GITHUB_OUTPUT"
+          echo "agent=ghcr.io/${GITHUB_REPOSITORY}-agent:$SHA" >> "$GITHUB_OUTPUT"
+
+      # PRs: build without push (no GHCR write from forks). main/dispatch: push.
+      - name: Push to GHCR
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "${{ steps.refs.outputs.ingest }}"
+          docker push "${{ steps.refs.outputs.agent }}"
+
+  # ------------------------------------------------- secret gate (fork-safe)
+  e2e-secrets-check:
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
+    steps:
+      - id: check
+        env:
+          SERVER: ${{ secrets.OPENSHIFT_SERVER }}
+          TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+        run: |
+          if [ -n "$SERVER" ] && [ -n "$TOKEN" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "OPENSHIFT_SERVER / OPENSHIFT_TOKEN not set; e2e will be skipped."
+          fi
+
+  # ---------------------------------------------------------- lab OpenShift
+  openshift-e2e:
+    needs: [build, e2e-secrets-check]
+    if: >-
+      needs.e2e-secrets-check.outputs.ok == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
+      OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+      SHA: ${{ needs.build.outputs.sha }}
+      # kustomize overlay placeholders (deploy/kustomize/overlays/ci):
+      KUSTOMIZE_OWNER_PLACEHOLDER: ghcr.io/OWNER
+      KUSTOMIZE_TAG_PLACEHOLDER: ":ci"
+      KUSTOMIZE_NS_PLACEHOLDER: "namespace: rag-ci"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install helm + oc
+        uses: azure/setup-helm@v4
+      - name: Install oc
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: "4"
+
+      - name: Log in to lab OpenShift
+        run: oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_TOKEN" --insecure-skip-tls-verify=true
+
+      - name: Create ephemeral namespace
+        run: |
+          NS="rag-ci-${SHA}"
+          echo "NS=$NS" >> "$GITHUB_ENV"
+          oc new-project "$NS"
+          oc label namespace "$NS" app.kubernetes.io/managed-by=e2e-workflow ephemeral=true
+
+      - name: Deploy Qdrant (CI overlay — 1 replica, 1Gi, unprivileged, ClusterIP)
+        run: |
+          helm upgrade -i qdrant charts/qdrant-*.tgz -n "$NS" -f overlays/ci/values.yaml
+          kubectl -n "$NS" rollout status statefulset/qdrant --timeout=300s
+
+      - name: Wait for Qdrant readyz
+        run: |
+          for i in $(seq 1 30); do
+            if kubectl -n "$NS" run readycheck-"$i" --image=curlimages/curl --restart=Never \
+                 --command -- curl -sf http://qdrant:6333/readyz; then
+              break
+            fi
+            kubectl -n "$NS" delete pod readycheck-"$i" --ignore-not-found
+            [ "$i" = 30 ] && exit 1
+            sleep 10
+          done
+
+      - name: Apply agent + ingest Job (kustomize overlay, sha-tagged GHCR images)
+        run: |
+          OWNER_LC="$(echo "${{ github.repository_owner }}" | tr 'A-Z' 'a-z')"
+          kubectl kustomize deploy/kustomize/overlays/ci \
+            | sed -e "s|$KUSTOMIZE_OWNER_PLACEHOLDER|ghcr.io/${GITHUB_REPOSITORY,,}|g" \
+                  -e "s|$KUSTOMIZE_TAG_PLACEHOLDER|:${SHA}|g" \
+                  -e "s|$KUSTOMIZE_NS_PLACEHOLDER|namespace: rag-ci-${SHA}|g" \
+            | kubectl apply -f -
+
+      - name: Wait for ingest Job (generates demo PDFs, ingests with EMBED_MODE=hash)
+        run: |
+          if ! kubectl -n "$NS" wait --for=condition=complete job/ingest --timeout=600s; then
+            echo "::error::ingest Job failed"
+            kubectl -n "$NS" logs job/ingest --tail=200 || true
+            kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -30 || true
+            exit 1
+          fi
+
+      - name: Wait for agent readiness
+        run: kubectl -n "$NS" rollout status deploy/rag-agent --timeout=300s
+
+      # Smoke 1: outline PDF — message id found (hybrid search, hash embeddings).
+      - name: Smoke — IEA500I from outline demo PDF
+        run: |
+          kubectl -n "$NS" exec deploy/rag-agent -- \
+            python /app/scripts/smoke_search.py \
+              --url http://rag-agent:8080 --query "IEA500I operator message" --expect "IEA500I"
+
+      # Smoke 2: plain generic PDF — lexical hit for widget/torque prose.
+      - name: Smoke — torque/widget text from plain demo PDF
+        run: |
+          kubectl -n "$NS" exec deploy/rag-agent -- \
+            python /app/scripts/smoke_search.py \
+              --url http://rag-agent:8080 --query "torque the widget screws" --expect "torque"
+
+      - name: Delete ephemeral namespace
+        if: always()
+        run: |
+          oc delete project "$NS" --wait=false --ignore-not-found || \
+            kubectl delete namespace "$NS" --ignore-not-found --wait=false || true
