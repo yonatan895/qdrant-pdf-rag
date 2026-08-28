@@ -12,14 +12,23 @@
 enforce_product_rules
 resolve_aliases
 require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM VLLM_BASE_URL
+case "$IMAGE_SHA" in
+    ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
+esac
+# Cross-check against the packed MANIFEST when it is reachable (dist/ or ../).
+MANIFEST=""
+[ -f dist/MANIFEST.txt ] && MANIFEST=dist/MANIFEST.txt
+[ -z "$MANIFEST" ] && [ -f ../MANIFEST.txt ] && MANIFEST=../MANIFEST.txt
+if [ -n "$MANIFEST" ]; then
+    packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
+    [ "$IMAGE_SHA" = "$packed_sha" ] || \
+        die "IMAGE_SHA=$IMAGE_SHA does not match the packed MANIFEST sha ($packed_sha) — wrong SHA for this sneakernet bundle"
+fi
 [ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || die "oc is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
 command -v helm >/dev/null 2>&1 || die "helm is required on the air-gap bastion"
 
 case "$STORAGE_CLASS" in
     *[Nn][Ff][Ss]*) die "STORAGE_CLASS='$STORAGE_CLASS' looks like NFS — Qdrant data requires RWO block storage" ;;
-esac
-case "$IMAGE_SHA" in
-    ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
 EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed 's:/*$::')/v1}
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}

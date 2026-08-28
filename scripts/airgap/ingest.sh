@@ -12,12 +12,21 @@
 enforce_product_rules
 resolve_aliases
 require_env INTERNAL_REGISTRY NAMESPACE IMAGE_SHA CORPUS_PVC EMBED_MODEL DENSE_DIM VLLM_BASE_URL
-[ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || die "oc is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
-if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi
-
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
+# Cross-check against the packed MANIFEST when it is reachable (dist/ or ../).
+MANIFEST=""
+[ -f dist/MANIFEST.txt ] && MANIFEST=dist/MANIFEST.txt
+[ -z "$MANIFEST" ] && [ -f ../MANIFEST.txt ] && MANIFEST=../MANIFEST.txt
+if [ -n "$MANIFEST" ]; then
+    packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
+    [ "$IMAGE_SHA" = "$packed_sha" ] || \
+        die "IMAGE_SHA=$IMAGE_SHA does not match the packed MANIFEST sha ($packed_sha) — wrong SHA for this sneakernet bundle"
+fi
+[ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || die "oc is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
+if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi
+
 EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed 's:/*$::')/v1}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 INGEST_TIMEOUT=${INGEST_TIMEOUT:-3600}
