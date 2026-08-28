@@ -1,0 +1,19 @@
+# Prod agent overlay for the air-gap (issue #15).
+# Placeholders (__TOKENS__) are substituted by scripts/airgap/deploy.sh from
+# airgap.env — the same sed style as the CI workflow, but the registry and
+# every runtime value come from the operator's env file. No real registries,
+# namespaces, or URLs in git.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mainframe-rag
+resources:
+  - ../../base
+images:
+  - name: qdrant-pdf-rag-agent
+    newName: __INTERNAL_REGISTRY__/qdrant-pdf-rag-agent
+    newTag: __IMAGE_SHA__
+patches:
+  - path: agent-prod-patch.yaml
+    target:
+      kind: Deployment
+      name: rag-agent

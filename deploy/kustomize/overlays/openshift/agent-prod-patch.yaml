@@ -1,0 +1,31 @@
+# Prod agent sizing + env. Values with __TOKENS__ are substituted by
+# scripts/airgap/deploy.sh. EMBED_MODE is deliberately absent: prod embeds via
+# the internal vLLM endpoint (EMBED_BASE_URL), never hash.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-agent
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: agent
+          env:
+            - name: QDRANT_URL
+              value: __QDRANT_URL__
+            - name: QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __QDRANT_RELEASE__-apikey   # created by the vendored chart (apiKey: true)
+                  key: api-key
+            - name: EMBED_BASE_URL
+              value: __EMBED_BASE_URL__
+            - name: EMBED_MODEL
+              value: __EMBED_MODEL__
+            - name: DENSE_DIM
+              value: __DENSE_DIM__
+            - name: LLM_BASE_URL
+              value: __LLM_BASE_URL__
+            - name: LLM_MODEL_REASONING
+              value: __LLM_MODEL_REASONING__

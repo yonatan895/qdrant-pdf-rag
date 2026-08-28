@@ -99,6 +99,34 @@ Notes:
 - Image refs are exactly `ghcr.io/<owner>/qdrant-pdf-rag-{ingest,agent}:<sha>`
   across `docker tag`, `docker push`, and the kustomize overlay sed.
 
+## Air-gap
+
+Three commands, one env file. **The air-gap never builds** — connected `main` is the only image factory.
+
+1. **Connected host** (after `main` is green):
+
+   ```bash
+   git clone https://github.com/yonatan895/qdrant-pdf-rag && cd qdrant-pdf-rag
+   git checkout <main-sha>     # the SHA whose GHCR tags exist
+   make airgap-pack            # -> dist/qdrant-pdf-rag-<sha>.tar + SHA256SUMS
+   ```
+
+2. **Transfer** `dist/qdrant-pdf-rag-<sha>.tar` + `dist/SHA256SUMS` to the bastion (USB / approved drop), verify the tarball checksum, then `tar xf`.
+
+3. **Air-gapped bastion** (`oc`, `helm`, `skopeo`; no internet):
+
+   ```bash
+   cp airgap.env.example airgap.env   # edit locally; never commit
+   make airgap-load                   # push the 3 images to $INTERNAL_REGISTRY (same names, SHA tags)
+   make airgap-deploy                 # vendored chart with PROD values + agent; waits Ready
+   ```
+
+   Required in `airgap.env`: `INTERNAL_REGISTRY`, `NAMESPACE`, `STORAGE_CLASS` (RWO block — NFS is refused), `EMBED_MODEL`, `DENSE_DIM`, `VLLM_BASE_URL` (in-cluster inference; this repo does not install vLLM).
+
+4. Optional, once a corpus PVC exists (no PDFs in git): `make airgap-ingest CORPUS_PVC=<pvc>`, then `make airgap-smoke`.
+
+Details: prod Qdrant stays 3 replicas / 500Gi / unprivileged (never shrunk); refs stay `...:{ingest,agent}:<sha>` across pack/load/apply; scripts refuse `EMBED_MODE=hash` and NFS storage classes; `AGENT_ROUTE=true` opts into an edge Route to the agent. `oc-mirror/imageset-config.yaml` remains the optional way to refresh base/Qdrant pins — not the happy path.
+
 ## For agents
 
 Qdrant-specific guidance (hybrid fusion, HNSW, quantization, deployment, client usage) is vendored under `.agents/skills/` (pinned; see `vendor/qdrant-skills.sha`). Read the matching skill before touching collections, retrieval, or Qdrant config — but this repo's AGENTS.md product rules win over any skill.

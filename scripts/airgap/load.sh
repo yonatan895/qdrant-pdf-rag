@@ -1,0 +1,42 @@
+#!/bin/sh
+# AIR-GAP SIDE (issue #15): verify checksums, load the packed images, push to
+# the internal registry under the SAME names and SHA tags.
+#
+#   make airgap-load
+#
+# Registry credentials: `skopeo login $INTERNAL_REGISTRY` (or a logged-in podman
+# credential store) before running. No tokens in git, ever.
+
+. "$(dirname -- "$0")/common.sh"
+
+enforce_product_rules
+require_env INTERNAL_REGISTRY IMAGE_SHA
+command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the air-gap bastion"
+[ -f dist/SHA256SUMS ] || die "dist/SHA256SUMS missing — unpack the sneakernet tarball first (tar xf dist/qdrant-pdf-rag-<sha>.tar)"
+[ -f dist/repo.bundle ] || die "dist/repo.bundle missing — unpack the sneakernet tarball first"
+
+echo "==> Verify member checksums"
+(cd dist && sha256sum -c SHA256SUMS)
+
+echo "==> Clone the repo from the bundle (same tree as the packed SHA)"
+if [ ! -d qdrant-pdf-rag ]; then
+    run git clone dist/repo.bundle qdrant-pdf-rag
+    if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
+        git -C qdrant-pdf-rag checkout --detach "$IMAGE_SHA" 2>/dev/null || true
+    fi
+fi
+
+load() {
+    src=$1
+    dst=$2
+    echo "==> $src -> $dst"
+    run skopeo copy "docker-archive:dist/$src" "docker://$dst"
+}
+
+load qdrant-image.tar "$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged"
+load "app-ingest-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA"
+load "app-agent-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-agent:$IMAGE_SHA"
+
+echo ""
+echo "Loaded 3 images into $INTERNAL_REGISTRY (SHA tag: $IMAGE_SHA)."
+next_step "make airgap-deploy"

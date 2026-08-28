@@ -107,6 +107,13 @@ New behavior belongs in the layer that already owns that decision. Do not thread
 - **This repository still wins on product constraints** wherever a skill says otherwise: unprivileged `*-unprivileged` image, prod 3-replica/500Gi vs CI 1-replica overlay, no NFS for Qdrant data, `EMBED_MODE=hash` never in prod, no Qdrant Cloud, no `3.14t`.
 - Updates: a dedicated pin-bump PR that refreshes the snapshot from a pinned SHA (SHA-only pins until upstream tags again). Pin-bump PRs must not rewrite or "improve" vendor files. Never install skills only on a developer machine (`npx skills add` etc.) — they live in this tree so GitHub, GitLab clones, and air-gap bundles all see them.
 
+## Air-gap path (issue #15)
+
+- **The air-gap never builds images.** `make airgap-pack` runs on a connected clone of public `main` at the SHA whose GHCR tags exist; `make airgap-load` / `airgap-deploy` run inside the gap against `airgap.env` (`INTERNAL_REGISTRY`, `NAMESPACE`, `STORAGE_CLASS`, `VLLM_BASE_URL`, …). Scripts are POSIX sh under `scripts/airgap/` and fail closed.
+- Scripts refuse `EMBED_MODE=hash`, NFS-looking `STORAGE_CLASS`, missing `VLLM_BASE_URL`/`EMBED_MODEL`/`DENSE_DIM`, and SHA-tag mismatches. Prod agent runs `embed_mode=vllm` — never add `EMBED_MODE` to prod manifests.
+- GitLab CI still does **not** deploy or pull GHCR: clone-and-pytest only. Pack output (`dist/`) is gitignored; no PDFs, kubeconfigs, tokens, or internal hostnames in git or in the tarball.
+- Prod overlays: `deploy/kustomize/overlays/openshift` (agent) and `overlays/openshift-ingest` (one-shot Job, caller-supplied corpus PVC). Do not shrink `overlays/openshift/values.yaml` (3/500Gi) to CI sizes; Qdrant stays unprivileged, no NFS, no Qdrant Cloud, no `3.14t`.
+
 ## When you change this file
 
 Same PR as the work that taught the rule. Keep it short. Delete advice that is no longer true.
