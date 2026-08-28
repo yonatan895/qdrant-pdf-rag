@@ -17,8 +17,13 @@ jobs:
   gate:
     if: >-
       github.event_name == 'pull_request' ||
-      contains(github.event.comment.body, '/oc') ||
-      contains(github.event.comment.body, '/opencode')
+      (
+        github.event.comment.user.type != 'Bot' &&
+        (
+          contains(github.event.comment.body, '/oc') ||
+          contains(github.event.comment.body, '/opencode')
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -64,13 +69,37 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Run opencode
-        uses: ./.github/actions/opencode
+      # Install steps are deliberately duplicated per job, not a local
+      # composite action: opencode may move the working tree mid-run (it
+      # checks out refs to diff), and local actions re-resolve action.yml
+      # from disk in their post phase — run 33203843046 died exactly there.
+      # Plain workflow steps have no post resolution, so the agent cannot
+      # break them. CLI pinned to release v1.18.25, sha256-verified; bump
+      # deliberately in BOTH jobs.
+      - name: Cache opencode
+        id: cache
+        uses: actions/cache@v4
         with:
-          model: opencode-go/hy4-preview
-          share: "false"
+          path: ~/.opencode/bin
+          key: opencode-${{ runner.os }}-${{ runner.arch }}-v1.18.25
+
+      - name: Install opencode v1.18.25
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/oc.tar.gz" \
+            https://github.com/anomalyco/opencode/releases/download/v1.18.25/opencode-linux-x64.tar.gz
+          echo "58a3729a6f3432dd6d2917fcc4a949788891a035818646ad480e12c947f56e78  $RUNNER_TEMP/oc.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.opencode/bin"
+          tar -xzf "$RUNNER_TEMP/oc.tar.gz" -C "$HOME/.opencode/bin"
+
+      - name: Run opencode
+        # Absolute path: the pin must not be bypassable via PATH order.
+        run: '"$HOME/.opencode/bin/opencode" github run'
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          MODEL: opencode-go/hy4-preview
+          SHARE: "false"
+          USE_GITHUB_TOKEN: "false"
 
   review:
     needs: gate
@@ -95,10 +124,27 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Run opencode review
-        uses: ./.github/actions/opencode
+      # See the comment on the /oc job: inlined on purpose, not a composite.
+      - name: Cache opencode
+        id: cache
+        uses: actions/cache@v4
         with:
-          model: opencode-go/hy4-preview
-          share: "false"
+          path: ~/.opencode/bin
+          key: opencode-${{ runner.os }}-${{ runner.arch }}-v1.18.25
+
+      - name: Install opencode v1.18.25
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/oc.tar.gz" \
+            https://github.com/anomalyco/opencode/releases/download/v1.18.25/opencode-linux-x64.tar.gz
+          echo "58a3729a6f3432dd6d2917fcc4a949788891a035818646ad480e12c947f56e78  $RUNNER_TEMP/oc.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.opencode/bin"
+          tar -xzf "$RUNNER_TEMP/oc.tar.gz" -C "$HOME/.opencode/bin"
+
+      - name: Run opencode review
+        run: '"$HOME/.opencode/bin/opencode" github run'
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          MODEL: opencode-go/hy4-preview
+          SHARE: "false"
+          USE_GITHUB_TOKEN: "false"
