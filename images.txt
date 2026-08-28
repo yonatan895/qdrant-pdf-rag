@@ -1,0 +1,8 @@
+# images.txt
+#
+# Append name + digest after the first pull on the connected host (make pull-images).
+# Digest pins are the air-gap contract: the cluster must run exactly these bytes.
+#
+# name                                                                  digest
+docker.io/qdrant/qdrant:v1.19.0-unprivileged                           sha256:PENDING
+registry.access.redhat.com/ubi9/ubi-minimal:9.5                        sha256:PENDING

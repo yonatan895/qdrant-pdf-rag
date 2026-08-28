@@ -1,0 +1,26 @@
+# Agent image: FastAPI retrieval + reasoning-model glue. No GPU.
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.5
+
+ARG PYV=3.12
+
+RUN microdnf install -y python${PYV} python${PYV}-pip && microdnf clean all
+
+COPY requirements.lock.txt /wheelhouse/requirements.lock.txt
+COPY --from=wheelhouse / /wheelhouse/
+RUN pip${PYV} install --no-index --find-links /wheelhouse -r /wheelhouse/requirements.lock.txt \
+    && rm -rf /root/.cache
+
+# BM25 weights are needed for query-side sparse vectors (no runtime download).
+COPY --from=bm25 / /opt/bm25/
+
+COPY src/ /app/src/
+ENV PYTHONPATH=/app/src \
+    BM25_CACHE_DIR=/opt/bm25 \
+    HF_HOME=/opt/bm25/hf
+
+RUN useradd -u 1000 -M -s /sbin/nologin rag
+USER 1000
+WORKDIR /app
+
+EXPOSE 8080
+CMD ["python3", "-m", "uvicorn", "mainframe_rag.agent.app:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -1,0 +1,11 @@
+# Python 3.12 pins. Lock file for the ingest and agent images.
+# Air-gap images install with: pip install --no-index --find-links /wheelhouse -r requirements.lock.txt
+pymupdf==1.26.3
+qdrant-client==1.16.2
+fastembed==0.7.3
+httpx==0.28.1
+fastapi==0.118.0
+uvicorn==0.37.0
+pydantic==2.13.4
+pydantic-settings==2.11.0
+litellm==1.78.0

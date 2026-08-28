@@ -1,0 +1,13 @@
+kind: ImageSetConfiguration
+apiVersion: mirror.openshift.io/v2alpha1
+mirror:
+  platform:
+    channels:
+      - name: stable-4.16
+        minVersion: 4.16.0
+        maxVersion: 4.16.0
+  additionalImages:
+    - name: docker.io/qdrant/qdrant:v1.19.0-unprivileged
+    # Digest pins: after first pull, replace tags with digests from images.txt
+    # Example:
+    # - name: docker.io/qdrant/qdrant@sha256:<digest>

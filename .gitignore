@@ -1,0 +1,43 @@
+# --- Corpus / manuals: NEVER commit (copyright, enterprise boundary) ---
+*.pdf
+*.PDF
+*.pdx
+*.idx
+!tests/fixtures/synthetic/*.pdf
+zOS*/
+*Organized/
+*Indexed-PDF-package*/
+
+# --- Air-gap artifacts (regenerated on the connected host) ---
+*.tar
+*.tar.gz
+!charts/*.tgz
+mirror_seq*.tar
+wheelhouse/
+bundles/
+dist/
+build/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# --- Secrets / local config ---
+.env
+*.env
+!airgap.env.example
+*-secret.yaml
+secrets/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store

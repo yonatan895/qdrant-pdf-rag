@@ -1,0 +1,86 @@
+# Ingest CronJob — runs INSIDE the enterprise/air-gap only.
+# Corpus: read-only mount (NFS RO accepted for read; Qdrant data stays RWO block).
+# Work volume: RWO block (local SSD class preferred) for scratch + progress state.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ingest
+  namespace: mainframe-rag
+  labels:
+    app: ingest
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 86400
+      template:
+        metadata:
+          labels:
+            app: ingest
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: PLACEHOLDER_PULL_SECRET
+          containers:
+            - name: ingest
+              image: PLACEHOLDER_REGISTRY/mainframe-rag/ingest:latest
+              imagePullPolicy: IfNotPresent
+              args: ["--src", "/corpus", "--progress", "/work/inventory.jsonl"]
+              env:
+                - name: QDRANT_URL
+                  value: http://qdrant.mainframe-rag.svc:6333
+                - name: QDRANT_COLLECTION
+                  value: mainframe_manuals
+                - name: QDRANT_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: qdrant-apikey
+                      key: api-key
+                - name: EMBED_BASE_URL
+                  value: http://vllm.mainframe-rag.svc:8000/v1
+                - name: EMBED_MODEL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: rag-config
+                      key: embed-model
+                - name: DENSE_DIM
+                  valueFrom:
+                    configMapKeyRef:
+                      name: rag-config
+                      key: dense-dim
+                - name: INGEST_WORKERS
+                  value: "8"
+              resources:
+                requests: { cpu: "4", memory: 8Gi }
+                limits: { cpu: "16", memory: 32Gi }
+              volumeMounts:
+                - name: corpus
+                  mountPath: /corpus
+                  readOnly: true
+                - name: work
+                  mountPath: /work
+          volumes:
+            - name: corpus
+              nfs:                       # read-only corpus mount; server/path from platform team
+                server: PLACEHOLDER_NFS_SERVER
+                path: PLACEHOLDER_NFS_PATH
+                readOnly: true
+            - name: work
+              persistentVolumeClaim:
+                claimName: ingest-work
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ingest-work
+  namespace: mainframe-rag
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: PLACEHOLDER_STORAGE_CLASS

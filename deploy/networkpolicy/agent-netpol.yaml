@@ -1,0 +1,83 @@
+# Agent + ingest egress: Qdrant 6333/6334 in-namespace only.
+# Agent additionally may reach vLLM/LiteLLM (OpenAI-compatible) in its namespace.
+# Ingest has no LLM egress beyond embeddings (EMBED_BASE_URL).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-egress
+  namespace: mainframe-rag
+spec:
+  podSelector:
+    matchLabels:
+      app: rag-agent
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: qdrant
+      ports:
+        - port: 6333
+          protocol: TCP
+        - port: 6334
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vllm
+      ports:
+        - port: 8000
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app: litellm
+      ports:
+        - port: 4000
+          protocol: TCP
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 5353
+          protocol: UDP
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingest-egress
+  namespace: mainframe-rag
+spec:
+  podSelector:
+    matchLabels:
+      app: ingest
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: qdrant
+      ports:
+        - port: 6333
+          protocol: TCP
+        - port: 6334
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vllm
+      ports:
+        - port: 8000
+          protocol: TCP
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 5353
+          protocol: UDP
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

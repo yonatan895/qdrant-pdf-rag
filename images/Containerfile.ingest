@@ -1,0 +1,30 @@
+# Ingest image: UBI, non-root, wheelhouse + BM25 weights baked in.
+# Build on the connected host (make build-images); BM25 weights must never be
+# downloaded at runtime (air-gap rule, architecture.md section 3.1).
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.5
+
+ARG PYV=3.12
+
+RUN microdnf install -y python${PYV} python${PYV}-pip python${PYV}-devel && \
+    microdnf clean all
+
+# Wheels: built on the connected host (make wheelhouse), installed offline.
+# Named build contexts (see Makefile build-images): wheelhouse=, bm25=
+COPY requirements.lock.txt /wheelhouse/requirements.lock.txt
+COPY --from=wheelhouse / /wheelhouse/
+RUN pip${PYV} install --no-index --find-links /wheelhouse -r /wheelhouse/requirements.lock.txt \
+    && rm -rf /root/.cache
+
+# BM25 sparse weights (FastEmbed Qdrant/bm25) — no network at run time.
+COPY --from=bm25 / /opt/bm25/
+
+COPY src/ /app/src/
+ENV PYTHONPATH=/app/src \
+    BM25_CACHE_DIR=/opt/bm25 \
+    HF_HOME=/opt/bm25/hf
+
+RUN useradd -u 1000 -M -s /sbin/nologin rag && mkdir -p /work && chown -R rag:rag /work
+USER 1000
+WORKDIR /work
+
+ENTRYPOINT ["python3", "-m", "mainframe_rag.ingest.run_ingest"]

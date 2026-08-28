@@ -1,0 +1,87 @@
+# Agent API Deployment — FastAPI retrieval + reasoning-model glue. No GPU.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-agent
+  namespace: mainframe-rag
+  labels:
+    app: rag-agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rag-agent
+  template:
+    metadata:
+      labels:
+        app: rag-agent
+    spec:
+      imagePullSecrets:
+        - name: PLACEHOLDER_PULL_SECRET
+      containers:
+        - name: agent
+          image: PLACEHOLDER_REGISTRY/mainframe-rag/agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: QDRANT_URL
+              value: http://qdrant.mainframe-rag.svc:6333
+            - name: QDRANT_COLLECTION
+              value: mainframe_manuals
+            - name: QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: qdrant-apikey
+                  key: api-key
+            - name: EMBED_BASE_URL
+              value: http://vllm.mainframe-rag.svc:8000/v1
+            - name: EMBED_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: rag-config
+                  key: embed-model
+            - name: DENSE_DIM
+              valueFrom:
+                configMapKeyRef:
+                  name: rag-config
+                  key: dense-dim
+            - name: LLM_BASE_URL
+              value: http://litellm.mainframe-rag.svc:4000/v1
+            - name: LLM_MODEL_REASONING
+              valueFrom:
+                configMapKeyRef:
+                  name: rag-config
+                  key: model-reasoning
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "1", memory: 2Gi }
+            limits: { cpu: "2", memory: 4Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-agent
+  namespace: mainframe-rag
+  labels:
+    app: rag-agent
+spec:
+  type: ClusterIP
+  selector:
+    app: rag-agent
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
