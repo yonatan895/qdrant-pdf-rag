@@ -34,6 +34,7 @@ If a review comment conflicts with this file, follow this file and note the conf
 - One concern per PR. Rebase on `main` before asking for review; no merge commits unless the reviewer asks.
 - Commits: imperative, present tense, say *why* if not obvious (`Fix chrome threshold so 3-page PDFs are not wiped`).
 - PR / MR description: issue number, what changed, how tested, air-gap / copyright impact if any.
+- Automation/workflow PRs: update the PR body in the same push as the code it describes — the opencode reviewer re-reviews on every push and reads a stale body as a blocker (three re-review rounds on PR #23).
 - Do not force-push `main`. Force-push feature branches only after rebase, before review comments exist.
 - Never commit: `.env`, `airgap.env`, secrets, tokens, `*.tar`, wheelhouses. `airgap.env.example` is allowed. Pack output lives in `dist/` (gitignored).
 

@@ -64,25 +64,13 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Install opencode
-        # CLI pinned to release v1.18.25; bump deliberately. Inlined from the
-        # composite action because its "Get opencode version" step does an
-        # unauthenticated api.github.com lookup that rate-limits on shared
-        # runners and kills the job (run 33200772808). A pinned --version
-        # resolves straight from the release CDN and pins the binary too.
-        run: |
-          curl -fsSL --retry 3 https://opencode.ai/install | bash -s -- --version 1.18.25
-
-      - name: Add opencode to PATH
-        run: echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
-
       - name: Run opencode
-        run: opencode github run
+        uses: ./.github/actions/opencode
+        with:
+          model: opencode-go/hy4-preview
+          share: "false"
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          MODEL: opencode-go/hy4-preview
-          SHARE: "false"
-          USE_GITHUB_TOKEN: "false"
 
   review:
     needs: gate
@@ -107,18 +95,10 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Install opencode
-        # CLI pinned to release v1.18.25; bump deliberately (see comment on the /oc job)
-        run: |
-          curl -fsSL --retry 3 https://opencode.ai/install | bash -s -- --version 1.18.25
-
-      - name: Add opencode to PATH
-        run: echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
-
       - name: Run opencode review
-        run: opencode github run
+        uses: ./.github/actions/opencode
+        with:
+          model: opencode-go/hy4-preview
+          share: "false"
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          MODEL: opencode-go/hy4-preview
-          SHARE: "false"
-          USE_GITHUB_TOKEN: "false"
