@@ -11,12 +11,14 @@ If Qdrant holds the doc_id with a different sha256, delete by doc_id then re-ups
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import itertools
 import json
 import logging
 import multiprocessing as mp
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from mainframe_rag.config import Settings, load_settings
@@ -79,6 +81,15 @@ def _parse_one(
         seconds=round(time.monotonic() - started, 3),
     )
     return record, parsed, chunks
+
+
+def resolve_workers(requested: int | None, settings: Settings) -> int:
+    """INGEST_WORKERS (or the CLI override) is a cap, never 'spawn unbounded':
+    clamp into [1, 2*CPU]. The pool is bounded either way; this keeps a bad
+    env value from fanning out beyond the box."""
+    cap = max(1, 2 * (mp.cpu_count() or 2))
+    base = settings.ingest_workers if requested is None else requested
+    return max(1, min(int(base), cap))
 
 
 def _init_worker() -> None:
@@ -171,45 +182,91 @@ def run(
     if not tasks:
         return 0
 
+    workers = resolve_workers(workers, settings)
     ctx = mp.get_context("spawn")
     failures = 0
+    # Backpressure: keep at most 2 results per worker in flight. Parsing a
+    # large PDF holds its whole chunk list in memory; submitting everything up
+    # front could hold every PDF's parsed result in memory at once.
+    window = max(2, workers * 2)
+    task_iter = iter(tasks)
+    pending: dict[concurrent.futures.Future, str] = {}
+
+    def submit(task: tuple[str, str | None, str | None, str | None, str]) -> None:
+        pending[pool.submit(_parse_one, task)] = task[0]
+
     with ProcessPoolExecutor(max_workers=workers, mp_context=ctx, initializer=_init_worker) as pool:
-        futures = {pool.submit(_parse_one, t): t[0] for t in tasks}
-        for future in as_completed(futures):
-            path_str = futures[future]
-            try:
-                record, parsed, chunks = future.result()
-            except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
-                failures += 1
-                append_record(
-                    progress,
-                    InventoryRecord(path=path_str, sha256="", status="error", error=str(exc)[:500]),
-                )
-                log.error(json.dumps({"path": path_str, "action": "error", "error": str(exc)[:500]}))
-                continue
+        for task in itertools.islice(task_iter, window):
+            submit(task)
 
-            if dry_run:
-                record.status = "dry"
+        while pending:
+            done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                path_str = pending.pop(future)
+                # Refill one-for-one so the window never grows.
+                next_task = next(task_iter, None)
+                if next_task is not None:
+                    submit(next_task)
+                try:
+                    record, parsed, chunks = future.result()
+                except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
+                    failures += 1
+                    append_record(
+                        progress,
+                        InventoryRecord(
+                            path=path_str,
+                            sha256="",
+                            status="error",
+                            error=str(exc)[:500],
+                            error_type=type(exc).__name__,
+                        ),
+                    )
+                    log.error(
+                        json.dumps(
+                            {
+                                "path": path_str,
+                                "action": "error",
+                                "error_type": type(exc).__name__,
+                                "error": str(exc)[:500],
+                            }
+                        )
+                    )
+                    continue
+
+                if dry_run:
+                    record.status = "dry"
+                    append_record(progress, record)
+                    log.info(
+                        json.dumps(
+                            {
+                                "path": path_str,
+                                "doc_id": record.doc_id,
+                                "chunks": record.chunks,
+                                "action": "dry",
+                            }
+                        )
+                    )
+                    continue
+
+                try:
+                    record.status = _upsert_one(parsed, chunks, settings)
+                except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
+                    failures += 1
+                    record.status = "error"
+                    record.error = str(exc)[:500]
+                    record.error_type = type(exc).__name__
+                    log.error(
+                        json.dumps(
+                            {
+                                "path": path_str,
+                                "doc_id": record.doc_id,
+                                "action": "error",
+                                "error_type": record.error_type,
+                                "error": record.error,
+                            }
+                        )
+                    )
                 append_record(progress, record)
-                log.info(
-                    json.dumps(
-                        {"path": path_str, "doc_id": record.doc_id, "chunks": record.chunks, "action": "dry"}
-                    )
-                )
-                continue
-
-            try:
-                record.status = _upsert_one(parsed, chunks, settings)
-            except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
-                failures += 1
-                record.status = "error"
-                record.error = str(exc)[:500]
-                log.error(
-                    json.dumps(
-                        {"path": path_str, "doc_id": record.doc_id, "action": "error", "error": record.error}
-                    )
-                )
-            append_record(progress, record)
 
     if failures:
         log.warning(json.dumps({"action": "done", "failures": failures}))

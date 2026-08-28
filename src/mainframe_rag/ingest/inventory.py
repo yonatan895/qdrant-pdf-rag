@@ -22,6 +22,7 @@ class InventoryRecord:
     status: str = "pending"  # pending | parsed | upserted | skipped | dry | error
     seconds: float = 0.0
     error: str | None = None
+    error_type: str | None = None  # exception class name, for typed triage
     finished_at: float = field(default_factory=time.time)
 
     def to_json(self) -> str:
@@ -29,7 +30,12 @@ class InventoryRecord:
 
 
 def load_inventory(progress_path: Path) -> dict[str, InventoryRecord]:
-    """Latest record per path from an existing JSONL file."""
+    """Latest record per path from an existing JSONL file.
+
+    Crash-survival contract: records are appended one JSON object per line
+    with an open/close per append (never buffered in-process), so a crash
+    mid-run leaves every completed record on disk; a torn final line is
+    ignored, not fatal."""
     latest: dict[str, InventoryRecord] = {}
     if not progress_path.exists():
         return latest

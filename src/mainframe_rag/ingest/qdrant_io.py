@@ -18,7 +18,6 @@ from mainframe_rag.ports import QdrantPoints, SparseVector
 
 HNSW_M = 16
 HNSW_EF_CONSTRUCT = 128
-UPSERT_BATCH = 64
 
 _KEYWORD_INDEXES = ("vendor", "product", "version", "doc_id", "chunk_type", "message_ids", "members", "sha256")
 
@@ -76,6 +75,9 @@ def ensure_collection(client: QdrantPoints, settings: Settings) -> None:
                 f"Collection '{collection}' dense dim is {actual_size}, DENSE_DIM={dim}. "
                 "Recreate the collection or fix DENSE_DIM."
             )
+        # Indexes-before-load holds for pre-existing collections too: retrieve
+        # filters on these payload fields; unindexed filters become scans.
+        ensure_payload_indexes(client, collection)
         return
 
     client.create_collection(
@@ -121,7 +123,8 @@ def upsert_chunks(
     chunks: list[Chunk],
     vectors: list[tuple[list[float], SparseVector]],
 ) -> int:
-    """Upsert chunk points in batches of UPSERT_BATCH. Returns point count."""
+    """Upsert chunk points in settings.batch_size batches (Qdrant skill
+    64-256 band, bounded in Settings). Returns point count."""
     collection = settings.qdrant_collection
     points: list[models.PointStruct] = []
     for chunk, (dense, (sparse_idx, sparse_val)) in zip(chunks, vectors):
@@ -155,6 +158,7 @@ def upsert_chunks(
             )
         )
 
-    for i in range(0, len(points), UPSERT_BATCH):
-        client.upsert(collection, points=points[i : i + UPSERT_BATCH], wait=True)
+    batch = settings.batch_size
+    for i in range(0, len(points), batch):
+        client.upsert(collection, points=points[i : i + batch], wait=True)
     return len(points)
