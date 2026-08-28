@@ -24,13 +24,22 @@ If a review comment conflicts with this file, follow this file and note the conf
 
 ## Git
 
+- Public forge is **GitHub**. Enterprise forge is **air-gapped GitLab**. Same git history moves by bundle / sneaker-net; do not maintain a divergent tree.
 - Default branch is `main`. Never push application commits to `main`.
 - Branch from latest `main`: `feat/<issue>-short`, `fix/<issue>-short`, `docs/<short>`.
 - One concern per PR. Rebase on `main` before asking for review; no merge commits unless the reviewer asks.
 - Commits: imperative, present tense, say *why* if not obvious (`Fix chrome threshold so 3-page PDFs are not wiped`).
-- PR description: issue number, what changed, how tested, air-gap / copyright impact if any.
+- PR / MR description: issue number, what changed, how tested, air-gap / copyright impact if any.
 - Do not force-push `main`. Force-push feature branches only after rebase, before review comments exist.
-- Never commit: `.env`, `airgap.env`, secrets, pull-secret names with tokens, `*.tar`, wheelhouses, `airgap.env` (example file is allowed).
+- Never commit: `.env`, `airgap.env`, secrets, tokens, `*.tar`, wheelhouses. `airgap.env.example` is allowed.
+
+## GitLab CI (air-gap import)
+
+- Keep **`.gitlab-ci.yml` at the repo root** in this public GitHub repo so an air-gap clone can run pipelines with no rewrite. That file is the GitLab entrypoint after import.
+- Keep **`.github/workflows/ci.yml`** for GitHub. Job *meaning* must stay aligned: refuse committed `.pdf`/`.pdx`/`.idx`, then pytest. If you change one CI, change the other in the same PR.
+- GitLab runners have **no internet**. Do not use images that only exist on Docker Hub. Do not `pip install` from PyPI.
+- No internal hostnames, registry URLs, or tokens in `.gitlab-ci.yml`. Use GitLab CI/CD **variables** on the project: `CI_PYTHON_IMAGE`, `CI_RUNNER_TAG` (default `airgap`), `PIP_INDEX_URL`, `PIP_FIND_LINKS`. If neither index nor wheelhouse is set, the job must fail closed with a clear error.
+- Coding agents implement or change `.gitlab-ci.yml` only when an issue asks (starting with #3). Do not add deploy/helm/image-build stages unless the issue says so.
 
 ## Issues and review
 
@@ -41,8 +50,8 @@ If a review comment conflicts with this file, follow this file and note the conf
 ## Testing
 
 - `pytest` is the gate. Tests generate original PDFs at runtime (`scripts/make_synthetic_pdf.py`). No binary fixtures in git.
-- Cover both: IBM-*shaped* synthetic extractors (form number, message id, outline) **and** generic PDFs (no outline, no form number, unknown vendor).
-- CI must fail if `git ls-files` matches `\\.(pdf|pdx|idx)$`.
+- Cover both: IBM-shaped synthetic extractors (form number, message id, outline) **and** generic PDFs (no outline, no form number, unknown vendor).
+- CI must fail if `git ls-files` matches `.pdf` / `.pdx` / `.idx`.
 - Do not call live Qdrant, vLLM, or the internet in unit tests. Fake the client. Ingest tests use `--dry-run`.
 - `test_chrome_strip` must keep using a **long** synthetic page list (≥8 pages). Chrome is disabled on short docs on purpose.
 - Prefer tests that would have caught the last CI failure.
@@ -55,7 +64,7 @@ Keep the pipeline boring and layered. Do not add LangChain, LlamaIndex, or a sec
 |---|---|
 | `walk` | `*.pdf` only; skip catalogs; path layout `vendor/product/version/` |
 | `ibm_pdf` (parse) | Open, metadata, optional IBM signals, generic fallbacks |
-| `chrome` | Repeated headers/footers; never threshold=1; skip docs &lt; 8 pages |
+| `chrome` | Repeated headers/footers; never threshold=1; skip docs under 8 pages |
 | `chunk` | Outline → else whole doc; UUID5 ids; heading path |
 | `classify` | `message` / `syntax` / `table` / `narrative` |
 | `embed` | Dense from internal vLLM; sparse local (no Cloud inference) |
