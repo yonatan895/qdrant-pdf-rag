@@ -62,8 +62,9 @@ def _parse_one(
     )
     doc = pymupdf.open(path)
     try:
-        page_texts = [page.get_text() for page in doc]
-        page_labels = [page.get_label() for page in doc]
+        # pymupdf 1.28 no longer types Document as iterable; index explicitly.
+        page_texts = [doc[i].get_text() for i in range(doc.page_count)]
+        page_labels = [doc[i].get_label() for i in range(doc.page_count)]
     finally:
         doc.close()
     stripped = strip_chrome(page_texts)
