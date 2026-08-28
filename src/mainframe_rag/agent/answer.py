@@ -71,23 +71,55 @@ def assert_reasoning_model(settings: Settings) -> str:
     return settings.require_reasoning_model()
 
 
-def call_reasoning_model(
-    messages: list[dict[str, str]], settings: Settings, client: httpx.Client | None = None
-) -> str:
-    model = assert_reasoning_model(settings)
-    assert settings.llm_base_url  # guaranteed by assert_reasoning_model
-    own_client = client is None
-    client = client or httpx.Client(timeout=300.0)
-    try:
-        resp = client.post(
-            f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+ANSWER_TIMEOUT_S = 300.0  # reasoning models think; keep the long timeout until PR C makes it a setting
+
+
+class HttpxLLMClient:
+    """LLMClient implementation: the reasoning model only — deliberately no
+    other model knob (architecture.md 4.6). Fails closed at call time when
+    LLM_BASE_URL / LLM_MODEL_REASONING are unset; startup fail-fast is PR D.
+    Owns its own connection pool with the long answer timeout (do NOT share
+    the embed client's short timeout)."""
+
+    def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
+        self._settings = settings
+        self._client = client
+
+    def _http(self) -> httpx.Client:
+        if self._client is None:
+            self._client = httpx.Client(timeout=ANSWER_TIMEOUT_S)
+        return self._client
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+    def chat(self, messages: list[dict[str, str]]) -> str:
+        model = assert_reasoning_model(self._settings)
+        base_url = self._settings.llm_base_url
+        assert base_url  # guaranteed by assert_reasoning_model
+        resp = self._http().post(
+            f"{base_url.rstrip('/')}/chat/completions",
             json={"model": model, "messages": messages},
         )
         resp.raise_for_status()
         return str(resp.json()["choices"][0]["message"]["content"])
+
+
+def call_reasoning_model(
+    messages: list[dict[str, str]], settings: Settings, client: httpx.Client | None = None
+) -> str:
+    """Thin wrapper kept for callers without an injected LLMClient; prefer
+    building HttpxLLMClient once and calling .chat() (issue #20 PR A).
+    Creates and closes its own pool when none is injected."""
+    llm = HttpxLLMClient(settings, client)
+    if client is not None:
+        return llm.chat(messages)
+    try:
+        return llm.chat(messages)
     finally:
-        if own_client:
-            client.close()
+        llm.close()
 
 
 def parse_answer(content: str, allowed_citations: set[str]) -> dict:

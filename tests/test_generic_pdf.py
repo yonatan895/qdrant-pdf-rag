@@ -17,7 +17,7 @@ def test_plain_pdf_chunks_without_outline(plain_pdf):
     import pymupdf
 
     parsed = parse_pdf(plain_pdf)
-    assert parsed.toc == []
+    assert parsed.toc == ()
     doc = pymupdf.open(plain_pdf)
     try:
         texts = [p.get_text() for p in doc]

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import pymupdf
@@ -23,7 +23,7 @@ GENERIC_VR_RE = re.compile(r"\bV(\d+)\s*\.?\s*R(\d+)\b")
 FILENAME_DOCNO_RE = re.compile(r"^([A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?)(?![\d-])")
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ParsedDoc:
     path: Path
     sha256: str
@@ -32,7 +32,7 @@ class ParsedDoc:
     product: str | None
     version: str | None
     vendor: str
-    toc: list[tuple[int, str, int]] = field(default_factory=list)
+    toc: tuple[tuple[int, str, int], ...] = ()
     page_count: int = 0
 
 
@@ -109,7 +109,7 @@ def parse_pdf(
             product=product_f,
             version=version_f or None,
             vendor=vendor_f or "unknown",
-            toc=doc.get_toc(simple=True),
+            toc=tuple(doc.get_toc(simple=True)),
             page_count=doc.page_count,
         )
     finally:

@@ -1,14 +1,14 @@
-"""Dense embeddings via internal vLLM (OpenAI-compatible) + local BM25 sparse.
+"""Embeddings behind the Embedder protocol (issue #20 PR A).
 
-Air-gap rule: dense vectors come from the internal endpoint; sparse vectors use
-FastEmbed Qdrant/bm25 with weights baked into the image (no runtime download).
-Never use Qdrant Cloud Document(model=...) inference. architecture.md 4.4.
+Two implementations, dispatched ONCE by build_embedder():
+- VllmEmbedder: dense via the internal vLLM endpoint (OpenAI-compatible),
+  sparse via local FastEmbed Qdrant/bm25 (weights baked into the image).
+  Prod path; requires EMBED_BASE_URL / EMBED_MODEL (fail fast at build).
+- HashEmbedder: deterministic in-process hashing (blake2b bag of words,
+  HASH_EMBED_DIM dense + sparse counts). CI/dev only — never in prod.
 
-EMBED_MODE=hash (issue #8): minimal deterministic in-process embedder for CI
-and local dev. Hashes tokens into a fixed-dim dense bag-of-words vector (L2
-normalized) and a sparse count vector, using blake2b so results are stable
-across processes and runs. No network, no weights, no vLLM dependency. It is
-NOT a semantic model: only lexical overlap works. Never the default in prod.
+Air-gap rules preserved: no Qdrant Cloud Document(model=...) inference, no
+runtime weight downloads, no network in hash mode. architecture.md 4.4.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import httpx
 
 from mainframe_rag.config import HASH_EMBED_DIM, Settings
 from mainframe_rag.ingest.chunk import Chunk
+from mainframe_rag.ports import Embedder, SparseVector
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]{2,}")
 _DENSE_PERSON = b"dense"
@@ -45,7 +46,7 @@ def chunk_embed_text(chunk: Chunk, product: str | None, version: str | None, tit
     return build_embed_text(product, version, chunk.doc_id, title, chunk.heading_path, chunk.text)
 
 
-# --------------------------------------------------------------------- hash mode
+# ------------------------------------------------------- hash implementation
 def _token_counts(text: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     for tok in _TOKEN_RE.findall(text):
@@ -73,9 +74,9 @@ def hash_dense_embed(texts: list[str], dim: int = HASH_EMBED_DIM) -> list[list[f
     return out
 
 
-def hash_sparse_embed(texts: list[str]) -> list[tuple[list[int], list[float]]]:
+def hash_sparse_embed(texts: list[str]) -> list[SparseVector]:
     """Deterministic hashed sparse count vectors (Qdrant applies IDF)."""
-    out: list[tuple[list[int], list[float]]] = []
+    out: list[SparseVector] = []
     for text in texts:
         buckets: dict[int, float] = {}
         for token, count in _token_counts(text).items():
@@ -86,33 +87,17 @@ def hash_sparse_embed(texts: list[str]) -> list[tuple[list[int], list[float]]]:
     return out
 
 
-# ------------------------------------------------------------------- dispatch
-def dense_embed(
-    texts: list[str], settings: Settings, client: httpx.Client | None = None
-) -> list[list[float]]:
-    """Hash mode embeds locally; otherwise POST {EMBED_BASE_URL}/embeddings."""
-    if settings.embed_mode == "hash":
+class HashEmbedder:
+    """CI/dev-only implementer: no network, no weights, no vLLM env needed."""
+
+    def dense(self, texts: list[str]) -> list[list[float]]:
         return hash_dense_embed(texts)
-    base_url, model = settings.require_embed()
-    if not texts:
-        return []
 
-    own_client = client is None
-    client = client or httpx.Client(timeout=settings.embed_timeout_s)
-    try:
-        resp = client.post(
-            f"{base_url.rstrip('/')}/embeddings",
-            json={"model": model, "input": texts},
-        )
-        resp.raise_for_status()
-        data = resp.json()["data"]
-        ordered = sorted(data, key=lambda d: d["index"])
-        return [d["embedding"] for d in ordered]
-    finally:
-        if own_client:
-            client.close()
+    def sparse(self, texts: list[str]) -> list[SparseVector]:
+        return hash_sparse_embed(texts)
 
 
+# ------------------------------------------------------- vLLM implementation
 @functools.lru_cache(maxsize=1)
 def _bm25_model(model_name: str, cache_dir: str | None):
     from fastembed import SparseTextEmbedding
@@ -120,27 +105,68 @@ def _bm25_model(model_name: str, cache_dir: str | None):
     return SparseTextEmbedding(model_name=model_name, cache_dir=cache_dir)
 
 
-def sparse_embed(
-    texts: list[str], settings: Settings
-) -> list[tuple[list[int], list[float]]]:
-    """Hash mode embeds locally; otherwise local BM25 sparse vectors."""
+class VllmEmbedder:
+    """Prod implementer: dense from the internal vLLM endpoint, sparse from
+    local BM25. One shared httpx.Client per instance. Endpoint/model are
+    resolved lazily (first dense call) via require_embed — construction never
+    blocks startup; PR D adds the startup fail-fast."""
+
+    def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
+        self._settings = settings
+        self._base_url: str | None = None
+        self._model: str | None = None
+        self._bm25_model_name = settings.bm25_model
+        self._bm25_cache_dir = settings.bm25_cache_dir
+        self._client = client
+
+    def _resolve(self) -> tuple[str, str]:
+        if self._base_url is None or self._model is None:
+            self._base_url, self._model = self._settings.require_embed()
+        return self._base_url, self._model
+
+    def _http(self) -> httpx.Client:
+        if self._client is None:
+            self._client = httpx.Client(timeout=self._settings.embed_timeout_s)
+        return self._client
+
+    def dense(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        base_url, model = self._resolve()
+        resp = self._http().post(
+            f"{base_url.rstrip('/')}/embeddings",
+            json={"model": model, "input": texts},
+        )
+        resp.raise_for_status()
+        data = resp.json()["data"]
+        ordered = sorted(data, key=lambda d: d["index"])
+        return [d["embedding"] for d in ordered]
+
+    def sparse(self, texts: list[str]) -> list[SparseVector]:
+        if not texts:
+            return []
+        model = _bm25_model(self._bm25_model_name, self._bm25_cache_dir)
+        return [(doc.indices.tolist(), doc.values.tolist()) for doc in model.embed(texts)]
+
+
+def build_embedder(settings: Settings, client: httpx.Client | None = None) -> Embedder:
+    """The single dispatch point for embed_mode. Never branch on embed_mode
+    anywhere else. Construction is cheap and side-effect free; env fail-fast
+    happens on first use (preserving current request-time behavior)."""
     if settings.embed_mode == "hash":
-        return hash_sparse_embed(texts)
-    if not texts:
-        return []
-    model = _bm25_model(settings.bm25_model, settings.bm25_cache_dir)
-    results: list[tuple[list[int], list[float]]] = []
-    for doc in list(model.embed(texts)):
-        results.append((doc.indices.tolist(), doc.values.tolist()))
-    return results
+        return HashEmbedder()
+    return VllmEmbedder(settings, client)
 
 
 def embed_batch(
-    chunks: list[Chunk], product: str | None, version: str | None, title: str,
-    settings: Settings, client: httpx.Client | None = None,
-) -> list[tuple[list[float], list[int], list[float]]]:
+    chunks: list[Chunk],
+    product: str | None,
+    version: str | None,
+    title: str,
+    embedder: Embedder,
+) -> list[tuple[list[float], SparseVector]]:
     """Dense + sparse vectors for a batch of chunks, aligned by index."""
     texts = [chunk_embed_text(c, product, version, title) for c in chunks]
-    dense = dense_embed(texts, settings, client)
-    sparse = sparse_embed(texts, settings)
-    return list(zip(dense, [s[0] for s in sparse], [s[1] for s in sparse]))
+    dense = embedder.dense(texts)
+    sparse = embedder.sparse(texts)
+    return list(zip(dense, sparse))

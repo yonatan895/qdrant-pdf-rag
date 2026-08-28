@@ -26,7 +26,7 @@ def _hit(cite_suffix: str = "p. 1-6") -> SearchHit:
         chunk_type="message",
         product="z/OS",
         version="9.9",
-        message_ids=["IEA500I"],
+        message_ids=("IEA500I",),
     )
 
 
@@ -35,8 +35,9 @@ def client(monkeypatch, synthetic_pdf):
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
     monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
     monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
-    monkeypatch.setattr(app_mod, "call_reasoning_model", fake_llm)
+    # patch the LLM client AFTER lifespan built it (module global exists then)
     with TestClient(app_mod.app) as c:
+        monkeypatch.setattr(app_mod, "llm", FakeLLM())
         yield c
 
 
@@ -44,20 +45,23 @@ class MagicMockSearch:
     def __init__(self):
         self.calls = []
 
-    def search(self, qdrant, settings, query, product=None, version=None, limit=8):
+    def search(self, qdrant, embedder, collection, query, product=None, version=None, limit=8):
         self.calls.append({"query": query, "product": product, "version": version})
         return [_hit()], "identifier", {"embed_ms": 1, "qdrant_ms": 2}
 
 
-def fake_llm(messages, settings, client=None):
-    assert messages[0]["role"] == "system"
-    return (
-        "Reissue the command after initialization completes.\n\n"
-        "```\n// example only\nIOSCMDS LIST\n```\n\n"
-        "Citations:\n"
-        "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
-        "- SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
-    )
+class FakeLLM:
+    """LLMClient double: asserts the reasoning prompt shape."""
+
+    def chat(self, messages):
+        assert messages[0]["role"] == "system"
+        return (
+            "Reissue the command after initialization completes.\n\n"
+            "```\n// example only\nIOSCMDS LIST\n```\n\n"
+            "Citations:\n"
+            "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            "- SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
+        )
 
 
 def test_search_returns_cite_fields(client):

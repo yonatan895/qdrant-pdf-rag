@@ -8,12 +8,13 @@ Collection mainframe_manuals (architecture.md section 4.3):
 
 from __future__ import annotations
 
-from qdrant_client import QdrantClient, models
+from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.embed import build_embed_text
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+from mainframe_rag.ports import QdrantPoints, SparseVector
 
 HNSW_M = 16
 HNSW_EF_CONSTRUCT = 128
@@ -47,7 +48,7 @@ def _sparse_params() -> models.SparseVectorParams:
     )
 
 
-def ensure_payload_indexes(client: QdrantClient, collection: str) -> None:
+def ensure_payload_indexes(client: QdrantPoints, collection: str) -> None:
     for field in _KEYWORD_INDEXES:
         client.create_payload_index(
             collection, field_name=field, field_schema=models.PayloadSchemaType.KEYWORD
@@ -57,7 +58,7 @@ def ensure_payload_indexes(client: QdrantClient, collection: str) -> None:
     )
 
 
-def ensure_collection(client: QdrantClient, settings: Settings) -> None:
+def ensure_collection(client: QdrantPoints, settings: Settings) -> None:
     """Create collection + payload indexes if missing; verify dim if present."""
     dim = settings.require_dense_dim()
     collection = settings.qdrant_collection
@@ -86,7 +87,7 @@ def ensure_collection(client: QdrantClient, settings: Settings) -> None:
     ensure_payload_indexes(client, collection)
 
 
-def doc_sha256(client: QdrantClient, settings: Settings, doc_id: str) -> str | None:
+def doc_sha256(client: QdrantPoints, settings: Settings, doc_id: str) -> str | None:
     """Stored sha256 for doc_id (first hit), or None if the doc is absent."""
     points, _ = client.scroll(
         settings.qdrant_collection,
@@ -101,7 +102,7 @@ def doc_sha256(client: QdrantClient, settings: Settings, doc_id: str) -> str | N
     return (points[0].payload or {}).get("sha256")
 
 
-def delete_by_doc(client: QdrantClient, settings: Settings, doc_id: str) -> None:
+def delete_by_doc(client: QdrantPoints, settings: Settings, doc_id: str) -> None:
     client.delete(
         settings.qdrant_collection,
         points_selector=models.FilterSelector(
@@ -114,16 +115,16 @@ def delete_by_doc(client: QdrantClient, settings: Settings, doc_id: str) -> None
 
 
 def upsert_chunks(
-    client: QdrantClient,
+    client: QdrantPoints,
     settings: Settings,
     parsed: ParsedDoc,
     chunks: list[Chunk],
-    vectors: list[tuple[list[float], list[int], list[float]]],
+    vectors: list[tuple[list[float], SparseVector]],
 ) -> int:
     """Upsert chunk points in batches of UPSERT_BATCH. Returns point count."""
     collection = settings.qdrant_collection
     points: list[models.PointStruct] = []
-    for chunk, (dense, sparse_idx, sparse_val) in zip(chunks, vectors):
+    for chunk, (dense, (sparse_idx, sparse_val)) in zip(chunks, vectors):
         payload = {
             "vendor": parsed.vendor,
             "product": parsed.product,

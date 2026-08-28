@@ -11,31 +11,41 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from mainframe_rag.agent.answer import build_messages, call_reasoning_model, parse_answer
+from mainframe_rag.agent.answer import HttpxLLMClient, build_messages, parse_answer
 from mainframe_rag.config import Settings, load_settings
+from mainframe_rag.ingest.embed import build_embedder
+from mainframe_rag.ports import Embedder, LLMClient
 from mainframe_rag.retrieve.query import search as retrieve_search
 
 if TYPE_CHECKING:
-    from qdrant_client import QdrantClient
+    from mainframe_rag.ports import QdrantPoints
 
 log = logging.getLogger("agent")
 
 settings: Settings
 http: httpx.Client
-qdrant: QdrantClient  # type: ignore[valid-type]
+qdrant: QdrantPoints
+embedder: Embedder
+llm: LLMClient
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global settings, http, qdrant
+    global settings, http, qdrant, embedder, llm
     settings = load_settings()
     http = httpx.Client(timeout=settings.embed_timeout_s)
+    # One dispatch point for embed_mode; the reasoning-model client owns its
+    # own connection pool with its own (long) timeout — env resolution stays
+    # lazy until first use (startup fail-fast is PR D).
+    embedder = build_embedder(settings, http)
+    llm = HttpxLLMClient(settings)
     from qdrant_client import QdrantClient
 
     qdrant = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key, timeout=30)
@@ -107,7 +117,7 @@ def v1_search(req: SearchRequest) -> SearchResponse:
     request_id = uuid.uuid4().hex[:12]
     try:
         hits, kind, timings = retrieve_search(
-            qdrant, settings, req.query,
+            qdrant, embedder, settings.qdrant_collection, req.query,
             product=req.product, version=req.version, limit=req.limit,
         )
     except Exception as exc:
@@ -122,7 +132,7 @@ def v1_search(req: SearchRequest) -> SearchResponse:
     return SearchResponse(
         request_id=request_id,
         query_kind=kind,
-        hits=[hit.__dict__ for hit in hits],
+        hits=[asdict(hit) for hit in hits],
     )
 
 
@@ -133,7 +143,7 @@ def v1_answer(req: AnswerRequest) -> AnswerResponse:
         # Fail fast: reasoning model must be configured; nothing else is callable.
         settings.require_reasoning_model()
         hits, kind, timings = retrieve_search(
-            qdrant, settings, req.query,
+            qdrant, embedder, settings.qdrant_collection, req.query,
             product=req.product, version=req.version, limit=8,
         )
         if not hits:
@@ -150,7 +160,7 @@ def v1_answer(req: AnswerRequest) -> AnswerResponse:
             product=req.product, version=req.version, splunk_context=req.splunk_context,
         )
         t0 = time.monotonic()
-        content = call_reasoning_model(messages, settings, http)
+        content = llm.chat(messages)
         llm_ms = int((time.monotonic() - t0) * 1000)
 
         parsed = parse_answer(content, {h.cite for h in hits})
