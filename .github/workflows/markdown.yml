@@ -1,0 +1,37 @@
+# Markdown-only lint (markdownlint-cli2). This is the ONLY CI that runs when a
+# change touches just Markdown — full CI (hygiene + pytest) is skipped for
+# markdown-only PRs via paths-ignore in ci.yml.
+# Vendored docs (.agents/skills, vendor/) are excluded: a skills pin-bump has
+# nothing to lint. See .markdownlint-cli2.yaml for rules.
+name: markdown-lint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.md"
+      - "**/*.markdown"
+    paths-ignore:
+      - ".agents/**"
+      - "vendor/**"
+  pull_request:
+    paths:
+      - "**/*.md"
+      - "**/*.markdown"
+    paths-ignore:
+      - ".agents/**"
+      - "vendor/**"
+
+permissions:
+  contents: read
+
+jobs:
+  markdownlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: markdownlint-cli2
+        uses: DavidAnson/markdownlint-cli2-action@v24
+        with:
+          globs: "**/*.md"
