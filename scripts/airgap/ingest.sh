@@ -25,8 +25,8 @@ if [ -n "$MANIFEST" ]; then
         die "IMAGE_SHA=$IMAGE_SHA does not match the packed MANIFEST sha ($packed_sha) — wrong SHA for this sneakernet bundle"
 fi
 [ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || die "oc is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
-if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi
 refuse_nfs_storage
+if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi
 
 EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed 's:/*$::')/v1}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
@@ -67,7 +67,10 @@ $render | sed \
     -e "s|__DENSE_DIM__|$DENSE_DIM|g" \
     -e "s|__CORPUS_PVC__|$CORPUS_PVC|g" \
     > dist/ingest-rendered.yaml
-if grep -q "__" dist/ingest-rendered.yaml; then
+if [ -n "${PULL_SECRET:-}" ]; then
+    sed -i "s|imagePullSecrets: \[\]|imagePullSecrets:\n  - name: $PULL_SECRET|" dist/ingest-rendered.yaml
+fi
+if grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml; then
     die "unsubstituted placeholder left in rendered ingest manifest (check airgap.env)"
 fi
 # Jobs are immutable: remove a previous run so re-ingest works.

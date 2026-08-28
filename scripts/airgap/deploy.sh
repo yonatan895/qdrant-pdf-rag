@@ -32,7 +32,8 @@ EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed 's:/*$::')/v1}
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
 # Chart appends "-unprivileged" to the tag when useUnprivilegedImage=true;
 # values.yaml pins v1.19.0 — set it explicitly so it always matches load.sh.
-QDRANT_TAG=${QDRANT_TAG:-$(echo "${QDRANT_IMAGE:-docker.io/qdrant/qdrant:v1.19.0-unprivileged}" | sed "s/.*://")}
+# Strip a "-unprivileged" suffix from the pin: the chart re-adds it itself.
+QDRANT_TAG=${QDRANT_TAG:-$(echo "${QDRANT_IMAGE:-docker.io/qdrant/qdrant:v1.19.0-unprivileged}" | sed "s/.*://; s/-unprivileged\$//")}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 
 if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi
@@ -84,7 +85,10 @@ $render | sed \
     -e "s|__LLM_BASE_URL__|${LLM_BASE_URL:-}|g" \
     -e "s|__LLM_MODEL_REASONING__|${LLM_MODEL_REASONING:-}|g" \
     > dist/agent-rendered.yaml
-if grep -q "__" dist/agent-rendered.yaml; then
+if [ -n "${PULL_SECRET:-}" ]; then
+    sed -i "s|imagePullSecrets: \[\]|imagePullSecrets:\n  - name: $PULL_SECRET|" dist/agent-rendered.yaml
+fi
+if grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml; then
     die "unsubstituted placeholder left in rendered agent manifest (check airgap.env)"
 fi
 run $KC apply -f dist/agent-rendered.yaml
