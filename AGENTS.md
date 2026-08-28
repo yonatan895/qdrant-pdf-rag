@@ -17,6 +17,7 @@ If a review comment conflicts with this file, follow this file and note the conf
 - User supplies PDFs at runtime. **Never** commit `.pdf`, `.pdx`, `.idx`, embeddings, Qdrant snapshots, or vendor manuals (IBM, Broadcom, BMC, Precisely, or anyone else).
 - Parser is generic. IBM form numbers / `XXXnnnY` messages are optional payload, not ingest gates. `doc_id` falls back to filename stem. Default vendor is `unknown` unless path, CLI, or text says otherwise.
 - Runtime is air-gapped OpenShift. No public internet from cluster or in-cluster CI. Images, wheels, and BM25 weights are mirrored in.
+- Runtime Python is CPython **3.14 GIL** (`requires-python >= 3.14`). Do not use free-threading (`3.14t`) and do not require the experimental JIT.
 - Qdrant point ids are UUID or unsigned int only (use UUID5 of the chunk key). sha256 hex is invalid.
 - `/v1/answer` uses the reasoning model only. `/v1/search` does not call an LLM.
 - Qdrant data PVC is RWO block, not NFS. Corpus may be NFS read-only.

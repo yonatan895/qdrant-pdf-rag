@@ -286,7 +286,7 @@ tests/
   fixtures/synthetic/SA22-0000-00_outline.pdf   # tiny generated PDF, not a real manual
 ```
 
-Language: Python 3.12. Pins in `requirements.lock.txt`. Ingest image installs from `/wheelhouse --no-index`.
+Language: Python 3.14 (GIL build; no free-threading). Pins in `requirements.lock.txt`. Ingest image installs from `/wheelhouse --no-index`.
 
 Libraries (allowed): `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx`, `fastapi`, `pydantic-settings`. Do not pull LangChain / LlamaIndex for v1.
 

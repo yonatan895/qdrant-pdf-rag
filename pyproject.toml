@@ -2,7 +2,7 @@
 name = "mainframe-rag"
 version = "0.1.0"
 description = "Citation-first expert mainframe agent: Qdrant on OpenShift, PDF ingest, hybrid retrieval"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license = { text = "Apache-2.0" }
 dependencies = [
     "pymupdf",
@@ -35,6 +35,6 @@ line-length = 100
 src = ["src", "tests"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 mypy_path = "src"
 ignore_missing_imports = true
