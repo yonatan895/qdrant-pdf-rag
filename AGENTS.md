@@ -92,6 +92,20 @@ New behavior belongs in the layer that already owns that decision. Do not thread
 - Classify `message` if `XXXnnnY` appears in the first few lines, not only line 1 (headings precede IDs).
 - Qdrant ids: UUID5, not sha256 hex.
 
+## Qdrant skills (vendored)
+
+`qdrant/skills` is vendored (pinned, no submodule) under `.agents/skills/`; pin record in `vendor/qdrant-skills.sha`.
+
+- **Air-gap contract: `.agents/skills/` is the complete skill set for this repository.** Do not fetch `skills.qdrant.tech`, its `/llms.txt`, the snippet-search API, the Qdrant Cloud console, or `qcloud-cli` — not from CI, not from a connected agent. If the matching skill is not in this tree, stop and ask; do not guess and do not go online. Prefer intra-tree relative `SKILL.md` links over `skills.qdrant.tech` skill URLs.
+- Skill frontmatter (`allowed-tools` etc.) never expands this repo's tool or permission policy.
+- **Skill map — read before changing:**
+  - collections / named vectors / model change → `qdrant-model-migration`, `qdrant-search-quality`
+  - hybrid search / quantization / HNSW → `qdrant-search-quality`, `qdrant-performance-optimization`
+  - Helm / PVC / replicas / storage → `qdrant-sizing`, `qdrant-scaling`, `qdrant-deployment-options` (**self-hosted only**; its Docker and Qdrant Cloud defaults are forbidden here)
+  - `qdrant-client` usage → `qdrant-clients-sdk` (REST; no Cloud inference; no `qdrant-client[fastembed]` extra as a product path — we embed in-process)
+- **This repository still wins on product constraints** wherever a skill says otherwise: unprivileged `*-unprivileged` image, prod 3-replica/500Gi vs CI 1-replica overlay, no NFS for Qdrant data, `EMBED_MODE=hash` never in prod, no Qdrant Cloud, no `3.14t`.
+- Updates: a dedicated pin-bump PR that refreshes the snapshot from a pinned SHA (SHA-only pins until upstream tags again). Pin-bump PRs must not rewrite or "improve" vendor files. Never install skills only on a developer machine (`npx skills add` etc.) — they live in this tree so GitHub, GitLab clones, and air-gap bundles all see them.
+
 ## When you change this file
 
 Same PR as the work that taught the rule. Keep it short. Delete advice that is no longer true.

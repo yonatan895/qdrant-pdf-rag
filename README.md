@@ -99,6 +99,10 @@ Notes:
 - Image refs are exactly `ghcr.io/<owner>/qdrant-pdf-rag-{ingest,agent}:<sha>`
   across `docker tag`, `docker push`, and the kustomize overlay sed.
 
+## For agents
+
+Qdrant-specific guidance (hybrid fusion, HNSW, quantization, deployment, client usage) is vendored under `.agents/skills/` (pinned; see `vendor/qdrant-skills.sha`). Read the matching skill before touching collections, retrieval, or Qdrant config — but this repo's AGENTS.md product rules win over any skill.
+
 ## Library scope
 
 `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx`, `fastapi`,
