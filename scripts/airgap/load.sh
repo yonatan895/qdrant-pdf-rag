@@ -23,6 +23,10 @@ elif [ -f ../SHA256SUMS ] && [ -f ../repo.bundle ]; then
 else
     die "packed artifacts not found — unpack the sneakernet tarball next to this clone (tar xf qdrant-pdf-rag-<sha>.tar)"
 fi
+case "$ARTDIR" in
+    /*) ;;
+    *) ARTDIR="$(pwd)/$ARTDIR" ;;
+esac
 
 echo "==> Verify member checksums"
 (cd "$ARTDIR" && sha256sum -c SHA256SUMS)
