@@ -34,6 +34,7 @@ If a review comment conflicts with this file, follow this file and note the conf
 - One concern per PR. Rebase on `main` before asking for review; no merge commits unless the reviewer asks.
 - Commits: imperative, present tense, say *why* if not obvious (`Fix chrome threshold so 3-page PDFs are not wiped`).
 - PR / MR description: issue number, what changed, how tested, air-gap / copyright impact if any.
+- Automation/workflow PRs: update the PR body in the same push as the code it describes — the opencode reviewer re-reviews on every push and reads a stale body as a blocker (three re-review rounds on PR #23).
 - Do not force-push `main`. Force-push feature branches only after rebase, before review comments exist.
 - Never commit: `.env`, `airgap.env`, secrets, tokens, `*.tar`, wheelhouses. `airgap.env.example` is allowed. Pack output lives in `dist/` (gitignored).
 
@@ -46,6 +47,7 @@ If a review comment conflicts with this file, follow this file and note the conf
 - Coding agents implement or change `.gitlab-ci.yml` only when an issue asks (starting with #3). Do not add deploy/helm/image-build/pack stages unless the issue says so.
 - Trigger split (GitHub only): **markdown-only** changes (excluding vendored `.agents/`/`vendor/` docs) run `.github/workflows/markdown.yml` (markdownlint-cli2, config in `.markdownlint-cli2.yaml`) and skip hygiene/pytest (`ci.yml`) **and** the GHCR image build (`e2e.yml`). Mixed changes run ci + e2e without the lint job — doc linting must not block code PRs. Vendored-only markdown bumps run nothing. GitLab keeps hygiene + pytest on every MR (no markdownlint, no e2e there).
 - The **connected-path E2E** (build images to GHCR, lab OpenShift smoke with synthetic demo PDFs) lives **only** in `.github/workflows/e2e.yml` on public GitHub. Air-gap GitLab must not gain jobs that talk to that cluster or to GHCR. Ephemeral `rag-ci-<sha>` namespaces only; cleanup is `if: always()`.
+- The opencode reviewer (`.github/workflows/opencode.yml`) is **GitHub-only automation**: automatic PR review on `pull_request`, `/oc`-summoned runs on comments. Never mirror it into `.gitlab-ci.yml`; air-gap runners must not call external services.
 - `EMBED_MODE=hash` (deterministic in-process embedder, issue #8) is **CI/dev only**: it makes `DENSE_DIM`/`EMBED_*` unnecessary and does lexical-only retrieval. Never set it in prod manifests or the default image env; prod requires the internal vLLM endpoint.
 
 ## Image refs (connected factory)
