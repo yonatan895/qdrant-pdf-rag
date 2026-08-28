@@ -208,3 +208,212 @@ jobs:
         run: |
           oc delete project "$NS" --wait=false --ignore-not-found || \
             kubectl delete namespace "$NS" --ignore-not-found --wait=false || true
+
+  # ---------------------------------------------- air-gap runbook rehearsal
+  # Rehearses the OPERATOR RUNBOOK (issue #15) against the lab OpenShift, so
+  # CI-green proves the air-gap deployment path works at the packed SHA:
+  #   airgap-pack -> airgap-load (INTERNAL_REGISTRY stand-in: GHCR)
+  #   -> airgap-deploy (PROD kustomize overlay + prod Helm values)
+  #   -> airgap-ingest (corpus PVC) -> airgap-smoke.
+  # CI-only stand-ins, never in git prod values (see the size knobs in
+  # scripts/airgap/deploy.sh + ingest.sh):
+  #   - GHCR plays INTERNAL_REGISTRY (node-side HTTP registry config is a
+  #     cluster-admin operation the lab does not grant).
+  #   - scripts/mock_vllm.py plays the owning team's vLLM endpoint: same API
+  #     shape, deterministic vectors — the airgap scripts refuse
+  #     EMBED_MODE=hash, so the prod embed path stays honest.
+  #   - QDRANT_STORAGE_SIZE / QDRANT_EXTRA_VALUES / INGEST_WORK_SIZE shrink
+  #     PVCs and pod resources for lab quota.
+  airgap-rehearsal:
+    needs: [build, e2e-secrets-check]
+    if: >-
+      needs.e2e-secrets-check.outputs.ok == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
+      OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+      SHA: ${{ needs.build.outputs.sha }}
+      AGENT_IMAGE: ${{ needs.build.outputs.agent_image }}
+      INGEST_IMAGE: ${{ needs.build.outputs.ingest_image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install helm, oc, skopeo
+        uses: azure/setup-helm@v4
+      - uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: "4"
+      - name: Install skopeo (pack/load)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo
+          skopeo --version
+
+      - name: Log in to lab OpenShift
+        run: oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_TOKEN" --insecure-skip-tls-verify=true
+
+      - name: Create ephemeral namespace
+        run: |
+          NS="rag-gap-${SHA}"
+          echo "NS=$NS" >> "$GITHUB_ENV"
+          oc new-project "$NS"
+          oc label namespace "$NS" app.kubernetes.io/managed-by=e2e-workflow ephemeral=true
+
+      - name: Deploy mock vLLM (deterministic embeddings stand-in)
+        run: |
+          OWNER_LC="$(echo "${{ github.repository_owner }}" | tr 'A-Z' 'a-z')"
+          echo "OWNER_LC=$OWNER_LC" >> "$GITHUB_ENV"
+          kubectl apply -n "$NS" -f - <<EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: vllm-mock
+            labels: {app: vllm-mock}
+          spec:
+            replicas: 1
+            selector: {matchLabels: {app: vllm-mock}}
+            template:
+              metadata: {labels: {app: vllm-mock}}
+              spec:
+                containers:
+                  - name: mock
+                    image: ${AGENT_IMAGE}
+                    command: ["python3", "/app/scripts/mock_vllm.py"]
+                    env:
+                      - {name: MOCK_DIM, value: "64"}
+                      - {name: PORT, value: "8000"}
+                    ports: [{containerPort: 8000}]
+                    readinessProbe:
+                      httpGet: {path: /healthz, port: 8000}
+                      initialDelaySeconds: 2
+                    resources:
+                      requests: {cpu: "50m", memory: 128Mi}
+                      limits: {cpu: "500m", memory: 256Mi}
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: vllm-mock
+          spec:
+            selector: {app: vllm-mock}
+            ports: [{port: 8000, targetPort: 8000}]
+          EOF
+          kubectl -n "$NS" rollout status deploy/vllm-mock --timeout=180s
+
+      - name: Detect default StorageClass
+        run: |
+          SC="$(oc get sc -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{end}')"
+          [ -n "$SC" ] || { echo "::error::no default StorageClass on the lab cluster"; exit 1; }
+          echo "SC=$SC" >> "$GITHUB_ENV"
+
+      - name: Write CI-scale Qdrant overrides (lab quota only; git prod values untouched)
+        run: |
+          cat > "$RUNNER_TEMP/qdrant-ci-scale.yaml" <<'EOF'
+          # Rehearsal-only: prod values.yaml keeps 4cpu/16Gi requests; the lab
+          # namespace quota cannot fit 3 replicas at prod size.
+          resources:
+            requests: {cpu: "100m", memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          EOF
+
+      - name: airgap-pack (real sneakernet bundle at this SHA)
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+        run: |
+          make airgap-pack
+          ls -la dist/
+          cat dist/MANIFEST.txt
+
+      - name: airgap-load (GHCR stands in for INTERNAL_REGISTRY)
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          INTERNAL_REGISTRY="ghcr.io/${OWNER_LC}"
+          echo "${GITHUB_TOKEN}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          export INTERNAL_REGISTRY
+          make airgap-load
+
+      - name: airgap-deploy (PROD overlays, helm-knobbed sizes, fail-closed checks)
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+          EMBED_MODEL: mock-embed
+          DENSE_DIM: "64"
+          VLLM_BASE_URL: http://vllm-mock:8000
+          QDRANT_STORAGE_SIZE: 1Gi
+        run: |
+          export INTERNAL_REGISTRY="ghcr.io/${OWNER_LC}"
+          export NAMESPACE="$NS"
+          export STORAGE_CLASS="$SC"
+          make airgap-deploy
+
+      - name: Generate corpus PVC + demo PDFs (operator-supplied corpus step)
+        env:
+          STORAGE_CLASS: ${{ env.SC }}
+        run: |
+          kubectl -n "$NS" apply -f - <<EOF
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata: {name: corpus}
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources: {requests: {storage: 1Gi}}
+            storageClassName: ${STORAGE_CLASS}
+          ---
+          apiVersion: batch/v1
+          kind: Job
+          metadata: {name: corpus-gen}
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: gen
+                    image: ${INGEST_IMAGE}
+                    command: ["/bin/sh", "-ec"]
+                    args:
+                      - |
+                        python3 /app/scripts/make_synthetic_pdf.py --out /corpus/SA22-0000-00_outline.pdf
+                        python3 /app/scripts/make_synthetic_pdf.py --plain --out /corpus/plain-widget-notes.pdf
+                        ls -la /corpus
+                    volumeMounts: [{name: corpus, mountPath: /corpus}]
+                volumes:
+                  - name: corpus
+                    persistentVolumeClaim: {claimName: corpus}
+          EOF
+          kubectl -n "$NS" wait --for=condition=complete job/corpus-gen --timeout=300s
+
+      - name: airgap-ingest (PROD ingest Job, corpus PVC, vLLM-shaped endpoint)
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+          CORPUS_PVC: corpus
+          EMBED_MODEL: mock-embed
+          DENSE_DIM: "64"
+          VLLM_BASE_URL: http://vllm-mock:8000
+          INGEST_WORK_SIZE: 2Gi
+          INGEST_TIMEOUT: "900"
+        run: |
+          export INTERNAL_REGISTRY="ghcr.io/${OWNER_LC}"
+          export NAMESPACE="$NS"
+          export STORAGE_CLASS="$SC"
+          make airgap-ingest
+
+      - name: airgap-smoke (operator smoke + expected-substring checks)
+        run: |
+          NAMESPACE="$NS" QUERY="IEA500I operator message" make airgap-smoke
+          kubectl -n "$NS" exec deploy/rag-agent -- \
+            python /app/scripts/smoke_search.py \
+              --url http://localhost:8080 --query "IEA500I operator message" --expect "IEA500I"
+          kubectl -n "$NS" exec deploy/rag-agent -- \
+            python /app/scripts/smoke_search.py \
+              --url http://localhost:8080 --query "torque the widget screws" --expect "torque"
+
+      - name: Delete ephemeral namespace
+        if: always()
+        run: |
+          oc delete project "$NS" --wait=false --ignore-not-found || \
+            kubectl delete namespace "$NS" --ignore-not-found --wait=false || true
