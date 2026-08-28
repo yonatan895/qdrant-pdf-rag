@@ -198,6 +198,34 @@ def test_strip_wrapped_fabricated_citations():
     assert valid_citations("Citations:\n`" + _hit().cite + "`", allowed) == [_hit().cite]
 
 
+def test_strip_enclosing_markup_and_inline_mentions():
+    """Markup-wrapped fabricated cites are stripped cleanly (no half-peeled
+    leftovers), bolded allowed cites validate unwrapped, and mid-sentence
+    inline mentions are deliberately left alone (standalone-line rule)."""
+    from mainframe_rag.agent.cites import strip_unauthorized_citations, valid_citations
+
+    allowed = {_hit().cite}
+    fabricated = "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9"
+    body = "\n".join(
+        [f"**{fabricated}**", f"__{fabricated}__", f"*{fabricated}*", _hit().cite]
+    )
+    out = strip_unauthorized_citations(body, allowed)
+    assert fabricated not in out
+    assert "*" not in out.replace("**", "")  # no half-peeled leftovers
+    assert _hit().cite in out
+
+    # A bolded allowed cite validates to the bare citation.
+    assert valid_citations("Citations:\n- **" + _hit().cite + "**", allowed) == [_hit().cite]
+
+    # Standalone-line rule: mid-sentence inline mentions survive untouched.
+    inline = f"Refer to {fabricated} for details."
+    assert strip_unauthorized_citations(inline, allowed) == inline
+
+    # Marker peel is a discrete prefix: digit-led prose keeps its number.
+    prose = "3.5 inches is the recommended gap."
+    assert strip_unauthorized_citations(prose, allowed) == prose
+
+
 def test_answer_script_block_passes_through_unvalidated(client, monkeypatch):
     """script is code: citation-shaped lines inside the fence are returned
     verbatim (documented behavior, issue #20 PR C)."""

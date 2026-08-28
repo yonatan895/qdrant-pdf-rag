@@ -20,29 +20,33 @@ CITATION_LINE_RE = re.compile(
 
 CITATIONS_HEADER_RE = re.compile(r"^\s*Citations?:\s*$", re.IGNORECASE | re.MULTILINE)
 
-# Bullet/dash/numbered-list markers, including multi-digit ("11.") and
-# bracketed ("12)") forms. Extends the pre-PR-C set with ")(" — a deliberate,
-# shared-behavior delta in the citations list parser.
-_LIST_MARKER_CHARS = "-*•0123456789. )("
+# List markers as a discrete prefix (bullet/space or number + [.)] + space),
+# never a greedy char-set lstrip: "- **cite**" must strip only "- " so the
+# enclosing markup peels as whole pairs afterwards. Prose like "3.5 inches"
+# survives untouched. The "))(" paren form and the bullet set are a deliberate
+# extension of the pre-PR-C list parser.
+_MARKER_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)+")
 
-_WRAP_QUOTES = "`\"'"
+# Enclosing markup peeled pairwise (with repetition, so **x** and __x__
+# resolve cleanly): bold, italic/underscore, inline code, quotes.
+_WRAP_CHARS = "`\"'*_"
 
 
 def _normalize_citation_line(line: str) -> str:
     """One normalizer for both citation paths (the Citations: list parser and
     the answer-body scanner) so a wrapped fabricated cite can never be clean
     in one path and leaked by the other: peels list markers, blockquote '>',
-    and matching wrapping quotes/backticks/parens. Over-stripping digit-led
-    prose is harmless — only CITATION_LINE_RE matches act, and the body
-    scanner keeps the original line in the output."""
+    and enclosing matching pairs (** __ * ` " ') cleanly — a bolded cite
+    normalizes to the bare citation, never a half-peeled leftover. Only
+    CITATION_LINE_RE matches act, and the body scanner keeps the original
+    line in the output."""
     candidate = line.strip()
-    for _ in range(4):  # bounded: '> "11. cite"' style nesting is shallow
+    for _ in range(6):  # bounded: '> "11. cite"' style nesting is shallow
         before = candidate
-        if candidate[:1].isdigit() or candidate.startswith(("-", "*", "•")):
-            candidate = candidate.lstrip(_LIST_MARKER_CHARS).strip()
+        candidate = _MARKER_RE.sub("", candidate)
         if candidate.startswith(">"):
             candidate = candidate.lstrip(">").strip()
-        if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in _WRAP_QUOTES:
+        if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in _WRAP_CHARS:
             candidate = candidate[1:-1].strip()
         if candidate.startswith("(") and candidate.endswith(")"):
             candidate = candidate[1:-1].strip()
@@ -84,8 +88,13 @@ def strip_unauthorized_citations(text: str, allowed: set[str]) -> str:
     """Remove citation-shaped lines from the answer body that are not in the
     retrieved hit set. The trailing Citations: list is validated separately;
     this closes the same hole for a fabricated cite quoted mid-answer —
-    including wrapped forms (blockquote, backticks, quotes) via the shared
-    normalizer. Same exact-match rule as valid_citations."""
+    including wrapped forms (markup, blockquote, quotes) via the shared
+    normalizer. Same exact-match rule as valid_citations.
+
+    Operates on standalone citation lines only: a mid-sentence inline mention
+    ("refer to SA22-9999-99 ... for details") never matches the full line
+    shape and is deliberately left untouched — stripping mid-prose would
+    corrupt the answer."""
     kept: list[str] = []
     for line in text.splitlines():
         candidate = _normalize_citation_line(line)
