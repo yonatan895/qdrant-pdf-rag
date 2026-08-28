@@ -10,6 +10,7 @@
 . "$(dirname -- "$0")/common.sh"
 
 enforce_product_rules
+resolve_aliases
 require_env IMAGE_SHA
 command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the connected pack host"
 [ -d .git ] || die "run from a git clone of the repository"

@@ -10,6 +10,7 @@
 . "$(dirname -- "$0")/common.sh"
 
 enforce_product_rules
+resolve_aliases
 require_env INTERNAL_REGISTRY NAMESPACE IMAGE_SHA CORPUS_PVC EMBED_MODEL DENSE_DIM VLLM_BASE_URL
 [ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || die "oc is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
 if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi

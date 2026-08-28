@@ -5,6 +5,7 @@
 
 . "$(dirname -- "$0")/common.sh"
 
+resolve_aliases
 require_env NAMESPACE
 if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi
 QUERY=${QUERY:-IEA500I operator message}
