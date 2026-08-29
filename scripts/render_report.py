@@ -451,15 +451,25 @@ def compare_eval(base: dict[str, Any], current: dict[str, Any], fmt: str) -> tup
         if cur_kind != base_kind:
             classification_changed.append((q, base_kind, cur_kind))
 
+        cur_r1 = cur_r.get("recall@1", 0.0)
+        base_r1 = base_r.get("recall@1", 0.0)
         cur_r5 = cur_r.get("recall@5", 0.0)
         base_r5 = base_r.get("recall@5", 0.0)
         cur_mrr = cur_r.get("mrr", 0.0)
         base_mrr = base_r.get("mrr", 0.0)
 
-        if cur_r5 > base_r5 or cur_mrr > base_mrr:
-            improved.append(q)
-        elif cur_r5 < base_r5 or cur_mrr < base_mrr:
+        r1_regressed = cur_r1 < base_r1 - 1e-4
+        r5_regressed = cur_r5 < base_r5 - 1e-4
+        mrr_regressed = cur_mrr < base_mrr - 1e-4
+
+        r1_improved = cur_r1 > base_r1 + 1e-4
+        r5_improved = cur_r5 > base_r5 + 1e-4
+        mrr_improved = cur_mrr > base_mrr + 1e-4
+
+        if r1_regressed or r5_regressed or mrr_regressed:
             regressed.append(q)
+        elif r1_improved or r5_improved or mrr_improved:
+            improved.append(q)
         else:
             unchanged.append(q)
 

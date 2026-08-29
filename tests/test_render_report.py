@@ -187,3 +187,38 @@ def test_compare_bench_regression_and_fail_flag(tmp_path: Path):
 
     assert main(["compare-bench", "--base", str(base_p), "--current", str(cur_p)]) == 0
     assert main(["compare-bench", "--base", str(base_p), "--current", str(cur_p), "--fail-on-regression"]) == 1
+
+
+def test_compare_eval_mixed_directional_change_regression(tmp_path: Path):
+    """Mixed directional change (e.g. improved recall@5 but reduced MRR) must NOT
+    be masked as improved; regression gate must catch query-level degradation even
+    when aggregate report metrics improve or stay flat."""
+    base = _eval_report()
+    cur = _eval_report()
+
+    # Query 0 in base: recall@5: 0.0, mrr: 1.0
+    base["rows"][0]["recall@5"] = 0.0
+    base["rows"][0]["mrr"] = 1.0
+    base["recall@5"] = 0.5
+    base["mrr"] = 0.75
+
+    # Query 0 in cur: recall@5: 1.0 (improved), mrr: 0.2 (regressed)
+    cur["rows"][0]["recall@5"] = 1.0
+    cur["rows"][0]["mrr"] = 0.2
+    # Keep aggregate metrics equal or improved (recall@5 improved, mrr equal)
+    cur["recall@5"] = 1.0
+    cur["mrr"] = 0.75
+
+    cmp_text, has_reg = compare_eval(base, cur, "text")
+    assert has_reg is True
+    assert "Regressed: 1" in cmp_text
+    assert "Improved: 0" in cmp_text
+    assert "! IEA500I" in cmp_text
+
+    base_p = tmp_path / "base.json"
+    cur_p = tmp_path / "cur.json"
+    base_p.write_text(json.dumps(base), encoding="utf-8")
+    cur_p.write_text(json.dumps(cur), encoding="utf-8")
+
+    assert main(["compare-eval", "--base", str(base_p), "--current", str(cur_p), "--fail-on-regression"]) == 1
+
