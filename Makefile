@@ -143,13 +143,15 @@ AGENT_URL ?= http://127.0.0.1:8080
 # committed baseline (RSS/disk x1.5, latency p95 x3 — see scripts/benchmark.py).
 .PHONY: bench
 bench: | .venv
-	$(PY) scripts/benchmark.py --collection bench --check benchmarks/baseline.json \
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/benchmark.py --collection bench --check benchmarks/baseline.json \
 	  --out $(BUNDLE_DIR)/bench-results.json --summary $(BUNDLE_DIR)/bench-summary.md
 
 # Re-record the committed baseline (dedicated PR — AGENTS.md).
 .PHONY: bench-baseline
 bench-baseline: | .venv
-	$(PY) scripts/benchmark.py --collection bench --update-baseline benchmarks/baseline.json \
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/benchmark.py --collection bench --update-baseline benchmarks/baseline.json \
 	  --out $(BUNDLE_DIR)/bench-results.json --summary $(BUNDLE_DIR)/bench-summary.md
 
 # Standalone load run against an already-running agent.

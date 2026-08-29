@@ -4,7 +4,8 @@
 Measures, against a real Qdrant server (docker, the images.txt pin) and a
 real agent (uvicorn, hash embedder):
 
-- ingest: wall time, docs/s, chunks, peak RSS of the ingest process tree
+- ingest: wall time, docs/s, chunks, peak single-process RSS (the max RSS
+  across reaped children/descendants — a floor for the tree total)
 - Qdrant: container memory/CPU (docker stats), storage disk footprint
 - agent endpoints: latency percentiles under concurrent load. /v1/answer is
   measured against the DETERMINISTIC MOCK LLM (no real model exists) — every
@@ -65,6 +66,22 @@ def _get(result: dict, dotted: str):
             return None
         node = node[part]
     return node
+
+
+def _set(target: dict, dotted: str, value) -> None:
+    """Mirror of _get: writes the nested shape the gate reads. Baselines and
+    results MUST share one shape — update_baseline emits nested records so
+    check_baseline's _get walk finds them (a flat dotted-key baseline would
+    gate nothing, forever)."""
+    parts = dotted.split(".")
+    node = target
+    for part in parts[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            node[part] = child
+        node = child
+    node[parts[-1]] = value
 
 
 def _meminfo_total_mb() -> float | None:
@@ -144,9 +161,10 @@ def run_ingest(corpus: Path, qdrant_url: str, collection: str) -> dict:
     wall = time.perf_counter() - started
     if proc.returncode != 0:
         raise RuntimeError(f"ingest failed rc={proc.returncode}: {proc.stderr[-400:]}")
-    # RUSAGE_CHILDREN.ru_maxrss is a monotonic high-water mark (KB on Linux)
-    # across all reaped children and their descendants; the ingest tree
-    # (pymupdf workers) dominates everything spawned before it.
+    # RUSAGE_CHILDREN.ru_maxrss is the max single-process RSS across all
+    # reaped children and their descendants (monotonic high-water, KB on
+    # Linux) — a floor for the tree total, and it also covers docker client
+    # children spawned before the ingest.
     peak_rss_mb = round(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024, 1)
     records = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
     docs_upserted = sum(1 for r in records if r["status"] == "upserted")
@@ -205,9 +223,9 @@ def qdrant_stats(sim: QdrantSim, collection: str) -> dict:
 
 
 def _parse_size_mb(text: str) -> float | None:
-    """docker stats MemUsage fragments like '123.4MiB', '1.2GiB', '512kB'."""
+    """docker stats MemUsage fragments like '123.4MiB', '1.2GiB', '512kB', '0B'."""
     text = text.strip()
-    for suffix, factor in (("GiB", 1024.0), ("MiB", 1.0), ("kB", 1 / 1024.0)):
+    for suffix, factor in (("GiB", 1024.0), ("MiB", 1.0), ("kB", 1 / 1024.0), ("B", 1 / (1024 * 1024))):
         if text.endswith(suffix):
             try:
                 return round(float(text[: -len(suffix)].strip()) * factor, 1)
@@ -302,15 +320,18 @@ def _wait_agent(agent: subprocess.Popen, log, timeout_s: float = 30.0) -> str:
     raise RuntimeError("agent /healthz never became ready")
 
 
-def check_baseline(result: dict, baseline_path: Path) -> list[str]:
-    baseline = json.loads(baseline_path.read_text())
+def check_baseline(result: dict, baseline: dict | None) -> list[str]:
+    if baseline is None:
+        return []
     regressions = []
     for dotted, tolerance in GATED_METRICS.items():
         current = _get(result, dotted)
-        allowed = _get(baseline, dotted)
         if current is None:
-            regressions.append(f"{dotted}: MISSING from the current run")
+            # Metric could not be measured this run (e.g. qdrant mem/disk on
+            # the QDRANT_SIM_URL reuse path) — warn and skip, not regress.
+            print(f"warn: {dotted} not measured this run; not gated", file=sys.stderr)
             continue
+        allowed = _get(baseline, dotted)
         if allowed is None:
             print(f"warn: baseline has no {dotted}; not gated", file=sys.stderr)
             continue
@@ -319,19 +340,25 @@ def check_baseline(result: dict, baseline_path: Path) -> list[str]:
             regressions.append(
                 f"{dotted}: {current} > {allowed} x{tolerance} (limit {round(limit, 2)})"
             )
+    for endpoint in ("search", "answer"):
+        errors = _get(result, f"agent.{endpoint}.errors")
+        if errors:
+            regressions.append(
+                f"agent.{endpoint}.errors: {errors} > 0 — the agent failed under load"
+            )
     return regressions
 
 
 def update_baseline(result: dict, baseline_path: Path) -> None:
-    gated = {dotted: _get(result, dotted) for dotted in GATED_METRICS}
-    payload = {
+    payload: dict = {
         "_meta": {
             "note": "Re-baseline via `make bench-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/benchmark.py GATED_METRICS.",
             "env": result["env"],
             "updated": time.strftime("%Y-%m-%d"),
         },
-        **gated,
     }
+    for dotted in GATED_METRICS:
+        _set(payload, dotted, _get(result, dotted))
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(json.dumps(payload, indent=2) + "\n")
 
@@ -353,6 +380,9 @@ def summary_markdown(result: dict, baseline: dict | None) -> str:
         allowed = _get(baseline, dotted) if baseline else None
         gate = f"<= {round(allowed * tolerance, 2)}" if allowed is not None else "n/a"
         lines.append(f"| {dotted} | {current} | {allowed} | {gate} |")
+    for endpoint in ("search", "answer"):
+        errors = _get(result, f"agent.{endpoint}.errors")
+        lines.append(f"| agent.{endpoint}.errors | {errors} | 0 | == 0 |")
     lines += [
         "",
         (
@@ -426,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"warn: baseline {args.check} missing; nothing gated", file=sys.stderr)
         else:
             baseline = json.loads(args.check.read_text())
-            regressions = check_baseline(result, args.check)
+            regressions = check_baseline(result, baseline)
     if args.update_baseline:
         update_baseline(result, args.update_baseline)
         print(f"baseline written to {args.update_baseline}", file=sys.stderr)
@@ -434,9 +464,11 @@ def main(argv: list[str] | None = None) -> int:
     summary = summary_markdown(result, baseline)
     print(summary, file=sys.stderr)
     if args.summary:
+        args.summary.parent.mkdir(parents=True, exist_ok=True)
         args.summary.write_text(summary)
     payload = json.dumps(result, indent=2)
     if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(payload + "\n")
     else:
         print(payload)
