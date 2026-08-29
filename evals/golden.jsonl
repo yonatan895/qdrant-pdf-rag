@@ -1,0 +1,21 @@
+# Golden set for retrieval accuracy eval (make eval).
+# One JSON object per line: query, expected_doc_ids (doc-level, never top-1),
+# optional expected_heading substring, optional note.
+# Expectations are verified z/OS 3.2 GA books in the local corpus:
+#   SC23-6883-70 z/OS Network File System Guide and Reference
+#   SC23-6878-70 z/OS DFSORT Application Programming Guide
+#   SC23-6879-70 z/OS DFSORT Messages, Codes and Diagnosis Guide
+#   SC23-6871-70 z/OS DFSMShsm Storage Administration
+#   SC23-6869-70 z/OS DFSMShsm Implementation and Customization Guide
+{"query": "NFS mount error return codes", "expected_doc_ids": ["SC23-6883-70"], "note": "user query 1: NFS guide Part 4 Diagnosis and Messages"}
+{"query": "DFSORT sysin squeeze parameter", "expected_doc_ids": ["SC23-6878-70"], "note": "user query 2: SQZ operand is in the DFSORT Application Programming Guide"}
+{"query": "hsm journal filling up troubleshooting", "expected_doc_ids": ["SC23-6871-70"], "note": "user query 3: DFSMShsm Storage Administration covers journal management"}
+{"query": "SC23-6883-70", "expected_doc_ids": ["SC23-6883-70"], "note": "identifier: doc number filter"}
+{"query": "SC23-6878-70", "expected_doc_ids": ["SC23-6878-70"], "note": "identifier: doc number filter"}
+{"query": "SC23-6871-70", "expected_doc_ids": ["SC23-6871-70"], "note": "identifier: doc number filter"}
+{"query": "Network File System mount", "expected_doc_ids": ["SC23-6883-70"], "note": "topic: title terms"}
+{"query": "DFSORT application programming", "expected_doc_ids": ["SC23-6878-70"], "note": "topic: title terms"}
+{"query": "DFSMShsm storage administration", "expected_doc_ids": ["SC23-6871-70"], "note": "topic: title terms"}
+{"query": "DFSMShsm implementation customization", "expected_doc_ids": ["SC23-6869-70"], "note": "topic: title terms"}
+{"query": "DFSORT messages codes diagnosis", "expected_doc_ids": ["SC23-6879-70"], "note": "topic: title terms"}
+{"query": "DFSORT tuning", "expected_doc_ids": ["SC23-6882-70"], "note": "topic: title terms (z/OS DFSORT Tuning Guide, SC23-6882-70)"}
