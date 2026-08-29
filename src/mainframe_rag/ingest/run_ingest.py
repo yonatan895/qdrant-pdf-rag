@@ -331,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
     return run(
         args.src,
         args.progress,
-        args.workers,
+        args.workers or None,  # --workers 0 means "default", not "1 worker"
         args.limit,
         args.dry_run,
         vendor=args.vendor,

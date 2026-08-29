@@ -39,6 +39,16 @@ def test_sha256_is_stable(synthetic_pdf):
     assert a.sha256 == b.sha256 and len(a.sha256) == 64
 
 
+def test_parse_pdf_sha256_override_and_fallback(synthetic_pdf):
+    """The caller-supplied digest must land in ParsedDoc.sha256 verbatim —
+    resume (should_skip / doc_sha256) keys on this field, so a dropped or
+    altered override would silently corrupt the skip logic."""
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+
+    assert parse_pdf(synthetic_pdf, sha256="ab" * 32).sha256 == "ab" * 32
+    assert parse_pdf(synthetic_pdf).sha256 == sha256_file(synthetic_pdf)
+
+
 def test_walker_ignores_pdx_and_idx(tmp_path, synthetic_pdf):
     import shutil
 
