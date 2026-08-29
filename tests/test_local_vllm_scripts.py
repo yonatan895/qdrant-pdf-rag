@@ -56,7 +56,7 @@ def test_run_e2e_query_flow():
         "SA22-7592-05 z/OS MVS Init, Section 1, p. 1-1"
     )
 
-    with patch("scripts.test_local_e2e_vllm.search", return_value=[mock_hit]), \
+    with patch("scripts.test_local_e2e_vllm.search", return_value=([mock_hit], "identifier", {"embed_ms": 1, "qdrant_ms": 2})), \
          patch("mainframe_rag.agent.answer.HttpxLLMClient.chat", return_value=model_reply):
         result = run_e2e_query(settings, "How to resolve IEA500I?")
         assert result["success"] is True

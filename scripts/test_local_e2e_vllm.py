@@ -17,10 +17,12 @@ from pathlib import Path
 from typing import Any
 
 import httpx2
+from qdrant_client import QdrantClient
 
 from mainframe_rag.agent.answer import HttpxLLMClient, build_messages
 from mainframe_rag.agent.cites import strip_unauthorized_citations, valid_citations
 from mainframe_rag.config import Settings
+from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.ingest.run_ingest import run as run_ingest
 from mainframe_rag.retrieve.query import search
 
@@ -98,8 +100,23 @@ def run_e2e_query(settings: Settings, query: str, product: str | None = None, ve
 
     # 1. Retrieval
     print("[*] Running parallel prefetch retrieval from Qdrant...")
-    hits = search(query=query, settings=settings, limit=5, product=product, version=version)
-    print(f"[+] Retrieved {len(hits)} ranked hits:")
+    qdrant_client = QdrantClient(url=settings.qdrant_url, timeout=settings.qdrant_timeout_s)
+    http_embed = httpx2.Client(timeout=settings.embed_timeout_s)
+    try:
+        embedder = build_embedder(settings, http_embed)
+        hits, kind, timing = search(
+            client=qdrant_client,
+            embedder=embedder,
+            collection=settings.qdrant_collection,
+            query=query,
+            product=product,
+            version=version,
+            limit=5,
+        )
+    finally:
+        http_embed.close()
+
+    print(f"[+] Retrieved {len(hits)} ranked hits (kind={kind}, timing={timing}):")
     for i, h in enumerate(hits, 1):
         print(f"    [{i}] score={h.score:.4f} cite={h.cite}")
         print(f"        preview: {h.text[:100]}...")
