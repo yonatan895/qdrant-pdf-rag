@@ -48,7 +48,11 @@ def _doc_id_from_text(text: str) -> str | None:
     matches = DOCNO_RE.findall(text)
     if not matches:
         return None
-    return max(set(matches), key=matches.count)
+    # sorted() before max(): equal-count ties must not depend on set iteration
+    # order — PYTHONHASHSEED differs per spawn worker, so an unsorted tie break
+    # flips doc_id between runs and churns the resume path (found on a real
+    # z/OS corpus: DCF books carry several form numbers with equal counts).
+    return max(sorted(set(matches)), key=matches.count)
 
 
 def extract_doc_id(doc: pymupdf.Document, path: Path) -> str | None:
