@@ -113,7 +113,8 @@ Recommended namespace: `mainframe-rag` (request; do not assume you can create it
 | `ingest` | CronJob / Job | 1 | CPU-heavy; local SSD / RWO work volume |
 | `bm25-weights` | baked in ingest + agent images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 
-Network: ClusterIP only. NetworkPolicy: agent + ingest may reach Qdrant 6333/6334; only agent may reach vLLM and Splunk; no ingress from other namespaces unless the cluster team requires a mesh.
+Network: ClusterIP only, no Route to Qdrant. NetworkPolicy intent: agent + ingest may reach Qdrant 6333/6334; only agent may reach vLLM and Splunk; no ingress from other namespaces unless the cluster team requires a mesh.
+Enforcement today is ClusterIP + namespace isolation. Dedicated NetworkPolicy manifests were removed from the repo (no deploy path ever applied them) and remain a platform-team follow-up.
 
 ### 3.2 Qdrant on OpenShift (pin)
 
@@ -311,13 +312,13 @@ No real IBM PDF in CI.
 Work in this order. Later steps assume earlier acceptance checks.
 
 1. **Repo skeleton** — Makefile, `airgap.env.example`, `images.txt`, this doc, license Apache-2.0.
-2. **OpenShift package** — vendored chart, values with placeholders, NetworkPolicy manifests, `ImageSetConfiguration`, unprivileged image pin. Dry-run `helm template`. No cluster required.
+2. **OpenShift package** — vendored chart, values with placeholders, `ImageSetConfiguration`, unprivileged image pin. Dry-run `helm template`. No cluster required.
 3. **Ingest core** — parse/chunk/classify on synthetic PDF; inventory JSONL; no Qdrant.
 4. **Qdrant IO** — `ensure_collection`, upsert, delete-by-doc; Qdrant container in CI **only** with synthetic data.
 5. **Retrieve** — hybrid query helper, identifier parse, citation formatter.
 6. **Agent API** — `/healthz`, `/v1/search`, `/v1/answer` stub (search + fake LLM in tests).
 7. **Containerfiles** — UBI, non-root, wheelhouse, BM25 weights copied in.
-8. **Air-gap Makefile targets** — `make pull-images save-images pack` on connected; `make load-images helm-apply` documented for disconnected.
+8. **Air-gap Makefile targets** — `make airgap-pack` on connected; `make airgap-load airgap-deploy airgap-ingest airgap-smoke` inside the gap (`scripts/airgap/`, issue #15).
 9. **Cluster bring-up** — with the other team: StorageClass, pull secret, registry, embedding dim.
 10. **Pilot ingest** — 5–10 real manuals **inside the enterprise**, eval 30 questions (message ID, parm name, conceptual), then full 100 GB.
 
@@ -326,7 +327,7 @@ Do not start step 10 from a public runner.
 ### 5.5 Observability
 
 - Ingest: JSON logs per file (doc_id, pages, chunks, seconds, skip/upsert)
-- Qdrant: scrape existing metrics if the cluster has Prometheus; otherwise `/metrics` NetworkPolicy for the platform team
+- Qdrant: scrape existing metrics if the cluster has Prometheus; otherwise request a scrape policy from the platform team (no NetworkPolicy manifests ship in this repo — see section 3.1)
 - Agent: request_id, query_kind (`identifier`|`nl`), hit count, embed_ms, qdrant_ms, llm_ms
 - No query text in logs if it might contain production dump content; log hashes / message IDs only
 
@@ -367,5 +368,5 @@ Keep these in one module imported by ingest and retrieve: `src/mainframe_rag/reg
 - `helm template` renders 3-replica unprivileged StatefulSet
 - Synthetic ingest → search for `IEA500I` returns the synthetic chunk with cite `SA22-0000-00 … p. 1-1`
 - Agent `/v1/answer` includes at least one citation in the required format
-- Bundle list in `make pack` output: chart, image tar or oc-mirror sequence, git bundle, wheelhouse, BM25 weights
+- `make airgap-pack` produces `dist/qdrant-pdf-rag-<sha>.tar`: git bundle (chart, values, code) + image archives + MANIFEST with member checksums
 - README states: no manuals in this repository; ingest inside the enterprise only

@@ -45,22 +45,38 @@ make helm-template   # renders 3-replica unprivileged StatefulSet
 
 ## Air-gap workflow
 
-Connected host (see Makefile):
+The air-gap never builds images (issue #15): connected `main` is the only
+image factory, and e2e tags app images with the full git SHA.
+
+Connected host:
 
 ```bash
-make pull-chart pull-images wheelhouse bm25-weights   # gather artifacts
-make pack                                             # bundles/: chart, images, git bundle, wheelhouse, BM25 weights
+make airgap-pack   # dist/qdrant-pdf-rag-<full-sha>.tar + .tar.sha256
+                   # tarball = git bundle + image archives + MANIFEST + member checksums
 ```
 
-Disconnected host:
+Sneakernet the `.tar` and its `.tar.sha256` into the gap. On the disconnected
+host, verify the digest **before** unpacking, then clone the bundled repo:
 
 ```bash
-make load-images   # skopeo docker-archive -> ${REGISTRY_INTERNAL}
-make helm-apply    # helm upgrade -i qdrant -f overlays/openshift/values.yaml
+sha256sum -c qdrant-pdf-rag-<full-sha>.tar.sha256
+# verify member SHA256SUMS inside the tarball after unpack (load.sh does this)
+git clone repo.bundle repo && cd repo
 ```
 
-Acceptance after bring-up: pods run under `restricted-v2`, PVCs Bound (RWO
-block), `/readyz` OK on 6333, P2P 6335 among 3 replicas.
+From inside that clone:
+
+```bash
+make airgap-load     # verify member checksums, load images, push to ${INTERNAL_REGISTRY}
+make airgap-deploy   # Qdrant (vendored chart, prod sizing) + agent prod overlay; waits for Ready
+make airgap-ingest   # one-shot ingest Job against the caller-supplied corpus PVC
+make airgap-smoke    # /v1/search non-empty hit check (skips when nothing ingested yet); --expect variant printed at the end
+```
+
+The scripts are POSIX sh under `scripts/airgap/` and fail closed (missing
+env, `EMBED_MODE=hash`, NFS-looking StorageClass, SHA mismatches). Acceptance
+after bring-up: pods run under `restricted-v2`, PVCs Bound (RWO block),
+`/readyz` OK on 6333, P2P 6335 among 3 replicas.
 
 ## Configuration
 
