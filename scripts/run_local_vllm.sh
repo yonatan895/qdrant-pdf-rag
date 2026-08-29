@@ -48,90 +48,51 @@ if [ -n "${HF_TOKEN:-}" ]; then
     ENV_ARGS="${ENV_ARGS} -e HF_TOKEN"
 fi
 
-# Construct CLI options as individual quoted argv parameters to prevent word-splitting on JSON flags
-CLI_OPTS="--gpu-memory-utilization ${GPU_MEM} --max-model-len ${MAX_LEN} --max-num-seqs 1 --port ${PORT}"
-
-# If MODEL is a local directory, mount it directly into the container as /model
-# Note: vLLM serve expects the model path/name as a positional argument.
+# Detect local model directory vs HuggingFace hub model ID
+LOCAL_MOUNT=""
 if [ -d "${MODEL}" ]; then
     ABS_MODEL_DIR="$(cd "${MODEL}" && pwd)"
     MODEL_NAME="${SERVED_NAME:-$(basename "${ABS_MODEL_DIR}")}"
+    LOCAL_MOUNT="-v ${ABS_MODEL_DIR}:/model:ro"
+    SERVED_TARGET="/model"
     echo " Detected local model directory: ${ABS_MODEL_DIR}"
     echo " Serving as model name:         ${MODEL_NAME}"
     echo "============================================================"
-    case "${MODEL_NAME}" in
-        *gemma-4*|*gemma4*)
-            exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
-                -p "${PORT}:${PORT}" \
-                -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-                -v "${ABS_MODEL_DIR}:/model:ro" \
-                ${ENV_ARGS} \
-                --ipc=host \
-                "${IMAGE}" \
-                /model \
-                --served-model-name "${MODEL_NAME}" \
-                --gpu-memory-utilization "${GPU_MEM}" \
-                --max-model-len "${MAX_LEN}" \
-                --limit-mm-per-prompt '{"image":0,"audio":0}' \
-                --max-num-seqs 1 \
-                --port "${PORT}" \
-                --tool-call-parser gemma4 \
-                --reasoning-parser gemma4 \
-                --chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja \
-                "$@"
-            ;;
-        *)
-            exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
-                -p "${PORT}:${PORT}" \
-                -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-                -v "${ABS_MODEL_DIR}:/model:ro" \
-                ${ENV_ARGS} \
-                --ipc=host \
-                "${IMAGE}" \
-                /model \
-                --served-model-name "${MODEL_NAME}" \
-                --gpu-memory-utilization "${GPU_MEM}" \
-                --max-model-len "${MAX_LEN}" \
-                --limit-mm-per-prompt '{"image":0,"audio":0}' \
-                --max-num-seqs 1 \
-                --port "${PORT}" \
-                "$@"
-            ;;
-    esac
 else
-    case "${MODEL}" in
-        *gemma-4*|*gemma4*)
-            exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
-                -p "${PORT}:${PORT}" \
-                -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-                ${ENV_ARGS} \
-                --ipc=host \
-                "${IMAGE}" \
-                "${MODEL}" \
-                --gpu-memory-utilization "${GPU_MEM}" \
-                --max-model-len "${MAX_LEN}" \
-                --limit-mm-per-prompt '{"image":0,"audio":0}' \
-                --max-num-seqs 1 \
-                --port "${PORT}" \
-                --tool-call-parser gemma4 \
-                --reasoning-parser gemma4 \
-                --chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja \
-                "$@"
-            ;;
-        *)
-            exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
-                -p "${PORT}:${PORT}" \
-                -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-                ${ENV_ARGS} \
-                --ipc=host \
-                "${IMAGE}" \
-                "${MODEL}" \
-                --gpu-memory-utilization "${GPU_MEM}" \
-                --max-model-len "${MAX_LEN}" \
-                --limit-mm-per-prompt '{"image":0,"audio":0}' \
-                --max-num-seqs 1 \
-                --port "${PORT}" \
-                "$@"
-            ;;
-    esac
+    MODEL_NAME="${SERVED_NAME:-${MODEL}}"
+    SERVED_TARGET="${MODEL}"
 fi
+
+# Build positional vllm serve arguments
+# Note: vLLM serve expects the model path/name as the first positional argument.
+set -- "${SERVED_TARGET}" \
+    --gpu-memory-utilization "${GPU_MEM}" \
+    --max-model-len "${MAX_LEN}" \
+    --limit-mm-per-prompt '{"image":0,"audio":0}' \
+    --max-num-seqs 1 \
+    --port "${PORT}"
+
+if [ "${SERVED_TARGET}" = "/model" ]; then
+    set -- "$@" --served-model-name "${MODEL_NAME}"
+fi
+
+# Add Gemma-4 reasoning and tool parser flags (matching either $MODEL or $MODEL_NAME)
+case "${MODEL} ${MODEL_NAME}" in
+    *gemma-4*|*gemma4*)
+        CHAT_TMPL="${CHAT_TEMPLATE:-/vllm-workspace/examples/tool_chat_template_gemma4.jinja}"
+        set -- "$@" \
+            --tool-call-parser gemma4 \
+            --reasoning-parser gemma4 \
+            --chat-template "${CHAT_TMPL}"
+        ;;
+esac
+
+# Single unified container execution
+exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
+    -p "${PORT}:${PORT}" \
+    -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
+    ${LOCAL_MOUNT} \
+    ${ENV_ARGS} \
+    --ipc=host \
+    "${IMAGE}" \
+    "$@"
