@@ -128,7 +128,81 @@ def evaluate(golden: list[dict], settings) -> dict:
     }
 
 
-def summary_markdown(report: dict) -> str:
+EVAL_GATED_METRICS = {
+    # dotted path into the report -> minimum allowed ratio vs baseline (1.0 = no drop, 0.95 = 5% margin)
+    "recall@1": 0.90,
+    "recall@5": 0.95,
+    "mrr": 0.95,
+    "identifier.recall@1": 1.0,  # identifier queries must never drop
+}
+
+
+def _get(result: dict, dotted: str):
+    node: object = result
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def _set(target: dict, dotted: str, value) -> None:
+    parts = dotted.split(".")
+    node = target
+    for part in parts[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            node[part] = child
+        node = child
+    node[parts[-1]] = value
+
+
+def check_baseline(report: dict, baseline: dict | None) -> list[str]:
+    if baseline is None:
+        return []
+    regressions: list[str] = []
+    if report.get("failures", 0) > 0:
+        regressions.append(f"failures: {report['failures']} > 0 query errors occurred during evaluation")
+    for dotted, min_ratio in EVAL_GATED_METRICS.items():
+        current = _get(report, dotted)
+        if current is None:
+            print(f"warn: {dotted} not scored in this run; not gated", file=sys.stderr)
+            continue
+        base_val = _get(baseline, dotted)
+        if base_val is None:
+            print(f"warn: baseline has no {dotted}; not gated", file=sys.stderr)
+            continue
+        # For accuracy, current must be >= base_val * min_ratio
+        threshold = round(base_val * min_ratio, 3)
+        if current < threshold:
+            regressions.append(
+                f"{dotted}: {current} < baseline {base_val} (min allowed {threshold} with ratio {min_ratio})"
+            )
+    return regressions
+
+
+def update_baseline(report: dict, baseline_path: Path) -> None:
+    payload: dict = {
+        "_meta": {
+            "note": "Re-baseline via `make eval-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/eval_retrieval.py.",
+            "n": report.get("n", 0),
+            "collection": report.get("collection", "local-corpus"),
+            "embed_mode": report.get("embed_mode", "hash"),
+            "updated": time.strftime("%Y-%m-%d"),
+        },
+        "recall@1": report.get("recall@1"),
+        "recall@3": report.get("recall@3"),
+        "recall@5": report.get("recall@5"),
+        "mrr": report.get("mrr"),
+        "identifier": report.get("identifier", {}),
+        "nl": report.get("nl", {}),
+    }
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+
+
+def summary_markdown(report: dict, baseline: dict | None = None) -> str:
     lines = [
         "## Retrieval eval",
         "",
@@ -137,12 +211,15 @@ def summary_markdown(report: dict) -> str:
             f"collection={report['collection']} ({report['elapsed_s']}s)"
         ),
         "",
-        "| metric | all | identifier | nl |",
-        "|---|---|---|---|",
+        "| metric | all | identifier | nl | baseline | gate |",
+        "|---|---|---|---|---|---|",
     ]
     for key in ("recall@1", "recall@3", "recall@5", "mrr"):
+        base_val = _get(baseline, key) if baseline else None
+        min_ratio = EVAL_GATED_METRICS.get(key)
+        gate = f">= {round(base_val * min_ratio, 3)}" if (base_val is not None and min_ratio is not None) else "n/a"
         lines.append(
-            f"| {key} | {report[key]} | {report['identifier'].get(key)} | {report['nl'].get(key)} |"
+            f"| {key} | {report[key]} | {report['identifier'].get(key)} | {report['nl'].get(key)} | {base_val} | {gate} |"
         )
     lines += ["", "| query | kind | r@1 | r@5 | mrr | top hit doc_ids |", "|---|---|---|---|---|---|"]
     for row in report["rows"]:
@@ -206,12 +283,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--golden", type=Path, default=None, help="golden JSONL path")
     parser.add_argument("--out", type=Path, default=None, help="write the JSON report here")
     parser.add_argument("--summary", type=Path, default=None, help="write a markdown table here")
+    parser.add_argument("--check", type=Path, default=None, help="fail on accuracy regressions vs this baseline")
+    parser.add_argument("--update-baseline", type=Path, default=None, help="record a new baseline here")
     parser.add_argument(
         "--label-draft", action="store_true",
         help="draft golden entries from collection payload instead of scoring",
     )
     parser.add_argument("--docs", type=int, default=40, help="label-draft: docs to sample")
     args = parser.parse_args(argv)
+    if args.check and args.update_baseline:
+        parser.error("--check and --update-baseline are mutually exclusive")
 
     settings = load_settings()
     if args.label_draft:
@@ -225,7 +306,19 @@ def main(argv: list[str] | None = None) -> int:
     golden = load_golden(args.golden)
     report = evaluate(golden, settings)
 
-    summary = summary_markdown(report)
+    baseline = None
+    regressions: list[str] = []
+    if args.check:
+        if not args.check.exists():
+            print(f"warn: baseline {args.check} missing; nothing gated", file=sys.stderr)
+        else:
+            baseline = json.loads(args.check.read_text(encoding="utf-8"))
+            regressions = check_baseline(report, baseline)
+    if args.update_baseline:
+        update_baseline(report, args.update_baseline)
+        print(f"baseline written to {args.update_baseline}", file=sys.stderr)
+
+    summary = summary_markdown(report, baseline)
     print(summary, file=sys.stderr)
     if args.summary:
         args.summary.parent.mkdir(parents=True, exist_ok=True)
@@ -236,6 +329,12 @@ def main(argv: list[str] | None = None) -> int:
         args.out.write_text(payload + "\n")
     else:
         print(payload)
+
+    if regressions:
+        print("REGRESSIONS:", file=sys.stderr)
+        for r in regressions:
+            print(f"  {r}", file=sys.stderr)
+        return 1
     return 0 if report["failures"] == 0 else 1
 
 

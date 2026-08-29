@@ -1,0 +1,23 @@
+{
+  "_meta": {
+    "note": "Re-baseline via `make eval-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/eval_retrieval.py.",
+    "n": 12,
+    "collection": "local-corpus",
+    "embed_mode": "hash",
+    "updated": "2026-08-29"
+  },
+  "recall@1": 0.5,
+  "recall@3": 0.75,
+  "recall@5": 0.75,
+  "mrr": 0.625,
+  "identifier": {
+    "recall@1": 1.0,
+    "recall@5": 1.0,
+    "mrr": 1.0
+  },
+  "nl": {
+    "recall@1": 0.333,
+    "recall@5": 0.667,
+    "mrr": 0.5
+  }
+}
