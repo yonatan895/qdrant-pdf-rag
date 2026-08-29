@@ -252,6 +252,32 @@ def test_plain_doc_retrievable_by_stem_doc_id(qdrant_url, mock_url, corpus, tmp_
         assert "widget-guide" in {h["doc_id"] for h in body["hits"]}
 
 
+def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):
+    """The eval harness (scripts/eval_retrieval.py) scores the real pipeline:
+    identifier queries must be perfect on the synthetic corpus (filters
+    guarantee them); the nl query must reach its doc within recall@5
+    (membership, never top-1 across equal-text chunks)."""
+    from scripts.eval_retrieval import evaluate
+
+    from mainframe_rag.config import load_settings
+
+    _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv.jsonl")
+    monkeypatch.setenv("QDRANT_URL", qdrant_url)
+    monkeypatch.setenv("QDRANT_COLLECTION", "sim-hash")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+
+    golden = [
+        {"query": "IEA500I operator message", "expected_doc_ids": ["SA22-0000-00"]},
+        {"query": "SA22-7777-01 initialization parameters", "expected_doc_ids": ["SA22-7777-01"]},
+        {"query": "widget torque buffer", "expected_doc_ids": ["widget-guide"]},
+    ]
+    report = evaluate(golden, load_settings())
+    assert report["failures"] == 0 and report["n"] == 3
+    assert report["identifier"]["recall@1"] == 1.0
+    assert report["identifier"]["mrr"] == 1.0
+    assert report["nl"]["recall@5"] == 1.0
+
+
 def test_vllm_shaped_embed_variant(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):
     """The prod embed path: dense over real HTTP to the mock vLLM endpoint,
     sparse via local fastembed BM25 (weights must already be cached)."""

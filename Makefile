@@ -161,6 +161,19 @@ bench-baseline: | .venv
 loadtest: | .venv
 	$(PY) scripts/loadtest.py --url $(AGENT_URL) --endpoint search --concurrency 8 --duration 30
 
+# ---------------------------------------------------------------- retrieval accuracy
+# Eval against a running Qdrant (sim-qdrant or QDRANT_SIM_URL); scores
+# evals/golden.jsonl through the real pipeline (recall@k / MRR).
+.PHONY: eval eval-draft
+eval: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl \
+	  --out $(BUNDLE_DIR)/eval-report.json --summary $(BUNDLE_DIR)/eval-summary.md
+
+# Draft golden-set candidates from a collection's payload (edit the queries).
+eval-draft: | .venv
+	.venv/bin/python scripts/eval_retrieval.py --label-draft --docs 40
+
 # ---------------------------------------------------------------- e2e demo
 .PHONY: e2e-demo-pdfs
 e2e-demo-pdfs: | .venv
@@ -179,5 +192,6 @@ help:
 	@echo "Air-gap happy path : airgap-pack (connected) | airgap-load airgap-deploy airgap-ingest airgap-smoke (inside the gap)"
 	@echo "Simulation     : sim (pytest integration tier; docker Qdrant) | sim-qdrant sim-clean"
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest"
+	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-draft (label helper)"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."
