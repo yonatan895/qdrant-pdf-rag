@@ -109,6 +109,32 @@ airgap-ingest:
 airgap-smoke:
 	sh scripts/airgap/smoke.sh
 
+# ---------------------------------------------------------------- simulation (docker Qdrant, tests/test_integration_sim.py)
+SIM_CONTAINER ?= qdrant-sim
+SIM_PORT ?= 6333
+
+# End-to-end simulation: real PDFs -> real ingest -> agent endpoints.
+# Needs docker (or an already-running server via QDRANT_SIM_URL=...).
+.PHONY: sim
+sim: | .venv
+	.venv/bin/python -m pytest -m integration -v
+
+# Long-lived sim server for manual iteration: make sim-qdrant, then
+# QDRANT_SIM_URL=http://127.0.0.1:$(SIM_PORT) make sim
+.PHONY: sim-qdrant
+sim-qdrant:
+	@if docker inspect $(SIM_CONTAINER) >/dev/null 2>&1; then \
+	  echo "sim qdrant already running: QDRANT_SIM_URL=http://127.0.0.1:$(SIM_PORT)"; \
+	else \
+	  docker run -d --name $(SIM_CONTAINER) --rm -p 127.0.0.1:$(SIM_PORT):6333 \
+	    $$(awk 'NF && !/^#/ && /qdrant/ {print $$1; exit}' images.txt); \
+	  echo "Qdrant sim up: QDRANT_SIM_URL=http://127.0.0.1:$(SIM_PORT) make sim"; \
+	fi
+
+.PHONY: sim-clean
+sim-clean:
+	-docker stop $(SIM_CONTAINER) 2>/dev/null || true
+
 # ---------------------------------------------------------------- e2e demo
 .PHONY: e2e-demo-pdfs
 e2e-demo-pdfs: | .venv
@@ -125,5 +151,6 @@ clean:
 help:
 	@echo "Connected host : venv wheelhouse bm25-weights pull-chart helm-lint helm-template build-images"
 	@echo "Air-gap happy path : airgap-pack (connected) | airgap-load airgap-deploy airgap-ingest airgap-smoke (inside the gap)"
+	@echo "Simulation     : sim (pytest integration tier; docker Qdrant) | sim-qdrant sim-clean"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."

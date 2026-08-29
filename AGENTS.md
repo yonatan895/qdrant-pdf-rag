@@ -108,6 +108,7 @@ If a review comment conflicts with this file, follow this file and note the conf
 - Cover both: IBM-shaped synthetic extractors (form number, message id, outline) **and** generic PDFs (no outline, no form number, unknown vendor).
 - CI must fail if `git ls-files` matches `.pdf` / `.pdx` / `.idx`.
 - Do not call live Qdrant, vLLM, or the internet in unit tests. Fake the client. Ingest tests use `--dry-run`.
+- Simulation tier (marker `integration`, `make sim`): real PDFs → real ingest into a docker Qdrant (the `images.txt` pin, or a running server via `QDRANT_SIM_URL`) → agent endpoints over the real app. `scripts/mock_vllm.py` is the only stand-in (deterministic embeds + chat); no retrieval/LLM code is monkeypatched. Docker-only, loopback-only, corpus generated at runtime. Plain `pytest` deselects it (`-m 'not integration'` in addopts), so the required gate never needs docker — the "fake the client" rule above stays true for unit tests.
 - `test_chrome_strip` must keep using a **long** synthetic page list (≥8 pages). Chrome is disabled on short docs on purpose.
 - Prefer tests that would have caught the last CI failure.
 

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pymupdf
 
-HEADER = "SA22-0000-00 Synthetic Operating System Reference"
 FOOTER = "(c) Synthetic Corp 2026 - Fixture for testing only"
 
 PAGES = [
@@ -55,20 +54,31 @@ TOC = [
 ]
 
 
-def build(out_path: Path) -> Path:
+def build(
+    out_path: Path,
+    doc_id: str = "SA22-0000-00",
+    title: str = "Synthetic Operating System Reference",
+) -> Path:
+    """Build the IBM-shaped fixture. doc_id/title are parameterized so the
+    simulation tier can build a second, distinct document; the defaults keep
+    the classic fixture unchanged."""
+    header = f"{doc_id} {title}"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc = pymupdf.open()
     for i, text in enumerate(PAGES):
+        if i == 0:
+            body = text.split("\n\n", 1)[1]
+            text = f"{title}\nz/OS V9R9\n{doc_id}\n\n{body}"
         page = doc.new_page()
         w, h = page.rect.width, page.rect.height
         page.insert_textbox(pymupdf.Rect(72, 72, w - 72, h - 90), text, fontsize=11)
-        page.insert_textbox(pymupdf.Rect(72, 30, w - 72, 55), HEADER, fontsize=8)
+        page.insert_textbox(pymupdf.Rect(72, 30, w - 72, 55), header, fontsize=8)
         page.insert_textbox(pymupdf.Rect(72, h - 60, w - 72, h - 40), FOOTER, fontsize=8)
     doc.set_toc(TOC)
     doc.set_page_labels(
         [{"startpage": 0, "prefix": "1-", "style": "D", "firstpagenumber": 1}]
     )
-    doc.set_metadata({"title": "Synthetic Operating System Reference", "author": "Synthetic Corp"})
+    doc.set_metadata({"title": title, "author": "Synthetic Corp"})
     doc.save(out_path)
     doc.close()
     return out_path
