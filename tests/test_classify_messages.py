@@ -32,3 +32,31 @@ def test_chrome_strip():
     stripped = strip_page(pages[0], chrome)
     assert "IEA500I Manual" not in stripped
     assert "body line 0" in stripped
+
+
+def test_strip_page_keeps_roman_letter_words():
+    """Regression: the old [ivxlcdm]+ IGNORECASE charset matched any word made
+    of roman-numeral letters, so standalone "XML", "civil", "dim" lines were
+    silently deleted as page numbers. Only strict numerals may be dropped."""
+    chrome: set[str] = set()
+    page = "XML samples\nxml\ncivil\ndim\nmid\nlid\nxiv\nXII\n12\n12-34"
+    out = strip_page(page, chrome)
+    for kept in ("XML samples", "xml", "civil", "dim", "mid", "lid"):
+        assert kept in out, kept
+    for dropped in ("xiv", "XII", "12", "12-34"):
+        assert dropped not in out, dropped
+
+
+def test_strip_page_drops_bare_page_numbers_everywhere():
+    """Page-number stripping is per-line and does not depend on chrome detection."""
+    page = "body\n7\niv.\n1234"
+    out = strip_page(page, set())
+    assert out == "body\niv."
+
+
+def test_strip_page_keeps_inner_dot_numbers():
+    """A standalone "1.2" is a section number, not a page footer: the old
+    r"\\d+[-.]?\\d*" form deleted it. Dash-between stays a page range."""
+    out = strip_page("intro\n1.2\n2.10\n12-34", set())
+    assert "1.2" in out and "2.10" in out
+    assert "12-34" not in out

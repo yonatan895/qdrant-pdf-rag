@@ -15,7 +15,16 @@ MIN_PAGES_FOR_CHROME = 8
 MIN_HITS = 3
 
 _WHITESPACE_RE = re.compile(r"\s+")
-_PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$|^[ivxlcdm]{1,8}$|^\d+[-.]?\d*$", re.IGNORECASE)
+# Bare page-number lines: decimal ("12", "1234", "12-34", "12.") or a strict
+# roman numeral ("xiv", "XII", "i"). The roman form is structural, not a
+# char-set: [ivxlcdm]+ with IGNORECASE also matched real words, so standalone
+# "XML", "civil", "dim" lines were silently deleted from pages. The decimal
+# form keeps an inner dot out ("1.2" is a section number, not a footer).
+# Genuinely ambiguous valid numerals ("mix" = 1009) stay treated as numerals.
+_ROMAN_NUMERAL_RE = re.compile(
+    r"m*(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})", re.IGNORECASE
+)
+_DECIMAL_PAGE_RE = re.compile(r"\d+(?:-\d+)?[-.]?")
 
 
 def _normalize(line: str) -> str:
@@ -23,7 +32,10 @@ def _normalize(line: str) -> str:
 
 
 def _is_page_number(line: str) -> bool:
-    return bool(_PAGE_NUMBER_RE.match(line.strip()))
+    s = line.strip()
+    if not s:
+        return False
+    return bool(_DECIMAL_PAGE_RE.fullmatch(s) or _ROMAN_NUMERAL_RE.fullmatch(s))
 
 
 def _sample_indices(page_count: int) -> list[int]:
