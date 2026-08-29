@@ -136,6 +136,27 @@ sim-qdrant:
 sim-clean:
 	-docker stop $(SIM_CONTAINER) 2>/dev/null || true
 
+# ---------------------------------------------------------------- benchmarks (simulation tier + load)
+AGENT_URL ?= http://127.0.0.1:8080
+
+# Full harness against the pinned Qdrant image; fails on regressions vs the
+# committed baseline (RSS/disk x1.5, latency p95 x3 — see scripts/benchmark.py).
+.PHONY: bench
+bench: | .venv
+	$(PY) scripts/benchmark.py --collection bench --check benchmarks/baseline.json \
+	  --out $(BUNDLE_DIR)/bench-results.json --summary $(BUNDLE_DIR)/bench-summary.md
+
+# Re-record the committed baseline (dedicated PR — AGENTS.md).
+.PHONY: bench-baseline
+bench-baseline: | .venv
+	$(PY) scripts/benchmark.py --collection bench --update-baseline benchmarks/baseline.json \
+	  --out $(BUNDLE_DIR)/bench-results.json --summary $(BUNDLE_DIR)/bench-summary.md
+
+# Standalone load run against an already-running agent.
+.PHONY: loadtest
+loadtest: | .venv
+	$(PY) scripts/loadtest.py --url $(AGENT_URL) --endpoint search --concurrency 8 --duration 30
+
 # ---------------------------------------------------------------- e2e demo
 .PHONY: e2e-demo-pdfs
 e2e-demo-pdfs: | .venv
@@ -153,5 +174,6 @@ help:
 	@echo "Connected host : venv wheelhouse bm25-weights pull-chart helm-lint helm-template build-images"
 	@echo "Air-gap happy path : airgap-pack (connected) | airgap-load airgap-deploy airgap-ingest airgap-smoke (inside the gap)"
 	@echo "Simulation     : sim (pytest integration tier; docker Qdrant) | sim-qdrant sim-clean"
+	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."
