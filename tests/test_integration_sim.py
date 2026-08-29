@@ -256,8 +256,9 @@ def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_pa
     """The eval harness (scripts/eval_retrieval.py) scores the real pipeline:
     identifier queries must be perfect on the synthetic corpus (filters
     guarantee them); the nl query must reach its doc within recall@5
-    (membership, never top-1 across equal-text chunks)."""
-    from scripts.eval_retrieval import evaluate
+    (membership, never top-1 across equal-text chunks). Baseline checking
+    must produce zero regressions."""
+    from scripts.eval_retrieval import check_baseline, evaluate, update_baseline
 
     from mainframe_rag.config import load_settings
 
@@ -276,6 +277,13 @@ def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_pa
     assert report["identifier"]["recall@1"] == 1.0
     assert report["identifier"]["mrr"] == 1.0
     assert report["nl"]["recall@5"] == 1.0
+
+    # Baseline roundtrip & check
+    baseline_path = tmp_path / "eval-baseline.json"
+    update_baseline(report, baseline_path)
+    import json
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    assert check_baseline(report, baseline) == []
 
 
 def test_vllm_shaped_embed_variant(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):

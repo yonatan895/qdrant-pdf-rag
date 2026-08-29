@@ -163,11 +163,19 @@ loadtest: | .venv
 
 # ---------------------------------------------------------------- retrieval accuracy
 # Eval against a running Qdrant (sim-qdrant or QDRANT_SIM_URL); scores
-# evals/golden.jsonl through the real pipeline (recall@k / MRR).
-.PHONY: eval eval-draft
+# evals/golden.jsonl through the real pipeline (recall@k / MRR) and checks
+# against the committed baseline (tolerances in scripts/eval_retrieval.py).
+.PHONY: eval eval-baseline eval-draft
 eval: | .venv
 	@mkdir -p $(BUNDLE_DIR)
-	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl \
+	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --check evals/baseline.json \
+	  --out $(BUNDLE_DIR)/eval-report.json --summary $(BUNDLE_DIR)/eval-summary.md
+
+# Re-record the committed accuracy baseline (dedicated PR — AGENTS.md).
+.PHONY: eval-baseline
+eval-baseline: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --update-baseline evals/baseline.json \
 	  --out $(BUNDLE_DIR)/eval-report.json --summary $(BUNDLE_DIR)/eval-summary.md
 
 # Draft golden-set candidates from a collection's payload (edit the queries).
@@ -192,6 +200,6 @@ help:
 	@echo "Air-gap happy path : airgap-pack (connected) | airgap-load airgap-deploy airgap-ingest airgap-smoke (inside the gap)"
 	@echo "Simulation     : sim (pytest integration tier; docker Qdrant) | sim-qdrant sim-clean"
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest"
-	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-draft (label helper)"
+	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper)"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."
