@@ -98,8 +98,15 @@ class QdrantPoints(Protocol):
         using: str,
         limit: int,
         query_filter: models.Filter | None,
-        with_payload: bool,
+        with_payload: bool | list[str],
     ) -> models.QueryResponse: ...
+
+    def query_batch_points(
+        self,
+        collection_name: str,
+        *,
+        requests: list[models.QueryRequest],
+    ) -> list[models.QueryResponse]: ...
 
 
 @runtime_checkable

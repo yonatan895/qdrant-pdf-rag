@@ -12,7 +12,6 @@ from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
-from mainframe_rag.ingest.embed import build_embed_text
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 from mainframe_rag.ports import QdrantPoints, SparseVector
 
@@ -173,10 +172,6 @@ def upsert_chunks(
             "members": chunk.members,
             "sha256": parsed.sha256,
             "text": chunk.text,
-            "embed_text": build_embed_text(
-                parsed.product, parsed.version, chunk.doc_id, parsed.title,
-                chunk.heading_path, chunk.text,
-            ),
         }
         points.append(
             models.PointStruct(

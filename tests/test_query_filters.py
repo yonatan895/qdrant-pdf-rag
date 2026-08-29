@@ -85,12 +85,35 @@ def _point(pid: str, score: float = 1.0) -> models.ScoredPoint:
 
 
 class FakeQdrant:
+    def __init__(self, dense, sparse, support_batch: bool = True):
+        self._dense, self._sparse = dense, sparse
+        self.support_batch = support_batch
+        self.queries = []
+        self.batch_requests = []
+
+    def query_points(self, collection, query, using, limit, query_filter, with_payload, **_):
+        self.queries.append({"using": using, "filter": query_filter, "with_payload": with_payload})
+        points = self._dense if using == "dense" else self._sparse
+        return SimpleNamespace(points=list(points))
+
+    def query_batch_points(self, collection, requests, **_):
+        self.batch_requests.extend(requests)
+        results = []
+        for req in requests:
+            self.queries.append({"using": req.using, "filter": req.filter, "with_payload": req.with_payload})
+            points = self._dense if req.using == "dense" else self._sparse
+            results.append(SimpleNamespace(points=list(points)))
+        return results
+
+
+class LegacyFakeQdrant:
+    """Client double lacking query_batch_points to test graceful fallback."""
     def __init__(self, dense, sparse):
         self._dense, self._sparse = dense, sparse
         self.queries = []
 
     def query_points(self, collection, query, using, limit, query_filter, with_payload, **_):
-        self.queries.append({"using": using, "filter": query_filter})
+        self.queries.append({"using": using, "filter": query_filter, "with_payload": with_payload})
         points = self._dense if using == "dense" else self._sparse
         return SimpleNamespace(points=list(points))
 
@@ -124,6 +147,34 @@ def test_search_applies_message_ids_filter_in_prefetch(embedder):
     assert {h.chunk_id for h in hits} == {"a", "b"}
 
 
+def test_search_uses_query_batch_points_with_field_include_list(embedder):
+    """search() must execute dense + sparse prefetches in a single batch call
+    with restricted payload fields (not full payload)."""
+    from mainframe_rag.retrieve.query import RETRIEVE_PAYLOAD_FIELDS
+
+    fake = FakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    hits, _kind, _timings = search(fake, embedder, "mainframe_manuals", "sample query", limit=5)
+    assert len(fake.batch_requests) == 2
+    assert fake.batch_requests[0].using == "dense"
+    assert fake.batch_requests[1].using == "bm25"
+    for req in fake.batch_requests:
+        assert req.with_payload == list(RETRIEVE_PAYLOAD_FIELDS)
+        assert "embed_text" not in req.with_payload
+    assert len(hits) == 2
+
+
+def test_search_falls_back_to_query_points_when_batch_unsupported(embedder):
+    """search() must fall back to sequential query_points if the client lacks query_batch_points."""
+    from mainframe_rag.retrieve.query import RETRIEVE_PAYLOAD_FIELDS
+
+    fake = LegacyFakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    hits, _kind, _timings = search(fake, embedder, "mainframe_manuals", "sample query", limit=5)
+    assert len(fake.queries) == 2
+    for q in fake.queries:
+        assert q["with_payload"] == list(RETRIEVE_PAYLOAD_FIELDS)
+    assert len(hits) == 2
+
+
 def test_search_identifier_weights_favor_bm25(embedder):
     fake = FakeQdrant(dense=[_point("dense-only")], sparse=[_point("sparse-only")])
     hits, kind, _ = search(fake, embedder, "mainframe_manuals", "IEA500I", limit=5)
@@ -153,3 +204,4 @@ def test_rrf_hits_carry_citation_fields():
     hits = rrf_fuse([_point("a")], [], weights=(1.0, 3.0))
     assert hits[0].cite == "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
     assert hits[0].text == "IEA500I synthetic text"
+

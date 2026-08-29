@@ -83,3 +83,55 @@ def test_ensure_collection_requires_dense_dim():
     client = RecordingClient(exists=False)
     with pytest.raises(RuntimeError, match="DENSE_DIM"):
         ensure_collection(client, _settings(dim=None))
+
+
+def test_upsert_chunks_payload_is_slimmed_without_embed_text():
+    """PointStruct payloads must store text and metadata without duplicating
+    text into embed_text (halving write bytes and storage)."""
+    from mainframe_rag.ingest.chunk import Chunk
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+    from mainframe_rag.ingest.qdrant_io import upsert_chunks
+
+    class UpsertRecordingClient(RecordingClient):
+        def __init__(self):
+            super().__init__()
+            self.upserted_points = []
+
+        def upsert(self, collection_name, *, points, wait=True):
+            self.upserted_points.extend(points)
+            return True
+
+    client = UpsertRecordingClient()
+    parsed = ParsedDoc(
+        path="manual.pdf",
+        doc_id="SC14-7315-70",
+        sha256="abc123",
+        vendor="IBM",
+        product="z/OS",
+        version="3.2",
+        title="Sample Manual",
+        page_count=10,
+    )
+    chunk = Chunk(
+        chunk_id="00000000-0000-0000-0000-000000000001",
+        doc_id="SC14-7315-70",
+        heading_path="Chapter 1 > Overview",
+        page_start=1,
+        page_label="1-1",
+        chunk_type="narrative",
+        text="This is the main body text of the chunk.",
+        message_ids=[],
+        members=[],
+        ordinal=0,
+    )
+    vectors = [([0.1] * 4, ([1, 2], [1.0, 2.0]))]
+
+    count = upsert_chunks(client, _settings(4), parsed, [chunk], vectors)
+    assert count == 1
+    assert len(client.upserted_points) == 1
+    payload = client.upserted_points[0].payload
+    assert payload["doc_id"] == "SC14-7315-70"
+    assert payload["text"] == "This is the main body text of the chunk."
+    assert payload["heading_path"] == "Chapter 1 > Overview"
+    assert "embed_text" not in payload, "embed_text must not be stored in point payload"
+
