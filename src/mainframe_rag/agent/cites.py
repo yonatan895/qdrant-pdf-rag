@@ -59,10 +59,18 @@ def _normalize_citation_line(line: str) -> str:
     return candidate
 
 
-def extract_citation_lines(text: str) -> list[str]:
-    """Citation-shaped lines from the model output (after the Citations: header)."""
-    lines: list[str] = []
+def extract_body_and_citations(text: str) -> tuple[str, list[str]]:
+    """Separates answer body prose from citations following any Citations: header.
+
+    A citations block begins at CITATIONS_HEADER_RE and consumes citation-shaped
+    lines matching CITATION_LINE_RE or bulleted list markers. At the first non-citation/
+    non-bullet line or blank line, the citations block terminates, and subsequent lines
+    are preserved as answer prose.
+    """
+    body_lines: list[str] = []
+    raw_citation_lines: list[str] = []
     in_citations = False
+
     for line in text.splitlines():
         if CITATIONS_HEADER_RE.match(line):
             in_citations = True
@@ -70,12 +78,29 @@ def extract_citation_lines(text: str) -> list[str]:
         if in_citations:
             raw = line.strip()
             if not raw:
-                if lines:
-                    break  # blank line after the list ends it
+                if raw_citation_lines:
+                    in_citations = False
                 continue
+            is_bullet = bool(_MARKER_RE.match(raw))
             stripped = _normalize_citation_line(raw)
-            if stripped:
-                lines.append(stripped)
+            is_cite = bool(CITATION_LINE_RE.match(stripped))
+
+            if is_cite or is_bullet:
+                raw_citation_lines.append(stripped)
+                continue
+            else:
+                # Non-citation, non-bullet line ends the block; belongs to body prose
+                in_citations = False
+                body_lines.append(line)
+                continue
+        body_lines.append(line)
+
+    return "\n".join(body_lines), raw_citation_lines
+
+
+def extract_citation_lines(text: str) -> list[str]:
+    """Citation-shaped lines from the model output (after the Citations: header)."""
+    _, lines = extract_body_and_citations(text)
     return lines
 
 
@@ -110,6 +135,7 @@ def strip_unauthorized_citations(text: str, allowed: set[str]) -> str:
 
 __all__ = [
     "CITATION_LINE_RE",
+    "extract_body_and_citations",
     "extract_citation_lines",
     "strip_unauthorized_citations",
     "valid_citations",

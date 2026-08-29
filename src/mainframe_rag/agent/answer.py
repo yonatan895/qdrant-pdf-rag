@@ -14,8 +14,8 @@ import httpx2
 from mainframe_rag.config import Settings
 from mainframe_rag.retrieve.query import SearchHit
 
-FENCE_RE = re.compile(r"```([a-zA-Z]*)\n(.*?)```", re.DOTALL)
-CITATIONS_BLOCK_RE = re.compile(r"(?:\n|^)\s*Citations:\s*\n(?:[ \t]*[-*•]?[ \t]*[^\n]+\n?)*", re.IGNORECASE)
+FENCE_RE = re.compile(r"```([a-zA-Z0-9_-]*)\n(.*?)```", re.DOTALL)
+SCRIPT_LANGS = frozenset({"jcl", "rexx", "sh", "bash", "shell", "python", "py", "yaml", "yml", "json"})
 
 SYSTEM_PROMPT = (
     "You are a mainframe operations expert (z/OS, CICS, Db2, IMS, JES2/3, RACF, "
@@ -149,27 +149,35 @@ def parse_answer(
     unvalidated — stripping citation-looking lines would corrupt examples.
     Documented behavior, pinned by test (issue #20 PR C)."""
     from mainframe_rag.agent.cites import (
+        extract_body_and_citations,
         strip_unauthorized_citations,
-        valid_citations,
     )
 
-    fence = FENCE_RE.search(content)
-    script: str | None = None
-    if fence:
-        lang = fence.group(1).strip().lower()
-        fence_content = fence.group(2).strip()
-        body_without_fence = content.replace(fence.group(0), "").strip()
-        # If explicitly a code script (jcl, rexx, sh, etc.) or there is substantial non-fenced body text
-        if lang in ("jcl", "rexx", "sh", "bash", "python", "yaml", "json") or len(body_without_fence) > 50:
-            script = fence_content
-            content_for_body = body_without_fence
+    # 1. Process code fences: extract scripts, drop thinking blocks, unwrap prose fences
+    scripts: list[str] = []
+    text_processed = content
+    for match in FENCE_RE.finditer(content):
+        lang = match.group(1).strip().lower()
+        code = match.group(2).strip()
+        if lang in SCRIPT_LANGS:
+            scripts.append(code)
+            text_processed = text_processed.replace(match.group(0), "")
+        elif lang in ("thought", "thinking"):
+            text_processed = text_processed.replace(match.group(0), "")
         else:
-            # Whole answer was wrapped in markdown code fence
-            content_for_body = fence_content
-    else:
-        content_for_body = content
+            # Unlabeled or prose markdown code fence - unwrap into answer body
+            text_processed = text_processed.replace(match.group(0), code)
 
-    citations = valid_citations(content, allowed_citations)
+    script = "\n\n".join(scripts).strip() if scripts else None
+
+    # 2. Extract citations & body prose
+    body, raw_cite_lines = extract_body_and_citations(text_processed)
+
+    citations: list[str] = []
+    for c in raw_cite_lines:
+        if c in allowed_citations and c not in citations:
+            citations.append(c)
+
     citations_inferred = False
     inferred_indices: list[int] = []
 
@@ -186,15 +194,9 @@ def parse_answer(
                         inferred_indices.append(idx + 1)
                         citations_inferred = True
 
-    # Strip Citations: block from anywhere in the text (top, middle, or bottom)
-    body = CITATIONS_BLOCK_RE.sub("\n", content_for_body).strip()
-    if not body and script:
-        body = script
-        script = None
-
-    # A fabricated full-format cite quoted mid-answer must not reach the
-    # client either (issue #20 PR C: no cite outside the hit set).
+    # 3. Clean up unauthorized citations in body
     body = strip_unauthorized_citations(body, allowed_citations)
+
     return {
         "answer": body.strip(),
         "citations": citations,
