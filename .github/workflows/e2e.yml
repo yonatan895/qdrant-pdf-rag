@@ -219,6 +219,113 @@ jobs:
           oc delete project "$NS" --wait=false --ignore-not-found || \
             kubectl delete namespace "$NS" --ignore-not-found --wait=false || true
 
+  # --------------------------------- air-gap config dry-run (no cluster, no secrets)
+  # Runs the REAL airgap scripts with AIRGAP_DRYRUN=1 on every PR: renders the
+  # PROD agent + ingest manifests, enforces the placeholder fail-close, the
+  # SHA rules, both PULL_SECRET branches, and the size-knob flow. Proves the
+  # deployment CONFIG with zero secrets and zero cluster; the live rehearsal
+  # (below, secrets-gated) proves the deployment comes up. A true in-runner
+  # OpenShift is not feasible (CRC needs KVM; microshift-aio abandoned 2022),
+  # so this is the PR-level gate for the air-gap path.
+  airgap-dryrun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install helm (vendored-chart deploy)
+        uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
+
+      - name: Install pinned kubectl (kustomize render + patch --local)
+        run: |
+          KUBECTL_VERSION=v1.31.2
+          # sha256 recorded in-repo (AGENTS.md §6): dl.k8s.io checksum file.
+          KUBECTL_SHA256=399e9d1995da80b64d2ef3606c1a239018660d8b35209fba3f7b0bc11c631c68
+          curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
+          sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client=true
+
+      - name: airgap-deploy dry-run (prod render, fail-closed placeholders, knobs)
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+          AIRGAP_DRYRUN: "1"
+          INTERNAL_REGISTRY: ghcr.io/dryrun-standin
+          NAMESPACE: airgap-dryrun
+          STORAGE_CLASS: standard
+          EMBED_MODEL: embed-from-airgap-env
+          DENSE_DIM: "768"
+          VLLM_BASE_URL: http://vllm:8000
+          QDRANT_STORAGE_SIZE: 1Gi
+        run: |
+          make airgap-deploy
+          test -f dist/agent-rendered.yaml
+          grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-agent:${SHA}" dist/agent-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml
+
+      - name: airgap-deploy dry-run with PULL_SECRET + extra values
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+          AIRGAP_DRYRUN: "1"
+          INTERNAL_REGISTRY: ghcr.io/dryrun-standin
+          NAMESPACE: airgap-dryrun
+          STORAGE_CLASS: standard
+          EMBED_MODEL: embed-from-airgap-env
+          DENSE_DIM: "768"
+          VLLM_BASE_URL: http://vllm:8000
+          PULL_SECRET: ci-pull
+          QDRANT_STORAGE_SIZE: 1Gi
+        run: |
+          printf 'resources:\n  requests: {cpu: "100m", memory: 256Mi}\n' > "$RUNNER_TEMP/vals.yaml"
+          export QDRANT_EXTRA_VALUES="$RUNNER_TEMP/vals.yaml"
+          out="$(make airgap-deploy)"
+          echo "$out" | grep -q "persistence.size=1Gi"
+          echo "$out" | grep -q "imagePullSecrets\[0\].name=ci-pull"
+          grep -q "name: ci-pull" dist/agent-rendered.yaml
+
+      - name: airgap-deploy dry-run fails closed on a bad extra-values file
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+          AIRGAP_DRYRUN: "1"
+          INTERNAL_REGISTRY: ghcr.io/dryrun-standin
+          NAMESPACE: airgap-dryrun
+          STORAGE_CLASS: standard
+          EMBED_MODEL: embed-from-airgap-env
+          DENSE_DIM: "768"
+          VLLM_BASE_URL: http://vllm:8000
+          QDRANT_EXTRA_VALUES: /nonexistent/vals.yaml
+        run: |
+          if make airgap-deploy 2>err.log; then
+            echo "::error::deploy.sh did not fail on a missing QDRANT_EXTRA_VALUES file"
+            exit 1
+          fi
+          grep -q "QDRANT_EXTRA_VALUES file not found" err.log
+
+      - name: airgap-ingest dry-run (prod ingest render + patch knob)
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+          AIRGAP_DRYRUN: "1"
+          INTERNAL_REGISTRY: ghcr.io/dryrun-standin
+          NAMESPACE: airgap-dryrun
+          STORAGE_CLASS: standard
+          CORPUS_PVC: corpus
+          EMBED_MODEL: embed-from-airgap-env
+          DENSE_DIM: "768"
+          VLLM_BASE_URL: http://vllm:8000
+          INGEST_WORK_SIZE: 2Gi
+        run: |
+          cat > "$RUNNER_TEMP/ingest-patch.json" <<'EOF'
+          {"spec":{"template":{"spec":{"containers":[{"name":"ingest","resources":{"requests":{"cpu":"250m","memory":"512Mi"},"limits":{"cpu":"1","memory":"1Gi"}}}]}}}}
+          EOF
+          export INGEST_EXTRA_PATCH="$RUNNER_TEMP/ingest-patch.json"
+          make airgap-ingest
+          test -f dist/ingest-rendered.yaml
+          grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-ingest:${SHA}" dist/ingest-rendered.yaml
+          grep -q "cpu: 250m" dist/ingest-rendered.yaml   # INGEST_EXTRA_PATCH applied
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml
+
   # ---------------------------------------------- air-gap runbook rehearsal
   # Rehearses the OPERATOR RUNBOOK (issue #15) against the lab OpenShift, so
   # CI-green proves the air-gap deployment path works at the packed SHA:
