@@ -259,20 +259,29 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
         log.warning(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(503, "not_configured", "reasoning model is not configured") from exc
 
+    # Retrieval and LLM legs are guarded separately: the same fault must map
+    # to the same code+message on every endpoint — a retrieval failure reads
+    # "retrieval failed" here exactly as it does on /v1/search, and a model or
+    # parse failure must not be mislabeled as a retrieval fault (AGENTS rule 2).
     try:
         hits, kind, timings = retrieve_search(
             qdrant, embedder, settings.qdrant_collection, req.query,
             product=req.product, version=req.version, limit=8,
         )
-        if not hits:
-            log.info(json_log(request_id, "answer", query_kind=kind, hits=0))
-            return AnswerResponse(
-                request_id=request_id,
-                answer="No supporting manual excerpts were found for this question.",
-                citations=[],
-                script=None,
-            )
+    except Exception as exc:
+        log.error(json_log(request_id, "answer", error=str(exc)[:200]))
+        raise AppError(502, "upstream_error", "retrieval failed") from exc
 
+    if not hits:
+        log.info(json_log(request_id, "answer", query_kind=kind, hits=0))
+        return AnswerResponse(
+            request_id=request_id,
+            answer="No supporting manual excerpts were found for this question.",
+            citations=[],
+            script=None,
+        )
+
+    try:
         messages = build_messages(
             req.query, hits,
             product=req.product, version=req.version, splunk_context=req.splunk_context,
@@ -280,25 +289,25 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
         t0 = time.monotonic()
         content = llm.chat(messages)
         llm_ms = int((time.monotonic() - t0) * 1000)
-
         parsed = parse_answer(content, {h.cite for h in hits})
-        log.info(
-            json_log(
-                request_id, "answer", query_kind=kind, hits=len(hits),
-                embed_ms=timings.get("embed_ms"), qdrant_ms=timings.get("qdrant_ms"),
-                llm_ms=llm_ms, citations=len(parsed["citations"]),
-                elapsed_ms=int((time.monotonic() - started) * 1000),
-            )
-        )
-        return AnswerResponse(
-            request_id=request_id,
-            answer=parsed["answer"],
-            citations=parsed["citations"],
-            script=parsed["script"],
-        )
     except Exception as exc:
         log.error(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "answer failed") from exc
+
+    log.info(
+        json_log(
+            request_id, "answer", query_kind=kind, hits=len(hits),
+            embed_ms=timings.get("embed_ms"), qdrant_ms=timings.get("qdrant_ms"),
+            llm_ms=llm_ms, citations=len(parsed["citations"]),
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+    )
+    return AnswerResponse(
+        request_id=request_id,
+        answer=parsed["answer"],
+        citations=parsed["citations"],
+        script=parsed["script"],
+    )
 
 
 def json_log(request_id: str, action: str, **fields) -> str:

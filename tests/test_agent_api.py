@@ -400,6 +400,34 @@ def test_error_shape_is_structured(client, monkeypatch):
     assert set(body) == {"code", "message"}
 
 
+def test_answer_retrieval_failure_reads_retrieval_failed(client, monkeypatch):
+    """Same fault, same code+message on every endpoint: a retrieval failure on
+    /v1/answer reads exactly like one on /v1/search."""
+
+    def boom(*_a, **_k):
+        raise RuntimeError("qdrant exploded: internal detail")
+
+    monkeypatch.setattr(app_mod, "retrieve_search", boom)
+    resp = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 502
+    assert resp.json() == {"code": "upstream_error", "message": "retrieval failed"}
+    assert "explode" not in resp.text
+
+
+def test_answer_llm_failure_reads_answer_failed(client, monkeypatch):
+    """A model or parse failure is not mislabeled as a retrieval fault."""
+
+    class ExplodingLLM:
+        def chat(self, _messages):
+            raise RuntimeError("llm exploded: internal detail")
+
+    monkeypatch.setattr(app_mod, "llm", ExplodingLLM())
+    resp = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 502
+    assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
+    assert "explode" not in resp.text
+
+
 def test_parse_answer_shape():
     content = (
         "Answer text.\n\nCitations:\n"
