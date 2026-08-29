@@ -39,6 +39,20 @@ def test_sha256_is_stable(synthetic_pdf):
     assert a.sha256 == b.sha256 and len(a.sha256) == 64
 
 
+def test_doc_id_tie_break_is_lexicographic():
+    """Equal-count doc numbers must break ties deterministically: the old
+    max(set(...)) depended on PYTHONHASHSEED (spawn workers flip it), so the
+    doc_id changed between runs and churned the resume path (found on a real
+    z/OS corpus whose front matter carries several form numbers)."""
+    from mainframe_rag.ingest.ibm_pdf import _doc_id_from_text
+
+    text = "Cover: GC20-0001-00  Manual: SX26-3723-06\nGC20-0001-00 again\nSX26-3723-06 again"
+    assert _doc_id_from_text(text) == "GC20-0001-00"  # lexicographically first of the tied pair
+    # A strictly-more-frequent doc number still wins outright.
+    text2 = "ZZ99-9999-00\nAA11-1111-00\nAA11-1111-00"
+    assert _doc_id_from_text(text2) == "AA11-1111-00"
+
+
 def test_parse_pdf_sha256_override_and_fallback(synthetic_pdf):
     """The caller-supplied digest must land in ParsedDoc.sha256 verbatim —
     resume (should_skip / doc_sha256) keys on this field, so a dropped or
