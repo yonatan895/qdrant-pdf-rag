@@ -216,11 +216,80 @@ def test_embed_failfast_upserts_nothing(tmp_path, synthetic_pdf, monkeypatch):
 def test_doc_locks_are_per_doc_id():
     """Colliding doc_ids (shared form numbers) must serialize their
     check-delete-upsert sequence; distinct doc_ids must not contend."""
+    import threading
+    import time
+
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
     from mainframe_rag.ingest.run_ingest import _DocLocks
 
     locks = _DocLocks()
     assert locks.get("SC14-7315-70") is locks.get("SC14-7315-70")
     assert locks.get("SC23-6845-22") is not locks.get("SC14-7315-70")
+
+    # Concurrency test: same doc_id cannot execute critical section concurrently
+    active = 0
+    max_active = 0
+    counter_lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    parsed = ParsedDoc(
+        path="manual.pdf",
+        doc_id="SC14-7315-70",
+        sha256="abc",
+        vendor=None,
+        product=None,
+        version=None,
+        title="Title",
+        page_count=1,
+    )
+
+    def run_worker():
+        nonlocal active, max_active
+        barrier.wait()
+        with locks.get(parsed.doc_id):
+            with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.05)
+            with counter_lock:
+                active -= 1
+
+    t1 = threading.Thread(target=run_worker)
+    t2 = threading.Thread(target=run_worker)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert max_active == 1, "threads with the same doc_id must not execute critical section simultaneously"
+
+
+def test_worker_embed_batches_by_batch_size(synthetic_pdf, monkeypatch):
+    """_parse_one must slice chunks by settings.batch_size rather than
+    passing all chunks to embed_batch in a single call."""
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+
+    embed_calls: list[int] = []
+    original_embed_batch = run_ingest.embed_batch
+
+    def mock_embed_batch(chunks, product, version, title, embedder):
+        embed_calls.append(len(chunks))
+        return original_embed_batch(chunks, product, version, title, embedder)
+
+    # batch_size min validator is 16; use Settings instance with batch_size=16 or mock chunks
+    test_settings = Settings(batch_size=16, embed_mode="hash")
+    # To verify slicing, override batch_size attribute to 2 for this test
+    object.__setattr__(test_settings, "batch_size", 2)
+    monkeypatch.setattr(run_ingest, "_load_worker_settings", lambda: test_settings)
+    monkeypatch.setattr(run_ingest, "embed_batch", mock_embed_batch)
+
+    task = (str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent), "dummy_sha", True)
+    _rec, _parsed, chunks, vectors = run_ingest._parse_one(task)
+    assert len(chunks) > 2
+    assert all(c <= 2 for c in embed_calls), f"every embed call must be <= batch_size=2: {embed_calls}"
+    assert sum(embed_calls) == len(chunks)
+    assert len(vectors) == len(chunks)
+
 
 
 def test_bulk_load_disables_and_restores_indexing(tmp_path, synthetic_pdf, monkeypatch):
@@ -262,3 +331,4 @@ def test_bulk_load_disables_and_restores_indexing(tmp_path, synthetic_pdf, monke
     assert upsert_idx[0] > 0 and upsert_idx[-1] < len(fake.events) - 1, (
         "restore happens strictly after all upserts"
     )
+

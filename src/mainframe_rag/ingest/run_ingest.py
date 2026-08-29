@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import itertools
 import json
 import logging
 import multiprocessing as mp
@@ -20,6 +19,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 
 from mainframe_rag.config import Settings, load_settings
@@ -80,13 +80,21 @@ def _parse_one(
         doc.close()
     stripped = strip_chrome(page_texts)
     chunks = make_chunks(parsed, stripped, page_labels)
-    vectors = (
-        embed_batch(
-            chunks, parsed.product, parsed.version, parsed.title, _get_embedder(_load_worker_settings())
-        )
-        if embed
-        else []
-    )
+    settings = _load_worker_settings()
+    batch = settings.batch_size
+    embedder = _get_embedder(settings) if embed else None
+    vectors: list[tuple[list[float], SparseVector]] = []
+    if embed and embedder is not None:
+        for i in range(0, len(chunks), batch):
+            vectors.extend(
+                embed_batch(
+                    chunks[i : i + batch],
+                    parsed.product,
+                    parsed.version,
+                    parsed.title,
+                    embedder,
+                )
+            )
     record = InventoryRecord(
         path=path_str,
         sha256=sha,
@@ -139,7 +147,10 @@ def _get_qdrant(settings: Settings):
 class _DocLocks:
     """Per-doc_id locks for the upsert stage. Two files may legitimately
     claim one doc_id (shared form numbers); their check-delete-upsert
-    sequence must not interleave across the parallel streams."""
+    sequence must not interleave across the parallel streams.
+
+    Locks are retained in memory for the run: bounded by the unique doc_ids
+    in the corpus (~hundreds of entries), so eviction is unnecessary."""
     _global: threading.Lock
     _locks: dict[str, threading.Lock]
 
@@ -208,6 +219,7 @@ def run(
     upsert_seconds = 0.0
     pages_seen = 0
     bulk = settings.ingest_bulk_load and not dry_run
+    bulk_active = False
     client = None
     if not dry_run:
         client = _get_qdrant(settings)
@@ -215,6 +227,7 @@ def run(
         if bulk:
             # Qdrant skill: HNSW builds must not compete with a bulk load.
             set_bulk_indexing(client, settings.qdrant_collection, bulk=True)
+            bulk_active = True
     try:
         pdfs = walk_pdfs(src)
         if limit:
@@ -259,27 +272,39 @@ def run(
 
         ctx = mp.get_context("spawn")
         failures = 0
-        # Backpressure: keep at most 2 results per worker in flight. Parsing a
-        # large PDF holds its whole chunk list in memory; submitting everything
-        # up front could hold every PDF's parsed result in memory at once.
+        # Combined in-flight budget: parse_pending + upsert_pending is capped
+        # at window so slow upserts never let the parent hold unbounded
+        # parsed/embedded docs and vectors in RAM.
         window = max(2, workers * 2)
         task_iter = iter(tasks)
         locks = _DocLocks()
         # Stage 2: dedicated upsert streams (Qdrant skill: 2-4 parallel
         # upload streams). Embedding is done in stage-1 workers; these
-        # threads are I/O-bound against Qdrant.
+        # threads are I/O-bound against Qdrant. Skipped during dry runs.
         parse_pending: dict[concurrent.futures.Future, str] = {}
         upsert_pending: dict[concurrent.futures.Future, InventoryRecord] = {}
 
         def submit_parse(task: tuple[str, str | None, str | None, str | None, str, str, bool]) -> None:
             parse_pending[pool.submit(_parse_one, task)] = task[0]
 
+        def refill_parse() -> None:
+            while len(parse_pending) + len(upsert_pending) < window:
+                next_task = next(task_iter, None)
+                if next_task is None:
+                    break
+                submit_parse(next_task)
+
+        upsert_ctx = (
+            ThreadPoolExecutor(max_workers=settings.ingest_upsert_streams)
+            if not dry_run
+            else nullcontext()
+        )
+
         with (
             ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool,
-            ThreadPoolExecutor(max_workers=settings.ingest_upsert_streams) as upsert_pool,
+            upsert_ctx as upsert_pool,
         ):
-            for task in itertools.islice(task_iter, window):
-                submit_parse(task)
+            refill_parse()
 
             while parse_pending or upsert_pending:
                 done, _ = concurrent.futures.wait(
@@ -289,10 +314,6 @@ def run(
                 for future in done:
                     if future in parse_pending:
                         path_str = parse_pending.pop(future)
-                        # Refill one-for-one so the window never grows.
-                        next_task = next(task_iter, None)
-                        if next_task is not None:
-                            submit_parse(next_task)
                         try:
                             record, parsed, chunks, vectors = future.result()
                         except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
@@ -318,6 +339,7 @@ def run(
                                     }
                                 )
                             )
+                            refill_parse()
                             continue
                         pages_seen += record.pages
                         parse_seconds += record.seconds
@@ -336,11 +358,14 @@ def run(
                                     }
                                 )
                             )
+                            refill_parse()
                             continue
 
+                        assert upsert_pool is not None
                         upsert_pending[
                             upsert_pool.submit(_upsert_one, parsed, chunks, vectors, settings, locks)
                         ] = record
+                        refill_parse()
                     else:  # upsert stream result
                         record = upsert_pending.pop(future)
                         try:
@@ -372,11 +397,19 @@ def run(
                         if record.status == "upserted":
                             chunks_upserted += record.chunks
                         append_record(progress, record)
+                        refill_parse()
     finally:
-        if bulk and client is not None:
+        if bulk_active and client is not None:
             # Restore the default indexing threshold; the optimizer rebuilds
             # HNSW in the background after the run (status yellow -> green).
-            set_bulk_indexing(client, settings.qdrant_collection, bulk=False)
+            try:
+                set_bulk_indexing(client, settings.qdrant_collection, bulk=False)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    json.dumps(
+                        {"action": "restore_bulk_indexing_failed", "error": str(exc)[:200]}
+                    )
+                )
 
     _log_summary(
         started, files_ok, files_failed, chunks_upserted, failures,
