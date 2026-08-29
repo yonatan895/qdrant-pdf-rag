@@ -198,6 +198,7 @@ Standing rules from the #20 hardening (PRs A–D):
 ## Standing bug rules (from CI)
 
 - Do not add unpublished extras (`types-httpx`). `httpx` ships types.
+- A dependency no module imports is a phantom (litellm was pinned and baked into the images while src used plain httpx). Audit `pyproject.toml` before adding; `test_no_litellm_anywhere` guards this one.
 - Chrome: `max(1, 0.35*n)` wipes short PDFs. Use min 8 pages and min 3 hits.
 - Classify `message` if `XXXnnnY` appears in the first few lines, not only line 1 (headings precede IDs).
 - Qdrant ids: UUID5, not sha256 hex.
