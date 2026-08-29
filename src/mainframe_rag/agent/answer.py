@@ -14,7 +14,8 @@ import httpx2
 from mainframe_rag.config import Settings
 from mainframe_rag.retrieve.query import SearchHit
 
-FENCE_RE = re.compile(r"```[a-zA-Z]*\n(.*?)```", re.DOTALL)
+FENCE_RE = re.compile(r"```([a-zA-Z0-9_-]*)\n(.*?)```", re.DOTALL)
+SCRIPT_LANGS = frozenset({"jcl", "rexx", "sh", "bash", "shell", "python", "py", "yaml", "yml", "json"})
 
 SYSTEM_PROMPT = (
     "You are a mainframe operations expert (z/OS, CICS, Db2, IMS, JES2/3, RACF, "
@@ -148,14 +149,35 @@ def parse_answer(
     unvalidated — stripping citation-looking lines would corrupt examples.
     Documented behavior, pinned by test (issue #20 PR C)."""
     from mainframe_rag.agent.cites import (
+        extract_body_and_citations,
         strip_unauthorized_citations,
-        valid_citations,
     )
 
-    fence = FENCE_RE.search(content)
-    script = fence.group(1).strip() if fence else None
+    # 1. Process code fences: extract scripts, drop thinking blocks, unwrap prose fences
+    scripts: list[str] = []
+    text_processed = content
+    for match in FENCE_RE.finditer(content):
+        lang = match.group(1).strip().lower()
+        code = match.group(2).strip()
+        if lang in SCRIPT_LANGS:
+            scripts.append(code)
+            text_processed = text_processed.replace(match.group(0), "")
+        elif lang in ("thought", "thinking"):
+            text_processed = text_processed.replace(match.group(0), "")
+        else:
+            # Unlabeled or prose markdown code fence - unwrap into answer body
+            text_processed = text_processed.replace(match.group(0), code)
 
-    citations = valid_citations(content, allowed_citations)
+    script = "\n\n".join(scripts).strip() if scripts else None
+
+    # 2. Extract citations & body prose
+    body, raw_cite_lines = extract_body_and_citations(text_processed)
+
+    citations: list[str] = []
+    for c in raw_cite_lines:
+        if c in allowed_citations and c not in citations:
+            citations.append(c)
+
     citations_inferred = False
     inferred_indices: list[int] = []
 
@@ -172,13 +194,9 @@ def parse_answer(
                         inferred_indices.append(idx + 1)
                         citations_inferred = True
 
-    # Answer body = everything before the Citations: header, minus the fence.
-    body = content.split("Citations:")[0] if "Citations:" in content else content
-    if fence and fence.group(0) in body:
-        body = body.replace(fence.group(0), "")
-    # A fabricated full-format cite quoted mid-answer must not reach the
-    # client either (issue #20 PR C: no cite outside the hit set).
+    # 3. Clean up unauthorized citations in body
     body = strip_unauthorized_citations(body, allowed_citations)
+
     return {
         "answer": body.strip(),
         "citations": citations,

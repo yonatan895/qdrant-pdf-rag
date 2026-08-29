@@ -67,7 +67,7 @@ class FakeLLM:
         assert messages[0]["role"] == "system"
         return (
             "Reissue the command after initialization completes.\n\n"
-            "```\n// example only\nIOSCMDS LIST\n```\n\n"
+            "```jcl\n// example only\nIOSCMDS LIST\n```\n\n"
             "Citations:\n"
             "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
             "- SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
@@ -93,7 +93,7 @@ class FabricatingScriptLLM:
     def chat(self, messages):
         return (
             "Answer text.\n\n"
-            "```\n// see SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
+            "```jcl\n// see SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
             "IOSCMDS LIST\n```\n\n"
             "Citations:\n"
             "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
@@ -431,8 +431,8 @@ def test_answer_llm_failure_reads_answer_failed(client, monkeypatch):
 def test_parse_answer_shape():
     content = (
         "Answer text.\n\nCitations:\n"
-        "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
-        "garbage line without format\n"
+        "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+        "- garbage line without format\n"
     )
     allowed = {_hit().cite}
     parsed = parse_answer(content, allowed)
@@ -475,6 +475,57 @@ def test_parse_answer_bracketed_fallback():
     res5 = parse_answer("See [99].", allowed, ordered_cites=ordered)
     assert res5["citations"] == []
     assert res5["citations_inferred"] is False
+
+
+def test_parse_answer_citations_positions_and_case():
+    """Citations block at top, middle, or uppercase CITATIONS: must not eat prose."""
+    cite1 = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
+    allowed = {cite1}
+
+    # 1. Top-placed Citations: without blank line before prose
+    raw_top = f"Citations:\n{cite1}\nActual explanation text here."
+    res_top = parse_answer(raw_top, allowed)
+    assert res_top["citations"] == [cite1]
+    assert res_top["answer"] == "Actual explanation text here."
+
+    # 2. Middle-placed Citations: without blank line before subsequent prose
+    raw_mid = f"Intro paragraph.\n\nCitations:\n{cite1}\nMore operational detail."
+    res_mid = parse_answer(raw_mid, allowed)
+    assert res_mid["citations"] == [cite1]
+    assert res_mid["answer"] == "Intro paragraph.\n\nMore operational detail."
+
+    # 3. Uppercase CITATIONS: header
+    raw_upper = f"Intro paragraph.\n\nCITATIONS:\n{cite1}\nMore detail."
+    res_upper = parse_answer(raw_upper, allowed)
+    assert res_upper["citations"] == [cite1]
+    assert res_upper["answer"] == "Intro paragraph.\n\nMore detail."
+
+
+def test_parse_answer_code_fence_and_script_extraction():
+    """Script languages extract to script; unlabeled/prose fences unwrap to answer."""
+    cite1 = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
+    allowed = {cite1}
+
+    # 1. Labeled ```jcl block returns both non-empty answer and extracted script
+    raw_jcl = f"To apply parameter updates:\n\n```jcl\n//JOB1 JOB ...\n//STEP1 EXEC PGM=IEFBR14\n```\n\nCitations:\n{cite1}"
+    res_jcl = parse_answer(raw_jcl, allowed)
+    assert res_jcl["citations"] == [cite1]
+    assert res_jcl["answer"] == "To apply parameter updates:"
+    assert res_jcl["script"] == "//JOB1 JOB ...\n//STEP1 EXEC PGM=IEFBR14"
+
+    # 2. Bare unlabeled fence unwraps to answer body; script is None
+    raw_bare = f"```\nAll text in code fence\n```\n\nCitations:\n{cite1}"
+    res_bare = parse_answer(raw_bare, allowed)
+    assert res_bare["citations"] == [cite1]
+    assert res_bare["answer"] == "All text in code fence"
+    assert res_bare["script"] is None
+
+    # 3. Thinking block dropped, JCL script extracted, prose answer preserved
+    raw_think = f"```thought\nAnalyzing parmlib member...\n```\nFinal operational guidance.\n```rexx\n/* REXX */\nSAY 'HELLO'\n```\nCitations:\n{cite1}"
+    res_think = parse_answer(raw_think, allowed)
+    assert res_think["citations"] == [cite1]
+    assert res_think["answer"] == "Final operational guidance."
+    assert res_think["script"] == "/* REXX */\nSAY 'HELLO'"
 
 
 def test_citation_validation():
