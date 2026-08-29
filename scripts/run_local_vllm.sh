@@ -41,11 +41,9 @@ else
 fi
 
 # Environment flags:
-# - VLLM_USE_V1=0: vLLM v1 engine relies on Unified Virtual Addressing (UVA), which fails
-#   with "RuntimeError: UVA is not available" on WSL2 and consumer laptop GPUs. V0 is stable.
 # - VLLM_WSL2_ENABLE_PIN_MEMORY=1: Enables pinned host memory allocation on WSL2.
 # - HF_TOKEN: Forwarded safely via `-e HF_TOKEN` without exposing the secret token string on argv.
-ENV_ARGS="-e VLLM_USE_V1=0 -e VLLM_WSL2_ENABLE_PIN_MEMORY=1"
+ENV_ARGS="-e VLLM_WSL2_ENABLE_PIN_MEMORY=1"
 if [ -n "${HF_TOKEN:-}" ]; then
     ENV_ARGS="${ENV_ARGS} -e HF_TOKEN"
 fi
@@ -63,6 +61,7 @@ case "${MODEL}" in
 esac
 
 # If MODEL is a local directory, mount it directly into the container as /model
+# Note: vLLM serve expects the model path/name as a positional argument.
 if [ -d "${MODEL}" ]; then
     ABS_MODEL_DIR="$(cd "${MODEL}" && pwd)"
     MODEL_NAME="${SERVED_NAME:-$(basename "${ABS_MODEL_DIR}")}"
@@ -76,7 +75,7 @@ if [ -d "${MODEL}" ]; then
         ${ENV_ARGS} \
         --ipc=host \
         "${IMAGE}" \
-        --model /model \
+        /model \
         --served-model-name "${MODEL_NAME}" \
         ${MODEL_ARGS} "$@"
 else
@@ -86,6 +85,6 @@ else
         ${ENV_ARGS} \
         --ipc=host \
         "${IMAGE}" \
-        --model "${MODEL}" \
+        "${MODEL}" \
         ${MODEL_ARGS} "$@"
 fi
