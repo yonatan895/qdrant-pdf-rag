@@ -140,6 +140,21 @@ EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus 
 EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus make query-demo QUERY="SC23-6883-70"
 ```
 
+### 3.6 Testing with Local vLLM & GPU Acceleration (e.g. RTX 5060 8GB)
+
+To test the entire reasoning and citation-generation pipeline locally with a real LLM on a consumer GPU:
+
+```bash
+# 1. Start local vLLM serving google/gemma-4-E4B-it-qat-mobile-ct on port 8000
+# (Pass your Hugging Face token if downloading gated weights)
+HF_TOKEN="<your-token>" make local-vllm
+
+# 2. In another terminal, run the automated local end-to-end test suite
+make test-vllm-e2e
+```
+
+The test script connects to `http://localhost:8000/v1`, starts a local Qdrant container, ingests synthetic IBM-shaped manuals, queries `/v1/answer`, and verifies that the model generates operational responses with valid, grounded citations.
+
 ---
 
 ## 4. Air-Gapped OpenShift Deployment

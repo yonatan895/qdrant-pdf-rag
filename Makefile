@@ -226,6 +226,15 @@ bench-compare: | .venv
 query-demo: | .venv
 	.venv/bin/python scripts/query_demo.py $(if $(QUERY),--query "$(QUERY)",)
 
+# Local GPU acceleration & vLLM testing
+.PHONY: local-vllm test-vllm-e2e
+local-vllm:
+	sh scripts/run_local_vllm.sh
+
+test-vllm-e2e: | .venv
+	.venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",)
+
+
 # ---------------------------------------------------------------- e2e demo
 .PHONY: e2e-demo-pdfs
 e2e-demo-pdfs: | .venv
