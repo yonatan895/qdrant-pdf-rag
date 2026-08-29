@@ -190,52 +190,75 @@ def test_qdrant_level_skip_counts_as_ok(tmp_path, synthetic_pdf, capsys, monkeyp
     assert fake.upserts == [] and fake.deletes == 0
 
 
-def test_upsert_one_is_all_or_nothing_per_doc(synthetic_pdf, monkeypatch):
-    """The one-owner refactor's contract: an embed failure on a later batch
-    leaves the doc completely un-upserted (the old interleaved loop could
-    land earlier batches before failing). Resume deletes by doc_id on sha
-    mismatch, but no partial doc should ever exist to begin with."""
-    import pymupdf
-
-    from mainframe_rag.config import Settings
+def test_embed_failfast_upserts_nothing(tmp_path, synthetic_pdf, monkeypatch):
+    """Embedding happens in the parse workers now, so an embed failure fails
+    the whole task — the upsert stage never sees the doc. Exercised through
+    the real runtime path: EMBED_MODE=vllm without EMBED_BASE_URL fails fast
+    in the worker on first use (no monkeypatching of spawn workers)."""
     from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.chrome import strip_chrome
-    from mainframe_rag.ingest.chunk import make_chunks
-    from mainframe_rag.ingest.ibm_pdf import parse_pdf
-
-    parsed = parse_pdf(synthetic_pdf, sha256="ab" * 32)
-    doc = pymupdf.open(synthetic_pdf)
-    try:
-        page_texts = [doc[i].get_text() for i in range(doc.page_count)]
-        labels = [doc[i].get_label() for i in range(doc.page_count)]
-    finally:
-        doc.close()
-    chunks = make_chunks(parsed, strip_chrome(page_texts), labels)
-
-    settings = Settings(embed_mode="hash", _env_file=None)
-    settings.batch_size = 2  # 7 chunks -> 4 batches; the ge=16 env bound stays
-
-    class RaisingEmbedder:
-        def __init__(self):
-            self.dense_calls = 0
-
-        def dense(self, texts):
-            self.dense_calls += 1
-            if self.dense_calls >= 2:  # batch 1 embeds fine, batch 2 explodes
-                raise RuntimeError("embed endpoint exploded on batch 2")
-            return [[0.0] * 4 for _ in texts]
-
-        def sparse(self, texts):
-            return [([1], [1.0]) for _ in texts]
 
     fake = _FakeQdrant()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
-    embedder = RaisingEmbedder()
-    monkeypatch.setattr(run_ingest, "_get_embedder", lambda settings: embedder)
+    monkeypatch.delenv("EMBED_BASE_URL", raising=False)
+    monkeypatch.delenv("EMBED_MODEL", raising=False)
+    monkeypatch.setenv("EMBED_MODE", "vllm")
+    monkeypatch.setenv("DENSE_DIM", "256")  # collection setup passes; the
+    # worker's embed call then fails fast on the missing EMBED_BASE_URL
+    progress = tmp_path / "inventory.jsonl"
+    rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"])
+    assert rc == 1
+    assert fake.upserts == [], "a doc whose embed failed must never be upserted"
+    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
+    assert records and all(r["status"] == "error" for r in records)
+    assert all(r["error_type"] == "RuntimeError" for r in records)
 
-    import pytest
 
-    with pytest.raises(RuntimeError, match="embed endpoint exploded"):
-        run_ingest._upsert_one(parsed, chunks, settings)
-    assert embedder.dense_calls >= 2, "test must fail on a LATER batch, not batch 1"
-    assert fake.upserts == [], "a partial doc must never be upserted"
+def test_doc_locks_are_per_doc_id():
+    """Colliding doc_ids (shared form numbers) must serialize their
+    check-delete-upsert sequence; distinct doc_ids must not contend."""
+    from mainframe_rag.ingest.run_ingest import _DocLocks
+
+    locks = _DocLocks()
+    assert locks.get("SC14-7315-70") is locks.get("SC14-7315-70")
+    assert locks.get("SC23-6845-22") is not locks.get("SC14-7315-70")
+
+
+def test_bulk_load_disables_and_restores_indexing(tmp_path, synthetic_pdf, monkeypatch):
+    """INGEST_BULK_LOAD raises the indexing threshold before the first upsert
+    and restores the server default after the last one (Qdrant skill:
+    HNSW builds must not compete with a bulk load). Default off."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.qdrant_io import (
+        BULK_INDEXING_THRESHOLD_KB,
+        DEFAULT_INDEXING_THRESHOLD_KB,
+    )
+
+    fake = _FakeQdrant()
+    fake.events: list[tuple[str, object]] = []
+    original_upsert = fake.upsert
+
+    def upsert(collection_name, *, points, wait=True):
+        fake.events.append(("upsert", len(points)))
+        return original_upsert(collection_name, points=points, wait=wait)
+
+    def update_collection(collection_name, *, optimizer_config):
+        fake.events.append(("indexing_threshold", optimizer_config.indexing_threshold))
+        return True
+
+    fake.upsert = upsert
+    fake.update_collection = update_collection
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    monkeypatch.setenv("INGEST_BULK_LOAD", "true")
+    progress = tmp_path / "inventory.jsonl"
+    rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"])
+    assert rc == 0
+    thresholds = [v for kind, v in fake.events if kind == "indexing_threshold"]
+    assert thresholds[0] == BULK_INDEXING_THRESHOLD_KB, "indexing disabled before the load"
+    assert thresholds[-1] == DEFAULT_INDEXING_THRESHOLD_KB, "restored after the load"
+    upsert_idx = [i for i, (kind, _) in enumerate(fake.events) if kind == "upsert"]
+    assert upsert_idx, "the run must have upserted points"
+    assert upsert_idx[0] > 0 and upsert_idx[-1] < len(fake.events) - 1, (
+        "restore happens strictly after all upserts"
+    )

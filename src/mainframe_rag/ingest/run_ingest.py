@@ -17,8 +17,9 @@ import json
 import logging
 import multiprocessing as mp
 import sys
+import threading
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 from mainframe_rag.config import Settings, load_settings
@@ -36,6 +37,7 @@ from mainframe_rag.ingest.qdrant_io import (
     delete_by_doc,
     doc_sha256,
     ensure_collection,
+    set_bulk_indexing,
     upsert_chunks,
 )
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
@@ -46,17 +48,21 @@ log = logging.getLogger("ingest")
 
 _worker_qdrant = None
 _worker_embedder = None
+_worker_settings: Settings | None = None
 
 
 def _parse_one(
-    args: tuple[str, str | None, str | None, str | None, str],
-) -> tuple[InventoryRecord, ParsedDoc, list[Chunk]]:
+    args: tuple[str, str | None, str | None, str | None, str, str, bool],
+) -> tuple[InventoryRecord, ParsedDoc, list[Chunk], list[tuple[list[float], SparseVector]]]:
+    """Stage 1 (parse worker): parse, chunk, and embed. Embedding lives in
+    the worker because hash embed is Python/GIL-bound — in a thread pool it
+    would serialize; in a process pool it scales with the parse pool.
+    Dry runs embed nothing (the --dry-run contract: parse + chunk only)."""
     import pymupdf
 
-    path_str, vendor, product, version, corpus_root = args
+    path_str, vendor, product, version, corpus_root, sha, embed = args
     path = Path(path_str)
     started = time.monotonic()
-    sha = sha256_file(path)
     parsed = parse_pdf(
         path,
         vendor=vendor,
@@ -74,6 +80,13 @@ def _parse_one(
         doc.close()
     stripped = strip_chrome(page_texts)
     chunks = make_chunks(parsed, stripped, page_labels)
+    vectors = (
+        embed_batch(
+            chunks, parsed.product, parsed.version, parsed.title, _get_embedder(_load_worker_settings())
+        )
+        if embed
+        else []
+    )
     record = InventoryRecord(
         path=path_str,
         sha256=sha,
@@ -82,7 +95,7 @@ def _parse_one(
         chunks=len(chunks),
         seconds=round(time.monotonic() - started, 3),
     )
-    return record, parsed, chunks
+    return record, parsed, chunks, vectors
 
 
 def resolve_workers(requested: int | None, settings: Settings) -> int:
@@ -92,6 +105,15 @@ def resolve_workers(requested: int | None, settings: Settings) -> int:
     cap = max(1, 2 * (mp.cpu_count() or 2))
     base = settings.ingest_workers if requested is None else requested
     return max(1, min(int(base), cap))
+
+
+def _load_worker_settings() -> Settings:
+    """Spawn workers start with fresh module state; env is inherited, so a
+    per-worker cached Settings is correct (and built once per worker)."""
+    global _worker_settings
+    if _worker_settings is None:
+        _worker_settings = load_settings()
+    return _worker_settings
 
 
 def _get_embedder(settings: Settings):
@@ -114,44 +136,54 @@ def _get_qdrant(settings: Settings):
     return _worker_qdrant
 
 
-def _upsert_one(parsed: ParsedDoc, chunks: list[Chunk], settings: Settings) -> str:
-    client = _get_qdrant(settings)
-    stored_sha = doc_sha256(client, settings, parsed.doc_id)
-    if stored_sha == parsed.sha256:
-        return "skipped"
-    if stored_sha is not None:
-        delete_by_doc(client, settings, parsed.doc_id)
+class _DocLocks:
+    """Per-doc_id locks for the upsert stage. Two files may legitimately
+    claim one doc_id (shared form numbers); their check-delete-upsert
+    sequence must not interleave across the parallel streams."""
+    _global: threading.Lock
+    _locks: dict[str, threading.Lock]
 
-    started = time.monotonic()
-    batch = settings.batch_size
-    # Embedding is batched (vLLM call shape); upserting is batched inside
-    # upsert_chunks (Qdrant call shape). One owner per layer — no nested
-    # re-slicing. A mid-doc embed failure upserts nothing; resume deletes the
-    # whole doc_id on sha mismatch, so partial-vs-none is recoverable either way.
-    vectors: list[tuple[list[float], SparseVector]] = []
-    for i in range(0, len(chunks), batch):
-        vectors.extend(
-            embed_batch(
-                chunks[i : i + batch],
-                parsed.product,
-                parsed.version,
-                parsed.title,
-                _get_embedder(settings),
-            )
-        )
-    upserted = upsert_chunks(client, settings, parsed, chunks, vectors)
+    def __init__(self) -> None:
+        self._global = threading.Lock()
+        self._locks = {}
+
+    def get(self, doc_id: str) -> threading.Lock:
+        with self._global:
+            return self._locks.setdefault(doc_id, threading.Lock())
+
+
+def _upsert_one(
+    parsed: ParsedDoc,
+    chunks: list[Chunk],
+    vectors: list[tuple[list[float], SparseVector]],
+    settings: Settings,
+    locks: _DocLocks,
+) -> tuple[str, float]:
+    """Stage 2 (upsert stream): qdrant-level skip, delete-on-sha-mismatch,
+    batched upsert. Vectors arrive precomputed from the parse worker. The
+    doc_id lock keeps colliding docs from interleaving. Returns
+    (status, seconds)."""
+    started = time.perf_counter()
+    client = _get_qdrant(settings)
+    with locks.get(parsed.doc_id):
+        stored_sha = doc_sha256(client, settings, parsed.doc_id)
+        if stored_sha == parsed.sha256:
+            return "skipped", round(time.perf_counter() - started, 3)
+        if stored_sha is not None:
+            delete_by_doc(client, settings, parsed.doc_id)
+        upserted = upsert_chunks(client, settings, parsed, chunks, vectors)
     log.info(
         json.dumps(
             {
                 "doc_id": parsed.doc_id,
                 "pages": parsed.page_count,
                 "chunks": upserted,
-                "seconds": round(time.monotonic() - started, 3),
+                "seconds": round(time.perf_counter() - started, 3),
                 "action": "upsert",
             }
         )
     )
-    return "upserted"
+    return "upserted", round(time.perf_counter() - started, 3)
 
 
 def run(
@@ -172,139 +204,213 @@ def run(
     files_ok = 0
     files_failed = 0
     chunks_upserted = 0
+    parse_seconds = 0.0
+    upsert_seconds = 0.0
+    pages_seen = 0
+    bulk = settings.ingest_bulk_load and not dry_run
+    client = None
     if not dry_run:
-        ensure_collection(_get_qdrant(settings), settings)
-    pdfs = walk_pdfs(src)
-    if limit:
-        pdfs = pdfs[:limit]
-    inventory = load_inventory(progress)
+        client = _get_qdrant(settings)
+        ensure_collection(client, settings)
+        if bulk:
+            # Qdrant skill: HNSW builds must not compete with a bulk load.
+            set_bulk_indexing(client, settings.qdrant_collection, bulk=True)
+    try:
+        pdfs = walk_pdfs(src)
+        if limit:
+            pdfs = pdfs[:limit]
+        inventory = load_inventory(progress)
 
-    tasks: list[tuple[str, str | None, str | None, str | None, str]] = []
-    for path in pdfs:
-        record = inventory.get(str(path))
-        if record and should_skip(record, sha256_file(path), allow_dry=dry_run):
-            files_ok += 1  # already ingested — an ok outcome
-            log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
-            continue
-        tasks.append((str(path), vendor or detect_vendor(path), product, version, str(src)))
+        tasks: list[tuple[str, str | None, str | None, str | None, str, str, bool]] = []
+        for path in pdfs:
+            record = inventory.get(str(path))
+            sha = sha256_file(path)
+            if record and should_skip(record, sha, allow_dry=dry_run):
+                files_ok += 1  # already ingested — an ok outcome
+                log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
+                continue
+            # sha passes through: the parent hashed for the skip check, so the
+            # worker never re-reads the file for hashing. Embedding flag keeps
+            # the --dry-run contract (parse + chunk only, no embeddings).
+            tasks.append(
+                (str(path), vendor or detect_vendor(path), product, version, str(src), sha, not dry_run)
+            )
 
-    log.info(
-        json.dumps({"action": "start", "pdfs": len(pdfs), "todo": len(tasks), "workers": workers})
+        log.info(
+            json.dumps(
+                {
+                    "action": "start",
+                    "pdfs": len(pdfs),
+                    "todo": len(tasks),
+                    "workers": workers,
+                    "upsert_streams": settings.ingest_upsert_streams,
+                    "bulk_load": bulk,
+                }
+            )
+        )
+        if not tasks:
+            # Nothing to do (all skipped): still emit the run summary.
+            _log_summary(
+                started, files_ok, files_failed, chunks_upserted, failures=0,
+                parse_seconds=parse_seconds, upsert_seconds=upsert_seconds,
+                pages=pages_seen, bulk_load=bulk,
+            )
+            return 0
+
+        ctx = mp.get_context("spawn")
+        failures = 0
+        # Backpressure: keep at most 2 results per worker in flight. Parsing a
+        # large PDF holds its whole chunk list in memory; submitting everything
+        # up front could hold every PDF's parsed result in memory at once.
+        window = max(2, workers * 2)
+        task_iter = iter(tasks)
+        locks = _DocLocks()
+        # Stage 2: dedicated upsert streams (Qdrant skill: 2-4 parallel
+        # upload streams). Embedding is done in stage-1 workers; these
+        # threads are I/O-bound against Qdrant.
+        parse_pending: dict[concurrent.futures.Future, str] = {}
+        upsert_pending: dict[concurrent.futures.Future, InventoryRecord] = {}
+
+        def submit_parse(task: tuple[str, str | None, str | None, str | None, str, str, bool]) -> None:
+            parse_pending[pool.submit(_parse_one, task)] = task[0]
+
+        with (
+            ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool,
+            ThreadPoolExecutor(max_workers=settings.ingest_upsert_streams) as upsert_pool,
+        ):
+            for task in itertools.islice(task_iter, window):
+                submit_parse(task)
+
+            while parse_pending or upsert_pending:
+                done, _ = concurrent.futures.wait(
+                    set(parse_pending) | set(upsert_pending),
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    if future in parse_pending:
+                        path_str = parse_pending.pop(future)
+                        # Refill one-for-one so the window never grows.
+                        next_task = next(task_iter, None)
+                        if next_task is not None:
+                            submit_parse(next_task)
+                        try:
+                            record, parsed, chunks, vectors = future.result()
+                        except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
+                            failures += 1
+                            files_failed += 1
+                            append_record(
+                                progress,
+                                InventoryRecord(
+                                    path=path_str,
+                                    sha256="",
+                                    status="error",
+                                    error=str(exc)[:500],
+                                    error_type=type(exc).__name__,
+                                ),
+                            )
+                            log.error(
+                                json.dumps(
+                                    {
+                                        "path": path_str,
+                                        "action": "error",
+                                        "error_type": type(exc).__name__,
+                                        "error": str(exc)[:500],
+                                    }
+                                )
+                            )
+                            continue
+                        pages_seen += record.pages
+                        parse_seconds += record.seconds
+
+                        if dry_run:
+                            record.status = "dry"
+                            append_record(progress, record)
+                            files_ok += 1
+                            log.info(
+                                json.dumps(
+                                    {
+                                        "path": path_str,
+                                        "doc_id": record.doc_id,
+                                        "chunks": record.chunks,
+                                        "action": "dry",
+                                    }
+                                )
+                            )
+                            continue
+
+                        upsert_pending[
+                            upsert_pool.submit(_upsert_one, parsed, chunks, vectors, settings, locks)
+                        ] = record
+                    else:  # upsert stream result
+                        record = upsert_pending.pop(future)
+                        try:
+                            status, seconds = future.result()
+                        except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
+                            failures += 1
+                            files_failed += 1
+                            record.status = "error"
+                            record.error = str(exc)[:500]
+                            record.error_type = type(exc).__name__
+                            log.error(
+                                json.dumps(
+                                    {
+                                        "path": record.path,
+                                        "doc_id": record.doc_id,
+                                        "action": "error",
+                                        "error_type": record.error_type,
+                                        "error": record.error,
+                                    }
+                                )
+                            )
+                        else:
+                            upsert_seconds += seconds
+                            record.status = status
+                        if record.status in ("upserted", "skipped"):
+                            # "skipped" = Qdrant already holds doc_id at this
+                            # sha256 — still an ok outcome.
+                            files_ok += 1
+                        if record.status == "upserted":
+                            chunks_upserted += record.chunks
+                        append_record(progress, record)
+    finally:
+        if bulk and client is not None:
+            # Restore the default indexing threshold; the optimizer rebuilds
+            # HNSW in the background after the run (status yellow -> green).
+            set_bulk_indexing(client, settings.qdrant_collection, bulk=False)
+
+    _log_summary(
+        started, files_ok, files_failed, chunks_upserted, failures,
+        parse_seconds=parse_seconds, upsert_seconds=upsert_seconds,
+        pages=pages_seen, bulk_load=bulk,
     )
-    if not tasks:
-        # Nothing to do (all skipped): still emit the run summary.
-        _log_summary(started, files_ok, files_failed, chunks_upserted, failures=0)
-        return 0
-
-    ctx = mp.get_context("spawn")
-    failures = 0
-    # Backpressure: keep at most 2 results per worker in flight. Parsing a
-    # large PDF holds its whole chunk list in memory; submitting everything up
-    # front could hold every PDF's parsed result in memory at once.
-    window = max(2, workers * 2)
-    task_iter = iter(tasks)
-    pending: dict[concurrent.futures.Future, str] = {}
-
-    def submit(task: tuple[str, str | None, str | None, str | None, str]) -> None:
-        pending[pool.submit(_parse_one, task)] = task[0]
-
-    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
-        for task in itertools.islice(task_iter, window):
-            submit(task)
-
-        while pending:
-            done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
-            for future in done:
-                path_str = pending.pop(future)
-                # Refill one-for-one so the window never grows.
-                next_task = next(task_iter, None)
-                if next_task is not None:
-                    submit(next_task)
-                try:
-                    record, parsed, chunks = future.result()
-                except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
-                    failures += 1
-                    files_failed += 1
-                    append_record(
-                        progress,
-                        InventoryRecord(
-                            path=path_str,
-                            sha256="",
-                            status="error",
-                            error=str(exc)[:500],
-                            error_type=type(exc).__name__,
-                        ),
-                    )
-                    log.error(
-                        json.dumps(
-                            {
-                                "path": path_str,
-                                "action": "error",
-                                "error_type": type(exc).__name__,
-                                "error": str(exc)[:500],
-                            }
-                        )
-                    )
-                    continue
-
-                if dry_run:
-                    record.status = "dry"
-                    append_record(progress, record)
-                    files_ok += 1
-                    log.info(
-                        json.dumps(
-                            {
-                                "path": path_str,
-                                "doc_id": record.doc_id,
-                                "chunks": record.chunks,
-                                "action": "dry",
-                            }
-                        )
-                    )
-                    continue
-
-                try:
-                    record.status = _upsert_one(parsed, chunks, settings)
-                except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
-                    failures += 1
-                    files_failed += 1
-                    record.status = "error"
-                    record.error = str(exc)[:500]
-                    record.error_type = type(exc).__name__
-                    log.error(
-                        json.dumps(
-                            {
-                                "path": path_str,
-                                "doc_id": record.doc_id,
-                                "action": "error",
-                                "error_type": record.error_type,
-                                "error": record.error,
-                            }
-                        )
-                    )
-                if record.status in ("upserted", "skipped"):
-                    # "skipped" = Qdrant already holds doc_id at this sha256
-                    # (fresh inventory, warm Qdrant) — still an ok outcome.
-                    files_ok += 1
-                if record.status == "upserted":
-                    chunks_upserted += record.chunks
-                append_record(progress, record)
-
-    _log_summary(started, files_ok, files_failed, chunks_upserted, failures)
     return 1 if failures else 0
 
 
 def _log_summary(
-    started: float, files_ok: int, files_failed: int, chunks_upserted: int, failures: int
+    started: float,
+    files_ok: int,
+    files_failed: int,
+    chunks_upserted: int,
+    failures: int,
+    parse_seconds: float,
+    upsert_seconds: float,
+    pages: int,
+    bulk_load: bool,
 ) -> None:
     """One 'done' summary per run (issue #20 PR D): files ok / failed /
-    chunks upserted / elapsed_ms. Warning level when anything failed."""
+    chunks upserted / phase seconds / pages_per_s / elapsed_ms. Warning
+    level when anything failed."""
+    wall = time.monotonic() - started
     payload = {
         "action": "done",
         "files_ok": files_ok,
         "files_failed": files_failed,
         "chunks_upserted": chunks_upserted,
-        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "parse_s": round(parse_seconds, 1),
+        "upsert_s": round(upsert_seconds, 1),
+        "pages_per_s": round(pages / wall, 1) if wall > 0 and pages else 0.0,
+        "bulk_load": bulk_load,
+        "elapsed_ms": int(wall * 1000),
     }
     if failures:
         log.warning(json.dumps(payload))

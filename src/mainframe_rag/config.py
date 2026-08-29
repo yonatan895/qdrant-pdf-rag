@@ -77,7 +77,14 @@ class Settings(BaseSettings):
     ingest_workers: int = Field(
         default_factory=lambda: max(1, (multiprocessing.cpu_count() or 2) - 1)
     )
-    batch_size: int = Field(default=64, ge=16, le=256)
+    batch_size: int = Field(default=128, ge=16, le=256)
+    # Embed+upsert ran serially in the parent process (274s of a 281s corpus
+    # run while 23 parse workers idled). Parse workers now embed; this many
+    # parallel streams drive the Qdrant upserts (Qdrant skill: 2-4 streams).
+    ingest_upsert_streams: int = Field(default=4, ge=1, le=8)
+    # Bulk-load mode: disable HNSW builds during the initial corpus load and
+    # restore after (Qdrant skill guidance) — never for incremental prod runs.
+    ingest_bulk_load: bool = False
     bm25_model: str = "Qdrant/bm25"
     bm25_cache_dir: str | None = None
 

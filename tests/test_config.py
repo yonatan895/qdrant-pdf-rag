@@ -47,3 +47,12 @@ def test_hash_mode_requires_explicit_allow():
     s = Settings(_env_file=None)
     assert s.allow_hash_mode is False
     assert s.log_level == "INFO"
+
+
+def test_ingest_tuning_defaults():
+    """Ingest pipeline knobs: bounded defaults, no magic numbers at call sites
+    (AGENTS rule 5). batch_size default 128 (Qdrant skill 64-256 band)."""
+    s = Settings(_env_file=None)
+    assert s.batch_size == 128
+    assert s.ingest_upsert_streams == 4
+    assert s.ingest_bulk_load is False

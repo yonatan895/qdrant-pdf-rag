@@ -18,12 +18,38 @@ from mainframe_rag.ports import QdrantPoints, SparseVector
 
 HNSW_M = 16
 HNSW_EF_CONSTRUCT = 128
+# Bulk-load guidance (Qdrant skill): raise indexing_threshold so HNSW builds
+# do not compete with upserts, restore to the server default afterwards.
+# Never m=0 — that drops existing HNSW on an existing collection.
+BULK_INDEXING_THRESHOLD_KB = 1 << 30
+DEFAULT_INDEXING_THRESHOLD_KB = 20000
 
 _KEYWORD_INDEXES = ("vendor", "product", "version", "doc_id", "chunk_type", "message_ids", "members", "sha256")
 
 
 class DimMismatchError(RuntimeError):
     """Existing collection vector size does not match DENSE_DIM."""
+
+
+def set_bulk_indexing(client: QdrantPoints, collection: str, *, bulk: bool) -> None:
+    """bulk=True: effectively disable HNSW builds for the load; bulk=False:
+    restore the server-default threshold so the optimizer catches up.
+
+    Measured caveat (371-doc z/OS corpus, 246k payload-heavy points, single
+    node): bulk=True made the load ~3x SLOWER wall-clock — with indexing
+    disabled, upsert time grew superlinearly as unindexed segments grew
+    (0.01s -> 30s/doc), while indexed loads stayed flat (~0.7s/doc). The
+    skill's bulk-load guidance pays off on multi-shard/remote targets, not
+    on a single-shard local node. Default is OFF; keep it off unless your
+    target actually parallelizes writes."""
+    client.update_collection(
+        collection,
+        optimizer_config=models.OptimizersConfigDiff(
+            indexing_threshold=(
+                BULK_INDEXING_THRESHOLD_KB if bulk else DEFAULT_INDEXING_THRESHOLD_KB
+            )
+        ),
+    )
 
 
 def _dense_params(dim: int) -> models.VectorParams:
