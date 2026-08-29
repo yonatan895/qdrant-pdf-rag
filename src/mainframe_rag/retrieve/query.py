@@ -23,6 +23,19 @@ RRF_WEIGHTS_IDENTIFIER = (1.0, 3.0)  # (dense, bm25): identifiers favor exact te
 RRF_WEIGHTS_NL = (1.0, 1.0)
 
 
+RETRIEVE_PAYLOAD_FIELDS: tuple[str, ...] = (
+    "doc_id",
+    "title",
+    "heading_path",
+    "page_label",
+    "chunk_type",
+    "product",
+    "version",
+    "message_ids",
+    "text",
+)
+
+
 def format_citation(doc_id: str, title: str, heading_path: str, page_label: str) -> str:
     """SA22-7592-05 z/OS MVS Init..., IEASYSxx > LFAREA, p. 1-17
 
@@ -82,14 +95,14 @@ def _prefetch_one(
     limit: int,
 ) -> list[models.ScoredPoint]:
     """Single-vector query against one named vector/sparse space; payload
-    included for fusion + citation fields."""
+    restricted to required citation and ranking fields."""
     result = client.query_points(
         collection,
         query=query_vec,
         using=using,
         limit=limit,
         query_filter=flt,
-        with_payload=True,
+        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
     )
     return result.points
 
@@ -121,7 +134,10 @@ def search(
     version: str | None = None,
     limit: int = 8,
 ) -> tuple[list[SearchHit], str, dict[str, int]]:
-    """Returns (hits, query_kind, timing_ms). Filters applied inside prefetch."""
+    """Returns (hits, query_kind, timing_ms). Filters applied inside prefetch.
+
+    Dense and sparse prefetch queries execute concurrently in a single HTTP
+    batch call via query_batch_points (falling back to query_points if unsupported)."""
     identifiers = parse_query(query)
     flt = build_filter(identifiers, product=product, version=version)
 
@@ -133,17 +149,38 @@ def search(
     timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 
     t0 = time.monotonic()
-    dense_points = _prefetch_one(client, collection, dense_vec, "dense", flt, PREFETCH_LIMIT)
-    sparse_points = _prefetch_one(
-        client,
-        collection,
-        models.SparseVector(indices=sparse_idx, values=sparse_val),
-        "bm25",
-        flt,
-        PREFETCH_LIMIT,
+    dense_req = models.QueryRequest(
+        query=dense_vec,
+        using="dense",
+        limit=PREFETCH_LIMIT,
+        filter=flt,
+        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
     )
+    sparse_req = models.QueryRequest(
+        query=models.SparseVector(indices=sparse_idx, values=sparse_val),
+        using="bm25",
+        limit=PREFETCH_LIMIT,
+        filter=flt,
+        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
+    )
+
+    if hasattr(client, "query_batch_points"):
+        responses = client.query_batch_points(collection, requests=[dense_req, sparse_req])
+        dense_points = responses[0].points
+        sparse_points = responses[1].points
+    else:
+        dense_points = _prefetch_one(client, collection, dense_vec, "dense", flt, PREFETCH_LIMIT)
+        sparse_points = _prefetch_one(
+            client,
+            collection,
+            models.SparseVector(indices=sparse_idx, values=sparse_val),
+            "bm25",
+            flt,
+            PREFETCH_LIMIT,
+        )
     timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
 
     weights = RRF_WEIGHTS_IDENTIFIER if identifiers.has_identifiers else RRF_WEIGHTS_NL
     hits = rrf_fuse(dense_points, sparse_points, weights, limit=limit)
     return hits, query_kind(identifiers), timings
+
