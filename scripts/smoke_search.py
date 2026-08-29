@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-import httpx
+import httpx2
 
 
 def main() -> int:
@@ -21,7 +21,7 @@ def main() -> int:
     parser.add_argument("--min-hits", type=int, default=1)
     args = parser.parse_args()
 
-    resp = httpx.post(f"{args.url.rstrip('/')}/v1/search",
+    resp = httpx2.post(f"{args.url.rstrip('/')}/v1/search",
                       json={"query": args.query, "limit": 8}, timeout=30)
     resp.raise_for_status()
     hits = resp.json()["hits"]

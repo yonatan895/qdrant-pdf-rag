@@ -155,5 +155,5 @@ Qdrant-specific guidance (hybrid fusion, HNSW, quantization, deployment, client 
 
 ## Library scope
 
-`pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx`, `fastapi`,
+`pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`,
 `pydantic-settings`. No LangChain / LlamaIndex in v1.

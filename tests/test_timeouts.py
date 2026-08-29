@@ -3,7 +3,7 @@
 No live Qdrant/vLLM: client objects are constructed but never dial out.
 """
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -23,16 +23,16 @@ def _settings(**kw) -> Settings:
 
 
 def _spy_transport(monkeypatch) -> dict:
-    """Capture HTTPTransport kwargs without reaching into httpx internals
+    """Capture HTTPTransport kwargs without reaching into httpx2 internals
     (round-7 nit 7: `_pool._retries` is private and bump-brittle)."""
     captured: dict = {}
-    real = httpx.HTTPTransport
+    real = httpx2.HTTPTransport
 
     def spy(**kw):
         captured.update(kw)
         return real(**kw)
 
-    monkeypatch.setattr(httpx, "HTTPTransport", spy)
+    monkeypatch.setattr(httpx2, "HTTPTransport", spy)
     return captured
 
 
@@ -68,14 +68,14 @@ def test_answer_chat_retries_nothing_on_connect_error():
 
         def post(self, *a, **k):
             self.posts += 1
-            raise httpx.ConnectError("boom")
+            raise httpx2.ConnectError("boom")
 
         def close(self):
             pass
 
     rc = RaisingClient()
     llm = HttpxLLMClient(s, rc)  # type: ignore[arg-type]
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(httpx2.ConnectError):
         llm.chat([{"role": "user", "content": "q"}])
     assert rc.posts == 1
 

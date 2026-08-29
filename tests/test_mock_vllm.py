@@ -9,7 +9,7 @@ import importlib.util
 import threading
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 SPEC = importlib.util.spec_from_file_location(
@@ -32,13 +32,13 @@ def base_url(monkeypatch):
 
 
 def test_healthz(base_url):
-    r = httpx.get(f"{base_url}/healthz")
+    r = httpx2.get(f"{base_url}/healthz")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
 
 
 def test_embeddings_shape_matches_vllm_client(base_url):
-    r = httpx.post(f"{base_url}/v1/embeddings", json={"model": "mock-embed", "input": ["IEA500I", "torque widget"]})
+    r = httpx2.post(f"{base_url}/v1/embeddings", json={"model": "mock-embed", "input": ["IEA500I", "torque widget"]})
     assert r.status_code == 200
     body = r.json()
     assert [d["index"] for d in body["data"]] == [0, 1]
@@ -48,9 +48,9 @@ def test_embeddings_shape_matches_vllm_client(base_url):
 
 
 def test_deterministic_and_order_sensitive(base_url):
-    a = httpx.post(f"{base_url}/v1/embeddings", json={"input": "IEA500I"}).json()
-    b = httpx.post(f"{base_url}/v1/embeddings", json={"input": ["IEA500I"]}).json()
-    c = httpx.post(f"{base_url}/v1/embeddings", json={"input": ["IEA500I AGAIN"]}).json()
+    a = httpx2.post(f"{base_url}/v1/embeddings", json={"input": "IEA500I"}).json()
+    b = httpx2.post(f"{base_url}/v1/embeddings", json={"input": ["IEA500I"]}).json()
+    c = httpx2.post(f"{base_url}/v1/embeddings", json={"input": ["IEA500I AGAIN"]}).json()
     assert a["data"][0]["embedding"] == b["data"][0]["embedding"]  # str input coerced
     assert a["data"][0]["embedding"] != c["data"][0]["embedding"]  # text changes vector
 
@@ -64,7 +64,7 @@ def test_chat_completions_shape_matches_httpx_llm_client(base_url):
         {"role": "system", "content": "You are a mainframe operations expert."},
         {"role": "user", "content": f"Question: reissue?\n\n[1] {cite}\nIEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy"},
     ]
-    r = httpx.post(f"{base_url}/v1/chat/completions", json={"model": "mock-reasoning", "messages": messages})
+    r = httpx2.post(f"{base_url}/v1/chat/completions", json={"model": "mock-reasoning", "messages": messages})
     assert r.status_code == 200
     content = r.json()["choices"][0]["message"]["content"]
     assert isinstance(content, str) and content
@@ -79,7 +79,7 @@ def test_chat_deterministic(base_url):
 
     def ask(cite: str) -> str:
         messages = [{"role": "user", "content": f"[1] {cite}\nSome invented fixture text."}]
-        return httpx.post(
+        return httpx2.post(
             f"{base_url}/v1/chat/completions", json={"messages": messages}
         ).json()["choices"][0]["message"]["content"]
 
@@ -89,7 +89,7 @@ def test_chat_deterministic(base_url):
 
 def test_chat_without_hit_blocks_is_deterministic_fallback(base_url):
     messages = [{"role": "user", "content": "No retrieved excerpts in this prompt."}]
-    r = httpx.post(f"{base_url}/v1/chat/completions", json={"messages": messages})
+    r = httpx2.post(f"{base_url}/v1/chat/completions", json={"messages": messages})
     assert r.status_code == 200
     content = r.json()["choices"][0]["message"]["content"]
     assert content == "The retrieved excerpts did not contain a usable citation."
@@ -100,7 +100,7 @@ def test_chat_multi_hit_echoes_first_only(base_url):
     cite_a = "SA22-0000-00 First Reference, Chapter 1 > IEA500I, p. 1-6"
     cite_b = "SA22-7777-01 Second Reference, Chapter 2 > IEB700I, p. 2-3"
     messages = [{"role": "user", "content": f"[1] {cite_a}\nFirst text.\n\n[2] {cite_b}\nSecond text."}]
-    content = httpx.post(
+    content = httpx2.post(
         f"{base_url}/v1/chat/completions", json={"messages": messages}
     ).json()["choices"][0]["message"]["content"]
     assert f"- {cite_a}" in content
@@ -114,7 +114,7 @@ def test_chat_long_hit_text_is_truncated(base_url):
     long_line = "word " * 60  # 300 chars
     cite = "SA22-0000-00 Ref, Chapter 1 > IEA500I, p. 1-1"
     messages = [{"role": "user", "content": f"[1] {cite}\n{long_line}"}]
-    content = httpx.post(
+    content = httpx2.post(
         f"{base_url}/v1/chat/completions", json={"messages": messages}
     ).json()["choices"][0]["message"]["content"]
     snippet = content.split("the manual states: ", 1)[1].split("\n", 1)[0]
@@ -123,24 +123,24 @@ def test_chat_long_hit_text_is_truncated(base_url):
 
 
 def test_unknown_path_404(base_url):
-    assert httpx.get(f"{base_url}/nope").status_code == 404
-    assert httpx.post(f"{base_url}/v1/nope", json={}).status_code == 404
+    assert httpx2.get(f"{base_url}/nope").status_code == 404
+    assert httpx2.post(f"{base_url}/v1/nope", json={}).status_code == 404
 
 
 def test_bad_input_400(base_url):
-    assert httpx.post(f"{base_url}/v1/embeddings", json={"input": 42}).status_code == 400
-    assert httpx.post(f"{base_url}/v1/chat/completions", json={"messages": 42}).status_code == 400
-    assert httpx.post(f"{base_url}/v1/embeddings", content=b"not json",
+    assert httpx2.post(f"{base_url}/v1/embeddings", json={"input": 42}).status_code == 400
+    assert httpx2.post(f"{base_url}/v1/chat/completions", json={"messages": 42}).status_code == 400
+    assert httpx2.post(f"{base_url}/v1/embeddings", content=b"not json",
                       headers={"Content-Type": "application/json"}).status_code == 400
 
 
 def test_non_object_body_400(base_url):
     """_read_json's non-object branch: valid JSON that is not an object."""
-    assert httpx.post(f"{base_url}/v1/embeddings", json=[1, 2]).status_code == 400
-    assert httpx.post(f"{base_url}/v1/chat/completions", json=[1, 2]).status_code == 400
+    assert httpx2.post(f"{base_url}/v1/embeddings", json=[1, 2]).status_code == 400
+    assert httpx2.post(f"{base_url}/v1/chat/completions", json=[1, 2]).status_code == 400
 
 
 def test_chat_messages_of_non_dicts_400(base_url):
     """'messages' must be a list of objects — a list of scalars is rejected."""
-    r = httpx.post(f"{base_url}/v1/chat/completions", json={"messages": [1, 2]})
+    r = httpx2.post(f"{base_url}/v1/chat/completions", json={"messages": [1, 2]})
     assert r.status_code == 400

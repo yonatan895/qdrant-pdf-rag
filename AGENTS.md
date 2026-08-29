@@ -55,7 +55,7 @@ If a review comment conflicts with this file, follow this file and note the conf
 - One string, everywhere: `ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<full-git-sha>`. Full SHA is `git rev-parse HEAD` / `$GITHUB_SHA`, **never** `${GITHUB_SHA::7}`. That exact string is used for `docker tag`, `docker push`, kustomize sed, `airgap-pack`, and `airgap-load`.
 - Makefile local names are `mainframe-rag/{ingest,agent}` — retag to the GHCR ref **before** push. Do not push a name that was never tagged.
 - Third-party pins live in `images.txt` (Qdrant unprivileged, UBI). A `requirements.lock.txt` bump requires `make wheelhouse bm25-weights` on CPython 3.14 and a connected image rebuild; that changes sneakernet contents. Dedicated PR, not drive-by. `qdrant-client` pin tracks the 1.19 server/chart.
-- Do not add unpublished extras (`types-httpx`). `httpx` ships types.
+- Do not add unpublished extras (`types-httpx2`). `httpx2` ships types.
 
 ## Overlays (never mix CI and prod)
 
@@ -200,8 +200,8 @@ Standing rules from the #20 hardening (PRs A–D):
 
 ## Standing bug rules (from CI)
 
-- Do not add unpublished extras (`types-httpx`). `httpx` ships types.
-- A dependency no module imports is a phantom (litellm was pinned and baked into the images while src used plain httpx). Audit `pyproject.toml` before adding; `test_no_litellm_anywhere` guards this one.
+- Do not add unpublished extras (`types-httpx2`). `httpx2` ships types.
+- A dependency no module imports is a phantom (litellm was pinned and baked into the images while src used plain httpx2). Audit `pyproject.toml` before adding; `test_no_litellm_anywhere` guards this one.
 - Chrome: `max(1, 0.35*n)` wipes short PDFs. Use min 8 pages and min 3 hits.
 - Classify `message` if `XXXnnnY` appears in the first few lines, not only line 1 (headings precede IDs).
 - Qdrant ids: UUID5, not sha256 hex.

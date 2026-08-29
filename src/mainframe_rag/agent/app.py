@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
-import httpx
+import httpx2
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("agent")
 
 settings: Settings
-http: httpx.Client
+http: httpx2.Client
 qdrant: QdrantPoints
 embedder: Embedder
 llm: LLMClient
@@ -78,9 +78,9 @@ async def lifespan(_app: FastAPI):
         settings.require_embed()
     # Bounded connection retries only fire when the request was never sent
     # (DNS/refused) — safe for any method. No request-level retries exist.
-    http = httpx.Client(
+    http = httpx2.Client(
         timeout=settings.embed_timeout_s,
-        transport=httpx.HTTPTransport(retries=settings.http_connect_retries),
+        transport=httpx2.HTTPTransport(retries=settings.http_connect_retries),
     )
     # One dispatch point for embed_mode; the reasoning-model client owns its
     # own connection pool with its own (long) timeout. LLM env stays
@@ -196,7 +196,7 @@ def healthz() -> dict:
     detail: dict = {"qdrant": False, "embed": None}
     try:
         base = settings.qdrant_url.rstrip("/")
-        resp = httpx.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
+        resp = httpx2.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
         detail["qdrant"] = resp.status_code == 200 and resp.text.strip().lower() == "all shards are ready"
         if not detail["qdrant"]:
             # Upstream response bodies go to the log, never the client body.

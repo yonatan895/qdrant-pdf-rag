@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     # never retries (issue #20 PR C).
     answer_timeout_s: float = 300.0
 
-    # Bounded httpx connection-establishment retries (0-5). These fire only
+    # Bounded httpx2 connection-establishment retries (0-5). These fire only
     # when the request was never sent (DNS/refused), so they are safe for any
     # method. There is deliberately no request-level retry anywhere.
     http_connect_retries: int = Field(default=2, ge=0, le=5)

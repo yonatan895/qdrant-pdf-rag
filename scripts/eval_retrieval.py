@@ -29,7 +29,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-import httpx
+import httpx2
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -99,7 +99,7 @@ def evaluate(golden: list[dict], settings) -> dict:
             )
             rows.append(score_entry([asdict(h) for h in hits], entry))
             rows[-1]["kind"] = kind
-        except (httpx.HTTPError, RuntimeError, OSError, ValueError) as exc:
+        except (httpx2.HTTPError, RuntimeError, OSError, ValueError) as exc:
             # One bad query must not kill the eval; counted as a failure.
             failures += 1
             rows.append({"query": entry["query"], "error": str(exc)[:200], "kind": "error"})

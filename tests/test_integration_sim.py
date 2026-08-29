@@ -21,7 +21,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -56,7 +56,7 @@ def _clean_sim_collections(qdrant_url):
     earlier run (fresh PDF timestamps change every sha) would otherwise be
     deleted-and-reupserted mid-tier, perturbing score ordering."""
     for name in ("sim-hash", "sim-vllm"):
-        httpx.delete(f"{qdrant_url}/collections/{name}", timeout=10.0)
+        httpx2.delete(f"{qdrant_url}/collections/{name}", timeout=10.0)
     yield
 
 
