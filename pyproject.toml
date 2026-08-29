@@ -13,7 +13,6 @@ dependencies = [
     "uvicorn",
     "pydantic",
     "pydantic-settings",
-    "litellm",
 ]
 
 [project.optional-dependencies]
