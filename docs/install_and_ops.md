@@ -133,11 +133,17 @@ make bench-report
 make bench-html
 # -> outputs bundles/bench-report.html
 
-# Launch interactive query debugger (REPL)
+# Launch interactive retrieval debugger (REPL)
 EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus make query-demo
 
 # Or inspect a single query with rank, scores, and text preview
 EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus make query-demo QUERY="SC23-6883-70"
+
+# Launch interactive conversational Q&A assistant (Reasoning LLM + Qdrant retrieval)
+EMBED_MODE=hash QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=zos_320_corpus LLM_BASE_URL=http://localhost:8000/v1 LLM_MODEL_REASONING=google/gemma-4-E4B-it-qat-mobile-ct make ask
+
+# Or ask a single question on the command line
+EMBED_MODE=hash QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=zos_320_corpus LLM_BASE_URL=http://localhost:8000/v1 LLM_MODEL_REASONING=google/gemma-4-E4B-it-qat-mobile-ct make ask QUERY="What is message ICH408I?"
 ```
 
 ### 3.6 Testing with Local vLLM & GPU Acceleration (e.g. RTX 5060 8GB)

@@ -224,7 +224,12 @@ bench-compare: | .venv
 
 # Interactive query inspection and debugging CLI
 query-demo: | .venv
-	.venv/bin/python scripts/query_demo.py $(if $(QUERY),--query "$(QUERY)",)
+	PYTHONPATH=. .venv/bin/python scripts/query_demo.py $(if $(QUERY),--query "$(QUERY)",) $(if $(COLLECTION),--collection "$(COLLECTION)",)
+
+# Interactive conversational Q&A assistant (reasoning LLM + Qdrant retrieval)
+.PHONY: ask
+ask: | .venv
+	PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer $(if $(QUERY),--query "$(QUERY)",) $(if $(COLLECTION),--collection "$(COLLECTION)",) $(if $(LIMIT),--limit "$(LIMIT)",)
 
 # Local GPU acceleration & vLLM testing
 .PHONY: local-vllm test-vllm-e2e
