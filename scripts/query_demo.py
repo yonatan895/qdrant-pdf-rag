@@ -482,6 +482,8 @@ def main(argv: list[str] | None = None) -> int:
                 "answer": parsed.get("answer"),
                 "script": parsed.get("script"),
                 "citations": parsed.get("citations"),
+                "citations_inferred": parsed.get("citations_inferred", False),
+                "inferred_indices": parsed.get("inferred_indices", []),
                 "hits": [asdict(h) for h in hits],
             }, indent=2)
         elif args.format == "html":

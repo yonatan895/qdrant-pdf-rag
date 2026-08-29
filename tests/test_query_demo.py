@@ -145,5 +145,7 @@ def test_main_cli_answer_mode(mock_qdrant, mock_chat, mock_embed, mock_search, t
     content = out_file.read_text(encoding="utf-8")
     assert '"query": "IEA500I"' in content
     assert '"answer": "Command rejected."' in content
+    assert '"citations_inferred": false' in content
+
 
 

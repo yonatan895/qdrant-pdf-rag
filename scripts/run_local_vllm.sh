@@ -8,7 +8,7 @@ MODEL="${MODEL:-google/gemma-4-E4B-it-qat-mobile-ct}"
 PORT="${PORT:-8000}"
 GPU_MEM="${GPU_MEM:-0.85}"
 MAX_LEN="${MAX_LEN:-4096}"
-IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.7.3}"
+IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}"
 
 echo "============================================================"
 echo " Starting local vLLM server"
@@ -48,17 +48,8 @@ if [ -n "${HF_TOKEN:-}" ]; then
     ENV_ARGS="${ENV_ARGS} -e HF_TOKEN"
 fi
 
-# 8GB VRAM optimizations:
-# - --limit-mm-per-prompt '{"image":0,"audio":0}': Disables vision/audio buffers on multimodal Gemma 4
-# - --max-num-seqs 1: Bounds concurrent sequence allocation
-MODEL_ARGS="--gpu-memory-utilization ${GPU_MEM} --max-model-len ${MAX_LEN} --limit-mm-per-prompt {\"image\":0,\"audio\":0} --max-num-seqs 1 --port 8000"
-
-# Add Gemma4 reasoning/tool parser flags if serving a Gemma 4 model
-case "${MODEL}" in
-    *gemma-4*|*gemma4*)
-        MODEL_ARGS="${MODEL_ARGS} --tool-call-parser gemma4 --reasoning-parser gemma4"
-        ;;
-esac
+# Construct CLI options as individual quoted argv parameters to prevent word-splitting on JSON flags
+CLI_OPTS="--gpu-memory-utilization ${GPU_MEM} --max-model-len ${MAX_LEN} --max-num-seqs 1 --port ${PORT}"
 
 # If MODEL is a local directory, mount it directly into the container as /model
 # Note: vLLM serve expects the model path/name as a positional argument.
@@ -68,23 +59,79 @@ if [ -d "${MODEL}" ]; then
     echo " Detected local model directory: ${ABS_MODEL_DIR}"
     echo " Serving as model name:         ${MODEL_NAME}"
     echo "============================================================"
-    exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
-        -p "${PORT}:8000" \
-        -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-        -v "${ABS_MODEL_DIR}:/model:ro" \
-        ${ENV_ARGS} \
-        --ipc=host \
-        "${IMAGE}" \
-        /model \
-        --served-model-name "${MODEL_NAME}" \
-        ${MODEL_ARGS} "$@"
+    case "${MODEL_NAME}" in
+        *gemma-4*|*gemma4*)
+            exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
+                -p "${PORT}:${PORT}" \
+                -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
+                -v "${ABS_MODEL_DIR}:/model:ro" \
+                ${ENV_ARGS} \
+                --ipc=host \
+                "${IMAGE}" \
+                /model \
+                --served-model-name "${MODEL_NAME}" \
+                --gpu-memory-utilization "${GPU_MEM}" \
+                --max-model-len "${MAX_LEN}" \
+                --limit-mm-per-prompt '{"image":0,"audio":0}' \
+                --max-num-seqs 1 \
+                --port "${PORT}" \
+                --tool-call-parser gemma4 \
+                --reasoning-parser gemma4 \
+                --chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja \
+                "$@"
+            ;;
+        *)
+            exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
+                -p "${PORT}:${PORT}" \
+                -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
+                -v "${ABS_MODEL_DIR}:/model:ro" \
+                ${ENV_ARGS} \
+                --ipc=host \
+                "${IMAGE}" \
+                /model \
+                --served-model-name "${MODEL_NAME}" \
+                --gpu-memory-utilization "${GPU_MEM}" \
+                --max-model-len "${MAX_LEN}" \
+                --limit-mm-per-prompt '{"image":0,"audio":0}' \
+                --max-num-seqs 1 \
+                --port "${PORT}" \
+                "$@"
+            ;;
+    esac
 else
-    exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
-        -p "${PORT}:8000" \
-        -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-        ${ENV_ARGS} \
-        --ipc=host \
-        "${IMAGE}" \
-        "${MODEL}" \
-        ${MODEL_ARGS} "$@"
+    case "${MODEL}" in
+        *gemma-4*|*gemma4*)
+            exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
+                -p "${PORT}:${PORT}" \
+                -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
+                ${ENV_ARGS} \
+                --ipc=host \
+                "${IMAGE}" \
+                "${MODEL}" \
+                --gpu-memory-utilization "${GPU_MEM}" \
+                --max-model-len "${MAX_LEN}" \
+                --limit-mm-per-prompt '{"image":0,"audio":0}' \
+                --max-num-seqs 1 \
+                --port "${PORT}" \
+                --tool-call-parser gemma4 \
+                --reasoning-parser gemma4 \
+                --chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja \
+                "$@"
+            ;;
+        *)
+            exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
+                -p "${PORT}:${PORT}" \
+                -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
+                ${ENV_ARGS} \
+                --ipc=host \
+                "${IMAGE}" \
+                "${MODEL}" \
+                --gpu-memory-utilization "${GPU_MEM}" \
+                --max-model-len "${MAX_LEN}" \
+                --limit-mm-per-prompt '{"image":0,"audio":0}' \
+                --max-num-seqs 1 \
+                --port "${PORT}" \
+                "$@"
+            ;;
+    esac
 fi

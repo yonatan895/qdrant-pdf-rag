@@ -68,7 +68,12 @@ def setup_local_corpus(settings: Settings, work_dir: str) -> None:
     print("[*] Preparing synthetic mainframe manual corpus...")
     os.makedirs(work_dir, exist_ok=True)
     pdf_path = Path(work_dir) / "SA22-7592-05_mvs_init.pdf"
-    build(pdf_path, doc_id="SA22-7592-05", title="z/OS MVS Initialization and Tuning Reference")
+    build(
+        pdf_path,
+        doc_id="SA22-7592-05",
+        title="z/OS MVS Initialization and Tuning Reference",
+        message_id="IEA500I",
+    )
 
     print(f"[*] Ingesting {pdf_path} into collection '{settings.qdrant_collection}'...")
     os.environ["QDRANT_URL"] = settings.qdrant_url
