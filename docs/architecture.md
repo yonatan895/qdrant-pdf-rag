@@ -115,7 +115,22 @@ User / Splunk Query
    └── Top-K Ranked Hits with Strict Citation Formatting
 ```
 
-### 4.4 Outbound HTTP & Agent Lifespan
+### 4.4 Reasoning LLM Prompt Construction & Citation Grounding Contract
+
+The agent enforces strict grounding guarantees before returning reasoning answers to clients:
+
+1. **Few-Shot Citation Injection:**
+   The prompt dynamically includes a concrete few-shot example using `hits[0].cite` in the instructions to enforce uniform formatting from both large reasoning models and quantized edge models (e.g. Gemma 4 INT4 QAT).
+
+2. **Two-Pass Citation Resolution:**
+   - **Primary Pass (Explicit Block):** Looks for a terminal `Citations:` section. Each listed citation is normalized and matched against the allowed search hit citations (`allowed_citations = {h.cite for h in hits}`).
+   - **Fallback Pass (Bracketed Index Resolution):** If no explicit `Citations:` block is present, the parser scans for bracketed number references `\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]` (matching prompt tokens like `[1]`, `[2]`, `[1, 2]`) and resolves them to `ordered_cites[index - 1]`.
+   - **Parenthesis Immunity:** Parentheses `(...)` are deliberately excluded from inference to avoid false positives on standard mainframe technical notation such as `z/OS (3.1)`, `SYS1.PARMLIB(IEASYS00)`, `(2)`, or `APARs (1, 2)`.
+
+3. **Body Stripping & Verification:**
+   Any hallucinated citation lines that match the citation regex but are not in `allowed_citations` are stripped from the response text before transmission. Mid-sentence narrative text mentioning document IDs is preserved under the standalone-line rule.
+
+### 4.5 Outbound HTTP & Agent Lifespan
 
 Outbound HTTP communication is managed via `httpx2` with connection pools created and closed during application lifespan:
 - **Reasoning Answer Calls (`/v1/answer`):** Single-shot with a 300s timeout; connection-level retries are explicitly disabled (`retries=0`).
@@ -139,12 +154,16 @@ Outbound HTTP communication is managed via `httpx2` with connection pools create
 - **Benchmark Suite:** `make bench` runs concurrent load tests against Qdrant and a deterministic mock LLM, measuring peak RSS, Qdrant container RAM/disk, and p50/p90/p95/p99 search and answer latencies against `benchmarks/baseline.json`.
 
 ### 5.3 Developer Tooling & Reporting (`scripts/`)
+- **Interactive Conversational Assistant & REPL (`scripts/query_demo.py` / `make ask`):**
+  - Interactive REPL (`rag-answer> `) and CLI tool supporting pure retrieval inspection, LLM reasoning answers, live mode toggling (`:mode`), and export to JSON/HTML.
+  - Surfaces citation extraction source (`[explicit Citations: section]` vs `[inferred from excerpt [1, 2]]`).
 - **Report Renderer & Comparator (`scripts/render_report.py`):**
-  - Formats eval and benchmark reports into terminal text, Markdown, and 100% self-contained offline HTML dashboards (zero CDN dependencies).
+  - Formats eval and benchmark reports into terminal text, Markdown, and 100% self-contained offline HTML dashboards.
   - Subcommands: `eval`, `bench`, `compare-eval`, `compare-bench`.
-  - Enforces `--fail-on-regression` for automated CI/release gating.
-- **Interactive Query Debugger (`scripts/query_demo.py`):**
-  - Provides a terminal REPL (`rag-query> `) and CLI tool for inspecting query classification, latency breakdowns, and retrieved chunks.
+- **Local GPU vLLM Launcher (`scripts/run_local_vllm.sh` / `make local-vllm`):**
+  - Runs `vllm/vllm-openai:v0.28.0` with 8GB VRAM tuning, Gemma 4 tool/reasoning parsers, and offline weights mounting.
+- **Automated Local End-to-End Suite (`scripts/test_local_e2e_vllm.py` / `make test-vllm-e2e`):**
+  - Validates full pipeline from PDF build to FastAPI HTTP `/v1/search` and `/v1/answer` endpoints against local vLLM.
 
 ---
 
