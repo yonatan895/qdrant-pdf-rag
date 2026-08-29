@@ -117,26 +117,41 @@ make bench-baseline
 
 ### 3.5 Developer Reporting & Interactive Query Assistant (`make ask` / `make query-demo`)
 
-Mainframe RAG provides interactive terminal REPLs and single-command CLI utilities for inspecting retrieval results and testing LLM reasoning:
+Mainframe RAG provides interactive terminal REPLs and single-command CLI utilities for inspecting retrieval results and testing LLM reasoning. Local developer defaults (`EMBED_MODE=hash`, `ALLOW_HASH_MODE=true`, `QDRANT_URL=http://localhost:6333`, and auto-detection of local vLLM models) are applied automatically:
 
 ```bash
 # 1. Interactive conversational Q&A assistant (Reasoning LLM + Qdrant retrieval)
-EMBED_MODE=hash QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=zos_320_corpus \
-  LLM_BASE_URL=http://localhost:8000/v1 LLM_MODEL_REASONING=google/gemma-4-E4B-it-qat-mobile-ct \
-  make ask
+make ask
 
 # 2. Ask a single question directly on the command line
-EMBED_MODE=hash QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=zos_320_corpus \
-  LLM_BASE_URL=http://localhost:8000/v1 LLM_MODEL_REASONING=google/gemma-4-E4B-it-qat-mobile-ct \
-  make ask QUERY="What is message ICH408I?"
+make ask QUERY="What is message ICH408I?"
 
-# 3. Launch pure retrieval debugger REPL (inspect rank scores and chunk payloads without calling LLM)
-EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus make query-demo
+# 3. Query a specific collection
+make ask QUERY="What is message IEA500I?" COLLECTION=local_vllm_test_corpus
 
-# 4. Export query results to self-contained HTML or JSON
+# 4. Launch pure retrieval debugger REPL (inspect rank scores and chunk payloads without calling LLM)
+make query-demo
+
+# 5. Inspect a single query in pure search mode
+make query-demo QUERY="IEA500I" COLLECTION=local_vllm_test_corpus
+
+# 6. Export query results to self-contained HTML or JSON
 PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer --query "IEA500I" --format html --out bundles/answer-IEA500I.html
 PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer --query "IEA500I" --format json --out bundles/answer-IEA500I.json
 ```
+
+#### Local Development Environment Defaults
+
+When running local tooling (`make ask`, `make query-demo`, `test_local_e2e_vllm.py`), the following defaults are automatically applied if unset in the environment:
+
+| Variable | Local Dev Default | Air-Gap / Prod Rule |
+|---|---|---|
+| **`QDRANT_URL`** | `http://localhost:6333` | Internal OpenShift service DNS (e.g. `http://qdrant:6333`) |
+| **`QDRANT_COLLECTION`** | `mainframe_manuals` (or CLI `COLLECTION=...`) | `mainframe_manuals` |
+| **`EMBED_MODE`** | `"hash"` (auto-set if `EMBED_BASE_URL` is unset) | `"vllm"` (mandatory; prod fails closed on hash mode) |
+| **`ALLOW_HASH_MODE`** | `"true"` (auto-set for local test utilities) | `false` (fails closed to prevent hash retrieval in prod) |
+| **`LLM_BASE_URL`** | `http://localhost:8000/v1` (auto-detected if listening) | Internal vLLM platform endpoint from `airgap.env` |
+| **`LLM_MODEL_REASONING`** | Auto-resolved from `/v1/models` on local server | Dedicated reasoning model specified in `airgap.env` |
 
 #### REPL Controls & Options
 * **Interactive Mode Switch (`:mode`)**: Type `:mode` inside the REPL to toggle dynamically between `search` (pure vector/BM25 retrieval preview) and `answer` (retrieval + LLM reasoning generation).
@@ -219,6 +234,64 @@ Files stored in `~/models/gemma-4-E4B-it-qat-mobile-ct/`:
 * `config.json` & `generation_config.json` — Model hyperparameters
 * `tokenizer.json` & `tokenizer_config.json` — Vocabulary and special tokens
 * `chat_template.jinja` — Chat formatting templates
+
+---
+
+### 3.9 Managing & Listing Qdrant Collections
+
+When testing with multiple corpora or adding new PDF sets for experimentation, use the following commands to inspect, manage, and query collections:
+
+#### 1. Listing All Collections
+
+**Via `curl` (Quickest):**
+```bash
+curl -s http://localhost:6333/collections | python3 -m json.tool
+```
+
+**Via Qdrant Web UI Dashboard:**
+Open your browser to:
+👉 **`http://localhost:6333/dashboard`**
+*(Provides an interactive visual inspection interface showing point counts, vector configurations, payload schemas, and disk sizes).*
+
+**Via Python SDK:**
+```bash
+.venv/bin/python -c '
+from qdrant_client import QdrantClient
+client = QdrantClient("http://localhost:6333")
+for c in client.get_collections().collections:
+    info = client.get_collection(c.name)
+    print(f"• {c.name:<25} ({info.points_count} points, status={info.status})")
+'
+```
+
+#### 2. Ingesting Additional PDFs into a Custom Collection
+
+To parse and index new PDF manuals from a local folder:
+
+```bash
+# 1. Place PDFs in a local directory (e.g. /path/to/my_pdfs/)
+# 2. Run ingestion worker into target collection name
+.venv/bin/python src/mainframe_rag/ingest/run_ingest.py \
+  --src /path/to/my_pdfs \
+  --progress /path/to/my_pdfs/inventory.jsonl \
+  --workers 4
+```
+
+> **Options:**
+> * `--src`: Directory containing `.pdf` files to discover recursively.
+> * `--progress`: Inventory tracking file (enables fast resume without re-parsing processed PDFs).
+> * `--workers`: Number of parallel parsing and ingestion worker threads (e.g. `4` or `8`).
+> * `QDRANT_COLLECTION=<name>`: Target collection name (defaults to `mainframe_manuals`).
+
+#### 3. Querying Against Your Custom Collection
+
+```bash
+# Conversational assistant
+make ask QUERY="How do I configure ..." COLLECTION=my_collection
+
+# Pure search debugger
+make query-demo QUERY="IEA500I" COLLECTION=my_collection
+```
 
 ---
 
