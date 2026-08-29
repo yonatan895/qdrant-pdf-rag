@@ -17,14 +17,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx2
-from qdrant_client import QdrantClient
 
-from mainframe_rag.agent.answer import HttpxLLMClient, build_messages
-from mainframe_rag.agent.cites import strip_unauthorized_citations, valid_citations
 from mainframe_rag.config import Settings
-from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.ingest.run_ingest import run as run_ingest
-from mainframe_rag.retrieve.query import search
 
 # Allow running directly via `python scripts/test_local_e2e_vllm.py`
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -92,74 +87,75 @@ def setup_local_corpus(settings: Settings, work_dir: str) -> None:
     print(f"[+] Ingest completed with code {rc}")
 
 
-def run_e2e_query(settings: Settings, query: str, product: str | None = None, version: str | None = None) -> dict[str, Any]:
-    """Execute hybrid retrieval, query the real reasoning model, and validate citations."""
+def run_e2e_query(client: Any, query: str, product: str | None = None, version: str | None = None) -> dict[str, Any]:
+    """Execute hybrid retrieval and reasoning via the real /v1/search and /v1/answer HTTP endpoints."""
     print("\n" + "=" * 60)
     print(f" QUERY: {query}")
     print("=" * 60)
 
-    # 1. Retrieval
-    print("[*] Running parallel prefetch retrieval from Qdrant...")
-    qdrant_client = QdrantClient(url=settings.qdrant_url, timeout=settings.qdrant_timeout_s)
-    http_embed = httpx2.Client(timeout=settings.embed_timeout_s)
-    try:
-        embedder = build_embedder(settings, http_embed)
-        hits, kind, timing = search(
-            client=qdrant_client,
-            embedder=embedder,
-            collection=settings.qdrant_collection,
-            query=query,
-            product=product,
-            version=version,
-            limit=5,
-        )
-    finally:
-        http_embed.close()
+    # 1. Test /v1/search endpoint
+    print("[*] Calling POST /v1/search...")
+    search_resp = client.post(
+        "/v1/search",
+        json={"query": query, "product": product, "version": version, "limit": 5},
+    )
+    if search_resp.status_code != 200:
+        print(f"[-] /v1/search failed with HTTP {search_resp.status_code}: {search_resp.text}", file=sys.stderr)
+        return {"success": False, "error": "search_http_error"}
 
-    print(f"[+] Retrieved {len(hits)} ranked hits (kind={kind}, timing={timing}):")
+    search_data = search_resp.json()
+    hits = search_data.get("hits", [])
+    print(f"[+] /v1/search returned {len(hits)} hits (kind={search_data.get('query_kind')}):")
     for i, h in enumerate(hits, 1):
-        print(f"    [{i}] score={h.score:.4f} cite={h.cite}")
-        print(f"        preview: {h.text[:100]}...")
+        print(f"    [{i}] score={h.get('score', 0):.4f} cite={h.get('cite')}")
+        print(f"        preview: {h.get('text', '')[:100]}...")
 
     if not hits:
-        print("[-] Retrieval returned 0 hits!", file=sys.stderr)
+        print("[-] Retrieval returned 0 hits! Grounding impossible.", file=sys.stderr)
         return {"success": False, "error": "zero_hits"}
 
-    # 2. Prompt Construction
-    messages = build_messages(
-        query=query,
-        hits=hits,
-        product=product,
-        version=version,
+    # 2. Test /v1/answer endpoint
+    print("\n[*] Calling POST /v1/answer (Reasoning model + citation grounding)...")
+    answer_resp = client.post(
+        "/v1/answer",
+        json={"query": query, "product": product, "version": version},
     )
+    if answer_resp.status_code != 200:
+        print(f"[-] /v1/answer failed with HTTP {answer_resp.status_code}: {answer_resp.text}", file=sys.stderr)
+        return {"success": False, "error": "answer_http_error"}
 
-    # 3. LLM Reasoning Call
-    print(f"[*] Calling reasoning model '{settings.llm_model_reasoning}' on vLLM...")
-    client = HttpxLLMClient(settings)
-    try:
-        reply = client.chat(messages)
-    finally:
-        client.close()
+    answer_data = answer_resp.json()
+    answer_text = answer_data.get("answer", "")
+    citations = answer_data.get("citations", [])
+    script = answer_data.get("script")
 
     print("\n[+] MODEL REASONING RESPONSE:")
     print("-" * 60)
-    print(reply)
+    print(answer_text)
     print("-" * 60)
 
-    # 4. Citation Validation
-    allowed_cites = {h.cite for h in hits}
-    extracted_cites = valid_citations(reply, allowed_cites)
-    cleaned_reply = strip_unauthorized_citations(reply, allowed_cites)
+    if script:
+        print("\n[+] EXTRACTED SCRIPT / CODE:")
+        print(script)
 
-    print(f"\n[+] Validated Citations ({len(extracted_cites)}):")
-    for c in extracted_cites:
+    print(f"\n[+] Validated Citations ({len(citations)}):")
+    for c in citations:
         print(f"    * {c}")
+
+    # 3. Grounding assertions: fail if citations are empty or answer is ungrounded
+    if not citations:
+        print("[-] FAIL: /v1/answer returned zero validated citations! Response is ungrounded.", file=sys.stderr)
+        return {"success": False, "error": "zero_citations", "answer_data": answer_data}
+
+    if "no supporting manual excerpts" in answer_text.lower():
+        print("[-] FAIL: Model claimed no supporting excerpts were found.", file=sys.stderr)
+        return {"success": False, "error": "unsupported_answer", "answer_data": answer_data}
 
     return {
         "success": True,
-        "raw_response": reply,
-        "cleaned_response": cleaned_reply,
-        "citations": extracted_cites,
+        "answer": answer_text,
+        "citations": citations,
+        "script": script,
     }
 
 
@@ -204,20 +200,33 @@ def main(argv: list[str] | None = None) -> int:
             work_dir = os.path.join(os.getcwd(), "output", "vllm-demo-pdfs")
             setup_local_corpus(settings, work_dir)
 
-        # Run test queries
+        # Set environment variables for FastAPI app
+        os.environ["QDRANT_URL"] = settings.qdrant_url
+        os.environ["QDRANT_COLLECTION"] = settings.qdrant_collection
+        os.environ["EMBED_MODE"] = "hash"
+        os.environ["ALLOW_HASH_MODE"] = "true"
+        os.environ["LLM_BASE_URL"] = settings.llm_base_url
+        os.environ["LLM_MODEL_REASONING"] = settings.require_reasoning_model()
+
+        from fastapi.testclient import TestClient
+
+        import mainframe_rag.agent.app as app_mod
+
+        # Run test queries via FastAPI HTTP TestClient
         test_queries = [
             ("How do I resolve IEA500I IOSCMDS command rejected and what operator action is needed?", None, None),
             ("What parameter controls the 64-bit large frame area (LFAREA) in IEASYSxx?", None, None),
         ]
 
         successes = 0
-        for q, prod, ver in test_queries:
-            res = run_e2e_query(settings, q, product=prod, version=ver)
-            if res.get("success"):
-                successes += 1
+        with TestClient(app_mod.app) as client:
+            for q, prod, ver in test_queries:
+                res = run_e2e_query(client, q, product=prod, version=ver)
+                if res.get("success"):
+                    successes += 1
 
         print("\n" + "=" * 60)
-        print(f" E2E vLLM Test Complete: {successes}/{len(test_queries)} queries executed successfully")
+        print(f" E2E vLLM Test Complete: {successes}/{len(test_queries)} queries passed grounding validation")
         print("=" * 60)
         return 0 if successes == len(test_queries) else 1
 

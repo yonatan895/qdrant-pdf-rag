@@ -188,16 +188,26 @@ def render_answer_text(
             "------------------------------------------------------------",
             parsed["script"].strip(),
         ])
+    cites = parsed.get("citations", [])
+    inferred = parsed.get("citations_inferred", False)
+    inferred_indices = parsed.get("inferred_indices", [])
+    if inferred:
+        cite_status = f" [inferred from excerpt {'[' + ', '.join(map(str, inferred_indices)) + ']'}]"
+    elif cites:
+        cite_status = " [explicit Citations: section]"
+    else:
+        cite_status = ""
+
     lines.extend([
         "",
         "------------------------------------------------------------",
-        f"VALIDATED CITATIONS ({len(parsed.get('citations', []))}):",
+        f"VALIDATED CITATIONS ({len(cites)}){cite_status}:",
         "------------------------------------------------------------",
     ])
-    if not parsed.get("citations"):
+    if not cites:
         lines.append("  (No direct citation lines verified in response)")
     else:
-        for c in parsed["citations"]:
+        for c in cites:
             lines.append(f"  * {c}")
     lines.append("============================================================")
     return "\n".join(lines) + "\n"
@@ -288,7 +298,7 @@ def render_answer_html(
       <h3>Reasoning Answer</h3>
       <div style="white-space: pre-wrap; line-height: 1.6;">{html.escape(parsed.get("answer", ""))}</div>
       <hr style="border: none; border-top: 1px solid var(--border); margin: 1.5rem 0;" />
-      <h3>Validated Citations</h3>
+      <h3>Validated Citations <span style="font-size: 0.85rem; font-weight: normal; color: var(--text-muted);">{"(Inferred from bracketed indices)" if parsed.get("citations_inferred") else "(Explicit Citations: section)"}</span></h3>
       <ul>{citations_html}</ul>
     </div>
     {script_html}

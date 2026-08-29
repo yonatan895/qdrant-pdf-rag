@@ -1,14 +1,14 @@
 #!/usr/bin/env sh
 # Run a local vLLM OpenAI-compatible server using Docker with NVIDIA GPU pass-through.
-# Optimized for consumer GPUs (e.g. RTX 5060 with 8GB VRAM).
+# Optimized for consumer GPUs (e.g. RTX 5060 with 8GB VRAM) and Gemma-4 models.
 
 set -eu
 
 MODEL="${MODEL:-google/gemma-4-E4B-it-qat-mobile-ct}"
 PORT="${PORT:-8000}"
 GPU_MEM="${GPU_MEM:-0.85}"
-MAX_LEN="${MAX_LEN:-8192}"
-IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:latest}"
+MAX_LEN="${MAX_LEN:-4096}"
+IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.7.3}"
 
 echo "============================================================"
 echo " Starting local vLLM server"
@@ -33,42 +33,59 @@ fi
 HF_CACHE_DIR="${HF_HOME:-${HOME}/.cache/huggingface}"
 mkdir -p "${HF_CACHE_DIR}"
 
-ENV_FLAGS="-e VLLM_USE_V1=0 -e VLLM_WSL2_ENABLE_PIN_MEMORY=1"
-if [ -n "${HF_TOKEN:-}" ]; then
-    ENV_FLAGS="${ENV_FLAGS} -e HF_TOKEN=${HF_TOKEN}"
+# TTY flag: only allocate pseudo-TTY if stdin is connected to an interactive terminal
+if [ -t 0 ]; then
+    TTY_FLAG="-it"
+else
+    TTY_FLAG=""
 fi
 
+# Environment flags:
+# - VLLM_USE_V1=0: vLLM v1 engine relies on Unified Virtual Addressing (UVA), which fails
+#   with "RuntimeError: UVA is not available" on WSL2 and consumer laptop GPUs. V0 is stable.
+# - VLLM_WSL2_ENABLE_PIN_MEMORY=1: Enables pinned host memory allocation on WSL2.
+# - HF_TOKEN: Forwarded safely via `-e HF_TOKEN` without exposing the secret token string on argv.
+ENV_ARGS="-e VLLM_USE_V1=0 -e VLLM_WSL2_ENABLE_PIN_MEMORY=1"
+if [ -n "${HF_TOKEN:-}" ]; then
+    ENV_ARGS="${ENV_ARGS} -e HF_TOKEN"
+fi
+
+# 8GB VRAM optimizations:
+# - --limit-mm-per-prompt '{"image":0,"audio":0}': Disables vision/audio buffers on multimodal Gemma 4
+# - --max-num-seqs 1: Bounds concurrent sequence allocation
+MODEL_ARGS="--gpu-memory-utilization ${GPU_MEM} --max-model-len ${MAX_LEN} --limit-mm-per-prompt {\"image\":0,\"audio\":0} --max-num-seqs 1 --port 8000"
+
+# Add Gemma4 reasoning/tool parser flags if serving a Gemma 4 model
+case "${MODEL}" in
+    *gemma-4*|*gemma4*)
+        MODEL_ARGS="${MODEL_ARGS} --tool-call-parser gemma4 --reasoning-parser gemma4"
+        ;;
+esac
+
 # If MODEL is a local directory, mount it directly into the container as /model
-EXTRA_VOLUMES=""
-SERVED_MODEL="${MODEL}"
 if [ -d "${MODEL}" ]; then
     ABS_MODEL_DIR="$(cd "${MODEL}" && pwd)"
-    EXTRA_VOLUMES="-v ${ABS_MODEL_DIR}:/model:ro"
     MODEL_NAME="${SERVED_NAME:-$(basename "${ABS_MODEL_DIR}")}"
     echo " Detected local model directory: ${ABS_MODEL_DIR}"
     echo " Serving as model name:         ${MODEL_NAME}"
     echo "============================================================"
-    exec "${RUNTIME}" run --rm -it --gpus all \
+    exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
         -p "${PORT}:8000" \
         -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-        ${EXTRA_VOLUMES} \
-        ${ENV_FLAGS} \
+        -v "${ABS_MODEL_DIR}:/model:ro" \
+        ${ENV_ARGS} \
         --ipc=host \
         "${IMAGE}" \
         --model /model \
         --served-model-name "${MODEL_NAME}" \
-        --gpu-memory-utilization "${GPU_MEM}" \
-        --max-model-len "${MAX_LEN}" \
-        --port 8000 "$@"
+        ${MODEL_ARGS} "$@"
 else
-    exec "${RUNTIME}" run --rm -it --gpus all \
+    exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
         -p "${PORT}:8000" \
         -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-        ${ENV_FLAGS} \
+        ${ENV_ARGS} \
         --ipc=host \
         "${IMAGE}" \
         --model "${MODEL}" \
-        --gpu-memory-utilization "${GPU_MEM}" \
-        --max-model-len "${MAX_LEN}" \
-        --port 8000 "$@"
+        ${MODEL_ARGS} "$@"
 fi

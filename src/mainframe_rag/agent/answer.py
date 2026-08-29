@@ -58,8 +58,15 @@ def build_messages(
         )
     parts.append("Question: " + query)
     parts.append("Retrieved manual excerpts:\n" + "\n\n".join(chunks))
+
+    example_cite = (
+        hits[0].cite
+        if hits
+        else "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17"
+    )
     parts.append(
-        "Please answer based on the excerpts above and conclude with the 'Citations:' section copying the exact citation line for each excerpt used."
+        "Please answer based strictly on the retrieved manual excerpts above and conclude with the 'Citations:' section copying the exact citation line for each excerpt used, for example:\n"
+        f"Citations:\n{example_cite}"
     )
 
     return [
@@ -135,16 +142,21 @@ def parse_answer(
     script = fence.group(1).strip() if fence else None
 
     citations = valid_citations(content, allowed_citations)
+    citations_inferred = False
+    inferred_indices: list[int] = []
+
     if not citations and ordered_cites:
-        # Resolve inline bracketed excerpt references (e.g. [1], [2], [1, 2])
-        for match in re.finditer(r"\[([0-9,\s]+)\]|\(([0-9,\s]+)\)", content):
-            raw_nums = match.group(1) or match.group(2) or ""
-            for num_str in re.findall(r"\b\d+\b", raw_nums):
+        # Strictly match bracketed numbers like [1], [2], [1, 2] corresponding to [{i}] prompt excerpts.
+        # Parentheses (e.g. "z/OS (3.1)", "(2)", "APARs (1, 2)") are ignored to avoid false inference.
+        for match in re.finditer(r"\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]", content):
+            for num_str in re.findall(r"\b\d+\b", match.group(1)):
                 idx = int(num_str) - 1
                 if 0 <= idx < len(ordered_cites):
                     cite = ordered_cites[idx]
                     if cite in allowed_citations and cite not in citations:
                         citations.append(cite)
+                        inferred_indices.append(idx + 1)
+                        citations_inferred = True
 
     # Answer body = everything before the Citations: header, minus the fence.
     body = content.split("Citations:")[0] if "Citations:" in content else content
@@ -157,4 +169,6 @@ def parse_answer(
         "answer": body.strip(),
         "citations": citations,
         "script": script,
+        "citations_inferred": citations_inferred,
+        "inferred_indices": inferred_indices,
     }

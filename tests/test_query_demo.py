@@ -87,6 +87,7 @@ def test_render_answer_text():
         "answer": "This message indicates command rejection.",
         "citations": ["SA22-0000-00 z/OS Messages, Chapter 1 > IEA Messages, p. 1-5"],
         "script": "//RETRY EXEC PGM=IEFBR14",
+        "citations_inferred": False,
     }
     rendered = render_answer_text("IEA500I", "identifier", parsed, hits, {"embed_ms": 2, "qdrant_ms": 8})
     assert "QUESTION: IEA500I" in rendered
@@ -94,8 +95,19 @@ def test_render_answer_text():
     assert "This message indicates command rejection." in rendered
     assert "EXTRACTED SCRIPT / CODE:" in rendered
     assert "//RETRY EXEC PGM=IEFBR14" in rendered
-    assert "VALIDATED CITATIONS (1):" in rendered
+    assert "VALIDATED CITATIONS (1) [explicit Citations: section]:" in rendered
     assert "SA22-0000-00" in rendered
+
+    # Inferred citation variant
+    parsed_inferred = {
+        "answer": "This message indicates command rejection [1].",
+        "citations": ["SA22-0000-00 z/OS Messages, Chapter 1 > IEA Messages, p. 1-5"],
+        "script": None,
+        "citations_inferred": True,
+        "inferred_indices": [1],
+    }
+    rendered_inferred = render_answer_text("IEA500I", "identifier", parsed_inferred, hits, {"embed_ms": 2, "qdrant_ms": 8})
+    assert "VALIDATED CITATIONS (1) [inferred from excerpt [1]]:" in rendered_inferred
 
 
 def test_render_answer_html():

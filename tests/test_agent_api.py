@@ -439,6 +439,42 @@ def test_parse_answer_shape():
     assert parsed["answer"] == "Answer text."
     assert parsed["citations"] == [_hit().cite]
     assert parsed["script"] is None
+    assert parsed["citations_inferred"] is False
+
+
+def test_parse_answer_bracketed_fallback():
+    """Item 1: [n] fallback resolves ordered_cites[n-1] when Citations: is absent."""
+    cite1 = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
+    cite2 = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+    allowed = {cite1, cite2}
+    ordered = [cite1, cite2]
+
+    # 1. [2] only -> ordered_cites[1]
+    res1 = parse_answer("Details in [2].", allowed, ordered_cites=ordered)
+    assert res1["citations"] == [cite2]
+    assert res1["citations_inferred"] is True
+    assert res1["inferred_indices"] == [2]
+
+    # 2. Citations: exact line still wins (not inferred)
+    res2 = parse_answer(f"Answer text based on [2].\n\nCitations:\n{cite1}", allowed, ordered_cites=ordered)
+    assert res2["citations"] == [cite1]
+    assert res2["citations_inferred"] is False
+
+    # 3. z/OS (3.1), (2), APARs (1, 2) in parentheses with no Citations: -> zero inferred cites
+    res3 = parse_answer("Runs on z/OS (3.1) with APARs (1, 2) and option (2).", allowed, ordered_cites=ordered)
+    assert res3["citations"] == []
+    assert res3["citations_inferred"] is False
+
+    # 4. Mixed [1] and [2] and [1, 2] -> both, de-duped
+    res4 = parse_answer("Points from [1] and [2], summarized in [1, 2].", allowed, ordered_cites=ordered)
+    assert res4["citations"] == [cite1, cite2]
+    assert res4["citations_inferred"] is True
+    assert res4["inferred_indices"] == [1, 2]
+
+    # 5. Out of bounds index [99] -> zero inferred
+    res5 = parse_answer("See [99].", allowed, ordered_cites=ordered)
+    assert res5["citations"] == []
+    assert res5["citations_inferred"] is False
 
 
 def test_citation_validation():

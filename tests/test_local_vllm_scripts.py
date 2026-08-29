@@ -5,9 +5,6 @@ from unittest.mock import MagicMock, patch
 import httpx2
 from scripts.test_local_e2e_vllm import check_vllm_connection, run_e2e_query
 
-from mainframe_rag.config import Settings
-from mainframe_rag.retrieve.query import SearchHit
-
 
 def test_vllm_connection_success():
     mock_resp = MagicMock()
@@ -25,40 +22,59 @@ def test_vllm_connection_failure():
 
 
 def test_run_e2e_query_flow():
-    settings = Settings(
-        qdrant_url="http://localhost:6333",
-        qdrant_collection="test_corpus",
-        embed_mode="hash",
-        allow_hash_mode=True,
-        llm_base_url="http://localhost:8000/v1",
-        llm_model_reasoning="google/gemma-4-E4B-it-qat-mobile-ct",
-    )
+    mock_client = MagicMock()
+    
+    # Mock /v1/search response
+    mock_search_resp = MagicMock()
+    mock_search_resp.status_code = 200
+    mock_search_resp.json.return_value = {
+        "query_kind": "identifier",
+        "hits": [{
+            "score": 0.95,
+            "cite": "SA22-7592-05 z/OS MVS Init, Section 1, p. 1-1",
+            "text": "IEA500I IOSCMDS command rejected.",
+        }],
+    }
 
-    mock_hit = SearchHit(
-        chunk_id="abc123",
-        score=0.95,
-        cite="SA22-7592-05 z/OS MVS Init, Section 1, p. 1-1",
-        heading="Section 1",
-        text="IEA500I IOSCMDS command rejected. Check device status.",
-        doc_id="SA22-7592-05",
-        title="z/OS MVS Init",
-        page_label="1-1",
-        chunk_type="message",
-        product="z/OS",
-        version="3.1",
-        message_ids=("IEA500I",),
-    )
+    # Mock /v1/answer response with grounded citations
+    mock_answer_resp = MagicMock()
+    mock_answer_resp.status_code = 200
+    mock_answer_resp.json.return_value = {
+        "answer": "To resolve IEA500I, check device allocation.",
+        "citations": ["SA22-7592-05 z/OS MVS Init, Section 1, p. 1-1"],
+        "script": "//RETRY EXEC PGM=IEFBR14",
+    }
 
-    model_reply = (
-        "To resolve IEA500I, check device allocation.\n\n"
-        "```jcl\n//RETRY EXEC PGM=IEFBR14\n```\n\n"
-        "Citations:\n"
-        "SA22-7592-05 z/OS MVS Init, Section 1, p. 1-1"
-    )
+    mock_client.post.side_effect = [mock_search_resp, mock_answer_resp]
 
-    with patch("scripts.test_local_e2e_vllm.search", return_value=([mock_hit], "identifier", {"embed_ms": 1, "qdrant_ms": 2})), \
-         patch("mainframe_rag.agent.answer.HttpxLLMClient.chat", return_value=model_reply):
-        result = run_e2e_query(settings, "How to resolve IEA500I?")
-        assert result["success"] is True
-        assert len(result["citations"]) == 1
-        assert "SA22-7592-05" in result["citations"][0]
+    result = run_e2e_query(mock_client, "How to resolve IEA500I?")
+    assert result["success"] is True
+    assert len(result["citations"]) == 1
+    assert "SA22-7592-05" in result["citations"][0]
+
+
+def test_run_e2e_query_ungrounded_fails():
+    mock_client = MagicMock()
+    
+    mock_search_resp = MagicMock()
+    mock_search_resp.status_code = 200
+    mock_search_resp.json.return_value = {
+        "query_kind": "identifier",
+        "hits": [{"score": 0.95, "cite": "SA22-7592-05 cite", "text": "sample"}],
+    }
+
+    # Answer without citations must fail grounding assertion
+    mock_answer_resp = MagicMock()
+    mock_answer_resp.status_code = 200
+    mock_answer_resp.json.return_value = {
+        "answer": "Ungrounded answer without citations.",
+        "citations": [],
+        "script": None,
+    }
+
+    mock_client.post.side_effect = [mock_search_resp, mock_answer_resp]
+
+    result = run_e2e_query(mock_client, "How to resolve IEA500I?")
+    assert result["success"] is False
+    assert result["error"] == "zero_citations"
+
