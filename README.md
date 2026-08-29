@@ -58,8 +58,10 @@ Citation-first expert mainframe agent: hybrid retrieval over ~100 GB of IBM-styl
 | | `make bench-html` | Generate self-contained offline HTML benchmark dashboard (`bundles/bench-report.html`) |
 | | `make bench-compare` | Compare benchmark performance against baseline |
 | | `make loadtest` | Run concurrent load test against agent search endpoint |
-| **Interactive Demo** | `make query-demo` | Launch interactive terminal REPL (`rag-query> `) for inspecting queries |
+| **Interactive Demo** | `make query-demo` | Launch interactive terminal REPL (`rag-search> `) for inspecting queries |
 | | `QUERY="..." make query-demo` | Inspect a single query with classification, latency, rank, citations & text |
+| | `make ask` | Launch interactive reasoning Q&A assistant (`rag-answer> `) with LLM & citations |
+| | `QUERY="..." make ask` | Ask a single question and get grounded reasoning answer with citations |
 | **Packaging & Air-Gap** | `make airgap-pack` | Build sneakernet package (`dist/qdrant-pdf-rag-<sha>.tar`) on connected host |
 | | `make airgap-load` | Load image archives and push to `${INTERNAL_REGISTRY}` in the air-gap |
 | | `make airgap-deploy` | Deploy Qdrant StatefulSet & Agent on air-gapped OpenShift |

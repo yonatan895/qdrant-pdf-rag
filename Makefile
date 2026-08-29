@@ -224,7 +224,21 @@ bench-compare: | .venv
 
 # Interactive query inspection and debugging CLI
 query-demo: | .venv
-	.venv/bin/python scripts/query_demo.py $(if $(QUERY),--query "$(QUERY)",)
+	PYTHONPATH=. .venv/bin/python scripts/query_demo.py $(if $(QUERY),--query "$(QUERY)",) $(if $(COLLECTION),--collection "$(COLLECTION)",)
+
+# Interactive conversational Q&A assistant (reasoning LLM + Qdrant retrieval)
+.PHONY: ask
+ask: | .venv
+	PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer $(if $(QUERY),--query "$(QUERY)",) $(if $(COLLECTION),--collection "$(COLLECTION)",) $(if $(LIMIT),--limit "$(LIMIT)",)
+
+# Local GPU acceleration & vLLM testing
+.PHONY: local-vllm test-vllm-e2e
+local-vllm:
+	sh scripts/run_local_vllm.sh
+
+test-vllm-e2e: | .venv
+	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",)
+
 
 # ---------------------------------------------------------------- e2e demo
 .PHONY: e2e-demo-pdfs
@@ -245,6 +259,7 @@ help:
 	@echo "Simulation     : sim (pytest integration tier; docker Qdrant) | sim-qdrant sim-clean"
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper)"
-	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo"
+	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"
+	@echo "Local vLLM / GPU : local-vllm (serve local model on GPU) | test-vllm-e2e (automated end-to-end suite)"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."
