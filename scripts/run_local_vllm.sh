@@ -38,13 +38,37 @@ if [ -n "${HF_TOKEN:-}" ]; then
     ENV_FLAGS="-e HF_TOKEN=${HF_TOKEN}"
 fi
 
-exec "${RUNTIME}" run --rm -it --gpus all \
-    -p "${PORT}:8000" \
-    -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-    ${ENV_FLAGS} \
-    --ipc=host \
-    "${IMAGE}" \
-    --model "${MODEL}" \
-    --gpu-memory-utilization "${GPU_MEM}" \
-    --max-model-len "${MAX_LEN}" \
-    --port 8000 "$@"
+# If MODEL is a local directory, mount it directly into the container as /model
+EXTRA_VOLUMES=""
+SERVED_MODEL="${MODEL}"
+if [ -d "${MODEL}" ]; then
+    ABS_MODEL_DIR="$(cd "${MODEL}" && pwd)"
+    EXTRA_VOLUMES="-v ${ABS_MODEL_DIR}:/model:ro"
+    MODEL_NAME="${SERVED_NAME:-$(basename "${ABS_MODEL_DIR}")}"
+    echo " Detected local model directory: ${ABS_MODEL_DIR}"
+    echo " Serving as model name:         ${MODEL_NAME}"
+    echo "============================================================"
+    exec "${RUNTIME}" run --rm -it --gpus all \
+        -p "${PORT}:8000" \
+        -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
+        ${EXTRA_VOLUMES} \
+        ${ENV_FLAGS} \
+        --ipc=host \
+        "${IMAGE}" \
+        --model /model \
+        --served-model-name "${MODEL_NAME}" \
+        --gpu-memory-utilization "${GPU_MEM}" \
+        --max-model-len "${MAX_LEN}" \
+        --port 8000 "$@"
+else
+    exec "${RUNTIME}" run --rm -it --gpus all \
+        -p "${PORT}:8000" \
+        -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
+        ${ENV_FLAGS} \
+        --ipc=host \
+        "${IMAGE}" \
+        --model "${MODEL}" \
+        --gpu-memory-utilization "${GPU_MEM}" \
+        --max-model-len "${MAX_LEN}" \
+        --port 8000 "$@"
+fi

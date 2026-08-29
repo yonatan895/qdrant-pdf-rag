@@ -144,12 +144,21 @@ EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus 
 
 To test the entire reasoning and citation-generation pipeline locally with a real LLM on a consumer GPU:
 
+**Option A: Using Local Weights Directory on Disk (No Token Needed, 100% Offline)**
 ```bash
-# 1. Start local vLLM serving google/gemma-4-E4B-it-qat-mobile-ct on port 8000
-# (Pass your Hugging Face token if downloading gated weights)
-HF_TOKEN="<your-token>" make local-vllm
+# Point to your local model directory
+MODEL="/path/to/local/gemma-4-E4B-it-qat-mobile-ct" make local-vllm
+```
 
-# 2. In another terminal, run the automated local end-to-end test suite
+**Option B: Downloading from Hugging Face**
+```bash
+# Provide HF_TOKEN for gated model download
+HF_TOKEN="<your-token>" make local-vllm
+```
+
+**Run Automated End-to-End Test:**
+```bash
+# In another terminal, run the automated local end-to-end test suite
 make test-vllm-e2e
 ```
 
