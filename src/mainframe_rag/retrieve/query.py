@@ -23,22 +23,16 @@ RRF_WEIGHTS_IDENTIFIER = (1.0, 3.0)  # (dense, bm25): identifiers favor exact te
 RRF_WEIGHTS_NL = (1.0, 1.0)
 
 
-@dataclass(frozen=True, slots=True)
-class Cite:
-    """Citation triple rendered as:
-    SA22-7592-05 z/OS MVS Init..., IEASYSxx > LFAREA, p. 1-17"""
+def format_citation(doc_id: str, title: str, heading_path: str, page_label: str) -> str:
+    """SA22-7592-05 z/OS MVS Init..., IEASYSxx > LFAREA, p. 1-17
 
-    doc_id: str
-    title: str
-    heading_path: str
-    page_label: str
-
-    def render(self) -> str:
-        parts = [f"{self.doc_id} {self.title}".strip(), self.heading_path]
-        cite = ", ".join(p for p in parts if p)
-        if self.page_label:
-            cite += f", p. {self.page_label}"
-        return cite
+    The citation shape contract; cites.CITATION_LINE_RE validates this shape
+    on LLM output."""
+    parts = [f"{doc_id} {title}".strip(), heading_path]
+    cite = ", ".join(p for p in parts if p)
+    if page_label:
+        cite += f", p. {page_label}"
+    return cite
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,15 +49,6 @@ class SearchHit:
     product: str | None
     version: str | None
     message_ids: tuple[str, ...]
-
-
-def format_citation(
-    doc_id: str, title: str, heading_path: str, page_label: str
-) -> str:
-    """SA22-7592-05 z/OS MVS Init..., IEASYSxx > LFAREA, p. 1-17"""
-    return Cite(
-        doc_id=doc_id, title=title, heading_path=heading_path, page_label=page_label
-    ).render()
 
 
 def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:

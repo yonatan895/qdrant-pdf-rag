@@ -51,6 +51,19 @@ def test_format_citation():
     assert cite == "SA22-7592-05 z/OS MVS Init, IEASYSxx > LFAREA, p. 1-17"
 
 
+def test_format_citation_round_trips_through_citation_line_re():
+    """The citation shape is one contract shared by retrieve.format_citation
+    (producer) and agent.cites.CITATION_LINE_RE (validator of LLM output); a
+    drift between the two would make every valid citation unvalidatable."""
+    from mainframe_rag.agent.cites import CITATION_LINE_RE
+
+    cite = format_citation("SA22-7592-05", "z/OS MVS Init", "IEASYSxx > LFAREA", "1-17")
+    m = CITATION_LINE_RE.match(cite)
+    assert m is not None
+    assert m.group("doc_id") == "SA22-7592-05"
+    assert m.group("page") == "1-17"
+
+
 def _point(pid: str, score: float = 1.0) -> models.ScoredPoint:
     return models.ScoredPoint(
         id=pid,

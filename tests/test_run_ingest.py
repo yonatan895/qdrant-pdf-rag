@@ -188,3 +188,54 @@ def test_qdrant_level_skip_counts_as_ok(tmp_path, synthetic_pdf, capsys, monkeyp
     assert done[0]["files_ok"] == 1
     assert done[0]["chunks_upserted"] == 0
     assert fake.upserts == [] and fake.deletes == 0
+
+
+def test_upsert_one_is_all_or_nothing_per_doc(synthetic_pdf, monkeypatch):
+    """The one-owner refactor's contract: an embed failure on a later batch
+    leaves the doc completely un-upserted (the old interleaved loop could
+    land earlier batches before failing). Resume deletes by doc_id on sha
+    mismatch, but no partial doc should ever exist to begin with."""
+    import pymupdf
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.chrome import strip_chrome
+    from mainframe_rag.ingest.chunk import make_chunks
+    from mainframe_rag.ingest.ibm_pdf import parse_pdf
+
+    parsed = parse_pdf(synthetic_pdf, sha256="ab" * 32)
+    doc = pymupdf.open(synthetic_pdf)
+    try:
+        page_texts = [doc[i].get_text() for i in range(doc.page_count)]
+        labels = [doc[i].get_label() for i in range(doc.page_count)]
+    finally:
+        doc.close()
+    chunks = make_chunks(parsed, strip_chrome(page_texts), labels)
+
+    settings = Settings(embed_mode="hash", _env_file=None)
+    settings.batch_size = 2  # 7 chunks -> 4 batches; the ge=16 env bound stays
+
+    class RaisingEmbedder:
+        def __init__(self):
+            self.dense_calls = 0
+
+        def dense(self, texts):
+            self.dense_calls += 1
+            if self.dense_calls >= 2:  # batch 1 embeds fine, batch 2 explodes
+                raise RuntimeError("embed endpoint exploded on batch 2")
+            return [[0.0] * 4 for _ in texts]
+
+        def sparse(self, texts):
+            return [([1], [1.0]) for _ in texts]
+
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    embedder = RaisingEmbedder()
+    monkeypatch.setattr(run_ingest, "_get_embedder", lambda settings: embedder)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="embed endpoint exploded"):
+        run_ingest._upsert_one(parsed, chunks, settings)
+    assert embedder.dense_calls >= 2, "test must fail on a LATER batch, not batch 1"
+    assert fake.upserts == [], "a partial doc must never be upserted"

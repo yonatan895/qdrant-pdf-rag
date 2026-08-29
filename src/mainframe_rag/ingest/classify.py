@@ -31,7 +31,7 @@ def classify(text: str) -> str:
         return "syntax"
 
     columnish = sum(1 for ln in lines if _COLUMN_RE.search(ln))
-    if lines and columnish / len(lines) >= 0.6:
+    if columnish / len(lines) >= 0.6:
         return "table"
 
     return "narrative"

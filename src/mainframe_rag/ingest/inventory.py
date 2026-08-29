@@ -19,7 +19,7 @@ class InventoryRecord:
     doc_id: str | None = None
     pages: int = 0
     chunks: int = 0
-    status: str = "pending"  # pending | parsed | upserted | skipped | dry | error
+    status: str = "pending"  # upserted | skipped | dry | error (set before append)
     seconds: float = 0.0
     error: str | None = None
     error_type: str | None = None  # exception class name, for typed triage

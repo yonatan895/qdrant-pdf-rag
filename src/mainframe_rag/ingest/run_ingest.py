@@ -40,10 +40,10 @@ from mainframe_rag.ingest.qdrant_io import (
 )
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
 from mainframe_rag.logs import configure_logging
+from mainframe_rag.ports import SparseVector
 
 log = logging.getLogger("ingest")
 
-_worker_settings: Settings | None = None
 _worker_qdrant = None
 _worker_embedder = None
 
@@ -63,6 +63,7 @@ def _parse_one(
         product=product,
         version=version,
         corpus_root=Path(corpus_root) if corpus_root else None,
+        sha256=sha,
     )
     doc = pymupdf.open(path)
     try:
@@ -91,12 +92,6 @@ def resolve_workers(requested: int | None, settings: Settings) -> int:
     cap = max(1, 2 * (mp.cpu_count() or 2))
     base = settings.ingest_workers if requested is None else requested
     return max(1, min(int(base), cap))
-
-
-def _init_worker() -> None:
-    global _worker_settings, _worker_qdrant
-    _worker_settings = load_settings()
-    _worker_qdrant = None
 
 
 def _get_embedder(settings: Settings):
@@ -128,17 +123,23 @@ def _upsert_one(parsed: ParsedDoc, chunks: list[Chunk], settings: Settings) -> s
         delete_by_doc(client, settings, parsed.doc_id)
 
     started = time.monotonic()
-    upserted = 0
     batch = settings.batch_size
+    # Embedding is batched (vLLM call shape); upserting is batched inside
+    # upsert_chunks (Qdrant call shape). One owner per layer — no nested
+    # re-slicing. A mid-doc embed failure upserts nothing; resume deletes the
+    # whole doc_id on sha mismatch, so partial-vs-none is recoverable either way.
+    vectors: list[tuple[list[float], SparseVector]] = []
     for i in range(0, len(chunks), batch):
-        vecs = embed_batch(
-            chunks[i : i + batch],
-            parsed.product,
-            parsed.version,
-            parsed.title,
-            _get_embedder(settings),
+        vectors.extend(
+            embed_batch(
+                chunks[i : i + batch],
+                parsed.product,
+                parsed.version,
+                parsed.title,
+                _get_embedder(settings),
+            )
         )
-        upserted += upsert_chunks(client, settings, parsed, chunks[i : i + batch], vecs)
+    upserted = upsert_chunks(client, settings, parsed, chunks, vectors)
     log.info(
         json.dumps(
             {
@@ -156,7 +157,7 @@ def _upsert_one(parsed: ParsedDoc, chunks: list[Chunk], settings: Settings) -> s
 def run(
     src: Path,
     progress: Path,
-    workers: int,
+    workers: int | None,
     limit: int | None,
     dry_run: bool,
     vendor: str | None = None,
@@ -164,6 +165,7 @@ def run(
     version: str | None = None,
 ) -> int:
     settings = load_settings()
+    workers = resolve_workers(workers, settings)
     started = time.monotonic()
     # Progress counters (issue #20 PR D): files ok / failed / chunks upserted,
     # logged once per run. Logs carry ids and counts, never PDF text.
@@ -194,7 +196,6 @@ def run(
         _log_summary(started, files_ok, files_failed, chunks_upserted, failures=0)
         return 0
 
-    workers = resolve_workers(workers, settings)
     ctx = mp.get_context("spawn")
     failures = 0
     # Backpressure: keep at most 2 results per worker in flight. Parsing a
@@ -207,7 +208,7 @@ def run(
     def submit(task: tuple[str, str | None, str | None, str | None, str]) -> None:
         pending[pool.submit(_parse_one, task)] = task[0]
 
-    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx, initializer=_init_worker) as pool:
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
         for task in itertools.islice(task_iter, window):
             submit(task)
 
@@ -327,11 +328,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     configure_logging(args.log_level)
-    workers = args.workers or load_settings().ingest_workers
     return run(
         args.src,
         args.progress,
-        workers,
+        args.workers or None,  # --workers 0 means "default", not "1 worker"
         args.limit,
         args.dry_run,
         vendor=args.vendor,
