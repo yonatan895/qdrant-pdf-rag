@@ -34,24 +34,38 @@ except ImportError:
     from qdrant_sim import QdrantSim, start_simulator
 
 
-def check_vllm_connection(base_url: str, model_name: str) -> bool:
+def check_vllm_connection(base_url: str, model_name: str) -> tuple[bool, str]:
     """Verify vLLM endpoint is listening and serving the expected model."""
     url = f"{base_url.rstrip('/')}/models"
     try:
         resp = httpx2.get(url, timeout=5.0)
         if resp.status_code != 200:
             print(f"[-] vLLM returned HTTP {resp.status_code}: {resp.text}", file=sys.stderr)
-            return False
+            return False, model_name
         data = resp.json()
-        models = [m.get("id") for m in data.get("data", [])]
+        models = [m.get("id") for m in data.get("data", []) if m.get("id")]
         print(f"[+] Connected to vLLM at {base_url}. Available models: {models}")
-        if model_name not in models and not any(model_name in m for m in models):
-            print(
-                f"[!] Warning: Requested model '{model_name}' not explicitly listed in {models}. "
-                "Will proceed assuming the server handles alias or default routing.",
-                file=sys.stderr,
-            )
-        return True
+
+        if model_name in models:
+            return True, model_name
+
+        # Match without org prefix or basename match (e.g. google/gemma-4... <-> gemma-4...)
+        for m in models:
+            if m.endswith(model_name) or model_name.endswith(m) or m.split("/")[-1] == model_name.split("/")[-1]:
+                print(f"[+] Using matching served model ID: '{m}' (requested: '{model_name}')")
+                return True, m
+
+        # If single model available on local test server, auto-select it
+        if len(models) == 1:
+            print(f"[+] Auto-selecting the only served model: '{models[0]}' (requested: '{model_name}')")
+            return True, models[0]
+
+        print(
+            f"[!] Warning: Requested model '{model_name}' not explicitly listed in {models}. "
+            "Will proceed assuming the server handles alias or default routing.",
+            file=sys.stderr,
+        )
+        return True, model_name
     except (httpx2.HTTPError, OSError) as exc:
         print(
             f"[-] Could not connect to vLLM at {base_url}: {exc}\n"
@@ -60,7 +74,7 @@ def check_vllm_connection(base_url: str, model_name: str) -> bool:
             f"      or: MODEL={model_name} sh scripts/run_local_vllm.sh",
             file=sys.stderr,
         )
-        return False
+        return False, model_name
 
 
 def setup_local_corpus(settings: Settings, work_dir: str) -> None:
@@ -177,8 +191,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-ingest", action="store_true", help="Skip corpus ingest if already populated")
     args = parser.parse_args(argv)
 
-    # Check vLLM connectivity
-    if not check_vllm_connection(args.vllm_url, args.model):
+    # Check vLLM connectivity and resolve served model ID
+    ok, actual_model = check_vllm_connection(args.vllm_url, args.model)
+    if not ok:
         return 1
 
     # Manage Qdrant container if not reachable
@@ -197,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         embed_mode="hash",
         allow_hash_mode=True,
         llm_base_url=args.vllm_url,
-        llm_model_reasoning=args.model,
+        llm_model_reasoning=actual_model,
     )
 
     try:

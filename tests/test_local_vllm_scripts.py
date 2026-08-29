@@ -10,15 +10,19 @@ def test_vllm_connection_success():
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {
-        "data": [{"id": "google/gemma-4-E4B-it-qat-mobile-ct"}]
+        "data": [{"id": "gemma-4-E4B-it-qat-mobile-ct"}]
     }
     with patch("httpx2.get", return_value=mock_resp):
-        assert check_vllm_connection("http://localhost:8000/v1", "google/gemma-4-E4B-it-qat-mobile-ct") is True
+        ok, model = check_vllm_connection("http://localhost:8000/v1", "google/gemma-4-E4B-it-qat-mobile-ct")
+        assert ok is True
+        assert model == "gemma-4-E4B-it-qat-mobile-ct"
 
 
 def test_vllm_connection_failure():
     with patch("httpx2.get", side_effect=httpx2.ConnectError("Connection refused")):
-        assert check_vllm_connection("http://localhost:8000/v1", "google/gemma-4-E4B-it-qat-mobile-ct") is False
+        ok, _ = check_vllm_connection("http://localhost:8000/v1", "google/gemma-4-E4B-it-qat-mobile-ct")
+        assert ok is False
+
 
 
 def test_run_e2e_query_flow():
