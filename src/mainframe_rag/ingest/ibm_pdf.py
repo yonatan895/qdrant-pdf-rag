@@ -89,7 +89,10 @@ def parse_pdf(
     product: str | None = None,
     version: str | None = None,
     corpus_root: Path | None = None,
+    sha256: str | None = None,
 ) -> ParsedDoc:
+    """sha256: caller-supplied digest to avoid re-reading the file — callers
+    that already hashed for the inventory skip-check pass it through."""
     path = Path(path)
     doc = pymupdf.open(path)
     try:
@@ -103,7 +106,7 @@ def parse_pdf(
         version_f = version or lver or text_version
         return ParsedDoc(
             path=path,
-            sha256=sha256_file(path),
+            sha256=sha256 or sha256_file(path),
             doc_id=doc_id,
             title=extract_title(doc, doc_id),
             product=product_f,

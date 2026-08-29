@@ -15,7 +15,9 @@ VENDOR_MARKERS = {
     "redhat": "Red Hat",
 }
 
-_IGNORED_DIRS = {".", "..", "__MACOSX", "lost+found"}
+# Dot-prefixed dirs are already excluded by the startswith(".") check; these
+# are the non-dot dirs to skip.
+_IGNORED_DIRS = {"__MACOSX", "lost+found"}
 
 
 def infer_from_path(pdf: Path, root: Path) -> tuple[str, str, str]:

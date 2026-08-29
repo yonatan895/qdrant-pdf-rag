@@ -9,6 +9,7 @@ query text.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -85,6 +86,8 @@ async def lifespan(_app: FastAPI):
     # own connection pool with its own (long) timeout. LLM env stays
     # request-time fail-fast (assert_reasoning_model in /v1/answer).
     embedder = build_embedder(settings, http)
+    # Two names on purpose: tests swap the `llm` global after startup; shutdown
+    # must close the pool THIS lifespan created, never a test double.
     llm_client = HttpxLLMClient(settings)
     llm = llm_client
     from qdrant_client import QdrantClient
@@ -299,6 +302,4 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
 
 
 def json_log(request_id: str, action: str, **fields) -> str:
-    import json
-
     return json.dumps({"request_id": request_id, "action": action, **fields})

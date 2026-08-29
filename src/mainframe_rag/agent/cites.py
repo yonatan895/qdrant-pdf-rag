@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import re
 
-from mainframe_rag.retrieve.query import format_citation
-
 # docno, title, heading path, printed page label
 CITATION_LINE_RE = re.compile(
     r"^\s*(?P<doc_id>[A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?)\s+(?P<title>.+?),\s+"
@@ -113,7 +111,6 @@ def strip_unauthorized_citations(text: str, allowed: set[str]) -> str:
 __all__ = [
     "CITATION_LINE_RE",
     "extract_citation_lines",
-    "format_citation",
     "strip_unauthorized_citations",
     "valid_citations",
 ]

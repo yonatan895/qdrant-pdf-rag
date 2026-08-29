@@ -131,7 +131,7 @@ def test_answer_validates_citations_and_script(client):
     assert "Citations:" not in body["answer"]
 
 
-def test_answer_refuses_without_reasoning_model(monkeypatch, synthetic_pdf):
+def test_answer_refuses_without_reasoning_model(monkeypatch):
     monkeypatch.delenv("LLM_MODEL_REASONING", raising=False)
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
     # CI/dev embed profile: hash mode, explicitly allowed (PR D fail-fast)

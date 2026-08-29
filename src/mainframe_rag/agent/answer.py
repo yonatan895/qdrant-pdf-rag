@@ -64,11 +64,12 @@ def build_messages(
     ]
 
 
-def assert_reasoning_model(settings: Settings) -> str:
-    """Fail closed: no reasoning model configured, no LLM call."""
+def assert_reasoning_model(settings: Settings) -> tuple[str, str]:
+    """Fail closed: no reasoning model configured, no LLM call. Returns
+    (base_url, model) so callers never re-read the Optional settings fields."""
     if not settings.llm_base_url:
         raise RuntimeError("LLM_BASE_URL is unset; /v1/answer cannot run.")
-    return settings.require_reasoning_model()
+    return settings.llm_base_url, settings.require_reasoning_model()
 
 
 class HttpxLLMClient:
@@ -101,30 +102,13 @@ class HttpxLLMClient:
             self._client.close()
 
     def chat(self, messages: list[dict[str, str]]) -> str:
-        model = assert_reasoning_model(self._settings)
-        base_url = self._settings.llm_base_url
-        assert base_url  # guaranteed by assert_reasoning_model
+        base_url, model = assert_reasoning_model(self._settings)
         resp = self._http().post(
             f"{base_url.rstrip('/')}/chat/completions",
             json={"model": model, "messages": messages},
         )
         resp.raise_for_status()
         return str(resp.json()["choices"][0]["message"]["content"])
-
-
-def call_reasoning_model(
-    messages: list[dict[str, str]], settings: Settings, client: httpx.Client | None = None
-) -> str:
-    """Thin wrapper kept for callers without an injected LLMClient; prefer
-    building HttpxLLMClient once and calling .chat() (issue #20 PR A).
-    Creates and closes its own pool when none is injected."""
-    llm = HttpxLLMClient(settings, client)
-    if client is not None:
-        return llm.chat(messages)
-    try:
-        return llm.chat(messages)
-    finally:
-        llm.close()
 
 
 def parse_answer(content: str, allowed_citations: set[str]) -> dict:
