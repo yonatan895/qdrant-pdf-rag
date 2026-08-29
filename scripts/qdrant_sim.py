@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
+import httpx2
 
 READY_TIMEOUT_S = 60.0
 QDRANT_PORT = 6333
@@ -61,11 +61,11 @@ def wait_ready(url: str, timeout_s: float = READY_TIMEOUT_S) -> None:
     last = ""
     while time.monotonic() < deadline:
         try:
-            r = httpx.get(f"{url.rstrip('/')}/readyz", timeout=2.0)
+            r = httpx2.get(f"{url.rstrip('/')}/readyz", timeout=2.0)
             if r.status_code == 200 and r.text.strip().lower() == "all shards are ready":
                 return
             last = f"/readyz {r.status_code}"
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             last = str(exc)[:120]
         time.sleep(0.5)
     raise QdrantSimError(f"Qdrant at {url} not ready within {timeout_s:.0f}s (last: {last})")

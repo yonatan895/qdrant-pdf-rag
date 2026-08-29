@@ -274,7 +274,7 @@ def test_healthz_ready_returns_clean_200(client, monkeypatch):
         status_code = 200
         text = "all shards are ready"
 
-    monkeypatch.setattr(app_mod.httpx, "get", lambda *a, **k: Ready())
+    monkeypatch.setattr(app_mod.httpx2, "get", lambda *a, **k: Ready())
     resp = client.get("/healthz")
     assert resp.status_code == 200
     body = resp.json()
@@ -290,7 +290,7 @@ def test_healthz_degraded_paths_leak_no_upstream_text(client, monkeypatch):
         status_code = 503
         text = "Internal Server Error: secret bits"
 
-    monkeypatch.setattr(app_mod.httpx, "get", lambda *a, **k: NotReady())
+    monkeypatch.setattr(app_mod.httpx2, "get", lambda *a, **k: NotReady())
 
     class Boom:
         def post(self, *a, **k):

@@ -18,7 +18,7 @@ import hashlib
 import math
 import re
 
-import httpx
+import httpx2
 
 from mainframe_rag.config import HASH_EMBED_DIM, Settings
 from mainframe_rag.ingest.chunk import Chunk
@@ -107,11 +107,11 @@ def _bm25_model(model_name: str, cache_dir: str | None):
 
 class VllmEmbedder:
     """Prod implementer: dense from the internal vLLM endpoint, sparse from
-    local BM25. One shared httpx.Client per instance. Endpoint/model resolve
+    local BM25. One shared httpx2.Client per instance. Endpoint/model resolve
     lazily via require_embed — the agent's startup fail-fast (PR D) validates
     them before listening; ingest workers validate on first use."""
 
-    def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
+    def __init__(self, settings: Settings, client: httpx2.Client | None = None) -> None:
         self._settings = settings
         self._base_url: str | None = None
         self._model: str | None = None
@@ -124,13 +124,13 @@ class VllmEmbedder:
             self._base_url, self._model = self._settings.require_embed()
         return self._base_url, self._model
 
-    def _http(self) -> httpx.Client:
+    def _http(self) -> httpx2.Client:
         if self._client is None:
             # Bounded connect retries (fire only if the request was never
             # sent); no request-level retries on POST /embeddings.
-            self._client = httpx.Client(
+            self._client = httpx2.Client(
                 timeout=self._settings.embed_timeout_s,
-                transport=httpx.HTTPTransport(retries=self._settings.http_connect_retries),
+                transport=httpx2.HTTPTransport(retries=self._settings.http_connect_retries),
             )
         return self._client
 
@@ -154,7 +154,7 @@ class VllmEmbedder:
         return [(doc.indices.tolist(), doc.values.tolist()) for doc in model.embed(texts)]
 
 
-def build_embedder(settings: Settings, client: httpx.Client | None = None) -> Embedder:
+def build_embedder(settings: Settings, client: httpx2.Client | None = None) -> Embedder:
     """The single dispatch point for embed_mode. Never branch on embed_mode
     anywhere else. Construction is cheap and side-effect free; env fail-fast
     happens on first use (preserving current request-time behavior)."""

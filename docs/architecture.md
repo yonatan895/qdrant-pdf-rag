@@ -289,7 +289,7 @@ tests/
 
 Language: Python 3.14 (GIL build; no free-threading). Pins in `requirements.lock.txt`. Ingest image installs from `/wheelhouse --no-index`.
 
-Libraries (allowed): `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx`, `fastapi`, `pydantic-settings`. Do not pull LangChain / LlamaIndex for v1.
+Libraries (allowed): `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`, `pydantic-settings`. Do not pull LangChain / LlamaIndex for v1.
 
 ### 5.2 Config (env)
 

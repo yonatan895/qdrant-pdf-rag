@@ -12,11 +12,11 @@ QUERY=${QUERY:-IEA500I operator message}
 
 # exit 3 from the pod = empty result = nothing ingested yet (skip, not fail).
 if $KC -n "$NAMESPACE" exec -i deploy/rag-agent -- python - "$QUERY" <<'PYEOF'
-import httpx
+import httpx2
 import sys
 
 query = sys.argv[1]
-r = httpx.post("http://localhost:8080/v1/search", json={"query": query, "limit": 8}, timeout=30)
+r = httpx2.post("http://localhost:8080/v1/search", json={"query": query, "limit": 8}, timeout=30)
 r.raise_for_status()
 hits = r.json()["hits"]
 print(f"hits={len(hits)}")

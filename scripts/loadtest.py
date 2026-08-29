@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 
-import httpx
+import httpx2
 
 DEFAULT_QUERIES = [
     "IEA500I operator message",
@@ -58,7 +58,7 @@ def run_load(
 
     def worker() -> None:
         nonlocal errors
-        client = httpx.Client(timeout=30.0)
+        client = httpx2.Client(timeout=30.0)
         try:
             while time.monotonic() < deadline:
                 with lock:
@@ -68,7 +68,7 @@ def run_load(
                 try:
                     resp = client.post(url, json={"query": query, "limit": limit})
                     ok = resp.status_code == 200
-                except httpx.HTTPError:
+                except httpx2.HTTPError:
                     ok = False
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
                 with lock:

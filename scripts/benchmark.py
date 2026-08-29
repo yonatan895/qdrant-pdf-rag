@@ -44,7 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import httpx
+import httpx2
 from loadtest import DEFAULT_QUERIES, run_load
 from qdrant_sim import QdrantSim, start_simulator
 
@@ -181,10 +181,10 @@ def run_ingest(corpus: Path, qdrant_url: str, collection: str) -> dict:
 def qdrant_stats(sim: QdrantSim, collection: str) -> dict:
     stats: dict = {}
     try:
-        info = httpx.get(f"{sim.url}/collections/{collection}", timeout=10.0).json()["result"]
+        info = httpx2.get(f"{sim.url}/collections/{collection}", timeout=10.0).json()["result"]
         stats["points"] = info.get("points_count")
         stats["indexed_vectors"] = info.get("indexed_vectors_count")
-    except (httpx.HTTPError, KeyError, ValueError):
+    except (httpx2.HTTPError, KeyError, ValueError):
         stats["points"] = None
     if sim.container_id:
         raw = subprocess.run(
@@ -211,13 +211,13 @@ def qdrant_stats(sim: QdrantSim, collection: str) -> dict:
             if len(lines) > 1:
                 stats["disk_apparent_mb"] = round(int(lines[1].split()[0]) / (1024 * 1024), 1)
     try:
-        metrics = httpx.get(f"{sim.url}/metrics", timeout=10.0).text
+        metrics = httpx2.get(f"{sim.url}/metrics", timeout=10.0).text
         stats["metrics_available"] = True
         stats["memory_metric_names"] = sorted(
             line.split("{")[0] for line in metrics.splitlines()
             if line.startswith("qdrant_") and "memory" in line and not line.startswith("#")
         )[:10]
-    except httpx.HTTPError:
+    except httpx2.HTTPError:
         stats["metrics_available"] = False
     return stats
 
@@ -312,9 +312,9 @@ def _wait_agent(agent: subprocess.Popen, log, timeout_s: float = 30.0) -> str:
     base_url = f"http://127.0.0.1:{port}"
     while time.monotonic() < deadline:
         try:
-            if httpx.get(f"{base_url}/healthz", timeout=5.0).status_code == 200:
+            if httpx2.get(f"{base_url}/healthz", timeout=5.0).status_code == 200:
                 return base_url
-        except httpx.HTTPError:
+        except httpx2.HTTPError:
             pass
         time.sleep(0.3)
     raise RuntimeError("agent /healthz never became ready")
@@ -425,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
         sim = start_simulator(REPO_ROOT, os.environ.get("QDRANT_SIM_URL"))
         # Sessions must be independent: a stale bench collection from an
         # earlier run would inflate the disk/RAM footprint being measured.
-        httpx.delete(f"{sim.url}/collections/{args.collection}", timeout=10.0)
+        httpx2.delete(f"{sim.url}/collections/{args.collection}", timeout=10.0)
         corpus_env = os.environ.get("BENCH_CORPUS_DIR")
         corpus_root = Path(corpus_env) if corpus_env else None
         corpus_info = generate_corpus(

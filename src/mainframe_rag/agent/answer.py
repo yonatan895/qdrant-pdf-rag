@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-import httpx
+import httpx2
 
 from mainframe_rag.config import Settings
 from mainframe_rag.retrieve.query import SearchHit
@@ -82,16 +82,16 @@ class HttpxLLMClient:
     shot — a retry would re-ask a reasoning model that may already be
     thinking, and answers are not idempotent (issue #20 PR C)."""
 
-    def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
+    def __init__(self, settings: Settings, client: httpx2.Client | None = None) -> None:
         self._settings = settings
         self._client = client
 
-    def _http(self) -> httpx.Client:
+    def _http(self) -> httpx2.Client:
         if self._client is None:
             # retries=0: connection blips surface as errors, never re-issued.
-            self._client = httpx.Client(
+            self._client = httpx2.Client(
                 timeout=self._settings.answer_timeout_s,
-                transport=httpx.HTTPTransport(retries=0),
+                transport=httpx2.HTTPTransport(retries=0),
             )
         return self._client
 

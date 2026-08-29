@@ -16,7 +16,7 @@ def test_repo_contains_no_pdf_or_adobe_catalogs():
 
 def test_no_litellm_anywhere():
     """LiteLLM was a phantom dependency: pinned in the lockfile and baked into
-    the images while every src module used plain OpenAI-compatible httpx. This
+    the images while every src module used plain OpenAI-compatible httpx2. This
     repo does not install LiteLLM (AGENTS.md) — no imports, no pyproject
     dependency, no lock pin."""
     import ast
