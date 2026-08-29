@@ -38,10 +38,24 @@ def build_messages(
     product: str | None = None,
     version: str | None = None,
     splunk_context: str | None = None,
+    max_context_chars: int = 8000,
+    max_chunk_chars: int = 3000,
 ) -> list[dict[str, str]]:
     chunks: list[str] = []
+    total_chars = 0
     for i, hit in enumerate(hits, 1):
-        chunks.append(f"[{i}] {hit.cite}\n{hit.text}")
+        text = hit.text.strip()
+        if len(text) > max_chunk_chars:
+            text = text[:max_chunk_chars].rstrip() + "\n... [truncated]"
+        chunk_repr = f"[{i}] {hit.cite}\n{text}"
+        if total_chars + len(chunk_repr) > max_context_chars and chunks:
+            remaining = max_context_chars - total_chars
+            if remaining > 200:
+                text = text[:remaining].rstrip() + "\n... [truncated]"
+                chunks.append(f"[{i}] {hit.cite}\n{text}")
+            break
+        chunks.append(chunk_repr)
+        total_chars += len(chunk_repr)
 
     parts = []
     context_bits = []

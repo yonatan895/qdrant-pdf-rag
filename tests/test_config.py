@@ -40,6 +40,8 @@ def test_outbound_timeout_defaults_bounded():
     assert s.health_qdrant_timeout_s > 0
     assert s.health_embed_timeout_s > 0
     assert 0 <= s.http_connect_retries <= 5
+    assert s.prompt_max_context_chars == 8000
+    assert s.prompt_max_chunk_chars == 3000
 
 
 def test_hash_mode_requires_explicit_allow():

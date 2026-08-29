@@ -390,6 +390,8 @@ def execute_answer(
         hits=hits,
         product=product,
         version=version,
+        max_context_chars=settings.prompt_max_context_chars,
+        max_chunk_chars=settings.prompt_max_chunk_chars,
     )
     client = HttpxLLMClient(settings)
     try:

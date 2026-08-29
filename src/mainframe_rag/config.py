@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # Reasoning models think; the long timeout is the retry policy — /v1/answer
     # never retries (issue #20 PR C).
     answer_timeout_s: float = 300.0
+    # Prompt context length budget: caps total characters of retrieved chunk
+    # text sent to the reasoning model to prevent context overflow (4096-token limits).
+    prompt_max_context_chars: int = Field(default=8000, ge=1000, le=50000)
+    prompt_max_chunk_chars: int = Field(default=3000, ge=500, le=10000)
 
     # Bounded httpx2 connection-establishment retries (0-5). These fire only
     # when the request was never sent (DNS/refused), so they are safe for any
