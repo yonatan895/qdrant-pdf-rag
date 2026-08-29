@@ -115,9 +115,10 @@ SIM_PORT ?= 6333
 
 # End-to-end simulation: real PDFs -> real ingest -> agent endpoints.
 # Needs docker (or an already-running server via QDRANT_SIM_URL=...).
+# -rs surfaces skip reasons (e.g. the vLLM-shaped variant without BM25 cache).
 .PHONY: sim
 sim: | .venv
-	.venv/bin/python -m pytest -m integration -v
+	.venv/bin/python -m pytest -m integration -v -rs
 
 # Long-lived sim server for manual iteration: make sim-qdrant, then
 # QDRANT_SIM_URL=http://127.0.0.1:$(SIM_PORT) make sim
@@ -127,7 +128,7 @@ sim-qdrant:
 	  echo "sim qdrant already running: QDRANT_SIM_URL=http://127.0.0.1:$(SIM_PORT)"; \
 	else \
 	  docker run -d --name $(SIM_CONTAINER) --rm -p 127.0.0.1:$(SIM_PORT):6333 \
-	    $$(awk 'NF && !/^#/ && /qdrant/ {print $$1; exit}' images.txt); \
+	    $$($(PY) scripts/qdrant_pin.py); \
 	  echo "Qdrant sim up: QDRANT_SIM_URL=http://127.0.0.1:$(SIM_PORT) make sim"; \
 	fi
 

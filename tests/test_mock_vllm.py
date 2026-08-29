@@ -56,7 +56,9 @@ def test_deterministic_and_order_sensitive(base_url):
 
 
 def test_chat_completions_shape_matches_httpx_llm_client(base_url):
-    """HttpxLLMClient.chat reads resp.json()['choices'][0]['message']['content']."""
+    """Deliberate contract change (PR #38): chat was pinned 404; the mock is
+    now the full model stand-in for the simulation tier.
+    HttpxLLMClient.chat reads resp.json()['choices'][0]['message']['content']."""
     cite = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
     messages = [
         {"role": "system", "content": "You are a mainframe operations expert."},
@@ -93,6 +95,33 @@ def test_chat_without_hit_blocks_is_deterministic_fallback(base_url):
     assert content == "The retrieved excerpts did not contain a usable citation."
 
 
+def test_chat_multi_hit_echoes_first_only(base_url):
+    """Only hit 1 is echoed; hit 2 must not appear in the citations list."""
+    cite_a = "SA22-0000-00 First Reference, Chapter 1 > IEA500I, p. 1-6"
+    cite_b = "SA22-7777-01 Second Reference, Chapter 2 > IEB700I, p. 2-3"
+    messages = [{"role": "user", "content": f"[1] {cite_a}\nFirst text.\n\n[2] {cite_b}\nSecond text."}]
+    content = httpx.post(
+        f"{base_url}/v1/chat/completions", json={"messages": messages}
+    ).json()["choices"][0]["message"]["content"]
+    assert f"- {cite_a}" in content
+    assert cite_b not in content
+    assert "First text." in content and "Second text." not in content
+
+
+def test_chat_long_hit_text_is_truncated(base_url):
+    """_first_line truncates at 160 chars on a word boundary — reachability
+    for the truncation branch."""
+    long_line = "word " * 60  # 300 chars
+    cite = "SA22-0000-00 Ref, Chapter 1 > IEA500I, p. 1-1"
+    messages = [{"role": "user", "content": f"[1] {cite}\n{long_line}"}]
+    content = httpx.post(
+        f"{base_url}/v1/chat/completions", json={"messages": messages}
+    ).json()["choices"][0]["message"]["content"]
+    snippet = content.split("the manual states: ", 1)[1].split("\n", 1)[0]
+    assert snippet.endswith(" ...")
+    assert len(snippet) <= 164
+
+
 def test_unknown_path_404(base_url):
     assert httpx.get(f"{base_url}/nope").status_code == 404
     assert httpx.post(f"{base_url}/v1/nope", json={}).status_code == 404
@@ -103,3 +132,15 @@ def test_bad_input_400(base_url):
     assert httpx.post(f"{base_url}/v1/chat/completions", json={"messages": 42}).status_code == 400
     assert httpx.post(f"{base_url}/v1/embeddings", content=b"not json",
                       headers={"Content-Type": "application/json"}).status_code == 400
+
+
+def test_non_object_body_400(base_url):
+    """_read_json's non-object branch: valid JSON that is not an object."""
+    assert httpx.post(f"{base_url}/v1/embeddings", json=[1, 2]).status_code == 400
+    assert httpx.post(f"{base_url}/v1/chat/completions", json=[1, 2]).status_code == 400
+
+
+def test_chat_messages_of_non_dicts_400(base_url):
+    """'messages' must be a list of objects — a list of scalars is rejected."""
+    r = httpx.post(f"{base_url}/v1/chat/completions", json={"messages": [1, 2]})
+    assert r.status_code == 400

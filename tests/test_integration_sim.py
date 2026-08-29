@@ -45,15 +45,12 @@ def _run(cmd: list[str], timeout: float = 120.0) -> subprocess.CompletedProcess:
 
 
 def _qdrant_image_pin() -> str:
-    """The images.txt name column, first qdrant line — the sim always runs the
-    pinned image, so a pin bump is picked up automatically."""
-    for line in (REPO_ROOT / "images.txt").read_text(encoding="utf-8").splitlines():
-        if line.lstrip().startswith("#") or not line.strip():
-            continue
-        fields = line.split()
-        if fields and "qdrant" in fields[0]:
-            return fields[0]
-    pytest.skip("no qdrant image pin in images.txt")
+    from scripts.qdrant_pin import qdrant_image_pin
+
+    try:
+        return qdrant_image_pin(REPO_ROOT / "images.txt")
+    except ValueError:
+        pytest.skip("no qdrant image pin in images.txt")
 
 
 def _wait_ready(url: str) -> None:
@@ -62,7 +59,8 @@ def _wait_ready(url: str) -> None:
     while time.monotonic() < deadline:
         try:
             r = httpx.get(f"{url.rstrip('/')}/readyz", timeout=2.0)
-            if r.status_code == 200 and "all shards are ready" in r.text.lower():
+            # Same predicate as agent /healthz — one readiness rule, not two.
+            if r.status_code == 200 and r.text.strip().lower() == "all shards are ready":
                 return
             last = f"/readyz {r.status_code}"
         except httpx.HTTPError as exc:
@@ -114,6 +112,16 @@ def qdrant_url():
         _run(["docker", "stop", cid], timeout=30)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _clean_sim_collections(qdrant_url):
+    """Sessions must be independent on a warm server: stale points from an
+    earlier run (fresh PDF timestamps change every sha) would otherwise be
+    deleted-and-reupserted mid-tier, perturbing score ordering."""
+    for name in ("sim-hash", "sim-vllm"):
+        httpx.delete(f"{qdrant_url}/collections/{name}", timeout=10.0)
+    yield
+
+
 @pytest.fixture(scope="session")
 def mock_url():
     """The model stand-in: deterministic embeddings + chat over real HTTP."""
@@ -141,10 +149,13 @@ def corpus(tmp_path_factory) -> Path:
 
     root = tmp_path_factory.mktemp("sim-corpus")
     build(root / "SA22-0000-00.pdf")
+    # Distinct message_id + title: identical bodies would tie in RRF and flip
+    # top-1 between runs (review round 1 blocker).
     build(
         root / "SA22-7777-01.pdf",
         doc_id="SA22-7777-01",
         title="Synthetic Initialization and Tuning Reference",
+        message_id="IEB700I",
     )
     build_plain(root / "widget-guide.pdf")
     return root
@@ -183,6 +194,11 @@ def _ingest(
         if bm25_cache:
             monkeypatch.setenv("BM25_CACHE_DIR", bm25_cache)
     # Cached parent-side globals from a previous variant must not leak in.
+    # Close the previous client before dropping it — resetting the global
+    # alone would leak its httpx pool on every ingest.
+    previous_qdrant = run_ingest._worker_qdrant
+    if previous_qdrant is not None:
+        previous_qdrant.close()
     monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
     monkeypatch.setattr(run_ingest, "_worker_embedder", None)
     rc = run_ingest.main(
@@ -236,9 +252,14 @@ def test_search_end_to_end_deterministic(qdrant_url, mock_url, corpus, tmp_path,
     with _agent(monkeypatch, qdrant_url, mock_url, "sim-hash") as client:
         body = client.post("/v1/search", json={"query": "IEA500I operator message"}).json()
         assert body["query_kind"] == "identifier"
-        assert body["hits"], "message_ids filter must match the ingested message chunk"
-        assert body["hits"][0]["cite"] == _MESSAGE_CITE
-        assert "IEA500I" in body["hits"][0]["message_ids"]
+        hits = body["hits"]
+        assert hits, "message_ids filter must match the ingested message chunk"
+        # The filter scopes to doc 1 only (doc 2 carries IEB700I) — every hit
+        # must come from it. Do not pin top-1 across equal-text chunks; pin
+        # the scoping, the presence of the message chunk, and determinism.
+        assert all(h["cite"].startswith("SA22-0000-00 ") for h in hits)
+        assert _MESSAGE_CITE in {h["cite"] for h in hits}
+        assert "IEA500I" in hits[0]["message_ids"]
 
         again = client.post("/v1/search", json={"query": "IEA500I operator message"}).json()
         # request_id is per-request by design; the result set must be identical.
@@ -253,8 +274,13 @@ def test_search_end_to_end_deterministic(qdrant_url, mock_url, corpus, tmp_path,
 def test_answer_deterministic(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):
     _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv.jsonl")
     with _agent(monkeypatch, qdrant_url, mock_url, "sim-hash") as client:
+        search = client.post("/v1/search", json={"query": "IEA500I operator message"}).json()
+        hit_cites = {h["cite"] for h in search["hits"]}
+
         body = client.post("/v1/answer", json={"query": "IEA500I operator message"}).json()
-        assert body["citations"] == [_MESSAGE_CITE], "mock echoes a retrieved cite -> validates"
+        assert body["citations"], "the mock echoes a retrieved cite -> validates"
+        assert len(body["citations"]) == 1
+        assert body["citations"][0] in hit_cites, "the echoed citation must be a retrieved hit"
         assert body["script"] is not None and "IOSCMDS LIST" in body["script"]
         assert body["answer"].startswith("Based on the retrieved excerpts")
         assert "Citations:" not in body["answer"]
@@ -304,7 +330,9 @@ def test_vllm_shaped_embed_variant(qdrant_url, mock_url, corpus, tmp_path, monke
     with _agent(monkeypatch, qdrant_url, mock_url, "sim-vllm", embed="vllm", bm25_cache=cache) as client:
         body = client.post("/v1/search", json={"query": "IEA500I operator message"}).json()
         assert body["hits"], "vLLM-shaped embeds must retrieve the ingested message chunk"
-        assert body["hits"][0]["cite"] == _MESSAGE_CITE
+        # Doc 2 carries IEB700I, so the message_ids filter scopes to doc 1.
+        assert all(h["cite"].startswith("SA22-0000-00 ") for h in body["hits"])
+        assert _MESSAGE_CITE in {h["cite"] for h in body["hits"]}
 
         health = client.get("/healthz")
         assert health.status_code == 200
