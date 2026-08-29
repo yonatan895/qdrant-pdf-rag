@@ -206,8 +206,8 @@ def main(argv: list[str] | None = None) -> int:
 
         # Run test queries
         test_queries = [
-            ("How do I resolve IEA500I IOSCMDS command rejected and what operator action is needed?", "z/OS", "3.1"),
-            ("What parameter controls the 64-bit large frame area (LFAREA) in IEASYSxx?", "z/OS", "3.1"),
+            ("How do I resolve IEA500I IOSCMDS command rejected and what operator action is needed?", None, None),
+            ("What parameter controls the 64-bit large frame area (LFAREA) in IEASYSxx?", None, None),
         ]
 
         successes = 0
