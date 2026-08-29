@@ -41,12 +41,14 @@ $(WHEELHOUSE): requirements.lock.txt | .venv
 	.venv/bin/python -m pip wheel -r requirements.lock.txt -w $@
 
 # BM25 sparse weights must be baked into images; no runtime download in the air-gap.
+# Verified against the in-repo sha256 manifest — upstream drift fails closed.
 .PHONY: bm25-weights
 bm25-weights: $(BM25_WEIGHTS)
 
 $(BM25_WEIGHTS): | .venv
 	rm -rf $@ && mkdir -p $@
-	.venv/bin/python scripts/fetch_bm25_weights.py --model $(BM25_MODEL) --out $@
+	.venv/bin/python scripts/fetch_bm25_weights.py --model $(BM25_MODEL) --out $@ \
+	  --verify-manifest bm25-weights.sha256
 
 # ---------------------------------------------------------------- cluster recipe
 .PHONY: chart
