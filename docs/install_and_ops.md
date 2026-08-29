@@ -165,7 +165,7 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
 **Option A: 100% Offline via Local Weights Directory (Recommended)**
 ```bash
 # Point directly to a downloaded weights directory on disk (no token or internet required)
-MODEL=/home/yonti/models/gemma-4-E4B-it-qat-mobile-ct make local-vllm
+MODEL=/path/to/models/gemma-4-E4B-it-qat-mobile-ct make local-vllm
 ```
 
 **Option B: Downloading directly from Hugging Face Hub**
@@ -203,7 +203,7 @@ To archive model weights and configurations for use in completely disconnected o
 from pathlib import Path
 from huggingface_hub import snapshot_download
 
-target_dir = Path("/home/yonti/models/gemma-4-E4B-it-qat-mobile-ct")
+target_dir = Path.home() / "models" / "gemma-4-E4B-it-qat-mobile-ct"
 target_dir.mkdir(parents=True, exist_ok=True)
 
 snapshot_download(
@@ -214,7 +214,7 @@ snapshot_download(
 '
 ```
 
-Files stored in `/home/yonti/models/gemma-4-E4B-it-qat-mobile-ct/`:
+Files stored in `~/models/gemma-4-E4B-it-qat-mobile-ct/`:
 * `model.safetensors` (~3.5 GB) — Quantized INT4 QAT weights
 * `config.json` & `generation_config.json` — Model hyperparameters
 * `tokenizer.json` & `tokenizer_config.json` — Vocabulary and special tokens
