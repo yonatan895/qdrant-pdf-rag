@@ -25,6 +25,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import httpx2
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mainframe_rag.config import load_settings
@@ -344,6 +346,34 @@ def execute_answer(
     from mainframe_rag.agent.answer import HttpxLLMClient, build_messages, parse_answer
 
     settings = load_settings()
+    llm_url = settings.llm_base_url or "http://localhost:8000/v1"
+    try:
+        m_resp = httpx2.get(f"{llm_url.rstrip('/')}/models", timeout=2.0)
+        if m_resp.status_code == 200:
+            avail = [m.get("id") for m in m_resp.json().get("data", []) if m.get("id")]
+            cur = settings.llm_model_reasoning
+            chosen_model = None
+            if cur and cur not in avail:
+                for m in avail:
+                    if m.endswith(cur) or cur.endswith(m) or m.split("/")[-1] == cur.split("/")[-1]:
+                        chosen_model = m
+                        break
+                else:
+                    if len(avail) == 1:
+                        chosen_model = avail[0]
+            elif not cur and len(avail) == 1:
+                chosen_model = avail[0]
+
+            updates: dict[str, Any] = {}
+            if not settings.llm_base_url:
+                updates["llm_base_url"] = llm_url
+            if chosen_model:
+                updates["llm_model_reasoning"] = chosen_model
+            if updates:
+                settings = settings.model_copy(update=updates)
+    except (httpx2.HTTPError, OSError):
+        pass
+
     hits, kind, timings = execute_query(
         query, limit=limit, product=product, version=version, collection=collection
     )
