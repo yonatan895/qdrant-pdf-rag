@@ -201,10 +201,14 @@ def repl_loop(limit: int = 5, product: str | None = None, version: str | None = 
             break
         if raw.startswith(":limit "):
             try:
-                limit = int(raw.split()[1])
-                print(f"Set limit to {limit}")
+                new_limit = int(raw.split()[1])
+                if new_limit < 1:
+                    print("Error: limit must be a positive integer (>= 1)")
+                else:
+                    limit = new_limit
+                    print(f"Set limit to {limit}")
             except (IndexError, ValueError):
-                print("Usage: :limit <int>")
+                print("Usage: :limit <positive-int>")
             continue
 
         try:
@@ -216,10 +220,20 @@ def repl_loop(limit: int = 5, product: str | None = None, version: str | None = 
             print(f"Error executing query: {exc}", file=sys.stderr)
 
 
+def _positive_int(val: str) -> int:
+    try:
+        ival = int(val)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Invalid integer value: {val!r}") from exc
+    if ival < 1:
+        raise argparse.ArgumentTypeError(f"Limit must be a positive integer (>= 1), got {ival}")
+    return ival
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--query", "-q", default=None, help="Query string to search (default: interactive REPL)")
-    parser.add_argument("--limit", "-k", type=int, default=5, help="Number of results to retrieve (default: 5)")
+    parser.add_argument("--limit", "-k", type=_positive_int, default=5, help="Number of results to retrieve (default: 5)")
     parser.add_argument("--product", default=None, help="Optional product filter (e.g. 'z/OS')")
     parser.add_argument("--version", default=None, help="Optional version filter (e.g. '3.2')")
     parser.add_argument("--collection", default=None, help="Qdrant collection override")

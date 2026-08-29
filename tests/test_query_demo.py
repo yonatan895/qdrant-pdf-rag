@@ -67,3 +67,14 @@ def test_main_cli_single_query(mock_qdrant, mock_embed, mock_search, tmp_path: P
     assert rc == 0
     assert out_file.exists()
     assert '"query": "IEA500I"' in out_file.read_text(encoding="utf-8")
+
+
+def test_positive_int_limit_validation():
+    import pytest
+
+    with pytest.raises(SystemExit):
+        main(["--query", "IEA500I", "--limit", "0"])
+
+    with pytest.raises(SystemExit):
+        main(["--query", "IEA500I", "--limit", "-3"])
+
