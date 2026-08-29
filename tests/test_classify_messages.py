@@ -48,10 +48,17 @@ def test_strip_page_keeps_roman_letter_words():
 
 
 def test_strip_page_drops_bare_page_numbers_everywhere():
-    """Page-number stripping is per-line and does not depend on chrome detection."""
-    page = "body\n7\niv.\n1234"
-    out = strip_page(page, set())
-    assert out == "body\niv."
+    """Page-number stripping is per-line and does not depend on chrome detection.
+    Roman footers take the same trailing punctuation as decimal ones — front
+    matter renders as "iv." as often as "iv" (one concept, one rule)."""
+    page = "body\n7\n1234\niv.\nxii.\nXIV-"
+    assert strip_page(page, set()) == "body"
+
+
+def test_strip_page_keeps_whitespace_lines():
+    """Empty/whitespace-only lines are never page numbers — the regexes reject
+    empty input structurally, and strip_page keeps blank lines as-is."""
+    assert strip_page("body\n\n   \n\t\n7", set()) == "body\n\n   \n\t"
 
 
 def test_strip_page_keeps_inner_dot_numbers():

@@ -16,15 +16,20 @@ MIN_HITS = 3
 
 _WHITESPACE_RE = re.compile(r"\s+")
 # Bare page-number lines: decimal ("12", "1234", "12-34", "12.") or a strict
-# roman numeral ("xiv", "XII", "i"). The roman form is structural, not a
-# char-set: [ivxlcdm]+ with IGNORECASE also matched real words, so standalone
-# "XML", "civil", "dim" lines were silently deleted from pages. The decimal
-# form keeps an inner dot out ("1.2" is a section number, not a footer).
-# Genuinely ambiguous valid numerals ("mix" = 1009) stay treated as numerals.
+# roman numeral ("xiv", "XII", "i", "iv." — front matter renders as "iv." as
+# often as "iv", so both forms accept one trailing [-.]). The roman form is
+# structural, not a char-set: [ivxlcdm]+ with IGNORECASE also matched real
+# words, so standalone "XML", "civil", "dim" lines were silently deleted from
+# pages. The decimal form keeps an inner dot out ("1.2" is a section number,
+# not a footer) and is ASCII-only. The roman lookahead rejects empty input
+# structurally (an empty fullmatch would otherwise eat every blank line), and
+# valid numerals that are also words ("mix" = 1009, "di" = 501) stay treated
+# as numerals — inherent ambiguity, not worth a word list.
 _ROMAN_NUMERAL_RE = re.compile(
-    r"m*(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})", re.IGNORECASE
+    r"(?=[ivxlcdm])m*(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})(?:[-.])?",
+    re.IGNORECASE,
 )
-_DECIMAL_PAGE_RE = re.compile(r"\d+(?:-\d+)?[-.]?")
+_DECIMAL_PAGE_RE = re.compile(r"[0-9]+(?:-[0-9]+)?[-.]?")
 
 
 def _normalize(line: str) -> str:
@@ -32,10 +37,12 @@ def _normalize(line: str) -> str:
 
 
 def _is_page_number(line: str) -> bool:
-    s = line.strip()
-    if not s:
-        return False
-    return bool(_DECIMAL_PAGE_RE.fullmatch(s) or _ROMAN_NUMERAL_RE.fullmatch(s))
+    # No empty-string branch needed: both patterns require at least one
+    # numeral character (decimal via [0-9]+, roman via the lookahead), and
+    # strip_page never routes an empty normalized line here.
+    return bool(
+        _DECIMAL_PAGE_RE.fullmatch(line.strip()) or _ROMAN_NUMERAL_RE.fullmatch(line.strip())
+    )
 
 
 def _sample_indices(page_count: int) -> list[int]:
