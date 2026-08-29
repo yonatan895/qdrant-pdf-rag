@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -471,6 +472,12 @@ def _positive_int(val: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Set convenient local dev defaults if unset in environment
+    if "EMBED_MODE" not in os.environ and "EMBED_BASE_URL" not in os.environ:
+        os.environ["EMBED_MODE"] = "hash"
+        os.environ["ALLOW_HASH_MODE"] = "true"
+    os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--query", "-q", default=None, help="Query string to search (default: interactive REPL)")
     parser.add_argument("--answer", "-a", action="store_true", help="Generate reasoning answer with citations using LLM")
