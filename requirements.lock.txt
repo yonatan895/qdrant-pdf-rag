@@ -1,8 +1,10 @@
 # Python 3.14 pins. Lock file for the ingest and agent images.
 # Air-gap images install with: pip install --no-index --find-links /wheelhouse -r requirements.lock.txt
-# Audited with pip-audit (2026-08): pillow 12.3 fixes PYSEC-2026-165/2249-2257/2874/3451-3496;
-# starlette 1.3.1+ fixes PYSEC-2026-161/248/249/1942/2280/2281.
-# litellm was removed (never imported; the LLM gateway is plain OpenAI-compatible httpx).
+# Audited with pip-audit (2026-08): transitive floors, not pinned here — pillow 12.3 fixes
+# PYSEC-2026-165/2249-2257/2874/3451-3496; starlette 1.3.1+ fixes PYSEC-2026-161/248/249/1942/2280/2281.
+# Reconcile at the next lockfile regeneration (connected-host wheelhouse rebuild).
+# The never-imported LLM-gateway package was removed 2026-08 (the gateway is plain
+# OpenAI-compatible httpx); do not re-add it — AGENTS.md phantom-dep rule, hygiene guard test.
 pymupdf==1.28.2
 qdrant-client==1.19.0
 fastembed==0.8.0
