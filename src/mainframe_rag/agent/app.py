@@ -289,7 +289,11 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
         t0 = time.monotonic()
         content = llm.chat(messages)
         llm_ms = int((time.monotonic() - t0) * 1000)
-        parsed = parse_answer(content, {h.cite for h in hits})
+        parsed = parse_answer(
+            content,
+            {h.cite for h in hits},
+            ordered_cites=[h.cite for h in hits],
+        )
     except Exception as exc:
         log.error(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "answer failed") from exc

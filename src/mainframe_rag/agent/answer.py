@@ -19,15 +19,16 @@ FENCE_RE = re.compile(r"```[a-zA-Z]*\n(.*?)```", re.DOTALL)
 SYSTEM_PROMPT = (
     "You are a mainframe operations expert (z/OS, CICS, Db2, IMS, JES2/3, RACF, "
     "z/VM, VTAM). Answer operational questions. Rules:\n"
-    "1. Only assert what the supplied citations support.\n"
+    "1. Only assert what the supplied excerpts support.\n"
     "2. If manuals disagree between versions, say which version each statement "
     "comes from.\n"
-    "3. If the citations do not answer the question, say so explicitly.\n"
+    "3. If the excerpts do not answer the question, say so explicitly.\n"
     "4. When you propose JCL, REXX, or operator steps, put them in a fenced code "
     "block and tie them to a citation. Scripts are examples, not "
     "production-ready without review.\n"
-    "5. End your reply with a 'Citations:' list. Each citation line must be "
-    "exactly: <doc number> <title>, <heading path>, p. <page label>\n"
+    "5. You MUST end your reply with a 'Citations:' section listing the exact citation strings of the excerpts used, for example:\n"
+    "Citations:\n"
+    "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17\n"
 )
 
 
@@ -57,6 +58,9 @@ def build_messages(
         )
     parts.append("Question: " + query)
     parts.append("Retrieved manual excerpts:\n" + "\n\n".join(chunks))
+    parts.append(
+        "Please answer based on the excerpts above and conclude with the 'Citations:' section copying the exact citation line for each excerpt used."
+    )
 
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -111,7 +115,11 @@ class HttpxLLMClient:
         return str(resp.json()["choices"][0]["message"]["content"])
 
 
-def parse_answer(content: str, allowed_citations: set[str]) -> dict:
+def parse_answer(
+    content: str,
+    allowed_citations: set[str],
+    ordered_cites: list[str] | None = None,
+) -> dict:
     """Split model output into answer, validated citations, optional script.
 
     The `citations` list and the answer body are filtered to the hit set.
@@ -127,6 +135,16 @@ def parse_answer(content: str, allowed_citations: set[str]) -> dict:
     script = fence.group(1).strip() if fence else None
 
     citations = valid_citations(content, allowed_citations)
+    if not citations and ordered_cites:
+        # Resolve inline bracketed excerpt references (e.g. [1], [2], [1, 2])
+        for match in re.finditer(r"\[([0-9,\s]+)\]|\(([0-9,\s]+)\)", content):
+            raw_nums = match.group(1) or match.group(2) or ""
+            for num_str in re.findall(r"\b\d+\b", raw_nums):
+                idx = int(num_str) - 1
+                if 0 <= idx < len(ordered_cites):
+                    cite = ordered_cites[idx]
+                    if cite in allowed_citations and cite not in citations:
+                        citations.append(cite)
 
     # Answer body = everything before the Citations: header, minus the fence.
     body = content.split("Citations:")[0] if "Citations:" in content else content

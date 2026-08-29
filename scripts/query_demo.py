@@ -357,7 +357,7 @@ def execute_answer(
         client.close()
 
     allowed_citations = {h.cite for h in hits}
-    parsed = parse_answer(reply, allowed_citations)
+    parsed = parse_answer(reply, allowed_citations, ordered_cites=[h.cite for h in hits])
     return parsed, hits, kind, timings
 
 
