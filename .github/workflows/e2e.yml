@@ -251,6 +251,7 @@ jobs:
       - name: airgap-deploy dry-run (prod render, fail-closed placeholders, knobs)
         env:
           IMAGE_SHA: ${{ env.SHA }}
+          AIRGAP_DRYRUN: "1"
           INTERNAL_REGISTRY: ghcr.io/dryrun-standin
           NAMESPACE: airgap-dryrun
           STORAGE_CLASS: standard
@@ -267,6 +268,7 @@ jobs:
       - name: airgap-deploy dry-run with PULL_SECRET + extra values
         env:
           IMAGE_SHA: ${{ env.SHA }}
+          AIRGAP_DRYRUN: "1"
           INTERNAL_REGISTRY: ghcr.io/dryrun-standin
           NAMESPACE: airgap-dryrun
           STORAGE_CLASS: standard
@@ -286,6 +288,7 @@ jobs:
       - name: airgap-deploy dry-run fails closed on a bad extra-values file
         env:
           IMAGE_SHA: ${{ env.SHA }}
+          AIRGAP_DRYRUN: "1"
           INTERNAL_REGISTRY: ghcr.io/dryrun-standin
           NAMESPACE: airgap-dryrun
           STORAGE_CLASS: standard
@@ -303,6 +306,7 @@ jobs:
       - name: airgap-ingest dry-run (prod ingest render + patch knob)
         env:
           IMAGE_SHA: ${{ env.SHA }}
+          AIRGAP_DRYRUN: "1"
           INTERNAL_REGISTRY: ghcr.io/dryrun-standin
           NAMESPACE: airgap-dryrun
           STORAGE_CLASS: standard
