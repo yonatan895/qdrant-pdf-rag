@@ -127,6 +127,16 @@ def generate_corpus(root: Path, docs: int) -> dict:
     # Self-consistent runs: a leftover corpus from a smaller BENCH_DOCS run
     # would otherwise be walked and ingested alongside the current one.
     if root.exists():
+        # Guard: only ever delete a directory that IS a previous bench corpus
+        # (identified by the first doc the harness always generates). An
+        # operator-supplied BENCH_CORPUS_DIR pointing at real data must never
+        # be touched.
+        if not (root / "SA22-0000-00.pdf").exists():
+            raise RuntimeError(
+                f"refusing to delete {root}: it does not look like a generated "
+                "bench corpus (no SA22-0000-00.pdf). Point BENCH_CORPUS_DIR at "
+                "a directory the harness may own, or let it use its default."
+            )
         shutil.rmtree(root)
     root.mkdir(parents=True, exist_ok=True)
     for i in range(docs):

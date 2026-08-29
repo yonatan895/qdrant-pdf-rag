@@ -110,3 +110,27 @@ def test_percentile():
     assert _percentile(values, 50) == 20.0
     assert _percentile(values, 100) == 30.0
     assert _percentile([], 50) == 0.0
+
+
+def test_corpus_guard_never_deletes_operator_data(tmp_path):
+    """BENCH_CORPUS_DIR may point at real data: the harness refuses to delete
+    a directory that is not a generated bench corpus, and leaves it intact."""
+    from scripts.benchmark import generate_corpus
+
+    foreign = tmp_path / "my-real-pdfs"
+    foreign.mkdir()
+    (foreign / "IEA500I-manual.pdf").write_bytes(b"not really a pdf, but data")
+
+    try:
+        generate_corpus(foreign, docs=1)
+        raise AssertionError("generate_corpus must refuse to wipe foreign directories")
+    except RuntimeError as exc:
+        assert "refusing to delete" in str(exc)
+    assert (foreign / "IEA500I-manual.pdf").exists(), "operator data must be untouched"
+
+    # A directory that IS a previous bench corpus is regenerated freely.
+    bench = tmp_path / "bench-corpus"
+    bench.mkdir()
+    (bench / "SA22-0000-00.pdf").write_bytes(b"stale bench artifact")
+    info = generate_corpus(bench, docs=1)
+    assert info["docs"] == 2 and (bench / "SA22-0000-00.pdf").stat().st_size > 1000
