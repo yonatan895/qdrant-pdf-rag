@@ -27,7 +27,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m 'not integration'"
+markers = [
+    "integration: end-to-end simulation against a docker Qdrant server + loopback mocks (run via `make sim`)",
+]
 
 [tool.ruff]
 line-length = 100
