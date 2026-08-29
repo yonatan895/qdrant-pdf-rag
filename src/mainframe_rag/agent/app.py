@@ -285,6 +285,8 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
         messages = build_messages(
             req.query, hits,
             product=req.product, version=req.version, splunk_context=req.splunk_context,
+            max_context_chars=settings.prompt_max_context_chars,
+            max_chunk_chars=settings.prompt_max_chunk_chars,
         )
         t0 = time.monotonic()
         content = llm.chat(messages)

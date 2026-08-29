@@ -498,3 +498,25 @@ def test_strip_unauthorized_body_citations():
     # Non-citation lines that merely mention a doc number survive untouched.
     out2 = strip_unauthorized_citations("refer to SA22-9999-99 for details", allowed)
     assert out2 == "refer to SA22-9999-99 for details"
+
+
+def test_build_messages_context_budgeting():
+    import dataclasses
+
+    from mainframe_rag.agent.answer import build_messages
+
+    hit1 = dataclasses.replace(_hit(), text="A" * 5000)
+    hit2 = dataclasses.replace(_hit(cite_suffix="p. 1-7"), text="B" * 5000)
+
+    # Per-chunk max caps chunk text to 100 chars
+    msgs1 = build_messages("test query", [hit1], max_chunk_chars=100, max_context_chars=1000)
+    user_prompt1 = msgs1[1]["content"]
+    assert "... [truncated]" in user_prompt1
+    assert len(user_prompt1) < 500
+
+    # Total context max truncates subsequent hits
+    msgs2 = build_messages("test query", [hit1, hit2], max_chunk_chars=400, max_context_chars=500)
+    user_prompt2 = msgs2[1]["content"]
+    assert "[1]" in user_prompt2
+    assert len(user_prompt2) < 1500
+
