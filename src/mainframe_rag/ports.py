@@ -58,6 +58,13 @@ class QdrantPoints(Protocol):
         field_schema: models.PayloadSchemaType,
     ) -> models.UpdateResult: ...
 
+    def update_collection(
+        self,
+        collection_name: str,
+        *,
+        optimizer_config: models.OptimizersConfigDiff,
+    ) -> bool: ...
+
     def scroll(
         self,
         collection_name: str,
