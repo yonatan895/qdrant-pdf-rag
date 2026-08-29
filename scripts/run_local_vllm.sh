@@ -33,9 +33,9 @@ fi
 HF_CACHE_DIR="${HF_HOME:-${HOME}/.cache/huggingface}"
 mkdir -p "${HF_CACHE_DIR}"
 
-ENV_FLAGS=""
+ENV_FLAGS="-e VLLM_USE_V1=0 -e VLLM_WSL2_ENABLE_PIN_MEMORY=1"
 if [ -n "${HF_TOKEN:-}" ]; then
-    ENV_FLAGS="-e HF_TOKEN=${HF_TOKEN}"
+    ENV_FLAGS="${ENV_FLAGS} -e HF_TOKEN=${HF_TOKEN}"
 fi
 
 # If MODEL is a local directory, mount it directly into the container as /model
