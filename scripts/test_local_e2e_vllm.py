@@ -23,8 +23,18 @@ from mainframe_rag.agent.cites import strip_unauthorized_citations, valid_citati
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.run_ingest import run as run_ingest
 from mainframe_rag.retrieve.query import search
-from scripts.make_synthetic_pdf import build
-from scripts.qdrant_sim import QdrantSim, start_simulator
+
+# Allow running directly via `python scripts/test_local_e2e_vllm.py`
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    from scripts.make_synthetic_pdf import build
+    from scripts.qdrant_sim import QdrantSim, start_simulator
+except ImportError:
+    from make_synthetic_pdf import build
+    from qdrant_sim import QdrantSim, start_simulator
 
 
 def check_vllm_connection(base_url: str, model_name: str) -> bool:

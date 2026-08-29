@@ -232,7 +232,7 @@ local-vllm:
 	sh scripts/run_local_vllm.sh
 
 test-vllm-e2e: | .venv
-	.venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",)
+	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",)
 
 
 # ---------------------------------------------------------------- e2e demo
