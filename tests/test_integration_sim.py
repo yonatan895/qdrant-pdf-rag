@@ -17,10 +17,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shutil
-import subprocess
 import threading
-import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -31,7 +28,6 @@ from fastapi.testclient import TestClient
 pytestmark = pytest.mark.integration
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-QDRANT_READY_TIMEOUT_S = 60.0
 MOCK_DIM = 32  # must equal the DENSE_DIM the vLLM-shaped variant declares
 
 MOCK_SPEC = importlib.util.spec_from_file_location(
@@ -39,77 +35,19 @@ MOCK_SPEC = importlib.util.spec_from_file_location(
 )
 
 
-def _run(cmd: list[str], timeout: float = 120.0) -> subprocess.CompletedProcess:
-    # Return codes are checked by each caller — docker failures must skip, not raise.
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
-
-
-def _qdrant_image_pin() -> str:
-    from scripts.qdrant_pin import qdrant_image_pin
-
-    try:
-        return qdrant_image_pin(REPO_ROOT / "images.txt")
-    except ValueError:
-        pytest.skip("no qdrant image pin in images.txt")
-
-
-def _wait_ready(url: str) -> None:
-    deadline = time.monotonic() + QDRANT_READY_TIMEOUT_S
-    last = ""
-    while time.monotonic() < deadline:
-        try:
-            r = httpx.get(f"{url.rstrip('/')}/readyz", timeout=2.0)
-            # Same predicate as agent /healthz — one readiness rule, not two.
-            if r.status_code == 200 and r.text.strip().lower() == "all shards are ready":
-                return
-            last = f"/readyz {r.status_code}"
-        except httpx.HTTPError as exc:
-            last = str(exc)[:120]
-        time.sleep(0.5)
-    pytest.skip(f"Qdrant at {url} not ready within {QDRANT_READY_TIMEOUT_S:.0f}s (last: {last})")
-
-
 @pytest.fixture(scope="session")
 def qdrant_url():
     """QDRANT_SIM_URL wins (a running server, e.g. `make sim-qdrant`);
-    otherwise run the pinned image on an ephemeral loopback port."""
-    env_url = os.environ.get("QDRANT_SIM_URL")
-    if env_url:
-        _wait_ready(env_url)
-        yield env_url.rstrip("/")
-        return
+    otherwise run the pinned image on an ephemeral loopback port. Lifecycle
+    lives in scripts/qdrant_sim.py (shared with the benchmark harness)."""
+    from scripts.qdrant_sim import QdrantSimError, start_simulator
 
-    if shutil.which("docker") is None:
-        pytest.skip("docker CLI not found; set QDRANT_SIM_URL to reuse a running server")
-    info = _run(["docker", "info"], timeout=15)
-    if info.returncode != 0:
-        pytest.skip("docker daemon not reachable; set QDRANT_SIM_URL to reuse a running server")
-
-    image = _qdrant_image_pin()
-    if not _run(["docker", "images", "-q", image]).stdout.strip():
-        pull = _run(["docker", "pull", image], timeout=300)
-        if pull.returncode != 0:
-            pytest.skip(f"could not pull {image}: {pull.stderr.strip()[:200]}")
-    run = _run(["docker", "run", "-d", "--rm", "-p", "127.0.0.1::6333", image])
-    if run.returncode != 0:
-        pytest.skip(f"could not start the qdrant container: {run.stderr.strip()[:200]}")
-    cid = run.stdout.strip()
     try:
-        deadline = time.monotonic() + 15
-        port = ""
-        while time.monotonic() < deadline:
-            out = _run(["docker", "port", cid, "6333/tcp"]).stdout.strip()
-            if out:
-                port = out.splitlines()[0].rsplit(":", 1)[1]
-                break
-            time.sleep(0.3)
-        if not port:
-            pytest.skip("container did not publish a host port in time")
-        url = f"http://127.0.0.1:{port}"
-        _wait_ready(url)
-        yield url
-    finally:
-        _run(["docker", "stop", cid], timeout=30)
+        sim = start_simulator(REPO_ROOT, os.environ.get("QDRANT_SIM_URL"))
+    except QdrantSimError as exc:
+        pytest.skip(str(exc))
+    yield sim.url
+    sim.stop()
 
 
 @pytest.fixture(scope="session", autouse=True)
