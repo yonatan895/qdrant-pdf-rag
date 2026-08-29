@@ -1,6 +1,7 @@
 # images.txt
 #
-# Append name + digest after the first pull on the connected host (make pull-images).
+# Record name + digest after the first pull on the connected host
+# (skopeo inspect; scripts/airgap/pack.sh applies the digest when packing).
 # Digest pins are the air-gap contract: the cluster must run exactly these bytes.
 #
 # name                                                                  digest

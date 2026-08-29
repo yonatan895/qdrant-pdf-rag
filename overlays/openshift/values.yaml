@@ -1,13 +1,13 @@
 # OpenShift overlay for the vendored Qdrant chart (charts/qdrant-*.tgz).
 # Placeholders only — real values come from airgap.env at deploy time
-# (helm-apply sets image.repository; secrets are cluster-side, never in git).
+# (airgap-deploy sets image.repository; secrets are cluster-side, never in git).
 # Pins: image v1.19.0-unprivileged, SCC restricted-v2, RWO block storage.
 # See docs/architecture.md section 3.2.
 
 replicaCount: 3
 
 image:
-  repository: PLACEHOLDER_REGISTRY/qdrant/qdrant   # helm-apply overrides with ${REGISTRY_INTERNAL}
+  repository: PLACEHOLDER_REGISTRY/qdrant/qdrant   # airgap-deploy overrides with ${INTERNAL_REGISTRY}
   tag: v1.19.0        # chart appends "-unprivileged" when useUnprivilegedImage: true
   pullPolicy: IfNotPresent
   useUnprivilegedImage: true

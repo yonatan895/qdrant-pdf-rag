@@ -5,16 +5,11 @@ SHELL := /bin/bash
 
 CHARTS_DIR := charts
 VALUES_FILE := overlays/openshift/values.yaml
-OC_MIRROR_DIR := oc-mirror
 BUNDLE_DIR ?= bundles
-IMAGE_ARCHIVE ?= $(BUNDLE_DIR)/qdrant-image.tar
-GIT_BUNDLE := $(BUNDLE_DIR)/repo.gitbundle
 WHEELHOUSE := $(BUNDLE_DIR)/wheelhouse
 BM25_WEIGHTS := $(BUNDLE_DIR)/bm25-weights
 BM25_MODEL ?= Qdrant/bm25
-REGISTRY ?= $(REGISTRY_INTERNAL)
 
-QDRANT_IMAGE ?= docker.io/qdrant/qdrant:v1.19.0-unprivileged
 INGEST_IMAGE_NAME ?= mainframe-rag/ingest
 AGENT_IMAGE_NAME ?= mainframe-rag/agent
 IMAGE_TAG ?= latest
@@ -92,26 +87,14 @@ typecheck: | .venv
 check: lint typecheck test
 
 # ---------------------------------------------------------------- images (connected host)
+# The air-gap never builds (issue #15): connected main is the only image
+# factory, and e2e.yml tags these images with the full git SHA.
 .PHONY: build-images
 build-images: | $(WHEELHOUSE) $(BM25_WEIGHTS)
 	docker build --build-context wheelhouse=$(WHEELHOUSE) --build-context bm25=$(BM25_WEIGHTS) \
 	  -f images/Containerfile.ingest -t $(INGEST_IMAGE_NAME):$(IMAGE_TAG) .
 	docker build --build-context wheelhouse=$(WHEELHOUSE) --build-context bm25=$(BM25_WEIGHTS) \
 	  -f images/Containerfile.agent -t $(AGENT_IMAGE_NAME):$(IMAGE_TAG) .
-
-.PHONY: pull-images
-pull-images:
-	@command -v skopeo >/dev/null || { echo "skopeo required"; exit 1; }
-	skopeo copy docker://$(QDRANT_IMAGE) docker-archive:$(IMAGE_ARCHIVE)
-	@echo "Record digest in images.txt:"; skopeo inspect docker://$(QDRANT_IMAGE) | grep -E '"Digest"'
-
-.PHONY: push-images
-push-images:
-	@command -v skopeo >/dev/null || { echo "skopeo required"; exit 1; }
-	docker tag $(INGEST_IMAGE_NAME):$(IMAGE_TAG) $(REGISTRY)/$(INGEST_IMAGE_NAME):$(IMAGE_TAG)
-	docker tag $(AGENT_IMAGE_NAME):$(IMAGE_TAG) $(REGISTRY)/$(AGENT_IMAGE_NAME):$(IMAGE_TAG)
-	docker push $(REGISTRY)/$(INGEST_IMAGE_NAME):$(IMAGE_TAG)
-	docker push $(REGISTRY)/$(AGENT_IMAGE_NAME):$(IMAGE_TAG)
 
 # ---------------------------------------------------------------- air-gap happy path (issue #15)
 .PHONY: airgap-pack airgap-load airgap-deploy airgap-ingest airgap-smoke
@@ -125,33 +108,6 @@ airgap-ingest:
 	sh scripts/airgap/ingest.sh
 airgap-smoke:
 	sh scripts/airgap/smoke.sh
-
-# ---------------------------------------------------------------- legacy/manual air-gap steps
-.PHONY: pack
-pack: chart wheelhouse bm25-weights
-	@mkdir -p $(BUNDLE_DIR)
-	@[ -f $(IMAGE_ARCHIVE) ] || [ -n "$(wildcard mirror_seq*.tar)" ] || { echo "No image archive: run make pull-images or oc mirror"; exit 1; }
-	@if [ -d .git ]; then git bundle create $(GIT_BUNDLE) --all; fi
-	@echo "=== Air-gap bundle contents ($(BUNDLE_DIR)) ==="
-	@echo "chart:        $$(ls $(CHARTS_DIR)/qdrant-*.tgz)"
-	@echo "values:       $(VALUES_FILE)"
-	@echo "oc-mirror:    $(OC_MIRROR_DIR)/imageset-config.yaml"
-	@echo "images:       $$( [ -f $(IMAGE_ARCHIVE) ] && echo $(IMAGE_ARCHIVE) || echo 'mirror_seq*.tar (oc mirror output)' )"
-	@echo "git bundle:   $(GIT_BUNDLE)"
-	@echo "wheelhouse:   $(WHEELHOUSE)"
-	@echo "bm25 weights: $(BM25_WEIGHTS)"
-	@echo "images.txt:   images.txt (digest pins)"
-
-.PHONY: load-images
-load-images:
-	@command -v skopeo >/dev/null || { echo "skopeo required"; exit 1; }
-	skopeo copy docker-archive:$(IMAGE_ARCHIVE) docker://$(REGISTRY)/qdrant/qdrant:$(QDRANT_TAG)
-
-.PHONY: helm-apply
-helm-apply: chart
-	helm upgrade -i qdrant $(CHARTS_DIR)/qdrant-*.tgz \
-	  -n $(OPENSHIFT_NAMESPACE) -f $(VALUES_FILE) \
-	  --set image.repository=$(REGISTRY)/qdrant/qdrant
 
 # ---------------------------------------------------------------- e2e demo
 .PHONY: e2e-demo-pdfs
@@ -167,8 +123,7 @@ clean:
 
 .PHONY: help
 help:
-	@echo "Connected host : venv wheelhouse bm25-weights pull-chart helm-lint helm-template build-images push-images pull-images"
+	@echo "Connected host : venv wheelhouse bm25-weights pull-chart helm-lint helm-template build-images"
 	@echo "Air-gap happy path : airgap-pack (connected) | airgap-load airgap-deploy airgap-ingest airgap-smoke (inside the gap)"
-	@echo "Air-gap legacy/manual : pack load-images helm-apply (or oc-mirror; see docs)"
 	@echo "Quality        : test lint typecheck check"
-	@echo "See README 'Air-gap' section and docs/architecture.md."
+	@echo "See README 'Air-gap workflow' section and docs/architecture.md."
