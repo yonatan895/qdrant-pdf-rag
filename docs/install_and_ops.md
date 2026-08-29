@@ -115,60 +115,110 @@ make bench
 make bench-baseline
 ```
 
-### 3.5 Developer Reporting & Interactive Query Demo
+### 3.5 Developer Reporting & Interactive Query Assistant (`make ask` / `make query-demo`)
+
+Mainframe RAG provides interactive terminal REPLs and single-command CLI utilities for inspecting retrieval results and testing LLM reasoning:
 
 ```bash
-# Render terminal evaluation summary
-make eval-report
+# 1. Interactive conversational Q&A assistant (Reasoning LLM + Qdrant retrieval)
+EMBED_MODE=hash QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=zos_320_corpus \
+  LLM_BASE_URL=http://localhost:8000/v1 LLM_MODEL_REASONING=google/gemma-4-E4B-it-qat-mobile-ct \
+  make ask
 
-# Generate self-contained offline HTML evaluation dashboard
-make eval-html
-# -> outputs bundles/eval-report.html
+# 2. Ask a single question directly on the command line
+EMBED_MODE=hash QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=zos_320_corpus \
+  LLM_BASE_URL=http://localhost:8000/v1 LLM_MODEL_REASONING=google/gemma-4-E4B-it-qat-mobile-ct \
+  make ask QUERY="What is message ICH408I?"
 
-# Compare current evaluation against baseline with regression checks
-make eval-compare
-
-# Render benchmark performance report and HTML dashboard
-make bench-report
-make bench-html
-# -> outputs bundles/bench-report.html
-
-# Launch interactive retrieval debugger (REPL)
+# 3. Launch pure retrieval debugger REPL (inspect rank scores and chunk payloads without calling LLM)
 EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus make query-demo
 
-# Or inspect a single query with rank, scores, and text preview
-EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus make query-demo QUERY="SC23-6883-70"
-
-# Launch interactive conversational Q&A assistant (Reasoning LLM + Qdrant retrieval)
-EMBED_MODE=hash QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=zos_320_corpus LLM_BASE_URL=http://localhost:8000/v1 LLM_MODEL_REASONING=google/gemma-4-E4B-it-qat-mobile-ct make ask
-
-# Or ask a single question on the command line
-EMBED_MODE=hash QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=zos_320_corpus LLM_BASE_URL=http://localhost:8000/v1 LLM_MODEL_REASONING=google/gemma-4-E4B-it-qat-mobile-ct make ask QUERY="What is message ICH408I?"
+# 4. Export query results to self-contained HTML or JSON
+PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer --query "IEA500I" --format html --out bundles/answer-IEA500I.html
+PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer --query "IEA500I" --format json --out bundles/answer-IEA500I.json
 ```
 
-### 3.6 Testing with Local vLLM & GPU Acceleration (e.g. RTX 5060 8GB)
+#### REPL Controls & Options
+* **Interactive Mode Switch (`:mode`)**: Type `:mode` inside the REPL to toggle dynamically between `search` (pure vector/BM25 retrieval preview) and `answer` (retrieval + LLM reasoning generation).
+* **Citation Status Indicators**: The output clearly indicates whether citations were parsed from a formal `Citations:` section (`[explicit Citations: section]`) or resolved from inline bracketed references (`[inferred from excerpt [1, 2]]`).
+* **Formatted Scripts**: JCL and REXX scripts produced by the reasoning model are automatically extracted and syntax-highlighted in terminal output and rendered inside copy-friendly code blocks in HTML exports.
 
-To test the entire reasoning and citation-generation pipeline locally with a real LLM on a consumer GPU:
+---
 
-**Option A: Using Local Weights Directory on Disk (No Token Needed, 100% Offline)**
+### 3.6 Local vLLM Inference & GPU Acceleration (RTX 5060 / 8GB VRAM)
+
+The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`](../scripts/run_local_vllm.sh)) for serving local reasoning models via Docker with NVIDIA GPU pass-through:
+
+#### Key Launcher Features
+* **Pinned Container Image**: Defaults to `vllm/vllm-openai:v0.28.0` (built with CUDA 12.8+, supporting NVIDIA Blackwell architectures like the RTX 5060 Laptop GPU and Gemma-4).
+* **8GB VRAM Optimizations**:
+  - `--limit-mm-per-prompt '{"image":0,"audio":0}'`: Disables multimodal vision/audio buffers in Gemma 4 to reclaim substantial VRAM.
+  - `--max-num-seqs 1`: Bounds concurrent sequence allocation to prevent out-of-memory spikes.
+  - `MAX_LEN=4096`: Caps model context length.
+  - `GPU_MEM=0.85`: Reserves memory headroom for PyTorch and driver overhead.
+* **Gemma-4 Support**: Automatically configures `--tool-call-parser gemma4`, `--reasoning-parser gemma4`, and `--chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja`.
+* **WSL2 Compatibility**: Exports `VLLM_WSL2_ENABLE_PIN_MEMORY=1` for host memory stability.
+* **Safe Secrets**: Passes `HF_TOKEN` via `-e HF_TOKEN` without exposing secret tokens on command-line argument lists.
+
+#### Starting the Local vLLM Server
+
+**Option A: 100% Offline via Local Weights Directory (Recommended)**
 ```bash
-# Point to your local model directory
-MODEL="/path/to/local/gemma-4-E4B-it-qat-mobile-ct" make local-vllm
+# Point directly to a downloaded weights directory on disk (no token or internet required)
+MODEL=/home/yonti/models/gemma-4-E4B-it-qat-mobile-ct make local-vllm
 ```
 
-**Option B: Downloading from Hugging Face**
+**Option B: Downloading directly from Hugging Face Hub**
 ```bash
-# Provide HF_TOKEN for gated model download
-HF_TOKEN="<your-token>" make local-vllm
+# Provide HF_TOKEN for downloading gated models
+HF_TOKEN="<your-hf-token>" make local-vllm
 ```
 
-**Run Automated End-to-End Test:**
+---
+
+### 3.7 Automated Local End-to-End Suite (`make test-vllm-e2e`)
+
+To verify the entire RAG pipeline from PDF generation to HTTP retrieval and grounded LLM reasoning:
+
 ```bash
-# In another terminal, run the automated local end-to-end test suite
 make test-vllm-e2e
 ```
 
-The test script connects to `http://localhost:8000/v1`, starts a local Qdrant container, ingests synthetic IBM-shaped manuals, queries `/v1/answer`, and verifies that the model generates operational responses with valid, grounded citations.
+#### Test Execution Flow
+1. **vLLM Health Probe**: Connects to `http://localhost:8000/v1` and verifies model availability.
+2. **Corpus Generation & Ingest**: Builds synthetic IBM-shaped manual PDFs with specific message IDs (`IEA500I`, `LFAREA`) and ingests them into a local Qdrant collection.
+3. **HTTP `/v1/search` Verification**: Queries the FastAPI endpoint and validates parallel prefetch fusion and hit ranking.
+4. **HTTP `/v1/answer` Verification**: Executes reasoning queries against the local vLLM server via FastAPI HTTP endpoints.
+5. **Strict Grounding Gate**: Fails closed if the model response returns zero validated citations or indicates ungrounded hallucination.
+
+---
+
+### 3.8 Exporting Standalone Model Weights for Offline Bastions
+
+To archive model weights and configurations for use in completely disconnected or air-gapped environments:
+
+```bash
+# Download complete snapshot to a standalone directory (dereferenced real files, no symlinks)
+.venv/bin/python -c '
+from pathlib import Path
+from huggingface_hub import snapshot_download
+
+target_dir = Path("/home/yonti/models/gemma-4-E4B-it-qat-mobile-ct")
+target_dir.mkdir(parents=True, exist_ok=True)
+
+snapshot_download(
+    repo_id="google/gemma-4-E4B-it-qat-mobile-ct",
+    local_dir=str(target_dir),
+    local_dir_use_symlinks=False,
+)
+'
+```
+
+Files stored in `/home/yonti/models/gemma-4-E4B-it-qat-mobile-ct/`:
+* `model.safetensors` (~3.5 GB) — Quantized INT4 QAT weights
+* `config.json` & `generation_config.json` — Model hyperparameters
+* `tokenizer.json` & `tokenizer_config.json` — Vocabulary and special tokens
+* `chat_template.jinja` — Chat formatting templates
 
 ---
 

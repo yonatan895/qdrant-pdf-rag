@@ -62,6 +62,8 @@ Citation-first expert mainframe agent: hybrid retrieval over ~100 GB of IBM-styl
 | | `QUERY="..." make query-demo` | Inspect a single query with classification, latency, rank, citations & text |
 | | `make ask` | Launch interactive reasoning Q&A assistant (`rag-answer> `) with LLM & citations |
 | | `QUERY="..." make ask` | Ask a single question and get grounded reasoning answer with citations |
+| **Local vLLM & GPU** | `make local-vllm` | Run local vLLM OpenAI-compatible server on GPU (RTX 5060 / 8GB VRAM) |
+| | `make test-vllm-e2e` | Run automated end-to-end suite against local vLLM & Qdrant with grounding validation |
 | **Packaging & Air-Gap** | `make airgap-pack` | Build sneakernet package (`dist/qdrant-pdf-rag-<sha>.tar`) on connected host |
 | | `make airgap-load` | Load image archives and push to `${INTERNAL_REGISTRY}` in the air-gap |
 | | `make airgap-deploy` | Deploy Qdrant StatefulSet & Agent on air-gapped OpenShift |
