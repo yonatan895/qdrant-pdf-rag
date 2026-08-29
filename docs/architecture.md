@@ -113,7 +113,8 @@ Recommended namespace: `mainframe-rag` (request; do not assume you can create it
 | `ingest` | CronJob / Job | 1 | CPU-heavy; local SSD / RWO work volume |
 | `bm25-weights` | baked in ingest + agent images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 
-Network: ClusterIP only, no Route to Qdrant. NetworkPolicy intent: agent + ingest may reach Qdrant 6333/6334; only agent may reach vLLM and Splunk; no ingress from other namespaces unless the cluster team requires a mesh. Enforcement today is ClusterIP + namespace isolation; dedicated NetworkPolicy manifests were removed from the repo (no deploy path ever applied them) and remain a platform-team follow-up.
+Network: ClusterIP only, no Route to Qdrant. NetworkPolicy intent: agent + ingest may reach Qdrant 6333/6334; only agent may reach vLLM and Splunk; no ingress from other namespaces unless the cluster team requires a mesh.
+Enforcement today is ClusterIP + namespace isolation. Dedicated NetworkPolicy manifests were removed from the repo (no deploy path ever applied them) and remain a platform-team follow-up.
 
 ### 3.2 Qdrant on OpenShift (pin)
 
@@ -326,7 +327,7 @@ Do not start step 10 from a public runner.
 ### 5.5 Observability
 
 - Ingest: JSON logs per file (doc_id, pages, chunks, seconds, skip/upsert)
-- Qdrant: scrape existing metrics if the cluster has Prometheus; otherwise `/metrics` NetworkPolicy for the platform team
+- Qdrant: scrape existing metrics if the cluster has Prometheus; otherwise request a scrape policy from the platform team (no NetworkPolicy manifests ship in this repo — see section 3.1)
 - Agent: request_id, query_kind (`identifier`|`nl`), hit count, embed_ms, qdrant_ms, llm_ms
 - No query text in logs if it might contain production dump content; log hashes / message IDs only
 

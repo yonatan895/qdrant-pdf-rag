@@ -70,7 +70,7 @@ From inside that clone:
 make airgap-load     # verify member checksums, load images, push to ${INTERNAL_REGISTRY}
 make airgap-deploy   # Qdrant (vendored chart, prod sizing) + agent prod overlay; waits for Ready
 make airgap-ingest   # one-shot ingest Job against the caller-supplied corpus PVC
-make airgap-smoke    # /v1/search smoke query with an expected substring
+make airgap-smoke    # /v1/search non-empty hit check (skips when nothing ingested yet); --expect variant printed at the end
 ```
 
 The scripts are POSIX sh under `scripts/airgap/` and fail closed (missing
