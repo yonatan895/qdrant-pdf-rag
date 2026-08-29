@@ -1,19 +1,8 @@
 name: opencode
 
+# Disabled: opencode out of quota. Preserved for workflow_dispatch or future re-enablement.
 on:
-  issue_comment:
-    types: [created]
-  pull_request_review_comment:
-    types: [created]
-  pull_request:
-    # No synchronize: hy4-preview treated every push as a new hunt
-    # (PRs #23/#24). Re-review via ready_for_review, reopen, or /oc.
-    types: [opened, reopened, ready_for_review]
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.markdown"
-      - ".agents/**"
-      - "vendor/**"
+  workflow_dispatch:
 
 jobs:
   gate:
