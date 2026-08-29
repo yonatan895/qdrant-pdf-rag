@@ -182,6 +182,50 @@ eval-baseline: | .venv
 eval-draft: | .venv
 	.venv/bin/python scripts/eval_retrieval.py --label-draft --docs 40
 
+# ---------------------------------------------------------------- reports & artifacts
+# Render evaluation and benchmark reports into text, markdown, or self-contained HTML dashboards.
+.PHONY: eval-report eval-html eval-compare bench-report bench-html bench-compare query-demo
+
+eval-report: | .venv
+	.venv/bin/python scripts/render_report.py eval \
+	  --report $(or $(REPORT),$(BUNDLE_DIR)/eval-report.json) \
+	  --baseline $(or $(BASELINE),evals/baseline.json)
+
+eval-html: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/render_report.py eval \
+	  --report $(or $(REPORT),$(BUNDLE_DIR)/eval-report.json) \
+	  --baseline $(or $(BASELINE),evals/baseline.json) \
+	  --format html --out $(or $(OUT),$(BUNDLE_DIR)/eval-report.html)
+	@echo "Rendered $(or $(OUT),$(BUNDLE_DIR)/eval-report.html)"
+
+eval-compare: | .venv
+	.venv/bin/python scripts/render_report.py compare-eval \
+	  --base $(or $(BASE),evals/baseline.json) \
+	  --current $(or $(CURRENT),$(BUNDLE_DIR)/eval-report.json)
+
+bench-report: | .venv
+	.venv/bin/python scripts/render_report.py bench \
+	  --report $(or $(REPORT),$(BUNDLE_DIR)/bench-report.json) \
+	  --baseline $(or $(BASELINE),benchmarks/baseline.json)
+
+bench-html: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/render_report.py bench \
+	  --report $(or $(REPORT),$(BUNDLE_DIR)/bench-report.json) \
+	  --baseline $(or $(BASELINE),benchmarks/baseline.json) \
+	  --format html --out $(or $(OUT),$(BUNDLE_DIR)/bench-report.html)
+	@echo "Rendered $(or $(OUT),$(BUNDLE_DIR)/bench-report.html)"
+
+bench-compare: | .venv
+	.venv/bin/python scripts/render_report.py compare-bench \
+	  --base $(or $(BASE),benchmarks/baseline.json) \
+	  --current $(or $(CURRENT),$(BUNDLE_DIR)/bench-report.json)
+
+# Interactive query inspection and debugging CLI
+query-demo: | .venv
+	.venv/bin/python scripts/query_demo.py $(if $(QUERY),--query "$(QUERY)",)
+
 # ---------------------------------------------------------------- e2e demo
 .PHONY: e2e-demo-pdfs
 e2e-demo-pdfs: | .venv
@@ -201,5 +245,6 @@ help:
 	@echo "Simulation     : sim (pytest integration tier; docker Qdrant) | sim-qdrant sim-clean"
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper)"
+	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."
