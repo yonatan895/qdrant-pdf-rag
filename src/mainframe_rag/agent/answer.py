@@ -14,7 +14,8 @@ import httpx2
 from mainframe_rag.config import Settings
 from mainframe_rag.retrieve.query import SearchHit
 
-FENCE_RE = re.compile(r"```[a-zA-Z]*\n(.*?)```", re.DOTALL)
+FENCE_RE = re.compile(r"```([a-zA-Z]*)\n(.*?)```", re.DOTALL)
+CITATIONS_BLOCK_RE = re.compile(r"(?:\n|^)\s*Citations:\s*\n(?:[ \t]*[-*•]?[ \t]*[^\n]+\n?)*", re.IGNORECASE)
 
 SYSTEM_PROMPT = (
     "You are a mainframe operations expert (z/OS, CICS, Db2, IMS, JES2/3, RACF, "
@@ -153,7 +154,20 @@ def parse_answer(
     )
 
     fence = FENCE_RE.search(content)
-    script = fence.group(1).strip() if fence else None
+    script: str | None = None
+    if fence:
+        lang = fence.group(1).strip().lower()
+        fence_content = fence.group(2).strip()
+        body_without_fence = content.replace(fence.group(0), "").strip()
+        # If explicitly a code script (jcl, rexx, sh, etc.) or there is substantial non-fenced body text
+        if lang in ("jcl", "rexx", "sh", "bash", "python", "yaml", "json") or len(body_without_fence) > 50:
+            script = fence_content
+            content_for_body = body_without_fence
+        else:
+            # Whole answer was wrapped in markdown code fence
+            content_for_body = fence_content
+    else:
+        content_for_body = content
 
     citations = valid_citations(content, allowed_citations)
     citations_inferred = False
@@ -172,10 +186,12 @@ def parse_answer(
                         inferred_indices.append(idx + 1)
                         citations_inferred = True
 
-    # Answer body = everything before the Citations: header, minus the fence.
-    body = content.split("Citations:")[0] if "Citations:" in content else content
-    if fence and fence.group(0) in body:
-        body = body.replace(fence.group(0), "")
+    # Strip Citations: block from anywhere in the text (top, middle, or bottom)
+    body = CITATIONS_BLOCK_RE.sub("\n", content_for_body).strip()
+    if not body and script:
+        body = script
+        script = None
+
     # A fabricated full-format cite quoted mid-answer must not reach the
     # client either (issue #20 PR C: no cite outside the hit set).
     body = strip_unauthorized_citations(body, allowed_citations)

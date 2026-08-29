@@ -476,6 +476,17 @@ def test_parse_answer_bracketed_fallback():
     assert res5["citations"] == []
     assert res5["citations_inferred"] is False
 
+    # 6. Citations: at top of answer -> answer body preserved, not wiped
+    res6 = parse_answer(f"Citations:\n{cite1}\n\nActual explanation text here.", allowed, ordered_cites=ordered)
+    assert res6["citations"] == [cite1]
+    assert res6["answer"] == "Actual explanation text here."
+
+    # 7. Whole answer wrapped in markdown code fence -> promoted to answer body, not wiped
+    res7 = parse_answer(f"```\nAll text in code fence\n```\n\nCitations:\n{cite1}", allowed, ordered_cites=ordered)
+    assert res7["citations"] == [cite1]
+    assert res7["answer"] == "All text in code fence"
+    assert res7["script"] is None
+
 
 def test_citation_validation():
     lines = extract_citation_lines(
