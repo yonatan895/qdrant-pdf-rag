@@ -76,8 +76,11 @@ if [ "${SERVED_TARGET}" = "/model" ]; then
     set -- "$@" --served-model-name "${MODEL_NAME}"
 fi
 
-# Add Gemma-4 reasoning and tool parser flags (matching either $MODEL or $MODEL_NAME)
-case "${MODEL} ${MODEL_NAME}" in
+# Add Gemma-4 reasoning parser flags or embedding task flags
+case "${MODEL} ${MODEL_NAME} ${TASK:-}" in
+    *embed*|*embedding*)
+        set -- "$@" --task embedding
+        ;;
     *gemma-4*|*gemma4*)
         CHAT_TMPL="${CHAT_TEMPLATE:-/vllm-workspace/examples/tool_chat_template_gemma4.jinja}"
         set -- "$@" \

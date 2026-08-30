@@ -127,6 +127,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # http.server API requires this camelCase name
         if self.path in ("/healthz", "/health"):
             self._send(200, {"status": "ok"})
+        elif self.path.endswith("/models"):
+            self._send(
+                200,
+                {
+                    "object": "list",
+                    "data": [
+                        {"id": "mock-reasoning", "object": "model"},
+                        {"id": "mock-embed", "object": "model"},
+                    ],
+                },
+            )
         else:
             self._send(404, {"error": {"message": f"unknown path {self.path}"}})
 
