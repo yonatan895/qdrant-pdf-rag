@@ -13,6 +13,7 @@ runtime weight downloads, no network in hash mode. architecture.md 4.4.
 
 from __future__ import annotations
 
+import concurrent.futures
 import functools
 import hashlib
 import math
@@ -172,6 +173,13 @@ def embed_batch(
 ) -> list[tuple[list[float], SparseVector]]:
     """Dense + sparse vectors for a batch of chunks, aligned by index."""
     texts = [chunk_embed_text(c, product, version, title) for c in chunks]
-    dense = embedder.dense(texts)
-    sparse = embedder.sparse(texts)
+    if isinstance(embedder, VllmEmbedder):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            fut_dense = executor.submit(embedder.dense, texts)
+            fut_sparse = executor.submit(embedder.sparse, texts)
+            dense = fut_dense.result()
+            sparse = fut_sparse.result()
+    else:
+        dense = embedder.dense(texts)
+        sparse = embedder.sparse(texts)
     return list(zip(dense, sparse))

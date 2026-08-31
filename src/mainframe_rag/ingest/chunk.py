@@ -49,13 +49,16 @@ class Chunk:
     ordinal: int
 
 
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
 def make_chunk_id(doc_id: str, heading_path: str, page_start: int, ordinal: int) -> str:
     key = f"{doc_id}|{heading_path}|{page_start}|{ordinal}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
 def _clean_title(title: str) -> str:
-    return re.sub(r"\s+", " ", title).strip()
+    return _WHITESPACE_RE.sub(" ", title).strip()
 
 
 def outline_sections(parsed: ParsedDoc) -> list[Section]:
@@ -111,8 +114,9 @@ def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, str]]:
                 blocks.append((page_idx, para[i : i + SECTION_MAX_CHARS]))
             continue
         if current_len + len(para) > SECTION_MAX_CHARS and current:
-            blocks.append((current[0][0], "\n\n".join(p for _, p in current)))
-            tail = "\n\n".join(p for _, p in current)[-SPLIT_OVERLAP_CHARS:]
+            joined = "\n\n".join(p for _, p in current)
+            blocks.append((current[0][0], joined))
+            tail = joined[-SPLIT_OVERLAP_CHARS:]
             current = [(current[-1][0], tail), (page_idx, para)]
             current_len = len(tail) + len(para) + 2
         else:

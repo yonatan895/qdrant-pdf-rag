@@ -78,9 +78,11 @@ async def lifespan(_app: FastAPI):
         settings.require_embed()
     # Bounded connection retries only fire when the request was never sent
     # (DNS/refused) — safe for any method. No request-level retries exist.
+    http_limits = httpx2.Limits(max_keepalive_connections=100, max_connections=200)
     http = httpx2.Client(
         timeout=settings.embed_timeout_s,
         transport=httpx2.HTTPTransport(retries=settings.http_connect_retries),
+        limits=http_limits,
     )
     # One dispatch point for embed_mode; the reasoning-model client owns its
     # own connection pool with its own (long) timeout. LLM env stays
@@ -97,6 +99,7 @@ async def lifespan(_app: FastAPI):
         url=settings.qdrant_url,
         api_key=settings.qdrant_api_key,
         timeout=settings.qdrant_timeout_s,
+        limits=http_limits,
     )
     yield
     http.close()
