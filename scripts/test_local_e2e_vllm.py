@@ -130,6 +130,25 @@ def check_embedding_connection(
         return False, model_name, explicit_dim or 1024
 
 
+def check_collection_dimension(settings: Settings) -> tuple[bool, int | None, int]:
+    """Check if collection exists and whether its vector dimension matches Settings.
+    Returns (matches, actual_dim, expected_dim)."""
+    from qdrant_client import QdrantClient
+
+    client = QdrantClient(url=settings.qdrant_url, timeout=10)
+    expected_dim = settings.require_dense_dim()
+    if not client.collection_exists(settings.qdrant_collection):
+        return True, None, expected_dim
+    info = client.get_collection(settings.qdrant_collection)
+    dense_cfg = info.config.params.vectors
+    if isinstance(dense_cfg, dict):
+        actual = dense_cfg.get("dense")
+        actual_size = actual.size if actual is not None else None
+    else:
+        actual_size = dense_cfg.size if dense_cfg is not None else None
+    return (actual_size == expected_dim), actual_size, expected_dim
+
+
 def setup_local_corpus(settings: Settings, work_dir: Path | str) -> None:
     """Generate synthetic IBM-shaped manuals and ingest them into Qdrant."""
     work_path = Path(work_dir)
@@ -146,24 +165,16 @@ def setup_local_corpus(settings: Settings, work_dir: Path | str) -> None:
     from qdrant_client import QdrantClient
 
     client = QdrantClient(url=settings.qdrant_url, timeout=10)
-    if client.collection_exists(settings.qdrant_collection):
-        info = client.get_collection(settings.qdrant_collection)
-        dense_cfg = info.config.params.vectors
-        if isinstance(dense_cfg, dict):
-            actual = dense_cfg.get("dense")
-            actual_size = actual.size if actual is not None else None
-        else:
-            actual_size = dense_cfg.size if dense_cfg is not None else None
-        expected_dim = settings.require_dense_dim()
-        if actual_size != expected_dim:
-            print(
-                f"[*] Recreating collection '{settings.qdrant_collection}' "
-                f"due to dimension change ({actual_size} -> {expected_dim})..."
-            )
-            client.delete_collection(settings.qdrant_collection)
-            progress_file = work_path / "inventory.jsonl"
-            if progress_file.exists():
-                progress_file.unlink()
+    matches, actual_size, expected_dim = check_collection_dimension(settings)
+    if not matches:
+        print(
+            f"[*] Recreating collection '{settings.qdrant_collection}' "
+            f"due to dimension change ({actual_size} -> {expected_dim})..."
+        )
+        client.delete_collection(settings.qdrant_collection)
+        progress_file = work_path / "inventory.jsonl"
+        if progress_file.exists():
+            progress_file.unlink()
 
     print(f"[*] Ingesting {pdf_path} into collection '{settings.qdrant_collection}'...")
     os.environ["QDRANT_URL"] = settings.qdrant_url
@@ -332,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 2. Check embedding model connectivity & probe dimension (if in vllm mode)
     actual_embed_model = args.embed_model
-    dense_dim = args.dense_dim or 256
+    dense_dim = args.dense_dim
     if args.embed_mode == "vllm":
         ok_embed, actual_embed_model, dense_dim = check_embedding_connection(
             args.embed_url, args.embed_model, args.dense_dim
@@ -363,7 +374,17 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        if not args.skip_ingest:
+        if args.skip_ingest:
+            matches, actual_dim, expected_dim = check_collection_dimension(settings)
+            if not matches:
+                print(
+                    f"[-] Collection '{settings.qdrant_collection}' vector dimension ({actual_dim}) "
+                    f"does not match expected dimension ({expected_dim}). "
+                    f"Drop --skip-ingest to recreate and re-ingest the collection.",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
             work_dir = Path.cwd() / "output" / "vllm-demo-pdfs"
             setup_local_corpus(settings, work_dir)
 

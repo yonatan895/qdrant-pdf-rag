@@ -62,6 +62,7 @@ def _parse_one(
 
     path_str, vendor, product, version, corpus_root, sha, embed = args
     started = time.monotonic()
+    parsed: ParsedDoc | None = None
     try:
         path = Path(path_str)
         parsed = parse_pdf(
@@ -109,15 +110,15 @@ def _parse_one(
         record = InventoryRecord(
             path=path_str,
             sha256=sha,
-            doc_id=parsed.doc_id if "parsed" in locals() else Path(path_str).stem,
-            pages=parsed.page_count if "parsed" in locals() else 0,
+            doc_id=parsed.doc_id if parsed is not None else Path(path_str).stem,
+            pages=parsed.page_count if parsed is not None else 0,
             chunks=0,
             status="error",
             seconds=round(time.monotonic() - started, 3),
             error=str(exc)[:500],
             error_type=type(exc).__name__,
         )
-        dummy_parsed = parsed if "parsed" in locals() else ParsedDoc(
+        dummy_parsed = parsed if parsed is not None else ParsedDoc(
             path=Path(path_str),
             sha256=sha,
             doc_id=Path(path_str).stem,

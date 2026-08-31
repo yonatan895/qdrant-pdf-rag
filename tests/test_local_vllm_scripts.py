@@ -74,7 +74,7 @@ def test_check_embedding_connection_invalid_response():
         assert dim == 1024
 
 
-def test_setup_local_corpus_vllm(tmp_path: Path):
+def test_setup_local_corpus_vllm(tmp_path: Path, monkeypatch):
     settings = Settings(
         qdrant_url="http://localhost:6333",
         qdrant_collection="test_col",
@@ -94,6 +94,84 @@ def test_setup_local_corpus_vllm(tmp_path: Path):
         setup_local_corpus(settings, tmp_path)
         assert mock_build.called
         assert mock_ingest.called
+
+
+def test_setup_local_corpus_dimension_mismatch(tmp_path: Path, monkeypatch):
+    settings = Settings(
+        qdrant_url="http://localhost:6333",
+        qdrant_collection="test_col",
+        embed_mode="vllm",
+        embed_base_url="http://localhost:8001/v1",
+        embed_model="Qwen/Qwen3-Embedding-0.6B",
+        dense_dim=1024,
+    )
+    inventory_file = tmp_path / "inventory.jsonl"
+    inventory_file.write_text("dummy record\n")
+
+    with (
+        patch("scripts.test_local_e2e_vllm.build") as mock_build,
+        patch("scripts.test_local_e2e_vllm.run_ingest", return_value=0) as mock_ingest,
+        patch("qdrant_client.QdrantClient") as mock_qdrant_cls,
+    ):
+        mock_client = MagicMock()
+        mock_client.collection_exists.return_value = True
+        mock_info = MagicMock()
+        mock_dense_vector = MagicMock()
+        mock_dense_vector.size = 256
+        mock_info.config.params.vectors = {"dense": mock_dense_vector}
+        mock_client.get_collection.return_value = mock_info
+        mock_qdrant_cls.return_value = mock_client
+
+        setup_local_corpus(settings, tmp_path)
+        assert mock_client.delete_collection.called
+        assert mock_client.delete_collection.call_args[0][0] == "test_col"
+        assert not inventory_file.exists()
+        assert mock_build.called
+        assert mock_ingest.called
+
+
+def test_check_collection_dimension():
+    from scripts.test_local_e2e_vllm import check_collection_dimension
+
+    settings = Settings(
+        qdrant_url="http://localhost:6333",
+        qdrant_collection="test_col",
+        embed_mode="vllm",
+        embed_base_url="http://localhost:8001/v1",
+        embed_model="Qwen/Qwen3-Embedding-0.6B",
+        dense_dim=1024,
+    )
+    with patch("qdrant_client.QdrantClient") as mock_qdrant_cls:
+        mock_client = MagicMock()
+        mock_qdrant_cls.return_value = mock_client
+
+        # 1. Non-existent collection
+        mock_client.collection_exists.return_value = False
+        matches, actual, expected = check_collection_dimension(settings)
+        assert matches is True
+        assert actual is None
+        assert expected == 1024
+
+        # 2. Existing matching collection
+        mock_client.collection_exists.return_value = True
+        mock_info = MagicMock()
+        mock_dense = MagicMock()
+        mock_dense.size = 1024
+        mock_info.config.params.vectors = {"dense": mock_dense}
+        mock_client.get_collection.return_value = mock_info
+        matches, actual, expected = check_collection_dimension(settings)
+        assert matches is True
+        assert actual == 1024
+        assert expected == 1024
+
+        # 3. Existing mismatched collection (single vector config style)
+        mock_single_vec = MagicMock()
+        mock_single_vec.size = 256
+        mock_info.config.params.vectors = mock_single_vec
+        matches, actual, expected = check_collection_dimension(settings)
+        assert matches is False
+        assert actual == 256
+        assert expected == 1024
 
 
 def test_run_e2e_query_flow():
