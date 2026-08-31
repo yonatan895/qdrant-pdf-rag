@@ -1,13 +1,14 @@
 """Unit tests for scripts/query_demo.py (pure functions, no network/docker)."""
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from scripts.query_demo import (
     _format_text_hit,
     main,
     render_query_html,
     render_query_text,
+    resolve_runtime_settings,
 )
 
 from mainframe_rag.retrieve.query import SearchHit
@@ -146,6 +147,66 @@ def test_main_cli_answer_mode(mock_qdrant, mock_chat, mock_embed, mock_search, t
     assert '"query": "IEA500I"' in content
     assert '"answer": "Command rejected."' in content
     assert '"citations_inferred": false' in content
+
+
+def test_resolve_runtime_settings_fallback_to_hash(monkeypatch):
+    monkeypatch.delenv("EMBED_MODE", raising=False)
+    monkeypatch.delenv("EMBED_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+
+    with patch("httpx2.get", side_effect=OSError("Connection refused")):
+        settings = resolve_runtime_settings()
+        assert settings.embed_mode == "hash"
+        assert settings.allow_hash_mode is True
+
+
+def test_resolve_runtime_settings_auto_detect_vllm_and_probing(monkeypatch):
+    monkeypatch.delenv("EMBED_MODE", raising=False)
+    monkeypatch.delenv("EMBED_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+
+    def mock_get(url, timeout=None):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        if "8001" in url:
+            mock_resp.json.return_value = {"data": [{"id": "Qwen/Qwen3-Embedding-0.6B"}]}
+        elif "8000" in url:
+            mock_resp.json.return_value = {"data": [{"id": "google/gemma-4-E4B-it-qat-mobile-ct"}]}
+        return mock_resp
+
+    def mock_post(url, json=None, timeout=None):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": [{"embedding": [0.1] * 1024}]}
+        return mock_resp
+
+    with patch("httpx2.get", side_effect=mock_get), patch("httpx2.post", side_effect=mock_post):
+        settings = resolve_runtime_settings()
+        assert settings.embed_mode == "vllm"
+        assert settings.embed_base_url == "http://localhost:8001/v1"
+        assert settings.embed_model == "Qwen/Qwen3-Embedding-0.6B"
+        assert settings.dense_dim == 1024
+        assert settings.llm_base_url == "http://localhost:8000/v1"
+        assert settings.llm_model_reasoning == "google/gemma-4-E4B-it-qat-mobile-ct"
+
+
+def test_resolve_runtime_settings_explicit_cli_overrides():
+    settings = resolve_runtime_settings(
+        collection="custom_collection",
+        embed_url="http://embed-host:9000/v1",
+        embed_model="custom-embed",
+        embed_mode="vllm",
+        dense_dim=768,
+        vllm_url="http://llm-host:9001/v1",
+        model="custom-llm",
+    )
+    assert settings.qdrant_collection == "custom_collection"
+    assert settings.embed_mode == "vllm"
+    assert settings.embed_base_url == "http://embed-host:9000/v1"
+    assert settings.embed_model == "custom-embed"
+    assert settings.dense_dim == 768
+    assert settings.llm_base_url == "http://llm-host:9001/v1"
+    assert settings.llm_model_reasoning == "custom-llm"
 
 
 

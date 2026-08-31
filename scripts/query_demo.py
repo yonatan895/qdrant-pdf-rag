@@ -30,7 +30,7 @@ import httpx2
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from mainframe_rag.config import load_settings
+from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import search as retrieve_search
@@ -313,16 +313,154 @@ def render_answer_html(
 """
 
 
+def resolve_runtime_settings(
+    collection: str | None = None,
+    embed_url: str | None = None,
+    embed_model: str | None = None,
+    embed_mode: str | None = None,
+    dense_dim: int | None = None,
+    vllm_url: str | None = None,
+    model: str | None = None,
+) -> Settings:
+    settings = load_settings()
+    updates: dict[str, Any] = {}
+
+    if collection:
+        updates["qdrant_collection"] = collection
+
+    # 1. Resolve embedding server & dimension
+    target_embed_mode = embed_mode or (
+        os.environ.get("EMBED_MODE") if "EMBED_MODE" in os.environ else None
+    )
+    target_embed_url = (
+        embed_url
+        or os.environ.get("EMBED_BASE_URL")
+        or settings.embed_base_url
+        or "http://localhost:8001/v1"
+    )
+
+    if target_embed_mode == "vllm" or (
+        target_embed_mode is None
+        and "EMBED_MODE" not in os.environ
+        and "EMBED_BASE_URL" not in os.environ
+    ):
+        try:
+            m_resp = httpx2.get(f"{target_embed_url.rstrip('/')}/models", timeout=1.5)
+            if m_resp.status_code == 200:
+                avail = [m.get("id") for m in m_resp.json().get("data", []) if m.get("id")]
+                cur = embed_model or settings.embed_model
+                chosen_embed_model = None
+                if cur and cur in avail:
+                    chosen_embed_model = cur
+                elif cur:
+                    for m in avail:
+                        if m.endswith(cur) or cur.endswith(m) or m.split("/")[-1] == cur.split("/")[-1]:
+                            chosen_embed_model = m
+                            break
+                    else:
+                        if len(avail) == 1:
+                            chosen_embed_model = avail[0]
+                elif len(avail) == 1:
+                    chosen_embed_model = avail[0]
+
+                resolved_dim = dense_dim or settings.dense_dim
+                if resolved_dim is None and chosen_embed_model:
+                    try:
+                        p_resp = httpx2.post(
+                            f"{target_embed_url.rstrip('/')}/embeddings",
+                            json={"model": chosen_embed_model, "input": "probe"},
+                            timeout=3.0,
+                        )
+                        if p_resp.status_code == 200:
+                            data = p_resp.json().get("data", [])
+                            if data and "embedding" in data[0]:
+                                resolved_dim = len(data[0]["embedding"])
+                    except (httpx2.HTTPError, OSError):
+                        pass
+
+                updates["embed_mode"] = "vllm"
+                updates["embed_base_url"] = target_embed_url
+                if chosen_embed_model:
+                    updates["embed_model"] = chosen_embed_model
+                if resolved_dim:
+                    updates["dense_dim"] = resolved_dim
+            elif target_embed_mode == "vllm":
+                updates["embed_mode"] = "vllm"
+                updates["embed_base_url"] = target_embed_url
+                if embed_model:
+                    updates["embed_model"] = embed_model
+                if dense_dim:
+                    updates["dense_dim"] = dense_dim
+            else:
+                updates["embed_mode"] = "hash"
+                updates["allow_hash_mode"] = True
+        except (httpx2.HTTPError, OSError):
+            if target_embed_mode == "vllm":
+                updates["embed_mode"] = "vllm"
+                updates["embed_base_url"] = target_embed_url
+                if embed_model:
+                    updates["embed_model"] = embed_model
+                if dense_dim:
+                    updates["dense_dim"] = dense_dim
+            else:
+                updates["embed_mode"] = "hash"
+                updates["allow_hash_mode"] = True
+    elif target_embed_mode == "hash":
+        updates["embed_mode"] = "hash"
+        updates["allow_hash_mode"] = True
+
+    # 2. Resolve LLM reasoning server & model
+    target_llm_url = (
+        vllm_url
+        or os.environ.get("LLM_BASE_URL")
+        or settings.llm_base_url
+        or "http://localhost:8000/v1"
+    )
+    try:
+        m_resp = httpx2.get(f"{target_llm_url.rstrip('/')}/models", timeout=1.5)
+        if m_resp.status_code == 200:
+            avail = [m.get("id") for m in m_resp.json().get("data", []) if m.get("id")]
+            cur = model or settings.llm_model_reasoning
+            chosen_llm_model = None
+            if cur and cur in avail:
+                chosen_llm_model = cur
+            elif cur:
+                for m in avail:
+                    if m.endswith(cur) or cur.endswith(m) or m.split("/")[-1] == cur.split("/")[-1]:
+                        chosen_llm_model = m
+                        break
+                else:
+                    if len(avail) == 1:
+                        chosen_llm_model = avail[0]
+            elif len(avail) == 1:
+                chosen_llm_model = avail[0]
+
+            updates["llm_base_url"] = target_llm_url
+            if chosen_llm_model:
+                updates["llm_model_reasoning"] = chosen_llm_model
+    except (httpx2.HTTPError, OSError):
+        if vllm_url:
+            updates["llm_base_url"] = vllm_url
+        if model:
+            updates["llm_model_reasoning"] = model
+
+    if updates:
+        settings = settings.model_copy(update=updates)
+    return settings
+
+
 def execute_query(
     query: str,
     limit: int = 5,
     product: str | None = None,
     version: str | None = None,
     collection: str | None = None,
+    settings: Settings | None = None,
 ) -> tuple[list[SearchHit], str, dict[str, int]]:
     from qdrant_client import QdrantClient
 
-    settings = load_settings()
+    if settings is None:
+        settings = resolve_runtime_settings(collection=collection)
     client = QdrantClient(
         url=settings.qdrant_url,
         api_key=settings.qdrant_api_key,
@@ -343,40 +481,15 @@ def execute_answer(
     product: str | None = None,
     version: str | None = None,
     collection: str | None = None,
+    settings: Settings | None = None,
 ) -> tuple[dict[str, Any], list[SearchHit], str, dict[str, int]]:
     from mainframe_rag.agent.answer import HttpxLLMClient, build_messages, parse_answer
 
-    settings = load_settings()
-    llm_url = settings.llm_base_url or "http://localhost:8000/v1"
-    try:
-        m_resp = httpx2.get(f"{llm_url.rstrip('/')}/models", timeout=2.0)
-        if m_resp.status_code == 200:
-            avail = [m.get("id") for m in m_resp.json().get("data", []) if m.get("id")]
-            cur = settings.llm_model_reasoning
-            chosen_model = None
-            if cur and cur not in avail:
-                for m in avail:
-                    if m.endswith(cur) or cur.endswith(m) or m.split("/")[-1] == cur.split("/")[-1]:
-                        chosen_model = m
-                        break
-                else:
-                    if len(avail) == 1:
-                        chosen_model = avail[0]
-            elif not cur and len(avail) == 1:
-                chosen_model = avail[0]
-
-            updates: dict[str, Any] = {}
-            if not settings.llm_base_url:
-                updates["llm_base_url"] = llm_url
-            if chosen_model:
-                updates["llm_model_reasoning"] = chosen_model
-            if updates:
-                settings = settings.model_copy(update=updates)
-    except (httpx2.HTTPError, OSError):
-        pass
+    if settings is None:
+        settings = resolve_runtime_settings(collection=collection)
 
     hits, kind, timings = execute_query(
-        query, limit=limit, product=product, version=version, collection=collection
+        query, limit=limit, product=product, version=version, collection=collection, settings=settings
     )
     if not hits:
         return {
@@ -410,6 +523,7 @@ def repl_loop(
     version: str | None = None,
     collection: str | None = None,
     answer_mode: bool = False,
+    settings: Settings | None = None,
 ) -> None:
     print("============================================================")
     print(" MAINFRAME RAG: INTERACTIVE REPL")
@@ -451,12 +565,12 @@ def repl_loop(
             if answer_mode:
                 print("[*] Retrieving from Qdrant and calling reasoning model...")
                 parsed, hits, kind, timings = execute_answer(
-                    raw, limit=limit, product=product, version=version, collection=collection
+                    raw, limit=limit, product=product, version=version, collection=collection, settings=settings
                 )
                 print(render_answer_text(raw, kind, parsed, hits, timings))
             else:
                 hits, kind, timings = execute_query(
-                    raw, limit=limit, product=product, version=version, collection=collection
+                    raw, limit=limit, product=product, version=version, collection=collection, settings=settings
                 )
                 print(render_query_text(raw, kind, hits, timings))
         except Exception as exc:  # noqa: BLE001
@@ -474,12 +588,6 @@ def _positive_int(val: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Set convenient local dev defaults if unset in environment
-    if "EMBED_MODE" not in os.environ and "EMBED_BASE_URL" not in os.environ:
-        os.environ["EMBED_MODE"] = "hash"
-        os.environ["ALLOW_HASH_MODE"] = "true"
-    os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
-
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--query", "-q", default=None, help="Query string to search (default: interactive REPL)")
     parser.add_argument("--answer", "-a", action="store_true", help="Generate reasoning answer with citations using LLM")
@@ -487,10 +595,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--product", default=None, help="Optional product filter (e.g. 'z/OS')")
     parser.add_argument("--version", default=None, help="Optional version filter (e.g. '3.2')")
     parser.add_argument("--collection", default=None, help="Qdrant collection override")
+    parser.add_argument("--embed-url", default=None, help="Embedding server URL (e.g. http://localhost:8001/v1)")
+    parser.add_argument("--embed-model", default=None, help="Embedding model name (e.g. Qwen3-Embedding-0.6B)")
+    parser.add_argument("--embed-mode", choices=["vllm", "hash"], default=None, help="Embedding mode ('vllm' or 'hash')")
+    parser.add_argument("--dense-dim", type=int, default=None, help="Dense vector dimension override")
+    parser.add_argument("--vllm-url", default=None, help="LLM reasoning server URL (e.g. http://localhost:8000/v1)")
+    parser.add_argument("--model", default=None, help="LLM reasoning model name override")
     parser.add_argument("--format", choices=["text", "json", "html"], default="text", help="Output format")
     parser.add_argument("--out", type=Path, default=None, help="Write output to file")
 
     args = parser.parse_args(argv)
+
+    settings = resolve_runtime_settings(
+        collection=args.collection,
+        embed_url=args.embed_url,
+        embed_model=args.embed_model,
+        embed_mode=args.embed_mode,
+        dense_dim=args.dense_dim,
+        vllm_url=args.vllm_url,
+        model=args.model,
+    )
 
     default_limit = 3 if args.answer else 5
     limit = args.limit or default_limit
@@ -502,6 +626,7 @@ def main(argv: list[str] | None = None) -> int:
             version=args.version,
             collection=args.collection,
             answer_mode=args.answer,
+            settings=settings,
         )
         return 0
 
@@ -512,6 +637,7 @@ def main(argv: list[str] | None = None) -> int:
             product=args.product,
             version=args.version,
             collection=args.collection,
+            settings=settings,
         )
         if args.format == "json":
             output = json.dumps({
@@ -536,6 +662,7 @@ def main(argv: list[str] | None = None) -> int:
             product=args.product,
             version=args.version,
             collection=args.collection,
+            settings=settings,
         )
 
         if args.format == "json":
