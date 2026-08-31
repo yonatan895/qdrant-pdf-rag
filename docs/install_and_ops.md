@@ -162,49 +162,70 @@ When running local tooling (`make ask`, `make query-demo`, `test_local_e2e_vllm.
 
 ### 3.6 Local vLLM Inference & GPU Acceleration (RTX 5060 / 8GB VRAM)
 
-The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`](../scripts/run_local_vllm.sh)) for serving local reasoning models via Docker with NVIDIA GPU pass-through:
+The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`](../scripts/run_local_vllm.sh)) and Makefile targets for serving local reasoning and dense embedding models via Docker with NVIDIA GPU pass-through:
 
 #### Key Launcher Features
 * **Pinned Container Image**: Defaults to `vllm/vllm-openai:v0.28.0` (built with CUDA 12.8+, supporting NVIDIA Blackwell architectures like the RTX 5060 Laptop GPU and Gemma-4).
+* **Dual-Model 8GB VRAM Co-Residency**:
+  - **Reasoning Model (Port 8000)**: `GPU_MEM=0.65` (~5.2 GB VRAM allocation).
+  - **Embedding Model (Port 8001)**: `GPU_MEM=0.30` (~2.4 GB VRAM allocation) with `--task embedding`.
+  - Fits comfortably within 8GB VRAM cards (~7.6 GB total allocation, leaving headroom for PyTorch and driver overhead).
+  - *Solo Runs*: For dedicated reasoning benchmarks, `GPU_MEM=0.85 make local-vllm` restores maximum KV cache capacity.
 * **8GB VRAM Optimizations**:
   - `--limit-mm-per-prompt '{"image":0,"audio":0}'`: Disables multimodal vision/audio buffers in Gemma 4 to reclaim substantial VRAM.
   - `--max-num-seqs 1`: Bounds concurrent sequence allocation to prevent out-of-memory spikes.
   - `MAX_LEN=4096`: Caps model context length.
-  - `GPU_MEM=0.85`: Reserves memory headroom for PyTorch and driver overhead.
 * **Gemma-4 Support**: Automatically configures `--tool-call-parser gemma4`, `--reasoning-parser gemma4`, and `--chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja`.
+* **Embedding Model Detection**: Automatically sets `--task embedding` for model IDs containing `*embed*` or `*Embed*` (e.g. `Qwen3-Embedding-0.6B`).
 * **WSL2 Compatibility**: Exports `VLLM_WSL2_ENABLE_PIN_MEMORY=1` for host memory stability.
 * **Safe Secrets**: Passes `HF_TOKEN` via `-e HF_TOKEN` without exposing secret tokens on command-line argument lists.
 
-#### Starting the Local vLLM Server
+#### Starting Local vLLM Servers
 
-**Option A: 100% Offline via Local Weights Directory (Recommended)**
+**1. Start the Reasoning Model Server (Port 8000):**
 ```bash
-# Point directly to a downloaded weights directory on disk (no token or internet required)
+# Offline weights directory (recommended):
 MODEL=/path/to/models/gemma-4-E4B-it-qat-mobile-ct make local-vllm
+
+# Or via HuggingFace Hub:
+HF_TOKEN="<your-token>" MODEL=google/gemma-4-E4B-it-qat-mobile-ct make local-vllm
 ```
 
-**Option B: Downloading directly from Hugging Face Hub**
+**2. Start the Dense Embedding Server (Port 8001):**
 ```bash
-# Provide HF_TOKEN for downloading gated models
-HF_TOKEN="<your-hf-token>" make local-vllm
+# Offline weights directory (recommended):
+MODEL=/path/to/models/Qwen3-Embedding-0.6B make local-vllm-embed
+
+# Or via HuggingFace Hub:
+MODEL=Qwen/Qwen3-Embedding-0.6B make local-vllm-embed
 ```
 
 ---
 
 ### 3.7 Automated Local End-to-End Suite (`make test-vllm-e2e`)
 
-To verify the entire RAG pipeline from PDF generation to HTTP retrieval and grounded LLM reasoning:
+To verify the entire RAG pipeline from PDF generation and dense/sparse ingestion to HTTP retrieval and grounded LLM reasoning:
 
 ```bash
+# Run automated end-to-end test against both local servers:
 make test-vllm-e2e
+
+# Or pass custom model parameters:
+make test-vllm-e2e \
+  MODEL=gemma-4-E4B-it-qat-mobile-ct \
+  VLLM_URL=http://localhost:8000/v1 \
+  EMBED_MODEL=Qwen3-Embedding-0.6B \
+  EMBED_URL=http://localhost:8001/v1 \
+  DENSE_DIM=1024
 ```
 
 #### Test Execution Flow
-1. **vLLM Health Probe**: Connects to `http://localhost:8000/v1` and verifies model availability.
-2. **Corpus Generation & Ingest**: Builds synthetic IBM-shaped manual PDFs with specific message IDs (`IEA500I`, `LFAREA`) and ingests them into a local Qdrant collection.
-3. **HTTP `/v1/search` Verification**: Queries the FastAPI endpoint and validates parallel prefetch fusion and hit ranking.
-4. **HTTP `/v1/answer` Verification**: Executes reasoning queries against the local vLLM server via FastAPI HTTP endpoints.
-5. **Strict Grounding Gate**: Fails closed if the model response returns zero validated citations or indicates ungrounded hallucination.
+1. **Model Connectivity & Dimension Probing**: Queries `/v1/models` and `/v1/embeddings` to auto-resolve served model names and probe the dense embedding dimension (`dense_dim=1024` for Qwen3-0.6B).
+2. **Collection Dimension Validation**: If `--skip-ingest` is passed, validates that the collection exists and its dense vector dimension matches `dense_dim` (failing fast if mismatched). If ingesting, automatically recreates the collection if dimensions changed.
+3. **Corpus Generation & Ingest**: Builds synthetic IBM-shaped manual PDFs with specific message IDs (`IEA500I`, `LFAREA`) and ingests them into a local Qdrant collection using real dense + BM25 sparse vectors.
+4. **HTTP `/v1/search` Verification**: Queries the FastAPI endpoint and validates parallel prefetch fusion and hit ranking.
+5. **HTTP `/v1/answer` Verification**: Executes reasoning queries against the local vLLM server via FastAPI HTTP endpoints.
+6. **Strict Grounding Gate**: Fails closed if the model response returns zero validated citations or indicates ungrounded hallucination.
 
 ---
 
@@ -213,84 +234,91 @@ make test-vllm-e2e
 To archive model weights and configurations for use in completely disconnected or air-gapped environments:
 
 ```bash
-# Download complete snapshot to a standalone directory (dereferenced real files, no symlinks)
+# 1. Download Gemma-4 Reasoning Model:
 .venv/bin/python -c '
 from pathlib import Path
 from huggingface_hub import snapshot_download
 
 target_dir = Path.home() / "models" / "gemma-4-E4B-it-qat-mobile-ct"
 target_dir.mkdir(parents=True, exist_ok=True)
-
 snapshot_download(
     repo_id="google/gemma-4-E4B-it-qat-mobile-ct",
     local_dir=str(target_dir),
     local_dir_use_symlinks=False,
 )
 '
-```
 
-Files stored in `~/models/gemma-4-E4B-it-qat-mobile-ct/`:
-* `model.safetensors` (~3.5 GB) — Quantized INT4 QAT weights
-* `config.json` & `generation_config.json` — Model hyperparameters
-* `tokenizer.json` & `tokenizer_config.json` — Vocabulary and special tokens
-* `chat_template.jinja` — Chat formatting templates
-
----
-
-### 3.9 Managing & Listing Qdrant Collections
-
-When testing with multiple corpora or adding new PDF sets for experimentation, use the following commands to inspect, manage, and query collections:
-
-#### 1. Listing All Collections
-
-**Via `curl` (Quickest):**
-```bash
-curl -s http://localhost:6333/collections | python3 -m json.tool
-```
-
-**Via Qdrant Web UI Dashboard:**
-Open your browser to:
-👉 **`http://localhost:6333/dashboard`**
-*(Provides an interactive visual inspection interface showing point counts, vector configurations, payload schemas, and disk sizes).*
-
-**Via Python SDK:**
-```bash
+# 2. Download Qwen3-Embedding-0.6B Dense Embedder:
 .venv/bin/python -c '
-from qdrant_client import QdrantClient
-client = QdrantClient("http://localhost:6333")
-for c in client.get_collections().collections:
-    info = client.get_collection(c.name)
-    print(f"• {c.name:<25} ({info.points_count} points, status={info.status})")
+from pathlib import Path
+from huggingface_hub import snapshot_download
+
+target_dir = Path.home() / "models" / "Qwen3-Embedding-0.6B"
+target_dir.mkdir(parents=True, exist_ok=True)
+snapshot_download(
+    repo_id="Qwen/Qwen3-Embedding-0.6B",
+    local_dir=str(target_dir),
+    local_dir_use_symlinks=False,
+)
 '
 ```
 
-#### 2. Ingesting Additional PDFs into a Custom Collection
+---
 
-To parse and index new PDF manuals from a local folder:
+### 3.9 Managing Collections & Real-World Ingest
 
+When working with real PDF corpora (e.g. `z/OS 3.2` manuals, vendor books):
+
+#### 1. Initial Ingestion with Dense Embeddings
 ```bash
-# 1. Place PDFs in a local directory (e.g. /path/to/my_pdfs/)
-# 2. Run ingestion worker into target collection name
-.venv/bin/python src/mainframe_rag/ingest/run_ingest.py \
-  --src /path/to/my_pdfs \
-  --progress /path/to/my_pdfs/inventory.jsonl \
+EMBED_MODE=vllm \
+EMBED_BASE_URL=http://localhost:8001/v1 \
+EMBED_MODEL=Qwen3-Embedding-0.6B \
+DENSE_DIM=1024 \
+QDRANT_URL=http://localhost:6333 \
+QDRANT_COLLECTION=mainframe_manuals \
+.venv/bin/python -m mainframe_rag.ingest.run_ingest \
+  --src /path/to/manuals \
+  --progress /path/to/manuals/inventory.jsonl \
   --workers 4
 ```
 
-> **Options:**
-> * `--src`: Directory containing `.pdf` files to discover recursively.
-> * `--progress`: Inventory tracking file (enables fast resume without re-parsing processed PDFs).
-> * `--workers`: Number of parallel parsing and ingestion worker threads (e.g. `4` or `8`).
-> * `QDRANT_COLLECTION=<name>`: Target collection name (defaults to `mainframe_manuals`).
+#### 2. Incremental Ingestion: Adding New PDFs Without Re-ingesting
+Mainframe RAG supports native **idempotent incremental ingestion** via the inventory tracking file (`--progress inventory.jsonl`):
 
-#### 3. Querying Against Your Custom Collection
+* **SHA-256 Change Detection**: On every run, `run_ingest` computes the SHA-256 digest of each discovered PDF.
+* **Instant Skipping**: Any PDF whose SHA-256 digest is already marked as `upserted` in `inventory.jsonl` is skipped immediately (zero PDF parsing, zero embedding overhead).
+* **Deterministic UUID5 Point IDs**: New chunks are assigned deterministic UUID5 keys and inserted directly into the existing Qdrant collection without deleting or modifying previously indexed vectors.
+* **Corrupted / Partial File Safety**: If ingestion was interrupted midway or a PDF failed earlier with an error, re-running `run_ingest` will pick up right where it left off, only processing un-ingested files.
+
+**How to add new manuals:**
+Simply drop the new PDFs into your manuals directory (or specify a new `--src` directory) and re-run with the same `QDRANT_COLLECTION` and `--progress` path:
 
 ```bash
-# Conversational assistant
-make ask QUERY="How do I configure ..." COLLECTION=my_collection
+# Ingest only newly added or modified PDFs:
+EMBED_MODE=vllm \
+EMBED_BASE_URL=http://localhost:8001/v1 \
+EMBED_MODEL=Qwen3-Embedding-0.6B \
+DENSE_DIM=1024 \
+QDRANT_URL=http://localhost:6333 \
+QDRANT_COLLECTION=mainframe_manuals \
+.venv/bin/python -m mainframe_rag.ingest.run_ingest \
+  --src /path/to/new_manuals \
+  --progress /path/to/manuals/inventory.jsonl \
+  --workers 4
+```
 
-# Pure search debugger
-make query-demo QUERY="IEA500I" COLLECTION=my_collection
+#### 3. Querying with Live Models
+```bash
+# Interactive reasoning assistant:
+EMBED_MODE=vllm \
+EMBED_BASE_URL=http://localhost:8001/v1 \
+EMBED_MODEL=Qwen3-Embedding-0.6B \
+DENSE_DIM=1024 \
+LLM_BASE_URL=http://localhost:8000/v1 \
+LLM_MODEL_REASONING=gemma-4-E4B-it-qat-mobile-ct \
+QDRANT_URL=http://localhost:6333 \
+.venv/bin/python scripts/query_demo.py --answer --query "Your question here"
 ```
 
 ---

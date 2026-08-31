@@ -208,6 +208,10 @@ Standing rules from the #20 hardening (PRs A–D):
 - Qdrant ids: UUID5, not sha256 hex.
 - `query_points` takes `query_filter`, not `filter` (the unit fake masked this; do not regress).
 - Image tags are the **full** git SHA. Short SHA (`::7`) will 404 on GHCR after #16.
+- Chunking: `SECTION_MAX_CHARS = 3500` (capped from 6000) prevents token overflows in table-dense/code-page sections under 4,096-token embedding models (PR #57).
+- Multiprocessing IPC error serialization: Ingest worker exceptions in `_parse_one` must be trapped and returned as plain `InventoryRecord(status="error")` data; unpicklable `httpx2.HTTPStatusError` objects with attached request/response instances crash `ProcessPoolExecutor` across IPC spawn boundaries (PR #57).
+- Local vLLM 8GB VRAM Co-residency: When running both local vLLM instances on an 8GB card, allocate `GPU_MEM=0.65` for reasoning (port 8000) and `GPU_MEM=0.30` with `--task embedding` for dense embedding (port 8001); use `GPU_MEM=0.85` for solo throughput runs (PR #57).
+- Test environment sandboxing: Tests that invoke functions mutating `os.environ` must register those keys via `monkeypatch.setenv` to ensure automatic restoration on teardown (PR #57).
 
 ## When you change this file
 
