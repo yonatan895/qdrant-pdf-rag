@@ -20,7 +20,7 @@ from mainframe_rag.regexes import (
     find_message_ids,
 )
 
-SECTION_MAX_CHARS = 6000
+SECTION_MAX_CHARS = 3500
 SPLIT_OVERLAP_CHARS = 400
 FRONT_MATTER_FRACTION = 0.15
 FRONT_MATTER_MIN_PAGES = 2

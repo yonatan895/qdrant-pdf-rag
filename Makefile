@@ -232,12 +232,15 @@ ask: | .venv
 	PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer $(if $(QUERY),--query "$(QUERY)",) $(if $(COLLECTION),--collection "$(COLLECTION)",) $(if $(LIMIT),--limit "$(LIMIT)",)
 
 # Local GPU acceleration & vLLM testing
-.PHONY: local-vllm test-vllm-e2e
+.PHONY: local-vllm local-vllm-embed test-vllm-e2e
 local-vllm:
 	sh scripts/run_local_vllm.sh
 
+local-vllm-embed:
+	MODEL=$(or $(MODEL),Qwen/Qwen3-Embedding-0.6B) PORT=$(or $(PORT),8001) GPU_MEM=$(or $(GPU_MEM),0.30) MAX_LEN=$(or $(MAX_LEN),4096) sh scripts/run_local_vllm.sh
+
 test-vllm-e2e: | .venv
-	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",)
+	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",)
 
 
 # ---------------------------------------------------------------- e2e demo
@@ -260,6 +263,6 @@ help:
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper)"
 	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"
-	@echo "Local vLLM / GPU : local-vllm (serve local model on GPU) | test-vllm-e2e (automated end-to-end suite)"
+	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | test-vllm-e2e (automated end-to-end suite)"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."

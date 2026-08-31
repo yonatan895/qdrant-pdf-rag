@@ -332,3 +332,36 @@ def test_bulk_load_disables_and_restores_indexing(tmp_path, synthetic_pdf, monke
         "restore happens strictly after all upserts"
     )
 
+
+def test_parse_one_error_isolation_and_picklability(tmp_path):
+    """Ensure worker errors are converted to plain data and round-trip through
+    multiprocessing pickling across process boundaries without crashing."""
+    import pickle
+
+    from mainframe_rag.ingest.run_ingest import _parse_one
+
+    bad_pdf = tmp_path / "corrupt_worker.pdf"
+    bad_pdf.write_bytes(b"not a valid pdf file")
+
+    record, parsed, chunks, vectors = _parse_one(
+        (str(bad_pdf), "IBM", "z/OS", "3.2", str(tmp_path), "test_sha", True)
+    )
+
+    assert record.status == "error"
+    assert record.error_type is not None
+    assert record.error is not None
+    assert record.path == str(bad_pdf)
+    assert chunks == []
+    assert vectors == []
+
+    # Round-trip through pickle to verify IPC safety in ProcessPoolExecutor
+    serialized = pickle.dumps((record, parsed, chunks, vectors))
+    unpacked_rec, _unpacked_parsed, unpacked_chunks, unpacked_vectors = pickle.loads(serialized)
+
+    assert unpacked_rec.status == "error"
+    assert unpacked_rec.error_type == record.error_type
+    assert unpacked_rec.error == record.error
+    assert unpacked_chunks == []
+    assert unpacked_vectors == []
+
+

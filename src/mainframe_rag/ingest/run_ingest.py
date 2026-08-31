@@ -61,49 +61,75 @@ def _parse_one(
     import pymupdf
 
     path_str, vendor, product, version, corpus_root, sha, embed = args
-    path = Path(path_str)
     started = time.monotonic()
-    parsed = parse_pdf(
-        path,
-        vendor=vendor,
-        product=product,
-        version=version,
-        corpus_root=Path(corpus_root) if corpus_root else None,
-        sha256=sha,
-    )
-    doc = pymupdf.open(path)
+    parsed: ParsedDoc | None = None
     try:
-        # pymupdf 1.28 no longer types Document as iterable; index explicitly.
-        page_texts = [doc[i].get_text() for i in range(doc.page_count)]
-        page_labels = [doc[i].get_label() for i in range(doc.page_count)]
-    finally:
-        doc.close()
-    stripped = strip_chrome(page_texts)
-    chunks = make_chunks(parsed, stripped, page_labels)
-    settings = _load_worker_settings()
-    batch = settings.batch_size
-    embedder = _get_embedder(settings) if embed else None
-    vectors: list[tuple[list[float], SparseVector]] = []
-    if embed and embedder is not None:
-        for i in range(0, len(chunks), batch):
-            vectors.extend(
-                embed_batch(
-                    chunks[i : i + batch],
-                    parsed.product,
-                    parsed.version,
-                    parsed.title,
-                    embedder,
+        path = Path(path_str)
+        parsed = parse_pdf(
+            path,
+            vendor=vendor,
+            product=product,
+            version=version,
+            corpus_root=Path(corpus_root) if corpus_root else None,
+            sha256=sha,
+        )
+        doc = pymupdf.open(path)
+        try:
+            # pymupdf 1.28 no longer types Document as iterable; index explicitly.
+            page_texts = [doc[i].get_text() for i in range(doc.page_count)]
+            page_labels = [doc[i].get_label() for i in range(doc.page_count)]
+        finally:
+            doc.close()
+        stripped = strip_chrome(page_texts)
+        chunks = make_chunks(parsed, stripped, page_labels)
+        settings = _load_worker_settings()
+        batch = settings.batch_size
+        embedder = _get_embedder(settings) if embed else None
+        vectors: list[tuple[list[float], SparseVector]] = []
+        if embed and embedder is not None:
+            for i in range(0, len(chunks), batch):
+                vectors.extend(
+                    embed_batch(
+                        chunks[i : i + batch],
+                        parsed.product,
+                        parsed.version,
+                        parsed.title,
+                        embedder,
+                    )
                 )
-            )
-    record = InventoryRecord(
-        path=path_str,
-        sha256=sha,
-        doc_id=parsed.doc_id,
-        pages=parsed.page_count,
-        chunks=len(chunks),
-        seconds=round(time.monotonic() - started, 3),
-    )
-    return record, parsed, chunks, vectors
+        record = InventoryRecord(
+            path=path_str,
+            sha256=sha,
+            doc_id=parsed.doc_id,
+            pages=parsed.page_count,
+            chunks=len(chunks),
+            seconds=round(time.monotonic() - started, 3),
+        )
+        return record, parsed, chunks, vectors
+    except Exception as exc:  # noqa: BLE001 — isolate worker crash from main pool
+        record = InventoryRecord(
+            path=path_str,
+            sha256=sha,
+            doc_id=parsed.doc_id if parsed is not None else Path(path_str).stem,
+            pages=parsed.page_count if parsed is not None else 0,
+            chunks=0,
+            status="error",
+            seconds=round(time.monotonic() - started, 3),
+            error=str(exc)[:500],
+            error_type=type(exc).__name__,
+        )
+        dummy_parsed = parsed if parsed is not None else ParsedDoc(
+            path=Path(path_str),
+            sha256=sha,
+            doc_id=Path(path_str).stem,
+            title="",
+            product=product or "",
+            version=version or "",
+            vendor=vendor or "",
+            toc=(),
+            page_count=0,
+        )
+        return record, dummy_parsed, [], []
 
 
 def resolve_workers(requested: int | None, settings: Settings) -> int:
@@ -336,6 +362,22 @@ def run(
                                         "action": "error",
                                         "error_type": type(exc).__name__,
                                         "error": str(exc)[:500],
+                                    }
+                                )
+                            )
+                            refill_parse()
+                            continue
+                        if record.status == "error":
+                            failures += 1
+                            files_failed += 1
+                            append_record(progress, record)
+                            log.error(
+                                json.dumps(
+                                    {
+                                        "path": path_str,
+                                        "action": "error",
+                                        "error_type": record.error_type,
+                                        "error": record.error,
                                     }
                                 )
                             )
