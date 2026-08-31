@@ -121,8 +121,8 @@ User-supplied `--embed-model`, `--model`, `--embed-url`, `--vllm-url`, `--embed-
 
 - Quote every shell expansion. Never stash JSON flags in an unquoted `${MODEL_ARGS}` string.
 - `case` globs are case-sensitive: `*embed*` does not match `Embedding`. Match `*embed*` and `*Embed*` (or use a case-insensitive test).
-- Pin vLLM image tags that actually implement the flags you pass (`gemma4` parsers, `--task embedding`). `:latest` and stale minors are production bugs.
-- Local 8GB co-residency: reasoning port 8000 `GPU_MEM=0.65`; embedding port 8001 `GPU_MEM=0.30` with `--task embedding`; solo reasoning `GPU_MEM=0.85`.
+- Pin vLLM image tags that actually implement the flags you pass (`gemma4` parsers). `:latest` and stale minors are production bugs.
+- Local 8GB co-residency: reasoning port 8000 `GPU_MEM=0.65`; embedding port 8001 `GPU_MEM=0.30`; solo reasoning `GPU_MEM=0.85`.
 - `scripts/qdrant_sim.py` / `scripts/qdrant_pin.py` remain the only docker-lifecycle and pin-parse owners.
 
 ## Error contract
@@ -233,6 +233,7 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 - Classify `message` if `XXXnnnY` appears in the first few lines, not only line 1.
 - Citation inference is `[n]` / `[n, m]` only. Parentheses are IBM-manual noise.
 - `SECTION_MAX_CHARS = 3500` (not 6000): table-dense / code pages must stay inside 4096-token embedders.
+- vLLM v0.28.0+ (V1): embedding models are auto-detected by pooling runner; `--task embedding` was removed in vLLM V1 and must not be passed.
 - After a non-obvious bug, add a regression test **and** a one-line note here if it is a standing rule.
 
 ## When you change this file

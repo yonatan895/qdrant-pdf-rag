@@ -256,3 +256,106 @@ def test_run_e2e_query_ungrounded_fails():
     assert result["success"] is False
     assert result["error"] == "zero_citations"
 
+
+def _run_vllm_script(tmp_path: Path, env_overrides: dict[str, str] | None = None) -> tuple[int, list[str]]:
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    log_file = tmp_path / "docker_args.log"
+    stub_docker = bin_dir / "docker"
+    stub_docker.write_text(f"""#!/bin/sh
+printf '%s\\n' "$@" > "{log_file}"
+exit 0
+""")
+    stub_docker.chmod(0o755)
+
+    script_path = Path(__file__).resolve().parent.parent / "scripts" / "run_local_vllm.sh"
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+    if env_overrides:
+        env.update(env_overrides)
+
+    res = subprocess.run(
+        ["sh", str(script_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    args = log_file.read_text().splitlines() if log_file.exists() else []
+    return res.returncode, args
+
+
+def test_run_local_vllm_sh_embedding_model_no_task_arg(tmp_path: Path):
+    rc, args = _run_vllm_script(
+        tmp_path,
+        {
+            "MODEL": "Qwen/Qwen3-Embedding-0.6B",
+            "PORT": "8001",
+            "GPU_MEM": "0.30",
+            "MAX_LEN": "4096",
+        },
+    )
+    assert rc == 0
+    # In vLLM v0.28.0+, --task embedding must NOT be passed (unrecognized argument error)
+    assert "--task" not in args
+    assert "embedding" not in args
+    assert "run" in args
+    assert "-p" in args
+    assert "8001:8001" in args
+    assert "Qwen/Qwen3-Embedding-0.6B" in args
+    assert "--gpu-memory-utilization" in args
+    assert "0.30" in args
+
+
+def test_run_local_vllm_sh_reasoning_gemma4_model(tmp_path: Path):
+    rc, args = _run_vllm_script(
+        tmp_path,
+        {
+            "MODEL": "google/gemma-4-E4B-it-qat-mobile-ct",
+            "PORT": "8000",
+            "GPU_MEM": "0.65",
+            "MAX_LEN": "4096",
+        },
+    )
+    assert rc == 0
+    assert "--tool-call-parser" in args
+    assert "gemma4" in args
+    assert "--reasoning-parser" in args
+    assert "--chat-template" in args
+    assert "-p" in args
+    assert "8000:8000" in args
+    assert "0.65" in args
+
+
+def test_run_local_vllm_sh_local_directory_mount(tmp_path: Path):
+    model_dir = tmp_path / "my-custom-model"
+    model_dir.mkdir()
+    rc, args = _run_vllm_script(
+        tmp_path,
+        {
+            "MODEL": str(model_dir),
+            "PORT": "8000",
+        },
+    )
+    assert rc == 0
+    assert any(a.startswith(f"{model_dir}:/model:ro") for a in args)
+    assert "/model" in args
+    assert "--served-model-name" in args
+    assert "my-custom-model" in args
+
+
+def test_run_local_vllm_sh_hf_token_forwarding(tmp_path: Path):
+    rc, args = _run_vllm_script(
+        tmp_path,
+        {
+            "MODEL": "google/gemma-4-E4B-it-qat-mobile-ct",
+            "HF_TOKEN": "hf_secret_12345",
+        },
+    )
+    assert rc == 0
+    # HF_TOKEN must be passed as -e HF_TOKEN without the secret value in argv
+    assert "HF_TOKEN" in args
+    assert "hf_secret_12345" not in args
+

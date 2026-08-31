@@ -168,7 +168,7 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
 * **Pinned Container Image**: Defaults to `vllm/vllm-openai:v0.28.0` (built with CUDA 12.8+, supporting NVIDIA Blackwell architectures like the RTX 5060 Laptop GPU and Gemma-4).
 * **Dual-Model 8GB VRAM Co-Residency**:
   - **Reasoning Model (Port 8000)**: `GPU_MEM=0.65` (~5.2 GB VRAM allocation).
-  - **Embedding Model (Port 8001)**: `GPU_MEM=0.30` (~2.4 GB VRAM allocation) with `--task embedding`.
+  - **Embedding Model (Port 8001)**: `GPU_MEM=0.30` (~2.4 GB VRAM allocation).
   - Fits comfortably within 8GB VRAM cards (~7.6 GB total allocation, leaving headroom for PyTorch and driver overhead).
   - *Solo Runs*: For dedicated reasoning benchmarks, `GPU_MEM=0.85 make local-vllm` restores maximum KV cache capacity.
 * **8GB VRAM Optimizations**:
@@ -176,7 +176,7 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
   - `--max-num-seqs 1`: Bounds concurrent sequence allocation to prevent out-of-memory spikes.
   - `MAX_LEN=4096`: Caps model context length.
 * **Gemma-4 Support**: Automatically configures `--tool-call-parser gemma4`, `--reasoning-parser gemma4`, and `--chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja`.
-* **Embedding Model Detection**: Automatically sets `--task embedding` for model IDs containing `*embed*` or `*Embed*` (e.g. `Qwen3-Embedding-0.6B`).
+* **Embedding Model Detection**: Automatically serves pooling/embedding models (e.g. `Qwen3-Embedding-0.6B`) with vLLM v0.28.0+'s auto-detected pooling runner.
 * **WSL2 Compatibility**: Exports `VLLM_WSL2_ENABLE_PIN_MEMORY=1` for host memory stability.
 * **Safe Secrets**: Passes `HF_TOKEN` via `-e HF_TOKEN` without exposing secret tokens on command-line argument lists.
 

@@ -78,10 +78,11 @@ if [ "${SERVED_TARGET}" = "/model" ]; then
     set -- "$@" --served-model-name "${MODEL_NAME}"
 fi
 
-# Add Gemma-4 reasoning parser flags or embedding task flags
+# Add Gemma-4 reasoning parser flags
 case "${MODEL} ${MODEL_NAME} ${TASK:-}" in
     *embed*|*Embed*)
-        set -- "$@" --task embedding
+        # In modern vLLM (v0.28.0+), embedding/pooling models are auto-detected by
+        # the runner (--runner auto / pooling) and --task embedding was removed in vLLM V1.
         ;;
     *gemma-4*|*gemma4*)
         CHAT_TMPL="${CHAT_TEMPLATE:-/vllm-workspace/examples/tool_chat_template_gemma4.jinja}"
