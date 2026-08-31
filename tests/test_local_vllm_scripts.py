@@ -1,9 +1,9 @@
-from __future__ import annotations
-
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx2
+import pytest
 from scripts.test_local_e2e_vllm import (
     check_embedding_connection,
     check_vllm_connection,
@@ -12,6 +12,29 @@ from scripts.test_local_e2e_vllm import (
 )
 
 from mainframe_rag.config import Settings
+
+_ENV_SANDBOX_VARS = (
+    "QDRANT_URL",
+    "QDRANT_COLLECTION",
+    "EMBED_MODE",
+    "EMBED_BASE_URL",
+    "EMBED_MODEL",
+    "DENSE_DIM",
+    "ALLOW_HASH_MODE",
+    "LLM_BASE_URL",
+    "LLM_MODEL_REASONING",
+)
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_env(monkeypatch: pytest.MonkeyPatch):
+    """Ensure no environment variables modified during tests leak into other test files."""
+    for key in _ENV_SANDBOX_VARS:
+        if key in os.environ:
+            monkeypatch.setenv(key, os.environ[key])
+        else:
+            monkeypatch.setenv(key, "")
+            del os.environ[key]
 
 
 def test_vllm_connection_success():
@@ -147,8 +170,8 @@ def test_check_collection_dimension():
 
         # 1. Non-existent collection
         mock_client.collection_exists.return_value = False
-        matches, actual, expected = check_collection_dimension(settings)
-        assert matches is True
+        matches, actual, expected = check_collection_dimension(settings, client=mock_client)
+        assert matches is False
         assert actual is None
         assert expected == 1024
 
@@ -159,7 +182,7 @@ def test_check_collection_dimension():
         mock_dense.size = 1024
         mock_info.config.params.vectors = {"dense": mock_dense}
         mock_client.get_collection.return_value = mock_info
-        matches, actual, expected = check_collection_dimension(settings)
+        matches, actual, expected = check_collection_dimension(settings, client=mock_client)
         assert matches is True
         assert actual == 1024
         assert expected == 1024
@@ -168,7 +191,7 @@ def test_check_collection_dimension():
         mock_single_vec = MagicMock()
         mock_single_vec.size = 256
         mock_info.config.params.vectors = mock_single_vec
-        matches, actual, expected = check_collection_dimension(settings)
+        matches, actual, expected = check_collection_dimension(settings, client=mock_client)
         assert matches is False
         assert actual == 256
         assert expected == 1024

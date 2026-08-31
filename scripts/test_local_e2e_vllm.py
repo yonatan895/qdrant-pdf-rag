@@ -14,12 +14,15 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx2
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.run_ingest import run as run_ingest
+
+if TYPE_CHECKING:
+    from qdrant_client import QdrantClient
 
 # Allow running directly via `python scripts/test_local_e2e_vllm.py`
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -130,15 +133,20 @@ def check_embedding_connection(
         return False, model_name, explicit_dim or 1024
 
 
-def check_collection_dimension(settings: Settings) -> tuple[bool, int | None, int]:
+def check_collection_dimension(
+    settings: Settings,
+    client: QdrantClient | None = None,
+) -> tuple[bool, int | None, int]:
     """Check if collection exists and whether its vector dimension matches Settings.
-    Returns (matches, actual_dim, expected_dim)."""
+    Returns (matches, actual_dim, expected_dim).
+    actual_dim is None when collection does not exist."""
     from qdrant_client import QdrantClient
 
-    client = QdrantClient(url=settings.qdrant_url, timeout=10)
+    if client is None:
+        client = QdrantClient(url=settings.qdrant_url, timeout=10)
     expected_dim = settings.require_dense_dim()
     if not client.collection_exists(settings.qdrant_collection):
-        return True, None, expected_dim
+        return False, None, expected_dim
     info = client.get_collection(settings.qdrant_collection)
     dense_cfg = info.config.params.vectors
     if isinstance(dense_cfg, dict):
@@ -165,16 +173,17 @@ def setup_local_corpus(settings: Settings, work_dir: Path | str) -> None:
     from qdrant_client import QdrantClient
 
     client = QdrantClient(url=settings.qdrant_url, timeout=10)
-    matches, actual_size, expected_dim = check_collection_dimension(settings)
-    if not matches:
-        print(
-            f"[*] Recreating collection '{settings.qdrant_collection}' "
-            f"due to dimension change ({actual_size} -> {expected_dim})..."
-        )
-        client.delete_collection(settings.qdrant_collection)
-        progress_file = work_path / "inventory.jsonl"
-        if progress_file.exists():
-            progress_file.unlink()
+    if client.collection_exists(settings.qdrant_collection):
+        matches, actual_size, expected_dim = check_collection_dimension(settings, client=client)
+        if not matches:
+            print(
+                f"[*] Recreating collection '{settings.qdrant_collection}' "
+                f"due to dimension change ({actual_size} -> {expected_dim})..."
+            )
+            client.delete_collection(settings.qdrant_collection)
+            progress_file = work_path / "inventory.jsonl"
+            if progress_file.exists():
+                progress_file.unlink()
 
     print(f"[*] Ingesting {pdf_path} into collection '{settings.qdrant_collection}'...")
     os.environ["QDRANT_URL"] = settings.qdrant_url
@@ -376,6 +385,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.skip_ingest:
             matches, actual_dim, expected_dim = check_collection_dimension(settings)
+            if actual_dim is None:
+                print(
+                    f"[-] Collection '{settings.qdrant_collection}' does not exist. "
+                    f"Drop --skip-ingest to create and ingest the demo corpus.",
+                    file=sys.stderr,
+                )
+                return 1
             if not matches:
                 print(
                     f"[-] Collection '{settings.qdrant_collection}' vector dimension ({actual_dim}) "
