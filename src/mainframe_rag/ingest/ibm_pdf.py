@@ -29,9 +29,9 @@ class ParsedDoc:
     sha256: str
     doc_id: str
     title: str
-    product: str | None
-    version: str | None
-    vendor: str
+    product: str | None = None
+    version: str | None = None
+    vendor: str = "unknown"
     toc: tuple[tuple[int, str, int], ...] = ()
     page_count: int = 0
 

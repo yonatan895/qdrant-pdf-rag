@@ -83,13 +83,15 @@ def test_positive_int_limit_validation():
 def test_render_answer_text():
     from scripts.query_demo import render_answer_text
 
+    from mainframe_rag.agent.answer import ParsedAnswer
+
     hits = [_sample_hit()]
-    parsed = {
-        "answer": "This message indicates command rejection.",
-        "citations": ["SA22-0000-00 z/OS Messages, Chapter 1 > IEA Messages, p. 1-5"],
-        "script": "//RETRY EXEC PGM=IEFBR14",
-        "citations_inferred": False,
-    }
+    parsed = ParsedAnswer(
+        answer="This message indicates command rejection.",
+        citations=["SA22-0000-00 z/OS Messages, Chapter 1 > IEA Messages, p. 1-5"],
+        script="//RETRY EXEC PGM=IEFBR14",
+        citations_inferred=False,
+    )
     rendered = render_answer_text("IEA500I", "identifier", parsed, hits, {"embed_ms": 2, "qdrant_ms": 8})
     assert "QUESTION: IEA500I" in rendered
     assert "MODEL REASONING ANSWER:" in rendered
@@ -100,13 +102,13 @@ def test_render_answer_text():
     assert "SA22-0000-00" in rendered
 
     # Inferred citation variant
-    parsed_inferred = {
-        "answer": "This message indicates command rejection [1].",
-        "citations": ["SA22-0000-00 z/OS Messages, Chapter 1 > IEA Messages, p. 1-5"],
-        "script": None,
-        "citations_inferred": True,
-        "inferred_indices": [1],
-    }
+    parsed_inferred = ParsedAnswer(
+        answer="This message indicates command rejection [1].",
+        citations=["SA22-0000-00 z/OS Messages, Chapter 1 > IEA Messages, p. 1-5"],
+        script=None,
+        citations_inferred=True,
+        inferred_indices=[1],
+    )
     rendered_inferred = render_answer_text("IEA500I", "identifier", parsed_inferred, hits, {"embed_ms": 2, "qdrant_ms": 8})
     assert "VALIDATED CITATIONS (1) [inferred from excerpt [1]]:" in rendered_inferred
 
@@ -114,12 +116,14 @@ def test_render_answer_text():
 def test_render_answer_html():
     from scripts.query_demo import render_answer_html
 
+    from mainframe_rag.agent.answer import ParsedAnswer
+
     hits = [_sample_hit()]
-    parsed = {
-        "answer": "This message indicates command rejection.",
-        "citations": ["SA22-0000-00 z/OS Messages, Chapter 1 > IEA Messages, p. 1-5"],
-        "script": "//RETRY EXEC PGM=IEFBR14",
-    }
+    parsed = ParsedAnswer(
+        answer="This message indicates command rejection.",
+        citations=["SA22-0000-00 z/OS Messages, Chapter 1 > IEA Messages, p. 1-5"],
+        script="//RETRY EXEC PGM=IEFBR14",
+    )
     html_out = render_answer_html("IEA500I", "identifier", parsed, hits, {"embed_ms": 2, "qdrant_ms": 8})
     assert "<!DOCTYPE html>" in html_out
     assert "Mainframe RAG Answer" in html_out

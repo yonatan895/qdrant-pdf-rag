@@ -236,7 +236,7 @@ def test_doc_locks_are_per_doc_id():
         path="manual.pdf",
         doc_id="SC14-7315-70",
         sha256="abc",
-        vendor=None,
+        vendor="ibm",
         product=None,
         version=None,
         title="Title",

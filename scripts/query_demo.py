@@ -22,7 +22,6 @@ import html
 import json
 import os
 import sys
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +29,7 @@ import httpx2
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from mainframe_rag.agent.answer import ParsedAnswer
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.retrieve.query import SearchHit
@@ -166,7 +166,7 @@ def render_query_html(query: str, kind: str, hits: list[SearchHit], timings: dic
 def render_answer_text(
     query: str,
     kind: str,
-    parsed: dict[str, Any],
+    parsed: ParsedAnswer,
     hits: list[SearchHit],
     timings: dict[str, int],
 ) -> str:
@@ -181,19 +181,19 @@ def render_answer_text(
         "------------------------------------------------------------",
         "MODEL REASONING ANSWER:",
         "------------------------------------------------------------",
-        parsed.get("answer", "").strip(),
+        parsed.answer.strip(),
     ]
-    if parsed.get("script"):
+    if parsed.script:
         lines.extend([
             "",
             "------------------------------------------------------------",
             "EXTRACTED SCRIPT / CODE:",
             "------------------------------------------------------------",
-            parsed["script"].strip(),
+            parsed.script.strip(),
         ])
-    cites = parsed.get("citations", [])
-    inferred = parsed.get("citations_inferred", False)
-    inferred_indices = parsed.get("inferred_indices", [])
+    cites = parsed.citations
+    inferred = parsed.citations_inferred
+    inferred_indices = parsed.inferred_indices
     if inferred:
         cite_status = f" [inferred from excerpt {'[' + ', '.join(map(str, inferred_indices)) + ']'}]"
     elif cites:
@@ -219,24 +219,24 @@ def render_answer_text(
 def render_answer_html(
     query: str,
     kind: str,
-    parsed: dict[str, Any],
+    parsed: ParsedAnswer,
     hits: list[SearchHit],
     timings: dict[str, int],
 ) -> str:
     total_ms = timings.get("embed_ms", 0) + timings.get("qdrant_ms", 0)
 
-    citations_html = "".join(f"<li>{html.escape(c)}</li>" for c in parsed.get("citations", []))
+    citations_html = "".join(f"<li>{html.escape(c)}</li>" for c in parsed.citations)
     if not citations_html:
         citations_html = "<li><em>No direct citations validated</em></li>"
 
     script_html = ""
-    if parsed.get("script"):
+    if parsed.script:
         script_html = f"""
         <div class="hit-card">
           <div class="hit-header">
             <span class="hit-title">Extracted Script / Code</span>
           </div>
-          <pre class="hit-text">{html.escape(parsed["script"])}</pre>
+          <pre class="hit-text">{html.escape(parsed.script)}</pre>
         </div>
         """
 
@@ -299,9 +299,9 @@ def render_answer_html(
     </div>
     <div class="answer-card">
       <h3>Reasoning Answer</h3>
-      <div style="white-space: pre-wrap; line-height: 1.6;">{html.escape(parsed.get("answer", ""))}</div>
+      <div style="white-space: pre-wrap; line-height: 1.6;">{html.escape(parsed.answer)}</div>
       <hr style="border: none; border-top: 1px solid var(--border); margin: 1.5rem 0;" />
-      <h3>Validated Citations <span style="font-size: 0.85rem; font-weight: normal; color: var(--text-muted);">{"(Inferred from bracketed indices)" if parsed.get("citations_inferred") else "(Explicit Citations: section)"}</span></h3>
+      <h3>Validated Citations <span style="font-size: 0.85rem; font-weight: normal; color: var(--text-muted);">{"(Inferred from bracketed indices)" if parsed.citations_inferred else "(Explicit Citations: section)"}</span></h3>
       <ul>{citations_html}</ul>
     </div>
     {script_html}
@@ -666,12 +666,12 @@ def main(argv: list[str] | None = None) -> int:
                 "query": args.query,
                 "kind": kind,
                 "timings": timings,
-                "answer": parsed.get("answer"),
-                "script": parsed.get("script"),
-                "citations": parsed.get("citations"),
-                "citations_inferred": parsed.get("citations_inferred", False),
-                "inferred_indices": parsed.get("inferred_indices", []),
-                "hits": [asdict(h) for h in hits],
+                "answer": parsed.answer,
+                "script": parsed.script,
+                "citations": parsed.citations,
+                "citations_inferred": parsed.citations_inferred,
+                "inferred_indices": parsed.inferred_indices,
+                "hits": [h.model_dump() for h in hits],
             }, indent=2)
         elif args.format == "html":
             output = render_answer_html(args.query, kind, parsed, hits, timings)
@@ -692,7 +692,7 @@ def main(argv: list[str] | None = None) -> int:
                 "query": args.query,
                 "kind": kind,
                 "timings": timings,
-                "hits": [asdict(h) for h in hits],
+                "hits": [h.model_dump() for h in hits],
             }, indent=2)
         elif args.format == "html":
             output = render_query_html(args.query, kind, hits, timings)

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.answer import HttpxLLMClient
 from mainframe_rag.config import Settings
+from mainframe_rag.ports import ChatMessage
 
 
 def _settings(**kw) -> Settings:
@@ -56,7 +57,7 @@ def test_chat_after_close_fails_loudly(monkeypatch):
     llm.close()
     assert captured["retries"] == 0
     with pytest.raises(RuntimeError, match="closed"):
-        llm.chat([{"role": "user", "content": "q"}])
+        llm.chat([ChatMessage(role="user", content="q")])
 
 
 def test_answer_chat_retries_nothing_on_connect_error():
@@ -76,7 +77,7 @@ def test_answer_chat_retries_nothing_on_connect_error():
     rc = RaisingClient()
     llm = HttpxLLMClient(s, rc)  # type: ignore[arg-type]
     with pytest.raises(httpx2.ConnectError):
-        llm.chat([{"role": "user", "content": "q"}])
+        llm.chat([ChatMessage(role="user", content="q")])
     assert rc.posts == 1
 
 

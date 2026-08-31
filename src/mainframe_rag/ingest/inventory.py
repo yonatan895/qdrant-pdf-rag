@@ -6,14 +6,13 @@ writes are append-only small lines so concurrent workers are safe enough.
 
 from __future__ import annotations
 
-import json
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
+from pydantic import BaseModel, Field, ValidationError
 
-@dataclass
-class InventoryRecord:
+
+class InventoryRecord(BaseModel):
     path: str
     sha256: str
     doc_id: str | None = None
@@ -23,10 +22,10 @@ class InventoryRecord:
     seconds: float = 0.0
     error: str | None = None
     error_type: str | None = None  # exception class name, for typed triage
-    finished_at: float = field(default_factory=time.time)
+    finished_at: float = Field(default_factory=time.time)
 
     def to_json(self) -> str:
-        return json.dumps(self.__dict__, ensure_ascii=False)
+        return self.model_dump_json()
 
 
 def load_inventory(progress_path: Path) -> dict[str, InventoryRecord]:
@@ -44,8 +43,8 @@ def load_inventory(progress_path: Path) -> dict[str, InventoryRecord]:
         if not line:
             continue
         try:
-            rec = InventoryRecord(**json.loads(line))
-        except (json.JSONDecodeError, TypeError):
+            rec = InventoryRecord.model_validate_json(line)
+        except (ValidationError, ValueError):
             continue
         latest[rec.path] = rec
     return latest

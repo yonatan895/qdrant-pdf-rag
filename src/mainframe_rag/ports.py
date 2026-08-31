@@ -12,10 +12,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
 
+from pydantic import BaseModel
+
 if TYPE_CHECKING:
     from qdrant_client import models
 
 SparseVector = tuple[list[int], list[float]]
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
 
 
 @runtime_checkable
@@ -114,4 +121,4 @@ class LLMClient(Protocol):
     """Reasoning-model chat (answer path only). Implementations fail closed
     when no reasoning model is configured."""
 
-    def chat(self, messages: list[dict[str, str]]) -> str: ...
+    def chat(self, messages: list[ChatMessage]) -> str: ...

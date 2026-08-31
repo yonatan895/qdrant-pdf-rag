@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from dataclasses import dataclass
 
+from pydantic import BaseModel, ConfigDict
 from qdrant_client import models
 
 from mainframe_rag.ports import Embedder, QdrantPoints
@@ -48,8 +48,9 @@ def format_citation(doc_id: str, title: str, heading_path: str, page_label: str)
     return cite
 
 
-@dataclass(frozen=True, slots=True)
-class SearchHit:
+class SearchHit(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     chunk_id: str
     score: float
     cite: str
@@ -59,9 +60,9 @@ class SearchHit:
     title: str
     page_label: str
     chunk_type: str
-    product: str | None
-    version: str | None
     message_ids: tuple[str, ...]
+    product: str | None = None
+    version: str | None = None
 
 
 def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:

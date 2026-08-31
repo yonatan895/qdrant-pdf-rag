@@ -116,3 +116,78 @@ def test_every_retrieve_filter_field_is_indexed():
         filter_keys.add(m.group(1))
     assert filter_keys, "no filter keys found — inspect.getsource broke"
     assert filter_keys <= indexed, f"unindexed filter fields: {filter_keys - indexed}"
+
+
+def test_models_ipc_pickle_round_trip():
+    """Verify that all core domain models cleanly serialize/deserialize across IPC boundaries (ProcessPoolExecutor)."""
+    import pickle
+
+    from mainframe_rag.agent.answer import ParsedAnswer
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+    from mainframe_rag.ports import ChatMessage
+    from mainframe_rag.retrieve.filters import QueryIdentifiers
+    from mainframe_rag.retrieve.query import SearchHit
+
+    doc = ParsedDoc(
+        path=Path("docs/manual.pdf"),
+        sha256="a" * 64,
+        doc_id="SC14-7315-70",
+        title="Sample Title",
+        vendor="ibm",
+        product="z/OS",
+        version="3.1",
+        toc=((1, "Intro", 1), (2, "Details", 5)),
+        page_count=10,
+    )
+    chunk = _chunk(1)
+    record = InventoryRecord(path="docs/manual.pdf", sha256="a" * 64, status="upserted", doc_id="SC14-7315-70")
+    identifiers = QueryIdentifiers(doc_ids=["SC14-7315-70"], message_ids=["IEA500I"])
+    hit = SearchHit(
+        chunk_id="chunk-1",
+        score=0.95,
+        cite="SC14-7315-70 Manual, p. 1",
+        heading="Intro",
+        text="Sample body text",
+        doc_id="SC14-7315-70",
+        title="Sample Title",
+        page_label="1",
+        chunk_type="narrative",
+        message_ids=("IEA500I",),
+    )
+    msg = ChatMessage(role="user", content="hello")
+    answer = ParsedAnswer(answer="Answer prose", citations=["SC14-7315-70 Manual, p. 1"], script="//JOB")
+
+    for obj in (doc, chunk, record, identifiers, hit, msg, answer):
+        restored = pickle.loads(pickle.dumps(obj))
+        assert restored == obj
+        assert type(restored) is type(obj)
+
+
+def test_inventory_json_pin_and_corrupt_line_handling(tmp_path):
+    progress = tmp_path / "inventory.jsonl"
+    record = InventoryRecord(
+        path="book.pdf",
+        sha256="f" * 64,
+        doc_id="SC14-0000-00",
+        pages=50,
+        chunks=12,
+        status="error",
+        error="Corrupt header",
+        error_type="ValueError",
+    )
+    append_record(progress, record)
+
+    # Corrupt lines and invalid JSON
+    with open(progress, "a", encoding="utf-8") as f:
+        f.write("\n")
+        f.write("not a json object\n")
+        f.write('{"invalid": "schema without required fields"}\n')
+        f.write('{"path": "incomplete.pdf", "sha256"\n')
+
+    records = load_inventory(progress)
+    assert len(records) == 1
+    loaded = records["book.pdf"]
+    assert loaded.doc_id == "SC14-0000-00"
+    assert loaded.status == "error"
+    assert loaded.error_type == "ValueError"
+    assert loaded.finished_at > 0

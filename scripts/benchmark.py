@@ -43,12 +43,13 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import httpx2
 from loadtest import DEFAULT_QUERIES, run_load
 from qdrant_sim import QdrantSim, start_simulator
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 GATED_METRICS = {
     # dotted path into the result -> regression tolerance multiplier
     "ingest.peak_rss_mb": 1.5,
@@ -166,9 +167,11 @@ def run_ingest(corpus: Path, qdrant_url: str, collection: str) -> dict:
     # Linux) — a floor for the tree total, and it also covers docker client
     # children spawned before the ingest.
     peak_rss_mb = round(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024, 1)
-    records = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
-    docs_upserted = sum(1 for r in records if r["status"] == "upserted")
-    chunks = sum(r["chunks"] for r in records if r["status"] == "upserted")
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    inventory = load_inventory(progress)
+    docs_upserted = sum(1 for r in inventory.values() if r.status == "upserted")
+    chunks = sum(r.chunks for r in inventory.values() if r.status == "upserted")
     return {
         "wall_s": round(wall, 2),
         "docs_per_s": round(docs_upserted / wall, 2) if wall else 0.0,

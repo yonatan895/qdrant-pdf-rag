@@ -258,7 +258,12 @@ def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_pa
     guarantee them); the nl query must reach its doc within recall@5
     (membership, never top-1 across equal-text chunks). Baseline checking
     must produce zero regressions."""
-    from scripts.eval_retrieval import check_baseline, evaluate, update_baseline
+    from scripts.eval_retrieval import (
+        GoldenEntry,
+        check_baseline,
+        evaluate,
+        update_baseline,
+    )
 
     from mainframe_rag.config import load_settings
 
@@ -268,9 +273,9 @@ def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_pa
     monkeypatch.setenv("EMBED_MODE", "hash")
 
     golden = [
-        {"query": "IEA500I operator message", "expected_doc_ids": ["SA22-0000-00"]},
-        {"query": "SA22-7777-01 initialization parameters", "expected_doc_ids": ["SA22-7777-01"]},
-        {"query": "widget torque buffer", "expected_doc_ids": ["widget-guide"]},
+        GoldenEntry(query="IEA500I operator message", expected_doc_ids=["SA22-0000-00"]),
+        GoldenEntry(query="SA22-7777-01 initialization parameters", expected_doc_ids=["SA22-7777-01"]),
+        GoldenEntry(query="widget torque buffer", expected_doc_ids=["widget-guide"]),
     ]
     report = evaluate(golden, load_settings())
     assert report["failures"] == 0 and report["n"] == 3
