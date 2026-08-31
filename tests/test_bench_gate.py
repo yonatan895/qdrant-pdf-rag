@@ -110,3 +110,29 @@ def test_percentile():
     assert _percentile(values, 50) == 20.0
     assert _percentile(values, 100) == 30.0
     assert _percentile([], 50) == 0.0
+
+
+def test_profile_pipeline_microbenchmarks(tmp_path):
+    from scripts.profile_pipeline import (
+        profile_answer_parsing,
+        profile_embedding,
+        profile_pdf_parsing_and_chunking,
+    )
+
+    res = profile_pdf_parsing_and_chunking(tmp_path, num_docs=2)
+    assert res["docs"] == 2
+    assert res["total_pages"] == 16
+    assert len(res["sample_parsed_docs"]) == 2
+    assert res["total_chunks"] > 0
+    assert res["docs_per_s"] > 0
+
+    embed_res = profile_embedding(res["sample_parsed_docs"])
+    assert embed_res["total_chunks"] == res["total_chunks"]
+    assert embed_res["dense_chunks_per_s"] > 0
+    assert embed_res["sparse_chunks_per_s"] > 0
+
+    answer_res = profile_answer_parsing(iterations=10)
+    assert answer_res["iterations"] == 10
+    assert answer_res["parses_per_s"] > 0
+    assert answer_res["latency_us_per_parse"] > 0
+

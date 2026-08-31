@@ -205,3 +205,15 @@ def test_rrf_hits_carry_citation_fields():
     assert hits[0].cite == "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
     assert hits[0].text == "IEA500I synthetic text"
 
+
+def test_rrf_fuse_tie_order_is_deterministic():
+    """Tied RRF scores must produce stable, deterministic ordering (Timsort stability)."""
+    p1 = _point("chunk-1")
+    p2 = _point("chunk-2")
+    # In equal weight and equal ranks across dense and sparse:
+    hits = rrf_fuse([p1, p2], [p2, p1], weights=(1.0, 1.0), k=2, limit=2)
+    assert len(hits) == 2
+    assert hits[0].score == hits[1].score
+    assert [h.chunk_id for h in hits] == ["chunk-1", "chunk-2"]
+
+

@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     # when the request was never sent (DNS/refused), so they are safe for any
     # method. There is deliberately no request-level retry anywhere.
     http_connect_retries: int = Field(default=2, ge=0, le=5)
+    http_max_connections: int = Field(default=200, ge=10, le=2000)
+    http_max_keepalive_connections: int = Field(default=100, ge=5, le=1000)
 
     # /healthz probes keep separate budgets: /readyz is a local GET, while a
     # cold vLLM can legitimately take ~10s to answer the embed ping.
