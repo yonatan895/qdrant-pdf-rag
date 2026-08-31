@@ -167,9 +167,9 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
 #### Key Launcher Features
 * **Pinned Container Image**: Defaults to `vllm/vllm-openai:v0.28.0` (built with CUDA 12.8+, supporting NVIDIA Blackwell architectures like the RTX 5060 Laptop GPU and Gemma-4).
 * **Dual-Model 8GB VRAM Co-Residency**:
-  - **Reasoning Model (Port 8000)**: `GPU_MEM=0.65` (~5.2 GB VRAM allocation).
-  - **Embedding Model (Port 8001)**: `GPU_MEM=0.30` (~2.4 GB VRAM allocation).
-  - Fits comfortably within 8GB VRAM cards (~7.6 GB total allocation, leaving headroom for PyTorch and driver overhead).
+  - **Reasoning Model (Port 8000)**: `GPU_MEM=0.55` (~4.4 GB VRAM allocation).
+  - **Embedding Model (Port 8001)**: `GPU_MEM=0.43 MAX_LEN=2048` (~3.4 GB VRAM allocation).
+  - Fits comfortably within 8GB VRAM cards (~7.8 GB total allocation, leaving headroom for PyTorch and driver overhead).
   - *Solo Runs*: For dedicated reasoning benchmarks, `GPU_MEM=0.85 make local-vllm` restores maximum KV cache capacity.
 * **8GB VRAM Optimizations**:
   - `--limit-mm-per-prompt '{"image":0,"audio":0}'`: Disables multimodal vision/audio buffers in Gemma 4 to reclaim substantial VRAM.

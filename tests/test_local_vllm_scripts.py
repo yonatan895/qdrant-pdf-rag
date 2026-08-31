@@ -293,8 +293,8 @@ def test_run_local_vllm_sh_embedding_model_no_task_arg(tmp_path: Path):
         {
             "MODEL": "Qwen/Qwen3-Embedding-0.6B",
             "PORT": "8001",
-            "GPU_MEM": "0.30",
-            "MAX_LEN": "4096",
+            "GPU_MEM": "0.43",
+            "MAX_LEN": "2048",
         },
     )
     assert rc == 0
@@ -306,7 +306,7 @@ def test_run_local_vllm_sh_embedding_model_no_task_arg(tmp_path: Path):
     assert "8001:8001" in args
     assert "Qwen/Qwen3-Embedding-0.6B" in args
     assert "--gpu-memory-utilization" in args
-    assert "0.30" in args
+    assert "0.43" in args
 
 
 def test_run_local_vllm_sh_reasoning_gemma4_model(tmp_path: Path):
@@ -315,7 +315,7 @@ def test_run_local_vllm_sh_reasoning_gemma4_model(tmp_path: Path):
         {
             "MODEL": "google/gemma-4-E4B-it-qat-mobile-ct",
             "PORT": "8000",
-            "GPU_MEM": "0.65",
+            "GPU_MEM": "0.55",
             "MAX_LEN": "4096",
         },
     )
@@ -326,7 +326,7 @@ def test_run_local_vllm_sh_reasoning_gemma4_model(tmp_path: Path):
     assert "--chat-template" in args
     assert "-p" in args
     assert "8000:8000" in args
-    assert "0.65" in args
+    assert "0.55" in args
 
 
 def test_run_local_vllm_sh_local_directory_mount(tmp_path: Path):

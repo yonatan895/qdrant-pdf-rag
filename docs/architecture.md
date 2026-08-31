@@ -169,7 +169,7 @@ Outbound HTTP communication is managed via `httpx2` with connection pools create
   - Formats eval and benchmark reports into terminal text, Markdown, and 100% self-contained offline HTML dashboards.
   - Subcommands: `eval`, `bench`, `compare-eval`, `compare-bench`.
 - **Local GPU Dual-Model vLLM Server (`scripts/run_local_vllm.sh` / `make local-vllm` / `make local-vllm-embed`):**
-  - Runs reasoning models (Gemma-4 on port 8000, `GPU_MEM=0.65`) and embedding models (Qwen3-Embedding-0.6B on port 8001, `GPU_MEM=0.30`) concurrently on consumer 8GB VRAM cards.
+  - Runs reasoning models (Gemma-4 on port 8000, `GPU_MEM=0.55`) and embedding models (Qwen3-Embedding-0.6B on port 8001, `GPU_MEM=0.43 MAX_LEN=2048`) concurrently on consumer 8GB VRAM cards.
 - **Automated Local End-to-End Suite (`scripts/test_local_e2e_vllm.py` / `make test-vllm-e2e`):**
   - Validates full pipeline from PDF build and dense/sparse ingestion to FastAPI HTTP `/v1/search` and `/v1/answer` endpoints against local vLLM, with dimension auto-probing and strict grounding validation.
 

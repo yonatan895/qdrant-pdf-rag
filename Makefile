@@ -237,7 +237,7 @@ local-vllm:
 	sh scripts/run_local_vllm.sh
 
 local-vllm-embed:
-	MODEL=$(or $(MODEL),Qwen/Qwen3-Embedding-0.6B) PORT=$(or $(PORT),8001) GPU_MEM=$(or $(GPU_MEM),0.30) MAX_LEN=$(or $(MAX_LEN),4096) sh scripts/run_local_vllm.sh
+	MODEL=$(or $(MODEL),Qwen/Qwen3-Embedding-0.6B) PORT=$(or $(PORT),8001) GPU_MEM=$(or $(GPU_MEM),0.43) MAX_LEN=$(or $(MAX_LEN),2048) sh scripts/run_local_vllm.sh
 
 test-vllm-e2e: | .venv
 	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",)

@@ -6,9 +6,9 @@ set -eu
 
 MODEL="${MODEL:-google/gemma-4-E4B-it-qat-mobile-ct}"
 PORT="${PORT:-8000}"
-# Default GPU_MEM=0.65 allows co-residency with Qwen3-Embedding (GPU_MEM=0.30) on 8GB VRAM.
+# Default GPU_MEM=0.55 allows co-residency with Qwen3-Embedding (GPU_MEM=0.43, MAX_LEN=2048) on 8GB VRAM.
 # For solo reasoning server runs, set GPU_MEM=0.85 to maximize KV cache throughput.
-GPU_MEM="${GPU_MEM:-0.65}"
+GPU_MEM="${GPU_MEM:-0.55}"
 MAX_LEN="${MAX_LEN:-4096}"
 IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}"
 
