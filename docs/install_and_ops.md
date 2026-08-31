@@ -169,7 +169,7 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
 * **Dual-Model 8GB VRAM Co-Residency**:
   - **Reasoning Model (Port 8000)**: `GPU_MEM=0.55` (~4.4 GB VRAM allocation).
   - **Embedding Model (Port 8001)**: `GPU_MEM=0.43 MAX_LEN=2048` (~3.4 GB VRAM allocation).
-  - Fits comfortably within 8GB VRAM cards (~7.8 GB total allocation, leaving headroom for PyTorch and driver overhead).
+  - **Why `0.55 / 0.43 / 2048`**: vLLM V1 enforces strict ahead-of-time KV-cache block allocation validation (`_check_enough_kv_cache_memory`) at startup against `MAX_LEN`. At `0.65 + 0.30` with `MAX_LEN=4096`, vLLM refused KV-cache allocation on 8GB cards (`ValueError: No available memory for the cache blocks`). `0.55 / 0.43 / 2048` guarantees both servers initialize in any order without memory collision, while `SECTION_MAX_CHARS=3500` ensures chunks (~700–900 tokens) remain well within the 2048 limit.
   - *Solo Runs*: For dedicated reasoning benchmarks, `GPU_MEM=0.85 make local-vllm` restores maximum KV cache capacity.
 * **8GB VRAM Optimizations**:
   - `--limit-mm-per-prompt '{"image":0,"audio":0}'`: Disables multimodal vision/audio buffers in Gemma 4 to reclaim substantial VRAM.

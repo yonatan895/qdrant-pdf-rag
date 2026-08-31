@@ -6,7 +6,13 @@ set -eu
 
 MODEL="${MODEL:-google/gemma-4-E4B-it-qat-mobile-ct}"
 PORT="${PORT:-8000}"
-# Default GPU_MEM=0.55 allows co-residency with Qwen3-Embedding (GPU_MEM=0.43, MAX_LEN=2048) on 8GB VRAM.
+# 8GB VRAM Co-Residency Contract (RTX 5060 / 8GB):
+# Reasoning (Port 8000): GPU_MEM=0.55 (~4.4GB reservation) with MAX_LEN=4096.
+# Embedding (Port 8001): GPU_MEM=0.43 (~3.4GB reservation) with MAX_LEN=2048.
+# DO NOT restore 0.65 + 0.30: vLLM V1 strictly validates KV-cache block headroom
+# against max_model_len during startup. At 0.65 + 0.30 with MAX_LEN=4096, vLLM
+# refused KV-cache allocation with ValueError ("No available memory for the cache blocks").
+# 0.55 / 0.43 / 2048 guarantees simultaneous co-residency in any startup order.
 # For solo reasoning server runs, set GPU_MEM=0.85 to maximize KV cache throughput.
 GPU_MEM="${GPU_MEM:-0.55}"
 MAX_LEN="${MAX_LEN:-4096}"

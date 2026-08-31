@@ -307,6 +307,8 @@ def test_run_local_vllm_sh_embedding_model_no_task_arg(tmp_path: Path):
     assert "Qwen/Qwen3-Embedding-0.6B" in args
     assert "--gpu-memory-utilization" in args
     assert "0.43" in args
+    assert "--max-model-len" in args
+    assert "2048" in args
 
 
 def test_run_local_vllm_sh_reasoning_gemma4_model(tmp_path: Path):

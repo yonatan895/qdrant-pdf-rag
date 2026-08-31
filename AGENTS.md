@@ -122,7 +122,7 @@ User-supplied `--embed-model`, `--model`, `--embed-url`, `--vllm-url`, `--embed-
 - Quote every shell expansion. Never stash JSON flags in an unquoted `${MODEL_ARGS}` string.
 - `case` globs are case-sensitive: `*embed*` does not match `Embedding`. Match `*embed*` and `*Embed*` (or use a case-insensitive test).
 - Pin vLLM image tags that actually implement the flags you pass (`gemma4` parsers). `:latest` and stale minors are production bugs.
-- Local 8GB co-residency: reasoning port 8000 `GPU_MEM=0.55`; embedding port 8001 `GPU_MEM=0.43 MAX_LEN=2048`; solo reasoning `GPU_MEM=0.85`.
+- Local 8GB co-residency: reasoning port 8000 `GPU_MEM=0.55`; embedding port 8001 `GPU_MEM=0.43 MAX_LEN=2048`; solo reasoning `GPU_MEM=0.85`. Do not restore 0.65/0.30: vLLM V1 refused KV-cache allocation with ValueError at 0.65+0.30 with 4096 on this card.
 - `scripts/qdrant_sim.py` / `scripts/qdrant_pin.py` remain the only docker-lifecycle and pin-parse owners.
 
 ## Error contract
