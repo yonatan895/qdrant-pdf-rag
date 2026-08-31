@@ -26,58 +26,76 @@ import argparse
 import json
 import sys
 import time
-from dataclasses import asdict
 from pathlib import Path
 
 import httpx2
+from pydantic import BaseModel, ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mainframe_rag.config import load_settings
+from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import search as retrieve_search
 
 SEARCH_LIMIT = 8  # headroom for recall@5
 
 
-def load_golden(path: Path) -> list[dict]:
-    entries = []
+class GoldenEntry(BaseModel):
+    query: str
+    expected_doc_ids: list[str]
+    expected_heading: str | None = None
+    note: str | None = None
+
+
+def load_golden(path: Path) -> list[GoldenEntry]:
+    entries: list[GoldenEntry] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        entry = json.loads(line)
-        if not entry.get("query") or not entry.get("expected_doc_ids"):
-            raise SystemExit(f"golden entry needs query + expected_doc_ids: {line[:120]}")
+        try:
+            entry = GoldenEntry.model_validate_json(line)
+        except (ValidationError, ValueError):
+            raise SystemExit(f"golden entry needs valid query + expected_doc_ids: {line[:120]}")
         entries.append(entry)
     return entries
 
 
-def score_entry(hits: list[dict], entry: dict) -> dict:
+def score_entry(hits: list[dict] | list[SearchHit], entry: GoldenEntry | dict) -> dict:
     """Relevance = doc_id in expected set AND heading substring (if given)."""
-    expected = set(entry["expected_doc_ids"])
-    heading = (entry.get("expected_heading") or "").lower()
+    expected = set(entry.expected_doc_ids if isinstance(entry, GoldenEntry) else entry["expected_doc_ids"])
+    exp_heading = (entry.expected_heading if isinstance(entry, GoldenEntry) else entry.get("expected_heading")) or ""
+    heading = exp_heading.lower()
+    query_str = entry.query if isinstance(entry, GoldenEntry) else entry["query"]
 
-    def relevant(hit: dict) -> bool:
-        if hit["doc_id"] not in expected:
+    def relevant(hit: dict | SearchHit) -> bool:
+        hit_doc_id = hit.doc_id if isinstance(hit, SearchHit) else hit["doc_id"]
+        hit_heading = hit.heading if isinstance(hit, SearchHit) else hit["heading"]
+        if hit_doc_id not in expected:
             return False
-        return not heading or heading in hit["heading"].lower()
+        return not heading or heading in hit_heading.lower()
 
     reciprocal_rank = 0.0
     for rank, hit in enumerate(hits, 1):
         if relevant(hit):
             reciprocal_rank = 1.0 / rank
             break
+
+    top3_doc_ids = [
+        h.doc_id if isinstance(h, SearchHit) else h["doc_id"]
+        for h in hits[:3]
+    ]
     return {
-        "query": entry["query"],
+        "query": query_str,
         "recall@1": 1.0 if hits[:1] and relevant(hits[0]) else 0.0,
         "recall@3": 1.0 if any(relevant(h) for h in hits[:3]) else 0.0,
         "recall@5": 1.0 if any(relevant(h) for h in hits[:5]) else 0.0,
         "mrr": reciprocal_rank,
-        "hit_doc_ids": [h["doc_id"] for h in hits[:3]],
+        "hit_doc_ids": top3_doc_ids,
     }
 
 
-def evaluate(golden: list[dict], settings) -> dict:
+def evaluate(golden: list[GoldenEntry] | list[dict], settings) -> dict:
     from qdrant_client import QdrantClient
 
     from mainframe_rag.ingest.embed import build_embedder
@@ -93,16 +111,17 @@ def evaluate(golden: list[dict], settings) -> dict:
     rows, failures = [], 0
     started = time.perf_counter()
     for entry in golden:
+        query_text = entry.query if isinstance(entry, GoldenEntry) else entry["query"]
         try:
             hits, kind, _timings = retrieve_search(
-                client, embedder, collection, entry["query"], limit=SEARCH_LIMIT
+                client, embedder, collection, query_text, limit=SEARCH_LIMIT
             )
-            rows.append(score_entry([asdict(h) for h in hits], entry))
+            rows.append(score_entry(hits, entry))
             rows[-1]["kind"] = kind
         except (httpx2.HTTPError, RuntimeError, OSError, ValueError) as exc:
             # One bad query must not kill the eval; counted as a failure.
             failures += 1
-            rows.append({"query": entry["query"], "error": str(exc)[:200], "kind": "error"})
+            rows.append({"query": query_text, "error": str(exc)[:200], "kind": "error"})
 
     def mean(key: str) -> float:
         scored = [r[key] for r in rows if key in r]

@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import re
 import uuid
-from dataclasses import dataclass
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from mainframe_rag.ingest.classify import classify
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
@@ -28,15 +29,17 @@ FRONT_MATTER_MIN_PAGES = 2
 _BLANK_SPLIT_RE = re.compile(r"\n\s*\n")
 
 
-@dataclass(frozen=True, slots=True)
-class Section:
+class Section(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     heading_path: str
     page_start: int
     page_end: int
 
 
-@dataclass(frozen=True, slots=True)
-class Chunk:
+class Chunk(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     chunk_id: str
     doc_id: str
     heading_path: str
@@ -44,8 +47,8 @@ class Chunk:
     page_label: str
     chunk_type: str
     text: str
-    message_ids: list[str]
-    members: list[str]
+    message_ids: list[str] = Field(default_factory=list)
+    members: list[str] = Field(default_factory=list)
     ordinal: int
 
 

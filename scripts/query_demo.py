@@ -22,7 +22,6 @@ import html
 import json
 import os
 import sys
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -671,7 +670,7 @@ def main(argv: list[str] | None = None) -> int:
                 "citations": parsed.get("citations"),
                 "citations_inferred": parsed.get("citations_inferred", False),
                 "inferred_indices": parsed.get("inferred_indices", []),
-                "hits": [asdict(h) for h in hits],
+                "hits": [h.model_dump() for h in hits],
             }, indent=2)
         elif args.format == "html":
             output = render_answer_html(args.query, kind, parsed, hits, timings)
@@ -692,7 +691,7 @@ def main(argv: list[str] | None = None) -> int:
                 "query": args.query,
                 "kind": kind,
                 "timings": timings,
-                "hits": [asdict(h) for h in hits],
+                "hits": [h.model_dump() for h in hits],
             }, indent=2)
         elif args.format == "html":
             output = render_query_html(args.query, kind, hits, timings)

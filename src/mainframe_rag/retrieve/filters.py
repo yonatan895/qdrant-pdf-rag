@@ -7,18 +7,16 @@ architecture.md section 4.5.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
+from pydantic import BaseModel, Field
 from qdrant_client import models
 
 from mainframe_rag.regexes import find_docnos, find_members, find_message_ids
 
 
-@dataclass
-class QueryIdentifiers:
-    doc_ids: list[str] = field(default_factory=list)
-    message_ids: list[str] = field(default_factory=list)
-    members: list[str] = field(default_factory=list)
+class QueryIdentifiers(BaseModel):
+    doc_ids: list[str] = Field(default_factory=list)
+    message_ids: list[str] = Field(default_factory=list)
+    members: list[str] = Field(default_factory=list)
 
     @property
     def has_identifiers(self) -> bool:

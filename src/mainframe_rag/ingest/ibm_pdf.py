@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
 from pathlib import Path
 
 import pymupdf
+from pydantic import BaseModel, ConfigDict, Field
 
 from mainframe_rag.ingest.walk import detect_vendor, infer_from_path
 from mainframe_rag.regexes import DOCNO_RE
@@ -23,16 +23,17 @@ GENERIC_VR_RE = re.compile(r"\bV(\d+)\s*\.?\s*R(\d+)\b")
 FILENAME_DOCNO_RE = re.compile(r"^([A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?)(?![\d-])")
 
 
-@dataclass(frozen=True, slots=True)
-class ParsedDoc:
+class ParsedDoc(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
     path: Path
     sha256: str
     doc_id: str
     title: str
-    product: str | None
-    version: str | None
-    vendor: str
-    toc: tuple[tuple[int, str, int], ...] = ()
+    product: str | None = None
+    version: str | None = None
+    vendor: str | None = "unknown"
+    toc: tuple[tuple[int, str, int], ...] = Field(default_factory=tuple)
     page_count: int = 0
 
 

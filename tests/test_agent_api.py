@@ -345,10 +345,10 @@ def test_404_405_use_structured_shape(client):
 
 def test_unhandled_error_returns_internal_shape(monkeypatch):
     """An exception escaping the handler logs server-side; client sees only
-    {"code": "internal"}. asdict runs after the handler's try, so breaking it
+    {"code": "internal"}. Response construction runs after the handler's try, so breaking it
     yields a genuinely unhandled exception."""
 
-    def boom_asdict(_x):
+    def boom_response(*_a, **_k):
         raise RuntimeError("serializer down")
 
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
@@ -361,7 +361,7 @@ def test_unhandled_error_returns_internal_shape(monkeypatch):
         app_mod, "retrieve_search",
         lambda *a, **k: ([_hit()], "identifier", {"embed_ms": 1, "qdrant_ms": 1}),
     )
-    monkeypatch.setattr(app_mod, "asdict", boom_asdict)
+    monkeypatch.setattr(app_mod, "SearchResponse", boom_response)
     # ServerErrorMiddleware re-raises after sending the 500; the client must
     # not surface that re-raise.
     with TestClient(app_mod.app, raise_server_exceptions=False) as c:
@@ -552,22 +552,20 @@ def test_strip_unauthorized_body_citations():
 
 
 def test_build_messages_context_budgeting():
-    import dataclasses
-
     from mainframe_rag.agent.answer import build_messages
 
-    hit1 = dataclasses.replace(_hit(), text="A" * 5000)
-    hit2 = dataclasses.replace(_hit(cite_suffix="p. 1-7"), text="B" * 5000)
+    hit1 = _hit().model_copy(update={"text": "A" * 5000})
+    hit2 = _hit(cite_suffix="p. 1-7").model_copy(update={"text": "B" * 5000})
 
     # Per-chunk max caps chunk text to 100 chars
     msgs1 = build_messages("test query", [hit1], max_chunk_chars=100, max_context_chars=1000)
-    user_prompt1 = msgs1[1]["content"]
+    user_prompt1 = msgs1[1].content
     assert "... [truncated]" in user_prompt1
     assert len(user_prompt1) < 500
 
     # Total context max truncates subsequent hits
     msgs2 = build_messages("test query", [hit1, hit2], max_chunk_chars=400, max_context_chars=500)
-    user_prompt2 = msgs2[1]["content"]
+    user_prompt2 = msgs2[1].content
     assert "[1]" in user_prompt2
     assert len(user_prompt2) < 1500
 

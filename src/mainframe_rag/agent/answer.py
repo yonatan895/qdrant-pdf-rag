@@ -8,14 +8,42 @@ settings.llm_model_reasoning; there is deliberately no other model knob.
 from __future__ import annotations
 
 import re
+from typing import Any
 
 import httpx2
+from pydantic import BaseModel, Field
 
 from mainframe_rag.config import Settings
 from mainframe_rag.retrieve.query import SearchHit
 
 FENCE_RE = re.compile(r"```([a-zA-Z0-9_-]*)\n(.*?)```", re.DOTALL)
 SCRIPT_LANGS = frozenset({"jcl", "rexx", "sh", "bash", "shell", "python", "py", "yaml", "yml", "json"})
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+    def __getitem__(self, item: str) -> str:
+        return getattr(self, item)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+
+class ParsedAnswer(BaseModel):
+    answer: str
+    citations: list[str] = Field(default_factory=list)
+    script: str | None = None
+    citations_inferred: bool = False
+    inferred_indices: list[int] = Field(default_factory=list)
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
 
 SYSTEM_PROMPT = (
     "You are a mainframe operations expert (z/OS, CICS, Db2, IMS, JES2/3, RACF, "
@@ -41,7 +69,7 @@ def build_messages(
     splunk_context: str | None = None,
     max_context_chars: int = 8000,
     max_chunk_chars: int = 3000,
-) -> list[dict[str, str]]:
+) -> list[ChatMessage]:
     chunks: list[str] = []
     total_chars = 0
     for i, hit in enumerate(hits, 1):
@@ -85,8 +113,8 @@ def build_messages(
     )
 
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": "\n\n".join(parts)},
+        ChatMessage(role="system", content=SYSTEM_PROMPT),
+        ChatMessage(role="user", content="\n\n".join(parts)),
     ]
 
 
@@ -127,11 +155,15 @@ class HttpxLLMClient:
         if self._client is not None:
             self._client.close()
 
-    def chat(self, messages: list[dict[str, str]]) -> str:
+    def chat(self, messages: list[ChatMessage] | list[dict[str, str]]) -> str:
         base_url, model = assert_reasoning_model(self._settings)
+        serialized = [
+            m.model_dump() if isinstance(m, BaseModel) else m
+            for m in messages
+        ]
         resp = self._http().post(
             f"{base_url.rstrip('/')}/chat/completions",
-            json={"model": model, "messages": messages},
+            json={"model": model, "messages": serialized},
         )
         resp.raise_for_status()
         return str(resp.json()["choices"][0]["message"]["content"])
@@ -141,7 +173,7 @@ def parse_answer(
     content: str,
     allowed_citations: set[str],
     ordered_cites: list[str] | None = None,
-) -> dict:
+) -> ParsedAnswer:
     """Split model output into answer, validated citations, optional script.
 
     The `citations` list and the answer body are filtered to the hit set.
@@ -197,10 +229,10 @@ def parse_answer(
     # 3. Clean up unauthorized citations in body
     body = strip_unauthorized_citations(body, allowed_citations)
 
-    return {
-        "answer": body.strip(),
-        "citations": citations,
-        "script": script,
-        "citations_inferred": citations_inferred,
-        "inferred_indices": inferred_indices,
-    }
+    return ParsedAnswer(
+        answer=body.strip(),
+        citations=citations,
+        script=script,
+        citations_inferred=citations_inferred,
+        inferred_indices=inferred_indices,
+    )
