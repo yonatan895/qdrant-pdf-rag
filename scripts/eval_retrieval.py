@@ -87,15 +87,11 @@ def score_entry(hits: list[SearchHit], entry: GoldenEntry) -> dict:
     }
 
 
-def evaluate(golden: list[GoldenEntry] | list[dict], settings) -> dict:
+def evaluate(golden: list[GoldenEntry], settings) -> dict:
     from qdrant_client import QdrantClient
 
     from mainframe_rag.ingest.embed import build_embedder
 
-    entries = [
-        g if isinstance(g, GoldenEntry) else GoldenEntry.model_validate(g)
-        for g in golden
-    ]
     client = QdrantClient(
         url=settings.qdrant_url,
         api_key=settings.qdrant_api_key,
@@ -106,7 +102,7 @@ def evaluate(golden: list[GoldenEntry] | list[dict], settings) -> dict:
 
     rows, failures = [], 0
     started = time.perf_counter()
-    for entry in entries:
+    for entry in golden:
         try:
             hits, kind, _timings = retrieve_search(
                 client, embedder, collection, entry.query, limit=SEARCH_LIMIT
