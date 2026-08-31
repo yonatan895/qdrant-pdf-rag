@@ -2,6 +2,7 @@
 
 Working agreement for coding agents on this repository.
 Revise this file in the same PR that learns a new rule.
+If a review comment conflicts with this file, follow this file and note the conflict on the PR.
 
 ## Roles
 
@@ -10,85 +11,214 @@ Revise this file in the same PR that learns a new rule.
 | Planner / architect / reviewer (human + Perplexity) | Design docs, issues, PR review, this file | Application code, tests, CI YAML except when the issue says otherwise |
 | Coding agent | Implement issues, tests, CI, Helm/Makefile as specified | Invent product scope, commit secrets/PDFs, merge own PRs |
 
-If a review comment conflicts with this file, follow this file and note the conflict on the PR.
+Implement only what the issue asks. New scope → comment on the issue, do not silently expand.
+If CI fails, fix the production cause. Do not delete or weaken tests to go green.
+
+## Start of work
+
+1. `git status` and `git branch`. Never start on a dirty tree or an already-merged branch.
+2. Fresh branch from latest main: `git fetch origin main && git checkout -b <type>/<issue>-<short> origin/main`.
+   Types: `feat/`, `fix/`, `docs/`. One concern per branch.
+3. Do not bundle application code into an open docs-only PR, or docs-only work into a code PR, unless the docs are the standing-rule note for that code.
+4. Read the layer table below and change only the module that owns the decision.
 
 ## Product constraints (do not regress)
 
 - User supplies PDFs at runtime. **Never** commit `.pdf`, `.pdx`, `.idx`, embeddings, Qdrant snapshots, or vendor manuals (IBM, Broadcom, BMC, Precisely, or anyone else).
 - Parser is generic. IBM form numbers / `XXXnnnY` messages are optional payload, not ingest gates. `doc_id` falls back to filename stem. Default vendor is `unknown` unless path, CLI, or text says otherwise.
 - Runtime is air-gapped OpenShift. No public internet from cluster or in-cluster CI. Images, wheels, and BM25 weights are mirrored in.
-- Runtime Python is CPython **3.14 GIL** (`requires-python >= 3.14`). Do not use free-threading (`3.14t`) and do not require the experimental JIT.
-- Qdrant point ids are UUID or unsigned int only (use UUID5 of the chunk key). sha256 hex is invalid.
-- `/v1/answer` uses the reasoning model only. `/v1/search` does not call an LLM.
-- Qdrant data PVC is RWO block, not NFS. Corpus may be NFS read-only. Ingest-work scratch on the prod cluster is also RWO block (same NFS refusal).
+- Runtime Python is CPython **3.14 GIL** (`requires-python >= 3.14`). No free-threading (`3.14t`), no experimental JIT.
+- Qdrant point ids are UUID or unsigned int only (UUID5 of the chunk key). sha256 hex is invalid. `query_points` takes `query_filter`, not `filter`.
+- `/v1/answer` uses the reasoning model only and never retries. `/v1/search` does not call an LLM.
+- Qdrant data PVC is RWO block, not NFS. Corpus may be NFS read-only. Ingest-work scratch on prod is also RWO block.
 - Unprivileged Qdrant image, `restricted-v2` SCC, ClusterIP only, no public Route to Qdrant. Agent Route only if `AGENT_ROUTE=true`.
 - Qdrant server is **1.19.0** `*-unprivileged`; `qdrant-client` in the lockfile must match; Helm chart is vendored at `charts/qdrant-1.19.0.tgz`. Do not `helm repo add` on the air-gap host.
 - This repository does **not** install vLLM, LiteLLM, Splunk, or GPU operators. Dense embed is the other team's in-cluster vLLM (`VLLM_BASE_URL`). Sparse is local FastEmbed with baked weights. Never Qdrant Cloud inference.
+- `EMBED_MODE=hash` is **CI/dev only**. Prod requires internal vLLM. Never set `EMBED_MODE` in prod manifests or the default image env. Agent refuses hash without `ALLOW_HASH_MODE=true`.
+- `DENSE_DIM` / `EMBED_MODEL` / `LLM_MODEL_REASONING` come from the owning team. Do not hardcode a model.
 - No git submodules (they break `git bundle`). Vendor third-party trees by copy at a pinned SHA, LICENSE + NOTICE + pin file, dedicated pin-bump PRs only.
+- Keep the pipeline boring. Do not add LangChain, LlamaIndex, or a second vector DB.
 
 ## Git
 
-- Public forge is **GitHub**. Enterprise forge is **air-gapped GitLab**. Same git history moves by bundle / sneaker-net; do not maintain a divergent tree.
+- Public forge is **GitHub**. Enterprise forge is **air-gapped GitLab**. Same history moves by bundle / sneakernet; do not maintain a divergent tree.
 - Default branch is `main`. Never push application commits to `main`.
-- **Branch verification before starting work:** Always verify current git branch and status before making changes (`git status`, `git branch`). Every distinct concern, fix, or feature must start on a fresh branch based on latest `origin/main` (`git fetch origin main && git checkout -b <type>/<issue>-<short> origin/main`). Never commit changes into an already merged branch or bundle code changes into an open docs-only PR.
-- Branch from latest `main`: `feat/<issue>-short`, `fix/<issue>-short`, `docs/<short>`.
 - One concern per PR. Rebase on `main` before asking for review; no merge commits unless the reviewer asks.
 - Commits: imperative, present tense, say *why* if not obvious (`Fix chrome threshold so 3-page PDFs are not wiped`).
-- PR / MR description: issue number, what changed, how tested, air-gap / copyright impact if any.
+- PR / MR body: issue number, what changed, how tested, air-gap / copyright impact if any. Update the body in the **same push** as the code. A stale body is a blocker.
 - Do not force-push `main`. Force-push feature branches only after rebase, before review comments exist.
 - Never commit: `.env`, `airgap.env`, secrets, tokens, `*.tar`, wheelhouses. `airgap.env.example` is allowed. Pack output lives in `dist/` (gitignored).
 
-## GitLab CI (air-gap import)
+## Definition of done — before every push
 
-- Keep **`.gitlab-ci.yml` at the repo root** in this public GitHub repo so an air-gap clone can run pipelines with no rewrite. That file is the GitLab entrypoint after import.
-- Keep **`.github/workflows/ci.yml`** for GitHub. Job *meaning* must stay aligned: refuse committed `.pdf`/`.pdx`/`.idx`, then pytest. If you change one CI, change the other in the same PR.
-- GitLab runners have **no internet**. Do not use images that only exist on Docker Hub. Do not `pip install` from PyPI.
-- No internal hostnames, registry URLs, or tokens in `.gitlab-ci.yml`. Use GitLab CI/CD **variables** on the project: `CI_PYTHON_IMAGE`, `CI_RUNNER_TAG` (default `airgap`), `PIP_INDEX_URL`, `PIP_FIND_LINKS`. If neither index nor wheelhouse is set, the job must fail closed with a clear error.
-- Coding agents implement or change `.gitlab-ci.yml` only when an issue asks (starting with #3). Do not add deploy/helm/image-build/pack stages unless the issue says so.
-- Trigger split (GitHub only): **markdown-only** changes (excluding vendored `.agents/`/`vendor/` docs) run **no GitHub checks at all** — no lint workflow exists (the markdown formatting gate was dropped; formatting is not worth a runner), and `ci.yml`/`e2e.yml` paths-ignore `*.md`/`**/*.md`. Mixed changes run ci + e2e. Vendored-only bumps run nothing. GitLab keeps hygiene + pytest on every MR (no e2e, no sim — air-gap runners cannot pull Docker Hub) — the hygiene gate must never silently skip on the air-gap side.
-- The **connected-path E2E** (build images to GHCR, lab OpenShift smoke with synthetic demo PDFs, and the **air-gap runbook rehearsal**: pack → load → prod-overlay deploy → ingest → smoke with a mock vLLM stand-in) lives **only** in `.github/workflows/e2e.yml` on public GitHub. Air-gap GitLab must not gain jobs that talk to that cluster or to GHCR. Ephemeral `rag-ci-<sha>` / `rag-gap-<sha>` namespaces only; cleanup is `if: always()`.
-- The opencode reviewer (`.github/workflows/opencode.yml`) is **GitHub-only automation**: automatic PR review on `pull_request`, `/oc`-summoned runs on comments. Never mirror it into `.gitlab-ci.yml`; air-gap runners must not call external services. Its install steps are inlined per job on purpose — no local composite action under `.github/actions/`: the agent moves the working tree mid-run and local actions re-resolve `action.yml` at post (run 33203843046).
-- `EMBED_MODE=hash` (deterministic in-process embedder, issue #8) is **CI/dev only**: it makes `DENSE_DIM`/`EMBED_*` unnecessary and does lexical-only retrieval. Never set it in prod manifests or the default image env; prod requires the internal vLLM endpoint.
+All of these must hold. Self-review the **diff**, not the PR body.
+
+- `python3 -m pytest`, `python3 -m mypy src`, and `python3 -m ruff check src tests scripts` are clean locally.
+- Branched fresh from `origin/main`, single concern, not an already-merged branch.
+- Every new behavior has a test that fires the **claimed path**, not only the exception/fallback path. See Testing.
+- Every new handler, branch, and error shape has a reachable test. A handler no test can fire is dead code.
+- Input-handling / parsers were probed adversarially: empty, multi-digit, wrapped (`> `, backticks, quotes, parens, `**bold**`, `[links](url)`, `<angle>`), inline/non-anchored, top-placed, missing blank lines, case folding.
+- `git status` shows no untracked toolchain artifacts (`node_modules/`, lockfiles from experiments, venvs, caches). Experiments run outside the repo tree.
+- Every claim in the PR body is true of the code in **this** push. Grep for the counterexample before writing “defaults unchanged”, “no runtime change”, “CLI overrides work”, or “prevents env leaks”.
+- Every change to a default, constant, timeout, retry count, limit, or chunk size is called out in the PR body.
+- Retrieval changes (embedder, chunking, RRF, filters, query shape) include `make eval` vs `evals/baseline.json` in the PR body (identifier recall@1 strict 1.0; overall recall@1 ×0.9, recall@5 ×0.95, MRR ×0.95; 0 query errors). Tooling PRs that also touch those paths still owe the numbers. Re-baseline is a dedicated PR (`make eval-baseline`).
+- Local vLLM / Makefile / script work must not change production chunking, retrieval constants, or ingest-worker semantics in the same PR. If they must, that is two concerns: split, or pay the eval rule above.
+
+## Testing
+
+`pytest` is the gate. Tests generate original PDFs at runtime (`scripts/make_synthetic_pdf.py`). No binary fixtures in git.
+CI must fail if `git ls-files` matches `.pdf` / `.pdx` / `.idx`.
+Cover IBM-shaped synthetics (form number, message id, outline) **and** generic PDFs (no outline, no form number, unknown vendor).
+`test_chrome_strip` must keep a **long** page list (≥8 pages). Chrome is disabled on short docs on purpose.
+
+### Unit tests are hermetic
+
+Do not call live Qdrant, vLLM, or the internet. Fake the client. Ingest tests use `--dry-run`.
+
+- Patch `httpx2.get` / `httpx2.post` in every unit test that can reach them. Hostnames like `embed-host:9000` are live network. A test that “works because connect failed” is invalid.
+- Requesting the `monkeypatch` fixture does nothing by itself. Register every mutated env key with `monkeypatch.setenv` / `monkeypatch.delenv` **before** the code under test runs, or snapshot with `monkeypatch.setattr(os, "environ", dict(os.environ))`. Autouse fixtures must call `monkeypatch`.
+- Do not mutate module-global state (routes on the global app, leftover `os.environ`) that later tests inherit.
+- Pin public contracts, not private internals (`client._transport._pool._retries` dies on the next lockfile bump).
+- Remove unused fixtures and parameters when touching a test.
+
+### Tests must lock the claimed path
+
+If the PR claims “CLI override”, “auto-detect”, “unwrap fence”, “sandbox env”, “IPC isolation”, or “dimension recreate”, the test must still pass when the **success** path is forced with mocks.
+
+Do not assert an outcome the fallback would also produce.
+
+Minimum matrix for any auto-detect / resolve helper:
+
+1. Explicit value matches a served id or basename.
+2. Explicit value + multiple nonmatching ids → keep the explicit value **or** fail closed with a message. Never silently keep `load_settings()` leftovers.
+3. No explicit value + exactly one served id → auto-select.
+4. Connection refused / timeout → documented fallback only; hash mode requires `allow_hash_mode=True`.
+5. HTTP 200 with non-JSON or missing `data` → must not raise out of the helper.
+
+Parser / citation / fence / grounding changes need the cases that broke last time:
+
+- Top-placed `Citations:` with no blank line after the last cite.
+- `CITATIONS:` case folding.
+- Parentheses noise must not become excerpt indexes (`z/OS (3.1)`).
+- Unlabeled vs language-tagged fences; do not use `len > N` as a script signal.
+- Out-of-bounds `[99]`.
+- e2e `/v1/answer` fails on zero citations or “no supporting excerpts”.
+- Queried identifiers (`IEA500I`, `LFAREA`, …) must exist in the synthetic `build()` fixture, otherwise the gate cannot fail for the right reason.
+
+IPC / worker changes: round-trip the error record through `pickle.dumps`.
+Collection-dimension logic: missing, matching, and mismatched (named `dense` dict **and** single-vector schemas), including `--skip-ingest`.
+
+### Simulation, eval, bench
+
+- Simulation tier (marker `integration`, `make sim`): real PDFs → real ingest into a docker Qdrant (`images.txt` pin, or `QDRANT_SIM_URL`) → agent endpoints over the real app. `scripts/mock_vllm.py` is the only stand-in. No retrieval/LLM code is monkeypatched. Docker-only, loopback-only, corpus generated at runtime. Plain `pytest` deselects it (`-m 'not integration'`). CI `sim` job is **fail-closed**: missing docker, any skipped test, or zero passes fails the job. Fetched BM25 weights verify against `bm25-weights.sha256`. Synthetic documents must differ in **body text**, not just metadata. Never pin top-1 across potentially equal-text chunks; assert scoping + presence + within-run determinism.
+- Eval: `make eval`, `evals/golden.jsonl` vs `evals/baseline.json`. Golden entries are doc-level. Sim runs `test_eval_retrieval_on_synthetic_corpus`.
+- Bench (`make bench`; `.github/workflows/bench.yml`; GitHub-only; never a PR gate): ingest wall/docs/s/RSS, Qdrant RAM/CPU/disk, agent latency against the pinned image. `/v1/answer` uses the mock LLM — say so in every report. `--check benchmarks/baseline.json` (RSS/disk ×1.5, latency p95 ×3; improvements never fail). Re-baseline is a dedicated PR. GitLab has no bench. `scripts/qdrant_sim.py` and `scripts/qdrant_pin.py` have exactly one owner each — do not fork them; `make sim-qdrant` is a fixed-port wrapper.
+- Reports: `scripts/render_report.py` (`make eval-report` / `eval-html` / `eval-compare` / `bench-report` / `bench-html` / `bench-compare`). `scripts/query_demo.py` (`make query-demo`, `make ask`) is inspection, not a substitute for eval.
+
+## CLI, Makefile, and local vLLM
+
+User-supplied `--embed-model`, `--model`, `--embed-url`, `--vllm-url`, `--embed-mode`, `--dense-dim`, and matching Makefile/`ENV` values must be applied or fail nonzero with a message. Never silently keep `load_settings()` values after a `/models` probe. Ambiguous auto-detect (`len(avail) != 1` and no match) fails closed.
+
+- Quote every shell expansion. Never stash JSON flags in an unquoted `${MODEL_ARGS}` string.
+- `case` globs are case-sensitive: `*embed*` does not match `Embedding`. Match `*embed*` and `*Embed*` (or use a case-insensitive test).
+- Pin vLLM image tags that actually implement the flags you pass (`gemma4` parsers, `--task embedding`). `:latest` and stale minors are production bugs.
+- Local 8GB co-residency: reasoning port 8000 `GPU_MEM=0.65`; embedding port 8001 `GPU_MEM=0.30` with `--task embedding`; solo reasoning `GPU_MEM=0.85`.
+- `scripts/qdrant_sim.py` / `scripts/qdrant_pin.py` remain the only docker-lifecycle and pin-parse owners.
+
+## Error contract
+
+- Client response bodies never contain exception text, upstream bodies, or internal detail — on any status, including 200/degraded. Fixed message + stable `code` client-side; `str(exc)` and upstream text go to logs only.
+- Catch the narrowest exception around the smallest call. The same fault produces the same error code on every endpoint.
+- If the contract claims a stable error shape, register and pin handlers for 404/405/500. Do not leave the framework default.
+- Logs are one JSON object per line via `logs.configure_logging` — ids, counts, `elapsed_ms`; never secrets or PDF text. Ingest parse workers (spawn) return records for the parent to log; they never inherit the handler.
+
+## One rule per concept
+
+- When two paths interpret the same data (validate vs strip, parse vs render, allow vs deny), they share one helper. Two regexes for one concept will diverge, and the divergence is the bug.
+- When review flags one instance, sweep every sibling site in the same push: every branch of the function, every job in the workflow, every call site.
+- After any fix, re-scan the touched file for variants of the same bug class. Do not fix only the quoted line.
+- A refactor labeled “no runtime change” must not share clients, pools, or mutable state across features. Sharing a pool **is** a runtime change.
+
+## Settings and lifecycle
+
+- All timeouts, retries, batch sizes, and limits come from Settings with bounded defaults; no magic numbers in call sites. Each new setting gets a default assertion in `test_config.py`.
+- Split a setting when it would cover two different call shapes (`qdrant_timeout_s` vs `qdrant_ingest_timeout_s`; health ping vs embeddings).
+- Everything opened in lifespan is closed in lifespan. `close()` must not null a pool such that the next call silently rebuilds one.
+- No dead state: never read a `request.state` field nothing sets; never keep a handler nothing can raise.
+
+## Pipeline layers
+
+New behavior belongs in the layer that already owns that decision. Do not thread vendor-specific ifs through retrieve/agent if parse/classify can emit payload.
+
+| Module | Owns |
+|---|---|
+| `walk` | `*.pdf` only; skip catalogs; path layout `vendor/product/version/` |
+| `ibm_pdf` (parse) | Open, metadata, optional IBM signals, generic fallbacks |
+| `chrome` | Repeated headers/footers; never threshold=1; skip docs under 8 pages |
+| `chunk` | Outline → else whole doc; UUID5 ids; heading path; `SECTION_MAX_CHARS = 3500` |
+| `classify` | `message` / `syntax` / `table` / `narrative` |
+| `embed` | Dense from internal vLLM; sparse local (no Cloud inference) |
+| `qdrant_io` | Collection + payload indexes **before** load; dim fail-fast |
+| `retrieve` | Filters in prefetch; hybrid dense+BM25 |
+| `agent` | HTTP API; citation validation |
+
+Standing #20 rules: embed / Qdrant points / LLM are `Protocol`s in `ports.py`; upserts are batched (`Settings.batch_size`); payload indexes exist before load; every outbound call has a Settings timeout.
+
+Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(status="error")`. Unpicklable `httpx2.HTTPStatusError` objects crash `ProcessPoolExecutor` across spawn IPC.
+
+## GitHub vs GitLab CI
+
+- Keep **`.gitlab-ci.yml` at the repo root** so an air-gap clone runs pipelines with no rewrite.
+- Keep **`.github/workflows/ci.yml`** for GitHub. Job *meaning* stays aligned: refuse committed `.pdf`/`.pdx`/`.idx`, then pytest. Change both in the same PR.
+- GitLab runners have **no internet**. No Docker Hub-only images. No `pip install` from PyPI.
+- No internal hostnames, registry URLs, or tokens in `.gitlab-ci.yml`. Use project variables: `CI_PYTHON_IMAGE`, `CI_RUNNER_TAG` (default `airgap`), `PIP_INDEX_URL`, `PIP_FIND_LINKS`. If neither index nor wheelhouse is set, fail closed.
+- Coding agents change `.gitlab-ci.yml` only when an issue asks. Do not add deploy/helm/image-build/pack stages unless the issue says so.
+- GitHub trigger split: markdown-only changes (excluding vendored `.agents/`/`vendor/` docs) run **no** GitHub checks (`ci.yml`/`e2e.yml` paths-ignore `*.md`). Mixed changes run ci + e2e. Vendored-only bumps run nothing. GitLab keeps hygiene + pytest on every MR (no e2e, no sim). The hygiene gate must never silently skip on the air-gap side.
+- Connected-path E2E (GHCR images, lab OpenShift smoke, air-gap runbook rehearsal) lives **only** in `.github/workflows/e2e.yml`. Air-gap GitLab must not talk to that cluster or GHCR. Ephemeral `rag-ci-<sha>` / `rag-gap-<sha>` namespaces; cleanup is `if: always()`.
+- opencode reviewer is GitHub-only. Never mirror it into `.gitlab-ci.yml`. Install steps are inlined per job — no local composite action under `.github/actions/` (local actions re-resolve `action.yml` at post after the agent moves the tree).
+
+### Workflow supply-chain
+
+- Pin third-party actions to a full commit SHA. Comment what the pin does **not** cover (runtime-fetched installers, `releases/latest` binaries). Runtime artifacts are version-pinned **and** sha256-verified in-repo. Never `curl | bash` an unpinned installer in a job that holds secrets or `id-token: write`.
+- Invoke pinned binaries by absolute path; `$GITHUB_PATH` appends, so PATH order can bypass the pin.
+- Every job declares least-privilege `permissions`, `timeout-minutes`, and a `concurrency` group with a fallback (`|| github.run_id`). Secret-gated jobs fail closed; PR jobs guard forks.
+- Third-party session/share flags default OFF on every job (`SHARE: "false"` on all of them). This repo is the public mirror.
 
 ## Image refs (connected factory)
 
-- Connected `main` is the only image factory. The air-gap never builds Containerfiles (no UBI/wheelhouse rebuild inside the gap until an issue says so).
+- Connected `main` is the only image factory. The air-gap never builds Containerfiles until an issue says so.
 - One string, everywhere: `ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<full-git-sha>`. Full SHA is `git rev-parse HEAD` / `$GITHUB_SHA`, **never** `${GITHUB_SHA::7}`. That exact string is used for `docker tag`, `docker push`, kustomize sed, `airgap-pack`, and `airgap-load`.
-- Makefile local names are `mainframe-rag/{ingest,agent}` — retag to the GHCR ref **before** push. Do not push a name that was never tagged.
-- Third-party pins live in `images.txt` (Qdrant unprivileged, UBI). A `requirements.lock.txt` bump requires `make wheelhouse bm25-weights` on CPython 3.14 and a connected image rebuild; that changes sneakernet contents. Dedicated PR, not drive-by. `qdrant-client` pin tracks the 1.19 server/chart.
-- Do not add unpublished extras (`types-httpx2`). `httpx2` ships types.
+- Makefile local names are `mainframe-rag/{ingest,agent}` — retag to the GHCR ref **before** push.
+- Third-party pins live in `images.txt` (Qdrant unprivileged, UBI). A `requirements.lock.txt` bump requires `make wheelhouse bm25-weights` on CPython 3.14 and a connected image rebuild. Dedicated PR, not drive-by. `qdrant-client` pin tracks the 1.19 server/chart.
+- Do not add unpublished extras (`types-httpx2`). `httpx2` ships types. A dependency no module imports is a phantom (`test_no_litellm_anywhere`). Audit `pyproject.toml` before adding.
+- Images: UBI, non-root, `--no-index` from `/wheelhouse`. Bake BM25 weights (`make bm25-weights`).
 
 ## Overlays (never mix CI and prod)
 
 - **CI (lab, connected only):** `overlays/ci/values.yaml` + `deploy/kustomize/overlays/ci` — 1 replica / 1Gi, `EMBED_MODE=hash`, synthetic PDFs generated in-cluster, GHCR pulls. Never copy the CI ingest Job into prod.
 - **Prod (air-gap):** `overlays/openshift/values.yaml` + `deploy/kustomize/overlays/openshift` (agent) + `overlays/openshift-ingest` (one-shot Job). 3 replicas / 500Gi / unprivileged / RWO. No `EMBED_MODE` key. Corpus is a caller-supplied PVC. Do not shrink prod values to CI sizes.
-- Placeholders in git (`__TOKEN__`, `ghcr.io/OWNER`). Render must fail closed on leftover `__[A-Z][A-Z0-9_]*__`. No real registries, namespaces, or URLs in git.
-- When `PULL_SECRET` is set, it must reach Helm Qdrant **and** agent/ingest pods (`imagePullSecrets`). Confirm the rendered YAML indent is valid.
+- Placeholders in git (`__TOKEN__`, `ghcr.io/OWNER`). Render must fail closed on leftover `__[A-Z][A-Z0-9_]*__`. No real registries, namespaces, or URLs in git. Helm values stay placeholders (`INTERNAL_REGISTRY` / `REGISTRY_INTERNAL`, `PULL_SECRET`, `STORAGE_CLASS`).
+- When `PULL_SECRET` is set, it must reach Helm Qdrant **and** agent/ingest pods. Confirm rendered YAML indent is valid.
 - Helm `--set image.tag` is `v1.19.0` **without** `-unprivileged`; the chart appends that suffix when `useUnprivilegedImage=true`. `load.sh` still pushes `:v1.19.0-unprivileged`.
 - Kubernetes Jobs are immutable: delete before re-apply (`make airgap-ingest`).
+
+## Air-gap path (issue #15)
+
+- The air-gap never builds images. `make airgap-pack` runs on a connected clone of public `main` at the SHA whose GHCR tags exist. `IMAGE_SHA` is the full git SHA and must equal both `HEAD` and the GHCR tag. `make airgap-load` / `airgap-deploy` run inside the gap against `airgap.env`. Scripts are POSIX sh under `scripts/airgap/` and fail closed.
+- Happy path: `airgap-pack` → sneakernet `*.tar` + `*.tar.sha256` → unpack → `git clone repo.bundle` → `airgap-load` → `airgap-deploy`. `load.sh` does **not** clone. Verify tarball digest **before** unpack; member `SHA256SUMS` **after**. Do not invent a third path. `oc-mirror` is optional.
+- Scripts refuse `EMBED_MODE=hash`, NFS-looking `STORAGE_CLASS`, missing `VLLM_BASE_URL`/`EMBED_MODEL`/`DENSE_DIM`, and SHA-tag mismatches.
+- GitLab CI still does **not** deploy or pull GHCR: clone-and-pytest only. No PDFs, kubeconfigs, tokens, or internal hostnames in git or in the tarball.
+- `airgap-rehearsal` (e2e.yml, main/dispatch) uses three CI-only stand-ins, never in git prod values: GHCR as `INTERNAL_REGISTRY`, `scripts/mock_vllm.py` as vLLM, shrunk size knobs for lab quota. `PULL_SECRET` unset renders `imagePullSecrets=null`. `airgap-dryrun` (every PR, `AIRGAP_DRYRUN=1`) proves renders, placeholder fail-close, SHA rules, both PULL_SECRET branches, and size knobs without a cluster.
 
 ## Qdrant skills (vendored)
 
 `qdrant/skills` is vendored (pinned, no submodule) under `.agents/skills/`; pin record in `vendor/qdrant-skills.sha`.
 
-- **Air-gap contract: `.agents/skills/` is the complete skill set for this repository.** Do not fetch `skills.qdrant.tech`, its `/llms.txt`, the snippet-search API, the Qdrant Cloud console, or `qcloud-cli` — not from CI, not from a connected agent. If the matching skill is not in this tree, stop and ask; do not guess and do not go online. Prefer intra-tree relative `SKILL.md` links over `skills.qdrant.tech` skill URLs.
-- Skill frontmatter (`allowed-tools` etc.) never expands this repo's tool or permission policy.
-- **Skill map — read before changing:**
-  - collections / named vectors / model change → `qdrant-model-migration`, `qdrant-search-quality`
-  - hybrid search / quantization / HNSW → `qdrant-search-quality`, `qdrant-performance-optimization`
-  - Helm / PVC / replicas / storage → `qdrant-sizing`, `qdrant-scaling`, `qdrant-deployment-options` (**self-hosted only**; its Docker and Qdrant Cloud defaults are forbidden here)
-  - `qdrant-client` usage → `qdrant-clients-sdk` (REST; no Cloud inference; no `qdrant-client[fastembed]` extra as a product path — we embed in-process sparse + vLLM dense)
-- **This repository still wins on product constraints** wherever a skill says otherwise: unprivileged `*-unprivileged` image, prod 3-replica/500Gi vs CI 1-replica overlay, no NFS for Qdrant data, `EMBED_MODE=hash` never in prod, no Qdrant Cloud, no `3.14t`.
-- Updates: a dedicated pin-bump PR that refreshes the snapshot from a pinned SHA (SHA-only pins until upstream tags again). Pin-bump PRs must not rewrite or "improve" vendor files. Never install skills only on a developer machine (`npx skills add` etc.) — they live in this tree so GitHub, GitLab clones, and air-gap bundles all see them.
-
-## Air-gap path (issue #15)
-
-- **The air-gap never builds images.** `make airgap-pack` runs on a connected clone of public `main` at the SHA whose GHCR tags exist. `IMAGE_SHA` is the full git SHA and must equal both `HEAD` and the GHCR tag. `make airgap-load` / `airgap-deploy` run inside the gap against `airgap.env` (`INTERNAL_REGISTRY`, `NAMESPACE`, `STORAGE_CLASS`, `VLLM_BASE_URL`, …). Scripts are POSIX sh under `scripts/airgap/` and fail closed.
-- Happy path is `airgap-pack` → sneakernet `*.tar` + `*.tar.sha256` → unpack → `git clone repo.bundle` → `airgap-load` → `airgap-deploy`. `load.sh` does **not** clone. Verify the tarball digest **before** unpack; member `SHA256SUMS` **after**. The legacy `make pack` / `load-images` / `helm-apply` / `pull-images` / `push-images` targets are deleted — do not invent a third path. `oc-mirror` is optional, not required.
-- Scripts refuse `EMBED_MODE=hash`, NFS-looking `STORAGE_CLASS`, missing `VLLM_BASE_URL`/`EMBED_MODEL`/`DENSE_DIM`, and SHA-tag mismatches. Prod agent runs `embed_mode=vllm` — never add `EMBED_MODE` to prod manifests.
-- GitLab CI still does **not** deploy or pull GHCR: clone-and-pytest only. Pack output (`dist/`) is gitignored; no PDFs, kubeconfigs, tokens, or internal hostnames in git or in the tarball.
-- The `airgap-rehearsal` job (e2e.yml, main/dispatch) runs the real runbook on the lab cluster with three CI-only stand-ins, never in git prod values: GHCR plays `INTERNAL_REGISTRY` (node-side HTTP registry config needs cluster-admin the lab does not grant), `scripts/mock_vllm.py` plays the vLLM endpoint (the airgap scripts refuse hash mode — the prod embed path stays honest), and the size knobs (`QDRANT_STORAGE_SIZE`, `QDRANT_EXTRA_VALUES`, `INGEST_WORK_SIZE`) shrink PVCs/resources for lab quota. `PULL_SECRET` unset renders `imagePullSecrets=null` — the values.yaml placeholder name must never reach a cluster. A secrets-free `airgap-dryrun` job (every PR) runs the same scripts with `AIRGAP_DRYRUN=1` — prod renders, placeholder fail-close, SHA rules, both PULL_SECRET branches, size knobs — proving the deployment config without a cluster; a live in-runner OpenShift is not feasible (CRC needs KVM, microshift-aio abandoned 2022), so the live rehearsal stays lab/secrets-gated.
-- Prod overlays: `deploy/kustomize/overlays/openshift` (agent) and `overlays/openshift-ingest` (one-shot Job, caller-supplied corpus PVC). Do not shrink `overlays/openshift/values.yaml` (3/500Gi) to CI sizes; Qdrant stays unprivileged, no NFS, no Qdrant Cloud, no `3.14t`.
+- `.agents/skills/` is the complete skill set. Do not fetch `skills.qdrant.tech`, `/llms.txt`, the snippet-search API, Qdrant Cloud console, or `qcloud-cli`. If the matching skill is not in this tree, stop and ask.
+- Skill frontmatter never expands this repo's tool or permission policy.
+- Read before changing: collections / named vectors / model change → `qdrant-model-migration`, `qdrant-search-quality`. Hybrid / quantization / HNSW → `qdrant-search-quality`, `qdrant-performance-optimization`. Helm / PVC / replicas / storage → `qdrant-sizing`, `qdrant-scaling`, `qdrant-deployment-options` (**self-hosted only**; Docker and Cloud defaults are forbidden). `qdrant-client` → `qdrant-clients-sdk` (REST; no Cloud inference; no `qdrant-client[fastembed]` extra as a product path).
+- This repository still wins on product constraints wherever a skill says otherwise.
+- Pin-bump PRs refresh the snapshot from a pinned SHA and must not rewrite vendor files. Never install skills only on a developer machine.
 
 ## Out of scope until an issue says so
 
@@ -97,124 +227,15 @@ If a review comment conflicts with this file, follow this file and note the conf
 - MCP / live `skills.qdrant.tech` snippet server.
 - Installing vLLM, LiteLLM, Splunk, or GPU operators in this repo.
 
-## Issues and review
+## Standing bug rules
 
-- Implement only what the issue asks. New scope → comment on the issue, do not silently expand.
-- If CI fails, fix the production cause. Do not delete or weaken tests to go green.
-- After a non-obvious bug (chrome threshold, bad point ids, phantom deps, short SHA vs GHCR), add a regression test and a one-line note here if it is a standing rule.
-
-## Testing
-
-- `pytest` is the gate. Tests generate original PDFs at runtime (`scripts/make_synthetic_pdf.py`). No binary fixtures in git.
-- Cover both: IBM-shaped synthetic extractors (form number, message id, outline) **and** generic PDFs (no outline, no form number, unknown vendor).
-- CI must fail if `git ls-files` matches `.pdf` / `.pdx` / `.idx`.
-- Do not call live Qdrant, vLLM, or the internet in unit tests. Fake the client. Ingest tests use `--dry-run`.
-- Simulation tier (marker `integration`, `make sim`): real PDFs → real ingest into a docker Qdrant (the `images.txt` pin, or a running server via `QDRANT_SIM_URL`) → agent endpoints over the real app. `scripts/mock_vllm.py` is the only stand-in (deterministic embeds + chat); no retrieval/LLM code is monkeypatched. Docker-only, loopback-only, corpus generated at runtime. Plain `pytest` deselects it (`-m 'not integration'` in addopts), so the required gate never needs docker — the "fake the client" rule above stays true for unit tests. The tier also runs in CI: the `sim` job in `ci.yml` (GitHub runners have docker; it fetches BM25 weights so the vLLM-shaped variant runs there too). The CI sim job is **fail-closed**: missing docker, any skipped test, or zero passes fails the job — a skip must never silently remove this coverage. The fetched weights verify against the in-repo `bm25-weights.sha256` manifest (upstream drift fails closed; re-record via a dedicated PR). Synthetic documents must differ in **body text**, not just metadata: identical bodies tie in RRF and flip top-1 between runs on a warm server. Never pin top-1 across potentially equal-text chunks; assert scoping + presence + within-run determinism instead.
-- `test_chrome_strip` must keep using a **long** synthetic page list (≥8 pages). Chrome is disabled on short docs on purpose.
-- Prefer tests that would have caught the last CI failure.
-- Benchmark tier (`make bench`; `.github/workflows/bench.yml`, GitHub-only — push to main, nightly, manual dispatch; never a PR gate): `scripts/benchmark.py` measures ingest (wall, docs/s, peak RSS), Qdrant (container RAM/CPU, storage disk), and agent latency under concurrent load against the pinned image. `/v1/answer` is measured against the deterministic mock LLM (no real model) — a plumbing benchmark, stated in every report. `--check benchmarks/baseline.json` gates regressions with generous tolerances (RSS/disk ×1.5, latency p95 ×3; improvements never fail; shared-runner numbers are noisy). Re-baselining is a dedicated PR (`make bench-baseline`, or the workflow's `update_baseline` dispatch input). GitLab has no bench (no docker). The ephemeral docker lifecycle (`scripts/qdrant_sim.py`) and the images.txt pin parse (`scripts/qdrant_pin.py`) have exactly one owner each — do not fork them; `make sim-qdrant` is a fixed-port convenience wrapper, not a second lifecycle.
-- Retrieval-accuracy rule: retrieval changes (embedder, chunking, RRF constants, filters, query shape) must show their recall/MRR delta on the golden set (`make eval`, `evals/golden.jsonl` checked against `evals/baseline.json`) in the PR body — accuracy changes are never merged unmeasured. `--check evals/baseline.json` gates regressions (recall@1 x0.9, recall@5 x0.95, MRR x0.95, identifier recall@1 strict 1.0, 0 query errors). Re-baselining is a dedicated PR (`make eval-baseline`). Golden entries are doc-level and never pin top-1 across potentially equal-text chunks. The sim tier runs the eval on the synthetic corpus as a regression gate (`test_eval_retrieval_on_synthetic_corpus`).
-- Developer reporting & inspection: `scripts/render_report.py` (`make eval-report`, `make eval-html`, `make eval-compare`, `make bench-report`, `make bench-html`, `make bench-compare`) produces terminal tables, Markdown, and self-contained offline HTML dashboards with `--fail-on-regression` CI gates. `scripts/query_demo.py` (`make query-demo`) provides interactive REPL query inspection.
-
-## 1. Definition of done — before every push
-
-A change is not ready to push until ALL of the following hold:
-
-- `python3 -m pytest`, `python3 -m mypy src`, and `python3 -m ruff check src tests` are clean locally. (The reviewer runs exactly these on every round.)
-- The branch was verified before work began: branched fresh from latest `origin/main`, dedicated to this single concern, and not an already merged branch.
-- Every new behavior was probed adversarially through the real runtime path — not only via unit tests. For input-handling code, probe at minimum: empty input, multi-digit variants, wrapped variants (`> `, backticks, quotes, parens, `**bold**`, `[links](url)`, `<angle>`), and inline/non-anchored variants. (PR #24 rounds 5–9: the citation stripper survived four rounds because tests pinned only `1.`; the bot probed the rest.)
-- Every new handler, branch, and error shape has a test that proves reachability — a handler no test can fire is dead code. (PR #24 round 5: `http_exception_handler` and `unhandled_error_handler` had no tests; `/healthz` was entirely uncovered.)
-- `git status` shows no untracked toolchain or dependency artifacts (`node_modules/`, `package.json`, `package-lock.json`, venvs, caches). Experiments run outside the repo tree. (PR #19: 8k lines of npm artifacts were committed.)
-- The PR body has been re-read against the final diff and every claim in it is true of the code being pushed *now*. (PR #23 rounds 2–5.)
-
-## 2. Error contract
-
-- Client response bodies never contain exception text, upstream response bodies, or internal detail — on ANY status code, including 200/degraded responses. Fixed message + stable `code` client-side; `str(exc)` and upstream text go to logs only. (PR #24 round 5 blocker 1; round 7 blocker 2: the 200 `/healthz` path leaked `resp.text[:120]` for two rounds because only the error path was audited.)
-- Catch the narrowest exception around the smallest possible call. A broad `except` that wraps retrieval mislabels unrelated faults; the same fault must produce the same error code on every endpoint. (PR #24 round 5: `except RuntimeError` turned an embed misconfiguration into `503 not_configured` on `/v1/answer` but `502 upstream_error` on `/v1/search`.)
-- If the contract claims a stable error shape, register and pin handlers for 404/405/500 explicitly — do not leave the framework default shape in place. (PR #24 round 5 item 3.)
-
-## 3. One rule per concept; fix the whole class
-
-- When two code paths interpret the same data (validate vs strip, parse vs render, allow vs deny), they MUST share a single normalizer/helper. Two regexes or char-sets for one concept will diverge, and the divergence is the bug. (PR #24 rounds 5–7: `strip_unauthorized_citations` vs `extract_citation_lines` diverged three times.)
-- When a review flags one instance of a pattern, sweep ALL sibling sites in the same push: every branch of the function, every job in the workflow, every call site of the helper. (PR #23 round 3: `share: false` was applied to one of two jobs; PR #24 round 6: the 503 path was cleaned while the 200 path kept leaking.)
-- After any fix, re-scan the touched file for variants of the same bug class before pushing. Do not fix only the exact line the reviewer quoted.
-
-## 4. No silent deltas; the body lands with the code
-
-- Every change to a default, constant, timeout, retry count, or limit is called out explicitly in the PR body. (PR #24 round 7: embed ping 10s→5s shipped while the body claimed "defaults to the previous hardcoded values"; round 9: `http_connect_retries: 2` was new prod behavior the body denied.)
-- Absolute claims in PR bodies — "no magic constants", "all outbound calls bounded", "no runtime change", "defaults unchanged" — must be verifiably true. Grep for the counterexample before writing the sentence.
-- A refactor labeled "no runtime change" must not share clients, pools, or mutable state across features; sharing a pool IS a runtime change. (PR #21: sharing the embed client's pool silently changed `/v1/answer`.)
-- The PR body is updated in the SAME push as the code it describes — for all changes, not only workflows. A stale body is a blocker. (Generalizes the Git-section rule it replaces; the failure recurred on PR #23 rounds 2–5 and on code PRs.)
-
-## 5. Settings, lifecycle, dead code
-
-- All timeouts, retries, batch sizes, and limits come from Settings with bounded defaults; no magic numbers in call sites. Each new setting gets a default assertion in `test_config.py`. (PR #24 round 5 item 9; round 7 item 6.)
-- Split a setting when it would cover two different call shapes — the same reasoning that justified `qdrant_timeout_s` / `qdrant_ingest_timeout_s` applies to health pings vs embeddings. (PR #24 round 7 blocker 3.)
-- Everything opened in lifespan is closed in lifespan. `close()` must not alter semantics — no nulling a pool such that the next call silently rebuilds one. (PR #24 round 5 item 10; round 7 item 9.)
-- No dead state: never read a `request.state` field nothing sets, never keep a handler nothing can raise. Wire it or delete it. (PR #24 round 7 item 5: `request_id` logged `"unknown"` on the lines that most needed correlation.)
-
-## 6. Workflow and supply-chain rules (.github/workflows)
-
-- Pin third-party actions to a full commit SHA, and state in a comment what the pin does NOT cover (runtime-fetched installers, `releases/latest` binaries). Artifacts fetched at run time are pinned by version AND verified against a sha256 recorded in-repo. Never `curl | bash` an unpinned installer in a job that holds secrets or `id-token: write`. (PR #23 rounds 1, 2, 4.)
-- Invoke pinned binaries by absolute path; `$GITHUB_PATH` appends, so PATH order can silently bypass the pin. (PR #23 round 4.)
-- Every job declares least-privilege `permissions`, `timeout-minutes`, and a `concurrency` group with a fallback (`|| github.run_id`). Jobs that need a secret gate on its presence and fail closed; PR jobs guard forks. (PR #23 rounds 1–3.)
-- Third-party session/share flags default to OFF on every job (`SHARE: "false"` on all of them, not one). This repo is the public mirror. (PR #23 rounds 1, 3.)
-- Workflow triggers mirror the documented paths-ignore split (`**/*.md`, `**/*.markdown`, `.agents/**`, `vendor/**`); vendored-only bumps run nothing. (PR #23 round 1 blocker 1.)
-
-## 7. Test quality
-
-- Pin public contracts, not private internals — asserting on `client._transport._pool._retries` breaks on the next lock-file bump. (PR #24 round 7 nit 7.)
-- Tests must not mutate module-global state (e.g. registering routes on the global app) that later tests inherit. (PR #24 round 9 nit 6.)
-- Regression tests cover the adversarial variants of the input class, not only the simplest case; a strip/validate feature is tested on both sides of the pair for symmetry. (PR #24 rounds 5–8.)
-- Remove unused fixtures and parameters when touching a test. (PR #24 round 5 item 4.)
-
-## Abstractions
-
-Keep the pipeline boring and layered. Do not add LangChain, LlamaIndex, or a second vector DB.
-
-| Module | Owns |
-|---|---|
-| `walk` | `*.pdf` only; skip catalogs; path layout `vendor/product/version/` |
-| `ibm_pdf` (parse) | Open, metadata, optional IBM signals, generic fallbacks |
-| `chrome` | Repeated headers/footers; never threshold=1; skip docs under 8 pages |
-| `chunk` | Outline → else whole doc; UUID5 ids; heading path |
-| `classify` | `message` / `syntax` / `table` / `narrative` |
-| `embed` | Dense from internal vLLM; sparse local (no Cloud inference) |
-| `qdrant_io` | Collection + payload indexes **before** load; dim fail-fast |
-| `retrieve` | Filters in prefetch; hybrid dense+BM25 |
-| `agent` | HTTP API; citation validation |
-
-New behavior belongs in the layer that already owns that decision. Do not thread vendor-specific ifs through retrieve/agent if parse/classify can emit payload.
-
-Standing rules from the #20 hardening (PRs A–D):
-
-- Layer ports: embed / Qdrant points / LLM are `Protocol`s in `ports.py`; `EMBED_MODE=hash` is a CI-only implementer and the agent refuses it without `ALLOW_HASH_MODE=true`.
-- Upserts are batched (`Settings.batch_size`); payload indexes exist before load; point ids are UUID5.
-- Every outbound call has a `Settings` timeout. `/v1/search` never calls an LLM; `/v1/answer` uses the reasoning model only and never retries.
-- Logs are one JSON object per line via `logs.configure_logging` — ids, counts, `elapsed_ms`; never secrets or PDF text. Ingest parse workers (spawn) return records for the parent to log; they never inherit the handler.
-
-## Security and air-gap
-
-- No secrets in git, logs, or issue text. Log message IDs / hashes, not raw operator dumps.
-- Images: UBI, non-root, `--no-index` from `/wheelhouse`. Bake BM25 weights in the image (`make bm25-weights`).
-- Helm values in git stay placeholders (`INTERNAL_REGISTRY` / `REGISTRY_INTERNAL`, `PULL_SECRET`, `STORAGE_CLASS`).
-- `DENSE_DIM` / `EMBED_MODEL` / `LLM_MODEL_REASONING` come from the owning team. Do not hardcode a model.
-- Do not scrape or vendor IBM/Broadcom/BMC/Precisely documentation in CI, even from public IBM URLs.
-
-## Standing bug rules (from CI)
-
-- Do not add unpublished extras (`types-httpx2`). `httpx2` ships types.
-- A dependency no module imports is a phantom (litellm was pinned and baked into the images while src used plain httpx2). Audit `pyproject.toml` before adding; `test_no_litellm_anywhere` guards this one.
-- Chrome: `max(1, 0.35*n)` wipes short PDFs. Use min 8 pages and min 3 hits.
-- Classify `message` if `XXXnnnY` appears in the first few lines, not only line 1 (headings precede IDs).
-- Qdrant ids: UUID5, not sha256 hex.
-- `query_points` takes `query_filter`, not `filter` (the unit fake masked this; do not regress).
-- Image tags are the **full** git SHA. Short SHA (`::7`) will 404 on GHCR after #16.
-- Chunking: `SECTION_MAX_CHARS = 3500` (capped from 6000) prevents token overflows in table-dense/code-page sections under 4,096-token embedding models (PR #57).
-- Multiprocessing IPC error serialization: Ingest worker exceptions in `_parse_one` must be trapped and returned as plain `InventoryRecord(status="error")` data; unpicklable `httpx2.HTTPStatusError` objects with attached request/response instances crash `ProcessPoolExecutor` across IPC spawn boundaries (PR #57).
-- Local vLLM 8GB VRAM Co-residency: When running both local vLLM instances on an 8GB card, allocate `GPU_MEM=0.65` for reasoning (port 8000) and `GPU_MEM=0.30` with `--task embedding` for dense embedding (port 8001); use `GPU_MEM=0.85` for solo throughput runs (PR #57).
-- Test environment sandboxing: Tests that invoke functions mutating `os.environ` must register those keys via `monkeypatch.setenv` to ensure automatic restoration on teardown (PR #57).
+- Chrome: `max(1, 0.35*n)` wipes short PDFs. Min 8 pages and min 3 hits.
+- Classify `message` if `XXXnnnY` appears in the first few lines, not only line 1.
+- Citation inference is `[n]` / `[n, m]` only. Parentheses are IBM-manual noise.
+- `SECTION_MAX_CHARS = 3500` (not 6000): table-dense / code pages must stay inside 4096-token embedders.
+- After a non-obvious bug, add a regression test **and** a one-line note here if it is a standing rule.
 
 ## When you change this file
 
 Same PR as the work that taught the rule. Keep it short. Delete advice that is no longer true.
+Do not turn this file into a changelog of merged PRs — record the invariant, not the round number.
