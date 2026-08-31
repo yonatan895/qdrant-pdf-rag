@@ -86,7 +86,11 @@ def test_setup_local_corpus_vllm(tmp_path: Path):
     with (
         patch("scripts.test_local_e2e_vllm.build") as mock_build,
         patch("scripts.test_local_e2e_vllm.run_ingest", return_value=0) as mock_ingest,
+        patch("qdrant_client.QdrantClient") as mock_qdrant_cls,
     ):
+        mock_client = MagicMock()
+        mock_client.collection_exists.return_value = False
+        mock_qdrant_cls.return_value = mock_client
         setup_local_corpus(settings, tmp_path)
         assert mock_build.called
         assert mock_ingest.called

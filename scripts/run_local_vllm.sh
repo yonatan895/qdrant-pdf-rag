@@ -6,7 +6,7 @@ set -eu
 
 MODEL="${MODEL:-google/gemma-4-E4B-it-qat-mobile-ct}"
 PORT="${PORT:-8000}"
-GPU_MEM="${GPU_MEM:-0.85}"
+GPU_MEM="${GPU_MEM:-0.65}"
 MAX_LEN="${MAX_LEN:-4096}"
 IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}"
 
