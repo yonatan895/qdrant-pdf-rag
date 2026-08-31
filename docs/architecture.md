@@ -80,16 +80,17 @@ The agent returns **answers grounded strictly in citations** (doc number, title,
 
 1. **PDF Discovery & Parsing:** PyMuPDF extracts metadata, table of contents (bookmarks), printed page labels (`page.get_label()`), and message IDs (`XXXnnnY`).
 2. **Chrome Stripping:** Repeated header/footer lines appearing across $\ge 35\%$ of sampled pages in documents $\ge 8$ pages are stripped.
-3. **Chunk Construction:** Sections partitioned by outline hierarchy. Sections $> 6000$ characters are split on blank lines with a 400-character overlap.
-4. **Point ID Generation:** UUID5 derived from document and chunk keys (guaranteeing deterministic, idempotency-safe IDs without invalid hex strings).
-5. **Payload Slimming:** Points store only essential query and citation attributes (`doc_id`, `title`, `heading_path`, `page_label`, `chunk_type`, `product`, `version`, `message_ids`, `text`). Redundant `embed_text` is omitted from storage.
+3. **Chunk Construction:** Sections partitioned by outline hierarchy. Sections $> 3500$ characters are split on blank lines with a 400-character overlap (`SECTION_MAX_CHARS = 3500`). This ensures dense tables, character code matrices (e.g. AFP fonts), and message documentation never exceed the 4,096-token context limit of dense embedding models.
+4. **Multiprocessing Worker IPC Isolation:** Ingest worker processes trap exceptions locally inside `_parse_one` and serialize plain-data `InventoryRecord(status="error")` payloads, preventing unpicklable exception instances (such as `httpx2.HTTPStatusError` with attached response/request references) from crashing the `ProcessPoolExecutor`.
+5. **Point ID Generation:** UUID5 derived from document and chunk keys (guaranteeing deterministic, idempotency-safe IDs without invalid hex strings).
+6. **Payload Slimming:** Points store only essential query and citation attributes (`doc_id`, `title`, `heading_path`, `page_label`, `chunk_type`, `product`, `version`, `message_ids`, `text`). Redundant `embed_text` is omitted from storage.
 
 ### 4.2 Hybrid Embeddings & Collection Configuration
 
-- **Dense Embeddings:** Ingest calls internal vLLM via `POST ${VLLM_BASE_URL}/embeddings`.
+- **Dense Embeddings:** Ingest calls internal vLLM via `POST ${VLLM_BASE_URL}/embeddings` (supporting arbitrary embedding dimensions, e.g. 1024-dim `Qwen3-Embedding-0.6B` or 768-dim models). Dimension is dynamically auto-probed and validated.
 - **Sparse BM25 Embeddings:** Computed in-process via FastEmbed using pre-baked `Qdrant/bm25` weights.
 - **Collection Configuration (`mainframe_manuals`):**
-  - Dense: `${DENSE_DIM}` dimensions, Cosine distance, on-disk HNSW ($M=16, ef\_construct=128$), int8 scalar quantization in RAM.
+  - Dense: `${DENSE_DIM}` dimensions, Cosine distance, on-disk HNSW ($M=16, ef\_construct=128$), int8 scalar quantization in RAM. Test runners automatically recreate collections if vector dimensions differ between test runs.
   - Sparse: `modifier=idf`, on-disk storage.
   - Payload indexes: `doc_id`, `product`, `version`, `vendor`, `chunk_type`, `message_ids`, `members`, `sha256` (keyword indexes).
 
@@ -143,7 +144,14 @@ Outbound HTTP communication is managed via `httpx2` with connection pools create
 
 ### 5.1 Retrieval Accuracy Gates (`evals/`)
 - **Golden Dataset:** `evals/golden.jsonl` contains labeled identifier and natural language queries.
-- **Regression Gate:** `make eval` evaluates retrieval recall and MRR against `evals/baseline.json`. Regression bounds:
+- **Regression Gate:** `make eval` evaluates retrieval recall and MRR against `evals/baseline.json`.
+- **Measured Accuracy (Qwen3-Embedding-0.6B Dense + BM25 Sparse):**
+  - **Recall@1:** `0.667` *(Identifier: 1.000, NL: 0.556, Baseline: 0.500)*
+  - **Recall@3:** `0.833` *(Baseline: 0.750)*
+  - **Recall@5:** `0.917` *(Identifier: 1.000, NL: 0.889, Baseline: 0.750)*
+  - **MRR:** `0.781` *(Identifier: 1.000, NL: 0.708, Baseline: 0.625)*
+  - **Failures:** `0 / 12`
+- **Regression Bounds:**
   - Overall $Recall@1 \ge 0.9\times$ baseline
   - Overall $Recall@5 \ge 0.95\times$ baseline
   - Overall $MRR \ge 0.95\times$ baseline
@@ -160,10 +168,10 @@ Outbound HTTP communication is managed via `httpx2` with connection pools create
 - **Report Renderer & Comparator (`scripts/render_report.py`):**
   - Formats eval and benchmark reports into terminal text, Markdown, and 100% self-contained offline HTML dashboards.
   - Subcommands: `eval`, `bench`, `compare-eval`, `compare-bench`.
-- **Local GPU vLLM Launcher (`scripts/run_local_vllm.sh` / `make local-vllm`):**
-  - Runs `vllm/vllm-openai:v0.28.0` with 8GB VRAM tuning, Gemma 4 tool/reasoning parsers, and offline weights mounting.
+- **Local GPU Dual-Model vLLM Server (`scripts/run_local_vllm.sh` / `make local-vllm` / `make local-vllm-embed`):**
+  - Runs reasoning models (Gemma-4 on port 8000, `GPU_MEM=0.65`) and embedding models (Qwen3-Embedding-0.6B on port 8001, `GPU_MEM=0.30`, `--task embedding`) concurrently on consumer 8GB VRAM cards.
 - **Automated Local End-to-End Suite (`scripts/test_local_e2e_vllm.py` / `make test-vllm-e2e`):**
-  - Validates full pipeline from PDF build to FastAPI HTTP `/v1/search` and `/v1/answer` endpoints against local vLLM.
+  - Validates full pipeline from PDF build and dense/sparse ingestion to FastAPI HTTP `/v1/search` and `/v1/answer` endpoints against local vLLM, with dimension auto-probing and strict grounding validation.
 
 ---
 
