@@ -224,12 +224,12 @@ bench-compare: | .venv
 
 # Interactive query inspection and debugging CLI
 query-demo: | .venv
-	PYTHONPATH=. .venv/bin/python scripts/query_demo.py $(if $(QUERY),--query "$(QUERY)",) $(if $(COLLECTION),--collection "$(COLLECTION)",)
+	PYTHONPATH=. .venv/bin/python scripts/query_demo.py $(if $(QUERY),--query "$(QUERY)",) $(if $(COLLECTION),--collection "$(COLLECTION)",) $(if $(LIMIT),--limit "$(LIMIT)",) $(if $(PRODUCT),--product "$(PRODUCT)",) $(if $(VERSION),--version "$(VERSION)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",)
 
 # Interactive conversational Q&A assistant (reasoning LLM + Qdrant retrieval)
 .PHONY: ask
 ask: | .venv
-	PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer $(if $(QUERY),--query "$(QUERY)",) $(if $(COLLECTION),--collection "$(COLLECTION)",) $(if $(LIMIT),--limit "$(LIMIT)",)
+	PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer $(if $(QUERY),--query "$(QUERY)",) $(if $(COLLECTION),--collection "$(COLLECTION)",) $(if $(LIMIT),--limit "$(LIMIT)",) $(if $(PRODUCT),--product "$(PRODUCT)",) $(if $(VERSION),--version "$(VERSION)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",)
 
 # Local GPU acceleration & vLLM testing
 .PHONY: local-vllm local-vllm-embed test-vllm-e2e
