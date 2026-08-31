@@ -293,8 +293,8 @@ def test_run_local_vllm_sh_embedding_model_no_task_arg(tmp_path: Path):
         {
             "MODEL": "Qwen/Qwen3-Embedding-0.6B",
             "PORT": "8001",
-            "GPU_MEM": "0.43",
-            "MAX_LEN": "2048",
+            "GPU_MEM": "0.48",
+            "MAX_LEN": "4096",
         },
     )
     assert rc == 0
@@ -305,10 +305,11 @@ def test_run_local_vllm_sh_embedding_model_no_task_arg(tmp_path: Path):
     assert "-p" in args
     assert "8001:8001" in args
     assert "Qwen/Qwen3-Embedding-0.6B" in args
+    # Pin 8GB VRAM co-residency contract
     assert "--gpu-memory-utilization" in args
-    assert "0.43" in args
+    assert "0.48" in args
     assert "--max-model-len" in args
-    assert "2048" in args
+    assert "4096" in args
 
 
 def test_run_local_vllm_sh_reasoning_gemma4_model(tmp_path: Path):
