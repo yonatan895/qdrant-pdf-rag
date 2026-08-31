@@ -30,6 +30,7 @@ If a review comment conflicts with this file, follow this file and note the conf
 
 - Public forge is **GitHub**. Enterprise forge is **air-gapped GitLab**. Same git history moves by bundle / sneaker-net; do not maintain a divergent tree.
 - Default branch is `main`. Never push application commits to `main`.
+- **Branch verification before starting work:** Always verify current git branch and status before making changes (`git status`, `git branch`). Every distinct concern, fix, or feature must start on a fresh branch based on latest `origin/main` (`git fetch origin main && git checkout -b <type>/<issue>-<short> origin/main`). Never commit changes into an already merged branch or bundle code changes into an open docs-only PR.
 - Branch from latest `main`: `feat/<issue>-short`, `fix/<issue>-short`, `docs/<short>`.
 - One concern per PR. Rebase on `main` before asking for review; no merge commits unless the reviewer asks.
 - Commits: imperative, present tense, say *why* if not obvious (`Fix chrome threshold so 3-page PDFs are not wiped`).
@@ -120,6 +121,7 @@ If a review comment conflicts with this file, follow this file and note the conf
 A change is not ready to push until ALL of the following hold:
 
 - `python3 -m pytest`, `python3 -m mypy src`, and `python3 -m ruff check src tests` are clean locally. (The reviewer runs exactly these on every round.)
+- The branch was verified before work began: branched fresh from latest `origin/main`, dedicated to this single concern, and not an already merged branch.
 - Every new behavior was probed adversarially through the real runtime path — not only via unit tests. For input-handling code, probe at minimum: empty input, multi-digit variants, wrapped variants (`> `, backticks, quotes, parens, `**bold**`, `[links](url)`, `<angle>`), and inline/non-anchored variants. (PR #24 rounds 5–9: the citation stripper survived four rounds because tests pinned only `1.`; the bot probed the rest.)
 - Every new handler, branch, and error shape has a test that proves reachability — a handler no test can fire is dead code. (PR #24 round 5: `http_exception_handler` and `unhandled_error_handler` had no tests; `/healthz` was entirely uncovered.)
 - `git status` shows no untracked toolchain or dependency artifacts (`node_modules/`, `package.json`, `package-lock.json`, venvs, caches). Experiments run outside the repo tree. (PR #19: 8k lines of npm artifacts were committed.)
