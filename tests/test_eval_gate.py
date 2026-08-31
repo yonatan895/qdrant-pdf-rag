@@ -107,3 +107,53 @@ def test_check_baseline_detects_query_failures():
 def test_check_baseline_none_baseline_passes():
     rep = _report()
     assert check_baseline(rep, None) == []
+
+
+def test_load_golden_validates_and_rejects_empty(tmp_path: Path):
+    from scripts.eval_retrieval import load_golden, score_entry
+
+    from mainframe_rag.retrieve.query import SearchHit
+
+    # Valid file with comments and blanks
+    golden_file = tmp_path / "valid_golden.jsonl"
+    golden_file.write_text(
+        "# Comment line\n\n"
+        '{"query": "IEA500I message", "expected_doc_ids": ["SC14-7315-70"], "expected_heading": "Chapter 2"}\n'
+        '{"query": "LFAREA parmlib", "expected_doc_ids": ["SA22-7592-05"]}\n'
+    )
+    entries = load_golden(golden_file)
+    assert len(entries) == 2
+    assert entries[0].query == "IEA500I message"
+    assert entries[0].expected_doc_ids == ["SC14-7315-70"]
+    assert entries[0].expected_heading == "Chapter 2"
+    assert entries[1].query == "LFAREA parmlib"
+
+    # Score entry against SearchHit
+    hit1 = SearchHit(
+        chunk_id="c1",
+        score=0.9,
+        cite="SC14-7315-70 Manual, p. 1",
+        heading="Chapter 2 > IEA500I",
+        text="Sample text",
+        doc_id="SC14-7315-70",
+        title="Manual",
+        page_label="1",
+        chunk_type="narrative",
+        message_ids=("IEA500I",),
+    )
+    score = score_entry([hit1], entries[0])
+    assert score["recall@1"] == 1.0
+    assert score["mrr"] == 1.0
+
+    # Reject empty query
+    bad1 = tmp_path / "bad1.jsonl"
+    bad1.write_text('{"query": "", "expected_doc_ids": ["SC14-7315-70"]}\n')
+    import pytest
+    with pytest.raises(SystemExit):
+        load_golden(bad1)
+
+    # Reject empty expected_doc_ids
+    bad2 = tmp_path / "bad2.jsonl"
+    bad2.write_text('{"query": "valid query", "expected_doc_ids": []}\n')
+    with pytest.raises(SystemExit):
+        load_golden(bad2)

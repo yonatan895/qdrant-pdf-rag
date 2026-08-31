@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 import pymupdf
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from mainframe_rag.ingest.walk import detect_vendor, infer_from_path
 from mainframe_rag.regexes import DOCNO_RE
@@ -32,8 +32,8 @@ class ParsedDoc(BaseModel):
     title: str
     product: str | None = None
     version: str | None = None
-    vendor: str | None = "unknown"
-    toc: tuple[tuple[int, str, int], ...] = Field(default_factory=tuple)
+    vendor: str = "unknown"
+    toc: tuple[tuple[int, str, int], ...] = ()
     page_count: int = 0
 
 

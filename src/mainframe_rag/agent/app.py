@@ -14,7 +14,7 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import httpx2
 from fastapi import FastAPI, HTTPException, Request
@@ -205,12 +205,13 @@ async def method_not_allowed_handler(_request: Request, _exc: Exception) -> JSON
 
 @app.get("/healthz", response_model=HealthzResponse)
 def healthz() -> HealthzResponse:
-    detail: dict[str, Any] = {"qdrant": False, "embed": None}
+    qdrant_ok = False
+    embed_ok: bool | None = None
     try:
         base = settings.qdrant_url.rstrip("/")
         resp = httpx2.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
-        detail["qdrant"] = resp.status_code == 200 and resp.text.strip().lower() == "all shards are ready"
-        if not detail["qdrant"]:
+        qdrant_ok = resp.status_code == 200 and resp.text.strip().lower() == "all shards are ready"
+        if not qdrant_ok:
             # Upstream response bodies go to the log, never the client body.
             log.warning(json_log("healthz", "health", qdrant_detail=resp.text[:200]))
     except Exception as exc:
@@ -224,12 +225,13 @@ def healthz() -> HealthzResponse:
                 json={"model": settings.embed_model, "input": ["ping"]},
                 timeout=settings.health_embed_timeout_s,
             )
-            detail["embed"] = resp.status_code == 200
+            embed_ok = resp.status_code == 200
         except Exception as exc:  # noqa: BLE001
-            detail["embed"] = False
+            embed_ok = False
             log.warning(json_log("healthz", "health", embed_error=str(exc)[:200]))
 
-    return HealthzResponse(status="ok", qdrant=detail["qdrant"], embed=detail["embed"])
+    status = "ok" if qdrant_ok and embed_ok is not False else "degraded"
+    return HealthzResponse(status=status, qdrant=qdrant_ok, embed=embed_ok)
 
 
 @app.post("/v1/search", response_model=SearchResponse)
@@ -316,15 +318,15 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
         json_log(
             request_id, "answer", query_kind=kind, hits=len(hits),
             embed_ms=timings.get("embed_ms"), qdrant_ms=timings.get("qdrant_ms"),
-            llm_ms=llm_ms, citations=len(parsed["citations"]),
+            llm_ms=llm_ms, citations=len(parsed.citations),
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
     )
     return AnswerResponse(
         request_id=request_id,
-        answer=parsed["answer"],
-        citations=parsed["citations"],
-        script=parsed["script"],
+        answer=parsed.answer,
+        citations=parsed.citations,
+        script=parsed.script,
     )
 
 

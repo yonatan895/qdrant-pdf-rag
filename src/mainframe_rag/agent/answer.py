@@ -8,27 +8,16 @@ settings.llm_model_reasoning; there is deliberately no other model knob.
 from __future__ import annotations
 
 import re
-from typing import Any
 
 import httpx2
 from pydantic import BaseModel, Field
 
 from mainframe_rag.config import Settings
+from mainframe_rag.ports import ChatMessage
 from mainframe_rag.retrieve.query import SearchHit
 
 FENCE_RE = re.compile(r"```([a-zA-Z0-9_-]*)\n(.*?)```", re.DOTALL)
 SCRIPT_LANGS = frozenset({"jcl", "rexx", "sh", "bash", "shell", "python", "py", "yaml", "yml", "json"})
-
-
-class ChatMessage(BaseModel):
-    role: str
-    content: str
-
-    def __getitem__(self, item: str) -> str:
-        return getattr(self, item)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
 
 
 class ParsedAnswer(BaseModel):
@@ -37,12 +26,6 @@ class ParsedAnswer(BaseModel):
     script: str | None = None
     citations_inferred: bool = False
     inferred_indices: list[int] = Field(default_factory=list)
-
-    def __getitem__(self, item: str) -> Any:
-        return getattr(self, item)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
 
 
 SYSTEM_PROMPT = (
@@ -155,12 +138,9 @@ class HttpxLLMClient:
         if self._client is not None:
             self._client.close()
 
-    def chat(self, messages: list[ChatMessage] | list[dict[str, str]]) -> str:
+    def chat(self, messages: list[ChatMessage]) -> str:
         base_url, model = assert_reasoning_model(self._settings)
-        serialized = [
-            m.model_dump() if isinstance(m, BaseModel) else m
-            for m in messages
-        ]
+        serialized = [m.model_dump() for m in messages]
         resp = self._http().post(
             f"{base_url.rstrip('/')}/chat/completions",
             json={"model": model, "messages": serialized},

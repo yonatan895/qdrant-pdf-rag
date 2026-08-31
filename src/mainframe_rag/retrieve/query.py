@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 from qdrant_client import models
 
 from mainframe_rag.ports import Embedder, QdrantPoints
@@ -59,10 +59,10 @@ class SearchHit(BaseModel):
     doc_id: str
     title: str
     page_label: str
-    chunk_type: str = "narrative"
+    chunk_type: str
+    message_ids: tuple[str, ...]
     product: str | None = None
     version: str | None = None
-    message_ids: tuple[str, ...] = Field(default_factory=tuple)
 
 
 def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:

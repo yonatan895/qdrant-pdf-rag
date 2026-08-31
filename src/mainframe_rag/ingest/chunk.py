@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from mainframe_rag.ingest.classify import classify
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
@@ -47,8 +47,8 @@ class Chunk(BaseModel):
     page_label: str
     chunk_type: str
     text: str
-    message_ids: list[str] = Field(default_factory=list)
-    members: list[str] = Field(default_factory=list)
+    message_ids: list[str]
+    members: list[str]
     ordinal: int
 
 

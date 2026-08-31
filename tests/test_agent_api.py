@@ -64,7 +64,7 @@ class FakeLLM:
 
     def chat(self, messages):
         self.calls += 1
-        assert messages[0]["role"] == "system"
+        assert messages[0].role == "system"
         return (
             "Reissue the command after initialization completes.\n\n"
             "```jcl\n// example only\nIOSCMDS LIST\n```\n\n"
@@ -436,10 +436,10 @@ def test_parse_answer_shape():
     )
     allowed = {_hit().cite}
     parsed = parse_answer(content, allowed)
-    assert parsed["answer"] == "Answer text."
-    assert parsed["citations"] == [_hit().cite]
-    assert parsed["script"] is None
-    assert parsed["citations_inferred"] is False
+    assert parsed.answer == "Answer text."
+    assert parsed.citations == [_hit().cite]
+    assert parsed.script is None
+    assert parsed.citations_inferred is False
 
 
 def test_parse_answer_bracketed_fallback():
@@ -451,30 +451,30 @@ def test_parse_answer_bracketed_fallback():
 
     # 1. [2] only -> ordered_cites[1]
     res1 = parse_answer("Details in [2].", allowed, ordered_cites=ordered)
-    assert res1["citations"] == [cite2]
-    assert res1["citations_inferred"] is True
-    assert res1["inferred_indices"] == [2]
+    assert res1.citations == [cite2]
+    assert res1.citations_inferred is True
+    assert res1.inferred_indices == [2]
 
     # 2. Citations: exact line still wins (not inferred)
     res2 = parse_answer(f"Answer text based on [2].\n\nCitations:\n{cite1}", allowed, ordered_cites=ordered)
-    assert res2["citations"] == [cite1]
-    assert res2["citations_inferred"] is False
+    assert res2.citations == [cite1]
+    assert res2.citations_inferred is False
 
     # 3. z/OS (3.1), (2), APARs (1, 2) in parentheses with no Citations: -> zero inferred cites
     res3 = parse_answer("Runs on z/OS (3.1) with APARs (1, 2) and option (2).", allowed, ordered_cites=ordered)
-    assert res3["citations"] == []
-    assert res3["citations_inferred"] is False
+    assert res3.citations == []
+    assert res3.citations_inferred is False
 
     # 4. Mixed [1] and [2] and [1, 2] -> both, de-duped
     res4 = parse_answer("Points from [1] and [2], summarized in [1, 2].", allowed, ordered_cites=ordered)
-    assert res4["citations"] == [cite1, cite2]
-    assert res4["citations_inferred"] is True
-    assert res4["inferred_indices"] == [1, 2]
+    assert res4.citations == [cite1, cite2]
+    assert res4.citations_inferred is True
+    assert res4.inferred_indices == [1, 2]
 
     # 5. Out of bounds index [99] -> zero inferred
     res5 = parse_answer("See [99].", allowed, ordered_cites=ordered)
-    assert res5["citations"] == []
-    assert res5["citations_inferred"] is False
+    assert res5.citations == []
+    assert res5.citations_inferred is False
 
 
 def test_parse_answer_citations_positions_and_case():
@@ -485,20 +485,20 @@ def test_parse_answer_citations_positions_and_case():
     # 1. Top-placed Citations: without blank line before prose
     raw_top = f"Citations:\n{cite1}\nActual explanation text here."
     res_top = parse_answer(raw_top, allowed)
-    assert res_top["citations"] == [cite1]
-    assert res_top["answer"] == "Actual explanation text here."
+    assert res_top.citations == [cite1]
+    assert res_top.answer == "Actual explanation text here."
 
     # 2. Middle-placed Citations: without blank line before subsequent prose
     raw_mid = f"Intro paragraph.\n\nCitations:\n{cite1}\nMore operational detail."
     res_mid = parse_answer(raw_mid, allowed)
-    assert res_mid["citations"] == [cite1]
-    assert res_mid["answer"] == "Intro paragraph.\n\nMore operational detail."
+    assert res_mid.citations == [cite1]
+    assert res_mid.answer == "Intro paragraph.\n\nMore operational detail."
 
     # 3. Uppercase CITATIONS: header
     raw_upper = f"Intro paragraph.\n\nCITATIONS:\n{cite1}\nMore detail."
     res_upper = parse_answer(raw_upper, allowed)
-    assert res_upper["citations"] == [cite1]
-    assert res_upper["answer"] == "Intro paragraph.\n\nMore detail."
+    assert res_upper.citations == [cite1]
+    assert res_upper.answer == "Intro paragraph.\n\nMore detail."
 
 
 def test_parse_answer_code_fence_and_script_extraction():
@@ -509,23 +509,23 @@ def test_parse_answer_code_fence_and_script_extraction():
     # 1. Labeled ```jcl block returns both non-empty answer and extracted script
     raw_jcl = f"To apply parameter updates:\n\n```jcl\n//JOB1 JOB ...\n//STEP1 EXEC PGM=IEFBR14\n```\n\nCitations:\n{cite1}"
     res_jcl = parse_answer(raw_jcl, allowed)
-    assert res_jcl["citations"] == [cite1]
-    assert res_jcl["answer"] == "To apply parameter updates:"
-    assert res_jcl["script"] == "//JOB1 JOB ...\n//STEP1 EXEC PGM=IEFBR14"
+    assert res_jcl.citations == [cite1]
+    assert res_jcl.answer == "To apply parameter updates:"
+    assert res_jcl.script == "//JOB1 JOB ...\n//STEP1 EXEC PGM=IEFBR14"
 
     # 2. Bare unlabeled fence unwraps to answer body; script is None
     raw_bare = f"```\nAll text in code fence\n```\n\nCitations:\n{cite1}"
     res_bare = parse_answer(raw_bare, allowed)
-    assert res_bare["citations"] == [cite1]
-    assert res_bare["answer"] == "All text in code fence"
-    assert res_bare["script"] is None
+    assert res_bare.citations == [cite1]
+    assert res_bare.answer == "All text in code fence"
+    assert res_bare.script is None
 
     # 3. Thinking block dropped, JCL script extracted, prose answer preserved
     raw_think = f"```thought\nAnalyzing parmlib member...\n```\nFinal operational guidance.\n```rexx\n/* REXX */\nSAY 'HELLO'\n```\nCitations:\n{cite1}"
     res_think = parse_answer(raw_think, allowed)
-    assert res_think["citations"] == [cite1]
-    assert res_think["answer"] == "Final operational guidance."
-    assert res_think["script"] == "/* REXX */\nSAY 'HELLO'"
+    assert res_think.citations == [cite1]
+    assert res_think.answer == "Final operational guidance."
+    assert res_think.script == "/* REXX */\nSAY 'HELLO'"
 
 
 def test_citation_validation():
