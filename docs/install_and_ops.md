@@ -269,7 +269,7 @@ snapshot_download(
 
 When working with real PDF corpora (e.g. `z/OS 3.2` manuals, vendor books):
 
-#### 1. Ingesting PDFs with Dense Embeddings
+#### 1. Initial Ingestion with Dense Embeddings
 ```bash
 EMBED_MODE=vllm \
 EMBED_BASE_URL=http://localhost:8001/v1 \
@@ -283,7 +283,32 @@ QDRANT_COLLECTION=mainframe_manuals \
   --workers 4
 ```
 
-#### 2. Querying with Live Models
+#### 2. Incremental Ingestion: Adding New PDFs Without Re-ingesting
+Mainframe RAG supports native **idempotent incremental ingestion** via the inventory tracking file (`--progress inventory.jsonl`):
+
+* **SHA-256 Change Detection**: On every run, `run_ingest` computes the SHA-256 digest of each discovered PDF.
+* **Instant Skipping**: Any PDF whose SHA-256 digest is already marked as `upserted` in `inventory.jsonl` is skipped immediately (zero PDF parsing, zero embedding overhead).
+* **Deterministic UUID5 Point IDs**: New chunks are assigned deterministic UUID5 keys and inserted directly into the existing Qdrant collection without deleting or modifying previously indexed vectors.
+* **Corrupted / Partial File Safety**: If ingestion was interrupted midway or a PDF failed earlier with an error, re-running `run_ingest` will pick up right where it left off, only processing un-ingested files.
+
+**How to add new manuals:**
+Simply drop the new PDFs into your manuals directory (or specify a new `--src` directory) and re-run with the same `QDRANT_COLLECTION` and `--progress` path:
+
+```bash
+# Ingest only newly added or modified PDFs:
+EMBED_MODE=vllm \
+EMBED_BASE_URL=http://localhost:8001/v1 \
+EMBED_MODEL=Qwen3-Embedding-0.6B \
+DENSE_DIM=1024 \
+QDRANT_URL=http://localhost:6333 \
+QDRANT_COLLECTION=mainframe_manuals \
+.venv/bin/python -m mainframe_rag.ingest.run_ingest \
+  --src /path/to/new_manuals \
+  --progress /path/to/manuals/inventory.jsonl \
+  --workers 4
+```
+
+#### 3. Querying with Live Models
 ```bash
 # Interactive reasoning assistant:
 EMBED_MODE=vllm \
