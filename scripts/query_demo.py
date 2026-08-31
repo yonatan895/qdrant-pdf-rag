@@ -328,7 +328,7 @@ def resolve_runtime_settings(
     if collection:
         updates["qdrant_collection"] = collection
 
-    # 1. Resolve embedding server & dimension
+    # 1. Resolve embedding server, model & dimension
     target_embed_mode = embed_mode or (
         os.environ.get("EMBED_MODE") if "EMBED_MODE" in os.environ else None
     )
@@ -339,6 +339,13 @@ def resolve_runtime_settings(
         or "http://localhost:8001/v1"
     )
 
+    if embed_model:
+        # Caller-supplied explicit embedding model is authoritative
+        updates["embed_model"] = embed_model
+
+    if dense_dim:
+        updates["dense_dim"] = dense_dim
+
     if target_embed_mode == "vllm" or (
         target_embed_mode is None
         and "EMBED_MODE" not in os.environ
@@ -347,7 +354,12 @@ def resolve_runtime_settings(
         try:
             m_resp = httpx2.get(f"{target_embed_url.rstrip('/')}/models", timeout=1.5)
             if m_resp.status_code == 200:
-                avail = [m.get("id") for m in m_resp.json().get("data", []) if m.get("id")]
+                raw_json = m_resp.json()
+                avail = [
+                    m.get("id")
+                    for m in raw_json.get("data", [])
+                    if isinstance(m, dict) and m.get("id")
+                ]
                 cur = embed_model or settings.embed_model
                 chosen_embed_model = None
                 if cur and cur in avail:
@@ -358,7 +370,9 @@ def resolve_runtime_settings(
                             chosen_embed_model = m
                             break
                     else:
-                        if len(avail) == 1:
+                        if embed_model:
+                            chosen_embed_model = embed_model
+                        elif len(avail) == 1:
                             chosen_embed_model = avail[0]
                 elif len(avail) == 1:
                     chosen_embed_model = avail[0]
@@ -372,10 +386,11 @@ def resolve_runtime_settings(
                             timeout=3.0,
                         )
                         if p_resp.status_code == 200:
-                            data = p_resp.json().get("data", [])
-                            if data and "embedding" in data[0]:
+                            p_json = p_resp.json()
+                            data = p_json.get("data", [])
+                            if data and isinstance(data, list) and isinstance(data[0], dict) and "embedding" in data[0]:
                                 resolved_dim = len(data[0]["embedding"])
-                    except (httpx2.HTTPError, OSError):
+                    except (httpx2.HTTPError, OSError, ValueError, KeyError, TypeError):
                         pass
 
                 updates["embed_mode"] = "vllm"
@@ -387,27 +402,23 @@ def resolve_runtime_settings(
             elif target_embed_mode == "vllm":
                 updates["embed_mode"] = "vllm"
                 updates["embed_base_url"] = target_embed_url
-                if embed_model:
-                    updates["embed_model"] = embed_model
-                if dense_dim:
-                    updates["dense_dim"] = dense_dim
             else:
                 updates["embed_mode"] = "hash"
                 updates["allow_hash_mode"] = True
-        except (httpx2.HTTPError, OSError):
+        except (httpx2.HTTPError, OSError, ValueError, KeyError, TypeError):
             if target_embed_mode == "vllm":
                 updates["embed_mode"] = "vllm"
                 updates["embed_base_url"] = target_embed_url
-                if embed_model:
-                    updates["embed_model"] = embed_model
-                if dense_dim:
-                    updates["dense_dim"] = dense_dim
             else:
                 updates["embed_mode"] = "hash"
                 updates["allow_hash_mode"] = True
     elif target_embed_mode == "hash":
         updates["embed_mode"] = "hash"
         updates["allow_hash_mode"] = True
+    elif target_embed_mode:
+        updates["embed_mode"] = target_embed_mode
+        if embed_url:
+            updates["embed_base_url"] = embed_url
 
     # 2. Resolve LLM reasoning server & model
     target_llm_url = (
@@ -416,10 +427,22 @@ def resolve_runtime_settings(
         or settings.llm_base_url
         or "http://localhost:8000/v1"
     )
+    if model:
+        # Caller-supplied explicit reasoning model is authoritative
+        updates["llm_model_reasoning"] = model
+
+    if vllm_url:
+        updates["llm_base_url"] = vllm_url
+
     try:
         m_resp = httpx2.get(f"{target_llm_url.rstrip('/')}/models", timeout=1.5)
         if m_resp.status_code == 200:
-            avail = [m.get("id") for m in m_resp.json().get("data", []) if m.get("id")]
+            raw_json = m_resp.json()
+            avail = [
+                m.get("id")
+                for m in raw_json.get("data", [])
+                if isinstance(m, dict) and m.get("id")
+            ]
             cur = model or settings.llm_model_reasoning
             chosen_llm_model = None
             if cur and cur in avail:
@@ -430,7 +453,9 @@ def resolve_runtime_settings(
                         chosen_llm_model = m
                         break
                 else:
-                    if len(avail) == 1:
+                    if model:
+                        chosen_llm_model = model
+                    elif len(avail) == 1:
                         chosen_llm_model = avail[0]
             elif len(avail) == 1:
                 chosen_llm_model = avail[0]
@@ -438,11 +463,8 @@ def resolve_runtime_settings(
             updates["llm_base_url"] = target_llm_url
             if chosen_llm_model:
                 updates["llm_model_reasoning"] = chosen_llm_model
-    except (httpx2.HTTPError, OSError):
-        if vllm_url:
-            updates["llm_base_url"] = vllm_url
-        if model:
-            updates["llm_model_reasoning"] = model
+    except (httpx2.HTTPError, OSError, ValueError, KeyError, TypeError):
+        pass
 
     if updates:
         settings = settings.model_copy(update=updates)

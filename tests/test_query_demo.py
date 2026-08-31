@@ -190,23 +190,63 @@ def test_resolve_runtime_settings_auto_detect_vllm_and_probing(monkeypatch):
         assert settings.llm_model_reasoning == "google/gemma-4-E4B-it-qat-mobile-ct"
 
 
-def test_resolve_runtime_settings_explicit_cli_overrides():
-    settings = resolve_runtime_settings(
-        collection="custom_collection",
-        embed_url="http://embed-host:9000/v1",
-        embed_model="custom-embed",
-        embed_mode="vllm",
-        dense_dim=768,
-        vllm_url="http://llm-host:9001/v1",
-        model="custom-llm",
-    )
-    assert settings.qdrant_collection == "custom_collection"
-    assert settings.embed_mode == "vllm"
-    assert settings.embed_base_url == "http://embed-host:9000/v1"
-    assert settings.embed_model == "custom-embed"
-    assert settings.dense_dim == 768
-    assert settings.llm_base_url == "http://llm-host:9001/v1"
-    assert settings.llm_model_reasoning == "custom-llm"
+def test_resolve_runtime_settings_explicit_cli_overrides_with_multi_model_discovery():
+    def mock_get(url, timeout=None):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        if "9000" in url:
+            mock_resp.json.return_value = {"data": [{"id": "served-embed-1"}, {"id": "served-embed-2"}]}
+        elif "9001" in url:
+            mock_resp.json.return_value = {"data": [{"id": "served-reasoner-1"}, {"id": "served-reasoner-2"}]}
+        return mock_resp
+
+    with patch("httpx2.get", side_effect=mock_get):
+        settings = resolve_runtime_settings(
+            collection="custom_collection",
+            embed_url="http://embed-host:9000/v1",
+            embed_model="custom-embed",
+            embed_mode="vllm",
+            dense_dim=768,
+            vllm_url="http://llm-host:9001/v1",
+            model="custom-reasoner",
+        )
+        assert settings.qdrant_collection == "custom_collection"
+        assert settings.embed_mode == "vllm"
+        assert settings.embed_base_url == "http://embed-host:9000/v1"
+        assert settings.embed_model == "custom-embed"
+        assert settings.dense_dim == 768
+        assert settings.llm_base_url == "http://llm-host:9001/v1"
+        assert settings.llm_model_reasoning == "custom-reasoner"
+
+
+def test_resolve_runtime_settings_explicit_model_matching_served_basename():
+    def mock_get(url, timeout=None):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        if "8001" in url:
+            mock_resp.json.return_value = {"data": [{"id": "Qwen/Qwen3-Embedding-0.6B"}, {"id": "unrelated/model"}]}
+        elif "8000" in url:
+            mock_resp.json.return_value = {"data": [{"id": "google/gemma-4-E4B-it-qat-mobile-ct"}, {"id": "unrelated/model"}]}
+        return mock_resp
+
+    with patch("httpx2.get", side_effect=mock_get):
+        settings = resolve_runtime_settings(
+            embed_model="Qwen3-Embedding-0.6B",
+            model="gemma-4-E4B-it-qat-mobile-ct",
+        )
+        assert settings.embed_model == "Qwen/Qwen3-Embedding-0.6B"
+        assert settings.llm_model_reasoning == "google/gemma-4-E4B-it-qat-mobile-ct"
+
+
+def test_resolve_runtime_settings_malformed_json_fallback():
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.side_effect = ValueError("Invalid JSON response from proxy")
+
+    with patch("httpx2.get", return_value=mock_resp):
+        settings = resolve_runtime_settings()
+        assert settings.embed_mode == "hash"
+        assert settings.allow_hash_mode is True
 
 
 
