@@ -6,8 +6,8 @@ server-side RRF does not expose weights. Two filtered prefetch queries, fused
 here, preserve the "filters in prefetch" contract. architecture.md 4.5.
 """
 
-import concurrent.futures
-import heapq
+from __future__ import annotations
+
 import time
 from collections import defaultdict
 
@@ -122,7 +122,7 @@ def rrf_fuse(
             key = str(point.id)
             by_id[key] = point
             scores[key] += weight / (k + rank + 1)
-    ranked = heapq.nlargest(limit, scores.items(), key=lambda kv: kv[1])
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:limit]
     return [_to_hit(by_id[key], score) for key, score in ranked]
 
 
@@ -145,17 +145,8 @@ def search(
     timings: dict[str, int] = {}
 
     t0 = time.monotonic()
-    from mainframe_rag.ingest.embed import VllmEmbedder
-
-    if isinstance(embedder, VllmEmbedder):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            fut_dense = executor.submit(embedder.dense, [query])
-            fut_sparse = executor.submit(embedder.sparse, [query])
-            dense_vec = fut_dense.result()[0]
-            sparse_idx, sparse_val = fut_sparse.result()[0]
-    else:
-        dense_vec = embedder.dense([query])[0]
-        sparse_idx, sparse_val = embedder.sparse([query])[0]
+    dense_vec = embedder.dense([query])[0]
+    sparse_idx, sparse_val = embedder.sparse([query])[0]
     timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 
     t0 = time.monotonic()

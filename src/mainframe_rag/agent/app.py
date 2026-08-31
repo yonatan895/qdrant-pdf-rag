@@ -76,9 +76,10 @@ async def lifespan(_app: FastAPI):
     if settings.embed_mode == "vllm":
         settings.require_dense_dim()
         settings.require_embed()
-    # Bounded connection retries only fire when the request was never sent
-    # (DNS/refused) — safe for any method. No request-level retries exist.
-    http_limits = httpx2.Limits(max_keepalive_connections=100, max_connections=200)
+    http_limits = httpx2.Limits(
+        max_keepalive_connections=settings.http_max_keepalive_connections,
+        max_connections=settings.http_max_connections,
+    )
     http = httpx2.Client(
         timeout=settings.embed_timeout_s,
         transport=httpx2.HTTPTransport(retries=settings.http_connect_retries),
