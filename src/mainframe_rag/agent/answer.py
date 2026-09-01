@@ -8,16 +8,18 @@ settings.llm_model_reasoning; there is deliberately no other model knob.
 from __future__ import annotations
 
 import re
+from typing import Any
 
 import httpx2
 from pydantic import BaseModel, Field
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage
+from mainframe_rag.regexes import find_message_ids
 from mainframe_rag.retrieve.query import SearchHit
 
 FENCE_RE = re.compile(r"```([a-zA-Z0-9_-]*)\n(.*?)```", re.DOTALL)
-SCRIPT_LANGS = frozenset({"jcl", "rexx", "sh", "bash", "shell", "python", "py", "yaml", "yml", "json"})
+SCRIPT_LANGS = frozenset({"jcl", "rexx", "sh", "bash", "shell", "python", "py", "yaml", "yml", "json", "ops", "rule", "parmlib"})
 
 
 class ParsedAnswer(BaseModel):
@@ -30,17 +32,67 @@ class ParsedAnswer(BaseModel):
 
 SYSTEM_PROMPT = (
     "You are a mainframe operations expert (z/OS, CICS, Db2, IMS, JES2/3, RACF, "
-    "z/VM, VTAM). Answer operational questions. Rules:\n"
-    "1. Only assert what the supplied excerpts support.\n"
-    "2. If manuals disagree between versions, say which version each statement "
-    "comes from.\n"
-    "3. If the excerpts do not answer the question, say so explicitly.\n"
-    "4. When you propose JCL, REXX, or operator steps, put them in a fenced code "
-    "block and tie them to a citation. Scripts are examples, not "
-    "production-ready without review.\n"
-    "5. You MUST end your reply with a 'Citations:' section listing the exact citation strings of the excerpts used, for example:\n"
+    "z/VM, VTAM, OPS/MVS). Answer operational questions. Rules:\n"
+    "1. Only assert facts and parameters that the supplied excerpts support. Do not invent fictitious keywords or commands.\n"
+    "2. When asked how to code or configure a specific case, apply the syntax templates, grammars, and parameter rules documented in the excerpts to the user's scenario. Do not refuse to synthesize code, JCL, rules, or commands simply because the manual lacks an identical verbatim example for the user's specific values.\n"
+    "3. If manuals disagree between versions, say which version each statement comes from.\n"
+    "4. If the excerpts truly do not contain the syntax, parameters, or rules to answer the question, say so explicitly.\n"
+    "5. When you propose JCL, REXX, rule definitions, or operator steps, put them in a fenced code block and explain how they map to the documented syntax. Scripts are examples, not production-ready without review.\n"
+    "6. You MUST end your reply with a 'Citations:' section listing the exact citation strings of the excerpts used, for example:\n"
     "Citations:\n"
     "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17\n"
+)
+
+COMPLEX_ROOTS = ("diagnos", "recover", "abend", "compar", "tuning", "optimi", "tradeoff")
+
+
+def classify_query_complexity(query: str) -> str:
+    """Classifies query as 'simple' (factoid, message id, or single parameter lookup)
+    or 'complex' (diagnostic, procedural, comparative, tuning, or multi-step inquiry)."""
+    q_lower = query.lower().strip()
+
+    # If the query contains a message ID (e.g. "How do I resolve IEA500I IOSCMDS command rejected and what operator action is needed?"),
+    # keep it simple unless explicit deep diagnostic/recovery/abend/compare/tuning roots are present.
+    msg_ids = find_message_ids(query)
+    has_complex_root = any(r in q_lower for r in COMPLEX_ROOTS)
+    if msg_ids and not has_complex_root:
+        return "simple"
+
+    if has_complex_root:
+        return "complex"
+
+    # Multi-step configuration / procedural intent
+    if any(k in q_lower for k in ("how to configure", "how do i configure", "how to setup", "how do i create", "step by step", "steps to", "configuration procedure")):
+        return "complex"
+
+    # Comparative analysis
+    if any(k in q_lower for k in ("versus", " vs ", "difference between")):
+        return "complex"
+
+    # Specific operational procedures or rule definitions
+    if any(k in q_lower for k in ("how to", "how do", "how can", "explain how", "procedure")) and any(
+        w in q_lower for w in ("rule", "interval", "parameter", "parmlib", "jcl", "policy", "threshold", "journal")
+    ):
+        return "complex"
+
+    return "simple"
+
+
+SYSTEM_PROMPT_COMPLEX_EXTENSION = (
+    "\nReasoning & Synthesis Protocol for Complex Mainframe Inquiries:\n"
+    "When answering complex diagnostic, procedural, or architectural questions:\n"
+    "1. Deep Internal Reasoning: In your internal thinking, conduct thorough step-by-step analysis:\n"
+    "   - Analyze the exact operational scenario, failure mode, and system components involved.\n"
+    "   - Systematically examine each retrieved excerpt for syntax specifications, parameter values, return codes, hardware/software prerequisites, and operational limits.\n"
+    "   - When synthesizing rules, JCL, or commands: extract the documented syntax template/grammar, map the user's scenario values into each parameter slot, and verify the resulting statement against the documented rules.\n"
+    "   - Cross-verify statements across excerpts before synthesizing the answer.\n"
+    "2. High-Actionability Response Structure:\n"
+    "   - Structure your response logically with clear technical headings.\n"
+    "   - Provide concrete, verified syntax, parmlib statements, rule definitions, or JCL examples in fenced code blocks whenever procedures or configurations are discussed.\n"
+    "   - Explain the derivation of each parameter from the documented syntax rules.\n"
+    "   - Detail both diagnosis (what happened and how to verify) and recovery (exact remediation steps).\n"
+    "3. Explicit Citations:\n"
+    "   - You MUST end your reply with the 'Citations:' section explicitly listing each excerpt citation used.\n"
 )
 
 
@@ -52,7 +104,11 @@ def build_messages(
     splunk_context: str | None = None,
     max_context_chars: int = 8000,
     max_chunk_chars: int = 3000,
+    complexity: str | None = None,
 ) -> list[ChatMessage]:
+    if complexity is None:
+        complexity = classify_query_complexity(query)
+
     chunks: list[str] = []
     total_chars = 0
     for i, hit in enumerate(hits, 1):
@@ -95,8 +151,14 @@ def build_messages(
         f"Citations:\n{example_cite}"
     )
 
+    system_content = (
+        SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
+        if complexity == "complex"
+        else SYSTEM_PROMPT
+    )
+
     return [
-        ChatMessage(role="system", content=SYSTEM_PROMPT),
+        ChatMessage(role="system", content=system_content),
         ChatMessage(role="user", content="\n\n".join(parts)),
     ]
 
@@ -138,12 +200,22 @@ class HttpxLLMClient:
         if self._client is not None:
             self._client.close()
 
-    def chat(self, messages: list[ChatMessage]) -> str:
+    def chat(
+        self,
+        messages: list[ChatMessage],
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+    ) -> str:
         base_url, model = assert_reasoning_model(self._settings)
         serialized = [m.model_dump() for m in messages]
+        body: dict[str, Any] = {"model": model, "messages": serialized}
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
+        if temperature is not None:
+            body["temperature"] = temperature
         resp = self._http().post(
             f"{base_url.rstrip('/')}/chat/completions",
-            json={"model": model, "messages": serialized},
+            json=body,
         )
         resp.raise_for_status()
         return str(resp.json()["choices"][0]["message"]["content"])
@@ -192,6 +264,30 @@ def parse_answer(
 
     citations_inferred = False
     inferred_indices: list[int] = []
+
+    if not citations:
+        # Check if model ended the response with citation lines matching allowed_citations
+        # even if the literal 'Citations:' header was omitted.
+        from mainframe_rag.agent.cites import normalize_citation_line
+
+        body_lines = body.splitlines()
+        trailing_cites: list[str] = []
+        while body_lines:
+            candidate = body_lines[-1].strip()
+            if not candidate:
+                body_lines.pop()
+                continue
+            norm = normalize_citation_line(candidate)
+            if norm in allowed_citations:
+                if norm not in trailing_cites:
+                    trailing_cites.append(norm)
+                body_lines.pop()
+            else:
+                break
+        if trailing_cites:
+            trailing_cites.reverse()
+            citations = trailing_cites
+            body = "\n".join(body_lines)
 
     if not citations and ordered_cites:
         # Strictly match bracketed numbers like [1], [2], [1, 2] corresponding to [{i}] prompt excerpts.

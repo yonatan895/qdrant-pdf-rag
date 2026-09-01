@@ -152,6 +152,11 @@ When running local tooling (`make ask`, `make query-demo`, `test_local_e2e_vllm.
 | **`ALLOW_HASH_MODE`** | `"true"` (auto-set for local test utilities) | `false` (fails closed to prevent hash retrieval in prod) |
 | **`LLM_BASE_URL`** | `http://localhost:8000/v1` (auto-detected if listening) | Internal vLLM platform endpoint from `airgap.env` |
 | **`LLM_MODEL_REASONING`** | Auto-resolved from `/v1/models` on local server | Dedicated reasoning model specified in `airgap.env` |
+| **`LLM_REASONING_EFFORT_SIMPLE`** | `"low"` | `"low"` (preserves latency on factoid lookups) |
+| **`LLM_REASONING_EFFORT_COMPLEX`** | `"high"` | `"high"` (enforces deep multi-step deliberation) |
+| **`LLM_TEMPERATURE`** | `0.2` | `0.2` (deterministic, grounded technical reasoning) |
+| **`PROMPT_MAX_CONTEXT_CHARS`** | `8000` | `8000` (for simple queries) |
+| **`PROMPT_MAX_CONTEXT_CHARS_COMPLEX`** | `4500` | `4500` (reserves ~2.6k token headroom for reasoning) |
 
 #### REPL Controls & Options
 * **Interactive Mode Switch (`:mode`)**: Type `:mode` inside the REPL to toggle dynamically between `search` (pure vector/BM25 retrieval preview) and `answer` (retrieval + LLM reasoning generation).
@@ -168,7 +173,7 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
 * **Pinned Container Image**: Defaults to `vllm/vllm-openai:v0.28.0` (built with CUDA 12.8+, supporting NVIDIA Blackwell architectures like the RTX 5060 Laptop GPU and Gemma-4).
 * **Dual-Model 8GB VRAM Co-Residency**:
   - **Reasoning Model (Port 8000)**: `GPU_MEM=0.65` (~5.2 GB VRAM allocation).
-  - **Embedding Model (Port 8001)**: `GPU_MEM=0.30` (~2.4 GB VRAM allocation) with `--task embedding`.
+  - **Embedding Model (Port 8001)**: `GPU_MEM=0.30` (~2.4 GB VRAM allocation).
   - Fits comfortably within 8GB VRAM cards (~7.6 GB total allocation, leaving headroom for PyTorch and driver overhead).
   - *Solo Runs*: For dedicated reasoning benchmarks, `GPU_MEM=0.85 make local-vllm` restores maximum KV cache capacity.
 * **8GB VRAM Optimizations**:
@@ -176,7 +181,7 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
   - `--max-num-seqs 1`: Bounds concurrent sequence allocation to prevent out-of-memory spikes.
   - `MAX_LEN=4096`: Caps model context length.
 * **Gemma-4 Support**: Automatically configures `--tool-call-parser gemma4`, `--reasoning-parser gemma4`, and `--chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja`.
-* **Embedding Model Detection**: Automatically sets `--task embedding` for model IDs containing `*embed*` or `*Embed*` (e.g. `Qwen3-Embedding-0.6B`).
+* **Embedding Model Detection**: Automatically handles embedding models (e.g. `Qwen3-Embedding-0.6B`).
 * **WSL2 Compatibility**: Exports `VLLM_WSL2_ENABLE_PIN_MEMORY=1` for host memory stability.
 * **Safe Secrets**: Passes `HF_TOKEN` via `-e HF_TOKEN` without exposing secret tokens on command-line argument lists.
 
@@ -202,7 +207,33 @@ MODEL=Qwen/Qwen3-Embedding-0.6B make local-vllm-embed
 
 ---
 
-### 3.7 Automated Local End-to-End Suite (`make test-vllm-e2e`)
+### 3.7 Reasoning Performance, Query Complexity & Context Budgeting
+
+The agent dynamically adapts its reasoning protocol and prompt allocation based on the technical nature of incoming inquiries.
+
+#### Query Classification Matrix
+The pipeline automatically classifies queries into two categories:
+* **Simple Inquiries (Factoids & Message Codes)**:
+  - Examples: `What does operator message IEA500I indicate?`, `What parameter in IEASYSxx defines 1MB large page frames?`, `What return code does NFS mount fail with?`
+  - Latency: ~4–8 seconds
+  - Reasoning Tokens: ~200–500 tokens
+  - Engine Settings: `LLM_REASONING_EFFORT_SIMPLE=low`, `PROMPT_MAX_CONTEXT_CHARS=8000`
+  - Operational Goal: Fast, concise, low-latency extraction without wasteful compute overhead.
+* **Complex Inquiries (Diagnostics, Procedures, Comparative Tuning)**:
+  - Examples: `How do I diagnose and recover when the DFSMShsm journal fills up during active migration?`, `Explain how to configure 1MB and 2GB large page frames with LFAREA in IEASYSxx...`, `Compare DFSORT memory options (HIPRMAX, MOSIZE, DSPSIZE)...`
+  - Latency: ~14–20 seconds
+  - Reasoning Tokens: ~800–1,250 tokens
+  - Engine Settings: `LLM_REASONING_EFFORT_COMPLEX=high`, `PROMPT_MAX_CONTEXT_CHARS_COMPLEX=4500`
+  - Operational Goal: Exhaustive technical analysis, cross-referencing parameters/messages across excerpts, and synthesizing actionable recovery steps and fenced JCL/operator command blocks.
+
+#### Context Length Budgeting: Root Cause & Solution
+* **The 4,096-Token Ceiling**: Local reasoning instances (e.g. Gemma-4) run with `--max-model-len 4096` to fit within 8GB VRAM cards alongside embedding models.
+* **The Truncation Bug**: If prompt context is allowed to reach 8,000 characters (~2,400 tokens), only ~1,600 tokens remain for both internal thinking and output generation. When the model thinks deeply (>1,000 reasoning tokens), it runs out of token budget before finishing the answer. This caused answers to be truncated mid-sentence (`Finish: length`) and dropped the `Citations:` section.
+* **The Solution**: Setting `PROMPT_MAX_CONTEXT_CHARS_COMPLEX=4500` caps complex retrieved passages at ~1,200 tokens. This guarantees **~2,600 tokens of headroom** exclusively for thinking tokens and comprehensive answer text, achieving a 100% completion rate (`Finish: stop`).
+
+---
+
+### 3.8 Automated Local End-to-End Suite (`make test-vllm-e2e`)
 
 To verify the entire RAG pipeline from PDF generation and dense/sparse ingestion to HTTP retrieval and grounded LLM reasoning:
 
@@ -229,7 +260,7 @@ make test-vllm-e2e \
 
 ---
 
-### 3.8 Exporting Standalone Model Weights for Offline Bastions
+### 3.9 Exporting Standalone Model Weights for Offline Bastions
 
 To archive model weights and configurations for use in completely disconnected or air-gapped environments:
 

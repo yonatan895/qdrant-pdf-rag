@@ -14,13 +14,13 @@ from mainframe_rag.agent.cites import extract_citation_lines, valid_citations
 from mainframe_rag.retrieve.query import SearchHit
 
 
-def _hit(cite_suffix: str = "p. 1-6") -> SearchHit:
+def _hit(cite_suffix: str = "p. 1-6", text: str = "IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy") -> SearchHit:
     return SearchHit(
         chunk_id="abc123",
         score=0.42,
         cite=f"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, {cite_suffix}",
         heading="Chapter 2 > IEA500I",
-        text="IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy",
+        text=text,
         doc_id="SA22-0000-00",
         title="Synthetic Reference",
         page_label="1-6",
@@ -61,9 +61,15 @@ class FakeLLM:
 
     def __init__(self):
         self.calls = 0
+        self.last_reasoning_effort = None
+        self.last_temperature = None
+        self.last_messages = None
 
-    def chat(self, messages):
+    def chat(self, messages, reasoning_effort=None, temperature=None):
         self.calls += 1
+        self.last_reasoning_effort = reasoning_effort
+        self.last_temperature = temperature
+        self.last_messages = messages
         assert messages[0].role == "system"
         return (
             "Reissue the command after initialization completes.\n\n"
@@ -77,7 +83,7 @@ class FakeLLM:
 class FabricatingBodyLLM:
     """Quotes a full citation line that is not in the hit set, mid-answer."""
 
-    def chat(self, messages):
+    def chat(self, messages, *args, **kwargs):
         return (
             "Answer text.\n"
             "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
@@ -90,7 +96,7 @@ class FabricatingBodyLLM:
 class FabricatingScriptLLM:
     """Puts a fabricated citation inside the fenced script block."""
 
-    def chat(self, messages):
+    def chat(self, messages, *args, **kwargs):
         return (
             "Answer text.\n\n"
             "```jcl\n// see SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
@@ -418,7 +424,7 @@ def test_answer_llm_failure_reads_answer_failed(client, monkeypatch):
     """A model or parse failure is not mislabeled as a retrieval fault."""
 
     class ExplodingLLM:
-        def chat(self, _messages):
+        def chat(self, _messages, *args, **kwargs):
             raise RuntimeError("llm exploded: internal detail")
 
     monkeypatch.setattr(app_mod, "llm", ExplodingLLM())
@@ -568,4 +574,193 @@ def test_build_messages_context_budgeting():
     user_prompt2 = msgs2[1].content
     assert "[1]" in user_prompt2
     assert len(user_prompt2) < 1500
+
+
+def test_classify_query_complexity():
+    from mainframe_rag.agent.answer import classify_query_complexity
+
+    # Simple queries
+    assert classify_query_complexity("IEA500I") == "simple"
+    assert classify_query_complexity("What does operator message IEA500I indicate?") == "simple"
+    assert classify_query_complexity("What parameter in IEASYSxx defines 1MB large page frames?") == "simple"
+    assert classify_query_complexity("What return code does NFS mount fail with?") == "simple"
+    # Operator inquiry with message ID stays simple (not penalized with complex protocol/thinner context)
+    assert classify_query_complexity("How do I resolve IEA500I IOSCMDS command rejected and what operator action is needed?") == "simple"
+
+    # Complex queries (diagnostic, troubleshooting, abend, recovery, procedural, tuning)
+    assert classify_query_complexity("How do I diagnose and recover when DFSMShsm journal fills up?") == "complex"
+    assert classify_query_complexity("Troubleshooting S0C4 abend in batch job") == "complex"
+    assert classify_query_complexity("Explain how to configure 1MB and 2GB page frames with LFAREA") == "complex"
+    assert classify_query_complexity("Compare DFSORT memory options HIPRMAX vs MOSIZE and how to tune") == "complex"
+    assert classify_query_complexity("How do I create an OPS TOD rule that runs in intervals of 4 hours, starting from 12:10 AM?") == "complex"
+
+
+def test_build_messages_complexity():
+    from mainframe_rag.agent.answer import (
+        SYSTEM_PROMPT,
+        SYSTEM_PROMPT_COMPLEX_EXTENSION,
+        build_messages,
+    )
+
+    simple_msgs = build_messages("IEA500I", [_hit()], complexity="simple")
+    assert simple_msgs[0].content == SYSTEM_PROMPT
+
+    complex_msgs = build_messages(
+        "How do I diagnose and recover when DFSMShsm journal fills up?",
+        [_hit()],
+        complexity="complex",
+    )
+    assert SYSTEM_PROMPT_COMPLEX_EXTENSION in complex_msgs[0].content
+
+
+def test_build_messages_context_budgeting_complex_vs_simple():
+    from mainframe_rag.agent.answer import build_messages
+
+    hits = [
+        _hit(f"p. 1-{i}", text="X" * 2000)
+        for i in range(3)
+    ]
+    # Simple query uses 8000 budget - all 3 hits fit
+    simple_msgs = build_messages("IEA500I", hits, complexity="simple", max_context_chars=8000)
+    user_content_simple = simple_msgs[1].content
+    assert "[1]" in user_content_simple
+    assert "[2]" in user_content_simple
+    assert "[3]" in user_content_simple
+
+    # Complex query uses 4500 budget - 3rd hit is truncated or omitted to stay within budget
+    complex_msgs = build_messages("How to configure large pages", hits, complexity="complex", max_context_chars=4500)
+    user_content_complex = complex_msgs[1].content
+    assert len(user_content_complex) < len(user_content_simple)
+    excerpts_part = user_content_complex.split("Retrieved manual excerpts:\n")[1].split("Please answer")[0]
+    assert len(excerpts_part) <= 4600
+
+
+def test_answer_dispatches_reasoning_effort_by_complexity(client, monkeypatch):
+    fake = FakeLLM()
+    monkeypatch.setattr(app_mod, "llm", fake)
+
+    # Simple query dispatches simple reasoning effort (low) and configured temperature
+    resp_simple = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp_simple.status_code == 200
+    assert fake.last_reasoning_effort == "low"
+    assert fake.last_temperature == 0.2
+
+    # Complex query dispatches complex reasoning effort (high) and configured temperature
+    resp_complex = client.post(
+        "/v1/answer",
+        json={"query": "How do I diagnose and recover when DFSMShsm journal fills up during migration?"},
+    )
+    assert resp_complex.status_code == 200
+    assert fake.last_reasoning_effort == "high"
+    assert fake.last_temperature == 0.2
+
+
+def test_httpx_llm_client_passes_reasoning_params(monkeypatch):
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    recorded_payload: dict[str, object] = {}
+
+    class MockHttpResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "choices": [
+                    {"message": {"content": "Test answer\n\nCitations:\nSA22-0000-00, p. 1-6"}}
+                ]
+            }
+
+    class MockHttpClient:
+        def post(self, url, json=None, timeout=None):
+            recorded_payload.update(json or {})
+            return MockHttpResp()
+
+        def close(self):
+            pass
+
+    s = Settings(
+        llm_base_url="http://mock-llm/v1",
+        llm_model_reasoning="mock-reasoning-model",
+        _env_file=None,
+    )
+    client = HttpxLLMClient(s, client=MockHttpClient())  # type: ignore[arg-type]
+    msgs = [ChatMessage(role="user", content="Hello")]
+    ans = client.chat(msgs, reasoning_effort="high", temperature=0.2)
+    assert "Test answer" in ans
+    assert recorded_payload["model"] == "mock-reasoning-model"
+    assert recorded_payload["reasoning_effort"] == "high"
+    assert recorded_payload["temperature"] == 0.2
+
+
+def test_parse_answer_markdown_heading_citations():
+    from mainframe_rag.agent.answer import parse_answer
+
+    allowed = {"SA22-7592-05 z/OS MVS Init, IEASYSxx > LFAREA, p. 1-17"}
+    content = (
+        "Here is the answer.\n\n"
+        "### Citations:\n"
+        "* SA22-7592-05 z/OS MVS Init, IEASYSxx > LFAREA, p. 1-17\n"
+    )
+    parsed = parse_answer(content, allowed, ordered_cites=list(allowed))
+    assert parsed.citations == ["SA22-7592-05 z/OS MVS Init, IEASYSxx > LFAREA, p. 1-17"]
+    assert not parsed.citations_inferred
+
+
+def test_parse_answer_trailing_citations_without_header():
+    from mainframe_rag.agent.answer import parse_answer
+
+    allowed = {
+        "ca-ops-14-0 OPS/MVS Using, p. 596",
+        "ca-ops-14-0 OPS/MVS Using > Rules > TOD, p. 589",
+    }
+    content = (
+        "Here is the synthesized TOD rule:\n"
+        ")TOD 00:10,4 HOURS\n\n"
+        "ca-ops-14-0 OPS/MVS Using, p. 596\n"
+        "ca-ops-14-0 OPS/MVS Using > Rules > TOD, p. 589\n"
+    )
+    parsed = parse_answer(content, allowed, ordered_cites=list(allowed))
+    assert len(parsed.citations) == 2
+    assert "ca-ops-14-0 OPS/MVS Using, p. 596" in parsed.citations
+    assert "ca-ops-14-0 OPS/MVS Using > Rules > TOD, p. 589" in parsed.citations
+    assert not parsed.citations_inferred
+    assert "ca-ops-14-0" not in parsed.answer
+
+
+def test_parse_answer_does_not_strip_non_citation_trailing_lines():
+    from mainframe_rag.agent.answer import parse_answer
+
+    allowed = {"ca-ops-14-0 OPS/MVS Using, p. 596"}
+    content = (
+        "Here is the synthesized TOD rule:\n"
+        ")TOD 00:10,4 HOURS\n\n"
+        "ca-ops-14-0 OPS/MVS Using, p. 596\n\n"
+        "Run DISPLAY M=CPU to verify."
+    )
+    parsed = parse_answer(content, allowed, ordered_cites=list(allowed))
+    # Last line is "Run DISPLAY M=CPU to verify." - must NOT be eaten or treated as a cite
+    assert "Run DISPLAY M=CPU to verify." in parsed.answer
+    assert parsed.citations == []
+
+
+def test_script_langs_supports_ops_and_rule():
+    from mainframe_rag.agent.answer import parse_answer
+
+    content = "Here is the rule:\n```ops\n)TOD 00:10,4 HOURS\n```\nDone."
+    parsed = parse_answer(content, set())
+    assert parsed.script == ")TOD 00:10,4 HOURS"
+    assert "```ops" not in parsed.answer
+
+
+def test_text_and_markdown_fences_unwrap_without_script():
+    from mainframe_rag.agent.answer import parse_answer
+
+    content = "Here is explanation:\n```text\nSome plain text prose\n```\nAnd:\n```markdown\n* bullet point\n```\nDone."
+    parsed = parse_answer(content, set())
+    assert parsed.script is None
+    assert "Some plain text prose" in parsed.answer
+    assert "* bullet point" in parsed.answer
 

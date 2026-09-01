@@ -16,7 +16,7 @@ CITATION_LINE_RE = re.compile(
     r"(?P<heading>.+?),\s+p\.\s+(?P<page>.+?)\s*$"
 )
 
-CITATIONS_HEADER_RE = re.compile(r"^\s*Citations?:\s*$", re.IGNORECASE | re.MULTILINE)
+CITATIONS_HEADER_RE = re.compile(r"^\s*#{0,6}\s*Citations?:\s*$", re.IGNORECASE | re.MULTILINE)
 
 # List markers as a discrete prefix (bullet/space or number + [.)] + space),
 # never a greedy char-set lstrip: "- **cite**" must strip only "- " so the
@@ -30,7 +30,7 @@ _MARKER_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)+")
 _WRAP_CHARS = "`\"'*_"
 
 
-def _normalize_citation_line(line: str) -> str:
+def normalize_citation_line(line: str) -> str:
     """One normalizer for both citation paths (the Citations: list parser and
     the answer-body scanner) so a wrapped fabricated cite can never be clean
     in one path and leaked by the other. Supported wrappers, each peeled
@@ -57,6 +57,9 @@ def _normalize_citation_line(line: str) -> str:
         if candidate == before:
             break
     return candidate
+
+
+_normalize_citation_line = normalize_citation_line
 
 
 def extract_body_and_citations(text: str) -> tuple[str, list[str]]:
@@ -137,6 +140,7 @@ __all__ = [
     "CITATION_LINE_RE",
     "extract_body_and_citations",
     "extract_citation_lines",
+    "normalize_citation_line",
     "strip_unauthorized_citations",
     "valid_citations",
 ]

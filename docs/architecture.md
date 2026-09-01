@@ -116,19 +116,33 @@ User / Splunk Query
    └── Top-K Ranked Hits with Strict Citation Formatting
 ```
 
-### 4.4 Reasoning LLM Prompt Construction & Citation Grounding Contract
+### 4.4 Reasoning LLM Prompt Construction, Complexity Modulation & Citation Grounding Contract
 
-The agent enforces strict grounding guarantees before returning reasoning answers to clients:
+The agent enforces strict grounding guarantees and adaptive reasoning depth before returning answers to clients:
 
-1. **Few-Shot Citation Injection:**
+1. **Query Complexity Classification (`classify_query_complexity`):**
+   Incoming inquiries are classified into two operational tiers:
+   - **Simple Lookups:** Single message code queries (e.g. `IEA500I`), return code lookups, or short factual definitions.
+   - **Complex Operational Inquiries:** Multi-step diagnostics, failure/abend troubleshooting (e.g. journal overflow, abend S0C4), configuration procedures (e.g. LFAREA 1M/2G page frames), and comparative memory tuning (e.g. DFSORT HIPRMAX vs MOSIZE).
+   - *Design Rationale:* Factoid questions need fast, accurate answers (~4–7s) without wasting compute. Diagnostic and configuration inquiries demand deep internal thinking (~14–20s, >1,000 reasoning tokens) to analyze interacting subsystems, verify syntax, and structure recovery procedures.
+
+2. **Adaptive Context Length Budgeting (`prompt_max_context_chars_complex`):**
+   - **Context Truncation Vulnerability:** Reasoning models running on a 4,096-token maximum context window (`max_model_len=4096`) are vulnerable to context exhaustion. A default 8,000-character prompt context consumes ~2,400 prompt tokens, leaving only ~1,600 tokens total for *both* reasoning thinking tokens and generated response content. When the model deliberated deeply (>1,000 reasoning tokens), generation hit `Finish: length`, resulting in answers truncated mid-sentence and omitted `Citations:` sections.
+   - **Solution:** For complex queries, prompt manual excerpts are capped at 4,500 characters (`Settings.prompt_max_context_chars_complex = 4500`). This preserves ~1,200 tokens for the prompt, reserving **~2,600 tokens of headroom** exclusively for thinking tokens and comprehensive answer text, completely eliminating truncation faults (`Finish: stop` guaranteed).
+
+3. **Reasoning Protocol & Engine Control:**
+   - **System Prompt Extension (`SYSTEM_PROMPT_COMPLEX_EXTENSION`):** Injected dynamically on complex queries. Instructs the reasoning model to conduct multi-phase internal deliberation: problem decomposition, cross-examining manual excerpts for parameters and return codes, constructing verified JCL/operator commands in fenced blocks, and auditing claims against cited manuals.
+   - **Engine Controls:** Dispatches `reasoning_effort="high"` for complex queries and `reasoning_effort="low"` for simple queries. Pins `temperature=0.2` for grounded, deterministic reasoning.
+
+4. **Few-Shot Citation Injection:**
    The prompt dynamically includes a concrete few-shot example using `hits[0].cite` in the instructions to enforce uniform formatting from both large reasoning models and quantized edge models (e.g. Gemma 4 INT4 QAT).
 
-2. **Two-Pass Citation Resolution:**
+5. **Two-Pass Citation Resolution:**
    - **Primary Pass (Explicit Block):** Looks for a terminal `Citations:` section. Each listed citation is normalized and matched against the allowed search hit citations (`allowed_citations = {h.cite for h in hits}`).
    - **Fallback Pass (Bracketed Index Resolution):** If no explicit `Citations:` block is present, the parser scans for bracketed number references `\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]` (matching prompt tokens like `[1]`, `[2]`, `[1, 2]`) and resolves them to `ordered_cites[index - 1]`.
    - **Parenthesis Immunity:** Parentheses `(...)` are deliberately excluded from inference to avoid false positives on standard mainframe technical notation such as `z/OS (3.1)`, `SYS1.PARMLIB(IEASYS00)`, `(2)`, or `APARs (1, 2)`.
 
-3. **Body Stripping & Verification:**
+6. **Body Stripping & Verification:**
    Any hallucinated citation lines that match the citation regex but are not in `allowed_citations` are stripped from the response text before transmission. Mid-sentence narrative text mentioning document IDs is preserved under the standalone-line rule.
 
 ### 4.5 Outbound HTTP & Agent Lifespan

@@ -43,7 +43,11 @@ def test_outbound_timeout_defaults_bounded():
     assert s.http_max_connections == 200
     assert s.http_max_keepalive_connections == 100
     assert s.prompt_max_context_chars == 8000
+    assert s.prompt_max_context_chars_complex == 4500
     assert s.prompt_max_chunk_chars == 3000
+    assert s.llm_reasoning_effort_simple == "low"
+    assert s.llm_reasoning_effort_complex == "high"
+    assert s.llm_temperature == 0.2
 
 
 def test_hash_mode_requires_explicit_allow():
@@ -60,3 +64,15 @@ def test_ingest_tuning_defaults():
     assert s.batch_size == 128
     assert s.ingest_upsert_streams == 4
     assert s.ingest_bulk_load is False
+
+
+def test_reasoning_effort_validation():
+    """llm_reasoning_effort_* are constrained to Literal['low', 'medium', 'high']."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, llm_reasoning_effort_simple="ultra")  # type: ignore[arg-type]
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, llm_reasoning_effort_complex="extreme")  # type: ignore[arg-type]
