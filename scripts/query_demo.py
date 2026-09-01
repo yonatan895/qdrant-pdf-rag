@@ -532,24 +532,21 @@ def execute_answer(
         if complexity == "complex"
         else settings.prompt_max_context_chars
     )
-    max_chunk = (
-        settings.prompt_max_chunk_chars_complex
-        if complexity == "complex"
-        else settings.prompt_max_chunk_chars
-    )
     effort = (
         settings.llm_reasoning_effort_complex
         if complexity == "complex"
         else settings.llm_reasoning_effort_simple
     )
-
     messages = build_messages(
         query=query,
         hits=hits,
         product=product,
         version=version,
         max_context_chars=max_context,
-        max_chunk_chars=max_chunk,
+        max_chunk_chars=settings.prompt_max_chunk_chars,
+        max_chunk_chars_narrative=(
+            settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
+        ),
         complexity=complexity,
     )
     client = HttpxLLMClient(settings)

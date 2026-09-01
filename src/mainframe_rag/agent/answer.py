@@ -115,9 +115,11 @@ def build_messages(
     for i, hit in enumerate(hits, 1):
         text = hit.text.strip()
         # High-fidelity chunk types (syntax, message, table) preserve their grammar/structure
-        # up to max_chunk_chars; only narrative prose is shrunk by max_chunk_chars_narrative.
-        narrative_cap = max_chunk_chars_narrative or (
-            1100 if complexity == "complex" else max_chunk_chars
+        # up to max_chunk_chars; narrative prose is bounded by max_chunk_chars_narrative if provided.
+        narrative_cap = (
+            max_chunk_chars_narrative
+            if max_chunk_chars_narrative is not None
+            else max_chunk_chars
         )
         chunk_cap = (
             max_chunk_chars
