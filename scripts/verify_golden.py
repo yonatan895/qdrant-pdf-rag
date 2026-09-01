@@ -121,11 +121,18 @@ def verify_entry(entry: GoldenEntry, facts: CorpusFacts) -> tuple[list[str], lis
         hit_docs = facts.msg_docs.get(msg, set())
         if not hit_docs:
             fails.append(f"must_not message id {msg!r} does not exist in the collection (typo?)")
-        broken = hit_docs & set(entry.expected_doc_ids)
-        if broken:
-            fails.append(
-                f"must_not message id {msg!r} is present inside expected doc(s) {sorted(broken)}; trap is broken"
-            )
+            continue
+        # A must_not ID inside an expected doc is only broken when the doc does
+        # not also carry the query's own message ID: same-volume sibling
+        # precision assertions (IOS207I vs IOS208I) are legitimate.
+        query_ids = set(parse_query(entry.query).message_ids)
+        for d in sorted(hit_docs & set(entry.expected_doc_ids)):
+            doc_ids = facts.docs[d].message_ids if d in facts.docs else set()
+            if not (query_ids & doc_ids):
+                fails.append(
+                    f"must_not message id {msg!r} is present inside expected doc {d} "
+                    "which does not carry the query's own message id; trap is broken"
+                )
         if len(hit_docs) > RARITY_LIMIT:
             warns.append(
                 f"must_not message id {msg!r} appears in {len(hit_docs)} docs (> {RARITY_LIMIT}); weak trap"
@@ -172,12 +179,16 @@ def load_entries(path: Path) -> tuple[list[GoldenEntry], list[str]]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--golden", type=Path, default=Path("evals/golden.jsonl"), help="golden JSONL path")
+    parser.add_argument(
+        "--golden", type=Path, action="append", default=None,
+        help="golden JSONL path (repeatable; default: evals/golden.jsonl + evals/holdout.jsonl)",
+    )
     parser.add_argument(
         "--strict", action="store_true",
         help="treat hygiene warnings (id/class/source, stratification) as failures",
     )
     args = parser.parse_args(argv)
+    golden_paths = args.golden or [Path("evals/golden.jsonl"), Path("evals/holdout.jsonl")]
 
     settings = load_settings()
     from qdrant_client import QdrantClient
@@ -189,7 +200,17 @@ def main(argv: list[str] | None = None) -> int:
     facts = build_corpus_facts(client, settings.qdrant_collection)
     print(f"[*] {len(facts.docs)} docs / {facts.points} points indexed for verification", file=sys.stderr)
 
-    entries, parse_errors = load_entries(args.golden)
+    entries: list[GoldenEntry] = []
+    parse_errors: list[str] = []
+    for path in golden_paths:
+        if not path.exists():
+            print(f"FAIL missing golden file: {path}", file=sys.stderr)
+            parse_errors.append(f"missing golden file: {path}")
+            continue
+        file_entries, file_errors = load_entries(path)
+        print(f"[*] {path}: {len(file_entries)} entries", file=sys.stderr)
+        entries.extend(file_entries)
+        parse_errors.extend(file_errors)
 
     total_fails: list[str] = list(parse_errors)
     total_warns: list[str] = []

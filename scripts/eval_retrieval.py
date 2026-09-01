@@ -522,14 +522,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"warn: baseline {check_path} missing; nothing gated", file=sys.stderr)
         else:
             baseline = json.loads(check_path.read_text(encoding="utf-8"))
-            base_mode = (baseline.get("_meta") or {}).get("embed_mode")
-            if base_mode and base_mode != settings.embed_mode:
+            meta = baseline.get("_meta") or {}
+            if meta.get("embed_mode") and meta["embed_mode"] != settings.embed_mode:
                 print(
-                    f"warn: baseline embed_mode={base_mode} but this run is {settings.embed_mode}; "
+                    f"warn: baseline embed_mode={meta['embed_mode']} but this run is {settings.embed_mode}; "
                     "the numbers are not comparable",
                     file=sys.stderr,
                 )
-            regressions = check_baseline(report, baseline)
+            if meta.get("collection") and meta["collection"] != settings.qdrant_collection:
+                print(
+                    f"warn: baseline collection {meta['collection']!r} != run collection "
+                    f"{settings.qdrant_collection!r}; skipping gate (different corpora)",
+                    file=sys.stderr,
+                )
+                baseline = None
+            else:
+                regressions = check_baseline(report, baseline)
     if args.update_baseline:
         update_baseline(report, args.update_baseline)
         print(f"baseline written to {args.update_baseline}", file=sys.stderr)

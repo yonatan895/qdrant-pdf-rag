@@ -182,14 +182,17 @@ eval: | .venv
 	  --out $(BUNDLE_DIR)/eval-report.json --summary $(BUNDLE_DIR)/eval-summary.md
 
 # Mechanical verification of golden expectations against the live collection
-# (doc/heading/page/message-id facts, must_not trap validity). Gates the
-# corpus: nonzero exit on any FAIL.
+# (doc/heading/page/message-id facts, must_not trap validity, duplicates).
+# Gates the corpus: nonzero exit on any FAIL. Verifies BOTH the dev set and
+# the frozen holdout.
 verify-golden: | .venv
 	.venv/bin/python scripts/verify_golden.py
 
-# Release candidates only: score the frozen holdout against its own baseline.
+# Release candidates only: verify the holdout sha256 pin, then score the
+# frozen holdout against its own baseline. Never iterate against this.
 eval-holdout: | .venv
 	@mkdir -p $(BUNDLE_DIR)
+	sha256sum -c evals/holdout.jsonl.sha256
 	.venv/bin/python scripts/eval_retrieval.py --golden evals/holdout.jsonl \
 	  --check evals/holdout-baseline.json \
 	  --out $(BUNDLE_DIR)/eval-holdout-report.json --summary $(BUNDLE_DIR)/eval-holdout-summary.md

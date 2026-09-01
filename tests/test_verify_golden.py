@@ -26,7 +26,7 @@ def _facts() -> CorpusFacts:
             "SA38-0677-70": DocFacts(pages={"7-1"}, headings=["iea500i"], message_ids={"IEA500I", "IEA501I"}, title="Messages"),
             "SA38-0674-70": DocFacts(pages={"3-1"}, headings=["csv"], message_ids={"IEA501I"}, title="Other messages"),
         },
-        msg_docs={"IEA501I": {"SA38-0674-70"}, "EZD1205I": {"SC23-6883-70"}},
+        msg_docs={"IEA501I": {"SA38-0674-70", "SA38-0677-70"}, "EZD1205I": {"SC23-6883-70"}},
         points=4,
     )
 
@@ -87,16 +87,34 @@ def test_verify_entry_message_id_must_be_in_expected_doc_payload():
 
 
 def test_verify_entry_broken_sibling_trap_fails():
+    """Broken trap: the expected doc carries the seductive sibling ID but not
+    the query's own message ID."""
     entry = GoldenEntry(
         id="msg-02",
-        query="IEA501I code",
+        query="EZD1205I code",
         query_class="message_id",
-        expected_doc_ids=["SA38-0674-70"],
+        expected_doc_ids=["SA38-0677-70"],
         must_not_message_ids=["IEA501I"],
         source="operator-history",
     )
     fails, _ = verify_entry(entry, _facts())
     assert any("trap is broken" in f for f in fails)
+
+
+def test_verify_entry_same_volume_sibling_trap_allowed():
+    """Same-volume siblings are a legitimate precision assertion: the expected
+    doc carries both the query's ID and the must_not sibling."""
+    entry = GoldenEntry(
+        id="msg-03",
+        query="IEA500I explanation",
+        query_class="message_id",
+        expected_doc_ids=["SA38-0677-70"],
+        must_not_message_ids=["IEA501I"],
+        source="operator-history",
+    )
+    fails, warns = verify_entry(entry, _facts())
+    assert not any("trap is broken" in f for f in fails)
+    assert fails == [] and warns == []
 
 
 def test_verify_entry_weak_trap_warns():
