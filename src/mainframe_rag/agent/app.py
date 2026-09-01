@@ -247,6 +247,7 @@ def v1_search(request: Request, req: SearchRequest) -> SearchResponse:
         hits, kind, timings = retrieve_search(
             qdrant, embedder, settings.qdrant_collection, req.query,
             product=req.product, version=req.version, limit=req.limit,
+            settings=settings,
         )
     except Exception as exc:
         log.error(json_log(request_id, "search", error=str(exc)[:200]))
@@ -286,6 +287,7 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
         hits, kind, timings = retrieve_search(
             qdrant, embedder, settings.qdrant_collection, req.query,
             product=req.product, version=req.version, limit=8,
+            settings=settings,
         )
     except Exception as exc:
         log.error(json_log(request_id, "answer", error=str(exc)[:200]))
@@ -317,6 +319,7 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
             product=req.product, version=req.version, splunk_context=req.splunk_context,
             max_context_chars=max_context,
             max_chunk_chars=settings.prompt_max_chunk_chars,
+            max_chunk_chars_narrative=settings.prompt_max_chunk_chars_complex if complexity == "complex" else None,
             complexity=complexity,
         )
         t0 = time.monotonic()

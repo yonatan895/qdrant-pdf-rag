@@ -93,6 +93,9 @@ class HashEmbedder:
     def dense(self, texts: list[str]) -> list[list[float]]:
         return hash_dense_embed(texts)
 
+    def dense_query(self, queries: list[str]) -> list[list[float]]:
+        return self.dense(queries)
+
     def sparse(self, texts: list[str]) -> list[SparseVector]:
         return hash_sparse_embed(texts)
 
@@ -146,6 +149,13 @@ class VllmEmbedder:
         data = resp.json()["data"]
         ordered = sorted(data, key=lambda d: d["index"])
         return [d["embedding"] for d in ordered]
+
+    def dense_query(self, queries: list[str]) -> list[list[float]]:
+        if not queries:
+            return []
+        prefix = self._settings.dense_query_prefix
+        prefixed = [f"{prefix}{q}" for q in queries] if prefix else queries
+        return self.dense(prefixed)
 
     def sparse(self, texts: list[str]) -> list[SparseVector]:
         if not texts:

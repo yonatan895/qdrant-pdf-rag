@@ -493,6 +493,7 @@ def execute_query(
     hits, kind, timings = retrieve_search(
         client, embedder, target_coll, query,
         product=product, version=version, limit=limit,
+        settings=settings,
     )
     return hits, kind, timings
 
@@ -536,7 +537,6 @@ def execute_answer(
         if complexity == "complex"
         else settings.llm_reasoning_effort_simple
     )
-
     messages = build_messages(
         query=query,
         hits=hits,
@@ -544,6 +544,9 @@ def execute_answer(
         version=version,
         max_context_chars=max_context,
         max_chunk_chars=settings.prompt_max_chunk_chars,
+        max_chunk_chars_narrative=(
+            settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
+        ),
         complexity=complexity,
     )
     client = HttpxLLMClient(settings)

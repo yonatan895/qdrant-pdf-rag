@@ -124,6 +124,9 @@ class FakeEmbedder:
     def dense(self, texts):
         return [[0.1] * 4 for _ in texts]
 
+    def dense_query(self, queries):
+        return self.dense(queries)
+
     def sparse(self, texts):
         return [([3], [1.0]) for _ in texts]
 
@@ -186,7 +189,7 @@ def test_search_nl_weights_equal(embedder):
     fake = FakeQdrant(dense=[_point("dense-only")], sparse=[_point("sparse-only")])
     hits, kind, _ = search(fake, embedder, "mainframe_manuals", "sizing lookaside", limit=5)
     assert kind == "nl"
-    # Equal weights, equal ranks -> tie; dense list order wins stably.
+    # Equal weights (1.0, 1.0), equal ranks -> tie; dense list order wins stably.
     assert [h.chunk_id for h in hits] == ["dense-only", "sparse-only"]
 
 
@@ -215,5 +218,37 @@ def test_rrf_fuse_tie_order_is_deterministic():
     assert len(hits) == 2
     assert hits[0].score == hits[1].score
     assert [h.chunk_id for h in hits] == ["chunk-1", "chunk-2"]
+
+
+def test_diversify_hits_prevents_page_monopoly():
+    from mainframe_rag.retrieve.query import SearchHit, diversify_hits
+
+    def h(chunk_id: str, doc_id: str, page_label: str, score: float) -> SearchHit:
+        return SearchHit(
+            chunk_id=chunk_id,
+            score=score,
+            cite=f"{doc_id}, p. {page_label}",
+            heading=f"Section {page_label}",
+            text=f"Text {chunk_id}",
+            doc_id=doc_id,
+            title="Title",
+            page_label=page_label,
+            chunk_type="narrative",
+            message_ids=(),
+        )
+
+    # 3 chunks from doc1 page 1, 1 chunk from doc1 page 2, 1 chunk from doc2 page 3
+    raw = [
+        h("c1", "doc1", "1", 0.9),
+        h("c2", "doc1", "1", 0.8),
+        h("c3", "doc1", "1", 0.7),
+        h("c4", "doc1", "2", 0.6),
+        h("c5", "doc2", "3", 0.5),
+    ]
+    # Diversified with max_per_page=1, max_per_doc=1:
+    # Phase 1 selects c1 (doc1, p1) and c5 (doc2, p3).
+    # Phase 2 backfills c4 (doc1, p2) which satisfies max_per_page=1 before picking duplicate page 1!
+    div = diversify_hits(raw, limit=3, max_per_page=1, max_per_doc=1)
+    assert [x.chunk_id for x in div] == ["c1", "c5", "c4"]
 
 

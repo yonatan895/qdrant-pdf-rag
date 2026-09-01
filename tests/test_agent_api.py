@@ -50,7 +50,7 @@ class MagicMockSearch:
     def __init__(self):
         self.calls = []
 
-    def search(self, qdrant, embedder, collection, query, product=None, version=None, limit=8):
+    def search(self, qdrant, embedder, collection, query, product=None, version=None, limit=8, *args, **kwargs):
         self.calls.append({"query": query, "product": product, "version": version})
         return [_hit()], "identifier", {"embed_ms": 1, "qdrant_ms": 2}
 
@@ -763,4 +763,65 @@ def test_text_and_markdown_fences_unwrap_without_script():
     assert parsed.script is None
     assert "Some plain text prose" in parsed.answer
     assert "* bullet point" in parsed.answer
+
+
+def test_normalize_citation_line_peels_bracketed_numbers():
+    from mainframe_rag.agent.cites import normalize_citation_line
+
+    assert (
+        normalize_citation_line("[1] SA22-7592-05 z/OS MVS Init, IEASYSxx, p. 1-17")
+        == "SA22-7592-05 z/OS MVS Init, IEASYSxx, p. 1-17"
+    )
+    assert (
+        normalize_citation_line("[1]: SA22-7592-05 z/OS MVS Init, IEASYSxx, p. 1-17")
+        == "SA22-7592-05 z/OS MVS Init, IEASYSxx, p. 1-17"
+    )
+    assert (
+        normalize_citation_line("* [2] SA22-7592-05 z/OS MVS Init, IEASYSxx, p. 1-17")
+        == "SA22-7592-05 z/OS MVS Init, IEASYSxx, p. 1-17"
+    )
+
+
+def test_build_messages_preserves_syntax_and_message_fidelity():
+    from mainframe_rag.agent.answer import build_messages
+    from mainframe_rag.retrieve.query import SearchHit
+
+    syntax_hit = SearchHit(
+        chunk_id="s1",
+        score=1.0,
+        cite="SA23-1380-70 z/OS MVS Reference, p. 444",
+        heading="LFAREA syntax",
+        text="LFAREA = {xM | xG | xT | x%} " + "A" * 1800,
+        doc_id="SA23-1380-70",
+        title="Title",
+        page_label="444",
+        chunk_type="syntax",
+        message_ids=(),
+    )
+    narrative_hit = SearchHit(
+        chunk_id="n1",
+        score=0.9,
+        cite="SA23-1379-70 z/OS MVS Guide, p. 32",
+        heading="Overview",
+        text="Narrative explanation " + "B" * 1800,
+        doc_id="SA23-1379-70",
+        title="Title",
+        page_label="32",
+        chunk_type="narrative",
+        message_ids=(),
+    )
+
+    msgs = build_messages(
+        "How to configure large pages",
+        [syntax_hit, narrative_hit],
+        complexity="complex",
+        max_context_chars=4500,
+        max_chunk_chars=3000,
+        max_chunk_chars_narrative=1100,
+    )
+    content = msgs[1].content
+    # Syntax chunk was NOT truncated down to 1100 chars; kept full 1800+ chars
+    assert "..." not in content.split("[1]")[1].split("[2]")[0]
+    # Narrative chunk was truncated to narrative_cap (1100 chars)
+    assert "[truncated]" in content.split("[2]")[1]
 
