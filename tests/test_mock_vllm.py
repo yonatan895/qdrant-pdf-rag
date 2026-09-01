@@ -155,6 +155,29 @@ def test_tokenize_endpoint(base_url):
     assert len(data["tokens"]) == 4
 
 
+def test_tokenize_accepts_messages_shape(base_url):
+    """The agent's verification loop tokenizes the message list (chat-template
+    aware); the mock must accept it like real vLLM does."""
+    r = httpx2.post(
+        f"{base_url}/tokenize",
+        json={
+            "model": "mock-reasoning",
+            "messages": [
+                {"role": "system", "content": "You are terse."},
+                {"role": "user", "content": "Hello world token test"},
+            ],
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["count"] > 4  # system message adds tokens
+
+
+def test_tokenize_served_at_origin_root_only(base_url):
+    """vLLM serves /tokenize at the server origin, not under /v1. A client
+    regression that posts /v1/tokenize must 404, not match a loose suffix."""
+    assert httpx2.post(f"{base_url}/v1/tokenize", json={"prompt": "x"}).status_code == 404
+
+
 def test_httpx_llm_client_returns_chat_result(base_url, monkeypatch):
     from mainframe_rag.agent.answer import HttpxLLMClient
     from mainframe_rag.config import Settings

@@ -3,6 +3,8 @@
 import json
 from types import SimpleNamespace
 
+import httpx2
+
 from mainframe_rag.config import Settings
 from mainframe_rag.manifest import (
     compute_settings_hash,
@@ -26,13 +28,34 @@ def test_compute_settings_hash_stable():
     assert len(compute_settings_hash(s1)) == 64
 
 
-def test_get_qdrant_version_fallback():
-    assert get_qdrant_version("http://invalid-host:9999") == "1.19.0"
+def test_get_qdrant_version_unreachable_is_unknown(monkeypatch):
+    """Unreachable Qdrant must record "unknown" — never the pinned server
+    version, which would forge comparability between run manifests."""
+
+    def boom(url, timeout=3.0):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(httpx2, "get", boom)
+    assert get_qdrant_version("http://qdrant:6333") == "unknown"
+
+
+def test_get_qdrant_version_non_200_is_unknown(monkeypatch):
+    monkeypatch.setattr(
+        httpx2, "get", lambda url, timeout=3.0: SimpleNamespace(status_code=503, json=dict)
+    )
+    assert get_qdrant_version("http://qdrant:6333") == "unknown"
+
+
+def test_get_qdrant_version_served(monkeypatch):
+    monkeypatch.setattr(
+        httpx2,
+        "get",
+        lambda url, timeout=3.0: SimpleNamespace(status_code=200, json=lambda: {"version": "1.19.0"}),
+    )
+    assert get_qdrant_version("http://qdrant:6333") == "1.19.0"
 
 
 def test_get_collection_snapshot_id_with_fake(monkeypatch):
-    import httpx2
-
     class FakeHttp:
         @staticmethod
         def get(url, timeout=3.0):
@@ -45,7 +68,14 @@ def test_get_collection_snapshot_id_with_fake(monkeypatch):
     assert snap == "snap-123"
 
 
-def test_write_run_manifest_appends_valid_json(tmp_path):
+def test_write_run_manifest_appends_valid_json(tmp_path, monkeypatch):
+    """With Qdrant unreachable (all httpx2.get fail), the manifest must still
+    be written, with qdrant_version="unknown" and no snapshot id."""
+
+    def not_found(url, timeout=3.0):
+        return SimpleNamespace(status_code=404, json=dict)
+
+    monkeypatch.setattr(httpx2, "get", not_found)
     settings = Settings(_env_file=None)
     metrics = {"recall@1": 0.833, "recall@5": 1.0, "mrr": 0.896}
 
@@ -55,7 +85,8 @@ def test_write_run_manifest_appends_valid_json(tmp_path):
     assert "settings_hash" in manifest
     assert "git_sha" in manifest
     assert "model_ids" in manifest
-    assert "qdrant_version" in manifest
+    assert manifest["qdrant_version"] == "unknown"
+    assert manifest["collection_snapshot_id"] is None
 
     out_file = tmp_path / "eval_runs.jsonl"
     assert out_file.exists()

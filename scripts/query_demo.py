@@ -509,6 +509,7 @@ def execute_answer(
 ) -> tuple[dict[str, Any], list[SearchHit], str, dict[str, int]]:
     from mainframe_rag.agent.answer import (
         HttpxLLMClient,
+        as_chat_result,
         build_messages,
         classify_query_complexity,
         parse_answer,
@@ -551,22 +552,21 @@ def execute_answer(
         ),
         complexity=complexity,
         tokenizer=tokenizer,
-        max_model_len=settings.llm_max_model_len,
-        reserved_output_tokens=settings.llm_reserved_output_tokens,
-        safety_margin_tokens=settings.llm_token_safety_margin,
-        max_chunk_tokens_narrative=settings.llm_max_chunk_tokens_narrative,
+        settings=settings,
     )
     client = HttpxLLMClient(settings)
     try:
-        reply = client.chat(
-            messages,
-            reasoning_effort=effort,
-            temperature=settings.llm_temperature,
+        reply = as_chat_result(
+            client.chat(
+                messages,
+                reasoning_effort=effort,
+                temperature=settings.llm_temperature,
+            )
         )
     finally:
         client.close()
 
-    reply_content = reply.content if hasattr(reply, "content") else str(reply)
+    reply_content = reply.content
     allowed_citations = {h.cite for h in hits}
     parsed = parse_answer(reply_content, allowed_citations, ordered_cites=[h.cite for h in hits])
     return parsed, hits, kind, timings

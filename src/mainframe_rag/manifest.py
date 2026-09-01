@@ -43,15 +43,18 @@ def compute_settings_hash(settings: Settings) -> str:
 
 
 def get_qdrant_version(qdrant_url: str, timeout_s: float = 3.0) -> str:
-    """Queries Qdrant server version via REST API root endpoint."""
+    """Queries Qdrant server version via REST API root endpoint.
+
+    Returns "unknown" when Qdrant is unreachable — never the pinned server
+    version, which would forge comparability between run manifests."""
     try:
         resp = httpx2.get(qdrant_url.rstrip("/") + "/", timeout=timeout_s)
         if resp.status_code == 200:
             data = resp.json()
-            return str(data.get("version", "unknown"))
+            return str(data.get("version") or "unknown")
     except Exception:  # noqa: BLE001, S110
         pass
-    return "1.19.0"  # fallback to pinned server version
+    return "unknown"
 
 
 def get_collection_snapshot_id(

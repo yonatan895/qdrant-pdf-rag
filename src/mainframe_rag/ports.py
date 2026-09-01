@@ -135,9 +135,13 @@ class ChatResult(BaseModel):
 
 @runtime_checkable
 class Tokenizer(Protocol):
-    """Token counting interface for model context budgeting."""
+    """Token counting for context budgeting. Implementations: VllmTokenizer
+    (one /tokenize RPC per call — reserve it for whole-prompt verification,
+    never per-chunk counting) and FallbackTokenizer (in-process estimator)."""
 
     def count_tokens(self, text: str) -> int: ...
+
+    def count_messages(self, messages: list[ChatMessage]) -> int: ...
 
 
 @runtime_checkable

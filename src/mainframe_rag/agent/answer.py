@@ -13,6 +13,7 @@ from typing import Any
 import httpx2
 from pydantic import BaseModel, Field
 
+from mainframe_rag.agent.tokenizer import estimate_tokens
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, ChatResult, Tokenizer, TokenUsage
 from mainframe_rag.regexes import find_message_ids
@@ -20,6 +21,15 @@ from mainframe_rag.retrieve.query import SearchHit
 
 FENCE_RE = re.compile(r"```([a-zA-Z0-9_-]*)\n(.*?)```", re.DOTALL)
 SCRIPT_LANGS = frozenset({"jcl", "rexx", "sh", "bash", "shell", "python", "py", "yaml", "yml", "json", "ops", "rule", "parmlib"})
+
+# Prompt-packing heuristics (tokenizer path). Chars-per-token bridges the
+# estimator's token budget to char-space cuts; the verification loop against
+# the real tokenizer is what actually guarantees the window.
+_APPROX_CHARS_PER_TOKEN = 3.5
+_TRUNCATED_SUFFIX = "\n... [truncated]"
+_MAX_TRIM_ROUNDS = 4
+_TRIM_OVERCUT_CHARS = 64
+_MIN_TAIL_CHARS = 80
 
 
 class ParsedAnswer(BaseModel):
@@ -107,10 +117,7 @@ def build_messages(
     max_chunk_chars_narrative: int | None = None,
     complexity: str | None = None,
     tokenizer: Tokenizer | None = None,
-    max_model_len: int | None = None,
-    reserved_output_tokens: int | None = None,
-    safety_margin_tokens: int | None = None,
-    max_chunk_tokens_narrative: int | None = None,
+    settings: Settings | None = None,
 ) -> list[ChatMessage]:
     if complexity is None:
         complexity = classify_query_complexity(query)
@@ -136,39 +143,85 @@ def build_messages(
         else SYSTEM_PROMPT
     )
 
-    chunks: list[str] = []
+    example_cite = (
+        hits[0].cite
+        if hits
+        else "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17"
+    )
+    tail_part = (
+        "Please answer based strictly on the retrieved manual excerpts above and conclude with the 'Citations:' section copying the exact citation line for each excerpt used, for example:\n"
+        f"Citations:\n{example_cite}"
+    )
+
+    packed: list[tuple[str, str]] = []
     if tokenizer is not None:
-        # Tokenizer accounting: budget = max_model_len - reserved - measured_system - safety_margin
-        model_len = max_model_len or 4096
-        reserved = reserved_output_tokens or 1536
-        margin = safety_margin_tokens or 128
-        measured_sys = tokenizer.count_tokens(system_content + "\n" + "\n".join(parts))
-        budget_tokens = max(100, model_len - reserved - measured_sys - margin)
-        narrative_token_cap = max_chunk_tokens_narrative or 350
+        if settings is None:
+            raise ValueError("settings is required when a tokenizer is provided")
+        model_len = settings.llm_max_model_len
+        reserved = settings.llm_reserved_output_tokens
+        margin = settings.llm_token_safety_margin
+        narrative_token_cap = settings.llm_max_chunk_tokens_narrative
+
+        # Planning is estimator-only (zero RPC): the budget for chunk bodies
+        # after the fixed preamble (system prompt + context + question +
+        # trailing citation example).
+        fixed_tokens = estimate_tokens(
+            system_content + "\n" + "\n".join(parts) + "\n" + tail_part
+        )
+        budget_tokens = max(100, model_len - reserved - margin - fixed_tokens)
 
         total_tokens = 0
         for i, hit in enumerate(hits, 1):
             text = hit.text.strip()
             if hit.chunk_type not in ("syntax", "message", "table"):
                 if max_chunk_chars_narrative is not None and len(text) > max_chunk_chars_narrative:
-                    text = text[:max_chunk_chars_narrative].rstrip() + "\n... [truncated]"
-                elif complexity == "complex" and tokenizer.count_tokens(text) > narrative_token_cap:
-                    target_chars = int(narrative_token_cap * 3.5)
-                    text = text[:target_chars].rstrip() + "\n... [truncated]"
+                    text = text[:max_chunk_chars_narrative].rstrip() + _TRUNCATED_SUFFIX
+                elif complexity == "complex" and estimate_tokens(text) > narrative_token_cap:
+                    text = text[: int(narrative_token_cap * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX
             elif len(text) > max_chunk_chars:
-                text = text[:max_chunk_chars].rstrip() + "\n... [truncated]"
-
-            chunk_repr = f"[{i}] {hit.cite}\n{text}"
-            chunk_tokens = tokenizer.count_tokens(chunk_repr)
-            if total_tokens + chunk_tokens > budget_tokens and chunks:
+                text = text[:max_chunk_chars].rstrip() + _TRUNCATED_SUFFIX
+            header = f"[{i}] {hit.cite}"
+            chunk_tokens = estimate_tokens(f"{header}\n{text}")
+            if total_tokens + chunk_tokens > budget_tokens and packed:
                 rem_tokens = budget_tokens - total_tokens
-                if rem_tokens > 60:
-                    rem_chars = int(rem_tokens * 3.5)
-                    text = text[:rem_chars].rstrip() + "\n... [truncated]"
-                    chunks.append(f"[{i}] {hit.cite}\n{text}")
+                # The char cut must leave room for the header too, or the
+                # packed sum can exceed the budget by the header size.
+                body_rem_tokens = rem_tokens - estimate_tokens(header)
+                if body_rem_tokens > 60:
+                    packed.append(
+                        (
+                            header,
+                            text[: int(body_rem_tokens * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX,
+                        )
+                    )
                 break
-            chunks.append(chunk_repr)
+            packed.append((header, text))
             total_tokens += chunk_tokens
+
+        # Verification is the only tokenizer work: count the packed prompt
+        # once, chat-template aware, and trim the tail if the estimator
+        # drifted past the window. Bounded rounds; a prompt that still does
+        # not fit surfaces later as finish_reason=length (alerted in app).
+        verify_limit = model_len - reserved
+        for _ in range(_MAX_TRIM_ROUNDS):
+            if not packed:
+                break
+            used = tokenizer.count_messages(
+                [
+                    ChatMessage(role="system", content=system_content),
+                    ChatMessage(role="user", content=_user_content(parts, packed, tail_part)),
+                ]
+            )
+            if used <= verify_limit:
+                break
+            overshoot = used - verify_limit
+            cut = int(overshoot * _APPROX_CHARS_PER_TOKEN) + _TRIM_OVERCUT_CHARS
+            header, body = packed[-1]
+            trimmed = body[:-cut] if cut < len(body) else ""
+            if len(trimmed.rstrip()) < _MIN_TAIL_CHARS:
+                packed.pop()
+            else:
+                packed[-1] = (header, trimmed.rstrip() + _TRUNCATED_SUFFIX)
     else:
         total_chars = 0
         for i, hit in enumerate(hits, 1):
@@ -186,33 +239,41 @@ def build_messages(
                 else min(max_chunk_chars, narrative_cap)
             )
             if len(text) > chunk_cap:
-                text = text[:chunk_cap].rstrip() + "\n... [truncated]"
-            chunk_repr = f"[{i}] {hit.cite}\n{text}"
-            if total_chars + len(chunk_repr) > max_context_chars and chunks:
+                text = text[:chunk_cap].rstrip() + _TRUNCATED_SUFFIX
+            header = f"[{i}] {hit.cite}"
+            chunk_len = len(header) + 1 + len(text)
+            if total_chars + chunk_len > max_context_chars and packed:
                 remaining = max_context_chars - total_chars
                 if remaining > 200:
-                    text = text[:remaining].rstrip() + "\n... [truncated]"
-                    chunks.append(f"[{i}] {hit.cite}\n{text}")
+                    packed.append((header, text[:remaining].rstrip() + _TRUNCATED_SUFFIX))
                 break
-            chunks.append(chunk_repr)
-            total_chars += len(chunk_repr)
+            packed.append((header, text))
+            total_chars += chunk_len
 
-    parts.append("Retrieved manual excerpts:\n" + "\n\n".join(chunks))
-
-    example_cite = (
-        hits[0].cite
-        if hits
-        else "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17"
-    )
-    parts.append(
-        "Please answer based strictly on the retrieved manual excerpts above and conclude with the 'Citations:' section copying the exact citation line for each excerpt used, for example:\n"
-        f"Citations:\n{example_cite}"
-    )
+    parts.append("Retrieved manual excerpts:\n" + "\n\n".join(f"{h}\n{b}" for h, b in packed))
+    parts.append(tail_part)
 
     return [
         ChatMessage(role="system", content=system_content),
         ChatMessage(role="user", content="\n\n".join(parts)),
     ]
+
+
+def _user_content(parts: list[str], packed: list[tuple[str, str]], tail_part: str) -> str:
+    """The final user message, used by the verification loop to count the
+    exact prompt that will be sent."""
+    excerpt_part = "Retrieved manual excerpts:\n" + "\n\n".join(f"{h}\n{b}" for h, b in packed)
+    return "\n\n".join([*parts, excerpt_part, tail_part])
+
+
+def as_chat_result(raw: ChatResult | str) -> ChatResult:
+    """Single adapter for LLMClient.chat() results: the production client
+    returns ChatResult; test doubles may still return a bare string. Every
+    consumer (app, query_demo) funnels through here instead of carrying its
+    own isinstance/hasattr branch."""
+    if isinstance(raw, ChatResult):
+        return raw
+    return ChatResult(content=str(raw), finish_reason="stop", usage=TokenUsage())
 
 
 def assert_reasoning_model(settings: Settings) -> tuple[str, str]:
@@ -272,7 +333,9 @@ class HttpxLLMClient:
         resp.raise_for_status()
         data = resp.json()
         choice = data["choices"][0]
-        content = str(choice["message"]["content"])
+        # Reasoning models may return content: None (all output went to the
+        # reasoning channel) — that must surface as "", never the string "None".
+        content = str(choice["message"].get("content") or "")
         finish_reason = str(choice.get("finish_reason") or "stop")
         usage_data = data.get("usage") or {}
         reasoning_tokens = (

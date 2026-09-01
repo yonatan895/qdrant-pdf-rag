@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from mainframe_rag.agent.answer import (
     HttpxLLMClient,
+    as_chat_result,
     assert_reasoning_model,
     build_messages,
     classify_query_complexity,
@@ -33,7 +34,7 @@ from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.logs import configure_logging
-from mainframe_rag.ports import ChatResult, Embedder, LLMClient, Tokenizer, TokenUsage
+from mainframe_rag.ports import Embedder, LLMClient, Tokenizer
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import search as retrieve_search
 
@@ -48,12 +49,6 @@ qdrant: QdrantPoints
 embedder: Embedder
 llm: LLMClient
 tokenizer: Tokenizer
-
-answer_metrics: dict[str, int] = {
-    "requests_total": 0,
-    "finish_reason_stop_total": 0,
-    "finish_reason_non_stop_total": 0,
-}
 
 
 class AppError(Exception):
@@ -331,23 +326,17 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
             max_chunk_chars_narrative=settings.prompt_max_chunk_chars_complex if complexity == "complex" else None,
             complexity=complexity,
             tokenizer=tokenizer,
-            max_model_len=settings.llm_max_model_len,
-            reserved_output_tokens=settings.llm_reserved_output_tokens,
-            safety_margin_tokens=settings.llm_token_safety_margin,
-            max_chunk_tokens_narrative=settings.llm_max_chunk_tokens_narrative,
+            settings=settings,
         )
         t0 = time.monotonic()
-        chat_raw = llm.chat(
-            messages,
-            reasoning_effort=effort,
-            temperature=settings.llm_temperature,
+        chat_res = as_chat_result(
+            llm.chat(
+                messages,
+                reasoning_effort=effort,
+                temperature=settings.llm_temperature,
+            )
         )
         llm_ms = int((time.monotonic() - t0) * 1000)
-        chat_res = (
-            chat_raw
-            if isinstance(chat_raw, ChatResult)
-            else ChatResult(content=str(chat_raw), finish_reason="stop", usage=TokenUsage())
-        )
         content = chat_res.content
         finish_reason = chat_res.finish_reason
         usage = chat_res.usage
@@ -360,11 +349,10 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
         log.error(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "answer failed") from exc
 
-    answer_metrics["requests_total"] += 1
-    if finish_reason == "stop":
-        answer_metrics["finish_reason_stop_total"] += 1
-    else:
-        answer_metrics["finish_reason_non_stop_total"] += 1
+    # finish_reason != stop is alerted per request: the JSON warning is the
+    # real, worker-safe signal. No process-local counters — they lie under
+    # multiple uvicorn workers and nothing exports them.
+    if finish_reason != "stop":
         log.warning(
             json_log(
                 request_id,
