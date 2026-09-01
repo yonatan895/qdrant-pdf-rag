@@ -306,6 +306,11 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
         if complexity == "complex"
         else settings.prompt_max_context_chars
     )
+    max_chunk = (
+        settings.prompt_max_chunk_chars_complex
+        if complexity == "complex"
+        else settings.prompt_max_chunk_chars
+    )
     effort = (
         settings.llm_reasoning_effort_complex
         if complexity == "complex"
@@ -316,7 +321,7 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
             req.query, hits,
             product=req.product, version=req.version, splunk_context=req.splunk_context,
             max_context_chars=max_context,
-            max_chunk_chars=settings.prompt_max_chunk_chars,
+            max_chunk_chars=max_chunk,
             complexity=complexity,
         )
         t0 = time.monotonic()

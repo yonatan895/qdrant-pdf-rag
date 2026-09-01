@@ -23,7 +23,7 @@ CITATIONS_HEADER_RE = re.compile(r"^\s*#{0,6}\s*Citations?:\s*$", re.IGNORECASE 
 # enclosing markup peels as whole pairs afterwards. Prose like "3.5 inches"
 # survives untouched. The "))(" paren form and the bullet set are a deliberate
 # extension of the pre-PR-C list parser.
-_MARKER_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)+")
+_MARKER_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+|\[\d+\]:?\s*)+")
 
 # Enclosing markup peeled pairwise (with repetition, so **x** and __x__
 # resolve cleanly): bold, italic/underscore, inline code, quotes.

@@ -764,3 +764,20 @@ def test_text_and_markdown_fences_unwrap_without_script():
     assert "Some plain text prose" in parsed.answer
     assert "* bullet point" in parsed.answer
 
+
+def test_normalize_citation_line_peels_bracketed_numbers():
+    from mainframe_rag.agent.cites import normalize_citation_line
+
+    assert (
+        normalize_citation_line("[1] SA22-7592-05 z/OS MVS Init, IEASYSxx, p. 1-17")
+        == "SA22-7592-05 z/OS MVS Init, IEASYSxx, p. 1-17"
+    )
+    assert (
+        normalize_citation_line("[1]: SA22-7592-05 z/OS MVS Init, IEASYSxx, p. 1-17")
+        == "SA22-7592-05 z/OS MVS Init, IEASYSxx, p. 1-17"
+    )
+    assert (
+        normalize_citation_line("* [2] SA22-7592-05 z/OS MVS Init, IEASYSxx, p. 1-17")
+        == "SA22-7592-05 z/OS MVS Init, IEASYSxx, p. 1-17"
+    )
+

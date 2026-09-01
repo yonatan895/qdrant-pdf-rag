@@ -105,7 +105,7 @@ def evaluate(golden: list[GoldenEntry], settings) -> dict:
     for entry in golden:
         try:
             hits, kind, _timings = retrieve_search(
-                client, embedder, collection, entry.query, limit=SEARCH_LIMIT
+                client, embedder, collection, entry.query, limit=SEARCH_LIMIT, settings=settings
             )
             rows.append(score_entry(hits, entry))
             rows[-1]["kind"] = kind

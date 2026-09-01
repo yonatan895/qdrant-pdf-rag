@@ -59,6 +59,23 @@ class Settings(BaseSettings):
     prompt_max_context_chars: int = Field(default=8000, ge=1000, le=50000)
     prompt_max_context_chars_complex: int = Field(default=4500, ge=1000, le=50000)
     prompt_max_chunk_chars: int = Field(default=3000, ge=500, le=10000)
+    prompt_max_chunk_chars_complex: int = Field(default=1100, ge=300, le=5000)
+
+    # Dense query instruction prefix for asymmetric embedders (e.g. Qwen3-Embedding).
+    # Applied to query vector embeddings; chunks during ingest remain raw text.
+    dense_query_prefix: str = Field(
+        default="Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "
+    )
+
+    # Hybrid retrieval fusion (local RRF) and diversity parameters
+    rrf_k: int = Field(default=2, ge=1, le=100)
+    rrf_weight_dense_nl: float = Field(default=1.5, gt=0.0, le=10.0)
+    rrf_weight_sparse_nl: float = Field(default=0.5, gt=0.0, le=10.0)
+    rrf_weight_dense_identifier: float = Field(default=1.0, gt=0.0, le=10.0)
+    rrf_weight_sparse_identifier: float = Field(default=3.0, gt=0.0, le=10.0)
+    retrieve_max_chunks_per_page: int = Field(default=1, ge=1, le=10)
+    retrieve_max_chunks_per_doc: int = Field(default=3, ge=1, le=10)
+
     # Reasoning effort control: directs the reasoning model to think more thoroughly
     # on complex operational, diagnostic, and comparative inquiries while conserving
     # latency on simple factoid/message lookups.

@@ -10,9 +10,13 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 from qdrant_client import models
+
+if TYPE_CHECKING:
+    from mainframe_rag.config import Settings
 
 from mainframe_rag.ports import Embedder, QdrantPoints
 from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
@@ -20,7 +24,7 @@ from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
 PREFETCH_LIMIT = 40
 RRF_K = 2
 RRF_WEIGHTS_IDENTIFIER = (1.0, 3.0)  # (dense, bm25): identifiers favor exact terms
-RRF_WEIGHTS_NL = (1.0, 1.0)
+RRF_WEIGHTS_NL = (1.5, 0.5)  # (dense, bm25): semantic query prefix gives dense high precision
 
 
 RETRIEVE_PAYLOAD_FIELDS: tuple[str, ...] = (
@@ -126,6 +130,40 @@ def rrf_fuse(
     return [_to_hit(by_id[key], score) for key, score in ranked]
 
 
+def diversify_hits(
+    hits: list[SearchHit],
+    limit: int = 8,
+    max_per_page: int = 1,
+    max_per_doc: int = 3,
+) -> list[SearchHit]:
+    """Ensures search results provide diverse coverage across documents and pages
+    so near-duplicate consecutive chunks do not crowd out relevant companion
+    manuals or distinct sections."""
+    selected: list[SearchHit] = []
+    deferred: list[SearchHit] = []
+    seen_pages: dict[tuple[str, str], int] = {}
+    seen_docs: dict[str, int] = {}
+
+    for h in hits:
+        p_key = (h.doc_id, h.page_label)
+        d_key = h.doc_id
+        if seen_pages.get(p_key, 0) < max_per_page and seen_docs.get(d_key, 0) < max_per_doc:
+            seen_pages[p_key] = seen_pages.get(p_key, 0) + 1
+            seen_docs[d_key] = seen_docs.get(d_key, 0) + 1
+            selected.append(h)
+        else:
+            deferred.append(h)
+        if len(selected) >= limit:
+            break
+
+    if len(selected) < limit:
+        for h in deferred:
+            selected.append(h)
+            if len(selected) >= limit:
+                break
+    return selected
+
+
 def search(
     client: QdrantPoints,
     embedder: Embedder,
@@ -134,18 +172,28 @@ def search(
     product: str | None = None,
     version: str | None = None,
     limit: int = 8,
+    settings: Settings | None = None,
 ) -> tuple[list[SearchHit], str, dict[str, int]]:
     """Returns (hits, query_kind, timing_ms). Filters applied inside prefetch.
 
     Dense and sparse prefetch queries execute concurrently in a single HTTP
     batch call via query_batch_points (falling back to query_points if unsupported)."""
+    if settings is None:
+        from mainframe_rag.config import load_settings
+
+        settings = load_settings()
+
     identifiers = parse_query(query)
     flt = build_filter(identifiers, product=product, version=version)
 
     timings: dict[str, int] = {}
 
     t0 = time.monotonic()
-    dense_vec = embedder.dense([query])[0]
+    dense_vec = (
+        embedder.dense_query([query])[0]
+        if hasattr(embedder, "dense_query")
+        else embedder.dense([query])[0]
+    )
     sparse_idx, sparse_val = embedder.sparse([query])[0]
     timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 
@@ -181,7 +229,22 @@ def search(
         )
     timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
 
-    weights = RRF_WEIGHTS_IDENTIFIER if identifiers.has_identifiers else RRF_WEIGHTS_NL
-    hits = rrf_fuse(dense_points, sparse_points, weights, limit=limit)
+    if settings:
+        weights = (
+            (settings.rrf_weight_dense_identifier, settings.rrf_weight_sparse_identifier)
+            if identifiers.has_identifiers
+            else (settings.rrf_weight_dense_nl, settings.rrf_weight_sparse_nl)
+        )
+        k = settings.rrf_k
+        max_per_page = settings.retrieve_max_chunks_per_page
+        max_per_doc = settings.retrieve_max_chunks_per_doc
+    else:
+        weights = RRF_WEIGHTS_IDENTIFIER if identifiers.has_identifiers else RRF_WEIGHTS_NL
+        k = RRF_K
+        max_per_page = 1
+        max_per_doc = 3
+
+    candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=max(limit * 3, 24))
+    hits = diversify_hits(candidates, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
     return hits, query_kind(identifiers), timings
 
