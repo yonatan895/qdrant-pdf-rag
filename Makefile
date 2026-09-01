@@ -162,20 +162,43 @@ loadtest: | .venv
 	$(PY) scripts/loadtest.py --url $(AGENT_URL) --endpoint search --concurrency 8 --duration 30
 
 # ---------------------------------------------------------------- retrieval accuracy
+# Mode-keyed baselines (not comparable): hash gates CI/dev runs; vllm gates
+# release-candidate runs against the live embedder. Exported so the script's
+# load_settings() sees the same mode the baseline selection used — the
+# Settings default is vllm (prod-first), so eval defaults to hash explicitly.
+EMBED_MODE ?= hash
+export EMBED_MODE
+EVAL_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-vllm.json,evals/baseline.json)
+
 # Eval against a running Qdrant (sim-qdrant or QDRANT_SIM_URL); scores
-# evals/golden.jsonl through the real pipeline (recall@k / MRR) and checks
-# against the committed baseline (tolerances in scripts/eval_retrieval.py).
-.PHONY: eval eval-baseline eval-draft
+# the dev golden set (evals/golden.jsonl) through the real pipeline
+# (recall@k / MRR) and checks against the mode-keyed baseline.
+# The frozen holdout (evals/holdout.jsonl) is NEVER iterated against:
+# `make eval-holdout` runs on release candidates only (AGENTS.md).
+.PHONY: eval eval-baseline eval-draft eval-holdout verify-golden
 eval: | .venv
 	@mkdir -p $(BUNDLE_DIR)
-	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --check evals/baseline.json \
+	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --check $(EVAL_BASELINE) \
 	  --out $(BUNDLE_DIR)/eval-report.json --summary $(BUNDLE_DIR)/eval-summary.md
+
+# Mechanical verification of golden expectations against the live collection
+# (doc/heading/page/message-id facts, must_not trap validity). Gates the
+# corpus: nonzero exit on any FAIL.
+verify-golden: | .venv
+	.venv/bin/python scripts/verify_golden.py
+
+# Release candidates only: score the frozen holdout against its own baseline.
+eval-holdout: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/eval_retrieval.py --golden evals/holdout.jsonl \
+	  --check evals/holdout-baseline.json \
+	  --out $(BUNDLE_DIR)/eval-holdout-report.json --summary $(BUNDLE_DIR)/eval-holdout-summary.md
 
 # Re-record the committed accuracy baseline (dedicated PR — AGENTS.md).
 .PHONY: eval-baseline
 eval-baseline: | .venv
 	@mkdir -p $(BUNDLE_DIR)
-	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --update-baseline evals/baseline.json \
+	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --update-baseline $(EVAL_BASELINE) \
 	  --out $(BUNDLE_DIR)/eval-report.json --summary $(BUNDLE_DIR)/eval-summary.md
 
 # Draft golden-set candidates from a collection's payload (edit the queries).
