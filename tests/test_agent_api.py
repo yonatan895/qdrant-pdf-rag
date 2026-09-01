@@ -669,3 +669,47 @@ def test_httpx_llm_client_passes_reasoning_params(monkeypatch):
     assert recorded_payload["reasoning_effort"] == "high"
     assert recorded_payload["temperature"] == 0.2
 
+
+def test_parse_answer_markdown_heading_citations():
+    from mainframe_rag.agent.answer import parse_answer
+
+    allowed = {"SA22-7592-05 z/OS MVS Init, IEASYSxx > LFAREA, p. 1-17"}
+    content = (
+        "Here is the answer.\n\n"
+        "### Citations:\n"
+        "* SA22-7592-05 z/OS MVS Init, IEASYSxx > LFAREA, p. 1-17\n"
+    )
+    parsed = parse_answer(content, allowed, ordered_cites=list(allowed))
+    assert parsed.citations == ["SA22-7592-05 z/OS MVS Init, IEASYSxx > LFAREA, p. 1-17"]
+    assert not parsed.citations_inferred
+
+
+def test_parse_answer_trailing_citations_without_header():
+    from mainframe_rag.agent.answer import parse_answer
+
+    allowed = {
+        "ca-ops-14-0 OPS/MVS Using, p. 596",
+        "ca-ops-14-0 OPS/MVS Using > Rules > TOD, p. 589",
+    }
+    content = (
+        "Here is the synthesized TOD rule:\n"
+        ")TOD 00:10,4 HOURS\n\n"
+        "ca-ops-14-0 OPS/MVS Using, p. 596\n"
+        "ca-ops-14-0 OPS/MVS Using > Rules > TOD, p. 589\n"
+    )
+    parsed = parse_answer(content, allowed, ordered_cites=list(allowed))
+    assert len(parsed.citations) == 2
+    assert "ca-ops-14-0 OPS/MVS Using, p. 596" in parsed.citations
+    assert "ca-ops-14-0 OPS/MVS Using > Rules > TOD, p. 589" in parsed.citations
+    assert not parsed.citations_inferred
+    assert "ca-ops-14-0" not in parsed.answer
+
+
+def test_script_langs_supports_ops_and_rule():
+    from mainframe_rag.agent.answer import parse_answer
+
+    content = "Here is the rule:\n```ops\n)TOD 00:10,4 HOURS\n```\nDone."
+    parsed = parse_answer(content, set())
+    assert parsed.script == ")TOD 00:10,4 HOURS"
+    assert "```ops" not in parsed.answer
+

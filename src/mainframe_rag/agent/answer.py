@@ -18,7 +18,7 @@ from mainframe_rag.ports import ChatMessage
 from mainframe_rag.retrieve.query import SearchHit
 
 FENCE_RE = re.compile(r"```([a-zA-Z0-9_-]*)\n(.*?)```", re.DOTALL)
-SCRIPT_LANGS = frozenset({"jcl", "rexx", "sh", "bash", "shell", "python", "py", "yaml", "yml", "json"})
+SCRIPT_LANGS = frozenset({"jcl", "rexx", "sh", "bash", "shell", "python", "py", "yaml", "yml", "json", "text", "txt", "ops", "rule", "parmlib"})
 
 
 class ParsedAnswer(BaseModel):
@@ -31,15 +31,13 @@ class ParsedAnswer(BaseModel):
 
 SYSTEM_PROMPT = (
     "You are a mainframe operations expert (z/OS, CICS, Db2, IMS, JES2/3, RACF, "
-    "z/VM, VTAM). Answer operational questions. Rules:\n"
-    "1. Only assert what the supplied excerpts support.\n"
-    "2. If manuals disagree between versions, say which version each statement "
-    "comes from.\n"
-    "3. If the excerpts do not answer the question, say so explicitly.\n"
-    "4. When you propose JCL, REXX, or operator steps, put them in a fenced code "
-    "block and tie them to a citation. Scripts are examples, not "
-    "production-ready without review.\n"
-    "5. You MUST end your reply with a 'Citations:' section listing the exact citation strings of the excerpts used, for example:\n"
+    "z/VM, VTAM, OPS/MVS). Answer operational questions. Rules:\n"
+    "1. Only assert facts and parameters that the supplied excerpts support. Do not invent fictitious keywords or commands.\n"
+    "2. When asked how to code or configure a specific case, apply the syntax templates, grammars, and parameter rules documented in the excerpts to the user's scenario. Do not refuse to synthesize code, JCL, rules, or commands simply because the manual lacks an identical verbatim example for the user's specific values.\n"
+    "3. If manuals disagree between versions, say which version each statement comes from.\n"
+    "4. If the excerpts truly do not contain the syntax, parameters, or rules to answer the question, say so explicitly.\n"
+    "5. When you propose JCL, REXX, rule definitions, or operator steps, put them in a fenced code block and explain how they map to the documented syntax. Scripts are examples, not production-ready without review.\n"
+    "6. You MUST end your reply with a 'Citations:' section listing the exact citation strings of the excerpts used, for example:\n"
     "Citations:\n"
     "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17\n"
 )
@@ -94,13 +92,13 @@ SYSTEM_PROMPT_COMPLEX_EXTENSION = (
     "1. Deep Internal Reasoning: In your internal thinking, conduct thorough step-by-step analysis:\n"
     "   - Analyze the exact operational scenario, failure mode, and system components involved.\n"
     "   - Systematically examine each retrieved excerpt for syntax specifications, parameter values, return codes, hardware/software prerequisites, and operational limits.\n"
+    "   - When synthesizing rules, JCL, or commands: extract the documented syntax template/grammar, map the user's scenario values into each parameter slot, and verify the resulting statement against the documented rules.\n"
     "   - Cross-verify statements across excerpts before synthesizing the answer.\n"
-    "   - Identify any MVS operator commands (e.g. DISPLAY, VARY), recovery procedures, or JCL statements needed for a complete solution.\n"
     "2. High-Actionability Response Structure:\n"
     "   - Structure your response logically with clear technical headings.\n"
-    "   - Provide concrete, verified syntax, parmlib statements, or JCL examples in fenced code blocks whenever procedures or configurations are discussed.\n"
+    "   - Provide concrete, verified syntax, parmlib statements, rule definitions, or JCL examples in fenced code blocks whenever procedures or configurations are discussed.\n"
+    "   - Explain the derivation of each parameter from the documented syntax rules.\n"
     "   - Detail both diagnosis (what happened and how to verify) and recovery (exact remediation steps).\n"
-    "   - Adhere strictly to the retrieved excerpts and do not extrapolate beyond what the manuals state.\n"
     "3. Explicit Citations:\n"
     "   - You MUST end your reply with the 'Citations:' section explicitly listing each excerpt citation used.\n"
 )
@@ -274,6 +272,30 @@ def parse_answer(
 
     citations_inferred = False
     inferred_indices: list[int] = []
+
+    if not citations:
+        # Check if model ended the response with citation lines matching allowed_citations
+        # even if the literal 'Citations:' header was omitted.
+        from mainframe_rag.agent.cites import _normalize_citation_line
+
+        body_lines = body.splitlines()
+        trailing_cites: list[str] = []
+        while body_lines:
+            candidate = body_lines[-1].strip()
+            if not candidate:
+                body_lines.pop()
+                continue
+            norm = _normalize_citation_line(candidate)
+            if norm in allowed_citations:
+                if norm not in trailing_cites:
+                    trailing_cites.append(norm)
+                body_lines.pop()
+            else:
+                break
+        if trailing_cites:
+            trailing_cites.reverse()
+            citations = trailing_cites
+            body = "\n".join(body_lines)
 
     if not citations and ordered_cites:
         # Strictly match bracketed numbers like [1], [2], [1, 2] corresponding to [{i}] prompt excerpts.
