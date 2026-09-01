@@ -9,6 +9,7 @@ feature hashing, no network, no model weights. Never the default in prod.
 """
 
 import multiprocessing
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -61,8 +62,8 @@ class Settings(BaseSettings):
     # Reasoning effort control: directs the reasoning model to think more thoroughly
     # on complex operational, diagnostic, and comparative inquiries while conserving
     # latency on simple factoid/message lookups.
-    llm_reasoning_effort_simple: str = Field(default="low")
-    llm_reasoning_effort_complex: str = Field(default="high")
+    llm_reasoning_effort_simple: Literal["low", "medium", "high"] = Field(default="low")
+    llm_reasoning_effort_complex: Literal["low", "medium", "high"] = Field(default="high")
     llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
     # Bounded httpx2 connection-establishment retries (0-5). These fire only

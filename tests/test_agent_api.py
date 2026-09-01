@@ -14,13 +14,13 @@ from mainframe_rag.agent.cites import extract_citation_lines, valid_citations
 from mainframe_rag.retrieve.query import SearchHit
 
 
-def _hit(cite_suffix: str = "p. 1-6") -> SearchHit:
+def _hit(cite_suffix: str = "p. 1-6", text: str = "IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy") -> SearchHit:
     return SearchHit(
         chunk_id="abc123",
         score=0.42,
         cite=f"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, {cite_suffix}",
         heading="Chapter 2 > IEA500I",
-        text="IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy",
+        text=text,
         doc_id="SA22-0000-00",
         title="Synthetic Reference",
         page_label="1-6",
@@ -584,12 +584,15 @@ def test_classify_query_complexity():
     assert classify_query_complexity("What does operator message IEA500I indicate?") == "simple"
     assert classify_query_complexity("What parameter in IEASYSxx defines 1MB large page frames?") == "simple"
     assert classify_query_complexity("What return code does NFS mount fail with?") == "simple"
+    # Operator inquiry with message ID stays simple (not penalized with complex protocol/thinner context)
+    assert classify_query_complexity("How do I resolve IEA500I IOSCMDS command rejected and what operator action is needed?") == "simple"
 
     # Complex queries (diagnostic, troubleshooting, abend, recovery, procedural, tuning)
     assert classify_query_complexity("How do I diagnose and recover when DFSMShsm journal fills up?") == "complex"
     assert classify_query_complexity("Troubleshooting S0C4 abend in batch job") == "complex"
     assert classify_query_complexity("Explain how to configure 1MB and 2GB page frames with LFAREA") == "complex"
     assert classify_query_complexity("Compare DFSORT memory options HIPRMAX vs MOSIZE and how to tune") == "complex"
+    assert classify_query_complexity("How do I create an OPS TOD rule that runs in intervals of 4 hours, starting from 12:10 AM?") == "complex"
 
 
 def test_build_messages_complexity():
@@ -608,6 +611,28 @@ def test_build_messages_complexity():
         complexity="complex",
     )
     assert SYSTEM_PROMPT_COMPLEX_EXTENSION in complex_msgs[0].content
+
+
+def test_build_messages_context_budgeting_complex_vs_simple():
+    from mainframe_rag.agent.answer import build_messages
+
+    hits = [
+        _hit(f"p. 1-{i}", text="X" * 2000)
+        for i in range(3)
+    ]
+    # Simple query uses 8000 budget - all 3 hits fit
+    simple_msgs = build_messages("IEA500I", hits, complexity="simple", max_context_chars=8000)
+    user_content_simple = simple_msgs[1].content
+    assert "[1]" in user_content_simple
+    assert "[2]" in user_content_simple
+    assert "[3]" in user_content_simple
+
+    # Complex query uses 4500 budget - 3rd hit is truncated or omitted to stay within budget
+    complex_msgs = build_messages("How to configure large pages", hits, complexity="complex", max_context_chars=4500)
+    user_content_complex = complex_msgs[1].content
+    assert len(user_content_complex) < len(user_content_simple)
+    excerpts_part = user_content_complex.split("Retrieved manual excerpts:\n")[1].split("Please answer")[0]
+    assert len(excerpts_part) <= 4600
 
 
 def test_answer_dispatches_reasoning_effort_by_complexity(client, monkeypatch):
@@ -705,6 +730,22 @@ def test_parse_answer_trailing_citations_without_header():
     assert "ca-ops-14-0" not in parsed.answer
 
 
+def test_parse_answer_does_not_strip_non_citation_trailing_lines():
+    from mainframe_rag.agent.answer import parse_answer
+
+    allowed = {"ca-ops-14-0 OPS/MVS Using, p. 596"}
+    content = (
+        "Here is the synthesized TOD rule:\n"
+        ")TOD 00:10,4 HOURS\n\n"
+        "ca-ops-14-0 OPS/MVS Using, p. 596\n\n"
+        "Run DISPLAY M=CPU to verify."
+    )
+    parsed = parse_answer(content, allowed, ordered_cites=list(allowed))
+    # Last line is "Run DISPLAY M=CPU to verify." - must NOT be eaten or treated as a cite
+    assert "Run DISPLAY M=CPU to verify." in parsed.answer
+    assert parsed.citations == []
+
+
 def test_script_langs_supports_ops_and_rule():
     from mainframe_rag.agent.answer import parse_answer
 
@@ -712,4 +753,14 @@ def test_script_langs_supports_ops_and_rule():
     parsed = parse_answer(content, set())
     assert parsed.script == ")TOD 00:10,4 HOURS"
     assert "```ops" not in parsed.answer
+
+
+def test_text_and_markdown_fences_unwrap_without_script():
+    from mainframe_rag.agent.answer import parse_answer
+
+    content = "Here is explanation:\n```text\nSome plain text prose\n```\nAnd:\n```markdown\n* bullet point\n```\nDone."
+    parsed = parse_answer(content, set())
+    assert parsed.script is None
+    assert "Some plain text prose" in parsed.answer
+    assert "* bullet point" in parsed.answer
 

@@ -15,10 +15,11 @@ from pydantic import BaseModel, Field
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage
+from mainframe_rag.regexes import find_message_ids
 from mainframe_rag.retrieve.query import SearchHit
 
 FENCE_RE = re.compile(r"```([a-zA-Z0-9_-]*)\n(.*?)```", re.DOTALL)
-SCRIPT_LANGS = frozenset({"jcl", "rexx", "sh", "bash", "shell", "python", "py", "yaml", "yml", "json", "text", "txt", "ops", "rule", "parmlib"})
+SCRIPT_LANGS = frozenset({"jcl", "rexx", "sh", "bash", "shell", "python", "py", "yaml", "yml", "json", "ops", "rule", "parmlib"})
 
 
 class ParsedAnswer(BaseModel):
@@ -42,47 +43,38 @@ SYSTEM_PROMPT = (
     "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17\n"
 )
 
-COMPLEX_QUERY_KEYWORDS: frozenset[str] = frozenset({
-    "diagnose", "diagnosis", "recover", "recovery", "troubleshoot", "troubleshooting",
-    "failure", "fail", "failed", "abend", "abends", "crash", "crashed", "loop",
-    "hang", "hangs", "corrupt", "corruption", "fill", "fills", "filling", "full",
-    "compare", "comparison", "difference", "differences", "vs", "versus",
-    "tune", "tuning", "optimize", "optimization", "performance", "tradeoff", "tradeoffs",
-    "configure", "configuration", "setup", "implement", "implementation", "procedure",
-    "procedures", "step", "steps", "migrate", "migration", "install", "installation",
-    "interact", "interaction", "explain how", "how to", "how do", "how can", "why did", "why does",
-})
+COMPLEX_ROOTS = ("diagnos", "recover", "abend", "compar", "tuning", "optimi", "tradeoff")
 
 
 def classify_query_complexity(query: str) -> str:
     """Classifies query as 'simple' (factoid, message id, or single parameter lookup)
     or 'complex' (diagnostic, procedural, comparative, tuning, or multi-step inquiry)."""
     q_lower = query.lower().strip()
-    # High-priority complex intent: procedures, troubleshooting, diagnosis, recovery, comparison
-    if any(k in q_lower for k in ("how to", "how do", "how can", "explain how", "step by step", "steps to", "procedure")):
-        return "complex"
-    if any(k in q_lower for k in ("diagnos", "recover", "troubleshoot", "optimi", "tuning", "tradeoff")):
-        return "complex"
-    if any(k in q_lower for k in ("compare", "versus", " vs ", "difference between")):
-        return "complex"
 
-    cleaned = (
-        q_lower.replace("?", " ")
-        .replace(",", " ")
-        .replace(";", " ")
-        .replace(":", " ")
-        .replace("(", " ")
-        .replace(")", " ")
-    )
-    words = set(cleaned.split())
-    # Factoid return-code or definition inquiries are simple
-    if "return" in words and "code" in words:
+    # If the query contains a message ID (e.g. "How do I resolve IEA500I IOSCMDS command rejected and what operator action is needed?"),
+    # keep it simple unless explicit deep diagnostic/recovery/abend/compare/tuning roots are present.
+    msg_ids = find_message_ids(query)
+    has_complex_root = any(r in q_lower for r in COMPLEX_ROOTS)
+    if msg_ids and not has_complex_root:
         return "simple"
 
-    if words & COMPLEX_QUERY_KEYWORDS:
+    if has_complex_root:
         return "complex"
-    if len(words) > 12:
+
+    # Multi-step configuration / procedural intent
+    if any(k in q_lower for k in ("how to configure", "how do i configure", "how to setup", "how do i create", "step by step", "steps to", "configuration procedure")):
         return "complex"
+
+    # Comparative analysis
+    if any(k in q_lower for k in ("versus", " vs ", "difference between")):
+        return "complex"
+
+    # Specific operational procedures or rule definitions
+    if any(k in q_lower for k in ("how to", "how do", "how can", "explain how", "procedure")) and any(
+        w in q_lower for w in ("rule", "interval", "parameter", "parmlib", "jcl", "policy", "threshold", "journal")
+    ):
+        return "complex"
+
     return "simple"
 
 
@@ -276,7 +268,7 @@ def parse_answer(
     if not citations:
         # Check if model ended the response with citation lines matching allowed_citations
         # even if the literal 'Citations:' header was omitted.
-        from mainframe_rag.agent.cites import _normalize_citation_line
+        from mainframe_rag.agent.cites import normalize_citation_line
 
         body_lines = body.splitlines()
         trailing_cites: list[str] = []
@@ -285,7 +277,7 @@ def parse_answer(
             if not candidate:
                 body_lines.pop()
                 continue
-            norm = _normalize_citation_line(candidate)
+            norm = normalize_citation_line(candidate)
             if norm in allowed_citations:
                 if norm not in trailing_cites:
                     trailing_cites.append(norm)

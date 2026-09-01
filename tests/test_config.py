@@ -64,3 +64,15 @@ def test_ingest_tuning_defaults():
     assert s.batch_size == 128
     assert s.ingest_upsert_streams == 4
     assert s.ingest_bulk_load is False
+
+
+def test_reasoning_effort_validation():
+    """llm_reasoning_effort_* are constrained to Literal['low', 'medium', 'high']."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, llm_reasoning_effort_simple="ultra")  # type: ignore[arg-type]
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, llm_reasoning_effort_complex="extreme")  # type: ignore[arg-type]
