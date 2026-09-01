@@ -11,7 +11,9 @@ the fail-fast wiring end to end.
 It also serves /v1/chat/completions deterministically (the reasoning-model
 stand-in for the simulation tier): the answer is derived from the retrieved-
 cite blocks in the prompt and echoes a retrieved citation, so it survives
-parse_answer's hit-set validation. Never a product path; never in the air gap.
+parse_answer's hit-set validation. /tokenize is served at the origin root
+(vLLM shape, prompt or messages) for the agent's token accounting. Never a
+product path; never in the air gap.
 
     MOCK_DIM=64 PORT=8000 python3 scripts/mock_vllm.py
 """
@@ -146,6 +148,11 @@ class Handler(BaseHTTPRequestHandler):
             self._chat_completions()
         elif self.path.endswith("/embeddings"):
             self._embeddings()
+        elif self.path == "/tokenize":
+            # Exact origin-root route on purpose (vLLM serves /tokenize next
+            # to /v1, not under it): a wrong-URL client regression must 404,
+            # not silently match a loose suffix.
+            self._tokenize()
         else:
             self._send(404, {"error": {"message": f"unknown path {self.path}"}})
 
@@ -157,6 +164,10 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
             self._send(400, {"error": {"message": "'messages' must be a list of objects"}})
             return
+        content = _chat_content(messages)
+        prompt_tokens = sum(len(str(m.get("content", "")).split()) for m in messages)
+        completion_tokens = len(content.split())
+        finish_reason = req.get("mock_finish_reason", "stop")
         self._send(
             200,
             {
@@ -166,11 +177,41 @@ class Handler(BaseHTTPRequestHandler):
                 "choices": [
                     {
                         "index": 0,
-                        "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": _chat_content(messages)},
+                        "finish_reason": finish_reason,
+                        "message": {"role": "assistant", "content": content},
                     }
                 ],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "reasoning_tokens": 10,
+                    "total_tokens": prompt_tokens + completion_tokens + 10,
+                },
+            },
+        )
+
+    def _tokenize(self) -> None:
+        req = self._read_json()
+        if req is None:
+            return
+        # vLLM /tokenize accepts either {"prompt": str} or {"messages": [...]}
+        # (the message form is chat-template aware — what the agent's
+        # verification loop uses).
+        msgs = req.get("messages")
+        if isinstance(msgs, list):
+            text = " ".join(
+                str(m.get("content") or "") for m in msgs if isinstance(m, dict)
+            )
+        else:
+            text = str(req.get("prompt") or "")
+        tokens = [abs(hash(w)) % 10000 + 1 for w in text.split()]
+        self._send(
+            200,
+            {
+                "count": len(tokens),
+                "max_model_len": 4096,
+                "tokens": tokens,
+                "token_strs": None,
             },
         )
 

@@ -50,6 +50,9 @@ import httpx2
 from loadtest import DEFAULT_QUERIES, run_load
 from qdrant_sim import QdrantSim, start_simulator
 
+from mainframe_rag.config import load_settings
+from mainframe_rag.manifest import write_run_manifest
+
 GATED_METRICS = {
     # dotted path into the result -> regression tolerance multiplier
     "ingest.peak_rss_mb": 1.5,
@@ -475,6 +478,16 @@ def main(argv: list[str] | None = None) -> int:
         args.out.write_text(payload + "\n")
     else:
         print(payload)
+
+    try:
+        bench_settings = load_settings()
+        manifest = write_run_manifest("bench", bench_settings, result)
+        print(
+            f"run manifest appended to evals/runs/bench_runs.jsonl (sha={manifest['git_sha'][:8]})",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"warn: failed to append run manifest: {exc}", file=sys.stderr)
 
     if regressions:
         print("REGRESSIONS:", file=sys.stderr)

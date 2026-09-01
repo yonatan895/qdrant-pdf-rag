@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.answer import parse_answer
 from mainframe_rag.agent.cites import extract_citation_lines, valid_citations
+from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.retrieve.query import SearchHit
 
 
@@ -43,6 +44,9 @@ def client(monkeypatch, synthetic_pdf):
     # patch the LLM client AFTER lifespan built it (module global exists then)
     with TestClient(app_mod.app) as c:
         monkeypatch.setattr(app_mod, "llm", FakeLLM())
+        # The lifespan builds a real VllmTokenizer pointed at llm.internal;
+        # swap in the in-process fallback so no test ever dials the network.
+        monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
         yield c
 
 
@@ -689,7 +693,8 @@ def test_httpx_llm_client_passes_reasoning_params(monkeypatch):
     client = HttpxLLMClient(s, client=MockHttpClient())  # type: ignore[arg-type]
     msgs = [ChatMessage(role="user", content="Hello")]
     ans = client.chat(msgs, reasoning_effort="high", temperature=0.2)
-    assert "Test answer" in ans
+    assert ans.content and "Test answer" in ans.content
+    assert ans.finish_reason == "stop"
     assert recorded_payload["model"] == "mock-reasoning-model"
     assert recorded_payload["reasoning_effort"] == "high"
     assert recorded_payload["temperature"] == 0.2
@@ -824,4 +829,219 @@ def test_build_messages_preserves_syntax_and_message_fidelity():
     assert "..." not in content.split("[1]")[1].split("[2]")[0]
     # Narrative chunk was truncated to narrative_cap (1100 chars)
     assert "[truncated]" in content.split("[2]")[1]
+
+
+def test_answer_audit_log_with_chat_result(client, monkeypatch, caplog):
+    import json
+    import logging
+
+    from mainframe_rag.ports import ChatResult, TokenUsage
+
+    class UsageLLM:
+        def chat(self, messages, *args, **kwargs):
+            return ChatResult(
+                content="Reissue command.\n\nCitations:\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
+                finish_reason="stop",
+                usage=TokenUsage(
+                    prompt_tokens=120,
+                    completion_tokens=45,
+                    reasoning_tokens=20,
+                    total_tokens=165,
+                ),
+            )
+
+    monkeypatch.setattr(app_mod, "llm", UsageLLM())
+
+    with caplog.at_level(logging.INFO):
+        resp = client.post("/v1/answer", json={"query": "IEA500I"})
+
+    assert resp.status_code == 200
+
+    # Find audit log record
+    records = []
+    for r in caplog.records:
+        try:
+            d = json.loads(r.message)
+            if d.get("action") == "answer":
+                records.append(d)
+        except (ValueError, KeyError):
+            pass
+    assert records
+    audit = records[-1]
+    assert audit["query_complexity"] == "simple"
+    assert audit["finish_reason"] == "stop"
+    assert audit["prompt_tokens"] == 120
+    assert audit["completion_tokens"] == 45
+    assert audit["reasoning_tokens"] == 20
+    assert audit["total_tokens"] == 165
+
+
+def test_answer_alert_on_non_stop_finish_reason(client, monkeypatch, caplog):
+    import json
+    import logging
+
+    from mainframe_rag.ports import ChatResult, TokenUsage
+
+    class TruncatedLLM:
+        def chat(self, messages, *args, **kwargs):
+            return ChatResult(
+                content="Partial answer without conclusion.\n\nCitations:\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
+                finish_reason="length",
+                usage=TokenUsage(prompt_tokens=200, completion_tokens=100, reasoning_tokens=0, total_tokens=300),
+            )
+
+    monkeypatch.setattr(app_mod, "llm", TruncatedLLM())
+
+    with caplog.at_level(logging.WARNING):
+        resp = client.post("/v1/answer", json={"query": "IEA500I"})
+
+    assert resp.status_code == 200
+
+    alert_records = []
+    for r in caplog.records:
+        try:
+            d = json.loads(r.message)
+            if d.get("action") == "answer_alert":
+                alert_records.append(d)
+        except (ValueError, KeyError):
+            pass
+    assert alert_records
+    alert = alert_records[-1]
+    assert alert["alert"] == "finish_reason_non_stop"
+    assert alert["finish_reason"] == "length"
+
+
+def test_build_messages_tokenizer_budget_respected():
+    """Packing keeps sum(count_tokens(chunk)) <= budget after the last
+    truncated chunk, and the full prompt fits model_len - reserved. The
+    fallback tokenizer is exactly the planner's counter, so the invariant is
+    checkable without any network."""
+    import re
+
+    from mainframe_rag.agent.answer import build_messages
+    from mainframe_rag.config import Settings
+
+    hits = [
+        SearchHit(
+            chunk_id=f"c{i}",
+            score=1.0 - i * 0.1,
+            cite=f"SA22-0000-0{i} Manual, p. {i}",
+            heading=f"Heading {i}",
+            text="word " * 170,  # ~183 tokens with the [i] header
+            doc_id=f"DOC{i}",
+            title="Title",
+            page_label=str(i),
+            chunk_type="narrative",
+            message_ids=(),
+        )
+        for i in range(1, 6)
+    ]
+
+    settings = Settings(
+        llm_max_model_len=1500,
+        llm_reserved_output_tokens=250,
+        llm_token_safety_margin=100,
+        _env_file=None,
+    )
+    tok = FallbackTokenizer()
+    msgs = build_messages(
+        "How to configure mainframe storage",
+        hits,
+        tokenizer=tok,
+        settings=settings,
+        complexity="simple",
+    )
+
+    user_content = msgs[1].content
+    # All five excerpts survive packing; the last one is cut, not dropped.
+    for i in range(1, 6):
+        assert f"[{i}]" in user_content
+    prefix, rest = user_content.split("Retrieved manual excerpts:\n", 1)
+    block, _tail = rest.split("\n\nPlease answer based strictly", 1)
+    chunk_texts = re.split(r"\n\n(?=\[\d+\] )", block)
+    assert len(chunk_texts) == 5
+    assert "[truncated]" in chunk_texts[-1]
+
+    tail = "Please answer based strictly" + rest.rsplit("Please answer based strictly", 1)[1]
+    measured_fixed = tok.count_tokens(msgs[0].content + "\n" + prefix) + tok.count_tokens(tail)
+    budget = (
+        settings.llm_max_model_len
+        - settings.llm_reserved_output_tokens
+        - settings.llm_token_safety_margin
+        - measured_fixed
+    )
+    # The invariant: packing (including the truncated tail) stays inside the
+    # budget measured against the same counter.
+    assert sum(tok.count_tokens(c) for c in chunk_texts) <= budget
+    # And the whole prompt fits the window left after the output reservation.
+    assert tok.count_messages(msgs) <= settings.llm_max_model_len - settings.llm_reserved_output_tokens
+
+
+def test_build_messages_tokenizer_requires_settings():
+    from mainframe_rag.agent.answer import build_messages
+
+    with pytest.raises(ValueError, match="settings"):
+        build_messages("IEA500I", [], tokenizer=FallbackTokenizer())
+
+
+def test_build_messages_ignores_none_settings_without_tokenizer():
+    """The char path must be unaffected by the settings parameter."""
+    from mainframe_rag.agent.answer import build_messages
+
+    msgs = build_messages("IEA500I", [_hit()], complexity="simple", settings=None)
+    assert "[1]" in msgs[1].content
+
+
+def test_as_chat_result_wraps_bare_string():
+    from mainframe_rag.agent.answer import as_chat_result
+    from mainframe_rag.ports import ChatResult, TokenUsage
+
+    res = as_chat_result("plain answer")
+    assert isinstance(res, ChatResult)
+    assert res.content == "plain answer"
+    assert res.finish_reason == "stop"
+    assert res.usage == TokenUsage()
+
+
+def test_as_chat_result_passthrough():
+    from mainframe_rag.agent.answer import as_chat_result
+    from mainframe_rag.ports import ChatResult, TokenUsage
+
+    original = ChatResult(content="x", finish_reason="length", usage=TokenUsage(prompt_tokens=3))
+    assert as_chat_result(original) is original
+
+
+def test_chat_content_none_becomes_empty_string():
+    """A reasoning model that returns content: None must surface as "",
+    never the string "None"."""
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage, ChatResult
+
+    class FakeResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {"message": {"role": "assistant", "content": None}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+            }
+
+    class FakeClient:
+        def post(self, url, json=None):
+            return FakeResp()
+
+    settings = Settings(
+        llm_base_url="http://llm.internal/v1",
+        llm_model_reasoning="test-reasoning-model",
+        _env_file=None,
+    )
+    result = HttpxLLMClient(settings, client=FakeClient()).chat(
+        [ChatMessage(role="user", content="q")]
+    )
+    assert isinstance(result, ChatResult)
+    assert result.content == ""
 

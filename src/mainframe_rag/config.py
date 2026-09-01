@@ -83,6 +83,14 @@ class Settings(BaseSettings):
     llm_reasoning_effort_complex: Literal["low", "medium", "high"] = Field(default="high")
     llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
+    # Context budgeting via tokenizer accounting:
+    # budget = max_model_len - reserved_output_tokens - measured_system_prompt - safety_margin
+    llm_max_model_len: int = Field(default=4096, ge=512, le=131072)
+    llm_reserved_output_tokens: int = Field(default=1536, ge=128, le=16384)
+    llm_token_safety_margin: int = Field(default=128, ge=0, le=1024)
+    llm_max_chunk_tokens_narrative: int = Field(default=350, ge=50, le=2048)
+    llm_tokenize_timeout_s: float = Field(default=5.0, gt=0.0, le=60.0)
+
     # Bounded httpx2 connection-establishment retries (0-5). These fire only
     # when the request was never sent (DNS/refused), so they are safe for any
     # method. There is deliberately no request-level retry anywhere.

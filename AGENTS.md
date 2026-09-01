@@ -237,6 +237,8 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 - Dense query prefix: asymmetric query embeddings prepend Settings.dense_query_prefix on dense query vectors only; document chunks stay raw; HashEmbedder remains plain text.
 - Hit diversification: retrieve_max_chunks_per_page=1 and retrieve_max_chunks_per_doc=3 with 3-phase backfill prevent near-duplicate consecutive chunks from monopolizing prompt context slots.
 - Citation normalization: normalize_citation_line peels bracketed index markers ([1], [1]:) from model citation lines.
+- Tokenizer: vLLM `/tokenize` is at the server **origin** (strip `/v1` from `LLM_BASE_URL`; LiteLLM may not expose it). First failure logs one warning and pins the estimator fallback — never a silent per-call fallback. Budgeting plans with the in-process estimator and verifies the packed prompt **once** via `/tokenize` `messages`; never per-chunk tokenize RPCs.
+- Run manifests: unreachable Qdrant records `qdrant_version="unknown"` — never the pinned server version.
 - After a non-obvious bug, add a regression test **and** a one-line note here if it is a standing rule.
 
 ## When you change this file

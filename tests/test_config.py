@@ -57,6 +57,11 @@ def test_outbound_timeout_defaults_bounded():
     assert s.llm_reasoning_effort_simple == "low"
     assert s.llm_reasoning_effort_complex == "high"
     assert s.llm_temperature == 0.2
+    assert s.llm_max_model_len == 4096
+    assert s.llm_reserved_output_tokens == 1536
+    assert s.llm_token_safety_margin == 128
+    assert s.llm_max_chunk_tokens_narrative == 350
+    assert s.llm_tokenize_timeout_s == 5.0
 
 
 def test_hash_mode_requires_explicit_allow():

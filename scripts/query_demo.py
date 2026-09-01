@@ -30,6 +30,7 @@ import httpx2
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mainframe_rag.agent.answer import ParsedAnswer
+from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.retrieve.query import SearchHit
@@ -508,6 +509,7 @@ def execute_answer(
 ) -> tuple[dict[str, Any], list[SearchHit], str, dict[str, int]]:
     from mainframe_rag.agent.answer import (
         HttpxLLMClient,
+        as_chat_result,
         build_messages,
         classify_query_complexity,
         parse_answer,
@@ -537,6 +539,7 @@ def execute_answer(
         if complexity == "complex"
         else settings.llm_reasoning_effort_simple
     )
+    tokenizer = build_tokenizer(settings)
     messages = build_messages(
         query=query,
         hits=hits,
@@ -548,19 +551,24 @@ def execute_answer(
             settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
         ),
         complexity=complexity,
+        tokenizer=tokenizer,
+        settings=settings,
     )
     client = HttpxLLMClient(settings)
     try:
-        reply = client.chat(
-            messages,
-            reasoning_effort=effort,
-            temperature=settings.llm_temperature,
+        reply = as_chat_result(
+            client.chat(
+                messages,
+                reasoning_effort=effort,
+                temperature=settings.llm_temperature,
+            )
         )
     finally:
         client.close()
 
+    reply_content = reply.content
     allowed_citations = {h.cite for h in hits}
-    parsed = parse_answer(reply, allowed_citations, ordered_cites=[h.cite for h in hits])
+    parsed = parse_answer(reply_content, allowed_citations, ordered_cites=[h.cite for h in hits])
     return parsed, hits, kind, timings
 
 

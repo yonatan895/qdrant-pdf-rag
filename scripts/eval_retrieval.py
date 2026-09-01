@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field, ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mainframe_rag.config import load_settings
+from mainframe_rag.manifest import write_run_manifest
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import search as retrieve_search
 
@@ -339,6 +340,22 @@ def main(argv: list[str] | None = None) -> int:
         args.out.write_text(payload + "\n")
     else:
         print(payload)
+
+    try:
+        # evaluate() returns a flat report; record the scored summary metrics
+        # (everything except the per-query rows) so manifests are comparable.
+        metrics = {
+            k: report[k]
+            for k in ("n", "failures", "recall@1", "recall@3", "recall@5", "mrr", "identifier", "nl")
+            if k in report
+        }
+        manifest = write_run_manifest("eval", settings, metrics)
+        print(
+            f"run manifest appended to evals/runs/eval_runs.jsonl (sha={manifest['git_sha'][:8]})",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"warn: failed to append run manifest: {exc}", file=sys.stderr)
 
     if regressions:
         print("REGRESSIONS:", file=sys.stderr)

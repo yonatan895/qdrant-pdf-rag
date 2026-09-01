@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     from qdrant_client import models
@@ -118,6 +118,32 @@ class QdrantPoints(Protocol):
     ) -> list[models.QueryResponse]: ...
 
 
+class TokenUsage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+
+
+class ChatResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    content: str
+    finish_reason: str = "stop"
+    usage: TokenUsage = Field(default_factory=TokenUsage)
+
+
+@runtime_checkable
+class Tokenizer(Protocol):
+    """Token counting for context budgeting. Implementations: VllmTokenizer
+    (one /tokenize RPC per call — reserve it for whole-prompt verification,
+    never per-chunk counting) and FallbackTokenizer (in-process estimator)."""
+
+    def count_tokens(self, text: str) -> int: ...
+
+    def count_messages(self, messages: list[ChatMessage]) -> int: ...
+
+
 @runtime_checkable
 class LLMClient(Protocol):
     """Reasoning-model chat (answer path only). Implementations fail closed
@@ -128,4 +154,4 @@ class LLMClient(Protocol):
         messages: list[ChatMessage],
         reasoning_effort: str | None = None,
         temperature: float | None = None,
-    ) -> str: ...
+    ) -> ChatResult: ...
