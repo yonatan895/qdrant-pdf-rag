@@ -14,7 +14,7 @@ import httpx2
 from pydantic import BaseModel, Field
 
 from mainframe_rag.config import Settings
-from mainframe_rag.ports import ChatMessage
+from mainframe_rag.ports import ChatMessage, ChatResult, Tokenizer, TokenUsage
 from mainframe_rag.regexes import find_message_ids
 from mainframe_rag.retrieve.query import SearchHit
 
@@ -106,39 +106,16 @@ def build_messages(
     max_chunk_chars: int = 3000,
     max_chunk_chars_narrative: int | None = None,
     complexity: str | None = None,
+    tokenizer: Tokenizer | None = None,
+    max_model_len: int | None = None,
+    reserved_output_tokens: int | None = None,
+    safety_margin_tokens: int | None = None,
+    max_chunk_tokens_narrative: int | None = None,
 ) -> list[ChatMessage]:
     if complexity is None:
         complexity = classify_query_complexity(query)
 
-    chunks: list[str] = []
-    total_chars = 0
-    for i, hit in enumerate(hits, 1):
-        text = hit.text.strip()
-        # High-fidelity chunk types (syntax, message, table) preserve their grammar/structure
-        # up to max_chunk_chars; narrative prose is bounded by max_chunk_chars_narrative if provided.
-        narrative_cap = (
-            max_chunk_chars_narrative
-            if max_chunk_chars_narrative is not None
-            else max_chunk_chars
-        )
-        chunk_cap = (
-            max_chunk_chars
-            if hit.chunk_type in ("syntax", "message", "table")
-            else min(max_chunk_chars, narrative_cap)
-        )
-        if len(text) > chunk_cap:
-            text = text[:chunk_cap].rstrip() + "\n... [truncated]"
-        chunk_repr = f"[{i}] {hit.cite}\n{text}"
-        if total_chars + len(chunk_repr) > max_context_chars and chunks:
-            remaining = max_context_chars - total_chars
-            if remaining > 200:
-                text = text[:remaining].rstrip() + "\n... [truncated]"
-                chunks.append(f"[{i}] {hit.cite}\n{text}")
-            break
-        chunks.append(chunk_repr)
-        total_chars += len(chunk_repr)
-
-    parts = []
+    parts: list[str] = []
     context_bits = []
     if product:
         context_bits.append(f"product: {product}")
@@ -152,6 +129,74 @@ def build_messages(
             + splunk_context.strip()
         )
     parts.append("Question: " + query)
+
+    system_content = (
+        SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
+        if complexity == "complex"
+        else SYSTEM_PROMPT
+    )
+
+    chunks: list[str] = []
+    if tokenizer is not None:
+        # Tokenizer accounting: budget = max_model_len - reserved - measured_system - safety_margin
+        model_len = max_model_len or 4096
+        reserved = reserved_output_tokens or 1536
+        margin = safety_margin_tokens or 128
+        measured_sys = tokenizer.count_tokens(system_content + "\n" + "\n".join(parts))
+        budget_tokens = max(100, model_len - reserved - measured_sys - margin)
+        narrative_token_cap = max_chunk_tokens_narrative or 350
+
+        total_tokens = 0
+        for i, hit in enumerate(hits, 1):
+            text = hit.text.strip()
+            if hit.chunk_type not in ("syntax", "message", "table"):
+                if max_chunk_chars_narrative is not None and len(text) > max_chunk_chars_narrative:
+                    text = text[:max_chunk_chars_narrative].rstrip() + "\n... [truncated]"
+                elif complexity == "complex" and tokenizer.count_tokens(text) > narrative_token_cap:
+                    target_chars = int(narrative_token_cap * 3.5)
+                    text = text[:target_chars].rstrip() + "\n... [truncated]"
+            elif len(text) > max_chunk_chars:
+                text = text[:max_chunk_chars].rstrip() + "\n... [truncated]"
+
+            chunk_repr = f"[{i}] {hit.cite}\n{text}"
+            chunk_tokens = tokenizer.count_tokens(chunk_repr)
+            if total_tokens + chunk_tokens > budget_tokens and chunks:
+                rem_tokens = budget_tokens - total_tokens
+                if rem_tokens > 60:
+                    rem_chars = int(rem_tokens * 3.5)
+                    text = text[:rem_chars].rstrip() + "\n... [truncated]"
+                    chunks.append(f"[{i}] {hit.cite}\n{text}")
+                break
+            chunks.append(chunk_repr)
+            total_tokens += chunk_tokens
+    else:
+        total_chars = 0
+        for i, hit in enumerate(hits, 1):
+            text = hit.text.strip()
+            # High-fidelity chunk types (syntax, message, table) preserve their grammar/structure
+            # up to max_chunk_chars; narrative prose is bounded by max_chunk_chars_narrative if provided.
+            narrative_cap = (
+                max_chunk_chars_narrative
+                if max_chunk_chars_narrative is not None
+                else max_chunk_chars
+            )
+            chunk_cap = (
+                max_chunk_chars
+                if hit.chunk_type in ("syntax", "message", "table")
+                else min(max_chunk_chars, narrative_cap)
+            )
+            if len(text) > chunk_cap:
+                text = text[:chunk_cap].rstrip() + "\n... [truncated]"
+            chunk_repr = f"[{i}] {hit.cite}\n{text}"
+            if total_chars + len(chunk_repr) > max_context_chars and chunks:
+                remaining = max_context_chars - total_chars
+                if remaining > 200:
+                    text = text[:remaining].rstrip() + "\n... [truncated]"
+                    chunks.append(f"[{i}] {hit.cite}\n{text}")
+                break
+            chunks.append(chunk_repr)
+            total_chars += len(chunk_repr)
+
     parts.append("Retrieved manual excerpts:\n" + "\n\n".join(chunks))
 
     example_cite = (
@@ -162,12 +207,6 @@ def build_messages(
     parts.append(
         "Please answer based strictly on the retrieved manual excerpts above and conclude with the 'Citations:' section copying the exact citation line for each excerpt used, for example:\n"
         f"Citations:\n{example_cite}"
-    )
-
-    system_content = (
-        SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
-        if complexity == "complex"
-        else SYSTEM_PROMPT
     )
 
     return [
@@ -218,7 +257,7 @@ class HttpxLLMClient:
         messages: list[ChatMessage],
         reasoning_effort: str | None = None,
         temperature: float | None = None,
-    ) -> str:
+    ) -> ChatResult:
         base_url, model = assert_reasoning_model(self._settings)
         serialized = [m.model_dump() for m in messages]
         body: dict[str, Any] = {"model": model, "messages": serialized}
@@ -231,7 +270,23 @@ class HttpxLLMClient:
             json=body,
         )
         resp.raise_for_status()
-        return str(resp.json()["choices"][0]["message"]["content"])
+        data = resp.json()
+        choice = data["choices"][0]
+        content = str(choice["message"]["content"])
+        finish_reason = str(choice.get("finish_reason") or "stop")
+        usage_data = data.get("usage") or {}
+        reasoning_tokens = (
+            usage_data.get("reasoning_tokens")
+            or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
+            or 0
+        )
+        usage = TokenUsage(
+            prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
+            completion_tokens=int(usage_data.get("completion_tokens") or 0),
+            reasoning_tokens=int(reasoning_tokens),
+            total_tokens=int(usage_data.get("total_tokens") or 0),
+        )
+        return ChatResult(content=content, finish_reason=finish_reason, usage=usage)
 
 
 def parse_answer(

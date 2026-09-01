@@ -30,6 +30,7 @@ import httpx2
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mainframe_rag.agent.answer import ParsedAnswer
+from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.retrieve.query import SearchHit
@@ -537,6 +538,7 @@ def execute_answer(
         if complexity == "complex"
         else settings.llm_reasoning_effort_simple
     )
+    tokenizer = build_tokenizer(settings)
     messages = build_messages(
         query=query,
         hits=hits,
@@ -548,6 +550,11 @@ def execute_answer(
             settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
         ),
         complexity=complexity,
+        tokenizer=tokenizer,
+        max_model_len=settings.llm_max_model_len,
+        reserved_output_tokens=settings.llm_reserved_output_tokens,
+        safety_margin_tokens=settings.llm_token_safety_margin,
+        max_chunk_tokens_narrative=settings.llm_max_chunk_tokens_narrative,
     )
     client = HttpxLLMClient(settings)
     try:
@@ -559,8 +566,9 @@ def execute_answer(
     finally:
         client.close()
 
+    reply_content = reply.content if hasattr(reply, "content") else str(reply)
     allowed_citations = {h.cite for h in hits}
-    parsed = parse_answer(reply, allowed_citations, ordered_cites=[h.cite for h in hits])
+    parsed = parse_answer(reply_content, allowed_citations, ordered_cites=[h.cite for h in hits])
     return parsed, hits, kind, timings
 
 

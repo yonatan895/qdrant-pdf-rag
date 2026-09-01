@@ -146,6 +146,8 @@ class Handler(BaseHTTPRequestHandler):
             self._chat_completions()
         elif self.path.endswith("/embeddings"):
             self._embeddings()
+        elif self.path.endswith("/tokenize"):
+            self._tokenize()
         else:
             self._send(404, {"error": {"message": f"unknown path {self.path}"}})
 
@@ -157,6 +159,10 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
             self._send(400, {"error": {"message": "'messages' must be a list of objects"}})
             return
+        content = _chat_content(messages)
+        prompt_tokens = sum(len(str(m.get("content", "")).split()) for m in messages)
+        completion_tokens = len(content.split())
+        finish_reason = req.get("mock_finish_reason", "stop")
         self._send(
             200,
             {
@@ -166,11 +172,32 @@ class Handler(BaseHTTPRequestHandler):
                 "choices": [
                     {
                         "index": 0,
-                        "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": _chat_content(messages)},
+                        "finish_reason": finish_reason,
+                        "message": {"role": "assistant", "content": content},
                     }
                 ],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "reasoning_tokens": 10,
+                    "total_tokens": prompt_tokens + completion_tokens + 10,
+                },
+            },
+        )
+
+    def _tokenize(self) -> None:
+        req = self._read_json()
+        if req is None:
+            return
+        prompt = req.get("prompt", "")
+        tokens = [abs(hash(w)) % 10000 + 1 for w in str(prompt).split()]
+        self._send(
+            200,
+            {
+                "count": len(tokens),
+                "max_model_len": 4096,
+                "tokens": tokens,
+                "token_strs": None,
             },
         )
 

@@ -29,10 +29,11 @@ from mainframe_rag.agent.answer import (
     classify_query_complexity,
     parse_answer,
 )
+from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.logs import configure_logging
-from mainframe_rag.ports import Embedder, LLMClient
+from mainframe_rag.ports import ChatResult, Embedder, LLMClient, Tokenizer, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import search as retrieve_search
 
@@ -46,6 +47,13 @@ http: httpx2.Client
 qdrant: QdrantPoints
 embedder: Embedder
 llm: LLMClient
+tokenizer: Tokenizer
+
+answer_metrics: dict[str, int] = {
+    "requests_total": 0,
+    "finish_reason_stop_total": 0,
+    "finish_reason_non_stop_total": 0,
+}
 
 
 class AppError(Exception):
@@ -60,7 +68,7 @@ class AppError(Exception):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global settings, http, qdrant, embedder, llm
+    global settings, http, qdrant, embedder, llm, tokenizer
     settings = load_settings()
     configure_logging(settings.log_level)
     # Startup fail-fast (issue #20 PR D): the agent refuses to listen on a
@@ -90,6 +98,7 @@ async def lifespan(_app: FastAPI):
     # own connection pool with its own (long) timeout. LLM env stays
     # request-time fail-fast (assert_reasoning_model in /v1/answer).
     embedder = build_embedder(settings, http)
+    tokenizer = build_tokenizer(settings, http)
     # Two names on purpose: tests swap the `llm` global after startup; shutdown
     # must close the pool THIS lifespan created, never a test double.
     llm_client = HttpxLLMClient(settings)
@@ -321,14 +330,27 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
             max_chunk_chars=settings.prompt_max_chunk_chars,
             max_chunk_chars_narrative=settings.prompt_max_chunk_chars_complex if complexity == "complex" else None,
             complexity=complexity,
+            tokenizer=tokenizer,
+            max_model_len=settings.llm_max_model_len,
+            reserved_output_tokens=settings.llm_reserved_output_tokens,
+            safety_margin_tokens=settings.llm_token_safety_margin,
+            max_chunk_tokens_narrative=settings.llm_max_chunk_tokens_narrative,
         )
         t0 = time.monotonic()
-        content = llm.chat(
+        chat_raw = llm.chat(
             messages,
             reasoning_effort=effort,
             temperature=settings.llm_temperature,
         )
         llm_ms = int((time.monotonic() - t0) * 1000)
+        chat_res = (
+            chat_raw
+            if isinstance(chat_raw, ChatResult)
+            else ChatResult(content=str(chat_raw), finish_reason="stop", usage=TokenUsage())
+        )
+        content = chat_res.content
+        finish_reason = chat_res.finish_reason
+        usage = chat_res.usage
         parsed = parse_answer(
             content,
             {h.cite for h in hits},
@@ -338,11 +360,31 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
         log.error(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "answer failed") from exc
 
+    answer_metrics["requests_total"] += 1
+    if finish_reason == "stop":
+        answer_metrics["finish_reason_stop_total"] += 1
+    else:
+        answer_metrics["finish_reason_non_stop_total"] += 1
+        log.warning(
+            json_log(
+                request_id,
+                "answer_alert",
+                alert="finish_reason_non_stop",
+                finish_reason=finish_reason,
+            )
+        )
+
     log.info(
         json_log(
             request_id, "answer", query_kind=kind, query_complexity=complexity, hits=len(hits),
             embed_ms=timings.get("embed_ms"), qdrant_ms=timings.get("qdrant_ms"),
             llm_ms=llm_ms, citations=len(parsed.citations),
+            has_script=parsed.script is not None,
+            finish_reason=finish_reason,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            total_tokens=usage.total_tokens,
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
     )

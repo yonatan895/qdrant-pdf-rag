@@ -689,7 +689,8 @@ def test_httpx_llm_client_passes_reasoning_params(monkeypatch):
     client = HttpxLLMClient(s, client=MockHttpClient())  # type: ignore[arg-type]
     msgs = [ChatMessage(role="user", content="Hello")]
     ans = client.chat(msgs, reasoning_effort="high", temperature=0.2)
-    assert "Test answer" in ans
+    assert ans.content and "Test answer" in ans.content
+    assert ans.finish_reason == "stop"
     assert recorded_payload["model"] == "mock-reasoning-model"
     assert recorded_payload["reasoning_effort"] == "high"
     assert recorded_payload["temperature"] == 0.2
@@ -824,4 +825,132 @@ def test_build_messages_preserves_syntax_and_message_fidelity():
     assert "..." not in content.split("[1]")[1].split("[2]")[0]
     # Narrative chunk was truncated to narrative_cap (1100 chars)
     assert "[truncated]" in content.split("[2]")[1]
+
+
+def test_answer_audit_log_and_metrics_with_chat_result(client, monkeypatch, caplog):
+    import json
+    import logging
+
+    from mainframe_rag.ports import ChatResult, TokenUsage
+
+    class UsageLLM:
+        def chat(self, messages, *args, **kwargs):
+            return ChatResult(
+                content="Reissue command.\n\nCitations:\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
+                finish_reason="stop",
+                usage=TokenUsage(
+                    prompt_tokens=120,
+                    completion_tokens=45,
+                    reasoning_tokens=20,
+                    total_tokens=165,
+                ),
+            )
+
+    monkeypatch.setattr(app_mod, "llm", UsageLLM())
+    prev_stop = app_mod.answer_metrics["finish_reason_stop_total"]
+
+    with caplog.at_level(logging.INFO):
+        resp = client.post("/v1/answer", json={"query": "IEA500I"})
+
+    assert resp.status_code == 200
+    assert app_mod.answer_metrics["finish_reason_stop_total"] == prev_stop + 1
+
+    # Find audit log record
+    records = []
+    for r in caplog.records:
+        try:
+            d = json.loads(r.message)
+            if d.get("action") == "answer":
+                records.append(d)
+        except (ValueError, KeyError):
+            pass
+    assert records
+    audit = records[-1]
+    assert audit["query_complexity"] == "simple"
+    assert audit["finish_reason"] == "stop"
+    assert audit["prompt_tokens"] == 120
+    assert audit["completion_tokens"] == 45
+    assert audit["reasoning_tokens"] == 20
+    assert audit["total_tokens"] == 165
+
+
+def test_answer_alert_on_non_stop_finish_reason(client, monkeypatch, caplog):
+    import json
+    import logging
+
+    from mainframe_rag.ports import ChatResult, TokenUsage
+
+    class TruncatedLLM:
+        def chat(self, messages, *args, **kwargs):
+            return ChatResult(
+                content="Partial answer without conclusion.\n\nCitations:\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
+                finish_reason="length",
+                usage=TokenUsage(prompt_tokens=200, completion_tokens=100, reasoning_tokens=0, total_tokens=300),
+            )
+
+    monkeypatch.setattr(app_mod, "llm", TruncatedLLM())
+    prev_non_stop = app_mod.answer_metrics["finish_reason_non_stop_total"]
+
+    with caplog.at_level(logging.WARNING):
+        resp = client.post("/v1/answer", json={"query": "IEA500I"})
+
+    assert resp.status_code == 200
+    assert app_mod.answer_metrics["finish_reason_non_stop_total"] == prev_non_stop + 1
+
+    alert_records = []
+    for r in caplog.records:
+        try:
+            d = json.loads(r.message)
+            if d.get("action") == "answer_alert":
+                alert_records.append(d)
+        except (ValueError, KeyError):
+            pass
+    assert alert_records
+    alert = alert_records[-1]
+    assert alert["alert"] == "finish_reason_non_stop"
+    assert alert["finish_reason"] == "length"
+
+
+def test_build_messages_tokenizer_accounting():
+    from mainframe_rag.agent.answer import build_messages
+    from mainframe_rag.retrieve.query import SearchHit
+
+    class CountingTokenizer:
+        def count_tokens(self, text: str) -> int:
+            return len(text.split())
+
+    hits = [
+        SearchHit(
+            chunk_id=f"c{i}",
+            score=1.0 - i * 0.1,
+            cite=f"SA22-0000-0{i} Manual, p. {i}",
+            heading=f"Heading {i}",
+            text="word " * 100,  # 100 tokens
+            doc_id=f"DOC{i}",
+            title="Title",
+            page_label=str(i),
+            chunk_type="narrative",
+            message_ids=(),
+        )
+        for i in range(5)
+    ]
+
+    tok = CountingTokenizer()
+    # Preamble is ~50 tokens. With max_model_len=500, reserved=200, margin=50:
+    # budget is 500 - 200 - ~50 - 50 = ~200 tokens.
+    # Each chunk is ~105 tokens. So only 1 or 2 chunks fit.
+    msgs = build_messages(
+        "How to configure mainframe storage",
+        hits,
+        tokenizer=tok,
+        max_model_len=500,
+        reserved_output_tokens=200,
+        safety_margin_tokens=50,
+        complexity="complex",
+    )
+    user_content = msgs[1].content
+    assert "[1]" in user_content
+    # Chunks 4 and 5 must NOT fit inside the 200-token budget
+    assert "[4]" not in user_content
+    assert "[5]" not in user_content
 

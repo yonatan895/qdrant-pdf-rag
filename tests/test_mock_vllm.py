@@ -144,3 +144,36 @@ def test_chat_messages_of_non_dicts_400(base_url):
     """'messages' must be a list of objects — a list of scalars is rejected."""
     r = httpx2.post(f"{base_url}/v1/chat/completions", json={"messages": [1, 2]})
     assert r.status_code == 400
+
+
+def test_tokenize_endpoint(base_url):
+    r = httpx2.post(f"{base_url}/tokenize", json={"model": "mock-reasoning", "prompt": "Hello world token test"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["count"] == 4
+    assert data["max_model_len"] == 4096
+    assert len(data["tokens"]) == 4
+
+
+def test_httpx_llm_client_returns_chat_result(base_url, monkeypatch):
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage, ChatResult
+
+    settings = Settings(
+        llm_base_url=f"{base_url}/v1",
+        llm_model_reasoning="mock-reasoning",
+        _env_file=None,
+    )
+    client = HttpxLLMClient(settings)
+    try:
+        messages = [ChatMessage(role="user", content="Question: test\n\n[1] cite\ntext")]
+        result = client.chat(messages)
+        assert isinstance(result, ChatResult)
+        assert result.finish_reason == "stop"
+        assert result.content
+        assert result.usage.prompt_tokens > 0
+        assert result.usage.completion_tokens > 0
+        assert result.usage.total_tokens > 0
+    finally:
+        client.close()

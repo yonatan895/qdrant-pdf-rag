@@ -17,6 +17,7 @@ bundles/
 dist/
 build/
 output/
+evals/runs/*.jsonl
 
 # --- Python ---
 __pycache__/
