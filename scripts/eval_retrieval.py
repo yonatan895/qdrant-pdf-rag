@@ -342,7 +342,14 @@ def main(argv: list[str] | None = None) -> int:
         print(payload)
 
     try:
-        manifest = write_run_manifest("eval", settings, report.get("summary", {}))
+        # evaluate() returns a flat report; record the scored summary metrics
+        # (everything except the per-query rows) so manifests are comparable.
+        metrics = {
+            k: report[k]
+            for k in ("n", "failures", "recall@1", "recall@3", "recall@5", "mrr", "identifier", "nl")
+            if k in report
+        }
+        manifest = write_run_manifest("eval", settings, metrics)
         print(
             f"run manifest appended to evals/runs/eval_runs.jsonl (sha={manifest['git_sha'][:8]})",
             file=sys.stderr,
