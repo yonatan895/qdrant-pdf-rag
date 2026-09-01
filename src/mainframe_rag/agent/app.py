@@ -26,6 +26,7 @@ from mainframe_rag.agent.answer import (
     HttpxLLMClient,
     assert_reasoning_model,
     build_messages,
+    classify_query_complexity,
     parse_answer,
 )
 from mainframe_rag.config import Settings, load_settings
@@ -299,15 +300,31 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
             script=None,
         )
 
+    complexity = classify_query_complexity(req.query)
+    max_context = (
+        settings.prompt_max_context_chars_complex
+        if complexity == "complex"
+        else settings.prompt_max_context_chars
+    )
+    effort = (
+        settings.llm_reasoning_effort_complex
+        if complexity == "complex"
+        else settings.llm_reasoning_effort_simple
+    )
     try:
         messages = build_messages(
             req.query, hits,
             product=req.product, version=req.version, splunk_context=req.splunk_context,
-            max_context_chars=settings.prompt_max_context_chars,
+            max_context_chars=max_context,
             max_chunk_chars=settings.prompt_max_chunk_chars,
+            complexity=complexity,
         )
         t0 = time.monotonic()
-        content = llm.chat(messages)
+        content = llm.chat(
+            messages,
+            reasoning_effort=effort,
+            temperature=settings.llm_temperature,
+        )
         llm_ms = int((time.monotonic() - t0) * 1000)
         parsed = parse_answer(
             content,
@@ -320,7 +337,7 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
 
     log.info(
         json_log(
-            request_id, "answer", query_kind=kind, hits=len(hits),
+            request_id, "answer", query_kind=kind, query_complexity=complexity, hits=len(hits),
             embed_ms=timings.get("embed_ms"), qdrant_ms=timings.get("qdrant_ms"),
             llm_ms=llm_ms, citations=len(parsed.citations),
             elapsed_ms=int((time.monotonic() - started) * 1000),

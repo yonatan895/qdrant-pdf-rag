@@ -43,7 +43,11 @@ def test_outbound_timeout_defaults_bounded():
     assert s.http_max_connections == 200
     assert s.http_max_keepalive_connections == 100
     assert s.prompt_max_context_chars == 8000
+    assert s.prompt_max_context_chars_complex == 4500
     assert s.prompt_max_chunk_chars == 3000
+    assert s.llm_reasoning_effort_simple == "low"
+    assert s.llm_reasoning_effort_complex == "high"
+    assert s.llm_temperature == 0.2
 
 
 def test_hash_mode_requires_explicit_allow():

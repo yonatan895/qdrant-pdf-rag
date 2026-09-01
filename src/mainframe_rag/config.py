@@ -56,7 +56,14 @@ class Settings(BaseSettings):
     # Prompt context length budget: caps total characters of retrieved chunk
     # text sent to the reasoning model to prevent context overflow (4096-token limits).
     prompt_max_context_chars: int = Field(default=8000, ge=1000, le=50000)
+    prompt_max_context_chars_complex: int = Field(default=4500, ge=1000, le=50000)
     prompt_max_chunk_chars: int = Field(default=3000, ge=500, le=10000)
+    # Reasoning effort control: directs the reasoning model to think more thoroughly
+    # on complex operational, diagnostic, and comparative inquiries while conserving
+    # latency on simple factoid/message lookups.
+    llm_reasoning_effort_simple: str = Field(default="low")
+    llm_reasoning_effort_complex: str = Field(default="high")
+    llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
     # Bounded httpx2 connection-establishment retries (0-5). These fire only
     # when the request was never sent (DNS/refused), so they are safe for any

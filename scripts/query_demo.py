@@ -505,7 +505,12 @@ def execute_answer(
     collection: str | None = None,
     settings: Settings | None = None,
 ) -> tuple[dict[str, Any], list[SearchHit], str, dict[str, int]]:
-    from mainframe_rag.agent.answer import HttpxLLMClient, build_messages, parse_answer
+    from mainframe_rag.agent.answer import (
+        HttpxLLMClient,
+        build_messages,
+        classify_query_complexity,
+        parse_answer,
+    )
 
     if settings is None:
         settings = resolve_runtime_settings(collection=collection)
@@ -520,17 +525,34 @@ def execute_answer(
             "script": None,
         }, hits, kind, timings
 
+    complexity = classify_query_complexity(query)
+    max_context = (
+        settings.prompt_max_context_chars_complex
+        if complexity == "complex"
+        else settings.prompt_max_context_chars
+    )
+    effort = (
+        settings.llm_reasoning_effort_complex
+        if complexity == "complex"
+        else settings.llm_reasoning_effort_simple
+    )
+
     messages = build_messages(
         query=query,
         hits=hits,
         product=product,
         version=version,
-        max_context_chars=settings.prompt_max_context_chars,
+        max_context_chars=max_context,
         max_chunk_chars=settings.prompt_max_chunk_chars,
+        complexity=complexity,
     )
     client = HttpxLLMClient(settings)
     try:
-        reply = client.chat(messages)
+        reply = client.chat(
+            messages,
+            reasoning_effort=effort,
+            temperature=settings.llm_temperature,
+        )
     finally:
         client.close()
 

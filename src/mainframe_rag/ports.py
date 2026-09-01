@@ -121,4 +121,9 @@ class LLMClient(Protocol):
     """Reasoning-model chat (answer path only). Implementations fail closed
     when no reasoning model is configured."""
 
-    def chat(self, messages: list[ChatMessage]) -> str: ...
+    def chat(
+        self,
+        messages: list[ChatMessage],
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+    ) -> str: ...

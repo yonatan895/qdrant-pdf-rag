@@ -8,6 +8,7 @@ settings.llm_model_reasoning; there is deliberately no other model knob.
 from __future__ import annotations
 
 import re
+from typing import Any
 
 import httpx2
 from pydantic import BaseModel, Field
@@ -43,6 +44,67 @@ SYSTEM_PROMPT = (
     "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17\n"
 )
 
+COMPLEX_QUERY_KEYWORDS: frozenset[str] = frozenset({
+    "diagnose", "diagnosis", "recover", "recovery", "troubleshoot", "troubleshooting",
+    "failure", "fail", "failed", "abend", "abends", "crash", "crashed", "loop",
+    "hang", "hangs", "corrupt", "corruption", "fill", "fills", "filling", "full",
+    "compare", "comparison", "difference", "differences", "vs", "versus",
+    "tune", "tuning", "optimize", "optimization", "performance", "tradeoff", "tradeoffs",
+    "configure", "configuration", "setup", "implement", "implementation", "procedure",
+    "procedures", "step", "steps", "migrate", "migration", "install", "installation",
+    "interact", "interaction", "explain how", "how to", "how do", "how can", "why did", "why does",
+})
+
+
+def classify_query_complexity(query: str) -> str:
+    """Classifies query as 'simple' (factoid, message id, or single parameter lookup)
+    or 'complex' (diagnostic, procedural, comparative, tuning, or multi-step inquiry)."""
+    q_lower = query.lower().strip()
+    # High-priority complex intent: procedures, troubleshooting, diagnosis, recovery, comparison
+    if any(k in q_lower for k in ("how to", "how do", "how can", "explain how", "step by step", "steps to", "procedure")):
+        return "complex"
+    if any(k in q_lower for k in ("diagnos", "recover", "troubleshoot", "optimi", "tuning", "tradeoff")):
+        return "complex"
+    if any(k in q_lower for k in ("compare", "versus", " vs ", "difference between")):
+        return "complex"
+
+    cleaned = (
+        q_lower.replace("?", " ")
+        .replace(",", " ")
+        .replace(";", " ")
+        .replace(":", " ")
+        .replace("(", " ")
+        .replace(")", " ")
+    )
+    words = set(cleaned.split())
+    # Factoid return-code or definition inquiries are simple
+    if "return" in words and "code" in words:
+        return "simple"
+
+    if words & COMPLEX_QUERY_KEYWORDS:
+        return "complex"
+    if len(words) > 12:
+        return "complex"
+    return "simple"
+
+
+SYSTEM_PROMPT_COMPLEX_EXTENSION = (
+    "\nReasoning & Synthesis Protocol for Complex Mainframe Inquiries:\n"
+    "When answering complex diagnostic, procedural, or architectural questions:\n"
+    "1. Deep Internal Reasoning: In your internal thinking, conduct thorough step-by-step analysis:\n"
+    "   - Analyze the exact operational scenario, failure mode, and system components involved.\n"
+    "   - Systematically examine each retrieved excerpt for syntax specifications, parameter values, return codes, hardware/software prerequisites, and operational limits.\n"
+    "   - Cross-verify statements across excerpts before synthesizing the answer.\n"
+    "   - Identify any MVS operator commands (e.g. DISPLAY, VARY), recovery procedures, or JCL statements needed for a complete solution.\n"
+    "2. High-Actionability Response Structure:\n"
+    "   - Structure your response logically with clear technical headings.\n"
+    "   - Provide concrete, verified syntax, parmlib statements, or JCL examples in fenced code blocks whenever procedures or configurations are discussed.\n"
+    "   - Detail both diagnosis (what happened and how to verify) and recovery (exact remediation steps).\n"
+    "   - Adhere strictly to the retrieved excerpts and do not extrapolate beyond what the manuals state.\n"
+    "3. Explicit Citations:\n"
+    "   - You MUST end your reply with the 'Citations:' section explicitly listing each excerpt citation used.\n"
+)
+
 
 def build_messages(
     query: str,
@@ -52,7 +114,11 @@ def build_messages(
     splunk_context: str | None = None,
     max_context_chars: int = 8000,
     max_chunk_chars: int = 3000,
+    complexity: str | None = None,
 ) -> list[ChatMessage]:
+    if complexity is None:
+        complexity = classify_query_complexity(query)
+
     chunks: list[str] = []
     total_chars = 0
     for i, hit in enumerate(hits, 1):
@@ -95,8 +161,14 @@ def build_messages(
         f"Citations:\n{example_cite}"
     )
 
+    system_content = (
+        SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
+        if complexity == "complex"
+        else SYSTEM_PROMPT
+    )
+
     return [
-        ChatMessage(role="system", content=SYSTEM_PROMPT),
+        ChatMessage(role="system", content=system_content),
         ChatMessage(role="user", content="\n\n".join(parts)),
     ]
 
@@ -138,12 +210,22 @@ class HttpxLLMClient:
         if self._client is not None:
             self._client.close()
 
-    def chat(self, messages: list[ChatMessage]) -> str:
+    def chat(
+        self,
+        messages: list[ChatMessage],
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+    ) -> str:
         base_url, model = assert_reasoning_model(self._settings)
         serialized = [m.model_dump() for m in messages]
+        body: dict[str, Any] = {"model": model, "messages": serialized}
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
+        if temperature is not None:
+            body["temperature"] = temperature
         resp = self._http().post(
             f"{base_url.rstrip('/')}/chat/completions",
-            json={"model": model, "messages": serialized},
+            json=body,
         )
         resp.raise_for_status()
         return str(resp.json()["choices"][0]["message"]["content"])

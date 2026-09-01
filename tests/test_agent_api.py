@@ -61,9 +61,15 @@ class FakeLLM:
 
     def __init__(self):
         self.calls = 0
+        self.last_reasoning_effort = None
+        self.last_temperature = None
+        self.last_messages = None
 
-    def chat(self, messages):
+    def chat(self, messages, reasoning_effort=None, temperature=None):
         self.calls += 1
+        self.last_reasoning_effort = reasoning_effort
+        self.last_temperature = temperature
+        self.last_messages = messages
         assert messages[0].role == "system"
         return (
             "Reissue the command after initialization completes.\n\n"
@@ -77,7 +83,7 @@ class FakeLLM:
 class FabricatingBodyLLM:
     """Quotes a full citation line that is not in the hit set, mid-answer."""
 
-    def chat(self, messages):
+    def chat(self, messages, *args, **kwargs):
         return (
             "Answer text.\n"
             "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
@@ -90,7 +96,7 @@ class FabricatingBodyLLM:
 class FabricatingScriptLLM:
     """Puts a fabricated citation inside the fenced script block."""
 
-    def chat(self, messages):
+    def chat(self, messages, *args, **kwargs):
         return (
             "Answer text.\n\n"
             "```jcl\n// see SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
@@ -418,7 +424,7 @@ def test_answer_llm_failure_reads_answer_failed(client, monkeypatch):
     """A model or parse failure is not mislabeled as a retrieval fault."""
 
     class ExplodingLLM:
-        def chat(self, _messages):
+        def chat(self, _messages, *args, **kwargs):
             raise RuntimeError("llm exploded: internal detail")
 
     monkeypatch.setattr(app_mod, "llm", ExplodingLLM())
@@ -568,4 +574,98 @@ def test_build_messages_context_budgeting():
     user_prompt2 = msgs2[1].content
     assert "[1]" in user_prompt2
     assert len(user_prompt2) < 1500
+
+
+def test_classify_query_complexity():
+    from mainframe_rag.agent.answer import classify_query_complexity
+
+    # Simple queries
+    assert classify_query_complexity("IEA500I") == "simple"
+    assert classify_query_complexity("What does operator message IEA500I indicate?") == "simple"
+    assert classify_query_complexity("What parameter in IEASYSxx defines 1MB large page frames?") == "simple"
+    assert classify_query_complexity("What return code does NFS mount fail with?") == "simple"
+
+    # Complex queries (diagnostic, troubleshooting, abend, recovery, procedural, tuning)
+    assert classify_query_complexity("How do I diagnose and recover when DFSMShsm journal fills up?") == "complex"
+    assert classify_query_complexity("Troubleshooting S0C4 abend in batch job") == "complex"
+    assert classify_query_complexity("Explain how to configure 1MB and 2GB page frames with LFAREA") == "complex"
+    assert classify_query_complexity("Compare DFSORT memory options HIPRMAX vs MOSIZE and how to tune") == "complex"
+
+
+def test_build_messages_complexity():
+    from mainframe_rag.agent.answer import (
+        SYSTEM_PROMPT,
+        SYSTEM_PROMPT_COMPLEX_EXTENSION,
+        build_messages,
+    )
+
+    simple_msgs = build_messages("IEA500I", [_hit()], complexity="simple")
+    assert simple_msgs[0].content == SYSTEM_PROMPT
+
+    complex_msgs = build_messages(
+        "How do I diagnose and recover when DFSMShsm journal fills up?",
+        [_hit()],
+        complexity="complex",
+    )
+    assert SYSTEM_PROMPT_COMPLEX_EXTENSION in complex_msgs[0].content
+
+
+def test_answer_dispatches_reasoning_effort_by_complexity(client, monkeypatch):
+    fake = FakeLLM()
+    monkeypatch.setattr(app_mod, "llm", fake)
+
+    # Simple query dispatches simple reasoning effort (low) and configured temperature
+    resp_simple = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp_simple.status_code == 200
+    assert fake.last_reasoning_effort == "low"
+    assert fake.last_temperature == 0.2
+
+    # Complex query dispatches complex reasoning effort (high) and configured temperature
+    resp_complex = client.post(
+        "/v1/answer",
+        json={"query": "How do I diagnose and recover when DFSMShsm journal fills up during migration?"},
+    )
+    assert resp_complex.status_code == 200
+    assert fake.last_reasoning_effort == "high"
+    assert fake.last_temperature == 0.2
+
+
+def test_httpx_llm_client_passes_reasoning_params(monkeypatch):
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    recorded_payload: dict[str, object] = {}
+
+    class MockHttpResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "choices": [
+                    {"message": {"content": "Test answer\n\nCitations:\nSA22-0000-00, p. 1-6"}}
+                ]
+            }
+
+    class MockHttpClient:
+        def post(self, url, json=None, timeout=None):
+            recorded_payload.update(json or {})
+            return MockHttpResp()
+
+        def close(self):
+            pass
+
+    s = Settings(
+        llm_base_url="http://mock-llm/v1",
+        llm_model_reasoning="mock-reasoning-model",
+        _env_file=None,
+    )
+    client = HttpxLLMClient(s, client=MockHttpClient())  # type: ignore[arg-type]
+    msgs = [ChatMessage(role="user", content="Hello")]
+    ans = client.chat(msgs, reasoning_effort="high", temperature=0.2)
+    assert "Test answer" in ans
+    assert recorded_payload["model"] == "mock-reasoning-model"
+    assert recorded_payload["reasoning_effort"] == "high"
+    assert recorded_payload["temperature"] == 0.2
 

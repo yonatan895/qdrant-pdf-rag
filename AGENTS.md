@@ -233,6 +233,7 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 - Classify `message` if `XXXnnnY` appears in the first few lines, not only line 1.
 - Citation inference is `[n]` / `[n, m]` only. Parentheses are IBM-manual noise.
 - `SECTION_MAX_CHARS = 3500` (not 6000): table-dense / code pages must stay inside 4096-token embedders.
+- Context budgeting: complex reasoning queries cap prompt manual excerpts at 4,500 chars (Settings.prompt_max_context_chars_complex) so the reasoning model has token headroom for deep thinking without context truncation.
 - After a non-obvious bug, add a regression test **and** a one-line note here if it is a standing rule.
 
 ## When you change this file
