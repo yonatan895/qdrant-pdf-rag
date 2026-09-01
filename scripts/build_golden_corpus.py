@@ -13,6 +13,22 @@ Outputs:
 Every message-id expectation is asserted against the live payload map before
 anything is written; the build fails loudly on broken bindings, missing docs,
 or duplicate queries. Split is deterministic (~60/40 dev/holdout per class).
+
+Re-bind runbook (when vendor books are loaded — e.g. the shop's CICS, MQ,
+IMS, JES3, and z/OS 2.2-era manuals):
+  1. Load the books into the collection (user-supplied PDFs; never in git).
+  2. Re-run this script. Seed entries whose domain was absent abstain only
+     while their identifiers cannot be bound (ABSENT_DOMAIN_FALLBACK); once
+     the books carry them they flip back to answer automatically with the
+     abstention notes dropped. FORCE_ABSTAIN entries stay abstain and print a
+     loud warning if they become bindable. Unbindable no-identifier entries
+     (VER-02/03/04, SYN-06, DIA-04, ...) need manual SEED_OVERRIDES bindings.
+  3. Author new entries for the loaded domains (mine real DFH*/CSQ*/DFS*/
+     HASP* message IDs) to restore class balance.
+  4. make verify-golden must be 0 FAIL, then re-freeze: the holdout sha
+     changes, so re-record evals/holdout-baseline.json and commit the new
+     pin + baselines as one dedicated re-freeze commit. Never iterate
+     against the holdout to tune.
 """
 
 from __future__ import annotations
@@ -238,40 +254,46 @@ e("NEG-09", "Look up document SA23-9999-99 and summarize the manual.", "negative
      trap_type="invented_identifier")
 
 # ---------------------------------------------------------------- seed absorption
+# Binding corrections discovered from the live payload (doc-number assumptions
+# in the seed that did not match the actual books are corrected and the
+# original assumption is preserved in the note). Always applied.
+DOC_CORRECTIONS = {
+    "DOC-02": "seed note assumed 'MVS System Commands'; the corpus book SA23-1383-70 is z/OS MVS IPCS Customization - expectation bound to the real book",
+    "DOC-03": "seed note assumed 'JES2 Initialization and Tuning Reference'; SC23-6858-70 is z/OS DFSMS Using Magnetic Tapes - expectation bound to the real book",
+    "DOC-04": "seed asked JES3 init/tuning vs commands; SC23-6862-70 is z/OS DFSMSdfp Checkpoint/Restart - neither; the number resolves to the real book",
+}
+
+# Applied only when the entry actually ends up abstain because its domain is
+# absent from the corpus at build time. When the CICS/MQ/IMS/JES3 (and
+# z/OS 2.2-era) books are loaded and the identifiers bind, these notes
+# disappear and the entries return to the answer class automatically.
+ABSENT_CORRECTIONS = {
+    "MSG-01": "IEA500I is not present in the real corpus (only ever the synthetic fixture, now removed); correct outcome is abstention",
+    "MSG-06": "no CICS TS messages book in the corpus (no DFH* content); correct outcome is abstention",
+    "MSG-07": "no IBM MQ book in the corpus (no CSQ* content); correct outcome is abstention",
+    "MSG-08": "no IMS messages book in the corpus (DFS554A absent); correct outcome is abstention",
+    "SYN-06": "no CICS SIT book in the corpus; correct outcome is abstention",
+    "SYN-07": "no IBM MQ book in the corpus (CSQ6SYSP absent); correct outcome is abstention",
+    "SYN-09": "no JES3 initialization book in the corpus; correct outcome is abstention",
+    "DIA-02": "HASP-prefixed JES2 messages are absent from the corpus (JES2 messages here are IAZ-prefixed); correct outcome is abstention",
+    "DIA-04": "no CICS book in the corpus (MXT/CEMT absent); correct outcome is abstention",
+    "DIA-08": "no IBM MQ book in the corpus (CSQW100I absent); correct outcome is abstention",
+    "CMP-04": "no CICS book in the corpus; correct outcome is abstention",
+    "VER-02": "no JES3 book in the corpus; support/migration statements cannot be answered from excerpts",
+    "VER-03": "no CICS book in the corpus; correct outcome is abstention",
+    "VER-04": "no IBM MQ book in the corpus; correct outcome is abstention",
+    "DIA-07": "no IMS book in the corpus (DFS629I appears only as a passing mention in SA23-1380-70); correct outcome is abstention",
+}
+
+
 def map_seed(entry: dict) -> dict:
     cls = SEED_CLASS_MAP[entry["class"]]
     behavior = SEED_BEHAVIOR_MAP[entry["expected_behavior"]]
     note_parts = [entry.get("notes") or ""]
     if entry.get("trap_type"):
         note_parts.append(f"trap_type={entry['trap_type']}")
-    if entry["id"] in RECLASSIFY_ABSTAIN:
-        cls = "negative"
-        behavior = "abstain"
-    # Binding corrections discovered from the live payload (doc-number assumptions
-    # in the seed that did not match the actual books are corrected here and the
-    # original assumption is preserved in the note).
-    corrections = {
-        "DOC-02": "seed note assumed 'MVS System Commands'; the corpus book SA23-1383-70 is z/OS MVS IPCS Customization - expectation bound to the real book",
-        "DOC-03": "seed note assumed 'JES2 Initialization and Tuning Reference'; SC23-6858-70 is z/OS DFSMS Using Magnetic Tapes - expectation bound to the real book",
-        "DOC-04": "seed asked JES3 init/tuning vs commands; SC23-6862-70 is z/OS DFSMSdfp Checkpoint/Restart - neither; the number resolves to the real book",
-        "MSG-01": "IEA500I is not present in the real corpus (only ever the synthetic fixture, now removed); correct outcome is abstention",
-        "MSG-06": "no CICS TS messages book in the corpus (no DFH* content); correct outcome is abstention",
-        "MSG-07": "no IBM MQ book in the corpus (no CSQ* content); correct outcome is abstention",
-        "MSG-08": "no IMS messages book in the corpus (DFS554A absent); correct outcome is abstention",
-        "SYN-06": "no CICS SIT book in the corpus; correct outcome is abstention",
-        "SYN-07": "no IBM MQ book in the corpus (CSQ6SYSP absent); correct outcome is abstention",
-        "SYN-09": "no JES3 initialization book in the corpus; correct outcome is abstention",
-        "DIA-02": "HASP-prefixed JES2 messages are absent from the corpus (JES2 messages here are IAZ-prefixed); correct outcome is abstention",
-        "DIA-04": "no CICS book in the corpus (MXT/CEMT absent); correct outcome is abstention",
-        "DIA-07": "no IMS book in the corpus (DFS629I appears only as a passing mention in SA23-1380-70); correct outcome is abstention",
-        "DIA-08": "no IBM MQ book in the corpus (CSQW100I absent); correct outcome is abstention",
-        "CMP-04": "no CICS book in the corpus; correct outcome is abstention",
-        "VER-02": "no JES3 book in the corpus; support/migration statements cannot be answered from excerpts",
-        "VER-03": "no CICS book in the corpus; correct outcome is abstention",
-        "VER-04": "no IBM MQ book in the corpus; correct outcome is abstention",
-    }
-    if entry["id"] in corrections:
-        note_parts.append(corrections[entry["id"]])
+    if entry["id"] in DOC_CORRECTIONS:
+        note_parts.append(DOC_CORRECTIONS[entry["id"]])
     out = {
         "id": entry["id"],
         "query": entry["query"],
@@ -341,13 +363,23 @@ SEED_OVERRIDES = {
     "SYN-08": ["SA23-2292-70"],                   # RACF PERMIT
 }
 
-# Seed entries whose domain is entirely absent from the corpus (no CICS, MQ,
-# IMS, or JES3 books; IEA500I only ever existed as the synthetic fixture).
-# They stay in the corpus as honest abstain entries under the negative class.
-RECLASSIFY_ABSTAIN = {
-    "MSG-01", "MSG-06", "MSG-07", "MSG-08",
+# Seed entries that abstain regardless of what the corpus carries:
+#   MSG-01 - IEA500I was the synthetic fixture's invented ID; if a real book
+#            ever carries it, flip deliberately after human review.
+#   DIA-07 - DFS629I appears only as a passing mention (not an IMS
+#            explanation); payload presence alone must not bind it.
+FORCE_ABSTAIN = {"MSG-01", "DIA-07"}
+
+# Seed entries whose domain books are not loaded yet (CICS, MQ, IMS, JES3, and
+# the shop's z/OS 2.2-era manuals). They abstain ONLY while their identifiers
+# cannot be bound: once the books are loaded and the build binds them, they
+# return to the answer class with the notes dropped. Entries without any
+# parseable identifier (VER-02/03/04, SYN-06, DIA-04, ...) stay abstain until
+# they receive a manual SEED_OVERRIDES binding at re-bind time.
+ABSENT_DOMAIN_FALLBACK = {
+    "MSG-06", "MSG-07", "MSG-08",
     "SYN-06", "SYN-07", "SYN-09",
-    "DIA-02", "DIA-04", "DIA-07", "DIA-08",
+    "DIA-02", "DIA-04", "DIA-08",
     "CMP-04",
     "VER-02", "VER-03", "VER-04",
 }
@@ -392,16 +424,44 @@ def main() -> int:
 
     # seed entries
     seed_entries: list[dict] = []
+    seed_errors: list[str] = []
     for line in SEED.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if line and not line.startswith("#"):
-            raw = json.loads(line)
-            if raw["id"] in DROP_SEED_IDS:
-                continue
-            mapped = map_seed(raw)
+        if not line or line.startswith("#"):
+            continue
+        raw = json.loads(line)
+        if raw["id"] in DROP_SEED_IDS:
+            continue
+        mapped = map_seed(raw)
+        if mapped["id"] in SEED_OVERRIDES:
+            mapped["expected_doc_ids"] = SEED_OVERRIDES[mapped["id"]]
+        else:
             mapped = bind_seed(mapped, msg_docs, titles)
-            mapped["expected_doc_ids"] = SEED_OVERRIDES.get(mapped["id"], mapped["expected_doc_ids"])
-            seed_entries.append(mapped)
+        if mapped["id"] in FORCE_ABSTAIN:
+            if mapped["expected_doc_ids"]:
+                print(
+                    f"warn: {mapped['id']} is forced to abstain but its identifiers now bind to "
+                    f"{mapped['expected_doc_ids']}; review a deliberate flip",
+                    file=sys.stderr,
+                )
+            mapped["query_class"] = "negative"
+            mapped["expected_behavior"] = "abstain"
+            mapped["expected_doc_ids"] = []
+            if ABSENT_CORRECTIONS.get(mapped["id"]):
+                mapped["note"] = f"{mapped['note']}; {ABSENT_CORRECTIONS[mapped['id']]}"
+        elif mapped["expected_behavior"] == "answer" and not mapped["expected_doc_ids"]:
+            if mapped["id"] in ABSENT_DOMAIN_FALLBACK:
+                # domain books not loaded yet: honest abstain until they bind
+                mapped["query_class"] = "negative"
+                mapped["expected_behavior"] = "abstain"
+                if ABSENT_CORRECTIONS.get(mapped["id"]):
+                    mapped["note"] = f"{mapped['note']}; {ABSENT_CORRECTIONS[mapped['id']]}"
+            else:
+                seed_errors.append(
+                    f"{mapped['id']}: answer seed entry could not be bound to any corpus doc "
+                    "(add a SEED_OVERRIDES binding or reclassify it deliberately)"
+                )
+        seed_entries.append(mapped)
 
     # new entries
     new_entries: list[dict] = []
@@ -418,7 +478,7 @@ def main() -> int:
         entry.setdefault("expected_doc_ids", [])
 
     # ---------------------------------------------------------- assertions
-    errors: list[str] = []
+    errors: list[str] = list(seed_errors)
     seen_queries: set[str] = set()
     for entry in entries:
         q = entry["query"].strip().lower()
