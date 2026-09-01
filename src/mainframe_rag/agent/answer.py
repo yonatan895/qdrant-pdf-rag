@@ -104,6 +104,7 @@ def build_messages(
     splunk_context: str | None = None,
     max_context_chars: int = 8000,
     max_chunk_chars: int = 3000,
+    max_chunk_chars_narrative: int | None = None,
     complexity: str | None = None,
 ) -> list[ChatMessage]:
     if complexity is None:
@@ -113,8 +114,18 @@ def build_messages(
     total_chars = 0
     for i, hit in enumerate(hits, 1):
         text = hit.text.strip()
-        if len(text) > max_chunk_chars:
-            text = text[:max_chunk_chars].rstrip() + "\n... [truncated]"
+        # High-fidelity chunk types (syntax, message, table) preserve their grammar/structure
+        # up to max_chunk_chars; only narrative prose is shrunk by max_chunk_chars_narrative.
+        narrative_cap = max_chunk_chars_narrative or (
+            1100 if complexity == "complex" else max_chunk_chars
+        )
+        chunk_cap = (
+            max_chunk_chars
+            if hit.chunk_type in ("syntax", "message", "table")
+            else min(max_chunk_chars, narrative_cap)
+        )
+        if len(text) > chunk_cap:
+            text = text[:chunk_cap].rstrip() + "\n... [truncated]"
         chunk_repr = f"[{i}] {hit.cite}\n{text}"
         if total_chars + len(chunk_repr) > max_context_chars and chunks:
             remaining = max_context_chars - total_chars

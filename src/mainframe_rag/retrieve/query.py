@@ -24,7 +24,7 @@ from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
 PREFETCH_LIMIT = 40
 RRF_K = 2
 RRF_WEIGHTS_IDENTIFIER = (1.0, 3.0)  # (dense, bm25): identifiers favor exact terms
-RRF_WEIGHTS_NL = (1.5, 0.5)  # (dense, bm25): semantic query prefix gives dense high precision
+RRF_WEIGHTS_NL = (1.0, 1.0)
 
 
 RETRIEVE_PAYLOAD_FIELDS: tuple[str, ...] = (
@@ -140,10 +140,11 @@ def diversify_hits(
     so near-duplicate consecutive chunks do not crowd out relevant companion
     manuals or distinct sections."""
     selected: list[SearchHit] = []
-    deferred: list[SearchHit] = []
     seen_pages: dict[tuple[str, str], int] = {}
     seen_docs: dict[str, int] = {}
+    remaining: list[SearchHit] = []
 
+    # Phase 1: select candidates respecting both per-page and per-doc caps
     for h in hits:
         p_key = (h.doc_id, h.page_label)
         d_key = h.doc_id
@@ -152,15 +153,32 @@ def diversify_hits(
             seen_docs[d_key] = seen_docs.get(d_key, 0) + 1
             selected.append(h)
         else:
-            deferred.append(h)
+            remaining.append(h)
+        if len(selected) >= limit:
+            return selected
+
+    # Phase 2: backfill without violating max_per_page (relax per-doc cap first)
+    still_remaining: list[SearchHit] = []
+    for h in remaining:
+        p_key = (h.doc_id, h.page_label)
+        if seen_pages.get(p_key, 0) < max_per_page:
+            seen_pages[p_key] = seen_pages.get(p_key, 0) + 1
+            selected.append(h)
+            if len(selected) >= limit:
+                return selected
+        else:
+            still_remaining.append(h)
+
+    # Phase 3: if every available candidate's page is already represented,
+    # backfill remaining slots preferring pages with the fewest occurrences so far.
+    still_remaining.sort(key=lambda h: (seen_pages.get((h.doc_id, h.page_label), 0), -h.score))
+    for h in still_remaining:
+        p_key = (h.doc_id, h.page_label)
+        seen_pages[p_key] = seen_pages.get(p_key, 0) + 1
+        selected.append(h)
         if len(selected) >= limit:
             break
 
-    if len(selected) < limit:
-        for h in deferred:
-            selected.append(h)
-            if len(selected) >= limit:
-                break
     return selected
 
 
@@ -178,22 +196,13 @@ def search(
 
     Dense and sparse prefetch queries execute concurrently in a single HTTP
     batch call via query_batch_points (falling back to query_points if unsupported)."""
-    if settings is None:
-        from mainframe_rag.config import load_settings
-
-        settings = load_settings()
-
     identifiers = parse_query(query)
     flt = build_filter(identifiers, product=product, version=version)
 
     timings: dict[str, int] = {}
 
     t0 = time.monotonic()
-    dense_vec = (
-        embedder.dense_query([query])[0]
-        if hasattr(embedder, "dense_query")
-        else embedder.dense([query])[0]
-    )
+    dense_vec = embedder.dense_query([query])[0]
     sparse_idx, sparse_val = embedder.sparse([query])[0]
     timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 

@@ -63,3 +63,47 @@ def test_different_texts_differ():
     a = hash_dense_embed(["torque wrench calibration"])[0]
     b = hash_dense_embed(["mainframe channel subsystem"])[0]
     assert a != b
+
+
+def test_vllm_embedder_dense_query_prepends_prefix():
+    """dense_query prepends Settings.dense_query_prefix for asymmetric embedders,
+    while document chunk ingest dense() stays unprefixed."""
+    from types import SimpleNamespace
+
+    from mainframe_rag.ingest.embed import VllmEmbedder
+
+    captured_inputs: list[str] = []
+
+    class FakeHttp:
+        def post(self, url, json, **kwargs):
+            captured_inputs.extend(json["input"])
+            return SimpleNamespace(
+                status_code=200,
+                raise_for_status=lambda: None,
+                json=lambda: {
+                    "data": [
+                        {"index": i, "embedding": [0.1] * 8}
+                        for i in range(len(json["input"]))
+                    ]
+                },
+            )
+
+    settings = Settings(
+        embed_mode="vllm",
+        embed_base_url="http://mock:8000/v1",
+        embed_model="mock-model",
+        dense_dim=8,
+        dense_query_prefix="Instruct: query prefix\nQuery: ",
+        _env_file=None,
+    )
+    embedder = VllmEmbedder(settings, client=FakeHttp())
+
+    # Ingest dense() MUST NOT prepend prefix (raw text)
+    embedder.dense(["doc chunk 1", "doc chunk 2"])
+    assert captured_inputs == ["doc chunk 1", "doc chunk 2"]
+
+    captured_inputs.clear()
+
+    # dense_query() MUST prepend prefix
+    embedder.dense_query(["user search query"])
+    assert captured_inputs == ["Instruct: query prefix\nQuery: user search query"]

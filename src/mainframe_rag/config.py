@@ -69,8 +69,8 @@ class Settings(BaseSettings):
 
     # Hybrid retrieval fusion (local RRF) and diversity parameters
     rrf_k: int = Field(default=2, ge=1, le=100)
-    rrf_weight_dense_nl: float = Field(default=1.5, gt=0.0, le=10.0)
-    rrf_weight_sparse_nl: float = Field(default=0.5, gt=0.0, le=10.0)
+    rrf_weight_dense_nl: float = Field(default=1.0, gt=0.0, le=10.0)
+    rrf_weight_sparse_nl: float = Field(default=1.0, gt=0.0, le=10.0)
     rrf_weight_dense_identifier: float = Field(default=1.0, gt=0.0, le=10.0)
     rrf_weight_sparse_identifier: float = Field(default=3.0, gt=0.0, le=10.0)
     retrieve_max_chunks_per_page: int = Field(default=1, ge=1, le=10)

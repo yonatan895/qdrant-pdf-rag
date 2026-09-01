@@ -233,9 +233,9 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 - Classify `message` if `XXXnnnY` appears in the first few lines, not only line 1.
 - Citation inference is `[n]` / `[n, m]` only. Parentheses are IBM-manual noise.
 - `SECTION_MAX_CHARS = 3500` (not 6000): table-dense / code pages must stay inside 4096-token embedders.
-- Context budgeting: complex reasoning queries cap prompt manual excerpts at 4,500 chars (Settings.prompt_max_context_chars_complex) and individual chunks at 1,100 chars (Settings.prompt_max_chunk_chars_complex) so multi-manual citations fit within token headroom.
+- Context budgeting: complex reasoning queries cap prompt manual excerpts at 4,500 chars (Settings.prompt_max_context_chars_complex) with type-aware chunk caps: syntax, message, and table chunks preserve full fidelity up to 3,000 chars, while narrative prose is capped at 1,100 chars (Settings.prompt_max_chunk_chars_complex).
 - Dense query prefix: asymmetric query embeddings prepend Settings.dense_query_prefix on dense query vectors only; document chunks stay raw; HashEmbedder remains plain text.
-- Hit diversification: retrieve_max_chunks_per_page=1 and retrieve_max_chunks_per_doc=3 prevent near-duplicate consecutive chunks from monopolizing prompt context slots.
+- Hit diversification: retrieve_max_chunks_per_page=1 and retrieve_max_chunks_per_doc=3 with 3-phase backfill prevent near-duplicate consecutive chunks from monopolizing prompt context slots.
 - Citation normalization: normalize_citation_line peels bracketed index markers ([1], [1]:) from model citation lines.
 - After a non-obvious bug, add a regression test **and** a one-line note here if it is a standing rule.
 

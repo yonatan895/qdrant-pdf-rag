@@ -48,8 +48,8 @@ def test_outbound_timeout_defaults_bounded():
     assert s.prompt_max_chunk_chars_complex == 1100
     assert "Instruct:" in s.dense_query_prefix
     assert s.rrf_k == 2
-    assert s.rrf_weight_dense_nl == 1.5
-    assert s.rrf_weight_sparse_nl == 0.5
+    assert s.rrf_weight_dense_nl == 1.0
+    assert s.rrf_weight_sparse_nl == 1.0
     assert s.rrf_weight_dense_identifier == 1.0
     assert s.rrf_weight_sparse_identifier == 3.0
     assert s.retrieve_max_chunks_per_page == 1
