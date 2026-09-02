@@ -35,10 +35,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import httpx2
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -139,6 +141,57 @@ def must_not_violations(hits: list[SearchHit], entry: GoldenEntry) -> list[dict]
     return violations
 
 
+def gain(hit_doc_id: str, hit_heading: str, hit_page: str, entry: GoldenEntry) -> int:
+    """Graded gain for one hit: 1 for a doc hit, +1 heading, +1 page."""
+    if hit_doc_id not in set(entry.expected_doc_ids):
+        return 0
+    g = 1
+    heading = (entry.expected_heading or "").lower()
+    if heading and heading in (hit_heading or "").lower():
+        g += 1
+    page = entry.expected_page or ""
+    if page and hit_page == page:
+        g += 1
+    return g
+
+
+def ndcg_at_k(hits: Sequence[Any], entry: GoldenEntry, k: int = SEARCH_LIMIT) -> float | None:
+    """Doc-level nDCG@k against the entry's own ideal (every expected doc at
+    max gain). The hit list is DEDUPLICATED per doc_id (best-ranked chunk
+    wins) — otherwise N chunks of one expected doc each contribute gain and
+    DCG can exceed IDCG (nDCG > 1), which is meaningless. Doc-level ranking
+    matches the doc-level gold. None when the entry has no expected docs
+    (abstain rows)."""
+    expected_n = len(entry.expected_doc_ids)
+    if expected_n == 0:
+        return None
+    max_gain = 1
+    if entry.expected_heading:
+        max_gain += 1
+    if entry.expected_page:
+        max_gain += 1
+    seen: set[str] = set()
+    dcg = 0.0
+    rank = 0
+    for hit in hits:
+        doc_id = getattr(hit, "doc_id", "")
+        heading = getattr(hit, "heading", "")
+        page_label = getattr(hit, "page_label", "") or ""
+        if doc_id in seen:
+            continue
+        seen.add(doc_id)
+        rank += 1
+        if rank > k:
+            break
+        g = gain(doc_id, heading, page_label, entry)
+        dcg += g / math.log2(rank + 1)
+    ideal_gains = [max_gain] + [1] * (expected_n - 1)
+    idcg = sum(g / math.log2(i + 1) for i, g in enumerate(ideal_gains[:k], start=1))
+    if idcg == 0.0:
+        return None
+    return dcg / idcg
+
+
 def score_entry(hits: list[SearchHit], entry: GoldenEntry) -> dict:
     """Score one entry against retrieved hits.
 
@@ -178,7 +231,11 @@ def score_entry(hits: list[SearchHit], entry: GoldenEntry) -> dict:
         row["recall@1"] = 1.0 if hits[:1] and relevant(hits[0]) else 0.0
         row["recall@3"] = 1.0 if any(relevant(h) for h in hits[:3]) else 0.0
         row["recall@5"] = 1.0 if any(relevant(h) for h in hits[:5]) else 0.0
+        row["recall@8"] = 1.0 if any(relevant(h) for h in hits[:8]) else 0.0
         row["mrr"] = reciprocal_rank
+        ndcg = ndcg_at_k(hits, entry, k=8)
+        if ndcg is not None:
+            row["ndcg@8"] = round(ndcg, 4)
 
     violations = must_not_violations(hits, entry)
     if violations:
@@ -258,7 +315,7 @@ def summarize(
     for cls in sorted({r["query_class"] for r in rows if r.get("query_class")}):
         sub = [r for r in rows if r.get("query_class") == cls]
         classes[cls] = {"n": len(sub), "scored": sum(1 for r in sub if "recall@1" in r)}
-        for key in ("recall@1", "recall@3", "recall@5", "mrr"):
+        for key in ("recall@1", "recall@3", "recall@5", "recall@8", "mrr", "ndcg@8"):
             classes[cls][key] = mean_over(sub, key)
 
     abstain_rows = [r for r in rows if r.get("expected_behavior") == "abstain" and "top_scores" in r]
@@ -292,9 +349,11 @@ def summarize(
         "recall@1": mean("recall@1"),
         "recall@3": mean("recall@3"),
         "recall@5": mean("recall@5"),
+        "recall@8": mean("recall@8"),
         "mrr": mean("mrr"),
-        "identifier": {k: mean_by_kind(k, "identifier") for k in ("recall@1", "recall@5", "mrr")},
-        "nl": {k: mean_by_kind(k, "nl") for k in ("recall@1", "recall@5", "mrr")},
+        "ndcg@8": mean("ndcg@8"),
+        "identifier": {k: mean_by_kind(k, "identifier") for k in ("recall@1", "recall@5", "recall@8", "mrr", "ndcg@8")},
+        "nl": {k: mean_by_kind(k, "nl") for k in ("recall@1", "recall@5", "recall@8", "mrr", "ndcg@8")},
         "classes": classes,
         "abstain": abstain_summary,
         "must_not": must_not_summary,
@@ -307,7 +366,9 @@ EVAL_GATED_METRICS = {
     # dotted path into the report -> minimum allowed ratio vs baseline (1.0 = no drop, 0.95 = 5% margin)
     "recall@1": 0.90,
     "recall@5": 0.95,
+    "recall@8": 0.95,
     "mrr": 0.95,
+    "ndcg@8": 0.95,
     "identifier.recall@1": 1.0,  # identifier queries must never drop
 }
 
@@ -383,7 +444,9 @@ def update_baseline(report: dict, baseline_path: Path) -> None:
         "recall@1": report.get("recall@1"),
         "recall@3": report.get("recall@3"),
         "recall@5": report.get("recall@5"),
+        "recall@8": report.get("recall@8"),
         "mrr": report.get("mrr"),
+        "ndcg@8": report.get("ndcg@8"),
         "identifier": report.get("identifier", {}),
         "nl": report.get("nl", {}),
         "classes": report.get("classes", {}),
@@ -406,7 +469,7 @@ def summary_markdown(report: dict, baseline: dict | None = None) -> str:
         "| metric | all | identifier | nl | baseline | gate |",
         "|---|---|---|---|---|---|",
     ]
-    for key in ("recall@1", "recall@3", "recall@5", "mrr"):
+    for key in ("recall@1", "recall@3", "recall@5", "recall@8", "mrr", "ndcg@8"):
         base_val = _get(baseline, key) if baseline else None
         min_ratio = EVAL_GATED_METRICS.get(key)
         gate = f">= {round(base_val * min_ratio, 3)}" if (base_val is not None and min_ratio is not None) else "n/a"
@@ -416,9 +479,9 @@ def summary_markdown(report: dict, baseline: dict | None = None) -> str:
 
     classes = report.get("classes") or {}
     if classes:
-        lines += ["", "### Per golden query class", "", "| class | n | scored | r@1 | r@3 | r@5 | mrr |", "|---|---|---|---|---|---|---|"]
+        lines += ["", "### Per golden query class", "", "| class | n | scored | r@1 | r@3 | r@5 | r@8 | mrr | ndcg@8 |", "|---|---|---|---|---|---|---|---|---|"]
         for cls, stats in classes.items():
-            cells = " | ".join("-" if stats.get(k) is None else str(stats.get(k)) for k in ("recall@1", "recall@3", "recall@5", "mrr"))
+            cells = " | ".join("-" if stats.get(k) is None else str(stats.get(k)) for k in ("recall@1", "recall@3", "recall@5", "recall@8", "mrr", "ndcg@8"))
             lines.append(f"| {cls} | {stats.get('n')} | {stats.get('scored')} | {cells} |")
 
     abstain = report.get("abstain") or {}

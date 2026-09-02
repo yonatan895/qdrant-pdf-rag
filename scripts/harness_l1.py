@@ -34,11 +34,11 @@ run-to-run noise.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from typing import Any
 
 from eval_retrieval import GoldenEntry, must_not_violations
+from eval_retrieval import ndcg_at_k as _ndcg_at_k
 
 L1_LIMIT = 8  # recall@8 headroom; matches the answer path's retrieval depth
 
@@ -49,58 +49,6 @@ def _relevant(hit_doc_id: str, hit_heading: str, entry: GoldenEntry) -> bool:
         return False
     heading = (entry.expected_heading or "").lower()
     return not heading or heading in hit_heading.lower()
-
-
-def _gain(hit_doc_id: str, hit_heading: str, hit_page: str, entry: GoldenEntry) -> int:
-    """Graded gain for one hit: 1 for a doc hit, +1 heading, +1 page."""
-    if hit_doc_id not in set(entry.expected_doc_ids):
-        return 0
-    gain = 1
-    heading = (entry.expected_heading or "").lower()
-    if heading and heading in hit_heading.lower():
-        gain += 1
-    page = entry.expected_page or ""
-    if page and hit_page == page:
-        gain += 1
-    return gain
-
-
-def _ndcg_at_k(hits: Sequence[Any], entry: GoldenEntry, k: int = L1_LIMIT) -> float | None:
-    """Doc-level nDCG@8 against the entry's own ideal (every expected doc at
-    max gain). The hit list is DEDUPLICATED per doc_id (best-ranked chunk
-    wins) — otherwise N chunks of one expected doc each contribute gain and
-    DCG can exceed IDCG (nDCG > 1), which is meaningless. Doc-level ranking
-    matches the doc-level gold. None when the entry has no expected docs
-    (abstain rows)."""
-    expected_n = len(entry.expected_doc_ids)
-    if expected_n == 0:
-        return None
-    max_gain = 1
-    if entry.expected_heading:
-        max_gain += 1
-    if entry.expected_page:
-        max_gain += 1
-    seen: set[str] = set()
-    dcg = 0.0
-    rank = 0
-    for hit in hits:
-        if hit.doc_id in seen:
-            continue
-        seen.add(hit.doc_id)
-        rank += 1
-        if rank > k:
-            break
-        g = _gain(hit.doc_id, hit.heading, hit.page_label or "", entry)
-        dcg += g / math.log2(rank + 1)
-    # The ideal gives max gain to ONE doc (heading/page gold are singular
-    # fields — they can be satisfied by at most one document) and plain doc
-    # gain to the rest. Assuming max gain for every expected doc overstated
-    # the ideal and depressed nDCG for multi-doc graded rows.
-    ideal_gains = [max_gain] + [1] * (expected_n - 1)
-    idcg = sum(g / math.log2(i + 1) for i, g in enumerate(ideal_gains[:k], start=1))
-    if idcg == 0.0:
-        return None
-    return dcg / idcg
 
 
 def score_row(hits: Sequence[Any], entry: GoldenEntry) -> dict[str, Any]:

@@ -129,7 +129,7 @@ def render_eval(report: dict[str, Any], baseline: dict[str, Any] | None, fmt: st
     coll = report.get("collection", "unknown")
     elapsed = report.get("elapsed_s", 0.0)
 
-    metrics = ["recall@1", "recall@3", "recall@5", "mrr"]
+    metrics = ["recall@1", "recall@3", "recall@5", "recall@8", "mrr", "ndcg@8"]
 
     if fmt == "html":
         cards_html = f"""
@@ -426,7 +426,7 @@ def render_bench(report: dict[str, Any], baseline: dict[str, Any] | None, fmt: s
 
 # ---------------------------------------------------------------- Compare Evaluations
 def compare_eval(base: dict[str, Any], current: dict[str, Any], fmt: str) -> tuple[str, bool]:
-    metrics = ["recall@1", "recall@3", "recall@5", "mrr"]
+    metrics = ["recall@1", "recall@3", "recall@5", "recall@8", "mrr", "ndcg@8"]
     base_rows = {r.get("query"): r for r in base.get("rows", []) if "query" in r}
     cur_rows = {r.get("query"): r for r in current.get("rows", []) if "query" in r}
 
@@ -475,7 +475,7 @@ def compare_eval(base: dict[str, Any], current: dict[str, Any], fmt: str) -> tup
 
     # Check overall metrics for regression
     global_regression = False
-    for m in ["recall@1", "recall@5", "mrr"]:
+    for m in ["recall@1", "recall@5", "recall@8", "mrr", "ndcg@8"]:
         b_val = base.get(m)
         c_val = current.get(m)
         if b_val is not None and c_val is not None and c_val < b_val - 1e-4:
