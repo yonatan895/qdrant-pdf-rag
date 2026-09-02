@@ -171,7 +171,9 @@ loadtest: | .venv
 # the only consumer of the default.
 EMBED_MODE ?= hash
 EVAL_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-vllm.json,evals/baseline.json)
-eval eval-baseline eval-draft eval-holdout eval-answers eval-report eval-html eval-compare: \
+HARNESS_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-vllm.json,benchmarks/harness.json)
+eval eval-baseline eval-draft eval-holdout eval-answers eval-report eval-html eval-compare \
+	harness-gate harness-baseline: \
 	export EMBED_MODE := $(EMBED_MODE)
 
 # Eval against a running Qdrant (sim-qdrant or QDRANT_SIM_URL); scores
@@ -218,6 +220,20 @@ eval-answers: | .venv
 	@mkdir -p $(BUNDLE_DIR)
 	.venv/bin/python scripts/eval_answers.py --max-queries $(or $(N),24) \
 	  --out $(BUNDLE_DIR)/eval-answers-report.json --summary $(BUNDLE_DIR)/eval-answers-summary.md
+
+# Layered harness (PR A: L1 retrieval + promotion gate). Snapshot-pinned
+# index, per-class recall@5/@8 + MRR + nDCG@8, paired-bootstrap CIs against
+# the mode-keyed baseline. RC-only gate (AGENTS.md): never a PR gate, never
+# GitLab. RESTORE=always forces a full snapshot recover (default drift-only).
+.PHONY: harness-gate harness-baseline
+harness-gate: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/harness.py --gate --baseline "$(HARNESS_BASELINE)" --restore $(or $(RESTORE),drift) \
+	  --out $(BUNDLE_DIR)/harness-report.json
+harness-baseline: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/harness.py --update-baseline --baseline "$(HARNESS_BASELINE)" --restore $(or $(RESTORE),drift) \
+	  --out $(BUNDLE_DIR)/harness-report.json
 
 # Draft golden-set candidates from a collection's payload (edit the queries).
 eval-draft: | .venv
