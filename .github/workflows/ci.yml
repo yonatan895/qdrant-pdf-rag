@@ -90,7 +90,7 @@ jobs:
           python-version: "3.14"
       - name: docker must be present for qdrant_sim
         run: docker version
-      - run: pip install -e ".[dev]"
+      - run: pip install -c requirements.lock.txt -e ".[dev]"
       - name: run L1 retrieval gate
         run: |
           python scripts/gate_l1.py \
@@ -111,6 +111,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
+              per_page: 100,
             });
             const botComment = comments.find(c => c.body.includes(header));
             if (botComment) {

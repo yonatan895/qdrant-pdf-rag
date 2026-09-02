@@ -248,6 +248,13 @@ def render_eval(report: dict[str, Any], baseline: dict[str, Any] | None, fmt: st
             "## Retrieval Evaluation Report",
             "",
             f"**Collection:** `{_md_esc(coll)}` | **Embed Mode:** `{_md_esc(mode)}` | **Queries:** `{_md_esc(n)}` | **Failures:** `{_md_esc(failures)}` | **Elapsed:** `{_md_esc(elapsed)}s`",
+        ]
+        if mode == "hash":
+            lines.append(
+                "> **Note:** L1 CPU hash mode evaluates pipeline integrity (ingest, indexing, prefetch filters, RRF, scoring) "
+                "using synthetic fixtures. Semantic retrieval quality is evaluated on live models via vLLM-mode baselines."
+            )
+        lines += [
             "",
             "| Metric | All | Identifier | NL | Baseline | Delta |",
             "|---|---|---|---|---|---|",
@@ -259,17 +266,33 @@ def render_eval(report: dict[str, Any], baseline: dict[str, Any] | None, fmt: st
             nl = _get(report, f"nl.{m}")
             badge = _diff_badge(cur, base) if base is not None else "-"
             lines.append(f"| {_md_esc(m)} | {_md_esc(cur)} | {_md_esc(ident) if ident is not None else '-'} | {_md_esc(nl) if nl is not None else '-'} | {_md_esc(base) if base is not None else '-'} | {badge} |")
+        rows = report.get("rows", [])
         lines += [
             "",
-            "| Query | Kind | R@1 | R@5 | MRR | Top Hit Doc IDs |",
-            "|---|---|---|---|---|---|",
+            "<details>",
+            f"<summary>Per-query evaluation results ({len(rows)} queries)</summary>",
+            "",
+            "| Query | Class | Kind | R@1 | R@5 | MRR | Top Hit Doc IDs |",
+            "|---|---|---|---|---|---|---|",
         ]
-        for row in report.get("rows", []):
+        for row in rows:
+            q_class = _md_esc(row.get("query_class", "-"))
             if "error" in row:
-                lines.append(f"| {_md_esc(row['query'][:60])} | error | - | - | - | {_md_esc(row['error'][:40])} |")
+                lines.append(f"| {_md_esc(row['query'][:60])} | {q_class} | error | - | - | - | {_md_esc(row['error'][:40])} |")
+            elif row.get("expected_behavior") == "abstain":
+                top_scores = row.get("top_scores", [])
+                score_str = f"top score: {top_scores[0]}" if top_scores else "no hits"
+                lines.append(f"| {_md_esc(row['query'][:60])} | {q_class} | abstain | — | — | — | {score_str} |")
             else:
                 hit_str = ", ".join(row.get("hit_doc_ids", []))[:60]
-                lines.append(f"| {_md_esc(row['query'][:60])} | {_md_esc(row.get('kind', ''))} | {row.get('recall@1', 0):.0f} | {row.get('recall@5', 0):.0f} | {row.get('mrr', 0):.2f} | {_md_esc(hit_str)} |")
+                r1 = f"{row['recall@1']:.0f}" if "recall@1" in row else "-"
+                r5 = f"{row['recall@5']:.0f}" if "recall@5" in row else "-"
+                mrr = f"{row['mrr']:.2f}" if "mrr" in row else "-"
+                lines.append(f"| {_md_esc(row['query'][:60])} | {q_class} | {_md_esc(row.get('kind', ''))} | {r1} | {r5} | {mrr} | {_md_esc(hit_str)} |")
+        lines += [
+            "",
+            "</details>",
+        ]
         return "\n".join(lines) + "\n"
 
     # Default text/terminal

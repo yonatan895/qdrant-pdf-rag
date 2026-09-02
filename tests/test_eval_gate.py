@@ -147,19 +147,6 @@ def test_load_golden_validates_and_rejects_empty(tmp_path: Path):
         chunk_type="narrative",
         message_ids=("IEA500I",),
     )
-    # Score entry against SearchHit
-    hit1 = SearchHit(
-        chunk_id="c1",
-        score=0.9,
-        cite="SC14-7315-70 Manual, p. 1",
-        heading="Chapter 2 > IEA500I",
-        text="Sample text",
-        doc_id="SC14-7315-70",
-        title="Manual",
-        page_label="1",
-        chunk_type="narrative",
-        message_ids=("IEA500I",),
-    )
     score = score_entry([hit1], entries[0])
     assert score["recall@1"] == 1.0
     assert score["recall@8"] == 1.0

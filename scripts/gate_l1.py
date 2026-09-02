@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -134,7 +135,7 @@ def run_gate(
     *,
     golden_path: Path = REPO_ROOT / "evals" / "golden.jsonl",
     baseline_path: Path = REPO_ROOT / "evals" / "baseline.json",
-    collection: str = "local-corpus",
+    collection: str | None = None,
     qdrant_url: str | None = None,
     out_path: Path | None = None,
     summary_path: Path | None = None,
@@ -146,6 +147,7 @@ def run_gate(
 
     Returns (exit_code, delta_markdown).
     """
+    target_collection = collection or f"gate-l1-{os.getpid()}"
     raw_entries: list[dict[str, Any]] = [
         json.loads(line)
         for line in golden_path.read_text(encoding="utf-8").splitlines()
@@ -175,7 +177,7 @@ def run_gate(
 
         # Ingest in hash mode
         os.environ["QDRANT_URL"] = sim.url
-        os.environ["QDRANT_COLLECTION"] = collection
+        os.environ["QDRANT_COLLECTION"] = target_collection
         os.environ["EMBED_MODE"] = "hash"
         os.environ["ALLOW_HASH_MODE"] = "true"
 
@@ -239,7 +241,7 @@ def run_gate(
     finally:
         # Cleanup collection from Qdrant
         try:
-            httpx2.delete(f"{sim.url.rstrip('/')}/collections/{collection}", timeout=5.0)
+            httpx2.delete(f"{sim.url.rstrip('/')}/collections/{target_collection}", timeout=5.0)
         except (httpx2.HTTPError, OSError):
             pass
         # Cleanup temp files
@@ -252,14 +254,17 @@ def run_gate(
                 os.environ.pop(k, None)
         # Stop simulator if we created it
         if not keep_sim:
-            sim.stop()
+            try:
+                sim.stop()
+            except (subprocess.SubprocessError, OSError):
+                pass
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--golden", type=Path, default=REPO_ROOT / "evals" / "golden.jsonl", help="Golden JSONL path")
     parser.add_argument("--baseline", type=Path, default=REPO_ROOT / "evals" / "baseline.json", help="Baseline JSON path")
-    parser.add_argument("--collection", default="local-corpus", help="Qdrant collection name")
+    parser.add_argument("--collection", default=None, help="Qdrant collection name (defaults to ephemeral gate-l1-<pid>)")
     parser.add_argument("--qdrant-url", default=None, help="Optional external Qdrant URL (defaults to simulator)")
     parser.add_argument("--out", type=Path, default=None, help="Write full JSON report to this path")
     parser.add_argument("--summary", type=Path, default=None, help="Write markdown summary to this path")

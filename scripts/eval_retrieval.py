@@ -370,6 +370,7 @@ EVAL_GATED_METRICS = {
     "mrr": 0.95,
     "ndcg@8": 0.95,
     "identifier.recall@1": 1.0,  # identifier queries must never drop
+    "classes.message_id.recall@1": 1.0,  # safety-critical message ID lookups must never drop
 }
 
 # Absolute invariants: must be exactly zero whenever baseline checking runs,

@@ -136,7 +136,7 @@ python scripts/gate_l1.py --out bundles/eval-report.json --delta bundles/eval-de
 ```
 
 - **Execution Invariant:** Zero committed PDFs. An original synthetic PDF corpus covering the golden dataset expectations is generated at runtime in a temporary directory and ingested in hash mode.
-- **Fail-Closed Verification:** Fails nonzero if any query fails or if metrics regress beyond tolerance (strict `identifier.recall@1 >= 1.0`, `recall@1 >= 0.90 * baseline`, `recall@5/8 >= 0.95 * baseline`, `mrr >= 0.95 * baseline`, `ndcg@8 >= 0.95 * baseline`, `must_not.violations == 0`).
+- **Fail-Closed Verification:** Fails nonzero if any query fails or if metrics regress beyond tolerance (strict no-drop `identifier.recall@1` ratio >= 1.0 vs baseline, `classes.message_id.recall@1` ratio >= 1.0, `recall@1 >= 0.90 * baseline`, `recall@5/8 >= 0.95 * baseline`, `mrr >= 0.95 * baseline`, `ndcg@8 >= 0.95 * baseline`, `must_not.violations == 0`).
 - **PR Delta Reporting:** Automatically posts or updates a markdown delta table comment on the PR (GitHub) or merge request note (GitLab).
 
 #### GPU Story for L2 and L3 Tiers (Operational Strategy)
