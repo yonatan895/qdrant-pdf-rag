@@ -1,41 +1,41 @@
 {
   "_meta": {
     "note": "Re-baseline via `make eval-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/eval_retrieval.py.",
-    "n": 62,
+    "n": 70,
     "collection": "mainframe_manuals",
     "embed_mode": "vllm",
-    "updated": "2026-09-01"
+    "updated": "2026-09-02"
   },
-  "recall@1": 0.596,
-  "recall@3": 0.865,
-  "recall@5": 0.885,
-  "mrr": 0.722,
+  "recall@1": 0.375,
+  "recall@3": 0.562,
+  "recall@5": 0.703,
+  "mrr": 0.51,
   "identifier": {
-    "recall@1": 0.485,
-    "recall@5": 0.909,
-    "mrr": 0.674
+    "recall@1": 0.342,
+    "recall@5": 0.711,
+    "mrr": 0.489
   },
   "nl": {
-    "recall@1": 0.789,
-    "recall@5": 0.842,
-    "mrr": 0.807
+    "recall@1": 0.423,
+    "recall@5": 0.692,
+    "mrr": 0.541
   },
   "classes": {
     "comparative": {
-      "n": 6,
-      "scored": 6,
-      "recall@1": 0.5,
-      "recall@3": 0.833,
-      "recall@5": 0.833,
-      "mrr": 0.667
+      "n": 7,
+      "scored": 7,
+      "recall@1": 0.0,
+      "recall@3": 0.143,
+      "recall@5": 0.286,
+      "mrr": 0.144
     },
     "diagnostic": {
-      "n": 11,
-      "scored": 11,
-      "recall@1": 0.455,
-      "recall@3": 0.818,
-      "recall@5": 0.818,
-      "mrr": 0.621
+      "n": 14,
+      "scored": 14,
+      "recall@1": 0.286,
+      "recall@3": 0.5,
+      "recall@5": 0.643,
+      "mrr": 0.449
     },
     "doc_number": {
       "n": 6,
@@ -46,15 +46,15 @@
       "mrr": 0.667
     },
     "message_id": {
-      "n": 12,
-      "scored": 12,
-      "recall@1": 0.667,
-      "recall@3": 0.917,
-      "recall@5": 1.0,
-      "mrr": 0.785
+      "n": 15,
+      "scored": 15,
+      "recall@1": 0.267,
+      "recall@3": 0.6,
+      "recall@5": 0.867,
+      "mrr": 0.482
     },
     "negative": {
-      "n": 10,
+      "n": 6,
       "scored": 0,
       "recall@1": null,
       "recall@3": null,
@@ -62,25 +62,25 @@
       "mrr": null
     },
     "syntax": {
-      "n": 13,
-      "scored": 13,
-      "recall@1": 0.538,
-      "recall@3": 0.923,
-      "recall@5": 0.923,
-      "mrr": 0.716
+      "n": 16,
+      "scored": 16,
+      "recall@1": 0.562,
+      "recall@3": 0.625,
+      "recall@5": 0.75,
+      "mrr": 0.653
     },
     "version": {
-      "n": 4,
-      "scored": 4,
-      "recall@1": 1.0,
-      "recall@3": 1.0,
-      "recall@5": 1.0,
-      "mrr": 1.0
+      "n": 6,
+      "scored": 6,
+      "recall@1": 0.5,
+      "recall@3": 0.833,
+      "recall@5": 0.833,
+      "mrr": 0.611
     }
   },
   "abstain": {
-    "n": 10,
-    "top_score_mean": 0.5625,
+    "n": 6,
+    "top_score_mean": 0.5166,
     "top_score_max": 1.25
   },
   "page": {

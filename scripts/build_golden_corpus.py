@@ -20,8 +20,11 @@ IMS, JES3, and z/OS 2.2-era manuals):
   2. Re-run this script. Seed entries whose domain was absent abstain only
      while their identifiers cannot be bound (ABSENT_DOMAIN_FALLBACK); once
      the books carry them they flip back to answer automatically with the
-     abstention notes dropped. FORCE_ABSTAIN entries stay abstain and print a
-     loud warning if they become bindable. Unbindable no-identifier entries
+     abstention notes dropped — but only when the id shape is parseable by
+     MSG_RE (MVS-style XXXnnnY). Vendor shapes outside it (DFH*, CSQ*,
+     HASP*, IAT*, DSNT*) need manual SEED_OVERRIDES bindings even when the
+     books are present. FORCE_ABSTAIN entries stay abstain and print a loud
+     warning if they become bindable. Unbindable no-identifier entries
      (VER-02/03/04, SYN-06, DIA-04, ...) need manual SEED_OVERRIDES bindings.
   3. Author new entries for the loaded domains (mine real DFH*/CSQ*/DFS*/
      HASP* message IDs) to restore class balance.
@@ -82,7 +85,7 @@ def e(id_, query, cls, docs, *, heading=None, page=None, must_not=None, must_not
         note = f"trap_type={trap_type}"
     E.append({
         "id": id_, "query": query, "query_class": cls, "expected_doc_ids": docs,
-        "expected_heading": heading, "expected_page": page,
+        "expected_heading": heading, "expected_page": str(page) if page is not None else None,
         "must_not_retrieve": must_not or [], "must_not_message_ids": must_not_msgs or [],
         "note": note,
     })
@@ -187,7 +190,9 @@ e("SYN-36", "Show documented ICKDSF INIT command syntax to initialize a DASD vol
 
 # --- new: diagnostic / recovery ------------------------------------------------
 
-e("DIA-09", "IEC161I during VSAM open: how should the reason codes be read and what recovery is documented?", "diagnostic", ["SA38-0674-70", "SC23-6852-70"])
+e("DIA-09", "IEC161I during VSAM open: how should the reason codes be read and what recovery is documented?", "diagnostic",
+     ["SA38-0674-70", "SA38-0674-06", "SC23-6852-70"],
+     note="IEC range lives in System Messages Vol 7 in both the z/OS 2.2 kit and the 2.5-era -70 editions; both are honest answers")
 e("DIA-10", "IOS071I rejected a command against a device. What do the reason codes mean per the manual?", "diagnostic", ["SA38-0676-70", "SA38-0666-70"])
 e("DIA-11", "What does IEE699I tell the operator about the display output that follows it?", "diagnostic", ["SA38-0674-70"], heading="IEE699I")
 e("DIA-12", "System Logger issued IXG601I. What condition is documented and what action follows?", "diagnostic", ["SA38-0677-70", "SC23-6843-70"])
@@ -238,7 +243,7 @@ e("VER-10", "Encryption Facility planning and customizing: which book covers key
      note="sibling-book trap, inverse of VER-09")
 e("VER-11", "SCRT sub-capacity reporting: which tool version does the documentation cover and what SMF data does it use?", "version", ["SC23-6845-22"],
      note="SCRT 30.1.0 documentation; version is part of the title")
-e("VER-12", "JES2 initialization statements: state which z/OS edition the excerpts cover before quoting IAZ/HASJ syntax.", "version", ["SA32-0992-70"],
+e("VER-12", "JES2 initialization statements: state which z/OS edition the excerpts cover before quoting IAZ/HASJ syntax.", "version", ["SA32-0992-70", "SA32-0992-02"],
      note="single-edition corpus: the answer must name the covered edition rather than merging releases")
 e("VER-13", "Infoprint Server Print Transforms: which product version do the excerpts document and how is it labeled?", "version", ["aokfa00_v2r3"],
      note="v2r3-era book; the answer must label the version from the excerpts")
@@ -253,6 +258,48 @@ e("NEG-09", "Look up document SA23-9999-99 and summarize the manual.", "negative
      note="invented doc number; no such publication exists in the corpus",
      trap_type="invented_identifier")
 
+# --- re-bind 2026-09: operator books loaded --------------------------------------
+# CICS TS 3.1, WebSphere MQ 7.1 (programming guide only), IMS 11, z/OS 2.2 kit
+# (incl. JES2/JES3), DB2 10, CA Top Secret 16, PDSMAN 7.7. Bindings verified
+# against the live payload after ingest; entry ids continue each class series
+# (the 170-entry corpus ran through MSG-36/DIA-32/SYN-36/CMP-17/VER-13/
+# DOC-16/NEG-09). DFH*/CSQ*/HASP*/IAT* shapes are outside MSG_RE, so these
+# message-id entries carry authored bindings (the auto-assert only covers
+# parseable ids).
+
+e("MSG-40", "DSN9022I came back for a DISPLAY DATABASE command. What does the message report?", "message_id",
+     ["SC19-2972-13", "SC19-2968-15"])
+e("MSG-37", "DFS0535I was issued during IMS startup. What does the IMS messages book say it reports?", "message_id", ["GC19-4233-01"])
+e("MSG-38", "TSS9134A appeared after a CA Top Secret signon. What does the message document?", "message_id",
+     ["tss-messages", "messages-for-ca-top-secret-for-z-os"])
+e("MSG-39", "What does DFHAC2006 indicate for a CICS TS 3.1 transaction?", "message_id", ["GC34-6442-07"])
+
+e("DIA-33", "A CICS TS 3.1 transaction abended and DFHAC2006 is in the message log. What does the message tell the operator to collect before calling support?", "diagnostic",
+     ["GC34-6442-07"], page=66)
+e("DIA-34", "DSNT500I came back from a DB2 10 BIND with a resource-unavailable reason code. What structure does the message document for decoding the reason?", "diagnostic",
+     ["GC19-2971-12"])
+e("DIA-35", "JES3 printed IAT8707 on the global during cold start. What condition is documented and what recovery is specified?", "diagnostic",
+     ["SA32-1007-02"])
+
+e("SYN-37", "Construct a JES2 SPOOLDEF initialization statement that defines a spool volume for a JES2 2.2 complex.", "syntax", ["SA32-0992-02"])
+e("SYN-38", "Draft CEDA RDO definitions for a CICS TS 3.1 transaction and the program it runs.", "syntax", ["SC34-6430-09"])
+e("SYN-39", "Show the documented DB2 10 BIND PACKAGE subcommand syntax, including the required keywords.", "syntax", ["SC19-2972-13"])
+e("SYN-40", "Which PDSMAN control statement activates journaling of PDS directory updates, and how is it coded?", "syntax", ["ca-pdsman-pds-library-management-7-7"])
+
+e("CMP-18", "Compare the documented JES2 and JES3 operator commands for draining spool volumes.", "comparative", ["SA32-0990-02", "SA32-1008-01"])
+
+e("VER-14", "State which z/OS release the HASP050 excerpts document before quoting JES2 spool guidance.", "version",
+     ["SA32-0989-03", "SA32-0989-70"],
+     note="both the 2.2 and 2.5-era JES2 Messages editions are honest gold; the answer must name the covered edition")
+e("VER-15", "Which IMS release do the abend-code excerpts document?", "version", ["GC19-4234-01"])
+
+e("DOC-17", "What does SA32-0989-03 cover and which JES2 release does it document?", "doc_number", ["SA32-0989-03"])
+e("DOC-18", "Summarize GC34-6442-07 and state the CICS release it covers.", "doc_number", ["GC34-6442-07"])
+
+e("NEG-10", "What does message HASP310I report after a JES2 checkpoint reconfiguration?", "negative", [],
+     note="sibling near-miss: HASP310I does not exist in the corpus while checkpoint sibling HASP309 does (unparseable by MSG_RE, so it cannot gate must_not); the wrong sibling must never supply the answer",
+     trap_type="sibling_near_miss")
+
 # ---------------------------------------------------------------- seed absorption
 # Binding corrections discovered from the live payload (doc-number assumptions
 # in the seed that did not match the actual books are corrected and the
@@ -264,25 +311,15 @@ DOC_CORRECTIONS = {
 }
 
 # Applied only when the entry actually ends up abstain because its domain is
-# absent from the corpus at build time. When the CICS/MQ/IMS/JES3 (and
-# z/OS 2.2-era) books are loaded and the identifiers bind, these notes
-# disappear and the entries return to the answer class automatically.
+# absent from the corpus at build time. After the 2026-09 book load most seed
+# entries bound again; these four remain honestly abstain (IEA500I was the
+# synthetic fixture's invention; only the MQ 7.1 programming guide was loaded,
+# so the MQ messages/log-manager books and their IDs are still absent).
 ABSENT_CORRECTIONS = {
     "MSG-01": "IEA500I is not present in the real corpus (only ever the synthetic fixture, now removed); correct outcome is abstention",
-    "MSG-06": "no CICS TS messages book in the corpus (no DFH* content); correct outcome is abstention",
-    "MSG-07": "no IBM MQ book in the corpus (no CSQ* content); correct outcome is abstention",
-    "MSG-08": "no IMS messages book in the corpus (DFS554A absent); correct outcome is abstention",
-    "SYN-06": "no CICS SIT book in the corpus; correct outcome is abstention",
-    "SYN-07": "no IBM MQ book in the corpus (CSQ6SYSP absent); correct outcome is abstention",
-    "SYN-09": "no JES3 initialization book in the corpus; correct outcome is abstention",
-    "DIA-02": "HASP-prefixed JES2 messages are absent from the corpus (JES2 messages here are IAZ-prefixed); correct outcome is abstention",
-    "DIA-04": "no CICS book in the corpus (MXT/CEMT absent); correct outcome is abstention",
-    "DIA-08": "no IBM MQ book in the corpus (CSQW100I absent); correct outcome is abstention",
-    "CMP-04": "no CICS book in the corpus; correct outcome is abstention",
-    "VER-02": "no JES3 book in the corpus; support/migration statements cannot be answered from excerpts",
-    "VER-03": "no CICS book in the corpus; correct outcome is abstention",
-    "VER-04": "no IBM MQ book in the corpus; correct outcome is abstention",
-    "DIA-07": "no IMS book in the corpus (DFS629I appears only as a passing mention in SA23-1380-70); correct outcome is abstention",
+    "MSG-07": "only the MQ 7.1 programming guide is loaded (no CSQ* messages/log books); CSQJ001I cannot be answered; correct outcome is abstention",
+    "DIA-08": "only the MQ 7.1 programming guide is loaded (no CSQ* messages/log books); CSQW100I cannot be answered; correct outcome is abstention",
+    "VER-04": "only the MQ 7.1 programming guide is loaded; MQ log/system-parameter defaults cannot be compared against another edition; correct outcome is abstention",
 }
 
 
@@ -350,32 +387,49 @@ SEED_OVERRIDES = {
     "CMP-01": ["SA32-0992-70", "SA32-0991-70"],  # JES2 side answerable; no JES3 book (note covers)
     "CMP-02": ["SA38-0667-70", INIT_REF],        # SMFPRMxx
     "CMP-03": [INIT_REF, "SA23-1379-70"],        # CSA/ECSA/SQA
-    "CMP-05": ["SC34-2662-70", "SC34-2663-70"],  # WLM
+    "CMP-05": ["SC34-2662-70", "SC34-2663-70", "SC34-2662-05"],  # WLM (2.5 + 2.2 editions)
     "CMP-06": ["SA23-2287-70", "SA23-2288-70"],  # RACF SETROPTS
-    "VER-01": [INIT_REF],                         # LFAREA: single edition (note covers)
+    "VER-01": [INIT_REF, "SA23-1380-09"],         # LFAREA: I&T Ref 2.5 + 2.2 editions
     "VER-05": ["SA23-2287-70"],                   # RACF version rules: single edition
-    "VER-06": [INIT_REF, "GA32-0884-70"],         # BPXPRMxx
+    "VER-06": [INIT_REF, "SA23-1380-09", "GA32-0884-70"],  # BPXPRMxx (both I&T editions)
     "SYN-01": [INIT_REF],                         # LFAREA -> IEASYSxx chapter
     "SYN-02": [INIT_REF, "SA23-1390-70"],         # COMMNDxx
     "SYN-03": ["SA23-1385-70"],                   # JCL
     "SYN-04": [OPS_DOC],                          # OPS/MVS AOF )MSG
     "SYN-05": [INIT_REF],                         # PROGxx APF
     "SYN-08": ["SA23-2292-70"],                   # RACF PERMIT
+    # --- re-bind 2026-09: operator books loaded; bindings verified against the
+    # live payload (CICS TS 3.1, MQ 7.1 programming, IMS 11, z/OS 2.2 kit incl.
+    # JES2/JES3). DFH*/CSQ*/HASP* shapes are outside MSG_RE, so these need
+    # manual bindings even though the books are present.
+    "MSG-06": ["GC34-6442-07"],                    # DFHAP0001 -> CICS Messages&Codes V3R1
+    "MSG-08": ["GC19-4233-01", "GC19-4234-01"],    # DFS554A -> IMS Messages&Codes vols
+    "DIA-02": ["SA32-0989-03"],                    # HASP050 -> z/OS 2.2 JES2 Messages
+    "DIA-04": ["GC34-6442-07", "SC34-6428-08", "SC34-6441-05"],  # MXT/CEMT diagnostics -> msgs+SysDef+CEMT
+    "SYN-06": ["SC34-6428-08"],                    # CICS SIT overrides -> Sys Def Guide
+    "SYN-07": ["wmq71.pdf"],                       # CSQ6SYSP checkpoint -> MQ 7.1 Prog
+    "SYN-09": ["SA32-1005-01"],                    # JES3 inish fragment -> JES3 I&T Ref
+    "CMP-04": ["SC34-6428-08", "SC34-6430-09", "GC34-6442-07"],  # MXT vs EDSALIMIT
+    "VER-02": ["SA32-1004-00"],                    # JES3 support/migration -> Introduction
+    "VER-03": ["SC34-6428-08", "SC34-6430-09"],    # SIT DSA params per CICS release
+    # DFS629I is carried by several books (incl. incidental mentions); pin the
+    # IMS 11 messages volume explicitly instead of relying on bind_seed order.
+    "DIA-07": ["GC19-4234-01"],
 }
 
-# Seed entries that abstain regardless of what the corpus carries:
-#   MSG-01 - IEA500I was the synthetic fixture's invented ID; if a real book
-#            ever carries it, flip deliberately after human review.
-#   DIA-07 - DFS629I appears only as a passing mention (not an IMS
-#            explanation); payload presence alone must not bind it.
-FORCE_ABSTAIN = {"MSG-01", "DIA-07"}
+# MSG-01 abstains regardless of what the corpus carries: IEA500I was the
+# synthetic fixture's invented ID; if a real book ever carries it, flip
+# deliberately after human review (the build prints a loud warning when that
+# happens). DIA-07 left this set at the 2026-09 re-bind: DFS629I became a real
+# IMS 11 messages entry and auto-binds from the payload.
+FORCE_ABSTAIN = {"MSG-01"}
 
-# Seed entries whose domain books are not loaded yet (CICS, MQ, IMS, JES3, and
-# the shop's z/OS 2.2-era manuals). They abstain ONLY while their identifiers
-# cannot be bound: once the books are loaded and the build binds them, they
-# return to the answer class with the notes dropped. Entries without any
-# parseable identifier (VER-02/03/04, SYN-06, DIA-04, ...) stay abstain until
-# they receive a manual SEED_OVERRIDES binding at re-bind time.
+# Seed entries whose domain books are not loaded yet abstain while their
+# identifiers cannot be bound. After the 2026-09 load the unbound remainder is
+# only the MQ-adjacent trio (MSG-07/DIA-08/VER-04: no MQ messages books) — they
+# have no parseable id and stay abstain via ABSENT_CORRECTIONS notes. Any
+# answer entry that lands here with an id NOT covered by a manual override or
+# note fails the build loudly.
 ABSENT_DOMAIN_FALLBACK = {
     "MSG-06", "MSG-07", "MSG-08",
     "SYN-06", "SYN-07", "SYN-09",
@@ -385,7 +439,7 @@ ABSENT_DOMAIN_FALLBACK = {
 }
 
 # trap IDs that must be ABSENT from the corpus for the trap to be valid
-ABSENT_TRAP_IDS = {"NEG-01": "IEA9999Z", "NEG-08": "IEC072I"}
+ABSENT_TRAP_IDS = {"NEG-01": "IEA9999Z", "NEG-08": "IEC072I", "NEG-10": "HASP310I"}
 ABSENT_TRAP_DOCS = {"NEG-09": "SA23-9999-99"}
 
 # seed entries dropped from the corpus (duplicates of the migrated legacy set;
@@ -480,11 +534,15 @@ def main() -> int:
     # ---------------------------------------------------------- assertions
     errors: list[str] = list(seed_errors)
     seen_queries: set[str] = set()
+    seen_ids: set[str] = set()
     for entry in entries:
         q = entry["query"].strip().lower()
         if q in seen_queries:
             errors.append(f"duplicate query: {entry['id']} {entry['query'][:60]}")
         seen_queries.add(q)
+        if entry["id"] in seen_ids:
+            errors.append(f"duplicate entry id: {entry['id']} (class series already used it)")
+        seen_ids.add(entry["id"])
         for d in entry["expected_doc_ids"]:
             if d not in titles:
                 errors.append(f"{entry['id']}: expected doc {d} not in corpus")

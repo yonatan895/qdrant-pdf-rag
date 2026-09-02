@@ -1,60 +1,60 @@
 {
   "_meta": {
     "note": "Re-baseline via `make eval-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/eval_retrieval.py.",
-    "n": 108,
+    "n": 117,
     "collection": "mainframe_manuals",
     "embed_mode": "vllm",
-    "updated": "2026-09-01"
+    "updated": "2026-09-02"
   },
-  "recall@1": 0.681,
-  "recall@3": 0.851,
-  "recall@5": 0.915,
-  "mrr": 0.769,
+  "recall@1": 0.45,
+  "recall@3": 0.752,
+  "recall@5": 0.826,
+  "mrr": 0.609,
   "identifier": {
-    "recall@1": 0.712,
-    "recall@5": 0.915,
-    "mrr": 0.797
+    "recall@1": 0.393,
+    "recall@5": 0.836,
+    "mrr": 0.587
   },
   "nl": {
-    "recall@1": 0.629,
-    "recall@5": 0.914,
-    "mrr": 0.722
+    "recall@1": 0.521,
+    "recall@5": 0.812,
+    "mrr": 0.638
   },
   "classes": {
     "comparative": {
-      "n": 11,
-      "scored": 11,
-      "recall@1": 0.455,
-      "recall@3": 0.636,
-      "recall@5": 0.909,
-      "mrr": 0.594
-    },
-    "diagnostic": {
-      "n": 24,
-      "scored": 24,
-      "recall@1": 0.625,
-      "recall@3": 0.875,
-      "recall@5": 0.875,
-      "mrr": 0.736
-    },
-    "doc_number": {
       "n": 12,
       "scored": 12,
-      "recall@1": 0.75,
-      "recall@3": 0.75,
-      "recall@5": 0.75,
-      "mrr": 0.75
+      "recall@1": 0.333,
+      "recall@3": 0.583,
+      "recall@5": 0.583,
+      "mrr": 0.472
+    },
+    "diagnostic": {
+      "n": 27,
+      "scored": 27,
+      "recall@1": 0.37,
+      "recall@3": 0.63,
+      "recall@5": 0.741,
+      "mrr": 0.518
+    },
+    "doc_number": {
+      "n": 14,
+      "scored": 14,
+      "recall@1": 0.786,
+      "recall@3": 0.786,
+      "recall@5": 0.786,
+      "mrr": 0.786
     },
     "message_id": {
-      "n": 20,
-      "scored": 20,
-      "recall@1": 0.8,
-      "recall@3": 0.95,
-      "recall@5": 1.0,
-      "mrr": 0.879
+      "n": 23,
+      "scored": 23,
+      "recall@1": 0.304,
+      "recall@3": 0.913,
+      "recall@5": 0.957,
+      "mrr": 0.598
     },
     "negative": {
-      "n": 14,
+      "n": 8,
       "scored": 0,
       "recall@1": null,
       "recall@3": null,
@@ -62,29 +62,29 @@
       "mrr": null
     },
     "syntax": {
-      "n": 21,
-      "scored": 21,
-      "recall@1": 0.714,
-      "recall@3": 0.905,
-      "recall@5": 1.0,
-      "mrr": 0.817
+      "n": 25,
+      "scored": 25,
+      "recall@1": 0.4,
+      "recall@3": 0.76,
+      "recall@5": 0.88,
+      "mrr": 0.591
     },
     "version": {
-      "n": 6,
-      "scored": 6,
-      "recall@1": 0.667,
-      "recall@3": 0.833,
-      "recall@5": 0.833,
-      "mrr": 0.722
+      "n": 8,
+      "scored": 8,
+      "recall@1": 0.875,
+      "recall@3": 0.875,
+      "recall@5": 1.0,
+      "mrr": 0.906
     }
   },
   "abstain": {
-    "n": 14,
-    "top_score_mean": 0.4105,
-    "top_score_max": 1.0385
+    "n": 8,
+    "top_score_mean": 0.4666,
+    "top_score_max": 1.0
   },
   "page": {
-    "checked": 0,
-    "hit@5": null
+    "checked": 1,
+    "hit@5": 0.0
   }
 }

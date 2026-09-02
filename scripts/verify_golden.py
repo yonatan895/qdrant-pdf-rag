@@ -173,7 +173,9 @@ def load_entries(path: Path) -> tuple[list[GoldenEntry], list[str]]:
         try:
             entries.append(GoldenEntry.model_validate_json(line))
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"line {lineno}: {line[:100]} ({str(exc)[:140]})")
+            msg = f"line {lineno}: {line[:100]} ({str(exc)[:140]})"
+            print(f"FAIL [{path.name}] {msg}", file=sys.stderr)
+            errors.append(msg)
     return entries, errors
 
 
