@@ -211,8 +211,16 @@ def test_summarize_mixed_corpus():
     assert report["identifier"]["recall@1"] == 0.5 and report["nl"]["recall@1"] is None
     assert report["classes"]["message_id"]["n"] == 2
     assert report["classes"]["message_id"]["scored"] == 2
-    assert report["classes"]["message_id"]["recall@1"] == 0.5
-    assert report["classes"]["negative"] == {"n": 1, "scored": 0, "recall@1": None, "recall@3": None, "recall@5": None, "mrr": None}
+    assert report["classes"]["negative"] == {
+        "n": 1,
+        "scored": 0,
+        "recall@1": None,
+        "recall@3": None,
+        "recall@5": None,
+        "recall@8": None,
+        "mrr": None,
+        "ndcg@8": None,
+    }
     assert report["abstain"]["n"] == 1
     assert report["must_not"] == {"checked": 4, "violations": 1, "rate": 0.25}
 

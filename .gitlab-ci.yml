@@ -104,6 +104,42 @@ test:
   # Tests generate synthetic PDFs at runtime; no artifacts are cached or
   # uploaded anywhere (deliberately no artifacts: section).
 
+gate-l1:
+  extends: .py-base
+  stage: test
+  services:
+    - name: ${CI_REGISTRY}/qdrant/qdrant:v1.19.0-unprivileged
+      alias: qdrant
+  variables:
+    QDRANT_SIM_URL: "http://qdrant:6333"
+  script:
+    - python scripts/gate_l1.py --out eval-report.json --summary eval-summary.md --delta eval-delta.md
+    - |
+      if [ -n "${CI_MERGE_REQUEST_IID:-}" ] && [ -n "${GITLAB_TOKEN:-}" ]; then
+        echo "Posting or updating delta table note on MR ${CI_MERGE_REQUEST_IID}..."
+        HEADER="<!-- gate-l1-report -->"
+        NOTE_BODY="${HEADER}
+$(cat eval-delta.md)"
+        EXISTING_NOTE_ID=$(curl -s -f -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes?per_page=100" | \
+          python3 -c "import sys, json; notes = json.load(sys.stdin); match = [n['id'] for n in notes if '<!-- gate-l1-report -->' in n.get('body', '')]; print(match[0] if match else '')" 2>/dev/null || true)
+        if [ -n "${EXISTING_NOTE_ID}" ]; then
+          curl -s -f -X PUT "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes/${EXISTING_NOTE_ID}" \
+            --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+            --form "body=${NOTE_BODY}" || echo "warn: unable to update MR note"
+        else
+          curl -s -f -X POST "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes" \
+            --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+            --form "body=${NOTE_BODY}" || echo "warn: unable to post MR note"
+        fi
+      fi
+  artifacts:
+    when: always
+    paths:
+      - eval-report.json
+      - eval-summary.md
+      - eval-delta.md
+
 # lint is intentionally omitted (issue #3): ruff is a dev extra but is not in
 # requirements.lock.txt, so a lint job would pull an unpinned package outside
 # the lockfile. If ruff is ever pinned into the lock, add a `lint` job using

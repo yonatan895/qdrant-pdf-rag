@@ -97,18 +97,72 @@ make sim-qdrant
 make sim-clean
 ```
 
-### 3.4 Retrieval Accuracy & Benchmarking
+### 3.4 Retrieval Evaluation Gates & Quality Tiers
 
-Mainframe RAG includes golden-dataset regression gates and performance benchmarking:
+Mainframe RAG employs a layered testing and evaluation hierarchy across CPU and GPU environments:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ EVALUATION TIERS                                                            │
+│                                                                             │
+│ [L1] Retrieval Gate (Every PR / MR — CPU Only)                             │
+│      • Mode: EMBED_MODE=hash (CPU) against scripts/qdrant_sim.py            │
+│      • Data: Runtime-generated synthetic PDFs matching evals/golden.jsonl   │
+│      • Metrics: recall@1, recall@5, recall@8, MRR, nDCG@8, zero traps       │
+│      • CI: gate-l1 job in GitHub Actions (.github) and GitLab CI (.gitlab)  │
+│      • PR Feedback: Rendered markdown delta table posted directly to PR/MR  │
+│                                                                             │
+│ [L2] Answer Grounding & Faithfulness (Live GPU Stack)                       │
+│      • Models: Internal vLLM reasoning model + dense embedding              │
+│      • Metrics: Citation precision/recall, temp-0 NLI judge, truncation     │
+│      • Execution: make harness-l2 (RC gate / dedicated GPU runner)          │
+│                                                                             │
+│ [L3] Latency & TTFT Performance Tier (Live GPU Stack)                       │
+│      • Metrics: Per-stage p50/p95 (embed, qdrant, llm), TTFT, VRAM          │
+│      • Execution: make harness-l3 (RC gate / dedicated GPU runner)          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Automated L1 Retrieval Gate (`make gate-l1`)
+
+The L1 gate runs automatically on every PR in GitHub Actions and GitLab CI:
 
 ```bash
-# Evaluate retrieval accuracy against golden set (checks against evals/baseline.json)
+# Run L1 retrieval evaluation gate locally (starts ephemeral Qdrant simulator if needed)
+make gate-l1
+
+# Or run the script directly:
+python scripts/gate_l1.py --out bundles/eval-report.json --delta bundles/eval-delta.md
+```
+
+- **Execution Invariant:** Zero committed PDFs. An original synthetic PDF corpus covering the golden dataset expectations is generated at runtime in a temporary directory and ingested in hash mode.
+- **Fail-Closed Verification:** Fails nonzero if any query fails or if metrics regress beyond tolerance (strict no-drop `identifier.recall@1` ratio >= 1.0 vs baseline, `classes.message_id.recall@1` ratio >= 1.0, `recall@1 >= 0.90 * baseline`, `recall@5/8 >= 0.95 * baseline`, `mrr >= 0.95 * baseline`, `ndcg@8 >= 0.95 * baseline`, `must_not.violations == 0`).
+- **PR Delta Reporting:** Automatically posts or updates a markdown delta table comment on the PR (GitHub) or merge request note (GitLab).
+
+#### GPU Story for L2 and L3 Tiers (Operational Strategy)
+
+Standard CI runners (`ubuntu-latest` on GitHub and air-gapped corporate GitLab runners) are CPU-only without GPU accelerators. Because L2 (NLI faithfulness judge) and L3 (Time To First Token and per-stage latency with concurrent VRAM tracking) require live GPU inference stacks:
+
+1. **Pre-Release Release Candidate (RC) Gate (Primary):**
+   - L2 and L3 are executed on lab GPU workstations during the release candidate stabilization window (`make harness-l2`, `make harness-l3`).
+   - Standing-red known product debts (e.g. suffix-less doc-number gap) serve as explicit release-candidate debt tracking.
+2. **Dedicated GPU Self-Hosted Runner (Optional CI Integration):**
+   - For teams desiring continuous GPU evaluation, register an enterprise runner equipped with an NVIDIA GPU and tag it `gpu`.
+   - Workflows target `runs-on: [self-hosted, gpu]` in GitHub Actions or `tags: [gpu]` in GitLab CI.
+3. **Scheduled Nightly Benchmarks:**
+   - Run L2 and L3 on a nightly schedule against `main` on the dedicated GPU runner rather than gating every PR. This avoids runner queue bottlenecks while continuously tracking latency and grounding trends.
+   - Baselines (`benchmarks/harness-l3-vllm.json`) are captured in the runner's own hardware environment to eliminate environment-mismatch false alarms.
+
+#### Manual Evaluation & Baseline Updates
+
+```bash
+# Evaluate retrieval accuracy against golden set on a running Qdrant instance
 EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus make eval
 
-# Re-record committed accuracy baseline (dedicated PR only)
+# Re-record committed accuracy baseline (dedicated PR only, per AGENTS.md)
 make eval-baseline
 
-# Run performance benchmarking (ingest throughput, Qdrant RAM/disk, agent latency)
+# Run performance benchmarking
 make bench
 
 # Re-record committed benchmark baseline (dedicated PR only)

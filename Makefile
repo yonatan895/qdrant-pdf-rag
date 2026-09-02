@@ -178,7 +178,7 @@ EVAL_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-vllm.json,evals
 HARNESS_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-vllm.json,benchmarks/harness.json)
 HARNESS_L3_BASELINE ?= $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-l3-vllm.json,benchmarks/harness-l3.json)
 eval eval-baseline eval-draft eval-holdout eval-answers eval-report eval-html eval-compare \
-	harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline: \
+	gate-l1 harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline: \
 	export EMBED_MODE := $(EMBED_MODE)
 
 # Eval against a running Qdrant (sim-qdrant or QDRANT_SIM_URL); scores
@@ -186,11 +186,18 @@ eval eval-baseline eval-draft eval-holdout eval-answers eval-report eval-html ev
 # (recall@k / MRR) and checks against the mode-keyed baseline.
 # The frozen holdout (evals/holdout.jsonl) is NEVER iterated against:
 # `make eval-holdout` runs on release candidates only (AGENTS.md).
-.PHONY: eval eval-baseline eval-draft eval-holdout verify-golden
+.PHONY: eval eval-baseline eval-draft eval-holdout verify-golden gate-l1
 eval: | .venv
 	@mkdir -p $(BUNDLE_DIR)
 	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --check $(EVAL_BASELINE) \
 	  --out $(BUNDLE_DIR)/eval-report.json --summary $(BUNDLE_DIR)/eval-summary.md
+
+# L1 retrieval gate (CPU hash mode against Qdrant simulator with synthetic corpus):
+# automated PR check in CI and local verification. Fails nonzero on regressions.
+gate-l1: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/gate_l1.py --out $(BUNDLE_DIR)/eval-report.json \
+	  --summary $(BUNDLE_DIR)/eval-summary.md --delta $(BUNDLE_DIR)/eval-delta.md
 
 # Mechanical verification of golden expectations against the live collection
 # (doc/heading/page/message-id facts, must_not trap validity, duplicates).
