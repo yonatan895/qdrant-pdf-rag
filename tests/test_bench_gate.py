@@ -11,6 +11,7 @@ from scripts.benchmark import (
     _get,
     _parse_size_mb,
     _set,
+    aggregate_runs,
     check_baseline,
     update_baseline,
 )
@@ -136,3 +137,114 @@ def test_profile_pipeline_microbenchmarks(tmp_path):
     assert answer_res["parses_per_s"] > 0
     assert answer_res["latency_us_per_parse"] > 0
 
+
+
+def _pass(p95_search: float, errors: int = 0, rps: float = 200.0, note: str = "x") -> dict:
+    return {
+        "env": {"cpu_count": 4, "python": "3.14.7"},
+        "ingest": {"docs": 31, "chunks": 211, "wall_s": 5.0, "docs_per_s": 6.0, "peak_rss_mb": 170.0},
+        "qdrant": {"mem_mb": 95.0, "disk_mb": 1.7, "points": 211, "metrics_available": True},
+        "agent": {
+            "model_note": note,
+            "search": {"rps": rps, "latency_ms": {"p50": 30.0, "p95": p95_search}, "errors": errors},
+            "answer": {"rps": rps, "latency_ms": {"p50": 55.0, "p95": 100.0}, "errors": errors},
+        },
+    }
+
+
+def test_aggregate_runs_noise_floor_policy():
+    """Latency/footprint = min (contention is noise, not signal); errors and
+    throughput = max (a failing pass must not average away); strings/bools
+    come from the first pass."""
+    merged = aggregate_runs([
+        _pass(50.0, errors=0, rps=250.0),
+        _pass(72.0, errors=2, rps=200.0),  # contended + failing pass
+        _pass(45.0, errors=0, rps=310.0),
+    ])
+    assert merged["agent"]["search"]["latency_ms"]["p95"] == 45.0
+    assert merged["agent"]["answer"]["latency_ms"]["p95"] == 100.0
+    assert merged["agent"]["search"]["errors"] == 2, "a failing pass must survive aggregation"
+    assert merged["agent"]["search"]["rps"] == 310.0
+    assert merged["ingest"]["peak_rss_mb"] == 170.0
+    assert merged["qdrant"]["mem_mb"] == 95.0
+    assert merged["ingest"]["docs"] == 31
+    assert merged["qdrant"]["metrics_available"] is True
+    assert merged["agent"]["model_note"] == "x"
+
+
+def test_aggregate_runs_tolerates_unpaired_keys():
+    """A pass missing a leaf (e.g. docker stats unavailable) must not crash;
+    the first pass's value stands."""
+    a = _pass(50.0)
+    b = _pass(70.0)
+    del b["qdrant"]["mem_mb"]
+    merged = aggregate_runs([a, b])
+    assert merged["qdrant"]["mem_mb"] == 95.0
+
+
+def test_aggregate_runs_single_pass_identity():
+    run = _pass(50.0)
+    assert aggregate_runs([run]) is run
+
+
+def test_update_baseline_records_capture_method(tmp_path):
+    """The baseline must be self-describing: how many passes and which
+    aggregation policy produced it, so a reviewer can trust (or reject)
+    the numbers without archaeology."""
+    path = tmp_path / "baseline.json"
+    result = _result()
+    result["repeats"] = 3
+    update_baseline(result, path)
+    meta = json.loads(path.read_text())["_meta"]
+    assert meta["capture"]["repeats"] == 3
+    assert "noise floor" in meta["capture"]["policy"]
+    assert meta["env"] == {"cpu_count": 4}
+
+
+def test_update_baseline_defaults_capture_to_single_pass(tmp_path):
+    path = tmp_path / "baseline.json"
+    update_baseline(_result(), path)
+    assert json.loads(path.read_text())["_meta"]["capture"]["repeats"] == 1
+
+
+def test_env_mismatch_fails_distinct_before_metric_gates(tmp_path):
+    """A 24-core baseline gating a 4-vCPU runner must fail with an actionable
+    env message — not a misleading `p95 > x3` that sends someone hunting for
+    a code regression that does not exist."""
+    path = tmp_path / "baseline.json"
+    result = _result()
+    update_baseline({**result, "env": {"cpu_count": 24}}, path)
+    baseline = json.loads(path.read_text())
+    regressions = check_baseline(_scaled(10.0), baseline)  # would blow every metric gate
+    assert len(regressions) == 1
+    assert "cpu_count 24 != runner 4" in regressions[0]
+    assert "p95" not in "".join(regressions)
+
+
+def test_qdrant_image_mismatch_fails_distinct(tmp_path):
+    path = tmp_path / "baseline.json"
+    result = _result()
+    update_baseline({**result, "env": {"cpu_count": 4, "qdrant_image": "qdrant:v1.18.0"}}, path)
+    baseline = json.loads(path.read_text())
+    live = _result()
+    live["env"]["qdrant_image"] = "qdrant:v1.19.0-unprivileged"
+    regressions = check_baseline(live, baseline)
+    assert len(regressions) == 1
+    assert "qdrant_image" in regressions[0]
+
+
+def test_matching_env_gates_metrics_normally(tmp_path):
+    path = tmp_path / "baseline.json"
+    update_baseline(_result(), path)
+    baseline = json.loads(path.read_text())
+    assert len(check_baseline(_scaled(4.0), baseline)) == len(GATED_METRICS)
+
+
+def test_baseline_without_recorded_env_still_gates_metrics(tmp_path):
+    """Old baselines without _meta.env keep working — env gating is opt-in
+    via what the record tool writes, not a hard requirement."""
+    path = tmp_path / "baseline.json"
+    update_baseline(_result(), path)
+    baseline = json.loads(path.read_text())
+    del baseline["_meta"]["env"]
+    assert len(check_baseline(_scaled(4.0), baseline)) == len(GATED_METRICS)

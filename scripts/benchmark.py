@@ -40,6 +40,7 @@ import sys
 import tempfile
 import threading
 import time
+from functools import reduce
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -326,10 +327,79 @@ def _wait_agent(agent: subprocess.Popen, log, timeout_s: float = 30.0) -> str:
     raise RuntimeError("agent /healthz never became ready")
 
 
+def measure_once(
+    sim: QdrantSim, collection: str, corpus_root: Path,
+    concurrency: int, search_s: float, answer_s: float,
+) -> dict:
+    """One clean measurement pass: wipe the collection (a stale bench
+    collection from an earlier pass would inflate the disk/RAM footprint
+    being measured), ingest, snapshot Qdrant footprints, run the load."""
+    httpx2.delete(f"{sim.url}/collections/{collection}", timeout=10.0)
+    ingest = run_ingest(corpus_root, sim.url, collection)
+    qdrant = qdrant_stats(sim, collection)
+    agent = run_agent_phase(sim.url, collection, concurrency, search_s, answer_s)
+    return {"ingest": ingest, "qdrant": qdrant, "agent": agent}
+
+
+_AGG_MAX_KEYS = {"errors", "rps", "docs_per_s"}
+
+
+def aggregate_runs(runs: list[dict]) -> dict:
+    """Noise-floor aggregation over repeated measurement passes (--repeats).
+
+    Latency and footprints take the MIN: wall time on a contended shared
+    runner is noise, not signal, and the minimum across passes approaches
+    the code's true cost. Throughput and error counts take the MAX: a pass
+    where the agent failed under load must not average away. Non-numeric
+    leaves come from the first pass. peak_rss_mb is a process-level
+    high-water (RUSAGE_CHILDREN monotonic), so its min across passes
+    degrades to the first pass's reading — documented, not fixable
+    in-process."""
+    if len(runs) == 1:
+        return runs[0]
+
+    def merge(a: dict, b: dict) -> dict:
+        out: dict = {}
+        for key, va in a.items():
+            vb = b.get(key)
+            if isinstance(va, dict) and isinstance(vb, dict):
+                out[key] = merge(va, vb)
+            elif (
+                isinstance(va, (int, float))
+                and isinstance(vb, (int, float))
+                and not isinstance(va, bool)
+            ):
+                out[key] = max(va, vb) if key in _AGG_MAX_KEYS else min(va, vb)
+            else:
+                out[key] = va
+        return out
+
+    return reduce(merge, runs)
+
+
+_ENV_GATE_KEYS = ("cpu_count", "qdrant_image")
+
+
 def check_baseline(result: dict, baseline: dict | None) -> list[str]:
     if baseline is None:
         return []
     regressions = []
+    recorded_env = (baseline.get("_meta") or {}).get("env") or {}
+    for key in _ENV_GATE_KEYS:
+        recorded = recorded_env.get(key)
+        live = result["env"].get(key)
+        if recorded is not None and live is not None and recorded != live:
+            regressions.append(
+                f"baseline env mismatch: {key} {recorded!r} != runner {live!r} — "
+                "the baseline was captured in a different environment; re-baseline "
+                "in the gate's own environment"
+            )
+    if regressions:
+        # A p95 ratio across mismatched environments is noise, not signal —
+        # report only the actionable mismatch instead of a misleading
+        # `p95 > x3` that sends someone hunting for a code regression that
+        # does not exist.
+        return regressions
     for dotted, tolerance in GATED_METRICS.items():
         current = _get(result, dotted)
         if current is None:
@@ -360,6 +430,10 @@ def update_baseline(result: dict, baseline_path: Path) -> None:
         "_meta": {
             "note": "Re-baseline via `make bench-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/benchmark.py GATED_METRICS.",
             "env": result["env"],
+            "capture": {
+                "repeats": result.get("repeats", 1),
+                "policy": "noise floor: min latency/footprint, max errors/throughput",
+            },
             "updated": time.strftime("%Y-%m-%d"),
         },
     }
@@ -377,6 +451,12 @@ def summary_markdown(result: dict, baseline: dict | None) -> str:
             f"env: {result['env']['cpu_count']} cpus, {result['env']['mem_total_mb']} MB RAM, "
             f"{result['env']['qdrant_image']}"
         ),
+    ]
+    if result.get("repeats", 1) > 1:
+        lines.append(
+            f"repeats: {result['repeats']} (noise floor: min latency/footprint, max errors/throughput)"
+        )
+    lines += [
         "",
         "| metric | current | baseline | gate |",
         "|---|---|---|---|",
@@ -417,10 +497,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--summary", type=Path, default=None, help="write a markdown table here")
     parser.add_argument("--check", type=Path, default=None, help="fail on regressions vs this baseline")
     parser.add_argument("--update-baseline", type=Path, default=None, help="record a new baseline here")
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="measurement passes; >1 records the noise floor (min latency/footprint, max errors/throughput)",
+    )
     parser.add_argument("--collection", default="bench")
     args = parser.parse_args(argv)
     if args.check and args.update_baseline:
         parser.error("--check and --update-baseline are mutually exclusive")
+    repeats = max(1, int(args.repeats))
 
     concurrency = int(os.environ.get("BENCH_CONCURRENCY", "8"))
     search_s = float(os.environ.get("BENCH_SEARCH_SECONDS", "120"))
@@ -429,9 +516,6 @@ def main(argv: list[str] | None = None) -> int:
     sim: QdrantSim | None = None
     try:
         sim = start_simulator(REPO_ROOT, os.environ.get("QDRANT_SIM_URL"))
-        # Sessions must be independent: a stale bench collection from an
-        # earlier run would inflate the disk/RAM footprint being measured.
-        httpx2.delete(f"{sim.url}/collections/{args.collection}", timeout=10.0)
         corpus_env = os.environ.get("BENCH_CORPUS_DIR")
         corpus_root = Path(corpus_env) if corpus_env else None
         corpus_info = generate_corpus(
@@ -440,9 +524,10 @@ def main(argv: list[str] | None = None) -> int:
             / "bench-corpus",
             int(os.environ.get("BENCH_DOCS", "30")),
         )
-        ingest = run_ingest(corpus_info["root"], sim.url, args.collection)
-        qdrant = qdrant_stats(sim, args.collection)
-        agent = run_agent_phase(sim.url, args.collection, concurrency, search_s, answer_s)
+        passes = [
+            measure_once(sim, args.collection, corpus_info["root"], concurrency, search_s, answer_s)
+            for _ in range(repeats)
+        ]
     finally:
         if sim is not None:
             sim.stop()
@@ -450,9 +535,8 @@ def main(argv: list[str] | None = None) -> int:
     result = {
         "env": env_snapshot(),
         "corpus": {"docs": corpus_info["docs"]},
-        "ingest": ingest,
-        "qdrant": qdrant,
-        "agent": agent,
+        "repeats": repeats,
+        **aggregate_runs(passes),
     }
 
     baseline = None
