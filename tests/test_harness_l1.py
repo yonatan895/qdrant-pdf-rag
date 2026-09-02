@@ -344,10 +344,13 @@ def test_resolve_drift_match_skips_restore():
     assert resolve_snapshot_action(fp, recorded, restore="drift", record_mode=False) == ("skip", "pin.snapshot")
 
 
-def test_resolve_drift_restores_recorded_pin_despite_stray():
-    # A stray snapshot lists first; the recorded pin still exists — restore
-    # the RECORDED name, never whichever snapshot happens to sort first.
-    fp = {"points_count": 840396, "snapshot_names": ["stray.snapshot", "pin.snapshot"]}
+def test_resolve_drift_restores_recorded_pin_despite_drift():
+    # Production shape: main() passes prefer_name=recorded, so a stray alone
+    # cannot push the recorded pin out of first place (that combination is
+    # the skip path). Reaching restore-with-stray requires a DRIFTED points
+    # count — and the restore must still target the recorded pin, not the
+    # stray that a naive fingerprint-first policy would pick.
+    fp = {"points_count": 900000, "snapshot_names": ["pin.snapshot", "stray.snapshot"]}
     recorded = {"points_count": 840396, "snapshot_name": "pin.snapshot"}
     action, name = resolve_snapshot_action(fp, recorded, restore="drift", record_mode=False)
     assert (action, name) == ("restore", "pin.snapshot")
@@ -395,16 +398,43 @@ def test_pin_snapshot_creates_when_missing():
     assert fp["points_count"] == 840396
 
 
-def test_pin_snapshot_protects_recorded_and_prunes_strays():
+def test_pin_snapshot_adopts_only_on_exact_match():
+    # Re-adoption happens only under the skip path's exact condition:
+    # recorded pin first AND points count equal. The fake's prefer_name puts
+    # the recorded pin first, mirroring the production call shape.
     recorded = "c-pin-2026-09-01.snapshot"
     c = _FakeQdrant(840396, [
         _Snap("c-x-2026-09-02.snapshot", "2026-09-02T00:00:00"),
         _Snap(recorded, "2026-09-01T00:00:00"),
-        _Snap("c-y-2026-09-03.snapshot", "2026-09-03T00:00:00"),
     ])
-    fp = pin_snapshot(c, "coll", keep=recorded)
+    fp = pin_snapshot(c, "coll", keep=recorded, expected_points=840396)
     assert fp["snapshot_name"] == recorded
-    assert c.deleted == ["c-x-2026-09-02.snapshot", "c-y-2026-09-03.snapshot"]
+    assert fp["points_count"] == 840396
+    assert c.deleted == ["c-x-2026-09-02.snapshot"]
+    assert c.recovered == []  # pin never recovers
+
+
+def test_pin_snapshot_drifted_record_creates_new_pin_and_prunes_old():
+    # The review's remaining hole: a record run against a DRIFTED index
+    # (new ingest changed the points count) must snapshot the CURRENT state
+    # and delete the previous pin — recording {new points, old name} would
+    # be a baseline no restore can reproduce.
+    recorded = "c-old-2026-09-01.snapshot"
+    c = _FakeQdrant(900000, [_Snap(recorded, "2026-09-01T00:00:00")])
+    fp = pin_snapshot(c, "coll", keep=recorded, expected_points=840396)
+    assert fp["points_count"] == 900000
+    assert fp["snapshot_name"] != recorded
+    assert c.deleted == [recorded]
+    assert [s.name for s in c.snaps] == [fp["snapshot_name"]]
+
+
+def test_pin_snapshot_no_recorded_pin_creates_fresh():
+    # A first baseline (no recorded fingerprint at all) pins current state
+    # and prunes anything pre-existing — never adopts an unknown snapshot.
+    c = _FakeQdrant(840396, [_Snap("c-preexisting.snapshot", "2026-09-01T00:00:00")])
+    fp = pin_snapshot(c, "coll", keep=None, expected_points=None)
+    assert fp["snapshot_name"] != "c-preexisting.snapshot"
+    assert c.deleted == ["c-preexisting.snapshot"]
 
 
 def test_restore_snapshot_uses_recorded_name_and_dir_setting():
@@ -418,6 +448,15 @@ def test_restore_snapshot_fails_closed_when_missing():
     c = _FakeQdrant(840396, [])
     with pytest.raises(RuntimeError, match="missing"):
         restore_snapshot(c, "coll", "gone.snapshot")
+
+
+def test_restore_snapshot_fails_when_index_does_not_roll_back():
+    # recover reporting success without actually rolling the collection
+    # back (post-restore points != recorded pin) must fail the run — a gate
+    # on a mutated index is worse than no gate.
+    c = _FakeQdrant(900000, [_Snap("c-pin.snapshot", "2026-09-01T00:00:00")])
+    with pytest.raises(RuntimeError, match="did not roll back"):
+        restore_snapshot(c, "coll", "c-pin.snapshot", expected_points=840396)
 
 
 # --------------------------------------------------------- metric cap / ideal

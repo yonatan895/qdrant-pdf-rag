@@ -159,7 +159,7 @@ def snapshot_fingerprint(client: Any, collection: str, prefer_name: str | None =
     None when the collection is unreachable (fail closed upstream)."""
     try:
         points = client.get_collection(collection).points_count
-        snaps = sorted(client.list_snapshots(collection), key=lambda s: (s.creation_time or "", s.name))
+        snaps = sorted(client.list_snapshots(collection), key=lambda s: (str(s.creation_time or ""), s.name))
         names = [s.name for s in snaps]
     except Exception:  # noqa: BLE001 — unreachable Qdrant fails closed upstream
         return None
@@ -230,32 +230,59 @@ def resolve_snapshot_action(
     )
 
 
-def pin_snapshot(client: Any, collection: str, keep: str | None = None) -> dict[str, Any]:
-    """Create the pin snapshot when none exists and prune strays, always
-    protecting `keep` (the recorded pin). Returns the fingerprint (name +
-    points count) to record in the baseline — its points_count is the drift
-    reference for later runs. Never called on a gate run."""
+def pin_snapshot(
+    client: Any,
+    collection: str,
+    keep: str | None = None,
+    expected_points: int | None = None,
+) -> dict[str, Any]:
+    """Pin the LIVE collection state for a baseline run.
+
+    The pin is re-adopted ONLY when the fingerprint matches the recorded
+    one (`keep` listed first by prefer_name AND points count equal) — the
+    skip path's exact condition. Anything else (no snapshots, a stray, or
+    a drifted points count from a new ingest) creates a NEW snapshot of the
+    current state and prunes everything else INCLUDING the previous pin:
+    an old pin snapshots a different index and can never reproduce the
+    metrics a drifted record run just measured, so recording
+    {points_count: new, snapshot_name: old} would be a baseline that no
+    restore can reproduce. Never called on a gate run."""
     fp = snapshot_fingerprint(client, collection, prefer_name=keep)
     if fp is None:
         raise RuntimeError(f"collection {collection!r} unreachable; refusing to pin a snapshot blind")
     names = fp["snapshot_names"]
-    if not names:
+    matched = (
+        bool(names)
+        and keep is not None
+        and names[0] == keep
+        and expected_points is not None
+        and fp["points_count"] == expected_points
+    )
+    if not matched:
         created = client.create_snapshot(collection, wait=True)
-        names = [created.name]
+        for stray in (n for n in names if n != created.name):
+            client.delete_snapshot(collection, stray)
+        return {"points_count": fp["points_count"], "snapshot_name": created.name}
     for stray in names[1:]:
         client.delete_snapshot(collection, stray)
     return {"points_count": fp["points_count"], "snapshot_name": names[0]}
 
 
 def restore_snapshot(
-    client: Any, collection: str, snapshot_name: str, snapshots_dir: str = "/qdrant/snapshots"
+    client: Any,
+    collection: str,
+    snapshot_name: str,
+    snapshots_dir: str = "/qdrant/snapshots",
+    expected_points: int | None = None,
 ) -> dict[str, Any]:
     """Restore the RECORDED pin snapshot and verify the post-restore
     fingerprint. The server-local file URL assumes the container's snapshot
     path (docker compose layout) — override via Settings.qdrant_snapshots_dir
-    for other deployments. Raises (fail closed) when the pin is missing or
-    unverifiable — a silently drifted index would make every CI and gate
-    verdict lie."""
+    for other deployments. When `expected_points` is provided (the recorded
+    pin's count) the post-restore collection must match it — recover can
+    report success without actually rolling the collection back, and a gate
+    that then evaluates a mutated index is worse than no gate. Raises (fail
+    closed) on any mismatch."""
     fp = snapshot_fingerprint(client, collection, prefer_name=snapshot_name)
     if fp is None or snapshot_name not in fp["snapshot_names"]:
         raise RuntimeError(f"pin snapshot {snapshot_name!r} missing; run `make harness-baseline` to re-pin")
@@ -267,6 +294,11 @@ def restore_snapshot(
     post = snapshot_fingerprint(client, collection, prefer_name=snapshot_name)
     if post is None:
         raise RuntimeError("post-restore fingerprint unverifiable; refusing to evaluate")
+    if expected_points is not None and post["points_count"] != expected_points:
+        raise RuntimeError(
+            f"post-restore points count {post['points_count']} != recorded pin "
+            f"{expected_points}; the index did not roll back — refusing to evaluate"
+        )
     return {"points_count": post["points_count"], "snapshot_name": snapshot_name}
 
 
@@ -328,10 +360,21 @@ def main(argv: list[str] | None = None) -> int:
     if action == "skip":
         policy_note = f"skipped (fingerprint matches pin: {fp['points_count']} points)"
     elif action == "restore":
-        fp = restore_snapshot(qdrant, collection, payload, settings.qdrant_snapshots_dir)
+        fp = restore_snapshot(
+            qdrant,
+            collection,
+            payload,
+            settings.qdrant_snapshots_dir,
+            expected_points=recorded.get("points_count"),
+        )
         policy_note = f"restored recorded pin {payload!r}"
     else:  # pin — only reachable in record mode
-        fp = pin_snapshot(qdrant, collection, keep=recorded.get("snapshot_name"))
+        fp = pin_snapshot(
+            qdrant,
+            collection,
+            keep=recorded.get("snapshot_name"),
+            expected_points=recorded.get("points_count"),
+        )
         policy_note = f"pinned {fp['snapshot_name']!r} ({fp['points_count']} points)"
     restore_s = round(time.monotonic() - t0, 1)
     print(f"[*] snapshot: {policy_note} in {restore_s}s ({fp['points_count']} points)", file=sys.stderr)
