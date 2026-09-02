@@ -78,7 +78,8 @@ INIT_REF = "SA23-1380-70"  # z/OS MVS Initialization and Tuning Reference (parml
 E = []
 
 
-def e(id_, query, cls, docs, *, heading=None, page=None, must_not=None, must_not_msgs=None, note=None, trap_type=None):
+def e(id_, query, cls, docs, *, heading=None, page=None, must_not=None, must_not_msgs=None, note=None, trap_type=None,
+      syntax_pattern=None):
     if trap_type and note:
         note = f"{note} (trap_type={trap_type})"
     elif trap_type:
@@ -87,7 +88,7 @@ def e(id_, query, cls, docs, *, heading=None, page=None, must_not=None, must_not
         "id": id_, "query": query, "query_class": cls, "expected_doc_ids": docs,
         "expected_heading": heading, "expected_page": str(page) if page is not None else None,
         "must_not_retrieve": must_not or [], "must_not_message_ids": must_not_msgs or [],
-        "note": note,
+        "note": note, "syntax_pattern": syntax_pattern,
     })
 
 
@@ -160,33 +161,33 @@ e("DOC-16", "Identify SC23-6879-70 and say what kind of content it holds.", "doc
 # --- new: syntax construction (parmlib members live in SA23-1380-70) -----------
 PARMLIB = "Part 2. Members of SYS1.PARMLIB"
 
-e("SYN-10", "Code a VATLSTxx entry that marks a user volume permanently resident, using only documented VATLSTxx syntax.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 86. VATLSTxx")
-e("SYN-11", "Write a SCHEDxx PPT entry that gives a program non-swappable status, per documented SCHEDxx syntax.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 82. SCHEDxx")
-e("SYN-12", "Define a new MCS console in CONSOLxx with a documented name and auth level.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 23. CONSOLxx")
-e("SYN-13", "Write an MPFLSTxx entry that suppresses a noisy message ID on the operator console.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 76. MPFLSTxx")
-e("SYN-14", "Code an LNKLSTxx statement that adds a user library to the LNKLST set after SYS1.LINKLIB.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 72. LNKLSTxx")
-e("SYN-15", "Draft an LPALSTxx entry adding a library to LPA, following the documented syntax.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 74. LPALSTxx")
-e("SYN-16", "Add a new SVC number with IEASVCxx using only documented parameters.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 54. IEASVCxx")
-e("SYN-17", "Define a GRS ring configuration in GRSCNFxx per the documented syntax.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 34. GRSCNFxx")
-e("SYN-18", "Use DIAGxx to enable common storage tracking as documented.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 30. DIAGxx")
-e("SYN-19", "Set unit affinity and allocation system defaults in ALLOCxx using documented statements.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 4. ALLOCxx")
-e("SYN-20", "Write CLOCKxx statements setting the time zone for UTC with the documented keywords.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 16. CLOCKxx")
-e("SYN-21", "Define XCF signalling paths in COUPLExx with documented syntax.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 24. COUPLExx")
-e("SYN-22", "Tune real storage management via IEAOPTxx with only documented parameters.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 51. IEAOPTxx")
-e("SYN-23", "Write an IEASLPxx SLIP SET statement to capture a dump for an abend in a named module.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 53. IEASLPxx")
-e("SYN-24", "Define a subsystem named BATCHA in IEFSSNxx keyword form per the documented syntax.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 59. IEFSSNxx")
-e("SYN-25", "Configure a System Logger structure in IXGCNFxx with documented keywords.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 70. IXGCNFxx")
-e("SYN-26", "Write IDCAMS DEFINE CLUSTER syntax for a KSDS with the documented parameters.", "syntax", ["SC23-6846-70"])
-e("SYN-27", "Use documented IDCAMS ALTER syntax to change a data set's share options.", "syntax", ["SC23-6846-70"])
-e("SYN-28", "Code a RACF RDEFINE command for a general resource profile with UACC NONE, per documented syntax.", "syntax", ["SA23-2292-70"])
-e("SYN-29", "Write the documented RACF CONNECT command syntax to add a user to a group.", "syntax", ["SA23-2292-70"])
-e("SYN-30", "Write a REXX exec that uses ARG and SAY per the documented TSO/E REXX instructions.", "syntax", ["SA32-0982-70"])
-e("SYN-31", "Show documented TSO/E ALLOCATE syntax allocating a new data set with a block size.", "syntax", ["SA32-0975-70"])
-e("SYN-32", "Code an OPS/MVS AOF )REQ rule that responds to a request, using only documented AOF grammar.", "syntax", [OPS_DOC])
-e("SYN-33", "Write an OPS/MVS AOF )CMD rule that issues a response command, per documented syntax.", "syntax", [OPS_DOC])
-e("SYN-34", "Write DFSORT INCLUDE and SORT FIELDS statements for filtering and sorting fixed records, using documented syntax.", "syntax", ["SC23-6878-70"])
-e("SYN-35", "Write JCL with a DD statement concatenating three data sets, following documented DD syntax.", "syntax", ["SA23-1385-70"])
-e("SYN-36", "Show documented ICKDSF INIT command syntax to initialize a DASD volume.", "syntax", ["GC35-0033-70"])
+e("SYN-10", "Code a VATLSTxx entry that marks a user volume permanently resident, using only documented VATLSTxx syntax.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 86. VATLSTxx", syntax_pattern=r"(?i)\bVATLSTxx\b")
+e("SYN-11", "Write a SCHEDxx PPT entry that gives a program non-swappable status, per documented SCHEDxx syntax.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 82. SCHEDxx", syntax_pattern=r"(?i)\bSCHEDxx\b")
+e("SYN-12", "Define a new MCS console in CONSOLxx with a documented name and auth level.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 23. CONSOLxx", syntax_pattern=r"(?i)\bCONSOLxx\b")
+e("SYN-13", "Write an MPFLSTxx entry that suppresses a noisy message ID on the operator console.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 76. MPFLSTxx", syntax_pattern=r"(?i)\bMPFLSTxx\b")
+e("SYN-14", "Code an LNKLSTxx statement that adds a user library to the LNKLST set after SYS1.LINKLIB.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 72. LNKLSTxx", syntax_pattern=r"(?i)\bLNKLSTxx\b")
+e("SYN-15", "Draft an LPALSTxx entry adding a library to LPA, following the documented syntax.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 74. LPALSTxx", syntax_pattern=r"(?i)\bLPALSTxx\b")
+e("SYN-16", "Add a new SVC number with IEASVCxx using only documented parameters.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 54. IEASVCxx", syntax_pattern=r"(?i)\bIEASVCxx\b")
+e("SYN-17", "Define a GRS ring configuration in GRSCNFxx per the documented syntax.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 34. GRSCNFxx", syntax_pattern=r"(?i)\bGRSCNFxx\b")
+e("SYN-18", "Use DIAGxx to enable common storage tracking as documented.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 30. DIAGxx", syntax_pattern=r"(?i)\bDIAGxx\b")
+e("SYN-19", "Set unit affinity and allocation system defaults in ALLOCxx using documented statements.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 4. ALLOCxx", syntax_pattern=r"(?i)\bALLOCxx\b")
+e("SYN-20", "Write CLOCKxx statements setting the time zone for UTC with the documented keywords.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 16. CLOCKxx", syntax_pattern=r"(?i)\bCLOCKxx\b")
+e("SYN-21", "Define XCF signalling paths in COUPLExx with documented syntax.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 24. COUPLExx", syntax_pattern=r"(?i)\bCOUPLExx\b")
+e("SYN-22", "Tune real storage management via IEAOPTxx with only documented parameters.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 51. IEAOPTxx", syntax_pattern=r"(?i)\bIEAOPTxx\b")
+e("SYN-23", "Write an IEASLPxx SLIP SET statement to capture a dump for an abend in a named module.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 53. IEASLPxx", syntax_pattern=r"(?i)\bSLIP\b")
+e("SYN-24", "Define a subsystem named BATCHA in IEFSSNxx keyword form per the documented syntax.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 59. IEFSSNxx", syntax_pattern=r"(?i)\bIEFSSNxx\b")
+e("SYN-25", "Configure a System Logger structure in IXGCNFxx with documented keywords.", "syntax", [INIT_REF], heading=f"{PARMLIB} > Chapter 70. IXGCNFxx", syntax_pattern=r"(?i)\bIXGCNFxx\b")
+e("SYN-26", "Write IDCAMS DEFINE CLUSTER syntax for a KSDS with the documented parameters.", "syntax", ["SC23-6846-70"], syntax_pattern=r"(?i)\bDEFINE\b")
+e("SYN-27", "Use documented IDCAMS ALTER syntax to change a data set's share options.", "syntax", ["SC23-6846-70"], syntax_pattern=r"(?i)\bALTER\b")
+e("SYN-28", "Code a RACF RDEFINE command for a general resource profile with UACC NONE, per documented syntax.", "syntax", ["SA23-2292-70"], syntax_pattern=r"(?i)\bRDEFINE\b")
+e("SYN-29", "Write the documented RACF CONNECT command syntax to add a user to a group.", "syntax", ["SA23-2292-70"], syntax_pattern=r"(?i)\bCONNECT\b")
+e("SYN-30", "Write a REXX exec that uses ARG and SAY per the documented TSO/E REXX instructions.", "syntax", ["SA32-0982-70"], syntax_pattern=r"(?i)\bARG\b")
+e("SYN-31", "Show documented TSO/E ALLOCATE syntax allocating a new data set with a block size.", "syntax", ["SA32-0975-70"], syntax_pattern=r"(?i)\bALLOCATE\b")
+e("SYN-32", "Code an OPS/MVS AOF )REQ rule that responds to a request, using only documented AOF grammar.", "syntax", [OPS_DOC], syntax_pattern=r"\)REQ")
+e("SYN-33", "Write an OPS/MVS AOF )CMD rule that issues a response command, per documented syntax.", "syntax", [OPS_DOC], syntax_pattern=r"\)CMD")
+e("SYN-34", "Write DFSORT INCLUDE and SORT FIELDS statements for filtering and sorting fixed records, using documented syntax.", "syntax", ["SC23-6878-70"], syntax_pattern=r"(?i)\bSORT\b")
+e("SYN-35", "Write JCL with a DD statement concatenating three data sets, following documented DD syntax.", "syntax", ["SA23-1385-70"], syntax_pattern=r"(?m)^\s*//")
+e("SYN-36", "Show documented ICKDSF INIT command syntax to initialize a DASD volume.", "syntax", ["GC35-0033-70"], syntax_pattern=r"(?i)\bINIT\b")
 
 # --- new: diagnostic / recovery ------------------------------------------------
 
@@ -281,10 +282,10 @@ e("DIA-34", "DSNT500I came back from a DB2 10 BIND with a resource-unavailable r
 e("DIA-35", "JES3 printed IAT8707 on the global during cold start. What condition is documented and what recovery is specified?", "diagnostic",
      ["SA32-1007-02"])
 
-e("SYN-37", "Construct a JES2 SPOOLDEF initialization statement that defines a spool volume for a JES2 2.2 complex.", "syntax", ["SA32-0992-02"])
-e("SYN-38", "Draft CEDA RDO definitions for a CICS TS 3.1 transaction and the program it runs.", "syntax", ["SC34-6430-09"])
-e("SYN-39", "Show the documented DB2 10 BIND PACKAGE subcommand syntax, including the required keywords.", "syntax", ["SC19-2972-13"])
-e("SYN-40", "Which PDSMAN control statement activates journaling of PDS directory updates, and how is it coded?", "syntax", ["ca-pdsman-pds-library-management-7-7"])
+e("SYN-37", "Construct a JES2 SPOOLDEF initialization statement that defines a spool volume for a JES2 2.2 complex.", "syntax", ["SA32-0992-02"], syntax_pattern=r"(?i)\bSPOOLDEF\b")
+e("SYN-38", "Draft CEDA RDO definitions for a CICS TS 3.1 transaction and the program it runs.", "syntax", ["SC34-6430-09"], syntax_pattern=r"(?i)\bCEDA\b")
+e("SYN-39", "Show the documented DB2 10 BIND PACKAGE subcommand syntax, including the required keywords.", "syntax", ["SC19-2972-13"], syntax_pattern=r"(?i)\bBIND\b")
+e("SYN-40", "Which PDSMAN control statement activates journaling of PDS directory updates, and how is it coded?", "syntax", ["ca-pdsman-pds-library-management-7-7"], syntax_pattern=r"(?i)\bPDSMAN\b")
 
 e("CMP-18", "Compare the documented JES2 and JES3 operator commands for draining spool volumes.", "comparative", ["SA32-0990-02", "SA32-1008-01"])
 
@@ -301,6 +302,25 @@ e("NEG-10", "What does message HASP310I report after a JES2 checkpoint reconfigu
      trap_type="sibling_near_miss")
 
 # ---------------------------------------------------------------- seed absorption
+# L2 syntax-shape gold for the seed syntax entries (scripts/harness_l2.py asserts
+# the produced answer/script names the construct the query asks to code). The
+# authored SYN-* entries carry theirs inline via e(syntax_pattern=...); this map
+# covers the seed rows, whose gold fields live in the seed file. Keyword presence
+# only, deliberately: a stricter statement-shape regex would gate on phrasing
+# guesses; tighten per entry only after observing real model outputs.
+SEED_SYNTAX_PATTERNS = {
+    "SYN-01": r"(?i)\bIEASYSxx\b",
+    "SYN-02": r"(?i)\bCOMMNDxx\b",
+    "SYN-03": r"(?m)^\s*//",             # JCL: a DD/EXEC statement always starts //
+    "SYN-04": r"\)MSG",                  # OPS/MVS AOF rule header
+    "SYN-05": r"(?i)\bAPF\b",
+    "SYN-06": r"(?i)\bSIT\b",
+    "SYN-07": r"(?i)\bCSQ6SYSP\b",
+    "SYN-08": r"(?i)\bPERMIT\b",
+    "SYN-09": r"(?i)\binish\b",          # JES3 I&T Ref initialization fragment
+    "LEG-02": r"(?i)\bDFSORT\b",         # legacy DFSORT syntax row
+}
+
 # Binding corrections discovered from the live payload (doc-number assumptions
 # in the seed that did not match the actual books are corrected and the
 # original assumption is preserved in the note). Always applied.
@@ -346,6 +366,8 @@ def map_seed(entry: dict) -> dict:
     for k in ("gold_must_contain", "gold_must_not_contain", "must_cite_identifier", "domain", "trap_type"):
         if entry.get(k) not in (None, []):
             out[k] = entry[k]
+    if out["id"] in SEED_SYNTAX_PATTERNS:
+        out["syntax_pattern"] = SEED_SYNTAX_PATTERNS[out["id"]]
     return out
 
 
@@ -523,6 +545,9 @@ def main() -> int:
         entry = dict(row)
         entry["expected_behavior"] = "abstain" if entry["query_class"] == "negative" else "answer"
         entry["source"] = "payload-draft"
+        if entry["id"] in SEED_SYNTAX_PATTERNS and not entry.get("syntax_pattern"):
+            # LEG-* syntax rows come from the table loop; same keyword-presence gold
+            entry["syntax_pattern"] = SEED_SYNTAX_PATTERNS[entry["id"]]
         new_entries.append(entry)
 
     entries = seed_entries + new_entries
@@ -575,6 +600,20 @@ def main() -> int:
                     errors.append(f"{entry['id']}: message id {m} not carried by expected doc(s) {missing}")
         if entry["query_class"] == "negative" and entry["expected_behavior"] == "answer":
             errors.append(f"{entry['id']}: negative class must be abstain")
+        # L2 syntax-shape gold: every syntax answer entry asserts the construct
+        # appears in the produced answer/script; nothing else carries a pattern.
+        import re as _re
+        pat = entry.get("syntax_pattern")
+        if entry["query_class"] == "syntax" and entry["expected_behavior"] == "answer":
+            if not pat:
+                errors.append(f"{entry['id']}: syntax answer entry has no syntax_pattern")
+            else:
+                try:
+                    _re.compile(pat)
+                except _re.error as exc:
+                    errors.append(f"{entry['id']}: invalid syntax_pattern {pat!r}: {exc}")
+        elif pat:
+            errors.append(f"{entry['id']}: syntax_pattern only applies to syntax answer entries")
         if entry["expected_behavior"] == "abstain" and entry["expected_doc_ids"]:
             errors.append(f"{entry['id']}: abstain entry carries expected_doc_ids")
         if entry["expected_behavior"] == "answer" and not entry["expected_doc_ids"]:

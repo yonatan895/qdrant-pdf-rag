@@ -264,6 +264,9 @@ def run_query(client: Any, entry: dict[str, Any]) -> dict[str, Any]:
         answer=answer,
         citations=citations,
         script=data.get("script"),
+        # joins server-side alert logs (finish_reason != stop) to this row —
+        # the response contract deliberately does not expose finish_reason
+        request_id=data.get("request_id"),
         path="zero_hits" if zero_hits else "llm",
         elapsed_ms=elapsed_ms,
     )
