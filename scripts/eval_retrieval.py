@@ -112,6 +112,33 @@ def default_baseline_path(embed_mode: str) -> Path:
     return Path("evals/baseline-vllm.json") if embed_mode == "vllm" else Path("evals/baseline.json")
 
 
+def must_not_violations(hits: list[SearchHit], entry: GoldenEntry) -> list[dict]:
+    """Collect must_not violations inside the top-5 window.
+
+    Sibling-precision allowance (same rule as the corpus builder's trap
+    assertion): a chunk that carries a bait message id ALONGSIDE the query's
+    own id is one page documenting adjacent messages (e.g. IOS207I and
+    IOS208I share a page in both editions of System Messages Vol 8) — not a
+    wrong-sibling answer. Only sibling-only chunks violate. Without this,
+    the chunk-level gate is stricter than the trap's documented intent and
+    every adjacent-message page in a multi-edition corpus trips it. Shared
+    by the retrieval eval and the harness L1 so the allowance cannot
+    diverge between the two gates."""
+    from mainframe_rag.regexes import find_message_ids
+
+    query_ids = set(find_message_ids(entry.query))
+    violations: list[dict] = []
+    for rank, hit in enumerate(hits[:MUST_NOT_WINDOW], 1):
+        if hit.doc_id in set(entry.must_not_retrieve):
+            violations.append({"type": "doc_id", "value": hit.doc_id, "rank": rank})
+        hit_msgs = set(hit.message_ids or ()) & set(entry.must_not_message_ids)
+        if hit_msgs and not (query_ids & set(hit.message_ids or ())):
+            violations.append(
+                {"type": "message_id", "value": sorted(hit_msgs), "rank": rank, "doc_id": hit.doc_id}
+            )
+    return violations
+
+
 def score_entry(hits: list[SearchHit], entry: GoldenEntry) -> dict:
     """Score one entry against retrieved hits.
 
@@ -153,25 +180,7 @@ def score_entry(hits: list[SearchHit], entry: GoldenEntry) -> dict:
         row["recall@5"] = 1.0 if any(relevant(h) for h in hits[:5]) else 0.0
         row["mrr"] = reciprocal_rank
 
-    violations: list[dict] = []
-    # Sibling-precision allowance (same rule as the corpus builder's trap
-    # assertion): a chunk that carries a bait message id ALONGSIDE the query's
-    # own id is one page documenting adjacent messages (e.g. IOS207I and
-    # IOS208I share a page in both editions of System Messages Vol 8) — not a
-    # wrong-sibling answer. Only sibling-only chunks violate. Without this,
-    # the chunk-level gate is stricter than the trap's documented intent and
-    # every adjacent-message page in a multi-edition corpus trips it.
-    from mainframe_rag.regexes import find_message_ids
-
-    query_ids = set(find_message_ids(entry.query))
-    for rank, hit in enumerate(hits[:MUST_NOT_WINDOW], 1):
-        if hit.doc_id in set(entry.must_not_retrieve):
-            violations.append({"type": "doc_id", "value": hit.doc_id, "rank": rank})
-        hit_msgs = set(hit.message_ids or ()) & set(entry.must_not_message_ids)
-        if hit_msgs and not (query_ids & set(hit.message_ids or ())):
-            violations.append(
-                {"type": "message_id", "value": sorted(hit_msgs), "rank": rank, "doc_id": hit.doc_id}
-            )
+    violations = must_not_violations(hits, entry)
     if violations:
         row["violations"] = violations
 

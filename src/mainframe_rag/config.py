@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None
     qdrant_collection: str = "mainframe_manuals"
+    # Container-internal snapshot directory (docker compose layout). The
+    # harness restores pins via file:// URLs against it; override for
+    # deployments that mount snapshot storage elsewhere.
+    qdrant_snapshots_dir: str = "/qdrant/snapshots"
     # Agent query path vs ingest upsert path: different worst-case call shapes,
     # so each gets its own bounded timeout (issue #20 PR C). Whole seconds —
     # qdrant-client's stub types timeout as int.

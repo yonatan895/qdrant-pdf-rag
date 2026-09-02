@@ -28,6 +28,7 @@ def test_env_loads(monkeypatch):
     s = Settings(_env_file=None)
     assert s.require_dense_dim() == 768
     assert s.qdrant_collection == "mainframe_manuals"
+    assert s.qdrant_snapshots_dir == "/qdrant/snapshots"
 
 
 def test_outbound_timeout_defaults_bounded():
