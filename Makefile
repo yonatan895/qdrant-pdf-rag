@@ -204,6 +204,17 @@ eval-baseline: | .venv
 	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --update-baseline $(EVAL_BASELINE) \
 	  --out $(BUNDLE_DIR)/eval-report.json --summary $(BUNDLE_DIR)/eval-summary.md
 
+# Answer-tier golden eval: /v1/answer grounding honesty (answer entries must
+# ground; abstain/trap entries must not be answered). Needs the LIVE GPU
+# stack (Qdrant + embed vLLM + reasoning vLLM) and the same env as `eval`;
+# run via the in-process TestClient, one reasoning call per query.
+# N bounds the deterministic stratified sample (N=all runs everything).
+.PHONY: eval-answers
+eval-answers: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/eval_answers.py --max-queries $(or $(N),24) \
+	  --out $(BUNDLE_DIR)/eval-answers-report.json --summary $(BUNDLE_DIR)/eval-answers-summary.md
+
 # Draft golden-set candidates from a collection's payload (edit the queries).
 eval-draft: | .venv
 	.venv/bin/python scripts/eval_retrieval.py --label-draft --docs 40
