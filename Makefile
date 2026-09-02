@@ -162,21 +162,62 @@ loadtest: | .venv
 	$(PY) scripts/loadtest.py --url $(AGENT_URL) --endpoint search --concurrency 8 --duration 30
 
 # ---------------------------------------------------------------- retrieval accuracy
+# Mode-keyed baselines (not comparable): hash gates CI/dev runs; vllm gates
+# release-candidate runs against the live embedder. The Settings default is
+# vllm (prod-first), so eval defaults to hash explicitly — but the export is
+# TARGET-SCOPED, never global: make exports reach every recipe, and the
+# airgap scripts refuse EMBED_MODE=hash fail-closed (a global export leaked
+# into airgap-deploy and failed the CI dry-run). The eval family below is
+# the only consumer of the default.
+EMBED_MODE ?= hash
+EVAL_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-vllm.json,evals/baseline.json)
+eval eval-baseline eval-draft eval-holdout eval-answers eval-report eval-html eval-compare: \
+	export EMBED_MODE := $(EMBED_MODE)
+
 # Eval against a running Qdrant (sim-qdrant or QDRANT_SIM_URL); scores
-# evals/golden.jsonl through the real pipeline (recall@k / MRR) and checks
-# against the committed baseline (tolerances in scripts/eval_retrieval.py).
-.PHONY: eval eval-baseline eval-draft
+# the dev golden set (evals/golden.jsonl) through the real pipeline
+# (recall@k / MRR) and checks against the mode-keyed baseline.
+# The frozen holdout (evals/holdout.jsonl) is NEVER iterated against:
+# `make eval-holdout` runs on release candidates only (AGENTS.md).
+.PHONY: eval eval-baseline eval-draft eval-holdout verify-golden
 eval: | .venv
 	@mkdir -p $(BUNDLE_DIR)
-	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --check evals/baseline.json \
+	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --check $(EVAL_BASELINE) \
 	  --out $(BUNDLE_DIR)/eval-report.json --summary $(BUNDLE_DIR)/eval-summary.md
+
+# Mechanical verification of golden expectations against the live collection
+# (doc/heading/page/message-id facts, must_not trap validity, duplicates).
+# Gates the corpus: nonzero exit on any FAIL. Verifies BOTH the dev set and
+# the frozen holdout.
+verify-golden: | .venv
+	.venv/bin/python scripts/verify_golden.py
+
+# Release candidates only: verify the holdout sha256 pin, then score the
+# frozen holdout against its own baseline. Never iterate against this.
+eval-holdout: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	sha256sum -c evals/holdout.jsonl.sha256
+	.venv/bin/python scripts/eval_retrieval.py --golden evals/holdout.jsonl \
+	  --check evals/holdout-baseline.json \
+	  --out $(BUNDLE_DIR)/eval-holdout-report.json --summary $(BUNDLE_DIR)/eval-holdout-summary.md
 
 # Re-record the committed accuracy baseline (dedicated PR — AGENTS.md).
 .PHONY: eval-baseline
 eval-baseline: | .venv
 	@mkdir -p $(BUNDLE_DIR)
-	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --update-baseline evals/baseline.json \
+	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --update-baseline $(EVAL_BASELINE) \
 	  --out $(BUNDLE_DIR)/eval-report.json --summary $(BUNDLE_DIR)/eval-summary.md
+
+# Answer-tier golden eval: /v1/answer grounding honesty (answer entries must
+# ground; abstain/trap entries must not be answered). Needs the LIVE GPU
+# stack (Qdrant + embed vLLM + reasoning vLLM) and the same env as `eval`;
+# run via the in-process TestClient, one reasoning call per query.
+# N bounds the deterministic stratified sample (N=all runs everything).
+.PHONY: eval-answers
+eval-answers: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/eval_answers.py --max-queries $(or $(N),24) \
+	  --out $(BUNDLE_DIR)/eval-answers-report.json --summary $(BUNDLE_DIR)/eval-answers-summary.md
 
 # Draft golden-set candidates from a collection's payload (edit the queries).
 eval-draft: | .venv

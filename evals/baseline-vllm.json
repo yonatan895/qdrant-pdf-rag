@@ -1,0 +1,90 @@
+{
+  "_meta": {
+    "note": "Re-baseline via `make eval-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/eval_retrieval.py.",
+    "n": 117,
+    "collection": "mainframe_manuals",
+    "embed_mode": "vllm",
+    "updated": "2026-09-02"
+  },
+  "recall@1": 0.45,
+  "recall@3": 0.752,
+  "recall@5": 0.826,
+  "mrr": 0.609,
+  "identifier": {
+    "recall@1": 0.393,
+    "recall@5": 0.836,
+    "mrr": 0.587
+  },
+  "nl": {
+    "recall@1": 0.521,
+    "recall@5": 0.812,
+    "mrr": 0.638
+  },
+  "classes": {
+    "comparative": {
+      "n": 12,
+      "scored": 12,
+      "recall@1": 0.333,
+      "recall@3": 0.583,
+      "recall@5": 0.583,
+      "mrr": 0.472
+    },
+    "diagnostic": {
+      "n": 27,
+      "scored": 27,
+      "recall@1": 0.37,
+      "recall@3": 0.63,
+      "recall@5": 0.741,
+      "mrr": 0.518
+    },
+    "doc_number": {
+      "n": 14,
+      "scored": 14,
+      "recall@1": 0.786,
+      "recall@3": 0.786,
+      "recall@5": 0.786,
+      "mrr": 0.786
+    },
+    "message_id": {
+      "n": 23,
+      "scored": 23,
+      "recall@1": 0.304,
+      "recall@3": 0.913,
+      "recall@5": 0.957,
+      "mrr": 0.598
+    },
+    "negative": {
+      "n": 8,
+      "scored": 0,
+      "recall@1": null,
+      "recall@3": null,
+      "recall@5": null,
+      "mrr": null
+    },
+    "syntax": {
+      "n": 25,
+      "scored": 25,
+      "recall@1": 0.4,
+      "recall@3": 0.76,
+      "recall@5": 0.88,
+      "mrr": 0.591
+    },
+    "version": {
+      "n": 8,
+      "scored": 8,
+      "recall@1": 0.875,
+      "recall@3": 0.875,
+      "recall@5": 1.0,
+      "mrr": 0.906
+    }
+  },
+  "abstain": {
+    "n": 8,
+    "top_score_mean": 0.4666,
+    "top_score_max": 1.0
+  },
+  "page": {
+    "checked": 1,
+    "hit@5": 0.0
+  }
+}
