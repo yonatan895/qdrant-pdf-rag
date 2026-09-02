@@ -149,11 +149,15 @@ bench: | .venv
 	.venv/bin/python scripts/benchmark.py --collection bench --check benchmarks/baseline.json \
 	  --out $(BUNDLE_DIR)/bench-results.json --summary $(BUNDLE_DIR)/bench-summary.md
 
-# Re-record the committed baseline (dedicated PR — AGENTS.md).
+# Re-record the committed baseline (dedicated PR — AGENTS.md). BENCH_REPEATS
+# defaults to 3: the noise floor (min latency/footprint, max errors), so one
+# contended pass cannot ratchet the baseline. Record in the gate's own
+# environment (CI runners), never a dev machine — _meta.env proves it.
 .PHONY: bench-baseline
 bench-baseline: | .venv
 	@mkdir -p $(BUNDLE_DIR)
 	.venv/bin/python scripts/benchmark.py --collection bench --update-baseline benchmarks/baseline.json \
+	  --repeats "$${BENCH_REPEATS:-3}" \
 	  --out $(BUNDLE_DIR)/bench-results.json --summary $(BUNDLE_DIR)/bench-summary.md
 
 # Standalone load run against an already-running agent.

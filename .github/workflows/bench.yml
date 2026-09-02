@@ -15,6 +15,10 @@ on:
         description: "Re-record the baseline instead of checking against it (re-baselining still lands as a dedicated PR)"
         type: boolean
         default: false
+      repeats:
+        description: "Record path only: measurement passes aggregated to the noise floor (min latency/footprint, max errors)"
+        type: number
+        default: 3
 
 permissions:
   contents: read
@@ -37,7 +41,8 @@ jobs:
         run: |
           ARGS="--collection bench --out bench-results.json --summary bench-summary.md"
           if [ "${{ inputs.update_baseline }}" = "true" ]; then
-            python scripts/benchmark.py $ARGS --update-baseline bench-baseline.json
+            python scripts/benchmark.py $ARGS --update-baseline bench-baseline.json \
+              --repeats "${{ inputs.repeats || '3' }}"
           else
             python scripts/benchmark.py $ARGS --check benchmarks/baseline.json
           fi
