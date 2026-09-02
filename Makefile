@@ -163,12 +163,16 @@ loadtest: | .venv
 
 # ---------------------------------------------------------------- retrieval accuracy
 # Mode-keyed baselines (not comparable): hash gates CI/dev runs; vllm gates
-# release-candidate runs against the live embedder. Exported so the script's
-# load_settings() sees the same mode the baseline selection used — the
-# Settings default is vllm (prod-first), so eval defaults to hash explicitly.
+# release-candidate runs against the live embedder. The Settings default is
+# vllm (prod-first), so eval defaults to hash explicitly — but the export is
+# TARGET-SCOPED, never global: make exports reach every recipe, and the
+# airgap scripts refuse EMBED_MODE=hash fail-closed (a global export leaked
+# into airgap-deploy and failed the CI dry-run). The eval family below is
+# the only consumer of the default.
 EMBED_MODE ?= hash
-export EMBED_MODE
 EVAL_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-vllm.json,evals/baseline.json)
+eval eval-baseline eval-draft eval-holdout eval-answers eval-report eval-html eval-compare: \
+	export EMBED_MODE := $(EMBED_MODE)
 
 # Eval against a running Qdrant (sim-qdrant or QDRANT_SIM_URL); scores
 # the dev golden set (evals/golden.jsonl) through the real pipeline

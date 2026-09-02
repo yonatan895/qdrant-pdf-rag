@@ -123,6 +123,7 @@ Collection-dimension logic: missing, matching, and mismatched (named `dense` dic
 User-supplied `--embed-model`, `--model`, `--embed-url`, `--vllm-url`, `--embed-mode`, `--dense-dim`, and matching Makefile/`ENV` values must be applied or fail nonzero with a message. Never silently keep `load_settings()` values after a `/models` probe. Ambiguous auto-detect (`len(avail) != 1` and no match) fails closed.
 
 - Quote every shell expansion. Never stash JSON flags in an unquoted `${MODEL_ARGS}` string.
+- Never `export` a mode variable globally in the Makefile: make exports reach every recipe, and the airgap scripts refuse `EMBED_MODE=hash` fail-closed (a global export broke the CI airgap-dryrun). Scope it: `eval eval-baseline …: export EMBED_MODE := $(EMBED_MODE)` (immediate expansion — a recursive `=` self-references under a target-specific directive).
 - `case` globs are case-sensitive: `*embed*` does not match `Embedding`. Match `*embed*` and `*Embed*` (or use a case-insensitive test).
 - Pin vLLM image tags that actually implement the flags you pass (`gemma4` parsers, `--task embedding`). `:latest` and stale minors are production bugs.
 - Local 8GB co-residency: reasoning port 8000 `GPU_MEM=0.65`; embedding port 8001 `GPU_MEM=0.30` with `--task embedding`; solo reasoning `GPU_MEM=0.85`.
