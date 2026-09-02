@@ -18,7 +18,7 @@ from qdrant_client import models
 if TYPE_CHECKING:
     from mainframe_rag.config import Settings
 
-from mainframe_rag.ports import Embedder, QdrantPoints
+from mainframe_rag.ports import Embedder, QdrantPoints, Reranker
 from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
 
 PREFETCH_LIMIT = 40
@@ -67,6 +67,7 @@ class SearchHit(BaseModel):
     message_ids: tuple[str, ...]
     product: str | None = None
     version: str | None = None
+    rerank_score: float | None = None
 
 
 def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:
@@ -169,9 +170,12 @@ def diversify_hits(
         else:
             still_remaining.append(h)
 
-    # Phase 3: if every available candidate's page is already represented,
-    # backfill remaining slots preferring pages with the fewest occurrences so far.
-    still_remaining.sort(key=lambda h: (seen_pages.get((h.doc_id, h.page_label), 0), -h.score))
+    still_remaining.sort(
+        key=lambda h: (
+            seen_pages.get((h.doc_id, h.page_label), 0),
+            -(h.rerank_score if h.rerank_score is not None else h.score),
+        )
+    )
     for h in still_remaining:
         p_key = (h.doc_id, h.page_label)
         seen_pages[p_key] = seen_pages.get(p_key, 0) + 1
@@ -191,13 +195,24 @@ def search(
     version: str | None = None,
     limit: int = 8,
     settings: Settings | None = None,
+    reranker: Reranker | None = None,
 ) -> tuple[list[SearchHit], str, dict[str, int]]:
     """Returns (hits, query_kind, timing_ms). Filters applied inside prefetch.
 
     Dense and sparse prefetch queries execute concurrently in a single HTTP
-    batch call via query_batch_points (falling back to query_points if unsupported)."""
+    batch call via query_batch_points (falling back to query_points if unsupported).
+    When reranking is enabled, fused candidates (top-50) are scored by the cross-encoder."""
     identifiers = parse_query(query)
     flt = build_filter(identifiers, product=product, version=version)
+
+    active_reranker = reranker
+    if active_reranker is None and settings and settings.rerank_enabled:
+        from mainframe_rag.retrieve.rerank import build_reranker
+
+        active_reranker = build_reranker(settings)
+    rerank_active = active_reranker is not None
+
+    prefetch_limit = settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
 
     timings: dict[str, int] = {}
 
@@ -210,14 +225,14 @@ def search(
     dense_req = models.QueryRequest(
         query=dense_vec,
         using="dense",
-        limit=PREFETCH_LIMIT,
+        limit=prefetch_limit,
         filter=flt,
         with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
     )
     sparse_req = models.QueryRequest(
         query=models.SparseVector(indices=sparse_idx, values=sparse_val),
         using="bm25",
-        limit=PREFETCH_LIMIT,
+        limit=prefetch_limit,
         filter=flt,
         with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
     )
@@ -227,14 +242,14 @@ def search(
         dense_points = responses[0].points
         sparse_points = responses[1].points
     else:
-        dense_points = _prefetch_one(client, collection, dense_vec, "dense", flt, PREFETCH_LIMIT)
+        dense_points = _prefetch_one(client, collection, dense_vec, "dense", flt, prefetch_limit)
         sparse_points = _prefetch_one(
             client,
             collection,
             models.SparseVector(indices=sparse_idx, values=sparse_val),
             "bm25",
             flt,
-            PREFETCH_LIMIT,
+            prefetch_limit,
         )
     timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
 
@@ -253,7 +268,18 @@ def search(
         max_per_page = 1
         max_per_doc = 3
 
-    candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=max(limit * 3, 24))
-    hits = diversify_hits(candidates, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
+    if rerank_active and active_reranker is not None:
+        from mainframe_rag.retrieve.rerank import rerank_candidates
+
+        rrf_limit = settings.rerank_candidates if settings else 50
+        candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=rrf_limit)
+        t_rr = time.monotonic()
+        reranked = rerank_candidates(query, candidates, active_reranker, top_k=limit)
+        timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
+        hits = diversify_hits(reranked, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
+    else:
+        candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=max(limit * 3, 24))
+        hits = diversify_hits(candidates, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
+
     return hits, query_kind(identifiers), timings
 
