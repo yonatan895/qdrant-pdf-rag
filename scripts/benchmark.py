@@ -377,10 +377,29 @@ def aggregate_runs(runs: list[dict]) -> dict:
     return reduce(merge, runs)
 
 
+_ENV_GATE_KEYS = ("cpu_count", "qdrant_image")
+
+
 def check_baseline(result: dict, baseline: dict | None) -> list[str]:
     if baseline is None:
         return []
     regressions = []
+    recorded_env = (baseline.get("_meta") or {}).get("env") or {}
+    for key in _ENV_GATE_KEYS:
+        recorded = recorded_env.get(key)
+        live = result["env"].get(key)
+        if recorded is not None and live is not None and recorded != live:
+            regressions.append(
+                f"baseline env mismatch: {key} {recorded!r} != runner {live!r} — "
+                "the baseline was captured in a different environment; re-baseline "
+                "in the gate's own environment"
+            )
+    if regressions:
+        # A p95 ratio across mismatched environments is noise, not signal —
+        # report only the actionable mismatch instead of a misleading
+        # `p95 > x3` that sends someone hunting for a code regression that
+        # does not exist.
+        return regressions
     for dotted, tolerance in GATED_METRICS.items():
         current = _get(result, dotted)
         if current is None:

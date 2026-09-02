@@ -205,3 +205,46 @@ def test_update_baseline_defaults_capture_to_single_pass(tmp_path):
     path = tmp_path / "baseline.json"
     update_baseline(_result(), path)
     assert json.loads(path.read_text())["_meta"]["capture"]["repeats"] == 1
+
+
+def test_env_mismatch_fails_distinct_before_metric_gates(tmp_path):
+    """A 24-core baseline gating a 4-vCPU runner must fail with an actionable
+    env message — not a misleading `p95 > x3` that sends someone hunting for
+    a code regression that does not exist."""
+    path = tmp_path / "baseline.json"
+    result = _result()
+    update_baseline({**result, "env": {"cpu_count": 24}}, path)
+    baseline = json.loads(path.read_text())
+    regressions = check_baseline(_scaled(10.0), baseline)  # would blow every metric gate
+    assert len(regressions) == 1
+    assert "cpu_count 24 != runner 4" in regressions[0]
+    assert "p95" not in "".join(regressions)
+
+
+def test_qdrant_image_mismatch_fails_distinct(tmp_path):
+    path = tmp_path / "baseline.json"
+    result = _result()
+    update_baseline({**result, "env": {"cpu_count": 4, "qdrant_image": "qdrant:v1.18.0"}}, path)
+    baseline = json.loads(path.read_text())
+    live = _result()
+    live["env"]["qdrant_image"] = "qdrant:v1.19.0-unprivileged"
+    regressions = check_baseline(live, baseline)
+    assert len(regressions) == 1
+    assert "qdrant_image" in regressions[0]
+
+
+def test_matching_env_gates_metrics_normally(tmp_path):
+    path = tmp_path / "baseline.json"
+    update_baseline(_result(), path)
+    baseline = json.loads(path.read_text())
+    assert len(check_baseline(_scaled(4.0), baseline)) == len(GATED_METRICS)
+
+
+def test_baseline_without_recorded_env_still_gates_metrics(tmp_path):
+    """Old baselines without _meta.env keep working — env gating is opt-in
+    via what the record tool writes, not a hard requirement."""
+    path = tmp_path / "baseline.json"
+    update_baseline(_result(), path)
+    baseline = json.loads(path.read_text())
+    del baseline["_meta"]["env"]
+    assert len(check_baseline(_scaled(4.0), baseline)) == len(GATED_METRICS)

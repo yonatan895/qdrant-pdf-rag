@@ -157,7 +157,7 @@ bench: | .venv
 bench-baseline: | .venv
 	@mkdir -p $(BUNDLE_DIR)
 	.venv/bin/python scripts/benchmark.py --collection bench --update-baseline benchmarks/baseline.json \
-	  --repeats "$${BENCH_REPEATS:-3}" \
+	  --repeats $(or $(BENCH_REPEATS),3) \
 	  --out $(BUNDLE_DIR)/bench-results.json --summary $(BUNDLE_DIR)/bench-summary.md
 
 # Standalone load run against an already-running agent.
