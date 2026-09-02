@@ -119,7 +119,9 @@ def score_entry(hits: list[SearchHit], entry: GoldenEntry) -> dict:
     Abstain entries produce no recall/MRR keys (excluded from the
     denominators) and record their top scores for calibration. must_not
     violations are collected inside the MUST_NOT_WINDOW window for both
-    doc IDs and message-ID payloads. expected_page feeds the page_hit@5
+    doc IDs and message-ID payloads, with the sibling-precision allowance:
+    a chunk co-carrying the query's own message id is the same documented
+    page, never a wrong-sibling answer. expected_page feeds the page_hit@5
     diagnostic (doc-restricted; never a hard gate)."""
     expected = set(entry.expected_doc_ids)
     heading = (entry.expected_heading or "").lower()
@@ -152,11 +154,21 @@ def score_entry(hits: list[SearchHit], entry: GoldenEntry) -> dict:
         row["mrr"] = reciprocal_rank
 
     violations: list[dict] = []
+    # Sibling-precision allowance (same rule as the corpus builder's trap
+    # assertion): a chunk that carries a bait message id ALONGSIDE the query's
+    # own id is one page documenting adjacent messages (e.g. IOS207I and
+    # IOS208I share a page in both editions of System Messages Vol 8) — not a
+    # wrong-sibling answer. Only sibling-only chunks violate. Without this,
+    # the chunk-level gate is stricter than the trap's documented intent and
+    # every adjacent-message page in a multi-edition corpus trips it.
+    from mainframe_rag.regexes import find_message_ids
+
+    query_ids = set(find_message_ids(entry.query))
     for rank, hit in enumerate(hits[:MUST_NOT_WINDOW], 1):
         if hit.doc_id in set(entry.must_not_retrieve):
             violations.append({"type": "doc_id", "value": hit.doc_id, "rank": rank})
         hit_msgs = set(hit.message_ids or ()) & set(entry.must_not_message_ids)
-        if hit_msgs:
+        if hit_msgs and not (query_ids & set(hit.message_ids or ())):
             violations.append(
                 {"type": "message_id", "value": sorted(hit_msgs), "rank": rank, "doc_id": hit.doc_id}
             )

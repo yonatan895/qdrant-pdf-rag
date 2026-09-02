@@ -129,6 +129,56 @@ def test_score_entry_must_not_message_id_via_payload():
     ]
 
 
+def test_score_entry_must_not_allows_cocarrying_chunk():
+    # Sibling-precision allowance: a chunk that documents BOTH the query's
+    # own message id and the bait id is one adjacent-message page (e.g.
+    # IOS207I/IOS208I share a page) — never a wrong-sibling answer.
+    entry = GoldenEntry(
+        query="IOS207I rejected a command",
+        expected_doc_ids=["SA38-0676-70"],
+        must_not_message_ids=["IOS208I"],
+    )
+    hits = [
+        _hit(doc_id="SA38-0676-70", message_ids=("IOS207I",), score=1.0),
+        _hit(doc_id="SA38-0676-07", message_ids=("IOS207I", "IOS208I"), score=0.6),
+    ]
+    row = score_entry(hits, entry)
+    assert "violations" not in row
+
+
+def test_score_entry_must_not_still_gates_sibling_only_chunk():
+    # The allowance needs the query's own parseable id on the chunk; a
+    # sibling-only chunk (bait without the query id) still violates.
+    entry = GoldenEntry(
+        query="IOS207I rejected a command",
+        expected_doc_ids=["SA38-0676-70"],
+        must_not_message_ids=["IOS208I"],
+    )
+    hits = [
+        _hit(doc_id="SA38-0676-70", message_ids=("IOS207I",), score=1.0),
+        _hit(doc_id="SA38-0676-07", message_ids=("IOS208I",), score=0.6),
+    ]
+    row = score_entry(hits, entry)
+    assert row["violations"] == [
+        {"type": "message_id", "value": ["IOS208I"], "rank": 2, "doc_id": "SA38-0676-07"}
+    ]
+
+
+def test_score_entry_must_not_unparseable_query_stays_strict():
+    # Without a parseable query id the allowance cannot apply; every bait
+    # chunk in the window violates (strict gate preserved).
+    entry = GoldenEntry(
+        query="the spool is short",
+        expected_behavior="abstain",
+        must_not_message_ids=["HASP309"],
+    )
+    hits = [_hit(doc_id="SA32-0989-03", message_ids=("HASP309",), score=0.7)]
+    row = score_entry(hits, entry)
+    assert row["violations"] == [
+        {"type": "message_id", "value": ["HASP309"], "rank": 1, "doc_id": "SA32-0989-03"}
+    ]
+
+
 def test_score_entry_page_diagnostic():
     entry = GoldenEntry(
         query="NFS mount error return codes",
