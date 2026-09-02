@@ -145,53 +145,129 @@ def save_baseline(path: Path, summary: dict[str, Any], *, embed_mode: str, snaps
 # ignores client-proposed names; each snapshot is large (the 840k-point
 # collection pins at ~7.8GB), so the pin policy is: keep exactly ONE
 # snapshot per collection, record its server-assigned name + the collection
-# points count in the baseline, and restore from that recorded name.
-# Measured on the 840k-point collection: recover takes ~30s.
+# points count in the baseline, and restore from that RECORDED name.
+# Ordering is by the server's creation_time — snapshot names sort by their
+# checksum segment, never by age. Measured on the 840k-point collection:
+# recover takes ~30s. The fingerprint (points count + pin name) is a cheap
+# drift guard, not a content pin: equal count + equal name is treated as
+# undrifted, not as proof of identical vectors.
 
-def snapshot_fingerprint(client: Any, collection: str) -> dict[str, Any] | None:
-    """Points count + the current pin snapshot name, or None when the
-    collection is unreachable (fail closed upstream)."""
+def snapshot_fingerprint(client: Any, collection: str, prefer_name: str | None = None) -> dict[str, Any] | None:
+    """Points count + snapshot names ordered oldest-first by the server's
+    creation_time (never lexicographic — the name leads with a checksum).
+    `prefer_name` moves the recorded pin to the front when it still exists.
+    None when the collection is unreachable (fail closed upstream)."""
     try:
         points = client.get_collection(collection).points_count
-        snaps = sorted(s.name for s in client.list_snapshots(collection))
+        snaps = sorted(client.list_snapshots(collection), key=lambda s: (s.creation_time or "", s.name))
+        names = [s.name for s in snaps]
     except Exception:  # noqa: BLE001 — unreachable Qdrant fails closed upstream
         return None
-    return {"points_count": points, "snapshot_name": snaps[0] if snaps else None}
+    if prefer_name and prefer_name in names:
+        names.remove(prefer_name)
+        names.insert(0, prefer_name)
+    return {"points_count": points, "snapshot_names": names}
 
 
-def pin_snapshot(client: Any, collection: str) -> dict[str, Any]:
-    """Ensure exactly one snapshot exists; create it when none does. Returns
-    the fingerprint (name + points count) to record in the baseline — its
-    points_count is the drift reference for later runs."""
-    fp = snapshot_fingerprint(client, collection)
+def resolve_snapshot_action(
+    fp: dict[str, Any],
+    recorded: dict[str, Any] | None,
+    *,
+    restore: str,
+    record_mode: bool,
+) -> tuple[str, Any]:
+    """Pure snapshot policy: (action, payload) where action is one of
+    "skip" | "restore" | "pin" | "fail" and the payload is the snapshot
+    name to restore or the fail reason.
+
+    Fail-closed rules (the review blockers): a gate run NEVER pins live
+    state — a deleted pin plus a mutated collection would otherwise be
+    promoted as the pin; restore always targets the RECORDED pin name from
+    the baseline, never whichever snapshot happens to be listed first."""
+    recorded_name = (recorded or {}).get("snapshot_name")
+    recorded_points = (recorded or {}).get("points_count")
+    live_names = fp["snapshot_names"]
+    if restore == "never":
+        return "skip", None
+    if restore == "always":
+        if record_mode:
+            return ("restore", recorded_name) if recorded_name and recorded_name in live_names else ("pin", None)
+        if not recorded_name:
+            return "fail", "no recorded pin in the baseline; --restore always cannot verify what to restore"
+        if recorded_name not in live_names:
+            return "fail", f"recorded pin {recorded_name!r} no longer exists on the server"
+        return "restore", recorded_name
+    # drift policy (default)
+    if (
+        recorded_name
+        and live_names
+        and live_names[0] == recorded_name
+        and recorded_points is not None
+        and fp["points_count"] == recorded_points
+    ):
+        return "skip", recorded_name
+    if record_mode:
+        # A baseline run owns pinning: create or re-adopt, then prune strays.
+        return "pin", None
+    if recorded_name:
+        if recorded_name in live_names:
+            # Fingerprint drifted (points count, or a stray snapshot sorts
+            # first) — restore the recorded pin regardless of list order.
+            return "restore", recorded_name
+        return (
+            "fail",
+            (
+                f"recorded pin {recorded_name!r} no longer exists on the server; "
+                "a gate run never pins live state — re-record with make harness-baseline"
+            ),
+        )
+    return (
+        "fail",
+        (
+            "no recorded pin in the baseline; a gate run never pins live state — "
+            "record one with make harness-baseline"
+        ),
+    )
+
+
+def pin_snapshot(client: Any, collection: str, keep: str | None = None) -> dict[str, Any]:
+    """Create the pin snapshot when none exists and prune strays, always
+    protecting `keep` (the recorded pin). Returns the fingerprint (name +
+    points count) to record in the baseline — its points_count is the drift
+    reference for later runs. Never called on a gate run."""
+    fp = snapshot_fingerprint(client, collection, prefer_name=keep)
     if fp is None:
         raise RuntimeError(f"collection {collection!r} unreachable; refusing to pin a snapshot blind")
-    if fp["snapshot_name"] is None:
+    names = fp["snapshot_names"]
+    if not names:
         created = client.create_snapshot(collection, wait=True)
-        fp = {"points_count": fp["points_count"], "snapshot_name": created.name}
-    # Delete strays beyond the oldest so repeated baselines cannot fill the
-    # disk (names sort by timestamp).
-    snaps = sorted(s.name for s in client.list_snapshots(collection))
-    for stray in snaps[1:]:
+        names = [created.name]
+    for stray in names[1:]:
         client.delete_snapshot(collection, stray)
-    return fp
+    return {"points_count": fp["points_count"], "snapshot_name": names[0]}
 
 
-def restore_snapshot(client: Any, collection: str, snapshot_name: str) -> dict[str, Any]:
-    """Restore the pin snapshot (server-local file URL) and verify the
-    post-restore fingerprint. Raises (fail closed) when the pin is missing
-    or unverifiable — a silently drifted index would make every CI and gate
+def restore_snapshot(
+    client: Any, collection: str, snapshot_name: str, snapshots_dir: str = "/qdrant/snapshots"
+) -> dict[str, Any]:
+    """Restore the RECORDED pin snapshot and verify the post-restore
+    fingerprint. The server-local file URL assumes the container's snapshot
+    path (docker compose layout) — override via Settings.qdrant_snapshots_dir
+    for other deployments. Raises (fail closed) when the pin is missing or
+    unverifiable — a silently drifted index would make every CI and gate
     verdict lie."""
-    fp = snapshot_fingerprint(client, collection)
-    if fp is None or fp["snapshot_name"] is None:
-        raise RuntimeError("pin snapshot missing; run `make harness-baseline` to re-pin")
+    fp = snapshot_fingerprint(client, collection, prefer_name=snapshot_name)
+    if fp is None or snapshot_name not in fp["snapshot_names"]:
+        raise RuntimeError(f"pin snapshot {snapshot_name!r} missing; run `make harness-baseline` to re-pin")
     client.recover_snapshot(
-        collection, location=f"file:///qdrant/snapshots/{collection}/{snapshot_name}", wait=True
+        collection,
+        location=f"file://{snapshots_dir.rstrip('/')}/{collection}/{snapshot_name}",
+        wait=True,
     )
-    post = snapshot_fingerprint(client, collection)
+    post = snapshot_fingerprint(client, collection, prefer_name=snapshot_name)
     if post is None:
         raise RuntimeError("post-restore fingerprint unverifiable; refusing to evaluate")
-    return post
+    return {"points_count": post["points_count"], "snapshot_name": snapshot_name}
 
 
 # --------------------------------------------------------------------- main
@@ -220,6 +296,13 @@ def main(argv: list[str] | None = None) -> int:
     for p in golden_paths:
         entries.extend(load_golden(p))
     baseline = load_baseline(baseline_path)
+    # Fail closed BEFORE anything runs: a gate (or any non-recording run)
+    # without a baseline would otherwise be invited to create one from
+    # whatever is live — recording happens only via --update-baseline.
+    if baseline is None and not args.update_baseline:
+        print(f"FAIL: no baseline at {baseline_path}; a gate run never creates one. "
+              "Record it first: make harness-baseline", file=sys.stderr)
+        return 1
     print(f"[*] harness L1: {len(entries)} entries, collection {collection!r}, "
           f"embed_mode={settings.embed_mode}, baseline={baseline_path.name}", file=sys.stderr)
 
@@ -230,42 +313,34 @@ def main(argv: list[str] | None = None) -> int:
     qdrant = QdrantClient(url=settings.qdrant_url, timeout=60)
     embedder = build_embedder(settings, None)
 
-    fp = snapshot_fingerprint(qdrant, collection)
+    recorded = (baseline or {}).get("_meta", {}).get("snapshot", {})
+    fp = snapshot_fingerprint(qdrant, collection, prefer_name=recorded.get("snapshot_name"))
     if fp is None:
         print(f"FAIL: collection {collection!r} unreachable; refusing to evaluate", file=sys.stderr)
         return 1
     t0 = time.monotonic()
-    if args.restore == "always":
-        if not fp["snapshot_name"]:
-            fp = pin_snapshot(qdrant, collection)
-        fp = restore_snapshot(qdrant, collection, fp["snapshot_name"])
-        policy_note = "restored (always)"
-    elif args.restore == "drift":
-        # Drift = the live points count or pin name differs from the
-        # fingerprint recorded with the baseline. L1 never mutates the
-        # index, so a matching fingerprint skips the restore; a mismatched
-        # one means another actor mutated the collection and the pin must
-        # be re-applied before any CI is honest.
-        recorded = (baseline or {}).get("_meta", {}).get("snapshot", {})
-        expected_points = recorded.get("points_count")
-        expected_name = recorded.get("snapshot_name")
-        if (
-            fp["snapshot_name"]
-            and expected_points is not None
-            and fp["points_count"] == expected_points
-            and (expected_name is None or fp["snapshot_name"] == expected_name)
-        ):
-            policy_note = f"skipped (fingerprint matches pin: {expected_points} points)"
-        elif fp["snapshot_name"]:
-            fp = restore_snapshot(qdrant, collection, fp["snapshot_name"])
-            policy_note = f"restored (drift: live {fp['points_count']} vs pin {expected_points})"
-        else:
-            fp = pin_snapshot(qdrant, collection)
-            policy_note = "pin created (no prior snapshot)"
-    else:
-        policy_note = "skipped (--restore never)"
+    action, payload = resolve_snapshot_action(
+        fp, recorded, restore=args.restore, record_mode=args.update_baseline
+    )
+    if action == "fail":
+        print(f"FAIL: {payload}", file=sys.stderr)
+        return 1
+    if action == "skip":
+        policy_note = f"skipped (fingerprint matches pin: {fp['points_count']} points)"
+    elif action == "restore":
+        fp = restore_snapshot(qdrant, collection, payload, settings.qdrant_snapshots_dir)
+        policy_note = f"restored recorded pin {payload!r}"
+    else:  # pin — only reachable in record mode
+        fp = pin_snapshot(qdrant, collection, keep=recorded.get("snapshot_name"))
+        policy_note = f"pinned {fp['snapshot_name']!r} ({fp['points_count']} points)"
     restore_s = round(time.monotonic() - t0, 1)
     print(f"[*] snapshot: {policy_note} in {restore_s}s ({fp['points_count']} points)", file=sys.stderr)
+    # The baseline records the PIN (singular snapshot_name), not the live
+    # fingerprint (an ordered list) — the drift policy matches on this shape.
+    pin = {
+        "points_count": fp["points_count"],
+        "snapshot_name": payload if action == "skip" else fp.get("snapshot_name"),
+    }
 
     from harness_l1 import aggregate, collect_rows
 
@@ -280,22 +355,21 @@ def main(argv: list[str] | None = None) -> int:
     for cls, block in summary["classes"].items():
         print(f"    {cls:12s} {json.dumps(block)}", file=sys.stderr)
 
-    if args.update_baseline or baseline is None:
-        save_baseline(baseline_path, summary, embed_mode=settings.embed_mode, snapshot=fp)
+    if args.update_baseline:
+        save_baseline(baseline_path, summary, embed_mode=settings.embed_mode, snapshot=pin)
         print(f"[*] baseline recorded: {baseline_path}", file=sys.stderr)
-        verdict, reasons = "baseline", ["first baseline recorded"]
+        verdict, reasons = "baseline", ["baseline recorded"]
     else:
         verdict, reasons = gate_verdict(summary, baseline, resamples=args.resamples)
-    if args.gate or baseline is not None:
-        print(f"[*] GATE VERDICT: {verdict}", file=sys.stderr)
-        for r in reasons:
-            print(f"    - {r}", file=sys.stderr)
+    print(f"[*] GATE VERDICT: {verdict}", file=sys.stderr)
+    for r in reasons:
+        print(f"    - {r}", file=sys.stderr)
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(
             json.dumps({"verdict": verdict, "reasons": reasons, "summary": summary,
-                        "snapshot": fp, "restore_s": restore_s}, indent=1, ensure_ascii=False) + "\n",
+                        "snapshot": pin, "restore_s": restore_s}, indent=1, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
     try:

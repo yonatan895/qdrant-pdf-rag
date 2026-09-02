@@ -228,11 +228,11 @@ eval-answers: | .venv
 .PHONY: harness-gate harness-baseline
 harness-gate: | .venv
 	@mkdir -p $(BUNDLE_DIR)
-	.venv/bin/python scripts/harness.py --gate --restore $(or $(RESTORE),drift) \
+	.venv/bin/python scripts/harness.py --gate --baseline "$(HARNESS_BASELINE)" --restore $(or $(RESTORE),drift) \
 	  --out $(BUNDLE_DIR)/harness-report.json
 harness-baseline: | .venv
 	@mkdir -p $(BUNDLE_DIR)
-	.venv/bin/python scripts/harness.py --update-baseline --restore $(or $(RESTORE),drift) \
+	.venv/bin/python scripts/harness.py --update-baseline --baseline "$(HARNESS_BASELINE)" --restore $(or $(RESTORE),drift) \
 	  --out $(BUNDLE_DIR)/harness-report.json
 
 # Draft golden-set candidates from a collection's payload (edit the queries).

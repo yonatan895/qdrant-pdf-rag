@@ -17,10 +17,11 @@ is doc-level; per-doc gain = 1 for a doc hit, +1 when the gold carries
 expected_heading and the heading matches (case-fold substring — the same
 relevance rule the retrieval eval uses), +1 when the gold carries
 expected_page and the page matches (doc-restricted, as in the retrieval
-eval). DCG uses the standard 1/log2(rank+1) discount; IDCG assumes every
-expected doc achieves the entry's max gain — the entry's own ceiling, so
-nDCG stays within [0, 1] and is comparable across entries with different
-gold richness.
+eval). DCG uses the standard 1/log2(rank+1) discount; IDCG gives max gain
+to ONE expected doc (the heading/page gold fields are singular and can be
+satisfied by at most one document) and plain doc gain to the rest — the
+entry's honest ceiling, so nDCG stays within [0, 1] and is comparable
+across entries with different gold richness.
 
 Abstain rows are excluded from recall/MRR/nDCG denominators (same rule as
 the retrieval eval) but their must_not traps are still checked.
@@ -91,8 +92,12 @@ def _ndcg_at_k(hits: Sequence[Any], entry: GoldenEntry, k: int = L1_LIMIT) -> fl
             break
         g = _gain(hit.doc_id, hit.heading, hit.page_label or "", entry)
         dcg += g / math.log2(rank + 1)
-    ideal_positions = min(k, expected_n)
-    idcg = max_gain * sum(1.0 / math.log2(i + 1) for i in range(1, ideal_positions + 1))
+    # The ideal gives max gain to ONE doc (heading/page gold are singular
+    # fields — they can be satisfied by at most one document) and plain doc
+    # gain to the rest. Assuming max gain for every expected doc overstated
+    # the ideal and depressed nDCG for multi-doc graded rows.
+    ideal_gains = [max_gain] + [1] * (expected_n - 1)
+    idcg = sum(g / math.log2(i + 1) for i, g in enumerate(ideal_gains[:k], start=1))
     if idcg == 0.0:
         return None
     return dcg / idcg
@@ -114,7 +119,7 @@ def score_row(hits: Sequence[Any], entry: GoldenEntry) -> dict[str, Any]:
         row["top_scores"] = [round(h.score, 4) for h in hits[:5]]
         return row
     reciprocal_rank = 0.0
-    for rank, hit in enumerate(hits, 1):
+    for rank, hit in enumerate(hits[:L1_LIMIT], 1):
         if _relevant(hit.doc_id, hit.heading, entry):
             reciprocal_rank = 1.0 / rank
             break

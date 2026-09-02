@@ -16,7 +16,11 @@ from scripts.harness import (
     baseline_path_for,
     gate_verdict,
     load_baseline,
+    pin_snapshot,
+    resolve_snapshot_action,
+    restore_snapshot,
     save_baseline,
+    snapshot_fingerprint,
 )
 from scripts.harness_l1 import aggregate, score_row
 
@@ -60,10 +64,11 @@ def test_ci95_empty_is_none():
 
 
 def test_ci95_regression_pinned_seeded_values():
-    # Pin the exact seeded resample behavior: identical inputs must give
-    # identical bounds across machines (stdlib random is stable).
+    # Pin the exact seeded bounds (not just determinism-vs-itself): stdlib
+    # random.Random(0) is stable, so these are cross-machine constants. A
+    # change here means the resampling behavior changed — update deliberately.
     values = [0.42, 0.51, 0.38, 0.60, 0.45, 0.49, 0.52, 0.40]
-    assert ci95(values, resamples=1000, seed=0) == ci95(values, resamples=1000, seed=0)
+    assert ci95(values, resamples=1000, seed=0) == (0.42625, 0.52125)
 
 
 # ------------------------------------------------------------------- L1 rows
@@ -268,3 +273,167 @@ def test_baseline_json_is_utf8_and_stable(tmp_path):
     save_baseline(path, summary, embed_mode="vllm", snapshot={"points_count": 1})
     doc = json.loads(path.read_text(encoding="utf-8"))
     assert doc["overall"]["recall@5"] == summary["overall"]["recall@5"]
+
+
+# ------------------------------------------------------- snapshot policy matrix
+class _Snap:
+    def __init__(self, name: str, creation_time: str):
+        self.name = name
+        self.creation_time = creation_time
+
+
+class _Collection:
+    def __init__(self, points: int):
+        self.points_count = points
+
+
+class _FakeQdrant:
+    """Minimal qdrant-client stand-in for the pin/restore helpers."""
+
+    def __init__(self, points: int, snaps: list[_Snap]):
+        self.points = points
+        self.snaps = list(snaps)
+        self.deleted: list[str] = []
+        self.recovered: list[str] = []
+
+    def get_collection(self, _c):
+        return _Collection(self.points)
+
+    def list_snapshots(self, _c):
+        return list(self.snaps)
+
+    def create_snapshot(self, _c, wait=True):
+        s = _Snap(f"c-{len(self.snaps)}-2026-09-03-00-00-0{len(self.snaps)}.snapshot", f"2026-09-03T00:00:0{len(self.snaps)}")
+        self.snaps.append(s)
+        return s
+
+    def delete_snapshot(self, _c, name):
+        self.deleted.append(name)
+        self.snaps = [s for s in self.snaps if s.name != name]
+
+    def recover_snapshot(self, _c, location, wait=True):
+        self.recovered.append(location)
+        return True
+
+
+def test_fingerprint_orders_by_creation_time_not_name():
+    # Names sort by checksum segment; ordering must follow creation_time.
+    c = _FakeQdrant(100, [
+        _Snap("c-zzz-2026-09-02-10-00-00.snapshot", "2026-09-02T10:00:00"),
+        _Snap("c-aaa-2026-09-02-09-00-00.snapshot", "2026-09-02T09:00:00"),
+    ])
+    fp = snapshot_fingerprint(c, "coll")
+    assert fp["snapshot_names"] == [
+        "c-aaa-2026-09-02-09-00-00.snapshot",
+        "c-zzz-2026-09-02-10-00-00.snapshot",
+    ]
+
+
+def test_fingerprint_prefers_recorded_pin():
+    c = _FakeQdrant(100, [
+        _Snap("c-a-old.snapshot", "2026-09-02T09:00:00"),
+        _Snap("c-b-pin.snapshot", "2026-09-02T11:00:00"),
+    ])
+    fp = snapshot_fingerprint(c, "coll", prefer_name="c-b-pin.snapshot")
+    assert fp["snapshot_names"][0] == "c-b-pin.snapshot"
+
+
+def test_resolve_drift_match_skips_restore():
+    fp = {"points_count": 840396, "snapshot_names": ["pin.snapshot"]}
+    recorded = {"points_count": 840396, "snapshot_name": "pin.snapshot"}
+    assert resolve_snapshot_action(fp, recorded, restore="drift", record_mode=False) == ("skip", "pin.snapshot")
+
+
+def test_resolve_drift_restores_recorded_pin_despite_stray():
+    # A stray snapshot lists first; the recorded pin still exists — restore
+    # the RECORDED name, never whichever snapshot happens to sort first.
+    fp = {"points_count": 840396, "snapshot_names": ["stray.snapshot", "pin.snapshot"]}
+    recorded = {"points_count": 840396, "snapshot_name": "pin.snapshot"}
+    action, name = resolve_snapshot_action(fp, recorded, restore="drift", record_mode=False)
+    assert (action, name) == ("restore", "pin.snapshot")
+
+
+def test_resolve_drift_fails_when_recorded_pin_deleted():
+    # Blocker 3: a deleted pin on a gate run must fail closed — a gate run
+    # never pins live state, even at the same points count.
+    fp = {"points_count": 840396, "snapshot_names": ["other.snapshot"]}
+    recorded = {"points_count": 840396, "snapshot_name": "pin.snapshot"}
+    action, reason = resolve_snapshot_action(fp, recorded, restore="drift", record_mode=False)
+    assert action == "fail"
+    assert "never pins live state" in reason
+
+
+def test_resolve_drift_fails_without_recorded_pin():
+    fp = {"points_count": 840396, "snapshot_names": ["whatever.snapshot"]}
+    action, _ = resolve_snapshot_action(fp, None, restore="drift", record_mode=False)
+    assert action == "fail"
+
+
+def test_resolve_drift_record_mode_pins():
+    fp = {"points_count": 840396, "snapshot_names": []}
+    assert resolve_snapshot_action(fp, None, restore="drift", record_mode=True) == ("pin", None)
+
+
+def test_resolve_never_skips():
+    fp = {"points_count": 1, "snapshot_names": []}
+    action, _ = resolve_snapshot_action(fp, None, restore="never", record_mode=False)
+    assert action == "skip"
+
+
+def test_resolve_always_restores_recorded_not_live():
+    fp = {"points_count": 840396, "snapshot_names": ["stray.snapshot", "pin.snapshot"]}
+    recorded = {"points_count": 840396, "snapshot_name": "pin.snapshot"}
+    assert resolve_snapshot_action(fp, recorded, restore="always", record_mode=False) == ("restore", "pin.snapshot")
+    action, _ = resolve_snapshot_action(fp, None, restore="always", record_mode=False)
+    assert action == "fail"
+
+
+def test_pin_snapshot_creates_when_missing():
+    c = _FakeQdrant(840396, [])
+    fp = pin_snapshot(c, "coll")
+    assert fp["snapshot_name"].startswith("c-0-")
+    assert fp["points_count"] == 840396
+
+
+def test_pin_snapshot_protects_recorded_and_prunes_strays():
+    recorded = "c-pin-2026-09-01.snapshot"
+    c = _FakeQdrant(840396, [
+        _Snap("c-x-2026-09-02.snapshot", "2026-09-02T00:00:00"),
+        _Snap(recorded, "2026-09-01T00:00:00"),
+        _Snap("c-y-2026-09-03.snapshot", "2026-09-03T00:00:00"),
+    ])
+    fp = pin_snapshot(c, "coll", keep=recorded)
+    assert fp["snapshot_name"] == recorded
+    assert c.deleted == ["c-x-2026-09-02.snapshot", "c-y-2026-09-03.snapshot"]
+
+
+def test_restore_snapshot_uses_recorded_name_and_dir_setting():
+    c = _FakeQdrant(840396, [_Snap("c-pin.snapshot", "2026-09-01T00:00:00")])
+    fp = restore_snapshot(c, "coll", "c-pin.snapshot", snapshots_dir="/snapshots")
+    assert fp == {"points_count": 840396, "snapshot_name": "c-pin.snapshot"}
+    assert c.recovered == ["file:///snapshots/coll/c-pin.snapshot"]
+
+
+def test_restore_snapshot_fails_closed_when_missing():
+    c = _FakeQdrant(840396, [])
+    with pytest.raises(RuntimeError, match="missing"):
+        restore_snapshot(c, "coll", "gone.snapshot")
+
+
+# --------------------------------------------------------- metric cap / ideal
+def test_mrr_capped_at_limit():
+    e = _entry(expected_doc_ids=["SA38-0673-70"])
+    hits = [_Hit(f"OTHER{i}", score=0.9) for i in range(8)] + [_Hit("SA38-0673-70", score=0.5)]
+    row = score_row(hits, e)
+    assert row["mrr"] == 0.0  # relevant at rank 9 is outside MRR@8
+    assert row["recall@8"] == 0.0
+
+
+def test_ndcg_graded_ideal_single_max_gain_for_multi_doc():
+    # Two expected docs with a singular heading gold: the ideal gives max
+    # gain (2) to ONE doc and plain gain (1) to the other — not max to both.
+    e = _entry(expected_doc_ids=["D1", "D2"], expected_heading="IEA794I")
+    hits = [_Hit("D1", heading="IEA794I", score=1.0)]  # D2 missed
+    row = score_row(hits, e)
+    # deduped: D1 rank1 gain2; ideal [2,1]: (2/1) / (2/1 + 1/1.585) = 0.7604
+    assert row["ndcg@8"] == pytest.approx(0.7604, abs=0.001)
