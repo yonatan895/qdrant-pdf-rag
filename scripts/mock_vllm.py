@@ -168,6 +168,39 @@ class Handler(BaseHTTPRequestHandler):
         prompt_tokens = sum(len(str(m.get("content", "")).split()) for m in messages)
         completion_tokens = len(content.split())
         finish_reason = req.get("mock_finish_reason", "stop")
+        if req.get("stream"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            split_at = min(len(content), max(1, len(content) // 2))
+            part1 = content[:split_at]
+            part2 = content[split_at:]
+            chunk1 = {
+                "id": "chatcmpl-mock-deterministic",
+                "object": "chat.completion.chunk",
+                "model": req.get("model", "mock-reasoning"),
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": part1}, "finish_reason": None}],
+            }
+            self.wfile.write(f"data: {json.dumps(chunk1)}\n\n".encode())
+            self.wfile.flush()
+            chunk2 = {
+                "id": "chatcmpl-mock-deterministic",
+                "object": "chat.completion.chunk",
+                "model": req.get("model", "mock-reasoning"),
+                "choices": [{"index": 0, "delta": {"content": part2}, "finish_reason": finish_reason}],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "reasoning_tokens": 10,
+                    "total_tokens": prompt_tokens + completion_tokens + 10,
+                },
+            }
+            self.wfile.write(f"data: {json.dumps(chunk2)}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            return
+
         self._send(
             200,
             {

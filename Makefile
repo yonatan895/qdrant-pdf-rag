@@ -176,8 +176,9 @@ loadtest: | .venv
 EMBED_MODE ?= hash
 EVAL_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-vllm.json,evals/baseline.json)
 HARNESS_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-vllm.json,benchmarks/harness.json)
+HARNESS_L3_BASELINE ?= $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-l3-vllm.json,benchmarks/harness-l3.json)
 eval eval-baseline eval-draft eval-holdout eval-answers eval-report eval-html eval-compare \
-	harness-gate harness-baseline harness-l2: \
+	harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline: \
 	export EMBED_MODE := $(EMBED_MODE)
 
 # Eval against a running Qdrant (sim-qdrant or QDRANT_SIM_URL); scores
@@ -250,6 +251,30 @@ harness-l2: | .venv
 	.venv/bin/python scripts/harness_l2.py --max-queries $(or $(N),24) \
 	  --out $(BUNDLE_DIR)/harness-l2-report.json --summary $(BUNDLE_DIR)/harness-l2-summary.md
 
+# Harness L3 (performance & latency tier): per-stage p50/p95 (embed_ms,
+# qdrant_ms, llm_ms, ttft_ms), TTFT via streaming, and VRAM footprint
+# under concurrent load. Live stack only; RC-only, never a PR gate, never
+# GitLab. Gates on 0 errors, 0 missing headers, and p95 within baseline limit (x3).
+# NOTE: The agent server process must be started with LLM_STREAM=true (e.g. via
+# `make run-agent` or container env) for TTFT streaming to be active on /v1/answer;
+# passing LLM_STREAM to the harness runner is a client-side no-op.
+.PHONY: harness-l3 harness-l3-baseline
+harness-l3: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/harness_l3.py \
+	  --url $(or $(AGENT_URL),http://127.0.0.1:8080) \
+	  --baseline "$(HARNESS_L3_BASELINE)" \
+	  --gate \
+	  --out $(BUNDLE_DIR)/harness-l3-report.json --summary $(BUNDLE_DIR)/harness-l3-summary.md
+
+harness-l3-baseline: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/harness_l3.py \
+	  --url $(or $(AGENT_URL),http://127.0.0.1:8080) \
+	  --baseline "$(HARNESS_L3_BASELINE)" \
+	  --update-baseline \
+	  --out $(BUNDLE_DIR)/harness-l3-report.json --summary $(BUNDLE_DIR)/harness-l3-summary.md
+
 # Draft golden-set candidates from a collection's payload (edit the queries).
 eval-draft: | .venv
 	.venv/bin/python scripts/eval_retrieval.py --label-draft --docs 40
@@ -304,7 +329,7 @@ ask: | .venv
 	PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer $(if $(QUERY),--query "$(QUERY)",) $(if $(COLLECTION),--collection "$(COLLECTION)",) $(if $(LIMIT),--limit "$(LIMIT)",) $(if $(PRODUCT),--product "$(PRODUCT)",) $(if $(VERSION),--version "$(VERSION)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",)
 
 # Local GPU acceleration & vLLM testing
-.PHONY: local-vllm local-vllm-embed test-vllm-e2e
+.PHONY: local-vllm local-vllm-embed test-vllm-e2e run-agent
 local-vllm:
 	sh scripts/run_local_vllm.sh
 
@@ -313,6 +338,10 @@ local-vllm-embed:
 
 test-vllm-e2e: | .venv
 	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",)
+
+# Run agent locally under uvicorn (LLM_STREAM=true enables TTFT streaming for L3)
+run-agent: | .venv
+	LLM_STREAM=true .venv/bin/python -m uvicorn mainframe_rag.agent.app:app --host 0.0.0.0 --port $(or $(PORT),8080)
 
 
 # ---------------------------------------------------------------- e2e demo
@@ -332,9 +361,9 @@ help:
 	@echo "Connected host : venv wheelhouse bm25-weights pull-chart helm-lint helm-template build-images"
 	@echo "Air-gap happy path : airgap-pack (connected) | airgap-load airgap-deploy airgap-ingest airgap-smoke (inside the gap)"
 	@echo "Simulation     : sim (pytest integration tier; docker Qdrant) | sim-qdrant sim-clean"
-	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest"
+	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest | harness-l3"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper)"
 	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"
-	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | test-vllm-e2e (automated end-to-end suite)"
+	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."
