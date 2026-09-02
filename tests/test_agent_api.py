@@ -1078,3 +1078,140 @@ def test_server_timing_headers_emitted_on_search_and_answer(client, monkeypatch)
     assert "llm;dur=" in st_ans
     assert "ttft;dur=45" in st_ans
 
+
+def test_httpx_llm_client_streaming_measures_ttft_on_first_content_token():
+    from contextlib import contextmanager
+
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    lines = [
+        'data: {"choices": [{"delta": {}}]}',
+        'data: {"choices": [{"delta": {"content": "Hello "}}]}',
+        'data: {"choices": [{"delta": {"content": "World"}}], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}',
+        "data: [DONE]",
+    ]
+
+    class FakeStreamResp:
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            return iter(lines)
+
+    class FakeStreamingClient:
+        @contextmanager
+        def stream(self, method, url, json=None):
+            yield FakeStreamResp()
+
+    settings = Settings(
+        llm_base_url="http://llm.internal/v1",
+        llm_model_reasoning="test-reasoning-model",
+        llm_stream=True,
+        _env_file=None,
+    )
+    client = HttpxLLMClient(settings, client=FakeStreamingClient())
+    res = client.chat([ChatMessage(role="user", content="hi")])
+    assert res.content == "Hello World"
+    assert res.ttft_ms is not None
+    assert res.usage.total_tokens == 7
+
+
+def test_httpx_llm_client_streaming_empty_content_falls_back_to_post():
+    from contextlib import contextmanager
+
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    class FakeEmptyStreamResp:
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            return iter(['data: {"choices": [{"delta": {}}]}', "data: [DONE]"])
+
+    class FakePostResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"role": "assistant", "content": "Fallback content"}}],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
+            }
+
+    class FakeFallbackClient:
+        def __init__(self):
+            self.stream_called = False
+            self.post_called = False
+
+        @contextmanager
+        def stream(self, method, url, json=None):
+            self.stream_called = True
+            yield FakeEmptyStreamResp()
+
+        def post(self, url, json=None):
+            self.post_called = True
+            return FakePostResp()
+
+    settings = Settings(
+        llm_base_url="http://llm.internal/v1",
+        llm_model_reasoning="test-reasoning-model",
+        llm_stream=True,
+        _env_file=None,
+    )
+    fake_client = FakeFallbackClient()
+    client = HttpxLLMClient(settings, client=fake_client)
+    res = client.chat([ChatMessage(role="user", content="hi")])
+    assert fake_client.stream_called is True
+    assert fake_client.post_called is True
+    assert res.content == "Fallback content"
+
+
+def test_httpx_llm_client_streaming_error_falls_back_to_post():
+    from contextlib import contextmanager
+
+    import httpx2
+
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    class FakePostResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"role": "assistant", "content": "Post after stream error"}}],
+                "usage": {"total_tokens": 5},
+            }
+
+    class FakeErrorStreamClient:
+        def __init__(self):
+            self.post_called = False
+
+        @contextmanager
+        def stream(self, method, url, json=None):
+            if False:
+                yield None
+            raise httpx2.ConnectError("Connection dropped during streaming")
+
+        def post(self, url, json=None):
+            self.post_called = True
+            return FakePostResp()
+
+    settings = Settings(
+        llm_base_url="http://llm.internal/v1",
+        llm_model_reasoning="test-reasoning-model",
+        llm_stream=True,
+        _env_file=None,
+    )
+    fake_client = FakeErrorStreamClient()
+    client = HttpxLLMClient(settings, client=fake_client)
+    res = client.chat([ChatMessage(role="user", content="hi")])
+    assert fake_client.post_called is True
+    assert res.content == "Post after stream error"
+

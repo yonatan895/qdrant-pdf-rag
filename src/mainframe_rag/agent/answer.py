@@ -8,12 +8,15 @@ settings.llm_model_reasoning; there is deliberately no other model knob.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from typing import Any
 
 import httpx2
 from pydantic import BaseModel, Field
+
+log = logging.getLogger(__name__)
 
 from mainframe_rag.agent.tokenizer import estimate_tokens
 from mainframe_rag.config import Settings
@@ -328,7 +331,7 @@ class HttpxLLMClient:
             body["reasoning_effort"] = reasoning_effort
         if temperature is not None:
             body["temperature"] = temperature
-        if getattr(self._settings, "llm_stream", True) and hasattr(self._http(), "stream"):
+        if getattr(self._settings, "llm_stream", False) and hasattr(self._http(), "stream"):
             body_stream = {**body, "stream": True, "stream_options": {"include_usage": True}}
             try:
                 t0 = time.monotonic()
@@ -366,20 +369,23 @@ class HttpxLLMClient:
                             if choices[0].get("finish_reason"):
                                 finish_reason = str(choices[0]["finish_reason"])
                 content = "".join(content_parts)
-                reasoning_tokens = (
-                    usage_data.get("reasoning_tokens")
-                    or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
-                    or 0
-                )
-                usage = TokenUsage(
-                    prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
-                    completion_tokens=int(usage_data.get("completion_tokens") or 0),
-                    reasoning_tokens=int(reasoning_tokens),
-                    total_tokens=int(usage_data.get("total_tokens") or 0),
-                )
-                return ChatResult(content=content, finish_reason=finish_reason, usage=usage, ttft_ms=ttft_ms)
-            except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError):
-                pass
+                if not content:
+                    log.warning("streaming chat returned empty content; falling back to non-streaming POST")
+                else:
+                    reasoning_tokens = (
+                        usage_data.get("reasoning_tokens")
+                        or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
+                        or 0
+                    )
+                    usage = TokenUsage(
+                        prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
+                        completion_tokens=int(usage_data.get("completion_tokens") or 0),
+                        reasoning_tokens=int(reasoning_tokens),
+                        total_tokens=int(usage_data.get("total_tokens") or 0),
+                    )
+                    return ChatResult(content=content, finish_reason=finish_reason, usage=usage, ttft_ms=ttft_ms)
+            except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
+                log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
 
         resp = self._http().post(
             f"{base_url.rstrip('/')}/chat/completions",

@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     llm_token_safety_margin: int = Field(default=128, ge=0, le=1024)
     llm_max_chunk_tokens_narrative: int = Field(default=350, ge=50, le=2048)
     llm_tokenize_timeout_s: float = Field(default=5.0, gt=0.0, le=60.0)
-    llm_stream: bool = Field(default=True, description="Stream chat completions to measure TTFT")
+    llm_stream: bool = Field(default=False, description="Stream chat completions to measure TTFT")
 
     # Bounded httpx2 connection-establishment retries (0-5). These fire only
     # when the request was never sent (DNS/refused), so they are safe for any

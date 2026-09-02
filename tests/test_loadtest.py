@@ -126,6 +126,58 @@ def test_export_to_baseline_preserves_existing_keys(tmp_path: Path):
     assert doc["vram"]["used_mb"] == 3500.0
 
 
+def test_query_gpu_name_success_and_fail(monkeypatch):
+    from scripts.loadtest import query_gpu_name
+
+    mock_run = MagicMock(
+        return_value=subprocess.CompletedProcess(
+            args=["nvidia-smi"],
+            returncode=0,
+            stdout="NVIDIA RTX 5060\n",
+            stderr="",
+        )
+    )
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    assert query_gpu_name() == "NVIDIA RTX 5060"
+
+    def mock_fail(*a, **k):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(subprocess, "run", mock_fail)
+    assert query_gpu_name() is None
+
+
+def test_export_to_baseline_saves_env(tmp_path: Path):
+    baseline_file = tmp_path / "baseline.json"
+    result = {
+        "latency_ms": {"p50": 15.0, "p95": 30.0},
+        "stages": {"embed_ms": {"p50": 5.0, "p95": 10.0}},
+    }
+    env = {"cpu_count": 8, "embed_mode": "vllm", "gpu_name": "RTX 5060"}
+    export_to_baseline(baseline_file, "search", result, env=env)
+    doc = json.loads(baseline_file.read_text(encoding="utf-8"))
+    assert doc["_meta"]["env"]["cpu_count"] == 8
+    assert doc["_meta"]["env"]["embed_mode"] == "vllm"
+    assert doc["_meta"]["env"]["gpu_name"] == "RTX 5060"
+
+
+def test_run_load_tracks_missing_timings_on_header_absence(monkeypatch):
+    class FakeResponseNoTiming:
+        def __init__(self):
+            self.status_code = 200
+            self.headers = {}
+
+    def fake_post(self, *a, **k):
+        return FakeResponseNoTiming()
+
+    import httpx2
+    monkeypatch.setattr(httpx2.Client, "post", fake_post)
+    res = run_load("http://127.0.0.1:8080", "search", ["IEA500I"], concurrency=2, duration_s=0.1)
+    assert res["requests"] > 0
+    assert res["missing_timings"] == res["requests"]
+    assert res["stages"] == {}
+
+
 def test_run_load_extracts_stages_and_percentiles(monkeypatch):
     class FakeResponse:
         def __init__(self):
@@ -141,6 +193,7 @@ def test_run_load_extracts_stages_and_percentiles(monkeypatch):
     assert res["endpoint"] == "search"
     assert res["requests"] > 0
     assert res["errors"] == 0
+    assert res["missing_timings"] == 0
     assert "embed_ms" in res["stages"]
     assert res["stages"]["embed_ms"]["p50"] == 15.0
     assert res["stages"]["qdrant_ms"]["p50"] == 25.0

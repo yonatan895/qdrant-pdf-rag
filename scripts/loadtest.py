@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import os
 import re
 import subprocess
 import sys
@@ -91,6 +92,23 @@ def query_vram_mb() -> dict[str, float] | None:
     return None
 
 
+def query_gpu_name() -> str | None:
+    """Query NVIDIA GPU model name via nvidia-smi. Returns None if unavailable."""
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip().splitlines()[0]
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def run_load(
     base_url: str,
     endpoint: str,
@@ -109,13 +127,14 @@ def run_load(
     latencies: list[float] = []
     stage_latencies: dict[str, list[float]] = collections.defaultdict(list)
     errors = 0
+    missing_timings = 0
     lock = threading.Lock()
     query_idx = {"next": 0}
 
     vram_start = query_vram_mb()
 
     def worker() -> None:
-        nonlocal errors
+        nonlocal errors, missing_timings
         client = httpx2.Client(timeout=30.0)
         try:
             while time.monotonic() < deadline:
@@ -136,6 +155,8 @@ def run_load(
                 with lock:
                     latencies.append(elapsed_ms)
                     if ok:
+                        if not timings:
+                            missing_timings += 1
                         for metric, val in timings.items():
                             stage_latencies[metric].append(val)
                     else:
@@ -172,6 +193,7 @@ def run_load(
         "duration_s": round(wall, 3),
         "requests": len(ordered),
         "errors": errors,
+        "missing_timings": missing_timings,
         "rps": round(len(ordered) / wall, 3) if wall > 0 else 0.0,
         "latency_ms": {
             "p50": round(_percentile(ordered, 50), 2),
@@ -197,7 +219,12 @@ def _set_nested(target: dict[str, Any], dotted: str, value: Any) -> None:
     node[parts[-1]] = value
 
 
-def export_to_baseline(baseline_path: Path, endpoint: str, result: dict[str, Any]) -> None:
+def export_to_baseline(
+    baseline_path: Path,
+    endpoint: str,
+    result: dict[str, Any],
+    env: dict[str, Any] | None = None,
+) -> None:
     """Export or update load test metrics (latencies, per-stage percentiles,
     and VRAM footprint) into the baseline JSON file preserving nested shape."""
     baseline: dict[str, Any] = {}
@@ -209,11 +236,16 @@ def export_to_baseline(baseline_path: Path, endpoint: str, result: dict[str, Any
 
     if "_meta" not in baseline:
         baseline["_meta"] = {
-            "note": "Re-baseline via `make bench-baseline` or `loadtest.py --baseline`; dedicated PR (AGENTS.md).",
+            "note": "Re-baseline via `make harness-l3 --update-baseline`; dedicated PR (AGENTS.md).",
             "updated": time.strftime("%Y-%m-%d"),
         }
     else:
         baseline["_meta"]["updated"] = time.strftime("%Y-%m-%d")
+
+    if env:
+        existing_env = baseline["_meta"].get("env", {})
+        existing_env.update(env)
+        baseline["_meta"]["env"] = existing_env
 
     lat = result.get("latency_ms", {})
     if "p50" in lat:
@@ -282,7 +314,8 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
         if args.baseline:
-            export_to_baseline(args.baseline, ep, res)
+            env = {"cpu_count": os.cpu_count(), "gpu_name": query_gpu_name()}
+            export_to_baseline(args.baseline, ep, res, env=env)
             print(f"exported {ep} metrics to baseline {args.baseline}", file=sys.stderr)
 
     output = results if args.endpoint == "all" else results[args.endpoint]

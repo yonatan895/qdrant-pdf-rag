@@ -55,11 +55,51 @@ def _sample_baseline() -> dict:
     }
 
 
-def test_gate_verdict_no_baseline():
+def test_gate_verdict_no_baseline_clean():
     report = _sample_report()
     verdict, reasons = gate_verdict_l3(report, None)
     assert verdict == "baseline"
     assert "no baseline recorded" in reasons[0]
+
+
+def test_gate_verdict_no_baseline_with_errors_holds():
+    """Fail-closed invariant: request errors must NOT be dropped when baseline is missing."""
+    report = _sample_report()
+    report["search"]["errors"] = 3
+    verdict, reasons = gate_verdict_l3(report, None)
+    assert verdict == "hold"
+    assert any("search: 3 request error(s)" in r for r in reasons)
+
+
+def test_gate_verdict_missing_server_timing_header_fails():
+    """Responses returning 200 without Server-Timing headers must fail the gate."""
+    report = _sample_report()
+    report["search"]["missing_timings"] = 5
+    baseline = _sample_baseline()
+    verdict, reasons = gate_verdict_l3(report, baseline)
+    assert verdict == "hold"
+    assert any("search: 5 response(s) missing Server-Timing header" in r for r in reasons)
+
+
+def test_gate_verdict_missing_expected_stage_fails():
+    """A missing stage present in baseline is a header regression and must fail."""
+    report = _sample_report()
+    del report["answer"]["stages"]["llm_ms"]
+    baseline = _sample_baseline()
+    verdict, reasons = gate_verdict_l3(report, baseline)
+    assert verdict == "hold"
+    assert any("answer.stages: expected stage llm_ms missing" in r for r in reasons)
+
+
+def test_gate_verdict_env_mismatch_fails_closed():
+    """PR 71 invariant: different environments refuse to gate to prevent spurious regressions."""
+    report = _sample_report()
+    report["env"] = {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a"}
+    baseline = _sample_baseline()
+    baseline["_meta"] = {"env": {"cpu_count": 4, "embed_mode": "vllm", "qdrant_image": "pin-a"}}
+    verdict, reasons = gate_verdict_l3(report, baseline)
+    assert verdict == "hold"
+    assert any("baseline env mismatch: cpu_count 4 != runner 8" in r for r in reasons)
 
 
 def test_gate_verdict_passes_within_tolerance():
@@ -110,5 +150,5 @@ def test_summary_markdown_renders_tables_and_vram():
     assert "qdrant_ms" in md
     assert "llm_ms" in md
     assert "ttft_ms" in md
-    assert "VRAM Footprint" in md
+    assert "VRAM Footprint (trend data; not gated)" in md
     assert "4000.0 MB" in md
