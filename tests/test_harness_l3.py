@@ -102,6 +102,27 @@ def test_gate_verdict_env_mismatch_fails_closed():
     assert any("baseline env mismatch: cpu_count 4 != runner 8" in r for r in reasons)
 
 
+def test_gate_verdict_gpu_name_mismatch_fails():
+    """Gate fails closed if both baseline and runner have non-null differing GPUs."""
+    report = _sample_report()
+    report["env"] = {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a", "gpu_name": "RTX 5060"}
+    baseline = _sample_baseline()
+    baseline["_meta"] = {"env": {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a", "gpu_name": "RTX 4090"}}
+    verdict, reasons = gate_verdict_l3(report, baseline)
+    assert verdict == "hold"
+    assert any("baseline env mismatch: gpu_name 'RTX 4090' != runner 'RTX 5060'" in r for r in reasons)
+
+
+def test_gate_verdict_gpu_name_null_passes():
+    """If one side lacks GPU info (e.g. CPU runner or unprobed), GPU gate does not fire."""
+    report = _sample_report()
+    report["env"] = {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a", "gpu_name": None}
+    baseline = _sample_baseline()
+    baseline["_meta"] = {"env": {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a", "gpu_name": "RTX 4090"}}
+    verdict, _ = gate_verdict_l3(report, baseline)
+    assert verdict == "pass"
+
+
 def test_gate_verdict_passes_within_tolerance():
     report = _sample_report()
     baseline = _sample_baseline()

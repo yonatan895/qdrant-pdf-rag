@@ -416,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
             os.environ["ALLOW_HASH_MODE"] = "true"
         os.environ["LLM_BASE_URL"] = settings.llm_base_url or ""
         os.environ["LLM_MODEL_REASONING"] = settings.require_reasoning_model()
+        os.environ["LLM_STREAM"] = "true"
 
         from fastapi.testclient import TestClient
 

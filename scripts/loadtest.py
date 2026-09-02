@@ -33,6 +33,8 @@ from typing import Any
 
 import httpx2
 
+REPO = Path(__file__).resolve().parents[1]
+
 DEFAULT_QUERIES = [
     "IEA500I operator message",
     "SA22-0000-00 initialization parameters",
@@ -226,7 +228,26 @@ def export_to_baseline(
     env: dict[str, Any] | None = None,
 ) -> None:
     """Export or update load test metrics (latencies, per-stage percentiles,
-    and VRAM footprint) into the baseline JSON file preserving nested shape."""
+    and VRAM footprint) into the baseline JSON file preserving nested shape.
+    Refuses to write to benchmarks/baseline.json to prevent polluting CI benchmarks.
+    Refuses to record runs with errors or missing Server-Timing headers."""
+    resolved = baseline_path.resolve()
+    ci_bench = (REPO / "benchmarks" / "baseline.json").resolve()
+    if resolved == ci_bench or (baseline_path.name == "baseline.json" and "benchmarks" in str(baseline_path)):
+        raise ValueError(
+            f"Refusing to export L3 metrics to {baseline_path}: benchmarks/baseline.json is reserved "
+            "for the CI benchmark gate. L3 metrics must be exported to dedicated L3 baseline files "
+            "(e.g. benchmarks/harness-l3*.json)."
+        )
+
+    errors = result.get("errors", 0)
+    missing_timings = result.get("missing_timings", 0)
+    if errors > 0 or missing_timings > 0:
+        raise ValueError(
+            f"Refusing to update baseline: {endpoint} run had faults (errors={errors}, "
+            f"missing_timings={missing_timings}). A broken run must not become the pin."
+        )
+
     baseline: dict[str, Any] = {}
     if baseline_path.exists():
         try:
@@ -285,9 +306,19 @@ def main(argv: list[str] | None = None) -> int:
         dest="baseline",
         type=Path,
         default=None,
-        help="export measured stage percentiles and VRAM into this baseline JSON file",
+        help="export measured stage percentiles and VRAM into this dedicated L3 baseline JSON file (refuses benchmarks/baseline.json)",
     )
     args = parser.parse_args(argv)
+
+    if args.baseline:
+        ci_bench = (REPO / "benchmarks" / "baseline.json").resolve()
+        if args.baseline.resolve() == ci_bench or (args.baseline.name == "baseline.json" and "benchmarks" in str(args.baseline)):
+            print(
+                f"ERROR: Refusing to export L3 metrics to {args.baseline}: benchmarks/baseline.json is reserved "
+                "for the CI benchmark gate. Specify a dedicated L3 baseline file (e.g. benchmarks/harness-l3.json).",
+                file=sys.stderr,
+            )
+            return 1
 
     queries = args.query or DEFAULT_QUERIES
     endpoints = ["search", "answer"] if args.endpoint == "all" else [args.endpoint]
@@ -299,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
         lat = res["latency_ms"]
         print(
             f"load[{ep}] requests={res['requests']} errors={res['errors']} "
+            f"missing_timings={res.get('missing_timings', 0)} "
             f"rps={res['rps']} p50={lat['p50']}ms p95={lat['p95']}ms p99={lat['p99']}ms",
             file=sys.stderr,
         )
@@ -314,6 +346,14 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
         if args.baseline:
+            if res.get("errors", 0) > 0 or res.get("missing_timings", 0) > 0:
+                print(
+                    f"ERROR: refusing to update baseline: {ep} run had faults "
+                    f"(errors={res.get('errors', 0)}, missing_timings={res.get('missing_timings', 0)}). "
+                    "A broken run must not become the pin.",
+                    file=sys.stderr,
+                )
+                return 1
             env = {"cpu_count": os.cpu_count(), "gpu_name": query_gpu_name()}
             export_to_baseline(args.baseline, ep, res, env=env)
             print(f"exported {ep} metrics to baseline {args.baseline}", file=sys.stderr)

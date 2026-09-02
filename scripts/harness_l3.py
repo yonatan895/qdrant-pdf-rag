@@ -107,6 +107,13 @@ def gate_verdict_l3(
                 f"baseline env mismatch: {key} {recorded!r} != runner {live!r} — "
                 "the baseline was captured in a different environment; re-baseline in the gate's own environment"
             )
+    recorded_gpu = recorded_env.get("gpu_name")
+    live_gpu = live_env.get("gpu_name")
+    if recorded_gpu and live_gpu and recorded_gpu != live_gpu:
+        reasons.append(
+            f"baseline env mismatch: gpu_name {recorded_gpu!r} != runner {live_gpu!r} — "
+            "the baseline was captured on a different GPU; re-baseline on this hardware"
+        )
     if any("baseline env mismatch" in r for r in reasons):
         return ("hold", reasons)
 
@@ -233,10 +240,25 @@ def main(argv: list[str] | None = None) -> int:
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
-    if args.update_baseline and args.baseline:
-        export_to_baseline(args.baseline, "search", search_res, env=env)
-        export_to_baseline(args.baseline, "answer", answer_res, env=env)
-        print(f"baseline updated at {args.baseline}", file=sys.stderr)
+    if args.update_baseline:
+        faults: list[str] = []
+        for ep, res in (("search", search_res), ("answer", answer_res)):
+            if res.get("errors", 0) > 0:
+                faults.append(f"{ep}: {res['errors']} request error(s)")
+            if res.get("missing_timings", 0) > 0:
+                faults.append(f"{ep}: {res['missing_timings']} response(s) missing Server-Timing header")
+        if faults:
+            print(
+                "ERROR: refusing to update baseline: load run had faults:\n  - "
+                + "\n  - ".join(faults)
+                + "\nA broken run must not become the pin.",
+                file=sys.stderr,
+            )
+            return 1
+        if args.baseline:
+            export_to_baseline(args.baseline, "search", search_res, env=env)
+            export_to_baseline(args.baseline, "answer", answer_res, env=env)
+            print(f"baseline updated at {args.baseline}", file=sys.stderr)
 
     summary_md = summary_markdown_l3(report, baseline)
     print(summary_md, file=sys.stderr)

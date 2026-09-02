@@ -69,7 +69,7 @@ def test_query_vram_mb_unavailable(monkeypatch):
 
 
 def test_export_to_baseline_new_file(tmp_path: Path):
-    baseline_file = tmp_path / "baseline.json"
+    baseline_file = tmp_path / "harness-l3.json"
     result = {
         "latency_ms": {"p50": 15.0, "p95": 30.0},
         "stages": {
@@ -91,7 +91,7 @@ def test_export_to_baseline_new_file(tmp_path: Path):
 
 
 def test_export_to_baseline_preserves_existing_keys(tmp_path: Path):
-    baseline_file = tmp_path / "baseline.json"
+    baseline_file = tmp_path / "harness-l3.json"
     existing = {
         "_meta": {"note": "existing", "env": {"cpu_count": 8}},
         "ingest": {"peak_rss_mb": 150.0},
@@ -148,7 +148,7 @@ def test_query_gpu_name_success_and_fail(monkeypatch):
 
 
 def test_export_to_baseline_saves_env(tmp_path: Path):
-    baseline_file = tmp_path / "baseline.json"
+    baseline_file = tmp_path / "harness-l3.json"
     result = {
         "latency_ms": {"p50": 15.0, "p95": 30.0},
         "stages": {"embed_ms": {"p50": 5.0, "p95": 10.0}},
@@ -159,6 +159,25 @@ def test_export_to_baseline_saves_env(tmp_path: Path):
     assert doc["_meta"]["env"]["cpu_count"] == 8
     assert doc["_meta"]["env"]["embed_mode"] == "vllm"
     assert doc["_meta"]["env"]["gpu_name"] == "RTX 5060"
+
+
+def test_export_to_baseline_refuses_ci_benchmark_file():
+    import pytest
+    from scripts.loadtest import REPO
+
+    ci_bench = REPO / "benchmarks" / "baseline.json"
+    with pytest.raises(ValueError, match="reserved for the CI benchmark gate"):
+        export_to_baseline(ci_bench, "search", {"latency_ms": {"p50": 10.0}})
+
+
+def test_export_to_baseline_refuses_faulty_run(tmp_path: Path):
+    import pytest
+
+    f = tmp_path / "harness-l3.json"
+    with pytest.raises(ValueError, match="run had faults"):
+        export_to_baseline(f, "search", {"errors": 1})
+    with pytest.raises(ValueError, match="run had faults"):
+        export_to_baseline(f, "search", {"missing_timings": 2})
 
 
 def test_run_load_tracks_missing_timings_on_header_absence(monkeypatch):
