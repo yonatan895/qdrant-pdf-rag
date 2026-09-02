@@ -177,7 +177,7 @@ EMBED_MODE ?= hash
 EVAL_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-vllm.json,evals/baseline.json)
 HARNESS_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-vllm.json,benchmarks/harness.json)
 eval eval-baseline eval-draft eval-holdout eval-answers eval-report eval-html eval-compare \
-	harness-gate harness-baseline: \
+	harness-gate harness-baseline harness-l2: \
 	export EMBED_MODE := $(EMBED_MODE)
 
 # Eval against a running Qdrant (sim-qdrant or QDRANT_SIM_URL); scores
@@ -238,6 +238,17 @@ harness-baseline: | .venv
 	@mkdir -p $(BUNDLE_DIR)
 	.venv/bin/python scripts/harness.py --update-baseline --baseline "$(HARNESS_BASELINE)" --restore $(or $(RESTORE),drift) \
 	  --out $(BUNDLE_DIR)/harness-report.json
+
+# Harness L2 (answer tier): citation precision/recall, temp-0 NLI faithfulness
+# judge, truncation rate from the app's non-stop alerts, syntax-shape gold.
+# Live GPU stack only (Qdrant + embedding vLLM + reasoning vLLM); structural
+# fails gate the exit code, rates are trend data. Never a PR gate, never
+# GitLab. N bounds reasoning-model calls (deterministic stratified sample).
+.PHONY: harness-l2
+harness-l2: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/harness_l2.py --max-queries $(or $(N),24) \
+	  --out $(BUNDLE_DIR)/harness-l2-report.json --summary $(BUNDLE_DIR)/harness-l2-summary.md
 
 # Draft golden-set candidates from a collection's payload (edit the queries).
 eval-draft: | .venv
