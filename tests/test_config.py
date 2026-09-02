@@ -63,6 +63,7 @@ def test_outbound_timeout_defaults_bounded():
     assert s.llm_token_safety_margin == 128
     assert s.llm_max_chunk_tokens_narrative == 350
     assert s.llm_tokenize_timeout_s == 5.0
+    assert s.llm_stream is True
 
 
 def test_hash_mode_requires_explicit_allow():

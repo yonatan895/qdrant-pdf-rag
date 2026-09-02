@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 import httpx2
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -244,7 +244,7 @@ def healthz() -> HealthzResponse:
 
 
 @app.post("/v1/search", response_model=SearchResponse)
-def v1_search(request: Request, req: SearchRequest) -> SearchResponse:
+def v1_search(request: Request, req: SearchRequest, response: Response) -> SearchResponse:
     request_id = request.state.request_id
     started = time.monotonic()
     try:
@@ -256,6 +256,13 @@ def v1_search(request: Request, req: SearchRequest) -> SearchResponse:
     except Exception as exc:
         log.error(json_log(request_id, "search", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "retrieval failed") from exc
+    timing_parts = []
+    if timings.get("embed_ms") is not None:
+        timing_parts.append(f"embed;dur={timings['embed_ms']}")
+    if timings.get("qdrant_ms") is not None:
+        timing_parts.append(f"qdrant;dur={timings['qdrant_ms']}")
+    if timing_parts:
+        response.headers["Server-Timing"] = ", ".join(timing_parts)
     log.info(
         json_log(
             request_id, "search", query_kind=kind, hits=len(hits),
@@ -271,7 +278,7 @@ def v1_search(request: Request, req: SearchRequest) -> SearchResponse:
 
 
 @app.post("/v1/answer", response_model=AnswerResponse)
-def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
+def v1_answer(request: Request, req: AnswerRequest, response: Response) -> AnswerResponse:
     request_id = request.state.request_id
     started = time.monotonic()
     # Fail fast before any retrieval: the reasoning model (and its endpoint)
@@ -298,6 +305,13 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
         raise AppError(502, "upstream_error", "retrieval failed") from exc
 
     if not hits:
+        timing_parts = []
+        if timings.get("embed_ms") is not None:
+            timing_parts.append(f"embed;dur={timings['embed_ms']}")
+        if timings.get("qdrant_ms") is not None:
+            timing_parts.append(f"qdrant;dur={timings['qdrant_ms']}")
+        if timing_parts:
+            response.headers["Server-Timing"] = ", ".join(timing_parts)
         log.info(json_log(request_id, "answer", query_kind=kind, hits=0))
         return AnswerResponse(
             request_id=request_id,
@@ -337,6 +351,7 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
             )
         )
         llm_ms = int((time.monotonic() - t0) * 1000)
+        ttft_ms = chat_res.ttft_ms
         content = chat_res.content
         finish_reason = chat_res.finish_reason
         usage = chat_res.usage
@@ -362,20 +377,37 @@ def v1_answer(request: Request, req: AnswerRequest) -> AnswerResponse:
             )
         )
 
-    log.info(
-        json_log(
-            request_id, "answer", query_kind=kind, query_complexity=complexity, hits=len(hits),
-            embed_ms=timings.get("embed_ms"), qdrant_ms=timings.get("qdrant_ms"),
-            llm_ms=llm_ms, citations=len(parsed.citations),
-            has_script=parsed.script is not None,
-            finish_reason=finish_reason,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            reasoning_tokens=usage.reasoning_tokens,
-            total_tokens=usage.total_tokens,
-            elapsed_ms=int((time.monotonic() - started) * 1000),
-        )
-    )
+    timing_parts = []
+    if timings.get("embed_ms") is not None:
+        timing_parts.append(f"embed;dur={timings['embed_ms']}")
+    if timings.get("qdrant_ms") is not None:
+        timing_parts.append(f"qdrant;dur={timings['qdrant_ms']}")
+    if llm_ms is not None:
+        timing_parts.append(f"llm;dur={llm_ms}")
+    if ttft_ms is not None:
+        timing_parts.append(f"ttft;dur={ttft_ms}")
+    if timing_parts:
+        response.headers["Server-Timing"] = ", ".join(timing_parts)
+
+    log_fields = {
+        "query_kind": kind,
+        "query_complexity": complexity,
+        "hits": len(hits),
+        "embed_ms": timings.get("embed_ms"),
+        "qdrant_ms": timings.get("qdrant_ms"),
+        "llm_ms": llm_ms,
+        "citations": len(parsed.citations),
+        "has_script": parsed.script is not None,
+        "finish_reason": finish_reason,
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+        "total_tokens": usage.total_tokens,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+    }
+    if ttft_ms is not None:
+        log_fields["ttft_ms"] = ttft_ms
+    log.info(json_log(request_id, "answer", **log_fields))
     return AnswerResponse(
         request_id=request_id,
         answer=parsed.answer,

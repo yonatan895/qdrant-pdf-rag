@@ -1045,3 +1045,36 @@ def test_chat_content_none_becomes_empty_string():
     assert isinstance(result, ChatResult)
     assert result.content == ""
 
+
+def test_server_timing_headers_emitted_on_search_and_answer(client, monkeypatch):
+    """L3 testing harness requirement: Server-Timing header must expose per-stage
+    timings (embed_ms, qdrant_ms, llm_ms, ttft_ms) on /v1/search and /v1/answer."""
+    from mainframe_rag.ports import ChatResult
+
+    monkeypatch.setattr(
+        app_mod, "retrieve_search",
+        lambda *a, **k: ([_hit()], "identifier", {"embed_ms": 12, "qdrant_ms": 34}),
+    )
+    resp = client.post("/v1/search", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+    st = resp.headers.get("server-timing", "")
+    assert "embed;dur=12" in st
+    assert "qdrant;dur=34" in st
+
+    class FakeLLMWithTTFT:
+        def chat(self, *a, **k):
+            return ChatResult(
+                content="Answer text.\n\nCitations:\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
+                finish_reason="stop",
+                ttft_ms=45,
+            )
+
+    monkeypatch.setattr(app_mod, "llm", FakeLLMWithTTFT())
+    resp_ans = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp_ans.status_code == 200
+    st_ans = resp_ans.headers.get("server-timing", "")
+    assert "embed;dur=12" in st_ans
+    assert "qdrant;dur=34" in st_ans
+    assert "llm;dur=" in st_ans
+    assert "ttft;dur=45" in st_ans
+

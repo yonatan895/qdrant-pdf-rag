@@ -131,6 +131,7 @@ class ChatResult(BaseModel):
     content: str
     finish_reason: str = "stop"
     usage: TokenUsage = Field(default_factory=TokenUsage)
+    ttft_ms: int | None = None
 
 
 @runtime_checkable

@@ -177,7 +177,7 @@ EMBED_MODE ?= hash
 EVAL_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-vllm.json,evals/baseline.json)
 HARNESS_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-vllm.json,benchmarks/harness.json)
 eval eval-baseline eval-draft eval-holdout eval-answers eval-report eval-html eval-compare \
-	harness-gate harness-baseline harness-l2: \
+	harness-gate harness-baseline harness-l2 harness-l3: \
 	export EMBED_MODE := $(EMBED_MODE)
 
 # Eval against a running Qdrant (sim-qdrant or QDRANT_SIM_URL); scores
@@ -249,6 +249,15 @@ harness-l2: | .venv
 	@mkdir -p $(BUNDLE_DIR)
 	.venv/bin/python scripts/harness_l2.py --max-queries $(or $(N),24) \
 	  --out $(BUNDLE_DIR)/harness-l2-report.json --summary $(BUNDLE_DIR)/harness-l2-summary.md
+
+# Harness L3 (performance & latency tier): per-stage p50/p95 (embed_ms,
+# qdrant_ms, llm_ms), TTFT, and VRAM footprint under concurrent load.
+# Live stack only; RC-only, never a PR gate, never GitLab.
+.PHONY: harness-l3
+harness-l3: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/harness_l3.py \
+	  --out $(BUNDLE_DIR)/harness-l3-report.json --summary $(BUNDLE_DIR)/harness-l3-summary.md
 
 # Draft golden-set candidates from a collection's payload (edit the queries).
 eval-draft: | .venv
@@ -332,7 +341,7 @@ help:
 	@echo "Connected host : venv wheelhouse bm25-weights pull-chart helm-lint helm-template build-images"
 	@echo "Air-gap happy path : airgap-pack (connected) | airgap-load airgap-deploy airgap-ingest airgap-smoke (inside the gap)"
 	@echo "Simulation     : sim (pytest integration tier; docker Qdrant) | sim-qdrant sim-clean"
-	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest"
+	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest | harness-l3"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper)"
 	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"
 	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | test-vllm-e2e (automated end-to-end suite)"

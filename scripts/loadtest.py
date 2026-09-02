@@ -3,10 +3,14 @@
 
 Drives real HTTP against a running agent with a deterministic query set and
 prints one JSON result object on stdout (human table goes to stderr, so the
-stdout stays pipeable). Used by scripts/benchmark.py; also runnable standalone:
+stdout stays pipeable). Used by scripts/benchmark.py and harness L3; also
+runnable standalone:
 
     python scripts/loadtest.py --url http://127.0.0.1:8080 \
         --endpoint search --concurrency 8 --duration 30 --query "IEA500I operator message"
+
+Exports per-stage p50/p95 latency (embed_ms, qdrant_ms, llm_ms, ttft_ms) and
+VRAM footprint into the baseline JSON via --baseline / --update-baseline.
 
 Every request is real; nothing is monkeypatched. The /v1/answer endpoint is
 only as honest as the model behind it — under the benchmark harness that is
@@ -16,10 +20,15 @@ the deterministic mock (no real model exists), and any report must say so.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
+import re
+import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
+from typing import Any
 
 import httpx2
 
@@ -38,6 +47,50 @@ def _percentile(sorted_ms: list[float], p: float) -> float:
     return sorted_ms[idx]
 
 
+def parse_server_timing(header_val: str | None) -> dict[str, float]:
+    """Parse W3C Server-Timing header (e.g. 'embed;dur=12, qdrant;dur=34, llm;dur=56, ttft;dur=45').
+    Returns a dict with timing values in ms, e.g. {'embed_ms': 12.0, 'qdrant_ms': 34.0, ...}."""
+    if not header_val:
+        return {}
+    timings: dict[str, float] = {}
+    for part in header_val.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.match(r"^([a-zA-Z0-9_-]+);dur=(\"?)([\d.]+)\2", part)
+        if m:
+            metric = m.group(1)
+            try:
+                dur = float(m.group(3))
+                timings[f"{metric}_ms"] = dur
+            except ValueError:
+                continue
+    return timings
+
+
+def query_vram_mb() -> dict[str, float] | None:
+    """Query NVIDIA GPU VRAM used/total in MB via nvidia-smi.
+    Returns None if nvidia-smi is unavailable (e.g. CPU-only or CI)."""
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            line = proc.stdout.strip().splitlines()[0]
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 2:
+                used = float(parts[0])
+                total = float(parts[1])
+                return {"used_mb": used, "total_mb": total}
+    except (FileNotFoundError, OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return None
+
+
 def run_load(
     base_url: str,
     endpoint: str,
@@ -45,16 +98,21 @@ def run_load(
     concurrency: int,
     duration_s: float,
     limit: int = 8,
-) -> dict:
+) -> dict[str, Any]:
     """Run the load and return the metrics dict. Thread-per-worker, each with
-    its own connection pool; round-robin over the deterministic query set."""
+    its own connection pool; round-robin over the deterministic query set.
+    Captures overall latency, per-stage timings from Server-Timing headers,
+    and VRAM footprint."""
     path = "/v1/search" if endpoint == "search" else "/v1/answer"
     url = f"{base_url.rstrip('/')}{path}"
     deadline = time.monotonic() + duration_s
     latencies: list[float] = []
+    stage_latencies: dict[str, list[float]] = collections.defaultdict(list)
     errors = 0
     lock = threading.Lock()
     query_idx = {"next": 0}
+
+    vram_start = query_vram_mb()
 
     def worker() -> None:
         nonlocal errors
@@ -65,15 +123,22 @@ def run_load(
                     query = queries[query_idx["next"] % len(queries)]
                     query_idx["next"] += 1
                 started = time.perf_counter()
+                st_header: str | None = None
                 try:
                     resp = client.post(url, json={"query": query, "limit": limit})
                     ok = resp.status_code == 200
+                    if ok:
+                        st_header = resp.headers.get("server-timing")
                 except httpx2.HTTPError:
                     ok = False
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
+                timings = parse_server_timing(st_header) if ok else {}
                 with lock:
                     latencies.append(elapsed_ms)
-                    if not ok:
+                    if ok:
+                        for metric, val in timings.items():
+                            stage_latencies[metric].append(val)
+                    else:
                         errors += 1
         finally:
             client.close()
@@ -86,7 +151,21 @@ def run_load(
         t.join()
     wall = time.perf_counter() - started
 
+    vram_end = query_vram_mb()
+    vram = vram_end or vram_start
+
     ordered = sorted(latencies)
+    stages: dict[str, dict[str, float]] = {}
+    for stage_name in sorted(stage_latencies):
+        ordered_stage = sorted(stage_latencies[stage_name])
+        stages[stage_name] = {
+            "p50": round(_percentile(ordered_stage, 50), 2),
+            "p90": round(_percentile(ordered_stage, 90), 2),
+            "p95": round(_percentile(ordered_stage, 95), 2),
+            "p99": round(_percentile(ordered_stage, 99), 2),
+            "max": round(ordered_stage[-1], 2) if ordered_stage else 0.0,
+        }
+
     return {
         "endpoint": endpoint,
         "concurrency": concurrency,
@@ -101,30 +180,113 @@ def run_load(
             "p99": round(_percentile(ordered, 99), 2),
             "max": round(ordered[-1], 2) if ordered else 0.0,
         },
+        "stages": stages,
+        "vram": vram,
     }
+
+
+def _set_nested(target: dict[str, Any], dotted: str, value: Any) -> None:
+    parts = dotted.split(".")
+    node = target
+    for part in parts[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            node[part] = child
+        node = child
+    node[parts[-1]] = value
+
+
+def export_to_baseline(baseline_path: Path, endpoint: str, result: dict[str, Any]) -> None:
+    """Export or update load test metrics (latencies, per-stage percentiles,
+    and VRAM footprint) into the baseline JSON file preserving nested shape."""
+    baseline: dict[str, Any] = {}
+    if baseline_path.exists():
+        try:
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            baseline = {}
+
+    if "_meta" not in baseline:
+        baseline["_meta"] = {
+            "note": "Re-baseline via `make bench-baseline` or `loadtest.py --baseline`; dedicated PR (AGENTS.md).",
+            "updated": time.strftime("%Y-%m-%d"),
+        }
+    else:
+        baseline["_meta"]["updated"] = time.strftime("%Y-%m-%d")
+
+    lat = result.get("latency_ms", {})
+    if "p50" in lat:
+        _set_nested(baseline, f"agent.{endpoint}.latency_ms.p50", lat["p50"])
+    if "p95" in lat:
+        _set_nested(baseline, f"agent.{endpoint}.latency_ms.p95", lat["p95"])
+
+    stages = result.get("stages", {})
+    for stage_name, metrics in stages.items():
+        if "p50" in metrics:
+            _set_nested(baseline, f"agent.{endpoint}.stages.{stage_name}.p50", metrics["p50"])
+        if "p95" in metrics:
+            _set_nested(baseline, f"agent.{endpoint}.stages.{stage_name}.p95", metrics["p95"])
+
+    vram = result.get("vram")
+    if isinstance(vram, dict) and "used_mb" in vram:
+        _set_nested(baseline, "vram.used_mb", vram["used_mb"])
+        if "total_mb" in vram:
+            _set_nested(baseline, "vram.total_mb", vram["total_mb"])
+
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--url", default="http://127.0.0.1:8080", help="agent base URL")
-    parser.add_argument("--endpoint", choices=("search", "answer"), default="search")
+    parser.add_argument("--endpoint", choices=("search", "answer", "all"), default="search")
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--duration", type=float, default=30.0, help="seconds of load")
     parser.add_argument(
         "--query", action="append", default=None,
         help="query to send (repeatable); defaults to a fixed mixed set",
     )
+    parser.add_argument(
+        "--baseline", "--update-baseline", "--export-baseline",
+        dest="baseline",
+        type=Path,
+        default=None,
+        help="export measured stage percentiles and VRAM into this baseline JSON file",
+    )
     args = parser.parse_args(argv)
 
     queries = args.query or DEFAULT_QUERIES
-    result = run_load(args.url, args.endpoint, queries, args.concurrency, args.duration)
-    lat = result["latency_ms"]
-    print(
-        f"load[{args.endpoint}] requests={result['requests']} errors={result['errors']} "
-        f"rps={result['rps']} p50={lat['p50']}ms p95={lat['p95']}ms p99={lat['p99']}ms",
-        file=sys.stderr,
-    )
-    print(json.dumps(result))
+    endpoints = ["search", "answer"] if args.endpoint == "all" else [args.endpoint]
+    results: dict[str, Any] = {}
+
+    for ep in endpoints:
+        res = run_load(args.url, ep, queries, args.concurrency, args.duration)
+        results[ep] = res
+        lat = res["latency_ms"]
+        print(
+            f"load[{ep}] requests={res['requests']} errors={res['errors']} "
+            f"rps={res['rps']} p50={lat['p50']}ms p95={lat['p95']}ms p99={lat['p99']}ms",
+            file=sys.stderr,
+        )
+        if res.get("stages"):
+            for sname, smetrics in res["stages"].items():
+                print(
+                    f"  stage[{sname}] p50={smetrics['p50']}ms p95={smetrics['p95']}ms max={smetrics['max']}ms",
+                    file=sys.stderr,
+                )
+        if res.get("vram"):
+            print(
+                f"  vram used={res['vram']['used_mb']}MB total={res['vram']['total_mb']}MB",
+                file=sys.stderr,
+            )
+        if args.baseline:
+            export_to_baseline(args.baseline, ep, res)
+            print(f"exported {ep} metrics to baseline {args.baseline}", file=sys.stderr)
+
+    output = results if args.endpoint == "all" else results[args.endpoint]
+    print(json.dumps(output, indent=2))
     return 0
 
 
