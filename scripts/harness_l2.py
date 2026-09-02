@@ -26,7 +26,13 @@ Judging contract (inherits the answer-tier eval's rules)
         `[n] {hit.cite}`; because /v1/answer retrieves with the same
         limit-8 retrieve_search call /v1/search makes (same query, no
         filters, deterministic index), each citation maps back to its hit
-        by exact cite-string match — no doc-number regex guessing.
+        by exact cite-string match — no doc-number regex guessing. L2
+        fetches that pool with a sibling /v1/search request rather than
+        seeing the answer request's internal retrieval (the response
+        contract deliberately does not expose it), so it must run on the
+        L1-pinned collection; any citation that does not map back to the
+        fetched pool FAILS the row — P/R computed over a silently-wrong
+        join would be worse than no measurement.
     faithfulness (temp-0 NLI judge)
         The same local reasoning model judges, per grounded answer, whether
         the ANSWER is entailed by / contradicted by / unsupported-by the
@@ -286,14 +292,22 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
         "",
         f"- queries: {metrics['queries']} (judged {metrics['judged']}, errors {metrics['errors']})",
         f"- grounded rate: {metrics['grounded_rate']} (n={metrics['answer_llm_n']} LLM-path answers)",
-        f"- citation precision/recall (doc-level): {metrics['citation_precision']} / {metrics['citation_recall']}",
-        f"- truncation rate: {metrics['truncation_rate']}",
-        f"- syntax compliance: {metrics['syntax_compliance']} (n={metrics['syntax_n']})",
+        (
+            "- citation precision/recall (doc-level): "
+            f"{metrics['citation_precision']} / {metrics['citation_recall']}  "
+            "(precision: mean over rows with ≥1 citation; recall: over all answer rows "
+            "with gold, zero cites = 0 — recall is the stricter half)"
+        ),
+        f"- truncation rate: {metrics['truncation_rate']} (non-stop finishes, from the app's alert logs)",
+        (
+            f"- syntax compliance: {metrics['syntax_compliance']} (n={metrics['syntax_n']})  "
+            "(keyword-presence gold: the construct was NAMED, not that valid syntax was produced)"
+        ),
         (
             f"- faithfulness: entailed {f['entailed']}, neutral {f['neutral']}, "
             f"contradiction {f['contradiction']} (judged {f['judged']}, judge errors {f['judge_errors']})"
         ),
-        f"- structural fails: {metrics['structural_fails']} (gates), unmapped citations: {metrics['unmapped_citations']}",
+        f"- structural fails: {metrics['structural_fails']} (gates), unmapped citations: {metrics['unmapped_citations']} (each fails its row)",
         "",
     ]
     fails = [r for r in results if r.get("verdict") in ("fail", "error")]
@@ -312,6 +326,66 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
                 lines.append(f"- citations: {r['citations']}")
             lines.append("")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def apply_l2_measurements(
+    row: dict[str, Any],
+    entry: dict[str, Any],
+    hits: list[dict[str, Any]],
+    alerts: dict[str, str],
+) -> None:
+    """Attach the L2 measurements to one answer-tier row and fail closed on
+    anything that would make a rate silently wrong. Pure function (no stack
+    access) so hermetic tests fire every branch; the faithfulness judge
+    stays in run_l2 because it needs the live client.
+
+    Fail-closed rules (all structural, all gating):
+      - a validated citation that does not map back to a hit — the join
+        behind citation P/R is broken, so P/R must not present itself as an
+        honest trend (the /v1/search pool can diverge from the agent's
+        retrieval; run L2 on the L1-pinned collection and this fires only
+        on real drift);
+      - a missing request_id on an LLM-path row — truncation would read
+        false by construction instead of being measured.
+    """
+    rid = row.get("request_id")
+    if row.get("path") == "llm":
+        if rid is None:
+            row["truncated"] = None
+            row.setdefault("failures", []).append("truncation unverifiable: response had no request_id")
+            row["verdict"] = "fail"
+        else:
+            row["truncated"] = str(rid) in alerts
+
+    cited, unmatched = cited_doc_ids(row.get("citations") or [], hits)
+    row["cited_doc_ids"] = sorted(cited)
+    row["unmatched_citations"] = unmatched
+    gold = set(entry.get("expected_doc_ids") or [])
+    if row["expected_behavior"] == "answer" and gold:
+        prec, rec = precision_recall(cited, gold)
+        row["citation_precision"] = prec
+        row["citation_recall"] = rec
+    if unmatched and row.get("path") == "llm":
+        row.setdefault("failures", []).append(
+            f"{len(unmatched)} validated citation(s) not in the fetched hit set: {unmatched}"
+        )
+        row["verdict"] = "fail"
+
+    # Syntax-shape gold: LLM-path rows with real model text only — a
+    # zero-hits canned message is already a structural fail via the
+    # answer-tier verdict.
+    pattern = entry.get("syntax_pattern")
+    if pattern and row.get("path") == "llm" and not row.get("failures"):
+        row["syntax_pattern"] = pattern
+        try:
+            row["syntax_ok"] = syntax_check(pattern, row.get("answer") or "", row.get("script"))
+            if not row["syntax_ok"]:
+                row.setdefault("failures", []).append(f"syntax pattern missed: {pattern}")
+                row["verdict"] = "fail"
+        except JudgeError as exc:
+            row["syntax_ok"] = None
+            row.setdefault("failures", []).append(str(exc))
+            row["verdict"] = "fail"
 
 
 def run_l2(
@@ -356,38 +430,7 @@ def run_l2(
             for i, entry in enumerate(sample, 1):
                 row = run_query(client, entry)
                 hits = hits_for(entry["query"])
-                row["truncated"] = bool(capture.alerts.get(str(row.get("request_id"))))
-
-                cited, unmatched = cited_doc_ids(row.get("citations") or [], hits)
-                row["cited_doc_ids"] = sorted(cited)
-                row["unmatched_citations"] = unmatched
-                gold = set(entry.get("expected_doc_ids") or [])
-                if row["expected_behavior"] == "answer" and gold:
-                    prec, rec = precision_recall(cited, gold)
-                    row["citation_precision"] = prec
-                    row["citation_recall"] = rec
-
-                # Syntax-shape gold: LLM-path rows with real model text only —
-                # a zero-hits canned message is already a structural fail via
-                # the answer-tier verdict.
-                pattern = entry.get("syntax_pattern")
-                if (
-                    pattern
-                    and row.get("path") == "llm"
-                    and not row.get("failures")
-                ):
-                    row["syntax_pattern"] = pattern
-                    try:
-                        row["syntax_ok"] = syntax_check(pattern, row.get("answer") or "", row.get("script"))
-                        if not row["syntax_ok"]:
-                            row.setdefault("failures", []).append(
-                                f"syntax pattern missed: {pattern}"
-                            )
-                            row["verdict"] = "fail"
-                    except JudgeError as exc:
-                        row["syntax_ok"] = None
-                        row.setdefault("failures", []).append(str(exc))
-                        row["verdict"] = "fail"
+                apply_l2_measurements(row, entry, hits, capture.alerts)
 
                 # Faithfulness judge: grounded, non-refused model text.
                 if (
@@ -397,9 +440,7 @@ def run_l2(
                     and row.get("citations")
                     and not row.get("failures")
                 ):
-                    evidence, unmapped = evidence_for_citations(row["citations"], hits)
-                    if unmapped:
-                        row["unmatched_citations"] = unmapped
+                    evidence, _unmapped = evidence_for_citations(row["citations"], hits)
                     try:
                         chat = judge_client.chat(
                             judge_messages(row["answer"], evidence),

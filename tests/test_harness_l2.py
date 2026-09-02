@@ -7,12 +7,14 @@ judge must fail closed on unparseable output.
 """
 
 import logging
+import re
 
 import pytest
 from scripts.harness_l2 import (
     JUDGE_MAX_EVIDENCE_CHARS,
     JudgeError,
     _AlertCapture,
+    apply_l2_measurements,
     citation_to_hit,
     cited_doc_ids,
     evidence_for_citations,
@@ -101,9 +103,15 @@ def test_parse_judge_label_garbage_fails_closed():
 
 def test_judge_messages_never_contain_citation_markers():
     # The agent's validator owns citation semantics; the judge sees only the
-    # evidence text and the answer body.
-    msgs = judge_messages("Use LFAREA=(1M) per the reference.", "LFAREA=(1M) syntax...")
-    assert all("[" not in m.content or "EXCERPTS" in m.content for m in msgs)
+    # evidence text and the answer body. No bracket-index citation marker may
+    # reach the judge in either message, and both inputs must be present.
+    evidence = "LFAREA=(1M) syntax..."
+    answer = "Set LFAREA=(1M) in IEASYSxx."
+    msgs = judge_messages(answer, evidence)
+    for m in msgs:
+        assert re.search(r"\[\d+\]", m.content) is None, m.content
+        assert "SA23-1380-70" not in m.content
+    assert evidence in msgs[1].content and answer in msgs[1].content
     assert msgs[0].role == "system" and msgs[1].role == "user"
     assert "contradiction" in msgs[0].content
 
@@ -147,6 +155,86 @@ def test_alert_capture_joins_request_ids():
     _emit(h, '{"request_id": "def", "action": "answer", "citations": 2}')  # not an alert
     _emit(h, "not json at all")  # never crashes the handler
     assert h.alerts == {"abc": "length"}
+
+
+# ---------------------------------------------------------------- apply_l2_measurements
+
+def _entry(eid: str = "X", behavior: str = "answer", gold: list | None = None, pattern: str | None = None) -> dict:
+    e: dict = {"id": eid, "query": "q", "query_class": "syntax", "expected_behavior": behavior}
+    if gold is not None:
+        e["expected_doc_ids"] = gold
+    if pattern:
+        e["syntax_pattern"] = pattern
+    return e
+
+
+def _llm_row(**kw) -> dict:
+    row = {
+        "id": "X", "query": "q", "query_class": "syntax", "expected_behavior": "answer",
+        "verdict": "pass", "failures": [], "path": "llm", "citations": [],
+        "request_id": "abc", "answer": "body", "script": None,
+    }
+    row.update(kw)
+    return row
+
+
+def test_apply_fail_closed_on_unmatched_citation():
+    # A validated citation that does not map back to the fetched pool means
+    # the P/R join is broken — the row must fail, not degrade quietly.
+    row = _llm_row(citations=["[1] SA23-1380-70 z/OS MVS Init Tuning Ref, p. 100", "[2] GC34-6442-07 CICS, p. 9"])
+    apply_l2_measurements(row, _entry(gold=["SA23-1380-70"]), HITS, alerts={})
+    assert row["verdict"] == "fail"
+    assert any("not in the fetched hit set" in f for f in row["failures"])
+    assert row["citation_precision"] == 1.0  # mapped subset still recorded
+    assert row["unmatched_citations"] == ["[2] GC34-6442-07 CICS, p. 9"]
+
+
+def test_apply_all_citations_mapped_keeps_pass():
+    row = _llm_row(citations=["[2] SC34-6428-08 CICS Sys Def, p. 55"])
+    apply_l2_measurements(row, _entry(gold=["SC34-6428-08"]), HITS, alerts={})
+    assert row["verdict"] == "pass"
+    assert row["citation_precision"] == 1.0 and row["citation_recall"] == 1.0
+    assert row["unmatched_citations"] == []
+
+
+def test_apply_zero_hits_path_skips_unmatched_fail():
+    # The canned zero-hits message has no citations and no model text; the
+    # answer-tier verdict already fired — no join to break.
+    row = _llm_row(path="zero_hits", citations=[], request_id="abc")
+    apply_l2_measurements(row, _entry(gold=["SA23-1380-70"]), HITS, alerts={})
+    assert row["verdict"] == "pass"
+
+
+def test_apply_missing_request_id_fails_closed():
+    # A silent truncated=false on a missing join key would undercount the
+    # truncation story — the row must fail instead.
+    row = _llm_row(request_id=None)
+    apply_l2_measurements(row, _entry(gold=["SA23-1380-70"]), HITS, alerts={})
+    assert row["truncated"] is None
+    assert row["verdict"] == "fail"
+    assert any("truncation unverifiable" in f for f in row["failures"])
+
+
+def test_apply_truncation_join():
+    row = _llm_row(request_id="abc")
+    apply_l2_measurements(row, _entry(gold=["SA23-1380-70"]), HITS, alerts={"abc": "length"})
+    assert row["truncated"] is True
+    assert row["verdict"] == "pass"
+
+
+def test_apply_syntax_miss_fails_row():
+    row = _llm_row(answer="prose without the construct")
+    apply_l2_measurements(row, _entry(gold=["SA23-1380-70"], pattern=r"\)REQ"), HITS, alerts={})
+    assert row["syntax_ok"] is False
+    assert row["verdict"] == "fail"
+    assert any("syntax pattern missed" in f for f in row["failures"])
+
+
+def test_apply_abstain_row_gets_no_precision():
+    row = _llm_row(expected_behavior="abstain", query_class="negative", citations=[])
+    apply_l2_measurements(row, _entry(behavior="abstain", gold=[]), HITS, alerts={})
+    assert "citation_precision" not in row
+    assert row["verdict"] == "pass"
 
 
 # ---------------------------------------------------------------- summarize + gate
