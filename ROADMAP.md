@@ -4,9 +4,10 @@
 > MUST read: the issue, this document, `AGENTS.md`, `docs/architecture.md`, and
 > `docs/adr/0001-baseline-decisions.md` before writing code.
 
-## Verified repo facts (audit of 2026-09-02)
+## Verified repo facts (audit of 2026-09-02; amended 2026-09-03 after PR-01/PR-02/PR-03 merged)
 
 These were verified against code and docs, not assumed. Agent tasks below reference them.
+Items marked **[amended]** changed with the merged P0 PRs.
 
 - **Parsing:** PyMuPDF is the baseline parser (ADR 0001). `.pdx`/`.idx` ignored.
 - **Chunking:** Section-outline aware. `chunk.py` builds chunks per section with
@@ -15,27 +16,49 @@ These were verified against code and docs, not assumed. Agent tasks below refere
   Point id = UUID5 of `{doc_id}|{heading_path}|{page_start}|{ordinal}`.
   NO code-atomic protection: nothing in `chunk.py` handles JCL/REXX blocks.
 - **Retrieval:** Hybrid dense + BM25 (FastEmbed, baked weights, `bm25-weights.sha256`),
-  local weighted RRF ([1,3] with identifiers, else [1,1], k=2) in `retrieve/query.py`.
-  No reranker, no SPLADE, no ColBERT, no query rewriting.
-- **Serving:** FastAPI. Routes `/healthz`, `/v1/search`, `/v1/answer` are sync `def`.
-  Only lifespan + request-id middleware are async. No SSE/streaming anywhere.
-  Embeddings via HTTP: `http.post(f"{settings.embed_base_url}/embeddings")`.
-  LLM via `HttpxLLMClient` (sync httpx) in `agent/answer.py`.
+  local weighted RRF ([1,3] with identifiers, else [1,1], k=2) in `retrieve/query.py`,
+  fused in one batched `query_batch_points` HTTP call. **[amended]** A cross-encoder
+  reranker exists (`retrieve/rerank.py`, `bge-reranker-v2-m3` via `HttpReranker`) but
+  ships **default-off** (`rerank_enabled=False`); fused top-50 are rescored only when
+  `RERANK_ENABLED=true`. `search()` and `async_search()` are drift-guard-pinned twins.
+  No SPLADE, no ColBERT, no query rewriting (PR-14/PR-19 still open).
+- **Serving:** FastAPI. **[amended]** All routes (`/healthz`, `/v1/search`, `/v1/answer`)
+  are `async def` on `AsyncQdrantClient` + `httpx2.AsyncClient`; the sync embed and
+  cross-encoder legs run via `asyncio.to_thread`, and the pooled sync retrieval-leg
+  client is built and closed in lifespan. `/v1/answer` supports SSE streaming
+  (`?stream=true` / body `stream: true`): `event: token` deltas → one terminal
+  `event: final` (schema identical on the empty-hits path); a mid-stream failure emits
+  `event: error` and ends without `final`. TTFT is measured on the first content token
+  (`ttft_ms` in the final event, `Server-Timing: ttft;dur=` on the JSON path);
+  server-side reasoning SSE is gated by `LLM_STREAM` (default off).
+  Embeddings via HTTP: `POST {embed_base_url}/embeddings` with the asymmetric
+  `dense_query_prefix` on query vectors only.
+  LLM via `HttpxLLMClient` (sync + async + SSE) in `agent/answer.py`.
 - **Splunk:** Already in scope as *caller-supplied* context: `/v1/answer` accepts
   `splunk_context` (see `app.py`, `answer.py`, `tests/test_agent_api.py`). ADR 0001:
   "Splunk stays system of record (context in, not crawl)."
-- **Eval gate (exists, not CI-wired):** `scripts/harness.py` gates on bootstrap CIs of
-  paired per-query deltas vs mode-keyed baselines (hash/vllm). Stages:
-  `harness_l1` (retrieval; must_not violations gated to zero in top-5),
-  `harness_l2` (answers), `harness_l3` (perf: p95 regression + VRAM, Server-Timing).
-  Support: `eval_retrieval.py`, `eval_answers.py`, `verify_golden.py`,
-  `render_report.py`, `bootstrap_ci.py`, `qdrant_sim.py`, `loadtest.py`.
-  Golden sets: `evals/golden.jsonl`, `evals/holdout.jsonl` (sha-pinned),
-  `evals/expert_golden_seed.jsonl`; baselines in `evals/baseline*.json`.
+- **Eval gate [amended]:** `make gate-l1` (ephemeral Qdrant simulator, hash-mode
+  synthetic corpus) is a **required PR check in GitHub CI** (`gate-l1` job, rendered
+  report posted as a PR comment). The full harness remains available locally/RC-only:
+  `harness_l1` (snapshot-pinned retrieval gate), `harness_l2` (answers: citation
+  precision/recall + NLI faithfulness judge), `harness_l3` (perf: p95 regression +
+  VRAM, Server-Timing TTFT). Support: `eval_retrieval.py`, `eval_answers.py`,
+  `verify_golden.py`, `render_report.py`, `bootstrap_ci.py`, `qdrant_sim.py`,
+  `loadtest.py`. Golden sets: `evals/golden.jsonl` (117), `evals/holdout.jsonl`
+  (70, sha-pinned), `evals/expert_golden_seed.jsonl`; baselines are mode-keyed
+  (`evals/baseline.json` hash, `evals/baseline-vllm.json` vllm).
   Re-freeze process documented in `scripts/build_golden_corpus.py`.
-- **CI:** `.github/workflows/ci.yml` + mirrored `.gitlab-ci.yml` = binary-hygiene +
-  pytest only. `bench.yml` benchmarks on push to main. `e2e.yml` = connected-path
-  smoke test on lab OpenShift with synthetic PDFs. The eval harness runs in NEITHER.
+- **Local vLLM [amended]:** `scripts/run_local_vllm.sh` on image
+  `vllm/vllm-openai:v0.28.0` — v0.28.0 removed `--task`, so the embed branch passes
+  `--runner pooling --convert embed --enforce-eager` with `GPU_MEM=0.33`; both servers
+  keep `--max-model-len 4096` (a 2048 embed window was rejected by tokenizer sweep:
+  worst-case embedded string measures 2043 tokens, ~2.0 chars/token; pinned by
+  `tests/test_embed_budget.py`).
+- **CI:** `.github/workflows/ci.yml` + mirrored `.gitlab-ci.yml`. **[amended]** GitHub
+  CI runs the `gate-l1` retrieval gate, sim tier, build, and hygiene checks on PRs;
+  GitLab mirrors hygiene + pytest only (no e2e, no sim). `bench.yml` benchmarks on
+  push to main. `e2e.yml` = connected-path smoke test on lab OpenShift with synthetic
+  PDFs.
 - **Constraints (AGENTS.md / ADR 0001):** Qdrant 1.19.0 `*-unprivileged`, vendored Helm
   chart, no `helm repo add` on air-gap host. This repo does NOT install vLLM/LiteLLM/
   Splunk/GPU operators. Dense embed = other team's in-cluster vLLM (`VLLM_BASE_URL`).
@@ -63,6 +86,9 @@ These were verified against code and docs, not assumed. Agent tasks below refere
 ## P0 — Foundation & highest ROI
 
 ### PR-01 (issue #75): Wire the eval gate into CI + close metric gaps
+> **Status: DONE — merged as PR #96.** `make gate-l1` is a required GitHub CI check;
+> do not re-implement.
+
 - **Why:** The harness exists and is statistically sound, but nothing enforces it on PRs.
   Every PR below depends on automatic enforcement.
 - **Scope:** `.github/workflows/ci.yml`, `.gitlab-ci.yml`, `Makefile`,
@@ -82,6 +108,9 @@ These were verified against code and docs, not assumed. Agent tasks below refere
   delta table renders without manual steps.
 
 ### PR-02 (issue #76): Cross-encoder reranking
+> **Status: DONE — merged as PR #97.** `retrieve/rerank.py`, default-off
+> (`rerank_enabled=False`); see the amended facts above.
+
 - **Why:** RRF is fusion, not scoring. Largest single retrieval-quality win.
 - **Scope:** new `src/mainframe_rag/retrieve/rerank.py`, `retrieve/query.py`, `config.py`
 - **Implementation:**
@@ -97,6 +126,9 @@ These were verified against code and docs, not assumed. Agent tasks below refere
 - **Depends on:** #75.
 
 ### PR-03 (issue #77): Async stack + SSE streaming
+> **Status: DONE — merged as PR #98.** Async routes + `AsyncQdrantClient`, SSE on
+> `/v1/answer` with TTFT; see the amended facts above.
+
 - **Why:** Routes are sync `def`; LLM/embed clients are sync httpx. No streaming → TTFT
   equals full generation time.
 - **Scope:** `agent/app.py`, `agent/answer.py`, `ingest/qdrant_io.py`, `retrieve/query.py`
