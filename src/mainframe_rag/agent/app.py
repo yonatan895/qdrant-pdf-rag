@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from mainframe_rag.agent.answer import (
     HttpxLLMClient,
+    TruncatedStreamError,
     as_chat_result,
     assert_reasoning_model,
     build_messages,
@@ -577,6 +578,22 @@ async def v1_answer(
                         usage = item["usage"]
                     if ttft_ms is None and item.get("ttft_ms") is not None:
                         ttft_ms = item["ttft_ms"]
+        except TruncatedStreamError as exc:
+            # Truncation observability: the partial prefix already went out
+            # as token events, so the answer_alert carries counts only —
+            # never response text.
+            log.warning(
+                json_log(
+                    request_id,
+                    "answer_alert",
+                    alert="stream_truncated",
+                    detail=str(exc)[:200],
+                )
+            )
+            log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
+            err_payload = {"type": "error", "code": "upstream_error", "message": "stream failed"}
+            yield f"event: error\ndata: {json.dumps(err_payload)}\n\n"
+            return
         except Exception as exc:  # noqa: BLE001
             log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
             err_payload = {"type": "error", "code": "upstream_error", "message": "stream failed"}
