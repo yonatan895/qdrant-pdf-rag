@@ -7,10 +7,12 @@ settings.llm_model_reasoning; there is deliberately no other model knob.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx2
@@ -299,26 +301,71 @@ class HttpxLLMClient:
     shot — a retry would re-ask a reasoning model that may already be
     thinking, and answers are not idempotent (issue #20 PR C)."""
 
-    def __init__(self, settings: Settings, client: httpx2.Client | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: Any = None,
+    ) -> None:
         self._settings = settings
         self._client = client
+        self._cached_sync_client: httpx2.Client | None = None
+        self._cached_async_client: httpx2.AsyncClient | None = None
 
-    def _http(self) -> httpx2.Client:
-        if self._client is None:
-            # retries=0: connection blips surface as errors, never re-issued.
-            self._client = httpx2.Client(
+    def _http(self) -> Any:
+        return self._sync_http()
+
+    def _sync_http(self) -> Any:
+        if self._client is not None:
+            return self._client
+        if self._cached_sync_client is None:
+            self._cached_sync_client = httpx2.Client(
                 timeout=self._settings.answer_timeout_s,
                 transport=httpx2.HTTPTransport(retries=0),
             )
-        return self._client
+        return self._cached_sync_client
+
+    def _async_http(self) -> Any:
+        if self._client is not None:
+            return self._client
+        if self._cached_async_client is None:
+            self._cached_async_client = httpx2.AsyncClient(
+                timeout=self._settings.answer_timeout_s,
+                transport=httpx2.AsyncHTTPTransport(retries=0),
+            )
+        return self._cached_async_client
 
     def close(self) -> None:
-        # Deliberately does not null the client: a post-shutdown chat() must
-        # fail loudly on the closed pool, never silently rebuild one.
-        if self._client is not None:
+        if self._client is not None and hasattr(self._client, "close"):
             self._client.close()
+        if self._cached_sync_client is not None:
+            self._cached_sync_client.close()
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            if hasattr(self._client, "aclose"):
+                await self._client.aclose()
+            elif hasattr(self._client, "close"):
+                self._client.close()
+        if self._cached_async_client is not None:
+            await self._cached_async_client.aclose()
 
     def chat(
+        self,
+        messages: list[ChatMessage],
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+    ) -> ChatResult | Any:
+        if isinstance(self._client, httpx2.AsyncClient):
+            return self.achat(messages, reasoning_effort=reasoning_effort, temperature=temperature)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            return self.achat(messages, reasoning_effort=reasoning_effort, temperature=temperature)
+        return self._chat_sync(messages, reasoning_effort=reasoning_effort, temperature=temperature)
+
+    async def achat(
         self,
         messages: list[ChatMessage],
         reasoning_effort: str | None = None,
@@ -331,7 +378,205 @@ class HttpxLLMClient:
             body["reasoning_effort"] = reasoning_effort
         if temperature is not None:
             body["temperature"] = temperature
-        if getattr(self._settings, "llm_stream", False) and hasattr(self._http(), "stream"):
+        if getattr(self._settings, "llm_stream", False):
+            try:
+                t0 = time.monotonic()
+                ttft_ms: int | None = None
+                content_parts: list[str] = []
+                finish_reason = "stop"
+                usage_data: dict[str, Any] = {}
+                body_stream = {**body, "stream": True, "stream_options": {"include_usage": True}}
+                async with self._async_http().stream(
+                    "POST",
+                    f"{base_url.rstrip('/')}/chat/completions",
+                    json=body_stream,
+                ) as stream_resp:
+                    stream_resp.raise_for_status()
+                    async for line in stream_resp.aiter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        chunk_str = line[5:].strip()
+                        if chunk_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(chunk_str)
+                        except json.JSONDecodeError:
+                            continue
+                        if chunk.get("usage"):
+                            usage_data = chunk["usage"]
+                        choices = chunk.get("choices") or []
+                        if choices:
+                            delta = choices[0].get("delta") or {}
+                            delta_content = delta.get("content")
+                            if delta_content:
+                                if ttft_ms is None:
+                                    ttft_ms = int((time.monotonic() - t0) * 1000)
+                                content_parts.append(delta_content)
+                            if choices[0].get("finish_reason"):
+                                finish_reason = str(choices[0]["finish_reason"])
+                content = "".join(content_parts)
+                if not content:
+                    log.warning("streaming chat returned empty content; falling back to non-streaming POST")
+                else:
+                    reasoning_tokens = (
+                        usage_data.get("reasoning_tokens")
+                        or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
+                        or 0
+                    )
+                    usage = TokenUsage(
+                        prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
+                        completion_tokens=int(usage_data.get("completion_tokens") or 0),
+                        reasoning_tokens=int(reasoning_tokens),
+                        total_tokens=int(usage_data.get("total_tokens") or 0),
+                    )
+                    return ChatResult(content=content, finish_reason=finish_reason, usage=usage, ttft_ms=ttft_ms)
+            except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
+                log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
+
+        # Fallback note: this re-asks the reasoning model — a second full
+        # think. Accepted on purpose: empty/failed content channels are a
+        # server-side parsing defect, not a transient fault, and there are no
+        # retries on the answer path (issue #20 PR C). The doubling only
+        # happens on that defect, never on the happy path.
+        resp = await self._async_http().post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            json=body,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        choice = data["choices"][0]
+        content = str(choice["message"].get("content") or "")
+        finish_reason = str(choice.get("finish_reason") or "stop")
+        usage_data = data.get("usage") or {}
+        reasoning_tokens = (
+            usage_data.get("reasoning_tokens")
+            or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
+            or 0
+        )
+        usage = TokenUsage(
+            prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
+            completion_tokens=int(usage_data.get("completion_tokens") or 0),
+            reasoning_tokens=int(reasoning_tokens),
+            total_tokens=int(usage_data.get("total_tokens") or 0),
+        )
+        return ChatResult(content=content, finish_reason=finish_reason, usage=usage)
+
+    async def chat_stream(
+        self,
+        messages: list[ChatMessage],
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        base_url, model = assert_reasoning_model(self._settings)
+        serialized = [m.model_dump() for m in messages]
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": serialized,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
+        if temperature is not None:
+            body["temperature"] = temperature
+
+        t0 = time.monotonic()
+        ttft_ms: int | None = None
+        finish_reason = "stop"
+        usage_data: dict[str, Any] = {}
+        content_parts: list[str] = []
+
+        async with self._async_http().stream(
+            "POST",
+            f"{base_url.rstrip('/')}/chat/completions",
+            json=body,
+        ) as stream_resp:
+            stream_resp.raise_for_status()
+            async for line in stream_resp.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                chunk_str = line[5:].strip()
+                if chunk_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(chunk_str)
+                except json.JSONDecodeError:
+                    continue
+                if chunk.get("usage"):
+                    usage_data = chunk["usage"]
+                choices = chunk.get("choices") or []
+                if choices:
+                    delta = choices[0].get("delta") or {}
+                    delta_content = delta.get("content")
+                    if delta_content:
+                        if ttft_ms is None:
+                            ttft_ms = int((time.monotonic() - t0) * 1000)
+                        content_parts.append(delta_content)
+                        yield {
+                            "type": "token",
+                            "delta": delta_content,
+                            "token": delta_content,
+                            "ttft_ms": ttft_ms,
+                        }
+                    if choices[0].get("finish_reason"):
+                        finish_reason = str(choices[0]["finish_reason"])
+
+        # Empty-content recovery, mirroring achat: a reasoning model whose
+        # whole output lands in the reasoning channel yields zero content
+        # deltas. Recovery is only possible BEFORE any token was yielded —
+        # a mid-stream failure after real deltas cannot be retried without
+        # duplicating content, so stream errors propagate to the app's
+        # event: error path instead.
+        if not content_parts:
+            log.warning("streaming chat returned empty content; falling back to non-streaming POST")
+            resp = await self._async_http().post(
+                f"{base_url.rstrip('/')}/chat/completions",
+                json=body,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            choice = data["choices"][0]
+            content = str(choice["message"].get("content") or "")
+            finish_reason = str(choice.get("finish_reason") or "stop")
+            usage_data = data.get("usage") or {}
+            if content:
+                ttft_ms = int((time.monotonic() - t0) * 1000)
+                yield {"type": "token", "delta": content, "token": content, "ttft_ms": ttft_ms}
+
+        reasoning_tokens = (
+            usage_data.get("reasoning_tokens")
+            or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
+            or 0
+        )
+        usage = TokenUsage(
+            prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
+            completion_tokens=int(usage_data.get("completion_tokens") or 0),
+            reasoning_tokens=int(reasoning_tokens),
+            total_tokens=int(usage_data.get("total_tokens") or 0),
+        )
+        yield {
+            "type": "done",
+            "finish_reason": finish_reason,
+            "usage": usage,
+            "ttft_ms": ttft_ms,
+        }
+
+    def _chat_sync(
+        self,
+        messages: list[ChatMessage],
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+    ) -> ChatResult:
+        base_url, model = assert_reasoning_model(self._settings)
+        serialized = [m.model_dump() for m in messages]
+        body: dict[str, Any] = {"model": model, "messages": serialized}
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
+        if temperature is not None:
+            body["temperature"] = temperature
+        if getattr(self._settings, "llm_stream", False) and hasattr(self._sync_http(), "stream"):
             body_stream = {**body, "stream": True, "stream_options": {"include_usage": True}}
             try:
                 t0 = time.monotonic()
@@ -339,7 +584,7 @@ class HttpxLLMClient:
                 content_parts: list[str] = []
                 finish_reason = "stop"
                 usage_data: dict[str, Any] = {}
-                with self._http().stream(
+                with self._sync_http().stream(
                     "POST",
                     f"{base_url.rstrip('/')}/chat/completions",
                     json=body_stream,
@@ -387,15 +632,13 @@ class HttpxLLMClient:
             except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
                 log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
 
-        resp = self._http().post(
+        resp = self._sync_http().post(
             f"{base_url.rstrip('/')}/chat/completions",
             json=body,
         )
         resp.raise_for_status()
         data = resp.json()
         choice = data["choices"][0]
-        # Reasoning models may return content: None (all output went to the
-        # reasoning channel) — that must surface as "", never the string "None".
         content = str(choice["message"].get("content") or "")
         finish_reason = str(choice.get("finish_reason") or "stop")
         usage_data = data.get("usage") or {}

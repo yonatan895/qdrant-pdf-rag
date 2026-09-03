@@ -1,5 +1,7 @@
 """Query filter + hybrid search tests with a mocked Qdrant client."""
 
+import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -250,5 +252,93 @@ def test_diversify_hits_prevents_page_monopoly():
     # Phase 2 backfills c4 (doc1, p2) which satisfies max_per_page=1 before picking duplicate page 1!
     div = diversify_hits(raw, limit=3, max_per_page=1, max_per_doc=1)
     assert [x.chunk_id for x in div] == ["c1", "c5", "c4"]
+
+
+class SlowBlockingEmbedder(FakeEmbedder):
+    """Embedder double whose sync calls block the thread like the real thing:
+    dense_query is a sync HTTP POST to the embed server, sparse is CPU-bound
+    FastEmbed/BM25 work."""
+
+    def __init__(self, delay_s: float = 0.15):
+        self.delay_s = delay_s
+
+    def dense_query(self, queries):
+        time.sleep(self.delay_s)
+        return super().dense_query(queries)
+
+    def sparse(self, texts):
+        time.sleep(self.delay_s)
+        return super().sparse(texts)
+
+
+@pytest.mark.anyio
+async def test_async_search_offloads_blocking_embed_from_event_loop():
+    """Review S1: the embed leg of async_search must run via asyncio.to_thread.
+
+    With the calls on the event loop, 4 concurrent queries each block the loop
+    2x0.15s sequentially (>= 1.2s wall) and the loop cannot tick at all;
+    offloaded, they overlap (~0.3s) and a heartbeat task keeps running."""
+    from mainframe_rag.retrieve.query import async_search
+
+    qdrant = FakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    embedder = SlowBlockingEmbedder()
+
+    heartbeats = 0
+
+    async def heartbeat():
+        nonlocal heartbeats
+        while True:
+            await asyncio.sleep(0.02)
+            heartbeats += 1
+
+    hb = asyncio.create_task(heartbeat())
+    t0 = time.monotonic()
+    await asyncio.gather(
+        *(async_search(qdrant, embedder, "mainframe_manuals", f"IEA500I {i}", limit=5) for i in range(4))
+    )
+    elapsed = time.monotonic() - t0
+    hb.cancel()
+    assert elapsed < 0.9
+    # The event loop stayed responsive while the sync embeds were in flight.
+    assert heartbeats > 5
+
+
+class RecordingReranker:
+    """Deterministic cross-encoder double: score derived from the text itself."""
+
+    def score(self, query, texts):
+        return [float(len(t) % 7) + 0.5 for t in texts]
+
+
+def test_async_search_matches_sync_search_identical_fakes():
+    """Review S3 drift guard: async_search mirrors search() line for line, so
+    any divergence between the two transports must fail here. Identical fakes
+    must produce identical hits (order + every field), query_kind, timing keys
+    and prefetch shapes — with and without the rerank leg, for identifier and
+    natural-language queries (different RRF weight branches)."""
+    from mainframe_rag.retrieve.query import async_search
+
+    for query in ("IEA500I rejected", "sizing the lookaside facility"):
+        for reranker in (None, RecordingReranker()):
+            fake_sync = FakeQdrant(dense=[_point("d1", 0.9), _point("d2", 0.5)], sparse=[_point("s1", 0.8)])
+            fake_async = FakeQdrant(dense=[_point("d1", 0.9), _point("d2", 0.5)], sparse=[_point("s1", 0.8)])
+            embedder = FakeEmbedder()
+
+            sync_res = search(fake_sync, embedder, "mainframe_manuals", query, limit=5, reranker=reranker)
+            async_res = asyncio.run(
+                async_search(fake_async, embedder, "mainframe_manuals", query, limit=5, reranker=reranker)
+            )
+
+            sync_hits, sync_kind, sync_timings = sync_res
+            async_hits, async_kind, async_timings = async_res
+            assert sync_kind == async_kind
+            assert [h.model_dump() for h in sync_hits] == [h.model_dump() for h in async_hits]
+            assert set(sync_timings) == set(async_timings)
+            assert [(r.using, r.limit) for r in fake_sync.batch_requests] == [
+                (r.using, r.limit) for r in fake_async.batch_requests
+            ]
+            rerank_expected = reranker is not None
+            assert ("rerank_ms" in sync_timings) is rerank_expected
+            assert (sync_hits[0].rerank_score is not None) is rerank_expected
 
 

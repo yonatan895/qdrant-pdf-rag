@@ -4,6 +4,9 @@ Qdrant and the LLM are faked; citation enforcement is checked against the
 retrieved hit set.
 """
 
+import json
+import time
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -12,6 +15,7 @@ from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.answer import parse_answer
 from mainframe_rag.agent.cites import extract_citation_lines, valid_citations
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
+from mainframe_rag.ports import TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
 
 
@@ -284,7 +288,13 @@ def test_healthz_ready_returns_clean_200(client, monkeypatch):
         status_code = 200
         text = "all shards are ready"
 
-    monkeypatch.setattr(app_mod.httpx2, "get", lambda *a, **k: Ready())
+    class ReadyPool:
+        async def get(self, *a, **k):
+            return Ready()
+
+    # healthz uses the pooled async client only (review S2): the double
+    # replaces app_mod.http, never the httpx2 module functions.
+    monkeypatch.setattr(app_mod, "http", ReadyPool())
     resp = client.get("/healthz")
     assert resp.status_code == 200
     body = resp.json()
@@ -300,16 +310,18 @@ def test_healthz_degraded_paths_leak_no_upstream_text(client, monkeypatch):
         status_code = 503
         text = "Internal Server Error: secret bits"
 
-    monkeypatch.setattr(app_mod.httpx2, "get", lambda *a, **k: NotReady())
+    class NotReadyPool:
+        async def get(self, *a, **k):
+            return NotReady()
 
     class Boom:
-        def post(self, *a, **k):
+        async def post(self, *a, **k):
             raise RuntimeError("vllm said: token=abc")
 
         def close(self):
             pass
 
-    monkeypatch.setattr(app_mod, "http", Boom())
+    monkeypatch.setattr(app_mod, "http", NotReadyPool())
     monkeypatch.setattr(app_mod.settings, "embed_base_url", "http://embed.internal/v1")
     monkeypatch.setattr(app_mod.settings, "embed_model", "test-embed")
     resp = client.get("/healthz")
@@ -436,6 +448,33 @@ def test_answer_llm_failure_reads_answer_failed(client, monkeypatch):
     assert resp.status_code == 502
     assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
     assert "explode" not in resp.text
+
+
+def test_prompt_build_failure_maps_to_internal(monkeypatch):
+    """Review S5: prompt construction is local work, deliberately outside the
+    upstream try — a build failure is an internal fault (500 "internal"),
+    never mislabeled as 502 "answer failed" / "retrieval failed". Like the
+    unhandled-error contract, ServerErrorMiddleware re-raises after the 500
+    is sent, so the client must be built with raise_server_exceptions=False."""
+
+    def boom_response(*_a, **_k):
+        raise ValueError("budget invariant violated: internal detail")
+
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    # CI/dev embed profile: hash mode, explicitly allowed (PR D fail-fast)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
+    with TestClient(app_mod.app, raise_server_exceptions=False) as c:
+        monkeypatch.setattr(app_mod, "llm", FakeLLM())
+        monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
+        monkeypatch.setattr(app_mod, "build_messages", boom_response)
+        resp = c.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 500
+    assert resp.json() == {"code": "internal", "message": "internal error"}
+    assert "budget invariant" not in resp.text
 
 
 def test_parse_answer_shape():
@@ -1214,4 +1253,312 @@ def test_httpx_llm_client_streaming_error_falls_back_to_post():
     res = client.chat([ChatMessage(role="user", content="hi")])
     assert fake_client.post_called is True
     assert res.content == "Post after stream error"
+
+
+class StreamingFakeLLM:
+    def __init__(self, deltas: list[str] | None = None):
+        self.deltas = deltas or [
+            "Reissue the command ",
+            "after initialization completes.\n\n",
+            "```jcl\n// example only\nIOSCMDS LIST\n```\n\n",
+            "Citations:\n",
+            "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
+            "- SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n",
+        ]
+
+    def chat(self, messages, *args, **kwargs):
+        return "".join(self.deltas)
+
+    async def chat_stream(self, messages, *args, **kwargs):
+        for i, delta in enumerate(self.deltas):
+            yield {
+                "type": "token",
+                "delta": delta,
+                "token": delta,
+                "ttft_ms": 12 if i == 0 else 24,
+            }
+        yield {
+            "type": "done",
+            "finish_reason": "stop",
+            "usage": TokenUsage(prompt_tokens=10, completion_tokens=25, reasoning_tokens=5, total_tokens=35),
+            "ttft_ms": 12,
+        }
+
+
+def _parse_sse_events(text: str) -> list[tuple[str, dict]]:
+    """Parse raw SSE text into a list of (event_type, json_data) tuples."""
+    events = []
+    current_event = "message"
+    current_data: list[str] = []
+
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            if current_data:
+                data_str = "\n".join(current_data)
+                events.append((current_event, json.loads(data_str)))
+                current_event = "message"
+                current_data = []
+            continue
+        if line.startswith("event:"):
+            current_event = line[6:].strip()
+        elif line.startswith("data:"):
+            current_data.append(line[5:].strip())
+
+    if current_data:
+        data_str = "\n".join(current_data)
+        events.append((current_event, json.loads(data_str)))
+
+    return events
+
+
+def test_v1_answer_streaming_sse_token_deltas_and_final_event(client, monkeypatch):
+    monkeypatch.setattr(app_mod, "llm", StreamingFakeLLM())
+    resp = client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
+    assert resp.status_code == 200
+    assert "text/event-stream" in resp.headers["content-type"]
+    assert "Cache-Control" in resp.headers and resp.headers["Cache-Control"] == "no-cache"
+
+    events = _parse_sse_events(resp.text)
+    assert len(events) >= 2
+
+    # Verify token deltas
+    token_events = [e for e in events if e[0] == "token"]
+    assert len(token_events) > 0
+    reconstructed = "".join(e[1]["delta"] for e in token_events)
+    assert "Reissue the command" in reconstructed
+
+    # Verify final event
+    final_events = [e for e in events if e[0] == "final"]
+    assert len(final_events) == 1
+    final_data = final_events[0][1]
+    assert final_data["type"] == "final"
+    assert "request_id" in final_data
+    assert final_data["citations"] == ["SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"]
+    assert final_data["script"] == "// example only\nIOSCMDS LIST"
+    assert final_data["query_kind"] == "identifier"
+    assert len(final_data["hits"]) == 1
+    assert final_data["ttft_ms"] == 12
+    assert final_data["usage"]["total_tokens"] == 35
+
+
+def test_v1_answer_streaming_citations_identical_to_non_streaming(client, monkeypatch):
+    llm = StreamingFakeLLM()
+    monkeypatch.setattr(app_mod, "llm", llm)
+
+    # 1. Non-streaming call
+    resp_sync = client.post("/v1/answer", json={"query": "IEA500I command", "stream": False})
+    assert resp_sync.status_code == 200
+    data_sync = resp_sync.json()
+
+    # 2. Streaming call
+    resp_stream = client.post("/v1/answer", json={"query": "IEA500I command", "stream": True})
+    assert resp_stream.status_code == 200
+    assert "text/event-stream" in resp_stream.headers["content-type"]
+    events = _parse_sse_events(resp_stream.text)
+    final_events = [e for e in events if e[0] == "final"]
+    assert len(final_events) == 1
+    data_stream = final_events[0][1]
+
+    # Citations and script must match exactly
+    assert data_stream["citations"] == data_sync["citations"]
+    assert data_stream["script"] == data_sync["script"]
+    assert data_stream["answer"] == data_sync["answer"]
+
+
+def test_v1_answer_stream_query_param_and_body_precedence(client, monkeypatch):
+    monkeypatch.setattr(app_mod, "llm", StreamingFakeLLM())
+
+    # Default is non-streaming
+    r1 = client.post("/v1/answer", json={"query": "IEA500I command"})
+    assert r1.headers["content-type"] == "application/json"
+    assert isinstance(r1.json(), dict)
+
+    # stream: true in body
+    r2 = client.post("/v1/answer", json={"query": "IEA500I command", "stream": True})
+    assert "text/event-stream" in r2.headers["content-type"]
+
+    # ?stream=true query param overrides body stream: false
+    r3 = client.post("/v1/answer?stream=true", json={"query": "IEA500I command", "stream": False})
+    assert "text/event-stream" in r3.headers["content-type"]
+
+    # ?stream=false query param overrides body stream: true
+    r4 = client.post("/v1/answer?stream=false", json={"query": "IEA500I command", "stream": True})
+    assert r4.headers["content-type"] == "application/json"
+
+
+def test_v1_answer_empty_hits_streaming(client, monkeypatch):
+    class EmptySearch:
+        def search(self, *a, **kw):
+            return [], "nl", {"embed_ms": 1, "qdrant_ms": 1}
+
+    monkeypatch.setattr(app_mod, "retrieve_search", EmptySearch().search)
+    resp = client.post("/v1/answer?stream=true", json={"query": "random obscure thing"})
+    assert resp.status_code == 200
+    assert "text/event-stream" in resp.headers["content-type"]
+    events = _parse_sse_events(resp.text)
+    assert len(events) == 1
+    event_type, payload = events[0]
+    assert event_type == "final"
+    assert payload["answer"] == "No supporting manual excerpts were found for this question."
+    assert payload["citations"] == []
+    assert payload["hits"] == []
+    # Schema parity with the non-empty final event (review S6): same keys,
+    # no tokens were streamed, usage is all zeros.
+    assert payload["finish_reason"] == "stop"
+    assert payload["ttft_ms"] is None
+    assert payload["usage"] == {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 0,
+    }
+
+
+@pytest.mark.anyio
+async def test_v1_answer_20_concurrent_requests_no_threadpool_starvation(monkeypatch):
+    import asyncio
+
+    import httpx2
+
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+
+    class SlowAsyncLLM:
+        async def chat(self, messages, *args, **kwargs):
+            await asyncio.sleep(0.05)
+            return "Async response\n\nCitations:\nSA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+
+    monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
+    monkeypatch.setattr(app_mod, "llm", SlowAsyncLLM())
+    monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
+
+    transport = httpx2.ASGITransport(app=app_mod.app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as ac:
+        t0 = time.monotonic()
+        reqs = [
+            ac.post("/v1/answer", json={"query": f"IEA500I test {i}"})
+            for i in range(20)
+        ]
+        responses = await asyncio.gather(*reqs)
+        total_time = time.monotonic() - t0
+
+    for r in responses:
+        assert r.status_code == 200
+        assert r.json()["answer"] == "Async response"
+
+    # 20 sequential calls of 0.05s would take >= 1.0s.
+    # Cooperatively run on the event loop, all 20 finish together well under 0.6s.
+    assert total_time < 0.6
+
+
+@pytest.mark.anyio
+async def test_httpx_llm_client_chat_stream_async():
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    class FakeAsyncStreamResp:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self) -> AsyncIterator[str]:
+            lines = [
+                'data: {"choices": [{"delta": {"content": "First "}}]}',
+                'data: {"choices": [{"delta": {"content": "second"}}]}',
+                'data: {"choices": [{"finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}',
+                "data: [DONE]",
+            ]
+            for l in lines:
+                yield l
+
+    class FakeAsyncHttpClient:
+        @asynccontextmanager
+        async def stream(self, method, url, json=None):
+            yield FakeAsyncStreamResp()
+
+    settings = Settings(
+        llm_base_url="http://llm.internal/v1",
+        llm_model_reasoning="test-reasoning-model",
+        _env_file=None,
+    )
+    client = HttpxLLMClient(settings, client=FakeAsyncHttpClient())
+    items = []
+    async for item in client.chat_stream([ChatMessage(role="user", content="hi")]):
+        items.append(item)
+
+    assert len(items) == 3
+    assert items[0]["type"] == "token" and items[0]["delta"] == "First "
+    assert items[0]["ttft_ms"] is not None
+    assert items[1]["type"] == "token" and items[1]["delta"] == "second"
+    assert items[2]["type"] == "done" and items[2]["finish_reason"] == "stop"
+    assert items[2]["usage"].total_tokens == 7
+
+
+@pytest.mark.anyio
+async def test_httpx_llm_client_chat_stream_empty_content_recovers_via_post():
+    """Review S7: a reasoning model whose whole output lands in the reasoning
+    channel yields zero content deltas. chat_stream must recover through the
+    non-streaming POST (mirroring achat) instead of ending with an empty
+    answer — recovery only fires before any token was yielded, so nothing is
+    ever duplicated."""
+
+    from contextlib import asynccontextmanager
+
+    class EmptyStreamResp:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield 'data: {"choices": [{"delta": {}}]}'
+            yield 'data: {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}'
+            yield "data: [DONE]"
+
+    class PostResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": "Recovered answer"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+            }
+
+    class RecoveringClient:
+        def __init__(self):
+            self.posts = 0
+
+        @asynccontextmanager
+        async def stream(self, method, url, json=None):
+            yield EmptyStreamResp()
+
+        async def post(self, url, json=None):
+            self.posts += 1
+            return PostResp()
+
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    fake = RecoveringClient()
+    settings = Settings(
+        llm_base_url="http://llm.internal/v1",
+        llm_model_reasoning="test-reasoning-model",
+        _env_file=None,
+    )
+    llm = HttpxLLMClient(settings, client=fake)
+    items = [item async for item in llm.chat_stream([ChatMessage(role="user", content="hi")])]
+
+    assert fake.posts == 1
+    assert len(items) == 2
+    assert items[0]["type"] == "token" and items[0]["delta"] == "Recovered answer"
+    assert items[0]["ttft_ms"] is not None
+    assert items[1]["type"] == "done" and items[1]["finish_reason"] == "stop"
+    assert items[1]["usage"].total_tokens == 8
 

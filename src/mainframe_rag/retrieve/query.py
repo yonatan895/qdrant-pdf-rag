@@ -8,6 +8,8 @@ here, preserve the "filters in prefetch" contract. architecture.md 4.5.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import time
 from collections import defaultdict
 from typing import TYPE_CHECKING
@@ -18,7 +20,7 @@ from qdrant_client import models
 if TYPE_CHECKING:
     from mainframe_rag.config import Settings
 
-from mainframe_rag.ports import Embedder, QdrantPoints, Reranker
+from mainframe_rag.ports import AsyncQdrantPoints, Embedder, QdrantPoints, Reranker
 from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
 
 PREFETCH_LIMIT = 40
@@ -282,6 +284,135 @@ def search(
         candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=rrf_limit)
         t_rr = time.monotonic()
         reranked = rerank_candidates(query, candidates, active_reranker)
+        timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
+        hits = diversify_hits(reranked, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
+    else:
+        candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=max(limit * 3, 24))
+        hits = diversify_hits(candidates, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
+
+    return hits, query_kind(identifiers), timings
+
+
+async def _async_prefetch_one(
+    client: AsyncQdrantPoints | QdrantPoints,
+    collection: str,
+    vec: list[float] | models.SparseVector,
+    using: str,
+    flt: models.Filter | None,
+    limit: int,
+) -> list[models.ScoredPoint]:
+    res = client.query_points(
+        collection,
+        query=vec,
+        using=using,
+        limit=limit,
+        query_filter=flt,
+        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
+    )
+    resp = await res if inspect.isawaitable(res) else res
+    return resp.points
+
+
+async def async_search(
+    client: AsyncQdrantPoints | QdrantPoints,
+    embedder: Embedder,
+    collection: str,
+    query: str,
+    product: str | None = None,
+    version: str | None = None,
+    limit: int = 8,
+    settings: Settings | None = None,
+    reranker: Reranker | None = None,
+) -> tuple[list[SearchHit], str, dict[str, int]]:
+    """Async: returns (hits, query_kind, timing_ms). Filters applied inside prefetch.
+
+    Dense and sparse prefetch queries execute concurrently in a single HTTP
+    batch call via query_batch_points (falling back to query_points if unsupported).
+    When reranking is enabled, fused candidates (top-50) are scored by the cross-encoder."""
+    identifiers = parse_query(query)
+    flt = build_filter(identifiers, product=product, version=version)
+
+    active_reranker = reranker
+    if active_reranker is None and settings and settings.rerank_enabled:
+        global _memoized_reranker
+        sid = id(settings)
+        if _memoized_reranker is None or _memoized_reranker[0] != sid:
+            from mainframe_rag.retrieve.rerank import build_reranker
+
+            _memoized_reranker = (sid, build_reranker(settings))
+        active_reranker = _memoized_reranker[1]
+    rerank_active = active_reranker is not None
+
+    prefetch_limit = settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
+
+    timings: dict[str, int] = {}
+
+    # dense_query is a sync HTTP POST to the embed server and sparse is
+    # CPU-bound FastEmbed/BM25; both are sync by protocol. Offload to a worker
+    # thread — running them on the event loop would block every in-flight
+    # request for the duration of the embed call (review S1).
+    t0 = time.monotonic()
+    dense_vec = (await asyncio.to_thread(embedder.dense_query, [query]))[0]
+    sparse_idx, sparse_val = (await asyncio.to_thread(embedder.sparse, [query]))[0]
+    timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
+
+    t0 = time.monotonic()
+    dense_req = models.QueryRequest(
+        query=dense_vec,
+        using="dense",
+        limit=prefetch_limit,
+        filter=flt,
+        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
+    )
+    sparse_req = models.QueryRequest(
+        query=models.SparseVector(indices=sparse_idx, values=sparse_val),
+        using="bm25",
+        limit=prefetch_limit,
+        filter=flt,
+        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
+    )
+
+    if hasattr(client, "query_batch_points"):
+        res = client.query_batch_points(collection, requests=[dense_req, sparse_req])
+        responses = await res if inspect.isawaitable(res) else res
+        dense_points = responses[0].points
+        sparse_points = responses[1].points
+    else:
+        dense_points = await _async_prefetch_one(client, collection, dense_vec, "dense", flt, prefetch_limit)
+        sparse_points = await _async_prefetch_one(
+            client,
+            collection,
+            models.SparseVector(indices=sparse_idx, values=sparse_val),
+            "bm25",
+            flt,
+            prefetch_limit,
+        )
+    timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
+
+    if settings:
+        weights = (
+            (settings.rrf_weight_dense_identifier, settings.rrf_weight_sparse_identifier)
+            if identifiers.has_identifiers
+            else (settings.rrf_weight_dense_nl, settings.rrf_weight_sparse_nl)
+        )
+        k = settings.rrf_k
+        max_per_page = settings.retrieve_max_chunks_per_page
+        max_per_doc = settings.retrieve_max_chunks_per_doc
+    else:
+        weights = RRF_WEIGHTS_IDENTIFIER if identifiers.has_identifiers else RRF_WEIGHTS_NL
+        k = RRF_K
+        max_per_page = 1
+        max_per_doc = 3
+
+    if rerank_active and active_reranker is not None:
+        from mainframe_rag.retrieve.rerank import rerank_candidates
+
+        rrf_limit = settings.rerank_candidates if settings else 50
+        candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=rrf_limit)
+        t_rr = time.monotonic()
+        # Cross-encoder scoring is sync HTTP (batches of settings.rerank_batch_size);
+        # offload like the embed leg above (review S1).
+        reranked = await asyncio.to_thread(rerank_candidates, query, candidates, active_reranker)
         timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
         hits = diversify_hits(reranked, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
     else:
