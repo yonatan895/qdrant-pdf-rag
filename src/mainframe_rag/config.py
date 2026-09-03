@@ -146,6 +146,25 @@ class Settings(BaseSettings):
     rerank_batch_size: int = Field(default=32, ge=1, le=128)
     rerank_timeout_s: float = Field(default=5.0, ge=0.5, le=30.0)
 
+    # Contextual retrieval (issue #78): an LLM-generated 1-2 sentence
+    # situating prefix per chunk, embedded with the chunk. Default off —
+    # enabling changes every dense vector, so the collection must be
+    # recreated. Calls run sequentially inside each parse worker; worker
+    # count (INGEST_WORKERS) is the throughput knob, so there is no
+    # separate concurrency setting.
+    contextual_embed_enabled: bool = False
+    context_llm_base_url: str | None = None
+    context_llm_model: str | None = None
+    # Short-call budget, distinct from the 300s answer timeout: context
+    # generation is a 1-2 sentence completion, never a reasoning trace.
+    context_llm_timeout_s: float = Field(default=30.0, gt=0.0, le=300.0)
+    # Deterministic cap so the embed-window budget pin stays provable
+    # (tests/test_embed_budget.py accounts for this prefix length).
+    context_max_chars: int = Field(default=500, ge=50, le=2000)
+    # Sidecar cache file; None resolves to a sibling of the --progress
+    # inventory in run_ingest.
+    context_cache_path: str | None = None
+
     def require_dense_dim(self) -> int:
         if self.embed_mode == "hash":
             return HASH_EMBED_DIM
@@ -172,6 +191,18 @@ class Settings(BaseSettings):
                 "LLM_MODEL_REASONING is unset; /v1/answer must use the reasoning model."
             )
         return self.llm_model_reasoning
+
+    def require_context_llm(self) -> tuple[str, str]:
+        """Fail fast for contextual ingest: a cheap chat model endpoint and
+        model name must be configured. Deliberately separate from the
+        reasoning-model knob — per-chunk gist generation is a short,
+        high-volume workload, not an answer."""
+        if not self.context_llm_base_url or not self.context_llm_model:
+            raise RuntimeError(
+                "CONTEXT_LLM_BASE_URL and CONTEXT_LLM_MODEL must be set when "
+                "CONTEXTUAL_EMBED_ENABLED=true."
+            )
+        return self.context_llm_base_url, self.context_llm_model
 
 
 def load_settings() -> Settings:

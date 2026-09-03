@@ -19,6 +19,7 @@ from typing import Any
 import httpx2
 
 from mainframe_rag.config import Settings
+from mainframe_rag.ingest.context import CONTEXT_PROMPT_VERSION
 
 
 def get_git_sha(repo_root: Path | None = None) -> str:
@@ -97,6 +98,8 @@ def write_run_manifest(
     model_ids = {
         "embed": settings.embed_model,
         "llm_reasoning": settings.llm_model_reasoning,
+        "llm_context": settings.context_llm_model,
+        "context_prompt": CONTEXT_PROMPT_VERSION if settings.contextual_embed_enabled else None,
     }
     qdrant_ver = get_qdrant_version(settings.qdrant_url)
     snapshot_id = get_collection_snapshot_id(settings.qdrant_url, settings.qdrant_collection)

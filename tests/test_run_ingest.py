@@ -272,9 +272,9 @@ def test_worker_embed_batches_by_batch_size(synthetic_pdf, monkeypatch):
     embed_calls: list[int] = []
     original_embed_batch = run_ingest.embed_batch
 
-    def mock_embed_batch(chunks, product, version, title, embedder):
+    def mock_embed_batch(chunks, product, version, title, embedder, contexts=None):
         embed_calls.append(len(chunks))
-        return original_embed_batch(chunks, product, version, title, embedder)
+        return original_embed_batch(chunks, product, version, title, embedder, contexts)
 
     # batch_size min validator is 16; use Settings instance with batch_size=16 or mock chunks
     test_settings = Settings(batch_size=16, embed_mode="hash")
@@ -283,8 +283,10 @@ def test_worker_embed_batches_by_batch_size(synthetic_pdf, monkeypatch):
     monkeypatch.setattr(run_ingest, "_load_worker_settings", lambda: test_settings)
     monkeypatch.setattr(run_ingest, "embed_batch", mock_embed_batch)
 
-    task = (str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent), "dummy_sha", True)
-    _rec, _parsed, chunks, vectors = run_ingest._parse_one(task)
+    task = (str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent), "dummy_sha", True, None)
+    _rec, _parsed, chunks, vectors, contexts = run_ingest._parse_one(task)
+    assert len(chunks) > 2
+    assert contexts == {}
     assert len(chunks) > 2
     assert all(c <= 2 for c in embed_calls), f"every embed call must be <= batch_size=2: {embed_calls}"
     assert sum(embed_calls) == len(chunks)
@@ -343,8 +345,8 @@ def test_parse_one_error_isolation_and_picklability(tmp_path):
     bad_pdf = tmp_path / "corrupt_worker.pdf"
     bad_pdf.write_bytes(b"not a valid pdf file")
 
-    record, parsed, chunks, vectors = _parse_one(
-        (str(bad_pdf), "IBM", "z/OS", "3.2", str(tmp_path), "test_sha", True)
+    record, parsed, chunks, vectors, contexts = _parse_one(
+        (str(bad_pdf), "IBM", "z/OS", "3.2", str(tmp_path), "test_sha", True, None)
     )
 
     assert record.status == "error"
@@ -353,15 +355,17 @@ def test_parse_one_error_isolation_and_picklability(tmp_path):
     assert record.path == str(bad_pdf)
     assert chunks == []
     assert vectors == []
+    assert contexts == {}
 
     # Round-trip through pickle to verify IPC safety in ProcessPoolExecutor
-    serialized = pickle.dumps((record, parsed, chunks, vectors))
-    unpacked_rec, _unpacked_parsed, unpacked_chunks, unpacked_vectors = pickle.loads(serialized)
+    serialized = pickle.dumps((record, parsed, chunks, vectors, contexts))
+    unpacked_rec, _unpacked_parsed, unpacked_chunks, unpacked_vectors, unpacked_contexts = pickle.loads(serialized)
 
     assert unpacked_rec.status == "error"
     assert unpacked_rec.error_type == record.error_type
     assert unpacked_rec.error == record.error
     assert unpacked_chunks == []
     assert unpacked_vectors == []
+    assert unpacked_contexts == {}
 
 

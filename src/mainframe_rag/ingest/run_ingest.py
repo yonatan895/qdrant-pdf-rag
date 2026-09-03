@@ -25,6 +25,13 @@ from pathlib import Path
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import Chunk, make_chunks
+from mainframe_rag.ingest.context import (
+    ContextLLMClient,
+    append_context_entries,
+    generate_contexts,
+    load_context_cache,
+    resolve_cache_path,
+)
 from mainframe_rag.ingest.embed import build_embedder, embed_batch
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc, parse_pdf, sha256_file
 from mainframe_rag.ingest.inventory import (
@@ -49,18 +56,26 @@ log = logging.getLogger("ingest")
 _worker_qdrant = None
 _worker_embedder = None
 _worker_settings: Settings | None = None
+_worker_context_client: ContextLLMClient | None = None
+_worker_context_cache: dict[str, str] | None = None
+_worker_context_cache_path: str | None = None
 
 
 def _parse_one(
-    args: tuple[str, str | None, str | None, str | None, str, str, bool],
-) -> tuple[InventoryRecord, ParsedDoc, list[Chunk], list[tuple[list[float], SparseVector]]]:
+    args: tuple[str, str | None, str | None, str | None, str, str, bool, str | None],
+) -> tuple[
+    InventoryRecord, ParsedDoc, list[Chunk], list[tuple[list[float], SparseVector]], dict[str, str]
+]:
     """Stage 1 (parse worker): parse, chunk, and embed. Embedding lives in
     the worker because hash embed is Python/GIL-bound — in a thread pool it
     would serialize; in a process pool it scales with the parse pool.
-    Dry runs embed nothing (the --dry-run contract: parse + chunk only)."""
+    Dry runs embed nothing (the --dry-run contract: parse + chunk only).
+    The trailing contexts dict maps chunk_id -> situating prefix for the doc
+    (empty when contextual ingest is off or on any error path); the parent
+    merges it into the sidecar cache and the upsert payload."""
     import pymupdf
 
-    path_str, vendor, product, version, corpus_root, sha, embed = args
+    path_str, vendor, product, version, corpus_root, sha, embed, cache_path = args
     started = time.monotonic()
     parsed: ParsedDoc | None = None
     try:
@@ -89,7 +104,31 @@ def _parse_one(
         batch = settings.batch_size
         embedder = _get_embedder(settings) if embed else None
         vectors: list[tuple[list[float], SparseVector]] = []
+        contexts: dict[str, str] = {}
         if embed and embedder is not None:
+            if settings.contextual_embed_enabled:
+                # Defense in depth: the parent validates before spawning the
+                # pool, but a worker must never silently embed header-only
+                # vectors when the flag asked for contexts.
+                if settings.embed_mode == "hash":
+                    raise RuntimeError(
+                        "CONTEXTUAL_EMBED_ENABLED=true requires embed_mode=vllm."
+                    )
+                settings.require_context_llm()
+                if cache_path is None:
+                    raise RuntimeError("contextual ingest requires a context cache path.")
+                cache = _get_context_cache(cache_path)
+                client = _get_context_client(settings)
+                contexts, _ = generate_contexts(
+                    chunks,
+                    doc_sha256=sha,
+                    product=parsed.product,
+                    version=parsed.version,
+                    title=parsed.title,
+                    client=client,
+                    cache=cache,
+                    max_chars=settings.context_max_chars,
+                )
             for i in range(0, len(chunks), batch):
                 vectors.extend(
                     embed_batch(
@@ -98,6 +137,7 @@ def _parse_one(
                         parsed.version,
                         parsed.title,
                         embedder,
+                        contexts or None,
                     )
                 )
         record = InventoryRecord(
@@ -108,7 +148,7 @@ def _parse_one(
             chunks=len(chunks),
             seconds=round(time.monotonic() - started, 3),
         )
-        return record, parsed, chunks, vectors
+        return record, parsed, chunks, vectors, contexts
     except Exception as exc:  # noqa: BLE001 — isolate worker crash from main pool
         record = InventoryRecord(
             path=path_str,
@@ -132,7 +172,7 @@ def _parse_one(
             toc=(),
             page_count=0,
         )
-        return record, dummy_parsed, [], []
+        return record, dummy_parsed, [], [], {}
 
 
 def resolve_workers(requested: int | None, settings: Settings) -> int:
@@ -158,6 +198,26 @@ def _get_embedder(settings: Settings):
     if _worker_embedder is None:
         _worker_embedder = build_embedder(settings)
     return _worker_embedder
+
+
+def _get_context_client(settings: Settings) -> ContextLLMClient:
+    global _worker_context_client
+    if _worker_context_client is None:
+        _worker_context_client = ContextLLMClient(settings)
+    return _worker_context_client
+
+
+def _get_context_cache(cache_path: str) -> dict[str, str]:
+    """Per-worker snapshot of the sidecar cache. A worker only ever needs
+    entries for the doc it is currently processing (chunk ids embed the
+    doc id, and one file is processed by exactly one worker), so a snapshot
+    taken at first use plus its own misses is complete — sibling workers'
+    mid-run appends are for other docs and safely invisible."""
+    global _worker_context_cache, _worker_context_cache_path
+    if _worker_context_cache is None or _worker_context_cache_path != cache_path:
+        _worker_context_cache = load_context_cache(Path(cache_path))
+        _worker_context_cache_path = cache_path
+    return _worker_context_cache
 
 
 def _get_qdrant(settings: Settings):
@@ -198,6 +258,7 @@ def _upsert_one(
     vectors: list[tuple[list[float], SparseVector]],
     settings: Settings,
     locks: _DocLocks,
+    contexts: dict[str, str] | None = None,
 ) -> tuple[str, float]:
     """Stage 2 (upsert stream): qdrant-level skip, delete-on-sha-mismatch,
     batched upsert. Vectors arrive precomputed from the parse worker. The
@@ -211,7 +272,7 @@ def _upsert_one(
             return "skipped", round(time.perf_counter() - started, 3)
         if stored_sha is not None:
             delete_by_doc(client, settings, parsed.doc_id)
-        upserted = upsert_chunks(client, settings, parsed, chunks, vectors)
+        upserted = upsert_chunks(client, settings, parsed, chunks, vectors, contexts)
     log.info(
         json.dumps(
             {
@@ -239,6 +300,17 @@ def run(
     settings = load_settings()
     workers = resolve_workers(workers, settings)
     started = time.monotonic()
+    if settings.contextual_embed_enabled and not dry_run:
+        # Fail the whole run before spawning the pool: a misconfigured flag
+        # must never degrade into header-only vectors doc by doc. Dry runs
+        # embed nothing, so they need no context endpoint.
+        if settings.embed_mode == "hash":
+            raise RuntimeError(
+                "CONTEXTUAL_EMBED_ENABLED=true requires embed_mode=vllm; "
+                "hash mode cannot call an LLM."
+            )
+        settings.require_context_llm()
+    cache_path = resolve_cache_path(settings, progress) if settings.contextual_embed_enabled else None
     # Progress counters (issue #20 PR D): files ok / failed / chunks upserted,
     # logged once per run. Logs carry ids and counts, never PDF text.
     files_ok = 0
@@ -263,7 +335,7 @@ def run(
             pdfs = pdfs[:limit]
         inventory = load_inventory(progress)
 
-        tasks: list[tuple[str, str | None, str | None, str | None, str, str, bool]] = []
+        tasks: list[tuple[str, str | None, str | None, str | None, str, str, bool, str | None]] = []
         for path in pdfs:
             record = inventory.get(str(path))
             sha = sha256_file(path)
@@ -274,8 +346,13 @@ def run(
             # sha passes through: the parent hashed for the skip check, so the
             # worker never re-reads the file for hashing. Embedding flag keeps
             # the --dry-run contract (parse + chunk only, no embeddings).
+            # Cache path travels with the task because spawn workers share no
+            # memory with the parent (None when contextual ingest is off).
             tasks.append(
-                (str(path), vendor or detect_vendor(path), product, version, str(src), sha, not dry_run)
+                (
+                    str(path), vendor or detect_vendor(path), product, version, str(src), sha,
+                    not dry_run, str(cache_path) if cache_path is not None else None,
+                )
             )
 
         log.info(
@@ -313,7 +390,7 @@ def run(
         parse_pending: dict[concurrent.futures.Future, str] = {}
         upsert_pending: dict[concurrent.futures.Future, InventoryRecord] = {}
 
-        def submit_parse(task: tuple[str, str | None, str | None, str | None, str, str, bool]) -> None:
+        def submit_parse(task: tuple[str, str | None, str | None, str | None, str, str, bool, str | None]) -> None:
             parse_pending[pool.submit(_parse_one, task)] = task[0]
 
         def refill_parse() -> None:
@@ -344,7 +421,7 @@ def run(
                     if future in parse_pending:
                         path_str = parse_pending.pop(future)
                         try:
-                            record, parsed, chunks, vectors = future.result()
+                            record, parsed, chunks, vectors, contexts = future.result()
                         except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
                             failures += 1
                             files_failed += 1
@@ -407,8 +484,15 @@ def run(
                             continue
 
                         assert upsert_pool is not None
+                        if contexts:
+                            # Cache-first: preserve the expensive LLM work even
+                            # if the upsert below fails. Non-empty contexts
+                            # imply cache_path was resolved (workers only
+                            # generate when the parent validated + passed it).
+                            assert cache_path is not None
+                            append_context_entries(cache_path, parsed.sha256, contexts)
                         upsert_pending[
-                            upsert_pool.submit(_upsert_one, parsed, chunks, vectors, settings, locks)
+                            upsert_pool.submit(_upsert_one, parsed, chunks, vectors, settings, locks, contexts or None)
                         ] = record
                         refill_parse()
                     else:  # upsert stream result

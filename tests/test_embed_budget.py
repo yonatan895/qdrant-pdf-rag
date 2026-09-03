@@ -145,3 +145,18 @@ def test_worst_case_embed_text_under_char_budget(tmp_path: Path):
         "The local embed server window would no longer be safe; re-run the "
         "issue #99 tokenizer sweep before changing anything."
     )
+
+
+def test_worst_case_with_max_context_prefix_under_budget(tmp_path: Path):
+    """Issue #78: the contextual prefix is deterministically capped at
+    context_max_chars, so the worst case stays provable — header + max
+    prefix + worst body must still fit the window's headroom budget."""
+    from mainframe_rag.config import Settings
+
+    max_prefix = Settings(_env_file=None).context_max_chars
+    _, body = _worst_case_embed_text(tmp_path)
+    with_prefix = build_embed_text(
+        PRODUCT, VERSION, DOC_ID, TITLE, HEADING_PATH, body,
+        context="x" * max_prefix,
+    )
+    assert len(with_prefix) <= CHAR_BUDGET + 1 + max_prefix
