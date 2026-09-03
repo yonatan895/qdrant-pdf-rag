@@ -4,6 +4,9 @@ Qdrant and the LLM are faked; citation enforcement is checked against the
 retrieved hit set.
 """
 
+import json
+import time
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -12,6 +15,7 @@ from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.answer import parse_answer
 from mainframe_rag.agent.cites import extract_citation_lines, valid_citations
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
+from mainframe_rag.ports import TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
 
 
@@ -1214,4 +1218,240 @@ def test_httpx_llm_client_streaming_error_falls_back_to_post():
     res = client.chat([ChatMessage(role="user", content="hi")])
     assert fake_client.post_called is True
     assert res.content == "Post after stream error"
+
+
+class StreamingFakeLLM:
+    def __init__(self, deltas: list[str] | None = None):
+        self.deltas = deltas or [
+            "Reissue the command ",
+            "after initialization completes.\n\n",
+            "```jcl\n// example only\nIOSCMDS LIST\n```\n\n",
+            "Citations:\n",
+            "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
+            "- SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n",
+        ]
+
+    def chat(self, messages, *args, **kwargs):
+        return "".join(self.deltas)
+
+    async def chat_stream(self, messages, *args, **kwargs):
+        for i, delta in enumerate(self.deltas):
+            yield {
+                "type": "token",
+                "delta": delta,
+                "token": delta,
+                "ttft_ms": 12 if i == 0 else 24,
+            }
+        yield {
+            "type": "done",
+            "finish_reason": "stop",
+            "usage": TokenUsage(prompt_tokens=10, completion_tokens=25, reasoning_tokens=5, total_tokens=35),
+            "ttft_ms": 12,
+        }
+
+
+def _parse_sse_events(text: str) -> list[tuple[str, dict]]:
+    """Parse raw SSE text into a list of (event_type, json_data) tuples."""
+    events = []
+    current_event = "message"
+    current_data: list[str] = []
+
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            if current_data:
+                data_str = "\n".join(current_data)
+                events.append((current_event, json.loads(data_str)))
+                current_event = "message"
+                current_data = []
+            continue
+        if line.startswith("event:"):
+            current_event = line[6:].strip()
+        elif line.startswith("data:"):
+            current_data.append(line[5:].strip())
+
+    if current_data:
+        data_str = "\n".join(current_data)
+        events.append((current_event, json.loads(data_str)))
+
+    return events
+
+
+def test_v1_answer_streaming_sse_token_deltas_and_final_event(client, monkeypatch):
+    monkeypatch.setattr(app_mod, "llm", StreamingFakeLLM())
+    resp = client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
+    assert resp.status_code == 200
+    assert "text/event-stream" in resp.headers["content-type"]
+    assert "Cache-Control" in resp.headers and resp.headers["Cache-Control"] == "no-cache"
+
+    events = _parse_sse_events(resp.text)
+    assert len(events) >= 2
+
+    # Verify token deltas
+    token_events = [e for e in events if e[0] == "token"]
+    assert len(token_events) > 0
+    reconstructed = "".join(e[1]["delta"] for e in token_events)
+    assert "Reissue the command" in reconstructed
+
+    # Verify final event
+    final_events = [e for e in events if e[0] == "final"]
+    assert len(final_events) == 1
+    final_data = final_events[0][1]
+    assert final_data["type"] == "final"
+    assert "request_id" in final_data
+    assert final_data["citations"] == ["SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"]
+    assert final_data["script"] == "// example only\nIOSCMDS LIST"
+    assert final_data["query_kind"] == "identifier"
+    assert len(final_data["hits"]) == 1
+    assert final_data["ttft_ms"] == 12
+    assert final_data["usage"]["total_tokens"] == 35
+
+
+def test_v1_answer_streaming_citations_identical_to_non_streaming(client, monkeypatch):
+    llm = StreamingFakeLLM()
+    monkeypatch.setattr(app_mod, "llm", llm)
+
+    # 1. Non-streaming call
+    resp_sync = client.post("/v1/answer", json={"query": "IEA500I command", "stream": False})
+    assert resp_sync.status_code == 200
+    data_sync = resp_sync.json()
+
+    # 2. Streaming call
+    resp_stream = client.post("/v1/answer", json={"query": "IEA500I command", "stream": True})
+    assert resp_stream.status_code == 200
+    assert "text/event-stream" in resp_stream.headers["content-type"]
+    events = _parse_sse_events(resp_stream.text)
+    final_events = [e for e in events if e[0] == "final"]
+    assert len(final_events) == 1
+    data_stream = final_events[0][1]
+
+    # Citations and script must match exactly
+    assert data_stream["citations"] == data_sync["citations"]
+    assert data_stream["script"] == data_sync["script"]
+    assert data_stream["answer"] == data_sync["answer"]
+
+
+def test_v1_answer_stream_query_param_and_body_precedence(client, monkeypatch):
+    monkeypatch.setattr(app_mod, "llm", StreamingFakeLLM())
+
+    # Default is non-streaming
+    r1 = client.post("/v1/answer", json={"query": "IEA500I command"})
+    assert r1.headers["content-type"] == "application/json"
+    assert isinstance(r1.json(), dict)
+
+    # stream: true in body
+    r2 = client.post("/v1/answer", json={"query": "IEA500I command", "stream": True})
+    assert "text/event-stream" in r2.headers["content-type"]
+
+    # ?stream=true query param overrides body stream: false
+    r3 = client.post("/v1/answer?stream=true", json={"query": "IEA500I command", "stream": False})
+    assert "text/event-stream" in r3.headers["content-type"]
+
+    # ?stream=false query param overrides body stream: true
+    r4 = client.post("/v1/answer?stream=false", json={"query": "IEA500I command", "stream": True})
+    assert r4.headers["content-type"] == "application/json"
+
+
+def test_v1_answer_empty_hits_streaming(client, monkeypatch):
+    class EmptySearch:
+        def search(self, *a, **kw):
+            return [], "nl", {"embed_ms": 1, "qdrant_ms": 1}
+
+    monkeypatch.setattr(app_mod, "retrieve_search", EmptySearch().search)
+    resp = client.post("/v1/answer?stream=true", json={"query": "random obscure thing"})
+    assert resp.status_code == 200
+    assert "text/event-stream" in resp.headers["content-type"]
+    events = _parse_sse_events(resp.text)
+    assert len(events) == 1
+    event_type, payload = events[0]
+    assert event_type == "final"
+    assert payload["answer"] == "No supporting manual excerpts were found for this question."
+    assert payload["citations"] == []
+    assert payload["hits"] == []
+
+
+@pytest.mark.anyio
+async def test_v1_answer_20_concurrent_requests_no_threadpool_starvation(monkeypatch):
+    import asyncio
+
+    import httpx2
+
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+
+    class SlowAsyncLLM:
+        async def chat(self, messages, *args, **kwargs):
+            await asyncio.sleep(0.05)
+            return "Async response\n\nCitations:\nSA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+
+    monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
+    monkeypatch.setattr(app_mod, "llm", SlowAsyncLLM())
+    monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
+
+    transport = httpx2.ASGITransport(app=app_mod.app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as ac:
+        t0 = time.monotonic()
+        reqs = [
+            ac.post("/v1/answer", json={"query": f"IEA500I test {i}"})
+            for i in range(20)
+        ]
+        responses = await asyncio.gather(*reqs)
+        total_time = time.monotonic() - t0
+
+    for r in responses:
+        assert r.status_code == 200
+        assert r.json()["answer"] == "Async response"
+
+    # 20 sequential calls of 0.05s would take >= 1.0s.
+    # Cooperatively run on the event loop, all 20 finish together well under 0.6s.
+    assert total_time < 0.6
+
+
+@pytest.mark.anyio
+async def test_httpx_llm_client_chat_stream_async():
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    class FakeAsyncStreamResp:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self) -> AsyncIterator[str]:
+            lines = [
+                'data: {"choices": [{"delta": {"content": "First "}}]}',
+                'data: {"choices": [{"delta": {"content": "second"}}]}',
+                'data: {"choices": [{"finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}',
+                "data: [DONE]",
+            ]
+            for l in lines:
+                yield l
+
+    class FakeAsyncHttpClient:
+        @asynccontextmanager
+        async def stream(self, method, url, json=None):
+            yield FakeAsyncStreamResp()
+
+    settings = Settings(
+        llm_base_url="http://llm.internal/v1",
+        llm_model_reasoning="test-reasoning-model",
+        _env_file=None,
+    )
+    client = HttpxLLMClient(settings, client=FakeAsyncHttpClient())
+    items = []
+    async for item in client.chat_stream([ChatMessage(role="user", content="hi")]):
+        items.append(item)
+
+    assert len(items) == 3
+    assert items[0]["type"] == "token" and items[0]["delta"] == "First "
+    assert items[0]["ttft_ms"] is not None
+    assert items[1]["type"] == "token" and items[1]["delta"] == "second"
+    assert items[2]["type"] == "done" and items[2]["finish_reason"] == "stop"
+    assert items[2]["usage"].total_tokens == 7
 

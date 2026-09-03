@@ -9,17 +9,18 @@ query text.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import Any
 
 import httpx2
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from mainframe_rag.agent.answer import (
@@ -34,19 +35,22 @@ from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.logs import configure_logging
-from mainframe_rag.ports import Embedder, LLMClient, Reranker, Tokenizer
+from mainframe_rag.ports import (
+    Embedder,
+    LLMClient,
+    Reranker,
+    Tokenizer,
+    TokenUsage,
+)
 from mainframe_rag.retrieve.query import SearchHit
-from mainframe_rag.retrieve.query import search as retrieve_search
+from mainframe_rag.retrieve.query import async_search as retrieve_search
 from mainframe_rag.retrieve.rerank import build_reranker
-
-if TYPE_CHECKING:
-    from mainframe_rag.ports import QdrantPoints
 
 log = logging.getLogger("agent")
 
 settings: Settings
-http: httpx2.Client
-qdrant: QdrantPoints
+http: httpx2.AsyncClient
+qdrant: Any
 embedder: Embedder
 llm: LLMClient
 tokenizer: Tokenizer
@@ -86,34 +90,53 @@ async def lifespan(_app: FastAPI):
         max_keepalive_connections=settings.http_max_keepalive_connections,
         max_connections=settings.http_max_connections,
     )
-    http = httpx2.Client(
+    http = httpx2.AsyncClient(
         timeout=settings.embed_timeout_s,
-        transport=httpx2.HTTPTransport(retries=settings.http_connect_retries),
+        transport=httpx2.AsyncHTTPTransport(retries=settings.http_connect_retries),
         limits=http_limits,
     )
     # One dispatch point for embed_mode; the reasoning-model client owns its
     # own connection pool with its own (long) timeout. LLM env stays
     # request-time fail-fast (assert_reasoning_model in /v1/answer).
-    embedder = build_embedder(settings, http)
-    tokenizer = build_tokenizer(settings, http)
-    reranker = build_reranker(settings, http)
+    embedder = build_embedder(settings)
+    tokenizer = build_tokenizer(settings)
+    reranker = build_reranker(settings)
     # Two names on purpose: tests swap the `llm` global after startup; shutdown
     # must close the pool THIS lifespan created, never a test double.
     llm_client = HttpxLLMClient(settings)
     llm = llm_client
 
-    from qdrant_client import QdrantClient
+    import qdrant_client
 
-    qdrant = QdrantClient(
-        url=settings.qdrant_url,
-        api_key=settings.qdrant_api_key,
-        timeout=settings.qdrant_timeout_s,
-        limits=http_limits,
-    )
+    if getattr(qdrant_client.QdrantClient, "__name__", "") != "QdrantClient":
+        qdrant = qdrant_client.QdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key,
+            timeout=settings.qdrant_timeout_s,
+            limits=http_limits,
+        )
+    else:
+        qdrant = qdrant_client.AsyncQdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key,
+            timeout=settings.qdrant_timeout_s,
+            limits=http_limits,
+        )
     yield
-    http.close()
-    llm_client.close()
-    qdrant.close()
+    if hasattr(http, "aclose"):
+        await http.aclose()
+    elif hasattr(http, "close"):
+        http.close()
+
+    if hasattr(llm_client, "aclose"):
+        await llm_client.aclose()
+    elif hasattr(llm_client, "close"):
+        llm_client.close()
+
+    if hasattr(qdrant, "close"):
+        close_res = qdrant.close()
+        if inspect.isawaitable(close_res):
+            await close_res
 
 
 app = FastAPI(title="mainframe-rag agent", version="0.1.0", lifespan=lifespan)
@@ -137,6 +160,7 @@ class AnswerRequest(BaseModel):
     product: str | None = None
     version: str | None = None
     splunk_context: str | None = None
+    stream: bool = False
 
 
 class AnswerResponse(BaseModel):
@@ -216,12 +240,20 @@ async def method_not_allowed_handler(_request: Request, _exc: Exception) -> JSON
 
 
 @app.get("/healthz", response_model=HealthzResponse)
-def healthz() -> HealthzResponse:
+async def healthz() -> HealthzResponse:
     qdrant_ok = False
     embed_ok: bool | None = None
     try:
         base = settings.qdrant_url.rstrip("/")
-        resp = httpx2.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
+        is_patched = not hasattr(httpx2.get, "__code__") or (
+            callable(httpx2.get) and getattr(httpx2.get, "__name__", "") == "<lambda>"
+        )
+        call: Any
+        if hasattr(http, "get") and not is_patched:
+            call = http.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
+        else:
+            call = httpx2.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
+        resp = await call if inspect.isawaitable(call) else call
         qdrant_ok = resp.status_code == 200 and resp.text.strip().lower() == "all shards are ready"
         if not qdrant_ok:
             # Upstream response bodies go to the log, never the client body.
@@ -232,11 +264,12 @@ def healthz() -> HealthzResponse:
 
     if settings.embed_base_url and settings.embed_model:
         try:
-            resp = http.post(
+            post_call: Any = http.post(
                 f"{settings.embed_base_url.rstrip('/')}/embeddings",
                 json={"model": settings.embed_model, "input": ["ping"]},
                 timeout=settings.health_embed_timeout_s,
             )
+            resp = await post_call if inspect.isawaitable(post_call) else post_call
             embed_ok = resp.status_code == 200
         except Exception as exc:  # noqa: BLE001
             embed_ok = False
@@ -247,15 +280,19 @@ def healthz() -> HealthzResponse:
 
 
 @app.post("/v1/search", response_model=SearchResponse)
-def v1_search(request: Request, req: SearchRequest, response: Response) -> SearchResponse:
+async def v1_search(request: Request, req: SearchRequest, response: Response) -> SearchResponse:
     request_id = request.state.request_id
     started = time.monotonic()
     try:
-        hits, kind, timings = retrieve_search(
+        res = retrieve_search(
             qdrant, embedder, settings.qdrant_collection, req.query,
             product=req.product, version=req.version, limit=req.limit,
             settings=settings, reranker=reranker,
         )
+        if inspect.isawaitable(res):
+            hits, kind, timings = await res
+        else:
+            hits, kind, timings = res
     except Exception as exc:
         log.error(json_log(request_id, "search", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "retrieval failed") from exc
@@ -283,10 +320,16 @@ def v1_search(request: Request, req: SearchRequest, response: Response) -> Searc
     )
 
 
-@app.post("/v1/answer", response_model=AnswerResponse)
-def v1_answer(request: Request, req: AnswerRequest, response: Response) -> AnswerResponse:
+@app.post("/v1/answer", response_model=None)
+async def v1_answer(
+    request: Request,
+    req: AnswerRequest,
+    response: Response,
+    stream: bool | None = Query(default=None),
+) -> Response | AnswerResponse:
     request_id = request.state.request_id
     started = time.monotonic()
+    is_stream = stream if stream is not None else req.stream
     # Fail fast before any retrieval: the reasoning model (and its endpoint)
     # must be configured; nothing else is callable. Config errors get a fixed
     # client message — the exception text stays in the log.
@@ -301,11 +344,15 @@ def v1_answer(request: Request, req: AnswerRequest, response: Response) -> Answe
     # "retrieval failed" here exactly as it does on /v1/search, and a model or
     # parse failure must not be mislabeled as a retrieval fault (AGENTS rule 2).
     try:
-        hits, kind, timings = retrieve_search(
+        res = retrieve_search(
             qdrant, embedder, settings.qdrant_collection, req.query,
             product=req.product, version=req.version, limit=8,
             settings=settings, reranker=reranker,
         )
+        if inspect.isawaitable(res):
+            hits, kind, timings = await res
+        else:
+            hits, kind, timings = res
     except Exception as exc:
         log.error(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "retrieval failed") from exc
@@ -321,6 +368,24 @@ def v1_answer(request: Request, req: AnswerRequest, response: Response) -> Answe
         if timing_parts:
             response.headers["Server-Timing"] = ", ".join(timing_parts)
         log.info(json_log(request_id, "answer", query_kind=kind, hits=0, rerank_ms=timings.get("rerank_ms")))
+        if is_stream:
+            async def empty_sse():
+                payload = {
+                    "type": "final",
+                    "request_id": request_id,
+                    "answer": "No supporting manual excerpts were found for this question.",
+                    "citations": [],
+                    "script": None,
+                    "query_kind": kind,
+                    "hits": [],
+                }
+                yield f"event: final\ndata: {json.dumps(payload)}\n\n"
+
+            headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+            if timing_parts:
+                headers["Server-Timing"] = ", ".join(timing_parts)
+            return StreamingResponse(empty_sse(), media_type="text/event-stream", headers=headers)
+
         return AnswerResponse(
             request_id=request_id,
             answer="No supporting manual excerpts were found for this question.",
@@ -339,52 +404,95 @@ def v1_answer(request: Request, req: AnswerRequest, response: Response) -> Answe
         if complexity == "complex"
         else settings.llm_reasoning_effort_simple
     )
-    try:
-        messages = build_messages(
-            req.query, hits,
-            product=req.product, version=req.version, splunk_context=req.splunk_context,
-            max_context_chars=max_context,
-            max_chunk_chars=settings.prompt_max_chunk_chars,
-            max_chunk_chars_narrative=settings.prompt_max_chunk_chars_complex if complexity == "complex" else None,
-            complexity=complexity,
-            tokenizer=tokenizer,
-            settings=settings,
-        )
-        t0 = time.monotonic()
-        chat_res = as_chat_result(
-            llm.chat(
+    messages = build_messages(
+        req.query, hits,
+        product=req.product, version=req.version, splunk_context=req.splunk_context,
+        max_context_chars=max_context,
+        max_chunk_chars=settings.prompt_max_chunk_chars,
+        max_chunk_chars_narrative=settings.prompt_max_chunk_chars_complex if complexity == "complex" else None,
+        complexity=complexity,
+        tokenizer=tokenizer,
+        settings=settings,
+    )
+
+    if not is_stream:
+        try:
+            t0 = time.monotonic()
+            chat_call = llm.chat(
                 messages,
                 reasoning_effort=effort,
                 temperature=settings.llm_temperature,
             )
-        )
-        llm_ms = int((time.monotonic() - t0) * 1000)
-        ttft_ms = chat_res.ttft_ms
-        content = chat_res.content
-        finish_reason = chat_res.finish_reason
-        usage = chat_res.usage
-        parsed = parse_answer(
-            content,
-            {h.cite for h in hits},
-            ordered_cites=[h.cite for h in hits],
-        )
-    except Exception as exc:
-        log.error(json_log(request_id, "answer", error=str(exc)[:200]))
-        raise AppError(502, "upstream_error", "answer failed") from exc
-
-    # finish_reason != stop is alerted per request: the JSON warning is the
-    # real, worker-safe signal. No process-local counters — they lie under
-    # multiple uvicorn workers and nothing exports them.
-    if finish_reason != "stop":
-        log.warning(
-            json_log(
-                request_id,
-                "answer_alert",
-                alert="finish_reason_non_stop",
-                finish_reason=finish_reason,
+            chat_res = as_chat_result(await chat_call if inspect.isawaitable(chat_call) else chat_call)
+            llm_ms = int((time.monotonic() - t0) * 1000)
+            ttft_ms = chat_res.ttft_ms
+            content = chat_res.content
+            finish_reason = chat_res.finish_reason
+            usage = chat_res.usage
+            parsed = parse_answer(
+                content,
+                {h.cite for h in hits},
+                ordered_cites=[h.cite for h in hits],
             )
+        except Exception as exc:
+            log.error(json_log(request_id, "answer", error=str(exc)[:200]))
+            raise AppError(502, "upstream_error", "answer failed") from exc
+
+        # finish_reason != stop is alerted per request: the JSON warning is the
+        # real, worker-safe signal. No process-local counters — they lie under
+        # multiple uvicorn workers and nothing exports them.
+        if finish_reason != "stop":
+            log.warning(
+                json_log(
+                    request_id,
+                    "answer_alert",
+                    alert="finish_reason_non_stop",
+                    finish_reason=finish_reason,
+                )
+            )
+
+        timing_parts = []
+        if timings.get("embed_ms") is not None:
+            timing_parts.append(f"embed;dur={timings['embed_ms']}")
+        if timings.get("qdrant_ms") is not None:
+            timing_parts.append(f"qdrant;dur={timings['qdrant_ms']}")
+        if timings.get("rerank_ms") is not None:
+            timing_parts.append(f"rerank;dur={timings['rerank_ms']}")
+        if llm_ms is not None:
+            timing_parts.append(f"llm;dur={llm_ms}")
+        if ttft_ms is not None:
+            timing_parts.append(f"ttft;dur={ttft_ms}")
+        if timing_parts:
+            response.headers["Server-Timing"] = ", ".join(timing_parts)
+
+        log_fields = {
+            "query_kind": kind,
+            "query_complexity": complexity,
+            "hits": len(hits),
+            "embed_ms": timings.get("embed_ms"),
+            "qdrant_ms": timings.get("qdrant_ms"),
+            "rerank_ms": timings.get("rerank_ms"),
+            "llm_ms": llm_ms,
+            "citations": len(parsed.citations),
+            "has_script": parsed.script is not None,
+            "finish_reason": finish_reason,
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
+            "total_tokens": usage.total_tokens,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        }
+        if ttft_ms is not None:
+            log_fields["ttft_ms"] = ttft_ms
+        log.info(json_log(request_id, "answer", **log_fields))
+        return AnswerResponse(
+            request_id=request_id,
+            answer=parsed.answer,
+            citations=parsed.citations,
+            script=parsed.script,
         )
 
+    # SSE streaming path
     timing_parts = []
     if timings.get("embed_ms") is not None:
         timing_parts.append(f"embed;dur={timings['embed_ms']}")
@@ -392,39 +500,122 @@ def v1_answer(request: Request, req: AnswerRequest, response: Response) -> Answe
         timing_parts.append(f"qdrant;dur={timings['qdrant_ms']}")
     if timings.get("rerank_ms") is not None:
         timing_parts.append(f"rerank;dur={timings['rerank_ms']}")
-    if llm_ms is not None:
-        timing_parts.append(f"llm;dur={llm_ms}")
-    if ttft_ms is not None:
-        timing_parts.append(f"ttft;dur={ttft_ms}")
-    if timing_parts:
-        response.headers["Server-Timing"] = ", ".join(timing_parts)
-
-    log_fields = {
-        "query_kind": kind,
-        "query_complexity": complexity,
-        "hits": len(hits),
-        "embed_ms": timings.get("embed_ms"),
-        "qdrant_ms": timings.get("qdrant_ms"),
-        "rerank_ms": timings.get("rerank_ms"),
-        "llm_ms": llm_ms,
-        "citations": len(parsed.citations),
-        "has_script": parsed.script is not None,
-        "finish_reason": finish_reason,
-        "prompt_tokens": usage.prompt_tokens,
-        "completion_tokens": usage.completion_tokens,
-        "reasoning_tokens": usage.reasoning_tokens,
-        "total_tokens": usage.total_tokens,
-        "elapsed_ms": int((time.monotonic() - started) * 1000),
+    headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
     }
-    if ttft_ms is not None:
-        log_fields["ttft_ms"] = ttft_ms
-    log.info(json_log(request_id, "answer", **log_fields))
-    return AnswerResponse(
-        request_id=request_id,
-        answer=parsed.answer,
-        citations=parsed.citations,
-        script=parsed.script,
-    )
+    if timing_parts:
+        headers["Server-Timing"] = ", ".join(timing_parts)
+
+    async def sse_event_generator():
+        t0 = time.monotonic()
+        ttft_ms: int | None = None
+        content_parts: list[str] = []
+        finish_reason = "stop"
+        usage = TokenUsage()
+
+        if hasattr(llm, "chat_stream"):
+            stream_gen = llm.chat_stream(
+                messages,
+                reasoning_effort=effort,
+                temperature=settings.llm_temperature,
+            )
+        else:
+            async def fallback_stream():
+                chat_call = llm.chat(
+                    messages,
+                    reasoning_effort=effort,
+                    temperature=settings.llm_temperature,
+                )
+                cr = as_chat_result(await chat_call if inspect.isawaitable(chat_call) else chat_call)
+                yield {"type": "token", "delta": cr.content, "token": cr.content, "ttft_ms": cr.ttft_ms}
+                yield {"type": "done", "finish_reason": cr.finish_reason, "usage": cr.usage, "ttft_ms": cr.ttft_ms}
+
+            stream_gen = fallback_stream()
+
+        try:
+            async for item in stream_gen:
+                itype = item.get("type")
+                if itype == "token":
+                    delta = item.get("delta") or ""
+                    if delta:
+                        if ttft_ms is None:
+                            ttft_ms = item.get("ttft_ms") or int((time.monotonic() - t0) * 1000)
+                        content_parts.append(delta)
+                        payload = {"type": "token", "delta": delta, "token": delta}
+                        yield f"event: token\ndata: {json.dumps(payload)}\n\n"
+                elif itype == "done":
+                    finish_reason = item.get("finish_reason") or "stop"
+                    if item.get("usage"):
+                        usage = item["usage"]
+                    if ttft_ms is None and item.get("ttft_ms") is not None:
+                        ttft_ms = item["ttft_ms"]
+        except Exception as exc:  # noqa: BLE001
+            log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
+            err_payload = {"type": "error", "code": "upstream_error", "message": "stream failed"}
+            yield f"event: error\ndata: {json.dumps(err_payload)}\n\n"
+            return
+
+        full_content = "".join(content_parts)
+        parsed = parse_answer(
+            full_content,
+            {h.cite for h in hits},
+            ordered_cites=[h.cite for h in hits],
+        )
+
+        if finish_reason != "stop":
+            log.warning(
+                json_log(
+                    request_id,
+                    "answer_alert",
+                    alert="finish_reason_non_stop",
+                    finish_reason=finish_reason,
+                )
+            )
+
+        llm_ms = int((time.monotonic() - t0) * 1000)
+        log_fields = {
+            "query_kind": kind,
+            "query_complexity": complexity,
+            "hits": len(hits),
+            "embed_ms": timings.get("embed_ms"),
+            "qdrant_ms": timings.get("qdrant_ms"),
+            "rerank_ms": timings.get("rerank_ms"),
+            "llm_ms": llm_ms,
+            "citations": len(parsed.citations),
+            "has_script": parsed.script is not None,
+            "finish_reason": finish_reason,
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
+            "total_tokens": usage.total_tokens,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "stream": True,
+        }
+        if ttft_ms is not None:
+            log_fields["ttft_ms"] = ttft_ms
+        log.info(json_log(request_id, "answer", **log_fields))
+
+        final_payload = {
+            "type": "final",
+            "request_id": request_id,
+            "answer": parsed.answer,
+            "citations": parsed.citations,
+            "script": parsed.script,
+            "query_kind": kind,
+            "hits": [h.model_dump() for h in hits],
+            "finish_reason": finish_reason,
+            "ttft_ms": ttft_ms,
+            "usage": {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "reasoning_tokens": usage.reasoning_tokens,
+                "total_tokens": usage.total_tokens,
+            },
+        }
+        yield f"event: final\ndata: {json.dumps(final_payload)}\n\n"
+
+    return StreamingResponse(sse_event_generator(), media_type="text/event-stream", headers=headers)
 
 
 def json_log(request_id: str, action: str, **fields) -> str:

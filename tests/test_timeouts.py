@@ -24,16 +24,22 @@ def _settings(**kw) -> Settings:
 
 
 def _spy_transport(monkeypatch) -> dict:
-    """Capture HTTPTransport kwargs without reaching into httpx2 internals
+    """Capture HTTPTransport / AsyncHTTPTransport kwargs without reaching into httpx2 internals
     (round-7 nit 7: `_pool._retries` is private and bump-brittle)."""
     captured: dict = {}
     real = httpx2.HTTPTransport
+    real_async = httpx2.AsyncHTTPTransport
 
     def spy(**kw):
         captured.update(kw)
         return real(**kw)
 
+    def spy_async(**kw):
+        captured.update(kw)
+        return real_async(**kw)
+
     monkeypatch.setattr(httpx2, "HTTPTransport", spy)
+    monkeypatch.setattr(httpx2, "AsyncHTTPTransport", spy_async)
     return captured
 
 
@@ -102,6 +108,7 @@ def test_agent_lifespan_timeouts_and_retries(monkeypatch):
             pass
 
     monkeypatch.setattr("qdrant_client.QdrantClient", FakeQdrantClient)
+    monkeypatch.setattr("qdrant_client.AsyncQdrantClient", FakeQdrantClient)
     with TestClient(app_mod.app):
         assert captured["timeout"] == 11.0
         assert app_mod.http.timeout.read == 7.0

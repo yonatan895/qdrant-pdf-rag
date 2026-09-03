@@ -9,7 +9,8 @@ structurally — parameter names/returns mirror the real client), HttpxLLMClient
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from collections.abc import AsyncIterator, Awaitable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -127,6 +128,85 @@ class QdrantPoints(Protocol):
     ) -> list[models.QueryResponse]: ...
 
 
+@runtime_checkable
+class AsyncQdrantPoints(Protocol):
+    """The async Qdrant surface for agent endpoints (issue #77 PR-03).
+    Mirrors qdrant_client.AsyncQdrantClient."""
+
+    async def collection_exists(self, collection_name: str) -> bool: ...
+
+    async def get_collection(self, collection_name: str) -> models.CollectionInfo: ...
+
+    async def create_collection(
+        self,
+        collection_name: str,
+        *,
+        vectors_config: dict[str, models.VectorParams],
+        sparse_vectors_config: dict[str, models.SparseVectorParams],
+        on_disk_payload: bool,
+    ) -> bool: ...
+
+    async def create_payload_index(
+        self,
+        collection_name: str,
+        *,
+        field_name: str,
+        field_schema: models.PayloadSchemaType,
+    ) -> models.UpdateResult: ...
+
+    async def update_collection(
+        self,
+        collection_name: str,
+        *,
+        optimizer_config: models.OptimizersConfigDiff,
+    ) -> bool: ...
+
+    async def scroll(
+        self,
+        collection_name: str,
+        *,
+        scroll_filter: models.Filter | None = None,
+        limit: int = 10,
+        with_payload: bool | list[str],
+    ) -> tuple[list[models.Record], int | str | UUID | None]: ...
+
+    async def delete(
+        self,
+        collection_name: str,
+        *,
+        points_selector: models.FilterSelector,
+        wait: bool = True,
+    ) -> models.UpdateResult: ...
+
+    async def upsert(
+        self,
+        collection_name: str,
+        *,
+        points: list[models.PointStruct],
+        wait: bool = True,
+    ) -> models.UpdateResult: ...
+
+    async def query_points(
+        self,
+        collection_name: str,
+        *,
+        query: list[float] | models.SparseVector,
+        using: str,
+        limit: int,
+        query_filter: models.Filter | None,
+        with_payload: bool | list[str],
+    ) -> models.QueryResponse: ...
+
+    async def query_batch_points(
+        self,
+        collection_name: str,
+        *,
+        requests: list[models.QueryRequest],
+    ) -> list[models.QueryResponse]: ...
+
+    async def close(self) -> None: ...
+
+
 class TokenUsage(BaseModel):
     model_config = ConfigDict(frozen=True)
     prompt_tokens: int = 0
@@ -157,11 +237,30 @@ class Tokenizer(Protocol):
 @runtime_checkable
 class LLMClient(Protocol):
     """Reasoning-model chat (answer path only). Implementations fail closed
-    when no reasoning model is configured."""
+    when no reasoning model is configured. May return ChatResult or Awaitable[ChatResult]."""
 
     def chat(
         self,
         messages: list[ChatMessage],
         reasoning_effort: str | None = None,
         temperature: float | None = None,
+    ) -> ChatResult | Awaitable[ChatResult]: ...
+
+
+@runtime_checkable
+class AsyncLLMClient(Protocol):
+    """Async reasoning-model chat with optional SSE streaming (issue #77 PR-03)."""
+
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
     ) -> ChatResult: ...
+
+    async def chat_stream(
+        self,
+        messages: list[ChatMessage],
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+    ) -> AsyncIterator[dict[str, Any]]: ...
