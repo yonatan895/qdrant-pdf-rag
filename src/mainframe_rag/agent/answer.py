@@ -229,6 +229,7 @@ def build_messages(
     max_context_chars: int = 8000,
     max_chunk_chars: int = 3000,
     max_chunk_chars_narrative: int | None = None,
+    splunk_context_max_chars: int = 4000,
     complexity: str | None = None,
     tokenizer: Tokenizer | None = None,
     settings: Settings | None = None,
@@ -247,9 +248,15 @@ def build_messages(
     if context_bits:
         context_entries.append("Sysplex context: " + ", ".join(context_bits))
     if splunk_context:
+        splunk_text = splunk_context.strip()
+        # Caller-supplied telemetry is unbounded by nature; cap it like
+        # per-chunk text (issue #87) so one huge Splunk dump cannot starve
+        # the excerpts out of the window. The suffix marks the cut.
+        if len(splunk_text) > splunk_context_max_chars:
+            splunk_text = splunk_text[:splunk_context_max_chars].rstrip() + _TRUNCATED_SUFFIX
         context_entries.append(
             "Splunk context (live system observation; join key is the message ID):\n"
-            + splunk_context.strip()
+            + splunk_text
         )
     question_text = "Question: " + query
     # Pre-excerpt user parts, exactly as before: the estimator below counts
