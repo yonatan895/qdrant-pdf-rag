@@ -1,34 +1,32 @@
 #!/usr/bin/env sh
 # Run a local vLLM OpenAI-compatible server using Docker with NVIDIA GPU pass-through.
-# Optimized for consumer GPUs (e.g. RTX 5060 with 8GB VRAM) and Gemma-4 models.
+# Launch flags (GPU memory, context window, runner/eager shape) resolve from
+# `mainframe_rag.serve` Budget profiles (default LOCAL_RT_8GB, tuned for
+# consumer 8GB cards); explicit GPU_MEM / MAX_LEN / SEQS / ROLE in the
+# environment always win. Run via `make local-vllm*` so BUDGET_PYTHON points
+# at the project venv.
 
 set -eu
 
 MODEL="${MODEL:-google/gemma-4-E4B-it-qat-mobile-ct}"
 PORT="${PORT:-8000}"
-# Track explicit overrides so the embed branch can apply its own default
-# without clobbering user-supplied values (issue #99).
+# Track explicit overrides so Budget resolution fills only what the operator
+# did not set (serving-budget track PR-B; extends the issue #99 pattern).
+# Launch-flag defaults come from `mainframe_rag.serve` Budget profiles below;
+# explicit GPU_MEM / MAX_LEN / SEQS in the environment always win.
 GPU_MEM_SET=0
 [ -n "${GPU_MEM:-}" ] && GPU_MEM_SET=1
-# Default GPU_MEM=0.65 allows co-residency with the local embed server
-# (GPU_MEM=0.33, see the embed branch below) on 8GB VRAM.
-# For solo reasoning server runs, set GPU_MEM=0.85 to maximize KV cache throughput.
-GPU_MEM="${GPU_MEM:-0.65}"
-# 4096 for both servers: the complex-query prompt budget physically requires
-# it on the reasoning side, and the issue #99 tokenizer sweep rejected a
-# 2048 embed window (worst case measured 2043 tokens).
-MAX_LEN="${MAX_LEN:-4096}"
+MAX_LEN_SET=0
+[ -n "${MAX_LEN:-}" ] && MAX_LEN_SET=1
+SEQS_SET=0
+[ -n "${SEQS:-}" ] && SEQS_SET=1
+GPU_MEM="${GPU_MEM:-}"
+MAX_LEN="${MAX_LEN:-}"
+SEQS="${SEQS:-}"
 IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}"
 
-echo "============================================================"
-echo " Starting local vLLM server"
-echo "============================================================"
-echo " Model:             ${MODEL}"
-echo " Port:              ${PORT}"
-echo " GPU Memory Util:   ${GPU_MEM}"
-echo " Max Context Len:   ${MAX_LEN}"
-echo " Container Image:   ${IMAGE}"
-echo "============================================================"
+# Startup banner is printed after Budget resolution below (it reports the
+# resolved GPU_MEM / MAX_LEN).
 
 # Detect container runtime
 if command -v docker >/dev/null 2>&1; then
@@ -73,33 +71,52 @@ else
     SERVED_TARGET="${MODEL}"
 fi
 
-# Resolve embed-server defaults BEFORE the args are built (issue #99): the
-# same case string as the flag block below, evaluated early so GPU_MEM lands
-# in --gpu-memory-utilization directly instead of relying on later-arg
-# override semantics.
-IS_EMBED=0
-case "${MODEL} ${MODEL_NAME} ${TASK:-}" in
-    *embed*|*Embed*) IS_EMBED=1 ;;
-esac
-if [ "${IS_EMBED}" -eq 1 ]; then
-    # Local dev embed server default (issue #99, verified on 8GB VRAM
-    # co-resident with the reasoning server at GPU_MEM=0.65):
-    # - GPU_MEM=0.33: the KV pool is sized to fill gpu-memory-utilization x
-    #   total VRAM, so the reasoning default (0.65) would over-commit the
-    #   8GB card at startup; 0.33 holds with 1.29 GiB KV headroom.
-    # - MAX_LEN stays 4096 (the reasoning default): a 2048 window was
-    #   rejected by the Task 1 tokenizer sweep — the worst-case embedded
-    #   string (header + a SECTION_MAX_CHARS=3500 body carrying the
-    #   SPLIT_OVERLAP_CHARS=400 seed) measures 2043 tokens under the real
-    #   Qwen3-Embedding tokenizer (~2.03 chars/token on syntax-dense text,
-    #   sweep artifact on PR #100; pinned by tests/test_embed_budget.py).
-    # - --enforce-eager: torch.compile + CUDA-graph workspace pushed the
-    #   profiled peak over the co-residency budget; embeddings are
-    #   single-shot prefill, so eager costs little.
-    # Explicit GPU_MEM / MAX_LEN always win (user-supplied values are
-    # applied, never silently replaced).
-    if [ "${GPU_MEM_SET}" -eq 0 ]; then GPU_MEM="0.33"; fi
+# Serving-budget sizing (serving-budget track PR-B): Budget
+# (src/mainframe_rag/serve) is the single source of truth for launch flags —
+# the same resolve path for every environment. ROLE selects the profile
+# server: `make local-vllm*` passes it explicitly; direct invocations derive
+# it from the model name with the match the old embed branch used (issue #99).
+# --check-pack preflights the whole co-resident pack, so a pack that does not
+# fit refuses here instead of failing at the second server's startup.
+ROLE="${ROLE:-}"
+if [ -z "${ROLE}" ]; then
+    case "${MODEL} ${MODEL_NAME} ${TASK:-}" in
+        *embed*|*Embed*) ROLE="embed" ;;
+        *) ROLE="reasoning" ;;
+    esac
 fi
+BUDGET_PYTHON="${BUDGET_PYTHON:-python3}"
+BUDGET_PROFILE="${BUDGET_PROFILE:-LOCAL_RT_8GB}"
+if ! BUDGET_OUT="$("${BUDGET_PYTHON}" -m mainframe_rag.serve resolve \
+        --profile "${BUDGET_PROFILE}" --role "${ROLE}" --check-pack)"; then
+    echo "ERROR: serving-budget resolve failed for profile '${BUDGET_PROFILE}' role '${ROLE}'." >&2
+    echo "Run via 'make local-vllm*' (provides the .venv python) or set BUDGET_PYTHON to a python with mainframe_rag installed." >&2
+    exit 1
+fi
+if [ -z "${BUDGET_OUT}" ]; then
+    echo "ERROR: serving-budget resolve returned empty output; refusing to launch with unset flags." >&2
+    exit 1
+fi
+eval "${BUDGET_OUT}"
+: "${BUDGET_GPU_MEM:?serving-budget resolve did not emit BUDGET_GPU_MEM}"
+: "${BUDGET_MAX_LEN:?serving-budget resolve did not emit BUDGET_MAX_LEN}"
+: "${BUDGET_RUNNER:?serving-budget resolve did not emit BUDGET_RUNNER}"
+: "${BUDGET_SEQS:?serving-budget resolve did not emit BUDGET_SEQS}"
+# Explicit environment wins over Budget resolution (operator override rule).
+if [ "${GPU_MEM_SET}" -eq 0 ]; then GPU_MEM="${BUDGET_GPU_MEM}"; fi
+if [ "${MAX_LEN_SET}" -eq 0 ]; then MAX_LEN="${BUDGET_MAX_LEN}"; fi
+if [ "${SEQS_SET}" -eq 0 ]; then SEQS="${BUDGET_SEQS}"; fi
+
+echo "============================================================"
+echo " Starting local vLLM server"
+echo "============================================================"
+echo " Model:             ${MODEL}"
+echo " Port:              ${PORT}"
+echo " Budget profile:    ${BUDGET_PROFILE} role ${ROLE}"
+echo " GPU Memory Util:   ${GPU_MEM}"
+echo " Max Context Len:   ${MAX_LEN}"
+echo " Container Image:   ${IMAGE}"
+echo "============================================================"
 
 # Build positional vllm serve arguments
 # Note: vLLM serve expects the model path/name as the first positional argument.
@@ -107,28 +124,39 @@ set -- "${SERVED_TARGET}" \
     --gpu-memory-utilization "${GPU_MEM}" \
     --max-model-len "${MAX_LEN}" \
     --limit-mm-per-prompt '{"image":0,"audio":0}' \
-    --max-num-seqs 1 \
+    --max-num-seqs "${SEQS}" \
     --port "${PORT}"
 
 if [ "${SERVED_TARGET}" = "/model" ]; then
     set -- "$@" --served-model-name "${MODEL_NAME}"
 fi
 
-# Add Gemma-4 reasoning parser flags or embedding task flags
+# Serving shape comes from Budget (single source of truth); model-family
+# parser flags stay name-based (a model family, not a serving shape).
+# Pooling rationale (issue #99, values now resolved from the Budget table):
+# vLLM v0.28.0 removed --task; the pooling runner with the embed converter
+# is its replacement. Batched tokens follow the Budget window so the
+# memory-profiling peak stays bounded (a 2048 window was rejected by the
+# tokenizer sweep — worst case 2043 tokens; pinned by
+# tests/test_embed_budget.py), and eager mode avoids the torch.compile +
+# CUDA-graph workspace that pushed the profiled peak over the 8GB
+# co-residency budget (embeddings are single-shot prefill; eager costs
+# little). A MAX_LEN operator override does not raise the batched cap:
+# erring small here is the safe side.
+if [ "${BUDGET_RUNNER}" = "pooling" ]; then
+    set -- "$@" --runner "${BUDGET_RUNNER}"
+    if [ "${BUDGET_CONVERT}" != "none" ]; then
+        set -- "$@" --convert "${BUDGET_CONVERT}"
+    fi
+    if [ -n "${BUDGET_BATCHED_TOKENS:-}" ]; then
+        set -- "$@" --max-num-batched-tokens "${BUDGET_BATCHED_TOKENS}"
+    fi
+    if [ "${BUDGET_EAGER:-0}" = "1" ]; then
+        set -- "$@" --enforce-eager
+    fi
+fi
+# Add Gemma-4 reasoning parser flags
 case "${MODEL} ${MODEL_NAME} ${TASK:-}" in
-    *embed*|*Embed*)
-        # vLLM v0.28.0 removed --task; the pooling runner with the embed
-        # converter is its replacement (issue #99). Batched tokens follow
-        # MAX_LEN so the memory-profiling peak stays bounded by the model
-        # window, and eager mode avoids the torch.compile + CUDA-graph
-        # workspace that pushed the profiled peak over the 8GB co-residency
-        # budget (embeddings are single-shot prefill; eager costs little).
-        set -- "$@" \
-            --runner pooling \
-            --convert embed \
-            --max-num-batched-tokens "${MAX_LEN}" \
-            --enforce-eager
-        ;;
     *gemma-4*|*gemma4*)
         CHAT_TMPL="${CHAT_TEMPLATE:-/vllm-workspace/examples/tool_chat_template_gemma4.jinja}"
         set -- "$@" \

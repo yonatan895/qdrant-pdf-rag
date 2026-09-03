@@ -352,15 +352,15 @@ ask: | .venv
 	PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer $(if $(QUERY),--query "$(QUERY)",) $(if $(COLLECTION),--collection "$(COLLECTION)",) $(if $(LIMIT),--limit "$(LIMIT)",) $(if $(PRODUCT),--product "$(PRODUCT)",) $(if $(VERSION),--version "$(VERSION)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",)
 
 # Local GPU acceleration & vLLM testing
+# Launch flags resolve from `mainframe_rag.serve` Budget profiles
+# (serving-budget track PR-B): the | .venv prereq provides the resolver
+# python, passed per-recipe (never exported globally). ROLE defaults to the
+# target's server; explicit ROLE=/GPU_MEM=/MAX_LEN=/SEQS= win.
 .PHONY: local-vllm local-vllm-embed test-vllm-e2e run-agent
-local-vllm:
-	sh scripts/run_local_vllm.sh
-# Embed server: GPU_MEM default (0.33, 8GB co-residency) lives in
-# scripts/run_local_vllm.sh's embed branch (issue #99); MAX_LEN stays at the
-# script default 4096 (a 2048 window was rejected by the tokenizer sweep).
-# Explicit GPU_MEM=/MAX_LEN= overrides still win.
-local-vllm-embed:
-	MODEL=$(or $(MODEL),Qwen/Qwen3-Embedding-0.6B) PORT=$(or $(PORT),8001) sh scripts/run_local_vllm.sh
+local-vllm: | .venv
+	BUDGET_PYTHON="$(CURDIR)/.venv/bin/python" ROLE=$(or $(ROLE),reasoning) sh scripts/run_local_vllm.sh
+local-vllm-embed: | .venv
+	BUDGET_PYTHON="$(CURDIR)/.venv/bin/python" ROLE=$(or $(ROLE),embed) MODEL=$(or $(MODEL),Qwen/Qwen3-Embedding-0.6B) PORT=$(or $(PORT),8001) sh scripts/run_local_vllm.sh
 
 test-vllm-e2e: | .venv
 	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",)
