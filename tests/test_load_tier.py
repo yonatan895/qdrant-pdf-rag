@@ -18,13 +18,17 @@ concurrency — never cross-environment comparisons (harness invariant #1):
 - citation parity stream-vs-search and stream-vs-JSON;
 - fixed error shapes (``code`` + ``message`` only) with no leaked internals
   under concurrent bad requests;
-- within-run determinism after load.
+- within-run determinism after load;
+- chaos survival (``MOCK_ERROR_RATE`` abort storm): every stream classifies
+  as complete XOR aborted, aborted streams carry ``event: error`` with no
+  ``final``, and each aborted stream leaves exactly one ``stream_truncated``
+  ``answer_alert`` joined by ``request_id`` — the live proof of the
+  truncation fix;
+- TTFT floor under a paced mock (``MOCK_TTFT_MS``): agent ``ttft_ms`` never
+  precedes the model's first byte.
 
 Fail-closed: ``QdrantSimError``, startup timeouts, and zero-request phases
-raise — nothing here skips. The mock-abort chaos phase and the TTFT-bound
-phase need the mock realism knobs and arrive separately; this composition
-already isolates the model behind a URL so those phases only add env plus
-assertions.
+raise — nothing here skips.
 
 Knobs (CI-sane defaults, override locally): ``LOAD_SEARCH_CONCURRENCY``,
 ``LOAD_SEARCH_DURATION_S``, ``LOAD_ANSWER_CONCURRENCY``,
@@ -41,6 +45,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -53,6 +58,24 @@ pytestmark = pytest.mark.integration
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COLLECTION = "load-hash"
 MOCK_DIM = 32  # mock-side only; the tier embeds with hash mode
+
+# Chaos leg: every second chat request aborts mid-stream. Mixed-shape
+# assertions need both outcomes in one run: at p=0.5 over 16 streams the
+# all-same chance is 2^-15, so both classes are near-certain without any
+# seed dependence (MOCK_SEED is still pinned for hygiene).
+CHAOS_ERROR_RATE = "0.5"
+CHAOS_SEED = "11"
+# TTFT leg: the mock holds first-byte 500ms; the agent's first-token
+# arrival cannot precede it. The 400ms floor keeps 100ms of timer
+# slack — scheduling only ever delays arrivals, so the floor is
+# deterministic-safe while still decisive (unpaced TTFT is ~ms).
+TTFT_MS = "500"
+TTFT_SEED = "7"
+TTFT_FLOOR_MS = 400
+
+# Agent log files by served URL: the chaos phase joins answer_alert lines
+# to its aborted streams through its own agent's log.
+_AGENT_LOG: dict[str, Path] = {}
 
 # Queries proven to hit the load corpus (identifier + nl): every answer in
 # every phase must carry >= 1 validated citation, so hitless queries have
@@ -103,30 +126,63 @@ def qdrant_url():
     sim.stop()
 
 
-@pytest.fixture(scope="session")
-def mock_url():
-    """The model stand-in over real loopback HTTP (sim-tier pattern)."""
+def _start_mock(tag: str, extra_env: dict[str, str]) -> tuple[str, Callable[[], None]]:
+    """One mock server with the given MOCK_* knobs over real loopback HTTP
+    (sim-tier pattern). Env is saved/restored; the server stops via the
+    returned thunk."""
     import importlib.util
+    from http.server import ThreadingHTTPServer
 
-    old_dim = os.environ.get("MOCK_DIM")
+    watched = ("MOCK_DIM", *extra_env)
+    saved = {key: os.environ.get(key) for key in watched}
     os.environ["MOCK_DIM"] = str(MOCK_DIM)
+    os.environ.update(extra_env)
     try:
-        spec = importlib.util.spec_from_file_location("mock_vllm_load", REPO_ROOT / "scripts" / "mock_vllm.py")
+        spec = importlib.util.spec_from_file_location(f"mock_vllm_load_{tag}", REPO_ROOT / "scripts" / "mock_vllm.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     finally:
-        if old_dim is None:
-            os.environ.pop("MOCK_DIM", None)
-        else:
-            os.environ["MOCK_DIM"] = old_dim
-    from http.server import ThreadingHTTPServer
-
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
     server = ThreadingHTTPServer(("127.0.0.1", 0), mod.Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield f"http://127.0.0.1:{server.server_address[1]}"
-    server.shutdown()
-    server.server_close()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def _stop() -> None:
+        server.shutdown()
+        server.server_close()
+
+    return url, _stop
+
+
+@pytest.fixture(scope="session")
+def mock_url():
+    """Clean model stand-in: instant, infallible, deterministic."""
+    url, stop = _start_mock("clean", {})
+    yield url
+    stop()
+
+
+@pytest.fixture(scope="session")
+def mock_url_chaos():
+    """Abort storm: half the chat requests die mid-stream (first chunk,
+    clean close, no [DONE]) — the wire shape the truncation fix must
+    survive, live."""
+    url, stop = _start_mock("chaos", {"MOCK_ERROR_RATE": CHAOS_ERROR_RATE, "MOCK_SEED": CHAOS_SEED})
+    yield url
+    stop()
+
+
+@pytest.fixture(scope="session")
+def mock_url_ttft():
+    """Paced model: 500ms first-byte latency on every chat request."""
+    url, stop = _start_mock("ttft", {"MOCK_TTFT_MS": TTFT_MS, "MOCK_SEED": TTFT_SEED})
+    yield url
+    stop()
 
 
 @pytest.fixture(scope="session")
@@ -186,16 +242,22 @@ def ingested(qdrant_url, corpus, tmp_path_factory) -> str:
     return COLLECTION
 
 
-@pytest.fixture(scope="session")
-def agent_url(qdrant_url, mock_url, ingested, tmp_path_factory):
+def _spawn_agent(
+    tag: str,
+    qdrant_url: str,
+    mock_url: str,
+    collection: str,
+    tmp_path_factory,
+) -> tuple[str, subprocess.Popen, Path]:
     """A real uvicorn agent on loopback (LLM_STREAM=true, the L3 venue):
     threaded load exercises the true HTTP stack, not TestClient."""
     port = _free_port()
-    log_dir = tmp_path_factory.mktemp("load-agent")
+    log_dir = tmp_path_factory.mktemp(f"load-agent-{tag}")
+    log_path = log_dir / "agent-stdout.log"
     env = {
         **os.environ,
         "QDRANT_URL": qdrant_url,
-        "QDRANT_COLLECTION": ingested,
+        "QDRANT_COLLECTION": collection,
         "EMBED_MODE": "hash",
         "ALLOW_HASH_MODE": "true",
         "LLM_BASE_URL": f"{mock_url}/v1",
@@ -203,12 +265,12 @@ def agent_url(qdrant_url, mock_url, ingested, tmp_path_factory):
         "LLM_STREAM": "true",
         "PYTHONUNBUFFERED": "1",
     }
-    print(f"\n[load-tier] mock={mock_url} qdrant={qdrant_url} agent-port={port}", flush=True)
+    print(f"\n[load-tier:{tag}] mock={mock_url} qdrant={qdrant_url} agent-port={port}", flush=True)
     # Agent stdout goes to a file, never a pipe: under threaded load the
     # agent logs thousands of JSON lines, and an unread pipe would fill and
     # wedge every request (every load request timing out at once). The child
     # keeps its own fd after spawn, so our handle closes right away.
-    with open(log_dir / "agent-stdout.log", "w") as log_file:
+    with open(log_path, "w") as log_file:
         proc = subprocess.Popen(
             [
                 sys.executable,
@@ -227,7 +289,7 @@ def agent_url(qdrant_url, mock_url, ingested, tmp_path_factory):
             stdout=log_file,
             stderr=subprocess.STDOUT,
         )
-    print(f"[load-tier] spawned pid={proc.pid}", flush=True)
+    print(f"[load-tier:{tag}] spawned pid={proc.pid}", flush=True)
     url = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + READY_TIMEOUT_S
     ready = False
@@ -236,8 +298,7 @@ def agent_url(qdrant_url, mock_url, ingested, tmp_path_factory):
     while time.monotonic() < deadline:
         attempts += 1
         if proc.poll() is not None:
-            log_file.flush()
-            out = (log_dir / "agent-stdout.log").read_text()[-2000:]
+            out = log_path.read_text()[-2000:]
             raise RuntimeError(f"agent exited during startup: {out}")
         try:
             r = httpx2.get(f"{url}/healthz", timeout=2.0)
@@ -248,18 +309,46 @@ def agent_url(qdrant_url, mock_url, ingested, tmp_path_factory):
         except httpx2.HTTPError as exc:
             last = f"{type(exc).__name__}"
         if attempts % 10 == 0:
-            print(f"[load-tier] still waiting ({attempts}s): {last}", flush=True)
+            print(f"[load-tier:{tag}] still waiting ({attempts}s): {last}", flush=True)
         time.sleep(1.0)
     if not ready:
         proc.terminate()
-        out = (log_dir / "agent-stdout.log").read_text()[-2000:]
+        out = log_path.read_text()[-2000:]
         raise RuntimeError(f"agent not ready within {READY_TIMEOUT_S:.0f}s (last: {last}): {out}")
-    yield url
+    _AGENT_LOG[url] = log_path
+    return url, proc, log_path
+
+
+def _stop_agent(proc: subprocess.Popen) -> None:
     proc.terminate()
     try:
         proc.wait(timeout=15.0)
     except subprocess.TimeoutExpired:
         proc.kill()
+
+
+@pytest.fixture(scope="session")
+def agent_url(qdrant_url, mock_url, ingested, tmp_path_factory):
+    url, proc, _ = _spawn_agent("clean", qdrant_url, mock_url, ingested, tmp_path_factory)
+    yield url
+    _stop_agent(proc)
+
+
+@pytest.fixture(scope="session")
+def agent_url_chaos(qdrant_url, mock_url_chaos, ingested, tmp_path_factory):
+    """Agent facing the abort storm. Shares the load collection (read-only
+    workload); the chaos comes only from its model URL."""
+    url, proc, _ = _spawn_agent("chaos", qdrant_url, mock_url_chaos, ingested, tmp_path_factory)
+    yield url
+    _stop_agent(proc)
+
+
+@pytest.fixture(scope="session")
+def agent_url_ttft(qdrant_url, mock_url_ttft, ingested, tmp_path_factory):
+    """Agent facing the paced model."""
+    url, proc, _ = _spawn_agent("ttft", qdrant_url, mock_url_ttft, ingested, tmp_path_factory)
+    yield url
+    _stop_agent(proc)
 
 
 def _parse_app_sse(text: str) -> list[tuple[str, dict]]:
@@ -412,3 +501,103 @@ def test_determinism_after_load(agent_url):
     assert {k: v for k, v in first.items() if k != "request_id"} == {
         k: v for k, v in second.items() if k != "request_id"
     }
+
+
+def test_aborted_streams_surface_error_without_final(agent_url_chaos):
+    """Chaos survival, live: under the abort storm every stream classifies
+    as complete XOR aborted. Aborted streams carry token deltas, then
+    event: error with no final (the truncation-fix contract); completed
+    streams keep the full integrity shape. Both classes must appear —
+    all-complete would prove nothing about the abort path."""
+    n_streams = _env_int("LOAD_STREAMS", 16)
+    workers = _env_int("LOAD_STREAM_WORKERS", 4)
+    classes: dict[int, str] = {}
+    lock = threading.Lock()
+
+    def one_stream(i: int) -> None:
+        query = QUERIES[i % len(QUERIES)]
+        status, _, text = _read_stream(agent_url_chaos, query)
+        assert status == 200, f"chaos stream {i}: status {status}: {text[:200]}"
+        events = _parse_app_sse(text)
+        kinds = [kind for kind, _ in events]
+        finals = [data for kind, data in events if kind == "final"]
+        errors = [data for kind, data in events if kind == "error"]
+        if errors:
+            assert "token" in kinds, f"chaos stream {i}: error without any token"
+            assert finals == [], f"chaos stream {i}: aborted stream must not emit final"
+            assert len(errors) == 1, f"chaos stream {i}: exactly one error event"
+            assert errors[0]["code"] == "upstream_error", f"chaos stream {i}: {errors[0]}"
+            cls = "aborted"
+        else:
+            assert len(finals) == 1, f"chaos stream {i}: expected exactly one final"
+            assert finals[0]["finish_reason"] == "stop"
+            assert len(finals[0]["citations"]) >= 1
+            cls = "complete"
+        with lock:
+            classes[i] = cls
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(one_stream, range(n_streams)))
+    assert len(classes) == n_streams, "every chaos stream must classify"
+    assert set(classes.values()) == {"complete", "aborted"}, (
+        f"the storm must produce both shapes, got {sorted(set(classes.values()))}"
+    )
+
+
+def test_aborted_streams_leave_truncation_alerts(agent_url_chaos):
+    """Observability join: every aborted stream leaves exactly one
+    stream_truncated answer_alert, and the alert carries counts only —
+    never response text (log contract). Joined by request_id presence;
+    windowed to this phase via the log offset."""
+    log_path = _AGENT_LOG[agent_url_chaos]
+    start_offset = log_path.stat().st_size
+    n_streams = _env_int("LOAD_STREAMS", 16)
+
+    aborted = 0
+    for i in range(n_streams):
+        _, _, text = _read_stream(agent_url_chaos, QUERIES[i % len(QUERIES)])
+        if any(kind == "error" for kind, _ in _parse_app_sse(text)):
+            aborted += 1
+    assert aborted > 0, "the storm must abort at least one stream in the join window"
+
+    with open(log_path) as handle:
+        handle.seek(start_offset)
+        appended = handle.read()
+    alerts = [
+        json.loads(line)
+        for line in appended.splitlines()
+        if '"answer_alert"' in line and '"stream_truncated"' in line
+    ]
+    assert len(alerts) == aborted, (
+        f"{aborted} aborted streams must leave {aborted} alerts, got {len(alerts)}"
+    )
+    for alert in alerts:
+        assert alert.get("request_id"), "truncation alert without request_id undercounts the join"
+        assert "Partial" not in json.dumps(alert), "alert must not carry response text"
+        assert "[DONE]" in alert.get("detail", ""), "alert must name the missing terminator"
+
+
+def test_ttft_floor_holds_under_paced_mock(agent_url_ttft):
+    """TTFT bound, live: with the model holding first-byte 500ms, the
+    agent's first-token arrival cannot precede it. The 400ms floor keeps
+    timer slack; scheduling only delays arrivals, so it is
+    deterministic-safe while decisive (unpaced TTFT is single-digit ms).
+    Streams still complete cleanly under pacing."""
+    n_streams = _env_int("LOAD_STREAMS", 16)
+    workers = _env_int("LOAD_STREAM_WORKERS", 4)
+
+    def one_stream(i: int) -> None:
+        _, _, text = _read_stream(agent_url_ttft, QUERIES[i % len(QUERIES)])
+        events = _parse_app_sse(text)
+        finals = [data for kind, data in events if kind == "final"]
+        assert len(finals) == 1, f"paced stream {i}: expected exactly one final"
+        final = finals[0]
+        assert final["finish_reason"] == "stop"
+        assert len(final["citations"]) >= 1
+        assert final["ttft_ms"] is not None, f"paced stream {i}: final without ttft_ms"
+        assert final["ttft_ms"] >= TTFT_FLOOR_MS, (
+            f"paced stream {i}: ttft {final['ttft_ms']}ms precedes the 500ms mock pace"
+        )
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(one_stream, range(n_streams)))
