@@ -132,6 +132,15 @@ class Settings(BaseSettings):
     bm25_model: str = "Qdrant/bm25"
     bm25_cache_dir: str | None = None
 
+    # Cross-encoder reranker (issue #76 PR-02).
+    # Feature flag, default off for byte-identical legacy path.
+    rerank_enabled: bool = False
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    rerank_base_url: str | None = None
+    rerank_candidates: int = Field(default=50, ge=10, le=100)
+    rerank_batch_size: int = Field(default=32, ge=1, le=128)
+    rerank_timeout_s: float = Field(default=5.0, ge=0.5, le=30.0)
+
     def require_dense_dim(self) -> int:
         if self.embed_mode == "hash":
             return HASH_EMBED_DIM

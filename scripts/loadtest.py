@@ -125,7 +125,6 @@ def run_load(
     and VRAM footprint."""
     path = "/v1/search" if endpoint == "search" else "/v1/answer"
     url = f"{base_url.rstrip('/')}{path}"
-    deadline = time.monotonic() + duration_s
     latencies: list[float] = []
     stage_latencies: dict[str, list[float]] = collections.defaultdict(list)
     errors = 0
@@ -168,6 +167,7 @@ def run_load(
 
     threads = [threading.Thread(target=worker) for _ in range(concurrency)]
     started = time.perf_counter()
+    deadline = time.monotonic() + duration_s
     for t in threads:
         t.start()
     for t in threads:

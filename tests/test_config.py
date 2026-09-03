@@ -64,6 +64,12 @@ def test_outbound_timeout_defaults_bounded():
     assert s.llm_max_chunk_tokens_narrative == 350
     assert s.llm_tokenize_timeout_s == 5.0
     assert s.llm_stream is False
+    assert s.rerank_enabled is False
+    assert s.rerank_model == "BAAI/bge-reranker-v2-m3"
+    assert s.rerank_base_url is None
+    assert s.rerank_candidates == 50
+    assert s.rerank_batch_size == 32
+    assert s.rerank_timeout_s == 5.0
 
 
 def test_hash_mode_requires_explicit_allow():

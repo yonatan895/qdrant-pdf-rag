@@ -34,9 +34,10 @@ from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.logs import configure_logging
-from mainframe_rag.ports import Embedder, LLMClient, Tokenizer
+from mainframe_rag.ports import Embedder, LLMClient, Reranker, Tokenizer
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import search as retrieve_search
+from mainframe_rag.retrieve.rerank import build_reranker
 
 if TYPE_CHECKING:
     from mainframe_rag.ports import QdrantPoints
@@ -49,6 +50,7 @@ qdrant: QdrantPoints
 embedder: Embedder
 llm: LLMClient
 tokenizer: Tokenizer
+reranker: Reranker | None = None
 
 
 class AppError(Exception):
@@ -63,7 +65,7 @@ class AppError(Exception):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global settings, http, qdrant, embedder, llm, tokenizer
+    global settings, http, qdrant, embedder, llm, tokenizer, reranker
     settings = load_settings()
     configure_logging(settings.log_level)
     # Startup fail-fast (issue #20 PR D): the agent refuses to listen on a
@@ -94,6 +96,7 @@ async def lifespan(_app: FastAPI):
     # request-time fail-fast (assert_reasoning_model in /v1/answer).
     embedder = build_embedder(settings, http)
     tokenizer = build_tokenizer(settings, http)
+    reranker = build_reranker(settings, http)
     # Two names on purpose: tests swap the `llm` global after startup; shutdown
     # must close the pool THIS lifespan created, never a test double.
     llm_client = HttpxLLMClient(settings)
@@ -251,7 +254,7 @@ def v1_search(request: Request, req: SearchRequest, response: Response) -> Searc
         hits, kind, timings = retrieve_search(
             qdrant, embedder, settings.qdrant_collection, req.query,
             product=req.product, version=req.version, limit=req.limit,
-            settings=settings,
+            settings=settings, reranker=reranker,
         )
     except Exception as exc:
         log.error(json_log(request_id, "search", error=str(exc)[:200]))
@@ -261,12 +264,15 @@ def v1_search(request: Request, req: SearchRequest, response: Response) -> Searc
         timing_parts.append(f"embed;dur={timings['embed_ms']}")
     if timings.get("qdrant_ms") is not None:
         timing_parts.append(f"qdrant;dur={timings['qdrant_ms']}")
+    if timings.get("rerank_ms") is not None:
+        timing_parts.append(f"rerank;dur={timings['rerank_ms']}")
     if timing_parts:
         response.headers["Server-Timing"] = ", ".join(timing_parts)
     log.info(
         json_log(
             request_id, "search", query_kind=kind, hits=len(hits),
             embed_ms=timings.get("embed_ms"), qdrant_ms=timings.get("qdrant_ms"),
+            rerank_ms=timings.get("rerank_ms"),
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
     )
@@ -298,7 +304,7 @@ def v1_answer(request: Request, req: AnswerRequest, response: Response) -> Answe
         hits, kind, timings = retrieve_search(
             qdrant, embedder, settings.qdrant_collection, req.query,
             product=req.product, version=req.version, limit=8,
-            settings=settings,
+            settings=settings, reranker=reranker,
         )
     except Exception as exc:
         log.error(json_log(request_id, "answer", error=str(exc)[:200]))
@@ -310,9 +316,11 @@ def v1_answer(request: Request, req: AnswerRequest, response: Response) -> Answe
             timing_parts.append(f"embed;dur={timings['embed_ms']}")
         if timings.get("qdrant_ms") is not None:
             timing_parts.append(f"qdrant;dur={timings['qdrant_ms']}")
+        if timings.get("rerank_ms") is not None:
+            timing_parts.append(f"rerank;dur={timings['rerank_ms']}")
         if timing_parts:
             response.headers["Server-Timing"] = ", ".join(timing_parts)
-        log.info(json_log(request_id, "answer", query_kind=kind, hits=0))
+        log.info(json_log(request_id, "answer", query_kind=kind, hits=0, rerank_ms=timings.get("rerank_ms")))
         return AnswerResponse(
             request_id=request_id,
             answer="No supporting manual excerpts were found for this question.",
@@ -382,6 +390,8 @@ def v1_answer(request: Request, req: AnswerRequest, response: Response) -> Answe
         timing_parts.append(f"embed;dur={timings['embed_ms']}")
     if timings.get("qdrant_ms") is not None:
         timing_parts.append(f"qdrant;dur={timings['qdrant_ms']}")
+    if timings.get("rerank_ms") is not None:
+        timing_parts.append(f"rerank;dur={timings['rerank_ms']}")
     if llm_ms is not None:
         timing_parts.append(f"llm;dur={llm_ms}")
     if ttft_ms is not None:
@@ -395,6 +405,7 @@ def v1_answer(request: Request, req: AnswerRequest, response: Response) -> Answe
         "hits": len(hits),
         "embed_ms": timings.get("embed_ms"),
         "qdrant_ms": timings.get("qdrant_ms"),
+        "rerank_ms": timings.get("rerank_ms"),
         "llm_ms": llm_ms,
         "citations": len(parsed.citations),
         "has_script": parsed.script is not None,

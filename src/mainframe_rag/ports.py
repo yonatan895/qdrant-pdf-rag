@@ -39,6 +39,15 @@ class Embedder(Protocol):
 
 
 @runtime_checkable
+class Reranker(Protocol):
+    """Relevance scoring protocol for candidate chunks (issue #76 PR-02).
+    Implementations: HttpReranker (prod vLLM/TEI), OnnxReranker (local ONNX weights),
+    HashReranker (CI/dev)."""
+
+    def score(self, query: str, texts: list[str]) -> list[float]: ...
+
+
+@runtime_checkable
 class QdrantPoints(Protocol):
     """The Qdrant surface this project actually uses — only these methods may
     appear at layer edges. Unit tests fake this protocol, which is why the
