@@ -47,6 +47,19 @@ class ParsedAnswer(BaseModel):
     inferred_indices: list[int] = Field(default_factory=list)
 
 
+class TruncatedStreamError(RuntimeError):
+    """An SSE chat stream ended without the [DONE] terminator: content
+    received so far is a prefix of unknown completeness and must never be
+    labeled finish_reason "stop". Carries counts only — never response text,
+    which reaches logs through the error paths that catch this."""
+
+    def __init__(self, content_chunks: int) -> None:
+        super().__init__(
+            f"SSE stream ended without [DONE] after {content_chunks} content chunks"
+        )
+        self.content_chunks = content_chunks
+
+
 SYSTEM_PROMPT = (
     "You are a mainframe operations expert (z/OS, CICS, Db2, IMS, JES2/3, RACF, "
     "z/VM, VTAM, OPS/MVS). Answer operational questions. Rules:\n"
@@ -392,12 +405,14 @@ class HttpxLLMClient:
                     json=body_stream,
                 ) as stream_resp:
                     stream_resp.raise_for_status()
+                    saw_done = False
                     async for line in stream_resp.aiter_lines():
                         line = line.strip()
                         if not line or not line.startswith("data:"):
                             continue
                         chunk_str = line[5:].strip()
                         if chunk_str == "[DONE]":
+                            saw_done = True
                             break
                         try:
                             chunk = json.loads(chunk_str)
@@ -415,6 +430,11 @@ class HttpxLLMClient:
                                 content_parts.append(delta_content)
                             if choices[0].get("finish_reason"):
                                 finish_reason = str(choices[0]["finish_reason"])
+                if not saw_done:
+                    # Transport truncation, not a complete answer: the except
+                    # below recovers through the non-streaming POST, which
+                    # returns whole content — the partial prefix is discarded.
+                    raise TruncatedStreamError(len(content_parts))
                 content = "".join(content_parts)
                 if not content:
                     log.warning("streaming chat returned empty content; falling back to non-streaming POST")
@@ -431,7 +451,7 @@ class HttpxLLMClient:
                         total_tokens=int(usage_data.get("total_tokens") or 0),
                     )
                     return ChatResult(content=content, finish_reason=finish_reason, usage=usage, ttft_ms=ttft_ms)
-            except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
+            except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
                 log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
 
         # Fallback note: this re-asks the reasoning model — a second full
@@ -439,6 +459,9 @@ class HttpxLLMClient:
         # server-side parsing defect, not a transient fault, and there are no
         # retries on the answer path (issue #20 PR C). The doubling only
         # happens on that defect, never on the happy path.
+        # A truncated stream (TruncatedStreamError above) joins the same
+        # recovery: the non-streaming POST returns whole content, so the
+        # partial prefix is never surfaced.
         resp = await self._async_http().post(
             f"{base_url.rstrip('/')}/chat/completions",
             json=body,
@@ -493,12 +516,14 @@ class HttpxLLMClient:
             json=body,
         ) as stream_resp:
             stream_resp.raise_for_status()
+            saw_done = False
             async for line in stream_resp.aiter_lines():
                 line = line.strip()
                 if not line or not line.startswith("data:"):
                     continue
                 chunk_str = line[5:].strip()
                 if chunk_str == "[DONE]":
+                    saw_done = True
                     break
                 try:
                     chunk = json.loads(chunk_str)
@@ -527,8 +552,10 @@ class HttpxLLMClient:
         # whole output lands in the reasoning channel yields zero content
         # deltas. Recovery is only possible BEFORE any token was yielded —
         # a mid-stream failure after real deltas cannot be retried without
-        # duplicating content, so stream errors propagate to the app's
-        # event: error path instead.
+        # duplicating content, so it raises (the app's event: error path)
+        # instead of shipping the prefix labeled "stop".
+        if not saw_done and content_parts:
+            raise TruncatedStreamError(len(content_parts))
         if not content_parts:
             log.warning("streaming chat returned empty content; falling back to non-streaming POST")
             resp = await self._async_http().post(
@@ -590,12 +617,14 @@ class HttpxLLMClient:
                     json=body_stream,
                 ) as stream_resp:
                     stream_resp.raise_for_status()
+                    saw_done = False
                     for line in stream_resp.iter_lines():
                         line = line.strip()
                         if not line or not line.startswith("data:"):
                             continue
                         chunk_str = line[5:].strip()
                         if chunk_str == "[DONE]":
+                            saw_done = True
                             break
                         try:
                             chunk = json.loads(chunk_str)
@@ -613,6 +642,11 @@ class HttpxLLMClient:
                                 content_parts.append(delta_content)
                             if choices[0].get("finish_reason"):
                                 finish_reason = str(choices[0]["finish_reason"])
+                if not saw_done:
+                    # Transport truncation, not a complete answer: the except
+                    # below recovers through the non-streaming POST, which
+                    # returns whole content — the partial prefix is discarded.
+                    raise TruncatedStreamError(len(content_parts))
                 content = "".join(content_parts)
                 if not content:
                     log.warning("streaming chat returned empty content; falling back to non-streaming POST")
@@ -629,7 +663,7 @@ class HttpxLLMClient:
                         total_tokens=int(usage_data.get("total_tokens") or 0),
                     )
                     return ChatResult(content=content, finish_reason=finish_reason, usage=usage, ttft_ms=ttft_ms)
-            except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
+            except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
                 log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
 
         resp = self._sync_http().post(
