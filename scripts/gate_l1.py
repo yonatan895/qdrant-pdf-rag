@@ -61,6 +61,13 @@ def generate_synthetic_golden_corpus(
     Builds one PDF per unique expected_doc_id with pages carrying the query
     text, expected headings, identifiers, and required phrases. Also generates
     an unrelated guide to ensure abstain queries have a distractor without false hits.
+
+    Paraphrase entries (those carrying `answer_text`, see evals/paraphrase.jsonl)
+    build the page from the answer text WITHOUT echoing the query: the query's
+    distinctive phrasing must not appear near-verbatim, so the page measures
+    semantic retrieval rather than lexical overlap. Identifiers, required
+    terms, and syntax constructs are still written verbatim — they are the
+    retrieval anchors under test, not the phrasing under test.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     docs_map: dict[str, list[dict[str, Any]]] = {}
@@ -89,12 +96,16 @@ def generate_synthetic_golden_corpus(
             heading = entry.get("expected_heading") or f"Chapter {idx}. {eid}"
             leaf = heading.split(">")[-1].strip()
 
-            text_parts = [
-                leaf,
-                "",
-                entry.get("query", ""),
-                "",
-            ]
+            answer_text = entry.get("answer_text")
+            if answer_text:
+                text_parts = [leaf, "", answer_text, ""]
+            else:
+                text_parts = [
+                    leaf,
+                    "",
+                    entry.get("query", ""),
+                    "",
+                ]
             ident = entry.get("must_cite_identifier")
             if ident:
                 text_parts.append(f"Identifier: {ident}")
