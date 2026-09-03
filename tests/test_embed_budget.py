@@ -150,7 +150,9 @@ def test_worst_case_embed_text_under_char_budget(tmp_path: Path):
 def test_worst_case_with_max_context_prefix_under_budget(tmp_path: Path):
     """Issue #78: the contextual prefix is deterministically capped at
     context_max_chars, so the worst case stays provable — header + max
-    prefix + worst body must still fit the window's headroom budget."""
+    prefix + worst body must fit INSIDE the window's headroom budget
+    (CHAR_BUDGET covers the entire embedded string; adding the prefix on
+    top would push the effective bound past the 3584-token headroom)."""
     from mainframe_rag.config import Settings
 
     max_prefix = Settings(_env_file=None).context_max_chars
@@ -159,4 +161,4 @@ def test_worst_case_with_max_context_prefix_under_budget(tmp_path: Path):
         PRODUCT, VERSION, DOC_ID, TITLE, HEADING_PATH, body,
         context="x" * max_prefix,
     )
-    assert len(with_prefix) <= CHAR_BUDGET + 1 + max_prefix
+    assert len(with_prefix) <= CHAR_BUDGET
