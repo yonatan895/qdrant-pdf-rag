@@ -227,6 +227,30 @@ def test_explain_contains_sizing_math():
     assert "FIT" in text
 
 
+def test_prefix_cache_defaults_off_everywhere():
+    """Prefix caching is opt-in per profile server (issue #80 measures
+    before enabling): both LOCAL plans resolve it off."""
+    plan = resolve(LOCAL_RT_8GB)
+    assert [s.enable_prefix_caching for s in plan.servers] == [False, False]
+
+
+def test_prefix_cache_flows_to_plan_and_explain():
+    spec = ModelSpec(
+        model_id="some/reasoning",
+        role="reasoning",
+        runner="generate",
+        weight_mib=2800.0,
+        kv_bytes_per_token=98304.0,
+        context_need=4096,
+        prefix_cache=True,
+    )
+    plan = resolve(
+        ProfileBundle(name="PC", host=HostSpec(total_vram_mib=8151.0), servers=[spec])
+    )
+    assert plan.servers[0].enable_prefix_caching is True
+    assert "--enable-prefix-caching" in plan.explain()
+
+
 def test_specs_are_immutable():
     """Declared facts are frozen: resolve inputs cannot be mutated mid-flight."""
     with pytest.raises(ValidationError):

@@ -13,7 +13,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 import httpx2
 from pydantic import BaseModel, Field
@@ -126,6 +126,55 @@ SYSTEM_PROMPT_COMPLEX_EXTENSION = (
 )
 
 
+# Prompt user-message blocks, the seam issue #80 (prefix caching + prompt
+# ordering) builds on. A block is (name, text); names: "context" (sysplex +
+# splunk lines), "question" (always present), "excerpt" (one per packed
+# chunk, in retrieval order), "tail" (citation instruction, always present),
+# "excerpts" (the section header alone, only when packed is empty).
+PromptBlock = tuple[str, str]
+
+
+def order_prompt_blocks(
+    blocks: list[PromptBlock], policy: str = "retrieval"
+) -> list[PromptBlock]:
+    """Pure user-message block ordering. "retrieval" preserves assembly
+    order (today's prompt, byte-exact). New policies widen this dispatch;
+    every policy must preserve the block multiset — reordering only, so a
+    future policy can never silently drop the tail (citation instruction)
+    or duplicate excerpts. Unknown policies fail closed."""
+    if policy == "retrieval":
+        ordered = list(blocks)
+    else:
+        raise ValueError(f"unknown prompt order policy: {policy!r}; known: retrieval")
+    if sorted(name for name, _ in ordered) != sorted(name for name, _ in blocks):
+        raise ValueError(f"prompt order policy {policy!r} must preserve blocks, not drop or duplicate them")
+    return ordered
+
+
+def _assemble_blocks(
+    context_entries: list[str],
+    question_text: str,
+    packed: list[tuple[str, str]],
+    tail_part: str,
+) -> list[PromptBlock]:
+    """Core-order blocks from packed excerpts. The section header rides on
+    the first excerpt block (or stands alone as "excerpts" when packed is
+    empty) so the "\\n\\n" join reproduces the historical user message
+    exactly."""
+    blocks: list[PromptBlock] = []
+    if context_entries:
+        blocks.append(("context", "\n\n".join(context_entries)))
+    blocks.append(("question", question_text))
+    if packed:
+        header, body = packed[0]
+        blocks.append(("excerpt", f"Retrieved manual excerpts:\n{header}\n{body}"))
+        blocks.extend(("excerpt", f"{header}\n{body}") for header, body in packed[1:])
+    else:
+        blocks.append(("excerpts", "Retrieved manual excerpts:\n"))
+    blocks.append(("tail", tail_part))
+    return blocks
+
+
 def build_messages(
     query: str,
     hits: list[SearchHit],
@@ -138,24 +187,29 @@ def build_messages(
     complexity: str | None = None,
     tokenizer: Tokenizer | None = None,
     settings: Settings | None = None,
+    order: Literal["retrieval"] = "retrieval",
 ) -> list[ChatMessage]:
     if complexity is None:
         complexity = classify_query_complexity(query)
 
     parts: list[str] = []
+    context_entries: list[str] = []
     context_bits = []
     if product:
         context_bits.append(f"product: {product}")
     if version:
         context_bits.append(f"version: {version}")
     if context_bits:
-        parts.append("Sysplex context: " + ", ".join(context_bits))
+        context_entries.append("Sysplex context: " + ", ".join(context_bits))
     if splunk_context:
-        parts.append(
+        context_entries.append(
             "Splunk context (live system observation; join key is the message ID):\n"
             + splunk_context.strip()
         )
-    parts.append("Question: " + query)
+    question_text = "Question: " + query
+    # Pre-excerpt user parts, exactly as before: the estimator below counts
+    # this shape, so it stays character-identical.
+    parts = [*context_entries, question_text]
 
     system_content = (
         SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
@@ -229,7 +283,12 @@ def build_messages(
             used = tokenizer.count_messages(
                 [
                     ChatMessage(role="system", content=system_content),
-                    ChatMessage(role="user", content=_user_content(parts, packed, tail_part)),
+                    ChatMessage(
+                        role="user",
+                        content=_user_content(
+                            _assemble_blocks(context_entries, question_text, packed, tail_part)
+                        ),
+                    ),
                 ]
             )
             if used <= verify_limit:
@@ -270,20 +329,21 @@ def build_messages(
             packed.append((header, text))
             total_chars += chunk_len
 
-    parts.append("Retrieved manual excerpts:\n" + "\n\n".join(f"{h}\n{b}" for h, b in packed))
-    parts.append(tail_part)
-
+    ordered = order_prompt_blocks(
+        _assemble_blocks(context_entries, question_text, packed, tail_part), order
+    )
     return [
         ChatMessage(role="system", content=system_content),
-        ChatMessage(role="user", content="\n\n".join(parts)),
+        ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),
     ]
 
 
-def _user_content(parts: list[str], packed: list[tuple[str, str]], tail_part: str) -> str:
-    """The final user message, used by the verification loop to count the
-    exact prompt that will be sent."""
-    excerpt_part = "Retrieved manual excerpts:\n" + "\n\n".join(f"{h}\n{b}" for h, b in packed)
-    return "\n\n".join([*parts, excerpt_part, tail_part])
+def _user_content(blocks: list[PromptBlock]) -> str:
+    """The final user message from ordered blocks, used by the verification
+    loop to count the exact prompt that will be sent. Verification runs in
+    core order; token totals are order-invariant, and build_messages applies
+    the policy once to the final blocks."""
+    return "\n\n".join(text for _, text in blocks)
 
 
 def as_chat_result(raw: ChatResult | str) -> ChatResult:

@@ -47,6 +47,7 @@ def test_outbound_timeout_defaults_bounded():
     assert s.prompt_max_context_chars_complex == 4500
     assert s.prompt_max_chunk_chars == 3000
     assert s.prompt_max_chunk_chars_complex == 1100
+    assert s.prompt_order == "retrieval"
     assert "Instruct:" in s.dense_query_prefix
     assert s.rrf_k == 2
     assert s.rrf_weight_dense_nl == 1.0
