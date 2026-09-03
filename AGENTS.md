@@ -176,7 +176,7 @@ New behavior belongs in the layer that already owns that decision. Do not thread
 | `classify` | `message` / `syntax` / `table` / `narrative` |
 | `embed` | Dense from internal vLLM; sparse local (no Cloud inference) |
 | `qdrant_io` | Collection + payload indexes **before** load; dim fail-fast |
-| `retrieve` | Filters in prefetch; hybrid dense+BM25; cross-encoder rerank dispatch (`rerank.py`, default off); query-class screen (`screen.py`: trap checked before identifiers, sibling must_nots stay answerable) |
+| `retrieve` | Filters in prefetch; hybrid dense+BM25; cross-encoder rerank dispatch (`rerank.py`, default off); query-class screen (`screen.py`: trap checked before identifiers, sibling must_nots stay answerable; trap queries bypass rerank in both search twins, RRF order stands) |
 | `agent` | HTTP API; citation validation; request-size guardrails (`query_max_chars` 422s closed, `splunk_context_max_chars` truncates with suffix) |
 
 Standing #20 rules: embed / Qdrant points / LLM are `Protocol`s in `ports.py`; upserts are batched (`Settings.batch_size`); payload indexes exist before load; every outbound call has a Settings timeout.
