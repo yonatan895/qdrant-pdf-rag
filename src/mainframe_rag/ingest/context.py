@@ -34,13 +34,21 @@ log = logging.getLogger("ingest")
 # Prompt template version. Bumped ONLY with the template text below; the
 # version rides the cache key, so a template change invalidates every cached
 # context automatically (stale contexts would embed under a new semantic).
-CONTEXT_PROMPT_VERSION = "v1"
+#
+# v2 (issue #78 reviewer sequence): v1 asked the model to name the manual and
+# section, which duplicated the already-indexed header and invited
+# instruction echo ("The user wants me to...") on small models. v2 forbids
+# restating anything the header carries and demands only the passage gist.
+# Wording is deliberately imperative with no enumerated list — an enumerated
+# "facts, parameters, values, actions" draft made the model mirror it back
+# as section headers ("Key Facts:", "Parameters:", ...). Validated live
+# against Qwen2.5-0.5B-Instruct on message/syntax/narrative passages.
+CONTEXT_PROMPT_VERSION = "v2"
 
 CONTEXT_SYSTEM_PROMPT = (
-    "You situate a passage from a mainframe operations manual so a vector "
-    "retriever can find it. Reply with one or two sentences ONLY: name the "
-    "manual and section the passage comes from and state what the passage "
-    "says. No preamble, no citations, no formatting, no extra sentences."
+    "In one or two sentences, say what the passage states. "
+    "Never repeat the manual title, document ID, or section path. "
+    "No headings, lists, or preamble."
 )
 
 # Server-side completion cap: a 1-2 sentence gist is ~150 tokens; 256 leaves
@@ -126,6 +134,7 @@ def append_context_entries(path: Path, doc_sha256: str, entries: dict[str, str])
     the inventory file's append-only discipline."""
     if not entries:
         return
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         for chunk_id, context in entries.items():
             fh.write(

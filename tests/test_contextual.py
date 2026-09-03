@@ -69,8 +69,12 @@ class FakeResp:
 
 
 def test_prompt_template_is_versioned_and_mirrors_embed_header():
-    assert ctx_mod.CONTEXT_PROMPT_VERSION == "v1"
-    assert "1" in ctx_mod.CONTEXT_SYSTEM_PROMPT or "two sentences" in ctx_mod.CONTEXT_SYSTEM_PROMPT
+    assert ctx_mod.CONTEXT_PROMPT_VERSION == "v2"
+    # v2 contract (issue #78 reviewer sequence): the gist must ADD what the
+    # header lacks, never restate it — pin both sides so the template cannot
+    # silently regress to v1 semantics.
+    assert "Never repeat the manual title" in ctx_mod.CONTEXT_SYSTEM_PROMPT
+    assert "name the manual and section" not in ctx_mod.CONTEXT_SYSTEM_PROMPT
     messages = ctx_mod.build_context_messages(
         product="z/OS",
         version="3.1",
@@ -92,7 +96,7 @@ def test_normalize_context_collapses_and_truncates():
 
 
 def test_cache_key_includes_template_version():
-    assert ctx_mod.cache_key("sha", "cid").startswith("v1:")
+    assert ctx_mod.cache_key("sha", "cid").startswith("v2:")
 
 
 def test_cache_round_trip_last_wins_and_skips_corrupt_lines(tmp_path, caplog):
