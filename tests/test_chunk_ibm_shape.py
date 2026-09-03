@@ -1,5 +1,7 @@
 """Chunk contract tests: outline sections, chunk_id stability, classification."""
 
+import re
+
 from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import make_chunks, outline_sections
 from mainframe_rag.ingest.ibm_pdf import parse_pdf
@@ -166,14 +168,17 @@ def test_jcl_fixture_statements_never_split(jcl_pdf):
     full = "\n".join(texts)
     for statement in _jcl_source_statements():
         assert statement in full, f"statement split across chunks: {statement[:60]!r}"
-    # Every chunk starts at a statement boundary: a JCL line opening a
-    # chunk is always a new statement, never a continuation.
+    # Every chunk starts at a statement boundary: the first JCL-looking
+    # line of a chunk (after stripping the manual's left pad) is always a
+    # new statement or unnamed op, never a col-16 continuation.
+    cont_re = re.compile(r"^//\s{2,}")
     for chunk in chunks:
-        first_jcl = next((ln for ln in chunk.text.splitlines() if ln.startswith("//")), None)
+        first_jcl = next(
+            (ln.lstrip() for ln in chunk.text.splitlines() if ln.lstrip().startswith("//")),
+            None,
+        )
         if first_jcl is not None:
-            assert not first_jcl.startswith("// ") and not first_jcl.startswith("//\t"), (
-                f"chunk opens mid-statement: {first_jcl[:40]!r}"
-            )
+            assert not cont_re.match(first_jcl), f"chunk opens mid-statement: {first_jcl[:40]!r}"
     # Detector fires on the real extraction (line starts survived the PDF round-trip).
     assert any(
         detect_code_region("\n".join(ln for ln in c.text.splitlines() if ln.startswith("//")))
@@ -187,6 +192,75 @@ def test_jcl_fixture_ids_stable(jcl_pdf):
     _, first = _chunks_for(jcl_pdf)
     _, second = _chunks_for(jcl_pdf)
     assert [c.chunk_id for c in first] == [c.chunk_id for c in second]
+
+
+def test_indented_jcl_detected_grouped_and_intact(jcl_pdf):
+    """Blocker 1 (review): manuals indent examples; the detector and the
+    splitter work on lstripped cards, continuations stay glued across the
+    indent, and the unnamed op stands alone."""
+    from mainframe_rag.ingest.chunk import _split_jcl_statements, detect_code_region
+
+    indented = (
+        "    //EXJOB JOB (ACCT),'EXAMPLE',CLASS=A\n"
+        "    //OUTDATA DD DSN=EXAMPLE.OUTPUT,DISP=(NEW,CATLG,DELETE),\n"
+        "    //            UNIT=SYSDA,SPACE=(CYL,(2,1),RLSE)\n"
+        "    // EXEC PGM=IKJEFT01"
+    )
+    assert detect_code_region(indented) == "jcl"
+    assert _split_jcl_statements(indented) == [
+        "    //EXJOB JOB (ACCT),'EXAMPLE',CLASS=A",
+        (
+            "    //OUTDATA DD DSN=EXAMPLE.OUTPUT,DISP=(NEW,CATLG,DELETE),\n"
+            "    //            UNIT=SYSDA,SPACE=(CYL,(2,1),RLSE)"
+        ),
+        "    // EXEC PGM=IKJEFT01",
+    ]
+    _, chunks = _chunks_for(jcl_pdf)
+    full = "\n".join(c.text for c in chunks)
+    assert "    //OUTDATA DD DSN=EXAMPLE.OUTPUT,DISP=(NEW,CATLG,DELETE),\n    //            UNIT=SYSDA" in full
+    assert "    // EXEC PGM=IKJEFT01" in full
+
+
+def test_unnamed_ops_are_statements_not_continuations():
+    from mainframe_rag.ingest.chunk import _split_jcl_statements
+
+    assert _split_jcl_statements("// EXEC PGM=X\n// DD DSN=Y") == ["// EXEC PGM=X", "// DD DSN=Y"]
+
+
+def test_instream_data_splits_between_lines_not_as_atom():
+    """Blocker 2 (review): a 4000-char SYSIN block must split between data
+    lines; only // cards stay continuation-atomic."""
+    from mainframe_rag.ingest.chunk import SECTION_MAX_CHARS, _split_blocks
+
+    data = [f"RECORD-{i:04d} PAYLOAD-DATA-LINE" for i in range(200)]
+    para = "//SYSIN DD *\n" + "\n".join(data)
+    assert len(para) > SECTION_MAX_CHARS
+    blocks = _split_blocks([(0, para)])
+    assert len(blocks) > 1
+    for _, text in blocks:
+        assert len(text) <= SECTION_MAX_CHARS + 100
+    assert blocks[0][1].startswith("//SYSIN DD *")
+    joined = "\n".join(text for _, text in blocks)
+    for line in data:
+        assert line in joined
+
+
+def test_rexx_nested_comments_dont_split():
+    from mainframe_rag.ingest.chunk import _split_rexx_statements
+
+    statements = _split_rexx_statements("/* outer /* inner ; */ still comment ; */\nX = 1;")
+    assert statements == ["/* outer /* inner ; */ still comment ; */", "X = 1;"]
+
+
+def test_code_runs_share_single_newlines():
+    """Review: adjacent atomic items join with one newline (exact-card
+    sparse fidelity); prose boundaries keep the double newline."""
+    from mainframe_rag.ingest.chunk import _split_blocks
+
+    (page, text), = [(0, "//A X\n//B Y")]
+    assert _split_blocks([(page, text)]) == [(0, "//A X\n//B Y")]
+    prose = _split_blocks([(0, "para one"), (0, "para two")])
+    assert prose == [(0, "para one\n\npara two")]
 
 
 def test_rexx_fixture_statements_never_split(rexx_pdf):
@@ -237,8 +311,10 @@ def test_oversize_single_statement_emitted_whole():
 
 def test_overlap_backoff_keeps_statements_whole():
     """Constructed arithmetic: prose 2000 + six 300-char JCL statements.
-    The flush tail (400 chars) would cut inside S3, so the seed must back
-    off to whole items and the next block must open with all of S4."""
+    The 400-char overlap tail starts inside S3, so the seed backs off to
+    whole trailing items and the next block opens with all of S4
+    (stmts[3]) followed by S5, joined with single newlines (code runs
+    share one newline, never a blank line)."""
     from mainframe_rag.ingest.chunk import _split_blocks
 
     prose = "y" * 2000
@@ -248,6 +324,6 @@ def test_overlap_backoff_keeps_statements_whole():
     blocks = _split_blocks([(0, prose), (0, code_para)])
     assert len(blocks) == 2
     assert blocks[0][1].endswith(stmts[3])
-    assert blocks[1][1].startswith(stmts[3] + "\n\n" + stmts[4])
+    assert blocks[1][1].startswith(stmts[3] + "\n" + stmts[4])
     for statement in stmts:
         assert statement in blocks[0][1] or statement in blocks[1][1]

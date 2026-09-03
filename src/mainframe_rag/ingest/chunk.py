@@ -34,8 +34,21 @@ _BLANK_SPLIT_RE = re.compile(r"\n\s*\n")
 # threshold); a missed region falls back to today's paragraph behavior,
 # never to an error. A false positive only makes a paragraph atomic, which
 # changes nothing below SECTION_MAX_CHARS.
+#
+# JCL matching runs on lstripped lines: page.get_text() keeps the left pad
+# IBM manuals put on examples, so column-0 anchoring would miss real cards.
+# A card starting `//` + non-space opens a statement (`//name`, `//*`
+# comment); `//` + 2+ spaces continues one (operand column — col-72
+# continuation semantics without depending on exact PDF column fidelity);
+# `//` + exactly one space is an unnamed op (`// EXEC`, `// DD`), which is
+# its own statement, not a continuation.
 _JCL_CARD_RE = re.compile(r"^//")
 _JCL_STMT_START_RE = re.compile(r"^//\S")
+_JCL_CONT_RE = re.compile(r"^//\s{2,}")
+_JCL_UNNAMED_RE = re.compile(r"^//\s\S")
+# In-stream data marker: `//name DD *` or `DD DATA` (optionally followed by
+# `,DLM=..`). Everything after it (until the next card) is data records.
+_JCL_DD_DATA_RE = re.compile(r"^//\S+\s+DD\s+(\*|DATA)(?=[\s,]|$)", re.IGNORECASE)
 _REXX_HEADER_RE = re.compile(r"/\*\s*rexx", re.IGNORECASE)
 
 
@@ -53,7 +66,15 @@ def detect_code_region(text: str) -> str | None:
     lines = _nonblank_lines(text)
     if not lines:
         return None
-    if sum(1 for line in lines if _JCL_CARD_RE.match(line)) / len(lines) >= 0.6:
+    stripped = [line.lstrip() for line in lines]
+    if sum(1 for line in stripped if _JCL_CARD_RE.match(line)) / len(lines) >= 0.6:
+        return "jcl"
+    # A DD-instream card makes the whole paragraph JCL even when data
+    # records dominate the line count: without this, a 200-line SYSIN
+    # block reads as prose and an oversize paragraph would char-slice
+    # mid-record. Prose merely mentioning such a card misdetects, but the
+    # only consequence is line-wise (never mid-word) overflow splits.
+    if any(_JCL_DD_DATA_RE.match(line) for line in stripped):
         return "jcl"
     if _REXX_HEADER_RE.search(text) or any(
         line.count("/*") > line.count("*/") for line in lines
@@ -137,20 +158,32 @@ def outline_sections(parsed: ParsedDoc) -> list[Section]:
 
 
 def _split_jcl_statements(text: str) -> list[str]:
-    """Group JCL cards into statements: a `^//\\S` line (name, `//*`
-    comment) starts one; a `^//\\s` line continues the open statement
-    (column-72 continuation semantics without depending on exact PDF
-    column fidelity). Non-card lines attach to the open statement so no
-    text is ever dropped."""
+    """Group JCL cards into statements on lstripped lines (see the column
+    note above): `^//\\S` and one-space unnamed ops (`// EXEC`) open one;
+    `^//\\s{2,}` continues the open statement. Non-card lines (in-stream
+    SYSIN data, the `/*` delimiter) become single-line units of their own:
+    gluing a 20k SYSIN block onto its `DD *` card would make one giant atom
+    that no window can hold — data lines split between lines, only `//`
+    cards stay continuation-atomic."""
     statements: list[str] = []
     current: list[str] = []
     for line in text.splitlines():
-        if _JCL_STMT_START_RE.match(line) or not current:
+        nospace = line.lstrip()
+        if _JCL_STMT_START_RE.match(nospace) or _JCL_UNNAMED_RE.match(nospace):
             if current:
                 statements.append("\n".join(current))
             current = [line]
+        elif _JCL_CARD_RE.match(nospace):
+            if not current:
+                current = [line]
+            else:
+                current.append(line)
         else:
-            current.append(line)
+            if current:
+                statements.append("\n".join(current))
+                current = []
+            if line.strip():
+                statements.append(line)
     if current:
         statements.append("\n".join(current))
     return [s for s in (stmt.rstrip() for stmt in statements) if s.strip()]
@@ -158,13 +191,14 @@ def _split_jcl_statements(text: str) -> list[str]:
 
 def _split_rexx_statements(text: str) -> list[str]:
     """Split a REXX region on `;` and line ends, but never inside `/* */`
-    comments, string literals (with `''` escape handling), or before a `,`
-    line-continuation. Comment/string state tracks across lines; an
-    unterminated comment or string swallows to the end — fail-safe toward
-    fewer, larger statements, never a split inside an ambiguous construct."""
+    comments (which nest per TSO/E), string literals (with `''` escape
+    handling), or before a `,` line-continuation. Comment/string state
+    tracks across lines; an unterminated comment or string swallows to the
+    end — fail-safe toward fewer, larger statements, never a split inside
+    an ambiguous construct."""
     statements: list[str] = []
     cur: list[str] = []
-    in_comment = False
+    in_comment = 0
     quote: str | None = None
     for line in text.splitlines():
         i, n = 0, len(line)
@@ -174,7 +208,13 @@ def _split_rexx_statements(text: str) -> list[str]:
                 if two == "*/":
                     cur.append("*/")
                     i += 2
-                    in_comment = False
+                    in_comment -= 1
+                elif two == "/*":
+                    # TSO/E nests block comments: only the matching close
+                    # exits, so a `;` inside the outer comment never splits.
+                    cur.append("/*")
+                    i += 2
+                    in_comment += 1
                 else:
                     cur.append(line[i])
                     i += 1
@@ -190,7 +230,7 @@ def _split_rexx_statements(text: str) -> list[str]:
             elif two == "/*":
                 cur.append("/*")
                 i += 2
-                in_comment = True
+                in_comment = 1
             elif line[i] in "\"'":
                 quote = line[i]
                 cur.append(line[i])
@@ -235,8 +275,29 @@ def _code_statements(text: str) -> list[str] | None:
     return statements or None
 
 
+def _join_items(items: list[tuple[int, str, bool]]) -> tuple[str, list[int]]:
+    """Join accumulated items: adjacent atomic (code-statement) items share
+    a single newline so listings keep their shape and exact-card sparse
+    matches are not diluted by blank lines; every other boundary keeps the
+    historical double newline. Returns the text plus each item's start
+    offset (for the overlap walk). Prose-only currents join exactly as
+    before, byte for byte."""
+    parts: list[str] = []
+    offsets: list[int] = []
+    pos = 0
+    for idx, (_, text, atomic) in enumerate(items):
+        if idx:
+            sep = "\n" if (atomic and items[idx - 1][2]) else "\n\n"
+            parts.append(sep)
+            pos += len(sep)
+        offsets.append(pos)
+        parts.append(text)
+        pos += len(text)
+    return "".join(parts), offsets
+
+
 def _overlap_seed(
-    items: list[tuple[int, str, bool]], joined: str
+    items: list[tuple[int, str, bool]], joined: str, offsets: list[int]
 ) -> list[tuple[int, str, bool]]:
     """Overlap seed for the next accumulation. Identical to today's blind
     SPLIT_OVERLAP_CHARS tail unless that tail would cut inside an atomic
@@ -245,11 +306,9 @@ def _overlap_seed(
     tail_start = len(joined) - SPLIT_OVERLAP_CHARS
     if tail_start <= 0:
         return [(items[-1][0], joined, False)]
-    offset = 0
     for idx, (page_idx, text, atomic) in enumerate(items):
-        if offset <= tail_start < offset + len(text) and atomic and tail_start > offset:
+        if offsets[idx] <= tail_start < offsets[idx] + len(text) and atomic and tail_start > offsets[idx]:
             return [(p, t, a) for (p, t, a) in items[idx + 1 :]]
-        offset += len(text) + 2
     return [(items[-1][0], joined[tail_start:], False)]
 
 
@@ -270,7 +329,7 @@ def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, str]]:
     for page_idx, text, atomic in items:
         if len(text) > SECTION_MAX_CHARS:
             if current:
-                joined = "\n\n".join(t for _, t, _ in current)
+                joined, _ = _join_items(current)
                 blocks.append((current[0][0], joined))
                 current, current_len = [], 0
             if atomic:
@@ -285,9 +344,9 @@ def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, str]]:
                     blocks.append((page_idx, text[i : i + SECTION_MAX_CHARS]))
             continue
         if current_len + len(text) > SECTION_MAX_CHARS and current:
-            joined = "\n\n".join(t for _, t, _ in current)
+            joined, offsets = _join_items(current)
             blocks.append((current[0][0], joined))
-            seed = _overlap_seed(current, joined)
+            seed = _overlap_seed(current, joined, offsets)
             if len(seed) == 1 and not seed[0][2]:
                 # Historical blind-tail seed: exact legacy accounting.
                 current = [seed[0], (page_idx, text, atomic)]
@@ -301,7 +360,8 @@ def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, str]]:
             current_len += len(text) + 2
 
     if current:
-        blocks.append((current[0][0], "\n\n".join(t for _, t, _ in current)))
+        joined, _ = _join_items(current)
+        blocks.append((current[0][0], joined))
     return blocks
 
 

@@ -143,7 +143,9 @@ JCL_BASE_LINES = [
 
 def _write_code_lines(doc: pymupdf.Document, lines: list[str], fontsize: int = 10, step: int = 12) -> None:
     """One page per ~55 lines; insert_text per line so cards keep their
-    line breaks (no textbox rewrap, no clipping of short lines)."""
+    line breaks (no textbox rewrap, no clipping of short lines). Leading
+    spaces are preserved: real manuals indent examples, and the detector
+    must see them that way."""
     page = doc.new_page()
     y = 72
     for line in lines:
@@ -166,6 +168,22 @@ def build_jcl(out_path: Path, doc_id: str = "SA22-8004-00") -> Path:
     page = doc.new_page()
     page.insert_text((72, 72), f"{title}\nz/OS V9R9\n{doc_id}", fontsize=11)
     _write_code_lines(doc, JCL_BASE_LINES)
+    # Indented example block, as IBM manuals print JCL inside running text:
+    # the detector must see lstripped cards, and continuations must stay
+    # glued to their opener across the indent. The prose lead shares the
+    # paragraph (no blank emitted) and must survive as its own unit.
+    _write_code_lines(
+        doc,
+        [
+            "Example job as printed in the manual:",
+            "    //EXJOB JOB (ACCT),'EXAMPLE',CLASS=A",
+            "    //EXSTEP EXEC PGM=IEFBR14",
+            "    //INDATA DD DSN=EXAMPLE.INPUT,DISP=SHR",
+            "    //OUTDATA DD DSN=EXAMPLE.OUTPUT,DISP=(NEW,CATLG,DELETE),",
+            "    //            UNIT=SYSDA,SPACE=(CYL,(2,1),RLSE)",
+            "    // EXEC PGM=IKJEFT01",
+        ],
+    )
     generated = []
     for n in range(1, 61):
         generated.append(f"//S{n:02d} EXEC PGM=IEFBR14,PARM='BLD{n:02d}'")
