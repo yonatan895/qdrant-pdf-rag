@@ -76,6 +76,7 @@ def test_embed_server_flags_come_from_budget(tmp_path: Path):
     assert pairs["--max-num-batched-tokens"] == "4096"
     assert pairs["--enforce-eager"] == "1"
     assert pairs["--max-num-seqs"] == "1"
+    assert "--enable-prefix-caching" not in argv
     assert "Qwen/Qwen3-Embedding-0.6B" in argv
 
 
@@ -91,6 +92,7 @@ def test_reasoning_server_flags_come_from_budget(tmp_path: Path):
     assert "--runner" not in pairs
     assert "--convert" not in pairs
     assert "--enforce-eager" not in pairs
+    assert "--enable-prefix-caching" in pairs
     assert pairs["--reasoning-parser"] == "gemma4"
 
 

@@ -227,11 +227,12 @@ def test_explain_contains_sizing_math():
     assert "FIT" in text
 
 
-def test_prefix_cache_defaults_off_everywhere():
-    """Prefix caching is opt-in per profile server (issue #80 measures
-    before enabling): both LOCAL plans resolve it off."""
+def test_prefix_cache_pinned_on_for_local_reasoning_only():
+    """Prefix caching is pinned ON for the LOCAL reasoning server (issue
+    #80: vLLM already caches by default; the explicit flag documents
+    effective state). Embed stays off: single-shot prefill, unmeasured."""
     plan = resolve(LOCAL_RT_8GB)
-    assert [s.enable_prefix_caching for s in plan.servers] == [False, False]
+    assert [s.enable_prefix_caching for s in plan.servers] == [True, False]
 
 
 def test_prefix_cache_flows_to_plan_and_explain():

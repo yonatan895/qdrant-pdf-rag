@@ -59,7 +59,7 @@ def test_resolve_reasoning_assignments():
         "BUDGET_CONVERT": "none",
         "BUDGET_BATCHED_TOKENS": "",
         "BUDGET_EAGER": "0",
-        "BUDGET_PREFIX_CACHE": "0",
+        "BUDGET_PREFIX_CACHE": "1",
         "BUDGET_SEQS": "1",
     }
 
