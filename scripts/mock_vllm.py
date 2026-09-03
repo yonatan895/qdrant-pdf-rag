@@ -15,6 +15,19 @@ parse_answer's hit-set validation. /tokenize is served at the origin root
 (vLLM shape, prompt or messages) for the agent's token accounting. Never a
 product path; never in the air gap.
 
+Realism knobs for the load tier (all default-off; zeros = today's instant,
+byte-identical server):
+    MOCK_TTFT_MS         sleep before the first chat byte (stream and non-stream)
+    MOCK_TOKEN_INTERVAL_MS  sleep between streamed chunks (one chunk per piece)
+    MOCK_JITTER_MS       uniform(-JITTER, +JITTER) added to each sleep
+    MOCK_SEED            seed for jitter + failure draws (same seed + fresh
+                         process = byte-identical streams and failure pattern)
+    MOCK_ERROR_RATE      per-chat-request failure probability in [0, 1]:
+                         stream -> abort after the first chunk (no [DONE]);
+                         non-stream -> HTTP 500 fixed-shape error.
+Scope: chat only. Embeddings, /tokenize, /healthz and /models stay instant
+and infallible so eval/sim determinism never depends on load noise.
+
     MOCK_DIM=64 PORT=8000 python3 scripts/mock_vllm.py
 """
 
@@ -24,11 +37,61 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DIM = int(os.environ.get("MOCK_DIM", "64"))
 PORT = int(os.environ.get("PORT", "8000"))
+
+TTFT_MS = float(os.environ.get("MOCK_TTFT_MS", "0"))
+TOKEN_INTERVAL_MS = float(os.environ.get("MOCK_TOKEN_INTERVAL_MS", "0"))
+JITTER_MS = float(os.environ.get("MOCK_JITTER_MS", "0"))
+SEED = int(os.environ.get("MOCK_SEED", "0"))
+ERROR_RATE = float(os.environ.get("MOCK_ERROR_RATE", "0"))
+
+if TTFT_MS < 0 or TOKEN_INTERVAL_MS < 0 or JITTER_MS < 0 or not 0.0 <= ERROR_RATE <= 1.0:
+    raise ValueError(
+        "mock realism knobs must satisfy TTFT/INTERVAL/JITTER >= 0 and 0 <= ERROR_RATE <= 1"
+    )
+
+# Seeded draws (jitter + failure decisions) under one lock: same seed from a
+# fresh process replays the same timing noise and failure pattern. Jitter and
+# failures never touch response bytes — determinism is structural, not lucky.
+_rng = random.Random(SEED)
+_rng_lock = threading.Lock()
+
+# Slept-milliseconds observability (load-tier assertions + knob tests):
+# X-Mock-Sleep-Ms carries the exact paced total on non-stream chat;
+# X-Mock-Ttft-Ms carries the exact first-byte pace on streams (interval
+# pacing happens live, so only TTFT is knowable up front). Seeded replay
+# reproduces these strings exactly — pacing is pinned without wall-clock
+# assertions.
+
+# Fixed-shape injected failure: no internals, no request echo.
+_INJECTED_FAILURE = {"error": {"message": "mock injected failure"}}
+
+
+def _pace(base_ms: float) -> float:
+    """Sleep base_ms plus uniform(-JITTER_MS, +JITTER_MS), floored at zero.
+    Returns the actual slept milliseconds for the timing headers."""
+    delay_ms = base_ms
+    if JITTER_MS > 0:
+        with _rng_lock:
+            delay_ms += _rng.uniform(-JITTER_MS, JITTER_MS)
+    slept_ms = max(0.0, delay_ms)
+    if slept_ms > 0:
+        time.sleep(slept_ms / 1000.0)
+    return slept_ms
+
+
+def _should_fail() -> bool:
+    if ERROR_RATE <= 0:
+        return False
+    with _rng_lock:
+        return _rng.random() < ERROR_RATE
 
 # build_messages renders hits as "[n] <cite>\n<text>"; a cite always carries
 # the ", p. <label>" suffix, which distinguishes hit markers from other
@@ -105,12 +168,14 @@ def _first_line(lines: list[str], limit: int = 160) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code: int, payload: dict | str) -> None:
+    def _send(self, code: int, payload: dict | str, headers: dict[str, str] | None = None) -> None:
         body = payload if isinstance(payload, str) else json.dumps(payload)
         data = body.encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -168,45 +233,64 @@ class Handler(BaseHTTPRequestHandler):
         prompt_tokens = sum(len(str(m.get("content", "")).split()) for m in messages)
         completion_tokens = len(content.split())
         finish_reason = req.get("mock_finish_reason", "stop")
+        model = req.get("model", "mock-reasoning")
+        usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "reasoning_tokens": 10,
+            "total_tokens": prompt_tokens + completion_tokens + 10,
+        }
         if req.get("stream"):
+            ttft_ms = _pace(TTFT_MS)  # first-byte latency, before any chunk
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Mock-Ttft-Ms", f"{ttft_ms:.1f}")
             self.end_headers()
-            split_at = min(len(content), max(1, len(content) // 2))
-            part1 = content[:split_at]
-            part2 = content[split_at:]
-            chunk1 = {
-                "id": "chatcmpl-mock-deterministic",
-                "object": "chat.completion.chunk",
-                "model": req.get("model", "mock-reasoning"),
-                "choices": [{"index": 0, "delta": {"role": "assistant", "content": part1}, "finish_reason": None}],
-            }
-            self.wfile.write(f"data: {json.dumps(chunk1)}\n\n".encode())
-            self.wfile.flush()
-            chunk2 = {
-                "id": "chatcmpl-mock-deterministic",
-                "object": "chat.completion.chunk",
-                "model": req.get("model", "mock-reasoning"),
-                "choices": [{"index": 0, "delta": {"content": part2}, "finish_reason": finish_reason}],
-                "usage": {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "reasoning_tokens": 10,
-                    "total_tokens": prompt_tokens + completion_tokens + 10,
-                },
-            }
-            self.wfile.write(f"data: {json.dumps(chunk2)}\n\n".encode())
+            abort = _should_fail()
+            # One SSE chunk per piece with per-chunk flush: real TTFT plus
+            # observable inter-token pacing (the old two-chunk split is
+            # gone; reassembly is still byte-exact). Pieces keep their
+            # whitespace so concatenation == content.
+            pieces = re.findall(r"\S+\s*|\s+", content) or [""]
+            for i, piece in enumerate(pieces):
+                if i > 0:
+                    _pace(TOKEN_INTERVAL_MS)
+                delta: dict[str, str] = {"content": piece}
+                if i == 0:
+                    delta["role"] = "assistant"
+                choice: dict = {"index": 0, "delta": delta, "finish_reason": None}
+                chunk: dict = {
+                    "id": "chatcmpl-mock-deterministic",
+                    "object": "chat.completion.chunk",
+                    "model": model,
+                    "choices": [choice],
+                }
+                if i == len(pieces) - 1 and not abort:
+                    choice["finish_reason"] = finish_reason
+                    chunk["usage"] = usage
+                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                self.wfile.flush()
+                if abort:
+                    # Mid-stream failure: close after the first chunk with no
+                    # [DONE] and no final — the truncated-SSE shape the
+                    # agent's stream recovery path must survive.
+                    return
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
             return
 
+        slept_ms = _pace(TTFT_MS)
+        pace_headers = {"X-Mock-Sleep-Ms": f"{slept_ms:.1f}"}
+        if _should_fail():
+            self._send(500, _INJECTED_FAILURE, headers=pace_headers)
+            return
         self._send(
             200,
             {
                 "id": "chatcmpl-mock-deterministic",
                 "object": "chat.completion",
-                "model": req.get("model", "mock-reasoning"),
+                "model": model,
                 "choices": [
                     {
                         "index": 0,
@@ -214,13 +298,9 @@ class Handler(BaseHTTPRequestHandler):
                         "message": {"role": "assistant", "content": content},
                     }
                 ],
-                "usage": {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "reasoning_tokens": 10,
-                    "total_tokens": prompt_tokens + completion_tokens + 10,
-                },
+                "usage": usage,
             },
+            headers=pace_headers,
         )
 
     def _tokenize(self) -> None:
