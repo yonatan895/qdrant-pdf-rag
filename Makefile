@@ -9,8 +9,6 @@ BUNDLE_DIR ?= bundles
 WHEELHOUSE := $(BUNDLE_DIR)/wheelhouse
 BM25_WEIGHTS := $(BUNDLE_DIR)/bm25-weights
 BM25_MODEL ?= Qdrant/bm25
-RERANKER_WEIGHTS := $(BUNDLE_DIR)/reranker-weights
-RERANKER_MODEL ?= BAAI/bge-reranker-v2-m3
 
 INGEST_IMAGE_NAME ?= mainframe-rag/ingest
 AGENT_IMAGE_NAME ?= mainframe-rag/agent
@@ -51,16 +49,6 @@ $(BM25_WEIGHTS): | .venv
 	rm -rf $@ && mkdir -p $@
 	.venv/bin/python scripts/fetch_bm25_weights.py --model $(BM25_MODEL) --out $@ \
 	  --verify-manifest bm25-weights.sha256
-
-# BGE Reranker v2 M3 cross-encoder weights for air-gap baking.
-# Pinned by content against in-repo sha256 manifest.
-.PHONY: reranker-weights
-reranker-weights: $(RERANKER_WEIGHTS)
-
-$(RERANKER_WEIGHTS): | .venv
-	rm -rf $@ && mkdir -p $@
-	.venv/bin/python scripts/fetch_reranker_weights.py --model $(RERANKER_MODEL) --out $@ \
-	  --verify-manifest reranker-weights.sha256
 
 # ---------------------------------------------------------------- cluster recipe
 .PHONY: chart

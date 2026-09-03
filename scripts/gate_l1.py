@@ -142,6 +142,7 @@ def run_gate(
     delta_path: Path | None = None,
     update_baseline_flag: bool = False,
     keep_sim: bool = False,
+    rerank: bool = False,
 ) -> tuple[int, str]:
     """Execute the L1 retrieval evaluation gate end-to-end.
 
@@ -192,6 +193,8 @@ def run_gate(
 
         # Evaluate
         settings = load_settings()
+        if rerank:
+            settings = settings.model_copy(update={"rerank_enabled": True})
         t_ev0 = time.monotonic()
         report = evaluate(entries, settings)
         ev_time = round(time.monotonic() - t_ev0, 2)
@@ -271,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--delta", type=Path, default=None, help="Write markdown delta table to this path")
     parser.add_argument("--update-baseline", action="store_true", help="Record candidate report as baseline")
     parser.add_argument("--keep-sim", action="store_true", help="Do not stop simulator on exit")
+    parser.add_argument("--rerank", action="store_true", help="Enable cross-encoder reranking")
 
     args = parser.parse_args(argv)
     code, md = run_gate(
@@ -283,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
         delta_path=args.delta,
         update_baseline_flag=args.update_baseline,
         keep_sim=args.keep_sim,
+        rerank=args.rerank,
     )
     # Output delta markdown to stdout for easy pipe/inspection
     print(md)

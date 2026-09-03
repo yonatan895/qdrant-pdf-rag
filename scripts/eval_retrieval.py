@@ -261,6 +261,9 @@ def evaluate(golden: list[GoldenEntry], settings) -> dict:
         timeout=settings.qdrant_timeout_s,
     )
     embedder = build_embedder(settings)
+    from mainframe_rag.retrieve.rerank import build_reranker
+
+    reranker = build_reranker(settings)
     collection = settings.qdrant_collection
 
     rows, failures = [], 0
@@ -268,7 +271,13 @@ def evaluate(golden: list[GoldenEntry], settings) -> dict:
     for entry in golden:
         try:
             hits, kind, _timings = retrieve_search(
-                client, embedder, collection, entry.query, limit=SEARCH_LIMIT, settings=settings
+                client,
+                embedder,
+                collection,
+                entry.query,
+                limit=SEARCH_LIMIT,
+                settings=settings,
+                reranker=reranker,
             )
             rows.append(score_entry(hits, entry))
             rows[-1]["kind"] = kind
@@ -578,11 +587,14 @@ def main(argv: list[str] | None = None) -> int:
         help="draft golden entries from collection payload instead of scoring",
     )
     parser.add_argument("--docs", type=int, default=40, help="label-draft: docs to sample")
+    parser.add_argument("--rerank", action="store_true", help="enable cross-encoder reranking")
     args = parser.parse_args(argv)
     if args.check and args.update_baseline:
         parser.error("--check and --update-baseline are mutually exclusive")
 
     settings = load_settings()
+    if args.rerank:
+        settings = settings.model_copy(update={"rerank_enabled": True})
     if args.label_draft:
         drafts = label_draft(settings.qdrant_collection, settings, args.docs)
         for d in drafts:

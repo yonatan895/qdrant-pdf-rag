@@ -1,12 +1,10 @@
 """Cross-encoder reranking (issue #76 PR-02).
 
 RRF provides rank fusion across vector spaces, but does not score relevance.
-The cross-encoder scores fused candidates (default top-50) using bge-reranker-v2-m3,
-returning the top-k (default 8) relevance-ranked chunks.
+The cross-encoder scores fused candidates (default top-50) using bge-reranker-v2-m3.
 
 Implementations:
 - HttpReranker: calls vLLM / TEI (/v1/score or /v1/rerank) over httpx2 (prod GPU path).
-- OnnxReranker: offline ONNX Runtime inference using local weights (offline air-gap path).
 - HashReranker: deterministic in-process lexical scoring (CI/dev and hash mode).
 """
 
@@ -15,7 +13,6 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Sequence
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx2
@@ -91,7 +88,7 @@ class HttpReranker:
         if not texts:
             return []
         if not self._base_url:
-            raise RuntimeError("RERANK_BASE_URL (or VLLM_BASE_URL) must be set for HttpReranker")
+            raise RuntimeError("RERANK_BASE_URL (or EMBED_BASE_URL) must be set for HttpReranker")
 
         base = self._base_url.rstrip("/")
         scores: list[float] = []
@@ -105,101 +102,46 @@ class HttpReranker:
                 "text_1": query,
                 "text_2": batch_texts,
             }
+            batch_scores: list[float] | None = None
             try:
-                resp = client.post(url, json=payload)
+                resp = client.post(url, json=payload, timeout=self._timeout)
                 resp.raise_for_status()
                 data = resp.json()
-                if "data" in data and isinstance(data["data"], list):
-                    items = sorted(data["data"], key=lambda d: d.get("index", 0))
-                    scores.extend([float(d["score"]) for d in items])
-                    continue
-            except (httpx2.HTTPStatusError, httpx2.RequestError):
-                # Fallback to Cohere/TEI standard (/v1/rerank or /rerank)
-                rerank_url = f"{base}/rerank" if base.endswith("/v1") else f"{base}/v1/rerank"
-                rerank_payload = {
-                    "model": self._model,
-                    "query": query,
-                    "documents": batch_texts,
-                }
-                resp = client.post(rerank_url, json=rerank_payload)
-                resp.raise_for_status()
-                data = resp.json()
-                results = data.get("results", [])
-                batch_scores = [0.0] * len(batch_texts)
-                for res in results:
-                    idx = res.get("index", 0)
-                    s = float(res.get("relevance_score", res.get("score", 0.0)))
-                    if 0 <= idx < len(batch_scores):
-                        batch_scores[idx] = s
+                if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+                    items = data["data"]
+                    if len(items) == len(batch_texts):
+                        sorted_items = sorted(items, key=lambda d: d.get("index", 0))
+                        batch_scores = [float(d["score"]) for d in sorted_items]
+            except (httpx2.HTTPStatusError, httpx2.RequestError, ValueError, KeyError):
+                batch_scores = None
+
+            if batch_scores is not None:
                 scores.extend(batch_scores)
+                continue
 
-        return scores
-
-
-# ------------------------------------------------------- ONNX implementation (local weights)
-class OnnxReranker:
-    """Local offline reranker running bge-reranker-v2-m3 ONNX model via ONNX Runtime."""
-
-    def __init__(
-        self,
-        cache_dir: Path,
-        settings: Settings,
-    ) -> None:
-        import numpy as np
-        import onnxruntime as ort
-        from tokenizers import Tokenizer
-
-        self._np = np
-        self._batch_size = settings.rerank_batch_size
-
-        tokenizer_path = cache_dir / "tokenizer.json"
-        if not tokenizer_path.exists():
-            raise FileNotFoundError(f"Missing tokenizer.json under {cache_dir}")
-        self._tokenizer = Tokenizer.from_file(str(tokenizer_path))
-
-        model_path = cache_dir / "model.onnx"
-        if not model_path.exists():
-            candidates = list(cache_dir.glob("*.onnx")) + list(cache_dir.glob("onnx/*.onnx"))
-            if candidates:
-                model_path = candidates[0]
-            else:
-                raise FileNotFoundError(f"Missing model.onnx under {cache_dir}")
-
-        opts = ort.SessionOptions()
-        opts.enable_mem_pattern = True
-        self._session = ort.InferenceSession(
-            str(model_path),
-            sess_options=opts,
-            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
-        )
-
-    def score(self, query: str, texts: list[str]) -> list[float]:
-        if not texts:
-            return []
-        scores: list[float] = []
-        for i in range(0, len(texts), self._batch_size):
-            batch_texts = texts[i : i + self._batch_size]
-            pairs = [(query, text) for text in batch_texts]
-            encodings = self._tokenizer.encode_batch(pairs)
-            max_len = max(len(enc.ids) for enc in encodings)
-
-            input_ids = self._np.zeros((len(encodings), max_len), dtype=self._np.int64)
-            attention_mask = self._np.zeros((len(encodings), max_len), dtype=self._np.int64)
-            for idx, enc in enumerate(encodings):
-                input_ids[idx, : len(enc.ids)] = enc.ids
-                attention_mask[idx, : len(enc.attention_mask)] = enc.attention_mask
-
-            inputs = {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
+            # Fallback to Cohere/TEI standard (/v1/rerank or /rerank)
+            rerank_url = f"{base}/rerank" if base.endswith("/v1") else f"{base}/v1/rerank"
+            rerank_payload = {
+                "model": self._model,
+                "query": query,
+                "documents": batch_texts,
             }
-            outputs = self._session.run(None, inputs)
-            logits = outputs[0]
-            if logits.ndim > 1:
-                logits = logits.squeeze(-1)
-            # Sigmoid activation for normalized 0..1 relevance scores
-            batch_scores = 1.0 / (1.0 + self._np.exp(-logits))
-            scores.extend([float(round(s, 4)) for s in batch_scores.tolist()])
+            resp = client.post(rerank_url, json=rerank_payload, timeout=self._timeout)
+            resp.raise_for_status()
+            r_data = resp.json()
+            results = r_data.get("results") if isinstance(r_data, dict) else None
+            if not isinstance(results, list) or len(results) != len(batch_texts):
+                raise RuntimeError(
+                    f"Reranker endpoint {rerank_url} returned invalid or mismatched results: {r_data}"
+                )
+            batch_scores = [0.0] * len(batch_texts)
+            for res in results:
+                idx = res.get("index")
+                if idx is None or not (0 <= idx < len(batch_texts)):
+                    raise RuntimeError(f"Reranker returned out-of-bounds index: {idx}")
+                batch_scores[idx] = float(res.get("relevance_score", res.get("score", 0.0)))
+            scores.extend(batch_scores)
+
         return scores
 
 
@@ -212,15 +154,11 @@ def build_reranker(settings: Settings, client: httpx2.Client | None = None) -> R
         return HashReranker()
     if settings.rerank_base_url or settings.embed_base_url:
         return HttpReranker(settings, client)
-    if settings.rerank_cache_dir:
-        cache_path = Path(settings.rerank_cache_dir)
-        if cache_path.exists():
-            return OnnxReranker(cache_path, settings)
     if settings.allow_hash_mode:
         return HashReranker()
     raise RuntimeError(
-        "RERANK_ENABLED is true but neither RERANK_BASE_URL nor RERANK_CACHE_DIR is configured. "
-        "Set RERANK_BASE_URL or RERANK_CACHE_DIR, or ALLOW_HASH_MODE=true for CI/dev."
+        "RERANK_ENABLED is true but neither RERANK_BASE_URL nor EMBED_BASE_URL is configured. "
+        "Set RERANK_BASE_URL (or EMBED_BASE_URL), or ALLOW_HASH_MODE=true for CI/dev."
     )
 
 
@@ -228,13 +166,20 @@ def rerank_candidates(
     query: str,
     candidates: Sequence[SearchHit],
     reranker: Reranker,
-    top_k: int = 8,
+    top_k: int | None = None,
 ) -> list[SearchHit]:
-    """Score candidates using the cross-encoder and sort descending by rerank_score."""
+    """Score candidates using the cross-encoder and sort descending by rerank_score.
+
+    If top_k is specified, truncates results to top_k.
+    """
     if not candidates:
         return []
     texts = [format_rerank_text(c) for c in candidates]
     scores = reranker.score(query, texts)
+    if len(scores) != len(candidates):
+        raise RuntimeError(
+            f"Reranker returned {len(scores)} scores for {len(candidates)} candidates"
+        )
     scored: list[SearchHit] = []
     for cand, score in zip(candidates, scores):
         scored.append(cand.model_copy(update={"rerank_score": score}))
@@ -247,4 +192,6 @@ def rerank_candidates(
         ),
         reverse=True,
     )
+    if top_k is not None:
+        return scored[:top_k]
     return scored

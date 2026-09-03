@@ -186,6 +186,9 @@ def diversify_hits(
     return selected
 
 
+_memoized_reranker: tuple[int, Reranker | None] | None = None
+
+
 def search(
     client: QdrantPoints,
     embedder: Embedder,
@@ -207,9 +210,13 @@ def search(
 
     active_reranker = reranker
     if active_reranker is None and settings and settings.rerank_enabled:
-        from mainframe_rag.retrieve.rerank import build_reranker
+        global _memoized_reranker
+        sid = id(settings)
+        if _memoized_reranker is None or _memoized_reranker[0] != sid:
+            from mainframe_rag.retrieve.rerank import build_reranker
 
-        active_reranker = build_reranker(settings)
+            _memoized_reranker = (sid, build_reranker(settings))
+        active_reranker = _memoized_reranker[1]
     rerank_active = active_reranker is not None
 
     prefetch_limit = settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
@@ -274,7 +281,7 @@ def search(
         rrf_limit = settings.rerank_candidates if settings else 50
         candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=rrf_limit)
         t_rr = time.monotonic()
-        reranked = rerank_candidates(query, candidates, active_reranker, top_k=limit)
+        reranked = rerank_candidates(query, candidates, active_reranker)
         timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
         hits = diversify_hits(reranked, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
     else:

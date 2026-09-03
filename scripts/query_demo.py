@@ -490,11 +490,14 @@ def execute_query(
         timeout=settings.qdrant_timeout_s,
     )
     embedder = build_embedder(settings)
+    from mainframe_rag.retrieve.rerank import build_reranker
+
+    reranker = build_reranker(settings)
     target_coll = collection or settings.qdrant_collection
     hits, kind, timings = retrieve_search(
         client, embedder, target_coll, query,
         product=product, version=version, limit=limit,
-        settings=settings,
+        settings=settings, reranker=reranker,
     )
     return hits, kind, timings
 
@@ -658,6 +661,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default=None, help="LLM reasoning model name override")
     parser.add_argument("--format", choices=["text", "json", "html"], default="text", help="Output format")
     parser.add_argument("--out", type=Path, default=None, help="Write output to file")
+    parser.add_argument("--rerank", action="store_true", help="Enable cross-encoder reranking")
 
     args = parser.parse_args(argv)
 
@@ -670,6 +674,8 @@ def main(argv: list[str] | None = None) -> int:
         vllm_url=args.vllm_url,
         model=args.model,
     )
+    if args.rerank:
+        settings = settings.model_copy(update={"rerank_enabled": True})
 
     default_limit = 3 if args.answer else 5
     limit = args.limit or default_limit

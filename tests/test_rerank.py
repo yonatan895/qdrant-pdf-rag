@@ -4,13 +4,17 @@ Tests:
 - Ordering: cross-encoder scores re-rank candidates over pure RRF.
 - Flag off: rerank_enabled=False preserves byte-identical legacy retrieval path.
 - Batching: handles candidate list larger than batch size.
-- HttpReranker: mocked /v1/score and /v1/rerank paths.
+- HttpReranker: mocked /v1/score, length validation, and fallback /v1/rerank.
+- Malformed response & length mismatch handling (R3).
+- Timeout enforcement per request (R6).
+- top_k parameter in rerank_candidates (R5).
 - HashReranker: deterministic hermetic scoring.
 - Dispatch: build_reranker resolves properly according to settings.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import httpx2
@@ -59,9 +63,6 @@ class FakeEmbedder:
 
     def sparse(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
         return [([1, 2], [1.0, 0.5])]
-
-
-from types import SimpleNamespace
 
 
 class FakeQdrantPoints:
@@ -145,6 +146,31 @@ def test_rerank_candidates_reorders_and_attaches_score():
     assert reranked[2].rerank_score == 0.1
 
 
+def test_rerank_candidates_applies_top_k():
+    hit1 = _make_hit("c1", "DOC1", 0.9, text="Doc 1")
+    hit2 = _make_hit("c2", "DOC2", 0.5, text="Doc 2")
+    t1 = format_rerank_text(hit1)
+    t2 = format_rerank_text(hit2)
+    reranker = MockReranker({t1: 0.2, t2: 0.8})
+
+    truncated = rerank_candidates("test", [hit1, hit2], reranker, top_k=1)
+    assert len(truncated) == 1
+    assert truncated[0].chunk_id == "c2"
+
+
+def test_rerank_candidates_raises_on_length_mismatch():
+    """Defense-in-depth: rerank_candidates raises if scorer returned wrong count."""
+    hit1 = _make_hit("c1", "DOC1", 0.9)
+    hit2 = _make_hit("c2", "DOC2", 0.5)
+
+    class BadReranker:
+        def score(self, query: str, texts: list[str]) -> list[float]:
+            return [0.5]  # Returns 1 score for 2 candidates
+
+    with pytest.raises(RuntimeError, match="Reranker returned 1 scores for 2 candidates"):
+        rerank_candidates("query", [hit1, hit2], BadReranker())
+
+
 def test_rerank_flag_off_is_byte_identical():
     """When rerank_enabled=False, search behaves exactly as legacy code."""
     scored_points = [
@@ -221,6 +247,7 @@ def test_http_reranker_v1_score_success():
         rerank_base_url="http://rerank.test/v1",
         rerank_model="BAAI/bge-reranker-v2-m3",
         rerank_batch_size=2,
+        rerank_timeout_s=3.0,
         _env_file=None,
     )
 
@@ -240,8 +267,8 @@ def test_http_reranker_v1_score_success():
     assert scores == [0.42, 0.88]
 
 
-def test_http_reranker_fallback_to_rerank_endpoint():
-    """HttpReranker falls back to /v1/rerank when /v1/score returns 404."""
+def test_http_reranker_malformed_200_missing_data_falls_back():
+    """R3: When /v1/score returns 200 without 'data', it must fall back to /v1/rerank."""
     settings = Settings(
         rerank_base_url="http://rerank.test/v1",
         rerank_model="BAAI/bge-reranker-v2-m3",
@@ -251,11 +278,12 @@ def test_http_reranker_fallback_to_rerank_endpoint():
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/v1/score":
-            return httpx2.Response(404, json={"error": "not found"})
+            # Malformed 200: missing "data" key entirely
+            return httpx2.Response(200, json={"results_unexpected": [1, 2]})
         if request.url.path == "/v1/rerank":
             return httpx2.Response(
                 200,
-                json={"results": [{"index": 0, "relevance_score": 0.77}, {"index": 1, "relevance_score": 0.99}]},
+                json={"results": [{"index": 0, "score": 0.3}, {"index": 1, "score": 0.9}]},
             )
         return httpx2.Response(500)
 
@@ -264,7 +292,33 @@ def test_http_reranker_fallback_to_rerank_endpoint():
     reranker = HttpReranker(settings, client=client)
 
     scores = reranker.score("query", ["text0", "text1"])
-    assert scores == [0.77, 0.99]
+    assert scores == [0.3, 0.9]
+
+
+def test_http_reranker_length_mismatch_raises():
+    """R3: When /v1/score and /v1/rerank both return wrong number of items, fail closed."""
+    settings = Settings(
+        rerank_base_url="http://rerank.test/v1",
+        rerank_model="BAAI/bge-reranker-v2-m3",
+        rerank_batch_size=2,
+        _env_file=None,
+    )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/v1/score":
+            # Only 1 item returned for batch of 2
+            return httpx2.Response(200, json={"data": [{"index": 0, "score": 0.5}]})
+        if request.url.path == "/v1/rerank":
+            # Fallback also returns 1 item instead of 2
+            return httpx2.Response(200, json={"results": [{"index": 0, "score": 0.5}]})
+        return httpx2.Response(500)
+
+    transport = httpx2.MockTransport(handler)
+    client = httpx2.Client(transport=transport)
+    reranker = HttpReranker(settings, client=client)
+
+    with pytest.raises(RuntimeError, match="invalid or mismatched results"):
+        reranker.score("query", ["text0", "text1"])
 
 
 def test_build_reranker_dispatch():
@@ -277,14 +331,19 @@ def test_build_reranker_dispatch():
     r_hash = build_reranker(s_hash)
     assert isinstance(r_hash, HashReranker)
 
-    # 3. HTTP mode
+    # 3. HTTP mode with rerank_base_url
     s_http = Settings(rerank_enabled=True, embed_mode="vllm", rerank_base_url="http://rerank:8000/v1", _env_file=None)
     r_http = build_reranker(s_http)
     assert isinstance(r_http, HttpReranker)
 
-    # 4. Misconfigured (vllm without base url or cache dir)
-    s_bad = Settings(rerank_enabled=True, embed_mode="vllm", rerank_base_url=None, embed_base_url=None, rerank_cache_dir=None, _env_file=None)
-    with pytest.raises(RuntimeError, match="neither RERANK_BASE_URL nor RERANK_CACHE_DIR"):
+    # 4. HTTP mode fallback to embed_base_url
+    s_embed = Settings(rerank_enabled=True, embed_mode="vllm", rerank_base_url=None, embed_base_url="http://embed:8001/v1", _env_file=None)
+    r_embed = build_reranker(s_embed)
+    assert isinstance(r_embed, HttpReranker)
+
+    # 5. Misconfigured (vllm without base url and no hash mode allowed)
+    s_bad = Settings(rerank_enabled=True, embed_mode="vllm", rerank_base_url=None, embed_base_url=None, _env_file=None)
+    with pytest.raises(RuntimeError, match="neither RERANK_BASE_URL nor EMBED_BASE_URL"):
         build_reranker(s_bad)
 
 
@@ -306,26 +365,3 @@ def test_search_response_payload_includes_rerank_score():
     resp = SearchResponse(request_id="req-1", query_kind="identifier", hits=[hit])
     dump = resp.model_dump()
     assert dump["hits"][0]["rerank_score"] == 0.923
-
-
-def test_verify_reranker_manifest(tmp_path):
-    import hashlib
-
-    from scripts.fetch_reranker_weights import verify_manifest
-
-    target_dir = tmp_path / "weights"
-    target_dir.mkdir()
-    f1 = target_dir / "config.json"
-    f1.write_text("{\"model\": \"test\"}", encoding="utf-8")
-    d1 = hashlib.sha256(f1.read_bytes()).hexdigest()
-
-    manifest_file = tmp_path / "reranker.sha256"
-    manifest_file.write_text(f"{d1}  config.json\n", encoding="utf-8")
-
-    # Success path
-    verify_manifest(target_dir, manifest_file)
-
-    # Mismatch path fails closed
-    f1.write_text("{\"model\": \"corrupt\"}", encoding="utf-8")
-    with pytest.raises(SystemExit):
-        verify_manifest(target_dir, manifest_file)
