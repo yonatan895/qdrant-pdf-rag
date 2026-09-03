@@ -38,6 +38,10 @@ QWEN3_EMBED_06B = ModelSpec(
 # bound). KV figure is a representative 4B-class GQA shape
 # (2 x 24 layers x 8 kv_heads x 128 dim x 2 B); replace with measured arch
 # facts. Single-query local dev, hence max_num_seqs=1 (matches the launcher).
+# prefix_cache is pinned ON (issue #80): vLLM v0.28.0 already caches by
+# default (live :8000 showed hits with no flag in args), so the explicit
+# flag documents effective state and guards against an upstream default
+# flip — it changes no code path. Measured hit rate lives in the #80 PR.
 GEMMA4_E4B_QAT = ModelSpec(
     model_id="google/gemma-4-E4B-it-qat-mobile-ct",
     role="reasoning",
@@ -46,6 +50,7 @@ GEMMA4_E4B_QAT = ModelSpec(
     kv_bytes_per_token=98304.0,
     context_need=4096,
     max_num_seqs=1,
+    prefix_cache=True,
 )
 
 # Local 8GB card (nvidia-smi reports 8151 MiB). Order is allocation order:
