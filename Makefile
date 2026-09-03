@@ -138,6 +138,17 @@ sim-qdrant:
 sim-clean:
 	-docker stop $(SIM_CONTAINER) 2>/dev/null || true
 
+# Load tier (tests/test_load_tier.py, marker 'integration'): the same
+# composition CI runs — docker Qdrant (or QDRANT_SIM_URL), real uvicorn
+# agent (LLM_STREAM=true), deterministic mock LLM. Fail-closed: no skips;
+# docker/startup/zero-request failures raise. Knobs (CI-sane defaults):
+# LOAD_SEARCH_CONCURRENCY / LOAD_SEARCH_DURATION_S /
+# LOAD_ANSWER_CONCURRENCY / LOAD_ANSWER_DURATION_S / LOAD_STREAMS /
+# LOAD_STREAM_WORKERS.
+.PHONY: loadtest-mock
+loadtest-mock: | .venv
+	.venv/bin/python -m pytest -m integration tests/test_load_tier.py -v
+
 # ---------------------------------------------------------------- benchmarks (simulation tier + load)
 AGENT_URL ?= http://127.0.0.1:8080
 
@@ -386,7 +397,7 @@ clean:
 help:
 	@echo "Connected host : venv wheelhouse bm25-weights pull-chart helm-lint helm-template build-images"
 	@echo "Air-gap happy path : airgap-pack (connected) | airgap-load airgap-deploy airgap-ingest airgap-smoke (inside the gap)"
-	@echo "Simulation     : sim (pytest integration tier; docker Qdrant) | sim-qdrant sim-clean"
+	@echo "Simulation     : sim (pytest integration tier; docker Qdrant) | sim-qdrant sim-clean | loadtest-mock (load tier: same composition, absolute contracts under concurrency)"
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest | harness-l3"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper)"
 	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"

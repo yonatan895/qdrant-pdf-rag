@@ -97,6 +97,13 @@ make sim-qdrant
 make sim-clean
 ```
 
+**Load tier** (`make loadtest-mock`, `tests/test_load_tier.py`) runs the same composition — runtime PDFs, hash-mode ingest into the pinned Qdrant image, a real uvicorn agent (`LLM_STREAM=true`) plus the deterministic mock LLM — and asserts absolute contracts under concurrency instead of correctness: zero request errors and zero missing `Server-Timing` headers on `/v1/search` and `/v1/answer`, per-stream SSE integrity on `/v1/answer?stream=true` (token deltas, exactly one `final` with citations, no `error` event), citation parity across stream/search/JSON shapes, fixed error envelopes with no leaked internals, and determinism after load. Never cross-environment latency comparisons; the mock-abort chaos phase and TTFT-bound phase arrive with the mock realism knobs. Knobs (CI-sane defaults): `LOAD_SEARCH_CONCURRENCY` / `LOAD_SEARCH_DURATION_S` / `LOAD_ANSWER_CONCURRENCY` / `LOAD_ANSWER_DURATION_S` / `LOAD_STREAMS` / `LOAD_STREAM_WORKERS`; `QDRANT_SIM_URL` reuses a running server.
+
+```bash
+# Run load tier (fail-closed: no skips; docker/startup/zero-request failures raise)
+make loadtest-mock
+```
+
 ### 3.4 Retrieval Evaluation Gates & Quality Tiers
 
 Mainframe RAG employs a layered testing and evaluation hierarchy across CPU and GPU environments:
