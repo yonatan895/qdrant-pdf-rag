@@ -258,7 +258,7 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
 
 #### Key Launcher Features
 * **Pinned Container Image**: Defaults to `vllm/vllm-openai:v0.28.0` (built with CUDA 12.8+, supporting NVIDIA Blackwell architectures like the RTX 5060 Laptop GPU and Gemma-4). The pinned tag implements every flag the script passes — v0.28.0 removed `--task`, so the embed branch passes `--runner pooling --convert embed`.
-* **Dual-Model 8GB VRAM Co-Residency** (defaults resolved from the `mainframe_rag.serve` Budget `LOCAL_RT_8GB` profile — single source of truth, not script constants):
+* **Dual-Model 8GB VRAM Co-Residency** (defaults resolved from the `mainframe_rag.serve` Budget `LOCAL_RT_8GB` profile — single source of truth, not script constants; the launcher preflights the full co-resident pack with `--check-pack` before starting either server):
   - **Reasoning Model (Port 8000)**: `GPU_MEM=0.64` (~5.2 GB VRAM allocation).
   - **Embedding Model (Port 8001)**: `GPU_MEM=0.33` with `--enforce-eager` (~2.7 GB VRAM budget; measured 1.29 GiB spare KV at startup). Explicit `GPU_MEM=`/`MAX_LEN=`/`SEQS=`/`ROLE=` always win.
   - Fits comfortably within 8GB VRAM cards. With torch.compile enabled the embed server's profiled peak (compile + CUDA-graph workspace) went over budget — eager mode removes it, and embeddings are single-shot prefill so eager costs little.

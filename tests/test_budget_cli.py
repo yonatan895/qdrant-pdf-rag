@@ -96,6 +96,49 @@ def test_unknown_role_fails_closed():
     assert proc.stdout.strip() == ""
 
 
+def test_check_pack_passes_on_fitting_pack():
+    """Preflight on a fitting pack emits the same flags as the single
+    resolve — the launcher path stays equivalent."""
+    plain = _assignments(_run("resolve", "--profile", "LOCAL_RT_8GB", "--role", "embed"))
+    checked = _assignments(
+        _run("resolve", "--profile", "LOCAL_RT_8GB", "--role", "embed", "--check-pack")
+    )
+    assert checked == plain
+
+
+def test_check_pack_refuses_unfitting_pack_that_single_resolve_emits():
+    """The reported hole, pinned: at --total-vram-mib 5000 the embed server
+    alone fits (free 4744 >= 2650) but the full LOCAL pack does not (reasoning
+    goes eager at 3584, leaving 1160 < 2650). Without --check-pack the CLI
+    emits flags happily; with it, the deficit refuses before any launch."""
+    single = _run(
+        "resolve",
+        "--profile",
+        "LOCAL_RT_8GB",
+        "--role",
+        "embed",
+        "--total-vram-mib",
+        "5000",
+    )
+    assert single.returncode == 0, single.stderr
+    assert "BUDGET_GPU_MEM='0.53'" in single.stdout.splitlines()
+
+    checked = _run(
+        "resolve",
+        "--profile",
+        "LOCAL_RT_8GB",
+        "--role",
+        "embed",
+        "--total-vram-mib",
+        "5000",
+        "--check-pack",
+    )
+    assert checked.returncode == 1
+    assert "BUDGET DEFICIT" in checked.stderr
+    assert "Qwen/Qwen3-Embedding-0.6B" in checked.stderr
+    assert checked.stdout.strip() == ""
+
+
 def test_deficit_host_override_fails_closed_with_remedies():
     proc = _run(
         "resolve",

@@ -53,6 +53,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Driver/CUDA-context reserve for a hypothetical host.",
     )
+    parser.add_argument(
+        "--check-pack",
+        action="store_true",
+        help="Preflight the full co-resident pack before emitting: resolve every "
+        "profile server in order so the sequential fit check runs. Refuses "
+        "when the pack does not fit even if this one server would.",
+    )
     return parser
 
 
@@ -115,16 +122,27 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         )
         return 2
     try:
-        plan = resolve(
-            ProfileBundle(name=profile.name, host=profile.host, servers=list(matches))
-        )
+        if args.check_pack:
+            # Preflight the whole co-resident pack in declared order: the
+            # per-server fit check runs sequentially, so a pack that does
+            # not fit refuses here instead of failing at the second
+            # server's startup. Utils are order-invariant, so the selected
+            # server's flags come from the full plan directly.
+            plan = resolve(profile)
+            # Role is unique here: several same-role servers already exit 2 above.
+            (server_plan,) = [s for s in plan.servers if s.role == args.role]
+        else:
+            plan = resolve(
+                ProfileBundle(name=profile.name, host=profile.host, servers=list(matches))
+            )
+            (server_plan,) = plan.servers
     except BudgetDeficitError as exc:
         print(f"BUDGET DEFICIT: {exc}", file=sys.stderr)
         for remedy in exc.remedies:
             print(f"  - {remedy}", file=sys.stderr)
         return 1
     try:
-        lines = _assignments(plan.servers[0])
+        lines = _assignments(server_plan)
     except BudgetDeficitError as exc:
         print(f"BUDGET DEFICIT: {exc}", file=sys.stderr)
         for remedy in exc.remedies:

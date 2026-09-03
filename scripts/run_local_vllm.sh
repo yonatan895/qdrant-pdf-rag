@@ -76,6 +76,8 @@ fi
 # the same resolve path for every environment. ROLE selects the profile
 # server: `make local-vllm*` passes it explicitly; direct invocations derive
 # it from the model name with the match the old embed branch used (issue #99).
+# --check-pack preflights the whole co-resident pack, so a pack that does not
+# fit refuses here instead of failing at the second server's startup.
 ROLE="${ROLE:-}"
 if [ -z "${ROLE}" ]; then
     case "${MODEL} ${MODEL_NAME} ${TASK:-}" in
@@ -86,7 +88,7 @@ fi
 BUDGET_PYTHON="${BUDGET_PYTHON:-python3}"
 BUDGET_PROFILE="${BUDGET_PROFILE:-LOCAL_RT_8GB}"
 if ! BUDGET_OUT="$("${BUDGET_PYTHON}" -m mainframe_rag.serve resolve \
-        --profile "${BUDGET_PROFILE}" --role "${ROLE}")"; then
+        --profile "${BUDGET_PROFILE}" --role "${ROLE}" --check-pack)"; then
     echo "ERROR: serving-budget resolve failed for profile '${BUDGET_PROFILE}' role '${ROLE}'." >&2
     echo "Run via 'make local-vllm*' (provides the .venv python) or set BUDGET_PYTHON to a python with mainframe_rag installed." >&2
     exit 1
