@@ -180,7 +180,7 @@ The agent is async end to end: all routes are `async def` on `AsyncQdrantClient`
   - Overall $MRR \ge 0.95\times$ baseline
   - Identifier $Recall@1 = 1.0$ (strict)
   - Zero query errors
-- **CI Wiring:** `make gate-l1` (ephemeral Qdrant simulator, hash-mode synthetic corpus) is an automated PR check in GitHub CI; the GitLab mirror runs hygiene + pytest only.
+- **CI Wiring:** `make gate-l1` (ephemeral Qdrant simulator, hash-mode synthetic corpus) is an automated PR check in GitHub CI; the GitLab mirror runs hygiene + pytest only. `make loadtest-mock` (same composition plus a real uvicorn agent: zero errors, SSE integrity, citation parity, fixed error shapes under concurrency) gates PRs touching agent/retrieve/ingest via `.github/workflows/load.yml`.
 - **Tier Map:** retrieval eval (`make eval`) → answer-tier grounding eval (`make eval-answers`, live GPU stack: answer entries must produce ≥1 validated citation, abstain/trap entries must not be answered) → layered harness (`make harness-gate` / `harness-l2` / `harness-l3`: snapshot-pinned L1 retrieval gate, citation precision/recall + NLI faithfulness judge, per-stage p50/p95 latency + TTFT + VRAM). Harness tiers are release-candidate-only, never PR gates.
 
 ### 5.2 Performance Benchmarking (`benchmarks/`)
