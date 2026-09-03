@@ -434,6 +434,11 @@ class HttpxLLMClient:
             except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
                 log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
 
+        # Fallback note: this re-asks the reasoning model — a second full
+        # think. Accepted on purpose: empty/failed content channels are a
+        # server-side parsing defect, not a transient fault, and there are no
+        # retries on the answer path (issue #20 PR C). The doubling only
+        # happens on that defect, never on the happy path.
         resp = await self._async_http().post(
             f"{base_url.rstrip('/')}/chat/completions",
             json=body,
@@ -480,6 +485,7 @@ class HttpxLLMClient:
         ttft_ms: int | None = None
         finish_reason = "stop"
         usage_data: dict[str, Any] = {}
+        content_parts: list[str] = []
 
         async with self._async_http().stream(
             "POST",
@@ -507,6 +513,7 @@ class HttpxLLMClient:
                     if delta_content:
                         if ttft_ms is None:
                             ttft_ms = int((time.monotonic() - t0) * 1000)
+                        content_parts.append(delta_content)
                         yield {
                             "type": "token",
                             "delta": delta_content,
@@ -515,6 +522,28 @@ class HttpxLLMClient:
                         }
                     if choices[0].get("finish_reason"):
                         finish_reason = str(choices[0]["finish_reason"])
+
+        # Empty-content recovery, mirroring achat: a reasoning model whose
+        # whole output lands in the reasoning channel yields zero content
+        # deltas. Recovery is only possible BEFORE any token was yielded —
+        # a mid-stream failure after real deltas cannot be retried without
+        # duplicating content, so stream errors propagate to the app's
+        # event: error path instead.
+        if not content_parts:
+            log.warning("streaming chat returned empty content; falling back to non-streaming POST")
+            resp = await self._async_http().post(
+                f"{base_url.rstrip('/')}/chat/completions",
+                json=body,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            choice = data["choices"][0]
+            content = str(choice["message"].get("content") or "")
+            finish_reason = str(choice.get("finish_reason") or "stop")
+            usage_data = data.get("usage") or {}
+            if content:
+                ttft_ms = int((time.monotonic() - t0) * 1000)
+                yield {"type": "token", "delta": content, "token": content, "ttft_ms": ttft_ms}
 
         reasoning_tokens = (
             usage_data.get("reasoning_tokens")

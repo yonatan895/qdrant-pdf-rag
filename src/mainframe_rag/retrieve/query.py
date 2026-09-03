@@ -8,6 +8,7 @@ here, preserve the "filters in prefetch" contract. architecture.md 4.5.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
 from collections import defaultdict
@@ -346,9 +347,13 @@ async def async_search(
 
     timings: dict[str, int] = {}
 
+    # dense_query is a sync HTTP POST to the embed server and sparse is
+    # CPU-bound FastEmbed/BM25; both are sync by protocol. Offload to a worker
+    # thread — running them on the event loop would block every in-flight
+    # request for the duration of the embed call (review S1).
     t0 = time.monotonic()
-    dense_vec = embedder.dense_query([query])[0]
-    sparse_idx, sparse_val = embedder.sparse([query])[0]
+    dense_vec = (await asyncio.to_thread(embedder.dense_query, [query]))[0]
+    sparse_idx, sparse_val = (await asyncio.to_thread(embedder.sparse, [query]))[0]
     timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 
     t0 = time.monotonic()
@@ -405,7 +410,9 @@ async def async_search(
         rrf_limit = settings.rerank_candidates if settings else 50
         candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=rrf_limit)
         t_rr = time.monotonic()
-        reranked = rerank_candidates(query, candidates, active_reranker)
+        # Cross-encoder scoring is sync HTTP (batches of settings.rerank_batch_size);
+        # offload like the embed leg above (review S1).
+        reranked = await asyncio.to_thread(rerank_candidates, query, candidates, active_reranker)
         timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
         hits = diversify_hits(reranked, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
     else:

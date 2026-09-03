@@ -13,7 +13,7 @@ from qdrant_client import models
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
-from mainframe_rag.ports import AsyncQdrantPoints, QdrantPoints, SparseVector
+from mainframe_rag.ports import QdrantPoints, SparseVector
 
 HNSW_M = 16
 HNSW_EF_CONSTRUCT = 128
@@ -188,79 +188,3 @@ def upsert_chunks(
     for i in range(0, len(points), batch):
         client.upsert(collection, points=points[i : i + batch], wait=True)
     return len(points)
-
-
-async def async_ensure_payload_indexes(client: AsyncQdrantPoints, collection: str) -> None:
-    for field in _KEYWORD_INDEXES:
-        await client.create_payload_index(
-            collection, field_name=field, field_schema=models.PayloadSchemaType.KEYWORD
-        )
-    await client.create_payload_index(
-        collection, field_name="page_start", field_schema=models.PayloadSchemaType.INTEGER
-    )
-
-
-async def async_ensure_collection(client: AsyncQdrantPoints, settings: Settings) -> None:
-    """Async: Create collection + payload indexes if missing; verify dim if present."""
-    dim = settings.require_dense_dim()
-    collection = settings.qdrant_collection
-
-    if await client.collection_exists(collection):
-        info = await client.get_collection(collection)
-        dense_cfg = info.config.params.vectors
-        if isinstance(dense_cfg, dict):
-            actual = dense_cfg.get("dense")
-            actual_size = actual.size if actual is not None else None
-        else:
-            actual_size = dense_cfg.size if dense_cfg is not None else None
-        if actual_size != dim:
-            raise DimMismatchError(
-                f"Collection '{collection}' dense dim is {actual_size}, DENSE_DIM={dim}. "
-                "Recreate the collection or fix DENSE_DIM."
-            )
-        await async_ensure_payload_indexes(client, collection)
-        return
-
-    await client.create_collection(
-        collection,
-        vectors_config={"dense": _dense_params(dim)},
-        sparse_vectors_config={"bm25": _sparse_params()},
-        on_disk_payload=True,
-    )
-    await async_ensure_payload_indexes(client, collection)
-
-
-async def async_doc_sha256(client: AsyncQdrantPoints, settings: Settings, doc_id: str) -> str | None:
-    points, _ = await client.scroll(
-        settings.qdrant_collection,
-        scroll_filter=models.Filter(
-            must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
-        ),
-        limit=1,
-        with_payload=["sha256"],
-    )
-    if not points:
-        return None
-    return (points[0].payload or {}).get("sha256")
-
-
-async def async_delete_by_doc(client: AsyncQdrantPoints, settings: Settings, doc_id: str) -> None:
-    await client.delete(
-        settings.qdrant_collection,
-        points_selector=models.FilterSelector(
-            filter=models.Filter(
-                must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
-            )
-        ),
-        wait=True,
-    )
-
-
-async def async_upsert_batch(
-    client: AsyncQdrantPoints,
-    settings: Settings,
-    points: list[models.PointStruct],
-) -> None:
-    batch = settings.batch_size
-    for i in range(0, len(points), batch):
-        await client.upsert(settings.qdrant_collection, points=points[i : i + batch], wait=True)

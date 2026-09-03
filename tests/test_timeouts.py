@@ -100,19 +100,36 @@ def test_agent_lifespan_timeouts_and_retries(monkeypatch):
     captured: dict = {}
     transport_kw = _spy_transport(monkeypatch)
 
-    class FakeQdrantClient:
+    class FakeAsyncQdrantClient:
         def __init__(self, **kw):
             captured.update(kw)
 
         def close(self):
             pass
 
-    monkeypatch.setattr("qdrant_client.QdrantClient", FakeQdrantClient)
-    monkeypatch.setattr("qdrant_client.AsyncQdrantClient", FakeQdrantClient)
-    with TestClient(app_mod.app):
+    # Only the async class is swapped: lifespan must construct AsyncQdrantClient
+    # unconditionally — the sync QdrantClient class is never consulted (review S2).
+    monkeypatch.setattr("qdrant_client.AsyncQdrantClient", FakeAsyncQdrantClient)
+
+    # The retrieval-leg sync pool is built by lifespan and closed on shutdown
+    # (review S4): spy httpx2.Client to prove construction + teardown.
+    sync_closed = []
+    real_client_cls = httpx2.Client
+
+    class SpySyncClient(real_client_cls):
+        def close(self):
+            sync_closed.append(True)
+            super().close()
+
+    monkeypatch.setattr(app_mod.httpx2, "Client", SpySyncClient)
+    with TestClient(app_mod.app) as _c:
         assert captured["timeout"] == 11.0
         assert app_mod.http.timeout.read == 7.0
+        # The sync retrieval-leg pool carries the embed timeout (embedder uses
+        # the client default; tokenizer/reranker pass their own per call).
+        assert app_mod.http_sync.timeout.read == 7.0
         assert transport_kw["retries"] == 3
+    assert sync_closed == [True]
 
 
 def test_ingest_qdrant_timeout_from_settings(monkeypatch):

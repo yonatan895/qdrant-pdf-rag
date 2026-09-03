@@ -5,6 +5,12 @@ model with retrieved chunks and validates its citations against the hit set.
 Errors return a stable JSON shape {"code", "message"} — never a stack trace
 (issue #20 PR C). Logs: request_id, query_kind, hit count, timings. Never the
 query text.
+
+SSE contract (?stream=true): zero or more `event: token` deltas, then exactly
+one terminal `event: final` carrying the same verified citations/script as the
+JSON mode (schema is identical for the empty-hits path too). A mid-stream
+failure emits `event: error` and the stream ends WITHOUT a final event —
+clients must treat "stream ended with no final" as failure.
 """
 
 from __future__ import annotations
@@ -15,7 +21,6 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any
 
 import httpx2
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -36,8 +41,10 @@ from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.logs import configure_logging
 from mainframe_rag.ports import (
+    AsyncQdrantPoints,
     Embedder,
     LLMClient,
+    QdrantPoints,
     Reranker,
     Tokenizer,
     TokenUsage,
@@ -50,7 +57,8 @@ log = logging.getLogger("agent")
 
 settings: Settings
 http: httpx2.AsyncClient
-qdrant: Any
+http_sync: httpx2.Client
+qdrant: AsyncQdrantPoints | QdrantPoints
 embedder: Embedder
 llm: LLMClient
 tokenizer: Tokenizer
@@ -69,7 +77,7 @@ class AppError(Exception):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global settings, http, qdrant, embedder, llm, tokenizer, reranker
+    global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker
     settings = load_settings()
     configure_logging(settings.log_level)
     # Startup fail-fast (issue #20 PR D): the agent refuses to listen on a
@@ -95,38 +103,46 @@ async def lifespan(_app: FastAPI):
         transport=httpx2.AsyncHTTPTransport(retries=settings.http_connect_retries),
         limits=http_limits,
     )
+    # Sync pool for the retrieval leg (embedder / tokenizer / reranker): the
+    # Embedder/Reranker/Tokenizer protocols are sync, so their calls run
+    # inside asyncio.to_thread off the event loop. Bounded limits like the
+    # async pool; closed on shutdown. One pool on purpose — same shape as the
+    # pre-async stack (review S4).
+    http_sync = httpx2.Client(
+        timeout=settings.embed_timeout_s,
+        transport=httpx2.HTTPTransport(retries=settings.http_connect_retries),
+        limits=http_limits,
+    )
     # One dispatch point for embed_mode; the reasoning-model client owns its
     # own connection pool with its own (long) timeout. LLM env stays
     # request-time fail-fast (assert_reasoning_model in /v1/answer).
-    embedder = build_embedder(settings)
-    tokenizer = build_tokenizer(settings)
-    reranker = build_reranker(settings)
+    embedder = build_embedder(settings, http_sync)
+    tokenizer = build_tokenizer(settings, http_sync)
+    reranker = build_reranker(settings, http_sync)
     # Two names on purpose: tests swap the `llm` global after startup; shutdown
     # must close the pool THIS lifespan created, never a test double.
     llm_client = HttpxLLMClient(settings)
     llm = llm_client
 
+    # The agent is async end to end: production always gets AsyncQdrantClient.
+    # No runtime sniffing of the module attribute — a swapped class (vendored
+    # shim, test double) is used as-is and sync doubles keep working through
+    # the isawaitable shims below (review S2).
     import qdrant_client
 
-    if getattr(qdrant_client.QdrantClient, "__name__", "") != "QdrantClient":
-        qdrant = qdrant_client.QdrantClient(
-            url=settings.qdrant_url,
-            api_key=settings.qdrant_api_key,
-            timeout=settings.qdrant_timeout_s,
-            limits=http_limits,
-        )
-    else:
-        qdrant = qdrant_client.AsyncQdrantClient(
-            url=settings.qdrant_url,
-            api_key=settings.qdrant_api_key,
-            timeout=settings.qdrant_timeout_s,
-            limits=http_limits,
-        )
+    qdrant = qdrant_client.AsyncQdrantClient(
+        url=settings.qdrant_url,
+        api_key=settings.qdrant_api_key,
+        timeout=settings.qdrant_timeout_s,
+        limits=http_limits,
+    )
     yield
     if hasattr(http, "aclose"):
         await http.aclose()
     elif hasattr(http, "close"):
         http.close()
+
+    http_sync.close()
 
     if hasattr(llm_client, "aclose"):
         await llm_client.aclose()
@@ -245,15 +261,11 @@ async def healthz() -> HealthzResponse:
     embed_ok: bool | None = None
     try:
         base = settings.qdrant_url.rstrip("/")
-        is_patched = not hasattr(httpx2.get, "__code__") or (
-            callable(httpx2.get) and getattr(httpx2.get, "__name__", "") == "<lambda>"
-        )
-        call: Any
-        if hasattr(http, "get") and not is_patched:
-            call = http.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
-        else:
-            call = httpx2.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
-        resp = await call if inspect.isawaitable(call) else call
+        # The pooled async client from lifespan only — no sync-call fallback.
+        # A blocking GET on the event loop would stall every in-flight
+        # request; if the pool is missing that is a startup bug, not
+        # something to paper over (review S2).
+        resp = await http.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
         qdrant_ok = resp.status_code == 200 and resp.text.strip().lower() == "all shards are ready"
         if not qdrant_ok:
             # Upstream response bodies go to the log, never the client body.
@@ -264,12 +276,11 @@ async def healthz() -> HealthzResponse:
 
     if settings.embed_base_url and settings.embed_model:
         try:
-            post_call: Any = http.post(
+            resp = await http.post(
                 f"{settings.embed_base_url.rstrip('/')}/embeddings",
                 json={"model": settings.embed_model, "input": ["ping"]},
                 timeout=settings.health_embed_timeout_s,
             )
-            resp = await post_call if inspect.isawaitable(post_call) else post_call
             embed_ok = resp.status_code == 200
         except Exception as exc:  # noqa: BLE001
             embed_ok = False
@@ -370,6 +381,9 @@ async def v1_answer(
         log.info(json_log(request_id, "answer", query_kind=kind, hits=0, rerank_ms=timings.get("rerank_ms")))
         if is_stream:
             async def empty_sse():
+                # Schema parity with the normal final event (review S6): the
+                # empty-hits path carries the same keys; no tokens were
+                # streamed, so ttft_ms stays null and usage is all zeros.
                 payload = {
                     "type": "final",
                     "request_id": request_id,
@@ -378,6 +392,14 @@ async def v1_answer(
                     "script": None,
                     "query_kind": kind,
                     "hits": [],
+                    "finish_reason": "stop",
+                    "ttft_ms": None,
+                    "usage": {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "total_tokens": 0,
+                    },
                 }
                 yield f"event: final\ndata: {json.dumps(payload)}\n\n"
 
@@ -393,6 +415,11 @@ async def v1_answer(
             script=None,
         )
 
+    # Prompt construction is local CPU work (estimate + optional /tokenize
+    # verify that pins its own fallback) — deliberately OUTSIDE the upstream
+    # try below: a build failure is an internal fault and surfaces as 500
+    # "internal", never mislabeled as 502 "answer failed" (review S5; pinned
+    # by test_prompt_build_failure_maps_to_internal).
     complexity = classify_query_complexity(req.query)
     max_context = (
         settings.prompt_max_context_chars_complex

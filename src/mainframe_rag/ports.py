@@ -9,8 +9,8 @@ structurally — parameter names/returns mirror the real client), HttpxLLMClient
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from collections.abc import Awaitable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -237,7 +237,16 @@ class Tokenizer(Protocol):
 @runtime_checkable
 class LLMClient(Protocol):
     """Reasoning-model chat (answer path only). Implementations fail closed
-    when no reasoning model is configured. May return ChatResult or Awaitable[ChatResult]."""
+    when no reasoning model is configured. May return ChatResult or Awaitable[ChatResult].
+
+    Implementations may additionally expose ``async chat_stream(messages, ...)
+    -> AsyncIterator[dict]`` (yielding {"type": "token", ...} then a terminal
+    {"type": "done", ...} item); /v1/answer streaming duck-types this
+    capability via hasattr and falls back to non-streaming chat otherwise.
+    There is deliberately no separate async-chat protocol: HttpxLLMClient's
+    chat() resolves to a coroutine when called on a running loop, and every
+    consumer funnels through as_chat_result / isawaitable.
+    """
 
     def chat(
         self,
@@ -245,22 +254,3 @@ class LLMClient(Protocol):
         reasoning_effort: str | None = None,
         temperature: float | None = None,
     ) -> ChatResult | Awaitable[ChatResult]: ...
-
-
-@runtime_checkable
-class AsyncLLMClient(Protocol):
-    """Async reasoning-model chat with optional SSE streaming (issue #77 PR-03)."""
-
-    async def chat(
-        self,
-        messages: list[ChatMessage],
-        reasoning_effort: str | None = None,
-        temperature: float | None = None,
-    ) -> ChatResult: ...
-
-    async def chat_stream(
-        self,
-        messages: list[ChatMessage],
-        reasoning_effort: str | None = None,
-        temperature: float | None = None,
-    ) -> AsyncIterator[dict[str, Any]]: ...

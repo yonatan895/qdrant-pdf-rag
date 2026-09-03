@@ -288,7 +288,13 @@ def test_healthz_ready_returns_clean_200(client, monkeypatch):
         status_code = 200
         text = "all shards are ready"
 
-    monkeypatch.setattr(app_mod.httpx2, "get", lambda *a, **k: Ready())
+    class ReadyPool:
+        async def get(self, *a, **k):
+            return Ready()
+
+    # healthz uses the pooled async client only (review S2): the double
+    # replaces app_mod.http, never the httpx2 module functions.
+    monkeypatch.setattr(app_mod, "http", ReadyPool())
     resp = client.get("/healthz")
     assert resp.status_code == 200
     body = resp.json()
@@ -304,16 +310,18 @@ def test_healthz_degraded_paths_leak_no_upstream_text(client, monkeypatch):
         status_code = 503
         text = "Internal Server Error: secret bits"
 
-    monkeypatch.setattr(app_mod.httpx2, "get", lambda *a, **k: NotReady())
+    class NotReadyPool:
+        async def get(self, *a, **k):
+            return NotReady()
 
     class Boom:
-        def post(self, *a, **k):
+        async def post(self, *a, **k):
             raise RuntimeError("vllm said: token=abc")
 
         def close(self):
             pass
 
-    monkeypatch.setattr(app_mod, "http", Boom())
+    monkeypatch.setattr(app_mod, "http", NotReadyPool())
     monkeypatch.setattr(app_mod.settings, "embed_base_url", "http://embed.internal/v1")
     monkeypatch.setattr(app_mod.settings, "embed_model", "test-embed")
     resp = client.get("/healthz")
@@ -440,6 +448,33 @@ def test_answer_llm_failure_reads_answer_failed(client, monkeypatch):
     assert resp.status_code == 502
     assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
     assert "explode" not in resp.text
+
+
+def test_prompt_build_failure_maps_to_internal(monkeypatch):
+    """Review S5: prompt construction is local work, deliberately outside the
+    upstream try — a build failure is an internal fault (500 "internal"),
+    never mislabeled as 502 "answer failed" / "retrieval failed". Like the
+    unhandled-error contract, ServerErrorMiddleware re-raises after the 500
+    is sent, so the client must be built with raise_server_exceptions=False."""
+
+    def boom_response(*_a, **_k):
+        raise ValueError("budget invariant violated: internal detail")
+
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    # CI/dev embed profile: hash mode, explicitly allowed (PR D fail-fast)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
+    with TestClient(app_mod.app, raise_server_exceptions=False) as c:
+        monkeypatch.setattr(app_mod, "llm", FakeLLM())
+        monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
+        monkeypatch.setattr(app_mod, "build_messages", boom_response)
+        resp = c.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 500
+    assert resp.json() == {"code": "internal", "message": "internal error"}
+    assert "budget invariant" not in resp.text
 
 
 def test_parse_answer_shape():
@@ -1368,6 +1403,16 @@ def test_v1_answer_empty_hits_streaming(client, monkeypatch):
     assert payload["answer"] == "No supporting manual excerpts were found for this question."
     assert payload["citations"] == []
     assert payload["hits"] == []
+    # Schema parity with the non-empty final event (review S6): same keys,
+    # no tokens were streamed, usage is all zeros.
+    assert payload["finish_reason"] == "stop"
+    assert payload["ttft_ms"] is None
+    assert payload["usage"] == {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 0,
+    }
 
 
 @pytest.mark.anyio
@@ -1454,4 +1499,66 @@ async def test_httpx_llm_client_chat_stream_async():
     assert items[1]["type"] == "token" and items[1]["delta"] == "second"
     assert items[2]["type"] == "done" and items[2]["finish_reason"] == "stop"
     assert items[2]["usage"].total_tokens == 7
+
+
+@pytest.mark.anyio
+async def test_httpx_llm_client_chat_stream_empty_content_recovers_via_post():
+    """Review S7: a reasoning model whose whole output lands in the reasoning
+    channel yields zero content deltas. chat_stream must recover through the
+    non-streaming POST (mirroring achat) instead of ending with an empty
+    answer — recovery only fires before any token was yielded, so nothing is
+    ever duplicated."""
+
+    from contextlib import asynccontextmanager
+
+    class EmptyStreamResp:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield 'data: {"choices": [{"delta": {}}]}'
+            yield 'data: {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}'
+            yield "data: [DONE]"
+
+    class PostResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": "Recovered answer"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+            }
+
+    class RecoveringClient:
+        def __init__(self):
+            self.posts = 0
+
+        @asynccontextmanager
+        async def stream(self, method, url, json=None):
+            yield EmptyStreamResp()
+
+        async def post(self, url, json=None):
+            self.posts += 1
+            return PostResp()
+
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    fake = RecoveringClient()
+    settings = Settings(
+        llm_base_url="http://llm.internal/v1",
+        llm_model_reasoning="test-reasoning-model",
+        _env_file=None,
+    )
+    llm = HttpxLLMClient(settings, client=fake)
+    items = [item async for item in llm.chat_stream([ChatMessage(role="user", content="hi")])]
+
+    assert fake.posts == 1
+    assert len(items) == 2
+    assert items[0]["type"] == "token" and items[0]["delta"] == "Recovered answer"
+    assert items[0]["ttft_ms"] is not None
+    assert items[1]["type"] == "done" and items[1]["finish_reason"] == "stop"
+    assert items[1]["usage"].total_tokens == 8
 
