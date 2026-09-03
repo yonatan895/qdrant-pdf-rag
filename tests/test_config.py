@@ -89,6 +89,31 @@ def test_ingest_tuning_defaults():
     assert s.ingest_bulk_load is False
 
 
+def test_contextual_embed_defaults():
+    """Contextual retrieval (issue #78): default off with bounded knobs; the
+    context model endpoint is unset until an operator enables the flag."""
+    s = Settings(_env_file=None)
+    assert s.contextual_embed_enabled is False
+    assert s.context_llm_base_url is None
+    assert s.context_llm_model is None
+    assert s.context_llm_timeout_s == 30.0
+    assert s.context_max_chars == 500
+    assert s.context_cache_path is None
+
+
+def test_require_context_llm_fails_closed():
+    """Enabled without an endpoint configured is a startup error, never a
+    silent fallback to header-only embeddings."""
+    s = Settings(
+        _env_file=None,
+        contextual_embed_enabled=True,
+        context_llm_base_url=None,
+        context_llm_model=None,
+    )
+    with pytest.raises(RuntimeError, match="CONTEXT_LLM_BASE_URL"):
+        s.require_context_llm()
+
+
 def test_reasoning_effort_validation():
     """llm_reasoning_effort_* are constrained to Literal['low', 'medium', 'high']."""
     import pytest

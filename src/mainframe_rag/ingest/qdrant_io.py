@@ -147,6 +147,7 @@ def upsert_chunks(
     parsed: ParsedDoc,
     chunks: list[Chunk],
     vectors: list[tuple[list[float], SparseVector]],
+    contexts: dict[str, str] | None = None,
 ) -> int:
     """Upsert chunk points in settings.batch_size batches (Qdrant skill
     64-256 band, bounded in Settings). Returns point count.
@@ -154,7 +155,9 @@ def upsert_chunks(
     Upserts are idempotent by construction — point ids are UUID5 of the chunk
     key — so a connection-level retry/replay of a batch is safe. There is no
     application-level retry loop; the client timeout bounds each call
-    (issue #20 PR C)."""
+    (issue #20 PR C). The contextual prefix (issue #78) is stored for
+    observability when present; it is never filtered on, so it takes no
+    payload index."""
     collection = settings.qdrant_collection
     points: list[models.PointStruct] = []
     for chunk, (dense, (sparse_idx, sparse_val)) in zip(chunks, vectors):
@@ -173,6 +176,8 @@ def upsert_chunks(
             "sha256": parsed.sha256,
             "text": chunk.text,
         }
+        if contexts and (context := contexts.get(chunk.chunk_id)):
+            payload["context"] = context
         points.append(
             models.PointStruct(
                 id=chunk.chunk_id,

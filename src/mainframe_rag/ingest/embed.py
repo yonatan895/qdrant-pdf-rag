@@ -36,14 +36,26 @@ def build_embed_text(
     title: str,
     heading_path: str,
     body: str,
+    context: str | None = None,
 ) -> str:
-    """Embed this string, not the body alone (architecture.md section 4.2)."""
+    """Embed this string, not the body alone (architecture.md section 4.2).
+    The optional contextual prefix (issue #78) sits between the heading path
+    and the body so the chunk's own terms keep the tail position."""
     header = " ".join(p for p in (product, version, doc_id) if p)
-    return "\n".join(p for p in (header, title, heading_path, body) if p)
+    return "\n".join(p for p in (header, title, heading_path, context, body) if p)
 
 
-def chunk_embed_text(chunk: Chunk, product: str | None, version: str | None, title: str) -> str:
-    return build_embed_text(product, version, chunk.doc_id, title, chunk.heading_path, chunk.text)
+def chunk_embed_text(
+    chunk: Chunk,
+    product: str | None,
+    version: str | None,
+    title: str,
+    context: str | None = None,
+) -> str:
+    return build_embed_text(
+        product, version, chunk.doc_id, title, chunk.heading_path, chunk.text,
+        context=context,
+    )
 
 
 # ------------------------------------------------------- hash implementation
@@ -179,9 +191,19 @@ def embed_batch(
     version: str | None,
     title: str,
     embedder: Embedder,
+    contexts: dict[str, str] | None = None,
 ) -> list[tuple[list[float], SparseVector]]:
-    """Dense + sparse vectors for a batch of chunks, aligned by index."""
-    texts = [chunk_embed_text(c, product, version, title) for c in chunks]
-    dense = embedder.dense(texts)
-    sparse = embedder.sparse(texts)
+    """Dense + sparse vectors for a batch of chunks, aligned by index. The
+    contextual prefix (issue #78) feeds the DENSE leg only — sparse BM25
+    must keep matching the raw terms operators type, never LLM prose."""
+    dense_texts = [
+        chunk_embed_text(
+            c, product, version, title,
+            context=(contexts.get(c.chunk_id) if contexts else None),
+        )
+        for c in chunks
+    ]
+    dense = embedder.dense(dense_texts)
+    sparse_texts = [chunk_embed_text(c, product, version, title) for c in chunks]
+    sparse = embedder.sparse(sparse_texts)
     return list(zip(dense, sparse))
