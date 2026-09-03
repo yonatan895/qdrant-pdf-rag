@@ -324,6 +324,62 @@ def test_parse_one_contextual_path_end_to_end(synthetic_pdf, tmp_path, monkeypat
     pickle.dumps((record2, parsed, chunks2, vectors2, contexts2))
 
 
+def test_rerun_reads_sidecar_file_with_zero_llm_calls(synthetic_pdf, tmp_path, monkeypatch):
+    """Acceptance #2 at file level: run 1 writes the sidecar through the
+    parent's append path; run 2 loads it through the real worker cache
+    loader (cold worker state, as in a separate process) and makes zero
+    LLM calls with identical contexts and vectors. The primed-dict test
+    above cannot catch a file-format skew between append and load."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.embed import HashEmbedder
+
+    settings = Settings(
+        _env_file=None,
+        embed_mode="vllm",
+        contextual_embed_enabled=True,
+        context_llm_base_url="http://context.internal/v1",
+        context_llm_model="test-gist-model",
+    )
+    monkeypatch.setattr(run_ingest, "_load_worker_settings", lambda: settings)
+    monkeypatch.setattr(run_ingest, "_get_embedder", lambda s: HashEmbedder())
+    cache_path = tmp_path / "inv.contexts.jsonl"
+
+    def fresh_worker_cache():
+        run_ingest._worker_context_cache = None
+        run_ingest._worker_context_cache_path = None
+
+    def task():
+        return (
+            str(synthetic_pdf), None, None, None, str(synthetic_pdf.parent),
+            "dummy_sha", True, str(cache_path),
+        )
+
+    http1 = FakeHttpClient([FakeResp(f"Gist {i}.") for i in range(100)])
+    monkeypatch.setattr(
+        run_ingest, "_get_context_client", lambda s: ctx_mod.ContextLLMClient(s, client=http1)
+    )
+    fresh_worker_cache()
+    record1, _, chunks1, vectors1, contexts1 = run_ingest._parse_one(task())
+    assert record1.status != "error"
+    assert len(http1.posts) == len(chunks1) > 0
+    # Parent append, exactly like run_ingest.main: the full map, last-wins load.
+    ctx_mod.append_context_entries(cache_path, "dummy_sha", contexts1)
+    assert cache_path.exists()
+
+    http2 = FakeHttpClient([])  # any POST raises: zero calls allowed
+    monkeypatch.setattr(
+        run_ingest, "_get_context_client", lambda s: ctx_mod.ContextLLMClient(s, client=http2)
+    )
+    fresh_worker_cache()
+    record2, _, _chunks2, vectors2, contexts2 = run_ingest._parse_one(task())
+    assert record2.status != "error"
+    assert http2.posts == []
+    assert contexts2 == contexts1
+    assert vectors2 == vectors1
+    lines = [line for line in cache_path.read_text().splitlines() if line.strip()]
+    assert len(lines) == len(chunks1)
+
+
 def test_dry_run_makes_no_context_calls(synthetic_pdf, tmp_path, monkeypatch):
     """The --dry-run contract (parse + chunk only) covers the context LLM."""
     from mainframe_rag.ingest import run_ingest
