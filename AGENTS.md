@@ -136,8 +136,8 @@ User-supplied `--embed-model`, `--model`, `--embed-url`, `--vllm-url`, `--embed-
 - Quote every shell expansion. Never stash JSON flags in an unquoted `${MODEL_ARGS}` string.
 - Never `export` a mode variable globally in the Makefile: make exports reach every recipe, and the airgap scripts refuse `EMBED_MODE=hash` fail-closed (a global export broke the CI airgap-dryrun). Scope it: `eval eval-baseline …: export EMBED_MODE := $(EMBED_MODE)` (immediate expansion — a recursive `=` self-references under a target-specific directive).
 - `case` globs are case-sensitive: `*embed*` does not match `Embedding`. Match `*embed*` and `*Embed*` (or use a case-insensitive test).
-- Pin vLLM image tags that actually implement the flags you pass (`gemma4` parsers, `--task embedding`). `:latest` and stale minors are production bugs.
-- Local 8GB co-residency: reasoning port 8000 `GPU_MEM=0.65`; embedding port 8001 `GPU_MEM=0.30` with `--task embedding`; solo reasoning `GPU_MEM=0.85`.
+- Pin vLLM image tags that actually implement the flags you pass (`gemma4` parsers, `--runner pooling --convert embed`). `:latest` and stale minors are production bugs. vLLM v0.28.0 removed `--task`.
+- Local 8GB co-residency: reasoning port 8000 `GPU_MEM=0.65`; embedding port 8001 `GPU_MEM=0.33` with `--runner pooling --convert embed --enforce-eager`; both servers `MAX_LEN=4096` (a 2048 embed window was rejected by the #99 tokenizer sweep: worst-case embedded string measures 2043 tokens, ~2.0 chars/token on syntax-dense text); solo reasoning `GPU_MEM=0.85`. The embed budget is pinned hermetically by `tests/test_embed_budget.py` — re-run the sweep before changing chunk constants or the embed-text header.
 - `scripts/qdrant_sim.py` / `scripts/qdrant_pin.py` remain the only docker-lifecycle and pin-parse owners.
 
 ## Error contract
@@ -174,7 +174,7 @@ New behavior belongs in the layer that already owns that decision. Do not thread
 | `classify` | `message` / `syntax` / `table` / `narrative` |
 | `embed` | Dense from internal vLLM; sparse local (no Cloud inference) |
 | `qdrant_io` | Collection + payload indexes **before** load; dim fail-fast |
-| `retrieve` | Filters in prefetch; hybrid dense+BM25 |
+| `retrieve` | Filters in prefetch; hybrid dense+BM25; cross-encoder rerank dispatch (`rerank.py`, default off) |
 | `agent` | HTTP API; citation validation |
 
 Standing #20 rules: embed / Qdrant points / LLM are `Protocol`s in `ports.py`; upserts are batched (`Settings.batch_size`); payload indexes exist before load; every outbound call has a Settings timeout.
@@ -251,6 +251,10 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 - Context budgeting: complex reasoning queries cap prompt manual excerpts at 4,500 chars (Settings.prompt_max_context_chars_complex) with type-aware chunk caps: syntax, message, and table chunks preserve full fidelity up to 3,000 chars, while narrative prose is capped at 1,100 chars (Settings.prompt_max_chunk_chars_complex).
 - Dense query prefix: asymmetric query embeddings prepend Settings.dense_query_prefix on dense query vectors only; document chunks stay raw; HashEmbedder remains plain text.
 - Hit diversification: retrieve_max_chunks_per_page=1 and retrieve_max_chunks_per_doc=3 with 3-phase backfill prevent near-duplicate consecutive chunks from monopolizing prompt context slots.
+- Rerank ships default-off (`rerank_enabled=False`): fused top-`rerank_candidates` (50) go through the cross-encoder only when explicitly enabled. `search()` and `async_search()` must return identical hits for identical fakes — the drift-guard test is the contract (query.py carries a near-verbatim twin by design).
+- Async handlers never run sync I/O on the event loop: the embed (`dense_query`/`sparse`) and cross-encoder (`rerank_candidates`) legs execute via `asyncio.to_thread`; the pooled sync retrieval-leg client is built and closed in lifespan.
+- Runtime paths never sniff monkeypatched module attributes to pick clients (no `__name__`/`<lambda>` checks). Construct the production class explicitly; test doubles ride the `isawaitable` shims.
+- SSE contract on `/v1/answer?stream=true`: token deltas → exactly one terminal `final` whose schema is identical on every path (the empty-hits path carries `finish_reason`/`ttft_ms`/`usage` too); a mid-stream failure emits `event: error` and ends WITHOUT `final` — no final = failed.
 - Citation normalization: normalize_citation_line peels bracketed index markers ([1], [1]:) from model citation lines.
 - Tokenizer: vLLM `/tokenize` is at the server **origin** (strip `/v1` from `LLM_BASE_URL`; LiteLLM may not expose it). First failure logs one warning and pins the estimator fallback — never a silent per-call fallback. Budgeting plans with the in-process estimator and verifies the packed prompt **once** via `/tokenize` `messages`; never per-chunk tokenize RPCs.
 - Run manifests: unreachable Qdrant records `qdrant_version="unknown"` — never the pinned server version.

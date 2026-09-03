@@ -156,7 +156,11 @@ Standard CI runners (`ubuntu-latest` on GitHub and air-gapped corporate GitLab r
 #### Manual Evaluation & Baseline Updates
 
 ```bash
-# Evaluate retrieval accuracy against golden set on a running Qdrant instance
+# Evaluate retrieval accuracy against golden set on a running Qdrant instance.
+# Baselines are mode-keyed: EMBED_MODE=hash scores against evals/baseline.json
+# (CI/dev); EMBED_MODE=vllm scores against evals/baseline-vllm.json (release
+# candidates, live embedder). Collection/embed-mode mismatch skips the gate
+# with a loud warning.
 EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus make eval
 
 # Re-record committed accuracy baseline (dedicated PR only, per AGENTS.md)
@@ -211,6 +215,10 @@ When running local tooling (`make ask`, `make query-demo`, `test_local_e2e_vllm.
 | **`LLM_TEMPERATURE`** | `0.2` | `0.2` (deterministic, grounded technical reasoning) |
 | **`PROMPT_MAX_CONTEXT_CHARS`** | `8000` | `8000` (for simple queries) |
 | **`PROMPT_MAX_CONTEXT_CHARS_COMPLEX`** | `4500` | `4500` (reserves ~2.6k token headroom for reasoning) |
+| **`RERANK_ENABLED`** | `false` | `false` (cross-encoder rerank ships default-off; see §3.11) |
+| **`RERANK_BASE_URL`** | — | vLLM/TEI scoring endpoint (required when `RERANK_ENABLED=true`) |
+| **`RERANK_MODEL`** | `BAAI/bge-reranker-v2-m3` | Must match the served reranker model |
+| **`LLM_STREAM`** | `true` via `make run-agent` | `false` (production default; enable only where TTFT metrics are wanted) |
 
 #### REPL Controls & Options
 * **Interactive Mode Switch (`:mode`)**: Type `:mode` inside the REPL to toggle dynamically between `search` (pure vector/BM25 retrieval preview) and `answer` (retrieval + LLM reasoning generation).
@@ -224,18 +232,19 @@ When running local tooling (`make ask`, `make query-demo`, `test_local_e2e_vllm.
 The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`](../scripts/run_local_vllm.sh)) and Makefile targets for serving local reasoning and dense embedding models via Docker with NVIDIA GPU pass-through:
 
 #### Key Launcher Features
-* **Pinned Container Image**: Defaults to `vllm/vllm-openai:v0.28.0` (built with CUDA 12.8+, supporting NVIDIA Blackwell architectures like the RTX 5060 Laptop GPU and Gemma-4).
+* **Pinned Container Image**: Defaults to `vllm/vllm-openai:v0.28.0` (built with CUDA 12.8+, supporting NVIDIA Blackwell architectures like the RTX 5060 Laptop GPU and Gemma-4). The pinned tag implements every flag the script passes — v0.28.0 removed `--task`, so the embed branch passes `--runner pooling --convert embed`.
 * **Dual-Model 8GB VRAM Co-Residency**:
   - **Reasoning Model (Port 8000)**: `GPU_MEM=0.65` (~5.2 GB VRAM allocation).
-  - **Embedding Model (Port 8001)**: `GPU_MEM=0.30` (~2.4 GB VRAM allocation).
-  - Fits comfortably within 8GB VRAM cards (~7.6 GB total allocation, leaving headroom for PyTorch and driver overhead).
+  - **Embedding Model (Port 8001)**: `GPU_MEM=0.33` with `--enforce-eager` (~2.7 GB VRAM budget; measured 1.29 GiB spare KV at startup). The embed default lives in the script's embed branch; explicit `GPU_MEM=`/`MAX_LEN=` always win.
+  - Fits comfortably within 8GB VRAM cards. With torch.compile enabled the embed server's profiled peak (compile + CUDA-graph workspace) went over budget — eager mode removes it, and embeddings are single-shot prefill so eager costs little.
   - *Solo Runs*: For dedicated reasoning benchmarks, `GPU_MEM=0.85 make local-vllm` restores maximum KV cache capacity.
 * **8GB VRAM Optimizations**:
   - `--limit-mm-per-prompt '{"image":0,"audio":0}'`: Disables multimodal vision/audio buffers in Gemma 4 to reclaim substantial VRAM.
   - `--max-num-seqs 1`: Bounds concurrent sequence allocation to prevent out-of-memory spikes.
-  - `MAX_LEN=4096`: Caps model context length.
+  - `--max-num-batched-tokens` (embed server): follows `MAX_LEN` so the memory-profiling peak stays bounded by the model window.
+  - `MAX_LEN=4096` for **both** servers: the reasoning prompt budget requires it, and a 2048 embed window was rejected by tokenizer sweep — the worst-case embedded string (chunk header + a `SECTION_MAX_CHARS=3500` body with the 400-char split seed) measures ~2,043 tokens at ~2.0 chars/token on syntax-dense text. The budget is pinned hermetically by `tests/test_embed_budget.py`.
 * **Gemma-4 Support**: Automatically configures `--tool-call-parser gemma4`, `--reasoning-parser gemma4`, and `--chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja`.
-* **Embedding Model Detection**: Automatically handles embedding models (e.g. `Qwen3-Embedding-0.6B`).
+* **Embedding Model Detection**: Model names matching `*embed*`/`*Embed*` (e.g. `Qwen/Qwen3-Embedding-0.6B`) get the pooling-runner flags and embed memory defaults automatically.
 * **WSL2 Compatibility**: Exports `VLLM_WSL2_ENABLE_PIN_MEMORY=1` for host memory stability.
 * **Safe Secrets**: Passes `HF_TOKEN` via `-e HF_TOKEN` without exposing secret tokens on command-line argument lists.
 
@@ -312,6 +321,18 @@ make test-vllm-e2e \
 5. **HTTP `/v1/answer` Verification**: Executes reasoning queries against the local vLLM server via FastAPI HTTP endpoints.
 6. **Strict Grounding Gate**: Fails closed if the model response returns zero validated citations or indicates ungrounded hallucination.
 
+#### Streaming Reasoning on the Local Stack (`make run-agent`)
+```bash
+# Start the agent with LLM_STREAM=true so reasoning SSE reaches the client:
+make run-agent                    # uvicorn on http://localhost:8080
+
+# Stream a grounded answer (SSE):
+curl -N -X POST "http://localhost:8080/v1/answer?stream=true" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What parameter controls LFAREA in IEASYSxx?"}'
+```
+The SSE response yields `event: token` deltas as the reasoning model generates, then exactly one terminal `event: final` carrying the full verified answer, citations, optional script, retrieval metadata, `ttft_ms`, and token usage. A mid-stream failure emits `event: error` and ends **without** a `final` event — treat stream-end-without-final as a failed request. `LLM_STREAM` (server-side reasoning SSE) defaults to `false` in production config; `make run-agent` enables it for TTFT measurement (also consumed by the L3 harness).
+
 ---
 
 ### 3.9 Exporting Standalone Model Weights for Offline Bastions
@@ -350,7 +371,7 @@ snapshot_download(
 
 ---
 
-### 3.9 Managing Collections & Real-World Ingest
+### 3.10 Managing Collections & Real-World Ingest
 
 When working with real PDF corpora (e.g. `z/OS 3.2` manuals, vendor books):
 
@@ -405,6 +426,31 @@ LLM_MODEL_REASONING=gemma-4-E4B-it-qat-mobile-ct \
 QDRANT_URL=http://localhost:6333 \
 .venv/bin/python scripts/query_demo.py --answer --query "Your question here"
 ```
+
+---
+
+### 3.11 Cross-Encoder Reranker (Optional, Default Off)
+
+Retrieval quality upgrade: fused RRF candidates (top-`RERANK_CANDIDATES`, default 50) are rescored by a cross-encoder before diversification. **Ships default-off** (`rerank_enabled=false`) — retrieval results are identical to the hybrid+RRF baseline until explicitly enabled.
+
+```bash
+# Enable against a vLLM /v1/score endpoint (falls back to /v1/rerank):
+RERANK_ENABLED=true \
+RERANK_BASE_URL=http://localhost:8001/v1 \
+RERANK_MODEL=BAAI/bge-reranker-v2-m3 \
+make run-agent
+```
+
+| Variable | Default | Notes |
+|---|---|---|
+| `RERANK_ENABLED` | `false` | Master switch; nothing calls the cross-encoder when off |
+| `RERANK_BASE_URL` | falls back to `EMBED_BASE_URL` | vLLM or TEI scoring endpoint |
+| `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Must match the served reranker |
+| `RERANK_CANDIDATES` | `50` | Fused candidates rescored per query (10–100) |
+| `RERANK_BATCH_SIZE` | `32` | Texts scored per HTTP call |
+| `RERANK_TIMEOUT_S` | `5.0` | Per scoring call |
+
+Failures surface as `rerank_ms` in `/v1/search` `Server-Timing` and the agent log; a reranker outage fails the request like any other retrieval fault (`502 upstream_error`). CI/dev runs without a reranker endpoint can use `HashReranker` (lexical scoring) via `ALLOW_HASH_MODE=true` — dev only, never production.
 
 ---
 
@@ -556,6 +602,8 @@ curl -X POST http://rag-agent:8080/v1/search \
   -d '{"query": "IEA500I IOSCMDS COMMAND REJECTED", "limit": 5}'
 ```
 
+Stage timings are returned as `Server-Timing: embed;dur=..., qdrant;dur=..., rerank;dur=...` (the rerank stage appears only when the cross-encoder is enabled).
+
 #### `POST /v1/answer`
 Executes hybrid retrieval, constructs a citation-grounded prompt, and queries the reasoning LLM.
 
@@ -568,6 +616,17 @@ curl -X POST http://rag-agent:8080/v1/answer \
     "version": "3.1"
   }'
 ```
+
+JSON-mode responses carry `Server-Timing: embed, qdrant, llm;dur=..., ttft;dur=...` (TTFT = time to first generated token; requires `LLM_STREAM=true` on the agent server for server-side reasoning SSE).
+
+#### Streaming (`?stream=true`)
+Both the query parameter and the body field (`"stream": true`) enable server-sent events; the query parameter wins when both are set. The response is `text/event-stream`:
+
+1. Zero or more `event: token` frames — incremental answer deltas.
+2. Exactly one terminal `event: final` — the full verified answer, validated citations, optional script, retrieval hits, query kind, `ttft_ms`, and token `usage`. The `final` schema is identical on the empty-hits path (zero citations, `ttft_ms: null`, zeroed usage).
+3. A mid-stream failure emits `event: error` and the stream ends **without** a `final` event — clients must treat stream-end-without-final as a failed request.
+
+Citation validation runs on the accumulated text exactly as in JSON mode: the citations in the `final` event are byte-identical to the non-streaming response for the same request.
 
 ### 5.3 Common Troubleshooting Scenarios
 

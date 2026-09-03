@@ -16,8 +16,8 @@ Citation-first expert mainframe agent: hybrid retrieval over ~100 GB of IBM-styl
 | `deploy/` | NetworkPolicies, ingest CronJob/Job, agent Deployment |
 | `oc-mirror/` | `ImageSetConfiguration` for disconnected mirroring |
 | `src/mainframe_rag/ingest/` | PDF walk, IBM-style parse, chrome strip, chunk, classify, embed, Qdrant IO |
-| `src/mainframe_rag/retrieve/` | Parallel prefetch hybrid search (dense + BM25, RRF), payload projection, filters |
-| `src/mainframe_rag/agent/` | FastAPI `/healthz`, `/v1/search`, `/v1/answer` (reasoning model) |
+| `src/mainframe_rag/retrieve/` | Hybrid search (dense + BM25 prefetch, batched query, weighted RRF), optional cross-encoder rerank, payload projection, filters |
+| `src/mainframe_rag/agent/` | Async FastAPI `/healthz`, `/v1/search`, `/v1/answer` (reasoning model, optional SSE streaming) |
 | `scripts/` | Benchmark suite, golden set eval, report renderer, query demo, air-gap ops |
 | `images/` | UBI Containerfiles (non-root, wheelhouse + BM25 weights baked in) |
 | `tests/` | Unit, hygiene, regression gates, and Docker simulation integration tests |
@@ -46,12 +46,17 @@ Citation-first expert mainframe agent: hybrid retrieval over ~100 GB of IBM-styl
 | **Simulation** | `make sim` | Run full integration simulation tier (ephemeral Docker Qdrant + mock LLM) |
 | | `make sim-qdrant` | Start a local Docker Qdrant container on port 6333 |
 | | `make sim-clean` | Stop and remove the local Docker Qdrant container |
-| **Accuracy & Eval** | `make eval` | Score golden set queries (`evals/golden.jsonl`) against `evals/baseline.json` |
+| **Accuracy & Eval** | `make eval` | Score golden set queries (`evals/golden.jsonl`) against the mode-keyed baseline (`evals/baseline.json` in hash mode, `evals/baseline-vllm.json` in vllm mode) |
+| | `make gate-l1` | L1 retrieval gate on an ephemeral Qdrant simulator (automated CI check) |
+| | `make eval-answers` | Answer-tier grounding eval (`/v1/answer` must cite, abstain entries must not answer) — live GPU stack |
+| | `make eval-holdout` | Score the frozen holdout (`evals/holdout.jsonl`, sha-pinned) — release candidates only |
 | | `make eval-baseline` | Re-record committed retrieval accuracy baseline (dedicated PR) |
 | | `make eval-draft` | Helper to draft golden-set candidate queries from collection payload |
+| | `make verify-golden` | Mechanically verify golden expectations against the live collection (gates the corpus) |
 | | `make eval-report` | Print terminal retrieval evaluation report |
 | | `make eval-html` | Generate self-contained offline HTML evaluation dashboard (`bundles/eval-report.html`) |
 | | `make eval-compare` | Compare evaluation runs with classification shifts and regression checks |
+| | `make harness-gate` / `harness-l2` / `harness-l3` | Layered harness tiers L1/L2/L3 — RC-only, live GPU stack |
 | **Benchmarks** | `make bench` | Benchmark ingest rate, peak RSS, Qdrant RAM/disk, and latency vs baseline |
 | | `make bench-baseline` | Re-record committed performance baseline (dedicated PR) |
 | | `make bench-report` | Print terminal benchmark performance report |
@@ -63,7 +68,8 @@ Citation-first expert mainframe agent: hybrid retrieval over ~100 GB of IBM-styl
 | | `make ask` | Launch interactive reasoning Q&A assistant (`rag-answer> `) with LLM & citations |
 | | `QUERY="..." make ask` | Ask a single question and get grounded reasoning answer with citations |
 | **Local vLLM & GPU** | `make local-vllm` | Run local vLLM reasoning server on GPU (port 8000, Gemma-4, `GPU_MEM=0.65`) |
-| | `make local-vllm-embed` | Run local vLLM dense embedding server on GPU (port 8001, Qwen3-Embedding-0.6B, `GPU_MEM=0.30`) |
+| | `make local-vllm-embed` | Run local vLLM dense embedding server on GPU (port 8001, Qwen3-Embedding-0.6B, `GPU_MEM=0.33`, `--runner pooling --convert embed --enforce-eager`) |
+| | `make run-agent` | Start the agent with `LLM_STREAM=true` (reasoning SSE streaming for TTFT) on port 8080 |
 | | `make test-vllm-e2e` | Run automated end-to-end suite against local vLLM & Qdrant with grounding validation |
 | **Packaging & Air-Gap** | `make airgap-pack` | Build sneakernet package (`dist/qdrant-pdf-rag-<sha>.tar`) on connected host |
 | | `make airgap-load` | Load image archives and push to `${INTERNAL_REGISTRY}` in the air-gap |
