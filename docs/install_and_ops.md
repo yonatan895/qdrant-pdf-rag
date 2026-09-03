@@ -139,6 +139,31 @@ python scripts/gate_l1.py --out bundles/eval-report.json --delta bundles/eval-de
 - **Fail-Closed Verification:** Fails nonzero if any query fails or if metrics regress beyond tolerance (strict no-drop `identifier.recall@1` ratio >= 1.0 vs baseline, `classes.message_id.recall@1` ratio >= 1.0, `recall@1 >= 0.90 * baseline`, `recall@5/8 >= 0.95 * baseline`, `mrr >= 0.95 * baseline`, `ndcg@8 >= 0.95 * baseline`, `must_not.violations == 0`).
 - **PR Delta Reporting:** Automatically posts or updates a markdown delta table comment on the PR (GitHub) or merge request note (GitLab).
 
+#### Paraphrase Retrieval Instrument (`make eval-paraphrase`)
+
+The main golden set writes each query's text nearly verbatim into its target pages, so header-only retrieval saturates and semantic improvements (dense prefixes, reranking, contextual chunks) cannot register. `evals/paraphrase.jsonl` (22 entries) is the complementary instrument: operator-phrased queries whose answers live in the synthetic corpus **without** the query text appearing near-verbatim, over a corpus with deliberate lexical competitors (sibling docs sharing vocabulary, intra-doc section pairs). A hermetic test pins the no-echo contract on every entry.
+
+```bash
+# 1. Generate the paraphrase corpus (runtime PDFs, never committed):
+.venv/bin/python -c "
+import json, sys; sys.path.insert(0, 'scripts')
+from pathlib import Path
+from gate_l1 import generate_synthetic_golden_corpus
+entries = [json.loads(l) for l in open('evals/paraphrase.jsonl') if l.strip()]
+generate_synthetic_golden_corpus(entries, Path('/tmp/para-corpus'))"
+
+# 2. Ingest into a dedicated collection (mode decides the embedder):
+QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=paraphrase-manuals \
+  EMBED_MODE=hash ALLOW_HASH_MODE=true \
+  .venv/bin/python -m mainframe_rag.ingest.run_ingest \
+  --src /tmp/para-corpus --progress /tmp/para-corpus/inventory.jsonl --workers 2
+
+# 3. Score against the mode-keyed paraphrase baselines:
+QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=paraphrase-manuals make eval-paraphrase
+```
+
+Baselines (`evals/baseline-paraphrase.json` hash, `evals/baseline-paraphrase-vllm.json` vllm) gate the same tolerances as the main set. The hash numbers are a plumbing anchor (lexical matching goes far on a small corpus); the vllm numbers are the semantic instrument — headroom below 1.0 with per-query variance is intentional. Uses: contextual-prefix A/B, reranker on/off A/B, dense-prefix tuning. Not wired into CI (no cluster, no embed server there); never iterate the frozen holdout to tune.
+
 #### GPU Story for L2 and L3 Tiers (Operational Strategy)
 
 Standard CI runners (`ubuntu-latest` on GitHub and air-gapped corporate GitLab runners) are CPU-only without GPU accelerators. Because L2 (NLI faithfulness judge) and L3 (Time To First Token and per-stage latency with concurrent VRAM tracking) require live GPU inference stacks:

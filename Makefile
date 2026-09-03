@@ -175,9 +175,11 @@ loadtest: | .venv
 # the only consumer of the default.
 EMBED_MODE ?= hash
 EVAL_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-vllm.json,evals/baseline.json)
+PARAPHRASE_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-paraphrase-vllm.json,evals/baseline-paraphrase.json)
 HARNESS_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-vllm.json,benchmarks/harness.json)
 HARNESS_L3_BASELINE ?= $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-l3-vllm.json,benchmarks/harness-l3.json)
 eval eval-baseline eval-draft eval-holdout eval-answers eval-report eval-html eval-compare \
+	eval-paraphrase \
 	gate-l1 harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline: \
 	export EMBED_MODE := $(EMBED_MODE)
 
@@ -191,6 +193,20 @@ eval: | .venv
 	@mkdir -p $(BUNDLE_DIR)
 	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --check $(EVAL_BASELINE) \
 	  --out $(BUNDLE_DIR)/eval-report.json --summary $(BUNDLE_DIR)/eval-summary.md
+
+# Paraphrase retrieval instrument (issue #78 sequence): operator-phrased
+# queries whose answers live in the synthetic corpus WITHOUT the query text
+# appearing near-verbatim — measures semantic retrieval where the main set
+# saturates (queries echoed into pages). Separate golden set and mode-keyed
+# baselines so the main gate is untouched. Corpus runbook: generate PDFs via
+# gate_l1.generate_synthetic_golden_corpus over evals/paraphrase.jsonl,
+# ingest into a dedicated collection, then run with QDRANT_COLLECTION set:
+#   QDRANT_COLLECTION=paraphrase-manuals make eval-paraphrase
+.PHONY: eval-paraphrase
+eval-paraphrase: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/eval_retrieval.py --golden evals/paraphrase.jsonl --check $(PARAPHRASE_BASELINE) \
+	  --out $(BUNDLE_DIR)/eval-paraphrase-report.json --summary $(BUNDLE_DIR)/eval-paraphrase-summary.md
 
 # L1 retrieval gate (CPU hash mode against Qdrant simulator with synthetic corpus):
 # automated PR check in CI and local verification. Fails nonzero on regressions.
