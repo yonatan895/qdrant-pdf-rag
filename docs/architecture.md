@@ -194,7 +194,7 @@ The agent is async end to end: all routes are `async def` on `AsyncQdrantClient`
   - Formats eval and benchmark reports into terminal text, Markdown, and 100% self-contained offline HTML dashboards.
   - Subcommands: `eval`, `bench`, `compare-eval`, `compare-bench`.
 - **Local GPU Dual-Model vLLM Server (`scripts/run_local_vllm.sh` / `make local-vllm` / `make local-vllm-embed`):**
-  - Runs reasoning models (Gemma-4 on port 8000, `GPU_MEM=0.65`) and embedding models (Qwen3-Embedding-0.6B on port 8001, `GPU_MEM=0.33`, `--runner pooling --convert embed --enforce-eager` — vLLM v0.28.0 removed `--task`) concurrently on consumer 8GB VRAM cards. Both servers keep `--max-model-len 4096`; the embed window budget is pinned by `tests/test_embed_budget.py` (see §4.2).
+  - Runs reasoning models (Gemma-4 on port 8000, `GPU_MEM=0.64`) and embedding models (Qwen3-Embedding-0.6B on port 8001, `GPU_MEM=0.33`, `--runner pooling --convert embed --enforce-eager` — vLLM v0.28.0 removed `--task`) concurrently on consumer 8GB VRAM cards. Launch flags resolve from the `mainframe_rag.serve` Budget `LOCAL_RT_8GB` profile (explicit env wins). Both servers keep `--max-model-len 4096`; the embed window budget is pinned by `tests/test_embed_budget.py` (see §4.2).
 - **Agent Dev Server (`make run-agent`):** starts uvicorn with `LLM_STREAM=true` so `/v1/answer?stream=true` streams reasoning tokens (default off in production config).
 - **Automated Local End-to-End Suite (`scripts/test_local_e2e_vllm.py` / `make test-vllm-e2e`):**
   - Validates full pipeline from PDF build and dense/sparse ingestion to FastAPI HTTP `/v1/search` and `/v1/answer` endpoints against local vLLM, with served-model resolution and strict grounding validation.
