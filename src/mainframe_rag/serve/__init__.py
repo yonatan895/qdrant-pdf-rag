@@ -1,0 +1,51 @@
+"""Serving-budget public surface (serving-budget track, PR-A)."""
+
+from mainframe_rag.serve.budget import (
+    COMPILED_MARGIN_FLOOR_MIB,
+    DEFAULT_RESERVE_MIB,
+    EAGER_GENERATE_MARGIN_MIB,
+    MAX_UTIL,
+    POOLING_EAGER_MARGIN_MIB,
+    BudgetDeficitError,
+    DeploymentPlan,
+    HostSpec,
+    ModelSpec,
+    ProfileBundle,
+    ServerPlan,
+    resolve,
+)
+from mainframe_rag.serve.profiles import (
+    BGE_RERANKER_V2_M3,
+    GEMMA4_31B,
+    GEMMA4_E4B_QAT,
+    LOCAL_RT_8GB,
+    OPENSHIFT_PROD,
+    PROFILES,
+    QWEN3_EMBED_06B,
+    QWEN3_EMBED_4B,
+    list_profiles,
+)
+
+__all__ = [
+    "BGE_RERANKER_V2_M3",
+    "COMPILED_MARGIN_FLOOR_MIB",
+    "DEFAULT_RESERVE_MIB",
+    "EAGER_GENERATE_MARGIN_MIB",
+    "GEMMA4_31B",
+    "GEMMA4_E4B_QAT",
+    "LOCAL_RT_8GB",
+    "MAX_UTIL",
+    "OPENSHIFT_PROD",
+    "POOLING_EAGER_MARGIN_MIB",
+    "PROFILES",
+    "QWEN3_EMBED_06B",
+    "QWEN3_EMBED_4B",
+    "BudgetDeficitError",
+    "DeploymentPlan",
+    "HostSpec",
+    "ModelSpec",
+    "ProfileBundle",
+    "ServerPlan",
+    "list_profiles",
+    "resolve",
+]
