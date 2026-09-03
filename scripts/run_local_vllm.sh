@@ -155,6 +155,12 @@ if [ "${BUDGET_RUNNER}" = "pooling" ]; then
         set -- "$@" --enforce-eager
     fi
 fi
+# vLLM prefix caching (KV reuse across shared prompt prefixes): resolved
+# from the Budget profile, off unless the profile enables it. Issue #80
+# measures the hit rate before enabling it anywhere.
+if [ "${BUDGET_PREFIX_CACHE:-0}" = "1" ]; then
+    set -- "$@" --enable-prefix-caching
+fi
 # Add Gemma-4 reasoning parser flags
 case "${MODEL} ${MODEL_NAME} ${TASK:-}" in
     *gemma-4*|*gemma4*)

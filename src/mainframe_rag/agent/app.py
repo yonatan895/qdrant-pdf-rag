@@ -441,6 +441,7 @@ async def v1_answer(
         complexity=complexity,
         tokenizer=tokenizer,
         settings=settings,
+        order=settings.prompt_order,
     )
 
     if not is_stream:

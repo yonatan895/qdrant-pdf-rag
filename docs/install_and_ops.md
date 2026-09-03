@@ -273,6 +273,7 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
 * **8GB VRAM Optimizations**:
   - `--limit-mm-per-prompt '{"image":0,"audio":0}'`: Disables multimodal vision/audio buffers in Gemma 4 to reclaim substantial VRAM.
   - `--max-num-seqs 1`: Bounds concurrent sequence allocation to prevent out-of-memory spikes.
+  - `--enable-prefix-caching`: off unless the Budget profile enables it (`prefix_cache`, issue #80 measures the hit rate first).
   - `--max-num-batched-tokens` (embed server): capped at the Budget window so the memory-profiling peak stays bounded; it does not follow a `MAX_LEN` operator override (erring small is the safe side).
   - `MAX_LEN=4096` for **both** servers: the reasoning prompt budget requires it, and a 2048 embed window was rejected by tokenizer sweep — the worst-case embedded string (chunk header + a `SECTION_MAX_CHARS=3500` body with the 400-char split seed) measures ~2,043 tokens at ~2.0 chars/token on syntax-dense text. The budget is pinned hermetically by `tests/test_embed_budget.py`.
 * **Gemma-4 Support**: Automatically configures `--tool-call-parser gemma4`, `--reasoning-parser gemma4`, and `--chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja`.

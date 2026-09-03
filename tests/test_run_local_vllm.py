@@ -141,3 +141,61 @@ def test_budget_failure_fails_closed_before_docker(tmp_path: Path):
     assert rc != 0
     assert "serving-budget" in stderr
     assert argv == [], "container runtime must never exec on resolve failure"
+
+
+def _run_script_with_stub_resolver(tmp_path: Path, extra_env: dict[str, str]) -> tuple[int, str, list[str]]:
+    """BUDGET_PYTHON stub emitting canned assignments: exercises the script's
+    flag conditionals independently of the Budget table."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    out_file = tmp_path / "docker-argv"
+    stub_docker = bindir / "docker"
+    stub_docker.write_text(f"#!/bin/sh\necho \"$@\" > \"{out_file}\"\n")
+    stub_docker.chmod(stub_docker.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    stub_python = bindir / "stub-python"
+    stub_python.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' "
+        "\"BUDGET_GPU_MEM='0.50'\" "
+        "\"BUDGET_MAX_LEN='4096'\" "
+        "\"BUDGET_RUNNER='generate'\" "
+        "\"BUDGET_CONVERT='none'\" "
+        "\"BUDGET_BATCHED_TOKENS=''\" "
+        "\"BUDGET_EAGER='0'\" "
+        "\"BUDGET_PREFIX_CACHE='${STUB_PREFIX_CACHE:-0}'\" "
+        "\"BUDGET_SEQS='1'\"\n"
+    )
+    stub_python.chmod(stub_python.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        "HOME": str(tmp_path / "home"),
+        "BUDGET_PYTHON": str(stub_python),
+        **extra_env,
+    }
+    proc = subprocess.run(
+        ["sh", str(SCRIPT)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    argv: list[str] = []
+    if out_file.exists():
+        argv = shlex.split(out_file.read_text())
+    return proc.returncode, proc.stderr, argv
+
+
+def test_prefix_cache_flag_follows_budget_resolution(tmp_path: Path):
+    rc, stderr, argv = _run_script_with_stub_resolver(tmp_path, {"STUB_PREFIX_CACHE": "1"})
+    assert rc == 0, stderr
+    pairs = _pairs(argv)
+    assert pairs["--gpu-memory-utilization"] == "0.50"
+    assert "--enable-prefix-caching" in argv
+
+
+def test_prefix_cache_flag_absent_by_default(tmp_path: Path):
+    rc, stderr, argv = _run_script_with_stub_resolver(tmp_path, {})
+    assert rc == 0, stderr
+    assert "--enable-prefix-caching" not in argv

@@ -83,6 +83,7 @@ def _assignments(plan_server: ServerPlan) -> list[str]:
             str(plan_server.max_num_batched_tokens or ""),
         ),
         _emit("BUDGET_EAGER", "1" if plan_server.enforce_eager else "0"),
+        _emit("BUDGET_PREFIX_CACHE", "1" if plan_server.enable_prefix_caching else "0"),
         _emit("BUDGET_SEQS", str(plan_server.max_num_seqs)),
     ]
 

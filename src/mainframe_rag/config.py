@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     prompt_max_context_chars_complex: int = Field(default=4500, ge=1000, le=50000)
     prompt_max_chunk_chars: int = Field(default=3000, ge=500, le=10000)
     prompt_max_chunk_chars_complex: int = Field(default=1100, ge=300, le=5000)
+    # User-message block ordering policy (answer.build_messages): "retrieval"
+    # keeps context/question/excerpts/tail in retrieval order. New policies
+    # (e.g. a prefix-cache-friendly static-first order for issue #80) widen
+    # this union; the default never changes silently.
+    prompt_order: Literal["retrieval"] = Field(default="retrieval")
 
     # Dense query instruction prefix for asymmetric embedders (e.g. Qwen3-Embedding).
     # Applied to query vector embeddings; chunks during ingest remain raw text.

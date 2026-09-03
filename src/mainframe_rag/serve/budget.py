@@ -84,6 +84,10 @@ class ModelSpec(BaseModel):
     # review rule): to change a window, change the declared spec.
     context_need: int = Field(gt=0, le=131072)
     max_num_seqs: int = Field(default=1, ge=1)
+    # vLLM prefix caching (KV reuse across shared prompt prefixes). A launch
+    # flag like runner/convert/eager, not sizing: off unless the profile
+    # enables it; issue #80 measures the hit rate before enabling anywhere.
+    prefix_cache: bool = False
 
 
 class HostSpec(BaseModel):
@@ -111,6 +115,7 @@ class ServerPlan(BaseModel):
     max_num_batched_tokens: int | None = Field(default=None, gt=0)
     max_num_seqs: int = Field(ge=1)
     enforce_eager: bool
+    enable_prefix_caching: bool = False
     footprint_mib: float = Field(gt=0.0)
     notes: list[str] = Field(default_factory=list)
 
@@ -158,6 +163,7 @@ class DeploymentPlan(BaseModel):
                 f"--runner {s.runner}"
                 + (f" --convert {s.convert}" if s.convert != "none" else "")
                 + (" --enforce-eager" if s.enforce_eager else "")
+                + (" --enable-prefix-caching" if s.enable_prefix_caching else "")
             )
             lines.append(
                 f"  {s.role} {s.model_id}: footprint {s.footprint_mib:.0f} MiB "
@@ -271,6 +277,7 @@ def resolve(profile: ProfileBundle) -> DeploymentPlan:
                 max_num_batched_tokens=batched,
                 max_num_seqs=spec.max_num_seqs,
                 enforce_eager=eager,
+                enable_prefix_caching=spec.prefix_cache,
                 footprint_mib=footprint,
                 notes=notes,
             )
