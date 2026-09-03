@@ -28,3 +28,21 @@ def plain_pdf(tmp_path_factory) -> Path:
     out = tmp_path_factory.mktemp("plain") / "widget-guide.pdf"
     build_plain(out)
     return out
+
+
+@pytest.fixture(scope="session")
+def jcl_pdf(tmp_path_factory) -> Path:
+    from scripts.make_synthetic_pdf import build_jcl
+
+    out = tmp_path_factory.mktemp("jcl") / "SA22-8004-00_smpjcl.pdf"
+    build_jcl(out)
+    return out
+
+
+@pytest.fixture(scope="session")
+def rexx_pdf(tmp_path_factory) -> Path:
+    from scripts.make_synthetic_pdf import build_rexx
+
+    out = tmp_path_factory.mktemp("rexx") / "SA22-8005-00_smprexx.pdf"
+    build_rexx(out)
+    return out

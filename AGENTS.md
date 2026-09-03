@@ -172,7 +172,7 @@ New behavior belongs in the layer that already owns that decision. Do not thread
 | `walk` | `*.pdf` only; skip catalogs; path layout `vendor/product/version/` |
 | `ibm_pdf` (parse) | Open, metadata, optional IBM signals, generic fallbacks |
 | `chrome` | Repeated headers/footers; never threshold=1; skip docs under 8 pages |
-| `chunk` | Outline → else whole doc; UUID5 ids; heading path; `SECTION_MAX_CHARS = 3500` |
+| `chunk` | Outline → else whole doc; UUID5 ids; heading path; `SECTION_MAX_CHARS = 3500`; code regions (JCL/REXX/console, detected in `chunk.py`) split at statement boundaries only — per-statement atomic items, overlap backs off to whole statements, one oversize statement emits whole |
 | `classify` | `message` / `syntax` / `table` / `narrative` |
 | `embed` | Dense from internal vLLM; sparse local (no Cloud inference) |
 | `qdrant_io` | Collection + payload indexes **before** load; dim fail-fast |
