@@ -7,8 +7,27 @@ If a review comment conflicts with this file, follow this file and note the conf
 ## Start here (new agents read this first)
 
 1. Read, in order: the issue → `ROADMAP.md` → this file → `docs/architecture.md` → `docs/adr/0001-baseline-decisions.md`.
-2. Prove the environment before writing code: bring up the stack and run the ladder in `docs/live-stack.md`. A red rung stops all work.
-3. Testing rules live in `docs/testing.md`. This file states what to run; that file states how to write it.
+2. Place the change using the Module/Owns layer table below, then read only that module's file. Do not wade through unrelated layers.
+3. Look up the change class and run exactly its rungs — no more, no less:
+
+| Change class | Required rungs (`docs/live-stack.md`) |
+|---|---|
+| Docs only | Existence-check cited paths; no GPU |
+| Tests / make / CI only | `make check` |
+| Agent HTTP / validation | `make check` + live probes (rung 6) |
+| Ingest / chunk / classify | `make check` + gate-l1 + fresh paraphrase |
+| Retrieve / embed / RRF / rerank / screen | Full ladder + A/B numbers in the PR body |
+| Defaults, UUID, `chunk_type`, production constants | Split the PR; the split-off pays eval + A/B |
+
+4. Lethal mistakes (any one of these fails review outright, however green the gates):
+   no new `chunk_type` vocabulary; no UUID5 point-id change; no default flips
+   (`RERANK_ENABLED`, `llm_stream`, any `Settings` default) inside a feature PR;
+   no committed PDFs/snapshots/manuals; never delete or weaken tests to go green;
+   never hash-eval against a vLLM-dim collection (a mismatch skip is not a pass);
+   no baseline rewrite except via `make eval-baseline` in a dedicated PR;
+   no quoting vendor-manual text into the tree.
+5. Prove the environment before writing code: bring up the stack and run the ladder rungs your class requires. A red rung stops all work.
+6. Testing rules live in `docs/testing.md`. This file states what to run; that file states how to write it.
 
 ## Roles
 
@@ -60,7 +79,7 @@ If CI fails, fix the production cause. Do not delete or weaken tests to go green
 All of these must hold. Self-review the **diff**, not the PR body.
 
 - `make check` is clean locally (ruff, mypy, unit suite).
-- The `docs/live-stack.md` verification ladder is green in full — mandatory for every non-docs PR: gate-l1 exit 0, paraphrase baseline-exact on a fresh ingest, sim with 0 skips, vLLM eval with 0 failures, live agent probes, feature A/B numbers in the PR body.
+- The ladder rungs your change class requires (Start-here table, `docs/live-stack.md`) are green in full. Skipping a required rung — or inventing its numbers — fails review outright.
 - Branched fresh from `origin/main`, single concern, not an already-merged branch.
 - Every new behavior has a test that fires the **claimed path**, not only the exception/fallback path. See `docs/testing.md`.
 - Every new handler, branch, and error shape has a reachable test. A handler no test can fire is dead code.
