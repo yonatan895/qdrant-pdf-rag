@@ -1562,3 +1562,58 @@ async def test_httpx_llm_client_chat_stream_empty_content_recovers_via_post():
     assert items[1]["type"] == "done" and items[1]["finish_reason"] == "stop"
     assert items[1]["usage"].total_tokens == 8
 
+
+
+def test_search_rejects_overlong_query_before_retrieval(client, monkeypatch):
+    """Issue #87: overlong queries fail closed with the validation envelope
+    before any retrieval work runs."""
+    called = []
+    orig = app_mod.retrieve_search
+
+    def recording(*a, **k):
+        called.append(1)
+        return orig(*a, **k)
+
+    monkeypatch.setattr(app_mod, "retrieve_search", recording)
+    resp = client.post("/v1/search", json={"query": "x" * 2001})
+    assert resp.status_code == 422
+    assert resp.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert called == []
+
+
+def test_search_accepts_boundary_length_query(client):
+    resp = client.post("/v1/search", json={"query": "x" * 2000})
+    assert resp.status_code == 200
+
+
+def test_query_cap_is_settings_driven(client, monkeypatch):
+    """The cap comes from Settings, not a hardcoded literal at the call site."""
+    monkeypatch.setattr(app_mod.settings, "query_max_chars", 10)
+    assert client.post("/v1/search", json={"query": "12345678901"}).status_code == 422
+    assert client.post("/v1/search", json={"query": "1234567890"}).status_code == 200
+
+
+def test_answer_rejects_overlong_query(client):
+    resp = client.post("/v1/answer", json={"query": "x" * 2001})
+    assert resp.status_code == 422
+    assert resp.json() == {"code": "invalid_request", "message": "request body failed validation"}
+
+
+def test_build_messages_truncates_overlong_splunk_context():
+    """Issue #87: unbounded caller-supplied telemetry truncates with the
+    standard suffix instead of starving excerpts out of the window."""
+    from mainframe_rag.agent.answer import build_messages
+
+    msgs = build_messages("IEA500I", [_hit()], splunk_context="y" * 5000, splunk_context_max_chars=100)
+    user = msgs[1].content
+    assert "... [truncated]" in user
+    assert "y" * 101 not in user
+
+
+def test_build_messages_leaves_bounded_splunk_context_alone():
+    from mainframe_rag.agent.answer import build_messages
+
+    splunk = "z" * 4000
+    msgs = build_messages("IEA500I", [_hit()], splunk_context=splunk, splunk_context_max_chars=4000)
+    assert splunk in msgs[1].content
+    assert "[truncated]" not in msgs[1].content

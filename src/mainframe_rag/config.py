@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     prompt_max_context_chars_complex: int = Field(default=4500, ge=1000, le=50000)
     prompt_max_chunk_chars: int = Field(default=3000, ge=500, le=10000)
     prompt_max_chunk_chars_complex: int = Field(default=1100, ge=300, le=5000)
+    # Request-size guardrails (issue #87): unbounded operator input must not
+    # eat the reasoning window or the embed call. Overlong queries fail
+    # closed with the same invalid_request 422 as any other body-validation
+    # failure; caller-supplied splunk_context truncates with the standard
+    # suffix, like per-chunk text. Longest golden query is 165 chars.
+    query_max_chars: int = Field(default=2000, ge=200, le=20000)
+    splunk_context_max_chars: int = Field(default=4000, ge=500, le=50000)
     # User-message block ordering policy (answer.build_messages): "retrieval"
     # keeps context/question/excerpts/tail in retrieval order; "stable_cache"
     # (issue #80) puts the static instruction block first for vLLM prefix

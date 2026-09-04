@@ -21,6 +21,10 @@ import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pymupdf
 
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.chrome import strip_chrome
@@ -33,7 +37,7 @@ from mainframe_rag.ingest.context import (
     resolve_cache_path,
 )
 from mainframe_rag.ingest.embed import build_embedder, embed_batch
-from mainframe_rag.ingest.ibm_pdf import ParsedDoc, parse_pdf, sha256_file
+from mainframe_rag.ingest.ibm_pdf import ParsedDoc, parse_pdf, sanitize_page_text, sha256_file
 from mainframe_rag.ingest.inventory import (
     InventoryRecord,
     append_record,
@@ -59,6 +63,24 @@ _worker_settings: Settings | None = None
 _worker_context_client: ContextLLMClient | None = None
 _worker_context_cache: dict[str, str] | None = None
 _worker_context_cache_path: str | None = None
+
+
+def _extract_page_texts(doc: pymupdf.Document) -> tuple[list[str], list[str | None]]:
+    """Page texts sanitized at extraction plus page labels, in page order.
+
+    Split out of _parse_one so the sanitize wiring is unit-testable with a
+    stub document (no PyMuPDF needed): control/bidi/zero-width characters
+    are dropped by sanitize_page_text (issue #87) before chrome detection
+    sees the text, since those characters would also fracture chrome
+    line-matching. Labels pass through untouched.
+    """
+    page_texts: list[str] = []
+    page_labels: list[str | None] = []
+    for i in range(doc.page_count):
+        page = doc[i]
+        page_texts.append(sanitize_page_text(page.get_text()))
+        page_labels.append(page.get_label())
+    return page_texts, page_labels
 
 
 def _parse_one(
@@ -90,12 +112,7 @@ def _parse_one(
         )
         doc = pymupdf.open(path)
         try:
-            page_texts: list[str] = []
-            page_labels: list[str | None] = []
-            for i in range(doc.page_count):
-                page = doc[i]
-                page_texts.append(page.get_text())
-                page_labels.append(page.get_label())
+            page_texts, page_labels = _extract_page_texts(doc)
         finally:
             doc.close()
         stripped = strip_chrome(page_texts)

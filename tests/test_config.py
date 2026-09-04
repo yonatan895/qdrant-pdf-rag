@@ -124,3 +124,12 @@ def test_reasoning_effort_validation():
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None, llm_reasoning_effort_complex="extreme")  # type: ignore[arg-type]
+
+
+def test_request_size_guardrail_defaults():
+    """Issue #87: bounded request-size guardrails — overlong queries fail
+    closed, caller-supplied splunk_context truncates. Defaults clear the
+    longest golden query (165 chars) by an order of magnitude."""
+    s = Settings(_env_file=None)
+    assert s.query_max_chars == 2000
+    assert s.splunk_context_max_chars == 4000

@@ -170,14 +170,14 @@ New behavior belongs in the layer that already owns that decision. Do not thread
 | Module | Owns |
 |---|---|
 | `walk` | `*.pdf` only; skip catalogs; path layout `vendor/product/version/` |
-| `ibm_pdf` (parse) | Open, metadata, optional IBM signals, generic fallbacks |
+| `ibm_pdf` (parse) | Open, metadata, optional IBM signals, generic fallbacks; extract-time text sanitization (`sanitize_page_text`: CSI/C0/bidi/zero-width dropped, printable bytes identical) |
 | `chrome` | Repeated headers/footers; never threshold=1; skip docs under 8 pages |
 | `chunk` | Outline → else whole doc; UUID5 ids; heading path; `SECTION_MAX_CHARS = 3500`; code regions (JCL/REXX/console, detected in `chunk.py`) split at statement boundaries only — per-statement atomic items, overlap backs off to whole statements, one oversize statement emits whole |
 | `classify` | `message` / `syntax` / `table` / `narrative` |
 | `embed` | Dense from internal vLLM; sparse local (no Cloud inference) |
 | `qdrant_io` | Collection + payload indexes **before** load; dim fail-fast |
-| `retrieve` | Filters in prefetch; hybrid dense+BM25; cross-encoder rerank dispatch (`rerank.py`, default off) |
-| `agent` | HTTP API; citation validation |
+| `retrieve` | Filters in prefetch; hybrid dense+BM25; cross-encoder rerank dispatch (`rerank.py`, default off); query-class screen (`screen.py`: trap checked before identifiers, sibling must_nots stay answerable) |
+| `agent` | HTTP API; citation validation; request-size guardrails (`query_max_chars` 422s closed, `splunk_context_max_chars` truncates with suffix) |
 
 Standing #20 rules: embed / Qdrant points / LLM are `Protocol`s in `ports.py`; upserts are batched (`Settings.batch_size`); payload indexes exist before load; every outbound call has a Settings timeout.
 

@@ -76,6 +76,17 @@ class AppError(Exception):
         self.message = message
 
 
+def _require_query_length(request_id: str, query: str) -> None:
+    """Fail closed on overlong queries (issue #87) before any embed or
+    retrieval work: one helper serves both endpoints so the same fault maps
+    to the same code on each. Code and message deliberately match the
+    pydantic body-validation failure — an overlong query IS a validation
+    failure, and no new client-visible shape is introduced."""
+    if len(query) > settings.query_max_chars:
+        log.warning(json_log(request_id, "query_too_long", chars=len(query)))
+        raise AppError(422, "invalid_request", "request body failed validation")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker
@@ -295,6 +306,7 @@ async def healthz() -> HealthzResponse:
 async def v1_search(request: Request, req: SearchRequest, response: Response) -> SearchResponse:
     request_id = request.state.request_id
     started = time.monotonic()
+    _require_query_length(request_id, req.query)
     try:
         res = retrieve_search(
             qdrant, embedder, settings.qdrant_collection, req.query,
@@ -342,6 +354,7 @@ async def v1_answer(
     request_id = request.state.request_id
     started = time.monotonic()
     is_stream = stream if stream is not None else req.stream
+    _require_query_length(request_id, req.query)
     # Fail fast before any retrieval: the reasoning model (and its endpoint)
     # must be configured; nothing else is callable. Config errors get a fixed
     # client message — the exception text stays in the log.
@@ -438,6 +451,7 @@ async def v1_answer(
         max_context_chars=max_context,
         max_chunk_chars=settings.prompt_max_chunk_chars,
         max_chunk_chars_narrative=settings.prompt_max_chunk_chars_complex if complexity == "complex" else None,
+        splunk_context_max_chars=settings.splunk_context_max_chars,
         complexity=complexity,
         tokenizer=tokenizer,
         settings=settings,

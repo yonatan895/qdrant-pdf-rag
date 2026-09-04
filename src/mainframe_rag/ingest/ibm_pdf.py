@@ -22,6 +22,27 @@ PRODUCT_VERSION_RE = re.compile(
 GENERIC_VR_RE = re.compile(r"\bV(\d+)\s*\.?\s*R(\d+)\b")
 FILENAME_DOCNO_RE = re.compile(r"^([A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?)(?![\d-])")
 
+# Invisible / control characters stripped from extracted page text (issue
+# #87): terminal escape sequences first (dropping lone ESC would leave
+# "[31m" behind), then C0 controls and DEL, Unicode bidi overrides (visual
+# spoofing), and zero-width / BOM characters (token smuggling that also
+# fractures sparse matching). \t and \n are preserved; every printable
+# character — including JCL alignment whitespace — is byte-identical,
+# pinned by the verbatim code-card tests.
+_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_BIDI_RE = re.compile(r"[\u202a-\u202e\u2066-\u2069]")
+_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200d\ufeff]")
+
+
+def sanitize_page_text(text: str) -> str:
+    """Drop control, bidi-override, and zero-width characters from text
+    extracted from a PDF page. Printable content is untouched."""
+    text = _CSI_RE.sub("", text)
+    text = _CONTROL_RE.sub("", text)
+    text = _BIDI_RE.sub("", text)
+    return _ZERO_WIDTH_RE.sub("", text)
+
 
 @dataclass(frozen=True, slots=True)
 class ParsedDoc:
@@ -112,7 +133,7 @@ def parse_pdf(
             path=path,
             sha256=sha256 or sha256_file(path),
             doc_id=doc_id,
-            title=extract_title(doc, doc_id),
+            title=sanitize_page_text(extract_title(doc, doc_id)),
             product=product_f,
             version=version_f or None,
             vendor=vendor_f or "unknown",
