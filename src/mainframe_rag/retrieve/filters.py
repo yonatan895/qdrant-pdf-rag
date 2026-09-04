@@ -24,9 +24,17 @@ class QueryIdentifiers(BaseModel):
 
 
 def parse_query(query: str) -> QueryIdentifiers:
+    # Issue #130: operators type lowercase. Message codes and doc numbers
+    # are canonical-uppercase on both sides (ingest source text is
+    # uppercase), so also extract from an uppercased copy and union.
+    # Case change preserves word-char class, so upper-casing only ADDS
+    # matches: pure-uppercase queries behave exactly as before.
+    # Members stay case-sensitive: MEMBER_RE's lowercase xx convention
+    # (IEASYSxx) matches payload case, and uppercasing would break it.
+    upper = query.upper()
     return QueryIdentifiers(
-        doc_ids=find_docnos(query),
-        message_ids=find_message_ids(query),
+        doc_ids=sorted(set(find_docnos(query)) | set(find_docnos(upper))),
+        message_ids=sorted(set(find_message_ids(query)) | set(find_message_ids(upper))),
         members=find_members(query),
     )
 

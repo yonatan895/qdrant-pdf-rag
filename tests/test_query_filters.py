@@ -37,6 +37,43 @@ def test_parse_query_nl():
     assert not ids.has_identifiers
 
 
+def test_parse_query_case_folds_codes_and_docnos():
+    """Issue #130: operators type lowercase. Message codes and doc numbers
+    are canonical-uppercase on both sides, so lowercase input normalizes
+    to the payload form."""
+    ids = parse_query("what does dfhac2006 mean?")
+    assert ids.message_ids == ["DFHAC2006"]
+    assert ids.has_identifiers
+
+    ids = parse_query("Dsn9022i details and tssc001e action")
+    assert ids.message_ids == ["DSN9022I", "TSSC001E"]
+
+    ids = parse_query("in sa38-0673-70 about dumps")
+    assert ids.doc_ids == ["SA38-0673-70"]
+
+
+def test_parse_query_unions_upper_and_lower_codes():
+    """A mixed-case query keeps the uppercase hit AND gains the lowercase
+    one — the union never drops what the old path found."""
+    ids = parse_query("DSN9022I and dfhac2006")
+    assert ids.message_ids == ["DFHAC2006", "DSN9022I"]
+
+
+def test_parse_query_members_stay_case_sensitive():
+    """Issue #130 scope guard: MEMBER_RE's lowercase xx convention matches
+    payload case, so members are NOT folded (lowercase members are a
+    documented follow-up, not silently mangled into payload misses)."""
+    assert "IEASYSxx" in parse_query("IEASYSxx LFAREA").members
+    assert parse_query("ieasysxx setting").members == []
+
+
+def test_parse_query_lowercase_prose_stays_nl():
+    """Ordinary lowercase prose must not sprout identifiers."""
+    assert not parse_query("compare the spool procedures").has_identifiers
+    assert not parse_query("db2 v10 install steps").has_identifiers
+    assert not parse_query("certificate key management").has_identifiers
+
+
 def test_build_filter_includes_all_context():
     ids = parse_query("IEA500I")
     flt = build_filter(ids, product="z/OS", version="3.1")
