@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from collections import Counter, defaultdict
@@ -76,11 +77,26 @@ if str(REPO) not in sys.path:
 # helpers' tests. If the production string changes, this must change with it.
 ZERO_HITS_ANSWER = "No supporting manual excerpts were found for this question."
 
+# Issue #132 named-code form: "No manual excerpts carry DSN90221I." (capped
+# term list, so the shape is bounded).
+_ZERO_HITS_NAMED_RE = re.compile(r"^No manual excerpts carry .{1,300}\.$")
+
+
+def is_zero_hits_answer(answer: str) -> bool:
+    """True for either canned zero-hits message. Single helper for the
+    live-row path below (one rule per concept): model text parroting the
+    exact shape is indistinguishable from canned by construction, the
+    same premise the exact-match form already accepts."""
+    body = answer.strip()
+    return body == ZERO_HITS_ANSWER or _ZERO_HITS_NAMED_RE.match(body) is not None
+
+
 # Explicit-refusal markers for the LLM path. The system prompt's rule 4
 # instructs the model to "say so explicitly" when excerpts do not answer;
 # these are the phrasings the prompt and the seed's gold fields actually use.
 REFUSAL_MARKERS = (
     "no supporting manual excerpts",
+    "no manual excerpts carry",
     "excerpts do not answer",
     "excerpts do not contain",
     "excerpts provided do not",
@@ -249,7 +265,7 @@ def run_query(client: Any, entry: dict[str, Any]) -> dict[str, Any]:
     data = resp.json()
     answer = str(data.get("answer") or "")
     citations = list(data.get("citations") or [])
-    zero_hits = answer.strip() == ZERO_HITS_ANSWER
+    zero_hits = is_zero_hits_answer(answer)
     # Zero-hits is the agent's canned message (no model text): gold-substring
     # checks would judge the canned string, not the model — suppress them and
     # record why. The structural verdict still fires (refusal on an answer

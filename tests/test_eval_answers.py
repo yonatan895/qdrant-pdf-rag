@@ -11,6 +11,7 @@ from __future__ import annotations
 from scripts.eval_answers import (
     ZERO_HITS_ANSWER,
     is_explicit_refusal,
+    is_zero_hits_answer,
     judge,
     select_sample,
     summarize,
@@ -178,7 +179,16 @@ def test_must_cite_identifier_absent_fails() -> None:
 def test_refusal_markers() -> None:
     assert is_explicit_refusal(ZERO_HITS_ANSWER)
     assert is_explicit_refusal("The excerpts do not answer this question.")
+    assert is_explicit_refusal("No manual excerpts carry DSN90221I.")
     assert not is_explicit_refusal("LFAREA reserves 64-bit frames above the bar.")
+
+
+def test_is_zero_hits_answer_recognizes_both_canned_forms() -> None:
+    assert is_zero_hits_answer(ZERO_HITS_ANSWER)
+    assert is_zero_hits_answer("No manual excerpts carry DSN90221I.")
+    assert is_zero_hits_answer("No manual excerpts carry DSN9000I, DSN9001I, +5 more.")
+    assert not is_zero_hits_answer("No manual excerpts carry")
+    assert not is_zero_hits_answer("The model wrote its own refusal here.")
 
 
 # ------------------------------------------------------------------ select_sample
