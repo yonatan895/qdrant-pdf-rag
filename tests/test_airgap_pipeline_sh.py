@@ -82,10 +82,27 @@ def test_pipeline_dryrun_full(pipe_tree):
     assert "STAGE 3/5: STACK DEPLOYMENT" in r.stdout
     assert "STAGE 4/5: CORPUS INGESTION" in r.stdout
     assert "STAGE 5/5: ACCEPTANCE & SMOKE VERIFICATION" in r.stdout
-    assert "PIPELINE ORCHESTRATION COMPLETE" in r.stdout
+    assert "PIPELINE ORCHESTRATION COMPLETE: AIR-GAP SYSTEM OPERATIONAL & ACCEPTED" in r.stdout
+
+
+def test_pipeline_dryrun_including_load(pipe_tree):
+    # Tests that load.sh honors dryrun without requiring --skip-load
+    r = _run_pipeline(pipe_tree, extra_env={"CORPUS_PVC": "test-corpus"})
+    assert r.returncode == 0, r.stderr
+    assert "STAGE 2/5: IMAGE LOADING & INTEGRITY" in r.stdout
+    assert "Loaded 4 images into reg.internal:5000 (dry-run)" in r.stdout
+    assert "PIPELINE ORCHESTRATION COMPLETE: AIR-GAP SYSTEM OPERATIONAL & ACCEPTED" in r.stdout
 
 
 def test_pipeline_skip_ingest_flag(pipe_tree):
     r = _run_pipeline(pipe_tree, "--skip-load", "--skip-ingest", extra_env={"CORPUS_PVC": "test-corpus"})
     assert r.returncode == 0, r.stderr
     assert "STAGE 4/5: CORPUS INGESTION (SKIPPED via --skip-ingest)" in r.stdout
+    assert "PIPELINE ORCHESTRATION COMPLETE: DEPLOYMENT READY (Awaiting Corpus Ingest)" in r.stdout
+
+
+def test_pipeline_without_corpus_pvc_awaits_ingest(pipe_tree):
+    r = _run_pipeline(pipe_tree, "--skip-load")
+    assert r.returncode == 0, r.stderr
+    assert "STAGE 4/5: CORPUS INGESTION (SKIPPED — CORPUS_PVC not set)" in r.stdout
+    assert "PIPELINE ORCHESTRATION COMPLETE: DEPLOYMENT READY (Awaiting Corpus Ingest)" in r.stdout

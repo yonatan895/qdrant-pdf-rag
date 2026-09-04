@@ -48,7 +48,7 @@ def bundle_dir(tmp_path):
         "app-ingest-test.tar": b"mock-ingest",
         "app-agent-test.tar": b"mock-agent",
         "MANIFEST.txt": b"sha: test\n",
-        "TRANSFER_CERTIFICATE.txt": b"cert\n",
+        "PACKING_RECORD.txt": b"record\n",
     }
     sums = []
     for name, content in files.items():
@@ -97,3 +97,4 @@ def test_bootstrap_success(bundle_dir):
     assert (dist_dir / "qdrant-image.tar").is_file()
     assert (dist_dir / "app-agent-test.tar").is_file()
     assert (dist_dir / "MANIFEST.txt").is_file()
+    assert (dist_dir / "PACKING_RECORD.txt").is_file()

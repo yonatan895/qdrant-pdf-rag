@@ -53,6 +53,15 @@ fi
 
 if [ "$status" -eq 3 ]; then
     echo "SKIP: nothing ingested yet — run make airgap-ingest CORPUS_PVC=<pvc> first"
+    echo ""
+    echo "================================================================================"
+    echo "                  AIR-GAP PRODUCTION ACCEPTANCE REPORT"
+    echo "================================================================================"
+    echo "Namespace:       $NAMESPACE"
+    echo "Agent /healthz:  OK (Qdrant and embedding services operational)"
+    echo "Smoke Search:    SKIPPED (Collection empty — nothing ingested yet)"
+    echo "Status:          INFRASTRUCTURE READY (Corpus not yet ingested)"
+    echo "================================================================================"
     exit 0
 elif [ "$status" -ne 0 ]; then
     die "search request failed (status $status)"

@@ -496,7 +496,7 @@ The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `air
 The sneakernet archive is packaged on the connected host. Connected `main` is the only image factory.
 
 > [!TIP]
-> **Automated CI Packaging:** Every commit merged to `main` on public GitHub automatically triggers the `airgap-package` workflow in `.github/workflows/e2e.yml`. Operators can download the pre-packaged, verified `sneakernet-bundle-<sha>` artifact (containing `qdrant-pdf-rag-<sha>.tar`, digest, `TRANSFER_CERTIFICATE.txt`, and `MANIFEST.txt`) directly from GitHub Actions without needing local build tools.
+> **Automated CI Packaging:** Every commit merged to `main` on public GitHub automatically triggers the `airgap-package` workflow in `.github/workflows/e2e.yml` once container images have been built and pushed to GHCR. Any authenticated GitHub user with read access to the repository can download the pre-packaged, verified `sneakernet-bundle-<sha>` artifact (containing `qdrant-pdf-rag-<sha>.tar`, digest, `PACKING_RECORD.txt`, and `MANIFEST.txt`, retained for 90 days) directly from GitHub Actions runs. Note that pull request runs intentionally skip this packaging job; the first real sneakernet bundle for a given commit is generated upon its first merge to `main`.
 
 To build the package manually on a connected Linux workstation:
 
@@ -515,7 +515,7 @@ This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-r
 3. Vendored third-party Qdrant unprivileged image and Jaeger v2 image.
 4. Vendored Helm chart (`charts/qdrant-1.19.0.tgz`).
 5. Self-contained extraction bootstrap script (`bootstrap.sh`).
-6. Manifest (`MANIFEST.txt`), Transfer Certificate (`TRANSFER_CERTIFICATE.txt`), and member `SHA256SUMS`.
+6. Manifest (`MANIFEST.txt`), Packing Record (`PACKING_RECORD.txt`), and member `SHA256SUMS`.
 
 ### 4.2 Transfer & Automated Bootstrap
 
@@ -542,6 +542,10 @@ The `bootstrap.sh` script automatically:
 ### 4.3 Configure Environment & Pre-Flight Validation
 
 Edit `airgap.env` to configure your cluster environment:
+
+> [!NOTE]
+> If the `AIRGAP_ENV` environment variable is exported in the calling shell, scripts load that file path directly, taking precedence over the local `./airgap.env`.
+
 ```ini
 # Internal image registry accessible to cluster nodes
 INTERNAL_REGISTRY=registry.internal.enterprise:5000/mainframe-rag

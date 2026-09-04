@@ -98,13 +98,6 @@ else
     echo "    Standard Kubernetes cluster detected (non-OpenShift SCC)."
 fi
 
-echo "==> 6. Validating image registry reachability"
-extra_args="${SKOPEO_ARGS:-}"
-if [ "${INSECURE_REGISTRY:-false}" = "true" ]; then
-    extra_args="$extra_args --dest-tls-verify=false"
-fi
-echo "    Testing connection to $INTERNAL_REGISTRY..."
-
 echo ""
 echo "SUCCESS: Pre-flight validation passed cleanly."
 next_step "make airgap-load"

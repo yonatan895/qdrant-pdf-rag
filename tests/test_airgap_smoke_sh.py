@@ -131,6 +131,7 @@ def test_smoke_clean_skip_on_empty_collection(smoke_tree):
     r = _run_smoke(smoke_tree)
     assert r.returncode == 0, r.stderr
     assert "SKIP: nothing ingested yet" in r.stdout
+    assert "INFRASTRUCTURE READY (Corpus not yet ingested)" in r.stdout
 
 
 def test_smoke_success_when_hits_found(smoke_tree):

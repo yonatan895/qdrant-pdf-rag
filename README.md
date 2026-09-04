@@ -113,7 +113,7 @@ The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `air
 1. **Connected Host (or CI Release Download):**
    ```bash
    git checkout <main-sha>  # Full 40-character Git SHA (or download sneakernet-bundle from GitHub Actions)
-   make airgap-pack         # -> dist/qdrant-pdf-rag-<sha>.tar + .sha256 + TRANSFER_CERTIFICATE.txt
+   make airgap-pack         # -> dist/qdrant-pdf-rag-<sha>.tar + .sha256 + PACKING_RECORD.txt
    ```
 
 2. **Sneakernet Transfer & Automated Bootstrap:**

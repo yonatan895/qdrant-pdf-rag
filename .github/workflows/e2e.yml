@@ -128,7 +128,7 @@ jobs:
           make airgap-pack
           ls -la dist/
           cat dist/MANIFEST.txt
-          cat dist/TRANSFER_CERTIFICATE.txt
+          cat dist/PACKING_RECORD.txt
 
       - name: Upload sneakernet bundle artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
@@ -137,7 +137,7 @@ jobs:
           path: |
             dist/qdrant-pdf-rag-*.tar
             dist/qdrant-pdf-rag-*.tar.sha256
-            dist/TRANSFER_CERTIFICATE.txt
+            dist/PACKING_RECORD.txt
             dist/MANIFEST.txt
           retention-days: 90
 

@@ -51,6 +51,7 @@ echo ""
 echo ">>> STAGE 3/5: STACK DEPLOYMENT"
 sh scripts/airgap/deploy.sh
 
+INGEST_PERFORMED=0
 if [ "$SKIP_INGEST" -eq 1 ]; then
     echo ""
     echo ">>> STAGE 4/5: CORPUS INGESTION (SKIPPED via --skip-ingest)"
@@ -58,6 +59,7 @@ elif [ -n "${CORPUS_PVC:-}" ]; then
     echo ""
     echo ">>> STAGE 4/5: CORPUS INGESTION (PVC: $CORPUS_PVC)"
     sh scripts/airgap/ingest.sh
+    INGEST_PERFORMED=1
 else
     echo ""
     echo ">>> STAGE 4/5: CORPUS INGESTION (SKIPPED — CORPUS_PVC not set)"
@@ -70,5 +72,9 @@ sh scripts/airgap/smoke.sh
 
 echo ""
 echo "================================================================================"
-echo "   PIPELINE ORCHESTRATION COMPLETE: AIR-GAP SYSTEM OPERATIONAL & ACCEPTED"
+if [ "$INGEST_PERFORMED" -eq 1 ]; then
+    echo "   PIPELINE ORCHESTRATION COMPLETE: AIR-GAP SYSTEM OPERATIONAL & ACCEPTED"
+else
+    echo "   PIPELINE ORCHESTRATION COMPLETE: DEPLOYMENT READY (Awaiting Corpus Ingest)"
+fi
 echo "================================================================================"

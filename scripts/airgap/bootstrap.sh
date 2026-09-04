@@ -32,7 +32,7 @@ fi
 
 echo "==> 3. Linking sneakernet artifacts to ./$DEST_DIR/dist"
 mkdir -p "$DEST_DIR/dist"
-for item in repo.bundle qdrant-image.tar jaeger-image.tar app-ingest-*.tar app-agent-*.tar MANIFEST.txt SHA256SUMS; do
+for item in repo.bundle qdrant-image.tar jaeger-image.tar app-ingest-*.tar app-agent-*.tar MANIFEST.txt PACKING_RECORD.txt SHA256SUMS; do
     # shellcheck disable=SC2086
     if [ -f $item ]; then
         cp $item "$DEST_DIR/dist/"

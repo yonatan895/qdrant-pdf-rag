@@ -113,12 +113,12 @@ CHART_VERSION=$(basename charts/qdrant-*.tgz .tgz)
 } > "$DIST/MANIFEST.txt"
 cat "$DIST/MANIFEST.txt"
 
-echo "==> Bootstrap helper & Transfer Certificate"
+echo "==> Bootstrap helper & Packing Record"
 cp "$REPO_ROOT/scripts/airgap/bootstrap.sh" "$DIST/bootstrap.sh"
 chmod +x "$DIST/bootstrap.sh"
 {
     echo "================================================================================"
-    echo "                 MAINFRAME RAG — AIR-GAP TRANSFER CERTIFICATE"
+    echo "                   MAINFRAME RAG — AIR-GAP PACKING RECORD"
     echo "================================================================================"
     echo "Commit SHA:     $IMAGE_SHA"
     echo "Build Date:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -133,7 +133,7 @@ chmod +x "$DIST/bootstrap.sh"
     echo "  - Helm Chart:          $CHART_VERSION"
     echo "  - Sparse Weights:      FastEmbed Qdrant/bm25 (baked in images)"
     echo ""
-    echo "INSPECTION & VERIFICATION INSTRUCTIONS:"
+    echo "INSPECTION & BOOTSTRAP INSTRUCTIONS:"
     echo "  1. Verify root archive digest:"
     echo "       sha256sum -c qdrant-pdf-rag-${IMAGE_SHA}.tar.sha256"
     echo "  2. Extract archive:"
@@ -141,19 +141,19 @@ chmod +x "$DIST/bootstrap.sh"
     echo "  3. Execute automated bootstrap:"
     echo "       sh bootstrap.sh"
     echo "================================================================================"
-} > "$DIST/TRANSFER_CERTIFICATE.txt"
+} > "$DIST/PACKING_RECORD.txt"
 
 echo "==> Member checksums (verified again inside the air-gap after unpack)"
 (
     cd "$DIST"
     sha256sum bootstrap.sh repo.bundle qdrant-image.tar jaeger-image.tar \
               app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar \
-              MANIFEST.txt TRANSFER_CERTIFICATE.txt > SHA256SUMS
+              MANIFEST.txt PACKING_RECORD.txt > SHA256SUMS
 )
 
 echo "==> Tarball + tarball digest"
 tar -C "$DIST" -cf "$OUT_TARBALL" bootstrap.sh repo.bundle qdrant-image.tar jaeger-image.tar \
-    app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar MANIFEST.txt TRANSFER_CERTIFICATE.txt SHA256SUMS
+    app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar MANIFEST.txt PACKING_RECORD.txt SHA256SUMS
 # shellcheck disable=SC2016
 ( cd "$DIST" && sha256sum "$(basename "$OUT_TARBALL")" ) > "$OUT_TARBALL.sha256"
 
