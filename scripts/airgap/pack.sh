@@ -90,8 +90,10 @@ extra_args="${SKOPEO_ARGS:-}"
 if [ "${INSECURE_REGISTRY:-false}" = "true" ]; then
     extra_args="$extra_args --src-tls-verify=false"
 fi
-skopeo copy "docker://$QDRANT_REF" "docker-archive:$DIST/qdrant-image.tar"
-skopeo copy "docker://$JAEGER_REF" "docker-archive:$DIST/jaeger-image.tar"
+# shellcheck disable=SC2086
+skopeo copy $extra_args "docker://$QDRANT_REF" "docker-archive:$DIST/qdrant-image.tar"
+# shellcheck disable=SC2086
+skopeo copy $extra_args "docker://$JAEGER_REF" "docker-archive:$DIST/jaeger-image.tar"
 # shellcheck disable=SC2086
 skopeo copy $extra_args "docker://$INGEST_IMAGE" "docker-archive:$DIST/app-ingest-$IMAGE_SHA.tar"
 # shellcheck disable=SC2086

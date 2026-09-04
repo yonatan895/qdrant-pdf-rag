@@ -15,7 +15,7 @@ REPO = Path(__file__).resolve().parent.parent
 IMAGE_SHA = "d" * 40
 
 STUB_BIN = """#!/bin/sh
-if [ "$1" = "kustomize" ]; then
+if [ "$1" = "kustomize" ] || [ "$1" = "build" ]; then
   cat {stub_yaml}
   exit 0
 fi
@@ -84,7 +84,7 @@ def ingest_tree(tmp_path):
     stub_patched_yaml = tmp_path / "stub-patched-ingest.yaml"
     stub_patched_yaml.write_text(STUB_INGEST_KUSTOMIZE.replace("cpu: 4", "cpu: 1"))
     kc_log = tmp_path / "kc.log"
-    for name in ("kubectl", "oc"):
+    for name in ("kubectl", "oc", "kustomize"):
         p = tmp_path / "bin" / name
         p.write_text(
             STUB_BIN.format(stub_yaml=stub_yaml, stub_patched_yaml=stub_patched_yaml)

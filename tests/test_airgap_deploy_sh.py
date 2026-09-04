@@ -65,7 +65,7 @@ spec:
 """
 
 STUB_BIN = """#!/bin/sh
-if [ "$1" = "kustomize" ]; then
+if [ "$1" = "kustomize" ] || [ "$1" = "build" ]; then
   case "$2" in
     *jaeger*) cat {jaeger_stub} ;;
     *) cat {stub_yaml} ;;
@@ -94,7 +94,7 @@ def tree(tmp_path):
     jaeger_stub = tmp_path / "stub-jaeger.yaml"
     jaeger_stub.write_text(STUB_JAEGER)
     helm_log = tmp_path / "helm-args.log"
-    for name in ("helm", "kubectl", "oc"):
+    for name in ("helm", "kubectl", "oc", "kustomize"):
         p = tmp_path / "bin" / name
         p.write_text(STUB_BIN.format(stub_yaml=stub_yaml, jaeger_stub=jaeger_stub))
         p.chmod(0o755)

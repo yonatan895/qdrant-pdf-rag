@@ -96,13 +96,31 @@ def test_smoke_defaults_namespace_to_mainframe_rag(smoke_tree):
     assert "-n mainframe-rag" in r.stdout
 
 
+def _clean_sysbin(tmp_path):
+    clean_bin = tmp_path / "clean_sysbin"
+    if not clean_bin.exists():
+        clean_bin.mkdir(exist_ok=True)
+        for bin_dir in ("/bin", "/usr/bin"):
+            p_dir = Path(bin_dir)
+            if not p_dir.is_dir():
+                continue
+            for item in p_dir.iterdir():
+                if item.name not in ("kubectl", "oc") and not (clean_bin / item.name).exists():
+                    try:
+                        (clean_bin / item.name).symlink_to(item)
+                    except OSError:
+                        pass
+    return clean_bin
+
+
 def test_smoke_uses_oc_when_kubectl_missing(smoke_tree):
     # Setup oc stub only
     script = STUB_KC_TEMPLATE.format(health_exit=0, search_exit=0, default_exit=0)
     p = smoke_tree / "bin" / "oc"
     p.write_text(script)
     p.chmod(0o755)
-    r = _run_smoke(smoke_tree)
+    sysbin = _clean_sysbin(smoke_tree)
+    r = _run_smoke(smoke_tree, ("PATH", f"{smoke_tree / 'bin'}:{sysbin}"))
     assert r.returncode == 0, r.stderr
     assert "Smoke query returned hits" in r.stdout
 
@@ -129,9 +147,19 @@ def test_smoke_fails_on_search_error(smoke_tree):
     assert "search request failed" in r.stderr
 
 
-def test_smoke_warns_on_degraded_healthz_but_continues(smoke_tree):
+def test_smoke_fails_on_degraded_healthz(smoke_tree):
     _setup_stub(smoke_tree, health_exit=1, search_exit=0)
     r = _run_smoke(smoke_tree)
+    assert r.returncode == 1
+    assert "FAIL: /healthz probe did not report ok" in r.stderr
+
+
+def test_smoke_kc_env_override_respected(smoke_tree):
+    # Ensure KC env override is used directly
+    script = STUB_KC_TEMPLATE.format(health_exit=0, search_exit=0, default_exit=0)
+    p = smoke_tree / "bin" / "custom-kc"
+    p.write_text(script)
+    p.chmod(0o755)
+    r = _run_smoke(smoke_tree, ("KC", str(p)))
     assert r.returncode == 0, r.stderr
-    assert "WARNING: /healthz probe did not report ok" in r.stderr
     assert "Smoke query returned hits" in r.stdout

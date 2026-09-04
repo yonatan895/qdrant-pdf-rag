@@ -6,5 +6,6 @@
 #
 # name                                                                  digest
 docker.io/qdrant/qdrant:v1.19.0-unprivileged                           sha256:PENDING
+# Upstream Jaeger tag is 2.20.0; load.sh and jaeger kustomize use v2.20.0.
 cr.jaegertracing.io/jaegertracing/jaeger:2.20.0                         sha256:PENDING
 registry.access.redhat.com/ubi9/python-314-minimal:9.8                 sha256:PENDING

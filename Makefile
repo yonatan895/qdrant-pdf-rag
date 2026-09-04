@@ -412,7 +412,8 @@ e2e-demo-pdfs: | .venv
 # ---------------------------------------------------------------- clean
 .PHONY: clean
 clean:
-	rm -rf .venv .pytest_cache .mypy_cache .ruff_cache $(BUNDLE_DIR) output dist
+	rm -rf .venv .pytest_cache .mypy_cache .ruff_cache $(BUNDLE_DIR) output
+	@if [ -d dist ]; then find dist -mindepth 1 ! -name "*.tar*" -delete 2>/dev/null || true; rmdir dist 2>/dev/null || true; fi
 
 .PHONY: help
 help:

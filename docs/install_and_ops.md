@@ -598,6 +598,9 @@ Qdrant's unprivileged image specifies `runAsUser: 1000` and `fsGroup: 3000` in `
    QDRANT_EXTRA_VALUES=qdrant-scc.yaml make airgap-deploy
    ```
 
+#### Qdrant Inter-Node Gossip (p2p TLS) Note
+In `overlays/openshift/values.yaml`, `config.cluster.p2p.enable_tls: false` is set because cluster gossip is plaintext on the CNI; we do not mount `./tls/cert.pem` (avoiding crashloops on startup).
+
 Verify pod statuses and readiness:
 ```bash
 oc -n mainframe-rag get pods -w

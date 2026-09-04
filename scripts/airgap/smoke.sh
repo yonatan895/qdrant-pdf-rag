@@ -7,7 +7,7 @@
 
 resolve_aliases
 require_env NAMESPACE
-if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi
+KC=${KC:-$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; else echo oc; fi)}
 QUERY=${QUERY:-IEA500I operator message}
 
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
@@ -32,7 +32,7 @@ except Exception as e:
     sys.exit(1)
 PYEOF
 then
-    echo "WARNING: /healthz probe did not report ok — check Qdrant and embedder connectivity" >&2
+    die "/healthz probe did not report ok — check Qdrant and embedder connectivity"
 fi
 
 # exit 3 from the pod = empty result = nothing ingested yet (skip, not fail).
