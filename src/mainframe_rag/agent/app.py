@@ -50,6 +50,7 @@ from mainframe_rag.ports import (
     Tokenizer,
     TokenUsage,
 )
+from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import async_search as retrieve_search
 from mainframe_rag.retrieve.rerank import build_reranker
@@ -344,6 +345,28 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
     )
 
 
+_EMPTY_ANSWER_MAX_TERMS = 5
+
+
+def empty_hits_answer(query: str) -> str:
+    """Message for the no-hits path (issue #132).
+
+    Identifier queries name the missing codes so typo users can spot and
+    retype them; unknown codes get the truth instead of a generic empty.
+    Unfiltered-serve fallback is deliberately NOT the mechanism: NEG-08
+    proves it would serve the must_not sibling. Capped — a code-salad
+    query must not echo unbounded input.
+    """
+    ids = parse_query(query)
+    terms = ids.message_ids + ids.doc_ids + ids.members
+    if not terms:
+        return "No supporting manual excerpts were found for this question."
+    shown = ", ".join(terms[:_EMPTY_ANSWER_MAX_TERMS])
+    if len(terms) > _EMPTY_ANSWER_MAX_TERMS:
+        shown += f", +{len(terms) - _EMPTY_ANSWER_MAX_TERMS} more"
+    return f"No manual excerpts carry {shown}."
+
+
 @app.post("/v1/answer", response_model=None)
 async def v1_answer(
     request: Request,
@@ -401,7 +424,7 @@ async def v1_answer(
                 payload = {
                     "type": "final",
                     "request_id": request_id,
-                    "answer": "No supporting manual excerpts were found for this question.",
+                    "answer": empty_hits_answer(req.query),
                     "citations": [],
                     "script": None,
                     "query_kind": kind,
@@ -424,7 +447,7 @@ async def v1_answer(
 
         return AnswerResponse(
             request_id=request_id,
-            answer="No supporting manual excerpts were found for this question.",
+            answer=empty_hits_answer(req.query),
             citations=[],
             script=None,
         )
