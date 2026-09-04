@@ -4,6 +4,31 @@ Working agreement for coding agents on this repository.
 Revise this file in the same PR that learns a new rule.
 If a review comment conflicts with this file, follow this file and note the conflict on the PR.
 
+## Start here (new agents read this first)
+
+1. Read, in order: the issue → `ROADMAP.md` → this file → `docs/architecture.md` → `docs/adr/0001-baseline-decisions.md`.
+2. Place the change using the Module/Owns layer table below, then read only that module's file. Do not wade through unrelated layers.
+3. Look up the change class and run exactly its rungs — no more, no less:
+
+| Change class | Required rungs (`docs/live-stack.md`) |
+|---|---|
+| Docs only | Existence-check cited paths; no GPU |
+| Tests / make / CI only | `make check` |
+| Agent HTTP / validation | `make check` + live probes (rung 6) |
+| Ingest / chunk / classify | `make check` + gate-l1 + fresh paraphrase |
+| Retrieve / embed / RRF / rerank / screen | Full ladder + A/B numbers in the PR body |
+| Defaults, UUID, `chunk_type`, production constants | Split the PR; the split-off pays eval + A/B |
+
+4. Lethal mistakes (any one of these fails review outright, however green the gates):
+   no new `chunk_type` vocabulary; no UUID5 point-id change; no default flips
+   (`RERANK_ENABLED`, `llm_stream`, any `Settings` default) inside a feature PR;
+   no committed PDFs/snapshots/manuals; never delete or weaken tests to go green;
+   never hash-eval against a vLLM-dim collection (a mismatch skip is not a pass);
+   no baseline rewrite except via `make eval-baseline` in a dedicated PR;
+   no quoting vendor-manual text into the tree.
+5. Prove the environment before writing code: bring up the stack and run the ladder rungs your class requires. A red rung stops all work.
+6. Testing rules live in `docs/testing.md`. This file states what to run; that file states how to write it.
+
 ## Roles
 
 | Role | Does | Does not |
@@ -53,9 +78,10 @@ If CI fails, fix the production cause. Do not delete or weaken tests to go green
 
 All of these must hold. Self-review the **diff**, not the PR body.
 
-- `python3 -m pytest`, `python3 -m mypy src`, and `python3 -m ruff check src tests scripts` are clean locally.
+- `make check` is clean locally (ruff, mypy, unit suite).
+- The ladder rungs your change class requires (Start-here table, `docs/live-stack.md`) are green in full. Skipping a required rung — or inventing its numbers — fails review outright.
 - Branched fresh from `origin/main`, single concern, not an already-merged branch.
-- Every new behavior has a test that fires the **claimed path**, not only the exception/fallback path. See Testing.
+- Every new behavior has a test that fires the **claimed path**, not only the exception/fallback path. See `docs/testing.md`.
 - Every new handler, branch, and error shape has a reachable test. A handler no test can fire is dead code.
 - Input-handling / parsers were probed adversarially: empty, multi-digit, wrapped (`> `, backticks, quotes, parens, `**bold**`, `[links](url)`, `<angle>`), inline/non-anchored, top-placed, missing blank lines, case folding.
 - `git status` shows no untracked toolchain artifacts (`node_modules/`, lockfiles from experiments, venvs, caches). Experiments run outside the repo tree.
@@ -64,72 +90,12 @@ All of these must hold. Self-review the **diff**, not the PR body.
 - Retrieval changes (embedder, chunking, RRF, filters, query shape) include `make eval` vs the mode-keyed baseline (`evals/baseline.json` hash, `evals/baseline-vllm.json` live) in the PR body (identifier recall@1 strict 1.0; overall recall@1 ×0.9, recall@5 ×0.95, MRR ×0.95; 0 query errors). Tooling PRs that also touch those paths still owe the numbers. Re-baseline is a dedicated PR (`make eval-baseline`).
 - Local vLLM / Makefile / script work must not change production chunking, retrieval constants, or ingest-worker semantics in the same PR. If they must, that is two concerns: split, or pay the eval rule above.
 
-## Testing
+## Testing (checklist; rules live in `docs/testing.md`)
 
-`pytest` is the gate. Tests generate original PDFs at runtime (`scripts/make_synthetic_pdf.py`). No binary fixtures in git.
-CI must fail if `git ls-files` matches `.pdf` / `.pdx` / `.idx`.
-Cover IBM-shaped synthetics (form number, message id, outline) **and** generic PDFs (no outline, no form number, unknown vendor).
-`test_chrome_strip` must keep a **long** page list (≥8 pages). Chrome is disabled on short docs on purpose.
-
-### Unit tests are hermetic
-
-Do not call live Qdrant, vLLM, or the internet. Fake the client. Ingest tests use `--dry-run`.
-
-- Patch `httpx2.get` / `httpx2.post` in every unit test that can reach them. Hostnames like `embed-host:9000` are live network. A test that “works because connect failed” is invalid.
-- Requesting the `monkeypatch` fixture does nothing by itself. Register every mutated env key with `monkeypatch.setenv` / `monkeypatch.delenv` **before** the code under test runs, or snapshot with `monkeypatch.setattr(os, "environ", dict(os.environ))`. Autouse fixtures must call `monkeypatch`.
-- Do not mutate module-global state (routes on the global app, leftover `os.environ`) that later tests inherit.
-- Pin public contracts, not private internals (`client._transport._pool._retries` dies on the next lockfile bump).
-- Remove unused fixtures and parameters when touching a test.
-
-### Tests must lock the claimed path
-
-If the PR claims “CLI override”, “auto-detect”, “unwrap fence”, “sandbox env”, “IPC isolation”, or “dimension recreate”, the test must still pass when the **success** path is forced with mocks.
-
-Do not assert an outcome the fallback would also produce.
-
-Minimum matrix for any auto-detect / resolve helper:
-
-1. Explicit value matches a served id or basename.
-2. Explicit value + multiple nonmatching ids → keep the explicit value **or** fail closed with a message. Never silently keep `load_settings()` leftovers.
-3. No explicit value + exactly one served id → auto-select.
-4. Connection refused / timeout → documented fallback only; hash mode requires `allow_hash_mode=True`.
-5. HTTP 200 with non-JSON or missing `data` → must not raise out of the helper.
-
-Parser / citation / fence / grounding changes need the cases that broke last time:
-
-- Top-placed `Citations:` with no blank line after the last cite.
-- `CITATIONS:` case folding.
-- Parentheses noise must not become excerpt indexes (`z/OS (3.1)`).
-- Unlabeled vs language-tagged fences; do not use `len > N` as a script signal.
-- Out-of-bounds `[99]`.
-- e2e `/v1/answer` fails on zero citations or “no supporting excerpts”.
-- Queried identifiers (`IEA500I`, `LFAREA`, …) must exist in the synthetic `build()` fixture, otherwise the gate cannot fail for the right reason.
-
-IPC / worker changes: round-trip the error record through `pickle.dumps`.
-Collection-dimension logic: missing, matching, and mismatched (named `dense` dict **and** single-vector schemas), including `--skip-ingest`.
-
-### Simulation, eval, bench
-
-- Golden corpus (dev/holdout): `evals/golden.jsonl` is the dev set; `evals/holdout.jsonl` is **frozen** (sha256-pinned at `evals/holdout.jsonl.sha256`). Tune against dev only; `make eval-holdout` runs on release candidates only. Both files are mechanically verified by `make verify-golden` (0 FAIL required; rebuild via `scripts/build_golden_corpus.py` from `evals/expert_golden_seed.jsonl` + payload mining). Entries carry `query_class` (message_id/doc_number/syntax/diagnostic/comparative/version/negative), `expected_behavior` (answer/abstain), `must_not_retrieve`/`must_not_message_ids` (gated hard-zero within top-5; a chunk co-carrying the query's own message id is the same documented page, not a violation — same sibling-allowance as the builder's trap assertion), `expected_page` (diagnostic), and answer-tier gold fields for the answer eval. Abstain entries carry no `expected_doc_ids` and stay out of recall/MRR denominators. Loading new vendor books (new domains/editions) triggers a re-bind: re-run `scripts/build_golden_corpus.py` (domain entries flip abstain→answer automatically when their identifiers bind), re-author for the new domains, `make verify-golden` 0 FAIL, then re-freeze the holdout (new sha) and re-record baselines in one dedicated commit.
-
-- Simulation tier (marker `integration`, `make sim`): real PDFs → real ingest into a docker Qdrant (`images.txt` pin, or `QDRANT_SIM_URL`) → agent endpoints over the real app. `scripts/mock_vllm.py` is the only stand-in. No retrieval/LLM code is monkeypatched. Docker-only, loopback-only, corpus generated at runtime. Plain `pytest` deselects it (`-m 'not integration'`). CI `sim` job is **fail-closed**: missing docker, any skipped test, or zero passes fails the job. Fetched BM25 weights verify against `bm25-weights.sha256`. Synthetic documents must differ in **body text**, not just metadata. Never pin top-1 across potentially equal-text chunks; assert scoping + presence + within-run determinism.
-- Load tier (marker `integration`, `make loadtest-mock`, PR-gated by `.github/workflows/load.yml` on agent/retrieve/ingest/mock paths): the sim composition plus a real uvicorn agent (`LLM_STREAM=true`) asserting **absolute** contracts under threaded load — zero errors, zero missing `Server-Timing`, per-stream SSE integrity (tokens → exactly one `final`, no `error`), citation parity stream/search/JSON, fixed error envelopes with no leaked internals, determinism after load, abort-storm survival (complete XOR aborted per stream, one `stream_truncated` alert per abort), and a TTFT floor under a paced mock. Never cross-environment comparisons. Fail-closed like sim (no skips; agent stdout goes to a file, never a pipe — an unread pipe wedges every request under load).
- - Eval: `make eval`, dev golden set vs the mode-keyed baseline (auto-selected by `EMBED_MODE`; collection mismatch skips the gate with a loud warning). Golden hits are doc-level. Sim runs `test_eval_retrieval_on_synthetic_corpus`.
- - Paraphrase instrument (`evals/paraphrase.jsonl`, `make eval-paraphrase`): operator-phrased queries whose answers exist in the synthetic corpus WITHOUT the query text near-verbatim (no-echo contract pinned hermetically in `tests/test_paraphrase.py`), over lexical-competitor docs. Separate golden set + mode-keyed baselines (`evals/baseline-paraphrase[-vllm].json`) so the main gate is untouched; corpus generated at runtime via `gate_l1.generate_synthetic_golden_corpus`, ingested into a dedicated collection. For semantic A/B work (contextual prefixes, reranker on/off, dense-prefix tuning) where the main set saturates. Not wired into CI.
-- Answer tier (`make eval-answers`, live GPU stack, in-process TestClient like `scripts/test_local_e2e_vllm.py`): `/v1/answer` grounding honesty — answer entries must produce ≥1 validated citation and must not refuse; abstain/trap entries must not be answered (zero validated citations). Gold substrings judge model phrasing and are suppressed on the canned zero-hits path. The judge never re-parses citations (the agent's validator is the single source of truth). No retries, no finish_reason checks (not in the response contract; the app alerts non-stop per request). Deterministic stratified round-robin sample (`N=24` default, `N=all` full run); reasoning sampling is not run-deterministic — structural FAILs gate, rates are trend data in the manifest.
-- Bench (`make bench`; `.github/workflows/bench.yml`; GitHub-only; never a PR gate): ingest wall/docs/s/RSS, Qdrant RAM/CPU/disk, agent latency against the pinned image. `/v1/answer` uses the mock LLM — say so in every report. `--check benchmarks/baseline.json` (RSS/disk ×1.5, latency p95 ×3; improvements never fail). Re-baseline is a dedicated PR. GitLab has no bench.
-- Bench baselines must be captured in the gate's own environment (CI runners) via the `update_baseline` dispatch with repeats ≥3 (noise floor: `--repeats N` aggregates min latency/footprint, max errors/throughput) — never a dev machine: a 24-core-local baseline gating 4-vCPU CI runs at ×3 left near-zero p95 headroom and failed on runner contention (2026-09-02). `scripts/qdrant_sim.py` and `scripts/qdrant_pin.py` have exactly one owner each — do not fork them; `make sim-qdrant` is a fixed-port wrapper.
-- Harness invariants (all harness tiers L1/L2/L3):
-  1. *One gate, one baseline file, one environment*: Bench ≠ L1 ≠ L2 ≠ L3. Never merge GPU numbers into the GitHub-runner bench JSON. Capture in the gate's own environment; env mismatch (`cpu_count`, `qdrant_image`, `embed_mode`, `gpu_name`) fails closed with a distinct error, not `p95 > ×3`.
-  2. *Harness PRs touching src/ are production PRs*: Justify runtime changes. Default-off for new transport/settings (`llm_stream: bool = False`). Fail-loud on fallback. Hermetic tests of the new production path, not only script helpers.
-  3. *Do not change response body contracts to measure*: Headers (`Server-Timing`) and logs are the probe surface; JSON schemas stay frozen.
-  4. *Fail-closed is the default*: Missing baseline, missing pin, missing header, unmatched join, unparseable judge, empty stream — refuse to score. Never `except: pass` then continue as success. Gate helpers must not drop earlier reasons when baseline is missing.
-  5. *Make recipes are part of the contract*: Recipes must pass the declared Make variables (`--gate`, `--baseline $(FILE)`, `--url`).
-  6. *Standing-red live runs are labeled as RC debt, not broken targets*.
-  7. *Read the last harness review before writing the next layer*.
-
-- Layered harness (`make harness-gate` / `harness-baseline`; RC-only, GPU stack; never a PR gate, never GitLab): L1 retrieval per class — recall@5/@8, MRR@8, doc-level nDCG@8 (per-doc deduped, gains: doc +1/heading +1/page +1; never aggregate-only), trap precision absolute (one must_not violation fails; sibling allowance shared with the retrieval eval via `must_not_violations`). Gate verdict: zero P0 trap failures AND no per-class regression beyond the baseline's `class_regression_floor` (0.05 default) AND ≥1 primary metric (recall@5, MRR) improving with a paired-bootstrap 95% CI excluding zero. Determinism is pinned: mode-keyed baselines store PER-QUERY values (retrieval is deterministic against the snapshot-pinned index — proven byte-stable), bootstrap is seeded (stdlib `random.Random`), Qdrant pin = exactly one snapshot whose server-assigned name + points count live in the baseline `_meta` (recover ≈30s per 840k points; drift-only restore by default, always by the RECORDED name; gate runs fail closed when the baseline or pin is missing — never pin live state; a drifted record run creates a NEW snapshot of the current state and prunes the old pin (re-adoption happens only under the skip path's exact fingerprint match). L2 (`make harness-l2`; answer tier, live GPU stack, same venue rules): reuses the answer-tier eval's runner (one judging path) and adds citation precision/recall vs `expected_doc_ids` (doc-level, citations mapped to hits by exact cite-string match — `/v1/answer` retrieves with the same limit-8 call `/v1/search` makes, so no regex guessing; L2 must run on the L1-pinned collection and any citation that does not map back to the fetched pool FAILS the row — P/R over a silently-wrong join is worse than no measurement; precision averages rows with ≥1 citation while recall includes zero-cite rows at 0), a temp-0 NLI faithfulness judge over the cited excerpts (unparseable judge output is a structural FAIL; label distribution is trend data; the judge never sees citation markers), truncation rate joined from the app's `answer_alert` log lines by request_id (a missing request_id fails the row — a silent false would undercount), and `syntax_pattern` gold (authored per syntax entry in `build_golden_corpus.py`; keyword-presence by design — echo-able, so a pass means the construct was NAMED, not that valid syntax was produced; a miss is a structural FAIL). Structural fails gate the exit code; all rates are trend data (sampling is not run-deterministic). The L2 gate is standing red on known product debt (suffix-less doc-number gap, 4096-window truncation, the MQ trap) until those are fixed — an RC debt signal, not a broken target. L3 (`make harness-l3` / `harness-l3-baseline`; performance & latency tier, live GPU stack, same venue rules): per-stage p50/p95 latency (`embed_ms`, `qdrant_ms`, `llm_ms`, `ttft_ms`) captured from `Server-Timing` headers, Time To First Token (TTFT) via reasoning-model SSE chunk streaming on first content token (agent server must be started with `LLM_STREAM=true`, e.g. via `make run-agent`; default production `llm_stream=False`), and VRAM footprint via `nvidia-smi` under concurrent load (`loadtest.py`) reported as trend data. Uses dedicated mode-keyed baselines (`benchmarks/harness-l3-vllm.json` / `benchmarks/harness-l3.json`), NEVER the CI bench file `benchmarks/baseline.json`. Gating fails closed on env mismatch (`cpu_count`, `embed_mode`, `qdrant_image`, `gpu_name`), requires 0 request errors, 0 missing `Server-Timing` headers, all baseline stages present, and p95 stage latencies within baseline limit (×3). Baselines refuse to record from broken runs (errors > 0 or missing_timings > 0).
-- Reports: `scripts/render_report.py` (`make eval-report` / `eval-html` / `eval-compare` / `bench-report` / `bench-html` / `bench-compare`). `scripts/query_demo.py` (`make query-demo`, `make ask`) is inspection, not a substitute for eval.
+- `pytest` is the gate; tests generate original PDFs at runtime, no binary fixtures; CI fails on committed `.pdf` / `.pdx` / `.idx`.
+- Unit tests are hermetic: no live Qdrant / vLLM / internet; fake the client; patch `httpx2`; never mutate module-global state; pin contracts, not internals.
+- Tests lock the claimed path: force the success path with mocks; never assert what the fallback would also produce. Adversarial matrices and the parser/citation/fence case lists are in `docs/testing.md` — apply the ones your change touches.
+- Tier commands and their green conditions are the ladder in `docs/live-stack.md`; tier mechanics (golden/holdout discipline, sim/load/bench/harness invariants) are in `docs/testing.md`.
 
 ## CLI, Makefile, and local vLLM
 
@@ -183,7 +149,7 @@ Standing #20 rules: embed / Qdrant points / LLM are `Protocol`s in `ports.py`; u
 
 Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(status="error")`. Unpicklable `httpx2.HTTPStatusError` objects crash `ProcessPoolExecutor` across spawn IPC.
 
-## GitHub vs GitLab CI
+## GitHub vs GitLab CI (read only when touching CI files)
 
 - Keep **`.gitlab-ci.yml` at the repo root** so an air-gap clone runs pipelines with no rewrite.
 - Keep **`.github/workflows/ci.yml`** for GitHub. Job *meaning* stays aligned: refuse committed `.pdf`/`.pdx`/`.idx`, then pytest. Change both in the same PR.
@@ -201,7 +167,7 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 - Every job declares least-privilege `permissions`, `timeout-minutes`, and a `concurrency` group with a fallback (`|| github.run_id`). Secret-gated jobs fail closed; PR jobs guard forks.
 - Third-party session/share flags default OFF on every job (`SHARE: "false"` on all of them). This repo is the public mirror.
 
-## Image refs (connected factory)
+## Image refs (connected factory — read only for image/pack work)
 
 - Connected `main` is the only image factory. The air-gap never builds Containerfiles until an issue says so.
 - One string, everywhere: `ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<full-git-sha>`. Full SHA is `git rev-parse HEAD` / `$GITHUB_SHA`, **never** `${GITHUB_SHA::7}`. That exact string is used for `docker tag`, `docker push`, kustomize sed, `airgap-pack`, and `airgap-load`.
@@ -210,7 +176,7 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 - Do not add unpublished extras (`types-httpx2`). `httpx2` ships types. A dependency no module imports is a phantom (`test_no_litellm_anywhere`). Audit `pyproject.toml` before adding.
 - Images: UBI, non-root, `--no-index` from `/wheelhouse`. Bake BM25 weights (`make bm25-weights`).
 
-## Overlays (never mix CI and prod)
+## Overlays (never mix CI and prod — read only for deploy work)
 
 - **CI (lab, connected only):** `overlays/ci/values.yaml` + `deploy/kustomize/overlays/ci` — 1 replica / 1Gi, `EMBED_MODE=hash`, synthetic PDFs generated in-cluster, GHCR pulls. Never copy the CI ingest Job into prod.
 - **Prod (air-gap):** `overlays/openshift/values.yaml` + `deploy/kustomize/overlays/openshift` (agent) + `overlays/openshift-ingest` (one-shot Job). 3 replicas / 500Gi / unprivileged / RWO. No `EMBED_MODE` key. Corpus is a caller-supplied PVC. Do not shrink prod values to CI sizes.
@@ -219,7 +185,7 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 - Helm `--set image.tag` is `v1.19.0` **without** `-unprivileged`; the chart appends that suffix when `useUnprivilegedImage=true`. `load.sh` still pushes `:v1.19.0-unprivileged`.
 - Kubernetes Jobs are immutable: delete before re-apply (`make airgap-ingest`).
 
-## Air-gap path (issue #15)
+## Air-gap path (issue #15 — read only for air-gap work)
 
 - The air-gap never builds images. `make airgap-pack` runs on a connected clone of public `main` at the SHA whose GHCR tags exist. `IMAGE_SHA` is the full git SHA and must equal both `HEAD` and the GHCR tag. `make airgap-load` / `airgap-deploy` run inside the gap against `airgap.env`. Scripts are POSIX sh under `scripts/airgap/` and fail closed.
 - Happy path: `airgap-pack` → sneakernet `*.tar` + `*.tar.sha256` → unpack → `git clone repo.bundle` → `airgap-load` → `airgap-deploy`. `load.sh` does **not** clone. Verify tarball digest **before** unpack; member `SHA256SUMS` **after**. Do not invent a third path. `oc-mirror` is optional.
@@ -227,7 +193,7 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 - GitLab CI still does **not** deploy or pull GHCR: clone-and-pytest only. No PDFs, kubeconfigs, tokens, or internal hostnames in git or in the tarball.
 - `airgap-rehearsal` (e2e.yml, main/dispatch) uses three CI-only stand-ins, never in git prod values: GHCR as `INTERNAL_REGISTRY`, `scripts/mock_vllm.py` as vLLM, shrunk size knobs for lab quota. `PULL_SECRET` unset renders `imagePullSecrets=null`. `airgap-dryrun` (every PR, `AIRGAP_DRYRUN=1`) proves renders, placeholder fail-close, SHA rules, both PULL_SECRET branches, and size knobs without a cluster.
 
-## Qdrant skills (vendored)
+## Qdrant skills (vendored — read before touching Qdrant)
 
 `qdrant/skills` is vendored (pinned, no submodule) under `.agents/skills/`; pin record in `vendor/qdrant-skills.sha`.
 
