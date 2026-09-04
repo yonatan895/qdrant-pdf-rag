@@ -64,13 +64,23 @@ The agent returns **answers grounded strictly in citations** (doc number, title,
 
 | Workload | Kind | Replicas | Spec |
 |---|---|---|---|
-| `qdrant` | StatefulSet (vendored chart) | 3 | Cluster mode, P2P 6335, HTTP 6333, gRPC 6334, `restricted-v2` SCC |
+| `qdrant` | StatefulSet (vendored chart) | 3 | Cluster mode, P2P 6335 (TLS off), HTTP 6333, gRPC 6334, `restricted-v2` SCC |
 | `rag-agent` | Deployment | 2 | FastAPI, unprivileged, no GPU |
 | `rag-ingest` | One-Shot Job | 1 | High CPU, worker pool, RWO scratch |
+| `jaeger` | Deployment (optional) | 1 | Jaeger v2 all-in-one, Badger RWO block PVC, opt-in tracing backend |
 | `bm25-weights` | Baked in images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 
 - **Storage Constraint:** Qdrant persistent data volume **must** be RWO Block storage (NFS and object storage are refused). Ingest work volume is also RWO Block. The corpus volume may be mounted as read-only NFS or PVC.
-- **Networking:** ClusterIP services only. No public Route to Qdrant. Agent Route is optional (`AGENT_ROUTE=true`).
+- **Networking:** ClusterIP services only. No public Route to Qdrant. Agent Route is optional (`AGENT_ROUTE=true`). Inter-node Qdrant gossip is plaintext on the CNI (`config.cluster.p2p.enable_tls: false` in `values.yaml`) because cluster certificates are not mounted.
+
+### 3.2 Canonical Deployment Standard Across Environments
+
+The 4-stage pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is the **canonical deployment standard across the entire project**:
+1. **Production (Air-Gapped OpenShift):** Full 3-replica Qdrant cluster, internal enterprise registry, `restricted-v2` SCC, cluster vLLM endpoints, sneakernet tarball verification.
+2. **Local Cluster Testing (Kind + Local Registry):** Local single-node Kind cluster using a local container registry (`localhost:5000` / `airgap-registry:5000`) and 1-replica overrides (`QDRANT_EXTRA_VALUES`). Runs the exact same packaging, images, Helm chart, and Kustomize overlays.
+3. **Continuous Integration (CI):** Mandatory `make airgap-dryrun` on every PR validating manifest rendering, variable quoting, and fail-closed placeholder rules without a cluster; `airgap-rehearsal` executes the end-to-end pipeline on `main`.
+
+This architectural standard guarantees 100% environment fidelity and eliminates drift between local development and production.
 
 ---
 

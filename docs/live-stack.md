@@ -11,8 +11,9 @@ the procedure.
 |---|---|
 | Docs only | Existence-check cited paths; no GPU |
 | Tests / make / CI only | `make check` (rung 1) |
-| Agent HTTP / validation | Rungs 1 + 6 (probes) |
-| Ingest / chunk / classify | Rungs 1 + 2 (gate-l1) + 3 (fresh paraphrase) |
+| Deployment / air-gap / Helm / overlays | `make check` (rung 1) + `make airgap-dryrun` (rung 2) |
+| Agent HTTP / validation | Rungs 1 + 7 (probes) |
+| Ingest / chunk / classify | Rungs 1 + 3 (gate-l1) + 4 (fresh paraphrase) |
 | Retrieve / embed / RRF / rerank / screen | Full ladder + A/B numbers in the PR body |
 | Defaults, UUID, `chunk_type`, production constants | Split the PR; the split-off pays eval + A/B |
 
@@ -28,8 +29,11 @@ into the repo); `$SCRATCH_DIR` is scratch space outside the repo
 
 ## 1. Bring-up order
 
-Start Qdrant first, then embed, then reasoning. Each step has a health
-proof — do not proceed past a failed proof.
+There are two primary local runtime topologies:
+1. **Standalone Development / GPU Mode** (loopback services for rapid retrieval & prompt iteration): start Qdrant first, then embed, then reasoning. Each step has a health proof — do not proceed past a failed proof.
+2. **Standard Local Cluster Mode** (Kind + local registry on port 5000): exercises the exact production air-gap deployment pipeline (`make airgap-pack` -> `load` -> `deploy` -> `ingest` -> `smoke`). See [docs/install_and_ops.md](install_and_ops.md#47-local-cluster-testing-standard-kind--local-registry) for step-by-step setup.
+
+### Standalone Bring-Up (GPU / Dev)
 
 ```sh
 # Qdrant (docker, loopback port 6333)
@@ -76,14 +80,15 @@ Run top to bottom. Each rung states its green condition — a red rung
 stops the push, no exceptions.
 
 1. `make check` — ruff, mypy, unit suite. Green: all clean.
-2. `make gate-l1` — L1 retrieval gate on the ephemeral simulator. Green: exit 0, 0 regressions.
-3. Fresh-ingest `make eval-paraphrase` — re-ingest the paraphrase corpus into a scratch collection, then evaluate. Green: exit 0 reproducing `evals/baseline-paraphrase.json` exactly (proves the change moves nothing it should not).
-4. `make sim` — integration tier. Green: all pass, **0 skipped** (a skip fails the job; a skip on missing local weights means symlink or rebuild them, never ignore it).
-5. `make eval EMBED_MODE=vllm` (with the §2 block exported) — Green: 0 query failures; numbers at or above the mode-keyed baseline.
-6. Live agent probes — `make run-agent` (or equivalent uvicorn) against the real stack, then the four copy-paste probes below (agent on `:8087` in these examples; `Q` is the query). Green: trap refuses with zero validated citations, legit answers grounded with ≥1 citation, overlong 422s with the fixed envelope.
-7. Feature A/B numbers in the PR body — any retrieval/ranking change ships measured deltas (2×2 where applicable: off/on × base/context), per-query attribution for every moved query, must_not hard-zero.
+2. `make airgap-dryrun` (deployment/ops changes) — proves template rendering, substitution, and fail-closed rules without cluster credentials. Green: exit 0, no unsubstituted placeholders.
+3. `make gate-l1` — L1 retrieval gate on the ephemeral simulator. Green: exit 0, 0 regressions.
+4. Fresh-ingest `make eval-paraphrase` — re-ingest the paraphrase corpus into a scratch collection, then evaluate. Green: exit 0 reproducing `evals/baseline-paraphrase.json` exactly (proves the change moves nothing it should not).
+5. `make sim` — integration tier. Green: all pass, **0 skipped** (a skip fails the job; a skip on missing local weights means symlink or rebuild them, never ignore it).
+6. `make eval EMBED_MODE=vllm` (with the §2 block exported) — Green: 0 query failures; numbers at or above the mode-keyed baseline.
+7. Live agent probes — `make run-agent` (or equivalent uvicorn) against the real stack, then the four copy-paste probes below (agent on `:8087` in these examples; `Q` is the query). Green: trap refuses with zero validated citations, legit answers grounded with ≥1 citation, overlong 422s with the fixed envelope.
+8. Feature A/B numbers in the PR body — any retrieval/ranking change ships measured deltas (2×2 where applicable: off/on × base/context), per-query attribution for every moved query, must_not hard-zero.
 
-### Rung 6 probes (exact)
+### Rung 7 probes (exact)
 
 ```sh
 # a. health
