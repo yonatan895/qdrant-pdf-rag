@@ -69,7 +69,7 @@ Collection-dimension logic: missing, matching, and mismatched (named `dense` dic
 
 ### Air-gap deployment tier (`make airgap-dryrun`, `tests/test_airgap_*.py`, local Kind)
 
-The canonical deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is verified across three complementary tiers:
+The canonical 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is verified across three complementary tiers:
 1. **Hermetic Test Suite (`pytest tests/test_airgap_*.py`):** Fast unit tests running without a cluster or Docker daemon. Exercises `scripts/airgap/*.sh` via stubs for `helm`, `kubectl`, `oc`, `kustomize`, and `skopeo`. Verifies manifest rendering, string quoting of integers and booleans (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`), storage class checks (refusing NFS), Jaeger v2 wiring, and fail-closed behavior on `/healthz` probe failures.
 2. **CI Pre-Flight Dry-Run (`make airgap-dryrun`):** Automated PR gate in GitHub Actions. Renders production Helm templates and Kustomize overlays using test parameters, verifying that all placeholders are substituted and zero leftover `__[A-Z0-9_]+__` patterns remain.
 3. **Local Cluster & E2E Rehearsal:** In local development, operators test the complete pipeline against a single-node Kind cluster and local registry container on port 5000 (`localhost:5000`). In CI, `airgap-rehearsal` runs on `main` against an ephemeral namespace in the lab OpenShift cluster, validating the real sneakernet tarball unpack, image push, StatefulSet rollout, and smoke queries.

@@ -15,7 +15,7 @@ If a review comment conflicts with this file, follow this file and note the conf
 | Docs only | Existence-check cited paths; no GPU |
 | Tests / make / CI only | `make check` |
 | Deployment / air-gap / Helm / overlays | `make check` + `make airgap-dryrun` |
-| Agent HTTP / validation | `make check` + live probes (rung 7) |
+| Agent HTTP / validation | `make check` + live probes (rung 6) |
 | Ingest / chunk / classify | `make check` + gate-l1 + fresh paraphrase |
 | Retrieve / embed / RRF / rerank / screen | Full ladder + A/B numbers in the PR body |
 | Defaults, UUID, `chunk_type`, production constants | Split the PR; the split-off pays eval + A/B |
@@ -191,9 +191,10 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 - The air-gap never builds images. `make airgap-pack` runs on a connected clone of public `main` at the SHA whose GHCR tags exist. `IMAGE_SHA` is the full git SHA and must equal both `HEAD` and the GHCR tag. `make airgap-load` / `airgap-deploy` run inside the gap against `airgap.env`. Scripts are POSIX sh under `scripts/airgap/` and fail closed.
 - Happy path: `airgap-pack` → sneakernet `*.tar` + `*.tar.sha256` → unpack → `git clone repo.bundle` → `airgap-load` → `airgap-deploy`. `load.sh` does **not** clone. Verify tarball digest **before** unpack; member `SHA256SUMS` **after**. Do not invent a third path. `oc-mirror` is optional.
 - Scripts refuse `EMBED_MODE=hash`, NFS-looking `STORAGE_CLASS`, missing `VLLM_BASE_URL`/`EMBED_MODEL`/`DENSE_DIM`, and SHA-tag mismatches.
-- Canonical deployment standard: the 4-stage pipeline (`airgap-pack` → `airgap-load` → `airgap-deploy` → `airgap-ingest` → `airgap-smoke`) is the standard deployment architecture across the repository.
-- Local cluster testing standard: developers test cluster manifests locally using Kind and a local registry container on port 5000 (`localhost:5000` / `airgap-registry:5000`), executing the identical 4-stage pipeline with single-replica overrides (`QDRANT_EXTRA_VALUES`), guaranteeing zero divergence from production.
+- Canonical deployment standard: the 5-stage pipeline (`airgap-pack` → `airgap-load` → `airgap-deploy` → `airgap-ingest` → `airgap-smoke`) is the standard deployment architecture across the repository.
+- Local cluster testing standard: developers test cluster manifests locally using Kind and a local registry container on port 5000 (`localhost:5000` / `airgap-registry:5000`), executing the identical 5-stage pipeline with single-replica overrides (`QDRANT_EXTRA_VALUES`) — same scripts and overlays, adapted sizing/SCC.
 - Operational invariants: Qdrant inter-node gossip is plaintext on CNI without `./tls/cert.pem` (`config.cluster.p2p.enable_tls: false` in `values.yaml`); integer/boolean env vars (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`) are strictly quoted in rendered manifests; `smoke.sh` fails closed on degraded `/healthz`.
+- GitLab CI still does **not** deploy or pull GHCR: clone-and-pytest only. No PDFs, kubeconfigs, tokens, or internal hostnames in git or in the tarball.
 - `airgap-rehearsal` (e2e.yml, main/dispatch) uses three CI-only stand-ins, never in git prod values: GHCR as `INTERNAL_REGISTRY`, `scripts/mock_vllm.py` as vLLM, shrunk size knobs for lab quota. `PULL_SECRET` unset renders `imagePullSecrets=null`. `airgap-dryrun` (every PR, `AIRGAP_DRYRUN=1`) proves renders, placeholder fail-close, SHA rules, both PULL_SECRET branches, and size knobs without a cluster.
 
 ## Qdrant skills (vendored — read before touching Qdrant)

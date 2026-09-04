@@ -101,7 +101,7 @@ EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus 
 
 ## Standard Deployment Architecture (Air-Gap & Local Cluster)
 
-The hardened air-gap deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this exact pipeline, eliminating environment drift.
+The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts, Helm chart, and Kustomize overlays, with adapted sizing and SCC for local test clusters).
 
 **The air-gap never builds images.** Connected `main` is the only image factory.
 
@@ -132,27 +132,28 @@ The hardened air-gap deployment pipeline (`airgap-pack` -> `airgap-load` -> `air
 
 ### 2. Local Cluster Testing Standard (Kind + Local Registry)
 
-To test the complete production deployment locally with full fidelity:
+To test the deployment scripts and Kubernetes manifests locally with adapted sizing (1-replica Kind with mock/local vLLM instead of 3-replica OpenShift `restricted-v2`):
 
-```bash
-# 1. Create local Kind cluster and local registry on port 5000
-kind create cluster --name airgap
-docker run -d --restart=always -p 5000:5000 --name airgap-registry registry:2
-docker network connect "kind" airgap-registry
+1. **Bootstrap Kind & Local Registry:**
+   ```bash
+   docker run -d --restart=always -p 5000:5000 --name airgap-registry registry:2
+   kind create cluster --name airgap
+   docker network connect "kind" airgap-registry || true
+   ```
 
-# 2. Build sneakernet package and load into local registry
-make airgap-pack
-INTERNAL_REGISTRY=localhost:5000 INSECURE_REGISTRY=true make airgap-load
+2. **Configure Environment:**
+   Copy `airgap.env.example` to `airgap.env`, pointing `INTERNAL_REGISTRY=airgap-registry:5000`, `STORAGE_CLASS=standard`, `QDRANT_EXTRA_VALUES=scratch/qdrant-local.yaml` (1 replica override), and your vLLM/mock endpoint.
 
-# 3. Deploy standard stack into Kind
-INTERNAL_REGISTRY=airgap-registry:5000 STORAGE_CLASS=standard QDRANT_STORAGE_SIZE=1Gi make airgap-deploy
+3. **Execute 5-Stage Pipeline:**
+   ```bash
+   make airgap-pack
+   INTERNAL_REGISTRY=localhost:5000 INSECURE_REGISTRY=true make airgap-load
+   make airgap-deploy
+   make airgap-ingest CORPUS_PVC=<pvc>
+   make airgap-smoke
+   ```
 
-# 4. Ingest and smoke test
-INTERNAL_REGISTRY=airgap-registry:5000 CORPUS_PVC=my-corpus-pvc make airgap-ingest
-make airgap-smoke
-```
-
-For full details, see **[docs/install_and_ops.md](docs/install_and_ops.md)**.
+See **[docs/install_and_ops.md](docs/install_and_ops.md#47-local-cluster-testing-standard-kind--local-registry)** for the complete Kind setup, registry configuration, and mock vLLM setup.
 
 ---
 

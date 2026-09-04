@@ -489,7 +489,7 @@ Failures surface as `rerank_ms` in `/v1/search` `Server-Timing` and the agent lo
 
 ## 4. Standard Deployment Architecture (Air-Gap Production & Local Cluster Testing)
 
-The hardened 4-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this exact architecture, ensuring zero environment drift between local development and production.
+The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts, Helm chart, and Kustomize overlays, with adapted sizing and SCC for local test clusters).
 
 ### 4.1 Packaging on the Connected Host (Image Factory)
 
@@ -662,16 +662,31 @@ QUERY="IEA500I operator message" make airgap-smoke
 
 ### 4.7 Local Cluster Testing Standard (Kind + Local Registry)
 
-To validate the complete deployment pipeline locally without access to an OpenShift cluster, the project standardizes on **Kind** (Kubernetes-in-Docker) paired with a local container registry container on port 5000. This executes the identical packaging, image-loading, Helm chart, Kustomize overlays, and smoke tests as production.
+To test the deployment scripts and Kubernetes manifests locally without access to an OpenShift cluster, the project standardizes on **Kind** (Kubernetes-in-Docker) paired with a local registry container on port 5000.
 
-#### Step 1: Provision Local Kind Cluster & Registry
+> [!NOTE]
+> Local cluster testing exercises the identical packaging scripts, container archives, Helm chart, and Kustomize overlays as production, but with adapted sizing and security contexts (1-replica Kind + mock/local vLLM rather than 3-replica OpenShift `restricted-v2`).
+
+#### Step 1: Provision Local Registry & Kind Cluster
+
+Kind nodes pull images inside Docker; pulling from `airgap-registry:5000` over HTTP requires configuring containerd mirrors in Kind:
 
 ```bash
-# 1. Start local container registry
+# 1. Start local container registry container
 docker run -d --restart=always -p 5000:5000 --name airgap-registry registry:2
 
-# 2. Create Kind cluster
-kind create cluster --name airgap
+# 2. Create Kind cluster with containerd insecure mirror for airgap-registry:5000
+cat <<'EOF' > scratch/kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry]
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors]
+      [plugins."io.containerd.grpc.v1.cri".registry.mirrors."airgap-registry:5000"]
+        endpoint = ["http://airgap-registry:5000"]
+EOF
+kind create cluster --name airgap --config scratch/kind-config.yaml
 
 # 3. Connect local registry to Kind network
 docker network connect "kind" airgap-registry || true
@@ -680,20 +695,20 @@ docker network connect "kind" airgap-registry || true
 #### Step 2: Pack Sneakernet Tarball
 
 ```bash
-# Build the complete 4-image archive bundle
+# Build the complete image and bundle archive in dist/
 make airgap-pack
 ```
 
 #### Step 3: Load & Push to Local Registry
 
 ```bash
-# Load archives from dist/ and push to localhost:5000 (airgap-registry inside the cluster)
+# Load archives from dist/ and push to localhost:5000 (airgap-registry)
 INTERNAL_REGISTRY=localhost:5000 INSECURE_REGISTRY=true make airgap-load
 ```
 
-#### Step 4: Deploy Stack to Kind
+#### Step 4: Configure `airgap.env` & Deploy Stack to Kind
 
-For single-node local testing, supply single-replica overrides via `QDRANT_EXTRA_VALUES`:
+Create a local single-replica override for Qdrant, copy `airgap.env.example` to `airgap.env`, and populate required values:
 
 ```bash
 # Create local sizing override (1 replica for Kind test node)
@@ -708,21 +723,34 @@ resources:
     memory: 2Gi
 EOF
 
-# Deploy Qdrant StatefulSet, Jaeger v2, and Agent Deployment
-INTERNAL_REGISTRY=airgap-registry:5000 \
-STORAGE_CLASS=standard \
-QDRANT_STORAGE_SIZE=1Gi \
-QDRANT_EXTRA_VALUES=scratch/qdrant-local.yaml \
+# Copy example and configure environment
+cp airgap.env.example airgap.env
+```
+
+Ensure `airgap.env` contains:
+```sh
+INTERNAL_REGISTRY=airgap-registry:5000
+NAMESPACE=mainframe-rag
+STORAGE_CLASS=standard
+QDRANT_STORAGE_SIZE=1Gi
+QDRANT_EXTRA_VALUES=scratch/qdrant-local.yaml
+IMAGE_SHA=$(awk '/^sha: /{print $2}' dist/MANIFEST.txt)
+VLLM_BASE_URL=http://<host-ip-or-svc>:8000
+EMBED_MODEL=ibm-granite/granite-embedding-125m-english
+DENSE_DIM=768
+```
+*(If running without a live GPU vLLM instance, launch `python scripts/mock_vllm.py --port 8000` and point `VLLM_BASE_URL` to the host).*
+
+Deploy the stack (Qdrant StatefulSet, Jaeger v2, Agent Deployment):
+```bash
 make airgap-deploy
 ```
 
 #### Step 5: Ingest Corpus & Run Smoke Test
 
 ```bash
-# Provision a test PVC with synthetic or local PDFs, then launch ingest:
-INTERNAL_REGISTRY=airgap-registry:5000 \
-CORPUS_PVC=my-corpus-pvc \
-make airgap-ingest
+# Provision a test PVC (backed by standard storage class) with sample PDFs, then launch ingest:
+CORPUS_PVC=my-corpus-pvc make airgap-ingest
 
 # Run in-cluster smoke search:
 make airgap-smoke
