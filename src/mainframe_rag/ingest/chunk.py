@@ -160,14 +160,37 @@ def outline_sections(parsed: ParsedDoc) -> list[Section]:
 def _split_jcl_statements(text: str) -> list[str]:
     """Group JCL cards into statements on lstripped lines (see the column
     note above): `^//\\S` and one-space unnamed ops (`// EXEC`) open one;
-    `^//\\s{2,}` continues the open statement. Non-card lines (in-stream
-    SYSIN data, the `/*` delimiter) become single-line units of their own:
-    gluing a 20k SYSIN block onto its `DD *` card would make one giant atom
-    that no window can hold — data lines split between lines, only `//`
-    cards stay continuation-atomic."""
+    `^//\\s{2,}` continues the open statement. A bare `//` line whose next
+    line carries a parameter (`=`, not blank, not `/`-starting) is an
+    extraction-wrapped card (`//` + newline + `ASMBLR=...`, seen in real IBM
+    manuals) and rejoins into the true card; without the `=` guard a null
+    statement followed by prose or SYSIN data would glue into a phantom
+    card, so those stay split. Non-card lines (in-stream SYSIN data, the
+    `/*` delimiter) become single-line units of their own: gluing a 20k
+    SYSIN block onto its `DD *` card would make one giant atom that no
+    window can hold — data lines split between lines, only `//` cards stay
+    continuation-atomic."""
     statements: list[str] = []
     current: list[str] = []
-    for line in text.splitlines():
+    lines = text.splitlines()
+    joined: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        nxt_stripped = nxt.lstrip()
+        if (
+            line.strip() == "//"
+            and "=" in nxt
+            and nxt.strip()
+            and not nxt_stripped.startswith("/")
+        ):
+            joined.append("//" + nxt_stripped)
+            i += 2
+        else:
+            joined.append(line)
+            i += 1
+    for line in joined:
         nospace = line.lstrip()
         if _JCL_STMT_START_RE.match(nospace) or _JCL_UNNAMED_RE.match(nospace):
             if current:

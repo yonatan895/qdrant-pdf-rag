@@ -227,6 +227,28 @@ def test_unnamed_ops_are_statements_not_continuations():
     assert _split_jcl_statements("// EXEC PGM=X\n// DD DSN=Y") == ["// EXEC PGM=X", "// DD DSN=Y"]
 
 
+def test_wrapped_card_rejoins_across_lines():
+    """Real IBM manuals wrap `//LABEL=params` as `//` + newline + params
+    (dfha3b08 Figure 12): the pair rejoins into the true card instead of a
+    dangling `//` plus a phantom prose unit."""
+    from mainframe_rag.ingest.chunk import _split_jcl_statements
+
+    assert _split_jcl_statements("//\nASMBLR=ASMA90,") == ["//ASMBLR=ASMA90,"]
+    assert _split_jcl_statements("//JOB JOB (A),\n//\nINDEX=X,") == ["//JOB JOB (A),", "//INDEX=X,"]
+
+
+def test_bare_slash_slash_does_not_glue_without_parameter():
+    """The `=` guard: null statements, delimiters, and SYSIN data after a
+    bare `//` stay split — only wrapped parameter cards rejoin."""
+    from mainframe_rag.ingest.chunk import _split_jcl_statements
+
+    assert _split_jcl_statements("//\nSome prose here") == ["//", "Some prose here"]
+    assert _split_jcl_statements("//\n//NEXT JOB") == ["//", "//NEXT JOB"]
+    assert _split_jcl_statements("//\n/*") == ["//", "/*"]
+    assert _split_jcl_statements("//X DD *\nENTRY prog") == ["//X DD *", "ENTRY prog"]
+    assert _split_jcl_statements("trailing\n//") == ["trailing", "//"]
+
+
 def test_instream_data_splits_between_lines_not_as_atom():
     """Blocker 2 (review): a 4000-char SYSIN block must split between data
     lines; only // cards stay continuation-atomic."""
