@@ -303,6 +303,26 @@ jobs:
           fi
           grep -q "QDRANT_EXTRA_VALUES file not found" err.log
 
+      - name: airgap-deploy dry-run with tracing enabled (Jaeger render, issue #83)
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+          AIRGAP_DRYRUN: "1"
+          INTERNAL_REGISTRY: ghcr.io/dryrun-standin
+          NAMESPACE: airgap-dryrun
+          STORAGE_CLASS: standard
+          EMBED_MODEL: embed-from-airgap-env
+          DENSE_DIM: "768"
+          VLLM_BASE_URL: http://vllm:8000
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+          QDRANT_STORAGE_SIZE: 1Gi
+        run: |
+          make airgap-deploy
+          test -f dist/jaeger-rendered.yaml
+          grep -q "ghcr.io/dryrun-standin/jaegertracing/jaeger:v2.20.0" dist/jaeger-rendered.yaml
+          grep -q "storageClassName: standard" dist/jaeger-rendered.yaml
+          grep -q 'value: http://jaeger:4318' dist/agent-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml
+
       - name: airgap-ingest dry-run (prod ingest render + patch knob)
         env:
           IMAGE_SHA: ${{ env.SHA }}

@@ -6,6 +6,7 @@ regression the rehearsal build surfaced: values.yaml's placeholder pull-secret
 name must never reach a cluster.
 """
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -31,11 +32,38 @@ spec:
           env:
             - name: EMBED_MODEL
               value: __EMBED_MODEL__
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_EXPORTER_OTLP_ENDPOINT__
+"""
+
+# Jaeger stub: mirrors the real render's placeholder surface (issue #83).
+STUB_JAEGER = """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: mainframe-rag
+spec:
+  template:
+    spec:
+      imagePullSecrets: []
+      containers:
+        - name: jaeger
+          image: __INTERNAL_REGISTRY__/jaegertracing/jaeger:v2.20.0
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jaeger-badger
+spec:
+  storageClassName: __STORAGE_CLASS__
 """
 
 STUB_BIN = """#!/bin/sh
 if [ "$1" = "kustomize" ]; then
-  cat {stub_yaml}
+  case "$2" in
+    *jaeger*) cat {jaeger_stub} ;;
+    *) cat {stub_yaml} ;;
+  esac
   exit 0
 fi
 printf '%s\\n' "$@" >> "$HELM_LOG"
@@ -48,17 +76,21 @@ def tree(tmp_path):
     (tmp_path / "bin").mkdir()
     (tmp_path / "charts").mkdir()
     (tmp_path / "overlays" / "openshift").mkdir(parents=True)
+    (tmp_path / "deploy" / "kustomize").mkdir(parents=True)
     (tmp_path / "scripts" / "airgap").mkdir(parents=True)
     for f in ("common.sh", "deploy.sh"):
         shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
     shutil.copy(next(REPO.glob("charts/qdrant-*.tgz")), tmp_path / "charts")
     shutil.copy(REPO / "overlays" / "openshift" / "values.yaml", tmp_path / "overlays" / "openshift")
+    shutil.copytree(REPO / "deploy" / "kustomize" / "jaeger", tmp_path / "deploy" / "kustomize" / "jaeger")
     stub_yaml = tmp_path / "stub-kustomize.yaml"
     stub_yaml.write_text(STUB_KUSTOMIZE)
+    jaeger_stub = tmp_path / "stub-jaeger.yaml"
+    jaeger_stub.write_text(STUB_JAEGER)
     helm_log = tmp_path / "helm-args.log"
     for name in ("helm", "kubectl", "oc"):
         p = tmp_path / "bin" / name
-        p.write_text(STUB_BIN.format(stub_yaml=stub_yaml))
+        p.write_text(STUB_BIN.format(stub_yaml=stub_yaml, jaeger_stub=jaeger_stub))
         p.chmod(0o755)
     return tmp_path, helm_log
 
@@ -132,3 +164,48 @@ def test_rendered_manifest_substituted_and_written(tree):
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     assert "reg.internal/qdrant-pdf-rag-agent" in rendered
     assert "__" not in rendered
+
+
+# ------------------------------------------------------- Jaeger / tracing (#83)
+
+
+def test_tracing_off_skips_jaeger_and_keeps_endpoint_empty(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    assert not (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    # Endpoint env var always rendered; empty value = tracing off (fail-closed).
+    assert re.search(r"OTEL_EXPORTER_OTLP_ENDPOINT\n\s+value:\s*$", rendered)
+    assert "Tracing off" in r.stdout
+
+
+def test_tracing_enabled_deploys_jaeger_and_wires_endpoint(tree):
+    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"))
+    assert r.returncode == 0, r.stderr
+    jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
+    agent = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert "reg.internal/jaegertracing/jaeger:v2.20.0" in jaeger
+    assert "storageClassName: standard" in jaeger
+    assert "namespace: ns" in jaeger
+    assert "__" not in jaeger
+    assert 'value: http://jaeger:4318' in agent
+    assert "__" not in agent
+
+
+def test_tracing_jaeger_pull_secret_wired_when_set(tree):
+    r = _run(
+        tree,
+        ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"),
+        ("PULL_SECRET", "ghcr-pull"),
+    )
+    assert r.returncode == 0, r.stderr
+    jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
+    assert "name: ghcr-pull" in jaeger
+
+
+def test_tracing_jaeger_pull_secret_stays_absent_when_unset(tree):
+    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"))
+    assert r.returncode == 0, r.stderr
+    jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
+    assert "imagePullSecrets: []" in jaeger
+    assert "name: ghcr-pull" not in jaeger

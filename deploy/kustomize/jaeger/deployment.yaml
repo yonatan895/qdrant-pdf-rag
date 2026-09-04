@@ -1,0 +1,59 @@
+# Jaeger v2 all-in-one. Container runs as USER 10001 (upstream default);
+# fsGroup makes the RWO block volume group-writable for badger under the
+# restricted-v2 SCC (same mechanism the vendored Qdrant chart uses).
+# Storage config is baked (badger) — this deployment is prod-shaped; CI/lab
+# rehearsal uses the shrunk PVC knob via QDRANT-style env (tracing rehearsal
+# is optional and off by default).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  labels:
+    app: jaeger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      securityContext:
+        fsGroup: 10001
+      # [] by default; scripts/airgap/deploy.sh substitutes the PULL_SECRET
+      # from airgap.env when the namespace cannot pull anonymously.
+      imagePullSecrets: []
+      containers:
+        - name: jaeger
+          image: jaeger:ci
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/jaeger/config-badger.yaml"]
+          ports:
+            - containerPort: 4318
+              name: otlp-http
+            - containerPort: 16686
+              name: ui
+          readinessProbe:
+            httpGet:
+              path: /
+              port: ui
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "50m", memory: 128Mi }
+            limits: { cpu: "500m", memory: 512Mi }
+          volumeMounts:
+            - name: config
+              mountPath: /etc/jaeger
+              readOnly: true
+            - name: badger
+              mountPath: /badger
+      volumes:
+        - name: config
+          configMap:
+            name: jaeger-config
+        - name: badger
+          persistentVolumeClaim:
+            claimName: jaeger-badger

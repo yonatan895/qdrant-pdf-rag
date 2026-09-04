@@ -26,6 +26,8 @@ import httpx2
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 from pydantic import BaseModel, Field
 
 from mainframe_rag.agent.answer import (
@@ -38,6 +40,7 @@ from mainframe_rag.agent.answer import (
     parse_answer,
 )
 from mainframe_rag.agent.tokenizer import build_tokenizer
+from mainframe_rag.agent.tracing import setup_tracing, shutdown_tracing
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.logs import configure_logging
@@ -65,6 +68,17 @@ embedder: Embedder
 llm: LLMClient
 tokenizer: Tokenizer
 reranker: Reranker | None = None
+# Tracer starts as the API proxy (no-op until a real provider is installed).
+# Lifespan reassigns it when tracing is enabled (issue #83); tests swap it
+# directly with a tracer backed by InMemorySpanExporter.
+tracer: trace.Tracer = trace.get_tracer("mainframe-rag.agent")
+
+
+def _span_error(span: trace.Span, exc: Exception) -> None:
+    """Record a failure on the active span. Observability only — never on
+    the client response path (export errors surface in logs, if at all)."""
+    span.record_exception(exc)
+    span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
 
 
 class AppError(Exception):
@@ -149,7 +163,19 @@ async def lifespan(_app: FastAPI):
         timeout=settings.qdrant_timeout_s,
         limits=http_limits,
     )
+    # OTel tracing (issue #83): OFF unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
+    # The provider/exporter live for the process; flush + shutdown at lifespan
+    # exit so in-flight spans land even on graceful shutdown. Every bounded
+    # knob comes from Settings — no magic numbers here.
+    global tracer
+    tracer = setup_tracing(
+        settings.otel_exporter_otlp_endpoint,
+        sample_ratio=settings.otel_sample_ratio,
+        export_queue_size=settings.otel_export_queue_size,
+        export_timeout_ms=settings.otel_export_timeout_ms,
+    )
     yield
+    shutdown_tracing()
     if hasattr(http, "aclose"):
         await http.aclose()
     elif hasattr(http, "close"):
@@ -244,6 +270,9 @@ async def validation_error_handler(_request: Request, exc: RequestValidationErro
 @app.exception_handler(Exception)
 async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
     # Full trace stays in server logs; the client never sees internals.
+    span = trace.get_current_span()
+    if span is not None and span.is_recording():
+        _span_error(span, exc)
     request_id = getattr(request.state, "request_id", "unknown")
     log.exception(json_log(request_id, "unhandled", error=str(exc)[:200]))
     return JSONResponse(
@@ -308,19 +337,31 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
     request_id = request.state.request_id
     started = time.monotonic()
     _require_query_length(request_id, req.query)
-    try:
-        res = retrieve_search(
-            qdrant, embedder, settings.qdrant_collection, req.query,
-            product=req.product, version=req.version, limit=req.limit,
-            settings=settings, reranker=reranker,
+    with tracer.start_as_current_span(
+        "v1.search",
+        attributes={"http.request_id": request_id, "rag.limit": req.limit, "rag.query": req.query},
+    ) as span:
+        try:
+            res = retrieve_search(
+                qdrant, embedder, settings.qdrant_collection, req.query,
+                product=req.product, version=req.version, limit=req.limit,
+                settings=settings, reranker=reranker,
+            )
+            if inspect.isawaitable(res):
+                hits, kind, timings = await res
+            else:
+                hits, kind, timings = res
+        except Exception as exc:
+            _span_error(span, exc)
+            log.error(json_log(request_id, "search", error=str(exc)[:200]))
+            raise AppError(502, "upstream_error", "retrieval failed") from exc
+        span.set_attributes(
+            {
+                "rag.query_kind": kind,
+                "rag.hits": len(hits),
+                "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
+            }
         )
-        if inspect.isawaitable(res):
-            hits, kind, timings = await res
-        else:
-            hits, kind, timings = res
-    except Exception as exc:
-        log.error(json_log(request_id, "search", error=str(exc)[:200]))
-        raise AppError(502, "upstream_error", "retrieval failed") from exc
     timing_parts = []
     if timings.get("embed_ms") is not None:
         timing_parts.append(f"embed;dur={timings['embed_ms']}")
@@ -386,26 +427,44 @@ async def v1_answer(
     except RuntimeError as exc:
         log.warning(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(503, "not_configured", "reasoning model is not configured") from exc
+    llm_model = settings.require_reasoning_model()
+
+    # One trace per request (issue #83): the root span starts after the
+    # cheap fail-fast gates and lives until the response body is produced.
+    # For SSE the span is ended inside the generator so the LLM stage (the
+    # longest leg) is a child of the same trace, not a detached one.
+    root_span = tracer.start_span(
+        "v1.answer",
+        attributes={"http.request_id": request_id, "rag.query": req.query, "rag.stream": is_stream},
+    )
 
     # Retrieval and LLM legs are guarded separately: the same fault must map
     # to the same code+message on every endpoint — a retrieval failure reads
     # "retrieval failed" here exactly as it does on /v1/search, and a model or
     # parse failure must not be mislabeled as a retrieval fault (AGENTS rule 2).
     try:
-        res = retrieve_search(
-            qdrant, embedder, settings.qdrant_collection, req.query,
-            product=req.product, version=req.version, limit=8,
-            settings=settings, reranker=reranker,
-        )
-        if inspect.isawaitable(res):
-            hits, kind, timings = await res
-        else:
-            hits, kind, timings = res
+        # retrieve.* stage spans must land under this request's trace, so the
+        # root is made current for the retrieval leg (the root span itself is
+        # not created "as current" — the SSE generator outlives this block).
+        with trace.use_span(root_span, end_on_exit=False):
+            res = retrieve_search(
+                qdrant, embedder, settings.qdrant_collection, req.query,
+                product=req.product, version=req.version, limit=8,
+                settings=settings, reranker=reranker,
+            )
+            if inspect.isawaitable(res):
+                hits, kind, timings = await res
+            else:
+                hits, kind, timings = res
     except Exception as exc:
+        _span_error(root_span, exc)
+        root_span.end()
         log.error(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "retrieval failed") from exc
 
     if not hits:
+        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
+        root_span.end()
         timing_parts = []
         if timings.get("embed_ms") is not None:
             timing_parts.append(f"embed;dur={timings['embed_ms']}")
@@ -468,28 +527,52 @@ async def v1_answer(
         if complexity == "complex"
         else settings.llm_reasoning_effort_simple
     )
-    messages = build_messages(
-        req.query, hits,
-        product=req.product, version=req.version, splunk_context=req.splunk_context,
-        max_context_chars=max_context,
-        max_chunk_chars=settings.prompt_max_chunk_chars,
-        max_chunk_chars_narrative=settings.prompt_max_chunk_chars_complex if complexity == "complex" else None,
-        splunk_context_max_chars=settings.splunk_context_max_chars,
-        complexity=complexity,
-        tokenizer=tokenizer,
-        settings=settings,
-        order=settings.prompt_order,
-    )
+    root_ctx = trace.set_span_in_context(root_span)
+    with tracer.start_as_current_span(
+        "prompt.build",
+        context=root_ctx,
+        attributes={
+            "rag.query_complexity": complexity,
+            "rag.reasoning_effort": effort,
+            "rag.max_context_chars": max_context,
+        },
+    ):
+        messages = build_messages(
+            req.query, hits,
+            product=req.product, version=req.version, splunk_context=req.splunk_context,
+            max_context_chars=max_context,
+            max_chunk_chars=settings.prompt_max_chunk_chars,
+            max_chunk_chars_narrative=settings.prompt_max_chunk_chars_complex if complexity == "complex" else None,
+            splunk_context_max_chars=settings.splunk_context_max_chars,
+            complexity=complexity,
+            tokenizer=tokenizer,
+            settings=settings,
+            order=settings.prompt_order,
+        )
 
     if not is_stream:
         try:
             t0 = time.monotonic()
-            chat_call = llm.chat(
-                messages,
-                reasoning_effort=effort,
-                temperature=settings.llm_temperature,
-            )
-            chat_res = as_chat_result(await chat_call if inspect.isawaitable(chat_call) else chat_call)
+            with tracer.start_as_current_span(
+                "llm.chat", context=root_ctx,
+                attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
+            ) as llm_span:
+                chat_call = llm.chat(
+                    messages,
+                    reasoning_effort=effort,
+                    temperature=settings.llm_temperature,
+                )
+                chat_res = as_chat_result(await chat_call if inspect.isawaitable(chat_call) else chat_call)
+                llm_span.set_attributes(
+                    {
+                        "llm.ttft_ms": chat_res.ttft_ms if chat_res.ttft_ms is not None else 0,
+                        "llm.finish_reason": chat_res.finish_reason,
+                        "llm.prompt_tokens": chat_res.usage.prompt_tokens,
+                        "llm.completion_tokens": chat_res.usage.completion_tokens,
+                        "llm.reasoning_tokens": chat_res.usage.reasoning_tokens,
+                        "llm.total_tokens": chat_res.usage.total_tokens,
+                    }
+                )
             llm_ms = int((time.monotonic() - t0) * 1000)
             ttft_ms = chat_res.ttft_ms
             content = chat_res.content
@@ -501,6 +584,8 @@ async def v1_answer(
                 ordered_cites=[h.cite for h in hits],
             )
         except Exception as exc:
+            _span_error(root_span, exc)
+            root_span.end()
             log.error(json_log(request_id, "answer", error=str(exc)[:200]))
             raise AppError(502, "upstream_error", "answer failed") from exc
 
@@ -551,6 +636,16 @@ async def v1_answer(
         if ttft_ms is not None:
             log_fields["ttft_ms"] = ttft_ms
         log.info(json_log(request_id, "answer", **log_fields))
+        root_span.set_attributes(
+            {
+                "rag.query_kind": kind,
+                "rag.hits": len(hits),
+                "rag.citations": len(parsed.citations),
+                "rag.has_script": parsed.script is not None,
+                "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
+            }
+        )
+        root_span.end()
         return AnswerResponse(
             request_id=request_id,
             answer=parsed.answer,
@@ -574,6 +669,17 @@ async def v1_answer(
         headers["Server-Timing"] = ", ".join(timing_parts)
 
     async def sse_event_generator():
+        # try/finally, not a per-branch end(): a mid-stream failure (both
+        # except branches return) or a client disconnect (GeneratorExit
+        # raised at a yield) must still end the root span — an unended trace
+        # would linger in the backend until TTL.
+        try:
+            async for chunk in _sse_events():
+                yield chunk
+        finally:
+            root_span.end()
+
+    async def _sse_events():
         t0 = time.monotonic()
         ttft_ms: int | None = None
         content_parts: list[str] = []
@@ -600,26 +706,41 @@ async def v1_answer(
             stream_gen = fallback_stream()
 
         try:
-            async for item in stream_gen:
-                itype = item.get("type")
-                if itype == "token":
-                    delta = item.get("delta") or ""
-                    if delta:
-                        if ttft_ms is None:
-                            ttft_ms = item.get("ttft_ms") or int((time.monotonic() - t0) * 1000)
-                        content_parts.append(delta)
-                        payload = {"type": "token", "delta": delta, "token": delta}
-                        yield f"event: token\ndata: {json.dumps(payload)}\n\n"
-                elif itype == "done":
-                    finish_reason = item.get("finish_reason") or "stop"
-                    if item.get("usage"):
-                        usage = item["usage"]
-                    if ttft_ms is None and item.get("ttft_ms") is not None:
-                        ttft_ms = item["ttft_ms"]
+            with tracer.start_as_current_span(
+                "llm.chat", context=root_ctx,
+                attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
+            ) as llm_span:
+                async for item in stream_gen:
+                    itype = item.get("type")
+                    if itype == "token":
+                        delta = item.get("delta") or ""
+                        if delta:
+                            if ttft_ms is None:
+                                ttft_ms = item.get("ttft_ms") or int((time.monotonic() - t0) * 1000)
+                            content_parts.append(delta)
+                            payload = {"type": "token", "delta": delta, "token": delta}
+                            yield f"event: token\ndata: {json.dumps(payload)}\n\n"
+                    elif itype == "done":
+                        finish_reason = item.get("finish_reason") or "stop"
+                        if item.get("usage"):
+                            usage = item["usage"]
+                        if ttft_ms is None and item.get("ttft_ms") is not None:
+                            ttft_ms = item["ttft_ms"]
+                llm_span.set_attributes(
+                    {
+                        "llm.ttft_ms": ttft_ms if ttft_ms is not None else 0,
+                        "llm.finish_reason": finish_reason,
+                        "llm.prompt_tokens": usage.prompt_tokens,
+                        "llm.completion_tokens": usage.completion_tokens,
+                        "llm.reasoning_tokens": usage.reasoning_tokens,
+                        "llm.total_tokens": usage.total_tokens,
+                    }
+                )
         except TruncatedStreamError as exc:
             # Truncation observability: the partial prefix already went out
             # as token events, so the answer_alert carries counts only —
             # never response text.
+            _span_error(root_span, exc)
             log.warning(
                 json_log(
                     request_id,
@@ -633,6 +754,7 @@ async def v1_answer(
             yield f"event: error\ndata: {json.dumps(err_payload)}\n\n"
             return
         except Exception as exc:  # noqa: BLE001
+            _span_error(root_span, exc)
             log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
             err_payload = {"type": "error", "code": "upstream_error", "message": "stream failed"}
             yield f"event: error\ndata: {json.dumps(err_payload)}\n\n"
@@ -695,6 +817,15 @@ async def v1_answer(
                 "total_tokens": usage.total_tokens,
             },
         }
+        root_span.set_attributes(
+            {
+                "rag.query_kind": kind,
+                "rag.hits": len(hits),
+                "rag.citations": len(parsed.citations),
+                "rag.has_script": parsed.script is not None,
+                "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
+            }
+        )
         yield f"event: final\ndata: {json.dumps(final_payload)}\n\n"
 
     return StreamingResponse(sse_event_generator(), media_type="text/event-stream", headers=headers)

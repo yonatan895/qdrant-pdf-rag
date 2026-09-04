@@ -1,0 +1,16 @@
+# Badger needs a single-node RWO block volume (NFS is refused at deploy time
+# by refuse_nfs_storage). 10Gi @ 14-day span TTL — trace volume for this
+# service is tiny (one root + ~8 stage spans per request).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jaeger-badger
+  labels:
+    app: jaeger
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: __STORAGE_CLASS__
+  resources:
+    requests:
+      storage: 10Gi

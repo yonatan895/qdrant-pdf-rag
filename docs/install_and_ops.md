@@ -577,6 +577,27 @@ Acceptance Criteria:
 - All PVCs `Bound` with block storage class.
 - Security Context: running unprivileged under `restricted-v2` SCC.
 
+### 4.3.1 Tracing (optional, issue #83)
+
+Tracing is opt-in: set `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318` in
+`airgap.env` **before** `make airgap-deploy`. deploy.sh then also renders and
+applies `deploy/kustomize/jaeger` (Jaeger v2 all-in-one, badger storage on a
+10Gi RWO block PVC, 14-day span TTL, ClusterIP only) and wires the endpoint
+into the agent. Without the variable the agent keeps tracing off and no
+Jaeger is deployed.
+
+The sneakernet bundle always carries the Jaeger image (`images.txt` is a
+pack-wide contract — every pinned image is mirrored on every pack), even
+when tracing stays off; only the deployment is opt-in. The endpoint may be
+given with or without the `/v1/traces` path — the agent accepts both.
+
+View traces (port-forward only — Jaeger has no public Route, like Qdrant):
+
+```bash
+oc -n mainframe-rag port-forward svc/jaeger 16686:16686
+# open http://localhost:16686, service "rag-agent-..." (set OTEL_SERVICE_NAME to rename)
+```
+
 ### 4.5 Corpus Ingestion
 
 Once the manual PDF corpus PVC is provisioned and populated:
