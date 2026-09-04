@@ -19,16 +19,16 @@ esac
 MANIFEST=""
 [ -f dist/MANIFEST.txt ] && MANIFEST=dist/MANIFEST.txt
 [ -z "$MANIFEST" ] && [ -f ../MANIFEST.txt ] && MANIFEST=../MANIFEST.txt
-if [ -n "$MANIFEST" ]; then
+if [ -n "$MANIFEST" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
     [ "$IMAGE_SHA" = "$packed_sha" ] || \
         die "IMAGE_SHA=$IMAGE_SHA does not match the packed MANIFEST sha ($packed_sha) — wrong SHA for this sneakernet bundle"
 fi
-[ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || die "oc is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
+[ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || command -v kubectl >/dev/null 2>&1 || die "oc or kubectl is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
 command -v helm >/dev/null 2>&1 || die "helm is required on the air-gap bastion"
 
 refuse_nfs_storage
-EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed 's:/*$::')/v1}
+EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed -E 's:(/v1)?/*$::')/v1}
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
 # Chart appends "-unprivileged" to the tag when useUnprivilegedImage=true;
 # values.yaml pins v1.19.0 — set it explicitly so it always matches load.sh.
@@ -36,7 +36,7 @@ SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
 QDRANT_TAG=${QDRANT_TAG:-$(echo "${QDRANT_IMAGE:-docker.io/qdrant/qdrant:v1.19.0-unprivileged}" | sed "s/.*://; s/-unprivileged\$//")}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 
-if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi
+KC=${KC:-$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; else echo oc; fi)}
 mkdir -p dist
 
 echo "==> Namespace: $NAMESPACE"
@@ -92,7 +92,7 @@ else
     # kubectl ships a built-in kustomize; always present on an OpenShift bastion.
     render="$KC kustomize deploy/kustomize/overlays/openshift"
 fi
-$render | sed \
+$render | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
     -e "s|__INTERNAL_REGISTRY__|$INTERNAL_REGISTRY|g" \
     -e "s|__IMAGE_SHA__|$IMAGE_SHA|g" \
     -e "s|namespace: mainframe-rag|namespace: $NAMESPACE|g" \
@@ -100,10 +100,13 @@ $render | sed \
     -e "s|__QDRANT_RELEASE__|$QDRANT_RELEASE|g" \
     -e "s|__EMBED_BASE_URL__|$EMBED_BASE_URL|g" \
     -e "s|__EMBED_MODEL__|$EMBED_MODEL|g" \
-    -e "s|__DENSE_DIM__|$DENSE_DIM|g" \
+    -e "s|__DENSE_DIM__|\"$DENSE_DIM\"|g" \
     -e "s|__LLM_BASE_URL__|${LLM_BASE_URL:-}|g" \
     -e "s|__LLM_MODEL_REASONING__|${LLM_MODEL_REASONING:-}|g" \
     -e "s|__OTEL_EXPORTER_OTLP_ENDPOINT__|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|g" \
+    -e "s|__RERANK_ENABLED__|\"${RERANK_ENABLED:-false}\"|g" \
+    -e "s|__RERANK_BASE_URL__|${RERANK_BASE_URL:-}|g" \
+    -e "s|__RERANK_MODEL__|${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}|g" \
     > dist/agent-rendered.yaml
 if [ -n "${PULL_SECRET:-}" ]; then
     sed -i "s|imagePullSecrets: \[\]|imagePullSecrets:\n  - name: $PULL_SECRET|" dist/agent-rendered.yaml

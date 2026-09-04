@@ -99,7 +99,7 @@ build-images: | $(WHEELHOUSE) $(BM25_WEIGHTS)
 	  -f images/Containerfile.agent -t $(AGENT_IMAGE_NAME):$(IMAGE_TAG) .
 
 # ---------------------------------------------------------------- air-gap happy path (issue #15)
-.PHONY: airgap-pack airgap-load airgap-deploy airgap-ingest airgap-smoke
+.PHONY: airgap-pack airgap-load airgap-deploy airgap-ingest airgap-smoke airgap-dryrun
 airgap-pack:
 	sh scripts/airgap/pack.sh
 airgap-load:
@@ -110,6 +110,27 @@ airgap-ingest:
 	sh scripts/airgap/ingest.sh
 airgap-smoke:
 	sh scripts/airgap/smoke.sh
+airgap-dryrun:
+	AIRGAP_DRYRUN=1 IMAGE_SHA=$$(git rev-parse HEAD 2>/dev/null || echo "0000000000000000000000000000000000000000") \
+	  INTERNAL_REGISTRY=registry.example.internal/mainframe-rag \
+	  NAMESPACE=mainframe-rag \
+	  STORAGE_CLASS=gp3-csi \
+	  EMBED_MODEL=ibm-granite/granite-embedding-278m-multilingual \
+	  DENSE_DIM=768 \
+	  VLLM_BASE_URL=http://vllm.inference.svc.cluster.local:8000/v1 \
+	  sh scripts/airgap/deploy.sh
+	AIRGAP_DRYRUN=1 IMAGE_SHA=$$(git rev-parse HEAD 2>/dev/null || echo "0000000000000000000000000000000000000000") \
+	  INTERNAL_REGISTRY=registry.example.internal/mainframe-rag \
+	  NAMESPACE=mainframe-rag \
+	  STORAGE_CLASS=gp3-csi \
+	  EMBED_MODEL=ibm-granite/granite-embedding-278m-multilingual \
+	  DENSE_DIM=768 \
+	  VLLM_BASE_URL=http://vllm.inference.svc.cluster.local:8000/v1 \
+	  CORPUS_PVC=corpus-pvc \
+	  sh scripts/airgap/ingest.sh
+	AIRGAP_DRYRUN=1 \
+	  NAMESPACE=mainframe-rag \
+	  sh scripts/airgap/smoke.sh
 
 # ---------------------------------------------------------------- simulation (docker Qdrant, tests/test_integration_sim.py)
 SIM_CONTAINER ?= qdrant-sim
@@ -392,6 +413,7 @@ e2e-demo-pdfs: | .venv
 .PHONY: clean
 clean:
 	rm -rf .venv .pytest_cache .mypy_cache .ruff_cache $(BUNDLE_DIR) output
+	@if [ -d dist ]; then find dist -mindepth 1 ! -name "*.tar*" -delete 2>/dev/null || true; rmdir dist 2>/dev/null || true; fi
 
 .PHONY: help
 help:

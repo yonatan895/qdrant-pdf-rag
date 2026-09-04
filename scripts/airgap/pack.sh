@@ -86,10 +86,18 @@ git bundle create "$DIST/repo.bundle" HEAD --all
 git bundle verify "$DIST/repo.bundle" >/dev/null
 
 echo "==> Pulling images (fail closed on missing tags)"
-skopeo copy "docker://$QDRANT_REF" "docker-archive:$DIST/qdrant-image.tar"
-skopeo copy "docker://$JAEGER_REF" "docker-archive:$DIST/jaeger-image.tar"
-skopeo copy "docker://$INGEST_IMAGE" "docker-archive:$DIST/app-ingest-$IMAGE_SHA.tar"
-skopeo copy "docker://$AGENT_IMAGE" "docker-archive:$DIST/app-agent-$IMAGE_SHA.tar"
+extra_args="${SKOPEO_ARGS:-}"
+if [ "${INSECURE_REGISTRY:-false}" = "true" ]; then
+    extra_args="$extra_args --src-tls-verify=false"
+fi
+# shellcheck disable=SC2086
+skopeo copy $extra_args "docker://$QDRANT_REF" "docker-archive:$DIST/qdrant-image.tar"
+# shellcheck disable=SC2086
+skopeo copy $extra_args "docker://$JAEGER_REF" "docker-archive:$DIST/jaeger-image.tar"
+# shellcheck disable=SC2086
+skopeo copy $extra_args "docker://$INGEST_IMAGE" "docker-archive:$DIST/app-ingest-$IMAGE_SHA.tar"
+# shellcheck disable=SC2086
+skopeo copy $extra_args "docker://$AGENT_IMAGE" "docker-archive:$DIST/app-agent-$IMAGE_SHA.tar"
 
 echo "==> MANIFEST"
 CHART_VERSION=$(basename charts/qdrant-*.tgz .tgz)

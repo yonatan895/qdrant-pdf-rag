@@ -43,7 +43,7 @@ resolve_aliases() {
             IMAGE_SHA=$(git rev-parse HEAD)  # full SHA: must equal the GHCR tag
         fi
     fi
-    EMBED_BASE_URL=${EMBED_BASE_URL:-${VLLM_BASE_URL:+$(echo "$VLLM_BASE_URL" | sed 's:/*$::')/v1}}
+    EMBED_BASE_URL=${EMBED_BASE_URL:-${VLLM_BASE_URL:+$(echo "$VLLM_BASE_URL" | sed -E 's:(/v1)?/*$::')/v1}}
 }
 
 # Qdrant data scratch and snapshots live on block storage; NFS is refused.

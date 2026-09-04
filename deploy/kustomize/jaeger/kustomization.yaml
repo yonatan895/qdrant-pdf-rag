@@ -16,4 +16,5 @@ resources:
 images:
   - name: jaeger
     newName: __INTERNAL_REGISTRY__/jaegertracing/jaeger
+    # Upstream source tag in images.txt is 2.20.0; load.sh pushes as v2.20.0 to match this manifest.
     newTag: v2.20.0

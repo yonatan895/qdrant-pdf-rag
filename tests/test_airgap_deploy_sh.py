@@ -34,6 +34,12 @@ spec:
               value: __EMBED_MODEL__
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
+            - name: RERANK_ENABLED
+              value: "__RERANK_ENABLED__"
+            - name: RERANK_BASE_URL
+              value: "__RERANK_BASE_URL__"
+            - name: RERANK_MODEL
+              value: "__RERANK_MODEL__"
 """
 
 # Jaeger stub: mirrors the real render's placeholder surface (issue #83).
@@ -59,7 +65,7 @@ spec:
 """
 
 STUB_BIN = """#!/bin/sh
-if [ "$1" = "kustomize" ]; then
+if [ "$1" = "kustomize" ] || [ "$1" = "build" ]; then
   case "$2" in
     *jaeger*) cat {jaeger_stub} ;;
     *) cat {stub_yaml} ;;
@@ -88,7 +94,7 @@ def tree(tmp_path):
     jaeger_stub = tmp_path / "stub-jaeger.yaml"
     jaeger_stub.write_text(STUB_JAEGER)
     helm_log = tmp_path / "helm-args.log"
-    for name in ("helm", "kubectl", "oc"):
+    for name in ("helm", "kubectl", "oc", "kustomize"):
         p = tmp_path / "bin" / name
         p.write_text(STUB_BIN.format(stub_yaml=stub_yaml, jaeger_stub=jaeger_stub))
         p.chmod(0o755)
@@ -175,7 +181,7 @@ def test_tracing_off_skips_jaeger_and_keeps_endpoint_empty(tree):
     assert not (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     # Endpoint env var always rendered; empty value = tracing off (fail-closed).
-    assert re.search(r"OTEL_EXPORTER_OTLP_ENDPOINT\n\s+value:\s*$", rendered)
+    assert re.search(r"OTEL_EXPORTER_OTLP_ENDPOINT\n\s+value:\s*$", rendered, re.MULTILINE)
     assert "Tracing off" in r.stdout
 
 
@@ -209,3 +215,26 @@ def test_tracing_jaeger_pull_secret_stays_absent_when_unset(tree):
     jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
     assert "imagePullSecrets: []" in jaeger
     assert "name: ghcr-pull" not in jaeger
+
+
+def test_reranker_defaults_off(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert 'value: "false"' in rendered or "value: false" in rendered
+    assert "__RERANK_" not in rendered
+
+
+def test_reranker_configured_when_enabled(tree):
+    r = _run(
+        tree,
+        ("RERANK_ENABLED", "true"),
+        ("RERANK_BASE_URL", "http://rerank:8002/v1"),
+        ("RERANK_MODEL", "my-reranker-model"),
+    )
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert 'value: "true"' in rendered or "value: true" in rendered
+    assert 'value: "http://rerank:8002/v1"' in rendered or "value: http://rerank:8002/v1" in rendered
+    assert 'value: "my-reranker-model"' in rendered or "value: my-reranker-model" in rendered
+    assert "__RERANK_" not in rendered

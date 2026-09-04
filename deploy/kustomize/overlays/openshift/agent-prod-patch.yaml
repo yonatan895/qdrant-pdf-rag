@@ -38,3 +38,10 @@ spec:
             # (fail-closed default); Jaeger is not deployed without it.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
+            # Cross-encoder reranker (issue #76): default off (RERANK_ENABLED=false).
+            - name: RERANK_ENABLED
+              value: "__RERANK_ENABLED__"
+            - name: RERANK_BASE_URL
+              value: "__RERANK_BASE_URL__"
+            - name: RERANK_MODEL
+              value: "__RERANK_MODEL__"
