@@ -315,8 +315,10 @@ def test_async_search_matches_sync_search_identical_fakes():
     any divergence between the two transports must fail here. Identical fakes
     must produce identical hits (order + every field), query_kind, timing keys
     and prefetch shapes — with and without the rerank leg, for identifier and
-    natural-language queries (different RRF weight branches), plus a trap
-    query that must bypass rerank on both twins (issue #113)."""
+    natural-language queries (different RRF weight branches),     plus a trap
+    query that must bypass rerank on both twins (issue #113), plus an
+    identifier query that must bypass rerank on both twins (issue #117:
+    rerank authority scales with anchor trust — exact codes keep RRF)."""
     from mainframe_rag.retrieve.query import async_search
     from mainframe_rag.retrieve.screen import screen_query
 
@@ -343,7 +345,11 @@ def test_async_search_matches_sync_search_identical_fakes():
             assert [(r.using, r.limit) for r in fake_sync.batch_requests] == [
                 (r.using, r.limit) for r in fake_async.batch_requests
             ]
-            rerank_expected = reranker is not None and screen_query(query) == "answerable"
+            rerank_expected = (
+                reranker is not None
+                and screen_query(query) == "answerable"
+                and not parse_query(query).has_identifiers
+            )
             assert ("rerank_ms" in sync_timings) is rerank_expected
             assert (sync_hits[0].rerank_score is not None) is rerank_expected
 

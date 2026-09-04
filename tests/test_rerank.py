@@ -456,6 +456,38 @@ def test_trap_query_bypasses_flag_built_reranker():
     assert "rerank_ms" not in timings
 
 
+# ------------------------------------------------------- Issue #117: identifier bypass
+IDENTIFIER_QUERY = "What does DSN9022I mean and what is the system action?"
+
+
+def test_identifier_query_bypasses_reranker():
+    """Rerank authority scales with anchor trust: on exact-code queries the
+    cross-encoder prefers confident definitions of the WRONG message, so
+    search() keeps RRF order, sets no scores, reports no rerank_ms, and
+    never calls score — plus prefetches only the non-rerank limit. NL
+    queries (test_answerable_query_still_reranks) still rerank."""
+    reranker = PromotingReranker()
+    candidates = [
+        _make_hit("c1", "DOC1", 0.9, text="Ordinary manual prose"),
+        _make_hit("c2", "DOC2", 0.4, text="DSN9022I definition-shaped prose"),
+    ]
+    flipped = rerank_candidates(IDENTIFIER_QUERY, candidates, reranker)
+    assert flipped[0].chunk_id == "c2"  # the flip is real without the gate
+
+    client = FakeQdrantPoints(_TRAP_POINTS)
+    hits, kind, timings = search(
+        client, FakeEmbedder(), "test-coll", IDENTIFIER_QUERY,
+        settings=_trap_settings(), reranker=reranker,
+    )
+    assert kind == "identifier"
+    assert [h.chunk_id for h in hits] == ["c1", "c2"]
+    assert all(h.rerank_score is None for h in hits)
+    assert "rerank_ms" not in timings
+    assert reranker.call_count == 1  # the direct proof above only
+    # No 50-candidate rerank fetch for a leg that will not run.
+    assert all(q["limit"] == 40 for q in client.queries_made)
+
+
 def test_answerable_query_still_reranks():
     """Control: the identical fixture with an answerable query reranks
     normally — the gate is trap-specific, not a silent disable."""
