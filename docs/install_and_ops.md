@@ -586,6 +586,11 @@ applies `deploy/kustomize/jaeger` (Jaeger v2 all-in-one, badger storage on a
 into the agent. Without the variable the agent keeps tracing off and no
 Jaeger is deployed.
 
+The sneakernet bundle always carries the Jaeger image (`images.txt` is a
+pack-wide contract — every pinned image is mirrored on every pack), even
+when tracing stays off; only the deployment is opt-in. The endpoint may be
+given with or without the `/v1/traces` path — the agent accepts both.
+
 View traces (port-forward only — Jaeger has no public Route, like Qdrant):
 
 ```bash

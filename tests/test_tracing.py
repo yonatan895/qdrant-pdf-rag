@@ -87,6 +87,9 @@ class FakeProvider:
 def _reset_provider(monkeypatch):
     monkeypatch.setattr(tracing_mod, "_provider", None)
     FakeProvider.instances.clear()
+    # No test in this file may install a global tracer provider (hermetic
+    # rule): the real set_tracer_provider is irreversible for the process.
+    monkeypatch.setattr(trace, "set_tracer_provider", lambda _p: None)
 
 
 def test_trace_disabled_without_endpoint(monkeypatch):
@@ -133,6 +136,46 @@ def test_setup_tracing_builds_provider_and_appends_traces_path(monkeypatch):
     assert tracer2 is not None
     assert tracing_mod._provider is FakeProvider.instances[0]
     assert len(FakeProvider.instances) == 1
+
+
+def test_setup_tracing_accepts_full_traces_url_without_doubling(monkeypatch):
+    seen: dict[str, object] = {}
+    original_init = FakeOTLPExporter.__init__
+
+    def exporter_init(self, endpoint=None, **kw):
+        seen["endpoint"] = endpoint
+        original_init(self, endpoint=None, **kw)
+
+    monkeypatch.setattr(FakeOTLPExporter, "__init__", exporter_init)
+    monkeypatch.setattr(tracing_mod, "OTLPSpanExporter", FakeOTLPExporter)
+    monkeypatch.setattr(tracing_mod, "TracerProvider", FakeProvider)
+    monkeypatch.setattr(
+        tracing_mod,
+        "BatchSpanProcessor",
+        lambda exporter, **kw: SimpleSpanProcessor(exporter),
+    )
+    tracing_mod.setup_tracing("http://collector.internal:4318/v1/traces")
+    assert seen["endpoint"] == "http://collector.internal:4318/v1/traces"
+
+
+def test_settings_knobs_reach_batch_processor(monkeypatch):
+    """Review fix (PR #137): the documented Settings bounds must actually
+    tune the exporter — dead Settings are a bug, not a contract."""
+    captured: dict[str, object] = {}
+    real = tracing_mod.BatchSpanProcessor
+
+    def capture(exporter, **kw):
+        captured.update(kw)
+        return real(exporter, **kw)
+
+    monkeypatch.setattr(tracing_mod, "OTLPSpanExporter", FakeOTLPExporter)
+    monkeypatch.setattr(tracing_mod, "TracerProvider", FakeProvider)
+    monkeypatch.setattr(tracing_mod, "BatchSpanProcessor", capture)
+    tracing_mod.setup_tracing(
+        "http://collector.internal:4318", export_queue_size=512, export_timeout_ms=1234
+    )
+    assert captured["max_queue_size"] == 512
+    assert captured["export_timeout_millis"] == 1234
 
 
 def test_shutdown_tracing_flushes_and_swallows_errors(monkeypatch):
@@ -256,6 +299,32 @@ def test_answer_stream_same_trace_id(client):
     assert trace_ids == {s.context.trace_id for s in by_name["prompt.build"]}
     root = by_name["v1.answer"][0]
     assert root.attributes["rag.stream"] is True
+
+
+class ExplodingStreamLLM:
+    """Streams a token, then fails mid-stream (review fix, PR #137): the SSE
+    error path must END the root span, not leave the trace open until TTL."""
+
+    def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+        async def gen():
+            yield {"type": "token", "delta": "partial ", "token": "partial ", "ttft_ms": 5}
+            raise RuntimeError("stream exploded")
+        return gen()
+
+
+def test_answer_stream_failure_ends_root_span(client, monkeypatch):
+    c, exporter = client
+    monkeypatch.setattr(app_mod, "llm", ExplodingStreamLLM())
+    with c.stream("POST", "/v1/answer", json={"query": "IEA500I", "stream": True}) as resp:
+        assert resp.status_code == 200
+        body = "".join(resp.iter_text())
+    assert "event: error" in body
+    assert "event: final" not in body
+    root = _spans(exporter)["v1.answer"][0]
+    # Ended despite the mid-stream failure: finished spans appear in the
+    # exporter only after end() — presence IS the assertion.
+    assert root.status.status_code == trace.StatusCode.ERROR
+    assert any(e.name == "exception" for e in root.events)
 
 
 def test_retrieval_failure_marks_span_error(client, monkeypatch):

@@ -11,7 +11,8 @@ lifecycle have exactly one implementation. Design rules:
   shutdown forces a final flush. Export failures log and drop; tracing is
   never on the response path.
 - OTLP/HTTP only (no grpcio in the air-gap wheelhouse). The endpoint is the
-  collector origin; the exporter appends /v1/traces itself.
+  collector origin; a value already ending in /v1/traces is accepted as-is,
+  anything else gets the path appended.
 - Service name comes from OTEL_SERVICE_NAME when the operator sets it,
   defaulting to "mainframe-rag-agent".
 
@@ -48,14 +49,25 @@ def trace_enabled(endpoint: str | None) -> bool:
     return bool(endpoint and endpoint.strip())
 
 
-def setup_tracing(endpoint: str | None, sample_ratio: float = 1.0) -> trace.Tracer:
+def setup_tracing(
+    endpoint: str | None,
+    sample_ratio: float = 1.0,
+    export_queue_size: int = 2048,
+    export_timeout_ms: int = 5000,
+) -> trace.Tracer:
     """Build the tracer for the agent's lifespan. Idempotent: the second call
     returns a tracer on the same provider (a redeploy of config within one
     process must not stack exporters).
 
     sample_ratio is the head sampler ratio — 0.0 disables span production
     entirely, 1.0 keeps every trace (the default; this service's request
-    volume is tiny).
+    volume is tiny). export_queue_size / export_timeout_ms bound the batch
+    processor; both come from Settings so operators can tune the documented
+    bounds (Settings.otel_export_queue_size / otel_export_timeout_ms).
+
+    The endpoint is the bare collector origin; a value that already ends in
+    /v1/traces is accepted as-is, anything else gets the path appended
+    (one helper, so an operator's `:4318/v1/traces` can never double it).
     """
     global _provider
     if not trace_enabled(endpoint):
@@ -69,12 +81,17 @@ def setup_tracing(endpoint: str | None, sample_ratio: float = 1.0) -> trace.Trac
         sampler=ParentBased(TraceIdRatioBased(sample_ratio)),
     )
     assert endpoint is not None
-    exporter = OTLPSpanExporter(endpoint=endpoint.rstrip("/") + DEFAULT_OTLP_TRACES_PATH)
+    origin = endpoint.rstrip("/")
+    traces_url = (
+        origin if origin.endswith(DEFAULT_OTLP_TRACES_PATH)
+        else origin + DEFAULT_OTLP_TRACES_PATH
+    )
+    exporter = OTLPSpanExporter(endpoint=traces_url)
     provider.add_span_processor(
         BatchSpanProcessor(
             exporter,
-            max_queue_size=2048,
-            export_timeout_millis=5000,
+            max_queue_size=export_queue_size,
+            export_timeout_millis=export_timeout_ms,
             max_export_batch_size=512,
         )
     )

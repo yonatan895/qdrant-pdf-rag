@@ -165,9 +165,15 @@ async def lifespan(_app: FastAPI):
     )
     # OTel tracing (issue #83): OFF unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
     # The provider/exporter live for the process; flush + shutdown at lifespan
-    # exit so in-flight spans land even on graceful shutdown.
+    # exit so in-flight spans land even on graceful shutdown. Every bounded
+    # knob comes from Settings — no magic numbers here.
     global tracer
-    tracer = setup_tracing(settings.otel_exporter_otlp_endpoint, settings.otel_sample_ratio)
+    tracer = setup_tracing(
+        settings.otel_exporter_otlp_endpoint,
+        sample_ratio=settings.otel_sample_ratio,
+        export_queue_size=settings.otel_export_queue_size,
+        export_timeout_ms=settings.otel_export_timeout_ms,
+    )
     yield
     shutdown_tracing()
     if hasattr(http, "aclose"):
@@ -663,6 +669,17 @@ async def v1_answer(
         headers["Server-Timing"] = ", ".join(timing_parts)
 
     async def sse_event_generator():
+        # try/finally, not a per-branch end(): a mid-stream failure (both
+        # except branches return) or a client disconnect (GeneratorExit
+        # raised at a yield) must still end the root span — an unended trace
+        # would linger in the backend until TTL.
+        try:
+            async for chunk in _sse_events():
+                yield chunk
+        finally:
+            root_span.end()
+
+    async def _sse_events():
         t0 = time.monotonic()
         ttft_ms: int | None = None
         content_parts: list[str] = []
@@ -810,7 +827,6 @@ async def v1_answer(
             }
         )
         yield f"event: final\ndata: {json.dumps(final_payload)}\n\n"
-        root_span.end()
 
     return StreamingResponse(sse_event_generator(), media_type="text/event-stream", headers=headers)
 
