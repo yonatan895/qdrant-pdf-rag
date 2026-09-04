@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 from mainframe_rag.ports import AsyncQdrantPoints, Embedder, QdrantPoints, Reranker
 from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
+from mainframe_rag.retrieve.rewrite import expand_query, should_rewrite
 from mainframe_rag.retrieve.screen import screen_query
 
 PREFETCH_LIMIT = 40
@@ -229,6 +230,11 @@ def search(
         # not run.
         active_reranker = None
     rerank_active = active_reranker is not None
+    if settings and settings.acronym_expansion_enabled and should_rewrite(query):
+        # Issue #82: deterministic acronym expansion feeds both retrieval
+        # legs (and rerank scoring below). Identifiers, filters, and the
+        # returned query_kind stay on the operator's original query.
+        query = expand_query(query)
 
     prefetch_limit = settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
 
@@ -359,6 +365,11 @@ async def async_search(
         # not run.
         active_reranker = None
     rerank_active = active_reranker is not None
+    if settings and settings.acronym_expansion_enabled and should_rewrite(query):
+        # Issue #82: deterministic acronym expansion feeds both retrieval
+        # legs (and rerank scoring below). Identifiers, filters, and the
+        # returned query_kind stay on the operator's original query.
+        query = expand_query(query)
 
     prefetch_limit = settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
 

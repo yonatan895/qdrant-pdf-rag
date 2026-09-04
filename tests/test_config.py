@@ -133,3 +133,11 @@ def test_request_size_guardrail_defaults():
     s = Settings(_env_file=None)
     assert s.query_max_chars == 2000
     assert s.splunk_context_max_chars == 4000
+
+
+def test_acronym_expansion_defaults_off():
+    """Issue #82 PR-A: deterministic acronym expansion ships default-off;
+    identifier-heavy queries bypass rewriting entirely (pinned in
+    test_rewrite.py, asserted here as a Settings contract)."""
+    s = Settings(_env_file=None)
+    assert s.acronym_expansion_enabled is False

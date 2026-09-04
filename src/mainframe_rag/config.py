@@ -83,6 +83,11 @@ class Settings(BaseSettings):
         default="Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "
     )
 
+    # Query understanding (issue #82): deterministic acronym expansion from
+    # the versioned glossary (retrieve/acronyms_v1.json via rewrite.py).
+    # Default off; identifier-heavy queries bypass rewriting entirely.
+    acronym_expansion_enabled: bool = False
+
     # Hybrid retrieval fusion (local RRF) and diversity parameters
     rrf_k: int = Field(default=2, ge=1, le=100)
     rrf_weight_dense_nl: float = Field(default=1.0, gt=0.0, le=10.0)
