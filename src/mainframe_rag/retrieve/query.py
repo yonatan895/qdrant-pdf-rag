@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 from mainframe_rag.ports import AsyncQdrantPoints, Embedder, QdrantPoints, Reranker
 from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
+from mainframe_rag.retrieve.screen import screen_query
 
 PREFETCH_LIMIT = 40
 RRF_K = 2
@@ -219,6 +220,14 @@ def search(
 
             _memoized_reranker = (sid, build_reranker(settings))
         active_reranker = _memoized_reranker[1]
+    if active_reranker is not None and screen_query(query) == "trap":
+        # Issue #113: trap-class (injection) queries bypass rerank — however
+        # the reranker arrived (flag-built, memoized, or explicitly passed
+        # by the lifespan client). RRF order stands, so the must_not
+        # hard-zero holds with RERANK_ENABLED=true. Prefetch also drops to
+        # the non-rerank limit: no 50-candidate fetch for a leg that will
+        # not run.
+        active_reranker = None
     rerank_active = active_reranker is not None
 
     prefetch_limit = settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
@@ -341,6 +350,14 @@ async def async_search(
 
             _memoized_reranker = (sid, build_reranker(settings))
         active_reranker = _memoized_reranker[1]
+    if active_reranker is not None and screen_query(query) == "trap":
+        # Issue #113: trap-class (injection) queries bypass rerank — however
+        # the reranker arrived (flag-built, memoized, or explicitly passed
+        # by the lifespan client). RRF order stands, so the must_not
+        # hard-zero holds with RERANK_ENABLED=true. Prefetch also drops to
+        # the non-rerank limit: no 50-candidate fetch for a leg that will
+        # not run.
+        active_reranker = None
     rerank_active = active_reranker is not None
 
     prefetch_limit = settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
