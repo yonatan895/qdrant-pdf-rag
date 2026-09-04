@@ -101,9 +101,21 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE wait --for=condition=complete job/ingest --timeout=${INGEST_TIMEOUT}s"
     echo "[dryrun] rendered manifest kept at dist/ingest-rendered.yaml"
 else
-    echo "==> Wait for ingest Job (timeout: ${INGEST_TIMEOUT}s)"
-    if ! $KC -n "$NAMESPACE" wait --for=condition=complete job/ingest --timeout="${INGEST_TIMEOUT}s"; then
-        echo "::error::ingest Job failed" >&2
+    echo "==> Wait for ingest Job pod to start..."
+    for i in $(seq 1 30); do
+        pod_phase=$($KC -n "$NAMESPACE" get pods -l job-name=ingest -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)
+        if [ "$pod_phase" = "Running" ] || [ "$pod_phase" = "Succeeded" ] || [ "$pod_phase" = "Failed" ]; then
+            break
+        fi
+        sleep 2
+    done
+
+    echo "==> Streaming ingest Job logs..."
+    $KC -n "$NAMESPACE" logs -f job/ingest 2>/dev/null || true
+
+    echo "==> Checking ingest Job completion..."
+    if ! $KC -n "$NAMESPACE" wait --for=condition=complete job/ingest --timeout=30s; then
+        echo "::error::ingest Job did not complete successfully" >&2
         $KC -n "$NAMESPACE" logs job/ingest --tail=200 || true
         $KC -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -30 || true
         exit 1

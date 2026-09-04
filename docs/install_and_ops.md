@@ -493,7 +493,12 @@ The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `air
 
 ### 4.1 Packaging on the Connected Host (Image Factory)
 
-On a connected Linux host with Docker/Podman:
+The sneakernet archive is packaged on the connected host. Connected `main` is the only image factory.
+
+> [!TIP]
+> **Automated CI Packaging:** Every commit merged to `main` on public GitHub automatically triggers the `airgap-package` workflow in `.github/workflows/e2e.yml`. Operators can download the pre-packaged, verified `sneakernet-bundle-<sha>` artifact (containing `qdrant-pdf-rag-<sha>.tar`, digest, `TRANSFER_CERTIFICATE.txt`, and `MANIFEST.txt`) directly from GitHub Actions without needing local build tools.
+
+To build the package manually on a connected Linux workstation:
 
 ```bash
 git clone https://github.com/yonatan895/qdrant-pdf-rag.git
@@ -507,11 +512,12 @@ make airgap-pack
 This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-rag-<sha>.tar.sha256`, containing:
 1. Complete Git repository bundle (`repo.bundle`).
 2. App container images (`qdrant-pdf-rag-agent`, `qdrant-pdf-rag-ingest`).
-3. Vendored third-party Qdrant unprivileged image.
+3. Vendored third-party Qdrant unprivileged image and Jaeger v2 image.
 4. Vendored Helm chart (`charts/qdrant-1.19.0.tgz`).
-5. Manifest and member `SHA256SUMS`.
+5. Self-contained extraction bootstrap script (`bootstrap.sh`).
+6. Manifest (`MANIFEST.txt`), Transfer Certificate (`TRANSFER_CERTIFICATE.txt`), and member `SHA256SUMS`.
 
-### 4.2 Transfer & Verification
+### 4.2 Transfer & Automated Bootstrap
 
 Transfer the tarball and checksum file via approved sneakernet media to the air-gapped bastion host:
 
@@ -519,24 +525,23 @@ Transfer the tarball and checksum file via approved sneakernet media to the air-
 # 1. Verify tarball integrity BEFORE unpacking
 sha256sum -c qdrant-pdf-rag-<sha>.tar.sha256
 
-# 2. Extract tarball
+# 2. Extract tarball and run the automated bootstrap script:
 tar -xf qdrant-pdf-rag-<sha>.tar
+sh bootstrap.sh
 
-# 3. Clone repository from bundle
-git clone repo.bundle qdrant-pdf-rag
+# 3. Enter the initialized workspace:
 cd qdrant-pdf-rag
 ```
 
-### 4.3 Configure Environment
+The `bootstrap.sh` script automatically:
+- Verifies all member checksums in `SHA256SUMS`.
+- Clones the Git repository from `repo.bundle`.
+- Populates `./dist` with image archives and manifests.
+- Initializes `airgap.env` from `airgap.env.example` if not already present.
 
-Copy `airgap.env.example` to `airgap.env` and populate cluster values:
+### 4.3 Configure Environment & Pre-Flight Validation
 
-```bash
-cp airgap.env.example airgap.env
-chmod 600 airgap.env
-```
-
-Edit `airgap.env`:
+Edit `airgap.env` to configure your cluster environment:
 ```ini
 # Internal image registry accessible to cluster nodes
 INTERNAL_REGISTRY=registry.internal.enterprise:5000/mainframe-rag
@@ -555,24 +560,36 @@ LLM_MODEL_REASONING=ibm-granite/granite-20b-code-instruct
 
 # Optional pull secret name (if registry requires credentials)
 PULL_SECRET=internal-registry-pull-secret
-
-# Optional registry flags for private registries (self-signed CAs or authfile)
-# SKOPEO_ARGS=--dest-tls-verify=false
-# INSECURE_REGISTRY=false
 ```
 
-#### Pre-Flight Dry-Run Verification (`make airgap-dryrun`)
+#### Pre-Flight Validation (`make airgap-validate`)
 
-Before applying changes to the cluster, operators can prove the entire configuration locally without cluster credentials:
+Before modifying any cluster state, run the pre-flight validation check to verify tools, required variables, storage class compliance (refusing NFS), and OpenShift SCC permissions:
 
 ```bash
-# Preview rendered Qdrant Helm command, Agent manifest, and Ingest Job manifest:
+make airgap-validate
+```
+
+To preview rendered templates and substitution rules without cluster credentials:
+```bash
 make airgap-dryrun
 ```
 
-This verifies that all placeholders in `agent-rendered.yaml` and `ingest-rendered.yaml` are substituted cleanly and conforms to fail-closed configuration rules.
+### 4.4 Load Images & Deploy Stack
 
-### 4.4 Load Images & Deploy
+Operators can either run the complete automated pipeline in one command or execute each stage individually:
+
+#### Option A: Unified Pipeline Orchestrator (Recommended)
+
+```bash
+# Execute validate -> load -> deploy -> (optional ingest) -> smoke in sequence:
+make airgap-pipeline
+
+# Or with ingest:
+CORPUS_PVC=my-corpus-pvc make airgap-pipeline
+```
+
+#### Option B: Step-by-Step Modular Execution
 
 ```bash
 # 1. Verify internal member checksums and push images to internal registry

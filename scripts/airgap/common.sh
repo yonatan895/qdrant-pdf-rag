@@ -8,12 +8,14 @@ set -eu
 REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$REPO_ROOT"
 
-if [ -f airgap.env ]; then
+if [ -n "${AIRGAP_ENV:-}" ]; then
+    if [ -f "$AIRGAP_ENV" ]; then
+        # shellcheck disable=SC1091
+        . "$AIRGAP_ENV"
+    fi
+elif [ -f airgap.env ]; then
     # shellcheck disable=SC1091
     . ./airgap.env
-elif [ -f "${AIRGAP_ENV:-/nonexistent}" ]; then
-    # shellcheck disable=SC1091
-    . "$AIRGAP_ENV"
 fi
 
 die() {

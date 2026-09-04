@@ -60,3 +60,13 @@ fi
 
 echo "Smoke query returned hits. For an expected-substring check run:"
 echo "  $KC -n $NAMESPACE exec deploy/rag-agent -- python3 /app/scripts/smoke_search.py --url http://localhost:8080 --query \"$QUERY\" --expect <substring>"
+
+echo ""
+echo "================================================================================"
+echo "                  AIR-GAP PRODUCTION ACCEPTANCE REPORT"
+echo "================================================================================"
+echo "Namespace:       $NAMESPACE"
+echo "Agent /healthz:  OK (Qdrant and embedding services operational)"
+echo "Smoke Search:    OK (Query: \"$QUERY\")"
+echo "Status:          ACCEPTANCE CRITERIA PASSED"
+echo "================================================================================"
