@@ -221,13 +221,23 @@ def search(
 
             _memoized_reranker = (sid, build_reranker(settings))
         active_reranker = _memoized_reranker[1]
-    if active_reranker is not None and screen_query(query) == "trap":
+    if active_reranker is not None and (
+        screen_query(query) == "trap" or identifiers.has_identifiers
+    ):
         # Issue #113: trap-class (injection) queries bypass rerank — however
         # the reranker arrived (flag-built, memoized, or explicitly passed
         # by the lifespan client). RRF order stands, so the must_not
         # hard-zero holds with RERANK_ENABLED=true. Prefetch also drops to
         # the non-rerank limit: no 50-candidate fetch for a leg that will
         # not run.
+        # Issue #117: identifier-kind queries bypass rerank on the same
+        # structural principle — rerank authority scales with anchor trust.
+        # The cross-encoder scores shape-compatibility, so on exact-code
+        # queries it prefers confident definitions of the WRONG message and
+        # buries the right context (DSN9022I live: CE rank 13+ over RRF
+        # rank 1 — no rank-fusion k can bridge that gap, k cancels out).
+        # RRF's lexical anchor is the trustworthy signal here; the CE
+        # keeps serving NL queries, where it earns its keep (PAR-10/19).
         active_reranker = None
     rerank_active = active_reranker is not None
     if settings and settings.acronym_expansion_enabled and should_rewrite(query):
@@ -356,13 +366,23 @@ async def async_search(
 
             _memoized_reranker = (sid, build_reranker(settings))
         active_reranker = _memoized_reranker[1]
-    if active_reranker is not None and screen_query(query) == "trap":
+    if active_reranker is not None and (
+        screen_query(query) == "trap" or identifiers.has_identifiers
+    ):
         # Issue #113: trap-class (injection) queries bypass rerank — however
         # the reranker arrived (flag-built, memoized, or explicitly passed
         # by the lifespan client). RRF order stands, so the must_not
         # hard-zero holds with RERANK_ENABLED=true. Prefetch also drops to
         # the non-rerank limit: no 50-candidate fetch for a leg that will
         # not run.
+        # Issue #117: identifier-kind queries bypass rerank on the same
+        # structural principle — rerank authority scales with anchor trust.
+        # The cross-encoder scores shape-compatibility, so on exact-code
+        # queries it prefers confident definitions of the WRONG message and
+        # buries the right context (DSN9022I live: CE rank 13+ over RRF
+        # rank 1 — no rank-fusion k can bridge that gap, k cancels out).
+        # RRF's lexical anchor is the trustworthy signal here; the CE
+        # keeps serving NL queries, where it earns its keep (PAR-10/19).
         active_reranker = None
     rerank_active = active_reranker is not None
     if settings and settings.acronym_expansion_enabled and should_rewrite(query):
