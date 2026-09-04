@@ -487,7 +487,9 @@ Failures surface as `rerank_ms` in `/v1/search` `Server-Timing` and the agent lo
 
 ---
 
-## 4. Air-Gapped OpenShift Deployment
+## 4. Standard Deployment Architecture (Air-Gap Production & Local Cluster Testing)
+
+The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts, Helm chart, and Kustomize overlays, with adapted sizing and SCC for local test clusters).
 
 ### 4.1 Packaging on the Connected Host (Image Factory)
 
@@ -658,6 +660,109 @@ make airgap-smoke
 QUERY="IEA500I operator message" make airgap-smoke
 ```
 
+### 4.7 Local Cluster Testing Standard (Kind + Local Registry)
+
+To test the deployment scripts and Kubernetes manifests locally without access to an OpenShift cluster, the project standardizes on **Kind** (Kubernetes-in-Docker) paired with a local registry container on port 5000.
+
+> [!NOTE]
+> Local cluster testing exercises the identical packaging scripts, container archives, Helm chart, and Kustomize overlays as production, but with adapted sizing and security contexts (1-replica Kind + mock/local vLLM rather than 3-replica OpenShift `restricted-v2`).
+
+#### Step 1: Provision Local Registry & Kind Cluster
+
+Kind nodes pull images inside Docker; pulling from `airgap-registry:5000` over HTTP requires configuring containerd mirrors in Kind:
+
+```bash
+# 1. Start local container registry container
+docker run -d --restart=always -p 5000:5000 --name airgap-registry registry:2
+
+# 2. Create Kind cluster with containerd insecure mirror for airgap-registry:5000
+cat <<'EOF' > scratch/kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry]
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors]
+      [plugins."io.containerd.grpc.v1.cri".registry.mirrors."airgap-registry:5000"]
+        endpoint = ["http://airgap-registry:5000"]
+EOF
+kind create cluster --name airgap --config scratch/kind-config.yaml
+
+# 3. Connect local registry to Kind network
+docker network connect "kind" airgap-registry || true
+```
+
+#### Step 2: Pack Sneakernet Tarball
+
+```bash
+# Build the complete image and bundle archive in dist/
+make airgap-pack
+```
+
+#### Step 3: Load & Push to Local Registry
+
+```bash
+# Load archives from dist/ and push to localhost:5000 (airgap-registry)
+INTERNAL_REGISTRY=localhost:5000 INSECURE_REGISTRY=true make airgap-load
+```
+
+#### Step 4: Configure `airgap.env` & Deploy Stack to Kind
+
+Create a local single-replica override for Qdrant, copy `airgap.env.example` to `airgap.env`, and populate required values:
+
+```bash
+# Create local sizing override (1 replica for Kind test node)
+cat > scratch/qdrant-local.yaml <<'EOF'
+replicaCount: 1
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+EOF
+
+# Copy example and configure environment
+cp airgap.env.example airgap.env
+```
+
+Ensure `airgap.env` contains:
+```sh
+INTERNAL_REGISTRY=airgap-registry:5000
+NAMESPACE=mainframe-rag
+STORAGE_CLASS=standard
+QDRANT_STORAGE_SIZE=1Gi
+QDRANT_EXTRA_VALUES=scratch/qdrant-local.yaml
+IMAGE_SHA=$(awk '/^sha: /{print $2}' dist/MANIFEST.txt)
+VLLM_BASE_URL=http://<host-ip-or-svc>:8000
+EMBED_MODEL=ibm-granite/granite-embedding-125m-english
+DENSE_DIM=768
+```
+*(If running without a live GPU vLLM instance, launch `python scripts/mock_vllm.py --port 8000` and point `VLLM_BASE_URL` to the host).*
+
+Deploy the stack (Qdrant StatefulSet, Jaeger v2, Agent Deployment):
+```bash
+make airgap-deploy
+```
+
+#### Step 5: Ingest Corpus & Run Smoke Test
+
+```bash
+# Provision a test PVC (backed by standard storage class) with sample PDFs, then launch ingest:
+CORPUS_PVC=my-corpus-pvc make airgap-ingest
+
+# Run in-cluster smoke search:
+make airgap-smoke
+```
+
+#### Teardown Local Test Cluster
+
+```bash
+kind delete cluster --name airgap
+docker rm -f airgap-registry
+```
+
 ---
 
 ## 5. Day-2 Operations & Maintenance
@@ -729,3 +834,6 @@ Citation validation runs on the accumulated text exactly as in JSON mode: the ci
 | **Registry Certificate Error** | `skopeo copy` fails with `x509: certificate signed by unknown authority` | Set `SKOPEO_ARGS=--dest-tls-verify=false` or `INSECURE_REGISTRY=true` in `airgap.env`. |
 | **OpenShift SCC Rejection** | Pod `qdrant-0` fails with `unable to validate against any security context constraint` | Grant `anyuid` SCC (`oc adm policy add-scc-to-user anyuid -z qdrant -n <ns>`) or supply `QDRANT_EXTRA_VALUES` to clear static `runAsUser`. |
 | **PVC Multi-Attach Error** | `job/ingest` fails with `Multi-Attach error for volume` on corpus PVC | Ensure any previous writer pod has released the PVC, or use a ReadOnlyMany volume. |
+| **Qdrant P2P CrashLoop** | Pod `qdrant-0` fails with `No such file or directory` looking for `cert.pem` | Ensure `config.cluster.p2p.enable_tls: false` in `values.yaml` (gossip is plaintext on CNI without `./tls/cert.pem`). |
+| **K8s Manifest Integer/Boolean Error** | `Invalid value: "string", expected integer/boolean` | Ensure numeric/boolean env vars (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`) are explicitly quoted in rendered manifests. |
+| **Degraded `/healthz` Smoke Failure** | `make airgap-smoke` exits 1 with `FAIL: /healthz probe did not report ok` | Pre-flight probe failed closed; check Qdrant and vLLM connectivity inside the cluster. |

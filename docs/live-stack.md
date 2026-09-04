@@ -11,6 +11,7 @@ the procedure.
 |---|---|
 | Docs only | Existence-check cited paths; no GPU |
 | Tests / make / CI only | `make check` (rung 1) |
+| Deployment / air-gap / Helm / overlays | `make check` + `make airgap-dryrun` |
 | Agent HTTP / validation | Rungs 1 + 6 (probes) |
 | Ingest / chunk / classify | Rungs 1 + 2 (gate-l1) + 3 (fresh paraphrase) |
 | Retrieve / embed / RRF / rerank / screen | Full ladder + A/B numbers in the PR body |
@@ -28,8 +29,11 @@ into the repo); `$SCRATCH_DIR` is scratch space outside the repo
 
 ## 1. Bring-up order
 
-Start Qdrant first, then embed, then reasoning. Each step has a health
-proof — do not proceed past a failed proof.
+There are two primary local runtime topologies:
+1. **Standalone Development / GPU Mode** (loopback services for rapid retrieval & prompt iteration): start Qdrant first, then embed, then reasoning. Each step has a health proof — do not proceed past a failed proof.
+2. **Standard Local Cluster Mode** (Kind + local registry on port 5000): exercises the production air-gap deployment scripts (`make airgap-pack` -> `load` -> `deploy` -> `ingest` -> `smoke`) with local single-replica sizing overrides. See [docs/install_and_ops.md](install_and_ops.md#47-local-cluster-testing-standard-kind--local-registry) for step-by-step setup.
+
+### Standalone Bring-Up (GPU / Dev)
 
 ```sh
 # Qdrant (docker, loopback port 6333)
@@ -72,8 +76,8 @@ skip is not a pass.
 
 ## 3. Verification ladder (run your class's rungs from §0)
 
-Run top to bottom. Each rung states its green condition — a red rung
-stops the push, no exceptions.
+Run top to bottom for your change class. Each rung states its green condition — a red rung
+stops the push, no exceptions. *(Note: Deployment / air-gap / Helm / overlays changes pay `make check` + `make airgap-dryrun` — they do not owe the retrieval ladder rungs 2–7).*
 
 1. `make check` — ruff, mypy, unit suite. Green: all clean.
 2. `make gate-l1` — L1 retrieval gate on the ephemeral simulator. Green: exit 0, 0 regressions.

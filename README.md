@@ -71,11 +71,12 @@ Citation-first expert mainframe agent: hybrid retrieval over ~100 GB of IBM-styl
 | | `make local-vllm-embed` | Run local vLLM dense embedding server on GPU (port 8001, Qwen3-Embedding-0.6B, `GPU_MEM=0.33`, `--runner pooling --convert embed --enforce-eager`) |
 | | `make run-agent` | Start the agent with `LLM_STREAM=true` (reasoning SSE streaming for TTFT) on port 8080 |
 | | `make test-vllm-e2e` | Run automated end-to-end suite against local vLLM & Qdrant with grounding validation |
-| **Packaging & Air-Gap** | `make airgap-pack` | Build sneakernet package (`dist/qdrant-pdf-rag-<sha>.tar`) on connected host |
-| | `make airgap-load` | Load image archives and push to `${INTERNAL_REGISTRY}` in the air-gap |
-| | `make airgap-deploy` | Deploy Qdrant StatefulSet & Agent on air-gapped OpenShift |
+| **Packaging & Standard Deployment** | `make airgap-pack` | Build sneakernet package (`dist/qdrant-pdf-rag-<sha>.tar`) on connected host |
+| | `make airgap-load` | Load image archives and push to `${INTERNAL_REGISTRY}` (in air-gap or local test registry) |
+| | `make airgap-deploy` | Deploy Qdrant cluster, Jaeger v2 tracing, and Agent via standard Helm + Kustomize |
 | | `make airgap-ingest` | Launch one-shot ingest Job against `CORPUS_PVC=<pvc>` |
-| | `make airgap-smoke` | Smoke test in-cluster search endpoint |
+| | `make airgap-smoke` | Smoke test in-cluster search endpoint with fail-closed `/healthz` probe |
+| | `make airgap-dryrun` | Pre-flight dry-run proving manifest rendering and fail-closed rules without cluster |
 
 ---
 
@@ -98,9 +99,13 @@ EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus 
 
 ---
 
-## Air-Gap Deployment Summary
+## Standard Deployment Architecture (Air-Gap & Local Cluster)
+
+The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts, Helm chart, and Kustomize overlays, with adapted sizing and SCC for local test clusters).
 
 **The air-gap never builds images.** Connected `main` is the only image factory.
+
+### 1. Production Air-Gapped OpenShift Workflow
 
 1. **Connected Host:**
    ```bash
@@ -118,13 +123,37 @@ EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus 
 3. **Air-Gapped Bastion:**
    ```bash
    cp airgap.env.example airgap.env   # Configure registry, namespace, storage class, vLLM
-   make airgap-load                   # Push images to internal registry
-   make airgap-deploy                 # Deploy Qdrant cluster & Agent
+   make airgap-dryrun                 # Pre-flight verification (proves manifests without cluster)
+   make airgap-load                   # Push 4 image archives to internal registry
+   make airgap-deploy                 # Deploy Qdrant StatefulSet, Jaeger v2 tracing, and Agent
    make airgap-ingest CORPUS_PVC=<pvc># Ingest corpus from storage PVC
-   make airgap-smoke                  # Verify search endpoint
+   make airgap-smoke                  # Verify search endpoint (/healthz pre-flight check)
    ```
 
-For full details, see **[docs/install_and_ops.md](docs/install_and_ops.md)**.
+### 2. Local Cluster Testing Standard (Kind + Local Registry)
+
+To test the deployment scripts and Kubernetes manifests locally with adapted sizing (1-replica Kind with mock/local vLLM instead of 3-replica OpenShift `restricted-v2`):
+
+1. **Bootstrap Kind & Local Registry:**
+   ```bash
+   docker run -d --restart=always -p 5000:5000 --name airgap-registry registry:2
+   kind create cluster --name airgap
+   docker network connect "kind" airgap-registry || true
+   ```
+
+2. **Configure Environment:**
+   Copy `airgap.env.example` to `airgap.env`, pointing `INTERNAL_REGISTRY=airgap-registry:5000`, `STORAGE_CLASS=standard`, `QDRANT_EXTRA_VALUES=scratch/qdrant-local.yaml` (1 replica override), and your vLLM/mock endpoint.
+
+3. **Execute 5-Stage Pipeline:**
+   ```bash
+   make airgap-pack
+   INTERNAL_REGISTRY=localhost:5000 INSECURE_REGISTRY=true make airgap-load
+   make airgap-deploy
+   make airgap-ingest CORPUS_PVC=<pvc>
+   make airgap-smoke
+   ```
+
+See **[docs/install_and_ops.md](docs/install_and_ops.md#47-local-cluster-testing-standard-kind--local-registry)** for the complete Kind setup, registry configuration, and mock vLLM setup.
 
 ---
 

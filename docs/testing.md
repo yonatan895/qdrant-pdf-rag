@@ -7,6 +7,7 @@ same PR.
 
 Jump list: [hermetic](#unit-tests-are-hermetic) ·
 [claimed-path](#tests-must-lock-the-claimed-path) ·
+[airgap-tier](#air-gap-deployment-tier-make-airgap-dryrun-tests-test_airgap_py-local-kind) ·
 [golden](#golden-corpus-devholdout) · [sim](#simulation-tier-marker-integration-make-sim) ·
 [load](#load-tier-marker-integration-make-loadtest-mock-pr-gated-by-githubworkflowsloadyml-on-agentretrieveingestmock-paths) ·
 [eval](#eval-make-eval) · [paraphrase](#paraphrase-instrument-evalsparaphrasejsonl-make-eval-paraphrase) ·
@@ -65,6 +66,13 @@ IPC / worker changes: round-trip the error record through `pickle.dumps`.
 Collection-dimension logic: missing, matching, and mismatched (named `dense` dict **and** single-vector schemas), including `--skip-ingest`.
 
 ## Tiers
+
+### Air-gap deployment tier (`make airgap-dryrun`, `tests/test_airgap_*.py`, local Kind)
+
+The canonical 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is verified across three complementary tiers:
+1. **Hermetic Test Suite (`pytest tests/test_airgap_*.py`):** Fast unit tests running without a cluster or Docker daemon. Exercises `scripts/airgap/*.sh` via stubs for `helm`, `kubectl`, `oc`, `kustomize`, and `skopeo`. Verifies manifest rendering, string quoting of integers and booleans (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`), storage class checks (refusing NFS), Jaeger v2 wiring, and fail-closed behavior on `/healthz` probe failures.
+2. **CI Pre-Flight Dry-Run (`make airgap-dryrun`):** Automated PR gate in GitHub Actions. Renders production Helm templates and Kustomize overlays using test parameters, verifying that all placeholders are substituted and zero leftover `__[A-Z0-9_]+__` patterns remain.
+3. **Local Cluster & E2E Rehearsal:** In local development, operators test the complete pipeline against a single-node Kind cluster and local registry container on port 5000 (`localhost:5000`). In CI, `airgap-rehearsal` runs on `main` against an ephemeral namespace in the lab OpenShift cluster, validating the real sneakernet tarball unpack, image push, StatefulSet rollout, and smoke queries.
 
 ### Golden corpus (dev/holdout)
 
