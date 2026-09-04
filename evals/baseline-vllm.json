@@ -4,38 +4,48 @@
     "n": 117,
     "collection": "mainframe_manuals",
     "embed_mode": "vllm",
-    "updated": "2026-09-02"
+    "updated": "2026-09-04"
   },
-  "recall@1": 0.45,
-  "recall@3": 0.752,
-  "recall@5": 0.826,
-  "mrr": 0.609,
+  "recall@1": 0.881,
+  "recall@3": 0.881,
+  "recall@5": 0.881,
+  "recall@8": 0.881,
+  "mrr": 0.881,
+  "ndcg@8": 0.922,
   "identifier": {
-    "recall@1": 0.393,
-    "recall@5": 0.836,
-    "mrr": 0.587
+    "recall@1": 0.797,
+    "recall@5": 0.797,
+    "recall@8": 0.797,
+    "mrr": 0.797,
+    "ndcg@8": 0.867
   },
   "nl": {
-    "recall@1": 0.521,
-    "recall@5": 0.812,
-    "mrr": 0.638
+    "recall@1": 1.0,
+    "recall@5": 1.0,
+    "recall@8": 1.0,
+    "mrr": 1.0,
+    "ndcg@8": 1.0
   },
   "classes": {
     "comparative": {
       "n": 12,
       "scored": 12,
-      "recall@1": 0.333,
-      "recall@3": 0.583,
-      "recall@5": 0.583,
-      "mrr": 0.472
+      "recall@1": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0,
+      "recall@8": 1.0,
+      "mrr": 1.0,
+      "ndcg@8": 1.0
     },
     "diagnostic": {
       "n": 27,
       "scored": 27,
-      "recall@1": 0.37,
-      "recall@3": 0.63,
-      "recall@5": 0.741,
-      "mrr": 0.518
+      "recall@1": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0,
+      "recall@8": 1.0,
+      "mrr": 1.0,
+      "ndcg@8": 0.981
     },
     "doc_number": {
       "n": 14,
@@ -43,15 +53,19 @@
       "recall@1": 0.786,
       "recall@3": 0.786,
       "recall@5": 0.786,
-      "mrr": 0.786
+      "recall@8": 0.786,
+      "mrr": 0.786,
+      "ndcg@8": 0.786
     },
     "message_id": {
       "n": 23,
       "scored": 23,
-      "recall@1": 0.304,
-      "recall@3": 0.913,
-      "recall@5": 0.957,
-      "mrr": 0.598
+      "recall@1": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0,
+      "recall@8": 1.0,
+      "mrr": 1.0,
+      "ndcg@8": 1.0
     },
     "negative": {
       "n": 8,
@@ -59,29 +73,35 @@
       "recall@1": null,
       "recall@3": null,
       "recall@5": null,
-      "mrr": null
+      "recall@8": null,
+      "mrr": null,
+      "ndcg@8": null
     },
     "syntax": {
       "n": 25,
       "scored": 25,
-      "recall@1": 0.4,
-      "recall@3": 0.76,
-      "recall@5": 0.88,
-      "mrr": 0.591
+      "recall@1": 0.6,
+      "recall@3": 0.6,
+      "recall@5": 0.6,
+      "recall@8": 0.6,
+      "mrr": 0.6,
+      "ndcg@8": 0.8
     },
     "version": {
       "n": 8,
       "scored": 8,
-      "recall@1": 0.875,
-      "recall@3": 0.875,
+      "recall@1": 1.0,
+      "recall@3": 1.0,
       "recall@5": 1.0,
-      "mrr": 0.906
+      "recall@8": 1.0,
+      "mrr": 1.0,
+      "ndcg@8": 1.0
     }
   },
   "abstain": {
     "n": 8,
-    "top_score_mean": 0.4666,
-    "top_score_max": 1.0
+    "top_score_mean": 0.7062,
+    "top_score_max": 1.3333
   },
   "page": {
     "checked": 1,
