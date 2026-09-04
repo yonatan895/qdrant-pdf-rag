@@ -72,10 +72,12 @@ Citation-first expert mainframe agent: hybrid retrieval over ~100 GB of IBM-styl
 | | `make run-agent` | Start the agent with `LLM_STREAM=true` (reasoning SSE streaming for TTFT) on port 8080 |
 | | `make test-vllm-e2e` | Run automated end-to-end suite against local vLLM & Qdrant with grounding validation |
 | **Packaging & Standard Deployment** | `make airgap-pack` | Build sneakernet package (`dist/qdrant-pdf-rag-<sha>.tar`) on connected host |
+| | `make airgap-validate` | Pre-flight validation of tools, env, storage class, and OpenShift SCC |
 | | `make airgap-load` | Load image archives and push to `${INTERNAL_REGISTRY}` (in air-gap or local test registry) |
 | | `make airgap-deploy` | Deploy Qdrant cluster, Jaeger v2 tracing, and Agent via standard Helm + Kustomize |
 | | `make airgap-ingest` | Launch one-shot ingest Job against `CORPUS_PVC=<pvc>` |
 | | `make airgap-smoke` | Smoke test in-cluster search endpoint with fail-closed `/healthz` probe |
+| | `make airgap-pipeline` | Single master orchestrator running validate -> load -> deploy -> ingest -> smoke |
 | | `make airgap-dryrun` | Pre-flight dry-run proving manifest rendering and fail-closed rules without cluster |
 
 ---
@@ -93,8 +95,9 @@ make check
 # 3. Run integration simulation
 make sim
 
-# 4. Try interactive query inspection
-EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus make query-demo
+# 4. Ingest sample corpus in development mode (standalone hash embedder)
+EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus \
+  make ingest-corpus CORPUS_DIR=tests/fixtures/sample_corpus/
 ```
 
 ---
@@ -107,23 +110,30 @@ The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `air
 
 ### 1. Production Air-Gapped OpenShift Workflow
 
-1. **Connected Host:**
+1. **Connected Host (or CI Release Download):**
    ```bash
-   git checkout <main-sha>  # Full 40-character Git SHA
-   make airgap-pack         # -> dist/qdrant-pdf-rag-<sha>.tar + .sha256
+   git checkout <main-sha>  # Full 40-character Git SHA (or download sneakernet-bundle from GitHub Actions)
+   make airgap-pack         # -> dist/qdrant-pdf-rag-<sha>.tar + .sha256 + PACKING_RECORD.txt
    ```
 
-2. **Sneakernet Transfer & Extract:**
+2. **Sneakernet Transfer & Automated Bootstrap:**
    ```bash
    sha256sum -c qdrant-pdf-rag-<sha>.tar.sha256
    tar -xf qdrant-pdf-rag-<sha>.tar
-   git clone repo.bundle qdrant-pdf-rag && cd qdrant-pdf-rag
+   sh bootstrap.sh          # Verifies checksums, clones repo, populates dist/, sets up airgap.env
+   cd qdrant-pdf-rag
    ```
 
 3. **Air-Gapped Bastion:**
    ```bash
+   # Configure environment & pre-flight validation:
    cp airgap.env.example airgap.env   # Configure registry, namespace, storage class, vLLM
-   make airgap-dryrun                 # Pre-flight verification (proves manifests without cluster)
+   make airgap-validate               # Verify tools, storage class (refusing NFS), and OpenShift SCC
+
+   # Option A: Run complete automated pipeline:
+   CORPUS_PVC=<pvc> make airgap-pipeline
+
+   # Option B: Or execute step-by-step:
    make airgap-load                   # Push 4 image archives to internal registry
    make airgap-deploy                 # Deploy Qdrant StatefulSet, Jaeger v2 tracing, and Agent
    make airgap-ingest CORPUS_PVC=<pvc># Ingest corpus from storage PVC

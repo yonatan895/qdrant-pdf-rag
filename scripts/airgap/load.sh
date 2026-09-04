@@ -26,13 +26,27 @@ elif [ -f dist/SHA256SUMS ]; then
     ARTDIR=dist
 elif [ -f ../SHA256SUMS ]; then
     ARTDIR=..
-else
+elif [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     die "packed artifacts not found — unpack the sneakernet tarball next to this clone (tar xf qdrant-pdf-rag-<sha>.tar)"
+else
+    ARTDIR=dist
 fi
 case "$ARTDIR" in
     /*) ;;
     *) ARTDIR="$(pwd)/$ARTDIR" ;;
 esac
+
+if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
+    echo "==> [dryrun] Member checksum verification skipped"
+    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/qdrant-image.tar docker://$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged"
+    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/jaeger-image.tar docker://$INTERNAL_REGISTRY/jaegertracing/jaeger:v2.20.0"
+    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/app-ingest-$IMAGE_SHA.tar docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA"
+    echo "[dryrun] skopeo copy docker-archive:$ARTDIR/app-agent-$IMAGE_SHA.tar docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-agent:$IMAGE_SHA"
+    echo ""
+    echo "Loaded 4 images into $INTERNAL_REGISTRY (dry-run)."
+    next_step "make airgap-deploy"
+    exit 0
+fi
 
 echo "==> Verify member checksums"
 (cd "$ARTDIR" && sha256sum -c SHA256SUMS)

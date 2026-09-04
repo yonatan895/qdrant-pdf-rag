@@ -101,13 +101,28 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE wait --for=condition=complete job/ingest --timeout=${INGEST_TIMEOUT}s"
     echo "[dryrun] rendered manifest kept at dist/ingest-rendered.yaml"
 else
-    echo "==> Wait for ingest Job (timeout: ${INGEST_TIMEOUT}s)"
+    echo "==> Waiting for ingest Job (timeout: ${INGEST_TIMEOUT}s)..."
+    # Stream logs as an overlay in the background once pod starts
+    (
+        for i in $(seq 1 60); do
+            pod_phase=$($KC -n "$NAMESPACE" get pods -l job-name=ingest -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)
+            if [ "$pod_phase" = "Running" ] || [ "$pod_phase" = "Succeeded" ] || [ "$pod_phase" = "Failed" ]; then
+                $KC -n "$NAMESPACE" logs -f job/ingest 2>/dev/null || true
+                break
+            fi
+            sleep 2
+        done
+    ) &
+    LOGS_PID=$!
+
     if ! $KC -n "$NAMESPACE" wait --for=condition=complete job/ingest --timeout="${INGEST_TIMEOUT}s"; then
-        echo "::error::ingest Job failed" >&2
+        kill "$LOGS_PID" 2>/dev/null || true
+        echo "::error::ingest Job did not complete successfully" >&2
         $KC -n "$NAMESPACE" logs job/ingest --tail=200 || true
         $KC -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -30 || true
         exit 1
     fi
+    kill "$LOGS_PID" 2>/dev/null || true
 fi
 
 next_step "make airgap-smoke"

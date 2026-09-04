@@ -145,6 +145,21 @@ else
     echo "==> Tracing off (OTEL_EXPORTER_OTLP_ENDPOINT unset): Jaeger not deployed"
 fi
 
+wait_rollout() {
+    target=$1
+    timeout_s=$2
+    if ! $KC -n "$NAMESPACE" rollout status "$target" --timeout="${timeout_s}s"; then
+        echo "::error::Rollout failed for $target" >&2
+        echo "==> Diagnostic: Pod statuses in $NAMESPACE" >&2
+        $KC -n "$NAMESPACE" get pods -o wide 2>/dev/null || true
+        echo "==> Diagnostic: Recent warning events" >&2
+        $KC -n "$NAMESPACE" get events --field-selector type=Warning --sort-by=.lastTimestamp 2>/dev/null | tail -20 || true
+        echo "==> Diagnostic: Pod logs (tail 50)" >&2
+        $KC -n "$NAMESPACE" logs "$target" --tail=50 --all-containers=true 2>/dev/null || true
+        die "rollout of $target did not succeed within ${timeout_s}s"
+    fi
+}
+
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE rollout status statefulset/$QDRANT_RELEASE --timeout=600s"
     echo "[dryrun] $KC -n $NAMESPACE rollout status deploy/rag-agent --timeout=300s"
@@ -156,10 +171,10 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
         echo "[dryrun] Jaeger manifest kept at dist/jaeger-rendered.yaml"
 else
     echo "==> Wait for Qdrant + agent Ready"
-    $KC -n "$NAMESPACE" rollout status statefulset/"$QDRANT_RELEASE" --timeout=600s
-    $KC -n "$NAMESPACE" rollout status deploy/rag-agent --timeout=300s
+    wait_rollout "statefulset/$QDRANT_RELEASE" 600
+    wait_rollout "deploy/rag-agent" 300
     if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then
-        $KC -n "$NAMESPACE" rollout status deploy/jaeger --timeout=120s
+        wait_rollout "deploy/jaeger" 120
     fi
     if [ "${AGENT_ROUTE:-false}" = "true" ]; then
         $KC -n "$NAMESPACE" get route rag-agent >/dev/null 2>&1 || \

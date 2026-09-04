@@ -113,22 +113,53 @@ CHART_VERSION=$(basename charts/qdrant-*.tgz .tgz)
 } > "$DIST/MANIFEST.txt"
 cat "$DIST/MANIFEST.txt"
 
+echo "==> Bootstrap helper & Packing Record"
+cp "$REPO_ROOT/scripts/airgap/bootstrap.sh" "$DIST/bootstrap.sh"
+chmod +x "$DIST/bootstrap.sh"
+{
+    echo "================================================================================"
+    echo "                   MAINFRAME RAG — AIR-GAP PACKING RECORD"
+    echo "================================================================================"
+    echo "Commit SHA:     $IMAGE_SHA"
+    echo "Build Date:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "Source Branch:  $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
+    echo ""
+    echo "PACKAGED ARTIFACTS:"
+    echo "  - Git Bundle:          repo.bundle (complete git history)"
+    echo "  - Qdrant Image:        $QDRANT_REF"
+    echo "  - Jaeger Image:        $JAEGER_REF"
+    echo "  - Ingest Image:        $INGEST_IMAGE"
+    echo "  - Agent Image:         $AGENT_IMAGE"
+    echo "  - Helm Chart:          $CHART_VERSION"
+    echo "  - Sparse Weights:      FastEmbed Qdrant/bm25 (baked in images)"
+    echo ""
+    echo "INSPECTION & BOOTSTRAP INSTRUCTIONS:"
+    echo "  1. Verify root archive digest:"
+    echo "       sha256sum -c qdrant-pdf-rag-${IMAGE_SHA}.tar.sha256"
+    echo "  2. Extract archive:"
+    echo "       tar -xf qdrant-pdf-rag-${IMAGE_SHA}.tar"
+    echo "  3. Execute automated bootstrap:"
+    echo "       sh bootstrap.sh"
+    echo "================================================================================"
+} > "$DIST/PACKING_RECORD.txt"
+
 echo "==> Member checksums (verified again inside the air-gap after unpack)"
 (
     cd "$DIST"
-    sha256sum repo.bundle qdrant-image.tar jaeger-image.tar app-ingest-"$IMAGE_SHA".tar \
-              app-agent-"$IMAGE_SHA".tar MANIFEST.txt > SHA256SUMS
+    sha256sum bootstrap.sh repo.bundle qdrant-image.tar jaeger-image.tar \
+              app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar \
+              MANIFEST.txt PACKING_RECORD.txt > SHA256SUMS
 )
 
 echo "==> Tarball + tarball digest"
-tar -C "$DIST" -cf "$OUT_TARBALL" repo.bundle qdrant-image.tar jaeger-image.tar \
-    app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar MANIFEST.txt SHA256SUMS
+tar -C "$DIST" -cf "$OUT_TARBALL" bootstrap.sh repo.bundle qdrant-image.tar jaeger-image.tar \
+    app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar MANIFEST.txt PACKING_RECORD.txt SHA256SUMS
 # shellcheck disable=SC2016
 ( cd "$DIST" && sha256sum "$(basename "$OUT_TARBALL")" ) > "$OUT_TARBALL.sha256"
 
 echo ""
 echo "Packed: $OUT_TARBALL"
 echo "Transfer $OUT_TARBALL and $OUT_TARBALL.sha256 to the air-gap bastion."
-echo "On the bastion: sha256sum -c $(basename "$OUT_TARBALL").sha256, then unpack,"
-echo "clone from repo.bundle, and run make airgap-load inside the clone."
-next_step "sha256sum -c qdrant-pdf-rag-${IMAGE_SHA}.tar.sha256 && tar xf qdrant-pdf-rag-${IMAGE_SHA}.tar && git clone repo.bundle qdrant-pdf-rag && cd qdrant-pdf-rag && make airgap-load"
+echo "On the bastion: sha256sum -c $(basename "$OUT_TARBALL").sha256, then unpack"
+echo "and run sh bootstrap.sh."
+next_step "sha256sum -c qdrant-pdf-rag-${IMAGE_SHA}.tar.sha256 && tar xf qdrant-pdf-rag-${IMAGE_SHA}.tar && sh bootstrap.sh"
