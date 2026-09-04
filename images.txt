@@ -6,4 +6,5 @@
 #
 # name                                                                  digest
 docker.io/qdrant/qdrant:v1.19.0-unprivileged                           sha256:PENDING
+cr.jaegertracing.io/jaegertracing/jaeger:v2.20.0                        sha256:PENDING
 registry.access.redhat.com/ubi9/python-314-minimal:9.8                 sha256:PENDING

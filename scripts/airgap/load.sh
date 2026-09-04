@@ -48,9 +48,10 @@ load() {
 }
 
 load qdrant-image.tar "$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged"
+load jaeger-image.tar "$INTERNAL_REGISTRY/jaegertracing/jaeger:v2.20.0"
 load "app-ingest-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA"
 load "app-agent-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-agent:$IMAGE_SHA"
 
 echo ""
-echo "Loaded 3 images into $INTERNAL_REGISTRY (SHA tag: $IMAGE_SHA)."
+echo "Loaded 4 images into $INTERNAL_REGISTRY (SHA tag: $IMAGE_SHA)."
 next_step "make airgap-deploy"

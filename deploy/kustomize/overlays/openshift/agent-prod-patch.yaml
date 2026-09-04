@@ -32,3 +32,9 @@ spec:
               value: __LLM_BASE_URL__
             - name: LLM_MODEL_REASONING
               value: __LLM_MODEL_REASONING__
+            # Issue #83: substituted from OTEL_EXPORTER_OTLP_ENDPOINT in
+            # airgap.env (http://jaeger:4318 enables tracing — deploy.sh also
+            # deploys Jaeger in that case). Empty string keeps tracing OFF
+            # (fail-closed default); Jaeger is not deployed without it.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_EXPORTER_OTLP_ENDPOINT__

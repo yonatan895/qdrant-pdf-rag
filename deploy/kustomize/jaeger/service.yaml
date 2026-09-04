@@ -1,0 +1,20 @@
+# ClusterIP only. 4318 = OTLP/HTTP (the agent's only exporter transport);
+# 16686 = Jaeger UI, operator access via `oc port-forward svc/jaeger 16686:16686`.
+# No Route, ever (the Qdrant no-public-Route rule applies to Jaeger too).
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  labels:
+    app: jaeger
+spec:
+  type: ClusterIP
+  selector:
+    app: jaeger
+  ports:
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+    - name: ui
+      port: 16686
+      targetPort: ui

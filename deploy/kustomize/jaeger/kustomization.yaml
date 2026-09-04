@@ -1,0 +1,19 @@
+# Jaeger v2 all-in-one — trace backend for the agent (issue #83).
+# Applied only when OTEL_EXPORTER_OTLP_ENDPOINT is set in airgap.env
+# (scripts/airgap/deploy.sh renders + applies this dir, else skips it).
+# Badger storage on RWO block (the same storage rule as Qdrant data; NFS is
+# refused). ClusterIP only — UI reaches operators via `oc port-forward`, the
+# same no-public-Route rule as Qdrant. Image is mirrored (images.txt pin,
+# pack/load). Placeholders are substituted by deploy.sh from airgap.env.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mainframe-rag
+resources:
+  - deployment.yaml
+  - service.yaml
+  - pvc.yaml
+  - config-badger.yaml
+images:
+  - name: jaeger
+    newName: __INTERNAL_REGISTRY__/jaegertracing/jaeger
+    newTag: v2.20.0

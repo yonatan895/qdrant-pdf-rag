@@ -1,0 +1,65 @@
+# Jaeger v2 badger storage config (issue #83), adapted from the upstream
+# sample at cmd/jaeger/config-badger.yaml (pinned tag v2.20.0):
+#   - single primary store on the mounted RWO volume (no archive store —
+#     traces are 14-day debug data, not records)
+#   - OTLP/HTTP receiver only: the agent's exporter is OTLP/HTTP (no grpcio
+#     in the wheelhouse) and 4317 stays closed
+#   - telemetry metrics at basic level, not exposed by the Service
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jaeger-config
+  labels:
+    app: jaeger
+data:
+  config-badger.yaml: |
+    service:
+      extensions: [jaeger_storage, jaeger_query, healthcheckv2]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [jaeger_storage_exporter]
+      telemetry:
+        resource:
+          service.name: jaeger
+        metrics:
+          level: basic
+        logs:
+          level: info
+
+    extensions:
+      healthcheckv2:
+        use_v2: true
+        http:
+      jaeger_query:
+        storage:
+          traces: badger_store
+        # No ui.config_file: the v2.20.0 image does not ship config-ui.json at
+        # that path and the query extension PANICS when it is unreadable
+        # (verified live). Defaults are fine; UI config can be added later by
+        # mounting the file and re-adding this key.
+      jaeger_storage:
+        backends:
+          badger_store:
+            badger:
+              directories:
+                keys: /badger/keys
+                values: /badger/values
+              ephemeral: false
+              ttl:
+                spans: 336h # 14 days
+              metrics_update_interval: 10s
+
+    receivers:
+      otlp:
+        protocols:
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      batch:
+
+    exporters:
+      jaeger_storage_exporter:
+        trace_storage: badger_store

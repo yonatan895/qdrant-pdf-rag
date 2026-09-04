@@ -35,7 +35,7 @@ fi
 INGEST_IMAGE="${APP_REGISTRY}/qdrant-pdf-rag-ingest:${IMAGE_SHA}"
 AGENT_IMAGE="${APP_REGISTRY}/qdrant-pdf-rag-agent:${IMAGE_SHA}"
 
-# Qdrant pin comes from images.txt (name column); digest applies when recorded.
+# Third-party pins come from images.txt (name column); digest applies when recorded.
 QDRANT_REF=""
 QDRANT_DIGEST=""
 while IFS= read -r line; do
@@ -54,10 +54,29 @@ if [ -n "$QDRANT_DIGEST" ]; then
     QDRANT_REF="${QDRANT_REF%@*}@${QDRANT_DIGEST}"
 fi
 
+# Jaeger v2 trace-backend pin (issue #83): same pin discipline.
+JAEGER_REF=""
+JAEGER_DIGEST=""
+while IFS= read -r line; do
+    case "$line" in
+        \#*|"") continue ;;
+        *jaeger*)
+            JAEGER_REF=$(echo "$line" | awk '{print $1}')
+            digest=$(echo "$line" | awk '{print $2}')
+            [ "$digest" != "sha256:PENDING" ] && JAEGER_DIGEST=$digest
+            break
+            ;;
+    esac
+done < images.txt
+[ -n "$JAEGER_REF" ] || die "no jaeger image pin found in images.txt"
+if [ -n "$JAEGER_DIGEST" ]; then
+    JAEGER_REF="${JAEGER_REF%@*}@${JAEGER_DIGEST}"
+fi
+
 DIST="$REPO_ROOT/dist"
 OUT_TARBALL="$DIST/qdrant-pdf-rag-${IMAGE_SHA}.tar"
 mkdir -p "$DIST"
-rm -f "$DIST"/repo.bundle "$DIST"/qdrant-image.tar "$DIST"/app-*.tar \
+rm -f "$DIST"/repo.bundle "$DIST"/qdrant-image.tar "$DIST"/jaeger-image.tar "$DIST"/app-*.tar \
       "$DIST"/MANIFEST.txt "$DIST"/SHA256SUMS "$OUT_TARBALL" "$OUT_TARBALL.sha256"
 
 echo "==> Git bundle of the checked-out commit"
@@ -66,8 +85,9 @@ echo "==> Git bundle of the checked-out commit"
 git bundle create "$DIST/repo.bundle" HEAD --all
 git bundle verify "$DIST/repo.bundle" >/dev/null
 
-echo "==> Pulling images (fail closed on missing GHCR tags)"
+echo "==> Pulling images (fail closed on missing tags)"
 skopeo copy "docker://$QDRANT_REF" "docker-archive:$DIST/qdrant-image.tar"
+skopeo copy "docker://$JAEGER_REF" "docker-archive:$DIST/jaeger-image.tar"
 skopeo copy "docker://$INGEST_IMAGE" "docker-archive:$DIST/app-ingest-$IMAGE_SHA.tar"
 skopeo copy "docker://$AGENT_IMAGE" "docker-archive:$DIST/app-agent-$IMAGE_SHA.tar"
 
@@ -77,6 +97,7 @@ CHART_VERSION=$(basename charts/qdrant-*.tgz .tgz)
     echo "sha: $IMAGE_SHA"
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "qdrant: $QDRANT_REF"
+    echo "jaeger: $JAEGER_REF"
     echo "chart: $CHART_VERSION"
     echo "ingest: $INGEST_IMAGE"
     echo "agent: $AGENT_IMAGE"
@@ -87,12 +108,12 @@ cat "$DIST/MANIFEST.txt"
 echo "==> Member checksums (verified again inside the air-gap after unpack)"
 (
     cd "$DIST"
-    sha256sum repo.bundle qdrant-image.tar app-ingest-"$IMAGE_SHA".tar \
+    sha256sum repo.bundle qdrant-image.tar jaeger-image.tar app-ingest-"$IMAGE_SHA".tar \
               app-agent-"$IMAGE_SHA".tar MANIFEST.txt > SHA256SUMS
 )
 
 echo "==> Tarball + tarball digest"
-tar -C "$DIST" -cf "$OUT_TARBALL" repo.bundle qdrant-image.tar \
+tar -C "$DIST" -cf "$OUT_TARBALL" repo.bundle qdrant-image.tar jaeger-image.tar \
     app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar MANIFEST.txt SHA256SUMS
 # shellcheck disable=SC2016
 ( cd "$DIST" && sha256sum "$(basename "$OUT_TARBALL")" ) > "$OUT_TARBALL.sha256"

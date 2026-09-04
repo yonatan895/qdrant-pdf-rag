@@ -103,6 +103,7 @@ $render | sed \
     -e "s|__DENSE_DIM__|$DENSE_DIM|g" \
     -e "s|__LLM_BASE_URL__|${LLM_BASE_URL:-}|g" \
     -e "s|__LLM_MODEL_REASONING__|${LLM_MODEL_REASONING:-}|g" \
+    -e "s|__OTEL_EXPORTER_OTLP_ENDPOINT__|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|g" \
     > dist/agent-rendered.yaml
 if [ -n "${PULL_SECRET:-}" ]; then
     sed -i "s|imagePullSecrets: \[\]|imagePullSecrets:\n  - name: $PULL_SECRET|" dist/agent-rendered.yaml
@@ -112,15 +113,51 @@ if grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml; then
 fi
 run $KC apply -f dist/agent-rendered.yaml
 
+# Jaeger v2 trace backend (issue #83): opt-in via OTEL_EXPORTER_OTLP_ENDPOINT
+# in airgap.env. The agent env var is always rendered (empty = tracing off);
+# the Jaeger deployment only exists when tracing is on. Badger on RWO block,
+# ClusterIP only, UI via port-forward — no Route, ever.
+JAEGER_UI_HINT=""
+if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then
+    echo "==> Kustomize: Jaeger v2 all-in-one (badger on RWO block, ClusterIP)"
+    if command -v kustomize >/dev/null 2>&1; then
+        jrender="kustomize build deploy/kustomize/jaeger"
+    else
+        jrender="$KC kustomize deploy/kustomize/jaeger"
+    fi
+    $jrender | sed \
+        -e "s|__INTERNAL_REGISTRY__|$INTERNAL_REGISTRY|g" \
+        -e "s|__STORAGE_CLASS__|$STORAGE_CLASS|g" \
+        -e "s|namespace: mainframe-rag|namespace: $NAMESPACE|g" \
+        > dist/jaeger-rendered.yaml
+    if [ -n "${PULL_SECRET:-}" ]; then
+        sed -i "s|imagePullSecrets: \[\]|imagePullSecrets:\n  - name: $PULL_SECRET|" dist/jaeger-rendered.yaml
+    fi
+    if grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml; then
+        die "unsubstituted placeholder left in rendered Jaeger manifest (check airgap.env)"
+    fi
+    run $KC apply -f dist/jaeger-rendered.yaml
+    JAEGER_UI_HINT="   |   traces UI: $KC -n $NAMESPACE port-forward svc/jaeger 16686:16686"
+else
+    echo "==> Tracing off (OTEL_EXPORTER_OTLP_ENDPOINT unset): Jaeger not deployed"
+fi
+
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE rollout status statefulset/$QDRANT_RELEASE --timeout=600s"
     echo "[dryrun] $KC -n $NAMESPACE rollout status deploy/rag-agent --timeout=300s"
+    [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] && \
+        echo "[dryrun] $KC -n $NAMESPACE rollout status deploy/jaeger --timeout=120s"
     [ "${AGENT_ROUTE:-false}" = "true" ] && echo "[dryrun] oc create route edge rag-agent --service=rag-agent -n $NAMESPACE"
     echo "[dryrun] rendered manifest kept at dist/agent-rendered.yaml"
+    [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] && \
+        echo "[dryrun] Jaeger manifest kept at dist/jaeger-rendered.yaml"
 else
     echo "==> Wait for Qdrant + agent Ready"
     $KC -n "$NAMESPACE" rollout status statefulset/"$QDRANT_RELEASE" --timeout=600s
     $KC -n "$NAMESPACE" rollout status deploy/rag-agent --timeout=300s
+    if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then
+        $KC -n "$NAMESPACE" rollout status deploy/jaeger --timeout=120s
+    fi
     if [ "${AGENT_ROUTE:-false}" = "true" ]; then
         $KC -n "$NAMESPACE" get route rag-agent >/dev/null 2>&1 || \
             oc create route edge rag-agent --service=rag-agent -n "$NAMESPACE"
@@ -128,4 +165,4 @@ else
     fi
 fi
 
-next_step "corpus ready? make airgap-ingest CORPUS_PVC=<pvc>   |   smoke: make airgap-smoke"
+next_step "corpus ready? make airgap-ingest CORPUS_PVC=<pvc>   |   smoke: make airgap-smoke$JAEGER_UI_HINT"
