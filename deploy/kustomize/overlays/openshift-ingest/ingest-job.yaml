@@ -41,7 +41,13 @@ spec:
             - name: DENSE_DIM
               value: __DENSE_DIM__
             - name: INGEST_WORKERS
-              value: "4"
+              value: "__INGEST_WORKERS__"
+            - name: CONTEXTUAL_EMBED_ENABLED
+              value: "__CONTEXTUAL_EMBED_ENABLED__"
+            - name: CONTEXT_LLM_BASE_URL
+              value: "__CONTEXT_LLM_BASE_URL__"
+            - name: CONTEXT_LLM_MODEL
+              value: "__CONTEXT_LLM_MODEL__"
           resources:
             requests: { cpu: "4", memory: 8Gi }
             limits: { cpu: "16", memory: 32Gi }

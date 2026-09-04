@@ -553,7 +553,22 @@ LLM_MODEL_REASONING=ibm-granite/granite-20b-code-instruct
 
 # Optional pull secret name (if registry requires credentials)
 PULL_SECRET=internal-registry-pull-secret
+
+# Optional registry flags for private registries (self-signed CAs or authfile)
+# SKOPEO_ARGS=--dest-tls-verify=false
+# INSECURE_REGISTRY=false
 ```
+
+#### Pre-Flight Dry-Run Verification (`make airgap-dryrun`)
+
+Before applying changes to the cluster, operators can prove the entire configuration locally without cluster credentials:
+
+```bash
+# Preview rendered Qdrant Helm command, Agent manifest, and Ingest Job manifest:
+make airgap-dryrun
+```
+
+This verifies that all placeholders in `agent-rendered.yaml` and `ingest-rendered.yaml` are substituted cleanly and conforms to fail-closed configuration rules.
 
 ### 4.4 Load Images & Deploy
 
@@ -564,6 +579,24 @@ make airgap-load
 # 2. Deploy Qdrant 3-replica cluster and Agent deployment
 make airgap-deploy
 ```
+
+#### OpenShift Security Context Constraints (SCC) Note
+Qdrant's unprivileged image specifies `runAsUser: 1000` and `fsGroup: 3000` in `overlays/openshift/values.yaml`. On OpenShift clusters enforcing `restricted-v2` with `MustRunAsRange` (where project UIDs are dynamically allocated, e.g. `1000670000/10000`), admission controllers will reject static UID 1000 unless:
+1. The `qdrant` ServiceAccount is granted `anyuid` SCC by a cluster admin:
+   ```bash
+   oc adm policy add-scc-to-user anyuid -z qdrant -n mainframe-rag
+   ```
+2. Or a project-specific override file is provided via `QDRANT_EXTRA_VALUES`:
+   ```bash
+   cat > qdrant-scc.yaml <<'EOF'
+   containerSecurityContext:
+     runAsUser: null
+     runAsGroup: null
+   podSecurityContext:
+     fsGroup: null
+   EOF
+   QDRANT_EXTRA_VALUES=qdrant-scc.yaml make airgap-deploy
+   ```
 
 Verify pod statuses and readiness:
 ```bash
@@ -690,3 +723,6 @@ Citation validation runs on the accumulated text exactly as in JSON mode: the ci
 | **Qdrant Unready** | `/healthz` returns `503 qdrant_unready` | Check Qdrant pod logs (`oc logs qdrant-0`); check block PVC mount. |
 | **NFS Storage Refusal** | `make airgap-deploy` fails validation | Set `STORAGE_CLASS` to an RWO block driver (Ceph RBD / SAN / EBS). |
 | **Hash Mode in Prod** | Scripts fail closed with `EMBED_MODE=hash forbidden` | Remove `EMBED_MODE` from production environment; provide valid vLLM endpoint. |
+| **Registry Certificate Error** | `skopeo copy` fails with `x509: certificate signed by unknown authority` | Set `SKOPEO_ARGS=--dest-tls-verify=false` or `INSECURE_REGISTRY=true` in `airgap.env`. |
+| **OpenShift SCC Rejection** | Pod `qdrant-0` fails with `unable to validate against any security context constraint` | Grant `anyuid` SCC (`oc adm policy add-scc-to-user anyuid -z qdrant -n <ns>`) or supply `QDRANT_EXTRA_VALUES` to clear static `runAsUser`. |
+| **PVC Multi-Attach Error** | `job/ingest` fails with `Multi-Attach error for volume` on corpus PVC | Ensure any previous writer pod has released the PVC, or use a ReadOnlyMany volume. |

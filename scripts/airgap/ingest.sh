@@ -19,16 +19,16 @@ esac
 MANIFEST=""
 [ -f dist/MANIFEST.txt ] && MANIFEST=dist/MANIFEST.txt
 [ -z "$MANIFEST" ] && [ -f ../MANIFEST.txt ] && MANIFEST=../MANIFEST.txt
-if [ -n "$MANIFEST" ]; then
+if [ -n "$MANIFEST" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
     [ "$IMAGE_SHA" = "$packed_sha" ] || \
         die "IMAGE_SHA=$IMAGE_SHA does not match the packed MANIFEST sha ($packed_sha) — wrong SHA for this sneakernet bundle"
 fi
-[ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || die "oc is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
+[ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || command -v kubectl >/dev/null 2>&1 || die "oc or kubectl is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
 refuse_nfs_storage
 if command -v kubectl >/dev/null 2>&1; then KC=kubectl; else KC=oc; fi
 
-EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed 's:/*$::')/v1}
+EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed -E 's:(/v1)?/*$::')/v1}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 INGEST_TIMEOUT=${INGEST_TIMEOUT:-3600}
 INGEST_WORK_SIZE=${INGEST_WORK_SIZE:-100Gi}   # CI-rehearsal knob; default = prod size
@@ -57,7 +57,8 @@ if command -v kustomize >/dev/null 2>&1; then
 else
     render="$KC kustomize deploy/kustomize/overlays/openshift-ingest"
 fi
-$render | sed \
+INGEST_WORKERS=${INGEST_WORKERS:-4}
+$render | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
     -e "s|__INTERNAL_REGISTRY__|$INTERNAL_REGISTRY|g" \
     -e "s|__IMAGE_SHA__|$IMAGE_SHA|g" \
     -e "s|namespace: mainframe-rag|namespace: $NAMESPACE|g" \
@@ -65,8 +66,12 @@ $render | sed \
     -e "s|__QDRANT_RELEASE__|$QDRANT_RELEASE|g" \
     -e "s|__EMBED_BASE_URL__|$EMBED_BASE_URL|g" \
     -e "s|__EMBED_MODEL__|$EMBED_MODEL|g" \
-    -e "s|__DENSE_DIM__|$DENSE_DIM|g" \
+    -e "s|__DENSE_DIM__|\"$DENSE_DIM\"|g" \
     -e "s|__CORPUS_PVC__|$CORPUS_PVC|g" \
+    -e "s|__INGEST_WORKERS__|\"$INGEST_WORKERS\"|g" \
+    -e "s|__CONTEXTUAL_EMBED_ENABLED__|\"${CONTEXTUAL_EMBED_ENABLED:-false}\"|g" \
+    -e "s|__CONTEXT_LLM_BASE_URL__|${CONTEXT_LLM_BASE_URL:-}|g" \
+    -e "s|__CONTEXT_LLM_MODEL__|${CONTEXT_LLM_MODEL:-}|g" \
     > dist/ingest-rendered.yaml
 if [ -n "${PULL_SECRET:-}" ]; then
     sed -i "s|imagePullSecrets: \[\]|imagePullSecrets:\n  - name: $PULL_SECRET|" dist/ingest-rendered.yaml
@@ -100,6 +105,7 @@ else
     if ! $KC -n "$NAMESPACE" wait --for=condition=complete job/ingest --timeout="${INGEST_TIMEOUT}s"; then
         echo "::error::ingest Job failed" >&2
         $KC -n "$NAMESPACE" logs job/ingest --tail=200 || true
+        $KC -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -30 || true
         exit 1
     fi
 fi

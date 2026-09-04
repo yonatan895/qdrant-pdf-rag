@@ -34,6 +34,12 @@ spec:
               value: __EMBED_MODEL__
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
+            - name: RERANK_ENABLED
+              value: "__RERANK_ENABLED__"
+            - name: RERANK_BASE_URL
+              value: "__RERANK_BASE_URL__"
+            - name: RERANK_MODEL
+              value: "__RERANK_MODEL__"
 """
 
 # Jaeger stub: mirrors the real render's placeholder surface (issue #83).
@@ -175,7 +181,7 @@ def test_tracing_off_skips_jaeger_and_keeps_endpoint_empty(tree):
     assert not (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     # Endpoint env var always rendered; empty value = tracing off (fail-closed).
-    assert re.search(r"OTEL_EXPORTER_OTLP_ENDPOINT\n\s+value:\s*$", rendered)
+    assert re.search(r"OTEL_EXPORTER_OTLP_ENDPOINT\n\s+value:\s*$", rendered, re.MULTILINE)
     assert "Tracing off" in r.stdout
 
 
@@ -209,3 +215,26 @@ def test_tracing_jaeger_pull_secret_stays_absent_when_unset(tree):
     jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
     assert "imagePullSecrets: []" in jaeger
     assert "name: ghcr-pull" not in jaeger
+
+
+def test_reranker_defaults_off(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert 'value: "false"' in rendered or "value: false" in rendered
+    assert "__RERANK_" not in rendered
+
+
+def test_reranker_configured_when_enabled(tree):
+    r = _run(
+        tree,
+        ("RERANK_ENABLED", "true"),
+        ("RERANK_BASE_URL", "http://rerank:8002/v1"),
+        ("RERANK_MODEL", "my-reranker-model"),
+    )
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert 'value: "true"' in rendered or "value: true" in rendered
+    assert 'value: "http://rerank:8002/v1"' in rendered or "value: http://rerank:8002/v1" in rendered
+    assert 'value: "my-reranker-model"' in rendered or "value: my-reranker-model" in rendered
+    assert "__RERANK_" not in rendered
