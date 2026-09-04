@@ -1,6 +1,7 @@
 """Config fail-fast behavior (architecture.md section 5.2)."""
 
 import pytest
+from pydantic import ValidationError
 
 from mainframe_rag.config import Settings
 
@@ -141,3 +142,21 @@ def test_acronym_expansion_defaults_off():
     test_rewrite.py, asserted here as a Settings contract)."""
     s = Settings(_env_file=None)
     assert s.acronym_expansion_enabled is False
+
+
+def test_otel_defaults_off_and_bounded():
+    """Issue #83: tracing ships fail-closed — no OTEL_EXPORTER_OTLP_ENDPOINT
+    means no exporter, no network. The exporter queue/timeout and the sample
+    ratio are bounded so a dead collector can neither grow the heap nor
+    disable sampling silently beyond the configured ratio."""
+    s = Settings(_env_file=None)
+    assert s.otel_exporter_otlp_endpoint is None
+    assert s.otel_sample_ratio == 1.0
+    assert s.otel_export_queue_size == 2048
+    assert s.otel_export_timeout_ms == 5000
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, otel_sample_ratio=1.5)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, otel_export_queue_size=32)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, otel_export_timeout_ms=50)  # type: ignore[arg-type]

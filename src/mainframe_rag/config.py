@@ -132,6 +132,16 @@ class Settings(BaseSettings):
     allow_hash_mode: bool = False
     log_level: str = "INFO"
 
+    # OpenTelemetry tracing (issue #83). Default OFF — a deployment opts in by
+    # pointing OTEL_EXPORTER_OTLP_ENDPOINT at its collector (Jaeger v2 OTLP/HTTP).
+    # The endpoint is the bare collector origin: the exporter appends /v1/traces.
+    # Bounded batch queue so a dead collector can never grow the heap; export
+    # failures log and drop (tracing must never fail a request).
+    otel_exporter_otlp_endpoint: str | None = None
+    otel_sample_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
+    otel_export_queue_size: int = Field(default=2048, ge=64, le=65536)
+    otel_export_timeout_ms: int = Field(default=5000, ge=100, le=60000)
+
     # Ingest. batch_size follows the Qdrant skill's 64-256 upsert band
     # (.agents/skills/qdrant-performance-optimization) — bounds enforced here
     # so no call site can grow a magic number outside it.

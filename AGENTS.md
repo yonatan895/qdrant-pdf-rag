@@ -228,6 +228,7 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 - Citation normalization: normalize_citation_line peels bracketed index markers ([1], [1]:) from model citation lines.
 - Tokenizer: vLLM `/tokenize` is at the server **origin** (strip `/v1` from `LLM_BASE_URL`; LiteLLM may not expose it). First failure logs one warning and pins the estimator fallback — never a silent per-call fallback. Budgeting plans with the in-process estimator and verifies the packed prompt **once** via `/tokenize` `messages`; never per-chunk tokenize RPCs.
 - Run manifests: unreachable Qdrant records `qdrant_version="unknown"` — never the pinned server version.
+- Tracing (#83) ships default-off (`OTEL_EXPORTER_OTLP_ENDPOINT` unset → no exporter, no network). Export is fail-open and bounded: collector outages log and drop, never fail a request or shutdown. OTel setup must call `trace.set_tracer_provider` — import-time proxy tracers (retrieve.query) silently no-op otherwise. Spans mirror the log contract (ids/counts/scores/timings); the bounded query text is the one allowed free-text span attr, PDF/manual text and secrets never enter spans; the JSON-log never-log-query-text rule is unchanged. api/sdk/exporter OTel pins must stay version-locked.
 - After a non-obvious bug, add a regression test **and** a one-line note here if it is a standing rule.
 
 ## When you change this file

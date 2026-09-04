@@ -14,6 +14,7 @@ import time
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
+from opentelemetry import trace
 from pydantic import BaseModel, ConfigDict
 from qdrant_client import models
 
@@ -24,6 +25,10 @@ from mainframe_rag.ports import AsyncQdrantPoints, Embedder, QdrantPoints, Reran
 from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
 from mainframe_rag.retrieve.rewrite import expand_query, should_rewrite
 from mainframe_rag.retrieve.screen import screen_query
+
+# Proxy tracer: no-op until a real provider is installed (issue #83 — the
+# agent's lifespan installs one when OTEL_EXPORTER_OTLP_ENDPOINT is set).
+tracer = trace.get_tracer("mainframe-rag.retrieve")
 
 PREFETCH_LIMIT = 40
 RRF_K = 2
@@ -193,6 +198,17 @@ def diversify_hits(
 _memoized_reranker: tuple[int, Reranker | None] | None = None
 
 
+def _rerank_bypass_reason(query: str, has_identifiers: bool) -> str | None:
+    """Shared bypass classification for both twins (one rule, one helper —
+    the reason string lands on the trace and must never diverge between
+    search() and async_search())."""
+    if screen_query(query) == "trap":
+        return "trap"
+    if has_identifiers:
+        return "identifier"
+    return None
+
+
 def search(
     client: QdrantPoints,
     embedder: Embedder,
@@ -221,9 +237,8 @@ def search(
 
             _memoized_reranker = (sid, build_reranker(settings))
         active_reranker = _memoized_reranker[1]
-    if active_reranker is not None and (
-        screen_query(query) == "trap" or identifiers.has_identifiers
-    ):
+    bypass_reason = _rerank_bypass_reason(query, identifiers.has_identifiers)
+    if active_reranker is not None and bypass_reason is not None:
         # Issue #113: trap-class (injection) queries bypass rerank — however
         # the reranker arrived (flag-built, memoized, or explicitly passed
         # by the lifespan client). RRF order stands, so the must_not
@@ -249,71 +264,126 @@ def search(
     prefetch_limit = settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
 
     timings: dict[str, int] = {}
+    span_attrs: dict[str, str | bool | int | float] = {
+        "rag.query": query,
+        "rag.limit": limit,
+        "rag.rerank_active": rerank_active,
+        "rag.prefetch_limit": prefetch_limit,
+        "rag.filter_present": flt is not None,
+    }
+    if bypass_reason is not None:
+        span_attrs["rag.rerank_bypass_reason"] = bypass_reason
 
-    t0 = time.monotonic()
-    dense_vec = embedder.dense_query([query])[0]
-    sparse_idx, sparse_val = embedder.sparse([query])[0]
-    timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
+    with tracer.start_as_current_span("retrieve.search", attributes=span_attrs) as span:
+        with tracer.start_as_current_span(
+            "retrieve.embed", attributes={"rag.embedder": type(embedder).__name__}
+        ):
+            t0 = time.monotonic()
+            dense_vec = embedder.dense_query([query])[0]
+            sparse_idx, sparse_val = embedder.sparse([query])[0]
+            timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 
-    t0 = time.monotonic()
-    dense_req = models.QueryRequest(
-        query=dense_vec,
-        using="dense",
-        limit=prefetch_limit,
-        filter=flt,
-        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
-    )
-    sparse_req = models.QueryRequest(
-        query=models.SparseVector(indices=sparse_idx, values=sparse_val),
-        using="bm25",
-        limit=prefetch_limit,
-        filter=flt,
-        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
-    )
+        with tracer.start_as_current_span(
+            "retrieve.prefetch",
+            attributes={
+                "rag.batch": hasattr(client, "query_batch_points"),
+                "rag.prefetch_limit": prefetch_limit,
+            },
+        ):
+            t0 = time.monotonic()
+            dense_req = models.QueryRequest(
+                query=dense_vec,
+                using="dense",
+                limit=prefetch_limit,
+                filter=flt,
+                with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
+            )
+            sparse_req = models.QueryRequest(
+                query=models.SparseVector(indices=sparse_idx, values=sparse_val),
+                using="bm25",
+                limit=prefetch_limit,
+                filter=flt,
+                with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
+            )
 
-    if hasattr(client, "query_batch_points"):
-        responses = client.query_batch_points(collection, requests=[dense_req, sparse_req])
-        dense_points = responses[0].points
-        sparse_points = responses[1].points
-    else:
-        dense_points = _prefetch_one(client, collection, dense_vec, "dense", flt, prefetch_limit)
-        sparse_points = _prefetch_one(
-            client,
-            collection,
-            models.SparseVector(indices=sparse_idx, values=sparse_val),
-            "bm25",
-            flt,
-            prefetch_limit,
-        )
-    timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
+            if hasattr(client, "query_batch_points"):
+                responses = client.query_batch_points(collection, requests=[dense_req, sparse_req])
+                dense_points = responses[0].points
+                sparse_points = responses[1].points
+            else:
+                dense_points = _prefetch_one(client, collection, dense_vec, "dense", flt, prefetch_limit)
+                sparse_points = _prefetch_one(
+                    client,
+                    collection,
+                    models.SparseVector(indices=sparse_idx, values=sparse_val),
+                    "bm25",
+                    flt,
+                    prefetch_limit,
+                )
+            timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
 
-    if settings:
-        weights = (
-            (settings.rrf_weight_dense_identifier, settings.rrf_weight_sparse_identifier)
-            if identifiers.has_identifiers
-            else (settings.rrf_weight_dense_nl, settings.rrf_weight_sparse_nl)
-        )
-        k = settings.rrf_k
-        max_per_page = settings.retrieve_max_chunks_per_page
-        max_per_doc = settings.retrieve_max_chunks_per_doc
-    else:
-        weights = RRF_WEIGHTS_IDENTIFIER if identifiers.has_identifiers else RRF_WEIGHTS_NL
-        k = RRF_K
-        max_per_page = 1
-        max_per_doc = 3
+        if settings:
+            weights = (
+                (settings.rrf_weight_dense_identifier, settings.rrf_weight_sparse_identifier)
+                if identifiers.has_identifiers
+                else (settings.rrf_weight_dense_nl, settings.rrf_weight_sparse_nl)
+            )
+            k = settings.rrf_k
+            max_per_page = settings.retrieve_max_chunks_per_page
+            max_per_doc = settings.retrieve_max_chunks_per_doc
+        else:
+            weights = RRF_WEIGHTS_IDENTIFIER if identifiers.has_identifiers else RRF_WEIGHTS_NL
+            k = RRF_K
+            max_per_page = 1
+            max_per_doc = 3
 
-    if rerank_active and active_reranker is not None:
-        from mainframe_rag.retrieve.rerank import rerank_candidates
+        if rerank_active and active_reranker is not None:
+            from mainframe_rag.retrieve.rerank import rerank_candidates
 
-        rrf_limit = settings.rerank_candidates if settings else 50
-        candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=rrf_limit)
-        t_rr = time.monotonic()
-        reranked = rerank_candidates(query, candidates, active_reranker)
-        timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
-        hits = diversify_hits(reranked, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
-    else:
-        candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=max(limit * 3, 24))
-        hits = diversify_hits(candidates, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
+            rrf_limit = settings.rerank_candidates if settings else 50
+            with tracer.start_as_current_span(
+                "retrieve.rrf",
+                attributes={
+                    "rag.rrf_k": k,
+                    "rag.rrf_weights": f"{weights[0]:g},{weights[1]:g}",
+                    "rag.candidates_in": len(dense_points) + len(sparse_points),
+                },
+            ):
+                candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=rrf_limit)
+            t_rr = time.monotonic()
+            with tracer.start_as_current_span(
+                "retrieve.rerank", attributes={"rag.candidates": len(candidates)}
+            ) as rr_span:
+                reranked = rerank_candidates(query, candidates, active_reranker)
+                rr_span.set_attributes(
+                    {"rag.rerank_scores": ",".join(f"{h.score:.3f}" for h in reranked[:5])}
+                )
+            timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
+            fused = reranked
+        else:
+            with tracer.start_as_current_span(
+                "retrieve.rrf",
+                attributes={
+                    "rag.rrf_k": k,
+                    "rag.rrf_weights": f"{weights[0]:g},{weights[1]:g}",
+                    "rag.candidates_in": len(dense_points) + len(sparse_points),
+                },
+            ):
+                candidates = rrf_fuse(
+                    dense_points, sparse_points, weights, k=k, limit=max(limit * 3, 24)
+                )
+            fused = candidates
+
+        with tracer.start_as_current_span("retrieve.diversify") as dv_span:
+            hits = diversify_hits(fused, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
+            dv_span.set_attributes(
+                {
+                    "rag.candidates_in": len(fused),
+                    "rag.candidates_out": len(hits),
+                    "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
+                }
+            )
+        span.set_attributes({"rag.query_kind": query_kind(identifiers), "rag.hits": len(hits)})
 
     return hits, query_kind(identifiers), timings
 
@@ -366,9 +436,8 @@ async def async_search(
 
             _memoized_reranker = (sid, build_reranker(settings))
         active_reranker = _memoized_reranker[1]
-    if active_reranker is not None and (
-        screen_query(query) == "trap" or identifiers.has_identifiers
-    ):
+    bypass_reason = _rerank_bypass_reason(query, identifiers.has_identifiers)
+    if active_reranker is not None and bypass_reason is not None:
         # Issue #113: trap-class (injection) queries bypass rerank — however
         # the reranker arrived (flag-built, memoized, or explicitly passed
         # by the lifespan client). RRF order stands, so the must_not
@@ -394,78 +463,133 @@ async def async_search(
     prefetch_limit = settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
 
     timings: dict[str, int] = {}
+    span_attrs: dict[str, str | bool | int | float] = {
+        "rag.query": query,
+        "rag.limit": limit,
+        "rag.rerank_active": rerank_active,
+        "rag.prefetch_limit": prefetch_limit,
+        "rag.filter_present": flt is not None,
+    }
+    if bypass_reason is not None:
+        span_attrs["rag.rerank_bypass_reason"] = bypass_reason
 
-    # dense_query is a sync HTTP POST to the embed server and sparse is
-    # CPU-bound FastEmbed/BM25; both are sync by protocol. Offload to a worker
-    # thread — running them on the event loop would block every in-flight
-    # request for the duration of the embed call (review S1).
-    t0 = time.monotonic()
-    dense_vec = (await asyncio.to_thread(embedder.dense_query, [query]))[0]
-    sparse_idx, sparse_val = (await asyncio.to_thread(embedder.sparse, [query]))[0]
-    timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
+    with tracer.start_as_current_span("retrieve.search", attributes=span_attrs) as span:
+        # dense_query is a sync HTTP POST to the embed server and sparse is
+        # CPU-bound FastEmbed/BM25; both are sync by protocol. Offload to a worker
+        # thread — running them on the event loop would block every in-flight
+        # request for the duration of the embed call (review S1).
+        with tracer.start_as_current_span(
+            "retrieve.embed", attributes={"rag.embedder": type(embedder).__name__}
+        ):
+            t0 = time.monotonic()
+            dense_vec = (await asyncio.to_thread(embedder.dense_query, [query]))[0]
+            sparse_idx, sparse_val = (await asyncio.to_thread(embedder.sparse, [query]))[0]
+            timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 
-    t0 = time.monotonic()
-    dense_req = models.QueryRequest(
-        query=dense_vec,
-        using="dense",
-        limit=prefetch_limit,
-        filter=flt,
-        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
-    )
-    sparse_req = models.QueryRequest(
-        query=models.SparseVector(indices=sparse_idx, values=sparse_val),
-        using="bm25",
-        limit=prefetch_limit,
-        filter=flt,
-        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
-    )
+        with tracer.start_as_current_span(
+            "retrieve.prefetch",
+            attributes={
+                "rag.batch": hasattr(client, "query_batch_points"),
+                "rag.prefetch_limit": prefetch_limit,
+            },
+        ):
+            t0 = time.monotonic()
+            dense_req = models.QueryRequest(
+                query=dense_vec,
+                using="dense",
+                limit=prefetch_limit,
+                filter=flt,
+                with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
+            )
+            sparse_req = models.QueryRequest(
+                query=models.SparseVector(indices=sparse_idx, values=sparse_val),
+                using="bm25",
+                limit=prefetch_limit,
+                filter=flt,
+                with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
+            )
 
-    if hasattr(client, "query_batch_points"):
-        res = client.query_batch_points(collection, requests=[dense_req, sparse_req])
-        responses = await res if inspect.isawaitable(res) else res
-        dense_points = responses[0].points
-        sparse_points = responses[1].points
-    else:
-        dense_points = await _async_prefetch_one(client, collection, dense_vec, "dense", flt, prefetch_limit)
-        sparse_points = await _async_prefetch_one(
-            client,
-            collection,
-            models.SparseVector(indices=sparse_idx, values=sparse_val),
-            "bm25",
-            flt,
-            prefetch_limit,
-        )
-    timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
+            if hasattr(client, "query_batch_points"):
+                res = client.query_batch_points(collection, requests=[dense_req, sparse_req])
+                responses = await res if inspect.isawaitable(res) else res
+                dense_points = responses[0].points
+                sparse_points = responses[1].points
+            else:
+                dense_points = await _async_prefetch_one(client, collection, dense_vec, "dense", flt, prefetch_limit)
+                sparse_points = await _async_prefetch_one(
+                    client,
+                    collection,
+                    models.SparseVector(indices=sparse_idx, values=sparse_val),
+                    "bm25",
+                    flt,
+                    prefetch_limit,
+                )
+            timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
 
-    if settings:
-        weights = (
-            (settings.rrf_weight_dense_identifier, settings.rrf_weight_sparse_identifier)
-            if identifiers.has_identifiers
-            else (settings.rrf_weight_dense_nl, settings.rrf_weight_sparse_nl)
-        )
-        k = settings.rrf_k
-        max_per_page = settings.retrieve_max_chunks_per_page
-        max_per_doc = settings.retrieve_max_chunks_per_doc
-    else:
-        weights = RRF_WEIGHTS_IDENTIFIER if identifiers.has_identifiers else RRF_WEIGHTS_NL
-        k = RRF_K
-        max_per_page = 1
-        max_per_doc = 3
+        if settings:
+            weights = (
+                (settings.rrf_weight_dense_identifier, settings.rrf_weight_sparse_identifier)
+                if identifiers.has_identifiers
+                else (settings.rrf_weight_dense_nl, settings.rrf_weight_sparse_nl)
+            )
+            k = settings.rrf_k
+            max_per_page = settings.retrieve_max_chunks_per_page
+            max_per_doc = settings.retrieve_max_chunks_per_doc
+        else:
+            weights = RRF_WEIGHTS_IDENTIFIER if identifiers.has_identifiers else RRF_WEIGHTS_NL
+            k = RRF_K
+            max_per_page = 1
+            max_per_doc = 3
 
-    if rerank_active and active_reranker is not None:
-        from mainframe_rag.retrieve.rerank import rerank_candidates
+        if rerank_active and active_reranker is not None:
+            from mainframe_rag.retrieve.rerank import rerank_candidates
 
-        rrf_limit = settings.rerank_candidates if settings else 50
-        candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=rrf_limit)
-        t_rr = time.monotonic()
-        # Cross-encoder scoring is sync HTTP (batches of settings.rerank_batch_size);
-        # offload like the embed leg above (review S1).
-        reranked = await asyncio.to_thread(rerank_candidates, query, candidates, active_reranker)
-        timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
-        hits = diversify_hits(reranked, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
-    else:
-        candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=max(limit * 3, 24))
-        hits = diversify_hits(candidates, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
+            rrf_limit = settings.rerank_candidates if settings else 50
+            with tracer.start_as_current_span(
+                "retrieve.rrf",
+                attributes={
+                    "rag.rrf_k": k,
+                    "rag.rrf_weights": f"{weights[0]:g},{weights[1]:g}",
+                    "rag.candidates_in": len(dense_points) + len(sparse_points),
+                },
+            ):
+                candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=rrf_limit)
+            t_rr = time.monotonic()
+            # Cross-encoder scoring is sync HTTP (batches of settings.rerank_batch_size);
+            # offload like the embed leg above (review S1).
+            with tracer.start_as_current_span(
+                "retrieve.rerank", attributes={"rag.candidates": len(candidates)}
+            ) as rr_span:
+                reranked = await asyncio.to_thread(rerank_candidates, query, candidates, active_reranker)
+                rr_span.set_attributes(
+                    {"rag.rerank_scores": ",".join(f"{h.score:.3f}" for h in reranked[:5])}
+                )
+            timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
+            fused = reranked
+        else:
+            with tracer.start_as_current_span(
+                "retrieve.rrf",
+                attributes={
+                    "rag.rrf_k": k,
+                    "rag.rrf_weights": f"{weights[0]:g},{weights[1]:g}",
+                    "rag.candidates_in": len(dense_points) + len(sparse_points),
+                },
+            ):
+                candidates = rrf_fuse(
+                    dense_points, sparse_points, weights, k=k, limit=max(limit * 3, 24)
+                )
+            fused = candidates
+
+        with tracer.start_as_current_span("retrieve.diversify") as dv_span:
+            hits = diversify_hits(fused, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
+            dv_span.set_attributes(
+                {
+                    "rag.candidates_in": len(fused),
+                    "rag.candidates_out": len(hits),
+                    "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
+                }
+            )
+        span.set_attributes({"rag.query_kind": query_kind(identifiers), "rag.hits": len(hits)})
 
     return hits, query_kind(identifiers), timings
 
