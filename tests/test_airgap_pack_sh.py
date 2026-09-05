@@ -66,6 +66,7 @@ TOOLS = (
     "head",
     "ls",
     "openssl",
+    "python3",
 )
 
 
@@ -76,6 +77,7 @@ def pack_tree(tmp_path):
     for f in ("common.sh", "pack.sh", "bootstrap.sh"):
         shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
     shutil.copy(REPO / "images.txt", tmp_path / "images.txt")
+    shutil.copy(REPO / "requirements.lock.txt", tmp_path / "requirements.lock.txt")
     (tmp_path / "charts").mkdir()
     shutil.copy(next(REPO.glob("charts/qdrant-*.tgz")), tmp_path / "charts")
 
@@ -155,6 +157,13 @@ def test_pack_missing_signing_key_fails_closed(pack_tree):
     assert "SNEAKERNET_SIGNING_KEY" in r.stderr
 
 
+def test_pack_trusted_key_labels_signed_true(pack_tree):
+    tmp_path, _, _, _ = pack_tree
+    r, _head = _run_pack(pack_tree, ("SNEAKERNET_KEY_TRUSTED", "true"))
+    assert r.returncode == 0, r.stderr
+    assert "signed: true" in (tmp_path / "dist" / "MANIFEST.txt").read_text()
+
+
 def test_pack_outside_git_repo_fails_closed(pack_tree):
     tmp_path, _, _, _ = pack_tree
     (tmp_path / ".git").rename(tmp_path / ".git-bak")
@@ -202,7 +211,7 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     # Tar-manifest digests, not the images.txt list pins: the stub answers
     # every inspect identically, while the fixture images.txt pins differ.
     assert f"qdrant_digest: {STUB_DIGEST}" in manifest
-    assert "signed: true" in manifest
+    assert "signed: ephemeral" in manifest
     log = skopeo_log.read_text()
     assert log.splitlines().count("copy") == 4
     assert log.count("inspect") == 4

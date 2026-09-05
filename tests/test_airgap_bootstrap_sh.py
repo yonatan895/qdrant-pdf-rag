@@ -102,6 +102,32 @@ def test_bootstrap_tampered_sums_fails_signature(bundle_dir):
     assert "signature verification failed" in r.stderr
 
 
+def test_bootstrap_trusted_pub_mismatch_refuses(bundle_dir):
+    other = bundle_dir / "other.key"
+    subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
+         "-out", str(other)],
+        check=True,
+        capture_output=True,
+    )
+    other_pub = bundle_dir / "other.pub"
+    subprocess.run(
+        ["openssl", "pkey", "-in", str(other), "-pubout", "-out", str(other_pub)],
+        check=True,
+        capture_output=True,
+    )
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "AIRGAP_WORKSPACE": "workspace",
+        "SNEAKERNET_TRUSTED_PUB": str(other_pub),
+    }
+    r = subprocess.run(
+        ["sh", "bootstrap.sh"], cwd=bundle_dir, capture_output=True, text=True, env=env, check=False
+    )
+    assert r.returncode != 0
+    assert "does not match SNEAKERNET_TRUSTED_PUB" in r.stderr
+
+
 def test_bootstrap_success(bundle_dir):
     r = subprocess.run(
         ["sh", "bootstrap.sh"],

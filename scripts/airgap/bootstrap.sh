@@ -21,6 +21,20 @@ for sigfile in sneakernet-signing.pub SHA256SUMS.sig; do
         exit 1
     fi
 done
+# Trust anchor (optional, strict): SNEAKERNET_TRUSTED_PUB names a pubkey
+# obtained out of band. Without it this check is TOFU — it binds the
+# members together but cannot prove which key signed. (Twin of
+# check_trusted_pub in common.sh, inlined: no clone exists yet to source.)
+if [ -n "${SNEAKERNET_TRUSTED_PUB:-}" ]; then
+    if [ ! -f "$SNEAKERNET_TRUSTED_PUB" ]; then
+        echo "FAIL: SNEAKERNET_TRUSTED_PUB file not found: $SNEAKERNET_TRUSTED_PUB" >&2
+        exit 1
+    fi
+    cmp -s "$SNEAKERNET_TRUSTED_PUB" sneakernet-signing.pub || {
+        echo "FAIL: bundle pubkey does not match SNEAKERNET_TRUSTED_PUB — untrusted bundle." >&2
+        exit 1
+    }
+fi
 openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null \
     || { echo "FAIL: SHA256SUMS signature verification failed — do not trust this bundle." >&2; exit 1; }
 sha256sum -c SHA256SUMS

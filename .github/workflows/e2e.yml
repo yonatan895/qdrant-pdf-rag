@@ -131,12 +131,17 @@ jobs:
           SNEAKERNET_SIGNING_KEY: ${{ secrets.SNEAKERNET_SIGNING_KEY }}
         run: |
           if [ -z "$SNEAKERNET_SIGNING_KEY" ]; then
-            echo "::warning::SNEAKERNET_SIGNING_KEY secret unset — packing with an ephemeral throwaway key (plumbing only, no trust)"
+            echo "::warning::SNEAKERNET_SIGNING_KEY secret unset — packing with an ephemeral throwaway key (plumbing only, no trust; MANIFEST records signed: ephemeral)"
             openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$RUNNER_TEMP/signing.key"
             export SNEAKERNET_SIGNING_KEY="$RUNNER_TEMP/signing.key"
           else
             printf '%s' "$SNEAKERNET_SIGNING_KEY" > "$RUNNER_TEMP/signing.key"
+            openssl pkey -in "$RUNNER_TEMP/signing.key" -noout || {
+              echo "::error::SNEAKERNET_SIGNING_KEY is not a valid PEM private key (store real newlines, not backslash-escaped ones)"
+              exit 1
+            }
             export SNEAKERNET_SIGNING_KEY="$RUNNER_TEMP/signing.key"
+            export SNEAKERNET_KEY_TRUSTED=true
           fi
           make airgap-pack
           ls -la dist/

@@ -239,6 +239,35 @@ def test_load_image_digest_mismatch_fails_closed(load_tree):
     assert "does not match MANIFEST" in r.stderr
 
 
+def test_load_trusted_pub_mismatch_refuses(load_tree):
+    tmp_path, _ = load_tree
+    _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
+    other = tmp_path / "other.key"
+    subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
+         "-out", str(other)],
+        check=True,
+        capture_output=True,
+    )
+    other_pub = tmp_path / "other.pub"
+    subprocess.run(
+        ["openssl", "pkey", "-in", str(other), "-pubout", "-out", str(other_pub)],
+        check=True,
+        capture_output=True,
+    )
+    r = _run_load(load_tree, ("SNEAKERNET_TRUSTED_PUB", str(other_pub)))
+    assert r.returncode != 0
+    assert "does not match SNEAKERNET_TRUSTED_PUB" in r.stderr
+
+
+def test_load_trusted_pub_match_passes(load_tree):
+    tmp_path, _ = load_tree
+    _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
+    r = _run_load(load_tree, ("SNEAKERNET_TRUSTED_PUB", str(tmp_path / "dist" / "sneakernet-signing.pub")))
+    assert r.returncode == 0, r.stderr
+    assert "Loaded 4 images into reg.internal:5000" in r.stdout
+
+
 def test_load_missing_internal_registry_fails_closed(load_tree):
     tmp_path, _ = load_tree
     _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)

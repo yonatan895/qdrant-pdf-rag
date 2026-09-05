@@ -505,13 +505,22 @@ git clone https://github.com/yonatan895/qdrant-pdf-rag.git
 cd qdrant-pdf-rag
 git checkout <main-sha>  # Full 40-character SHA matching built GHCR images
 
-# Signing key: CI uses the SNEAKERNET_SIGNING_KEY secret (PEM private key).
-# A maintainer creates it once with `openssl genpkey -algorithm RSA
-# -pkeyopt rsa_keygen_bits:2048` and stores the PEM as the secret; the
-# matching ceremony is: the bundle carries the derived
-# sneakernet-signing.pub, and bootstrap.sh / load.sh verify SHA256SUMS
-# against it offline (tamper-evidence across the sneakernet — any member
-# swap invalidates the signature). Local rehearsal generates a throwaway:
+# Signing key: CI uses the SNEAKERNET_SIGNING_KEY secret (PEM private key),
+# with SNEAKERNET_KEY_TRUSTED=true so MANIFEST records signed: true.
+# Without the secret, CI packs with an ephemeral throwaway key and records
+# signed: ephemeral. A maintainer creates the production key once with
+# `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048` and stores
+# the PEM as the secret.
+# Trust model (read carefully): the offline signature binds the bundle
+# members together — any member swap invalidates it — but verification
+# against the in-bundle pubkey alone is TOFU and cannot prove which key
+# signed. Authenticity roots, strongest first: (1) set SNEAKERNET_TRUSTED_PUB
+# to a pubkey file obtained out of band and bootstrap.sh / load.sh refuse
+# any bundle whose pub differs; (2) compare the bundle pubkey fingerprint
+# against the org-published value (PACKING_RECORD.txt records the signing
+# key fingerprint: `openssl pkey -in <key> -pubout | openssl sha256`);
+# (3) download the tarball over HTTPS from GitHub Actions (TLS plus access
+# control). Local rehearsal generates a throwaway:
 #   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/signing.key
 # Build air-gap sneakernet package:
 SNEAKERNET_SIGNING_KEY=/tmp/signing.key make airgap-pack

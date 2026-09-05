@@ -15,8 +15,10 @@ enforce_product_rules
 resolve_aliases
 command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the connected pack host"
 command -v openssl >/dev/null 2>&1 || die "openssl is required to sign the bundle"
+command -v python3 >/dev/null 2>&1 || die "python3 is required to write sbom.json"
 [ -n "${SNEAKERNET_SIGNING_KEY:-}" ] || die "SNEAKERNET_SIGNING_KEY is unset (path to the PEM signing key; CI uses the secret, local rehearsal generates a throwaway pair)"
 [ -f "$SNEAKERNET_SIGNING_KEY" ] || die "SNEAKERNET_SIGNING_KEY file not found: $SNEAKERNET_SIGNING_KEY"
+openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -noout >/dev/null 2>&1 || die "SNEAKERNET_SIGNING_KEY is not a valid PEM private key (store real newlines, not backslash-escaped ones)"
 [ -d .git ] || die "run from a git clone of the repository"
 [ -n "$IMAGE_SHA" ] || die "IMAGE_SHA could not be resolved from git"
 [ "$IMAGE_SHA" = "$(git rev-parse HEAD)" ] || \
@@ -101,30 +103,52 @@ CHART_SHA256=$(sha256sum charts/qdrant-*.tgz | awk '{print $1}')
     echo "agent: $AGENT_IMAGE"
     echo "agent_digest: $AGENT_DIGEST"
     echo "app_registry: $APP_REGISTRY"
-    echo "signed: true"
+    # Honesty label, not a trust root: "true" only when the caller asserts
+    # SNEAKERNET_KEY_TRUSTED=true for a production-custody key; throwaway
+    # rehearsal keys record "ephemeral". Strength comes from the load-side
+    # SNEAKERNET_TRUSTED_PUB check, never from this string.
+    if [ "${SNEAKERNET_KEY_TRUSTED:-}" = "true" ]; then
+        echo "signed: true"
+    else
+        echo "signed: ephemeral"
+    fi
 } > "$DIST/MANIFEST.txt"
 cat "$DIST/MANIFEST.txt"
 
 echo "==> SBOM (digest enumeration of every pinned input)"
-WHEELS=$(awk '!/^#/ && NF {print $0}' requirements.lock.txt | sed 's/^/    "/; s/$/",/' | sed '$ s/,$//')
-{
-    echo "{"
-    echo "  \"generated\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
-    echo "  \"image_sha\": \"$IMAGE_SHA\","
-    echo "  \"images\": ["
-    echo "    {\"name\": \"qdrant\", \"ref\": \"$QDRANT_REF\", \"digest\": \"$QDRANT_DIGEST\"},"
-    echo "    {\"name\": \"jaeger\", \"ref\": \"$JAEGER_REF\", \"digest\": \"$JAEGER_DIGEST\"},"
-    echo "    {\"name\": \"app-ingest\", \"ref\": \"$INGEST_IMAGE\", \"digest\": \"$INGEST_DIGEST\"},"
-    echo "    {\"name\": \"app-agent\", \"ref\": \"$AGENT_IMAGE\", \"digest\": \"$AGENT_DIGEST\"}"
-    echo "  ],"
-    echo "  \"base_image\": {\"ref\": \"$UBI_REF\", \"digest\": \"$UBI_DIGEST\"},"
-    echo "  \"chart\": \"$CHART_VERSION\","
-    echo "  \"chart_sha256\": \"$CHART_SHA256\","
-    echo "  \"wheels\": ["
-    echo "$WHEELS"
-    echo "  ]"
-    echo "}"
-} > "$DIST/sbom.json"
+SBOM_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+export SBOM_DATE IMAGE_SHA QDRANT_REF QDRANT_DIGEST JAEGER_REF JAEGER_DIGEST
+export INGEST_IMAGE INGEST_DIGEST AGENT_IMAGE AGENT_DIGEST UBI_REF UBI_DIGEST
+export CHART_VERSION CHART_SHA256 DIST REPO_ROOT
+python3 - <<'PYEOF'
+import json
+import os
+
+wheels = []
+with open(os.path.join(os.environ["REPO_ROOT"], "requirements.lock.txt"), encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if line and not line.startswith("#"):
+            wheels.append(line)
+
+sbom = {
+    "generated": os.environ["SBOM_DATE"],
+    "image_sha": os.environ["IMAGE_SHA"],
+    "images": [
+        {"name": "qdrant", "ref": os.environ["QDRANT_REF"], "digest": os.environ["QDRANT_DIGEST"]},
+        {"name": "jaeger", "ref": os.environ["JAEGER_REF"], "digest": os.environ["JAEGER_DIGEST"]},
+        {"name": "app-ingest", "ref": os.environ["INGEST_IMAGE"], "digest": os.environ["INGEST_DIGEST"]},
+        {"name": "app-agent", "ref": os.environ["AGENT_IMAGE"], "digest": os.environ["AGENT_DIGEST"]},
+    ],
+    "base_image": {"ref": os.environ["UBI_REF"], "digest": os.environ["UBI_DIGEST"]},
+    "chart": os.environ["CHART_VERSION"],
+    "chart_sha256": os.environ["CHART_SHA256"],
+    "wheels": wheels,
+}
+with open(os.path.join(os.environ["DIST"], "sbom.json"), "w", encoding="utf-8") as fh:
+    json.dump(sbom, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PYEOF
 
 echo "==> Bootstrap helper & Packing Record"
 cp "$REPO_ROOT/scripts/airgap/bootstrap.sh" "$DIST/bootstrap.sh"

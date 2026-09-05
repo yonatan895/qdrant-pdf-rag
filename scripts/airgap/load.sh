@@ -53,6 +53,7 @@ command -v openssl >/dev/null 2>&1 || die "openssl is required to verify the bun
 for sigfile in sneakernet-signing.pub SHA256SUMS.sig; do
     [ -f "$ARTDIR/$sigfile" ] || die "$sigfile not found in $ARTDIR — unpack the sneakernet tarball first"
 done
+check_trusted_pub "$ARTDIR"
 (cd "$ARTDIR" && openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null) \
     || die "SHA256SUMS signature verification failed — do not trust this bundle"
 (cd "$ARTDIR" && sha256sum -c SHA256SUMS)
