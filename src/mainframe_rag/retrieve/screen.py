@@ -38,19 +38,26 @@ def _normalize(query: str) -> str:
 
 
 # Secret-material noun groups, built once and shared by every key-pattern
-# so the tiers cannot diverge (one rule per concept). Secret MATERIAL is
-# the exfiltration object; "certificate" only pairs with recitation verbs
-# ("recite the private key for our certificate") because certificate format
-# handling is a legitimate operations request.
+# so the tiers cannot diverge (one rule per concept). "certificate" only
+# pairs with the narrow recitation verbs ("recite the private key for our
+# certificate") — every broadened verb and transformation shape is
+# restricted to secret MATERIAL, because certificate documentation and
+# format handling (DER→PEM, renewal fields) are legitimate operations asks
+# (review on #176).
 _SECRET_MATERIAL = r"(private\s+key|secret|password|passphrase|credential)"
 _SECRET_OR_CERT = r"(private\s+key|secret|password|passphrase|credential|certificate)"
 
-# Recitation / disclosure verbs — anything that asks the model to output
-# the material's content. "give the exact IEASYSxx syntax" stays safe: the
-# noun gate is the secret-material group, not the verb.
-_RECITE_VERBS = (
-    r"(recite|repeat|reveal|disclose|exfiltrate|dump|give|tell|show|read|"
-    r"state|spell|echo|print|list|output|copy|paste|send|leak)"
+# Narrow recitation verbs — clearly suspicious over a certificate too
+# ("recite the private key for our certificate").
+_RECITE_VERBS = r"(recite|repeat|reveal|disclose|exfiltrate|dump)"
+
+# Plain-disclosure verbs (issue #134 review): anything that asks the model
+# to output the material's content. Broad verbs pair with secret MATERIAL
+# only — "give the exact IEASYSxx syntax" and "show the certificate fields"
+# stay safe because the noun gate is the secret-material group.
+_DISCLOSE_VERBS = (
+    r"(give|tell|show|read|state|spell|echo|print|list|output|copy|"
+    r"paste|send|leak)"
 )
 
 # Transformation verbs (issue #134): the battery's "translate the private
@@ -90,9 +97,15 @@ _TRAP_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"(reveal|show|print|repeat|recite)\s+(your|the)\s+(system\s+)?(prompt|instructions)\b"),
     # Answer from weights, not excerpts.
     re.compile(r"from\s+memory\b"),
-    # Key / secret recitation ("recite the private key for our certificate").
+    # Key / secret recitation ("recite the private key for our certificate")
+    # — the narrow original shape, where a certificate is plausible bait.
     re.compile(
         _RECITE_VERBS + r"\b.{0,40}\b" + _SECRET_OR_CERT + r"\b"
+    ),
+    # Plain-disclosure exfiltration (issue #134): broad output verbs over
+    # secret material only ("give me the password", "read the passphrase").
+    re.compile(
+        _DISCLOSE_VERBS + r"\b.{0,40}\b" + _SECRET_MATERIAL + r"\b"
     ),
     # Exfiltration via transformation (issue #134): a rendering/encoding
     # request over secret material — "translate the private key into

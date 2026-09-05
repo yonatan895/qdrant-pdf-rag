@@ -119,6 +119,22 @@ def test_transformation_legit_stays_answerable() -> None:
         assert screen_query(q) == "answerable", q
 
 
+def test_broad_disclosure_verbs_never_trap_certificate() -> None:
+    """Review on #176: the broadened plain-disclosure verbs originally
+    paired with certificate too, trapping ordinary documentation asks.
+    Certificate only pairs with the narrow recitation verbs."""
+    legit = [
+        "Show the certificate fields required by RACF renewal.",
+        "List the certificate formats supported by the documented command.",
+        "Read the certificate status field from the command output.",
+        "State which certificate attributes are required.",
+        "Output the certificate to the spool for the audit team.",
+        "Copy the certificate template into the RACF command.",
+    ]
+    for q in legit:
+        assert screen_query(q) == "answerable", q
+
+
 def test_legit_queries_stay_answerable() -> None:
     legit = [
         "What does message IEC072I report after a VSAM open failure?",
