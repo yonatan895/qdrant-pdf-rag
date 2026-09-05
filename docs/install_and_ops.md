@@ -64,9 +64,13 @@ cd qdrant-pdf-rag
 # 2. Bootstrap virtual environment and install locked dependencies
 make venv
 
-# 3. Download and cache BM25 model weights locally
+# 3. Download and cache BM25 model weights locally (first run downloads
+# Qdrant/bm25 via FastEmbed — needs HuggingFace reachability; afterwards the
+# weights live in bundles/bm25-weights and are baked into images)
 make bm25-weights
 ```
+
+Fresh-machine heavylift to budget for: the venv install, the BM25 download above, the Qdrant image pull on first `make sim`, and the `vllm-openai` pull on first `make local-vllm*` (the pinned `v0.28.0` image is ≈29 GB). The `HF_TOKEN` path in §3.6 additionally needs gated-repo approval (e.g. Gemma) before the token works — request access first.
 
 ### 3.2 Code Quality & Unit Tests
 
@@ -561,7 +565,7 @@ The `bootstrap.sh` script automatically:
 Edit `airgap.env` to configure your cluster environment:
 
 > [!NOTE]
-> If the `AIRGAP_ENV` environment variable is exported in the calling shell, scripts load that file path directly, taking precedence over the local `./airgap.env`. Within either file, an explicitly exported non-empty variable in the calling environment always wins over the file value, so `VAR=x make airgap-*` overrides a stale key.
+> If the `AIRGAP_ENV` environment variable is exported in the calling shell, scripts load that file path directly, taking precedence over the local `./airgap.env`. Within either file, an explicitly exported non-empty variable in the calling environment always wins over the file value, so `VAR=x make airgap-*` overrides a stale key. Note the reverse for re-runs: a bare `make airgap-*` re-run reuses whatever the file still holds — after editing `airgap.env`, re-run `make airgap-validate` before touching the cluster.
 
 ```ini
 # Internal image registry accessible to cluster nodes
@@ -714,6 +718,7 @@ Kind nodes pull images inside Docker; pulling from `airgap-registry:5000` over H
 docker run -d --restart=always -p 5000:5000 --name airgap-registry registry:2
 
 # 2. Create Kind cluster with containerd insecure mirror for airgap-registry:5000
+mkdir -p scratch
 cat <<'EOF' > scratch/kind-config.yaml
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
@@ -728,13 +733,27 @@ kind create cluster --name airgap --config scratch/kind-config.yaml
 
 # 3. Connect local registry to Kind network
 docker network connect "kind" airgap-registry || true
+
+# 4. Point kubectl at the new cluster and verify access (a fresh shell may
+# have no current-context, in which case every kubectl call fails against
+# localhost:8080)
+kubectl config use-context kind-airgap
+kubectl get nodes
 ```
 
 #### Step 2: Pack Sneakernet Tarball
 
+Packing pulls the app images from the registry tags for the checked-out SHA — it never builds locally. That means this step only works on a **green `main` SHA whose CI images already exist** (check out `main` first; an unmerged branch fails closed with `manifest unknown`). It also requires a signing key (§4.1); for rehearsal generate a throwaway:
+
 ```bash
+# Checkout a green main SHA first (pack bundles HEAD and pulls its GHCR tags):
+git checkout <green-main-sha>
+
+# Rehearsal-only signing key (production uses the custodied key, §4.1):
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/signing.key
+
 # Build the complete image and bundle archive in dist/
-make airgap-pack
+SNEAKERNET_SIGNING_KEY=/tmp/signing.key make airgap-pack
 ```
 
 #### Step 3: Load & Push to Local Registry
@@ -749,7 +768,8 @@ INTERNAL_REGISTRY=localhost:5000 INSECURE_REGISTRY=true make airgap-load
 Create a local single-replica override for Qdrant, copy `airgap.env.example` to `airgap.env`, and populate required values:
 
 ```bash
-# Create local sizing override (1 replica for Kind test node)
+# Create local sizing override (1 replica for Kind test node; the 3x16Gi
+# prod values cannot schedule on one node)
 cat > scratch/qdrant-local.yaml <<'EOF'
 replicaCount: 1
 resources:
@@ -773,11 +793,59 @@ STORAGE_CLASS=standard
 QDRANT_STORAGE_SIZE=1Gi
 QDRANT_EXTRA_VALUES=scratch/qdrant-local.yaml
 IMAGE_SHA=$(awk '/^sha: /{print $2}' dist/MANIFEST.txt)
-VLLM_BASE_URL=http://<host-ip-or-svc>:8000
-EMBED_MODEL=ibm-granite/granite-embedding-125m-english
-DENSE_DIM=768
+VLLM_BASE_URL=http://vllm-mock:8000
+EMBED_MODEL=mock-embed
+DENSE_DIM=64
 ```
-*(If running without a live GPU vLLM instance, launch `python scripts/mock_vllm.py --port 8000` and point `VLLM_BASE_URL` to the host).*
+`DENSE_DIM` must equal the mock's `MOCK_DIM` below (both 64 here); any pair works as long as they match — ingest fails closed on a mismatch. `LLM_BASE_URL` / `LLM_MODEL_REASONING` are intentionally left unset: the Kind path proves ingest + `/v1/search`; `/v1/answer` stays disabled without a reasoning endpoint (the mock does serve `/v1/chat/completions` deterministically, but wiring answers in-cluster is unproven — see the e2e rehearsal, which asserts search only).
+
+Deploy the in-cluster mock vLLM **before** `make airgap-deploy` (pods resolve `vllm-mock` over cluster DNS — no host networking needed; the "point at the host" alternative does not work from Kind pods without extra setup):
+
+```bash
+NS=mainframe-rag
+SHA=$(awk '/^sha: /{print $2}' dist/MANIFEST.txt)
+kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n "$NS" create configmap mock-vllm --from-file=mock_vllm.py=scripts/mock_vllm.py
+kubectl apply -n "$NS" -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-mock
+  labels: {app: vllm-mock}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: vllm-mock}}
+  template:
+    metadata: {labels: {app: vllm-mock}}
+    spec:
+      containers:
+        - name: mock
+          # Tarball-faithful: loaded from the bundle via airgap-load, never pulled.
+          image: localhost:5000/qdrant-pdf-rag-ingest:${SHA}
+          command: ["python3", "/cm/mock_vllm.py"]
+          env:
+            - {name: MOCK_DIM, value: "64"}
+            - {name: PORT, value: "8000"}
+          ports: [{containerPort: 8000}]
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8000}
+            initialDelaySeconds: 2
+          volumeMounts: [{name: mock, mountPath: /cm}]
+      volumes:
+        - name: mock
+          configMap: {name: mock-vllm}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-mock
+spec:
+  selector: {app: vllm-mock}
+  ports: [{port: 8000, targetPort: 8000}]
+EOF
+kubectl -n "$NS" rollout status deploy/vllm-mock --timeout=180s
+```
+(This mirrors the `airgap-rehearsal` job in `.github/workflows/e2e.yml`, which is the proven reference when this section and CI disagree.)
 
 Deploy the stack (Qdrant StatefulSet, Jaeger v2, Agent Deployment):
 ```bash
@@ -786,9 +854,50 @@ make airgap-deploy
 
 #### Step 5: Ingest Corpus & Run Smoke Test
 
+The ingest Job mounts a caller-supplied corpus PVC read-only — the scripts never create it. For rehearsal, create a `corpus` PVC and fill it with synthetic PDFs via a generator Job (same tarball-faithful ingest image as the mock above):
+
 ```bash
-# Provision a test PVC (backed by standard storage class) with sample PDFs, then launch ingest:
-CORPUS_PVC=my-corpus-pvc make airgap-ingest
+NS=mainframe-rag
+SHA=$(awk '/^sha: /{print $2}' dist/MANIFEST.txt)
+kubectl -n "$NS" apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: corpus}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: {requests: {storage: 1Gi}}
+  storageClassName: standard
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: corpus-gen}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: gen
+          image: localhost:5000/qdrant-pdf-rag-ingest:${SHA}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              python3 /app/scripts/make_synthetic_pdf.py --out /corpus/SA22-0000-00_outline.pdf
+              python3 /app/scripts/make_synthetic_pdf.py --plain --out /corpus/plain-widget-notes.pdf
+              ls -la /corpus
+          volumeMounts: [{name: corpus, mountPath: /corpus}]
+      volumes:
+        - name: corpus
+          persistentVolumeClaim: {claimName: corpus}
+EOF
+kubectl -n "$NS" wait --for=condition=complete job/corpus-gen --timeout=300s
+```
+
+Then launch ingest and smoke-test (shrink the prod-sized ingest scratch for the single Kind node):
+
+```bash
+# Launch one-shot ingest Job against corpus PVC:
+CORPUS_PVC=corpus INGEST_WORK_SIZE=2Gi make airgap-ingest
 
 # Run in-cluster smoke search:
 make airgap-smoke
@@ -876,3 +985,4 @@ Citation validation runs on the accumulated text exactly as in JSON mode: the ci
 | **K8s Manifest Integer/Boolean Error** | `Invalid value: "string", expected integer/boolean` | Ensure numeric/boolean env vars (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`) are explicitly quoted in rendered manifests. |
 | **Degraded `/healthz` Smoke Failure** | `make airgap-smoke` exits 1 with `FAIL: /healthz probe did not report ok` | Pre-flight probe failed closed; check Qdrant and vLLM connectivity inside the cluster. |
 | **Qdrant 401 After Reinstall** | `/v1/search` fails with `401 Invalid API key or JWT` after Qdrant was reinstalled or re-`helm upgrade`d | The chart regenerates the `<release>-apikey` secret on reinstall while running agent pods keep the old key in env. Roll the agent: `kubectl -n <ns> rollout restart deploy/rag-agent` and wait for rollout before smoking again. |
+| **Stale dist/ MANIFEST** | `make airgap-validate` / `-deploy` / `-ingest` / `-dryrun` fail with `IMAGE_SHA=<sha> does not match packed MANIFEST sha` | `dist/` is gitignored build output that persists across checkouts — the MANIFEST inside is from an older pack (only `pack` regenerates it; the other steps just read it). Repack at the current HEAD, or clear the stale `dist/` before re-running. |

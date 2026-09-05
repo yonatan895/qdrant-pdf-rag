@@ -17,6 +17,7 @@ bundles/
 dist/
 build/
 output/
+scratch/  # throwaway local-cluster working files (§4.7 kind configs, overrides)
 evals/runs/*.jsonl
 
 # --- Python ---
