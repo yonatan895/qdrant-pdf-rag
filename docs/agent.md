@@ -149,7 +149,7 @@ trailing sweep in `cites.py` / `parse_answer`:
    never inferred** — IBM-manual noise like `z/OS (3.1)` stays body text.
 
 - One shared normalizer peels list markers, `>` quotes, paired
-  punctuation, `[x](url)` links, `<angle>` wraps, `(parens)` groups, and
+  punctuation, ``[x](url)`` links, `<angle>` wraps, `(parens)` groups, and
   `[1]:`-style numeric prefixes (up to 6 rounds) on both paths — two
   regexes for one concept would diverge.
 - Validation is exact-match + dedupe against the retrieved pool; standalone
