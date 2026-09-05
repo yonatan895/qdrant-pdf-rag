@@ -88,6 +88,19 @@ class Settings(BaseSettings):
     # Default off; identifier-heavy queries bypass rewriting entirely.
     acronym_expansion_enabled: bool = False
 
+    # LLM query rewriting (issue #82, HyDE / step-back): independent flags,
+    # default off. The rewrite feeds the dense leg only — the sparse (BM25)
+    # and rerank legs keep the operator's own words, mirroring the asymmetric
+    # dense-query-prefix design. Any LLM failure falls back to the unrewritten
+    # query. Traps and identifier-heavy queries bypass via should_rewrite.
+    hyde_enabled: bool = False
+    hyde_max_chars: int = Field(default=1500, ge=200, le=3500)
+    stepback_enabled: bool = False
+    stepback_max_chars: int = Field(default=400, ge=80, le=1000)
+    # Short-call budget for one rewrite completion — a different call shape
+    # from the 300s answer timeout and the 30s context budget, so its own knob.
+    llm_rewrite_timeout_s: float = Field(default=15.0, gt=0.0, le=60.0)
+
     # Hybrid retrieval fusion (local RRF) and diversity parameters
     rrf_k: int = Field(default=2, ge=1, le=100)
     rrf_weight_dense_nl: float = Field(default=1.0, gt=0.0, le=10.0)

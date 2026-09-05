@@ -159,6 +159,20 @@ def test_answer_refuses_without_reasoning_model(monkeypatch):
     assert "reasoning" in body["message"].lower()
 
 
+def test_rewrite_flags_fail_closed_without_reasoning_model(monkeypatch):
+    """Issue #82: a rewrite flag without a reasoning model refuses startup —
+    the rewrite leg cannot work per-request and must not silently degrade
+    every query to the unrewritten form."""
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_MODEL_REASONING", raising=False)
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("HYDE_ENABLED", "true")
+    with pytest.raises(RuntimeError, match="rewrite leg cannot run"), TestClient(app_mod.app):
+        pass
+
+
 def test_answer_strips_fabricated_body_citation(client, monkeypatch):
     """No cite outside the hit set may reach the client — including ones the
     model quotes mid-answer (issue #20 PR C)."""

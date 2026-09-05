@@ -283,6 +283,14 @@ def evaluate(golden: list[GoldenEntry], settings) -> dict:
     from mainframe_rag.retrieve.rerank import build_reranker
 
     reranker = build_reranker(settings)
+    # HyDE/step-back A/B (issue #82): the eval drives the sync twin, so the
+    # rewrite leg rides the same dedicated bounded-timeout client the agent
+    # builds in lifespan. Absent unless a rewrite flag is on.
+    rewrite_llm = None
+    if settings.hyde_enabled or settings.stepback_enabled:
+        from mainframe_rag.agent.answer import build_rewrite_llm
+
+        rewrite_llm = build_rewrite_llm(settings)
     collection = settings.qdrant_collection
 
     rows, failures = [], 0
@@ -297,6 +305,7 @@ def evaluate(golden: list[GoldenEntry], settings) -> dict:
                 limit=SEARCH_LIMIT,
                 settings=settings,
                 reranker=reranker,
+                llm=rewrite_llm,
             )
             rows.append(score_entry(hits, entry))
             rows[-1]["kind"] = kind

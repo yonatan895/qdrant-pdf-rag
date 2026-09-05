@@ -36,6 +36,7 @@ from mainframe_rag.agent.answer import (
     as_chat_result,
     assert_reasoning_model,
     build_messages,
+    build_rewrite_llm,
     classify_query_complexity,
     parse_answer,
 )
@@ -68,6 +69,10 @@ embedder: Embedder
 llm: LLMClient
 tokenizer: Tokenizer
 reranker: Reranker | None = None
+# Dedicated rewrite client for HyDE/step-back (issue #82): built only when a
+# rewrite flag is on; carries the bounded rewrite timeout, not the 300s
+# answer pool. None by default — no pool exists when the feature is off.
+rewrite_llm: LLMClient | None = None
 # Tracer starts as the API proxy (no-op until a real provider is installed).
 # Lifespan reassigns it when tracing is enabled (issue #83); tests swap it
 # directly with a tracer backed by InMemorySpanExporter.
@@ -120,6 +125,8 @@ def _timing_parts(
     parts = []
     if timings.get("embed_ms") is not None:
         parts.append(f"embed;dur={timings['embed_ms']}")
+    if timings.get("rewrite_ms") is not None:
+        parts.append(f"rewrite;dur={timings['rewrite_ms']}")
     if timings.get("qdrant_ms") is not None:
         parts.append(f"qdrant;dur={timings['qdrant_ms']}")
     if timings.get("rerank_ms") is not None:
@@ -191,7 +198,7 @@ def _answer_log_fields(
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker
+    global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker, rewrite_llm
     settings = load_settings()
     configure_logging(settings.log_level)
     # Startup fail-fast (issue #20 PR D): the agent refuses to listen on a
@@ -208,6 +215,16 @@ async def lifespan(_app: FastAPI):
     if settings.embed_mode == "vllm":
         settings.require_dense_dim()
         settings.require_embed()
+    # LLM rewrites (issue #82): fail closed at startup like the embed path —
+    # a rewrite flag without a reasoning model cannot work per-request and
+    # must not silently degrade every query to the unrewritten form.
+    if (settings.hyde_enabled or settings.stepback_enabled) and (
+        not settings.llm_base_url or not settings.llm_model_reasoning
+    ):
+        raise RuntimeError(
+            "HYDE_ENABLED or STEPBACK_ENABLED is set but LLM_BASE_URL/"
+            "LLM_MODEL_REASONING is not; the rewrite leg cannot run"
+        )
     http_limits = httpx2.Limits(
         max_keepalive_connections=settings.http_max_keepalive_connections,
         max_connections=settings.http_max_connections,
@@ -237,6 +254,7 @@ async def lifespan(_app: FastAPI):
     # must close the pool THIS lifespan created, never a test double.
     llm_client = HttpxLLMClient(settings)
     llm = llm_client
+    rewrite_llm = build_rewrite_llm(settings) if (settings.hyde_enabled or settings.stepback_enabled) else None
 
     # The agent is async end to end: production always gets AsyncQdrantClient.
     # No runtime sniffing of the module attribute — a swapped class (vendored
@@ -274,6 +292,11 @@ async def lifespan(_app: FastAPI):
         await llm_client.aclose()
     elif hasattr(llm_client, "close"):
         llm_client.close()
+
+    if rewrite_llm is not None and hasattr(rewrite_llm, "aclose"):
+        await rewrite_llm.aclose()
+    elif rewrite_llm is not None and hasattr(rewrite_llm, "close"):
+        rewrite_llm.close()
 
     if hasattr(qdrant, "close"):
         close_res = qdrant.close()
@@ -432,7 +455,7 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
             res = retrieve_search(
                 qdrant, embedder, settings.qdrant_collection, req.query,
                 product=req.product, version=req.version, limit=req.limit,
-                settings=settings, reranker=reranker,
+                settings=settings, reranker=reranker, llm=rewrite_llm,
             )
             hits, kind, timings = await _await_retrieval(res)
         except Exception as exc:
@@ -446,7 +469,8 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
     log.info(
         json_log(
             request_id, "search", query_kind=kind, hits=len(hits),
-            embed_ms=timings.get("embed_ms"), qdrant_ms=timings.get("qdrant_ms"),
+            embed_ms=timings.get("embed_ms"), rewrite_ms=timings.get("rewrite_ms"),
+            qdrant_ms=timings.get("qdrant_ms"),
             rerank_ms=timings.get("rerank_ms"),
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
@@ -522,7 +546,7 @@ async def v1_answer(
             res = retrieve_search(
                 qdrant, embedder, settings.qdrant_collection, req.query,
                 product=req.product, version=req.version, limit=8,
-                settings=settings, reranker=reranker,
+                settings=settings, reranker=reranker, llm=rewrite_llm,
             )
             hits, kind, timings = await _await_retrieval(res)
     except Exception as exc:

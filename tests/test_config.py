@@ -144,6 +144,25 @@ def test_acronym_expansion_defaults_off():
     assert s.acronym_expansion_enabled is False
 
 
+def test_llm_rewrite_defaults_off_and_bounded():
+    """Issue #82: HyDE / step-back ship default-off with bounded caps; the
+    rewrite timeout is a distinct call shape from the 300s answer pool."""
+    s = Settings(_env_file=None)
+    assert s.hyde_enabled is False
+    assert s.stepback_enabled is False
+    assert s.hyde_max_chars == 1500
+    assert s.stepback_max_chars == 400
+    assert s.llm_rewrite_timeout_s == 15.0
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, hyde_max_chars=100)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, stepback_max_chars=50)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, llm_rewrite_timeout_s=0.0)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, llm_rewrite_timeout_s=90.0)  # type: ignore[arg-type]
+
+
 def test_otel_defaults_off_and_bounded():
     """Issue #83: tracing ships fail-closed — no OTEL_EXPORTER_OTLP_ENDPOINT
     means no exporter, no network. The exporter queue/timeout and the sample

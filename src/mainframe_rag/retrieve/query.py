@@ -21,9 +21,15 @@ from qdrant_client import models
 if TYPE_CHECKING:
     from mainframe_rag.config import Settings
 
-from mainframe_rag.ports import AsyncQdrantPoints, Embedder, QdrantPoints, Reranker
+from mainframe_rag.ports import AsyncQdrantPoints, Embedder, LLMClient, QdrantPoints, Reranker
 from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
-from mainframe_rag.retrieve.rewrite import expand_query, should_rewrite
+from mainframe_rag.retrieve.rewrite import (
+    _stage_plan,
+    dense_text_async,
+    dense_text_sync,
+    expand_query,
+    should_rewrite,
+)
 from mainframe_rag.retrieve.screen import screen_query
 
 # Proxy tracer: no-op until a real provider is installed (issue #83 — the
@@ -392,12 +398,15 @@ def search(
     limit: int = 8,
     settings: Settings | None = None,
     reranker: Reranker | None = None,
+    llm: LLMClient | None = None,
 ) -> tuple[list[SearchHit], str, dict[str, int]]:
     """Returns (hits, query_kind, timing_ms). Filters applied inside prefetch.
 
     Dense and sparse prefetch queries execute concurrently in a single HTTP
     batch call via query_batch_points (falling back to query_points if unsupported).
-    When reranking is enabled, fused candidates (top-50) are scored by the cross-encoder."""
+    When reranking is enabled, fused candidates (top-50) are scored by the cross-encoder.
+    With HyDE/step-back enabled (issue #82) the dense leg embeds the LLM rewrite;
+    the sparse and rerank legs keep the operator's own words."""
     identifiers = parse_query(query)
     flt = build_filter(identifiers, product=product, version=version)
 
@@ -412,11 +421,19 @@ def search(
     span_attrs = _retrieve_span_attrs(query, limit, rerank_active, prefetch_limit, flt, bypass_reason)
 
     with tracer.start_as_current_span("retrieve.search", attributes=span_attrs) as span:
+        dense_text = query
+        if llm is not None and _stage_plan(settings):
+            with tracer.start_as_current_span(
+                "retrieve.rewrite", attributes={"rag.rewrite": "+".join(_stage_plan(settings))}
+            ):
+                t_rw = time.monotonic()
+                dense_text = dense_text_sync(settings, llm, query)
+                timings["rewrite_ms"] = int((time.monotonic() - t_rw) * 1000)
         with tracer.start_as_current_span(
             "retrieve.embed", attributes={"rag.embedder": type(embedder).__name__}
         ):
             t0 = time.monotonic()
-            dense_vec = embedder.dense_query([query])[0]
+            dense_vec = embedder.dense_query([dense_text])[0]
             sparse_idx, sparse_val = embedder.sparse([query])[0]
             timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 
@@ -506,12 +523,17 @@ async def async_search(
     limit: int = 8,
     settings: Settings | None = None,
     reranker: Reranker | None = None,
+    llm: LLMClient | None = None,
 ) -> tuple[list[SearchHit], str, dict[str, int]]:
     """Async: returns (hits, query_kind, timing_ms). Filters applied inside prefetch.
 
     Dense and sparse prefetch queries execute concurrently in a single HTTP
     batch call via query_batch_points (falling back to query_points if unsupported).
-    When reranking is enabled, fused candidates (top-50) are scored by the cross-encoder."""
+    When reranking is enabled, fused candidates (top-50) are scored by the cross-encoder.
+    With HyDE/step-back enabled (issue #82) the dense leg embeds the LLM rewrite;
+    the sparse and rerank legs keep the operator's own words. Near-verbatim twin
+    of search() by design — the drift-guard test pins identical hits for
+    identical fakes."""
     identifiers = parse_query(query)
     flt = build_filter(identifiers, product=product, version=version)
 
@@ -526,6 +548,14 @@ async def async_search(
     span_attrs = _retrieve_span_attrs(query, limit, rerank_active, prefetch_limit, flt, bypass_reason)
 
     with tracer.start_as_current_span("retrieve.search", attributes=span_attrs) as span:
+        dense_text = query
+        if llm is not None and _stage_plan(settings):
+            with tracer.start_as_current_span(
+                "retrieve.rewrite", attributes={"rag.rewrite": "+".join(_stage_plan(settings))}
+            ):
+                t_rw = time.monotonic()
+                dense_text = await dense_text_async(settings, llm, query)
+                timings["rewrite_ms"] = int((time.monotonic() - t_rw) * 1000)
         # dense_query is a sync HTTP POST to the embed server and sparse is
         # CPU-bound FastEmbed/BM25; both are sync by protocol. Offload to a worker
         # thread — running them on the event loop would block every in-flight
@@ -534,7 +564,7 @@ async def async_search(
             "retrieve.embed", attributes={"rag.embedder": type(embedder).__name__}
         ):
             t0 = time.monotonic()
-            dense_vec = (await asyncio.to_thread(embedder.dense_query, [query]))[0]
+            dense_vec = (await asyncio.to_thread(embedder.dense_query, [dense_text]))[0]
             sparse_idx, sparse_val = (await asyncio.to_thread(embedder.sparse, [query]))[0]
             timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 

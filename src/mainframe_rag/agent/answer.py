@@ -416,6 +416,22 @@ def assert_reasoning_model(settings: Settings) -> tuple[str, str]:
     return settings.llm_base_url, settings.require_reasoning_model()
 
 
+def build_rewrite_llm(settings: Settings) -> HttpxLLMClient:
+    """Dedicated client for the HyDE/step-back rewrite leg (issue #82):
+    the answer path's 300s reasoning pool is the wrong call shape for a
+    short retrieval-side completion, so this client carries the bounded
+    rewrite timeout and forces non-streaming output. Same endpoint/model —
+    only the pool semantics differ. Built in lifespan when either flag is
+    on; closed with everything else lifespan opened."""
+    rewrite_settings = settings.model_copy(
+        update={
+            "answer_timeout_s": settings.llm_rewrite_timeout_s,
+            "llm_stream": False,
+        }
+    )
+    return HttpxLLMClient(rewrite_settings)
+
+
 class HttpxLLMClient:
     """LLMClient implementation: the reasoning model only — deliberately no
     other model knob (architecture.md 4.6). LLM env fails closed at request
