@@ -103,9 +103,13 @@ kustomize_render() {
 }
 
 # Wire PULL_SECRET into a rendered manifest (no-op when unset).
+# The inserted item reuses the matched line's indent: every overlay nests
+# `imagePullSecrets: []` inside the pod spec, and a fixed 2-space item breaks
+# out of the mapping (kubectl: "did not find expected key" on apply).
+# PULL_SECRET is a DNS-subdomain secret name by contract — no sed-active chars.
 wire_pull_secret() {
     if [ -n "${PULL_SECRET:-}" ]; then
-        sed -i "s|imagePullSecrets: \[\]|imagePullSecrets:\n  - name: $PULL_SECRET|" "$1"
+        sed -E -i "s|^([[:space:]]*)imagePullSecrets: \[\]|\1imagePullSecrets:\n\1  - name: $PULL_SECRET|" "$1"
     fi
 }
 

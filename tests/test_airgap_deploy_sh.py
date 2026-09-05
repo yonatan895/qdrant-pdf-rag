@@ -141,6 +141,20 @@ def test_pull_secret_wired_when_set(tree):
     assert "imagePullSecrets=null" not in log
 
 
+def test_pull_secret_wired_agent_render_keeps_mapping(tree):
+    # The wired item must reuse the pod-spec indent: a fixed 2-space insert
+    # broke out of the mapping and kubectl rejected agent-rendered.yaml
+    # ("did not find expected key") in the Kind rehearsal.
+    r = _run(tree, ("PULL_SECRET", "ghcr-pull"))
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert re.search(
+        r"^([ ]*)imagePullSecrets:\n\1  - name: ghcr-pull$",
+        rendered,
+        re.MULTILINE,
+    )
+
+
 def test_storage_size_knob_covers_persistence_and_snapshot(tree):
     _run(tree, ("QDRANT_STORAGE_SIZE", "1Gi"))
     log = _helm_log(tree)
@@ -207,6 +221,11 @@ def test_tracing_jaeger_pull_secret_wired_when_set(tree):
     assert r.returncode == 0, r.stderr
     jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
     assert "name: ghcr-pull" in jaeger
+    assert re.search(
+        r"^([ ]*)imagePullSecrets:\n\1  - name: ghcr-pull$",
+        jaeger,
+        re.MULTILINE,
+    )
 
 
 def test_tracing_jaeger_pull_secret_stays_absent_when_unset(tree):
