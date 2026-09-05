@@ -109,8 +109,17 @@ class _FakeQdrant:
     """QdrantPoints double for the parent-side run() path (review round on
     PR D: the non-dry upsert branch had no coverage)."""
 
-    def __init__(self, stored_sha: str | None = None):
+    def __init__(self, stored_sha: str | None = None, stored_rules_v: str | None = None):
+        from mainframe_rag.ingest.rules_version import extraction_rules_version
+
         self.stored_sha = stored_sha
+        # A stored collection defaults to the CURRENT rules so existing
+        # skip tests model a matching collection; tests pass an explicit
+        # value (including "" for a legacy pre-versioning collection) to
+        # exercise the extraction-rules gate (issue #124).
+        self.stored_rules_v = (
+            extraction_rules_version() if stored_rules_v is None else stored_rules_v
+        )
         self.upserts: list[int] = []
         self.deletes = 0
 
@@ -133,9 +142,14 @@ class _FakeQdrant:
 
         return SimpleNamespace()
 
-    def scroll(self, collection_name, *, scroll_filter, limit, with_payload):
+    def scroll(self, collection_name, *, scroll_filter=None, limit=1, with_payload=None, offset=None):
         from types import SimpleNamespace
 
+        if with_payload == ["rules_v"]:
+            # Empty collection (stored_sha None) vs versioned points.
+            if self.stored_sha is None:
+                return [], None
+            return [SimpleNamespace(payload={"rules_v": self.stored_rules_v})], None
         if self.stored_sha is None:
             return [], None
         return [SimpleNamespace(payload={"sha256": self.stored_sha})], None

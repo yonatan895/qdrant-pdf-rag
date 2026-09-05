@@ -49,8 +49,10 @@ from mainframe_rag.ingest.qdrant_io import (
     doc_sha256,
     ensure_collection,
     set_bulk_indexing,
+    stored_rules_version,
     upsert_chunks,
 )
+from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
 from mainframe_rag.logs import configure_logging
 from mainframe_rag.ports import SparseVector
@@ -164,6 +166,7 @@ def _parse_one(
             pages=parsed.page_count,
             chunks=len(chunks),
             seconds=round(time.monotonic() - started, 3),
+            rules_version=extraction_rules_version(),
         )
         return record, parsed, chunks, vectors, contexts
     except Exception as exc:  # noqa: BLE001 — isolate worker crash from main pool
@@ -276,16 +279,20 @@ def _upsert_one(
     settings: Settings,
     locks: _DocLocks,
     contexts: dict[str, str] | None = None,
+    force_reingest: bool = False,
 ) -> tuple[str, float]:
     """Stage 2 (upsert stream): qdrant-level skip, delete-on-sha-mismatch,
     batched upsert. Vectors arrive precomputed from the parse worker. The
     doc_id lock keeps colliding docs from interleaving. Returns
-    (status, seconds)."""
+    (status, seconds). `force_reingest` (--reingest, issue #124) turns the
+    stored-sha-equal early return into delete+re-upsert: after a rules
+    change the payload content is stale even though the file bytes are
+    identical, so the sha check alone must never skip."""
     started = time.perf_counter()
     client = _get_qdrant(settings)
     with locks.get(parsed.doc_id):
         stored_sha = doc_sha256(client, settings, parsed.doc_id)
-        if stored_sha == parsed.sha256:
+        if stored_sha == parsed.sha256 and not force_reingest:
             return "skipped", round(time.perf_counter() - started, 3)
         if stored_sha is not None:
             delete_by_doc(client, settings, parsed.doc_id)
@@ -313,9 +320,11 @@ def run(
     vendor: str | None = None,
     product: str | None = None,
     version: str | None = None,
+    force_reingest: bool = False,
 ) -> int:
     settings = load_settings()
     workers = resolve_workers(workers, settings)
+    rules_v = extraction_rules_version()
     started = time.monotonic()
     if settings.contextual_embed_enabled and not dry_run:
         # Fail the whole run before spawning the pool: a misconfigured flag
@@ -342,6 +351,30 @@ def run(
     if not dry_run:
         client = _get_qdrant(settings)
         ensure_collection(client, settings)
+        # Extraction-rules gate (issue #124): a non-empty collection whose
+        # payloads were extracted under different rules must never be
+        # appended to or skipped against — identifier regexes, chunking, or
+        # classify changes would silently mix rule generations in one
+        # collection and desync the message_ids prefetch filter (the #120
+        # failure mode). Fail closed with the remediation; --reingest is
+        # the deliberate override that re-extracts every doc. Empty
+        # collection (None) needs no gate; legacy points (empty string)
+        # are a mismatch like any other version.
+        stored_v = stored_rules_version(client, settings)
+        if stored_v is not None and stored_v != rules_v and not force_reingest:
+            if stored_v == "":
+                raise RuntimeError(
+                    f"collection {settings.qdrant_collection!r} predates extraction-rules "
+                    f"versioning (no rules_v on its points; this tree computes {rules_v!r}). "
+                    "Re-ingest required: re-run with --reingest to stamp every doc "
+                    "(never serve mixed-rule payloads)."
+                )
+            raise RuntimeError(
+                f"extraction-rules mismatch: collection {settings.qdrant_collection!r} holds "
+                f"payloads extracted under rules {stored_v!r}, this tree computes {rules_v!r}. "
+                "Re-ingest required: re-run with --reingest to re-extract every doc "
+                "(never serve mixed-rule payloads)."
+            )
         if bulk:
             # Qdrant skill: HNSW builds must not compete with a bulk load.
             set_bulk_indexing(client, settings.qdrant_collection, bulk=True)
@@ -356,7 +389,7 @@ def run(
         for path in pdfs:
             record = inventory.get(str(path))
             sha = sha256_file(path)
-            if record and should_skip(record, sha, allow_dry=dry_run):
+            if record and should_skip(record, sha, allow_dry=dry_run, rules_version=rules_v):
                 files_ok += 1  # already ingested — an ok outcome
                 log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
                 continue
@@ -509,7 +542,10 @@ def run(
                             assert cache_path is not None
                             append_context_entries(cache_path, parsed.sha256, contexts)
                         upsert_pending[
-                            upsert_pool.submit(_upsert_one, parsed, chunks, vectors, settings, locks, contexts or None)
+                            upsert_pool.submit(
+                                _upsert_one, parsed, chunks, vectors, settings, locks,
+                                contexts or None, force_reingest,
+                            )
                         ] = record
                         refill_parse()
                     else:  # upsert stream result
@@ -607,6 +643,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--product", default=None)
     parser.add_argument("--version", default=None)
     parser.add_argument(
+        "--reingest",
+        action="store_true",
+        help="Re-extract every doc (bypass inventory and Qdrant sha skips); "
+        "required after an extraction-rules change so payloads match the "
+        "current rules (issue #124)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Parse + chunk only; no Qdrant, no embeddings"
     )
     parser.add_argument("--log-level", default="INFO")
@@ -622,6 +665,7 @@ def main(argv: list[str] | None = None) -> int:
         vendor=args.vendor,
         product=args.product,
         version=args.version,
+        force_reingest=args.reingest,
     )
 
 
