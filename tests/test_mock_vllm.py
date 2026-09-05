@@ -6,7 +6,12 @@ HttpxLLMClient.chat consume.
 """
 
 import importlib.util
+import os
+import socket
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import httpx2
@@ -176,6 +181,55 @@ def test_tokenize_served_at_origin_root_only(base_url):
     """vLLM serves /tokenize at the server origin, not under /v1. A client
     regression that posts /v1/tokenize must 404, not match a loose suffix."""
     assert httpx2.post(f"{base_url}/v1/tokenize", json={"prompt": "x"}).status_code == 404
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _tokenize_over_stdio(prompt, seed):
+    """Run a real mock_vllm process (own hash seed) and tokenize once."""
+    port = _free_port()
+    env = dict(os.environ, PORT=str(port), PYTHONHASHSEED=seed)
+    proc = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve().parent.parent / "scripts" / "mock_vllm.py")],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        body = None
+        for _ in range(100):
+            try:
+                r = httpx2.post(
+                    f"http://127.0.0.1:{port}/tokenize",
+                    json={"model": "mock-reasoning", "prompt": prompt},
+                    timeout=0.2,
+                )
+                if r.status_code == 200:
+                    body = r.json()
+                    break
+            except Exception:  # noqa: BLE001 — server still starting
+                time.sleep(0.1)
+        assert body is not None, "mock server did not start"
+        return body
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_tokenize_ids_stable_across_processes():
+    """Issue #160: token ids must not depend on the per-process hash salt.
+    Two fresh interpreters with different PYTHONHASHSEED values serve
+    byte-identical ids for the same prompt."""
+    prompt = "Hello world token test"
+    first = _tokenize_over_stdio(prompt, "1")
+    second = _tokenize_over_stdio(prompt, "2")
+    assert first["tokens"] == second["tokens"]
+    assert first["count"] == 4 == len(first["tokens"])
+    assert all(1 <= t <= 10000 for t in first["tokens"])
 
 
 def test_httpx_llm_client_returns_chat_result(base_url, monkeypatch):
