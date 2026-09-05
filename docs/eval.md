@@ -223,8 +223,9 @@ evidence, not quality evidence:
 - Chat derives its body from hit-1 text and echoes hit-1's cite so parsing
   passes by construction — always cites hit-1, proving nothing about
   grounding honesty, rerank quality, or semantics.
-- `/tokenize` uses a per-process salted hash: timing/failure replay is
-  deterministic per seed, but tokenize bytes vary across processes.
+- `/tokenize` ids are stable across processes (blake2b, issue #160) — but
+  they are still mock ids, not real vLLM BPE ids, so budget assertions must
+  treat them as shape-only evidence, never as ground-truth tokenization.
 - Knobs (`MOCK_TTFT_MS`, interval/jitter/seed, `MOCK_ERROR_RATE`,
   `mock_finish_reason` backdoor) default to byte-identical zeros; scope is
   chat-only, with embeddings/tokenize/health/models instant and infallible.

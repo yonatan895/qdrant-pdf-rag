@@ -317,7 +317,15 @@ class Handler(BaseHTTPRequestHandler):
             )
         else:
             text = str(req.get("prompt") or "")
-        tokens = [abs(hash(w)) % 10000 + 1 for w in text.split()]
+        # Stable across processes (issue #160): Python's hash() is salted
+        # per process, so token ids varied run to run. blake2b matches
+        # _embed's spirit; case is preserved (unlike _embed's lowering) so
+        # ids lose only the salt, nothing else. Still mock ids, never real
+        # vLLM BPE ids — see docs/eval.md §9.
+        tokens = [
+            int.from_bytes(hashlib.blake2b(w.encode(), digest_size=8).digest(), "big") % 10000 + 1
+            for w in text.split()
+        ]
         self._send(
             200,
             {
