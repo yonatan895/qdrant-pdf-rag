@@ -16,7 +16,9 @@ Deliberately narrow:
 - Identifier-shaped tokens never expand (a `DSN9022I` keeps its exact
   form even if a substring rang a bell) and identifier-heavy queries
   bypass rewriting entirely via `should_rewrite` (exact-code matching
-  must not be diluted — the issue's core constraint).
+  must not be diluted — the issue's core constraint). Screen-class trap
+  queries bypass rewriting too: expansion must never alter the text the
+  screen and refusal path reason about (issue #157).
 - Ambiguous tokens are EXCLUDED from the glossary, never guessed: DSN
   (Data Set Name vs Db2 prefix), PDF (Portable Document Format), AIX
   (IBM AIX vs Alternate Index), CA, MAP, CP, SAP, PU, DR, BCP, GDS,
@@ -31,6 +33,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from mainframe_rag.retrieve.filters import parse_query
+from mainframe_rag.retrieve.screen import screen_query
 
 ACRONYM_GLOSSARY_VERSION = "v1"
 
@@ -55,8 +58,14 @@ def _glossary() -> dict[str, str]:
 
 
 def should_rewrite(query: str) -> bool:
-    """False for identifier-heavy queries (exact-code path stays exact).
-    Trap queries never reach rewriting — the screen runs first."""
+    """False for identifier-heavy queries (exact-code path stays exact) and
+    for screen-class trap queries: a trap must reach the retrieval legs and
+    the refusal path on the operator's own words — expansion would change
+    the very text the screen and answer path reason about (issue #157).
+    Enforced here so every caller inherits it; the screen runs *inside*
+    this gate, not only ahead of it at call sites."""
+    if screen_query(query) == "trap":
+        return False
     return not parse_query(query).has_identifiers
 
 
