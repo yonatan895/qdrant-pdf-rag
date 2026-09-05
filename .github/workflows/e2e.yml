@@ -224,7 +224,15 @@ jobs:
             -e 's|^CORPUS_PVC=.*|CORPUS_PVC=corpus|' \
             airgap.env
           AIRGAP_DRYRUN=1 make airgap-validate
-          make airgap-dryrun
+          # Render the operator's standin values explicitly: `make
+          # airgap-dryrun` carries its own fixed test parameters by contract,
+          # so it cannot render this airgap.env — pass the same standins as
+          # environment (explicit env wins over the file since #152).
+          AIRGAP_DRYRUN=1 IMAGE_SHA="$SHA" \
+            INTERNAL_REGISTRY=ghcr.io/acceptance-standin NAMESPACE=acceptance \
+            STORAGE_CLASS=standard EMBED_MODEL=embed-from-airgap-env DENSE_DIM=768 \
+            VLLM_BASE_URL=http://vllm:8000 CORPUS_PVC=corpus \
+            sh scripts/airgap/pipeline.sh --dry-run
           test -f dist/agent-rendered.yaml
           test -f dist/ingest-rendered.yaml
           grep -q "ghcr.io/acceptance-standin/qdrant-pdf-rag-agent:${SHA}" dist/agent-rendered.yaml
