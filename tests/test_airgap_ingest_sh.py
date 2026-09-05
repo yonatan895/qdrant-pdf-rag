@@ -5,6 +5,7 @@ NFS storage refusal, INGEST_WORKERS, contextual embed placeholders,
 PULL_SECRET wiring, and strategic merge patches without a cluster.
 """
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -157,6 +158,14 @@ def test_ingest_pull_secret_wired_when_set(ingest_tree):
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert "name: custom-registry-secret" in rendered
+    # The wired item must stay inside the pod-spec mapping: a fixed 2-space
+    # insert broke out of it and kubectl rejected the manifest
+    # ("did not find expected key" in the Kind rehearsal).
+    assert re.search(
+        r"^([ ]*)imagePullSecrets:\n\1  - name: custom-registry-secret$",
+        rendered,
+        re.MULTILINE,
+    )
 
 
 def test_ingest_pull_secret_stays_empty_when_unset(ingest_tree):
