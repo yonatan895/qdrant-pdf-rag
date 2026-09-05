@@ -2,7 +2,7 @@
 
 Extracted identifiers (doc numbers, message IDs, members) plus product/version
 from agent context become must-clauses on both dense and bm25 prefetches.
-architecture.md section 4.5.
+retrieval.md section 2.
 """
 
 from __future__ import annotations

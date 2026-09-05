@@ -1,4 +1,4 @@
-"""Shared identifier regexes (Appendix A of docs/architecture.md).
+"""Shared identifier regexes (Appendix A of docs/retrieval.md).
 
 Single source of truth imported by ingest and retrieve.
 """
@@ -15,12 +15,12 @@ DOCNO_RE = re.compile(r"\b([A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?)\b")
 # One shared pattern on purpose: ingest payloads and query parsing use the
 # same helper, so a token either matches on both sides or neither — there
 # is no asymmetric false positive, only term matching. Tune before widening
-# further; see architecture.md Appendix A.
+# further; see retrieval.md Appendix A.
 MSG_RE = re.compile(
     r"\b([A-Z]{3}\d{2,5}[A-Z]|DFH[A-Z]{0,2}\d{4,5}|DFS\d{3,4}[A-Z]?|[A-Z]{4}\d{2,5}[A-Z])\b"
 )
 # Prefer precision: xx-suffixed PARMLIB-style names (IEASYSxx, PROGxx) or short
-# member-shaped tokens. Tune before widening; see architecture.md Appendix A.
+# member-shaped tokens. Tune before widening; see retrieval.md Appendix A.
 MEMBER_RE = re.compile(r"\b([A-Z]{3,8}(?:xx|\d{2}))\b")
 
 # Back/front matter bookmark titles to skip entirely. IBM titles often carry
