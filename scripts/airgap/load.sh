@@ -48,13 +48,35 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     exit 0
 fi
 
-echo "==> Verify member checksums"
+echo "==> Verify bundle signature, then member checksums"
+command -v openssl >/dev/null 2>&1 || die "openssl is required to verify the bundle signature"
+for sigfile in sneakernet-signing.pub SHA256SUMS.sig; do
+    [ -f "$ARTDIR/$sigfile" ] || die "$sigfile not found in $ARTDIR — unpack the sneakernet tarball first"
+done
+check_trusted_pub "$ARTDIR"
+(cd "$ARTDIR" && openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null) \
+    || die "SHA256SUMS signature verification failed — do not trust this bundle"
 (cd "$ARTDIR" && sha256sum -c SHA256SUMS)
 
 # Cross-check IMAGE_SHA against the packed MANIFEST.
 packed_sha=$(awk '/^sha: /{print $2}' "$ARTDIR/MANIFEST.txt")
 [ "$IMAGE_SHA" = "$packed_sha" ] || \
     die "IMAGE_SHA=$IMAGE_SHA does not match the packed MANIFEST sha ($packed_sha) — wrong SHA for this sneakernet bundle"
+
+# Digest binding: every image must equal the MANIFEST-recorded digest.
+check_image_digest() {
+    _tar=$1
+    _key=$2
+    _actual=$(skopeo inspect "docker-archive:$ARTDIR/$_tar" --format '{{.Digest}}')
+    _expected=$(awk -F': ' -v k="$_key" '$1 == k {print $2}' "$ARTDIR/MANIFEST.txt")
+    [ -n "$_expected" ] || die "MANIFEST.txt has no $_key entry"
+    [ "$_actual" = "$_expected" ] || \
+        die "$_tar digest $_actual does not match MANIFEST $_key ($_expected) — wrong image bytes"
+}
+check_image_digest qdrant-image.tar qdrant_digest
+check_image_digest jaeger-image.tar jaeger_digest
+check_image_digest "app-ingest-$IMAGE_SHA.tar" ingest_digest
+check_image_digest "app-agent-$IMAGE_SHA.tar" agent_digest
 
 load() {
     src=$1

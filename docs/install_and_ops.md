@@ -505,17 +505,34 @@ git clone https://github.com/yonatan895/qdrant-pdf-rag.git
 cd qdrant-pdf-rag
 git checkout <main-sha>  # Full 40-character SHA matching built GHCR images
 
+# Signing key: CI uses the SNEAKERNET_SIGNING_KEY secret (PEM private key),
+# with SNEAKERNET_KEY_TRUSTED=true so MANIFEST records signed: true.
+# Without the secret, CI packs with an ephemeral throwaway key and records
+# signed: ephemeral. A maintainer creates the production key once with
+# `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048` and stores
+# the PEM as the secret.
+# Trust model (read carefully): the offline signature binds the bundle
+# members together — any member swap invalidates it — but verification
+# against the in-bundle pubkey alone is TOFU and cannot prove which key
+# signed. Authenticity roots, strongest first: (1) set SNEAKERNET_TRUSTED_PUB
+# to a pubkey file obtained out of band and bootstrap.sh / load.sh refuse
+# any bundle whose pub differs; (2) compare the bundle pubkey fingerprint
+# against the org-published value (PACKING_RECORD.txt records the signing
+# key fingerprint: `openssl pkey -in <key> -pubout | openssl sha256`);
+# (3) download the tarball over HTTPS from GitHub Actions (TLS plus access
+# control). Local rehearsal generates a throwaway:
+#   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/signing.key
 # Build air-gap sneakernet package:
-make airgap-pack
+SNEAKERNET_SIGNING_KEY=/tmp/signing.key make airgap-pack
 ```
 
 This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-rag-<sha>.tar.sha256`, containing:
 1. Complete Git repository bundle (`repo.bundle`).
-2. App container images (`qdrant-pdf-rag-agent`, `qdrant-pdf-rag-ingest`).
-3. Vendored third-party Qdrant unprivileged image and Jaeger v2 image.
+2. App container images (`qdrant-pdf-rag-agent`, `qdrant-pdf-rag-ingest`), with per-image digests bound in `MANIFEST.txt` and re-verified on load.
+3. Vendored third-party Qdrant unprivileged image and Jaeger v2 image (tag + digest pinned in `images.txt`).
 4. Vendored Helm chart (`charts/qdrant-1.19.0.tgz`).
 5. Self-contained extraction bootstrap script (`bootstrap.sh`).
-6. Manifest (`MANIFEST.txt`), Packing Record (`PACKING_RECORD.txt`), and member `SHA256SUMS`.
+6. Manifest (`MANIFEST.txt`), Packing Record (`PACKING_RECORD.txt`), digest enumeration (`sbom.json`), offline signature (`SHA256SUMS.sig` + `sneakernet-signing.pub`), and member `SHA256SUMS`.
 
 ### 4.2 Transfer & Automated Bootstrap
 

@@ -131,9 +131,31 @@ pin_from_images_txt() {
     done < images.txt
     [ -n "$_pin_ref" ] || die "no $_pin_needle image pin found in images.txt"
     if [ -n "$_pin_digest" ]; then
-        _pin_ref="${_pin_ref%@*}@${_pin_digest}"
+        # Digest-only form: tag+digest combined is not a valid reference
+        # (skopeo and docker builds reject it).
+        _pin_leaf=${_pin_ref##*/}
+        case "$_pin_leaf" in
+            *:* ) _pin_ref="${_pin_ref%:*}@${_pin_digest}" ;;
+            * ) _pin_ref="${_pin_ref}@${_pin_digest}" ;;
+        esac
     fi
     echo "$_pin_ref"
+}
+
+# Trust anchor (optional, strict): when SNEAKERNET_TRUSTED_PUB names a
+# pubkey file obtained out of band (org-published fingerprint, HTTPS
+# Actions artifact), the bundle is refused unless its bundled pub matches
+# byte-for-byte. Without it, signature verification is TOFU: it binds the
+# members together but cannot prove which key signed. $1 = artifact dir.
+# (bootstrap.sh carries an inline twin: it verifies before any clone exists
+# to source this file from.)
+check_trusted_pub() {
+    if [ -n "${SNEAKERNET_TRUSTED_PUB:-}" ]; then
+        [ -f "$SNEAKERNET_TRUSTED_PUB" ] || \
+            die "SNEAKERNET_TRUSTED_PUB file not found: $SNEAKERNET_TRUSTED_PUB"
+        cmp -s "$SNEAKERNET_TRUSTED_PUB" "$1/sneakernet-signing.pub" || \
+            die "bundle pubkey does not match SNEAKERNET_TRUSTED_PUB — untrusted bundle"
+    fi
 }
 
 # Run a command, or only print it under AIRGAP_DRYRUN=1.

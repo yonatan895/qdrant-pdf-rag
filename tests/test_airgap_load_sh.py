@@ -16,9 +16,16 @@ REPO = Path(__file__).resolve().parent.parent
 IMAGE_SHA = "b" * 40
 
 STUB_SKOPEO = """#!/bin/sh
+if [ "$1" = "inspect" ]; then
+  printf 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\n'
+  printf '%s\\n' "$@" >> "$SKOPEO_LOG"
+  exit 0
+fi
 printf '%s\\n' "$@" >> "$SKOPEO_LOG"
 exit 0
 """
+
+STUB_DIGEST = "sha256:" + "b" * 64
 
 
 def _sha256(data: bytes) -> str:
@@ -33,7 +40,14 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False):
         "jaeger-image.tar": b"jaeger-tar\n",
         f"app-ingest-{sha}.tar": b"ingest-tar\n",
         f"app-agent-{sha}.tar": b"agent-tar\n",
-        "MANIFEST.txt": f"sha: {sha}\ndate: 2026-09-05T00:00:00Z\n".encode(),
+        "MANIFEST.txt": (
+            f"sha: {sha}\ndate: 2026-09-05T00:00:00Z\n"
+            f"qdrant_digest: {STUB_DIGEST}\n"
+            f"jaeger_digest: {STUB_DIGEST}\n"
+            f"ingest_digest: {STUB_DIGEST}\n"
+            f"agent_digest: {STUB_DIGEST}\n"
+        ).encode(),
+        "sbom.json": b'{"images": []}\n',
     }
     sums = []
     for name, content in files.items():
@@ -42,6 +56,30 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False):
         digest = _sha256(b"corrupt\n" if corrupt and name == "qdrant-image.tar" else content)
         sums.append(f"{digest}  {name}\n")
     (artdir / "SHA256SUMS").write_text("".join(sums))
+    _sign_artifacts(artdir)
+
+
+def _sign_artifacts(artdir: Path) -> None:
+    """Throwaway keypair + offline signature, mirroring pack.sh output."""
+    key = artdir / "signing.key"
+    subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
+         "-out", str(key)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["openssl", "pkey", "-in", str(key), "-pubout",
+         "-out", str(artdir / "sneakernet-signing.pub")],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["openssl", "dgst", "-sha256", "-sign", str(key),
+         "-out", str(artdir / "SHA256SUMS.sig"), str(artdir / "SHA256SUMS")],
+        check=True,
+        capture_output=True,
+    )
 
 
 @pytest.fixture
@@ -165,6 +203,69 @@ def test_load_insecure_registry_flag(load_tree):
     assert r.returncode == 0, r.stderr
     log = skopeo_log.read_text()
     assert "--dest-tls-verify=false" in log
+
+
+def test_load_tampered_sums_fails_signature(load_tree):
+    tmp_path, _ = load_tree
+    _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
+    with open(tmp_path / "dist" / "SHA256SUMS", "a") as f:
+        f.write(f"{'0' * 64}  injected\n")
+    r = _run_load(load_tree)
+    assert r.returncode != 0
+    assert "signature verification failed" in r.stderr
+
+
+def test_load_image_digest_mismatch_fails_closed(load_tree):
+    tmp_path, _ = load_tree
+    artdir = tmp_path / "dist"
+    _make_artifacts(artdir, sha=IMAGE_SHA)
+    # A validly-signed bundle with a lying manifest: re-checksum and
+    # re-sign after the edit, so only the digest binding can catch it.
+    manifest = artdir / "MANIFEST.txt"
+    manifest.write_text(manifest.read_text().replace(STUB_DIGEST, "sha256:" + "c" * 64, 1))
+    sums = []
+    for line in (artdir / "SHA256SUMS").read_text().splitlines():
+        name = line.split("  ", 1)[1]
+        sums.append(f"{hashlib.sha256((artdir / name).read_bytes()).hexdigest()}  {name}\n")
+    (artdir / "SHA256SUMS").write_text("".join(sums))
+    subprocess.run(
+        ["openssl", "dgst", "-sha256", "-sign", str(artdir / "signing.key"),
+         "-out", str(artdir / "SHA256SUMS.sig"), str(artdir / "SHA256SUMS")],
+        check=True,
+        capture_output=True,
+    )
+    r = _run_load(load_tree)
+    assert r.returncode == 1
+    assert "does not match MANIFEST" in r.stderr
+
+
+def test_load_trusted_pub_mismatch_refuses(load_tree):
+    tmp_path, _ = load_tree
+    _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
+    other = tmp_path / "other.key"
+    subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
+         "-out", str(other)],
+        check=True,
+        capture_output=True,
+    )
+    other_pub = tmp_path / "other.pub"
+    subprocess.run(
+        ["openssl", "pkey", "-in", str(other), "-pubout", "-out", str(other_pub)],
+        check=True,
+        capture_output=True,
+    )
+    r = _run_load(load_tree, ("SNEAKERNET_TRUSTED_PUB", str(other_pub)))
+    assert r.returncode != 0
+    assert "does not match SNEAKERNET_TRUSTED_PUB" in r.stderr
+
+
+def test_load_trusted_pub_match_passes(load_tree):
+    tmp_path, _ = load_tree
+    _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
+    r = _run_load(load_tree, ("SNEAKERNET_TRUSTED_PUB", str(tmp_path / "dist" / "sneakernet-signing.pub")))
+    assert r.returncode == 0, r.stderr
+    assert "Loaded 4 images into reg.internal:5000" in r.stdout
 
 
 def test_load_missing_internal_registry_fails_closed(load_tree):

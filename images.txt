@@ -5,7 +5,7 @@
 # Digest pins are the air-gap contract: the cluster must run exactly these bytes.
 #
 # name                                                                  digest
-docker.io/qdrant/qdrant:v1.19.0-unprivileged                           sha256:PENDING
+docker.io/qdrant/qdrant:v1.19.0-unprivileged                           sha256:a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e
 # Upstream Jaeger tag is 2.20.0; load.sh and jaeger kustomize use v2.20.0.
-cr.jaegertracing.io/jaegertracing/jaeger:2.20.0                         sha256:PENDING
-registry.access.redhat.com/ubi9/python-314-minimal:9.8                 sha256:PENDING
+cr.jaegertracing.io/jaegertracing/jaeger:2.20.0                         sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8
+registry.access.redhat.com/ubi9/python-314-minimal:9.8                 sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba
