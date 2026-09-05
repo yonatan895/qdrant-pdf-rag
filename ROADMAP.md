@@ -4,7 +4,7 @@
 > MUST read: the issue, this document, `AGENTS.md`, `docs/architecture.md`, and
 > `docs/adr/0001-baseline-decisions.md` before writing code.
 
-## Verified repo facts (audit of 2026-09-02; amended 2026-09-03 after PR-01/PR-02/PR-03 merged)
+## Verified repo facts (audit of 2026-09-02; amended 2026-09-03 after PR-01/PR-02/PR-03 merged; amended 2026-09-05 in docs-epic PR-A: PR-04/PR-05/PR-06/PR-09 marked shipped, PR-08 partial)
 
 These were verified against code and docs, not assumed. Agent tasks below reference them.
 Items marked **[amended]** changed with the merged P0 PRs.
@@ -14,14 +14,17 @@ Items marked **[amended]** changed with the merged P0 PRs.
   `heading_path`, threaded through `embed.py` → `qdrant_io.py` (payload) →
   `retrieve/query.py` → `scripts/eval_retrieval.py` (`expected_heading` matching).
   Point id = UUID5 of `{doc_id}|{heading_path}|{page_start}|{ordinal}`.
-  NO code-atomic protection: nothing in `chunk.py` handles JCL/REXX blocks.
+  Code-atomic protection SHIPPED (PR-05): `chunk.py` detects JCL/REXX/console
+  regions (`detect_code_region`) and splits them at statement boundaries only
+  (`_split_jcl_statements`); `heading_path` is filterable in the Qdrant payload.
 - **Retrieval:** Hybrid dense + BM25 (FastEmbed, baked weights, `bm25-weights.sha256`),
   local weighted RRF ([1,3] with identifiers, else [1,1], k=2) in `retrieve/query.py`,
   fused in one batched `query_batch_points` HTTP call. **[amended]** A cross-encoder
   reranker exists (`retrieve/rerank.py`, `bge-reranker-v2-m3` via `HttpReranker`) but
   ships **default-off** (`rerank_enabled=False`); fused top-50 are rescored only when
   `RERANK_ENABLED=true`. `search()` and `async_search()` are drift-guard-pinned twins.
-  No SPLADE, no ColBERT, no query rewriting (PR-14/PR-19 still open).
+  No SPLADE, no ColBERT, no HyDE (PR-14/PR-19 still open). Deterministic acronym
+  expansion shipped default-off (`retrieve/rewrite.py` + `acronyms_v1.json`, PR-08 partial).
 - **Serving:** FastAPI. **[amended]** All routes (`/healthz`, `/v1/search`, `/v1/answer`)
   are `async def` on `AsyncQdrantClient` + `httpx2.AsyncClient`; the sync embed and
   cross-encoder legs run via `asyncio.to_thread`, and the pooled sync retrieval-leg
@@ -147,6 +150,10 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** none. Land early — #80 and #83 build on it.
 
 ### PR-04 (issue #78): Contextual retrieval (chunk context prefixes)
+> **Status: DONE.** Shipped as `ingest/context.py` (versioned `CONTEXT_PROMPT_VERSION=v2`
+> cache keyed by `v2:sha:chunk_id`, dense-only contexts) behind `CONTEXTUAL_EMBED_ENABLED`
+> (default off); enabling changes every dense vector so the collection must be recreated.
+> Tests: `tests/test_contextual.py`.
 - **Why:** Anthropic-style contextual prefixes cut retrieval failures; today bare chunks
   are embedded.
 - **Scope:** `ingest/chunk.py`, `ingest/embed.py`, `ingest/run_ingest.py`
@@ -164,6 +171,9 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** #75.
 
 ### PR-05 (issue #79): Code-atomic chunking for JCL/REXX (rescoped)
+> **Status: DONE.** `detect_code_region` + statement-boundary splitters in `ingest/chunk.py`;
+> `heading_path` filterable in the Qdrant payload (`qdrant_io.py`); UUID5 contract kept.
+> Tests: `tests/test_chunk_ibm_shape.py` (JCL/REXX fixtures, no-statement-split).
 - **Why:** Section-outline chunking with `heading_path` ALREADY exists — do not rebuild it.
   The real gap: `_split_blocks` works on paragraphs and can split positional code
   (JCL statements, col-72 continuations, REXX blocks) across chunks.
@@ -182,6 +192,11 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** none.
 
 ### PR-06 (issue #80): vLLM prefix caching + prompt ordering + injection hardening
+> **Status: DONE.** `order_prompt_blocks` (`retrieval`/`stable_cache` policies) in
+> `agent/answer.py` with prefix-cache-safe static instructions; `--enable-prefix-caching`
+> documented for the LOCAL reasoning server (`install_and_ops.md` §3.6, Budget `prefix_cache`);
+> injection screening via `retrieve/screen.py` (trap before identifiers).
+> Tests: `tests/test_prompt_order.py`, `tests/test_screen.py`.
 - **Why:** Free GPU via KV-cache reuse; current prompt assembly (`answer.py`) must be
   ordered for it.
 - **Scope:** `agent/answer.py`, deploy manifests (vLLM launch args are NOT in this repo —
@@ -214,6 +229,11 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** #78, #79.
 
 ### PR-08 (issue #82): Query understanding — acronym expansion + HyDE (gated)
+> **Status: PARTIAL.** Deterministic acronym expansion shipped (`retrieve/rewrite.py` +
+> `acronyms_v1.json`, `acronym_expansion_enabled=False`, identifier bypass;
+> tests `tests/test_rewrite.py`). Remaining: HyDE / step-back behind independent flags
+> with per-technique L1 deltas. The section below now describes the shipped part plus
+> the remaining HyDE scope.
 - **Scope:** new `src/mainframe_rag/retrieve/rewrite.py`, `agent/answer.py`
 - **Implementation:** Curated versioned acronym glossary (JSON) for deterministic
   expansion; HyDE / step-back behind independent flags; heuristic bypass when the query
@@ -223,6 +243,9 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** #75.
 
 ### PR-09 (issue #83): OpenTelemetry tracing
+> **Status: DONE.** `agent/tracing.py` (opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`, default off;
+> fail-open bounded export) + Jaeger v2 all-in-one overlay (`deploy/kustomize/jaeger`).
+> Tests: `tests/test_tracing.py`.
 - **Scope:** `agent/`, `retrieve/`, `deploy/` (collector config)
 - **Implementation:** Spans: tokenize → embed (HTTP) → qdrant prefetch → RRF → rerank →
   LLM (TTFT, tokens/s). Attrs: scores, rerank rank deltas, doc ids, cache hits. OTLP

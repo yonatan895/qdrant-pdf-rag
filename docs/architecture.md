@@ -97,7 +97,7 @@ This architectural standard ensures local cluster testing exercises the real pro
 
 ### 4.2 Hybrid Embeddings & Collection Configuration
 
-- **Dense Embeddings:** Ingest and query embed via internal vLLM at `POST ${EMBED_BASE_URL}/embeddings` (supporting arbitrary embedding dimensions, e.g. 1024-dim `Qwen3-Embedding-0.6B` or 768-dim models). `DENSE_DIM` is a fail-fast setting in vLLM mode: the agent and ingest validate it before any collection or embed call, and collection creation verifies the stored dimension matches. Query embeddings prepend the asymmetric query prefix (`Settings.dense_query_prefix`) on the dense query vector only; document chunks and the CI/dev hash embedder stay raw text.
+- **Dense Embeddings:** Ingest and query embed via internal vLLM at `POST ${EMBED_BASE_URL}/embeddings` (supporting arbitrary embedding dimensions, e.g. 1024-dim `Qwen3-Embedding-0.6B` or 768-dim models). Operators configure `VLLM_BASE_URL`; deploy scripts derive `EMBED_BASE_URL=${VLLM_BASE_URL%/}/v1` (`scripts/airgap/common.sh`); the agent only reads `EMBED_BASE_URL`. `DENSE_DIM` is a fail-fast setting in vLLM mode: the agent and ingest validate it before any collection or embed call, and collection creation verifies the stored dimension matches. Query embeddings prepend the asymmetric query prefix (`Settings.dense_query_prefix`) on the dense query vector only; document chunks and the CI/dev hash embedder stay raw text.
 - **Sparse BM25 Embeddings:** Computed in-process via FastEmbed using pre-baked `Qdrant/bm25` weights.
 - **Collection Configuration (`mainframe_manuals`):**
   - Dense: `${DENSE_DIM}` dimensions, Cosine distance, on-disk HNSW ($M=16, ef\_construct=128$), int8 scalar quantization in RAM. Test runners automatically recreate collections if vector dimensions differ between test runs.
@@ -184,14 +184,14 @@ The agent is async end to end: all routes are `async def` on `AsyncQdrantClient`
 ### 5.1 Retrieval Accuracy Gates (`evals/`)
 - **Golden Dataset:** `evals/golden.jsonl` (dev set, 117 entries) and the frozen `evals/holdout.jsonl` (70 entries, sha256-pinned at `evals/holdout.jsonl.sha256`). Entries carry `query_class` (message_id / doc_number / syntax / diagnostic / comparative / version / negative), `expected_behavior` (answer / abstain), and `must_not_retrieve` trap guards. The holdout is never iterated against: it runs on release candidates only (`make eval-holdout`). Corpus entries are mechanically verified against the live collection (`make verify-golden`).
 - **Regression Gate:** `make eval` evaluates retrieval recall and MRR against the **mode-keyed baseline**: `evals/baseline.json` in hash mode (CI/dev), `evals/baseline-vllm.json` in vllm mode (release candidates, live embedder). Re-baselining is a dedicated PR (`make eval-baseline`).
-- **Recorded vllm baseline (evals/baseline-vllm.json, 2026-09-02):** Recall@1 `0.45` · Recall@3 `0.752` · Recall@5 `0.826` · MRR `0.609` over 117 dev queries.
+- **Recorded vllm baseline:** `evals/baseline-vllm.json` (mode-keyed, dev set; current numbers live in the file's `_meta` — never inline them here, snapshots rot).
 - **Regression Bounds:**
   - Overall $Recall@1 \ge 0.9\times$ baseline
   - Overall $Recall@5 \ge 0.95\times$ baseline
   - Overall $MRR \ge 0.95\times$ baseline
   - Identifier $Recall@1 = 1.0$ (strict)
   - Zero query errors
-- **CI Wiring:** `make gate-l1` (ephemeral Qdrant simulator, hash-mode synthetic corpus) is an automated PR check in GitHub CI; the GitLab mirror runs hygiene + pytest only. `make loadtest-mock` (same composition plus a real uvicorn agent: zero errors, SSE integrity, citation parity, fixed error shapes under concurrency) gates PRs touching agent/retrieve/ingest via `.github/workflows/load.yml`.
+- **CI Wiring:** `make gate-l1` (ephemeral Qdrant simulator, hash-mode synthetic corpus) is an automated PR check in GitHub CI; the GitLab mirror runs hygiene + pytest + gate-l1 (no e2e, no load tier, no deploys). `make loadtest-mock` (same composition plus a real uvicorn agent: zero errors, SSE integrity, citation parity, fixed error shapes under concurrency) gates PRs touching agent/retrieve/ingest via `.github/workflows/load.yml`.
 - **Tier Map:** retrieval eval (`make eval`) → answer-tier grounding eval (`make eval-answers`, live GPU stack: answer entries must produce ≥1 validated citation, abstain/trap entries must not be answered) → layered harness (`make harness-gate` / `harness-l2` / `harness-l3`: snapshot-pinned L1 retrieval gate, citation precision/recall + NLI faithfulness judge, per-stage p50/p95 latency + TTFT + VRAM). Harness tiers are release-candidate-only, never PR gates.
 
 ### 5.2 Performance Benchmarking (`benchmarks/`)
@@ -221,8 +221,10 @@ src/mainframe_rag/
     walk.py           # *.pdf discovery
     ibm_pdf.py        # PDF parser & metadata extraction
     chrome.py         # Running header/footer stripping
-    chunk.py          # Outline-based chunking & UUID5 generation
+    chunk.py          # Outline-based chunking, code-atomic regions & UUID5 generation
     classify.py       # Message, syntax, table, narrative classification
+    context.py        # Contextual retrieval prefixes (versioned cache)
+    inventory.py      # Idempotent ingest progress tracking
     embed.py          # vLLM dense & FastEmbed BM25 embedder; embed-text builder
     qdrant_io.py      # Collection creation & upsert batching
     run_ingest.py     # Ingest CLI worker orchestration
@@ -230,11 +232,16 @@ src/mainframe_rag/
     query.py          # Batched prefetch, weighted RRF fusion, diversification (sync + async)
     filters.py        # Query classification & Qdrant filter building
     rerank.py         # Cross-encoder rerank: HashReranker / HttpReranker + dispatch
+    screen.py         # Injection trap screen (trap before identifiers)
+    rewrite.py        # Deterministic acronym expansion (default off)
+    acronyms_v1.json  # Versioned acronym glossary
   agent/
     app.py            # FastAPI service (async routes, SSE) & lifespan client management
     answer.py         # Reasoning LLM client (sync/async/SSE), prompt construction & citation grounding
     tokenizer.py      # vLLM /tokenize counting with estimator fallback
     cites.py          # Citation shape validation & extraction
+    tracing.py        # Opt-in OTel export (default off)
+  serve/              # Local vLLM VRAM budget profiles (LOCAL_RT_8GB) + resolve CLI
   config.py           # Pydantic Settings & environment validation
   logs.py             # One-JSON-object-per-line logging
   manifest.py         # Run manifests (git sha, model ids, settings hash)
@@ -242,3 +249,12 @@ src/mainframe_rag/
 ```
 
 **Allowed Dependencies:** Python 3.14 GIL, `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`, `pydantic-settings`.
+
+### Per-area reference docs
+
+Deep contracts, rationale, and constants live in the per-area references (one fact, one owner — this file states the design, those files state the details):
+- `docs/ingest.md` — parse/chunk/classify/embed/Qdrant pipeline, payload contract, id-stability rules
+- `docs/retrieval.md` — query flow, RRF, filters, screen, rerank, rewrite, diversification (incl. Appendix A identifier patterns)
+- `docs/agent.md` — endpoint/error/SSE contracts, prompt assembly and budgets, Settings catalog
+- `docs/eval.md` — tiers, gates, thresholds, baselines, mock fidelity limits
+- `docs/deploy.md` — air-gap script contracts, render pipeline, signing model, CI inventory

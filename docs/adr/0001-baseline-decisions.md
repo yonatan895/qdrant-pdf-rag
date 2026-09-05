@@ -1,7 +1,7 @@
 # ADR-0001: Baseline decisions adopted from architecture.md
 
 - **Status:** accepted
-- **Context:** First implementation; architecture.md §5.6 locks these.
+- **Context:** First implementation; architecture.md §4 locks these.
 - **Decision:** Qdrant OSS (vendored Helm, `*-unprivileged` image) on RWO block
   storage; PyMuPDF parser; `.pdx`/`.idx` ignored; FastEmbed BM25 for sparse;
   RRF fusion (local, weighted) until an eval set exists; reasoning model only
