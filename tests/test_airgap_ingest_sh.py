@@ -176,4 +176,4 @@ def test_ingest_refuses_nfs_storage(ingest_tree):
 def test_ingest_missing_corpus_pvc_fails_closed(ingest_tree):
     r = _run_ingest(ingest_tree, ("CORPUS_PVC", ""))
     assert r.returncode == 1
-    assert "required variable CORPUS_PVC is unset" in r.stderr
+    assert "required variables unset: CORPUS_PVC" in r.stderr
