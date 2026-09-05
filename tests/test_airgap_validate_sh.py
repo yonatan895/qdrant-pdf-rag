@@ -120,3 +120,71 @@ def test_validate_missing_skopeo_fails(tree):
     r = _run(tree, {"PATH": str(tree / "bin")})
     assert r.returncode != 0
     assert "skopeo is required" in r.stderr
+
+
+POISON_ENV_FILE = """\
+INTERNAL_REGISTRY=wrong.invalid:5000
+NAMESPACE=file-ns
+STORAGE_CLASS=nfs-client
+EMBED_MODEL=file-model
+DENSE_DIM=9999
+VLLM_BASE_URL=ftp://file-vllm:8000
+"""
+
+VALID_ENV_FILE = """\
+INTERNAL_REGISTRY=reg.internal:5000
+NAMESPACE=mainframe-rag
+STORAGE_CLASS=standard
+EMBED_MODEL=ibm-granite/granite-embedding-125m-english
+DENSE_DIM=768
+VLLM_BASE_URL=http://vllm:8000/v1
+"""
+
+
+def _write_env_file(tree, content):
+    p = tree / "case.env"
+    p.write_text(content)
+    return str(p)
+
+
+def test_explicit_env_beats_env_file(tree):
+    # Every file value here would fail validation on its own (NFS storage,
+    # non-http URL); exit 0 proves the explicit environment won on all keys.
+    r = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, POISON_ENV_FILE)})
+    assert r.returncode == 0, r.stderr
+    assert "SUCCESS: Pre-flight validation passed (dry-run mode)." in r.stdout
+
+
+def test_env_file_still_feeds_unset_vars(tree):
+    r = _run(
+        tree,
+        {
+            "AIRGAP_ENV": _write_env_file(tree, VALID_ENV_FILE),
+            "INTERNAL_REGISTRY": None,
+            "REGISTRY_INTERNAL": None,
+            "NAMESPACE": None,
+            "STORAGE_CLASS": None,
+            "EMBED_MODEL": None,
+            "DENSE_DIM": None,
+            "VLLM_BASE_URL": None,
+        },
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_empty_env_value_leaves_file_value(tree):
+    # Empty is unset everywhere (${VAR:-} idiom): the file still feeds the key.
+    r = _run(
+        tree,
+        {"AIRGAP_ENV": _write_env_file(tree, VALID_ENV_FILE), "INTERNAL_REGISTRY": ""},
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_makefile_does_not_include_airgap_env():
+    # Locks the other half of the precedence fix: a make-level `-include`
+    # would silently override `VAR=x make ...` with stale file values in
+    # recipe environments and $(...) interpolation alike. Scripts source the
+    # file themselves (see common.sh OPERATOR_ENV_KEYS).
+    text = (REPO / "Makefile").read_text()
+    assert "include airgap.env" not in text

@@ -561,7 +561,7 @@ The `bootstrap.sh` script automatically:
 Edit `airgap.env` to configure your cluster environment:
 
 > [!NOTE]
-> If the `AIRGAP_ENV` environment variable is exported in the calling shell, scripts load that file path directly, taking precedence over the local `./airgap.env`.
+> If the `AIRGAP_ENV` environment variable is exported in the calling shell, scripts load that file path directly, taking precedence over the local `./airgap.env`. Within either file, an explicitly exported non-empty variable in the calling environment always wins over the file value, so `VAR=x make airgap-*` overrides a stale key.
 
 ```ini
 # Internal image registry accessible to cluster nodes
