@@ -7,6 +7,7 @@ MANIFEST + packing record + member checksums + tarball digest, with the
 bundle clone-traversable (the airgap-package CI check, hermetically).
 """
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -29,6 +30,31 @@ done
 printf '%s\\n' "$@" >> "$SKOPEO_LOG"
 exit 0
 """
+
+# Hermetic tool PATH: every external pack.sh needs, symlinked from the host.
+# skopeo is intentionally absent unless the stub below adds it — CI runners
+# ship a real skopeo in /usr/bin, so relying on its absence there is red.
+TOOLS = (
+    "sh",
+    "dirname",
+    "awk",
+    "sed",
+    "git",
+    "tar",
+    "sha256sum",
+    "date",
+    "basename",
+    "cat",
+    "chmod",
+    "cp",
+    "mkdir",
+    "rm",
+    "grep",
+    "tr",
+    "cut",
+    "head",
+    "ls",
+)
 
 
 @pytest.fixture
@@ -53,17 +79,20 @@ def pack_tree(tmp_path):
     ).stdout.strip()
 
     skopeo_log = tmp_path / "skopeo-args.log"
+    for tool in TOOLS:
+        src = shutil.which(tool)
+        if src and not (tmp_path / "bin" / tool).exists():
+            (tmp_path / "bin" / tool).symlink_to(src)
     p = tmp_path / "bin" / "skopeo"
     p.write_text(STUB_SKOPEO)
     p.chmod(0o755)
     return tmp_path, skopeo_log, head
 
 
-def _run_pack(tree, *extra_env, with_skopeo=True):
+def _run_pack(tree, *extra_env):
     tmp_path, _skopeo_log, head = tree
-    path = f"{tmp_path / 'bin'}:/usr/bin:/bin" if with_skopeo else "/usr/bin:/bin"
     env = {
-        "PATH": path,
+        "PATH": str(tmp_path / "bin"),
         "SKOPEO_LOG": str(tmp_path / "skopeo-args.log"),
         "AIRGAP_APP_REGISTRY": "ghcr.io/pack-test",
     }
@@ -89,7 +118,8 @@ def test_pack_sha_mismatch_fails_closed(pack_tree):
 
 
 def test_pack_missing_skopeo_fails_closed(pack_tree):
-    r, _head = _run_pack(pack_tree, with_skopeo=False)
+    os.remove(pack_tree[0] / "bin" / "skopeo")
+    r, _head = _run_pack(pack_tree)
     assert r.returncode != 0
     assert "skopeo is required on the connected pack host" in r.stderr
 

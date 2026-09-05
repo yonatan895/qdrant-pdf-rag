@@ -207,9 +207,13 @@ jobs:
           test -f dist/agent-rendered.yaml
           test -f dist/ingest-rendered.yaml
           grep -q "ghcr.io/acceptance-standin/qdrant-pdf-rag-agent:${SHA}" dist/agent-rendered.yaml
-          grep -q "imagePullSecrets=null" dist/agent-rendered.yaml
+          grep -q "imagePullSecrets: \[\]" dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml
+          # Second PULL_SECRET branch: a wired secret reaches the manifests.
+          sed -i 's|^PULL_SECRET=.*|PULL_SECRET=acceptance-pull|' airgap.env
+          AIRGAP_DRYRUN=1 make airgap-deploy
+          grep -q "name: acceptance-pull" dist/agent-rendered.yaml
 
   # ------------------------------------------------- secret gate (fork-safe)
   e2e-secrets-check:
