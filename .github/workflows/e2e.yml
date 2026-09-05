@@ -124,7 +124,20 @@ jobs:
       - name: airgap-pack
         env:
           IMAGE_SHA: ${{ needs.build.outputs.sha }}
+          # Production trust comes from the SNEAKERNET_SIGNING_KEY secret
+          # (PEM private key; pubkey ceremony in docs/install_and_ops.md).
+          # Until a maintainer stores it, pack with an ephemeral throwaway
+          # key so the sign/verify plumbing still executes end to end.
+          SNEAKERNET_SIGNING_KEY: ${{ secrets.SNEAKERNET_SIGNING_KEY }}
         run: |
+          if [ -z "$SNEAKERNET_SIGNING_KEY" ]; then
+            echo "::warning::SNEAKERNET_SIGNING_KEY secret unset — packing with an ephemeral throwaway key (plumbing only, no trust)"
+            openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$RUNNER_TEMP/signing.key"
+            export SNEAKERNET_SIGNING_KEY="$RUNNER_TEMP/signing.key"
+          else
+            printf '%s' "$SNEAKERNET_SIGNING_KEY" > "$RUNNER_TEMP/signing.key"
+            export SNEAKERNET_SIGNING_KEY="$RUNNER_TEMP/signing.key"
+          fi
           make airgap-pack
           ls -la dist/
           cat dist/MANIFEST.txt
@@ -188,6 +201,9 @@ jobs:
           # The bootstrapped layout must satisfy ARTDIR discovery on its own.
           test -f qdrant-pdf-rag/dist/SHA256SUMS
           (cd qdrant-pdf-rag/dist && sha256sum -c SHA256SUMS)
+          test -f qdrant-pdf-rag/dist/sbom.json
+          test -f qdrant-pdf-rag/dist/SHA256SUMS.sig
+          test -f qdrant-pdf-rag/dist/sneakernet-signing.pub
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
           test "$(awk '/^sha: /{print $2}' qdrant-pdf-rag/dist/MANIFEST.txt)" = "$SHA"
           cd qdrant-pdf-rag
@@ -316,6 +332,9 @@ jobs:
           AIRGAP_WORKSPACE=qdrant-pdf-rag sh bootstrap.sh
           test -f qdrant-pdf-rag/dist/SHA256SUMS
           (cd qdrant-pdf-rag/dist && sha256sum -c SHA256SUMS)
+          test -f qdrant-pdf-rag/dist/sbom.json
+          test -f qdrant-pdf-rag/dist/SHA256SUMS.sig
+          test -f qdrant-pdf-rag/dist/sneakernet-signing.pub
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
           test "$(awk '/^sha: /{print $2}' qdrant-pdf-rag/dist/MANIFEST.txt)" = "$SHA"
 

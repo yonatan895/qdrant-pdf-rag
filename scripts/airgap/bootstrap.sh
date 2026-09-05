@@ -9,11 +9,20 @@
 
 set -eu
 
-echo "==> 1. Verifying member checksums (SHA256SUMS)"
+echo "==> 1. Verifying bundle signature, then member checksums (SHA256SUMS)"
 if [ ! -f SHA256SUMS ]; then
     echo "FAIL: SHA256SUMS not found in current directory. Extract tarball first." >&2
     exit 1
 fi
+command -v openssl >/dev/null 2>&1 || { echo "FAIL: openssl is required to verify the bundle signature." >&2; exit 1; }
+for sigfile in sneakernet-signing.pub SHA256SUMS.sig; do
+    if [ ! -f "$sigfile" ]; then
+        echo "FAIL: $sigfile not found in current directory. Extract tarball first." >&2
+        exit 1
+    fi
+done
+openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null \
+    || { echo "FAIL: SHA256SUMS signature verification failed — do not trust this bundle." >&2; exit 1; }
 sha256sum -c SHA256SUMS
 
 echo "==> 2. Setting up repository workspace"
@@ -32,7 +41,7 @@ fi
 
 echo "==> 3. Linking sneakernet artifacts to ./$DEST_DIR/dist"
 mkdir -p "$DEST_DIR/dist"
-for item in bootstrap.sh repo.bundle qdrant-image.tar jaeger-image.tar app-ingest-*.tar app-agent-*.tar MANIFEST.txt PACKING_RECORD.txt SHA256SUMS; do
+for item in bootstrap.sh repo.bundle qdrant-image.tar jaeger-image.tar app-ingest-*.tar app-agent-*.tar MANIFEST.txt PACKING_RECORD.txt sbom.json sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig; do
     # shellcheck disable=SC2086
     if [ -f $item ]; then
         cp $item "$DEST_DIR/dist/"

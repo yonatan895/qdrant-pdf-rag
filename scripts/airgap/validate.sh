@@ -40,6 +40,7 @@ echo "    IMAGE_SHA:         $IMAGE_SHA"
 echo "==> 2. Validating required CLI tools"
 command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the air-gap bastion"
 command -v helm >/dev/null 2>&1 || die "helm is required on the air-gap bastion"
+command -v openssl >/dev/null 2>&1 || die "openssl is required on the air-gap bastion"
 KC=${KC:-$(kc)}
 command -v "$KC" >/dev/null 2>&1 || die "oc or kubectl is required on the air-gap bastion"
 echo "    skopeo: $(command -v skopeo)"

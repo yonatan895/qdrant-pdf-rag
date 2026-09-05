@@ -40,6 +40,18 @@ def bundle_dir(tmp_path):
     subprocess.run(["git", "bundle", "create", str(extract_dir / "repo.bundle"), "HEAD", "--all"], cwd=src_repo, check=True)
 
     # Add mock image files
+    subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
+         "-out", str(extract_dir / "signing.key")],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["openssl", "pkey", "-in", str(extract_dir / "signing.key"),
+         "-pubout", "-out", str(extract_dir / "sneakernet-signing.pub")],
+        check=True,
+        capture_output=True,
+    )
     files = {
         "bootstrap.sh": (extract_dir / "bootstrap.sh").read_bytes(),
         "repo.bundle": (extract_dir / "repo.bundle").read_bytes(),
@@ -49,6 +61,8 @@ def bundle_dir(tmp_path):
         "app-agent-test.tar": b"mock-agent",
         "MANIFEST.txt": b"sha: test\n",
         "PACKING_RECORD.txt": b"record\n",
+        "sbom.json": b'{"images": []}\n',
+        "sneakernet-signing.pub": (extract_dir / "sneakernet-signing.pub").read_bytes(),
     }
     sums = []
     for name, content in files.items():
@@ -56,6 +70,12 @@ def bundle_dir(tmp_path):
         p.write_bytes(content)
         sums.append(f"{_sha256(content)}  {name}\n")
     (extract_dir / "SHA256SUMS").write_text("".join(sums))
+    subprocess.run(
+        ["openssl", "dgst", "-sha256", "-sign", str(extract_dir / "signing.key"),
+         "-out", str(extract_dir / "SHA256SUMS.sig"), str(extract_dir / "SHA256SUMS")],
+        check=True,
+        capture_output=True,
+    )
 
     return extract_dir
 
@@ -72,6 +92,14 @@ def test_bootstrap_corrupt_checksum_fails(bundle_dir):
     r = subprocess.run(["sh", "bootstrap.sh"], cwd=bundle_dir, capture_output=True, text=True, check=False)
     assert r.returncode != 0
     assert "FAILED" in r.stdout or "FAIL" in r.stderr
+
+
+def test_bootstrap_tampered_sums_fails_signature(bundle_dir):
+    with open(bundle_dir / "SHA256SUMS", "a") as f:
+        f.write("0" * 64 + "  injected\n")
+    r = subprocess.run(["sh", "bootstrap.sh"], cwd=bundle_dir, capture_output=True, text=True, check=False)
+    assert r.returncode != 0
+    assert "signature verification failed" in r.stderr
 
 
 def test_bootstrap_success(bundle_dir):
@@ -99,3 +127,6 @@ def test_bootstrap_success(bundle_dir):
     assert (dist_dir / "app-agent-test.tar").is_file()
     assert (dist_dir / "MANIFEST.txt").is_file()
     assert (dist_dir / "PACKING_RECORD.txt").is_file()
+    assert (dist_dir / "sbom.json").is_file()
+    assert (dist_dir / "sneakernet-signing.pub").is_file()
+    assert (dist_dir / "SHA256SUMS.sig").is_file()
