@@ -1,7 +1,8 @@
 # Agent image: FastAPI retrieval + reasoning-model glue. No GPU.
 # Python 3.14 GIL (issue #5): ubi9/python-314-minimal ships python3.14 + pip.
-# Exact image pinned in images.txt (tag + digest; digest is the contract).
-FROM registry.access.redhat.com/ubi9/python-314-minimal:9.8@sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba
+# Exact image pinned in images.txt (digest-only form: tag+digest combined is
+# not a valid reference; tag here was 9.8, digest is the contract).
+FROM registry.access.redhat.com/ubi9/python-314-minimal@sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba
 
 COPY requirements.lock.txt /wheelhouse/requirements.lock.txt
 COPY --from=wheelhouse / /wheelhouse/

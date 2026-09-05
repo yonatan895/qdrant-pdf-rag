@@ -199,10 +199,17 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert f"ingest_digest: {STUB_DIGEST}" in manifest
     assert f"agent_digest: {STUB_DIGEST}" in manifest
     assert "qdrant_digest: sha256:" in manifest
+    # Tar-manifest digests, not the images.txt list pins: the stub answers
+    # every inspect identically, while the fixture images.txt pins differ.
+    assert f"qdrant_digest: {STUB_DIGEST}" in manifest
     assert "signed: true" in manifest
     log = skopeo_log.read_text()
     assert log.splitlines().count("copy") == 4
-    assert log.count("inspect") == 2
+    assert log.count("inspect") == 4
+    # Digest-only refs: tag+digest combined is not a valid reference.
+    assert "docker.io/qdrant/qdrant@sha256:" in log
+    assert "@sha256:" in log
+    assert ":v1.19.0-unprivileged@sha256:" not in log
 
     # sbom.json enumerates the pinned inputs as valid JSON.
     sbom = json.loads((dist / "sbom.json").read_text())

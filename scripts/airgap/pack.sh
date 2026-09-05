@@ -71,10 +71,16 @@ skopeo copy $extra_args "docker://$INGEST_IMAGE" "docker-archive:$DIST/app-inges
 skopeo copy $extra_args "docker://$AGENT_IMAGE" "docker-archive:$DIST/app-agent-$IMAGE_SHA.tar"
 
 echo "==> Image digests (bound into MANIFEST, verified on load)"
+# Post-copy tar manifest digests: skopeo resolves the pinned manifest list
+# to one arch manifest when writing docker-archive, so the tar digest
+# differs from the images.txt list pin by construction (--preserve-digests
+# cannot bridge it: docker-archive rejects lists outright). MANIFEST keeps
+# both: the ref line carries the requested pin, the *_digest line carries
+# the bundled bytes that load re-verifies.
 INGEST_DIGEST=$(skopeo inspect "docker-archive:$DIST/app-ingest-$IMAGE_SHA.tar" --format '{{.Digest}}')
 AGENT_DIGEST=$(skopeo inspect "docker-archive:$DIST/app-agent-$IMAGE_SHA.tar" --format '{{.Digest}}')
-QDRANT_DIGEST=${QDRANT_REF##*@}
-JAEGER_DIGEST=${JAEGER_REF##*@}
+QDRANT_DIGEST=$(skopeo inspect "docker-archive:$DIST/qdrant-image.tar" --format '{{.Digest}}')
+JAEGER_DIGEST=$(skopeo inspect "docker-archive:$DIST/jaeger-image.tar" --format '{{.Digest}}')
 UBI_REF=$(pin_from_images_txt python-314-minimal)
 UBI_DIGEST=${UBI_REF##*@}
 
@@ -141,6 +147,8 @@ chmod +x "$DIST/bootstrap.sh"
     echo "  - Sparse Weights:      FastEmbed Qdrant/bm25 (baked in images)"
     echo "  - Bundle signature:    SHA256SUMS.sig (openssl dgst; pubkey sneakernet-signing.pub)"
     echo "  - Signing key (pub):   $(openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -pubout | openssl sha256)"
+    echo "  - Digest binding:      MANIFEST *_digest lines are post-copy tar manifest digests;"
+    echo "                           qdrant:/jaeger: refs carry the images.txt list pins they were pulled by."
     echo ""
     echo "INSPECTION & BOOTSTRAP INSTRUCTIONS:"
     echo "  1. Verify root archive digest:"

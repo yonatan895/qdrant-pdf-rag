@@ -3,8 +3,9 @@
 # downloaded at runtime (air-gap rule, architecture.md section 3.1).
 # Python 3.14 GIL (issue #5): ubi9/python-314-minimal ships python3.14 + pip;
 # no microdnf python install needed. Exact image pinned in images.txt
-# (tag + digest; digest is the contract).
-FROM registry.access.redhat.com/ubi9/python-314-minimal:9.8@sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba
+# (digest-only form: tag+digest combined is not a valid reference; tag here
+# was 9.8, digest is the contract).
+FROM registry.access.redhat.com/ubi9/python-314-minimal@sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba
 
 # Wheels: built on the connected host (make wheelhouse), installed offline.
 # Named build contexts (see Makefile build-images): wheelhouse=, bm25=
