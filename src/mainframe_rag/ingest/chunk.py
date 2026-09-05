@@ -44,7 +44,6 @@ _BLANK_SPLIT_RE = re.compile(r"\n\s*\n")
 # its own statement, not a continuation.
 _JCL_CARD_RE = re.compile(r"^//")
 _JCL_STMT_START_RE = re.compile(r"^//\S")
-_JCL_CONT_RE = re.compile(r"^//\s{2,}")
 _JCL_UNNAMED_RE = re.compile(r"^//\s\S")
 # In-stream data marker: `//name DD *` or `DD DATA` (optionally followed by
 # `,DLM=..`). Everything after it (until the next card) is data records.
