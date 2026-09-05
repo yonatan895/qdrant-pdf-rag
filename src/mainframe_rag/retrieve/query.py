@@ -209,6 +209,161 @@ def _rerank_bypass_reason(query: str, has_identifiers: bool) -> str | None:
     return None
 
 
+def _resolve_active_reranker(
+    settings: Settings | None,
+    reranker: Reranker | None,
+    query: str,
+    has_identifiers: bool,
+) -> tuple[Reranker | None, bool, str | None]:
+    """Reranker dispatch shared by both twins: explicit client wins, else the
+    flag-built memoized one; trap/identifier queries bypass (RRF order
+    stands). Returns (active_reranker_or_None, rerank_active, bypass_reason).
+
+    Issue #113: trap-class (injection) queries bypass rerank — however
+    the reranker arrived (flag-built, memoized, or explicitly passed
+    by the lifespan client). RRF order stands, so the must_not
+    hard-zero holds with RERANK_ENABLED=true. Prefetch also drops to
+    the non-rerank limit: no 50-candidate fetch for a leg that will
+    not run.
+    Issue #117: identifier-kind queries bypass rerank on the same
+    structural principle — rerank authority scales with anchor trust.
+    The cross-encoder scores shape-compatibility, so on exact-code
+    queries it prefers confident definitions of the WRONG message and
+    buries the right context (DSN9022I live: CE rank 13+ over RRF
+    rank 1 — no rank-fusion k can bridge that gap, k cancels out).
+    RRF's lexical anchor is the trustworthy signal here; the CE
+    keeps serving NL queries, where it earns its keep (PAR-10/19)."""
+    active_reranker = reranker
+    if active_reranker is None and settings and settings.rerank_enabled:
+        global _memoized_reranker
+        sid = id(settings)
+        if _memoized_reranker is None or _memoized_reranker[0] != sid:
+            from mainframe_rag.retrieve.rerank import build_reranker
+
+            _memoized_reranker = (sid, build_reranker(settings))
+        active_reranker = _memoized_reranker[1]
+    bypass_reason = _rerank_bypass_reason(query, has_identifiers)
+    if active_reranker is not None and bypass_reason is not None:
+        active_reranker = None
+    return active_reranker, active_reranker is not None, bypass_reason
+
+
+def _effective_query(settings: Settings | None, query: str) -> str:
+    """Deterministic acronym expansion (issue #82) feeds both retrieval legs
+    (and rerank scoring below). Identifiers, filters, and the returned
+    query_kind stay on the operator's original query."""
+    if settings and settings.acronym_expansion_enabled and should_rewrite(query):
+        return expand_query(query)
+    return query
+
+
+def _prefetch_limit_for(settings: Settings | None, rerank_active: bool) -> int:
+    return settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
+
+
+def _retrieve_span_attrs(
+    query: str,
+    limit: int,
+    rerank_active: bool,
+    prefetch_limit: int,
+    flt: models.Filter | None,
+    bypass_reason: str | None,
+) -> dict[str, str | bool | int | float]:
+    attrs: dict[str, str | bool | int | float] = {
+        "rag.query": query,
+        "rag.limit": limit,
+        "rag.rerank_active": rerank_active,
+        "rag.prefetch_limit": prefetch_limit,
+        "rag.filter_present": flt is not None,
+    }
+    if bypass_reason is not None:
+        attrs["rag.rerank_bypass_reason"] = bypass_reason
+    return attrs
+
+
+def _build_prefetch_requests(
+    dense_vec,
+    sparse_idx,
+    sparse_val,
+    flt: models.Filter | None,
+    prefetch_limit: int,
+) -> tuple[models.QueryRequest, models.QueryRequest]:
+    dense_req = models.QueryRequest(
+        query=dense_vec,
+        using="dense",
+        limit=prefetch_limit,
+        filter=flt,
+        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
+    )
+    sparse_req = models.QueryRequest(
+        query=models.SparseVector(indices=sparse_idx, values=sparse_val),
+        using="bm25",
+        limit=prefetch_limit,
+        filter=flt,
+        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
+    )
+    return dense_req, sparse_req
+
+
+def _ranking_params(
+    settings: Settings | None, has_identifiers: bool
+) -> tuple[tuple[float, float], int, int, int]:
+    """(weights, k, max_per_page, max_per_doc): Settings when present, else
+    the module-constant fallback both twins shared before."""
+    if settings:
+        weights = (
+            (settings.rrf_weight_dense_identifier, settings.rrf_weight_sparse_identifier)
+            if has_identifiers
+            else (settings.rrf_weight_dense_nl, settings.rrf_weight_sparse_nl)
+        )
+        k = settings.rrf_k
+        max_per_page = settings.retrieve_max_chunks_per_page
+        max_per_doc = settings.retrieve_max_chunks_per_doc
+    else:
+        weights = RRF_WEIGHTS_IDENTIFIER if has_identifiers else RRF_WEIGHTS_NL
+        k = RRF_K
+        max_per_page = 1
+        max_per_doc = 3
+    return weights, k, max_per_page, max_per_doc
+
+
+def _rrf_span_attrs(weights: tuple[float, float], k: int, candidates_in: int) -> dict:
+    return {
+        "rag.rrf_k": k,
+        "rag.rrf_weights": f"{weights[0]:g},{weights[1]:g}",
+        "rag.candidates_in": candidates_in,
+    }
+
+
+def _fuse_with_span(
+    dense_points: list[models.ScoredPoint],
+    sparse_points: list[models.ScoredPoint],
+    weights: tuple[float, float],
+    k: int,
+    limit: int,
+) -> list[SearchHit]:
+    with tracer.start_as_current_span(
+        "retrieve.rrf",
+        attributes=_rrf_span_attrs(weights, k, len(dense_points) + len(sparse_points)),
+    ):
+        return rrf_fuse(dense_points, sparse_points, weights, k=k, limit=limit)
+
+
+def _diversify_with_span(
+    fused: list[SearchHit], limit: int, max_per_page: int, max_per_doc: int
+) -> list[SearchHit]:
+    with tracer.start_as_current_span("retrieve.diversify") as dv_span:
+        hits = diversify_hits(fused, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
+        dv_span.set_attributes(
+            {
+                "rag.candidates_in": len(fused),
+                "rag.candidates_out": len(hits),
+                "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
+            }
+        )
+    return hits
+
+
 def search(
     client: QdrantPoints,
     embedder: Embedder,
@@ -228,51 +383,15 @@ def search(
     identifiers = parse_query(query)
     flt = build_filter(identifiers, product=product, version=version)
 
-    active_reranker = reranker
-    if active_reranker is None and settings and settings.rerank_enabled:
-        global _memoized_reranker
-        sid = id(settings)
-        if _memoized_reranker is None or _memoized_reranker[0] != sid:
-            from mainframe_rag.retrieve.rerank import build_reranker
+    active_reranker, rerank_active, bypass_reason = _resolve_active_reranker(
+        settings, reranker, query, identifiers.has_identifiers
+    )
+    query = _effective_query(settings, query)
 
-            _memoized_reranker = (sid, build_reranker(settings))
-        active_reranker = _memoized_reranker[1]
-    bypass_reason = _rerank_bypass_reason(query, identifiers.has_identifiers)
-    if active_reranker is not None and bypass_reason is not None:
-        # Issue #113: trap-class (injection) queries bypass rerank — however
-        # the reranker arrived (flag-built, memoized, or explicitly passed
-        # by the lifespan client). RRF order stands, so the must_not
-        # hard-zero holds with RERANK_ENABLED=true. Prefetch also drops to
-        # the non-rerank limit: no 50-candidate fetch for a leg that will
-        # not run.
-        # Issue #117: identifier-kind queries bypass rerank on the same
-        # structural principle — rerank authority scales with anchor trust.
-        # The cross-encoder scores shape-compatibility, so on exact-code
-        # queries it prefers confident definitions of the WRONG message and
-        # buries the right context (DSN9022I live: CE rank 13+ over RRF
-        # rank 1 — no rank-fusion k can bridge that gap, k cancels out).
-        # RRF's lexical anchor is the trustworthy signal here; the CE
-        # keeps serving NL queries, where it earns its keep (PAR-10/19).
-        active_reranker = None
-    rerank_active = active_reranker is not None
-    if settings and settings.acronym_expansion_enabled and should_rewrite(query):
-        # Issue #82: deterministic acronym expansion feeds both retrieval
-        # legs (and rerank scoring below). Identifiers, filters, and the
-        # returned query_kind stay on the operator's original query.
-        query = expand_query(query)
-
-    prefetch_limit = settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
+    prefetch_limit = _prefetch_limit_for(settings, rerank_active)
 
     timings: dict[str, int] = {}
-    span_attrs: dict[str, str | bool | int | float] = {
-        "rag.query": query,
-        "rag.limit": limit,
-        "rag.rerank_active": rerank_active,
-        "rag.prefetch_limit": prefetch_limit,
-        "rag.filter_present": flt is not None,
-    }
-    if bypass_reason is not None:
-        span_attrs["rag.rerank_bypass_reason"] = bypass_reason
+    span_attrs = _retrieve_span_attrs(query, limit, rerank_active, prefetch_limit, flt, bypass_reason)
 
     with tracer.start_as_current_span("retrieve.search", attributes=span_attrs) as span:
         with tracer.start_as_current_span(
@@ -291,19 +410,8 @@ def search(
             },
         ):
             t0 = time.monotonic()
-            dense_req = models.QueryRequest(
-                query=dense_vec,
-                using="dense",
-                limit=prefetch_limit,
-                filter=flt,
-                with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
-            )
-            sparse_req = models.QueryRequest(
-                query=models.SparseVector(indices=sparse_idx, values=sparse_val),
-                using="bm25",
-                limit=prefetch_limit,
-                filter=flt,
-                with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
+            dense_req, sparse_req = _build_prefetch_requests(
+                dense_vec, sparse_idx, sparse_val, flt, prefetch_limit
             )
 
             if hasattr(client, "query_batch_points"):
@@ -322,34 +430,13 @@ def search(
                 )
             timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
 
-        if settings:
-            weights = (
-                (settings.rrf_weight_dense_identifier, settings.rrf_weight_sparse_identifier)
-                if identifiers.has_identifiers
-                else (settings.rrf_weight_dense_nl, settings.rrf_weight_sparse_nl)
-            )
-            k = settings.rrf_k
-            max_per_page = settings.retrieve_max_chunks_per_page
-            max_per_doc = settings.retrieve_max_chunks_per_doc
-        else:
-            weights = RRF_WEIGHTS_IDENTIFIER if identifiers.has_identifiers else RRF_WEIGHTS_NL
-            k = RRF_K
-            max_per_page = 1
-            max_per_doc = 3
+        weights, k, max_per_page, max_per_doc = _ranking_params(settings, identifiers.has_identifiers)
 
         if rerank_active and active_reranker is not None:
             from mainframe_rag.retrieve.rerank import rerank_candidates
 
             rrf_limit = settings.rerank_candidates if settings else 50
-            with tracer.start_as_current_span(
-                "retrieve.rrf",
-                attributes={
-                    "rag.rrf_k": k,
-                    "rag.rrf_weights": f"{weights[0]:g},{weights[1]:g}",
-                    "rag.candidates_in": len(dense_points) + len(sparse_points),
-                },
-            ):
-                candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=rrf_limit)
+            candidates = _fuse_with_span(dense_points, sparse_points, weights, k, rrf_limit)
             t_rr = time.monotonic()
             with tracer.start_as_current_span(
                 "retrieve.rerank", attributes={"rag.candidates": len(candidates)}
@@ -361,28 +448,11 @@ def search(
             timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
             fused = reranked
         else:
-            with tracer.start_as_current_span(
-                "retrieve.rrf",
-                attributes={
-                    "rag.rrf_k": k,
-                    "rag.rrf_weights": f"{weights[0]:g},{weights[1]:g}",
-                    "rag.candidates_in": len(dense_points) + len(sparse_points),
-                },
-            ):
-                candidates = rrf_fuse(
-                    dense_points, sparse_points, weights, k=k, limit=max(limit * 3, 24)
-                )
-            fused = candidates
-
-        with tracer.start_as_current_span("retrieve.diversify") as dv_span:
-            hits = diversify_hits(fused, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
-            dv_span.set_attributes(
-                {
-                    "rag.candidates_in": len(fused),
-                    "rag.candidates_out": len(hits),
-                    "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
-                }
+            fused = _fuse_with_span(
+                dense_points, sparse_points, weights, k, max(limit * 3, 24)
             )
+
+        hits = _diversify_with_span(fused, limit, max_per_page, max_per_doc)
         span.set_attributes({"rag.query_kind": query_kind(identifiers), "rag.hits": len(hits)})
 
     return hits, query_kind(identifiers), timings
@@ -427,51 +497,15 @@ async def async_search(
     identifiers = parse_query(query)
     flt = build_filter(identifiers, product=product, version=version)
 
-    active_reranker = reranker
-    if active_reranker is None and settings and settings.rerank_enabled:
-        global _memoized_reranker
-        sid = id(settings)
-        if _memoized_reranker is None or _memoized_reranker[0] != sid:
-            from mainframe_rag.retrieve.rerank import build_reranker
+    active_reranker, rerank_active, bypass_reason = _resolve_active_reranker(
+        settings, reranker, query, identifiers.has_identifiers
+    )
+    query = _effective_query(settings, query)
 
-            _memoized_reranker = (sid, build_reranker(settings))
-        active_reranker = _memoized_reranker[1]
-    bypass_reason = _rerank_bypass_reason(query, identifiers.has_identifiers)
-    if active_reranker is not None and bypass_reason is not None:
-        # Issue #113: trap-class (injection) queries bypass rerank — however
-        # the reranker arrived (flag-built, memoized, or explicitly passed
-        # by the lifespan client). RRF order stands, so the must_not
-        # hard-zero holds with RERANK_ENABLED=true. Prefetch also drops to
-        # the non-rerank limit: no 50-candidate fetch for a leg that will
-        # not run.
-        # Issue #117: identifier-kind queries bypass rerank on the same
-        # structural principle — rerank authority scales with anchor trust.
-        # The cross-encoder scores shape-compatibility, so on exact-code
-        # queries it prefers confident definitions of the WRONG message and
-        # buries the right context (DSN9022I live: CE rank 13+ over RRF
-        # rank 1 — no rank-fusion k can bridge that gap, k cancels out).
-        # RRF's lexical anchor is the trustworthy signal here; the CE
-        # keeps serving NL queries, where it earns its keep (PAR-10/19).
-        active_reranker = None
-    rerank_active = active_reranker is not None
-    if settings and settings.acronym_expansion_enabled and should_rewrite(query):
-        # Issue #82: deterministic acronym expansion feeds both retrieval
-        # legs (and rerank scoring below). Identifiers, filters, and the
-        # returned query_kind stay on the operator's original query.
-        query = expand_query(query)
-
-    prefetch_limit = settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
+    prefetch_limit = _prefetch_limit_for(settings, rerank_active)
 
     timings: dict[str, int] = {}
-    span_attrs: dict[str, str | bool | int | float] = {
-        "rag.query": query,
-        "rag.limit": limit,
-        "rag.rerank_active": rerank_active,
-        "rag.prefetch_limit": prefetch_limit,
-        "rag.filter_present": flt is not None,
-    }
-    if bypass_reason is not None:
-        span_attrs["rag.rerank_bypass_reason"] = bypass_reason
+    span_attrs = _retrieve_span_attrs(query, limit, rerank_active, prefetch_limit, flt, bypass_reason)
 
     with tracer.start_as_current_span("retrieve.search", attributes=span_attrs) as span:
         # dense_query is a sync HTTP POST to the embed server and sparse is
@@ -494,19 +528,8 @@ async def async_search(
             },
         ):
             t0 = time.monotonic()
-            dense_req = models.QueryRequest(
-                query=dense_vec,
-                using="dense",
-                limit=prefetch_limit,
-                filter=flt,
-                with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
-            )
-            sparse_req = models.QueryRequest(
-                query=models.SparseVector(indices=sparse_idx, values=sparse_val),
-                using="bm25",
-                limit=prefetch_limit,
-                filter=flt,
-                with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
+            dense_req, sparse_req = _build_prefetch_requests(
+                dense_vec, sparse_idx, sparse_val, flt, prefetch_limit
             )
 
             if hasattr(client, "query_batch_points"):
@@ -526,34 +549,13 @@ async def async_search(
                 )
             timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
 
-        if settings:
-            weights = (
-                (settings.rrf_weight_dense_identifier, settings.rrf_weight_sparse_identifier)
-                if identifiers.has_identifiers
-                else (settings.rrf_weight_dense_nl, settings.rrf_weight_sparse_nl)
-            )
-            k = settings.rrf_k
-            max_per_page = settings.retrieve_max_chunks_per_page
-            max_per_doc = settings.retrieve_max_chunks_per_doc
-        else:
-            weights = RRF_WEIGHTS_IDENTIFIER if identifiers.has_identifiers else RRF_WEIGHTS_NL
-            k = RRF_K
-            max_per_page = 1
-            max_per_doc = 3
+        weights, k, max_per_page, max_per_doc = _ranking_params(settings, identifiers.has_identifiers)
 
         if rerank_active and active_reranker is not None:
             from mainframe_rag.retrieve.rerank import rerank_candidates
 
             rrf_limit = settings.rerank_candidates if settings else 50
-            with tracer.start_as_current_span(
-                "retrieve.rrf",
-                attributes={
-                    "rag.rrf_k": k,
-                    "rag.rrf_weights": f"{weights[0]:g},{weights[1]:g}",
-                    "rag.candidates_in": len(dense_points) + len(sparse_points),
-                },
-            ):
-                candidates = rrf_fuse(dense_points, sparse_points, weights, k=k, limit=rrf_limit)
+            candidates = _fuse_with_span(dense_points, sparse_points, weights, k, rrf_limit)
             t_rr = time.monotonic()
             # Cross-encoder scoring is sync HTTP (batches of settings.rerank_batch_size);
             # offload like the embed leg above (review S1).
@@ -567,28 +569,11 @@ async def async_search(
             timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
             fused = reranked
         else:
-            with tracer.start_as_current_span(
-                "retrieve.rrf",
-                attributes={
-                    "rag.rrf_k": k,
-                    "rag.rrf_weights": f"{weights[0]:g},{weights[1]:g}",
-                    "rag.candidates_in": len(dense_points) + len(sparse_points),
-                },
-            ):
-                candidates = rrf_fuse(
-                    dense_points, sparse_points, weights, k=k, limit=max(limit * 3, 24)
-                )
-            fused = candidates
-
-        with tracer.start_as_current_span("retrieve.diversify") as dv_span:
-            hits = diversify_hits(fused, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
-            dv_span.set_attributes(
-                {
-                    "rag.candidates_in": len(fused),
-                    "rag.candidates_out": len(hits),
-                    "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
-                }
+            fused = _fuse_with_span(
+                dense_points, sparse_points, weights, k, max(limit * 3, 24)
             )
+
+        hits = _diversify_with_span(fused, limit, max_per_page, max_per_doc)
         span.set_attributes({"rag.query_kind": query_kind(identifiers), "rag.hits": len(hits)})
 
     return hits, query_kind(identifiers), timings
