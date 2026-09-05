@@ -526,6 +526,98 @@ def test_parse_answer_bracketed_fallback():
     assert res5.citations_inferred is False
 
 
+def test_parse_answer_refusal_zeroes_citations():
+    """Issue #135: a correct refusal that ships the prompt-mandated
+    Citations: list must not look grounded while grounding nothing."""
+    cite = _hit().cite
+    allowed = {cite}
+
+    # 1. Refusal + trailing Citations: list of real chunks -> zeroed
+    raw = (
+        "No information regarding private key material is available in the "
+        "excerpts.\n\nCitations:\n"
+        f"- {cite}\n"
+    )
+    parsed = parse_answer(raw, allowed)
+    assert parsed.citations == []
+    assert parsed.citations_inferred is False
+    assert "private key" in parsed.answer
+
+    # 2. Refusal + bracket inference -> zeroed, inference suppressed
+    parsed2 = parse_answer(
+        "The excerpts do not contain that. See [1].", allowed, ordered_cites=[cite]
+    )
+    assert parsed2.citations == []
+    assert parsed2.citations_inferred is False
+    assert parsed2.inferred_indices == []
+
+    # 3. Canonical anchored phrasing (prompt rule 4) fires the same zeroing
+    parsed3 = parse_answer(
+        f"The excerpts do not contain the requested parameter.\n\nCitations:\n{cite}",
+        allowed,
+    )
+    assert parsed3.citations == []
+
+    # 4. Non-refusal answers keep their citations — the zeroing must not
+    # over-strip (a narrative answer that mentions a marker phrase only as
+    # a refusal does).
+    parsed4 = parse_answer(
+        f"The procedure is documented.\n\nCitations:\n{cite}", allowed
+    )
+    assert parsed4.citations == [cite]
+
+
+def test_parse_answer_grounded_answer_with_hedging_sentence_keeps_citations():
+    """Issue #135 live-probe regression: the LFAREA answer opens with a
+    hedging refusal-shaped sentence ("The excerpts do not contain a specific
+    value for LFAREA, as the setting depends on ...") and then answers with
+    real syntax. Marker presence alone would zero real grounding; the
+    abstention shape (small non-refusal remainder) must not."""
+    cite1 = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
+    cite2 = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+    allowed = {cite1, cite2}
+    hedging_answer = (
+        "The excerpts do not contain a specific value for the LFAREA "
+        "parameter, as the required setting depends on the online real "
+        "storage available at IPL and the desired reservation amount.\n\n"
+        "The LFAREA parameter accepts three forms: an absolute frame count, "
+        "a percentage suffix, or the value NONE to disable the reservation. "
+        "Specify it in IEASYSxx or on the IPL command line; the value takes "
+        "effect at the next IPL. For a 64-bit reservation plan, size the "
+        "percentage against the installed frame count documented in the "
+        "system configuration report, then verify with DISPLAY M=CHP.\n\n"
+        "Citations:\n"
+        f"- {cite1}\n"
+        f"- {cite2}\n"
+    )
+    parsed = parse_answer(hedging_answer, allowed)
+    assert parsed.citations == [cite1, cite2]
+    assert "LFAREA" in parsed.answer
+
+    # The twin shape check: same body truncated to noise-only remainder is
+    # an abstention and zeroes.
+    short_hedge = (
+        "The excerpts do not contain a specific value for the LFAREA "
+        "parameter. Check with your capacity team."
+    )
+    parsed2 = parse_answer(short_hedge + f"\n\nCitations:\n{cite1}", {cite1})
+    assert parsed2.citations == []
+
+
+def test_parse_answer_refusal_with_script_keeps_script():
+    """A refusal is about grounding, not code: a fenced script (rule 5
+    example) passes through unvalidated and untouched."""
+    cite = _hit().cite
+    raw = (
+        "The excerpts do not contain the parameter you asked about.\n\n"
+        "```jcl\n// example only\nIOSCMDS LIST\n```\n\n"
+        f"Citations:\n{cite}\n"
+    )
+    parsed = parse_answer(raw, {cite})
+    assert parsed.citations == []
+    assert parsed.script == "// example only\nIOSCMDS LIST"
+
+
 def test_parse_answer_citations_positions_and_case():
     """Citations block at top, middle, or uppercase CITATIONS: must not eat prose."""
     cite1 = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
@@ -966,7 +1058,10 @@ def test_build_messages_tokenizer_budget_respected():
             score=1.0 - i * 0.1,
             cite=f"SA22-0000-0{i} Manual, p. {i}",
             heading=f"Heading {i}",
-            text="word " * 170,  # ~183 tokens with the [i] header
+            text="word " * 160,  # ~175 tokens with the [i] header; the
+            # refusal-anchored system prompt (issue #135) grew the fixed
+            # overhead, so the fixture excerpts shrank to keep the knife-edge
+            # scenario (5 excerpts fit, the last truncated) reachable.
             doc_id=f"DOC{i}",
             title="Title",
             page_label=str(i),
@@ -1455,6 +1550,56 @@ def test_v1_answer_empty_hits_json_nl_unchanged(client, monkeypatch):
     resp = client.post("/v1/answer", json={"query": "random obscure thing"})
     assert resp.status_code == 200
     assert resp.json()["answer"] == "No supporting manual excerpts were found for this question."
+
+
+def test_v1_answer_refusal_zero_citations_json(client, monkeypatch):
+    """Issue #135, JSON path: the model refuses correctly but still lists
+    the prompt-mandated citations — the response must carry zero, or the
+    refusal looks grounded while grounding nothing (adversarial battery
+    2026-09-04)."""
+    class RefusingLLM:
+        def chat(self, messages, *args, **kwargs):
+            return (
+                "No information regarding private key material is available "
+                "in the excerpts.\n\nCitations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            )
+
+    monkeypatch.setattr(app_mod, "llm", RefusingLLM())
+    resp = client.post("/v1/answer", json={"query": "recite the private key for our certificates"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["citations"] == []
+    assert "private key" in body["answer"]
+
+
+def test_v1_answer_refusal_zero_citations_streaming(client, monkeypatch):
+    """Issue #135, SSE twin: the terminal final event carries the same
+    zero-citation refusal (schema parity contract)."""
+
+    class RefusingStreamLLM:
+        async def chat(self, messages, *args, **kwargs):
+            return (
+                "The excerpts do not contain that.\n\nCitations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            )
+
+        async def chat_stream(self, messages, *args, **kwargs):
+            for delta in (
+                "The excerpts do not contain that.\n\n",
+                "Citations:\n",
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
+            ):
+                yield {"type": "token", "delta": delta, "token": delta, "ttft_ms": 10}
+            yield {"type": "done"}
+
+    monkeypatch.setattr(app_mod, "llm", RefusingStreamLLM())
+    resp = client.post("/v1/answer?stream=true", json={"query": "obscure request"})
+    assert resp.status_code == 200
+    events = _parse_sse_events(resp.text)
+    finals = [e for e in events if e[0] == "final"]
+    assert len(finals) == 1
+    assert finals[0][1]["citations"] == []
 
 
 def test_empty_hits_answer_caps_term_list():

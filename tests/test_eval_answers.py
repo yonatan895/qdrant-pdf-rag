@@ -17,6 +17,8 @@ from scripts.eval_answers import (
     summarize,
 )
 
+from mainframe_rag.agent.answer import is_refusal
+
 
 def _entry(**overrides) -> dict:
     base = {
@@ -28,6 +30,27 @@ def _entry(**overrides) -> dict:
     }
     base.update(overrides)
     return base
+
+
+# ----------------------------------------------------------------- refusal helper
+def test_refusal_helper_shared_with_agent() -> None:
+    """Issue #135: the eval's refusal verdicts and the agent's zero-citation
+    rule must be the same predicate — one helper, one marker list."""
+    assert is_explicit_refusal is is_refusal
+
+
+def test_refusal_marker_battery() -> None:
+    """Adversarial battery phrasings must fire the refusal predicate:
+    the battery's 'no information regarding' refusal shipped 4 citations
+    of real-but-unsupporting chunks because no marker caught it."""
+    assert is_refusal("No information regarding private keys is available in the excerpts.")
+    assert is_refusal("There is no information about that parameter in the manuals provided.")
+    assert is_refusal("The excerpts do not answer this question.")
+    assert is_refusal("no manual excerpts carry dsn90221i")  # case-folded
+    assert is_refusal("The EXCERPTS DO NOT CONTAIN the requested syntax.")
+    assert is_refusal("**Not documented in the excerpts.**")  # wrapped markup
+    assert not is_refusal("LFAREA reserves 64-bit frames above the bar.")
+    assert not is_refusal("")
 
 
 # ---------------------------------------------------------------- judge: answer

@@ -66,14 +66,64 @@ SYSTEM_PROMPT = (
     "1. Only assert facts and parameters that the supplied excerpts support. Do not invent fictitious keywords or commands.\n"
     "2. When asked how to code or configure a specific case, apply the syntax templates, grammars, and parameter rules documented in the excerpts to the user's scenario. Do not refuse to synthesize code, JCL, rules, or commands simply because the manual lacks an identical verbatim example for the user's specific values.\n"
     "3. If manuals disagree between versions, say which version each statement comes from.\n"
-    "4. If the excerpts truly do not contain the syntax, parameters, or rules to answer the question, say so explicitly.\n"
+    "4. If the excerpts truly do not contain the syntax, parameters, or rules to answer the question, say so explicitly — start that statement with \"the excerpts do not contain\" and cite nothing for what you cannot answer.\n"
     "5. When you propose JCL, REXX, rule definitions, or operator steps, put them in a fenced code block and explain how they map to the documented syntax. Scripts are examples, not production-ready without review.\n"
-    "6. You MUST end your reply with a 'Citations:' section listing the exact citation strings of the excerpts used, for example:\n"
+    "6. You MUST always end your reply with a 'Citations:' section listing the exact citation strings of the excerpts you used; when you refused per rule 4, the section lists nothing, for example:\n"
     "Citations:\n"
     "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17\n"
 )
 
 COMPLEX_ROOTS = ("diagnos", "recover", "abend", "compar", "tuning", "optimi", "tradeoff")
+
+# Explicit-refusal markers (issue #135): the system prompt's rule 4 tells the
+# model to say so explicitly and anchors the canonical phrasing; the marker
+# list must also catch the phrasings the model produces unprompted (the
+# adversarial battery's "no information regarding ..."). Single helper for
+# every refusal interpretation — parse_answer's zero-cite, the answer eval's
+# abstain verdicts — so the two can never diverge.
+REFUSAL_MARKERS = (
+    "no supporting manual excerpts",
+    "no manual excerpts carry",
+    "excerpts do not answer",
+    "excerpts do not contain",
+    "excerpts provided do not",
+    "not documented in the excerpts",
+    "excerpts do not cover",
+    "no information regarding",
+    "no information about",
+)
+
+
+def is_refusal(answer_body: str) -> bool:
+    """True when the answer body explicitly declines to answer from the
+    excerpts. Case-folded substring semantics; shared by the answer-tier
+    eval's refusal verdicts and the abstention shape test below."""
+    low = answer_body.lower()
+    return any(m in low for m in REFUSAL_MARKERS)
+
+
+# Abstention shape: an abstention's substance is the refusal itself. After
+# stripping the refusal-marked sentences, whatever prose remains is below
+# this floor. A grounded answer that hedges one sentence ("the excerpts do
+# not contain a specific value, the setting depends on ...") keeps several
+# hundred chars of substance and is NOT an abstention (caught live on the
+# LFAREA probe — issue #135).
+_ABSTENTION_REMAINDER_CHARS = 200
+
+
+def is_abstention(answer_body: str) -> bool:
+    """True when the answer's substance is the refusal itself: at least one
+    explicit-refusal marker is present AND, after stripping the refusal-
+    marked sentences, the non-refusal remainder is under the shape floor.
+    The marker gate first (a short grounded answer carries no marker and is
+    never an abstention); the shape second — the battery alone cannot
+    distinguish a full abstention from a grounded answer quoting one
+    hedging sentence."""
+    if not is_refusal(answer_body):
+        return False
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", answer_body)
+    remaining = [s for s in sentences if s.strip() and not is_refusal(s)]
+    return sum(len(s) for s in remaining) < _ABSTENTION_REMAINDER_CHARS
 
 
 def classify_query_complexity(query: str) -> str:
@@ -885,6 +935,18 @@ def parse_answer(
 
     # 3. Clean up unauthorized citations in body
     body = strip_unauthorized_citations(body, allowed_citations)
+
+    # 4. Zero citations on abstention (issue #135): a correct refusal that
+    # ships citations to real-but-unsupporting chunks looks grounded while
+    # grounding nothing. Shape-based, not marker-based: a grounded answer
+    # that quotes one hedging sentence keeps its citations. Enforced here —
+    # not prompt hygiene — so every consumer of parse_answer (JSON path,
+    # SSE final, query_demo) inherits it. `script` is code and passes
+    # through untouched, as documented above.
+    if is_abstention(body):
+        citations = []
+        citations_inferred = False
+        inferred_indices = []
 
     return ParsedAnswer(
         answer=body.strip(),

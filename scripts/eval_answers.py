@@ -91,26 +91,9 @@ def is_zero_hits_answer(answer: str) -> bool:
     return body == ZERO_HITS_ANSWER or _ZERO_HITS_NAMED_RE.match(body) is not None
 
 
-# Explicit-refusal markers for the LLM path. The system prompt's rule 4
-# instructs the model to "say so explicitly" when excerpts do not answer;
-# these are the phrasings the prompt and the seed's gold fields actually use.
-REFUSAL_MARKERS = (
-    "no supporting manual excerpts",
-    "no manual excerpts carry",
-    "excerpts do not answer",
-    "excerpts do not contain",
-    "excerpts provided do not",
-    "not documented in the excerpts",
-    "excerpts do not cover",
-)
-
-
-def is_explicit_refusal(answer_body: str) -> bool:
-    """True when the answer body explicitly declines to answer from the
-    excerpts. Single helper for both verdict branches (one rule per
-    concept); case-folded substring semantics, matching the gold fields."""
-    low = answer_body.lower()
-    return any(m in low for m in REFUSAL_MARKERS)
+# Refusal interpretation is the agent's single helper (issue #135): the eval's
+# abstain verdicts and the agent's zero-citation rule must never diverge.
+from mainframe_rag.agent.answer import is_refusal as is_explicit_refusal
 
 
 def judge(
