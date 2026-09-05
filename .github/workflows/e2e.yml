@@ -358,6 +358,11 @@ jobs:
           EOF
           echo "INGEST_EXTRA_PATCH=$RUNNER_TEMP/ingest-kind-scale.json" >> "$GITHUB_ENV"
 
+      - name: airgap-load (fill the Kind registry BEFORE any pod pulls it)
+        run: |
+          cd gapbox/qdrant-pdf-rag
+          make airgap-load
+
       - name: Deploy mock vLLM (deterministic embeddings stand-in)
         run: |
           cd gapbox/qdrant-pdf-rag
@@ -461,7 +466,7 @@ jobs:
           EOF
           kubectl -n "$NS" wait --for=condition=complete job/corpus-gen --timeout=300s
 
-      - name: airgap-pipeline LIVE (load, deploy, ingest, smoke)
+      - name: airgap-pipeline LIVE (deploy, ingest, smoke; registry pre-loaded)
         env:
           IMAGE_SHA: ${{ env.SHA }}
           QDRANT_STORAGE_SIZE: 1Gi
@@ -469,7 +474,10 @@ jobs:
           INGEST_TIMEOUT: "900"
         run: |
           cd gapbox/qdrant-pdf-rag
-          make airgap-pipeline
+          # Images are already in the Kind registry from the airgap-load
+          # step above (mock and corpus-gen pods pulled them); skip the
+          # second push — same flag an operator re-running pipeline uses.
+          sh scripts/airgap/pipeline.sh --skip-load
 
       - name: Expected-substring acceptance
         run: |
