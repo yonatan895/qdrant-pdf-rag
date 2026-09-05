@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root: scrip
 
 from mainframe_rag.config import load_settings
 from mainframe_rag.retrieve.filters import parse_query
-from scripts.eval_retrieval import QUERY_CLASSES, GoldenEntry
+from scripts.eval_retrieval import QUERY_CLASSES, GoldenEntry, is_sibling_exception
 
 RARITY_LIMIT = 10  # a must_not message ID in more docs than this is a weak trap
 PAGE_SIZE = 1000
@@ -128,7 +128,7 @@ def verify_entry(entry: GoldenEntry, facts: CorpusFacts) -> tuple[list[str], lis
         query_ids = set(parse_query(entry.query).message_ids)
         for d in sorted(hit_docs & set(entry.expected_doc_ids)):
             doc_ids = facts.docs[d].message_ids if d in facts.docs else set()
-            if not (query_ids & doc_ids):
+            if not is_sibling_exception(query_ids, doc_ids):
                 fails.append(
                     f"must_not message id {msg!r} is present inside expected doc {d} "
                     "which does not carry the query's own message id; trap is broken"

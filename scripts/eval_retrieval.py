@@ -114,6 +114,24 @@ def default_baseline_path(embed_mode: str) -> Path:
     return Path("evals/baseline-vllm.json") if embed_mode == "vllm" else Path("evals/baseline.json")
 
 
+def is_sibling_exception(query_ids: set[str], doc_message_ids) -> bool:
+    """Sibling-precision allowance, shared by must_not_violations (retrieval
+    eval + harness L1) and verify_golden: a chunk/doc that carries a bait
+    message id ALONGSIDE the query's own id is one page documenting adjacent
+    messages (e.g. IOS207I and IOS208I share a page) — not a wrong-sibling
+    answer. Only sibling-only payloads violate."""
+    return bool(set(query_ids) & set(doc_message_ids or ()))
+
+
+def is_relevant_hit(hit_doc_id: str, hit_heading: str, entry: GoldenEntry) -> bool:
+    """Doc-level relevance, shared by score_entry and harness L1: doc_id in
+    the expected set AND heading substring (if given)."""
+    if hit_doc_id not in set(entry.expected_doc_ids):
+        return False
+    heading = (entry.expected_heading or "").lower()
+    return not heading or heading in hit_heading.lower()
+
+
 def must_not_violations(hits: list[SearchHit], entry: GoldenEntry) -> list[dict]:
     """Collect must_not violations inside the top-5 window.
 
@@ -134,7 +152,7 @@ def must_not_violations(hits: list[SearchHit], entry: GoldenEntry) -> list[dict]
         if hit.doc_id in set(entry.must_not_retrieve):
             violations.append({"type": "doc_id", "value": hit.doc_id, "rank": rank})
         hit_msgs = set(hit.message_ids or ()) & set(entry.must_not_message_ids)
-        if hit_msgs and not (query_ids & set(hit.message_ids or ())):
+        if hit_msgs and not is_sibling_exception(query_ids, hit.message_ids):
             violations.append(
                 {"type": "message_id", "value": sorted(hit_msgs), "rank": rank, "doc_id": hit.doc_id}
             )
@@ -204,13 +222,10 @@ def score_entry(hits: list[SearchHit], entry: GoldenEntry) -> dict:
     page, never a wrong-sibling answer. expected_page feeds the page_hit@5
     diagnostic (doc-restricted; never a hard gate)."""
     expected = set(entry.expected_doc_ids)
-    heading = (entry.expected_heading or "").lower()
     abstain = entry.expected_behavior == "abstain"
 
     def relevant(hit: SearchHit) -> bool:
-        if hit.doc_id not in expected:
-            return False
-        return not heading or heading in hit.heading.lower()
+        return is_relevant_hit(hit.doc_id, hit.heading, entry)
 
     row: dict = {
         "query": entry.query,

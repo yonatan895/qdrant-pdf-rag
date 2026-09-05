@@ -12,6 +12,8 @@ from scripts.eval_retrieval import (
     GoldenEntry,
     check_baseline,
     default_baseline_path,
+    is_relevant_hit,
+    is_sibling_exception,
     load_golden,
     score_entry,
     summarize,
@@ -49,6 +51,18 @@ def test_score_entry_answer_perfect():
     assert row["recall@1"] == 1.0 and row["recall@3"] == 1.0 and row["recall@5"] == 1.0
     assert row["mrr"] == 1.0
     assert "top_scores" not in row
+
+
+def test_shared_predicates_single_source_for_eval_harness_verify():
+    entry = GoldenEntry(
+        query="IOS207I message", expected_doc_ids=["SA38-0677-70"], expected_heading="mounting"
+    )
+    assert is_relevant_hit("SA38-0677-70", "Chapter 4 > Mounting", entry) is True
+    assert is_relevant_hit("SA38-0677-70", "Chapter 9 > Editing", entry) is False
+    assert is_relevant_hit("OTHER-DOC", "Chapter 4 > Mounting", entry) is False
+    assert is_sibling_exception({"IOS207I"}, {"IOS207I", "IOS208I"}) is True
+    assert is_sibling_exception({"IOS207I"}, {"IOS208I"}) is False
+    assert is_sibling_exception(set(), {"IOS208I"}) is False
 
 
 def test_score_entry_heading_scoped():

@@ -14,8 +14,8 @@ gate's metric set:
 nDCG@8 definition (graded, deterministic, doc-level): the hit list is
 deduplicated per doc_id (best-ranked chunk of a doc wins) because the gold
 is doc-level; per-doc gain = 1 for a doc hit, +1 when the gold carries
-expected_heading and the heading matches (case-fold substring — the same
-relevance rule the retrieval eval uses), +1 when the gold carries
+expected_heading and the heading matches (case-fold substring — the shared
+relevance helper in the retrieval eval), +1 when the gold carries
 expected_page and the page matches (doc-restricted, as in the retrieval
 eval). DCG uses the standard 1/log2(rank+1) discount; IDCG gives max gain
 to ONE expected doc (the heading/page gold fields are singular and can be
@@ -37,18 +37,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from eval_retrieval import GoldenEntry, must_not_violations
+from eval_retrieval import GoldenEntry, is_relevant_hit, must_not_violations
 from eval_retrieval import ndcg_at_k as _ndcg_at_k
 
 L1_LIMIT = 8  # recall@8 headroom; matches the answer path's retrieval depth
-
-
-def _relevant(hit_doc_id: str, hit_heading: str, entry: GoldenEntry) -> bool:
-    expected = set(entry.expected_doc_ids)
-    if hit_doc_id not in expected:
-        return False
-    heading = (entry.expected_heading or "").lower()
-    return not heading or heading in hit_heading.lower()
 
 
 def score_row(hits: Sequence[Any], entry: GoldenEntry) -> dict[str, Any]:
@@ -68,11 +60,11 @@ def score_row(hits: Sequence[Any], entry: GoldenEntry) -> dict[str, Any]:
         return row
     reciprocal_rank = 0.0
     for rank, hit in enumerate(hits[:L1_LIMIT], 1):
-        if _relevant(hit.doc_id, hit.heading, entry):
+        if is_relevant_hit(hit.doc_id, hit.heading, entry):
             reciprocal_rank = 1.0 / rank
             break
-    row["recall@5"] = 1.0 if any(_relevant(h.doc_id, h.heading, entry) for h in hits[:5]) else 0.0
-    row["recall@8"] = 1.0 if any(_relevant(h.doc_id, h.heading, entry) for h in hits[:L1_LIMIT]) else 0.0
+    row["recall@5"] = 1.0 if any(is_relevant_hit(h.doc_id, h.heading, entry) for h in hits[:5]) else 0.0
+    row["recall@8"] = 1.0 if any(is_relevant_hit(h.doc_id, h.heading, entry) for h in hits[:L1_LIMIT]) else 0.0
     row["mrr"] = reciprocal_rank
     ndcg = _ndcg_at_k(hits, entry)
     if ndcg is not None:
