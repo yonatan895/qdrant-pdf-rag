@@ -8,6 +8,22 @@ set -eu
 REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$REPO_ROOT"
 
+# Explicit environment wins over the env file. Snapshot every documented
+# operator key that is already (non-empty) set, source the file, then restore
+# the snapshot over whatever the file assigned — so `VAR=x make airgap-*`
+# beats a stale key in airgap.env instead of being silently overridden by it.
+# Empty stays unset, matching the ${VAR:-default} idiom used everywhere below.
+OPERATOR_ENV_KEYS="AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC EMBED_BASE_URL EMBED_MODE EMBED_MODEL GHCR_OWNER IMAGE_SHA INGEST_EXTRA_PATCH INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY KC LLM_BASE_URL LLM_MODEL_REASONING NAMESPACE OPENSHIFT_NAMESPACE OTEL_EXPORTER_OTLP_ENDPOINT PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_STORAGE_SIZE QDRANT_TAG QUERY REGISTRY_INTERNAL RERANK_BASE_URL RERANK_ENABLED RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB STORAGE_CLASS VLLM_BASE_URL"
+_cli_saved_keys=""
+for _k in $OPERATOR_ENV_KEYS; do
+    eval "_is_set=\${$_k:+set}"
+    if [ -n "$_is_set" ]; then
+        eval "_cli_saved_${_k}=\${$_k}"
+        _cli_saved_keys="${_cli_saved_keys:+$_cli_saved_keys }$_k"
+    fi
+done
+unset _k _is_set
+
 if [ -n "${AIRGAP_ENV:-}" ]; then
     if [ -f "$AIRGAP_ENV" ]; then
         # shellcheck disable=SC1091
@@ -17,6 +33,12 @@ elif [ -f airgap.env ]; then
     # shellcheck disable=SC1091
     . ./airgap.env
 fi
+
+for _k in $_cli_saved_keys; do
+    eval "${_k}=\${_cli_saved_${_k}}"
+    eval "unset _cli_saved_${_k}"
+done
+unset _k _cli_saved_keys OPERATOR_ENV_KEYS
 
 die() {
     echo "FAIL: $*" >&2

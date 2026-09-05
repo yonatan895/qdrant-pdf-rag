@@ -177,3 +177,13 @@ def test_ingest_missing_corpus_pvc_fails_closed(ingest_tree):
     r = _run_ingest(ingest_tree, ("CORPUS_PVC", ""))
     assert r.returncode == 1
     assert "required variables unset: CORPUS_PVC" in r.stderr
+
+
+def test_ingest_cli_corpus_pvc_beats_env_file(ingest_tree):
+    env_file = ingest_tree[0] / "case.env"
+    env_file.write_text("CORPUS_PVC=file-pvc-should-lose\n")
+    r = _run_ingest(ingest_tree, ("AIRGAP_ENV", str(env_file)))
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert "claimName: my-manuals-pvc" in rendered
+    assert "file-pvc-should-lose" not in rendered

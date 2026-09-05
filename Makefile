@@ -1,7 +1,11 @@
 # Mainframe RAG — connected-host build and air-gap packaging.
-# See docs/architecture.md. Include airgap.env (copy of airgap.env.example) when using cluster targets.
+# See docs/architecture.md.
 SHELL := /bin/bash
--include airgap.env
+# NOTE: airgap.env is deliberately NOT included here. scripts/airgap/*.sh
+# source it themselves, with explicit environment winning over the file (see
+# common.sh). A make-level `-include` would silently override `VAR=x make ...`
+# with stale file values — in recipe environments and in $(...) interpolation
+# alike — while no recipe needs those keys as make variables.
 
 CHARTS_DIR := charts
 VALUES_FILE := overlays/openshift/values.yaml
