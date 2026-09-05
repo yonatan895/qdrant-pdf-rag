@@ -59,10 +59,12 @@ over a live collection and scores doc-level against the golden entries.
   `must_not.violations == 0` regardless of baseline.
 - **Skip semantics:** missing metric or baseline warns and never gates; a
   **collection** mismatch skips the gate (baseline dropped); an
-  **embed-mode** mismatch only warns and still gates. A fully skipped gate
-  with zero query errors exits 0 — a skip reads as pass, so check *which*
-  baseline was compared before trusting green (tracked observable; see the
-  mismatch note in `live-stack.md`).
+  **embed-mode** mismatch only warns and still gates. A requested gate
+  that cannot be applied — missing `--check` file or collection mismatch
+  — exits **2**, never 0 (issue #159): a skip is distinguishable from
+  green, so `make eval` / `make eval-paraphrase` fail the job. Exit 0
+  remains only for a genuinely green gated run or a run with no gate
+  requested (`--no-check`, or no mode-keyed baseline recorded yet).
 - **`--check` vs `--update-baseline` are mutually exclusive.** Baselines
   record `_meta` (size, collection, mode, timestamp) plus the gated metrics;
   `must_not`/failures/per-query are intentionally omitted (the zero-gate is
