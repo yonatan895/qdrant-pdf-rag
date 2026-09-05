@@ -24,9 +24,6 @@ class InventoryRecord(BaseModel):
     error_type: str | None = None  # exception class name, for typed triage
     finished_at: float = Field(default_factory=time.time)
 
-    def to_json(self) -> str:
-        return self.model_dump_json()
-
 
 def load_inventory(progress_path: Path) -> dict[str, InventoryRecord]:
     """Latest record per path from an existing JSONL file.
@@ -61,4 +58,4 @@ def should_skip(record: InventoryRecord | None, sha256: str, allow_dry: bool = F
 def append_record(progress_path: Path, record: InventoryRecord) -> None:
     progress_path.parent.mkdir(parents=True, exist_ok=True)
     with open(progress_path, "a", encoding="utf-8") as f:
-        f.write(record.to_json() + "\n")
+        f.write(record.model_dump_json() + "\n")

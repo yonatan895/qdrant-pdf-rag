@@ -20,6 +20,9 @@ PRODUCT_VERSION_RE = re.compile(
     re.IGNORECASE,
 )
 GENERIC_VR_RE = re.compile(r"\bV(\d+)\s*\.?\s*R(\d+)\b")
+# Deliberately anchored, not regexes.DOCNO_RE: filename stems need the
+# start anchor + trailing-guard, and doc_id feeds UUID5 point ids — folding
+# this into the text-search form risks identity churn, not a cleanup.
 FILENAME_DOCNO_RE = re.compile(r"^([A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?)(?![\d-])")
 
 # Invisible / control characters stripped from extracted page text (issue

@@ -13,6 +13,9 @@ _SYNTAX_RE = re.compile(r"(::=|>>-|>>\+|<--|--\+|-\+-|--\\-)")
 _PARM_RE = re.compile(r"<[a-zA-Z][\w-]*>")
 _COLUMN_RE = re.compile(r"\S(?:.*\S)?(?:\s{2,}\S)+")
 
+# Deliberately narrower than regexes.MSG_RE: chunk_type is a precision label
+# (line-anchored classic form only), while MSG_RE is the broad extractor.
+# Widening this changes chunk_type distribution — needs eval, not a cleanup.
 MESSAGE_LINE_RE = re.compile(r"^\s*[A-Z]{3}\d{2,5}[A-Z]")
 
 
