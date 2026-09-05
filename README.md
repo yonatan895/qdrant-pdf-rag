@@ -1,5 +1,7 @@
 # Mainframe RAG
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/yonatan895/qdrant-pdf-rag)
+
 Citation-first expert mainframe agent: hybrid retrieval over ~100 GB of IBM-style manuals (IBM, Broadcom/CA, BMC, Precisely) on **air-gapped OpenShift**, answering operational questions with exact citations — document number, title, heading path, printed page label — plus optional JCL/REXX/operator steps from a reasoning model.
 
 - **Design & Architecture:** [docs/architecture.md](docs/architecture.md) (source of truth)
