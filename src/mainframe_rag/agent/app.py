@@ -102,6 +102,93 @@ def _require_query_length(request_id: str, query: str) -> None:
         raise AppError(422, "invalid_request", "request body failed validation")
 
 
+async def _await_retrieval(res) -> tuple:
+    """Sync/async retrieval-leg shim: the pooled async client awaits while
+    sync test doubles resolve inline — one helper serves both endpoints so
+    the twin call sites cannot diverge (review S2)."""
+    if inspect.isawaitable(res):
+        return await res
+    return res
+
+
+def _timing_parts(
+    timings: dict, llm_ms: int | None = None, ttft_ms: int | None = None
+) -> list[str]:
+    """Server-Timing parts shared by /v1/search and every /v1/answer path
+    (JSON, empty-hits, SSE headers): retrieval legs always, LLM legs only on
+    the non-streaming answer path that measured them."""
+    parts = []
+    if timings.get("embed_ms") is not None:
+        parts.append(f"embed;dur={timings['embed_ms']}")
+    if timings.get("qdrant_ms") is not None:
+        parts.append(f"qdrant;dur={timings['qdrant_ms']}")
+    if timings.get("rerank_ms") is not None:
+        parts.append(f"rerank;dur={timings['rerank_ms']}")
+    if llm_ms is not None:
+        parts.append(f"llm;dur={llm_ms}")
+    if ttft_ms is not None:
+        parts.append(f"ttft;dur={ttft_ms}")
+    return parts
+
+
+def _search_span_attrs(kind: str, hits: list[SearchHit]) -> dict:
+    return {
+        "rag.query_kind": kind,
+        "rag.hits": len(hits),
+        "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
+    }
+
+
+def _answer_span_attrs(kind: str, hits: list[SearchHit], citations: int, has_script: bool) -> dict:
+    return {
+        "rag.query_kind": kind,
+        "rag.hits": len(hits),
+        "rag.citations": citations,
+        "rag.has_script": has_script,
+        "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
+    }
+
+
+def _answer_log_fields(
+    kind: str,
+    complexity: str,
+    hits: list[SearchHit],
+    timings: dict,
+    citations: int,
+    has_script: bool,
+    finish_reason: str,
+    usage: TokenUsage,
+    llm_ms: int,
+    ttft_ms: int | None,
+    started: float,
+    stream: bool = False,
+) -> dict:
+    """Answer-leg log fields shared by the JSON and SSE finals: identical
+    keys so log consumers see one shape; stream=True only marks the SSE one."""
+    fields: dict = {
+        "query_kind": kind,
+        "query_complexity": complexity,
+        "hits": len(hits),
+        "embed_ms": timings.get("embed_ms"),
+        "qdrant_ms": timings.get("qdrant_ms"),
+        "rerank_ms": timings.get("rerank_ms"),
+        "llm_ms": llm_ms,
+        "citations": citations,
+        "has_script": has_script,
+        "finish_reason": finish_reason,
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+        "total_tokens": usage.total_tokens,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+    }
+    if stream:
+        fields["stream"] = True
+    if ttft_ms is not None:
+        fields["ttft_ms"] = ttft_ms
+    return fields
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker
@@ -347,28 +434,13 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
                 product=req.product, version=req.version, limit=req.limit,
                 settings=settings, reranker=reranker,
             )
-            if inspect.isawaitable(res):
-                hits, kind, timings = await res
-            else:
-                hits, kind, timings = res
+            hits, kind, timings = await _await_retrieval(res)
         except Exception as exc:
             _span_error(span, exc)
             log.error(json_log(request_id, "search", error=str(exc)[:200]))
             raise AppError(502, "upstream_error", "retrieval failed") from exc
-        span.set_attributes(
-            {
-                "rag.query_kind": kind,
-                "rag.hits": len(hits),
-                "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
-            }
-        )
-    timing_parts = []
-    if timings.get("embed_ms") is not None:
-        timing_parts.append(f"embed;dur={timings['embed_ms']}")
-    if timings.get("qdrant_ms") is not None:
-        timing_parts.append(f"qdrant;dur={timings['qdrant_ms']}")
-    if timings.get("rerank_ms") is not None:
-        timing_parts.append(f"rerank;dur={timings['rerank_ms']}")
+        span.set_attributes(_search_span_attrs(kind, hits))
+    timing_parts = _timing_parts(timings)
     if timing_parts:
         response.headers["Server-Timing"] = ", ".join(timing_parts)
     log.info(
@@ -452,10 +524,7 @@ async def v1_answer(
                 product=req.product, version=req.version, limit=8,
                 settings=settings, reranker=reranker,
             )
-            if inspect.isawaitable(res):
-                hits, kind, timings = await res
-            else:
-                hits, kind, timings = res
+            hits, kind, timings = await _await_retrieval(res)
     except Exception as exc:
         _span_error(root_span, exc)
         root_span.end()
@@ -465,13 +534,7 @@ async def v1_answer(
     if not hits:
         root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
         root_span.end()
-        timing_parts = []
-        if timings.get("embed_ms") is not None:
-            timing_parts.append(f"embed;dur={timings['embed_ms']}")
-        if timings.get("qdrant_ms") is not None:
-            timing_parts.append(f"qdrant;dur={timings['qdrant_ms']}")
-        if timings.get("rerank_ms") is not None:
-            timing_parts.append(f"rerank;dur={timings['rerank_ms']}")
+        timing_parts = _timing_parts(timings)
         if timing_parts:
             response.headers["Server-Timing"] = ", ".join(timing_parts)
         log.info(json_log(request_id, "answer", query_kind=kind, hits=0, rerank_ms=timings.get("rerank_ms")))
@@ -602,48 +665,23 @@ async def v1_answer(
                 )
             )
 
-        timing_parts = []
-        if timings.get("embed_ms") is not None:
-            timing_parts.append(f"embed;dur={timings['embed_ms']}")
-        if timings.get("qdrant_ms") is not None:
-            timing_parts.append(f"qdrant;dur={timings['qdrant_ms']}")
-        if timings.get("rerank_ms") is not None:
-            timing_parts.append(f"rerank;dur={timings['rerank_ms']}")
-        if llm_ms is not None:
-            timing_parts.append(f"llm;dur={llm_ms}")
-        if ttft_ms is not None:
-            timing_parts.append(f"ttft;dur={ttft_ms}")
+        timing_parts = _timing_parts(timings, llm_ms=llm_ms, ttft_ms=ttft_ms)
         if timing_parts:
             response.headers["Server-Timing"] = ", ".join(timing_parts)
 
-        log_fields = {
-            "query_kind": kind,
-            "query_complexity": complexity,
-            "hits": len(hits),
-            "embed_ms": timings.get("embed_ms"),
-            "qdrant_ms": timings.get("qdrant_ms"),
-            "rerank_ms": timings.get("rerank_ms"),
-            "llm_ms": llm_ms,
-            "citations": len(parsed.citations),
-            "has_script": parsed.script is not None,
-            "finish_reason": finish_reason,
-            "prompt_tokens": usage.prompt_tokens,
-            "completion_tokens": usage.completion_tokens,
-            "reasoning_tokens": usage.reasoning_tokens,
-            "total_tokens": usage.total_tokens,
-            "elapsed_ms": int((time.monotonic() - started) * 1000),
-        }
-        if ttft_ms is not None:
-            log_fields["ttft_ms"] = ttft_ms
-        log.info(json_log(request_id, "answer", **log_fields))
+        log.info(
+            json_log(
+                request_id,
+                "answer",
+                **_answer_log_fields(
+                    kind, complexity, hits, timings,
+                    len(parsed.citations), parsed.script is not None,
+                    finish_reason, usage, llm_ms, ttft_ms, started,
+                ),
+            )
+        )
         root_span.set_attributes(
-            {
-                "rag.query_kind": kind,
-                "rag.hits": len(hits),
-                "rag.citations": len(parsed.citations),
-                "rag.has_script": parsed.script is not None,
-                "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
-            }
+            _answer_span_attrs(kind, hits, len(parsed.citations), parsed.script is not None)
         )
         root_span.end()
         return AnswerResponse(
@@ -654,13 +692,7 @@ async def v1_answer(
         )
 
     # SSE streaming path
-    timing_parts = []
-    if timings.get("embed_ms") is not None:
-        timing_parts.append(f"embed;dur={timings['embed_ms']}")
-    if timings.get("qdrant_ms") is not None:
-        timing_parts.append(f"qdrant;dur={timings['qdrant_ms']}")
-    if timings.get("rerank_ms") is not None:
-        timing_parts.append(f"rerank;dur={timings['rerank_ms']}")
+    timing_parts = _timing_parts(timings)
     headers = {
         "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no",
@@ -778,27 +810,18 @@ async def v1_answer(
             )
 
         llm_ms = int((time.monotonic() - t0) * 1000)
-        log_fields = {
-            "query_kind": kind,
-            "query_complexity": complexity,
-            "hits": len(hits),
-            "embed_ms": timings.get("embed_ms"),
-            "qdrant_ms": timings.get("qdrant_ms"),
-            "rerank_ms": timings.get("rerank_ms"),
-            "llm_ms": llm_ms,
-            "citations": len(parsed.citations),
-            "has_script": parsed.script is not None,
-            "finish_reason": finish_reason,
-            "prompt_tokens": usage.prompt_tokens,
-            "completion_tokens": usage.completion_tokens,
-            "reasoning_tokens": usage.reasoning_tokens,
-            "total_tokens": usage.total_tokens,
-            "elapsed_ms": int((time.monotonic() - started) * 1000),
-            "stream": True,
-        }
-        if ttft_ms is not None:
-            log_fields["ttft_ms"] = ttft_ms
-        log.info(json_log(request_id, "answer", **log_fields))
+        log.info(
+            json_log(
+                request_id,
+                "answer",
+                **_answer_log_fields(
+                    kind, complexity, hits, timings,
+                    len(parsed.citations), parsed.script is not None,
+                    finish_reason, usage, llm_ms, ttft_ms, started,
+                    stream=True,
+                ),
+            )
+        )
 
         final_payload = {
             "type": "final",
@@ -818,13 +841,7 @@ async def v1_answer(
             },
         }
         root_span.set_attributes(
-            {
-                "rag.query_kind": kind,
-                "rag.hits": len(hits),
-                "rag.citations": len(parsed.citations),
-                "rag.has_script": parsed.script is not None,
-                "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
-            }
+            _answer_span_attrs(kind, hits, len(parsed.citations), parsed.script is not None)
         )
         yield f"event: final\ndata: {json.dumps(final_payload)}\n\n"
 
