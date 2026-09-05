@@ -273,4 +273,4 @@ def test_load_missing_internal_registry_fails_closed(load_tree):
     _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
     r = _run_load(load_tree, ("INTERNAL_REGISTRY", ""))
     assert r.returncode == 1
-    assert "required variable INTERNAL_REGISTRY is unset" in r.stderr
+    assert "required variables unset: INTERNAL_REGISTRY" in r.stderr

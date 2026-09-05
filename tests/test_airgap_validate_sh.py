@@ -77,7 +77,14 @@ def test_validate_clean_exits_zero(tree):
 def test_validate_missing_registry_fails(tree):
     r = _run(tree, {"INTERNAL_REGISTRY": None, "REGISTRY_INTERNAL": None})
     assert r.returncode != 0
-    assert "INTERNAL_REGISTRY is unset" in r.stderr or "FAIL:" in r.stderr
+    assert "INTERNAL_REGISTRY" in r.stderr and "FAIL:" in r.stderr
+
+
+def test_validate_lists_all_missing_vars_at_once(tree):
+    r = _run(tree, {"INTERNAL_REGISTRY": None, "REGISTRY_INTERNAL": None, "STORAGE_CLASS": None})
+    assert r.returncode != 0
+    assert "INTERNAL_REGISTRY" in r.stderr
+    assert "STORAGE_CLASS" in r.stderr
 
 
 def test_validate_nfs_storage_refused(tree):

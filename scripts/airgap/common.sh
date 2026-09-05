@@ -24,10 +24,14 @@ die() {
 }
 
 require_env() {
+    # Collect every missing key before failing, so one run tells the
+    # operator everything to fill in — not one variable per attempt.
+    _missing=""
     for key in "$@"; do
         eval "val=\${$key:-}"
-        [ -n "$val" ] || die "required variable $key is unset (copy airgap.env.example to airgap.env and edit it)"
+        [ -n "$val" ] || _missing="${_missing:+$_missing }$key"
     done
+    [ -z "$_missing" ] || die "required variables unset: $_missing (copy airgap.env.example to airgap.env and edit it)"
 }
 
 # Product rules that every air-gap step enforces (AGENTS.md).
