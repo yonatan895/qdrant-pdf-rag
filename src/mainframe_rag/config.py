@@ -93,6 +93,16 @@ class Settings(BaseSettings):
     # and rerank legs keep the operator's own words, mirroring the asymmetric
     # dense-query-prefix design. Any LLM failure falls back to the unrewritten
     # query. Traps and identifier-heavy queries bypass via should_rewrite.
+    #
+    # MEASURED HARMFUL — DO NOT ENABLE without fresh benchmark evidence.
+    # Paired A/B on the live stack (real manuals, 435k chunks, vLLM embedder,
+    # golden set with payload-verified expectations): hyde recall@1 −0.015
+    # (neutral at best for one extra LLM call per query), stepback −0.177,
+    # combined −0.192 — step-back generalization drops the product/feature
+    # tokens that select the right manual, and every combined-pass move was
+    # a loss. Identifier class bit-flat in every run (the bypass holds).
+    # These flags ship gated OFF and must stay OFF unless a re-benchmark
+    # shows actual improvement; do not flip a default inside a feature PR.
     hyde_enabled: bool = False
     hyde_max_chars: int = Field(default=1500, ge=200, le=3500)
     stepback_enabled: bool = False

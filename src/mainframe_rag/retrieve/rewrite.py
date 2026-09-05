@@ -26,6 +26,16 @@ Deliberately narrow:
 - LLM rewrites (HyDE, step-back — issue #82) share the same home and the
   same bypass: gated, default-off, dense-leg-only, fail-open to the
   operator's own words.
+
+  MEASURED DEGRADATION — never enable without fresh benchmark evidence.
+  Paired A/B on the live stack over the real manuals (435k chunks,
+  semantic embedder): HyDE recall@1 −0.015 (neutral at best, one extra
+  LLM call per query), step-back −0.177, combined −0.192. Step-back
+  generalization strips the product/feature tokens that pick the right
+  manual at corpus scale; every combined-pass move was a loss. The flags
+  exist for measurement and future re-evaluation only — treat enabling
+  either as a retrieval-quality change that owes eval + A/B numbers
+  proving improvement, never a default flip.
 """
 
 from __future__ import annotations
