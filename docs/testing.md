@@ -7,7 +7,7 @@ same PR.
 
 Jump list: [hermetic](#unit-tests-are-hermetic) ·
 [claimed-path](#tests-must-lock-the-claimed-path) ·
-[airgap-tier](#air-gap-deployment-tier-make-airgap-dryrun-tests-test_airgap_py-local-kind) ·
+[airgap-tier](#air-gap-deployment-tier-make-airgap-dryrun-teststest_airgap_py-local-kind) ·
 [golden](#golden-corpus-devholdout) · [sim](#simulation-tier-marker-integration-make-sim) ·
 [load](#load-tier-marker-integration-make-loadtest-mock-pr-gated-by-githubworkflowsloadyml-on-agentretrieveingestmock-paths) ·
 [eval](#eval-make-eval) · [paraphrase](#paraphrase-instrument-evalsparaphrasejsonl-make-eval-paraphrase) ·
