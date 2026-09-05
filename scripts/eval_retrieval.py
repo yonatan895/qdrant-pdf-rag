@@ -28,6 +28,9 @@ must_not violations are gated to zero within the top-5 window.
     EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus \
         python scripts/eval_retrieval.py --golden evals/golden.jsonl
 
+    # Paired A/B (issue #82): hyde/stepback/combined off vs on, delta + per-query attribution
+    python scripts/eval_retrieval.py --ab hyde --no-check
+
     python scripts/eval_retrieval.py --label-draft --docs 40   # draft candidates
 
 Exit codes: 0 green (or no gate requested); 1 regressions or query
@@ -557,6 +560,158 @@ def summary_markdown(report: dict, baseline: dict | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ------------------------------------------------------- A/B mode (issue #82)
+# Per-technique delta: the same golden set scored twice — flags off vs the
+# one technique on — over the identical collection, so every difference is
+# attributable to the rewrite and not to corpus drift. The paired delta IS
+# the verdict; a single-config baseline file does not apply to it.
+
+AB_VARIANTS: dict[str, dict[str, Any]] = {
+    "hyde": {"hyde_enabled": True},
+    "stepback": {"stepback_enabled": True},
+    "combined": {"hyde_enabled": True, "stepback_enabled": True},
+}
+
+AB_METRICS = ("recall@1", "recall@3", "recall@5", "recall@8", "mrr", "ndcg@8")
+AB_SCOPES = (("all", ""), ("identifier", "identifier"), ("nl", "nl"))
+AB_ROW_METRICS = ("recall@1", "recall@5", "mrr")
+
+
+def ab_variant_settings(settings, variant: str):
+    """The ON half of the A/B: turn exactly this variant's flags on over the
+    loaded settings. The OFF half is the settings as loaded — main() refuses
+    to run the A/B when the loaded settings already enable a rewrite flag,
+    so "off" can never silently be a second on-run."""
+    return settings.model_copy(update=AB_VARIANTS[variant])
+
+
+def _row_key(row: dict) -> str:
+    return str(row.get("id") or row.get("query") or "")
+
+
+def _scope_get(report: dict, prefix: str, metric: str) -> float | None:
+    node = report.get(prefix) if prefix else report
+    if not isinstance(node, dict):
+        return None
+    return node.get(metric)
+
+
+def compare_ab(off_report: dict, on_report: dict, *, variant: str) -> dict:
+    """Pure delta between the off and on summarize() reports.
+
+    Aggregate deltas over the all/identifier/nl scopes, per-query attribution
+    for every row whose r@1 / r@5 / mrr moved (or which errored on exactly
+    one side), and the two acceptance-critical regressions from the issue:
+    must_not hard-zero on the variant pass and no identifier degradation
+    (identifier-heavy queries bypass the LLM via should_rewrite, so their
+    numbers moving is a wiring bug, not noise)."""
+    off_rows = {_row_key(r): r for r in off_report.get("rows", [])}
+    on_rows = {_row_key(r): r for r in on_report.get("rows", [])}
+
+    aggregate: dict[str, dict] = {}
+    for label, prefix in AB_SCOPES:
+        node: dict[str, dict] = {}
+        for metric in AB_METRICS:
+            off_val = _scope_get(off_report, prefix, metric)
+            on_val = _scope_get(on_report, prefix, metric)
+            delta = None if (off_val is None or on_val is None) else round(on_val - off_val, 3)
+            node[metric] = {"off": off_val, "on": on_val, "delta": delta}
+        aggregate[label] = node
+
+    per_query: list[dict] = []
+    for key in sorted(set(off_rows) & set(on_rows)):
+        a, b = off_rows[key], on_rows[key]
+        if "error" in a or "error" in b:
+            if "error" in a and "error" in b:
+                continue  # both sides failed: counted by the failures gate
+            per_query.append({
+                "query": key,
+                "query_class": a.get("query_class") or b.get("query_class"),
+                "off": a.get("error"),
+                "on": b.get("error"),
+                "error_side": "off" if "error" in a else "on",
+            })
+            continue
+        off_vals = {m: a.get(m) for m in AB_ROW_METRICS}
+        on_vals = {m: b.get(m) for m in AB_ROW_METRICS}
+        if off_vals != on_vals and "recall@1" in a and "recall@1" in b:
+            per_query.append({
+                "query": key,
+                "query_class": a.get("query_class"),
+                "off": off_vals,
+                "on": on_vals,
+            })
+
+    regressions: list[str] = []
+    on_violations = (on_report.get("must_not") or {}).get("violations", 0)
+    if on_violations:
+        regressions.append(
+            f"must_not violations on the {variant} pass: {on_violations} (absolute gate: 0)"
+        )
+    for metric in ("recall@1", "mrr"):
+        ident_off = (off_report.get("identifier") or {}).get(metric)
+        ident_on = (on_report.get("identifier") or {}).get(metric)
+        if ident_off is not None and ident_on is not None and ident_on < ident_off:
+            regressions.append(
+                f"identifier.{metric} degraded: {ident_on} < {ident_off} "
+                "(identifier-heavy queries bypass rewriting; if this moves, the bypass leaked)"
+            )
+
+    return {
+        "variant": variant,
+        "moved_queries": len(per_query),
+        "aggregate": aggregate,
+        "per_query": per_query,
+        "regressions": regressions,
+    }
+
+
+def ab_markdown(delta: dict) -> str:
+    """Markdown report for the PR body: aggregate delta table plus per-query
+    attribution for every moved query (live-stack ladder rule)."""
+    lines = [
+        f"## A/B: {delta['variant']} off vs on",
+        "",
+        "| scope | metric | off | on | delta |",
+        "|---|---|---|---|---|",
+    ]
+    for label, _ in AB_SCOPES:
+        for metric in AB_METRICS:
+            cell = delta["aggregate"][label][metric]
+            fmt = lambda v: "-" if v is None else f"{v}"
+            lines.append(
+                f"| {label} | {metric} | {fmt(cell['off'])} | {fmt(cell['on'])} | {fmt(cell['delta'])} |"
+            )
+    lines += ["", f"moved queries: {delta['moved_queries']}"]
+    if delta["per_query"]:
+        lines += [
+            "",
+            "| query | class | off r@1/r@5/mrr | on r@1/r@5/mrr |",
+            "|---|---|---|---|",
+        ]
+        for row in delta["per_query"]:
+            if "error_side" in row:
+                side = row["error_side"]
+                detail = str(row[side])[:60]
+                lines.append(
+                    f"| {row['query'][:60]} | {row.get('query_class') or '-'} "
+                    f"| {'error: ' + detail if side == 'off' else '-'} "
+                    f"| {'error: ' + detail if side == 'on' else '-'} |"
+                )
+            else:
+                fmt_row = lambda v: "/".join(
+                    "-" if v[m] is None else f"{v[m]:.2f}" for m in AB_ROW_METRICS
+                )
+                lines.append(
+                    f"| {row['query'][:60]} | {row.get('query_class') or '-'} "
+                    f"| {fmt_row(row['off'])} | {fmt_row(row['on'])} |"
+                )
+    if delta["regressions"]:
+        lines += ["", "### Regressions", ""]
+        lines += [f"- {r}" for r in delta["regressions"]]
+    return "\n".join(lines) + "\n"
+
+
 def label_draft(collection: str, settings, docs: int) -> list[dict]:
     """Mechanically true draft entries from collection payload: identifier
     queries per doc (doc number, message ids) plus one heading-derived topic
@@ -602,6 +757,85 @@ def label_draft(collection: str, settings, docs: int) -> list[dict]:
     return unique
 
 
+MANIFEST_METRIC_KEYS = (
+    "n", "failures", "recall@1", "recall@3", "recall@5", "mrr",
+    "identifier", "nl", "classes", "abstain", "must_not", "page",
+)
+
+
+def _record_manifest(report: dict, settings) -> None:
+    """Append one eval run manifest; a manifest failure never fails the run."""
+    try:
+        metrics = {k: report[k] for k in MANIFEST_METRIC_KEYS if k in report}
+        manifest = write_run_manifest("eval", settings, metrics)
+        print(
+            f"run manifest appended to evals/runs/eval_runs.jsonl (sha={manifest['git_sha'][:8]})",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"warn: failed to append run manifest: {exc}", file=sys.stderr)
+
+
+def _run_ab(args, settings, golden: list[GoldenEntry]) -> int:
+    """Paired A/B (issue #82): the same golden set on the same collection
+    scored twice — flags off, then the one variant on — so every difference
+    is attributable to the rewrite. Each pass records its own manifest; the
+    exit code carries the failures count and the compare_ab regressions."""
+    print(
+        f"A/B mode: {args.ab} off vs on over {len(golden)} golden entries; "
+        "baseline gating not applied (the paired delta is the verdict)",
+        file=sys.stderr,
+    )
+    off_report = evaluate(golden, settings)
+    on_settings = ab_variant_settings(settings, args.ab)
+    on_report = evaluate(golden, on_settings)
+    delta = compare_ab(off_report, on_report, variant=args.ab)
+
+    print(summary_markdown(off_report, None), file=sys.stderr)
+    print(summary_markdown(on_report, None), file=sys.stderr)
+    markdown = ab_markdown(delta)
+    print(markdown, file=sys.stderr)
+    payload = json.dumps(
+        {"variant": args.ab, "delta": delta, "off": off_report, "on": on_report},
+        indent=2,
+        ensure_ascii=False,
+    )
+    if args.summary:
+        args.summary.parent.mkdir(parents=True, exist_ok=True)
+        args.summary.write_text(markdown)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(payload + "\n")
+    else:
+        print(payload)
+
+    _record_manifest(off_report, settings)
+    _record_manifest(on_report, on_settings)
+
+    # A paired run where BOTH passes score zero measures nothing — usually a
+    # golden set run against the wrong corpus (a mismatch skip is not a pass,
+    # issue #159 discipline). Exit 2 so it cannot read as a clean null result.
+    if (off_report.get("recall@1") == 0.0 and on_report.get("recall@1") == 0.0
+            and any("recall@1" in r for r in off_report.get("rows", []))):
+        print(
+            "REGRESSIONS: both passes scored recall@1 = 0.0 — the golden set and the "
+            "collection look mismatched; the paired delta is unverifiable",
+            file=sys.stderr,
+        )
+        return 2
+
+    failures = off_report.get("failures", 0) + on_report.get("failures", 0)
+    if failures:
+        print(f"REGRESSIONS: {failures} query failures across the two passes", file=sys.stderr)
+        return 1
+    if delta["regressions"]:
+        print("REGRESSIONS:", file=sys.stderr)
+        for r in delta["regressions"]:
+            print(f"  {r}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--golden", type=Path, default=Path("evals/golden.jsonl"), help="golden JSONL path (default: dev set)")
@@ -616,20 +850,39 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--docs", type=int, default=40, help="label-draft: docs to sample")
     parser.add_argument("--rerank", action="store_true", help="enable cross-encoder reranking")
+    parser.add_argument(
+        "--ab", choices=sorted(AB_VARIANTS), default=None,
+        help="paired A/B: score the golden set with this technique off, then on, and report the delta "
+        "(implies no baseline gate; the paired delta is the verdict)",
+    )
     args = parser.parse_args(argv)
     if args.check and args.update_baseline:
         parser.error("--check and --update-baseline are mutually exclusive")
+    if args.ab and (args.check or args.update_baseline or args.label_draft):
+        parser.error(
+            "--ab is a paired off/on measurement: baseline gating and label-draft "
+            "do not apply (the paired delta is the verdict)"
+        )
 
     settings = load_settings()
     if args.rerank:
         settings = settings.model_copy(update={"rerank_enabled": True})
+    if args.ab and (settings.hyde_enabled or settings.stepback_enabled):
+        parser.error(
+            "--ab runs its own off pass: the loaded settings must leave hyde_enabled "
+            "and stepback_enabled off, or 'off' would silently be a second on-run"
+        )
     if args.label_draft:
         drafts = label_draft(settings.qdrant_collection, settings, args.docs)
         for d in drafts:
             print(json.dumps(d, ensure_ascii=False))
         return 0
 
-    report = evaluate(load_golden(args.golden), settings)
+    golden = load_golden(args.golden)
+    if args.ab:
+        return _run_ab(args, settings, golden)
+
+    report = evaluate(golden, settings)
 
     baseline = None
     regressions: list[str] = []
@@ -687,24 +940,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(payload)
 
-    try:
-        # evaluate() returns a flat report; record the scored summary metrics
-        # (everything except the per-query rows) so manifests are comparable.
-        metrics = {
-            k: report[k]
-            for k in (
-                "n", "failures", "recall@1", "recall@3", "recall@5", "mrr",
-                "identifier", "nl", "classes", "abstain", "must_not", "page",
-            )
-            if k in report
-        }
-        manifest = write_run_manifest("eval", settings, metrics)
-        print(
-            f"run manifest appended to evals/runs/eval_runs.jsonl (sha={manifest['git_sha'][:8]})",
-            file=sys.stderr,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"warn: failed to append run manifest: {exc}", file=sys.stderr)
+    _record_manifest(report, settings)
 
     if regressions:
         print("REGRESSIONS:", file=sys.stderr)
