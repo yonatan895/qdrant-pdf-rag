@@ -157,7 +157,7 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 - GitLab runners have **no internet**. No Docker Hub-only images. No `pip install` from PyPI.
 - No internal hostnames, registry URLs, or tokens in `.gitlab-ci.yml`. Use project variables: `CI_PYTHON_IMAGE`, `CI_RUNNER_TAG` (default `airgap`), `PIP_INDEX_URL`, `PIP_FIND_LINKS`. If neither index nor wheelhouse is set, fail closed.
 - Coding agents change `.gitlab-ci.yml` only when an issue asks. Do not add deploy/helm/image-build/pack stages unless the issue says so.
-- GitHub trigger split: markdown-only changes (excluding vendored `.agents/`/`vendor/` docs) run **no** GitHub checks (`ci.yml`/`e2e.yml` paths-ignore `*.md`). Mixed changes run ci + e2e. Vendored-only bumps run nothing. GitLab keeps hygiene + pytest on every MR (no e2e, no sim). The hygiene gate must never silently skip on the air-gap side.
+- GitHub trigger split: markdown-only changes (excluding vendored `.agents/`/`vendor/` docs) run **no** GitHub checks (`ci.yml`/`e2e.yml` paths-ignore `*.md`). Mixed changes run ci + e2e. Vendored-only bumps run nothing. GitLab keeps hygiene + pytest + gate-l1 on every MR (no e2e, no load tier, no deploys). The hygiene gate must never silently skip on the air-gap side.
 - Connected-path E2E (GHCR images, lab OpenShift smoke, air-gap runbook rehearsal) lives **only** in `.github/workflows/e2e.yml`. Air-gap GitLab must not talk to that cluster or GHCR. Ephemeral `rag-ci-<sha>` / `rag-gap-<sha>` namespaces; cleanup is `if: always()`.
 - opencode reviewer is GitHub-only. Never mirror it into `.gitlab-ci.yml`. Install steps are inlined per job — no local composite action under `.github/actions/` (local actions re-resolve `action.yml` at post after the agent moves the tree).
 
@@ -180,7 +180,7 @@ Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(
 ## Overlays (never mix CI and prod — read only for deploy work)
 
 - **CI (lab, connected only):** `overlays/ci/values.yaml` + `deploy/kustomize/overlays/ci` — 1 replica / 1Gi, `EMBED_MODE=hash`, synthetic PDFs generated in-cluster, GHCR pulls. Never copy the CI ingest Job into prod.
-- **Prod (air-gap):** `overlays/openshift/values.yaml` + `deploy/kustomize/overlays/openshift` (agent) + `overlays/openshift-ingest` (one-shot Job). 3 replicas / 500Gi / unprivileged / RWO. No `EMBED_MODE` key. Corpus is a caller-supplied PVC. Do not shrink prod values to CI sizes.
+- **Prod (air-gap):** `overlays/openshift/values.yaml` + `deploy/kustomize/overlays/openshift` (agent) + `overlays/openshift-ingest` (one-shot Job). Qdrant 3 replicas / 500Gi / unprivileged / RWO (agent stays 2 replicas). No `EMBED_MODE` key. Corpus is a caller-supplied PVC. Do not shrink prod values to CI sizes.
 - Placeholders in git (`__TOKEN__`, `ghcr.io/OWNER`). Render must fail closed on leftover `__[A-Z][A-Z0-9_]*__`. No real registries, namespaces, or URLs in git. Helm values stay placeholders (`INTERNAL_REGISTRY` / `REGISTRY_INTERNAL`, `PULL_SECRET`, `STORAGE_CLASS`).
 - When `PULL_SECRET` is set, it must reach Helm Qdrant **and** agent/ingest pods. Confirm rendered YAML indent is valid.
 - Helm `--set image.tag` is `v1.19.0` **without** `-unprivileged`; the chart appends that suffix when `useUnprivilegedImage=true`. `load.sh` still pushes `:v1.19.0-unprivileged`.

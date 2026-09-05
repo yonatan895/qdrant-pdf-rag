@@ -15,7 +15,7 @@ Citation-first expert mainframe agent: hybrid retrieval over ~100 GB of IBM-styl
 |---|---|
 | `charts/qdrant-*.tgz` | Vendored Qdrant Helm chart (Apache-2.0); never `helm repo add` in the air-gap |
 | `overlays/openshift/values.yaml` | OpenShift values: 3 replicas, unprivileged, RWO block, ClusterIP only |
-| `deploy/` | NetworkPolicies, ingest CronJob/Job, agent Deployment |
+| `deploy/` | agent Deployment, one-shot ingest Job, opt-in Jaeger |
 | `oc-mirror/` | `ImageSetConfiguration` for disconnected mirroring |
 | `src/mainframe_rag/ingest/` | PDF walk, IBM-style parse, chrome strip, chunk, classify, embed, Qdrant IO |
 | `src/mainframe_rag/retrieve/` | Hybrid search (dense + BM25 prefetch, batched query, weighted RRF), optional cross-encoder rerank, payload projection, filters |
