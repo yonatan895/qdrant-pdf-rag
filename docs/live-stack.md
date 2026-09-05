@@ -71,8 +71,8 @@ fails every query.
 
 Eval/collection pairing: hash ingest → hash-dim collection → hash eval;
 vLLM ingest → vLLM-dim collection → vLLM eval. Never cross the streams:
-a mode/collection mismatch skips the gate with a warning, and a mismatch
-skip is not a pass.
+a collection mismatch skips the gate with a warning and exits **2** — a
+mismatch skip is not a pass (issue #159).
 
 ## 3. Verification ladder (run your class's rungs from §0)
 

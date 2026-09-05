@@ -29,6 +29,10 @@ must_not violations are gated to zero within the top-5 window.
         python scripts/eval_retrieval.py --golden evals/golden.jsonl
 
     python scripts/eval_retrieval.py --label-draft --docs 40   # draft candidates
+
+Exit codes: 0 green (or no gate requested); 1 regressions or query
+failures; 2 an explicitly requested gate could not be applied (baseline
+file missing, or collection mismatch — a skip is not a pass, issue #159).
 """
 
 from __future__ import annotations
@@ -629,9 +633,15 @@ def main(argv: list[str] | None = None) -> int:
             check_path = candidate
         else:
             print(f"warn: no baseline for embed_mode={settings.embed_mode} ({candidate}); nothing gated", file=sys.stderr)
+    gate_skipped = False
     if check_path is not None:
         if not check_path.exists():
-            print(f"warn: baseline {check_path} missing; nothing gated", file=sys.stderr)
+            print(
+                f"warn: baseline {check_path} missing; the requested gate cannot be applied — "
+                "exit 2 so a missing gate cannot read as pass",
+                file=sys.stderr,
+            )
+            gate_skipped = True
         else:
             baseline = json.loads(check_path.read_text(encoding="utf-8"))
             meta = baseline.get("_meta") or {}
@@ -644,10 +654,12 @@ def main(argv: list[str] | None = None) -> int:
             if meta.get("collection") and meta["collection"] != settings.qdrant_collection:
                 print(
                     f"warn: baseline collection {meta['collection']!r} != run collection "
-                    f"{settings.qdrant_collection!r}; skipping gate (different corpora)",
+                    f"{settings.qdrant_collection!r}; skipping gate (different corpora) — "
+                    "exit 2 so a skip cannot read as pass (issue #159)",
                     file=sys.stderr,
                 )
                 baseline = None
+                gate_skipped = True
             else:
                 regressions = check_baseline(report, baseline)
     if args.update_baseline:
@@ -690,7 +702,14 @@ def main(argv: list[str] | None = None) -> int:
         for r in regressions:
             print(f"  {r}", file=sys.stderr)
         return 1
-    return 0 if report["failures"] == 0 else 1
+    if report["failures"] > 0:
+        return 1
+    if gate_skipped:
+        # An explicitly requested gate that could not be applied is not a
+        # pass: a skipped verdict must be distinguishable from green (issue
+        # #159). Query failures above already exit 1.
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

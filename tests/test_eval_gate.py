@@ -7,8 +7,11 @@ from scripts.eval_retrieval import (
     _get,
     _set,
     check_baseline,
+    main,
     update_baseline,
 )
+
+from mainframe_rag.config import Settings
 
 
 def _report() -> dict:
@@ -113,6 +116,66 @@ def test_check_baseline_detects_query_failures():
 def test_check_baseline_none_baseline_passes():
     rep = _report()
     assert check_baseline(rep, None) == []
+
+
+# --- main() exit-code contract (issue #159): a skipped gate is not a pass ---
+
+def _hermetic_main(monkeypatch, tmp_path: Path, **settings_kwargs) -> Path:
+    """Drive eval_retrieval.main() with evaluate() canned and settings
+    patched: no Qdrant, no embedder, no repo-file manifest writes."""
+    import scripts.eval_retrieval as ev
+
+    golden = tmp_path / "golden.jsonl"
+    golden.write_text((Path("evals/golden.jsonl").read_text().splitlines()[0]) + "\n")
+    settings = Settings(embed_mode="hash", qdrant_collection="test-corpus", _env_file=None, **settings_kwargs)
+    monkeypatch.setattr(ev, "evaluate", lambda golden_entries, s: _report())
+    monkeypatch.setattr(ev, "load_settings", lambda: settings)
+    monkeypatch.setattr(ev, "write_run_manifest", lambda *a, **k: {"git_sha": "test"})
+    return golden
+
+
+def test_main_exit_2_when_collection_mismatch(tmp_path, monkeypatch, capfd):
+    golden = _hermetic_main(monkeypatch, tmp_path)
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"_meta": {"collection": "other-corpus", "embed_mode": "hash"}}))
+    summary = tmp_path / "summary.md"
+    rc = main(["--golden", str(golden), "--check", str(baseline), "--summary", str(summary)])
+    assert rc == 2
+    assert "skipping gate (different corpora)" in capfd.readouterr().err
+    assert summary.read_text().startswith("## Retrieval eval")  # artifacts still written
+
+
+def test_main_exit_2_when_check_file_missing(tmp_path, monkeypatch, capfd):
+    golden = _hermetic_main(monkeypatch, tmp_path)
+    rc = main(["--golden", str(golden), "--check", str(tmp_path / "nope.json")])
+    assert rc == 2
+    assert "cannot be applied" in capfd.readouterr().err
+
+
+def test_main_exit_0_when_gate_applied_and_green(tmp_path, monkeypatch):
+    golden = _hermetic_main(monkeypatch, tmp_path)
+    baseline = tmp_path / "baseline.json"
+    update_baseline(_report(), baseline)  # same collection + numbers as the canned report
+    rc = main(["--golden", str(golden), "--check", str(baseline)])
+    assert rc == 0
+
+
+def test_main_exit_0_when_no_gate_requested(tmp_path, monkeypatch):
+    golden = _hermetic_main(monkeypatch, tmp_path)
+    assert main(["--golden", str(golden), "--no-check"]) == 0
+
+
+def test_main_exit_1_when_query_failures_despite_skip(tmp_path, monkeypatch):
+    """Failures dominate the skip signal: both are job-failing, but real
+    query errors must keep the more specific verdict."""
+    import scripts.eval_retrieval as ev
+
+    golden = _hermetic_main(monkeypatch, tmp_path)
+    rep = _report() | {"failures": 2}
+    monkeypatch.setattr(ev, "evaluate", lambda golden_entries, s: rep)
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"_meta": {"collection": "other-corpus", "embed_mode": "hash"}}))
+    assert main(["--golden", str(golden), "--check", str(baseline)]) == 1
 
 
 def test_load_golden_validates_and_rejects_empty(tmp_path: Path):
