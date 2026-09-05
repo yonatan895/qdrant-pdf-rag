@@ -40,16 +40,14 @@ echo "    IMAGE_SHA:         $IMAGE_SHA"
 echo "==> 2. Validating required CLI tools"
 command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the air-gap bastion"
 command -v helm >/dev/null 2>&1 || die "helm is required on the air-gap bastion"
-KC=${KC:-$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; else echo oc; fi)}
+KC=${KC:-$(kc)}
 command -v "$KC" >/dev/null 2>&1 || die "oc or kubectl is required on the air-gap bastion"
 echo "    skopeo: $(command -v skopeo)"
 echo "    helm:   $(command -v helm)"
 echo "    client: $(command -v "$KC") ($KC)"
 
 echo "==> 3. Validating sneakernet package manifest"
-MANIFEST=""
-[ -f dist/MANIFEST.txt ] && MANIFEST=dist/MANIFEST.txt
-[ -z "$MANIFEST" ] && [ -f ../MANIFEST.txt ] && MANIFEST=../MANIFEST.txt
+MANIFEST=$(find_manifest)
 if [ -n "$MANIFEST" ]; then
     packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
     [ "$IMAGE_SHA" = "$packed_sha" ] || \

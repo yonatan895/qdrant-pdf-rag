@@ -16,19 +16,12 @@ case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
 # Cross-check against the packed MANIFEST when it is reachable (dist/ or ../).
-MANIFEST=""
-[ -f dist/MANIFEST.txt ] && MANIFEST=dist/MANIFEST.txt
-[ -z "$MANIFEST" ] && [ -f ../MANIFEST.txt ] && MANIFEST=../MANIFEST.txt
-if [ -n "$MANIFEST" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
-    packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
-    [ "$IMAGE_SHA" = "$packed_sha" ] || \
-        die "IMAGE_SHA=$IMAGE_SHA does not match the packed MANIFEST sha ($packed_sha) — wrong SHA for this sneakernet bundle"
-fi
-[ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || command -v kubectl >/dev/null 2>&1 || die "oc or kubectl is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
+MANIFEST=$(find_manifest)
+check_manifest_sha
+require_kc
 refuse_nfs_storage
-KC=${KC:-$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; else echo oc; fi)}
+KC=${KC:-$(kc)}
 
-EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed -E 's:(/v1)?/*$::')/v1}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 INGEST_TIMEOUT=${INGEST_TIMEOUT:-3600}
 INGEST_WORK_SIZE=${INGEST_WORK_SIZE:-100Gi}   # CI-rehearsal knob; default = prod size
@@ -52,13 +45,8 @@ EOF
 fi
 
 echo "==> Kustomize: prod ingest Job (corpus PVC: $CORPUS_PVC)"
-if command -v kustomize >/dev/null 2>&1; then
-    render="kustomize build deploy/kustomize/overlays/openshift-ingest"
-else
-    render="$KC kustomize deploy/kustomize/overlays/openshift-ingest"
-fi
 INGEST_WORKERS=${INGEST_WORKERS:-4}
-$render | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
+kustomize_render deploy/kustomize/overlays/openshift-ingest | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
     -e "s|__INTERNAL_REGISTRY__|$INTERNAL_REGISTRY|g" \
     -e "s|__IMAGE_SHA__|$IMAGE_SHA|g" \
     -e "s|namespace: mainframe-rag|namespace: $NAMESPACE|g" \
@@ -73,12 +61,8 @@ $render | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
     -e "s|__CONTEXT_LLM_BASE_URL__|${CONTEXT_LLM_BASE_URL:-}|g" \
     -e "s|__CONTEXT_LLM_MODEL__|${CONTEXT_LLM_MODEL:-}|g" \
     > dist/ingest-rendered.yaml
-if [ -n "${PULL_SECRET:-}" ]; then
-    sed -i "s|imagePullSecrets: \[\]|imagePullSecrets:\n  - name: $PULL_SECRET|" dist/ingest-rendered.yaml
-fi
-if grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml; then
-    die "unsubstituted placeholder left in rendered ingest manifest (check airgap.env)"
-fi
+wire_pull_secret dist/ingest-rendered.yaml
+fail_on_placeholders dist/ingest-rendered.yaml ingest
 # CI-rehearsal knob (never set in the air gap): strategic-merge a patch into
 # the rendered Job — e.g. lab-quota resources — without touching the prod
 # overlay in git. Client-side only; the cluster is not contacted.

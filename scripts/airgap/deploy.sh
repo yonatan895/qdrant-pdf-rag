@@ -16,19 +16,12 @@ case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
 # Cross-check against the packed MANIFEST when it is reachable (dist/ or ../).
-MANIFEST=""
-[ -f dist/MANIFEST.txt ] && MANIFEST=dist/MANIFEST.txt
-[ -z "$MANIFEST" ] && [ -f ../MANIFEST.txt ] && MANIFEST=../MANIFEST.txt
-if [ -n "$MANIFEST" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
-    packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
-    [ "$IMAGE_SHA" = "$packed_sha" ] || \
-        die "IMAGE_SHA=$IMAGE_SHA does not match the packed MANIFEST sha ($packed_sha) — wrong SHA for this sneakernet bundle"
-fi
-[ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || command -v kubectl >/dev/null 2>&1 || die "oc or kubectl is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
+MANIFEST=$(find_manifest)
+check_manifest_sha
+require_kc
 command -v helm >/dev/null 2>&1 || die "helm is required on the air-gap bastion"
 
 refuse_nfs_storage
-EMBED_BASE_URL=${EMBED_BASE_URL:-$(echo "$VLLM_BASE_URL" | sed -E 's:(/v1)?/*$::')/v1}
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
 # Chart appends "-unprivileged" to the tag when useUnprivilegedImage=true;
 # values.yaml pins v1.19.0 — set it explicitly so it always matches load.sh.
@@ -36,7 +29,7 @@ SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
 QDRANT_TAG=${QDRANT_TAG:-$(echo "${QDRANT_IMAGE:-docker.io/qdrant/qdrant:v1.19.0-unprivileged}" | sed "s/.*://; s/-unprivileged\$//")}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 
-KC=${KC:-$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; else echo oc; fi)}
+KC=${KC:-$(kc)}
 mkdir -p dist
 
 echo "==> Namespace: $NAMESPACE"
@@ -86,13 +79,7 @@ fi
 run "$@"
 
 echo "==> Kustomize: agent (prod overlay, placeholders substituted from airgap.env)"
-if command -v kustomize >/dev/null 2>&1; then
-    render="kustomize build deploy/kustomize/overlays/openshift"
-else
-    # kubectl ships a built-in kustomize; always present on an OpenShift bastion.
-    render="$KC kustomize deploy/kustomize/overlays/openshift"
-fi
-$render | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
+kustomize_render deploy/kustomize/overlays/openshift | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
     -e "s|__INTERNAL_REGISTRY__|$INTERNAL_REGISTRY|g" \
     -e "s|__IMAGE_SHA__|$IMAGE_SHA|g" \
     -e "s|namespace: mainframe-rag|namespace: $NAMESPACE|g" \
@@ -108,12 +95,8 @@ $render | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
     -e "s|__RERANK_BASE_URL__|${RERANK_BASE_URL:-}|g" \
     -e "s|__RERANK_MODEL__|${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}|g" \
     > dist/agent-rendered.yaml
-if [ -n "${PULL_SECRET:-}" ]; then
-    sed -i "s|imagePullSecrets: \[\]|imagePullSecrets:\n  - name: $PULL_SECRET|" dist/agent-rendered.yaml
-fi
-if grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml; then
-    die "unsubstituted placeholder left in rendered agent manifest (check airgap.env)"
-fi
+wire_pull_secret dist/agent-rendered.yaml
+fail_on_placeholders dist/agent-rendered.yaml agent
 run $KC apply -f dist/agent-rendered.yaml
 
 # Jaeger v2 trace backend (issue #83): opt-in via OTEL_EXPORTER_OTLP_ENDPOINT
@@ -123,22 +106,13 @@ run $KC apply -f dist/agent-rendered.yaml
 JAEGER_UI_HINT=""
 if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then
     echo "==> Kustomize: Jaeger v2 all-in-one (badger on RWO block, ClusterIP)"
-    if command -v kustomize >/dev/null 2>&1; then
-        jrender="kustomize build deploy/kustomize/jaeger"
-    else
-        jrender="$KC kustomize deploy/kustomize/jaeger"
-    fi
-    $jrender | sed \
+    kustomize_render deploy/kustomize/jaeger | sed \
         -e "s|__INTERNAL_REGISTRY__|$INTERNAL_REGISTRY|g" \
         -e "s|__STORAGE_CLASS__|$STORAGE_CLASS|g" \
         -e "s|namespace: mainframe-rag|namespace: $NAMESPACE|g" \
         > dist/jaeger-rendered.yaml
-    if [ -n "${PULL_SECRET:-}" ]; then
-        sed -i "s|imagePullSecrets: \[\]|imagePullSecrets:\n  - name: $PULL_SECRET|" dist/jaeger-rendered.yaml
-    fi
-    if grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml; then
-        die "unsubstituted placeholder left in rendered Jaeger manifest (check airgap.env)"
-    fi
+    wire_pull_secret dist/jaeger-rendered.yaml
+    fail_on_placeholders dist/jaeger-rendered.yaml Jaeger
     run $KC apply -f dist/jaeger-rendered.yaml
     JAEGER_UI_HINT="   |   traces UI: $KC -n $NAMESPACE port-forward svc/jaeger 16686:16686"
 else

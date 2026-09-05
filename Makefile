@@ -122,27 +122,8 @@ airgap-dryrun:
 	  EMBED_MODEL=ibm-granite/granite-embedding-278m-multilingual \
 	  DENSE_DIM=768 \
 	  VLLM_BASE_URL=http://vllm.inference.svc.cluster.local:8000/v1 \
-	  sh scripts/airgap/validate.sh
-	AIRGAP_DRYRUN=1 IMAGE_SHA=$$(git rev-parse HEAD 2>/dev/null || echo "0000000000000000000000000000000000000000") \
-	  INTERNAL_REGISTRY=registry.example.internal/mainframe-rag \
-	  NAMESPACE=mainframe-rag \
-	  STORAGE_CLASS=gp3-csi \
-	  EMBED_MODEL=ibm-granite/granite-embedding-278m-multilingual \
-	  DENSE_DIM=768 \
-	  VLLM_BASE_URL=http://vllm.inference.svc.cluster.local:8000/v1 \
-	  sh scripts/airgap/deploy.sh
-	AIRGAP_DRYRUN=1 IMAGE_SHA=$$(git rev-parse HEAD 2>/dev/null || echo "0000000000000000000000000000000000000000") \
-	  INTERNAL_REGISTRY=registry.example.internal/mainframe-rag \
-	  NAMESPACE=mainframe-rag \
-	  STORAGE_CLASS=gp3-csi \
-	  EMBED_MODEL=ibm-granite/granite-embedding-278m-multilingual \
-	  DENSE_DIM=768 \
-	  VLLM_BASE_URL=http://vllm.inference.svc.cluster.local:8000/v1 \
 	  CORPUS_PVC=corpus-pvc \
-	  sh scripts/airgap/ingest.sh
-	AIRGAP_DRYRUN=1 \
-	  NAMESPACE=mainframe-rag \
-	  sh scripts/airgap/smoke.sh
+	  sh scripts/airgap/pipeline.sh --dry-run
 
 # ---------------------------------------------------------------- simulation (docker Qdrant, tests/test_integration_sim.py)
 SIM_CONTAINER ?= qdrant-sim
