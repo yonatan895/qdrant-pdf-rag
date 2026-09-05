@@ -22,6 +22,7 @@ class InventoryRecord(BaseModel):
     seconds: float = 0.0
     error: str | None = None
     error_type: str | None = None  # exception class name, for typed triage
+    rules_version: str | None = None  # extraction-rules version (issue #124)
     finished_at: float = Field(default_factory=time.time)
 
 
@@ -47,10 +48,21 @@ def load_inventory(progress_path: Path) -> dict[str, InventoryRecord]:
     return latest
 
 
-def should_skip(record: InventoryRecord | None, sha256: str, allow_dry: bool = False) -> bool:
-    """Skip when this exact file already finished. 'upserted' always skips;
-    'dry' only skips for another dry run (a real run still needs embed+upsert)."""
+def should_skip(
+    record: InventoryRecord | None,
+    sha256: str,
+    allow_dry: bool = False,
+    rules_version: str | None = None,
+) -> bool:
+    """Skip when this exact file already finished under the SAME extraction
+    rules (issue #124): the record carries the rules version its payloads
+    were extracted with, and a content-unchanged file must still re-ingest
+    when the rules changed — otherwise a regex widening desyncs queries
+    (new rules) from payloads (old rules) and recall collapses silently.
+    Records from before versioning carry no field and never skip."""
     if not (record and record.sha256 == sha256):
+        return False
+    if record.rules_version != rules_version:
         return False
     return record.status == "upserted" or (allow_dry and record.status == "dry")
 

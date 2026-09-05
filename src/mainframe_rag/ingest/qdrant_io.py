@@ -13,6 +13,7 @@ from qdrant_client import models
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ports import QdrantPoints, SparseVector
 
 HNSW_M = 16
@@ -129,6 +130,22 @@ def doc_sha256(client: QdrantPoints, settings: Settings, doc_id: str) -> str | N
     return (points[0].payload or {}).get("sha256")
 
 
+def stored_rules_version(client: QdrantPoints, settings: Settings) -> str | None:
+    """Extraction-rules version carried by the collection's points (issue
+    #124). Returns None when the collection is EMPTY (fresh — nothing to
+    compare) and the empty string when points exist but predate versioning
+    (legacy — a mismatch, never a pass): the two must not blur, or an old
+    collection would silently serve mixed-rule payloads."""
+    points, _ = client.scroll(
+        settings.qdrant_collection,
+        limit=1,
+        with_payload=["rules_v"],
+    )
+    if not points:
+        return None
+    return str((points[0].payload or {}).get("rules_v") or "")
+
+
 def delete_by_doc(client: QdrantPoints, settings: Settings, doc_id: str) -> None:
     client.delete(
         settings.qdrant_collection,
@@ -159,6 +176,7 @@ def upsert_chunks(
     observability when present; it is never filtered on, so it takes no
     payload index."""
     collection = settings.qdrant_collection
+    rules_v = extraction_rules_version()
     points: list[models.PointStruct] = []
     for chunk, (dense, (sparse_idx, sparse_val)) in zip(chunks, vectors):
         payload = {
@@ -174,6 +192,7 @@ def upsert_chunks(
             "message_ids": chunk.message_ids,
             "members": chunk.members,
             "sha256": parsed.sha256,
+            "rules_v": rules_v,
             "text": chunk.text,
         }
         if contexts and (context := contexts.get(chunk.chunk_id)):
