@@ -94,6 +94,7 @@ def test_bootstrap_success(bundle_dir):
 
     # Verify dist directory was populated with image artifacts
     dist_dir = repo_dir / "dist"
+    assert (dist_dir / "bootstrap.sh").is_file()
     assert (dist_dir / "qdrant-image.tar").is_file()
     assert (dist_dir / "app-agent-test.tar").is_file()
     assert (dist_dir / "MANIFEST.txt").is_file()
