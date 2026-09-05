@@ -195,7 +195,25 @@ def diversify_hits(
     return selected
 
 
-_memoized_reranker: tuple[int, Reranker | None] | None = None
+_memoized_reranker: tuple[tuple[object, ...], Reranker | None] | None = None
+
+
+def _reranker_config_key(settings: Settings) -> tuple[object, ...]:
+    """Value key over every Settings field build_reranker()/HttpReranker
+    consume (issue #156). The memo used id(settings): ids can be recycled
+    by the allocator after a garbage-collected Settings, silently reusing
+    a reranker built for a previous configuration. Equal values are safe
+    to reuse by construction, so the key is the values themselves."""
+    return (
+        settings.embed_mode,
+        settings.rerank_base_url,
+        settings.embed_base_url,
+        settings.rerank_model,
+        settings.rerank_batch_size,
+        settings.rerank_timeout_s,
+        settings.allow_hash_mode,
+        settings.http_connect_retries,
+    )
 
 
 def _rerank_bypass_reason(query: str, has_identifiers: bool) -> str | None:
@@ -236,11 +254,11 @@ def _resolve_active_reranker(
     active_reranker = reranker
     if active_reranker is None and settings and settings.rerank_enabled:
         global _memoized_reranker
-        sid = id(settings)
-        if _memoized_reranker is None or _memoized_reranker[0] != sid:
+        key = _reranker_config_key(settings)
+        if _memoized_reranker is None or _memoized_reranker[0] != key:
             from mainframe_rag.retrieve.rerank import build_reranker
 
-            _memoized_reranker = (sid, build_reranker(settings))
+            _memoized_reranker = (key, build_reranker(settings))
         active_reranker = _memoized_reranker[1]
     bypass_reason = _rerank_bypass_reason(query, has_identifiers)
     if active_reranker is not None and bypass_reason is not None:

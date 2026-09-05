@@ -347,6 +347,86 @@ def test_build_reranker_dispatch():
         build_reranker(s_bad)
 
 
+def test_reranker_config_key_covers_every_build_field():
+    """Issue #156: the memo key must change whenever any field
+    build_reranker()/HttpReranker consume changes — a key that misses a
+    field would silently reuse a reranker built for the old value."""
+    from mainframe_rag.retrieve.query import _reranker_config_key
+
+    base = Settings(
+        rerank_enabled=True,
+        embed_mode="vllm",
+        rerank_base_url="http://rerank:8000/v1",
+        embed_base_url="http://embed:8001/v1",
+        rerank_model="m",
+        rerank_batch_size=16,
+        rerank_timeout_s=5.0,
+        allow_hash_mode=True,
+        http_connect_retries=2,
+        _env_file=None,
+    )
+    baseline = _reranker_config_key(base)
+    flips: dict[str, dict[str, object]] = {
+        "embed_mode": {"embed_mode": "hash"},
+        "rerank_base_url": {"rerank_base_url": "http://other:8000/v1"},
+        "embed_base_url": {"embed_base_url": "http://other:8001/v1"},
+        "rerank_model": {"rerank_model": "other"},
+        "rerank_batch_size": {"rerank_batch_size": 32},
+        "rerank_timeout_s": {"rerank_timeout_s": 9.0},
+        "allow_hash_mode": {"allow_hash_mode": False},
+        "http_connect_retries": {"http_connect_retries": 4},
+    }
+    for field, override in flips.items():
+        changed = base.model_copy(update=override)  # type: ignore[arg-type]
+        assert _reranker_config_key(changed) != baseline, f"key missed {field}"
+
+
+def test_reranker_memo_reuses_equal_values_across_instances():
+    """Issue #156: equal-valued Settings must reuse the memoized reranker
+    even though the objects have different ids. Under the old id(settings)
+    key this rebuilt on every new Settings object (and worse, could reuse
+    a stale one when the allocator recycled a garbage-collected id)."""
+    import mainframe_rag.retrieve.query as query_mod
+    from mainframe_rag.retrieve.query import _resolve_active_reranker
+
+    saved = query_mod._memoized_reranker
+    query_mod._memoized_reranker = None
+    try:
+        s1 = Settings(rerank_enabled=True, embed_mode="hash", allow_hash_mode=True, _env_file=None)
+        r1, active1, _ = _resolve_active_reranker(s1, None, "how do I allocate a dataset", False)
+        assert active1 and r1 is not None
+        s2 = Settings(rerank_enabled=True, embed_mode="hash", allow_hash_mode=True, _env_file=None)
+        assert id(s2) != id(s1)  # both alive: distinct objects, equal values
+        r2, _, _ = _resolve_active_reranker(s2, None, "how do I allocate a dataset", False)
+        assert r2 is r1
+    finally:
+        query_mod._memoized_reranker = saved
+
+
+def test_reranker_memo_rebuilds_on_value_change():
+    """Issue #156: a value change must rebuild the reranker regardless of
+    object identity — the exact stale-reuse hazard id(settings) allowed
+    when the allocator recycled a garbage-collected Settings id."""
+    import mainframe_rag.retrieve.query as query_mod
+    from mainframe_rag.retrieve.query import _resolve_active_reranker
+
+    saved = query_mod._memoized_reranker
+    query_mod._memoized_reranker = None
+    try:
+        s1 = Settings(
+            rerank_enabled=True, embed_mode="hash", allow_hash_mode=True, rerank_batch_size=16, _env_file=None
+        )
+        r1, _, _ = _resolve_active_reranker(s1, None, "how do I allocate a dataset", False)
+        assert r1 is not None
+        s2 = Settings(
+            rerank_enabled=True, embed_mode="hash", allow_hash_mode=True, rerank_batch_size=32, _env_file=None
+        )
+        r2, _, _ = _resolve_active_reranker(s2, None, "how do I allocate a dataset", False)
+        assert r2 is not r1
+    finally:
+        query_mod._memoized_reranker = saved
+
+
 def test_diversify_hits_respects_rerank_scores():
     """diversify_hits sorts backfilled pages using rerank_score."""
     h1 = _make_hit("c1", "D1", 0.5, page_label="1", rerank_score=0.9)
