@@ -36,42 +36,10 @@ INGEST_IMAGE="${APP_REGISTRY}/qdrant-pdf-rag-ingest:${IMAGE_SHA}"
 AGENT_IMAGE="${APP_REGISTRY}/qdrant-pdf-rag-agent:${IMAGE_SHA}"
 
 # Third-party pins come from images.txt (name column); digest applies when recorded.
-QDRANT_REF=""
-QDRANT_DIGEST=""
-while IFS= read -r line; do
-    case "$line" in
-        \#*|"") continue ;;
-        *qdrant*)
-            QDRANT_REF=$(echo "$line" | awk '{print $1}')
-            digest=$(echo "$line" | awk '{print $2}')
-            [ "$digest" != "sha256:PENDING" ] && QDRANT_DIGEST=$digest
-            break
-            ;;
-    esac
-done < images.txt
-[ -n "$QDRANT_REF" ] || die "no qdrant image pin found in images.txt"
-if [ -n "$QDRANT_DIGEST" ]; then
-    QDRANT_REF="${QDRANT_REF%@*}@${QDRANT_DIGEST}"
-fi
+QDRANT_REF=$(pin_from_images_txt qdrant)
 
 # Jaeger v2 trace-backend pin (issue #83): same pin discipline.
-JAEGER_REF=""
-JAEGER_DIGEST=""
-while IFS= read -r line; do
-    case "$line" in
-        \#*|"") continue ;;
-        *jaeger*)
-            JAEGER_REF=$(echo "$line" | awk '{print $1}')
-            digest=$(echo "$line" | awk '{print $2}')
-            [ "$digest" != "sha256:PENDING" ] && JAEGER_DIGEST=$digest
-            break
-            ;;
-    esac
-done < images.txt
-[ -n "$JAEGER_REF" ] || die "no jaeger image pin found in images.txt"
-if [ -n "$JAEGER_DIGEST" ]; then
-    JAEGER_REF="${JAEGER_REF%@*}@${JAEGER_DIGEST}"
-fi
+JAEGER_REF=$(pin_from_images_txt jaeger)
 
 DIST="$REPO_ROOT/dist"
 OUT_TARBALL="$DIST/qdrant-pdf-rag-${IMAGE_SHA}.tar"

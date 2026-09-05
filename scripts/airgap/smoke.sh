@@ -7,7 +7,7 @@
 
 resolve_aliases
 require_env NAMESPACE
-KC=${KC:-$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; else echo oc; fi)}
+KC=${KC:-$(kc)}
 QUERY=${QUERY:-IEA500I operator message}
 
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
