@@ -1824,3 +1824,26 @@ def test_build_messages_leaves_bounded_splunk_context_alone():
     msgs = build_messages("IEA500I", [_hit()], splunk_context=splunk, splunk_context_max_chars=4000)
     assert splunk in msgs[1].content
     assert "[truncated]" not in msgs[1].content
+
+
+def test_metrics_disabled_serves_stable_404(client):
+    """Issue #187: opt-in endpoint — scanners learn nothing when off."""
+    resp = client.get("/metrics")
+    assert resp.status_code == 404
+    assert resp.json() == {"code": "not_found", "message": "not found"}
+
+
+def test_metrics_enabled_serves_prometheus_exposition(monkeypatch):
+    """Issue #187: enabled lifespan exposes runtime defaults as Prometheus
+    text for UWM scrapes."""
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    monkeypatch.setenv("METRICS_ENABLED", "true")
+    with TestClient(app_mod.app) as c:
+        resp = c.get("/metrics")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+    assert "python_gc_objects_collected_total" in resp.text

@@ -768,6 +768,28 @@ jobs:
           grep -q 'value: http://jaeger:4318' dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml
 
+      - name: airgap-deploy dry-run with metrics enabled (ServiceMonitor render, issue #187)
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+          AIRGAP_DRYRUN: "1"
+          INTERNAL_REGISTRY: ghcr.io/dryrun-standin
+          NAMESPACE: airgap-dryrun
+          STORAGE_CLASS: standard
+          EMBED_MODEL: embed-from-airgap-env
+          DENSE_DIM: "768"
+          VLLM_BASE_URL: http://vllm:8000
+          METRICS_ENABLED: "true"
+          QDRANT_STORAGE_SIZE: 1Gi
+        run: |
+          make airgap-deploy
+          test -f dist/servicemonitor-rendered.yaml
+          grep -q "kind: ServiceMonitor" dist/servicemonitor-rendered.yaml
+          grep -q "path: /metrics" dist/servicemonitor-rendered.yaml
+          grep -q "namespace: airgap-dryrun" dist/servicemonitor-rendered.yaml
+          grep -A1 'name: METRICS_ENABLED' dist/agent-rendered.yaml | grep -q 'value: "true"'
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/servicemonitor-rendered.yaml
+          test ! -f dist/jaeger-rendered.yaml
+
       - name: airgap-ingest dry-run (prod ingest render + patch knob)
         env:
           IMAGE_SHA: ${{ env.SHA }}

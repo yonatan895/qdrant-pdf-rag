@@ -1,0 +1,11 @@
+# Prometheus ServiceMonitor for UWM scrapes of the agent /metrics (issue #187).
+# Applied only when METRICS_ENABLED=true in airgap.env (scripts/airgap/deploy.sh
+# renders + applies this dir, else skips it). No images, no storage, no
+# secrets: one namespaced object selecting the ClusterIP agent Service.
+# Cluster prerequisite (cluster-admin owned, NOT this repo): user-workload
+# monitoring enabled and the namespace labeled for UWM discovery.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mainframe-rag
+resources:
+  - servicemonitor.yaml

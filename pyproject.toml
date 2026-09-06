@@ -16,6 +16,7 @@ dependencies = [
     "opentelemetry-api",
     "opentelemetry-sdk",
     "opentelemetry-exporter-otlp-proto-http",
+    "opentelemetry-exporter-prometheus",
 ]
 
 [project.optional-dependencies]

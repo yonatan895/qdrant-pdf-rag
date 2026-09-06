@@ -19,3 +19,9 @@ pydantic-settings==2.15.0
 opentelemetry-api==1.44.0
 opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp-proto-http==1.44.0
+# Issue #187: OTel Prometheus exporter for the UWM-scraped /metrics endpoint.
+# The exporter lives on the contrib release line (0.65b0), not the core 1.x
+# line — but 0.65b0 requires opentelemetry-sdk~=1.44.0, so lockstep with the
+# #83 pins above holds. Transitive prometheus-client floats per this file's
+# convention (exporter requires prometheus-client>=0.5,<1.0).
+opentelemetry-exporter-prometheus==0.65b0

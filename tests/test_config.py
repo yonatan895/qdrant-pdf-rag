@@ -160,3 +160,11 @@ def test_otel_defaults_off_and_bounded():
         Settings(_env_file=None, otel_export_queue_size=32)  # type: ignore[arg-type]
     with pytest.raises(ValidationError):
         Settings(_env_file=None, otel_export_timeout_ms=50)  # type: ignore[arg-type]
+
+
+def test_metrics_defaults_off():
+    """Issue #187: the Prometheus endpoint ships fail-closed — UWM scrapes
+    404 until the operator opts in."""
+    s = Settings(_env_file=None)
+    assert s.metrics_enabled is False
+    assert Settings(_env_file=None, metrics_enabled=True).metrics_enabled is True
