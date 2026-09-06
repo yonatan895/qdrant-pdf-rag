@@ -332,6 +332,16 @@ def test_build_reranker_dispatch():
     r_hash = build_reranker(s_hash)
     assert isinstance(r_hash, HashReranker)
 
+    # 2b. Hash mode with explicit RERANK_BASE_URL (issue #193): explicit
+    # opt-out into the live cross-encoder, determinism knowingly traded.
+    s_hash_http = Settings(
+        rerank_enabled=True, embed_mode="hash", allow_hash_mode=True,
+        rerank_base_url="http://rerank:8000/v1", _env_file=None,
+    )
+    r_hash_http = build_reranker(s_hash_http)
+    assert isinstance(r_hash_http, HttpReranker)
+    assert r_hash_http._base_url == "http://rerank:8000/v1"
+
     # 3. HTTP mode with rerank_base_url
     s_http = Settings(rerank_enabled=True, embed_mode="vllm", rerank_base_url="http://rerank:8000/v1", _env_file=None)
     r_http = build_reranker(s_http)

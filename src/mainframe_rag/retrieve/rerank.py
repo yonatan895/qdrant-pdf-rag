@@ -164,10 +164,17 @@ def probe_reranker(reranker: Reranker) -> str | None:
 
 
 def build_reranker(settings: Settings, client: httpx2.Client | None = None) -> Reranker | None:
-    """The single dispatch point for reranking. Never branch on reranker flags elsewhere."""
+    """The single dispatch point for reranking. Never branch on reranker flags elsewhere.
+
+    Hash mode defaults to HashReranker (deterministic, keeps CI/dev
+    byte-stable); an explicit RERANK_BASE_URL opts out into HttpReranker
+    even in hash mode (issue #193) — knowingly trading determinism for a
+    live cross-encoder, e.g. reasoning+ranking stacks with zero GPU embed
+    spend.
+    """
     if not settings.rerank_enabled:
         return None
-    if settings.embed_mode == "hash":
+    if settings.embed_mode == "hash" and not settings.rerank_base_url:
         return HashReranker()
     if settings.rerank_base_url or settings.embed_base_url:
         return HttpReranker(settings, client)
