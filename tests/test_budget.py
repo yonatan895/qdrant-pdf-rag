@@ -11,13 +11,17 @@ import pytest
 from pydantic import ValidationError
 
 from mainframe_rag.serve import (
+    BGE_RERANKER_V2_M3,
     COMPILED_MARGIN_FLOOR_MIB,
     DEFAULT_RESERVE_MIB,
     EAGER_GENERATE_MARGIN_MIB,
+    GEMMA4_E4B_QAT,
     LOCAL_RT_8GB,
     MAX_UTIL,
     OPENSHIFT_PROD,
     POOLING_EAGER_MARGIN_MIB,
+    QWEN3_EMBED_06B,
+    RANK_EMBED_8GB,
     TRIPLE_8GB,
     BudgetDeficitError,
     HostSpec,
@@ -44,7 +48,7 @@ def test_engine_margin_defaults():
 
 
 def test_profiles_registered():
-    assert list_profiles() == ["LOCAL_RT_8GB", "OPENSHIFT_PROD", "TRIPLE_8GB"]
+    assert list_profiles() == ["LOCAL_RT_8GB", "OPENSHIFT_PROD", "RANK_EMBED_8GB", "TRIPLE_8GB"]
 
 
 def test_local_profile_resolves_to_validated_operating_points():
@@ -284,7 +288,7 @@ def test_triple_pack_fits_with_measured_operating_points():
     assert rerank.gpu_memory_utilization == 0.34
     assert rerank.runner == "pooling"
     assert rerank.enforce_eager is True
-    assert rerank.max_num_batched_tokens == 1024
+    assert rerank.max_num_batched_tokens == 2048
 
     assert plan.slack_mib >= 0
     assert plan.warnings == []
@@ -301,3 +305,35 @@ def test_compiled_margin_override_defaults_to_formula():
 
     assert _compiled_margin(TRIPLE_8GB.servers[0]) == 500.0
     assert _compiled_margin(TRIPLE_8GB.servers[1]) == COMPILED_MARGIN_FLOOR_MIB
+
+
+def test_rank_embed_pack_fits_without_reasoning():
+    """RANK_EMBED_8GB: embed + rerank for retrieval/rerank work with no LLM
+    VRAM spent. Same specs as the triple minus reasoning."""
+    plan = resolve(RANK_EMBED_8GB)
+    assert plan.profile_name == "RANK_EMBED_8GB"
+    assert len(plan.servers) == 2
+    embed, rerank = plan.servers
+
+    assert embed.model_id == "Qwen/Qwen3-Embedding-0.6B"
+    assert embed.gpu_memory_utilization == 0.33
+    assert rerank.model_id == "BAAI/bge-reranker-v2-m3"
+    assert rerank.gpu_memory_utilization == 0.34
+    assert rerank.runner == "pooling"
+    assert rerank.enforce_eager is True
+
+    assert plan.slack_mib >= 0
+    assert plan.warnings == []
+
+
+def test_big_reasoning_triple_refuses_closed():
+    """E4B reasoning + embed + rerank demonstrably does not fit 8GB
+    (measured 7.0 GB for the pair alone): resolve must refuse, not emit an
+    OOM plan. Operators pick TRIPLE_8GB (small reasoning) instead."""
+    pack = ProfileBundle(
+        name="E4B_TRIPLE",
+        host=TRIPLE_8GB.host,
+        servers=[GEMMA4_E4B_QAT, QWEN3_EMBED_06B, BGE_RERANKER_V2_M3],
+    )
+    with pytest.raises(BudgetDeficitError):
+        resolve(pack)
