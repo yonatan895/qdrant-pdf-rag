@@ -145,18 +145,22 @@ e("MSG-35", "IEE892I was displayed at the console. What does the message book sa
 e("MSG-36", "IXC207A from XCF: what does the message document?", "message_id", ["SA38-0677-04"])
 
 # --- new: doc_number identifiers (full suffix form; suffix-less numbers hit the
-# exact-match doc_id filter gap and are documented as a follow-up) --------------
+# exact-match doc_id filter gap and are documented as a follow-up).
+# One rule: every doc_number query names a LOADED edition in full suffix
+# form (re-pointed at each re-bind). Edition-agnostic phrasing (suffix-less
+# or -xx numbers) is reserved for the seed's deliberate cross-edition gap
+# (DOC-01/02/03/04); a retired-edition number in a query is a re-bind miss. --------------
 
-e("DOC-07", "What manual is SC23-6846-70 and which commands does it define?", "doc_number", ["SC23-6846-02"])
+e("DOC-07", "What manual is SC23-6846-02 and which commands does it define?", "doc_number", ["SC23-6846-02"])
 e("DOC-08", "GC35-0033-41", "doc_number", ["GC35-0033-41"])
-e("DOC-09", "Which publication carries number SA23-1385-70 and what is its scope?", "doc_number", ["SA23-1385-03"])
+e("DOC-09", "Which publication carries number SA23-1385-03 and what is its scope?", "doc_number", ["SA23-1385-03"])
 e("DOC-10", "SA32-0992-02", "doc_number", ["SA32-0992-02"])
-e("DOC-11", "Identify document SC34-2662-70 and its subject area.", "doc_number", ["SC34-2662-05"])
-e("DOC-12", "What book is SA23-1382-70 and what is it used for?", "doc_number", ["SA23-1382-03"])
+e("DOC-11", "Identify document SC34-2662-05 and its subject area.", "doc_number", ["SC34-2662-05"])
+e("DOC-12", "What book is SA23-1382-03 and what is it used for?", "doc_number", ["SA23-1382-03"])
 e("DOC-13", "SA23-2274-09", "doc_number", ["SA23-2274-09"])
-e("DOC-14", "Which manual is SC23-6855-70?", "doc_number", ["SC23-6855-03"])
+e("DOC-14", "Which manual is SC23-6855-03?", "doc_number", ["SC23-6855-03"])
 e("DOC-15", "SA38-0666-07", "doc_number", ["SA38-0666-07"])
-e("DOC-16", "Identify SC23-6879-70 and say what kind of content it holds.", "doc_number", ["SC23-6879-00"])
+e("DOC-16", "Identify SC23-6879-00 and say what kind of content it holds.", "doc_number", ["SC23-6879-00"])
 
 # --- new: syntax construction (parmlib members live in SA23-1380-09; headings
 # re-mined 2026-09-06: the V2R2 edition renumbered the chapters and dropped
@@ -192,8 +196,8 @@ e("SYN-36", "Show documented ICKDSF INIT command syntax to initialize a DASD vol
 # --- new: diagnostic / recovery ------------------------------------------------
 
 e("DIA-09", "IEC161I during VSAM open: how should the reason codes be read and what recovery is documented?", "diagnostic",
-     ["SA38-0674-06", "SA38-0674-06", "SC23-6852-03"],
-     note="IEC range lives in System Messages Vol 7 in both the z/OS 2.2 kit and the 2.5-era -70 editions; both are honest answers")
+     ["SA38-0674-06"],
+     note="IEC161I reason codes and recovery are documented in System Messages Vol 7 (SA38-0674-06); single honest doc in the loaded corpus")
 e("DIA-10", "IOS071I rejected a command against a device. What do the reason codes mean per the manual?", "diagnostic", ["SA38-0676-07", "SA38-0666-07"])
 e("DIA-11", "What does IEE699I tell the operator about the display output that follows it?", "diagnostic", ["SA38-0674-06"], heading="IEE699I")
 e("DIA-12", "System Logger issued IXG601I. What condition is documented and what action follows?", "diagnostic", ["SA38-0677-04", "SC23-6843-05"])
@@ -300,8 +304,8 @@ e("SYN-40", "Which PDSMAN control statement activates journaling of PDS director
 e("CMP-18", "Compare the documented JES2 and JES3 operator commands for draining spool volumes.", "comparative", ["SA32-0990-02", "SA32-1008-01"])
 
 e("VER-14", "State which z/OS release the HASP050 excerpts document before quoting JES2 spool guidance.", "version",
-     ["SA32-0989-03", "SA32-0989-03"],
-     note="both the 2.2 and 2.5-era JES2 Messages editions are honest gold; the answer must name the covered edition")
+     ["SA32-0989-03"],
+     note="single loaded edition (z/OS 2.2 JES2 Messages, SA32-0989-03); the answer must name the covered edition")
 e("VER-15", "Which IMS release do the abend-code excerpts document?", "version", ["GC19-4234-01"])
 
 e("DOC-17", "What does SA32-0989-03 cover and which JES2 release does it document?", "doc_number", ["SA32-0989-03"])
@@ -335,9 +339,9 @@ SEED_SYNTAX_PATTERNS = {
 # in the seed that did not match the actual books are corrected and the
 # original assumption is preserved in the note). Always applied.
 DOC_CORRECTIONS = {
-    "DOC-02": "seed note assumed 'MVS System Commands'; the corpus book SA23-1383-70 is z/OS MVS IPCS Customization - expectation bound to the real book",
-    "DOC-03": "seed note assumed 'JES2 Initialization and Tuning Reference'; SC23-6858-70 is z/OS DFSMS Using Magnetic Tapes - expectation bound to the real book",
-    "DOC-04": "seed asked JES3 init/tuning vs commands; SC23-6862-70 is z/OS DFSMSdfp Checkpoint/Restart - neither; the number resolves to the real book",
+    "DOC-02": "seed note assumed 'MVS System Commands'; the corpus book SA23-1383-01 is z/OS MVS IPCS Customization - expectation bound to the real book",
+    "DOC-03": "seed note assumed 'JES2 Initialization and Tuning Reference'; SC23-6858-01 is z/OS DFSMS Using Magnetic Tapes - expectation bound to the real book",
+    "DOC-04": "seed asked JES3 init/tuning vs commands; SC23-6862-00 is z/OS DFSMSdfp Checkpoint/Restart - neither; the number resolves to the real book",
 }
 
 # Applied only when the entry actually ends up abstain because its domain is
@@ -607,6 +611,8 @@ def main() -> int:
         for d in entry["expected_doc_ids"]:
             if d not in titles:
                 errors.append(f"{entry['id']}: expected doc {d} not in corpus")
+        if len(entry["expected_doc_ids"]) != len(set(entry["expected_doc_ids"])):
+            errors.append(f"{entry['id']}: duplicate expected_doc_ids {entry['expected_doc_ids']}")
         for d in entry["must_not_retrieve"]:
             if d not in titles:
                 errors.append(f"{entry['id']}: must_not doc {d} not in corpus")

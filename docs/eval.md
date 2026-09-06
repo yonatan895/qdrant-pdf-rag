@@ -100,16 +100,21 @@ verdict.
   name-and-count match. Re-adoption creates a new snapshot and prunes
   strays. Restore verifies the post-restore point count.
 - **Mode-keyed venues:** `benchmarks/harness-vllm.json` (vllm venue: golden
-  + holdout over the pinned real corpus) and `benchmarks/harness.json`
+  + holdout over the snapshot-pinned **synthetic** corpus — the regenerated
+  dev venue, not the real books) and `benchmarks/harness.json`
   (hash venue: **dev golden set only**, `evals/golden.jsonl`, over the
   snapshot-pinned synthetic hash corpus — the Makefile harness targets pin
-  `--golden` per mode, issue #158). The holdout is vllm-venue-only: its
-  sibling-book traps (VER-09/10) are structurally unpassable in the
-  synthetic hash corpus, whose sibling pages carry near-identical query
-  text by corpus design ("deliberate lexical competitors") — recording
-  them would bake a permanent P0 into the venue. Both venues: collection
-  + hash-vs-vllm pairing is operator env (the baseline pins the snapshot,
-  not the collection name).
+  `--golden` per mode, issue #158). Venue architecture: dev ↔ synthetic
+  (determinism and promotion signal), holdout ↔ real (`real_manuals` via
+  `make eval-holdout` — the honest real-corpus semantic gate). The vLLM
+  harness over 211 synthetic points saturates most classes at 1.0 and has
+  accordingly little discriminating power; it guards determinism, not
+  real-corpus quality. The holdout runs only under vllm mode — inside the
+  vllm harness (synthetic venue) and as `make eval-holdout` against
+  `real_manuals` (the semantic gate). The hash harness stays dev-only per
+  #158: the synthetic hash venue's sibling pages carry near-identical
+  query text by corpus design ("deliberate lexical competitors"). Both venues: collection + hash-vs-vllm pairing is
+  operator env (the baseline pins the snapshot, not the collection name).
 - **Verdict:** zero trap failures AND no per-class regression beyond the
   baseline floor (default 0.05) AND at least one primary metric (recall@5,
   MRR) improving with a paired-bootstrap 95% CI excluding zero (2000

@@ -3,8 +3,8 @@
   "note": "Harness promotion baseline; re-record via `make harness-baseline` (dedicated PR, AGENTS.md).",
   "embed_mode": "vllm",
   "snapshot": {
-   "points_count": 211,
-   "snapshot_name": "mainframe_manuals-2007008481010860-2026-09-06-05-50-11.snapshot"
+   "points_count": 208,
+   "snapshot_name": "mainframe_manuals-2007008481010860-2026-09-06-06-06-42.snapshot"
   },
   "class_regression_floor": 0.05,
   "updated": "2026-09-06"
@@ -12,10 +12,10 @@
  "overall": {
   "n": 167,
   "scored": 167,
-  "recall@5": 0.9341,
-  "recall@8": 0.9341,
-  "mrr": 0.9341,
-  "ndcg@8": 0.9304
+  "recall@5": 0.9701,
+  "recall@8": 0.9701,
+  "mrr": 0.9701,
+  "ndcg@8": 0.9701
  },
  "classes": {
   "comparative": {
@@ -32,15 +32,15 @@
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.9943
+   "ndcg@8": 1.0
   },
   "doc_number": {
    "n": 20,
    "scored": 20,
-   "recall@5": 0.45,
-   "recall@8": 0.45,
-   "mrr": 0.45,
-   "ndcg@8": 0.45
+   "recall@5": 0.75,
+   "recall@8": 0.75,
+   "mrr": 0.75,
+   "ndcg@8": 0.75
   },
   "message_id": {
    "n": 38,
@@ -72,7 +72,7 @@
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.9648
+   "ndcg@8": 1.0
   }
  },
  "traps": {
@@ -236,7 +236,7 @@
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.7654
+   "ndcg@8": 1.0
   },
   "DIA-10": {
    "recall@5": 1.0,
@@ -425,10 +425,10 @@
    "ndcg@8": 0.0
   },
   "DOC-07": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-08": {
    "recall@5": 1.0,
@@ -437,10 +437,10 @@
    "ndcg@8": 1.0
   },
   "DOC-09": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-10": {
    "recall@5": 1.0,
@@ -449,16 +449,16 @@
    "ndcg@8": 1.0
   },
   "DOC-11": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-12": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-13": {
    "recall@5": 1.0,
@@ -467,10 +467,10 @@
    "ndcg@8": 1.0
   },
   "DOC-14": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-15": {
    "recall@5": 1.0,
@@ -479,10 +479,10 @@
    "ndcg@8": 1.0
   },
   "DOC-16": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-17": {
    "recall@5": 1.0,
@@ -1095,7 +1095,7 @@
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.6131
+   "ndcg@8": 1.0
   },
   "VER-15": {
    "recall@5": 1.0,

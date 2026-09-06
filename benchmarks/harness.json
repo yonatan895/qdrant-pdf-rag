@@ -3,8 +3,8 @@
   "note": "Harness promotion baseline; re-record via `make harness-baseline` (dedicated PR, AGENTS.md).",
   "embed_mode": "hash",
   "snapshot": {
-   "points_count": 211,
-   "snapshot_name": "mainframe_manuals-2007008481010860-2026-09-06-05-49-38.snapshot"
+   "points_count": 208,
+   "snapshot_name": "mainframe_manuals-2007008481010860-2026-09-06-06-06-18.snapshot"
   },
   "class_regression_floor": 0.05,
   "updated": "2026-09-06"
@@ -12,10 +12,10 @@
  "overall": {
   "n": 104,
   "scored": 104,
-  "recall@5": 0.9327,
-  "recall@8": 0.9327,
-  "mrr": 0.9327,
-  "ndcg@8": 0.9327
+  "recall@5": 0.9712,
+  "recall@8": 0.9712,
+  "mrr": 0.9712,
+  "ndcg@8": 0.9712
  },
  "classes": {
   "comparative": {
@@ -37,10 +37,10 @@
   "doc_number": {
    "n": 14,
    "scored": 14,
-   "recall@5": 0.5,
-   "recall@8": 0.5,
-   "mrr": 0.5,
-   "ndcg@8": 0.5
+   "recall@5": 0.7857,
+   "recall@8": 0.7857,
+   "mrr": 0.7857,
+   "ndcg@8": 0.7857
   },
   "message_id": {
    "n": 23,
@@ -287,10 +287,10 @@
    "ndcg@8": 0.0
   },
   "DOC-07": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-08": {
    "recall@5": 1.0,
@@ -299,16 +299,16 @@
    "ndcg@8": 1.0
   },
   "DOC-11": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-12": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-13": {
    "recall@5": 1.0,
@@ -317,10 +317,10 @@
    "ndcg@8": 1.0
   },
   "DOC-16": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-17": {
    "recall@5": 1.0,

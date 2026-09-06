@@ -52,6 +52,12 @@ def test_verify_entry_fails_on_unknown_docs():
     assert any("NOPE-2" in f for f in fails)
 
 
+def test_verify_entry_fails_on_duplicate_expected_docs():
+    entry = GoldenEntry(query="x", expected_doc_ids=["SC23-6883-70", "SC23-6883-70"])
+    fails, _ = verify_entry(entry, _facts())
+    assert any("duplicate expected_doc_ids" in f for f in fails)
+
+
 def test_verify_entry_fails_on_missing_heading_and_page():
     entry = GoldenEntry(
         query="q",

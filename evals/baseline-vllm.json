@@ -6,18 +6,18 @@
     "embed_mode": "vllm",
     "updated": "2026-09-06"
   },
-  "recall@1": 0.933,
-  "recall@3": 0.933,
-  "recall@5": 0.933,
-  "recall@8": 0.933,
-  "mrr": 0.933,
-  "ndcg@8": 0.933,
+  "recall@1": 0.971,
+  "recall@3": 0.971,
+  "recall@5": 0.971,
+  "recall@8": 0.971,
+  "mrr": 0.971,
+  "ndcg@8": 0.971,
   "identifier": {
-    "recall@1": 0.889,
-    "recall@5": 0.889,
-    "recall@8": 0.889,
-    "mrr": 0.889,
-    "ndcg@8": 0.889
+    "recall@1": 0.952,
+    "recall@5": 0.952,
+    "recall@8": 0.952,
+    "mrr": 0.952,
+    "ndcg@8": 0.952
   },
   "nl": {
     "recall@1": 1.0,
@@ -50,12 +50,12 @@
     "doc_number": {
       "n": 14,
       "scored": 14,
-      "recall@1": 0.5,
-      "recall@3": 0.5,
-      "recall@5": 0.5,
-      "recall@8": 0.5,
-      "mrr": 0.5,
-      "ndcg@8": 0.5
+      "recall@1": 0.786,
+      "recall@3": 0.786,
+      "recall@5": 0.786,
+      "recall@8": 0.786,
+      "mrr": 0.786,
+      "ndcg@8": 0.786
     },
     "message_id": {
       "n": 23,
@@ -100,7 +100,7 @@
   },
   "abstain": {
     "n": 13,
-    "top_score_mean": 0.6187,
+    "top_score_mean": 0.6124,
     "top_score_max": 1.3333
   },
   "page": {
