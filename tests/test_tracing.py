@@ -476,3 +476,28 @@ def test_span_attributes_bounded():
     for span in exporter.get_finished_spans():
         for key in span.attributes:
             assert key in allowed, f"unexpected span attribute {key!r} on {span.name}"
+
+
+# ---------------------------------------------------------------- log correlation
+
+
+def test_current_trace_ids_empty_without_span():
+    """Issue #185: no active span (tracing off) -> {} so the log shape is
+    unchanged."""
+    assert tracing_mod.current_trace_ids() == {}
+
+
+def test_current_trace_ids_match_active_span():
+    """Issue #185: under a real SDK span the helper returns that span's
+    32/16-hex ids for log correlation."""
+    provider, _exporter = _provider()
+    tracer = provider.get_tracer("test")
+    with tracer.start_as_current_span("op") as span:
+        got = tracing_mod.current_trace_ids()
+        ctx = span.get_span_context()
+        assert got == {
+            "trace_id": trace.format_trace_id(ctx.trace_id),
+            "span_id": trace.format_span_id(ctx.span_id),
+        }
+        assert len(got["trace_id"]) == 32 and len(got["span_id"]) == 16
+    assert tracing_mod.current_trace_ids() == {}

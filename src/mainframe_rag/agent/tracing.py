@@ -49,6 +49,26 @@ def trace_enabled(endpoint: str | None) -> bool:
     return bool(endpoint and endpoint.strip())
 
 
+def current_trace_ids() -> dict[str, str]:
+    """trace_id/span_id of the active span for log correlation (issue #185).
+
+    Returns {} when no valid span is active (tracing off, unsampled drop,
+    or outside any span) so callers can unconditionally merge the result.
+    Values are opaque hex IDs — never query text, payloads, or secrets.
+    Fail-open by design: telemetry must never break the logging path.
+    """
+    try:
+        ctx = trace.get_current_span().get_span_context()
+    except Exception:  # noqa: BLE001
+        return {}
+    if not ctx.is_valid:
+        return {}
+    return {
+        "trace_id": trace.format_trace_id(ctx.trace_id),
+        "span_id": trace.format_span_id(ctx.span_id),
+    }
+
+
 def setup_tracing(
     endpoint: str | None,
     sample_ratio: float = 1.0,

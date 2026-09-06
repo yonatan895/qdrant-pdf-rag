@@ -66,3 +66,48 @@ def test_configure_logging_is_idempotent(monkeypatch):
     configure_logging("INFO")
     assert len(root.handlers) == 1
     assert isinstance(root.handlers[0].formatter, JsonFormatter)
+
+
+def test_trace_ids_stamped_under_active_span():
+    """Issue #185: a log line emitted inside a span carries that span's ids,
+    joining JSON logs to Jaeger traces."""
+    import json as _json
+
+    from opentelemetry.sdk.trace import TracerProvider
+
+    from mainframe_rag.agent import tracing as tracing_mod
+
+    tracer = TracerProvider().get_tracer("test")
+    with tracer.start_as_current_span("op") as span:
+        line = JsonFormatter().format(_record('{"request_id": "abc"}'))
+    payload = _json.loads(line)
+    ctx = span.get_span_context()
+    from opentelemetry import trace as trace_api
+
+    assert payload["trace_id"] == trace_api.format_trace_id(ctx.trace_id)
+    assert payload["span_id"] == trace_api.format_span_id(ctx.span_id)
+    assert tracing_mod.current_trace_ids() == {}
+
+
+def test_trace_ids_omitted_without_span():
+    """Issue #185: tracing off -> log shape unchanged (no new keys)."""
+    import json as _json
+
+    payload = _json.loads(JsonFormatter().format(_record('{"request_id": "abc"}')))
+    assert "trace_id" not in payload
+    assert "span_id" not in payload
+
+
+def test_caller_trace_id_wins_over_ambient_span():
+    """Issue #185: an explicit caller value (e.g. propagated across a
+    process boundary) is never overwritten by the ambient span."""
+    import json as _json
+
+    from opentelemetry.sdk.trace import TracerProvider
+
+    tracer = TracerProvider().get_tracer("test")
+    with tracer.start_as_current_span("op"):
+        line = JsonFormatter().format(_record('{"trace_id": "caller", "span_id": "s"}'))
+    payload = _json.loads(line)
+    assert payload["trace_id"] == "caller"
+    assert payload["span_id"] == "s"
