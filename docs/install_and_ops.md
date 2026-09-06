@@ -305,6 +305,19 @@ MODEL=/path/to/models/Qwen3-Embedding-0.6B make local-vllm-embed
 MODEL=Qwen/Qwen3-Embedding-0.6B make local-vllm-embed
 ```
 
+#### Serving configurations (pick one pack per 8GB card)
+
+One server per `make` invocation (each blocks its shell — run each in its own terminal or background it). `BUDGET_PROFILE` selects the pack; the launcher preflights the full pack (`--check-pack`) and fails closed on deficits. Explicit `GPU_MEM=`/`MAX_LEN=`/`SEQS=` always win over resolved values.
+
+| Goal | Profile (default `LOCAL_RT_8GB`) | Commands | Notes |
+|---|---|---|---|
+| Answer quality (big reasoning + embedding) | `LOCAL_RT_8GB` | `make local-vllm` (:8000, E4B) + `make local-vllm-embed` (:8001) | Default pair. No room for a third leg (measured 7.0 GB resident). |
+| Full topology (reasoning + embedding + ranking) | `TRIPLE_8GB` | Above with `MODEL=Qwen/Qwen2.5-0.5B-Instruct GPU_MEM=0.20 MAX_LEN=4096 SEQS=1` on :8000, plus `make local-vllm-rerank` (:8002) | 0.5B answers are weak — plumbing/rerank coverage only. E4B triple demonstrably does not fit; resolve refuses it. |
+| Retrieval + ranking, no LLM | `RANK_EMBED_8GB` | `make local-vllm-embed` (:8001) + `make local-vllm-rerank` (:8002) | Rerank A/B and `--rerank` evals without spending VRAM on reasoning. |
+| Reasoning + ranking (no vLLM embed) | — | Unsupported | Hash embed mode pins `HashReranker` by design (determinism), so a GPU reranker is unreachable there — see issue #193. |
+
+Reranked search also needs `RERANK_ENABLED=true RERANK_BASE_URL=http://127.0.0.1:8002 RERANK_MODEL=BAAI/bge-reranker-v2-m3` on the consumer side (`query-demo`, eval `--rerank`, agent env). Launch order on a cold card: reasoning → embed → rerank (a 4k-context server fails KV init against leftovers; the profiles declare this allocation order).
+
 ---
 
 ### 3.7 Reasoning Performance, Query Complexity & Context Budgeting

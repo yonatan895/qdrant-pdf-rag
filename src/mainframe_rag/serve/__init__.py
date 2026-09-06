@@ -24,6 +24,7 @@ from mainframe_rag.serve.profiles import (
     QWEN2_5_05B,
     QWEN3_EMBED_06B,
     QWEN3_EMBED_4B,
+    RANK_EMBED_8GB,
     TRIPLE_8GB,
     list_profiles,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "QWEN2_5_05B",
     "QWEN3_EMBED_06B",
     "QWEN3_EMBED_4B",
+    "RANK_EMBED_8GB",
     "TRIPLE_8GB",
     "BudgetDeficitError",
     "DeploymentPlan",

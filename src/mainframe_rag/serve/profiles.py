@@ -109,14 +109,17 @@ QWEN3_EMBED_4B = ModelSpec(
 )
 
 # Ranking server served via the pooling runner (score path); cross-encoders
-# hold no KV cache. 1k window covers query+passage pairs.
+# hold no KV cache. 2k window: query+passage pairs over SECTION_MAX_CHARS
+# bodies overflow 1k (measured live 2026-09-06: 23/70 holdout queries 400d
+# at 1024) — the pooling margin is calibrated through 4096, so the window
+# bump needs no margin change.
 BGE_RERANKER_V2_M3 = ModelSpec(
     model_id="BAAI/bge-reranker-v2-m3",
     role="rerank",
     runner="pooling",
     weight_mib=1200.0,
     kv_bytes_per_token=0.0,
-    context_need=1024,
+    context_need=2048,
     max_num_seqs=32,
 )
 
@@ -137,10 +140,23 @@ TRIPLE_8GB = ProfileBundle(
     servers=[QWEN2_5_05B, QWEN3_EMBED_06B, BGE_RERANKER_V2_M3],
 )
 
+# Retrieval-only pack: embed first (allocation order — rerank scores the
+# embed leg's candidates), no reasoning server. For rerank A/B and gate
+# evals with --rerank where no LLM VRAM is wanted; answers are served by
+# hash-mode abstention only in this shape. Resolves 0.33 / 0.34 on 8151
+# MiB with wide slack; validated live 2026-09-06 (both 200 alongside the
+# triple's reasoning server, which this bundle simply omits).
+RANK_EMBED_8GB = ProfileBundle(
+    name="RANK_EMBED_8GB",
+    host=HostSpec(total_vram_mib=8151.0),
+    servers=[QWEN3_EMBED_06B, BGE_RERANKER_V2_M3],
+)
+
 PROFILES: dict[str, ProfileBundle] = {
     LOCAL_RT_8GB.name: LOCAL_RT_8GB,
     OPENSHIFT_PROD.name: OPENSHIFT_PROD,
     TRIPLE_8GB.name: TRIPLE_8GB,
+    RANK_EMBED_8GB.name: RANK_EMBED_8GB,
 }
 
 

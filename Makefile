@@ -392,11 +392,13 @@ ask: | .venv
 # (serving-budget track PR-B): the | .venv prereq provides the resolver
 # python, passed per-recipe (never exported globally). ROLE defaults to the
 # target's server; explicit ROLE=/GPU_MEM=/MAX_LEN=/SEQS= win.
-.PHONY: local-vllm local-vllm-embed test-vllm-e2e run-agent
+.PHONY: local-vllm local-vllm-embed local-vllm-rerank test-vllm-e2e run-agent
 local-vllm: | .venv
 	BUDGET_PYTHON="$(CURDIR)/.venv/bin/python" ROLE=$(or $(ROLE),reasoning) sh scripts/run_local_vllm.sh
 local-vllm-embed: | .venv
 	BUDGET_PYTHON="$(CURDIR)/.venv/bin/python" ROLE=$(or $(ROLE),embed) MODEL=$(or $(MODEL),Qwen/Qwen3-Embedding-0.6B) PORT=$(or $(PORT),8001) sh scripts/run_local_vllm.sh
+local-vllm-rerank: | .venv
+	BUDGET_PROFILE=$(or $(BUDGET_PROFILE),TRIPLE_8GB) BUDGET_PYTHON="$(CURDIR)/.venv/bin/python" ROLE=$(or $(ROLE),rerank) MODEL=$(or $(MODEL),BAAI/bge-reranker-v2-m3) PORT=$(or $(PORT),8002) sh scripts/run_local_vllm.sh
 
 test-vllm-e2e: | .venv
 	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",)
@@ -427,6 +429,6 @@ help:
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest | harness-l3"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper)"
 	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"
-	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
+	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."
