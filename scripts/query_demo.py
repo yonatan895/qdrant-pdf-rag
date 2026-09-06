@@ -529,9 +529,10 @@ def execute_answer(
     version: str | None = None,
     collection: str | None = None,
     settings: Settings | None = None,
-) -> tuple[dict[str, Any], list[SearchHit], str, dict[str, int]]:
+) -> tuple[ParsedAnswer, list[SearchHit], str, dict[str, int]]:
     from mainframe_rag.agent.answer import (
         HttpxLLMClient,
+        ParsedAnswer,
         as_chat_result,
         build_messages,
         classify_query_complexity,
@@ -545,11 +546,11 @@ def execute_answer(
         query, limit=limit, product=product, version=version, collection=collection, settings=settings
     )
     if not hits:
-        return {
-            "answer": "No relevant manual excerpts found in the collection.",
-            "citations": [],
-            "script": None,
-        }, hits, kind, timings
+        return ParsedAnswer(
+            answer="No relevant manual excerpts found in the collection.",
+            citations=[],
+            script=None,
+        ), hits, kind, timings
 
     complexity = classify_query_complexity(query)
     max_context = (

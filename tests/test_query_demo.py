@@ -154,6 +154,27 @@ def test_main_cli_answer_mode(mock_qdrant, mock_chat, mock_embed, mock_search, t
     assert '"citations_inferred": false' in content
 
 
+@patch("scripts.query_demo.retrieve_search")
+@patch("scripts.query_demo.build_embedder")
+@patch("qdrant_client.QdrantClient")
+def test_main_cli_answer_mode_zero_hits_renders_gracefully(
+    mock_qdrant, mock_embed, mock_search, tmp_path: Path, capsys
+):
+    # Issue #181: the empty-hits path returned a dict while renderers expect
+    # ParsedAnswer attributes — answer mode crashed instead of rendering.
+    mock_search.return_value = ([], "nl", {"embed_ms": 2, "qdrant_ms": 8})
+    out_file = tmp_path / "empty.json"
+
+    rc = main(["--query", "ZZZ9Z9Z9Z", "--answer", "--format", "json", "--out", str(out_file)])
+    assert rc == 0
+    content = out_file.read_text(encoding="utf-8")
+    assert "No relevant manual excerpts found" in content
+
+    rc = main(["--query", "ZZZ9Z9Z9Z", "--answer"])
+    assert rc == 0
+    assert "No relevant manual excerpts found" in capsys.readouterr().out
+
+
 def test_resolve_runtime_settings_fallback_to_hash(monkeypatch):
     monkeypatch.delenv("EMBED_MODE", raising=False)
     monkeypatch.delenv("EMBED_BASE_URL", raising=False)
