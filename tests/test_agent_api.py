@@ -1847,3 +1847,23 @@ def test_metrics_enabled_serves_prometheus_exposition(monkeypatch):
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/plain")
     assert "python_gc_objects_collected_total" in resp.text
+
+
+def test_lifespan_reranker_unreachable_warns_but_still_listens(monkeypatch, capsys):
+    """Prod reranker check: a dead RERANK_BASE_URL surfaces one loud startup
+    warning and never keeps the agent from listening (rerank is opt-in)."""
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "vllm")
+    monkeypatch.setenv("EMBED_BASE_URL", "http://embed.internal/v1")
+    monkeypatch.setenv("EMBED_MODEL", "test-embed-model")
+    monkeypatch.setenv("DENSE_DIM", "64")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    monkeypatch.setenv("RERANK_ENABLED", "true")
+    monkeypatch.setenv("RERANK_BASE_URL", "http://127.0.0.1:1")
+    with TestClient(app_mod.app) as c:
+        resp = c.get("/metrics")
+    assert resp.status_code == 404
+    # configure_logging replaces root handlers, so pytest's caplog stays
+    # empty — assert on the real stderr stream instead.
+    assert "reranker_unreachable" in capsys.readouterr().err

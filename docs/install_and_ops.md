@@ -587,6 +587,16 @@ LLM_MODEL_REASONING=ibm-granite/granite-20b-code-instruct
 PULL_SECRET=internal-registry-pull-secret
 ```
 
+#### Production model trio (reasoning / embed / rerank)
+
+The platform team serves three model endpoints; this repo never hardcodes model names — wire all three in `airgap.env`:
+
+| Role | URL key | Model key | Notes |
+|---|---|---|---|
+| Reasoning (`/v1/answer` only) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). |
+| Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `VLLM_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. |
+| Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `EMBED_BASE_URL`) | `RERANK_MODEL` | Served via vLLM `--task score` (`/v1/score`, TEI `/v1/rerank` fallback). Point it at the reranker server — the embed default only fits single-server deployments. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. |
+
 #### Pre-Flight Validation (`make airgap-validate`)
 
 Before modifying any cluster state, run the pre-flight validation check to verify tools, required variables, storage class compliance (refusing NFS), and OpenShift SCC permissions:

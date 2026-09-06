@@ -15,6 +15,7 @@ clients must treat "stream ended with no final" as failure.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -57,7 +58,7 @@ from mainframe_rag.ports import (
 from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import async_search as retrieve_search
-from mainframe_rag.retrieve.rerank import build_reranker
+from mainframe_rag.retrieve.rerank import build_reranker, probe_reranker
 
 log = logging.getLogger("agent")
 
@@ -234,6 +235,15 @@ async def lifespan(_app: FastAPI):
     embedder = build_embedder(settings, http_sync)
     tokenizer = build_tokenizer(settings, http_sync)
     reranker = build_reranker(settings, http_sync)
+    if reranker is not None:
+        # Best-effort reachability ping (warn-only): a mispointed
+        # RERANK_BASE_URL should surface as one loud startup line, not as
+        # per-request failures. Never fail-closed here — rerank is opt-in
+        # and must not keep the agent from listening at startup.
+        # Off the event loop like every other sync leg.
+        probe_error = await asyncio.to_thread(probe_reranker, reranker)
+        if probe_error is not None:
+            log.warning(json_log("lifespan", "reranker_unreachable", error=probe_error[:200]))
     # Two names on purpose: tests swap the `llm` global after startup; shutdown
     # must close the pool THIS lifespan created, never a test double.
     llm_client = HttpxLLMClient(settings)
