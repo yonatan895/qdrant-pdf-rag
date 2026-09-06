@@ -34,6 +34,8 @@ spec:
               value: __EMBED_MODEL__
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
+            - name: METRICS_ENABLED
+              value: "__METRICS_ENABLED__"
             - name: RERANK_ENABLED
               value: "__RERANK_ENABLED__"
             - name: RERANK_BASE_URL
@@ -64,10 +66,24 @@ spec:
   storageClassName: __STORAGE_CLASS__
 """
 
+# ServiceMonitor stub: mirrors the real render's placeholder surface (issue
+# #187) — namespace rewritten by deploy.sh, no images or storage.
+STUB_SERVICEMONITOR = """apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rag-agent
+  namespace: mainframe-rag
+spec:
+  endpoints:
+    - port: http
+      path: /metrics
+"""
+
 STUB_BIN = """#!/bin/sh
 if [ "$1" = "kustomize" ] || [ "$1" = "build" ]; then
   case "$2" in
     *jaeger*) cat {jaeger_stub} ;;
+    *servicemonitor*) cat {servicemonitor_stub} ;;
     *) cat {stub_yaml} ;;
   esac
   exit 0
@@ -89,14 +105,17 @@ def tree(tmp_path):
     shutil.copy(next(REPO.glob("charts/qdrant-*.tgz")), tmp_path / "charts")
     shutil.copy(REPO / "overlays" / "openshift" / "values.yaml", tmp_path / "overlays" / "openshift")
     shutil.copytree(REPO / "deploy" / "kustomize" / "jaeger", tmp_path / "deploy" / "kustomize" / "jaeger")
+    shutil.copytree(REPO / "deploy" / "kustomize" / "servicemonitor", tmp_path / "deploy" / "kustomize" / "servicemonitor")
     stub_yaml = tmp_path / "stub-kustomize.yaml"
     stub_yaml.write_text(STUB_KUSTOMIZE)
     jaeger_stub = tmp_path / "stub-jaeger.yaml"
     jaeger_stub.write_text(STUB_JAEGER)
+    servicemonitor_stub = tmp_path / "stub-servicemonitor.yaml"
+    servicemonitor_stub.write_text(STUB_SERVICEMONITOR)
     helm_log = tmp_path / "helm-args.log"
     for name in ("helm", "kubectl", "oc", "kustomize"):
         p = tmp_path / "bin" / name
-        p.write_text(STUB_BIN.format(stub_yaml=stub_yaml, jaeger_stub=jaeger_stub))
+        p.write_text(STUB_BIN.format(stub_yaml=stub_yaml, jaeger_stub=jaeger_stub, servicemonitor_stub=servicemonitor_stub))
         p.chmod(0o755)
     return tmp_path, helm_log
 
@@ -234,6 +253,40 @@ def test_tracing_jaeger_pull_secret_stays_absent_when_unset(tree):
     jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
     assert "imagePullSecrets: []" in jaeger
     assert "name: ghcr-pull" not in jaeger
+
+
+# ------------------------------------------------------- ServiceMonitor (#187)
+
+
+def test_metrics_off_skips_servicemonitor_and_renders_false(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    assert not (tree[0] / "dist" / "servicemonitor-rendered.yaml").exists()
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    # Env var always rendered, quoted "false" = /metrics 404s (fail-closed).
+    assert re.search(r'METRICS_ENABLED\n\s+value: "false"', rendered, re.MULTILINE)
+    assert "Metrics off" in r.stdout
+
+
+def test_metrics_enabled_deploys_servicemonitor_and_wires_env(tree):
+    r = _run(tree, ("METRICS_ENABLED", "true"))
+    assert r.returncode == 0, r.stderr
+    sm = (tree[0] / "dist" / "servicemonitor-rendered.yaml").read_text()
+    agent = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert "kind: ServiceMonitor" in sm
+    assert "path: /metrics" in sm
+    assert "namespace: ns" in sm
+    assert "__" not in sm
+    assert re.search(r'METRICS_ENABLED\n\s+value: "true"', agent, re.MULTILINE)
+    assert "__" not in agent
+
+
+def test_metrics_non_true_value_skips_servicemonitor(tree):
+    # Only the literal "true" opts in — "false"/"1"/empty all stay off.
+    for value in ("false", "1", ""):
+        r = _run(tree, ("METRICS_ENABLED", value))
+        assert r.returncode == 0, r.stderr
+        assert not (tree[0] / "dist" / "servicemonitor-rendered.yaml").exists()
 
 
 def test_reranker_defaults_off(tree):

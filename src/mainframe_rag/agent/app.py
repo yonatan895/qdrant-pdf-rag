@@ -39,6 +39,7 @@ from mainframe_rag.agent.answer import (
     classify_query_complexity,
     parse_answer,
 )
+from mainframe_rag.agent.metrics import setup_metrics
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.tracing import setup_tracing, shutdown_tracing
 from mainframe_rag.config import Settings, load_settings
@@ -261,6 +262,10 @@ async def lifespan(_app: FastAPI):
         export_queue_size=settings.otel_export_queue_size,
         export_timeout_ms=settings.otel_export_timeout_ms,
     )
+    # Prometheus metrics (issue #187): process-global provider + reader for
+    # UWM scrapes of GET /metrics. Pull model — nothing to flush, so no
+    # shutdown step; idempotent across lifespan re-entry.
+    setup_metrics(settings.metrics_enabled)
     yield
     shutdown_tracing()
     if hasattr(http, "aclose"):
@@ -382,6 +387,25 @@ async def method_not_allowed_handler(_request: Request, _exc: Exception) -> JSON
         status_code=405,
         content=ErrorEnvelope(code="method_not_allowed", message="method not allowed").model_dump(),
     )
+
+
+@app.get("/metrics")
+async def metrics() -> Response:
+    """Prometheus text exposition for UWM scrapes (issue #187). Opt-in via
+    Settings.metrics_enabled — disabled serves the stable 404 envelope, so
+    scanners learn nothing about the process. Scrape failures are a fixed
+    503; upstream text never reaches the client body. No trace span: scrapes
+    must not pollute request traces."""
+    if not settings.metrics_enabled:
+        raise AppError(404, "not_found", "not found")
+    try:
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+        body = generate_latest()
+    except Exception as exc:
+        log.warning(json_log("metrics", "scrape_failed", error=str(exc)[:200]))
+        raise AppError(503, "metrics_unavailable", "metrics are not available") from exc
+    return Response(content=body, media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/healthz", response_model=HealthzResponse)

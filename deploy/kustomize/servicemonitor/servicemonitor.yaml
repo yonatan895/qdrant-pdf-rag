@@ -1,0 +1,20 @@
+# ServiceMonitor: OpenShift user-workload monitoring scrapes the agent's
+# Prometheus exposition at GET /metrics (issue #187). Selector + port name
+# must track deploy/kustomize/base/agent.yaml (Service rag-agent, port http).
+# ClusterIP only — scrapes stay in-cluster; no Route, ever.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rag-agent
+  namespace: mainframe-rag
+  labels:
+    app: rag-agent
+spec:
+  selector:
+    matchLabels:
+      app: rag-agent
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

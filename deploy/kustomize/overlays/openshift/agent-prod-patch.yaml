@@ -38,6 +38,11 @@ spec:
             # (fail-closed default); Jaeger is not deployed without it.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
+            # Prometheus /metrics for UWM scrapes (issue #187): "true" serves
+            # exposition, anything else 404s (fail-closed default). deploy.sh
+            # also deploys the ServiceMonitor only in that case.
+            - name: METRICS_ENABLED
+              value: "__METRICS_ENABLED__"
             # Cross-encoder reranker (issue #76): default off (RERANK_ENABLED=false).
             - name: RERANK_ENABLED
               value: "__RERANK_ENABLED__"

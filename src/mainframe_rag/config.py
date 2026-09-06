@@ -142,6 +142,12 @@ class Settings(BaseSettings):
     otel_export_queue_size: int = Field(default=2048, ge=64, le=65536)
     otel_export_timeout_ms: int = Field(default=5000, ge=100, le=60000)
 
+    # Prometheus metrics (issue #187). Default OFF, mirroring tracing
+    # opt-in: UWM scrapes GET /metrics only when the operator enables this.
+    # No instruments are registered yet (WS3); the endpoint exposes process
+    # and runtime defaults for pipeline verification.
+    metrics_enabled: bool = False
+
     # Ingest. batch_size follows the Qdrant skill's 64-256 upsert band
     # (.agents/skills/qdrant-performance-optimization) — bounds enforced here
     # so no call site can grow a magic number outside it.

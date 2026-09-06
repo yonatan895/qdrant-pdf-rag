@@ -218,6 +218,7 @@ readers:
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
 | `allow_hash_mode` / `log_level` | `false` / INFO | lifespan hash gate / logging |
 | `otel_exporter_otlp_endpoint` (+ sample/queue/timeout) | unset = tracing off | tracing setup |
+| `metrics_enabled` | `false` = /metrics 404s | Prometheus exposition for UWM scrapes |
 | `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / bge-reranker-v2-m3 / embed URL / 50 / 32 / 5.0 | rerank dispatch → retrieve |
 | `rrf_k` / `rrf_weight_*` / `retrieve_max_chunks_per_page|doc` | 2 / 1.0,1.0 – 1.0,3.0 / 1, 3 | retrieve fusion + diversification |
 | `acronym_expansion_enabled` | `false` | rewrite (not agent) |

@@ -91,6 +91,7 @@ kustomize_render deploy/kustomize/overlays/openshift | sed -E 's|"(__[A-Z0-9_]+_
     -e "s|__LLM_BASE_URL__|${LLM_BASE_URL:-}|g" \
     -e "s|__LLM_MODEL_REASONING__|${LLM_MODEL_REASONING:-}|g" \
     -e "s|__OTEL_EXPORTER_OTLP_ENDPOINT__|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|g" \
+    -e "s|__METRICS_ENABLED__|\"${METRICS_ENABLED:-false}\"|g" \
     -e "s|__RERANK_ENABLED__|\"${RERANK_ENABLED:-false}\"|g" \
     -e "s|__RERANK_BASE_URL__|${RERANK_BASE_URL:-}|g" \
     -e "s|__RERANK_MODEL__|${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}|g" \
@@ -119,6 +120,21 @@ else
     echo "==> Tracing off (OTEL_EXPORTER_OTLP_ENDPOINT unset): Jaeger not deployed"
 fi
 
+# Prometheus ServiceMonitor for UWM scrapes (issue #187): opt-in via
+# METRICS_ENABLED=true in airgap.env. The agent env var is always rendered
+# ("false" = /metrics 404s); the ServiceMonitor only exists when on. No
+# rollout to wait for (not a workload).
+if [ "${METRICS_ENABLED:-false}" = "true" ]; then
+    echo "==> Kustomize: ServiceMonitor for UWM scrapes of /metrics"
+    kustomize_render deploy/kustomize/servicemonitor | sed \
+        -e "s|namespace: mainframe-rag|namespace: $NAMESPACE|g" \
+        > dist/servicemonitor-rendered.yaml
+    fail_on_placeholders dist/servicemonitor-rendered.yaml ServiceMonitor
+    run $KC apply -f dist/servicemonitor-rendered.yaml
+else
+    echo "==> Metrics off (METRICS_ENABLED!=true): ServiceMonitor not deployed"
+fi
+
 wait_rollout() {
     target=$1
     timeout_s=$2
@@ -143,6 +159,8 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] rendered manifest kept at dist/agent-rendered.yaml"
     [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] && \
         echo "[dryrun] Jaeger manifest kept at dist/jaeger-rendered.yaml"
+    [ "${METRICS_ENABLED:-false}" = "true" ] && \
+        echo "[dryrun] ServiceMonitor manifest kept at dist/servicemonitor-rendered.yaml"
 else
     echo "==> Wait for Qdrant + agent Ready"
     wait_rollout "statefulset/$QDRANT_RELEASE" 600
