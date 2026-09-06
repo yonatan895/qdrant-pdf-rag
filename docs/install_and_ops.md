@@ -717,7 +717,13 @@ Kind nodes pull images inside Docker; pulling from `airgap-registry:5000` over H
 # 1. Start local container registry container
 docker run -d --restart=always -p 5000:5000 --name airgap-registry registry:2
 
-# 2. Create Kind cluster with containerd insecure mirror for airgap-registry:5000
+# 2. Create Kind cluster with containerd mirrors for the local registry.
+# Two mirror keys, one registry: host-side pushes address it as
+# localhost:5000 (only localhost resolves on the host), while in-cluster
+# image refs use airgap-registry:5000 (deploy.sh renders app images under
+# INTERNAL_REGISTRY) AND localhost:5000 (the mock/corpus-gen manifests
+# below). Both keys point at the same registry container over plain HTTP —
+# drop either one and that naming family ErrImagePulls (proven 2026-09-06).
 mkdir -p scratch
 cat <<'EOF' > scratch/kind-config.yaml
 kind: Cluster
@@ -726,13 +732,16 @@ containerdConfigPatches:
 - |-
   [plugins."io.containerd.grpc.v1.cri".registry]
     [plugins."io.containerd.grpc.v1.cri".registry.mirrors]
+      [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5000"]
+        endpoint = ["http://airgap-registry:5000"]
       [plugins."io.containerd.grpc.v1.cri".registry.mirrors."airgap-registry:5000"]
         endpoint = ["http://airgap-registry:5000"]
 EOF
 kind create cluster --name airgap --config scratch/kind-config.yaml
 
-# 3. Connect local registry to Kind network
-docker network connect "kind" airgap-registry || true
+# 3. Connect local registry to Kind network (already connected on re-runs;
+# the redirect keeps the re-run output clean)
+docker network connect "kind" airgap-registry 2>/dev/null || true
 
 # 4. Point kubectl at the new cluster and verify access (a fresh shell may
 # have no current-context, in which case every kubectl call fails against
@@ -746,8 +755,13 @@ kubectl get nodes
 Packing pulls the app images from the registry tags for the checked-out SHA — it never builds locally. That means this step only works on a **green `main` SHA whose CI images already exist** (check out `main` first; an unmerged branch fails closed with `manifest unknown`). It also requires a signing key (§4.1); for rehearsal generate a throwaway:
 
 ```bash
-# Checkout a green main SHA first (pack bundles HEAD and pulls its GHCR tags):
+# Checkout a green main SHA first (pack bundles HEAD and pulls its GHCR tags).
+# Confirm the SHA's main workflows are green — e2e green means its images
+# were pushed; a missing tag still fails closed at pack time with a 404.
+# A stale local airgap.env IMAGE_SHA also fails closed here (explicit env
+# beats the file, or update the file):
 git checkout <green-main-sha>
+gh run list --branch main --limit 5   # ci + e2e green for the SHA
 
 # Rehearsal-only signing key (production uses the custodied key, §4.1):
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/signing.key
@@ -844,6 +858,13 @@ spec:
   ports: [{port: 8000, targetPort: 8000}]
 EOF
 kubectl -n "$NS" rollout status deploy/vllm-mock --timeout=180s
+# Probe the mock before deploying: rollout only proves the pod is up, while a
+# dim mismatch (MOCK_DIM vs airgap.env DENSE_DIM) surfaces much later at
+# ingest, which fails closed. The lengths must agree (no wget in the image;
+# python3 + stdlib urllib instead):
+kubectl -n "$NS" exec deploy/vllm-mock -- python3 -c \
+  "import json,urllib.request;print(len(json.load(urllib.request.urlopen(urllib.request.Request('http://localhost:8000/v1/embeddings',data=json.dumps({'model':'mock-embed','input':'probe'}).encode(),headers={'Content-Type':'application/json'}),timeout=10))['data'][0]['embedding']))"
+# expect: 64 (== DENSE_DIM)
 ```
 (This mirrors the `airgap-rehearsal` job in `.github/workflows/e2e.yml`, which is the proven reference when this section and CI disagree.)
 
@@ -986,3 +1007,6 @@ Citation validation runs on the accumulated text exactly as in JSON mode: the ci
 | **Degraded `/healthz` Smoke Failure** | `make airgap-smoke` exits 1 with `FAIL: /healthz probe did not report ok` | Pre-flight probe failed closed; check Qdrant and vLLM connectivity inside the cluster. |
 | **Qdrant 401 After Reinstall** | `/v1/search` fails with `401 Invalid API key or JWT` after Qdrant was reinstalled or re-`helm upgrade`d | The chart regenerates the `<release>-apikey` secret on reinstall while running agent pods keep the old key in env. Roll the agent: `kubectl -n <ns> rollout restart deploy/rag-agent` and wait for rollout before smoking again. |
 | **Stale dist/ MANIFEST** | `make airgap-validate` / `-deploy` / `-ingest` / `-dryrun` fail with `IMAGE_SHA=<sha> does not match packed MANIFEST sha` | `dist/` is gitignored build output that persists across checkouts — the MANIFEST inside is from an older pack (only `pack` regenerates it; the other steps just read it). Repack at the current HEAD, or clear the stale `dist/` before re-running. |
+| **Stale airgap.env IMAGE_SHA** | `make airgap-pack` / `-load` fail with `IMAGE_SHA=<sha> is not the checked-out commit` right after checking out a new SHA | `airgap.env` is gitignored local state from a previous rehearsal — its `IMAGE_SHA` no longer matches HEAD. Explicit env beats the file (`IMAGE_SHA=$(git rev-parse HEAD) make airgap-pack`), or update the file. |
+| **Stale dist/ tarballs fill disk** | `pack`/`load` fail with no-space errors after several rehearsals | Every pack leaves a ~1.5 GB `qdrant-pdf-rag-<sha>.tar` in gitignored `dist/`; only the MANIFEST-pinned one is live. Delete superseded tarballs (keep the `.tar.sha256` of the live one) — pack never prunes. |
+| **Kind ErrImagePull on localhost:5000** | mock/corpus-gen pods fail with `dial tcp [::1]:5000: connect: connection refused` | The Kind `containerdConfigPatches` in §4.7 must mirror **both** `localhost:5000` and `airgap-registry:5000` to the registry container — one key per naming family used by the manifests. Recreate the cluster with the documented config (containerd mirrors are set at creation). |
