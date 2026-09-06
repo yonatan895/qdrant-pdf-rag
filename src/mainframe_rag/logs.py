@@ -4,7 +4,10 @@ One JSON object per line: {"ts", "level", "logger", ...event fields}. Call
 sites pass either a pre-serialized JSON object string (merged when it parses
 — the agent's json_log and the ingest counters already do this) or plain
 text (wrapped as {"message": ...}). No secrets, no PDF text: callers log ids
-(doc_id, chunk_id, request_id), counts, and elapsed_ms only.
+(doc_id, chunk_id, request_id), counts, and elapsed_ms only. When a traced
+request is active, the formatter also stamps the OTel trace_id/span_id
+(issue #185) so log lines join to Jaeger traces; with tracing off the
+fields are omitted and the log shape is unchanged.
 """
 
 from __future__ import annotations
@@ -12,6 +15,8 @@ from __future__ import annotations
 import json
 import logging
 import time
+
+from mainframe_rag.agent.tracing import current_trace_ids
 
 
 class JsonFormatter(logging.Formatter):
@@ -32,6 +37,11 @@ class JsonFormatter(logging.Formatter):
             payload = {**parsed, **payload}
         else:
             payload["message"] = message
+        # Trace correlation last, never overwriting: an explicit caller
+        # value (e.g. propagated across a process boundary) wins over the
+        # ambient span context.
+        for key, value in current_trace_ids().items():
+            payload.setdefault(key, value)
         if record.exc_info:
             payload["error_type"] = (
                 record.exc_info[0].__name__ if record.exc_info[0] else "Error"
