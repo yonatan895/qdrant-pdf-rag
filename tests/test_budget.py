@@ -18,6 +18,7 @@ from mainframe_rag.serve import (
     MAX_UTIL,
     OPENSHIFT_PROD,
     POOLING_EAGER_MARGIN_MIB,
+    TRIPLE_8GB,
     BudgetDeficitError,
     HostSpec,
     ModelSpec,
@@ -43,7 +44,7 @@ def test_engine_margin_defaults():
 
 
 def test_profiles_registered():
-    assert list_profiles() == ["LOCAL_RT_8GB", "OPENSHIFT_PROD"]
+    assert list_profiles() == ["LOCAL_RT_8GB", "OPENSHIFT_PROD", "TRIPLE_8GB"]
 
 
 def test_local_profile_resolves_to_validated_operating_points():
@@ -258,3 +259,45 @@ def test_specs_are_immutable():
         LOCAL_RT_8GB.servers[0].weight_mib = 1.0  # type: ignore[misc]
     with pytest.raises(ValidationError):
         LOCAL_RT_8GB.host.total_vram_mib = 1.0  # type: ignore[misc]
+
+
+def test_triple_pack_fits_with_measured_operating_points():
+    """TRIPLE_8GB: small reasoning + embed + rerank co-reside on 8151 MiB.
+    Validated live 2026-09-06 (all three 200 at 4601 MiB resident); the
+    resolve must reproduce that pack, not merely avoid a deficit."""
+    plan = resolve(TRIPLE_8GB)
+    assert plan.profile_name == "TRIPLE_8GB"
+    assert len(plan.servers) == 3
+    reasoning, embed, rerank = plan.servers
+
+    assert reasoning.model_id == "Qwen/Qwen2.5-0.5B-Instruct"
+    assert reasoning.gpu_memory_utilization == 0.19
+    assert reasoning.max_model_len == 2048
+    assert reasoning.runner == "generate"
+    assert reasoning.enforce_eager is False
+    assert reasoning.max_num_seqs == 4
+
+    assert embed.model_id == "Qwen/Qwen3-Embedding-0.6B"
+    assert embed.gpu_memory_utilization == 0.33
+
+    assert rerank.model_id == "BAAI/bge-reranker-v2-m3"
+    assert rerank.gpu_memory_utilization == 0.34
+    assert rerank.runner == "pooling"
+    assert rerank.enforce_eager is True
+    assert rerank.max_num_batched_tokens == 1024
+
+    assert plan.slack_mib >= 0
+    assert plan.warnings == []
+
+
+def test_compiled_margin_override_defaults_to_formula():
+    """The override is opt-in per spec: unset means the floor+fraction
+    formula, so every existing profile resolves byte-identically."""
+    assert TRIPLE_8GB.servers[1].compiled_margin_mib is None
+    assert TRIPLE_8GB.servers[0].compiled_margin_mib == 500.0
+    # The override is what lets the 0.5B server fit: the 2 GiB floor alone
+    # prices it off the card (3048 MiB footprint before embed/rerank claim).
+    from mainframe_rag.serve.budget import _compiled_margin
+
+    assert _compiled_margin(TRIPLE_8GB.servers[0]) == 500.0
+    assert _compiled_margin(TRIPLE_8GB.servers[1]) == COMPILED_MARGIN_FLOOR_MIB

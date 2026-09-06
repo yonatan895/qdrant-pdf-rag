@@ -84,6 +84,13 @@ class ModelSpec(BaseModel):
     # review rule): to change a window, change the declared spec.
     context_need: int = Field(gt=0, le=131072)
     max_num_seqs: int = Field(default=1, ge=1)
+    # Optional override for the compiled-generate workspace margin (default:
+    # floor 2 GiB + 5% of weights). The floor is calibrated for 4B+ servers;
+    # sub-billion models capture far smaller graphs (measured 0.08 GiB for
+    # the 0.5B reasoning server, 2026-09-06), so the default would price
+    # them off small hosts they demonstrably fit. Set only with a measured
+    # basis, never to squeeze a deficit.
+    compiled_margin_mib: float | None = Field(default=None, ge=0.0)
     # vLLM prefix caching (KV reuse across shared prompt prefixes). A launch
     # flag like runner/convert/eager, not sizing: off unless the profile
     # enables it; issue #80 measures the hit rate before enabling anywhere.
@@ -186,6 +193,14 @@ def _compiled_margin_mib(weight_mib: float) -> float:
     return max(COMPILED_MARGIN_FLOOR_MIB, COMPILED_MARGIN_WEIGHT_FRACTION * weight_mib)
 
 
+def _compiled_margin(spec: ModelSpec) -> float:
+    """Per-model override when declared (measured basis only), else the
+    floor+fraction formula. One helper so the two use sites cannot diverge."""
+    if spec.compiled_margin_mib is not None:
+        return spec.compiled_margin_mib
+    return _compiled_margin_mib(spec.weight_mib)
+
+
 def _ceil_util(footprint_mib: float, total_mib: float) -> float:
     return math.ceil(footprint_mib / total_mib / UTIL_QUANTUM) * UTIL_QUANTUM
 
@@ -227,12 +242,10 @@ def resolve(profile: ProfileBundle) -> DeploymentPlan:
             margin = POOLING_EAGER_MARGIN_MIB
             batched: int | None = spec.context_need
         else:
-            compiled_footprint = spec.weight_mib + kv_pool_mib + _compiled_margin_mib(
-                spec.weight_mib
-            )
+            compiled_footprint = spec.weight_mib + kv_pool_mib + _compiled_margin(spec)
             if compiled_footprint <= free:
                 eager = False
-                margin = _compiled_margin_mib(spec.weight_mib)
+                margin = _compiled_margin(spec)
                 batched = None
             else:
                 eager_footprint = spec.weight_mib + kv_pool_mib + EAGER_GENERATE_MARGIN_MIB

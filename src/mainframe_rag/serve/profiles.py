@@ -61,6 +61,26 @@ LOCAL_RT_8GB = ProfileBundle(
     servers=[GEMMA4_E4B_QAT, QWEN3_EMBED_06B],
 )
 
+# Qwen2.5-0.5B-Instruct: sub-billion reasoning stand-in so all three legs
+# (reasoning + embed + rerank) co-reside on one 8GB card — the 4B reasoning
+# server leaves no room for a third. Weights ~= 1.0 GiB fp16 resident; KV
+# figure is the arch shape (2 x 24 layers x 2 kv_heads x 128 dim x 2 B).
+# Compiled margin is a measured override (live 2026-09-06: 0.08 GiB graph
+# resident, 1.27 GiB total server at 0.20 util): the 2 GiB floor would price
+# this server off the card it demonstrably fits. Single-query dev smoke and
+# rerank A/B plumbing only — answers are weak; answer-quality sessions
+# time-share the 4B server back in. No prefix cache (unmeasured here).
+QWEN2_5_05B = ModelSpec(
+    model_id="Qwen/Qwen2.5-0.5B-Instruct",
+    role="reasoning",
+    runner="generate",
+    weight_mib=1000.0,
+    kv_bytes_per_token=24576.0,
+    context_need=2048,
+    max_num_seqs=4,
+    compiled_margin_mib=500.0,
+)
+
 # Illustrative 31B-class reasoning server (bf16 ~= 59 GiB resident upper
 # bound) at an 8k window with production concurrency. KV shape is a
 # representative large-GQA layout (2 x 48 x 8 x 128 x 2 B); confirm SKUs
@@ -106,9 +126,21 @@ OPENSHIFT_PROD = ProfileBundle(
     servers=[GEMMA4_31B, QWEN3_EMBED_4B, BGE_RERANKER_V2_M3],
 )
 
+# Triple-leg local pack: small reasoning first (allocation order), then the
+# unchanged embed + rerank specs. Resolves 0.19 / 0.33 / 0.34 on 8151 MiB
+# with ~1 GiB slack; validated live 2026-09-06 (all three 200, 4601 MiB
+# resident). Run with BUDGET_PROFILE=TRIPLE_8GB (ROLE=rerank included —
+# LOCAL_RT_8GB fails that role closed by design).
+TRIPLE_8GB = ProfileBundle(
+    name="TRIPLE_8GB",
+    host=HostSpec(total_vram_mib=8151.0),
+    servers=[QWEN2_5_05B, QWEN3_EMBED_06B, BGE_RERANKER_V2_M3],
+)
+
 PROFILES: dict[str, ProfileBundle] = {
     LOCAL_RT_8GB.name: LOCAL_RT_8GB,
     OPENSHIFT_PROD.name: OPENSHIFT_PROD,
+    TRIPLE_8GB.name: TRIPLE_8GB,
 }
 
 
