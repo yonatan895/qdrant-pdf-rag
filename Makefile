@@ -207,10 +207,11 @@ EVAL_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-vllm.json,evals
 PARAPHRASE_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-paraphrase-vllm.json,evals/baseline-paraphrase.json)
 HARNESS_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-vllm.json,benchmarks/harness.json)
 # Venue pin (issue #158): the hash venue evaluates the dev golden set only —
-# the holdout sibling-book traps (VER-09/10) are structurally unpassable in
-# the synthetic hash corpus (sibling pages carry near-identical query text by
-# corpus design), so the holdout is vllm-venue-only. Empty for vllm: the
-# harness default (golden + holdout) stands.
+# the holdout binds real-corpus books, so the holdout is vllm-venue-only
+# (the real-corpus semantic gate is `make eval-holdout`, not the harness).
+# The vllm harness runs golden + holdout over the snapshot-pinned synthetic
+# venue: a determinism guard, mostly saturated, with little discriminating
+# power. Empty for vllm: the harness default (golden + holdout) stands.
 HARNESS_GOLDEN = $(if $(filter vllm,$(EMBED_MODE)),,--golden evals/golden.jsonl)
 HARNESS_L3_BASELINE ?= $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-l3-vllm.json,benchmarks/harness-l3.json)
 eval eval-baseline eval-draft eval-holdout eval-answers eval-report eval-html eval-compare \

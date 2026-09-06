@@ -98,6 +98,8 @@ def verify_entry(entry: GoldenEntry, facts: CorpusFacts) -> tuple[list[str], lis
     missing_docs = [d for d in entry.expected_doc_ids if d not in facts.docs]
     if missing_docs:
         fails.append(f"expected doc(s) not in collection: {missing_docs}")
+    if len(entry.expected_doc_ids) != len(set(entry.expected_doc_ids)):
+        fails.append(f"duplicate expected_doc_ids: {entry.expected_doc_ids}")
     missing_traps = [d for d in entry.must_not_retrieve if d not in facts.docs]
     if missing_traps:
         fails.append(f"must_not doc(s) not in collection: {missing_traps}")

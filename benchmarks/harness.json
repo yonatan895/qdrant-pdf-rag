@@ -3,19 +3,19 @@
   "note": "Harness promotion baseline; re-record via `make harness-baseline` (dedicated PR, AGENTS.md).",
   "embed_mode": "hash",
   "snapshot": {
-   "points_count": 221,
-   "snapshot_name": "mainframe_manuals_hash-2007008481010860-2026-09-05-16-37-36.snapshot"
+   "points_count": 208,
+   "snapshot_name": "mainframe_manuals-2007008481010860-2026-09-06-06-06-18.snapshot"
   },
   "class_regression_floor": 0.05,
-  "updated": "2026-09-05"
+  "updated": "2026-09-06"
  },
  "overall": {
-  "n": 109,
-  "scored": 109,
-  "recall@5": 0.8807,
-  "recall@8": 0.8807,
-  "mrr": 0.8761,
-  "ndcg@8": 0.9186
+  "n": 104,
+  "scored": 104,
+  "recall@5": 0.9712,
+  "recall@8": 0.9712,
+  "mrr": 0.9712,
+  "ndcg@8": 0.9712
  },
  "classes": {
   "comparative": {
@@ -31,8 +31,8 @@
    "scored": 27,
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.9815,
-   "ndcg@8": 0.9678
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "doc_number": {
    "n": 14,
@@ -44,7 +44,7 @@
   },
   "message_id": {
    "n": 23,
-   "scored": 23,
+   "scored": 22,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
@@ -60,15 +60,15 @@
   },
   "syntax": {
    "n": 25,
-   "scored": 25,
-   "recall@5": 0.6,
-   "recall@8": 0.6,
-   "mrr": 0.6,
-   "ndcg@8": 0.8
+   "scored": 24,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "version": {
    "n": 8,
-   "scored": 8,
+   "scored": 5,
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
@@ -266,7 +266,7 @@
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.5
+   "ndcg@8": 1.0
   },
   "DOC-01": {
    "recall@5": 0.0,
@@ -379,8 +379,8 @@
   "LEG-08": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "LEG-09": {
    "recall@5": 1.0,
@@ -485,12 +485,7 @@
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
-  "MSG-24": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
-  },
+  "MSG-24": {},
   "MSG-27": {
    "recall@5": 1.0,
    "recall@8": 1.0,
@@ -582,64 +577,64 @@
    "ndcg@8": 1.0
   },
   "SYN-10": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.5
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-11": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.5
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-12": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.5
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-15": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.5
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-16": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.5
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-17": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.5
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-20": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.5
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-21": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.5
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-22": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.5
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-25": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.5
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-26": {
    "recall@5": 1.0,
@@ -665,12 +660,7 @@
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
-  "SYN-32": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
-  },
+  "SYN-32": {},
   "SYN-35": {
    "recall@5": 1.0,
    "recall@8": 1.0,
@@ -713,24 +703,9 @@
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
-  "VER-07": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
-  },
-  "VER-08": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
-  },
-  "VER-11": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
-  },
+  "VER-07": {},
+  "VER-08": {},
+  "VER-11": {},
   "VER-12": {
    "recall@5": 1.0,
    "recall@8": 1.0,
