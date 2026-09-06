@@ -781,6 +781,9 @@ jobs:
           METRICS_ENABLED: "true"
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
+          # Hermetic w.r.t. sibling dry-run steps sharing this workspace:
+          # prove metrics-on does not drag Jaeger along.
+          rm -f dist/jaeger-rendered.yaml
           make airgap-deploy
           test -f dist/servicemonitor-rendered.yaml
           grep -q "kind: ServiceMonitor" dist/servicemonitor-rendered.yaml
