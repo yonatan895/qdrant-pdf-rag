@@ -146,6 +146,23 @@ class HttpReranker:
 
 
 # ------------------------------------------------------- Dispatch and candidate scoring
+def probe_reranker(reranker: Reranker) -> str | None:
+    """Best-effort 1x1 score ping for lifespan startup.
+
+    Returns None when the endpoint answers with one score, else a short
+    error string for a loud startup warning. Warn-only by design: rerank
+    is opt-in, so a dead endpoint must never keep the agent from listening
+    at startup. HashReranker always passes (in-process, nothing to probe).
+    """
+    try:
+        scores = reranker.score("probe", ["probe"])
+    except Exception as exc:  # noqa: BLE001
+        return f"{type(exc).__name__}: {exc}"[:200]
+    if len(scores) != 1:
+        return f"expected 1 score, got {len(scores)}"
+    return None
+
+
 def build_reranker(settings: Settings, client: httpx2.Client | None = None) -> Reranker | None:
     """The single dispatch point for reranking. Never branch on reranker flags elsewhere."""
     if not settings.rerank_enabled:

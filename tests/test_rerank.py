@@ -29,6 +29,7 @@ from mainframe_rag.retrieve.rerank import (
     HttpReranker,
     build_reranker,
     format_rerank_text,
+    probe_reranker,
     rerank_candidates,
 )
 
@@ -582,3 +583,45 @@ def test_answerable_query_still_reranks():
     assert "rerank_ms" in timings
     assert reranker.call_count == 1
     assert all(q["limit"] == 50 for q in client.queries_made)
+
+
+def _probe_settings(**overrides):
+    base = {
+        "rerank_base_url": "http://rerank.test/v1",
+        "rerank_model": "Qwen/Qwen3-Reranker-8B",
+        "rerank_batch_size": 2,
+        "rerank_timeout_s": 3.0,
+        "_env_file": None,
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
+def test_probe_reranker_success():
+    """Lifespan probe passes when the endpoint answers one score."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/v1/score"
+        return httpx2.Response(200, json={"data": [{"index": 0, "score": 0.7}]})
+
+    reranker = HttpReranker(
+        _probe_settings(), client=httpx2.Client(transport=httpx2.MockTransport(handler))
+    )
+    assert probe_reranker(reranker) is None
+
+
+def test_probe_reranker_dead_endpoint_returns_message():
+    """Lifespan probe reports (never raises) when score + fallback both fail."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(500)
+
+    reranker = HttpReranker(
+        _probe_settings(), client=httpx2.Client(transport=httpx2.MockTransport(handler))
+    )
+    err = probe_reranker(reranker)
+    assert isinstance(err, str) and err
+
+
+def test_probe_reranker_hash_always_passes():
+    assert probe_reranker(HashReranker()) is None
