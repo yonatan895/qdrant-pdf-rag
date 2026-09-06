@@ -21,8 +21,10 @@ from mainframe_rag.serve.profiles import (
     LOCAL_RT_8GB,
     OPENSHIFT_PROD,
     PROFILES,
+    QWEN2_5_05B,
     QWEN3_EMBED_06B,
     QWEN3_EMBED_4B,
+    TRIPLE_8GB,
     list_profiles,
 )
 
@@ -38,8 +40,10 @@ __all__ = [
     "OPENSHIFT_PROD",
     "POOLING_EAGER_MARGIN_MIB",
     "PROFILES",
+    "QWEN2_5_05B",
     "QWEN3_EMBED_06B",
     "QWEN3_EMBED_4B",
+    "TRIPLE_8GB",
     "BudgetDeficitError",
     "DeploymentPlan",
     "HostSpec",
