@@ -22,7 +22,7 @@ openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -noout >/dev/null 2>&1 || die "SNEAKE
 [ -d .git ] || die "run from a git clone of the repository"
 [ -n "$IMAGE_SHA" ] || die "IMAGE_SHA could not be resolved from git"
 [ "$IMAGE_SHA" = "$(git rev-parse HEAD)" ] || \
-    die "IMAGE_SHA=$IMAGE_SHA is not the checked-out commit ($(git rev-parse HEAD)). Pack at the SHA whose GHCR tags exist; the bundle is always of HEAD."
+    die "IMAGE_SHA=$IMAGE_SHA is not the checked-out commit ($(git rev-parse HEAD)). Pack at the SHA whose GHCR tags exist; the bundle is always of HEAD. Usual cause: a stale IMAGE_SHA in ./airgap.env — explicit env beats the file, or update the file."
 
 GHCR_OWNER=${GHCR_OWNER:-}
 APP_REGISTRY=${AIRGAP_APP_REGISTRY:-}

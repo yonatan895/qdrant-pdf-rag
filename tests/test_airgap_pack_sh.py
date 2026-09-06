@@ -140,6 +140,7 @@ def test_pack_sha_mismatch_fails_closed(pack_tree):
     r, _head = _run_pack(pack_tree, ("IMAGE_SHA", "f" * 40))
     assert r.returncode != 0
     assert "is not the checked-out commit" in r.stderr
+    assert "airgap.env" in r.stderr
 
 
 def test_pack_missing_skopeo_fails_closed(pack_tree):
