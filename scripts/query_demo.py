@@ -379,7 +379,8 @@ def resolve_runtime_settings(
                     chosen_embed_model = avail[0]
 
                 resolved_dim = dense_dim or settings.dense_dim
-                if resolved_dim is None and chosen_embed_model:
+                server_dim: int | None = None
+                if (resolved_dim is None or dense_dim is not None) and chosen_embed_model:
                     try:
                         p_resp = httpx2.post(
                             f"{target_embed_url.rstrip('/')}/embeddings",
@@ -390,9 +391,28 @@ def resolve_runtime_settings(
                             p_json = p_resp.json()
                             data = p_json.get("data", [])
                             if data and isinstance(data, list) and isinstance(data[0], dict) and "embedding" in data[0]:
-                                resolved_dim = len(data[0]["embedding"])
+                                server_dim = len(data[0]["embedding"])
+                                if resolved_dim is None:
+                                    resolved_dim = server_dim
                     except (httpx2.HTTPError, OSError, ValueError, KeyError, TypeError):
                         pass
+
+                # Fail closed (issue #180): the vLLM embedder returns
+                # native-dim vectors and never consults dense_dim, so an
+                # explicit --dense-dim that disagrees with the server would
+                # otherwise be silently ignored with a green exit.
+                if dense_dim is not None and server_dim is not None and dense_dim != server_dim:
+                    raise SystemExit(
+                        f"error: --dense-dim {dense_dim} does not match the embedding "
+                        f"server's native dimension {server_dim} "
+                        f"(model {chosen_embed_model} at {target_embed_url})"
+                    )
+                if dense_dim is not None and server_dim is None:
+                    print(
+                        f"warn: --dense-dim {dense_dim} could not be verified against the "
+                        "embedding server (probe failed); proceeding",
+                        file=sys.stderr,
+                    )
 
                 updates["embed_mode"] = "vllm"
                 updates["embed_base_url"] = target_embed_url
@@ -657,7 +677,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--embed-url", default=None, help="Embedding server URL (e.g. http://localhost:8001/v1)")
     parser.add_argument("--embed-model", default=None, help="Embedding model name (e.g. Qwen3-Embedding-0.6B)")
     parser.add_argument("--embed-mode", choices=["vllm", "hash"], default=None, help="Embedding mode ('vllm' or 'hash')")
-    parser.add_argument("--dense-dim", type=int, default=None, help="Dense vector dimension override")
+    parser.add_argument("--dense-dim", type=int, default=None, help="Dense vector dimension override (must match the embedding server's native dimension; mismatches fail closed)")
     parser.add_argument("--vllm-url", default=None, help="LLM reasoning server URL (e.g. http://localhost:8000/v1)")
     parser.add_argument("--model", default=None, help="LLM reasoning model name override")
     parser.add_argument("--format", choices=["text", "json", "html"], default="text", help="Output format")
