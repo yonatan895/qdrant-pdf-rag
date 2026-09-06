@@ -76,7 +76,10 @@ QWEN2_5_05B = ModelSpec(
     runner="generate",
     weight_mib=1000.0,
     kv_bytes_per_token=24576.0,
-    context_need=2048,
+    # 4096, not 2048: live 2026-09-06 proved a 2048 window 400s real RAG
+    # prompts (system + 3 excerpts), so the smaller window cannot serve the
+    # answer tier at all. Footprint still fits the triple (see TRIPLE_8GB).
+    context_need=4096,
     max_num_seqs=4,
     compiled_margin_mib=500.0,
 )
@@ -130,10 +133,10 @@ OPENSHIFT_PROD = ProfileBundle(
 )
 
 # Triple-leg local pack: small reasoning first (allocation order), then the
-# unchanged embed + rerank specs. Resolves 0.19 / 0.33 / 0.34 on 8151 MiB
-# with ~1 GiB slack; validated live 2026-09-06 (all three 200, 4601 MiB
-# resident). Run with BUDGET_PROFILE=TRIPLE_8GB (ROLE=rerank included —
-# LOCAL_RT_8GB fails that role closed by design).
+# unchanged embed + rerank specs. Resolves 0.20 / 0.33 / 0.34 on 8151 MiB
+# with ~0.9 GiB slack; validated live 2026-09-06 (all three 200, 5777 MiB
+# resident with the 4k reasoning window). Run with BUDGET_PROFILE=TRIPLE_8GB
+# (ROLE=rerank included — LOCAL_RT_8GB fails that role closed by design).
 TRIPLE_8GB = ProfileBundle(
     name="TRIPLE_8GB",
     host=HostSpec(total_vram_mib=8151.0),

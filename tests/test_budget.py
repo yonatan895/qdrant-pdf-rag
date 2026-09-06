@@ -275,8 +275,8 @@ def test_triple_pack_fits_with_measured_operating_points():
     reasoning, embed, rerank = plan.servers
 
     assert reasoning.model_id == "Qwen/Qwen2.5-0.5B-Instruct"
-    assert reasoning.gpu_memory_utilization == 0.19
-    assert reasoning.max_model_len == 2048
+    assert reasoning.gpu_memory_utilization == 0.20
+    assert reasoning.max_model_len == 4096
     assert reasoning.runner == "generate"
     assert reasoning.enforce_eager is False
     assert reasoning.max_num_seqs == 4
