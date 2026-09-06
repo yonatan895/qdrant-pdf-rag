@@ -280,6 +280,22 @@ def evaluate(golden: list[GoldenEntry], settings) -> dict:
         timeout=settings.qdrant_timeout_s,
     )
     embedder = build_embedder(settings)
+    # Extraction-rules desync warning (issue #124): the eval is the
+    # instrument that caught the #120 silent-recall loss — payload
+    # message_ids extracted under older regex rules made the prefetch
+    # filter match nothing. Warning only: the run still produces numbers
+    # (trend data), but they are not comparable to a same-rules baseline.
+    from mainframe_rag.ingest.qdrant_io import stored_rules_version
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    stored_v = stored_rules_version(client, settings)
+    if stored_v is not None and stored_v != extraction_rules_version():
+        print(
+            f"warn: collection {settings.qdrant_collection!r} payloads were extracted under rules "
+            f"{stored_v!r}; this tree computes {extraction_rules_version()!r} — "
+            "re-ingest required for numbers comparable to a same-rules baseline",
+            file=sys.stderr,
+        )
     from mainframe_rag.retrieve.rerank import build_reranker
 
     reranker = build_reranker(settings)

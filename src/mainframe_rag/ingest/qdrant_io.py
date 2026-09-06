@@ -13,6 +13,7 @@ from qdrant_client import models
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ports import QdrantPoints, SparseVector
 
 HNSW_M = 16
@@ -114,19 +115,40 @@ def ensure_collection(client: QdrantPoints, settings: Settings) -> None:
     ensure_payload_indexes(client, collection)
 
 
-def doc_sha256(client: QdrantPoints, settings: Settings, doc_id: str) -> str | None:
-    """Stored sha256 for doc_id (first hit), or None if the doc is absent."""
+def stored_doc_state(client: QdrantPoints, settings: Settings, doc_id: str) -> tuple[str | None, str | None]:
+    """(sha256, rules_v) for doc_id (first hit), or (None, None) if absent.
+    The third skip layer (issue #124, found live on the real_manuals
+    re-stamp): a sha-equal doc whose stored rules_v differs is stale —
+    same file bytes do not mean current payloads — so the skip decision
+    must gate on BOTH, exactly like the inventory skip."""
     points, _ = client.scroll(
         settings.qdrant_collection,
         scroll_filter=models.Filter(
             must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
         ),
         limit=1,
-        with_payload=["sha256"],
+        with_payload=["sha256", "rules_v"],
+    )
+    if not points:
+        return None, None
+    payload = points[0].payload or {}
+    return payload.get("sha256"), payload.get("rules_v")
+
+
+def stored_rules_version(client: QdrantPoints, settings: Settings) -> str | None:
+    """Extraction-rules version carried by the collection's points (issue
+    #124). Returns None when the collection is EMPTY (fresh — nothing to
+    compare) and the empty string when points exist but predate versioning
+    (legacy — a mismatch, never a pass): the two must not blur, or an old
+    collection would silently serve mixed-rule payloads."""
+    points, _ = client.scroll(
+        settings.qdrant_collection,
+        limit=1,
+        with_payload=["rules_v"],
     )
     if not points:
         return None
-    return (points[0].payload or {}).get("sha256")
+    return str((points[0].payload or {}).get("rules_v") or "")
 
 
 def delete_by_doc(client: QdrantPoints, settings: Settings, doc_id: str) -> None:
@@ -159,6 +181,7 @@ def upsert_chunks(
     observability when present; it is never filtered on, so it takes no
     payload index."""
     collection = settings.qdrant_collection
+    rules_v = extraction_rules_version()
     points: list[models.PointStruct] = []
     for chunk, (dense, (sparse_idx, sparse_val)) in zip(chunks, vectors):
         payload = {
@@ -174,6 +197,7 @@ def upsert_chunks(
             "message_ids": chunk.message_ids,
             "members": chunk.members,
             "sha256": parsed.sha256,
+            "rules_v": rules_v,
             "text": chunk.text,
         }
         if contexts and (context := contexts.get(chunk.chunk_id)):

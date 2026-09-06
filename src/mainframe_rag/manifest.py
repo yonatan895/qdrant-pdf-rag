@@ -20,6 +20,7 @@ import httpx2
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.context import CONTEXT_PROMPT_VERSION
+from mainframe_rag.ingest.rules_version import extraction_rules_version
 
 
 def get_git_sha(repo_root: Path | None = None) -> str:
@@ -110,6 +111,11 @@ def write_run_manifest(
         "git_sha": git_sha,
         "settings_hash": settings_hash,
         "model_ids": model_ids,
+        # Extraction-rules version (issue #124): which identifier-regex /
+        # chunk / classify rules produced the payloads this run scored.
+        # Eval numbers are only comparable across runs with equal values —
+        # a mismatch is the #120 silent-recall-loss failure mode.
+        "extraction_rules_version": extraction_rules_version(),
         "qdrant_version": qdrant_ver,
         "collection_snapshot_id": snapshot_id,
         "metrics": metrics,
