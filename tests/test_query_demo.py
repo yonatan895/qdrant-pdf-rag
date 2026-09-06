@@ -3,6 +3,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from scripts.query_demo import (
     _format_text_hit,
     main,
@@ -251,6 +252,48 @@ def test_resolve_runtime_settings_malformed_json_fallback():
         settings = resolve_runtime_settings()
         assert settings.embed_mode == "hash"
         assert settings.allow_hash_mode is True
+
+
+def _vllm_1024_mocks():
+    def mock_get(url, timeout=None):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": [{"id": "Qwen/Qwen3-Embedding-0.6B"}]}
+        return mock_resp
+
+    def mock_post(url, json=None, timeout=None):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": [{"embedding": [0.1] * 1024}]}
+        return mock_resp
+
+    return mock_get, mock_post
+
+
+def test_resolve_runtime_settings_explicit_dense_dim_mismatch_fails_closed(monkeypatch):
+    # Issue #180: an explicit --dense-dim disagreeing with the server's
+    # native dim must exit nonzero, never silently search at native dim.
+    monkeypatch.delenv("EMBED_MODE", raising=False)
+    monkeypatch.delenv("EMBED_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    mock_get, mock_post = _vllm_1024_mocks()
+    with (
+        patch("httpx2.get", side_effect=mock_get),
+        patch("httpx2.post", side_effect=mock_post),
+        pytest.raises(SystemExit) as exc,
+    ):
+        resolve_runtime_settings(embed_mode="vllm", dense_dim=512)
+    assert "512" in str(exc.value.code) and "1024" in str(exc.value.code)
+
+
+def test_resolve_runtime_settings_explicit_dense_dim_match_applies(monkeypatch):
+    monkeypatch.delenv("EMBED_MODE", raising=False)
+    monkeypatch.delenv("EMBED_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    mock_get, mock_post = _vllm_1024_mocks()
+    with patch("httpx2.get", side_effect=mock_get), patch("httpx2.post", side_effect=mock_post):
+        settings = resolve_runtime_settings(embed_mode="vllm", dense_dim=1024)
+        assert settings.dense_dim == 1024
 
 
 
