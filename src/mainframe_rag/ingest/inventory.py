@@ -53,13 +53,18 @@ def should_skip(
     sha256: str,
     allow_dry: bool = False,
     rules_version: str | None = None,
+    force_reingest: bool = False,
 ) -> bool:
     """Skip when this exact file already finished under the SAME extraction
     rules (issue #124): the record carries the rules version its payloads
     were extracted with, and a content-unchanged file must still re-ingest
     when the rules changed — otherwise a regex widening desyncs queries
     (new rules) from payloads (old rules) and recall collapses silently.
-    Records from before versioning carry no field and never skip."""
+    Records from before versioning carry no field and never skip.
+    `--reingest` (issue #179) forces re-extraction of every doc, so a
+    forced run never skips on the progress file."""
+    if force_reingest:
+        return False
     if not (record and record.sha256 == sha256):
         return False
     if record.rules_version != rules_version:

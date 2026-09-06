@@ -62,6 +62,15 @@ def test_should_skip_gates_on_rules_version() -> None:
     assert should_skip(rec, "b" * 64, rules_version="v1") is False
 
 
+def test_should_skip_force_reingest_never_skips() -> None:
+    # Issue #179: --reingest re-extracts every doc, so a finished record
+    # under identical bytes and rules must not skip the progress file.
+    rec = InventoryRecord(path="x.pdf", sha256="a" * 64, status="upserted", rules_version="v1")
+    assert should_skip(rec, "a" * 64, rules_version="v1", force_reingest=True) is False
+    # Control: the same record still skips without the flag.
+    assert should_skip(rec, "a" * 64, rules_version="v1", force_reingest=False) is True
+
+
 # ---------------------------------------------------------------- payload
 def test_upsert_payload_carries_rules_v() -> None:
     from types import SimpleNamespace
