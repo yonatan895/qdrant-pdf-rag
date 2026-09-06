@@ -90,6 +90,10 @@ if str(REPO / "scripts") not in sys.path:
 
 from eval_answers import run_query, select_sample
 
+# Shared citation-index shape ([n] / [n, m]); see the inference rule in
+# agent/answer.py — parentheses are IBM-manual noise, never markers.
+_INLINE_CITE_RE = re.compile(r"\[\s*\d+(?:\s*,\s*\d+)*\s*\]")
+
 from mainframe_rag.ports import ChatMessage
 
 # Evidence bound for the judge prompt: 8 chunk-capped excerpts can exceed
@@ -368,6 +372,26 @@ def apply_l2_measurements(
     if unmatched and row.get("path") == "llm":
         row.setdefault("failures", []).append(
             f"{len(unmatched)} validated citation(s) not in the fetched hit set: {unmatched}"
+        )
+        row["verdict"] = "fail"
+
+    # Answer-content floor (issue #192): validated citations over a vacuous
+    # body are decoration, not grounding — a weak model emitting only a
+    # copied Citations: section photographs healthy P/R over zero
+    # substance. Inline [n] / [n, m] markers are the shared citation shape
+    # (parentheses are manual noise, never stripped). Script answers are
+    # exempt (code carries the substance); honest abstentions never reach
+    # here (no citations) and stay judged by the refusal verdict.
+    if (
+        row.get("path") == "llm"
+        and row.get("expected_behavior") == "answer"
+        and (row.get("citations") or [])
+        and not row.get("script")
+        and not _INLINE_CITE_RE.sub("", row.get("answer") or "").strip()
+    ):
+        row.setdefault("failures", []).append(
+            "answer body has no substantive prose outside citations: "
+            "validated citations over a vacuous body"
         )
         row["verdict"] = "fail"
 

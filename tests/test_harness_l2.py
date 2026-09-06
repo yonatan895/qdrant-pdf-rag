@@ -291,3 +291,58 @@ def test_gate_holds_on_judge_error_alone():
     verdict, reasons = gate_l2(m)
     assert verdict == "hold"
     assert any("judge" in r for r in reasons)
+
+
+def test_apply_fails_vacuous_body_with_validated_citations():
+    # Issue #192: a weak model emitting only a copied Citations: section
+    # photographs healthy P/R over zero substance — the row must fail.
+    row = _llm_row(answer="   ", citations=["[2] SC34-6428-08 CICS Sys Def, p. 55"])
+    apply_l2_measurements(row, _entry(gold=["SC34-6428-08"]), HITS, alerts={})
+    assert row["verdict"] == "fail"
+    assert any("no substantive prose" in f for f in row["failures"])
+
+
+def test_apply_index_markers_only_body_fails():
+    row = _llm_row(answer="[1]", citations=["[2] SC34-6428-08 CICS Sys Def, p. 55"])
+    apply_l2_measurements(row, _entry(gold=["SC34-6428-08"]), HITS, alerts={})
+    assert row["verdict"] == "fail"
+    assert any("no substantive prose" in f for f in row["failures"])
+
+
+def test_apply_substantive_body_with_citations_passes():
+    row = _llm_row(
+        answer="Set the value in the member. [1]",
+        citations=["[2] SC34-6428-08 CICS Sys Def, p. 55"],
+    )
+    apply_l2_measurements(row, _entry(gold=["SC34-6428-08"]), HITS, alerts={})
+    assert row["verdict"] == "pass"
+    assert not any("no substantive prose" in f for f in row["failures"])
+
+
+def test_apply_vacuous_body_without_citations_not_floored():
+    # No cites: honest abstentions stay judged by the refusal verdict,
+    # never by the content floor.
+    row = _llm_row(answer="   ", citations=[])
+    apply_l2_measurements(row, _entry(gold=["SC34-6428-08"]), HITS, alerts={})
+    assert not any("no substantive prose" in f for f in row["failures"])
+
+
+def test_apply_script_answer_exempt_from_floor():
+    # Code carries the substance for syntax entries.
+    row = _llm_row(
+        answer="   ", script="//SYSIN DD *",
+        citations=["[2] SC34-6428-08 CICS Sys Def, p. 55"],
+    )
+    apply_l2_measurements(row, _entry(gold=["SC34-6428-08"]), HITS, alerts={})
+    assert not any("no substantive prose" in f for f in row["failures"])
+
+
+def test_apply_abstain_entry_exempt_from_floor():
+    row = _llm_row(
+        expected_behavior="abstain",
+        answer="   ", citations=["[2] SC34-6428-08 CICS Sys Def, p. 55"],
+    )
+    apply_l2_measurements(
+        row, _entry(behavior="abstain", gold=["SC34-6428-08"]), HITS, alerts={}
+    )
+    assert not any("no substantive prose" in f for f in row["failures"])
