@@ -397,7 +397,10 @@ def run(
         for path in pdfs:
             record = inventory.get(str(path))
             sha = sha256_file(path)
-            if record and should_skip(record, sha, allow_dry=dry_run, rules_version=rules_v):
+            if record and should_skip(
+                record, sha, allow_dry=dry_run, rules_version=rules_v,
+                force_reingest=force_reingest,
+            ):
                 files_ok += 1  # already ingested — an ok outcome
                 log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
                 continue
