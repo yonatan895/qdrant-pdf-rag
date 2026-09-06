@@ -150,6 +150,8 @@ Standing #20 rules: embed / Qdrant points / LLM are `Protocol`s in `ports.py`; u
 
 Ingest workers (`_parse_one`) trap exceptions and return plain `InventoryRecord(status="error")`. Unpicklable `httpx2.HTTPStatusError` objects crash `ProcessPoolExecutor` across spawn IPC.
 
+Re-ingesting a regenerated corpus (new doc_id generation) requires deleting the collection first: `--reingest` only deletes docs present in the new corpus, so stale-generation points survive and silently pollute evals.
+
 ## GitHub vs GitLab CI (read only when touching CI files)
 
 - Keep **`.gitlab-ci.yml` at the repo root** so an air-gap clone runs pipelines with no rewrite.

@@ -3,52 +3,52 @@
   "note": "Harness promotion baseline; re-record via `make harness-baseline` (dedicated PR, AGENTS.md).",
   "embed_mode": "vllm",
   "snapshot": {
-   "points_count": 840396,
-   "snapshot_name": "mainframe_manuals-7684669377153974-2026-09-02-12-27-01.snapshot"
+   "points_count": 211,
+   "snapshot_name": "mainframe_manuals-2007008481010860-2026-09-06-05-50-11.snapshot"
   },
   "class_regression_floor": 0.05,
-  "updated": "2026-09-02"
+  "updated": "2026-09-06"
  },
  "overall": {
-  "n": 173,
-  "scored": 173,
-  "recall@5": 0.7746,
-  "recall@8": 0.8786,
-  "mrr": 0.5761,
-  "ndcg@8": 0.6291
+  "n": 167,
+  "scored": 167,
+  "recall@5": 0.9341,
+  "recall@8": 0.9341,
+  "mrr": 0.9341,
+  "ndcg@8": 0.9304
  },
  "classes": {
   "comparative": {
    "n": 19,
    "scored": 19,
-   "recall@5": 0.4211,
-   "recall@8": 0.7368,
-   "mrr": 0.3496,
-   "ndcg@8": 0.3892
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "diagnostic": {
    "n": 41,
    "scored": 41,
-   "recall@5": 0.7073,
-   "recall@8": 0.8537,
-   "mrr": 0.4945,
-   "ndcg@8": 0.5304
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 0.9943
   },
   "doc_number": {
    "n": 20,
    "scored": 20,
-   "recall@5": 0.75,
-   "recall@8": 0.75,
-   "mrr": 0.75,
-   "ndcg@8": 0.75
+   "recall@5": 0.45,
+   "recall@8": 0.45,
+   "mrr": 0.45,
+   "ndcg@8": 0.45
   },
   "message_id": {
    "n": 38,
-   "scored": 38,
-   "recall@5": 0.9211,
-   "recall@8": 0.9474,
-   "mrr": 0.5522,
-   "ndcg@8": 0.6382
+   "scored": 37,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "negative": {
    "n": 14,
@@ -60,19 +60,19 @@
   },
   "syntax": {
    "n": 41,
-   "scored": 41,
-   "recall@5": 0.8293,
-   "recall@8": 0.9512,
-   "mrr": 0.6305,
-   "ndcg@8": 0.7274
+   "scored": 39,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "version": {
    "n": 14,
-   "scored": 14,
-   "recall@5": 0.9286,
-   "recall@8": 0.9286,
-   "mrr": 0.7798,
-   "ndcg@8": 0.7583
+   "scored": 11,
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 0.9648
   }
  },
  "traps": {
@@ -82,40 +82,40 @@
  },
  "per_query": {
   "CMP-01": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-02": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.3869
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-03": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.14285714285714285,
-   "ndcg@8": 0.2372
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-04": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-05": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.4693
+   "ndcg@8": 1.0
   },
   "CMP-06": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.16666666666666666,
-   "ndcg@8": 0.2372
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-07": {
    "recall@5": 1.0,
@@ -124,46 +124,46 @@
    "ndcg@8": 1.0
   },
   "CMP-08": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.16666666666666666,
-   "ndcg@8": 0.4307
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-09": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.16666666666666666,
-   "ndcg@8": 0.2372
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-10": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-11": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-12": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.16666666666666666,
-   "ndcg@8": 0.5013
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-13": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-14": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-15": {
    "recall@5": 1.0,
@@ -180,69 +180,69 @@
   "CMP-17": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "CMP-18": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.16666666666666666,
-   "ndcg@8": 0.2641
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-01": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.5438
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-02": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.125,
-   "ndcg@8": 0.3869
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-03": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-04": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.7039
+   "ndcg@8": 1.0
   },
   "DIA-05": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.14285714285714285,
-   "ndcg@8": 0.2641
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-06": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.16666666666666666,
-   "ndcg@8": 0.3836
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-07": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.125,
-   "ndcg@8": 0.4307
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-08": {},
   "DIA-09": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.25,
-   "ndcg@8": 0.4367
+   "mrr": 1.0,
+   "ndcg@8": 0.7654
   },
   "DIA-10": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6934
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-11": {
    "recall@5": 1.0,
@@ -253,92 +253,92 @@
   "DIA-12": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6241
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-13": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.3066
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-14": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.2,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-15": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-16": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-17": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.6131
+   "ndcg@8": 1.0
   },
   "DIA-18": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-19": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.6131
+   "ndcg@8": 1.0
   },
   "DIA-20": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-21": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.2,
-   "ndcg@8": 0.4307
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-22": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.2,
-   "ndcg@8": 0.4307
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-23": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.2,
-   "ndcg@8": 0.2641
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-24": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-25": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.16666666666666666,
-   "ndcg@8": 0.2641
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-26": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-27": {
    "recall@5": 1.0,
@@ -347,28 +347,28 @@
    "ndcg@8": 1.0
   },
   "DIA-28": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-29": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.6131
+   "ndcg@8": 1.0
   },
   "DIA-30": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.16666666666666666,
-   "ndcg@8": 0.2184
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-31": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DIA-32": {
    "recall@5": 1.0,
@@ -380,7 +380,7 @@
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.5
+   "ndcg@8": 1.0
   },
   "DIA-34": {
    "recall@5": 1.0,
@@ -391,8 +391,8 @@
   "DIA-35": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-01": {
    "recall@5": 0.0,
@@ -425,10 +425,10 @@
    "ndcg@8": 0.0
   },
   "DOC-07": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "DOC-08": {
    "recall@5": 1.0,
@@ -437,10 +437,10 @@
    "ndcg@8": 1.0
   },
   "DOC-09": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "DOC-10": {
    "recall@5": 1.0,
@@ -449,16 +449,16 @@
    "ndcg@8": 1.0
   },
   "DOC-11": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "DOC-12": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "DOC-13": {
    "recall@5": 1.0,
@@ -467,10 +467,10 @@
    "ndcg@8": 1.0
   },
   "DOC-14": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "DOC-15": {
    "recall@5": 1.0,
@@ -479,10 +479,10 @@
    "ndcg@8": 1.0
   },
   "DOC-16": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "DOC-17": {
    "recall@5": 1.0,
@@ -503,16 +503,16 @@
    "ndcg@8": 1.0
   },
   "LEG-02": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.14285714285714285,
-   "ndcg@8": 0.4307
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "LEG-03": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "LEG-04": {
    "recall@5": 1.0,
@@ -535,8 +535,8 @@
   "LEG-07": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "LEG-08": {
    "recall@5": 1.0,
@@ -565,88 +565,88 @@
   "LEG-12": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-01": {},
   "MSG-02": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-03": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.3869
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-04": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-05": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.25,
-   "ndcg@8": 0.4307
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-06": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-07": {},
   "MSG-08": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.6131
+   "ndcg@8": 1.0
   },
   "MSG-09": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-10": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.25,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-11": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.2,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-12": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-13": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-14": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-15": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.2,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-16": {
    "recall@5": 1.0,
@@ -657,26 +657,26 @@
   "MSG-17": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-18": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.25,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-19": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-20": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-21": {
    "recall@5": 1.0,
@@ -685,23 +685,18 @@
    "ndcg@8": 1.0
   },
   "MSG-22": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
-  },
-  "MSG-23": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.6309
-  },
-  "MSG-24": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
+  "MSG-23": {
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
+  },
+  "MSG-24": {},
   "MSG-25": {
    "recall@5": 1.0,
    "recall@8": 1.0,
@@ -711,20 +706,20 @@
   "MSG-26": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-27": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.6131
+   "ndcg@8": 1.0
   },
   "MSG-28": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.6131
+   "ndcg@8": 1.0
   },
   "MSG-29": {
    "recall@5": 1.0,
@@ -733,52 +728,52 @@
    "ndcg@8": 1.0
   },
   "MSG-30": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.16666666666666666,
-   "ndcg@8": 0.3869
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-31": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-32": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-33": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-34": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-35": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-36": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-37": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "MSG-38": {
    "recall@5": 1.0,
@@ -796,7 +791,7 @@
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.8503
+   "ndcg@8": 1.0
   },
   "NEG-01": {},
   "NEG-02": {},
@@ -811,20 +806,20 @@
   "SYN-01": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-02": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.3869
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-03": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-04": {
    "recall@5": 1.0,
@@ -841,20 +836,20 @@
   "SYN-06": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.2,
-   "ndcg@8": 0.3869
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-07": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.14285714285714285,
-   "ndcg@8": 0.3869
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-08": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.16666666666666666,
-   "ndcg@8": 0.4307
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-09": {
    "recall@5": 1.0,
@@ -869,22 +864,22 @@
    "ndcg@8": 1.0
   },
   "SYN-11": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-12": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.2,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-13": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.16666666666666666,
-   "ndcg@8": 0.3869
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-14": {
    "recall@5": 1.0,
@@ -901,14 +896,14 @@
   "SYN-16": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.25,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-17": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-18": {
    "recall@5": 1.0,
@@ -925,32 +920,32 @@
   "SYN-20": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-21": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-22": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-23": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.25,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-24": {
-   "recall@5": 0.0,
+   "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.16666666666666666,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-25": {
    "recall@5": 1.0,
@@ -985,38 +980,28 @@
   "SYN-30": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-31": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
-  },
-  "SYN-32": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
-  "SYN-33": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
-  },
+  "SYN-32": {},
+  "SYN-33": {},
   "SYN-34": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-35": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.5,
-   "ndcg@8": 0.6309
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "SYN-36": {
    "recall@5": 1.0,
@@ -1063,34 +1048,24 @@
   "VER-03": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.3869
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "VER-04": {},
   "VER-05": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "VER-06": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 0.7654
-  },
-  "VER-07": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
    "ndcg@8": 1.0
   },
-  "VER-08": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
-  },
+  "VER-07": {},
+  "VER-08": {},
   "VER-09": {
    "recall@5": 1.0,
    "recall@8": 1.0,
@@ -1100,26 +1075,21 @@
   "VER-10": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.3333333333333333,
-   "ndcg@8": 0.5
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
-  "VER-11": {
+  "VER-11": {},
+  "VER-12": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
-  "VER-12": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 0.9197
-  },
   "VER-13": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 0.25,
-   "ndcg@8": 0.4307
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "VER-14": {
    "recall@5": 1.0,

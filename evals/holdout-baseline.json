@@ -2,56 +2,70 @@
   "_meta": {
     "note": "Re-baseline via `make eval-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/eval_retrieval.py.",
     "n": 70,
-    "collection": "mainframe_manuals",
+    "collection": "real_manuals",
     "embed_mode": "vllm",
-    "updated": "2026-09-02"
+    "updated": "2026-09-06"
   },
-  "recall@1": 0.375,
-  "recall@3": 0.562,
-  "recall@5": 0.703,
-  "mrr": 0.51,
+  "recall@1": 0.571,
+  "recall@3": 0.762,
+  "recall@5": 0.825,
+  "recall@8": 0.841,
+  "mrr": 0.664,
+  "ndcg@8": 0.684,
   "identifier": {
-    "recall@1": 0.342,
-    "recall@5": 0.711,
-    "mrr": 0.489
+    "recall@1": 0.641,
+    "recall@5": 0.872,
+    "recall@8": 0.897,
+    "mrr": 0.713,
+    "ndcg@8": 0.743
   },
   "nl": {
-    "recall@1": 0.423,
-    "recall@5": 0.692,
-    "mrr": 0.541
+    "recall@1": 0.458,
+    "recall@5": 0.75,
+    "recall@8": 0.75,
+    "mrr": 0.583,
+    "ndcg@8": 0.588
   },
   "classes": {
     "comparative": {
       "n": 7,
       "scored": 7,
-      "recall@1": 0.0,
-      "recall@3": 0.143,
-      "recall@5": 0.286,
-      "mrr": 0.144
+      "recall@1": 0.286,
+      "recall@3": 0.714,
+      "recall@5": 0.714,
+      "recall@8": 0.714,
+      "mrr": 0.429,
+      "ndcg@8": 0.431
     },
     "diagnostic": {
       "n": 14,
       "scored": 14,
-      "recall@1": 0.286,
-      "recall@3": 0.5,
-      "recall@5": 0.643,
-      "mrr": 0.449
+      "recall@1": 0.571,
+      "recall@3": 0.714,
+      "recall@5": 0.786,
+      "recall@8": 0.857,
+      "mrr": 0.655,
+      "ndcg@8": 0.619
     },
     "doc_number": {
       "n": 6,
       "scored": 6,
-      "recall@1": 0.667,
-      "recall@3": 0.667,
-      "recall@5": 0.667,
-      "mrr": 0.667
+      "recall@1": 0.333,
+      "recall@3": 0.333,
+      "recall@5": 0.333,
+      "recall@8": 0.333,
+      "mrr": 0.333,
+      "ndcg@8": 0.333
     },
     "message_id": {
       "n": 15,
       "scored": 15,
-      "recall@1": 0.267,
-      "recall@3": 0.6,
-      "recall@5": 0.867,
-      "mrr": 0.482
+      "recall@1": 0.8,
+      "recall@3": 0.867,
+      "recall@5": 1.0,
+      "recall@8": 1.0,
+      "mrr": 0.852,
+      "ndcg@8": 0.89
     },
     "negative": {
       "n": 6,
@@ -59,28 +73,34 @@
       "recall@1": null,
       "recall@3": null,
       "recall@5": null,
-      "mrr": null
+      "recall@8": null,
+      "mrr": null,
+      "ndcg@8": null
     },
     "syntax": {
       "n": 16,
-      "scored": 16,
-      "recall@1": 0.562,
-      "recall@3": 0.625,
-      "recall@5": 0.75,
-      "mrr": 0.653
+      "scored": 15,
+      "recall@1": 0.667,
+      "recall@3": 0.933,
+      "recall@5": 1.0,
+      "recall@8": 1.0,
+      "mrr": 0.802,
+      "ndcg@8": 0.868
     },
     "version": {
       "n": 6,
       "scored": 6,
-      "recall@1": 0.5,
-      "recall@3": 0.833,
-      "recall@5": 0.833,
-      "mrr": 0.611
+      "recall@1": 0.333,
+      "recall@3": 0.667,
+      "recall@5": 0.667,
+      "recall@8": 0.667,
+      "mrr": 0.472,
+      "ndcg@8": 0.503
     }
   },
   "abstain": {
-    "n": 6,
-    "top_score_mean": 0.5166,
+    "n": 7,
+    "top_score_mean": 0.5625,
     "top_score_max": 1.25
   },
   "page": {

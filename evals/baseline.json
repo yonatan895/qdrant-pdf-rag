@@ -2,29 +2,29 @@
   "_meta": {
     "note": "Re-baseline via `make eval-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/eval_retrieval.py.",
     "n": 117,
-    "collection": "local-corpus",
+    "collection": "gate-l1-381894",
     "embed_mode": "hash",
-    "updated": "2026-09-02"
+    "updated": "2026-09-06"
   },
-  "recall@1": 0.872,
-  "recall@3": 0.881,
-  "recall@5": 0.881,
-  "recall@8": 0.881,
-  "mrr": 0.876,
-  "ndcg@8": 0.919,
+  "recall@1": 0.923,
+  "recall@3": 0.933,
+  "recall@5": 0.933,
+  "recall@8": 0.933,
+  "mrr": 0.928,
+  "ndcg@8": 0.929,
   "identifier": {
-    "recall@1": 0.787,
-    "recall@5": 0.787,
-    "recall@8": 0.787,
-    "mrr": 0.787,
-    "ndcg@8": 0.869
+    "recall@1": 0.889,
+    "recall@5": 0.889,
+    "recall@8": 0.889,
+    "mrr": 0.889,
+    "ndcg@8": 0.889
   },
   "nl": {
-    "recall@1": 0.979,
+    "recall@1": 0.976,
     "recall@5": 1.0,
     "recall@8": 1.0,
-    "mrr": 0.99,
-    "ndcg@8": 0.982
+    "mrr": 0.988,
+    "ndcg@8": 0.991
   },
   "classes": {
     "comparative": {
@@ -45,21 +45,21 @@
       "recall@5": 1.0,
       "recall@8": 1.0,
       "mrr": 0.981,
-      "ndcg@8": 0.968
+      "ndcg@8": 0.986
     },
     "doc_number": {
       "n": 14,
       "scored": 14,
-      "recall@1": 0.786,
-      "recall@3": 0.786,
-      "recall@5": 0.786,
-      "recall@8": 0.786,
-      "mrr": 0.786,
-      "ndcg@8": 0.786
+      "recall@1": 0.5,
+      "recall@3": 0.5,
+      "recall@5": 0.5,
+      "recall@8": 0.5,
+      "mrr": 0.5,
+      "ndcg@8": 0.5
     },
     "message_id": {
       "n": 23,
-      "scored": 23,
+      "scored": 22,
       "recall@1": 1.0,
       "recall@3": 1.0,
       "recall@5": 1.0,
@@ -79,17 +79,17 @@
     },
     "syntax": {
       "n": 25,
-      "scored": 25,
-      "recall@1": 0.6,
-      "recall@3": 0.6,
-      "recall@5": 0.6,
-      "recall@8": 0.6,
-      "mrr": 0.6,
-      "ndcg@8": 0.8
+      "scored": 24,
+      "recall@1": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0,
+      "recall@8": 1.0,
+      "mrr": 1.0,
+      "ndcg@8": 1.0
     },
     "version": {
       "n": 8,
-      "scored": 8,
+      "scored": 5,
       "recall@1": 1.0,
       "recall@3": 1.0,
       "recall@5": 1.0,
@@ -99,12 +99,12 @@
     }
   },
   "abstain": {
-    "n": 8,
-    "top_score_mean": 0.6733,
+    "n": 13,
+    "top_score_mean": 0.6482,
     "top_score_max": 1.3333
   },
   "page": {
-    "checked": 1,
-    "hit@5": 0.0
+    "checked": 0,
+    "hit@5": null
   }
 }

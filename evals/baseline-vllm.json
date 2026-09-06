@@ -4,20 +4,20 @@
     "n": 117,
     "collection": "mainframe_manuals",
     "embed_mode": "vllm",
-    "updated": "2026-09-04"
+    "updated": "2026-09-06"
   },
-  "recall@1": 0.881,
-  "recall@3": 0.881,
-  "recall@5": 0.881,
-  "recall@8": 0.881,
-  "mrr": 0.881,
-  "ndcg@8": 0.922,
+  "recall@1": 0.933,
+  "recall@3": 0.933,
+  "recall@5": 0.933,
+  "recall@8": 0.933,
+  "mrr": 0.933,
+  "ndcg@8": 0.933,
   "identifier": {
-    "recall@1": 0.797,
-    "recall@5": 0.797,
-    "recall@8": 0.797,
-    "mrr": 0.797,
-    "ndcg@8": 0.867
+    "recall@1": 0.889,
+    "recall@5": 0.889,
+    "recall@8": 0.889,
+    "mrr": 0.889,
+    "ndcg@8": 0.889
   },
   "nl": {
     "recall@1": 1.0,
@@ -45,21 +45,21 @@
       "recall@5": 1.0,
       "recall@8": 1.0,
       "mrr": 1.0,
-      "ndcg@8": 0.981
+      "ndcg@8": 1.0
     },
     "doc_number": {
       "n": 14,
       "scored": 14,
-      "recall@1": 0.786,
-      "recall@3": 0.786,
-      "recall@5": 0.786,
-      "recall@8": 0.786,
-      "mrr": 0.786,
-      "ndcg@8": 0.786
+      "recall@1": 0.5,
+      "recall@3": 0.5,
+      "recall@5": 0.5,
+      "recall@8": 0.5,
+      "mrr": 0.5,
+      "ndcg@8": 0.5
     },
     "message_id": {
       "n": 23,
-      "scored": 23,
+      "scored": 22,
       "recall@1": 1.0,
       "recall@3": 1.0,
       "recall@5": 1.0,
@@ -79,17 +79,17 @@
     },
     "syntax": {
       "n": 25,
-      "scored": 25,
-      "recall@1": 0.6,
-      "recall@3": 0.6,
-      "recall@5": 0.6,
-      "recall@8": 0.6,
-      "mrr": 0.6,
-      "ndcg@8": 0.8
+      "scored": 24,
+      "recall@1": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0,
+      "recall@8": 1.0,
+      "mrr": 1.0,
+      "ndcg@8": 1.0
     },
     "version": {
       "n": 8,
-      "scored": 8,
+      "scored": 5,
       "recall@1": 1.0,
       "recall@3": 1.0,
       "recall@5": 1.0,
@@ -99,12 +99,12 @@
     }
   },
   "abstain": {
-    "n": 8,
-    "top_score_mean": 0.7062,
+    "n": 13,
+    "top_score_mean": 0.6187,
     "top_score_max": 1.3333
   },
   "page": {
-    "checked": 1,
-    "hit@5": 0.0
+    "checked": 0,
+    "hit@5": null
   }
 }
