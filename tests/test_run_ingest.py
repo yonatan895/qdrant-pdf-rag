@@ -109,16 +109,23 @@ class _FakeQdrant:
     """QdrantPoints double for the parent-side run() path (review round on
     PR D: the non-dry upsert branch had no coverage)."""
 
-    def __init__(self, stored_sha: str | None = None, stored_rules_v: str | None = None):
+    def __init__(self, stored_sha: str | None = None, stored_rules_v: str | None = None,
+                 sample_rules_v: str | None = None):
         from mainframe_rag.ingest.rules_version import extraction_rules_version
 
         self.stored_sha = stored_sha
         # A stored collection defaults to the CURRENT rules so existing
         # skip tests model a matching collection; tests pass an explicit
         # value (including "" for a legacy pre-versioning collection) to
-        # exercise the extraction-rules gate (issue #124).
+        # exercise the extraction-rules gate (issue #124). sample_rules_v
+        # models a MIXED collection (startup sample reads current, but an
+        # individual doc carries an older/unstamped rules_v) — the state
+        # the live re-stamp run exposed.
         self.stored_rules_v = (
             extraction_rules_version() if stored_rules_v is None else stored_rules_v
+        )
+        self.sample_rules_v = (
+            self.stored_rules_v if sample_rules_v is None else sample_rules_v
         )
         self.upserts: list[int] = []
         self.deletes = 0
@@ -149,10 +156,12 @@ class _FakeQdrant:
             # Empty collection (stored_sha None) vs versioned points.
             if self.stored_sha is None:
                 return [], None
-            return [SimpleNamespace(payload={"rules_v": self.stored_rules_v})], None
+            return [SimpleNamespace(payload={"rules_v": self.sample_rules_v})], None
         if self.stored_sha is None:
             return [], None
-        return [SimpleNamespace(payload={"sha256": self.stored_sha})], None
+        return [
+            SimpleNamespace(payload={"sha256": self.stored_sha, "rules_v": self.stored_rules_v})
+        ], None
 
     def upsert(self, collection_name, *, points, wait=True):
         self.upserts.append(len(points))

@@ -46,9 +46,9 @@ from mainframe_rag.ingest.inventory import (
 )
 from mainframe_rag.ingest.qdrant_io import (
     delete_by_doc,
-    doc_sha256,
     ensure_collection,
     set_bulk_indexing,
+    stored_doc_state,
     stored_rules_version,
     upsert_chunks,
 )
@@ -291,8 +291,16 @@ def _upsert_one(
     started = time.perf_counter()
     client = _get_qdrant(settings)
     with locks.get(parsed.doc_id):
-        stored_sha = doc_sha256(client, settings, parsed.doc_id)
-        if stored_sha == parsed.sha256 and not force_reingest:
+        stored_sha, stored_rules_v = stored_doc_state(client, settings, parsed.doc_id)
+        # Skip only when BOTH the file sha and the stored rules version
+        # match: a sha-equal doc extracted under older rules is stale
+        # (issue #124, live-found on the real_manuals re-stamp — the
+        # sha-only skip let unstamped points survive a plain rerun).
+        if (
+            stored_sha == parsed.sha256
+            and stored_rules_v == extraction_rules_version()
+            and not force_reingest
+        ):
             return "skipped", round(time.perf_counter() - started, 3)
         if stored_sha is not None:
             delete_by_doc(client, settings, parsed.doc_id)

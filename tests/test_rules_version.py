@@ -189,3 +189,39 @@ def test_manifest_records_rules_version(tmp_path, monkeypatch) -> None:
     assert manifest["extraction_rules_version"] == extraction_rules_version()
     line = json.loads((tmp_path / "runs" / "eval_runs.jsonl").read_text().splitlines()[0])
     assert line["extraction_rules_version"] == manifest["extraction_rules_version"]
+
+
+# ---------------------------------------------------------------- qdrant skip
+def test_qdrant_skip_gates_on_rules_version(tmp_path, synthetic_pdf, monkeypatch, capsys) -> None:
+    """The third skip layer (live-found on the real_manuals re-stamp): a
+    sha-equal doc whose stored rules_v differs must be deleted and
+    re-upserted by a plain rerun — same file bytes, stale payloads."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+    from tests.test_run_ingest import _FakeQdrant
+
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    sha = sha256_file(synthetic_pdf)
+
+    # Mixed collection (startup sample reads current, the doc itself is
+    # legacy-stale — exactly the state a partially-interrupted stamp run
+    # leaves): NOT skipped — delete + re-upsert.
+    fake = _FakeQdrant(stored_sha=sha, stored_rules_v="",
+                       sample_rules_v=extraction_rules_version())
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    assert run_ingest.main([
+        "--src", str(synthetic_pdf.parent),
+        "--progress", str(tmp_path / "inv.jsonl"), "--workers", "1",
+    ]) == 0
+    assert fake.deletes >= 1 and fake.upserts, "stale sha-equal doc must re-upsert"
+
+    # Matching rules_v: skipped, nothing deleted.
+    fake2 = _FakeQdrant(stored_sha=sha, stored_rules_v=extraction_rules_version())
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake2)
+    progress = tmp_path / "inv2.jsonl"
+    assert run_ingest.main([
+        "--src", str(synthetic_pdf.parent),
+        "--progress", str(progress), "--workers", "1",
+    ]) == 0
+    assert fake2.upserts == [] and fake2.deletes == 0

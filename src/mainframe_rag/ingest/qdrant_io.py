@@ -115,19 +115,24 @@ def ensure_collection(client: QdrantPoints, settings: Settings) -> None:
     ensure_payload_indexes(client, collection)
 
 
-def doc_sha256(client: QdrantPoints, settings: Settings, doc_id: str) -> str | None:
-    """Stored sha256 for doc_id (first hit), or None if the doc is absent."""
+def stored_doc_state(client: QdrantPoints, settings: Settings, doc_id: str) -> tuple[str | None, str | None]:
+    """(sha256, rules_v) for doc_id (first hit), or (None, None) if absent.
+    The third skip layer (issue #124, found live on the real_manuals
+    re-stamp): a sha-equal doc whose stored rules_v differs is stale —
+    same file bytes do not mean current payloads — so the skip decision
+    must gate on BOTH, exactly like the inventory skip."""
     points, _ = client.scroll(
         settings.qdrant_collection,
         scroll_filter=models.Filter(
             must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
         ),
         limit=1,
-        with_payload=["sha256"],
+        with_payload=["sha256", "rules_v"],
     )
     if not points:
-        return None
-    return (points[0].payload or {}).get("sha256")
+        return None, None
+    payload = points[0].payload or {}
+    return payload.get("sha256"), payload.get("rules_v")
 
 
 def stored_rules_version(client: QdrantPoints, settings: Settings) -> str | None:
