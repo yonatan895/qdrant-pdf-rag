@@ -710,6 +710,9 @@ oc -n mainframe-rag port-forward svc/jaeger 16686:16686
 # open http://localhost:16686, service "rag-agent-..." (set OTEL_SERVICE_NAME to rename)
 ```
 
+Backend posture (single-replica debug-grade, sample-all retention math,
+exemplar deferral) is recorded in `docs/adr/0002-otel-backend-posture.md`.
+
 ### 4.5 Corpus Ingestion
 
 Once the manual PDF corpus PVC is provisioned and populated:
