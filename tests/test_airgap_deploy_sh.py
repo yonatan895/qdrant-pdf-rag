@@ -34,6 +34,10 @@ spec:
               value: __EMBED_MODEL__
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
+            - name: IMAGE_SHA
+              value: __IMAGE_SHA__
+            - name: OTEL_DEPLOYMENT_ENVIRONMENT
+              value: __OTEL_DEPLOYMENT_ENVIRONMENT__
             - name: METRICS_ENABLED
               value: "__METRICS_ENABLED__"
             - name: RERANK_ENABLED
@@ -253,6 +257,34 @@ def test_tracing_jaeger_pull_secret_stays_absent_when_unset(tree):
     jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
     assert "imagePullSecrets: []" in jaeger
     assert "name: ghcr-pull" not in jaeger
+
+
+# ------------------------------------------------------- deploy identity (Phase 2b)
+
+
+def test_deploy_identity_version_always_rendered(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    # service.version is the packed SHA: always set, deploy.sh fail-closes
+    # on empty/HEAD before rendering.
+    assert re.search(r"IMAGE_SHA\n\s+value: " + IMAGE_SHA, rendered, re.MULTILINE)
+
+
+def test_deploy_identity_environment_empty_by_default(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    # Optional: bare `value:` renders and the agent omits the attribute —
+    # same empty-renders-bare convention as the OTEL endpoint above.
+    assert re.search(r"OTEL_DEPLOYMENT_ENVIRONMENT\n\s+value:\s*$", rendered, re.MULTILINE)
+
+
+def test_deploy_identity_environment_wired_when_set(tree):
+    r = _run(tree, ("OTEL_DEPLOYMENT_ENVIRONMENT", "lab"))
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert re.search(r"OTEL_DEPLOYMENT_ENVIRONMENT\n\s+value: lab$", rendered, re.MULTILINE)
 
 
 # ------------------------------------------------------- ServiceMonitor (#187)

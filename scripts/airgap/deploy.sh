@@ -91,6 +91,7 @@ kustomize_render deploy/kustomize/overlays/openshift | sed -E 's|"(__[A-Z0-9_]+_
     -e "s|__LLM_BASE_URL__|${LLM_BASE_URL:-}|g" \
     -e "s|__LLM_MODEL_REASONING__|${LLM_MODEL_REASONING:-}|g" \
     -e "s|__OTEL_EXPORTER_OTLP_ENDPOINT__|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|g" \
+    -e "s|__OTEL_DEPLOYMENT_ENVIRONMENT__|${OTEL_DEPLOYMENT_ENVIRONMENT:-}|g" \
     -e "s|__METRICS_ENABLED__|\"${METRICS_ENABLED:-false}\"|g" \
     -e "s|__RERANK_ENABLED__|\"${RERANK_ENABLED:-false}\"|g" \
     -e "s|__RERANK_BASE_URL__|${RERANK_BASE_URL:-}|g" \

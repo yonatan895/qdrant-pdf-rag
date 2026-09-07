@@ -112,8 +112,20 @@ def setup_tracing(
         return _provider.get_tracer("mainframe-rag")
 
     service_name = os.environ.get("OTEL_SERVICE_NAME", DEFAULT_SERVICE_NAME)
+    # Deploy identity (OTel Phase 2b): version is the packed IMAGE_SHA the
+    # image already runs as; environment is operator-set and optional.
+    # Unset values are omitted, never rendered as empty attributes.
+    # Resource.create additionally merges the standard
+    # OTEL_RESOURCE_ATTRIBUTES env mapping underneath these explicit keys.
+    resource_attrs = {"service.name": service_name}
+    image_sha = os.environ.get("IMAGE_SHA", "").strip()
+    if image_sha:
+        resource_attrs["service.version"] = image_sha
+    deployment_env = os.environ.get("OTEL_DEPLOYMENT_ENVIRONMENT", "").strip()
+    if deployment_env:
+        resource_attrs["deployment.environment"] = deployment_env
     provider = TracerProvider(
-        resource=Resource.create({"service.name": service_name}),
+        resource=Resource.create(resource_attrs),
         sampler=ParentBased(TraceIdRatioBased(sample_ratio)),
     )
     assert endpoint is not None

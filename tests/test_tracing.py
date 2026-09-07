@@ -199,6 +199,34 @@ def test_shutdown_tracing_noop_when_never_enabled():
     tracing_mod.shutdown_tracing()  # no provider installed: must not raise
 
 
+# ---------------------------------------------------------------- resource identity
+
+
+def test_setup_tracing_resource_carries_deploy_identity(monkeypatch):
+    """OTel Phase 2b: every exported span carries the packed version and the
+    operator environment, so multi-env Jaeger backends stay unambiguous."""
+    monkeypatch.setenv("IMAGE_SHA", "abc123def456")
+    monkeypatch.setenv("OTEL_DEPLOYMENT_ENVIRONMENT", "lab")
+    monkeypatch.setattr(tracing_mod, "OTLPSpanExporter", FakeOTLPExporter)
+    tracing_mod.setup_tracing("http://collector.internal:4318")
+    attrs = dict(tracing_mod._provider.resource.attributes)
+    assert attrs["service.name"] == "mainframe-rag-agent"
+    assert attrs["service.version"] == "abc123def456"
+    assert attrs["deployment.environment"] == "lab"
+    assert all(v != "" for v in attrs.values() if isinstance(v, str))
+
+
+def test_setup_tracing_omits_identity_when_unset(monkeypatch):
+    """Unset identity is omitted, never rendered as an empty attribute."""
+    monkeypatch.delenv("IMAGE_SHA", raising=False)
+    monkeypatch.delenv("OTEL_DEPLOYMENT_ENVIRONMENT", raising=False)
+    monkeypatch.setattr(tracing_mod, "OTLPSpanExporter", FakeOTLPExporter)
+    tracing_mod.setup_tracing("http://collector.internal:4318")
+    attrs = dict(tracing_mod._provider.resource.attributes)
+    assert "service.version" not in attrs
+    assert "deployment.environment" not in attrs
+
+
 # ---------------------------------------------------------------- app spans
 
 
