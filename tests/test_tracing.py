@@ -517,13 +517,17 @@ def test_span_attributes_bounded():
     allowed = {
         "rag.query", "rag.limit", "rag.rerank_active", "rag.prefetch_limit",
         "rag.filter_present", "rag.rerank_bypass_reason", "rag.query_kind",
-        "rag.hits", "rag.rrf_k", "rag.rrf_weights", "rag.candidates_in",
+        "rag.hits", "rag.filter_fallback", "rag.rrf_k", "rag.rrf_weights", "rag.candidates_in",
         "rag.candidates_out", "rag.doc_ids", "rag.batch", "rag.embedder",
         "rag.rerank_scores",
     }
     for span in exporter.get_finished_spans():
         for key in span.attributes:
             assert key in allowed, f"unexpected span attribute {key!r} on {span.name}"
+    # The new fallback signal is a bounded bool, never free text: non-empty
+    # filtered results must not have fallen back.
+    root = next(s for s in exporter.get_finished_spans() if s.name == "retrieve.search")
+    assert root.attributes["rag.filter_fallback"] is False
 
 
 # ---------------------------------------------------------------- log correlation

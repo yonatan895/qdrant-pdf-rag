@@ -55,6 +55,12 @@ so lexical and semantic candidates are scoped identically before any fusion.
 - `build_filter` ANDs its clauses: exact `product`, exact `version`, and
   `MatchAny` within each identifier field (`doc_id`, `message_ids`,
   `members`). Empty input yields no filter rather than a match-nothing.
+- Empty-filtered recovery: when a filter was applied and both prefetch legs
+  return zero points (exact doc-id stem vs edition suffix, multi-identifier
+  AND with no co-carrying chunk), both twins retry once unfiltered at the
+  same prefetch depth and fuse that pool. Non-empty filtered results never
+  pay the second call. The retry lands on the trace as boolean
+  `rag.filter_fallback` (bounded, never free text).
 - The legs are named `dense` and `bm25`, dense first.
 
 ## 3. Identifiers and query kind
