@@ -13,6 +13,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import httpx2
@@ -495,6 +496,52 @@ def _chat_result_from_response(data: dict[str, Any]) -> ChatResult:
     return ChatResult(content=content, finish_reason=finish_reason, usage=usage)
 
 
+@dataclass
+class _SseStreamState:
+    """Accumulated parse state for one SSE chat-completion stream: time to
+    first content token, terminal finish reason, latest usage payload, content
+    deltas in order, and whether the [DONE] terminator arrived."""
+
+    ttft_ms: int | None = None
+    finish_reason: str = "stop"
+    usage_data: dict[str, Any] = field(default_factory=dict)
+    content_parts: list[str] = field(default_factory=list)
+    saw_done: bool = False
+
+
+def _feed_sse_line(state: _SseStreamState, line: str, t0: float) -> str | None:
+    """Fold one raw SSE line into the stream state; returns the content delta
+    when the line carries one, else None. Blank lines, non-data lines, and
+    unparseable JSON are skipped — never an error. [DONE] sets saw_done.
+    Shared by achat, chat_stream, and _chat_sync so line semantics (prefix,
+    terminator, usage, delta, finish) cannot diverge copies; each caller keeps
+    its own iteration (sync/async), truncation recovery, and yield behavior."""
+    line = line.strip()
+    if not line or not line.startswith("data:"):
+        return None
+    chunk_str = line[5:].strip()
+    if chunk_str == "[DONE]":
+        state.saw_done = True
+        return None
+    try:
+        chunk = json.loads(chunk_str)
+    except json.JSONDecodeError:
+        return None
+    if chunk.get("usage"):
+        state.usage_data = chunk["usage"]
+    choices = chunk.get("choices") or []
+    if not choices:
+        return None
+    delta_content = (choices[0].get("delta") or {}).get("content")
+    if delta_content:
+        if state.ttft_ms is None:
+            state.ttft_ms = int((time.monotonic() - t0) * 1000)
+        state.content_parts.append(delta_content)
+    if choices[0].get("finish_reason"):
+        state.finish_reason = str(choices[0]["finish_reason"])
+    return delta_content
+
+
 class HttpxLLMClient:
     """LLMClient implementation: the reasoning model only — deliberately no
     other model knob (architecture.md 4.6). LLM env fails closed at request
@@ -585,10 +632,7 @@ class HttpxLLMClient:
         if getattr(self._settings, "llm_stream", False):
             try:
                 t0 = time.monotonic()
-                ttft_ms: int | None = None
-                content_parts: list[str] = []
-                finish_reason = "stop"
-                usage_data: dict[str, Any] = {}
+                state = _SseStreamState()
                 body_stream = {**body, "stream": True, "stream_options": {"include_usage": True}}
                 async with self._async_http().stream(
                     "POST",
@@ -596,42 +640,21 @@ class HttpxLLMClient:
                     json=body_stream,
                 ) as stream_resp:
                     stream_resp.raise_for_status()
-                    saw_done = False
                     async for line in stream_resp.aiter_lines():
-                        line = line.strip()
-                        if not line or not line.startswith("data:"):
-                            continue
-                        chunk_str = line[5:].strip()
-                        if chunk_str == "[DONE]":
-                            saw_done = True
+                        _feed_sse_line(state, line, t0)
+                        if state.saw_done:
                             break
-                        try:
-                            chunk = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            continue
-                        if chunk.get("usage"):
-                            usage_data = chunk["usage"]
-                        choices = chunk.get("choices") or []
-                        if choices:
-                            delta = choices[0].get("delta") or {}
-                            delta_content = delta.get("content")
-                            if delta_content:
-                                if ttft_ms is None:
-                                    ttft_ms = int((time.monotonic() - t0) * 1000)
-                                content_parts.append(delta_content)
-                            if choices[0].get("finish_reason"):
-                                finish_reason = str(choices[0]["finish_reason"])
-                if not saw_done:
+                if not state.saw_done:
                     # Transport truncation, not a complete answer: the except
                     # below recovers through the non-streaming POST, which
                     # returns whole content — the partial prefix is discarded.
-                    raise TruncatedStreamError(len(content_parts))
-                content = "".join(content_parts)
+                    raise TruncatedStreamError(len(state.content_parts))
+                content = "".join(state.content_parts)
                 if not content:
                     log.warning("streaming chat returned empty content; falling back to non-streaming POST")
                 else:
-                    usage = _token_usage_from_dict(usage_data)
-                    return ChatResult(content=content, finish_reason=finish_reason, usage=usage, ttft_ms=ttft_ms)
+                    usage = _token_usage_from_dict(state.usage_data)
+                    return ChatResult(content=content, finish_reason=state.finish_reason, usage=usage, ttft_ms=state.ttft_ms)
             except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
                 log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
 
@@ -670,10 +693,7 @@ class HttpxLLMClient:
             body["temperature"] = temperature
 
         t0 = time.monotonic()
-        ttft_ms: int | None = None
-        finish_reason = "stop"
-        usage_data: dict[str, Any] = {}
-        content_parts: list[str] = []
+        state = _SseStreamState()
 
         async with self._async_http().stream(
             "POST",
@@ -681,37 +701,17 @@ class HttpxLLMClient:
             json=body,
         ) as stream_resp:
             stream_resp.raise_for_status()
-            saw_done = False
             async for line in stream_resp.aiter_lines():
-                line = line.strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                chunk_str = line[5:].strip()
-                if chunk_str == "[DONE]":
-                    saw_done = True
+                delta = _feed_sse_line(state, line, t0)
+                if state.saw_done:
                     break
-                try:
-                    chunk = json.loads(chunk_str)
-                except json.JSONDecodeError:
-                    continue
-                if chunk.get("usage"):
-                    usage_data = chunk["usage"]
-                choices = chunk.get("choices") or []
-                if choices:
-                    delta = choices[0].get("delta") or {}
-                    delta_content = delta.get("content")
-                    if delta_content:
-                        if ttft_ms is None:
-                            ttft_ms = int((time.monotonic() - t0) * 1000)
-                        content_parts.append(delta_content)
-                        yield {
-                            "type": "token",
-                            "delta": delta_content,
-                            "token": delta_content,
-                            "ttft_ms": ttft_ms,
-                        }
-                    if choices[0].get("finish_reason"):
-                        finish_reason = str(choices[0]["finish_reason"])
+                if delta:
+                    yield {
+                        "type": "token",
+                        "delta": delta,
+                        "token": delta,
+                        "ttft_ms": state.ttft_ms,
+                    }
 
         # Empty-content recovery, mirroring achat: a reasoning model whose
         # whole output lands in the reasoning channel yields zero content
@@ -719,9 +719,12 @@ class HttpxLLMClient:
         # a mid-stream failure after real deltas cannot be retried without
         # duplicating content, so it raises (the app's event: error path)
         # instead of shipping the prefix labeled "stop".
-        if not saw_done and content_parts:
-            raise TruncatedStreamError(len(content_parts))
-        if not content_parts:
+        if not state.saw_done and state.content_parts:
+            raise TruncatedStreamError(len(state.content_parts))
+        finish_reason = state.finish_reason
+        usage_data = state.usage_data
+        ttft_ms = state.ttft_ms
+        if not state.content_parts:
             log.warning("streaming chat returned empty content; falling back to non-streaming POST")
             resp = await self._async_http().post(
                 f"{base_url.rstrip('/')}/chat/completions",
@@ -762,52 +765,28 @@ class HttpxLLMClient:
             body_stream = {**body, "stream": True, "stream_options": {"include_usage": True}}
             try:
                 t0 = time.monotonic()
-                ttft_ms: int | None = None
-                content_parts: list[str] = []
-                finish_reason = "stop"
-                usage_data: dict[str, Any] = {}
+                state = _SseStreamState()
                 with self._sync_http().stream(
                     "POST",
                     f"{base_url.rstrip('/')}/chat/completions",
                     json=body_stream,
                 ) as stream_resp:
                     stream_resp.raise_for_status()
-                    saw_done = False
                     for line in stream_resp.iter_lines():
-                        line = line.strip()
-                        if not line or not line.startswith("data:"):
-                            continue
-                        chunk_str = line[5:].strip()
-                        if chunk_str == "[DONE]":
-                            saw_done = True
+                        _feed_sse_line(state, line, t0)
+                        if state.saw_done:
                             break
-                        try:
-                            chunk = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            continue
-                        if chunk.get("usage"):
-                            usage_data = chunk["usage"]
-                        choices = chunk.get("choices") or []
-                        if choices:
-                            delta = choices[0].get("delta") or {}
-                            delta_content = delta.get("content")
-                            if delta_content:
-                                if ttft_ms is None:
-                                    ttft_ms = int((time.monotonic() - t0) * 1000)
-                                content_parts.append(delta_content)
-                            if choices[0].get("finish_reason"):
-                                finish_reason = str(choices[0]["finish_reason"])
-                if not saw_done:
+                if not state.saw_done:
                     # Transport truncation, not a complete answer: the except
                     # below recovers through the non-streaming POST, which
                     # returns whole content — the partial prefix is discarded.
-                    raise TruncatedStreamError(len(content_parts))
-                content = "".join(content_parts)
+                    raise TruncatedStreamError(len(state.content_parts))
+                content = "".join(state.content_parts)
                 if not content:
                     log.warning("streaming chat returned empty content; falling back to non-streaming POST")
                 else:
-                    usage = _token_usage_from_dict(usage_data)
-                    return ChatResult(content=content, finish_reason=finish_reason, usage=usage, ttft_ms=ttft_ms)
+                    usage = _token_usage_from_dict(state.usage_data)
+                    return ChatResult(content=content, finish_reason=state.finish_reason, usage=usage, ttft_ms=state.ttft_ms)
             except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
                 log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
 
