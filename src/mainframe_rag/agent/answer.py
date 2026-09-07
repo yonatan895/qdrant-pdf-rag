@@ -466,6 +466,24 @@ def assert_reasoning_model(settings: Settings) -> tuple[str, str]:
     return settings.llm_base_url, settings.require_reasoning_model()
 
 
+def _token_usage_from_dict(usage_data: dict[str, Any]) -> TokenUsage:
+    """Single builder for chat-completion usage payloads: top-level counts
+    with the reasoning-tokens fallback into completion_tokens_details.
+    Every chat path (achat, chat_stream, _chat_sync, stream and fallback)
+    funnels through here so a usage-schema change cannot diverge copies."""
+    reasoning_tokens = (
+        usage_data.get("reasoning_tokens")
+        or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
+        or 0
+    )
+    return TokenUsage(
+        prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
+        completion_tokens=int(usage_data.get("completion_tokens") or 0),
+        reasoning_tokens=int(reasoning_tokens),
+        total_tokens=int(usage_data.get("total_tokens") or 0),
+    )
+
+
 class HttpxLLMClient:
     """LLMClient implementation: the reasoning model only — deliberately no
     other model knob (architecture.md 4.6). LLM env fails closed at request
@@ -601,17 +619,7 @@ class HttpxLLMClient:
                 if not content:
                     log.warning("streaming chat returned empty content; falling back to non-streaming POST")
                 else:
-                    reasoning_tokens = (
-                        usage_data.get("reasoning_tokens")
-                        or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
-                        or 0
-                    )
-                    usage = TokenUsage(
-                        prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
-                        completion_tokens=int(usage_data.get("completion_tokens") or 0),
-                        reasoning_tokens=int(reasoning_tokens),
-                        total_tokens=int(usage_data.get("total_tokens") or 0),
-                    )
+                    usage = _token_usage_from_dict(usage_data)
                     return ChatResult(content=content, finish_reason=finish_reason, usage=usage, ttft_ms=ttft_ms)
             except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
                 log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
@@ -634,17 +642,7 @@ class HttpxLLMClient:
         content = str(choice["message"].get("content") or "")
         finish_reason = str(choice.get("finish_reason") or "stop")
         usage_data = data.get("usage") or {}
-        reasoning_tokens = (
-            usage_data.get("reasoning_tokens")
-            or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
-            or 0
-        )
-        usage = TokenUsage(
-            prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
-            completion_tokens=int(usage_data.get("completion_tokens") or 0),
-            reasoning_tokens=int(reasoning_tokens),
-            total_tokens=int(usage_data.get("total_tokens") or 0),
-        )
+        usage = _token_usage_from_dict(usage_data)
         return ChatResult(content=content, finish_reason=finish_reason, usage=usage)
 
     async def chat_stream(
@@ -734,17 +732,7 @@ class HttpxLLMClient:
                 ttft_ms = int((time.monotonic() - t0) * 1000)
                 yield {"type": "token", "delta": content, "token": content, "ttft_ms": ttft_ms}
 
-        reasoning_tokens = (
-            usage_data.get("reasoning_tokens")
-            or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
-            or 0
-        )
-        usage = TokenUsage(
-            prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
-            completion_tokens=int(usage_data.get("completion_tokens") or 0),
-            reasoning_tokens=int(reasoning_tokens),
-            total_tokens=int(usage_data.get("total_tokens") or 0),
-        )
+        usage = _token_usage_from_dict(usage_data)
         yield {
             "type": "done",
             "finish_reason": finish_reason,
@@ -813,17 +801,7 @@ class HttpxLLMClient:
                 if not content:
                     log.warning("streaming chat returned empty content; falling back to non-streaming POST")
                 else:
-                    reasoning_tokens = (
-                        usage_data.get("reasoning_tokens")
-                        or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
-                        or 0
-                    )
-                    usage = TokenUsage(
-                        prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
-                        completion_tokens=int(usage_data.get("completion_tokens") or 0),
-                        reasoning_tokens=int(reasoning_tokens),
-                        total_tokens=int(usage_data.get("total_tokens") or 0),
-                    )
+                    usage = _token_usage_from_dict(usage_data)
                     return ChatResult(content=content, finish_reason=finish_reason, usage=usage, ttft_ms=ttft_ms)
             except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
                 log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
@@ -838,17 +816,7 @@ class HttpxLLMClient:
         content = str(choice["message"].get("content") or "")
         finish_reason = str(choice.get("finish_reason") or "stop")
         usage_data = data.get("usage") or {}
-        reasoning_tokens = (
-            usage_data.get("reasoning_tokens")
-            or (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
-            or 0
-        )
-        usage = TokenUsage(
-            prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
-            completion_tokens=int(usage_data.get("completion_tokens") or 0),
-            reasoning_tokens=int(reasoning_tokens),
-            total_tokens=int(usage_data.get("total_tokens") or 0),
-        )
+        usage = _token_usage_from_dict(usage_data)
         return ChatResult(content=content, finish_reason=finish_reason, usage=usage)
 
 
