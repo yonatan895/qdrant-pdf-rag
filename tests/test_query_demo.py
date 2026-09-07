@@ -12,6 +12,7 @@ from scripts.query_demo import (
     resolve_runtime_settings,
 )
 
+from mainframe_rag.config import Settings
 from mainframe_rag.retrieve.query import SearchHit
 
 
@@ -315,6 +316,131 @@ def test_resolve_runtime_settings_explicit_dense_dim_match_applies(monkeypatch):
     with patch("httpx2.get", side_effect=mock_get), patch("httpx2.post", side_effect=mock_post):
         settings = resolve_runtime_settings(embed_mode="vllm", dense_dim=1024)
         assert settings.dense_dim == 1024
+
+
+def test_resolve_runtime_settings_otel_endpoint_explicit():
+    with patch("httpx2.get", side_effect=OSError("Connection refused")):
+        settings = resolve_runtime_settings(otel_endpoint="http://custom-jaeger:4318")
+        assert settings.otel_exporter_otlp_endpoint == "http://custom-jaeger:4318"
+
+
+def test_resolve_runtime_settings_otel_endpoint_off():
+    with patch("httpx2.get", side_effect=OSError("Connection refused")):
+        for disable_val in ("off", "none", "false", "0", ""):
+            settings = resolve_runtime_settings(otel_endpoint=disable_val)
+            assert settings.otel_exporter_otlp_endpoint is None
+
+
+def test_resolve_runtime_settings_otel_endpoint_env(monkeypatch):
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://env-collector:4318")
+    with patch("httpx2.get", side_effect=OSError("Connection refused")):
+        settings = resolve_runtime_settings()
+        assert settings.otel_exporter_otlp_endpoint == "http://env-collector:4318"
+
+
+def test_resolve_runtime_settings_otel_autodetect_local_collector(monkeypatch):
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+
+    def mock_get(url, timeout=None):
+        if "4318" in url:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 404
+            return mock_resp
+        raise OSError("Connection refused")
+
+    with patch("httpx2.get", side_effect=mock_get):
+        settings = resolve_runtime_settings()
+        assert settings.otel_exporter_otlp_endpoint == "http://127.0.0.1:4318"
+
+
+def test_resolve_runtime_settings_otel_probe_failure_stays_none(monkeypatch):
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+
+    def mock_get(url, timeout=None):
+        raise OSError("Connection refused")
+
+    with patch("httpx2.get", side_effect=mock_get):
+        settings = resolve_runtime_settings()
+        assert settings.otel_exporter_otlp_endpoint is None
+
+
+def test_execute_query_emits_v1_search_span():
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from scripts.query_demo import execute_query
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    mock_hit = _sample_hit()
+    dummy_settings = Settings(qdrant_collection="test_coll")
+    with (
+        patch("scripts.query_demo.tracer", provider.get_tracer("test")),
+        patch("scripts.query_demo.retrieve_search", return_value=([mock_hit], "identifier", {"embed_ms": 5, "qdrant_ms": 10})),
+        patch("scripts.query_demo.build_embedder"),
+        patch("qdrant_client.QdrantClient"),
+    ):
+        execute_query("IEA500I", settings=dummy_settings)
+
+    spans = exporter.get_finished_spans()
+    search_spans = [s for s in spans if s.name == "v1.search"]
+    assert len(search_spans) == 1
+    root = search_spans[0]
+    assert root.attributes["rag.query"] == "IEA500I"
+    assert root.attributes["rag.query_kind"] == "identifier"
+    assert root.attributes["rag.hits"] == 1
+
+
+def test_execute_answer_emits_v1_answer_and_child_spans():
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from scripts.query_demo import execute_answer
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    mock_hit = _sample_hit()
+    mock_chat_res = MagicMock()
+    mock_chat_res.content = "Answer text."
+    mock_chat_res.ttft_ms = 150
+    mock_chat_res.finish_reason = "stop"
+    mock_chat_res.usage.prompt_tokens = 100
+    mock_chat_res.usage.completion_tokens = 50
+    mock_chat_res.usage.reasoning_tokens = 20
+    mock_chat_res.usage.total_tokens = 150
+
+    dummy_settings = Settings(qdrant_collection="test_coll")
+    with (
+        patch("scripts.query_demo.tracer", provider.get_tracer("test")),
+        patch("scripts.query_demo.retrieve_search", return_value=([mock_hit], "identifier", {"embed_ms": 5, "qdrant_ms": 10})),
+        patch("scripts.query_demo.build_embedder"),
+        patch("qdrant_client.QdrantClient"),
+        patch("mainframe_rag.agent.answer.HttpxLLMClient"),
+        patch("mainframe_rag.agent.answer.as_chat_result", return_value=mock_chat_res),
+        patch("mainframe_rag.agent.answer.parse_answer") as mock_parse,
+    ):
+        mock_parsed = MagicMock()
+        mock_parsed.answer = "Answer text."
+        mock_parsed.citations = [mock_hit.cite]
+        mock_parsed.script = None
+        mock_parse.return_value = mock_parsed
+
+        execute_answer("What does message IEA500I mean?", settings=dummy_settings)
+
+    spans = exporter.get_finished_spans()
+    span_names = [s.name for s in spans]
+    assert "v1.answer" in span_names
+    assert "prompt.build" in span_names
+    assert "llm.chat" in span_names
+
+    root = next(s for s in spans if s.name == "v1.answer")
+    assert root.attributes["rag.query"] == "What does message IEA500I mean?"
+    assert root.attributes["rag.hits"] == 1
+    assert root.attributes["rag.citations"] == 1
 
 
 
