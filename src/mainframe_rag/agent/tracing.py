@@ -28,7 +28,8 @@ import logging
 import os
 from typing import Final
 
-from opentelemetry import trace
+from opentelemetry import propagate, trace
+from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -47,6 +48,21 @@ def trace_enabled(endpoint: str | None) -> bool:
     """Enabled iff an endpoint is configured. One rule, shared by lifespan
     setup and tests."""
     return bool(endpoint and endpoint.strip())
+
+
+def parent_context(headers) -> Context:
+    """W3C ingress context for a request's root span. Returns the upstream
+    traceparent/tracestate as a parent Context so this service's trace joins
+    the caller's (gateway, orchestrator); with no (or a malformed) header
+    it returns an empty Context — a new root, today's behavior. Never
+    raises: a bad header must not fail the request. Composes with the
+    lifespan sampler (ParentBased): an upstream sampled flag is honored,
+    an unsampled parent stays dropped."""
+    try:
+        return propagate.extract(dict(headers))
+    except Exception:  # noqa: BLE001
+        log.debug("otel ingress extract failed; starting a new root")
+        return Context()
 
 
 def current_trace_ids() -> dict[str, str]:

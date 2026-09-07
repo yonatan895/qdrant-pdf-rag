@@ -480,7 +480,6 @@ def test_span_attributes_bounded():
 
 # ---------------------------------------------------------------- log correlation
 
-
 def test_current_trace_ids_empty_without_span():
     """Issue #185: no active span (tracing off) -> {} so the log shape is
     unchanged."""
@@ -501,3 +500,65 @@ def test_current_trace_ids_match_active_span():
         }
         assert len(got["trace_id"]) == 32 and len(got["span_id"]) == 16
     assert tracing_mod.current_trace_ids() == {}
+
+
+# ---------------------------------------------------------------- ingress propagation
+
+
+_UP_TRACE_ID = 0x1234567890ABCDEF1234567890ABCDEF
+_UP_SPAN_ID = 0xABCDEF1234567890
+
+
+def _traceparent(trace_id=_UP_TRACE_ID, span_id=_UP_SPAN_ID, sampled=True):
+    flag = "01" if sampled else "00"
+    return f"00-{trace_id:032x}-{span_id:16x}-{flag}"
+
+
+def _remote_context(ctx):
+    span = trace.get_current_span(ctx)
+    return span.get_span_context()
+
+
+def test_parent_context_joins_upstream():
+    ctx = tracing_mod.parent_context({"traceparent": _traceparent()})
+    remote = _remote_context(ctx)
+    assert remote.is_valid and remote.is_remote
+    assert remote.trace_id == _UP_TRACE_ID
+    assert remote.span_id == _UP_SPAN_ID
+
+
+def test_parent_context_empty_without_header():
+    assert not _remote_context(tracing_mod.parent_context({})).is_valid
+
+
+def test_parent_context_malformed_header_starts_new_root():
+    # Never raises: a bad header degrades to today's new-root behavior.
+    ctx = tracing_mod.parent_context({"traceparent": "bogus"})
+    assert not _remote_context(ctx).is_valid
+
+
+def test_search_joins_upstream_trace(client):
+    c, exporter = client
+    resp = c.post("/v1/search", json={"query": "IEA500I"}, headers={"traceparent": _traceparent()})
+    assert resp.status_code == 200
+    root = _spans(exporter)["v1.search"][0]
+    assert root.context.trace_id == _UP_TRACE_ID
+    assert root.parent is not None and root.parent.span_id == _UP_SPAN_ID
+
+
+def test_search_without_header_starts_root(client):
+    c, exporter = client
+    resp = c.post("/v1/search", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+    root = _spans(exporter)["v1.search"][0]
+    assert root.context.trace_id != _UP_TRACE_ID
+    assert root.parent is None
+
+
+def test_answer_joins_upstream_trace(client):
+    c, exporter = client
+    resp = c.post("/v1/answer", json={"query": "IEA500I"}, headers={"traceparent": _traceparent()})
+    assert resp.status_code == 200
+    root = _spans(exporter)["v1.answer"][0]
+    assert root.context.trace_id == _UP_TRACE_ID
+    assert root.parent is not None and root.parent.span_id == _UP_SPAN_ID
