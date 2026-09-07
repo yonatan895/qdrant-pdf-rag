@@ -279,6 +279,17 @@ def _prefetch_limit_for(settings: Settings | None, rerank_active: bool) -> int:
     return settings.rerank_candidates if (settings and rerank_active) else PREFETCH_LIMIT
 
 
+def _needs_filter_fallback(
+    dense_points: list[models.ScoredPoint],
+    sparse_points: list[models.ScoredPoint],
+    flt: models.Filter | None,
+) -> bool:
+    """One rule for the empty-filtered retry (both twins share it): only when
+    a filter was applied and both legs came back empty. Non-empty filtered
+    results take the byte-identical legacy path — no second call."""
+    return flt is not None and not dense_points and not sparse_points
+
+
 def _retrieve_span_attrs(
     query: str,
     limit: int,
@@ -446,6 +457,33 @@ def search(
                     flt,
                     prefetch_limit,
                 )
+            # Empty-filtered recovery: an exact doc-id stem (SC23-6858 vs
+            # SC23-6858-01) or a multi-identifier AND can match zero points
+            # while the unfiltered legs score. Retry once unfiltered — a
+            # single retry only, so non-empty filtered results never pay it.
+            filter_fallback = _needs_filter_fallback(dense_points, sparse_points, flt)
+            if filter_fallback:
+                dense_req, sparse_req = _build_prefetch_requests(
+                    dense_vec, sparse_idx, sparse_val, None, prefetch_limit
+                )
+                if hasattr(client, "query_batch_points"):
+                    responses = client.query_batch_points(
+                        collection, requests=[dense_req, sparse_req]
+                    )
+                    dense_points = responses[0].points
+                    sparse_points = responses[1].points
+                else:
+                    dense_points = _prefetch_one(
+                        client, collection, dense_vec, "dense", None, prefetch_limit
+                    )
+                    sparse_points = _prefetch_one(
+                        client,
+                        collection,
+                        models.SparseVector(indices=sparse_idx, values=sparse_val),
+                        "bm25",
+                        None,
+                        prefetch_limit,
+                    )
             timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
 
         weights, k, max_per_page, max_per_doc = _ranking_params(settings, identifiers.has_identifiers)
@@ -471,7 +509,13 @@ def search(
             )
 
         hits = _diversify_with_span(fused, limit, max_per_page, max_per_doc)
-        span.set_attributes({"rag.query_kind": query_kind(identifiers), "rag.hits": len(hits)})
+        span.set_attributes(
+            {
+                "rag.query_kind": query_kind(identifiers),
+                "rag.hits": len(hits),
+                "rag.filter_fallback": filter_fallback,
+            }
+        )
 
     return hits, query_kind(identifiers), timings
 
@@ -565,6 +609,28 @@ async def async_search(
                     flt,
                     prefetch_limit,
                 )
+            filter_fallback = _needs_filter_fallback(dense_points, sparse_points, flt)
+            if filter_fallback:
+                dense_req, sparse_req = _build_prefetch_requests(
+                    dense_vec, sparse_idx, sparse_val, None, prefetch_limit
+                )
+                if hasattr(client, "query_batch_points"):
+                    res = client.query_batch_points(collection, requests=[dense_req, sparse_req])
+                    responses = await res if inspect.isawaitable(res) else res
+                    dense_points = responses[0].points
+                    sparse_points = responses[1].points
+                else:
+                    dense_points = await _async_prefetch_one(
+                        client, collection, dense_vec, "dense", None, prefetch_limit
+                    )
+                    sparse_points = await _async_prefetch_one(
+                        client,
+                        collection,
+                        models.SparseVector(indices=sparse_idx, values=sparse_val),
+                        "bm25",
+                        None,
+                        prefetch_limit,
+                    )
             timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
 
         weights, k, max_per_page, max_per_doc = _ranking_params(settings, identifiers.has_identifiers)
@@ -592,7 +658,13 @@ async def async_search(
             )
 
         hits = _diversify_with_span(fused, limit, max_per_page, max_per_doc)
-        span.set_attributes({"rag.query_kind": query_kind(identifiers), "rag.hits": len(hits)})
+        span.set_attributes(
+            {
+                "rag.query_kind": query_kind(identifiers),
+                "rag.hits": len(hits),
+                "rag.filter_fallback": filter_fallback,
+            }
+        )
 
     return hits, query_kind(identifiers), timings
 

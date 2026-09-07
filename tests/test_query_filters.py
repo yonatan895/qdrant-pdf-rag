@@ -391,3 +391,131 @@ def test_async_search_matches_sync_search_identical_fakes():
             assert (sync_hits[0].rerank_score is not None) is rerank_expected
 
 
+class FilterAwareFakeQdrant(FakeQdrant):
+    """Returns hits only when the prefetch carries no filter: proves the
+    empty-filtered retry fires the claimed unfiltered path, not a fallback
+    that would also produce empty."""
+
+    def __init__(self, dense, sparse):
+        super().__init__(dense=dense, sparse=sparse)
+        self.batch_calls = 0
+
+    def query_batch_points(self, collection, requests, **_):
+        self.batch_calls += 1
+        # First batch carries the identifier filter -> empty; retry is
+        # unfiltered -> hits. Forcing the success path with mocks.
+        if any(req.filter is not None for req in requests):
+            for req in requests:
+                self.queries.append(
+                    {"using": req.using, "filter": req.filter, "with_payload": req.with_payload}
+                )
+                self.batch_requests.append(req)
+            return [SimpleNamespace(points=[]), SimpleNamespace(points=[])]
+        for req in requests:
+            self.queries.append(
+                {"using": req.using, "filter": req.filter, "with_payload": req.with_payload}
+            )
+            self.batch_requests.append(req)
+        # Return per-leg points: dense leg gets dense, sparse leg gets sparse.
+        return [
+            SimpleNamespace(points=list(self._dense)),
+            SimpleNamespace(points=list(self._sparse)),
+        ]
+
+
+def test_search_filter_fallback_recovers_unfiltered_hits(embedder):
+    """Claimed path: exact doc-id stem (SC23-6862 vs SC23-6862-00) matches
+    zero filtered points; the single unfiltered retry must return hits."""
+    from mainframe_rag.retrieve.query import _needs_filter_fallback
+
+    assert _needs_filter_fallback([], [], build_filter(parse_query("SC23-6862"))) is True
+    assert _needs_filter_fallback([_point("a")], [], build_filter(parse_query("SC23-6862"))) is False
+    assert _needs_filter_fallback([], [], None) is False
+
+    fake = FilterAwareFakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    hits, kind, timings = search(fake, embedder, "mainframe_manuals", "Identify SC23-6862", limit=5)
+    assert kind == "identifier"
+    assert {h.chunk_id for h in hits} == {"d1", "s1"}
+    assert fake.batch_calls == 2
+    # First batch filtered, second batch unfiltered on both legs.
+    assert fake.batch_requests[0].filter is not None
+    assert fake.batch_requests[2].filter is None
+    assert fake.batch_requests[3].filter is None
+    assert timings["embed_ms"] >= 0 and timings["qdrant_ms"] >= 0
+
+
+def test_search_filter_fallback_single_retry_only(embedder):
+    """Non-empty filtered results never pay the second call: byte-identical
+    legacy path."""
+
+    fake = FakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    hits, _kind, _timings = search(fake, embedder, "mainframe_manuals", "IEA500I rejected", limit=5)
+    assert {h.chunk_id for h in hits} == {"d1", "s1"}
+    assert len(fake.batch_requests) == 2
+    assert all(req.filter is not None for req in fake.batch_requests)
+
+
+def test_search_filter_fallback_legacy_client_retries_unfiltered(embedder):
+    """Same claimed path over the sequential query_points fallback transport."""
+
+    class FilterAwareLegacy(LegacyFakeQdrant):
+        def query_points(self, collection, query, using, limit, query_filter, with_payload, **_):
+            self.queries.append({"using": using, "filter": query_filter, "with_payload": with_payload})
+            if query_filter is not None:
+                return SimpleNamespace(points=[])
+            points = self._dense if using == "dense" else self._sparse
+            return SimpleNamespace(points=list(points))
+
+    fake = FilterAwareLegacy(dense=[_point("d1")], sparse=[_point("s1")])
+    hits, _kind, _timings = search(fake, embedder, "mainframe_manuals", "SC23-6862 details", limit=5)
+    assert {h.chunk_id for h in hits} == {"d1", "s1"}
+    assert len(fake.queries) == 4
+    assert fake.queries[0]["filter"] is not None
+    assert fake.queries[2]["filter"] is None
+
+
+def test_async_search_filter_fallback_matches_sync(embedder):
+    """Drift guard for the new branch: identical filter-aware fakes in,
+    identical recovered hits out of both twins."""
+    from mainframe_rag.retrieve.query import async_search
+
+    fake_sync = FilterAwareFakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    fake_async = FilterAwareFakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    sync_hits, sync_kind, _ = search(fake_sync, embedder, "mainframe_manuals", "SC23-6862", limit=5)
+    async_hits, async_kind, _ = asyncio.run(
+        async_search(fake_async, embedder, "mainframe_manuals", "SC23-6862", limit=5)
+    )
+    assert sync_kind == async_kind == "identifier"
+    assert [h.model_dump() for h in sync_hits] == [h.model_dump() for h in async_hits]
+    assert fake_sync.batch_calls == fake_async.batch_calls == 2
+
+
+@pytest.mark.parametrize(
+    "wrapped",
+    [
+        "SC23-6862",
+        "sc23-6862",
+        "`SC23-6862`",
+        "> SC23-6862",
+        '"SC23-6862"',
+        "(SC23-6862)",
+        "**SC23-6862**",
+        "[SC23-6862](http://example.invalid)",
+        "<SC23-6862>",
+        "  SC23-6862  ",
+        "CITATIONS:\nSC23-6862 details",
+    ],
+)
+def test_search_filter_fallback_adversarial_wrappings(embedder, wrapped):
+    """Input-handling matrix: wrapping must not shield the identifier from
+    the filter (which then empties) nor from the fallback that recovers it."""
+    ids = parse_query(wrapped)
+    # Case folding + inline/non-anchored extraction must still find the stem.
+    assert ids.doc_ids == ["SC23-6862"], wrapped
+    fake = FilterAwareFakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
+    hits, kind, _ = search(fake, embedder, "mainframe_manuals", wrapped, limit=5)
+    assert kind == "identifier", wrapped
+    assert {h.chunk_id for h in hits} == {"d1", "s1"}, wrapped
+    assert fake.batch_calls == 2, wrapped
+
+
