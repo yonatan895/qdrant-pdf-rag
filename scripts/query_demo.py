@@ -22,19 +22,29 @@ import html
 import json
 import os
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 import httpx2
+from opentelemetry import trace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mainframe_rag.agent.answer import ParsedAnswer
 from mainframe_rag.agent.tokenizer import build_tokenizer
+from mainframe_rag.agent.tracing import (
+    flush_tracing,
+    setup_tracing,
+    shutdown_tracing,
+    trace_enabled,
+)
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import search as retrieve_search
+
+tracer: trace.Tracer = trace.get_tracer("mainframe-rag")
 
 
 def _format_text_hit(rank: int, hit: SearchHit) -> str:
@@ -322,6 +332,7 @@ def resolve_runtime_settings(
     dense_dim: int | None = None,
     vllm_url: str | None = None,
     model: str | None = None,
+    otel_endpoint: str | None = None,
 ) -> Settings:
     settings = load_settings()
     updates: dict[str, Any] = {}
@@ -487,6 +498,25 @@ def resolve_runtime_settings(
     except (httpx2.HTTPError, OSError, ValueError, KeyError, TypeError):
         pass
 
+    # 3. Resolve OpenTelemetry tracing endpoint (Jaeger / OTLP HTTP)
+    if otel_endpoint is not None:
+        cleaned_otel = otel_endpoint.strip()
+        if cleaned_otel.lower() in ("none", "off", "false", "0", ""):
+            updates["otel_exporter_otlp_endpoint"] = None
+        else:
+            updates["otel_exporter_otlp_endpoint"] = cleaned_otel
+    elif os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        updates["otel_exporter_otlp_endpoint"] = os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"].strip()
+    elif settings.otel_exporter_otlp_endpoint:
+        updates["otel_exporter_otlp_endpoint"] = settings.otel_exporter_otlp_endpoint
+    else:
+        # Auto-detect local Jaeger / OTLP collector on :4318 if listening
+        try:
+            httpx2.get("http://127.0.0.1:4318", timeout=0.3)
+            updates["otel_exporter_otlp_endpoint"] = "http://127.0.0.1:4318"
+        except (httpx2.HTTPError, OSError):
+            pass
+
     if updates:
         settings = settings.model_copy(update=updates)
     return settings
@@ -514,12 +544,34 @@ def execute_query(
 
     reranker = build_reranker(settings)
     target_coll = collection or settings.qdrant_collection
-    hits, kind, timings = retrieve_search(
-        client, embedder, target_coll, query,
-        product=product, version=version, limit=limit,
-        settings=settings, reranker=reranker,
+
+    current_span = trace.get_current_span()
+    is_root = not (current_span and current_span.get_span_context().is_valid)
+    cm = (
+        tracer.start_as_current_span(
+            "v1.search",
+            attributes={
+                "rag.query": query,
+                "rag.limit": limit,
+                "rag.collection": target_coll,
+            },
+        )
+        if is_root
+        else nullcontext()
     )
-    return hits, kind, timings
+    with cm as span:
+        hits, kind, timings = retrieve_search(
+            client, embedder, target_coll, query,
+            product=product, version=version, limit=limit,
+            settings=settings, reranker=reranker,
+        )
+        if span is not None and hasattr(span, "set_attributes"):
+            span.set_attributes({
+                "rag.query_kind": kind,
+                "rag.hits": len(hits),
+                "rag.doc_ids": ",".join(h.doc_id for h in hits[:8]),
+            })
+        return hits, kind, timings
 
 
 def execute_answer(
@@ -542,59 +594,103 @@ def execute_answer(
     if settings is None:
         settings = resolve_runtime_settings(collection=collection)
 
-    hits, kind, timings = execute_query(
-        query, limit=limit, product=product, version=version, collection=collection, settings=settings
-    )
-    if not hits:
-        return ParsedAnswer(
-            answer="No relevant manual excerpts found in the collection.",
-            citations=[],
-            script=None,
-        ), hits, kind, timings
-
-    complexity = classify_query_complexity(query)
-    max_context = (
-        settings.prompt_max_context_chars_complex
-        if complexity == "complex"
-        else settings.prompt_max_context_chars
-    )
-    effort = (
-        settings.llm_reasoning_effort_complex
-        if complexity == "complex"
-        else settings.llm_reasoning_effort_simple
-    )
-    tokenizer = build_tokenizer(settings)
-    messages = build_messages(
-        query=query,
-        hits=hits,
-        product=product,
-        version=version,
-        max_context_chars=max_context,
-        max_chunk_chars=settings.prompt_max_chunk_chars,
-        max_chunk_chars_narrative=(
-            settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
-        ),
-        complexity=complexity,
-        tokenizer=tokenizer,
-        settings=settings,
-        order=settings.prompt_order,
-    )
-    client = HttpxLLMClient(settings)
-    try:
-        reply = as_chat_result(
-            client.chat(
-                messages,
-                reasoning_effort=effort,
-                temperature=settings.llm_temperature,
-            )
+    with tracer.start_as_current_span(
+        "v1.answer",
+        attributes={
+            "rag.query": query,
+            "rag.limit": limit,
+            "rag.collection": collection or settings.qdrant_collection,
+        },
+    ) as root_span:
+        hits, kind, timings = execute_query(
+            query, limit=limit, product=product, version=version, collection=collection, settings=settings
         )
-    finally:
-        client.close()
+        if not hits:
+            root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
+            return ParsedAnswer(
+                answer="No relevant manual excerpts found in the collection.",
+                citations=[],
+                script=None,
+            ), hits, kind, timings
 
-    reply_content = reply.content
-    allowed_citations = {h.cite for h in hits}
-    parsed = parse_answer(reply_content, allowed_citations, ordered_cites=[h.cite for h in hits])
-    return parsed, hits, kind, timings
+        complexity = classify_query_complexity(query)
+        max_context = (
+            settings.prompt_max_context_chars_complex
+            if complexity == "complex"
+            else settings.prompt_max_context_chars
+        )
+        effort = (
+            settings.llm_reasoning_effort_complex
+            if complexity == "complex"
+            else settings.llm_reasoning_effort_simple
+        )
+        tokenizer = build_tokenizer(settings)
+        root_ctx = trace.set_span_in_context(root_span)
+        with tracer.start_as_current_span(
+            "prompt.build",
+            context=root_ctx,
+            attributes={
+                "rag.query_complexity": complexity,
+                "rag.reasoning_effort": effort,
+                "rag.max_context_chars": max_context,
+            },
+        ):
+            messages = build_messages(
+                query=query,
+                hits=hits,
+                product=product,
+                version=version,
+                max_context_chars=max_context,
+                max_chunk_chars=settings.prompt_max_chunk_chars,
+                max_chunk_chars_narrative=(
+                    settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
+                ),
+                complexity=complexity,
+                tokenizer=tokenizer,
+                settings=settings,
+                order=settings.prompt_order,
+            )
+
+        with tracer.start_as_current_span(
+            "llm.chat",
+            context=root_ctx,
+            attributes={
+                "llm.model": settings.llm_model_reasoning or "unknown",
+                "llm.reasoning_effort": effort,
+            },
+        ) as llm_span:
+            client = HttpxLLMClient(settings)
+            try:
+                reply = as_chat_result(
+                    client.chat(
+                        messages,
+                        reasoning_effort=effort,
+                        temperature=settings.llm_temperature,
+                    )
+                )
+            finally:
+                client.close()
+
+            llm_span.set_attributes({
+                "llm.ttft_ms": reply.ttft_ms if reply.ttft_ms is not None else 0,
+                "llm.finish_reason": reply.finish_reason,
+                "llm.prompt_tokens": reply.usage.prompt_tokens,
+                "llm.completion_tokens": reply.usage.completion_tokens,
+                "llm.reasoning_tokens": reply.usage.reasoning_tokens,
+                "llm.total_tokens": reply.usage.total_tokens,
+            })
+
+        reply_content = reply.content
+        allowed_citations = {h.cite for h in hits}
+        parsed = parse_answer(reply_content, allowed_citations, ordered_cites=[h.cite for h in hits])
+        root_span.set_attributes({
+            "rag.query_kind": kind,
+            "rag.hits": len(hits),
+            "rag.citations": len(parsed.citations),
+            "rag.has_script": parsed.script is not None,
+            "rag.doc_ids": ",".join(h.doc_id for h in hits[:8]),
+        })
+        return parsed, hits, kind, timings
 
 
 def repl_loop(
@@ -653,6 +749,7 @@ def repl_loop(
                     raw, limit=limit, product=product, version=version, collection=collection, settings=settings
                 )
                 print(render_query_text(raw, kind, hits, timings))
+            flush_tracing()
         except Exception as exc:  # noqa: BLE001
             print(f"Error executing query: {exc}", file=sys.stderr)
 
@@ -684,6 +781,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--format", choices=["text", "json", "html"], default="text", help="Output format")
     parser.add_argument("--out", type=Path, default=None, help="Write output to file")
     parser.add_argument("--rerank", action="store_true", help="Enable cross-encoder reranking")
+    parser.add_argument("--otel-endpoint", default=None, help="OpenTelemetry OTLP/HTTP collector endpoint (e.g. http://localhost:4318, 'off' to disable)")
 
     args = parser.parse_args(argv)
 
@@ -695,79 +793,92 @@ def main(argv: list[str] | None = None) -> int:
         dense_dim=args.dense_dim,
         vllm_url=args.vllm_url,
         model=args.model,
+        otel_endpoint=args.otel_endpoint,
     )
     if args.rerank:
         settings = settings.model_copy(update={"rerank_enabled": True})
 
-    default_limit = 3 if args.answer else 5
-    limit = args.limit or default_limit
-
-    if args.query is None:
-        repl_loop(
-            limit=limit,
-            product=args.product,
-            version=args.version,
-            collection=args.collection,
-            answer_mode=args.answer,
-            settings=settings,
+    global tracer
+    if trace_enabled(settings.otel_exporter_otlp_endpoint):
+        tracer = setup_tracing(
+            settings.otel_exporter_otlp_endpoint,
+            sample_ratio=settings.otel_sample_ratio,
+            export_queue_size=settings.otel_export_queue_size,
+            export_timeout_ms=settings.otel_export_timeout_ms,
         )
+
+    try:
+        default_limit = 3 if args.answer else 5
+        limit = args.limit or default_limit
+
+        if args.query is None:
+            repl_loop(
+                limit=limit,
+                product=args.product,
+                version=args.version,
+                collection=args.collection,
+                answer_mode=args.answer,
+                settings=settings,
+            )
+            return 0
+
+        if args.answer:
+            parsed, hits, kind, timings = execute_answer(
+                args.query,
+                limit=limit,
+                product=args.product,
+                version=args.version,
+                collection=args.collection,
+                settings=settings,
+            )
+            if args.format == "json":
+                output = json.dumps({
+                    "query": args.query,
+                    "kind": kind,
+                    "timings": timings,
+                    "answer": parsed.answer,
+                    "script": parsed.script,
+                    "citations": parsed.citations,
+                    "citations_inferred": parsed.citations_inferred,
+                    "inferred_indices": parsed.inferred_indices,
+                    "hits": [h.model_dump() for h in hits],
+                }, indent=2)
+            elif args.format == "html":
+                output = render_answer_html(args.query, kind, parsed, hits, timings)
+            else:
+                output = render_answer_text(args.query, kind, parsed, hits, timings)
+        else:
+            hits, kind, timings = execute_query(
+                args.query,
+                limit=limit,
+                product=args.product,
+                version=args.version,
+                collection=args.collection,
+                settings=settings,
+            )
+
+            if args.format == "json":
+                output = json.dumps({
+                    "query": args.query,
+                    "kind": kind,
+                    "timings": timings,
+                    "hits": [h.model_dump() for h in hits],
+                }, indent=2)
+            elif args.format == "html":
+                output = render_query_html(args.query, kind, hits, timings)
+            else:
+                output = render_query_text(args.query, kind, hits, timings)
+
+        if args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(output, encoding="utf-8")
+            print(f"Output written to {args.out}")
+        else:
+            print(output)
+
         return 0
-
-    if args.answer:
-        parsed, hits, kind, timings = execute_answer(
-            args.query,
-            limit=limit,
-            product=args.product,
-            version=args.version,
-            collection=args.collection,
-            settings=settings,
-        )
-        if args.format == "json":
-            output = json.dumps({
-                "query": args.query,
-                "kind": kind,
-                "timings": timings,
-                "answer": parsed.answer,
-                "script": parsed.script,
-                "citations": parsed.citations,
-                "citations_inferred": parsed.citations_inferred,
-                "inferred_indices": parsed.inferred_indices,
-                "hits": [h.model_dump() for h in hits],
-            }, indent=2)
-        elif args.format == "html":
-            output = render_answer_html(args.query, kind, parsed, hits, timings)
-        else:
-            output = render_answer_text(args.query, kind, parsed, hits, timings)
-    else:
-        hits, kind, timings = execute_query(
-            args.query,
-            limit=limit,
-            product=args.product,
-            version=args.version,
-            collection=args.collection,
-            settings=settings,
-        )
-
-        if args.format == "json":
-            output = json.dumps({
-                "query": args.query,
-                "kind": kind,
-                "timings": timings,
-                "hits": [h.model_dump() for h in hits],
-            }, indent=2)
-        elif args.format == "html":
-            output = render_query_html(args.query, kind, hits, timings)
-        else:
-            output = render_query_text(args.query, kind, hits, timings)
-
-    if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(output, encoding="utf-8")
-        print(f"Output written to {args.out}")
-    else:
-        print(output)
-
-    return 0
+    finally:
+        shutdown_tracing()
 
 
 if __name__ == "__main__":

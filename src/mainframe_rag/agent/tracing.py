@@ -157,6 +157,21 @@ def setup_tracing(
     return provider.get_tracer("mainframe-rag")
 
 
+def flush_tracing(timeout_ms: int = 5000) -> None:
+    """Force-flush pending spans from the batch processor.
+
+    Useful for interactive CLI sessions and REPL loops so spans land in
+    Jaeger immediately after each query. Errors are swallowed — telemetry
+    must not break the query path.
+    """
+    if _provider is None:
+        return
+    try:
+        _provider.force_flush(timeout_millis=timeout_ms)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("otel flush failed: %s", exc)
+
+
 def shutdown_tracing() -> None:
     """Lifespan shutdown: flush the batch queue. Bounded by the exporter's
     own timeout; a wedged collector cannot hang shutdown forever. Errors are

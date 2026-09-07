@@ -199,6 +199,26 @@ def test_shutdown_tracing_noop_when_never_enabled():
     tracing_mod.shutdown_tracing()  # no provider installed: must not raise
 
 
+def test_flush_tracing_flushes_and_swallows_errors(monkeypatch):
+    provider = FakeProvider()
+    monkeypatch.setattr(tracing_mod, "_provider", provider)
+    tracing_mod.flush_tracing()
+    assert provider.flushes == 1
+    assert provider.shutdowns == 0
+    assert tracing_mod._provider is provider
+
+    class ExplodingProvider(FakeProvider):
+        def force_flush(self, timeout_millis=30000):
+            raise RuntimeError("collector timeout")
+
+    monkeypatch.setattr(tracing_mod, "_provider", ExplodingProvider())
+    tracing_mod.flush_tracing()  # must not raise
+
+
+def test_flush_tracing_noop_when_never_enabled():
+    tracing_mod.flush_tracing()  # no provider installed: must not raise
+
+
 # ---------------------------------------------------------------- resource identity
 
 
