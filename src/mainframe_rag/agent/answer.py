@@ -484,6 +484,17 @@ def _token_usage_from_dict(usage_data: dict[str, Any]) -> TokenUsage:
     )
 
 
+def _chat_result_from_response(data: dict[str, Any]) -> ChatResult:
+    """Single parser for non-streaming chat-completion payloads: content,
+    finish_reason, and usage. Both fallback legs (achat, _chat_sync) funnel
+    through here so response-shape handling cannot diverge copies."""
+    choice = data["choices"][0]
+    content = str(choice["message"].get("content") or "")
+    finish_reason = str(choice.get("finish_reason") or "stop")
+    usage = _token_usage_from_dict(data.get("usage") or {})
+    return ChatResult(content=content, finish_reason=finish_reason, usage=usage)
+
+
 class HttpxLLMClient:
     """LLMClient implementation: the reasoning model only — deliberately no
     other model knob (architecture.md 4.6). LLM env fails closed at request
@@ -637,13 +648,7 @@ class HttpxLLMClient:
             json=body,
         )
         resp.raise_for_status()
-        data = resp.json()
-        choice = data["choices"][0]
-        content = str(choice["message"].get("content") or "")
-        finish_reason = str(choice.get("finish_reason") or "stop")
-        usage_data = data.get("usage") or {}
-        usage = _token_usage_from_dict(usage_data)
-        return ChatResult(content=content, finish_reason=finish_reason, usage=usage)
+        return _chat_result_from_response(resp.json())
 
     async def chat_stream(
         self,
@@ -811,13 +816,7 @@ class HttpxLLMClient:
             json=body,
         )
         resp.raise_for_status()
-        data = resp.json()
-        choice = data["choices"][0]
-        content = str(choice["message"].get("content") or "")
-        finish_reason = str(choice.get("finish_reason") or "stop")
-        usage_data = data.get("usage") or {}
-        usage = _token_usage_from_dict(usage_data)
-        return ChatResult(content=content, finish_reason=finish_reason, usage=usage)
+        return _chat_result_from_response(resp.json())
 
 
 def parse_answer(
