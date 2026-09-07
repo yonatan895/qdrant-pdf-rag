@@ -40,7 +40,7 @@ from mainframe_rag.agent.answer import (
     classify_query_complexity,
     parse_answer,
 )
-from mainframe_rag.agent.metrics import setup_metrics
+from mainframe_rag.agent.metrics import endpoint_for_path, record_request, setup_metrics
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.tracing import setup_tracing, shutdown_tracing
 from mainframe_rag.config import Settings, load_settings
@@ -341,28 +341,78 @@ class ErrorEnvelope(BaseModel):
 @app.middleware("http")
 async def attach_request_id(request: Request, call_next):
     """One request id per request, shared by every log line including the
-    unhandled-error handler (round-7 review)."""
+    unhandled-error handler (round-7 review). Also stamps the arrival time so
+    error handlers (which have no endpoint-local `started`) can still record
+    RED durations."""
     request.state.request_id = uuid.uuid4().hex[:12]
+    request.state.started = time.monotonic()
     return await call_next(request)
 
 
+def _record_handler_error(request: Request, code: str) -> None:
+    """RED outcome for every error-handler response. One helper serves all
+    six handlers so a new error shape cannot forget its series; non-product
+    paths (scrapes, probes, unknown routes) map to no endpoint and are
+    skipped. query_class is unknown here by construction — the handlers run
+    for requests whose retrieval leg may never have started. Skipped when
+    the endpoint already recorded a richer series (kind/hits known) before
+    raising — each request counts exactly once."""
+    if getattr(request.state, "red_recorded", False):
+        return
+    # getattr, not attribute access: the handler also serves synthetic
+    # requests (tests) that carry no URL — telemetry degrades to skipping.
+    url = getattr(request, "url", None)
+    path = getattr(url, "path", "") if url is not None else ""
+    endpoint = endpoint_for_path(path)
+    if endpoint is None:
+        return
+    started = getattr(request.state, "started", None)
+    elapsed = time.monotonic() - started if started is not None else 0.0
+    record_request(endpoint, code, elapsed_s=elapsed)
+
+
+def _record_endpoint(
+    request: Request,
+    endpoint: str,
+    outcome: str,
+    started: float,
+    *,
+    query_class: str = "unknown",
+    hits: int | None = None,
+    ttft_ms: int | None = None,
+    llm_model: str | None = None,
+) -> None:
+    """RED record for endpoint-leg outcomes (success and raised errors).
+    Marks the request so the error handler does not double-count the
+    AppError that follows a recorded raise."""
+    request.state.red_recorded = True
+    record_request(
+        endpoint, outcome, query_class=query_class,
+        elapsed_s=time.monotonic() - started, hits=hits,
+        ttft_ms=ttft_ms, llm_model=llm_model,
+    )
+
+
 @app.exception_handler(AppError)
-async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
+async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
+    _record_handler_error(request, exc.code)
     return JSONResponse(status_code=exc.status, content=ErrorEnvelope(code=exc.code, message=exc.message).model_dump())
 
 
 @app.exception_handler(HTTPException)
-async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     # Fixed message on purpose: nothing in src/ raises HTTPException, this
     # only fires from framework internals, and exc.detail must never reach a
     # client body (the "no internals" rule is structural, not incidental).
+    _record_handler_error(request, "http_error")
     return JSONResponse(
         status_code=exc.status_code, content=ErrorEnvelope(code="http_error", message="request failed").model_dump()
     )
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_error_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    _record_handler_error(request, "invalid_request")
     return JSONResponse(
         status_code=422,
         content=ErrorEnvelope(code="invalid_request", message="request body failed validation").model_dump(),
@@ -372,6 +422,7 @@ async def validation_error_handler(_request: Request, exc: RequestValidationErro
 @app.exception_handler(Exception)
 async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
     # Full trace stays in server logs; the client never sees internals.
+    _record_handler_error(request, "internal")
     span = trace.get_current_span()
     if span is not None and span.is_recording():
         _span_error(span, exc)
@@ -385,14 +436,16 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
 # Router-level 404/405 raise Starlette's HTTPException, which the FastAPI
 # subclass handler does not cover — key these by status code.
 @app.exception_handler(404)
-async def not_found_handler(_request: Request, _exc: Exception) -> JSONResponse:
+async def not_found_handler(request: Request, _exc: Exception) -> JSONResponse:
+    _record_handler_error(request, "not_found")
     return JSONResponse(
         status_code=404, content=ErrorEnvelope(code="not_found", message="not found").model_dump()
     )
 
 
 @app.exception_handler(405)
-async def method_not_allowed_handler(_request: Request, _exc: Exception) -> JSONResponse:
+async def method_not_allowed_handler(request: Request, _exc: Exception) -> JSONResponse:
+    _record_handler_error(request, "method_not_allowed")
     return JSONResponse(
         status_code=405,
         content=ErrorEnvelope(code="method_not_allowed", message="method not allowed").model_dump(),
@@ -471,10 +524,14 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
             hits, kind, timings = await _await_retrieval(res)
         except Exception as exc:
             _span_error(span, exc)
+            _record_endpoint(request, "search", "upstream_error", started)
             log.error(json_log(request_id, "search", error=str(exc)[:200]))
             raise AppError(502, "upstream_error", "retrieval failed") from exc
         span.set_attributes(_search_span_attrs(kind, hits))
     timing_parts = _timing_parts(timings)
+    if timing_parts:
+        response.headers["Server-Timing"] = ", ".join(timing_parts)
+    _record_endpoint(request, "search", "ok", started, query_class=kind, hits=len(hits))
     if timing_parts:
         response.headers["Server-Timing"] = ", ".join(timing_parts)
     log.info(
@@ -531,6 +588,7 @@ async def v1_answer(
     try:
         assert_reasoning_model(settings)
     except RuntimeError as exc:
+        _record_endpoint(request, "answer", "not_configured", started)
         log.warning(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(503, "not_configured", "reasoning model is not configured") from exc
     llm_model = settings.require_reasoning_model()
@@ -562,12 +620,14 @@ async def v1_answer(
     except Exception as exc:
         _span_error(root_span, exc)
         root_span.end()
+        _record_endpoint(request, "answer", "upstream_error", started)
         log.error(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "retrieval failed") from exc
 
     if not hits:
         root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
         root_span.end()
+        _record_endpoint(request, "answer", "ok", started, query_class=kind, hits=0)
         timing_parts = _timing_parts(timings)
         if timing_parts:
             response.headers["Server-Timing"] = ", ".join(timing_parts)
@@ -683,12 +743,16 @@ async def v1_answer(
         except Exception as exc:
             _span_error(root_span, exc)
             root_span.end()
+            _record_endpoint(
+                request, "answer", "upstream_error", started,
+                query_class=kind, hits=len(hits),
+            )
             log.error(json_log(request_id, "answer", error=str(exc)[:200]))
             raise AppError(502, "upstream_error", "answer failed") from exc
 
         # finish_reason != stop is alerted per request: the JSON warning is the
-        # real, worker-safe signal. No process-local counters — they lie under
-        # multiple uvicorn workers and nothing exports them.
+        # real, worker-safe log signal; the countable signal is the OTel
+        # rag.requests counter (single uvicorn worker only, see metrics.py).
         if finish_reason != "stop":
             log.warning(
                 json_log(
@@ -718,6 +782,10 @@ async def v1_answer(
             _answer_span_attrs(kind, hits, len(parsed.citations), parsed.script is not None)
         )
         root_span.end()
+        _record_endpoint(
+            request, "answer", "ok", started, query_class=kind,
+            hits=len(hits), ttft_ms=ttft_ms, llm_model=llm_model,
+        )
         return AnswerResponse(
             request_id=request_id,
             answer=parsed.answer,
@@ -815,12 +883,20 @@ async def v1_answer(
                     detail=str(exc)[:200],
                 )
             )
+            _record_endpoint(
+                request, "answer", "upstream_error", started,
+                query_class=kind, hits=len(hits),
+            )
             log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
             err_payload = {"type": "error", "code": "upstream_error", "message": "stream failed"}
             yield f"event: error\ndata: {json.dumps(err_payload)}\n\n"
             return
         except Exception as exc:  # noqa: BLE001
             _span_error(root_span, exc)
+            _record_endpoint(
+                request, "answer", "upstream_error", started,
+                query_class=kind, hits=len(hits),
+            )
             log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
             err_payload = {"type": "error", "code": "upstream_error", "message": "stream failed"}
             yield f"event: error\ndata: {json.dumps(err_payload)}\n\n"
@@ -876,6 +952,10 @@ async def v1_answer(
         }
         root_span.set_attributes(
             _answer_span_attrs(kind, hits, len(parsed.citations), parsed.script is not None)
+        )
+        _record_endpoint(
+            request, "answer", "ok", started, query_class=kind,
+            hits=len(hits), ttft_ms=ttft_ms, llm_model=llm_model,
         )
         yield f"event: final\ndata: {json.dumps(final_payload)}\n\n"
 
