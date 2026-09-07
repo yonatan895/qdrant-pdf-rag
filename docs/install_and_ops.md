@@ -694,6 +694,15 @@ pack-wide contract — every pinned image is mirrored on every pack), even
 when tracing stays off; only the deployment is opt-in. The endpoint may be
 given with or without the `/v1/traces` path — the agent accepts both.
 
+Every exported span carries deploy identity as resource attributes:
+`service.version` is the packed `IMAGE_SHA` automatically, and
+`deployment.environment` comes from the optional
+`OTEL_DEPLOYMENT_ENVIRONMENT` in `airgap.env` (e.g. `prod`; omitted when
+unset) — so traces from lab and prod sharing one backend stay
+unambiguous. The agent also honors the standard `OTEL_RESOURCE_ATTRIBUTES`
+mapping underneath these explicit keys, and joins an upstream W3C
+`traceparent` when the caller sends one.
+
 View traces (port-forward only — Jaeger has no public Route, like Qdrant):
 
 ```bash

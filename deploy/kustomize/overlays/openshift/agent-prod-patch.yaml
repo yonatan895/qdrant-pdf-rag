@@ -38,6 +38,16 @@ spec:
             # (fail-closed default); Jaeger is not deployed without it.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
+            # Deploy identity for trace resource attributes (OTel Phase 2b):
+            # service.version is the packed IMAGE_SHA (always set —
+            # deploy.sh fail-closes on empty/HEAD); deployment.environment
+            # is OTEL_DEPLOYMENT_ENVIRONMENT (optional, e.g. "prod" — empty
+            # renders bare `value:` and the agent omits the attribute,
+            # exactly like the endpoint above when tracing is off).
+            - name: IMAGE_SHA
+              value: __IMAGE_SHA__
+            - name: OTEL_DEPLOYMENT_ENVIRONMENT
+              value: __OTEL_DEPLOYMENT_ENVIRONMENT__
             # Prometheus /metrics for UWM scrapes (issue #187): "true" serves
             # exposition, anything else 404s (fail-closed default). deploy.sh
             # also deploys the ServiceMonitor only in that case.
