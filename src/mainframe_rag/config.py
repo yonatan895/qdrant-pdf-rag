@@ -173,6 +173,14 @@ class Settings(BaseSettings):
     rerank_candidates: int = Field(default=50, ge=10, le=100)
     rerank_batch_size: int = Field(default=32, ge=1, le=128)
     rerank_timeout_s: float = Field(default=5.0, ge=0.5, le=30.0)
+    # Fusion of the cross-encoder score with the pre-rerank RRF score inside
+    # rerank_candidates (both min-max normalized over the candidate pool):
+    # 1.0 = legacy cross-encoder-only order, 0.0 = RRF order decides (the
+    # cross-encoder still scores and attaches rerank_score, so 0.0 is the
+    # ablation that isolates the CE signal). Mid values keep RRF rank-1s
+    # unless the cross-encoder strongly disagrees (measured churn on the
+    # real-corpus holdout: CE-only promotes 3 but demotes 3).
+    rerank_fusion_alpha: float = Field(default=1.0, ge=0.0, le=1.0)
 
     # Contextual retrieval (issue #78): an LLM-generated 1-2 sentence
     # situating prefix per chunk, embedded with the chunk. Default off —

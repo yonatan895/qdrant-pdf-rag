@@ -186,36 +186,55 @@ def build_reranker(settings: Settings, client: httpx2.Client | None = None) -> R
     )
 
 
+def _minmax(values: Sequence[float]) -> list[float]:
+    """Min-max normalize over the candidate pool. A constant list carries no
+    signal, so it normalizes to 0.5 and the other leg decides the blend."""
+    lo = min(values)
+    hi = max(values)
+    if hi == lo:
+        return [0.5] * len(values)
+    span = hi - lo
+    return [(v - lo) / span for v in values]
+
+
 def rerank_candidates(
     query: str,
     candidates: Sequence[SearchHit],
     reranker: Reranker,
     top_k: int | None = None,
+    alpha: float = 1.0,
 ) -> list[SearchHit]:
-    """Score candidates using the cross-encoder and sort descending by rerank_score.
+    """Score candidates using the cross-encoder and sort descending by a blend
+    of the normalized cross-encoder and pre-rerank RRF scores.
+
+    Both legs are min-max normalized over the candidate pool. ``alpha`` is
+    the cross-encoder weight: 1.0 reproduces the legacy cross-encoder-only
+    order exactly (the normalization is strictly monotonic, so the blended
+    key plus the raw-score tie-breaks match the old ``(rerank_score, RRF
+    score, chunk_id)`` key); 0.0 keeps RRF order while still attaching
+    ``rerank_score``. Out-of-range alphas clamp to [0, 1].
 
     If top_k is specified, truncates results to top_k.
     """
     if not candidates:
         return []
+    alpha = min(1.0, max(0.0, alpha))
     texts = [format_rerank_text(c) for c in candidates]
     scores = reranker.score(query, texts)
     if len(scores) != len(candidates):
         raise RuntimeError(
             f"Reranker returned {len(scores)} scores for {len(candidates)} candidates"
         )
-    scored: list[SearchHit] = []
-    for cand, score in zip(candidates, scores):
-        scored.append(cand.model_copy(update={"rerank_score": score}))
-    # Stable sort: rerank_score descending, then original RRF score, then chunk_id
-    scored.sort(
-        key=lambda h: (
-            h.rerank_score if h.rerank_score is not None else float("-inf"),
-            h.score,
-            h.chunk_id,
-        ),
-        reverse=True,
-    )
+    ce_norm = _minmax(scores)
+    rrf_norm = _minmax([c.score for c in candidates])
+    ranked: list[tuple[float, float, float, str, SearchHit]] = []
+    for cand, ce, cn, rn in zip(candidates, scores, ce_norm, rrf_norm):
+        blend = alpha * cn + (1.0 - alpha) * rn
+        ranked.append((blend, ce, cand.score, cand.chunk_id, cand.model_copy(update={"rerank_score": ce})))
+    # Stable sort: blended score descending, then raw cross-encoder score,
+    # then original RRF score, then chunk_id.
+    ranked.sort(key=lambda t: (t[0], t[1], t[2], t[3]), reverse=True)
+    out = [t[4] for t in ranked]
     if top_k is not None:
-        return scored[:top_k]
-    return scored
+        return out[:top_k]
+    return out
