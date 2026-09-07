@@ -13,11 +13,16 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 
 STUB_KC_TEMPLATE = """#!/bin/sh
-# Check if this is the healthz probe or search query
+# Check if this is the healthz probe, search query, or Jaeger trace poll.
+# The trace arm comes first: the trace-poll script mentions v1.search, so a
+# search arm would swallow it.
 for arg in "$@"; do
     case "$arg" in
         *healthz*)
             exit {health_exit}
+            ;;
+        *traces*|*jaeger*)
+            exit {trace_exit}
             ;;
         *search*)
             exit {search_exit}
@@ -28,6 +33,7 @@ done
 content="$(cat)"
 case "$content" in
     *healthz*) exit {health_exit} ;;
+    *traces*|*jaeger*) exit {trace_exit} ;;
     *search*) exit {search_exit} ;;
 esac
 exit {default_exit}
@@ -43,9 +49,10 @@ def smoke_tree(tmp_path):
     return tmp_path
 
 
-def _setup_stub(tmp_path, health_exit=0, search_exit=0, default_exit=0):
+def _setup_stub(tmp_path, health_exit=0, search_exit=0, default_exit=0, trace_exit=0):
     script = STUB_KC_TEMPLATE.format(
-        health_exit=health_exit, search_exit=search_exit, default_exit=default_exit
+        health_exit=health_exit, search_exit=search_exit, default_exit=default_exit,
+        trace_exit=trace_exit,
     )
     for name in ("kubectl", "oc"):
         p = tmp_path / "bin" / name
@@ -115,7 +122,7 @@ def _clean_sysbin(tmp_path):
 
 def test_smoke_uses_oc_when_kubectl_missing(smoke_tree):
     # Setup oc stub only
-    script = STUB_KC_TEMPLATE.format(health_exit=0, search_exit=0, default_exit=0)
+    script = STUB_KC_TEMPLATE.format(health_exit=0, search_exit=0, default_exit=0, trace_exit=0)
     p = smoke_tree / "bin" / "oc"
     p.write_text(script)
     p.chmod(0o755)
@@ -157,10 +164,38 @@ def test_smoke_fails_on_degraded_healthz(smoke_tree):
 
 def test_smoke_kc_env_override_respected(smoke_tree):
     # Ensure KC env override is used directly
-    script = STUB_KC_TEMPLATE.format(health_exit=0, search_exit=0, default_exit=0)
+    script = STUB_KC_TEMPLATE.format(health_exit=0, search_exit=0, default_exit=0, trace_exit=0)
     p = smoke_tree / "bin" / "custom-kc"
     p.write_text(script)
     p.chmod(0o755)
     r = _run_smoke(smoke_tree, ("KC", str(p)))
     assert r.returncode == 0, r.stderr
     assert "Smoke query returned hits" in r.stdout
+
+
+def test_smoke_tracing_off_skips_trace_check(smoke_tree):
+    _setup_stub(smoke_tree, health_exit=0, search_exit=0)
+    r = _run_smoke(smoke_tree)
+    assert r.returncode == 0, r.stderr
+    assert "Tracing:       OFF (skipped — OTEL_EXPORTER_OTLP_ENDPOINT unset)" in r.stdout
+
+
+def test_smoke_tracing_ok_when_span_landed(smoke_tree):
+    _setup_stub(smoke_tree, health_exit=0, search_exit=0, trace_exit=0)
+    r = _run_smoke(smoke_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"))
+    assert r.returncode == 0, r.stderr
+    assert "Tracing:       OK (recent v1.search span in Jaeger)" in r.stdout
+
+
+def test_smoke_tracing_fails_when_no_span_landed(smoke_tree):
+    _setup_stub(smoke_tree, health_exit=0, search_exit=0, trace_exit=1)
+    r = _run_smoke(smoke_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"))
+    assert r.returncode == 1
+    assert "no v1.search span landed in Jaeger" in r.stderr
+
+
+def test_smoke_tracing_skipped_on_empty_collection(smoke_tree):
+    _setup_stub(smoke_tree, health_exit=0, search_exit=3)
+    r = _run_smoke(smoke_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"))
+    assert r.returncode == 0, r.stderr
+    assert "Tracing:       SKIPPED (nothing ingested — no request traced yet)" in r.stdout
