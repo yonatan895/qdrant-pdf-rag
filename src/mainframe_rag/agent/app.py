@@ -533,8 +533,6 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
     if timing_parts:
         response.headers["Server-Timing"] = ", ".join(timing_parts)
     _record_endpoint(request, "search", "ok", started, query_class=kind, hits=len(hits))
-    if timing_parts:
-        response.headers["Server-Timing"] = ", ".join(timing_parts)
     log.info(
         json_log(
             request_id, "search", query_kind=kind, hits=len(hits),
