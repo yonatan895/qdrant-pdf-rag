@@ -42,7 +42,7 @@ from mainframe_rag.agent.answer import (
 )
 from mainframe_rag.agent.metrics import endpoint_for_path, record_request, setup_metrics
 from mainframe_rag.agent.tokenizer import build_tokenizer
-from mainframe_rag.agent.tracing import setup_tracing, shutdown_tracing
+from mainframe_rag.agent.tracing import parent_context, setup_tracing, shutdown_tracing
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.logs import configure_logging
@@ -513,6 +513,7 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
     _require_query_length(request_id, req.query)
     with tracer.start_as_current_span(
         "v1.search",
+        context=parent_context(request.headers),
         attributes={"http.request_id": request_id, "rag.limit": req.limit, "rag.query": req.query},
     ) as span:
         try:
@@ -599,6 +600,7 @@ async def v1_answer(
     # longest leg) is a child of the same trace, not a detached one.
     root_span = tracer.start_span(
         "v1.answer",
+        context=parent_context(request.headers),
         attributes={"http.request_id": request_id, "rag.query": req.query, "rag.stream": is_stream},
     )
 
