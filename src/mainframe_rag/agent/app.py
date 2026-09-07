@@ -191,6 +191,22 @@ def _answer_log_fields(
     return fields
 
 
+def _alert_finish_reason_non_stop(request_id: str, finish_reason: str) -> None:
+    """Per-request alert when the reasoning model stops abnormally: the JSON
+    warning is the real, worker-safe log signal; the countable signal is the
+    OTel rag.requests counter (single uvicorn worker only, see metrics.py).
+    Shared by the JSON and SSE finals so the alert cannot diverge copies."""
+    if finish_reason != "stop":
+        log.warning(
+            json_log(
+                request_id,
+                "answer_alert",
+                alert="finish_reason_non_stop",
+                finish_reason=finish_reason,
+            )
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker
@@ -750,18 +766,7 @@ async def v1_answer(
             log.error(json_log(request_id, "answer", error=str(exc)[:200]))
             raise AppError(502, "upstream_error", "answer failed") from exc
 
-        # finish_reason != stop is alerted per request: the JSON warning is the
-        # real, worker-safe log signal; the countable signal is the OTel
-        # rag.requests counter (single uvicorn worker only, see metrics.py).
-        if finish_reason != "stop":
-            log.warning(
-                json_log(
-                    request_id,
-                    "answer_alert",
-                    alert="finish_reason_non_stop",
-                    finish_reason=finish_reason,
-                )
-            )
+        _alert_finish_reason_non_stop(request_id, finish_reason)
 
         timing_parts = _timing_parts(timings, llm_ms=llm_ms, ttft_ms=ttft_ms)
         if timing_parts:
@@ -909,15 +914,7 @@ async def v1_answer(
             ordered_cites=[h.cite for h in hits],
         )
 
-        if finish_reason != "stop":
-            log.warning(
-                json_log(
-                    request_id,
-                    "answer_alert",
-                    alert="finish_reason_non_stop",
-                    finish_reason=finish_reason,
-                )
-            )
+        _alert_finish_reason_non_stop(request_id, finish_reason)
 
         llm_ms = int((time.monotonic() - t0) * 1000)
         log.info(
