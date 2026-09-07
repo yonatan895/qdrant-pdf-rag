@@ -496,6 +496,30 @@ def _chat_result_from_response(data: dict[str, Any]) -> ChatResult:
     return ChatResult(content=content, finish_reason=finish_reason, usage=usage)
 
 
+def _chat_body(
+    model: str,
+    serialized: list[dict[str, Any]],
+    reasoning_effort: str | None,
+    temperature: float | None,
+    *,
+    stream: bool,
+) -> dict[str, Any]:
+    """Single builder for chat-completion request bodies: model + messages,
+    optional reasoning_effort/temperature, and the streaming flags
+    (stream + usage ask). Every chat path (achat, chat_stream, _chat_sync,
+    stream and fallback legs) funnels through here so a request-shape change
+    cannot diverge copies."""
+    body: dict[str, Any] = {"model": model, "messages": serialized}
+    if reasoning_effort:
+        body["reasoning_effort"] = reasoning_effort
+    if temperature is not None:
+        body["temperature"] = temperature
+    if stream:
+        body["stream"] = True
+        body["stream_options"] = {"include_usage": True}
+    return body
+
+
 @dataclass
 class _SseStreamState:
     """Accumulated parse state for one SSE chat-completion stream: time to
@@ -624,16 +648,12 @@ class HttpxLLMClient:
     ) -> ChatResult:
         base_url, model = assert_reasoning_model(self._settings)
         serialized = [m.model_dump() for m in messages]
-        body: dict[str, Any] = {"model": model, "messages": serialized}
-        if reasoning_effort:
-            body["reasoning_effort"] = reasoning_effort
-        if temperature is not None:
-            body["temperature"] = temperature
+        body = _chat_body(model, serialized, reasoning_effort, temperature, stream=False)
         if getattr(self._settings, "llm_stream", False):
             try:
                 t0 = time.monotonic()
                 state = _SseStreamState()
-                body_stream = {**body, "stream": True, "stream_options": {"include_usage": True}}
+                body_stream = _chat_body(model, serialized, reasoning_effort, temperature, stream=True)
                 async with self._async_http().stream(
                     "POST",
                     f"{base_url.rstrip('/')}/chat/completions",
@@ -681,16 +701,7 @@ class HttpxLLMClient:
     ) -> AsyncIterator[dict[str, Any]]:
         base_url, model = assert_reasoning_model(self._settings)
         serialized = [m.model_dump() for m in messages]
-        body: dict[str, Any] = {
-            "model": model,
-            "messages": serialized,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-        if reasoning_effort:
-            body["reasoning_effort"] = reasoning_effort
-        if temperature is not None:
-            body["temperature"] = temperature
+        body = _chat_body(model, serialized, reasoning_effort, temperature, stream=True)
 
         t0 = time.monotonic()
         state = _SseStreamState()
@@ -756,13 +767,9 @@ class HttpxLLMClient:
     ) -> ChatResult:
         base_url, model = assert_reasoning_model(self._settings)
         serialized = [m.model_dump() for m in messages]
-        body: dict[str, Any] = {"model": model, "messages": serialized}
-        if reasoning_effort:
-            body["reasoning_effort"] = reasoning_effort
-        if temperature is not None:
-            body["temperature"] = temperature
+        body = _chat_body(model, serialized, reasoning_effort, temperature, stream=False)
         if getattr(self._settings, "llm_stream", False) and hasattr(self._sync_http(), "stream"):
-            body_stream = {**body, "stream": True, "stream_options": {"include_usage": True}}
+            body_stream = _chat_body(model, serialized, reasoning_effort, temperature, stream=True)
             try:
                 t0 = time.monotonic()
                 state = _SseStreamState()
