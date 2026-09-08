@@ -519,7 +519,7 @@ def test_span_attributes_bounded():
         "rag.filter_present", "rag.rerank_bypass_reason", "rag.query_kind",
         "rag.hits", "rag.filter_fallback", "rag.rrf_k", "rag.rrf_weights", "rag.candidates_in",
         "rag.candidates_out", "rag.doc_ids", "rag.batch", "rag.embedder",
-        "rag.rerank_scores",
+        "rag.rerank_scores", "rag.rerank_alpha",
     }
     for span in exporter.get_finished_spans():
         for key in span.attributes:

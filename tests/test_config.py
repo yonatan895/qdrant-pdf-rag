@@ -72,6 +72,7 @@ def test_outbound_timeout_defaults_bounded():
     assert s.rerank_candidates == 50
     assert s.rerank_batch_size == 32
     assert s.rerank_timeout_s == 5.0
+    assert s.rerank_fusion_alpha == 1.0
 
 
 def test_hash_mode_requires_explicit_allow():

@@ -159,6 +159,90 @@ def test_rerank_candidates_applies_top_k():
     assert truncated[0].chunk_id == "c2"
 
 
+def _blend_hits() -> tuple[list[SearchHit], dict[str, float]]:
+    """RRF order [c1, c2, c3], cross-encoder order [c3, c2, c1]: the two legs
+    maximally disagree so every alpha regime is distinguishable."""
+    hit1 = _make_hit("c1", "DOC1", 0.9, text="Doc 1")
+    hit2 = _make_hit("c2", "DOC2", 0.5, text="Doc 2")
+    hit3 = _make_hit("c3", "DOC3", 0.1, text="Doc 3")
+    t1 = format_rerank_text(hit1)
+    t2 = format_rerank_text(hit2)
+    t3 = format_rerank_text(hit3)
+    return [hit1, hit2, hit3], {t1: 0.0, t2: 0.7, t3: 1.0}
+
+
+def test_rerank_alpha_one_reproduces_legacy_order():
+    """alpha=1.0 is byte-identical legacy: strictly monotonic rescale of the
+    CE score plus the same raw-score tie-breaks."""
+    hits, score_map = _blend_hits()
+    reranked = rerank_candidates("test query", hits, MockReranker(score_map), alpha=1.0)
+    assert [h.chunk_id for h in reranked] == ["c3", "c2", "c1"]
+    assert [h.rerank_score for h in reranked] == [1.0, 0.7, 0.0]
+
+
+def test_rerank_alpha_zero_keeps_rrf_order():
+    """alpha=0.0: RRF decides, but rerank_score is still attached (ablation
+    isolates the cross-encoder signal without losing its payload field)."""
+    hits, score_map = _blend_hits()
+    reranked = rerank_candidates("test query", hits, MockReranker(score_map), alpha=0.0)
+    assert [h.chunk_id for h in reranked] == ["c1", "c2", "c3"]
+    assert [h.rerank_score for h in reranked] == [0.0, 0.7, 1.0]
+
+
+def test_rerank_alpha_half_blends_to_middle_order():
+    """alpha=0.5 on maximally-disagreeing legs: RRF norms [1, 0.5, 0], CE
+    norms [0, 0.7, 1] blend to [0.5, 0.6, 0.5] — c2 wins, and the 0.5 tie
+    breaks on raw CE score toward c3. Neither extreme produces [c2, c3, c1]."""
+    hits, score_map = _blend_hits()
+    reranked = rerank_candidates("test query", hits, MockReranker(score_map), alpha=0.5)
+    assert [h.chunk_id for h in reranked] == ["c2", "c3", "c1"]
+
+
+def test_rerank_alpha_clamps_out_of_range():
+    hits, score_map = _blend_hits()
+    hi = rerank_candidates("test query", hits, MockReranker(score_map), alpha=2.0)
+    assert [h.chunk_id for h in hi] == ["c3", "c2", "c1"]
+    lo = rerank_candidates("test query", hits, MockReranker(score_map), alpha=-0.5)
+    assert [h.chunk_id for h in lo] == ["c1", "c2", "c3"]
+
+
+def test_rerank_alpha_flat_leg_abstains():
+    """A constant leg normalizes to 0.5 and the other leg decides at any alpha."""
+    hit1 = _make_hit("c1", "DOC1", 0.9, text="Doc 1")
+    hit2 = _make_hit("c2", "DOC2", 0.5, text="Doc 2")
+    t1 = format_rerank_text(hit1)
+    t2 = format_rerank_text(hit2)
+    flat = MockReranker({t1: 0.5, t2: 0.5})
+    for alpha in (0.0, 0.5, 1.0):
+        reranked = rerank_candidates("test", [hit1, hit2], flat, alpha=alpha)
+        assert [h.chunk_id for h in reranked] == ["c1", "c2"], alpha
+
+
+def test_search_rerank_alpha_zero_keeps_rrf_order():
+    """Claimed path: the Settings knob flows through search() into ranking —
+    alpha=0.0 keeps RRF order where the default alpha=1.0 flips it."""
+    c1 = models.ScoredPoint(
+        id="c1", version=1, score=0.9,
+        payload={"doc_id": "DOC1", "title": "M1", "heading_path": "H1", "page_label": "1", "text": "Ordinary prose"},
+    )
+    c2 = models.ScoredPoint(
+        id="c2", version=1, score=0.4,
+        payload={"doc_id": "DOC2", "title": "M2", "heading_path": "H2", "page_label": "2", "text": "Other prose"},
+    )
+    reranker = PromotingReranker()
+    base = {"rerank_enabled": True, "embed_mode": "hash", "allow_hash_mode": True, "_env_file": None}
+    kept = search(
+        FakeQdrantPoints([c1, c2]), FakeEmbedder(), "test-coll", "certificate key management",
+        settings=Settings(**base, rerank_fusion_alpha=0.0), reranker=reranker,
+    )[0]
+    assert [h.chunk_id for h in kept] == ["c1", "c2"]
+    flipped = search(
+        FakeQdrantPoints([c1, c2]), FakeEmbedder(), "test-coll", "certificate key management",
+        settings=Settings(**base, rerank_fusion_alpha=1.0), reranker=reranker,
+    )[0]
+    assert [h.chunk_id for h in flipped] == ["c2", "c1"]
+
+
 def test_rerank_candidates_raises_on_length_mismatch():
     """Defense-in-depth: rerank_candidates raises if scorer returned wrong count."""
     hit1 = _make_hit("c1", "DOC1", 0.9)

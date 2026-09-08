@@ -497,9 +497,13 @@ def search(
             with tracer.start_as_current_span(
                 "retrieve.rerank", attributes={"rag.candidates": len(candidates)}
             ) as rr_span:
-                reranked = rerank_candidates(query, candidates, active_reranker)
+                fusion_alpha = settings.rerank_fusion_alpha if settings else 1.0
+                reranked = rerank_candidates(query, candidates, active_reranker, alpha=fusion_alpha)
                 rr_span.set_attributes(
-                    {"rag.rerank_scores": ",".join(f"{h.score:.3f}" for h in reranked[:5])}
+                    {
+                        "rag.rerank_scores": ",".join(f"{h.score:.3f}" for h in reranked[:5]),
+                        "rag.rerank_alpha": fusion_alpha,
+                    }
                 )
             timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
             fused = reranked
@@ -646,9 +650,15 @@ async def async_search(
             with tracer.start_as_current_span(
                 "retrieve.rerank", attributes={"rag.candidates": len(candidates)}
             ) as rr_span:
-                reranked = await asyncio.to_thread(rerank_candidates, query, candidates, active_reranker)
+                fusion_alpha = settings.rerank_fusion_alpha if settings else 1.0
+                reranked = await asyncio.to_thread(
+                    rerank_candidates, query, candidates, active_reranker, alpha=fusion_alpha
+                )
                 rr_span.set_attributes(
-                    {"rag.rerank_scores": ",".join(f"{h.score:.3f}" for h in reranked[:5])}
+                    {
+                        "rag.rerank_scores": ",".join(f"{h.score:.3f}" for h in reranked[:5]),
+                        "rag.rerank_alpha": fusion_alpha,
+                    }
                 )
             timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
             fused = reranked

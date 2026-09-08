@@ -125,14 +125,18 @@ Two ordering rules matter:
 ## 6. Rerank dispatch
 
 Reranking ships default-off. When enabled, the fused top candidates
-(default 50) are rescored by a cross-encoder and stably resorted by
-`(rerank_score, RRF score, chunk_id)`; length mismatches raise rather than
-misalign.
+(default 50) are rescored by a cross-encoder and stably resorted by a blend
+of the min-max normalized cross-encoder and pre-rerank RRF scores
+(`Settings.rerank_fusion_alpha` is the cross-encoder weight: 1.0 reproduces
+the legacy cross-encoder-only order exactly, 0.0 keeps RRF order while still
+attaching `rerank_score`); a constant leg normalizes to 0.5 and abstains.
+Tie-breaks after the blend are raw cross-encoder score, RRF score,
+`chunk_id`. Length mismatches raise rather than misalign. The alpha lands on
+the trace as `rag.rerank_alpha` (bounded float, never free text).
 
 Dispatch (`_resolve_active_reranker`): an explicitly passed reranker wins,
 else the flag-built memoized one. Then the bypass applies — and it
 **nullifies even an explicitly passed reranker**:
-
 - `trap` queries bypass (injection must never be re-ranked; RRF order
   stands so the trap hard-zero holds with reranking on).
 - `identifier` queries bypass (the cross-encoder scores shape-compatibility,
