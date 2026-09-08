@@ -468,6 +468,44 @@ def test_search_stage_tree_nl_with_rerank():
     assert "rag.rerank_bypass_reason" not in root.attributes
 
 
+def test_search_stage_tree_split_reports_paths_and_mode():
+    """Issue #214: rag.split_paths/mode are emitted (not just allowed) on
+    both twins — comparative NL splits 2/comparative with flags on,
+    flags-off stays 1/single."""
+    from mainframe_rag.config import Settings
+
+    settings = Settings(
+        comparative_split_enabled=True, diagnostic_dualpath_enabled=True, _env_file=None
+    )
+    query = "Compare JES2 versus JES3 spool concepts for the job."
+    (_hits, kind, _timings), exporter = _run_and_collect(
+        search, FakeQdrant(dense=[_point("a")], sparse=[_point("b")]),
+        FakeEmbedder(), "mainframe_manuals", query, limit=5, settings=settings,
+    )
+    assert kind == "nl"
+    root = _spans(exporter)["retrieve.search"][0]
+    assert root.attributes["rag.split_paths"] == 2
+    assert root.attributes["rag.split_mode"] == "comparative"
+
+    (_a_hits, a_kind, _a_timings), a_exporter = _run_and_collect(
+        lambda *args, **kwargs: asyncio.run(async_search(*args, **kwargs)),
+        FakeQdrant(dense=[_point("a")], sparse=[_point("b")]),
+        FakeEmbedder(), "mainframe_manuals", query, limit=5, settings=settings,
+    )
+    assert a_kind == "nl"
+    a_root = _spans(a_exporter)["retrieve.search"][0]
+    assert a_root.attributes["rag.split_paths"] == 2
+    assert a_root.attributes["rag.split_mode"] == "comparative"
+
+    (_s_hits, _, _s_timings), s_exporter = _run_and_collect(
+        search, FakeQdrant(dense=[_point("a")], sparse=[_point("b")]),
+        FakeEmbedder(), "mainframe_manuals", query, limit=5,
+    )
+    s_root = _spans(s_exporter)["retrieve.search"][0]
+    assert s_root.attributes["rag.split_paths"] == 1
+    assert s_root.attributes["rag.split_mode"] == "single"
+
+
 def test_search_stage_tree_trap_bypass():
     fake = FakeQdrant(dense=[_point("a")], sparse=[_point("b")])
     (_hits, _kind, _timings), exporter = _run_and_collect(
@@ -519,7 +557,7 @@ def test_span_attributes_bounded():
         "rag.filter_present", "rag.rerank_bypass_reason", "rag.query_kind",
         "rag.hits", "rag.filter_fallback", "rag.rrf_k", "rag.rrf_weights", "rag.candidates_in",
         "rag.candidates_out", "rag.doc_ids", "rag.batch", "rag.embedder",
-        "rag.rerank_scores", "rag.rerank_alpha",
+        "rag.rerank_scores", "rag.rerank_alpha", "rag.split_paths", "rag.split_mode",
     }
     for span in exporter.get_finished_spans():
         for key in span.attributes:

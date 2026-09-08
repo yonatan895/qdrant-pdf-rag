@@ -19,16 +19,27 @@ Stage order for both twins:
 1. `parse_query` extracts identifiers; `build_filter` turns them (plus
    product/version) into a Qdrant filter, or `None` when empty.
 2. `_resolve_active_reranker` decides whether the rerank leg runs (§6).
-3. `_effective_query` applies acronym expansion, if enabled (§7).
+3. `_split_paths_for` decomposes into 1–2 retrieval paths (§3b). Single
+   path short-circuits: flags-off is byte-identical legacy.
+4. `_effective_query` applies acronym expansion, if enabled (§7), per leg.
    Identifiers, the filter, and the returned `query_kind` always stay on the
    operator's original query.
-4. `embedder.dense_query` + `embedder.sparse` embed the (possibly expanded)
-   query.
-5. `_build_prefetch_requests` issues one dense + one BM25 prefetch in a
-   single batched `query_batch_points` call (falling back to two sequential
-   `query_points` when the server lacks batching).
-6. `rrf_fuse` merges the legs (§4); `rerank_candidates` optionally rescores
-   (§6); `diversify_hits` enforces coverage caps (§8).
+5. `embedder.dense_query` + `embedder.sparse` embed each leg (one embed per
+   path, sequential on the async twin for parity).
+6. `_build_prefetch_requests` issues one dense + one BM25 prefetch per leg
+   in batched `query_batch_points` calls (falling back to sequential
+   `query_points` when the server lacks batching). Every leg shares the
+   ORIGINAL filter: splitting changes ranking text only, never the
+   constraint allowlist.
+7. `rrf_fuse` merges the legs per path (§4); paths merge when split —
+   comparative peers by best evidence (`max_split_hits`: each doc's maximum
+   `1/(k+rank+1)` across paths, so shared-context noise ranking mid in both
+   legs cannot outscore an entity-focused rank-1 the way an RRF sum lets it;
+   ties keep leg order), diagnostic by rank sum 2:1 symptom-first
+   (`merge_split_hits`); `rerank_candidates` optionally rescores the merged pool
+   against the original question (§6); `diversify_hits` enforces coverage
+   caps (§8). The split lands on the trace as `rag.split_paths` (1–2) and
+   `rag.split_mode` (`single`/`comparative`/`diagnostic`), both bounded.
 
 Output is `(hits, query_kind, timings)` where `query_kind` is `identifier`
 or `nl`, and timings carry `embed_ms`/`qdrant_ms` plus `rerank_ms` only when
@@ -75,6 +86,27 @@ case, and uppercasing would break it.
 `query_kind` is `identifier` when any of the three lists is non-empty (a
 lone member code flips it too), else `nl`. The kind drives RRF weights and
 the rerank bypass — but never the filter shape.
+
+## 3b. Multi-path splitting
+
+`split_query` (`retrieve/split.py`, issue #214) decomposes comparative and
+diagnostic queries into at most two retrieval paths — deterministic regexes,
+no LLM. Both flags (`comparative_split_enabled`,
+`diagnostic_dualpath_enabled`) ship default-off.
+
+- Comparative (`versus`/`vs`/`difference(s) between` + paired `and`/
+  `between`-`and`/narrow `X and/or Y`): NL queries only. Identifier-heavy
+  comparatives bypass — the exact-code path stays exact. Slash pairs
+  (`A/B`) deliberately never split (ambiguous joint-"both" vs "versus").
+  Sub-queries are built by removal (original minus marker minus the other
+  entity), so shared context is verbatim; first marker only, cap 2 paths.
+  Paths merge by best evidence (`max_split_hits`).
+- Diagnostic (identifier query + failure/recovery signal words, excluding
+  pure `what does X mean` factoids): symptom leg (original text, identifier
+  weights) + cause leg (identifiers stripped, NL weights), merged 2:1
+  symptom-first. Every leg shares the original filter.
+- Trap queries never split. `query_kind`, filters, and rerank scoring stay
+  on the original question; per-leg weights follow per-leg text.
 
 ## 4. RRF fusion
 

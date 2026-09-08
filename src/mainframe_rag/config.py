@@ -88,6 +88,16 @@ class Settings(BaseSettings):
     # Default off; identifier-heavy queries bypass rewriting entirely.
     acronym_expansion_enabled: bool = False
 
+    # Multi-path retrieval (issue #214): deterministic comparative split
+    # (``X versus Y`` → two entity-focused paths) and diagnostic dual-path
+    # (symptom leg + identifier-stripped cause leg, symptom-favoring merge).
+    # Both default off (no behavior change until enabled); trap and
+    # identifier-heavy comparative queries bypass splitting entirely, and
+    # every leg shares the original query's filter (splitting changes
+    # ranking text only, never the constraint allowlist).
+    comparative_split_enabled: bool = False
+    diagnostic_dualpath_enabled: bool = False
+
     # Hybrid retrieval fusion (local RRF) and diversity parameters
     rrf_k: int = Field(default=2, ge=1, le=100)
     rrf_weight_dense_nl: float = Field(default=1.0, gt=0.0, le=10.0)

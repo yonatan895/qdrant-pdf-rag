@@ -145,6 +145,15 @@ def test_acronym_expansion_defaults_off():
     assert s.acronym_expansion_enabled is False
 
 
+def test_multipath_split_defaults_off():
+    """Issue #214: comparative split + diagnostic dual-path ship default-off
+    (no behavior change until enabled); every leg shares the original
+    filter, so enabling never widens the constraint allowlist."""
+    s = Settings(_env_file=None)
+    assert s.comparative_split_enabled is False
+    assert s.diagnostic_dualpath_enabled is False
+
+
 def test_otel_defaults_off_and_bounded():
     """Issue #83: tracing ships fail-closed — no OTEL_EXPORTER_OTLP_ENDPOINT
     means no exporter, no network. The exporter queue/timeout and the sample
