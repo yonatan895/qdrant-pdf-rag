@@ -391,6 +391,53 @@ def test_async_search_matches_sync_search_identical_fakes():
             assert (sync_hits[0].rerank_score is not None) is rerank_expected
 
 
+def test_async_search_alpha_sweep_matches_sync():
+    """Alpha-flow drift guard: the twins must thread rerank_fusion_alpha
+    identically at 0.0/0.5/1.0 — the base drift guard above passes
+    settings=None, so both twins only ever see the 1.0 fallback and would
+    not catch an async twin that dropped alpha."""
+    from mainframe_rag.retrieve.query import async_search
+
+    class PromotingByIndex:
+        """Scores later RRF candidates highest, so alpha=1.0 flips RRF
+        order while alpha=0.0 keeps it — the sweep is not vacuous."""
+
+        def score(self, query, texts):
+            return [float(i) for i in range(len(texts))]
+
+    query = "sizing the lookaside facility"
+    orders: dict[float, list[str]] = {}
+    for fusion_alpha in (0.0, 0.5, 1.0):
+        settings = Settings(
+            rerank_enabled=True,
+            embed_mode="hash",
+            allow_hash_mode=True,
+            rerank_fusion_alpha=fusion_alpha,
+            _env_file=None,
+        )
+        fake_sync = FakeQdrant(dense=[_point("d1", 0.9), _point("d2", 0.5)], sparse=[_point("s1", 0.8)])
+        fake_async = FakeQdrant(dense=[_point("d1", 0.9), _point("d2", 0.5)], sparse=[_point("s1", 0.8)])
+        embedder = FakeEmbedder()
+        sync_hits, sync_kind, sync_timings = search(
+            fake_sync, embedder, "mainframe_manuals", query, limit=5,
+            settings=settings, reranker=PromotingByIndex(),
+        )
+        async_hits, async_kind, async_timings = asyncio.run(
+            async_search(
+                fake_async, embedder, "mainframe_manuals", query, limit=5,
+                settings=settings, reranker=PromotingByIndex(),
+            )
+        )
+        assert sync_kind == async_kind == "nl"
+        assert [h.model_dump() for h in sync_hits] == [h.model_dump() for h in async_hits]
+        assert set(sync_timings) == set(async_timings)
+        assert "rerank_ms" in sync_timings
+        orders[fusion_alpha] = [h.chunk_id for h in sync_hits]
+    # Sensitivity control: alpha actually moves ranking, so identical
+    # twins at every alpha is not a vacuous pass.
+    assert orders[0.0] != orders[1.0]
+
+
 class FilterAwareFakeQdrant(FakeQdrant):
     """Returns hits only when the prefetch carries no filter: proves the
     empty-filtered retry fires the claimed unfiltered path, not a fallback
