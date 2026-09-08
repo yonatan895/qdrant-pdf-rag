@@ -14,6 +14,7 @@ Tests:
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,7 +24,7 @@ from qdrant_client import models
 
 from mainframe_rag.agent.app import SearchResponse
 from mainframe_rag.config import Settings
-from mainframe_rag.retrieve.query import SearchHit, diversify_hits, search
+from mainframe_rag.retrieve.query import SearchHit, async_search, diversify_hits, search
 from mainframe_rag.retrieve.rerank import (
     HashReranker,
     HttpReranker,
@@ -181,12 +182,31 @@ def test_rerank_alpha_one_reproduces_legacy_order():
 
 
 def test_rerank_alpha_zero_keeps_rrf_order():
-    """alpha=0.0: RRF decides, but rerank_score is still attached (ablation
-    isolates the cross-encoder signal without losing its payload field)."""
+    """alpha=0.0: RRF decides exactly, but rerank_score is still attached
+    (ablation isolates the cross-encoder signal without losing its payload
+    field)."""
     hits, score_map = _blend_hits()
     reranked = rerank_candidates("test query", hits, MockReranker(score_map), alpha=0.0)
     assert [h.chunk_id for h in reranked] == ["c1", "c2", "c3"]
     assert [h.rerank_score for h in reranked] == [0.0, 0.7, 1.0]
+
+
+def test_rerank_alpha_zero_rrf_tie_ignores_ce():
+    """alpha=0.0 keeps RRF order exactly: on an RRF tie the cross-encoder
+    must not reorder through the blend tie-break (blend ties break by RRF
+    then chunk_id, never by raw CE)."""
+    hit1 = _make_hit("c1", "DOC1", 0.5, text="Doc 1")
+    hit2 = _make_hit("c2", "DOC2", 0.5, text="Doc 2")
+    t1 = format_rerank_text(hit1)
+    t2 = format_rerank_text(hit2)
+    prefers_c2 = MockReranker({t1: 0.0, t2: 1.0})
+    # Control: the CE signal is real — alpha=1.0 flips to [c2, c1].
+    flipped = rerank_candidates("test", [hit1, hit2], prefers_c2, alpha=1.0)
+    assert [h.chunk_id for h in flipped] == ["c2", "c1"]
+    # At 0.0 the RRF tie (then chunk_id) decides, not the CE.
+    kept = rerank_candidates("test", [hit1, hit2], prefers_c2, alpha=0.0)
+    assert [h.chunk_id for h in kept] == ["c1", "c2"]
+    assert [h.rerank_score for h in kept] == [0.0, 1.0]
 
 
 def test_rerank_alpha_half_blends_to_middle_order():
@@ -239,6 +259,34 @@ def test_search_rerank_alpha_zero_keeps_rrf_order():
     flipped = search(
         FakeQdrantPoints([c1, c2]), FakeEmbedder(), "test-coll", "certificate key management",
         settings=Settings(**base, rerank_fusion_alpha=1.0), reranker=reranker,
+    )[0]
+    assert [h.chunk_id for h in flipped] == ["c2", "c1"]
+
+
+def test_async_search_rerank_alpha_zero_keeps_rrf_order():
+    """Async twin threads the same knob: alpha=0.0 keeps RRF order where
+    alpha=1.0 flips it, identical to search() on identical fakes."""
+    c1 = models.ScoredPoint(
+        id="c1", version=1, score=0.9,
+        payload={"doc_id": "DOC1", "title": "M1", "heading_path": "H1", "page_label": "1", "text": "Ordinary prose"},
+    )
+    c2 = models.ScoredPoint(
+        id="c2", version=1, score=0.4,
+        payload={"doc_id": "DOC2", "title": "M2", "heading_path": "H2", "page_label": "2", "text": "Other prose"},
+    )
+    base = {"rerank_enabled": True, "embed_mode": "hash", "allow_hash_mode": True, "_env_file": None}
+    kept = asyncio.run(
+        async_search(
+            FakeQdrantPoints([c1, c2]), FakeEmbedder(), "test-coll", "certificate key management",
+            settings=Settings(**base, rerank_fusion_alpha=0.0), reranker=PromotingReranker(),
+        )
+    )[0]
+    assert [h.chunk_id for h in kept] == ["c1", "c2"]
+    flipped = asyncio.run(
+        async_search(
+            FakeQdrantPoints([c1, c2]), FakeEmbedder(), "test-coll", "certificate key management",
+            settings=Settings(**base, rerank_fusion_alpha=1.0), reranker=PromotingReranker(),
+        )
     )[0]
     assert [h.chunk_id for h in flipped] == ["c2", "c1"]
 

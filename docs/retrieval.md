@@ -160,10 +160,13 @@ Reranking ships default-off. When enabled, the fused top candidates
 (default 50) are rescored by a cross-encoder and stably resorted by a blend
 of the min-max normalized cross-encoder and pre-rerank RRF scores
 (`Settings.rerank_fusion_alpha` is the cross-encoder weight: 1.0 reproduces
-the legacy cross-encoder-only order exactly, 0.0 keeps RRF order while still
-attaching `rerank_score`); a constant leg normalizes to 0.5 and abstains.
-Tie-breaks after the blend are raw cross-encoder score, RRF score,
-`chunk_id`. Length mismatches raise rather than misalign. The alpha lands on
+the legacy cross-encoder-only order exactly, 0.0 keeps RRF order exactly
+while still attaching `rerank_score`); a constant leg normalizes to 0.5
+and abstains. Tie-breaks after the blend are raw cross-encoder score, RRF
+score, `chunk_id` — except at `alpha=0.0`, where blend ties break by RRF
+score only and the stable sort keeps input order (already RRF order), so an
+RRF tie never reorders by the cross-encoder or `chunk_id`.
+Length mismatches raise rather than misalign. The alpha lands on
 the trace as `rag.rerank_alpha` (bounded float, never free text).
 
 Dispatch (`_resolve_active_reranker`): an explicitly passed reranker wins,

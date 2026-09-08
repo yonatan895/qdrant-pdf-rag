@@ -506,6 +506,43 @@ def test_search_stage_tree_split_reports_paths_and_mode():
     assert s_root.attributes["rag.split_mode"] == "single"
 
 
+def test_search_stage_tree_rerank_reports_bounded_alpha():
+    """rag.rerank_alpha is emitted (not just allowed) and bounded, on both
+    twins: rerank-enabled searches carry the Settings knob as a float."""
+    from mainframe_rag.config import Settings
+
+    for fusion_alpha in (0.0, 0.25, 1.0):
+        settings = Settings(
+            rerank_enabled=True,
+            embed_mode="hash",
+            allow_hash_mode=True,
+            rerank_fusion_alpha=fusion_alpha,
+            _env_file=None,
+        )
+        (_hits, kind, _timings), exporter = _run_and_collect(
+            search, FakeQdrant(dense=[_point("a")], sparse=[_point("b")]),
+            FakeEmbedder(), "mainframe_manuals", "sizing the lookaside facility",
+            limit=5, settings=settings, reranker=MockReranker(),
+        )
+        assert kind == "nl"
+        rr = _spans(exporter)["retrieve.rerank"][0]
+        assert rr.attributes["rag.rerank_alpha"] == fusion_alpha
+        assert isinstance(rr.attributes["rag.rerank_alpha"], float)
+        assert 0.0 <= rr.attributes["rag.rerank_alpha"] <= 1.0
+
+        (_a_hits, a_kind, _a_timings), a_exporter = _run_and_collect(
+            lambda *args, **kwargs: asyncio.run(async_search(*args, **kwargs)),
+            FakeQdrant(dense=[_point("a")], sparse=[_point("b")]),
+            FakeEmbedder(), "mainframe_manuals", "sizing the lookaside facility",
+            limit=5, settings=settings, reranker=MockReranker(),
+        )
+        assert a_kind == "nl"
+        a_rr = _spans(a_exporter)["retrieve.rerank"][0]
+        assert a_rr.attributes["rag.rerank_alpha"] == fusion_alpha
+        assert isinstance(a_rr.attributes["rag.rerank_alpha"], float)
+        assert 0.0 <= a_rr.attributes["rag.rerank_alpha"] <= 1.0
+
+
 def test_search_stage_tree_trap_bypass():
     fake = FakeQdrant(dense=[_point("a")], sparse=[_point("b")])
     (_hits, _kind, _timings), exporter = _run_and_collect(

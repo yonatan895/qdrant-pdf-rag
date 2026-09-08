@@ -185,8 +185,9 @@ class Settings(BaseSettings):
     rerank_timeout_s: float = Field(default=5.0, ge=0.5, le=30.0)
     # Fusion of the cross-encoder score with the pre-rerank RRF score inside
     # rerank_candidates (both min-max normalized over the candidate pool):
-    # 1.0 = legacy cross-encoder-only order, 0.0 = RRF order decides (the
-    # cross-encoder still scores and attaches rerank_score, so 0.0 is the
+    # 1.0 = legacy cross-encoder-only order, 0.0 = RRF order exactly (blend
+    # ties break by RRF, then stable input order which is already RRF order;
+    # the cross-encoder still scores and attaches rerank_score, so 0.0 is the
     # ablation that isolates the CE signal). Mid values keep RRF rank-1s
     # unless the cross-encoder strongly disagrees (measured churn on the
     # real-corpus holdout: CE-only promotes 3 but demotes 3).

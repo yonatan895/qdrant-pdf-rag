@@ -211,7 +211,9 @@ def rerank_candidates(
     the cross-encoder weight: 1.0 reproduces the legacy cross-encoder-only
     order exactly (the normalization is strictly monotonic, so the blended
     key plus the raw-score tie-breaks match the old ``(rerank_score, RRF
-    score, chunk_id)`` key); 0.0 keeps RRF order while still attaching
+    score, chunk_id)`` key); 0.0 keeps RRF order exactly (blend ties break
+    by RRF score, then stable input order which is already RRF order —
+    never by the cross-encoder or chunk_id) while still attaching
     ``rerank_score``. Out-of-range alphas clamp to [0, 1].
 
     If top_k is specified, truncates results to top_k.
@@ -231,9 +233,17 @@ def rerank_candidates(
     for cand, ce, cn, rn in zip(candidates, scores, ce_norm, rrf_norm):
         blend = alpha * cn + (1.0 - alpha) * rn
         ranked.append((blend, ce, cand.score, cand.chunk_id, cand.model_copy(update={"rerank_score": ce})))
-    # Stable sort: blended score descending, then raw cross-encoder score,
-    # then original RRF score, then chunk_id.
-    ranked.sort(key=lambda t: (t[0], t[1], t[2], t[3]), reverse=True)
+    # Stable sort: blended score descending. At alpha=0.0 the blend IS the
+    # RRF leg, so a raw-CE (or chunk_id) tie-break would reorder RRF ties
+    # away from RRF order — break by RRF only and let the stable sort keep
+    # input order, which is already RRF order. Otherwise break blend ties
+    # by raw cross-encoder score, then RRF, then chunk_id (at alpha=1.0
+    # the blend ties imply raw-CE ties, so this matches the legacy
+    # (rerank_score, RRF, chunk_id) key exactly).
+    if alpha == 0.0:
+        ranked.sort(key=lambda t: (t[0], t[2]), reverse=True)
+    else:
+        ranked.sort(key=lambda t: (t[0], t[1], t[2], t[3]), reverse=True)
     out = [t[4] for t in ranked]
     if top_k is not None:
         return out[:top_k]
