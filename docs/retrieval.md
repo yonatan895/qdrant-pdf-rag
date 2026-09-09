@@ -120,6 +120,14 @@ top is extremely heavy compared to the industry-default `k=60`.
   recall, and the small `k` is what makes rank 1 dominate. Both are
   `Settings`-overridable (`rrf_weight_*`, `rrf_k`); without settings the
   module constants apply.
+- Per-type sparse boost (issue #216, default 1.0 = off): the BM25
+  contribution of a `syntax`/`table` chunk multiplies by
+  `Settings.rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` (read off
+  the point payload's `chunk_type`, already indexed; unknown/missing types
+  score 1.0). Dense-leg contributions are never boosted. `_type_boosts` is
+  the single dispatch both twins share (`None` when off, so fusion stays
+  byte-identical legacy); an active boost lands on the trace as
+  `rag.rrf_type_boosts` (bounded `type=factor` pairs, never free text).
 - The non-rerank fuse keeps only `max(limit*3, 24)` candidates — with the
   default limit of 8, 24 of up to 80 prefetched points survive to
   diversification. This truncation is the real recall knob: it has no

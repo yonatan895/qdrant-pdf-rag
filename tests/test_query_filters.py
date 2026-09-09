@@ -259,6 +259,82 @@ def test_rrf_fuse_tie_order_is_deterministic():
     assert [h.chunk_id for h in hits] == ["chunk-1", "chunk-2"]
 
 
+def _typed_point(pid: str, chunk_type: str, page: str, score: float = 1.0) -> models.ScoredPoint:
+    """_point with an overridden payload chunk_type/page so per-type BM25
+    boosts have something to read without diversify collapsing the pool."""
+    base = _point(pid, score)
+    payload = dict(base.payload or {})
+    payload["chunk_type"] = chunk_type
+    payload["page_label"] = page
+    return base.model_copy(update={"payload": payload})
+
+
+def test_rrf_fuse_type_boosts_promote_syntax_on_sparse_leg():
+    """Issue #216 claimed path: a syntax boost multiplies the BM25 leg only.
+    Without boosts the narrative dense hit wins; with syntax x3 the sparse
+    syntax hit takes rank 1. Control: a syntax hit seen ONLY on the dense
+    leg is unmoved, proving leg-specificity (not a global reweight)."""
+    narr = _typed_point("narr", "narrative", "1-1")
+    syn = _typed_point("syn", "syntax", "1-2")
+    dense_only_syn = _typed_point("dense-syn", "syntax", "1-3")
+    dense = [narr, dense_only_syn]
+    sparse = [syn, narr]
+    plain = rrf_fuse(dense, sparse, weights=(1.0, 1.0), k=2, limit=8)
+    assert [h.chunk_id for h in plain] == ["narr", "syn", "dense-syn"]
+    boosted = rrf_fuse(dense, sparse, weights=(1.0, 1.0), k=2, limit=8, type_boosts={"syntax": 3.0})
+    assert boosted[0].chunk_id == "syn"
+    # Dense-only syntax hit keeps its unboosted RRF score exactly.
+    assert boosted[1].chunk_id == "narr"
+    plain_by_id = {h.chunk_id: h.score for h in plain}
+    boosted_by_id = {h.chunk_id: h.score for h in boosted}
+    assert boosted_by_id["dense-syn"] == plain_by_id["dense-syn"]
+    assert boosted_by_id["narr"] == plain_by_id["narr"]
+
+
+def test_rrf_fuse_no_boosts_is_byte_identical():
+    """None and {} both reproduce legacy fusion exactly (flag-off safety)."""
+    dense = [_typed_point("a", "table", "1-1"), _typed_point("b", "narrative", "1-2")]
+    sparse = [_typed_point("b", "narrative", "1-2")]
+    base = [h.model_dump() for h in rrf_fuse(dense, sparse, weights=(1.0, 1.0))]
+    assert [h.model_dump() for h in rrf_fuse(dense, sparse, weights=(1.0, 1.0), type_boosts=None)] == base
+    assert [h.model_dump() for h in rrf_fuse(dense, sparse, weights=(1.0, 1.0), type_boosts={})] == base
+
+
+def test_search_type_boost_matches_async_twin():
+    """Drift guard: the Settings knob flows through both twins identically —
+    default keeps RRF order where syntax x3 flips it, sync == async dumps."""
+    from mainframe_rag.retrieve.query import async_search
+
+    def fakes():
+        return (
+            FakeQdrant(
+                dense=[_typed_point("narr", "narrative", "1-1")],
+                sparse=[_typed_point("syn", "syntax", "1-2"), _typed_point("narr", "narrative", "1-1")],
+            ),
+            FakeQdrant(
+                dense=[_typed_point("narr", "narrative", "1-1")],
+                sparse=[_typed_point("syn", "syntax", "1-2"), _typed_point("narr", "narrative", "1-1")],
+            ),
+        )
+
+    base = {"embed_mode": "hash", "allow_hash_mode": True, "_env_file": None}
+    query = "sizing the lookaside facility"
+    for extra, winner in ({}, "narr"), ({"rrf_sparse_boost_syntax": 3.0}, "syn"):
+        settings = Settings(**base, **extra)
+        fake_sync, fake_async = fakes()
+        sync_hits, sync_kind, _ = search(
+            fake_sync, FakeEmbedder(), "mainframe_manuals", query, limit=5, settings=settings
+        )
+        async_hits, async_kind, _ = asyncio.run(
+            async_search(
+                fake_async, FakeEmbedder(), "mainframe_manuals", query, limit=5, settings=settings
+            )
+        )
+        assert sync_kind == async_kind == "nl"
+        assert next(h.chunk_id for h in sync_hits) == winner
+        assert [h.model_dump() for h in sync_hits] == [h.model_dump() for h in async_hits]
+
+
 def test_diversify_hits_prevents_page_monopoly():
     from mainframe_rag.retrieve.query import SearchHit, diversify_hits
 

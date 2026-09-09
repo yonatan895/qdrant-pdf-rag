@@ -9,6 +9,37 @@ def test_message():
     assert classify(text) == "message"
 
 
+def test_message_families_beyond_classic():
+    """Issue #216: the anchored detector covers the MSG_RE families CICS
+    DFH cards, IMS DFS codes (severity optional), and 4-letter prefixes —
+    still line-anchored, still the fixed `message` value (no new vocab)."""
+    assert classify("DFHAC2006 CICS TRANSACTION FAILED") == "message"
+    assert classify("DFHSI1579 CICS INITIALIZATION") == "message"
+    assert classify("DFS058 IMS DATABASE ERROR") == "message"
+    assert classify("DFS058I IMS DATABASE ERROR") == "message"
+    assert classify("DSNA670I DB2 OBJECT UNAVAILABLE") == "message"
+    assert classify("TSSC001E SECURITY VIOLATION") == "message"
+
+
+def test_message_buried_after_explanation():
+    """Issue #216: 1-2 explanation lines above the anchored id card still
+    classify as message; a bare mid-line mention never does."""
+    buried = (
+        "This message appears during initialization.\n"
+        "Check the operator console for details.\n"
+        "DFHAC2006 CICS TRANSACTION FAILED"
+    )
+    assert classify(buried) == "message"
+    assert classify("The manual mentions IEA500I in passing among words.") == "narrative"
+    # Anchored code past the scan window stays narrative (precision over
+    # recall: the window is MESSAGE_SCAN_LINES, not the whole chunk).
+    from mainframe_rag.ingest.classify import MESSAGE_SCAN_LINES
+
+    deep = "\n".join(f"Filler prose line {i}." for i in range(MESSAGE_SCAN_LINES + 1))
+    deep += "\nIEA500I BURIED TOO DEEP"
+    assert classify(deep) == "narrative"
+
+
 def test_syntax():
     assert classify(">>-IOSCMDS--+-APPLY-+--parm---><\n            +-LIST--+") == "syntax"
     assert classify("expr ::= term | factor") == "syntax"

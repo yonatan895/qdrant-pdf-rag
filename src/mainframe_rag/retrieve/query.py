@@ -134,14 +134,24 @@ def rrf_fuse(
     weights: tuple[float, float],
     k: int = RRF_K,
     limit: int = 8,
+    type_boosts: dict[str, float] | None = None,
 ) -> list[SearchHit]:
     by_id: dict[str, models.ScoredPoint] = {}
     scores: dict[str, float] = defaultdict(float)
-    for weight, points in zip(weights, (dense, sparse)):
+    for weight, points, leg in zip(weights, (dense, sparse), ("dense", "bm25")):
         for rank, point in enumerate(points):
             key = str(point.id)
             by_id[key] = point
-            scores[key] += weight / (k + rank + 1)
+            contrib = weight / (k + rank + 1)
+            if leg == "bm25" and type_boosts:
+                # Per-type sparse boost (issue #216): syntax/table chunks
+                # earn their factor; unknown/missing types score 1.0, and a
+                # None/empty mapping keeps legacy fusion byte-identical.
+                payload = point.payload or {}
+                ctype = payload.get("chunk_type")
+                if isinstance(ctype, str):
+                    contrib *= type_boosts.get(ctype, 1.0)
+            scores[key] += contrib
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:limit]
     return [_to_hit(by_id[key], score) for key, score in ranked]
 
@@ -413,6 +423,20 @@ def _build_prefetch_requests(
     return dense_req, sparse_req
 
 
+def _type_boosts(settings: Settings | None) -> dict[str, float] | None:
+    """Sparse-leg per-type boosts for rrf_fuse (issue #216, one rule per
+    concept — both twins share it): None when settings are absent or both
+    factors are 1.0, so legacy fusion stays byte-identical."""
+    if settings is None:
+        return None
+    boosts: dict[str, float] = {}
+    if settings.rrf_sparse_boost_syntax != 1.0:
+        boosts["syntax"] = settings.rrf_sparse_boost_syntax
+    if settings.rrf_sparse_boost_table != 1.0:
+        boosts["table"] = settings.rrf_sparse_boost_table
+    return boosts or None
+
+
 def _ranking_params(
     settings: Settings | None, has_identifiers: bool
 ) -> tuple[tuple[float, float], int, int, int]:
@@ -435,12 +459,20 @@ def _ranking_params(
     return weights, k, max_per_page, max_per_doc
 
 
-def _rrf_span_attrs(weights: tuple[float, float], k: int, candidates_in: int) -> dict:
-    return {
+def _rrf_span_attrs(
+    weights: tuple[float, float],
+    k: int,
+    candidates_in: int,
+    type_boosts: dict[str, float] | None = None,
+) -> dict:
+    attrs: dict = {
         "rag.rrf_k": k,
         "rag.rrf_weights": f"{weights[0]:g},{weights[1]:g}",
         "rag.candidates_in": candidates_in,
     }
+    if type_boosts:
+        attrs["rag.rrf_type_boosts"] = ",".join(f"{t}={v:g}" for t, v in sorted(type_boosts.items()))
+    return attrs
 
 
 def _fuse_with_span(
@@ -449,12 +481,13 @@ def _fuse_with_span(
     weights: tuple[float, float],
     k: int,
     limit: int,
+    type_boosts: dict[str, float] | None = None,
 ) -> list[SearchHit]:
     with tracer.start_as_current_span(
         "retrieve.rrf",
-        attributes=_rrf_span_attrs(weights, k, len(dense_points) + len(sparse_points)),
+        attributes=_rrf_span_attrs(weights, k, len(dense_points) + len(sparse_points), type_boosts),
     ):
-        return rrf_fuse(dense_points, sparse_points, weights, k=k, limit=limit)
+        return rrf_fuse(dense_points, sparse_points, weights, k=k, limit=limit, type_boosts=type_boosts)
 
 
 def _diversify_with_span(
@@ -589,6 +622,7 @@ def search(
             timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
 
         weights, k, max_per_page, max_per_doc = _ranking_params(settings, identifiers.has_identifiers)
+        boosts = _type_boosts(settings)
         if split_mode == "single":
             leg_weights = [weights]
         else:
@@ -604,7 +638,7 @@ def search(
 
             rrf_limit = settings.rerank_candidates if settings else 50
             fused_lists = [
-                _fuse_with_span(dp, sp, w, k, rrf_limit)
+                _fuse_with_span(dp, sp, w, k, rrf_limit, type_boosts=boosts)
                 for (dp, sp), w in zip(zip(leg_dense_points, leg_sparse_points), leg_weights)
             ]
             if split_mode == "single":
@@ -630,7 +664,7 @@ def search(
         else:
             fuse_limit = max(limit * 3, 24)
             fused_lists = [
-                _fuse_with_span(dp, sp, w, k, fuse_limit)
+                _fuse_with_span(dp, sp, w, k, fuse_limit, type_boosts=boosts)
                 for (dp, sp), w in zip(zip(leg_dense_points, leg_sparse_points), leg_weights)
             ]
             if split_mode == "single":
@@ -790,6 +824,7 @@ async def async_search(
             timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
 
         weights, k, max_per_page, max_per_doc = _ranking_params(settings, identifiers.has_identifiers)
+        boosts = _type_boosts(settings)
         if split_mode == "single":
             leg_weights = [weights]
         else:
@@ -805,7 +840,7 @@ async def async_search(
 
             rrf_limit = settings.rerank_candidates if settings else 50
             fused_lists = [
-                _fuse_with_span(dp, sp, w, k, rrf_limit)
+                _fuse_with_span(dp, sp, w, k, rrf_limit, type_boosts=boosts)
                 for (dp, sp), w in zip(zip(leg_dense_points, leg_sparse_points), leg_weights)
             ]
             if split_mode == "single":
@@ -835,7 +870,7 @@ async def async_search(
         else:
             fuse_limit = max(limit * 3, 24)
             fused_lists = [
-                _fuse_with_span(dp, sp, w, k, fuse_limit)
+                _fuse_with_span(dp, sp, w, k, fuse_limit, type_boosts=boosts)
                 for (dp, sp), w in zip(zip(leg_dense_points, leg_sparse_points), leg_weights)
             ]
             if split_mode == "single":
