@@ -191,9 +191,15 @@ tries `{base}/v1/score` (or `{base}/score` when the base already ends in
 Cohere/TEI-style `/rerank` shape on narrowly-defined failures
 (bad-status/request/shape errors), and raises strictly when the second leg
 fails or returns mismatched/out-of-bounds indexes. Anything else raises
-fail-closed. Rerank input passages are `product/version/doc_id` header plus
-title/heading/text (not raw chunk text), and the query is the
-acronym-expanded form.
+fail-closed. Rerank input passages are `product/version/doc_id` plus a
+`[chunk_type]` tag and bare `message_ids` header, then title/heading, then
+a type-distinct body template (`Table:`/`Syntax:` label line for table/syntax
+bodies; message/narrative keep the bare prose shape), then text
+(not raw chunk text), and the query is the acronym-expanded form. Passages
+cap at `RERANK_PASSAGE_MAX_CHARS` (3000 chars, header-first: header, title,
+heading, and template label stay whole, the body tail is cut): oversize
+atomic chunks would otherwise 400 the scorer's 2048-token window and fail
+the whole search.
 
 The memoized reranker is keyed by `id(settings)` — a memory address, so a
 mutated `Settings` object never rebuilds it and GC address reuse can alias
