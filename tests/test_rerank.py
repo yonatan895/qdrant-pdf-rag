@@ -33,38 +33,7 @@ from mainframe_rag.retrieve.rerank import (
     probe_reranker,
     rerank_candidates,
 )
-
-
-def _make_hit(
-    chunk_id: str,
-    doc_id: str,
-    score: float,
-    heading: str = "Heading",
-    text: str = "Body text",
-    page_label: str = "1",
-    rerank_score: float | None = None,
-) -> SearchHit:
-    return SearchHit(
-        chunk_id=chunk_id,
-        score=score,
-        cite=f"{doc_id} Manual, {heading}, p. {page_label}",
-        heading=heading,
-        text=text,
-        doc_id=doc_id,
-        title="Manual",
-        page_label=page_label,
-        chunk_type="narrative",
-        message_ids=(),
-        rerank_score=rerank_score,
-    )
-
-
-class FakeEmbedder:
-    def dense_query(self, queries: list[str]) -> list[list[float]]:
-        return [[0.1] * 16]
-
-    def sparse(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
-        return [([1, 2], [1.0, 0.5])]
+from tests.conftest import FakeEmbedder, MockReranker, PromotingReranker, _make_hit
 
 
 class FakeQdrantPoints:
@@ -84,18 +53,6 @@ class FakeQdrantPoints:
     ) -> Any:
         self.queries_made.append({"using": using, "limit": limit})
         return SimpleNamespace(points=self.points[:limit])
-
-
-class MockReranker:
-    def __init__(self, score_map: dict[str, float] | None = None) -> None:
-        self.score_map = score_map or {}
-        self.call_count = 0
-        self.last_texts: list[str] = []
-
-    def score(self, query: str, texts: list[str]) -> list[float]:
-        self.call_count += 1
-        self.last_texts = texts
-        return [self.score_map.get(t, 0.5) for t in texts]
 
 
 # ---------------------------------------------------------------- Tests
@@ -691,18 +648,6 @@ _TRAP_POINTS = [
         },
     ),
 ]
-
-
-class PromotingReranker:
-    """Double that scores later candidates highest: without the #113 gate it
-    would promote the trap doc (c2) to top-1."""
-
-    def __init__(self) -> None:
-        self.call_count = 0
-
-    def score(self, query: str, texts: list[str]) -> list[float]:
-        self.call_count += 1
-        return [float(i) for i in range(len(texts))]
 
 
 def _trap_settings() -> Settings:

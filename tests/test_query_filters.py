@@ -5,12 +5,12 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import Embedder
 from mainframe_rag.retrieve.filters import build_filter, parse_query
 from mainframe_rag.retrieve.query import format_citation, rrf_fuse, search
+from tests.conftest import FakeEmbedder, FakeQdrant, _point, _typed_point
 
 
 def _settings(dim: int | None = 768) -> Settings:
@@ -103,48 +103,6 @@ def test_format_citation_round_trips_through_citation_line_re():
     assert m.group("page") == "1-17"
 
 
-def _point(pid: str, score: float = 1.0) -> models.ScoredPoint:
-    return models.ScoredPoint(
-        id=pid,
-        version=1,
-        score=score,
-        payload={
-            "doc_id": "SA22-0000-00",
-            "title": "Synthetic Reference",
-            "heading_path": "Chapter 2 > IEA500I",
-            "page_label": "1-6",
-            "page_start": 5,
-            "chunk_type": "message",
-            "product": "z/OS",
-            "version": "9.9",
-            "message_ids": ["IEA500I"],
-            "text": "IEA500I synthetic text",
-        },
-    )
-
-
-class FakeQdrant:
-    def __init__(self, dense, sparse, support_batch: bool = True):
-        self._dense, self._sparse = dense, sparse
-        self.support_batch = support_batch
-        self.queries = []
-        self.batch_requests = []
-
-    def query_points(self, collection, query, using, limit, query_filter, with_payload, **_):
-        self.queries.append({"using": using, "filter": query_filter, "with_payload": with_payload})
-        points = self._dense if using == "dense" else self._sparse
-        return SimpleNamespace(points=list(points))
-
-    def query_batch_points(self, collection, requests, **_):
-        self.batch_requests.extend(requests)
-        results = []
-        for req in requests:
-            self.queries.append({"using": req.using, "filter": req.filter, "with_payload": req.with_payload})
-            points = self._dense if req.using == "dense" else self._sparse
-            results.append(SimpleNamespace(points=list(points)))
-        return results
-
-
 class LegacyFakeQdrant:
     """Client double lacking query_batch_points to test graceful fallback."""
     def __init__(self, dense, sparse):
@@ -155,19 +113,6 @@ class LegacyFakeQdrant:
         self.queries.append({"using": using, "filter": query_filter, "with_payload": with_payload})
         points = self._dense if using == "dense" else self._sparse
         return SimpleNamespace(points=list(points))
-
-
-class FakeEmbedder:
-    """Embedder protocol double: deterministic vectors, no network."""
-
-    def dense(self, texts):
-        return [[0.1] * 4 for _ in texts]
-
-    def dense_query(self, queries):
-        return self.dense(queries)
-
-    def sparse(self, texts):
-        return [([3], [1.0]) for _ in texts]
 
 
 @pytest.fixture
@@ -257,16 +202,6 @@ def test_rrf_fuse_tie_order_is_deterministic():
     assert len(hits) == 2
     assert hits[0].score == hits[1].score
     assert [h.chunk_id for h in hits] == ["chunk-1", "chunk-2"]
-
-
-def _typed_point(pid: str, chunk_type: str, page: str, score: float = 1.0) -> models.ScoredPoint:
-    """_point with an overridden payload chunk_type/page so per-type BM25
-    boosts have something to read without diversify collapsing the pool."""
-    base = _point(pid, score)
-    payload = dict(base.payload or {})
-    payload["chunk_type"] = chunk_type
-    payload["page_label"] = page
-    return base.model_copy(update={"payload": payload})
 
 
 def test_rrf_fuse_type_boosts_promote_syntax_on_sparse_leg():
