@@ -15,7 +15,7 @@ from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.retrieve.query import async_search, max_split_hits, merge_split_hits, search
-from tests.test_query_filters import _point
+from tests.conftest import _point
 
 
 def _doc_point(pid: str, doc_id: str, score: float = 0.9) -> models.ScoredPoint:

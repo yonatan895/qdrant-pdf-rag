@@ -19,8 +19,7 @@ from mainframe_rag.agent import tracing as tracing_mod
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.retrieve import query as query_mod
 from mainframe_rag.retrieve.query import async_search, search
-from tests.test_query_filters import FakeEmbedder, FakeQdrant, _point
-from tests.test_rerank import MockReranker
+from tests.conftest import FakeEmbedder, FakeQdrant, MockReranker, _point
 
 
 def _provider() -> tuple[TracerProvider, InMemorySpanExporter]:
