@@ -41,6 +41,13 @@ from mainframe_rag.agent.answer import (
     parse_answer,
 )
 from mainframe_rag.agent.metrics import endpoint_for_path, record_request, setup_metrics
+from mainframe_rag.agent.sse import (
+    empty_final_payload,
+    error_payload,
+    fallback_stream,
+    final_payload,
+    format_sse_event,
+)
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.tracing import parent_context, setup_tracing, shutdown_tracing
 from mainframe_rag.config import Settings, load_settings
@@ -653,24 +660,10 @@ async def v1_answer(
                 # Schema parity with the normal final event (review S6): the
                 # empty-hits path carries the same keys; no tokens were
                 # streamed, so ttft_ms stays null and usage is all zeros.
-                payload = {
-                    "type": "final",
-                    "request_id": request_id,
-                    "answer": empty_hits_answer(req.query),
-                    "citations": [],
-                    "script": None,
-                    "query_kind": kind,
-                    "hits": [],
-                    "finish_reason": "stop",
-                    "ttft_ms": None,
-                    "usage": {
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "reasoning_tokens": 0,
-                        "total_tokens": 0,
-                    },
-                }
-                yield f"event: final\ndata: {json.dumps(payload)}\n\n"
+                yield format_sse_event(
+                    "final",
+                    empty_final_payload(request_id, empty_hits_answer(req.query), kind),
+                )
 
             headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
             if timing_parts:
@@ -832,17 +825,7 @@ async def v1_answer(
                 temperature=settings.llm_temperature,
             )
         else:
-            async def fallback_stream():
-                chat_call = llm.chat(
-                    messages,
-                    reasoning_effort=effort,
-                    temperature=settings.llm_temperature,
-                )
-                cr = as_chat_result(await chat_call if inspect.isawaitable(chat_call) else chat_call)
-                yield {"type": "token", "delta": cr.content, "token": cr.content, "ttft_ms": cr.ttft_ms}
-                yield {"type": "done", "finish_reason": cr.finish_reason, "usage": cr.usage, "ttft_ms": cr.ttft_ms}
-
-            stream_gen = fallback_stream()
+            stream_gen = fallback_stream(llm, messages, effort, settings.llm_temperature)
 
         try:
             with tracer.start_as_current_span(
@@ -857,8 +840,7 @@ async def v1_answer(
                             if ttft_ms is None:
                                 ttft_ms = item.get("ttft_ms") or int((time.monotonic() - t0) * 1000)
                             content_parts.append(delta)
-                            payload = {"type": "token", "delta": delta, "token": delta}
-                            yield f"event: token\ndata: {json.dumps(payload)}\n\n"
+                            yield format_sse_event("token", {"type": "token", "delta": delta, "token": delta})
                     elif itype == "done":
                         finish_reason = item.get("finish_reason") or "stop"
                         if item.get("usage"):
@@ -893,8 +875,7 @@ async def v1_answer(
                 query_class=kind, hits=len(hits),
             )
             log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
-            err_payload = {"type": "error", "code": "upstream_error", "message": "stream failed"}
-            yield f"event: error\ndata: {json.dumps(err_payload)}\n\n"
+            yield format_sse_event("error", error_payload())
             return
         except Exception as exc:  # noqa: BLE001
             _span_error(root_span, exc)
@@ -903,8 +884,7 @@ async def v1_answer(
                 query_class=kind, hits=len(hits),
             )
             log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
-            err_payload = {"type": "error", "code": "upstream_error", "message": "stream failed"}
-            yield f"event: error\ndata: {json.dumps(err_payload)}\n\n"
+            yield format_sse_event("error", error_payload())
             return
 
         full_content = "".join(content_parts)
@@ -930,23 +910,17 @@ async def v1_answer(
             )
         )
 
-        final_payload = {
-            "type": "final",
-            "request_id": request_id,
-            "answer": parsed.answer,
-            "citations": parsed.citations,
-            "script": parsed.script,
-            "query_kind": kind,
-            "hits": [h.model_dump() for h in hits],
-            "finish_reason": finish_reason,
-            "ttft_ms": ttft_ms,
-            "usage": {
-                "prompt_tokens": usage.prompt_tokens,
-                "completion_tokens": usage.completion_tokens,
-                "reasoning_tokens": usage.reasoning_tokens,
-                "total_tokens": usage.total_tokens,
-            },
-        }
+        final = final_payload(
+            request_id,
+            parsed.answer,
+            parsed.citations,
+            parsed.script,
+            kind,
+            hits,
+            finish_reason,
+            ttft_ms,
+            usage,
+        )
         root_span.set_attributes(
             _answer_span_attrs(kind, hits, len(parsed.citations), parsed.script is not None)
         )
@@ -954,7 +928,7 @@ async def v1_answer(
             request, "answer", "ok", started, query_class=kind,
             hits=len(hits), ttft_ms=ttft_ms, llm_model=llm_model,
         )
-        yield f"event: final\ndata: {json.dumps(final_payload)}\n\n"
+        yield format_sse_event("final", final)
 
     return StreamingResponse(sse_event_generator(), media_type="text/event-stream", headers=headers)
 

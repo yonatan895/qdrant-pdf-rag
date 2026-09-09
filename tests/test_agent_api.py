@@ -1622,6 +1622,46 @@ def test_empty_hits_answer_trap_identifier_echoes_only_codes():
     assert "private key" not in msg
 
 
+def test_sse_final_schemas_match_across_paths():
+    """The moved builders (agent/sse.py) keep one terminal schema: the
+    empty-hits final carries exactly the normal final's keys (review S6)."""
+    from mainframe_rag.agent.sse import (
+        empty_final_payload,
+        error_payload,
+        final_payload,
+        format_sse_event,
+    )
+    from mainframe_rag.ports import TokenUsage
+    from tests.conftest import _make_hit
+
+    hit = _make_hit("c1", "SA22-7592-05", 0.9, text="Body")
+    usage = TokenUsage(prompt_tokens=10, completion_tokens=5, reasoning_tokens=3, total_tokens=15)
+    full = final_payload("req-1", "Answer text.", ["cite one"], None, "nl", [hit], "stop", 12, usage)
+    empty = empty_final_payload("req-1", "No supporting manual excerpts were found.", "nl")
+    assert set(empty) == set(full)
+    assert full["hits"] == [hit.model_dump()]
+    assert full["usage"] == {
+        "prompt_tokens": 10, "completion_tokens": 5, "reasoning_tokens": 3, "total_tokens": 15,
+    }
+    assert empty["usage"] == {
+        "prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0, "total_tokens": 0,
+    }
+    assert empty["ttft_ms"] is None
+    assert error_payload() == {"type": "error", "code": "upstream_error", "message": "stream failed"}
+    frame = format_sse_event("final", full)
+    assert frame.startswith("event: final\ndata: ")
+    assert frame.endswith("\n\n")
+    import json
+
+    back = json.loads(frame.split("data: ", 1)[1])
+    # Round-trip note: message_ids () serializes to [] — compare the frame
+    # minus hits exactly, hits against model_dump above.
+    assert {k: v for k, v in back.items() if k != "hits"} == {
+        k: v for k, v in full.items() if k != "hits"
+    }
+    assert [h["chunk_id"] for h in back["hits"]] == ["c1"]
+
+
 @pytest.mark.anyio
 async def test_v1_answer_20_concurrent_requests_no_threadpool_starvation(monkeypatch):
     import asyncio
