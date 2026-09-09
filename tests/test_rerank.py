@@ -106,6 +106,84 @@ def test_format_rerank_text():
     assert "Manual" in text
     assert "Parmlib > IEASYSxx" in text
     assert "LFAREA=2G parameter" in text
+    assert "[narrative]" in text.splitlines()[0]
+
+
+def test_format_rerank_text_carries_type_and_message_ids():
+    """Issue #215: the header fences the chunk_type tag and bare message
+    codes so the cross-encoder grades a declared template, not prose."""
+    hit = _make_hit("c9", "SA22-7592-05", 0.7, heading="Messages", text="IEA500I explanation")
+    hit = hit.model_copy(update={"chunk_type": "message", "message_ids": ("IEA500I",)})
+    lines = format_rerank_text(hit).splitlines()
+    assert "[message]" in lines[0]
+    assert "IEA500I" in lines[0]
+    assert "SA22-7592-05" in lines[0]
+
+
+def test_format_rerank_text_caps_oversize_body():
+    """Oversize atomic chunks (emitted whole past SECTION_MAX_CHARS) must
+    not 400 the scorer's 2048-token window: header/title/heading stay
+    whole, the body tail is cut, total capped."""
+    from mainframe_rag.retrieve.rerank import RERANK_PASSAGE_MAX_CHARS
+
+    hit = _make_hit("c9", "SA22-7592-05", 0.7, heading="Messages", text="x" * 5000)
+    text = format_rerank_text(hit)
+    assert len(text) == RERANK_PASSAGE_MAX_CHARS
+    assert text.splitlines()[0].startswith("SA22-7592-05")
+    assert "Messages" in text
+    # Short passages are byte-identical to uncapped formatting.
+    short = _make_hit("c1", "D1", 0.5, heading="H", text="Body")
+    assert format_rerank_text(short) == "D1 [narrative]\nManual\nH\nBody"
+
+
+def test_format_rerank_text_table_syntax_distinct_templates():
+    """Issue #215: table/syntax bodies get a declared template label, not
+    the bare prose shape. Same body text, different chunk_type, must
+    produce different passages."""
+    body = "PARM1  VALUE1  DESCRIPTION"
+    narrative = _make_hit("c1", "D1", 0.5, heading="H", text=body)
+    table = narrative.model_copy(update={"chunk_type": "table"})
+    syntax = narrative.model_copy(update={"chunk_type": "syntax"})
+    narrative_text = format_rerank_text(narrative)
+    table_text = format_rerank_text(table)
+    syntax_text = format_rerank_text(syntax)
+    assert narrative_text == f"D1 [narrative]\nManual\nH\n{body}"
+    assert table_text == f"D1 [table]\nManual\nH\nTable:\n{body}"
+    assert syntax_text == f"D1 [syntax]\nManual\nH\nSyntax:\n{body}"
+    assert table_text != narrative_text
+    assert syntax_text != narrative_text
+    assert table_text != syntax_text
+
+
+def test_format_rerank_text_message_keeps_prose_shape():
+    """Issue #215: message keeps the prose shape (no template label) so
+    previously enriched message passages stay byte-identical."""
+    hit = _make_hit("c9", "SA22-7592-05", 0.7, heading="Messages", text="IEA500I explanation")
+    hit = hit.model_copy(update={"chunk_type": "message", "message_ids": ("IEA500I",)})
+    assert format_rerank_text(hit) == (
+        "SA22-7592-05 [message] IEA500I\nManual\nMessages\nIEA500I explanation"
+    )
+
+
+def test_format_rerank_text_unknown_type_keeps_prose_shape():
+    """Unknown chunk_type values must not invent a template: prose shape."""
+    hit = _make_hit("c1", "D1", 0.5, heading="H", text="Body")
+    hit = hit.model_copy(update={"chunk_type": "unknown-thing"})
+    assert format_rerank_text(hit) == "D1 [unknown-thing]\nManual\nH\nBody"
+
+
+def test_format_rerank_text_cap_keeps_template_label_whole():
+    """Oversize table/syntax bodies: the template label stays whole with
+    header/title/heading; only the body tail is cut."""
+    from mainframe_rag.retrieve.rerank import RERANK_PASSAGE_MAX_CHARS
+
+    hit = _make_hit("c9", "SA22-7592-05", 0.7, heading="H", text="x" * 5000)
+    hit = hit.model_copy(update={"chunk_type": "table"})
+    text = format_rerank_text(hit)
+    assert len(text) == RERANK_PASSAGE_MAX_CHARS
+    lines = text.splitlines()
+    assert "Table:" in lines
+    assert lines[lines.index("Table:") + 1].startswith("x")
 
 
 def test_hash_reranker_deterministic():

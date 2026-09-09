@@ -25,11 +25,54 @@ from mainframe_rag.ports import Reranker
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]{2,}")
 
+# Longest passage the rerank server scores faithfully. The server window is
+# 2048 tokens (Budget rerank role) and syntax-dense text measures ~2.0
+# chars/token, so 3000 chars keeps query+passage inside with margin.
+# Oversize atomic chunks are emitted whole past SECTION_MAX_CHARS (up to
+# ~5300 chars measured live) and would otherwise 400 the /v1/score call —
+# failing the whole search, not just one candidate.
+RERANK_PASSAGE_MAX_CHARS = 3000
+
+
+def _rerank_body_label(chunk_type: str) -> str | None:
+    """Type-distinct body framing (issue #215): table/syntax bodies score
+    differently shaped text than prose, so they get a declared template
+    label instead of the bare prose shape. Message/narrative (and unknown
+    types) keep the prose shape so existing passages stay byte-identical."""
+    if chunk_type == "syntax":
+        return "Syntax:"
+    if chunk_type == "table":
+        return "Table:"
+    return None
+
 
 def format_rerank_text(hit: SearchHit) -> str:
-    """Format candidate metadata and body into a passage for cross-encoder scoring."""
-    header = " ".join(p for p in (hit.product, hit.version, hit.doc_id) if p)
-    return "\n".join(p for p in (header, hit.title, hit.heading, hit.text) if p)
+    """Format candidate metadata and body into a passage for cross-encoder scoring.
+
+    The header carries type signals the body alone does not state (issue
+    #215): the chunk_type (message/syntax/table/narrative score differently
+    shaped text, so the cross-encoder sees which template it is grading)
+    and message_ids (exact codes it would otherwise have to rediscover in
+    body prose). Brackets fence the type tag; codes stay bare for exact
+    token match. Table/syntax bodies carry a distinct one-line template
+    label (``Table:``/``Syntax:``) between heading and body; message and
+    narrative keep the bare prose shape.
+
+    Passages cap at RERANK_PASSAGE_MAX_CHARS: header/title/heading/label stay
+    whole (the discriminative part), the body tail is cut. Short passages
+    are byte-identical to uncapped formatting.
+    """
+    meta = " ".join(p for p in (hit.product, hit.version, hit.doc_id) if p)
+    tags = " ".join(t for t in (f"[{hit.chunk_type}]", *hit.message_ids) if t)
+    header = " ".join(p for p in (meta, tags) if p)
+    label = _rerank_body_label(hit.chunk_type)
+    head = "\n".join(p for p in (header, hit.title, hit.heading, label) if p)
+    if not hit.text:
+        return head[:RERANK_PASSAGE_MAX_CHARS]
+    budget = RERANK_PASSAGE_MAX_CHARS - (len(head) + 1 if head else 0)
+    if budget < 0:
+        return head[:RERANK_PASSAGE_MAX_CHARS]
+    return head + "\n" + hit.text[:budget] if head else hit.text[:budget]
 
 
 # ------------------------------------------------------- Hash implementation (CI / dev)
