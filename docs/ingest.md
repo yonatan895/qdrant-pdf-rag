@@ -117,7 +117,11 @@ Section-outline chunking with per-statement code protection. Point id =
   the TOC, or inserting a section re-IDs every later chunk in that section
   (full re-embed; stale points are removed only via the sha-mismatch delete
   in §9).
-- No TOC → one whole-document section.
+- No TOC → windowed fallback sections (`fallback_sections`, issue #216),
+  not one whole-document blob: a new section opens at a heading-like page
+  lead (numbered headings, Chapter/Appendix/Section leads) or every
+  `FALLBACK_MAX_PAGES = 10` pages, whichever comes first. Deterministic in
+  the input (same pages → same sections and ordinals).
 - Front matter: the limit is `max(2, int(0.15 * page_count))`. Always-skipped
   sections (notices, trademarks, reader comments, bibliography, copyright,
   index) skip at any position; contents/figures/tables/summary-of-changes
@@ -129,7 +133,10 @@ Section-outline chunking with per-statement code protection. Point id =
   ranges dropped.
 - Code regions (`detect_code_region`): JCL-dominant at 0.6 on left-stripped
   lines (PDFs left-pad code), a `DD DATA/*` single-card override, REXX via a
-  `/* rexx` header or unbalanced `/*` vs `*/`, console via indent;
+  `/* rexx` header, unbalanced `/*` vs `*/`, or (issue #216) a keyword
+  fallback — ≥2 line-initial REXX keywords plus an assignment or `;`, so
+  balanced samples without headers still detect while "Do not"/"If" prose
+  without code signals stays prose; console via indent;
   precedence JCL > REXX > console; empty input yields no region.
 - JCL splitting: `//`-cards open a statement, deeply-indented `//` lines
   continue it; a bare `//` rejoins the next line when that line contains `=`
@@ -139,17 +146,35 @@ Section-outline chunking with per-statement code protection. Point id =
   honor quoted strings with `''` escapes, and follow `,` continuations;
   unterminated constructs swallow to end (fail-safe toward larger, never
   split).
+- Table regions (`detect_table_region`, issue #216): column blocks per the
+  shared `classify.is_table_block` rule (one rule, one helper) that are NOT
+  code (JCL continuations carry wide indents that read as columns, so code
+  wins). Rows are atomic like code statements: overflow splits at row
+  boundaries (one line is one row), the overlap backs off to whole rows,
+  and an oversize single row emits whole.
+- Mixed prose+JCL paragraphs (`_mixed_jcl_items`, issue #216): runs of `//`
+  cards expand to atomic statements while prose runs stay blobs — but only
+  with ≥2 statement-starts, so one `//see`-style mention passes through
+  byte-identical.
+- SYSIN adjacency (issue #216): data paragraphs following a `DD *`/`DD DATA`
+  card keep splitting between records across page/paragraph boundaries
+  (line-atomic units). The chain ends at sentence punctuation (data records
+  do not end lines with `.`/`?`/`!`/`:`; prose explanations do) or at a
+  code/table paragraph — a missed break only makes prose line-atomic (text
+  preserved), a   false break restores the status-quo slice.
 - Console blocks stay per-line atomic.
 - Joining: adjacent atomic items share one newline, else two; offsets
   tracked; prose-only joins stay byte-identical to the legacy path.
 - Overlap: the next chunk restarts from the blind 400-char tail **unless**
-  that cut lands inside an atomic code statement — then it backs off to
+  that cut lands inside an atomic (code/table) item — then it backs off to
   whole trailing items, possibly empty. Oversize atomics are emitted whole
   (no slicing; overlap restarts after them); oversize prose is char-sliced
   every 3500.
-- Paragraphs split on blank lines; empties dropped with page tracking. The
-  chunk label comes from a **single-page lookup** — a block spanning pages
-  does not span labels. Label ranges format as empty, single, or
+- Paragraphs split on blank lines; empties dropped with page tracking. Each
+  block tracks its page span (min/max over composing items): the chunk
+  label cites the full span (`_page_label_range` over every touched page),
+  while the UUID pins the span start — the `doc|heading|page|ordinal` key
+  contract is unchanged. Label ranges format as empty, single, or
   `first–last` with an en-dash.
 - Per chunk, `classify` (§5) plus message/member extraction run and land in
   the payload (§8).
@@ -163,13 +188,18 @@ Fixed vocabulary — `message` / `syntax` / `table` / `narrative`. Adding a
 value breaks the payload contract and the retrieval filters, so it is
 forbidden. Precedence is message > syntax > table > narrative.
 
-- `message`: a line-anchored classic `XXXnnnY` pattern matched against the
-  first 4 non-blank lines. Deliberately narrower than the broad extractor
-  `regexes.MSG_RE`: widening it changes `chunk_type` distribution — needs an
-  eval, not a cleanup.
+- `message`: a line-anchored id pattern matched against the first
+  `MESSAGE_SCAN_LINES = 6` non-blank lines (issue #216: 1-2 explanation
+  lines may sit above the id card). The pattern covers the `MSG_RE`
+  families — classic `XXXnnnY`, CICS `DFH` cards, IMS `DFS` codes with
+  optional severity, 4-letter prefixes — but stays line-anchored, so a bare
+  mid-line mention never flips a chunk. Widening it further changes
+  `chunk_type` distribution — needs an eval, not a cleanup.
 - `syntax`: `"::="` anywhere, or ≥2 box-drawing lines, or ≥2 syntax-marker
   lines, or a `<parm>` token anywhere.
-- `table`: fraction of columnish lines (2+-space-separated columns) ≥ 0.6.
+- `table`: fraction of columnish lines (2+-space-separated columns) ≥ 0.6
+  via `is_table_block` — the same helper `chunk.detect_table_region` uses
+  for atomic row splitting (one rule per concept).
 - Empty text → `narrative`.
 
 Contract tests: `tests/test_classify_messages.py`.

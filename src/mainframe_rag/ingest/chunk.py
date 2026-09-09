@@ -11,7 +11,7 @@ import re
 import uuid
 from dataclasses import dataclass
 
-from mainframe_rag.ingest.classify import classify
+from mainframe_rag.ingest.classify import classify, is_table_block
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 from mainframe_rag.regexes import (
     FRONT_MATTER_RE,
@@ -49,6 +49,26 @@ _JCL_UNNAMED_RE = re.compile(r"^//\s\S")
 # `,DLM=..`). Everything after it (until the next card) is data records.
 _JCL_DD_DATA_RE = re.compile(r"^//\S+\s+DD\s+(\*|DATA)(?=[\s,]|$)", re.IGNORECASE)
 _REXX_HEADER_RE = re.compile(r"/\*\s*rexx", re.IGNORECASE)
+# REXX keyword fallback (issue #216): balanced-comment samples with no
+# header carry no unbalanced `/*`, so sample line-initial keywords instead.
+# Line-anchored and requiring a code signal (assignment or `;`) beside it:
+# manual prose opens lines with "Do not"/"If" too, but without assignments
+# it stays prose. A miss still falls back to paragraph behavior.
+_REXX_KEYWORD_RE = re.compile(
+    r"^\s*(say|do|end|parse|pull|push|queue|exit|return|address|trace|signal"
+    r"|call|select|when|otherwise|nop|drop|interpret)\b",
+    re.IGNORECASE,
+)
+_REXX_ASSIGN_RE = re.compile(r"^\s*[A-Za-z_][\w.]*\s*=[^=]")
+# A SYSIN-adjacency chain breaks at sentence punctuation (issue #216):
+# data records do not end lines with `.`/`?`/`!`/`:`; prose explanations
+# do. A missed break only makes prose line-atomic (text preserved); a
+# false break restores today's char-slice (status quo, never worse).
+_SENTENCE_END_RE = re.compile(r"[.?!:]\s*$")
+# Minimum JCL statement-starts before a paragraph is treated as mixed
+# prose+JCL (issue #216): one `//see`-style prose line must not flip a
+# paragraph; two cards are an example, not a mention.
+_MIXED_JCL_MIN_STARTS = 2
 
 
 def _nonblank_lines(text: str) -> list[str]:
@@ -79,9 +99,30 @@ def detect_code_region(text: str) -> str | None:
         line.count("/*") > line.count("*/") for line in lines
     ):
         return "rexx"
+    keyword_lines = sum(1 for line in lines if _REXX_KEYWORD_RE.match(line))
+    if keyword_lines >= 2 and (
+        any(_REXX_ASSIGN_RE.match(line) for line in lines) or ";" in text
+    ):
+        return "rexx"
     if sum(1 for line in lines if line[:1].isspace()) / len(lines) >= 0.6:
         return "console"
     return None
+
+
+def _is_dd_data_para(text: str) -> bool:
+    """True when the paragraph opens a SYSIN in-stream block (a DD */DATA
+    card), making following data paragraphs adjacency candidates."""
+    return any(_JCL_DD_DATA_RE.match(line.lstrip()) for line in text.splitlines())
+
+
+def detect_table_region(text: str) -> bool:
+    """Column-block test for atomic row splitting (issue #216): a table
+    block only when it is NOT code (JCL continuations carry wide indents
+    that read as columns) and the shared classify helper agrees. One rule
+    per concept: the 0.6 column heuristic lives in classify.is_table_block."""
+    if detect_code_region(text) is not None:
+        return False
+    return is_table_block(text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +321,50 @@ def _split_rexx_statements(text: str) -> list[str]:
     return [s.rstrip() for s in statements if s.strip()]
 
 
+def _mixed_jcl_items(para: str) -> list[tuple[str, bool]]:
+    """Split a mixed prose+JCL paragraph (issue #216): runs of `//` cards
+    expand to atomic JCL statements, prose runs stay single blobs with
+    original newlines. Fewer than _MIXED_JCL_MIN_STARTS statement-starts
+    passes the paragraph through untouched (byte-identical prose path)."""
+    lstripped = [line.lstrip() for line in para.splitlines()]
+    starts = sum(
+        1
+        for line in lstripped
+        if _JCL_STMT_START_RE.match(line) or _JCL_UNNAMED_RE.match(line)
+    )
+    if starts < _MIXED_JCL_MIN_STARTS:
+        return [(para, False)]
+    items: list[tuple[str, bool]] = []
+    run: list[str] = []
+    prose: list[str] = []
+
+    def flush_prose() -> None:
+        if prose:
+            items.append(("\n".join(prose), False))
+            prose.clear()
+
+    for line in para.splitlines():
+        if _JCL_CARD_RE.match(line.lstrip()):
+            flush_prose()
+            run.append(line)
+        else:
+            if run:
+                items.extend((s, True) for s in _split_jcl_statements("\n".join(run)))
+                run.clear()
+            prose.append(line)
+    if run:
+        items.extend((s, True) for s in _split_jcl_statements("\n".join(run)))
+    flush_prose()
+    return [(t, a) for (t, a) in items if t.strip()] or [(para, False)]
+
+
+def _block_span(items: list[tuple[int, str, bool]]) -> tuple[int, int]:
+    """Min/max page over the items composing one block (issue #216: chunk
+    labels span every page a block touches, not just its first page)."""
+    pages = [p for (p, _, _) in items]
+    return (min(pages), max(pages))
+
+
 def _code_statements(text: str) -> list[str] | None:
     """Statement units for a code region, or None for the prose path.
     Console blocks split between lines; JCL/REXX split at statement
@@ -334,17 +419,45 @@ def _overlap_seed(
     return [(items[-1][0], joined[tail_start:], False)]
 
 
-def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, str]]:
-    blocks: list[tuple[int, str]] = []
-    # Expand code paragraphs into atomic statement items; prose passes
-    # through untouched. Item shape: (page_idx, text, atomic).
+def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, int, str]]:
+    """Split paragraphs into capped blocks, tracking each block's page span.
+
+    Returns (page_start, page_end, text): the span covers every page the
+    block's items touch, so chunk labels cite the full range (issue #216).
+    The UUID still pins the span start (see make_chunks).
+    """
+    blocks: list[tuple[int, int, str]] = []
+    # Expand structured paragraphs into atomic items; prose passes through
+    # untouched. Item shape: (page_idx, text, atomic).
     items: list[tuple[int, str, bool]] = []
+    dd_data_open = False
     for page_idx, para in paras:
         statements = _code_statements(para)
         if statements:
             items.extend((page_idx, statement, True) for statement in statements)
+            dd_data_open = _is_dd_data_para(para)
+        elif detect_table_region(para):
+            # Table rows are atomic like code statements: overflow splits
+            # at row boundaries and the overlap backs off to whole rows.
+            # One line is one row (wrapped-row detection is unreliable);
+            # separator/dash lines stay glued by accumulation.
+            items.extend((page_idx, line, True) for line in _nonblank_lines(para))
+            dd_data_open = False
+        elif dd_data_open and _nonblank_lines(para):
+            data_lines = _nonblank_lines(para)
+            if any(_SENTENCE_END_RE.search(line) for line in data_lines):
+                # Prose explanation after the SYSIN block: the adjacency
+                # chain ends here (status-quo prose path for this para).
+                items.append((page_idx, para, False))
+                dd_data_open = False
+            else:
+                # SYSIN data adjacency (issue #216): records following a
+                # DD */DATA card split between lines, never mid-record —
+                # even across page/paragraph boundaries.
+                items.extend((page_idx, line, True) for line in data_lines)
         else:
-            items.append((page_idx, para, False))
+            items.extend((page_idx, t, a) for (t, a) in _mixed_jcl_items(para))
+            dd_data_open = False
     current: list[tuple[int, str, bool]] = []
     current_len = 0
 
@@ -352,7 +465,8 @@ def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, str]]:
         if len(text) > SECTION_MAX_CHARS:
             if current:
                 joined, _ = _join_items(current)
-                blocks.append((current[0][0], joined))
+                span = _block_span(current)
+                blocks.append((span[0], span[1], joined))
                 current, current_len = [], 0
             if atomic:
                 # A single statement longer than the section cap is emitted
@@ -360,14 +474,15 @@ def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, str]]:
                 # fixes, and the 4096-token embed window still covers roughly
                 # twice the cap. The overlap chain restarts after it rather
                 # than seeding from a sliced statement.
-                blocks.append((page_idx, text))
+                blocks.append((page_idx, page_idx, text))
             else:
                 for i in range(0, len(text), SECTION_MAX_CHARS):
-                    blocks.append((page_idx, text[i : i + SECTION_MAX_CHARS]))
+                    blocks.append((page_idx, page_idx, text[i : i + SECTION_MAX_CHARS]))
             continue
         if current_len + len(text) > SECTION_MAX_CHARS and current:
             joined, offsets = _join_items(current)
-            blocks.append((current[0][0], joined))
+            span = _block_span(current)
+            blocks.append((span[0], span[1], joined))
             seed = _overlap_seed(current, joined, offsets)
             if len(seed) == 1 and not seed[0][2]:
                 # Historical blind-tail seed: exact legacy accounting.
@@ -383,8 +498,54 @@ def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, str]]:
 
     if current:
         joined, _ = _join_items(current)
-        blocks.append((current[0][0], joined))
+        span = _block_span(current)
+        blocks.append((span[0], span[1], joined))
     return blocks
+
+
+# No-TOC fallback sectioning (issue #216): books without bookmarks no
+# longer collapse to one giant whole-document section. A new section opens
+# at a heading-like page lead (numbered headings, Chapter/Appendix/Section
+# leads) or when the current run reaches FALLBACK_MAX_PAGES — whichever
+# comes first, so over-eager heading matches cannot strand giant runs and
+# missing headings cannot collapse the book. Deterministic in the input:
+# same pages in, same sections (and ordinals) out.
+_FALLBACK_HEADING_RE = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)+\s+\S|(?:chapter|appendix|section)\b)", re.IGNORECASE
+)
+FALLBACK_MAX_PAGES = 10
+_FALLBACK_HEADING_CHARS = 100
+
+
+def fallback_sections(page_texts: list[str], title: str) -> list[Section]:
+    """Windowed sections for documents without a table of contents."""
+    sections: list[Section] = []
+    start = 0
+    heading_path = title
+    for idx, page_text in enumerate(page_texts):
+        if idx > start:
+            lead = ""
+            for line in page_text.splitlines():
+                if line.strip():
+                    lead = line.strip()
+                    break
+            new_heading = bool(lead and _FALLBACK_HEADING_RE.match(lead))
+            window_full = idx - start >= FALLBACK_MAX_PAGES
+            if new_heading or window_full:
+                if idx > start:
+                    sections.append(
+                        Section(heading_path=heading_path, page_start=start, page_end=idx)
+                    )
+                start = idx
+                heading_path = (
+                    title
+                    if not new_heading
+                    else f"{title} > {_clean_title(lead)[:_FALLBACK_HEADING_CHARS]}"
+                )
+    sections.append(
+        Section(heading_path=heading_path, page_start=start, page_end=len(page_texts))
+    )
+    return [s for s in sections if s.page_end > s.page_start]
 
 
 def _page_label_range(labels: list[str | None]) -> str:
@@ -404,7 +565,8 @@ def make_chunks(
     labels = page_labels or [None] * parsed.page_count
     chunks: list[Chunk] = []
 
-    for section in outline_sections(parsed):
+    sections = outline_sections(parsed) if parsed.toc else fallback_sections(page_texts, parsed.title)
+    for section in sections:
         body_pages = page_texts[section.page_start : section.page_end]
 
         paras: list[tuple[int, str]] = []
@@ -415,15 +577,18 @@ def make_chunks(
         if not paras:
             continue
 
-        for ordinal, (page_idx, text) in enumerate(_split_blocks(paras)):
-            chunk_id = make_chunk_id(doc_id, section.heading_path, page_idx, ordinal)
-            label = _page_label_range([labels[page_idx]]) if page_idx < len(labels) else ""
+        for ordinal, (page_start, page_end, text) in enumerate(_split_blocks(paras)):
+            # UUID pins the span start: the deterministic chunk key contract
+            # (doc|heading|page|ordinal) is unchanged, only the label spans.
+            chunk_id = make_chunk_id(doc_id, section.heading_path, page_start, ordinal)
+            span_labels = labels[page_start : page_end + 1] if page_start < len(labels) else []
+            label = _page_label_range(span_labels)
             chunks.append(
                 Chunk(
                     chunk_id=chunk_id,
                     doc_id=doc_id,
                     heading_path=section.heading_path,
-                    page_start=page_idx,
+                    page_start=page_start,
                     page_label=label,
                     chunk_type=classify(text),
                     text=text,

@@ -104,6 +104,13 @@ class Settings(BaseSettings):
     rrf_weight_sparse_nl: float = Field(default=1.0, gt=0.0, le=10.0)
     rrf_weight_dense_identifier: float = Field(default=1.0, gt=0.0, le=10.0)
     rrf_weight_sparse_identifier: float = Field(default=3.0, gt=0.0, le=10.0)
+    # Per-type sparse-leg boost (issue #216): the BM25 contribution of a
+    # syntax/table chunk multiplies by its factor inside rrf_fuse (read off
+    # the point payload's chunk_type, already indexed). Default 1.0 keeps
+    # fusion byte-identical legacy; enabling is an eval-backed ON decision,
+    # never a silent flip in a behavior PR.
+    rrf_sparse_boost_syntax: float = Field(default=1.0, gt=0.0, le=10.0)
+    rrf_sparse_boost_table: float = Field(default=1.0, gt=0.0, le=10.0)
     retrieve_max_chunks_per_page: int = Field(default=1, ge=1, le=10)
     retrieve_max_chunks_per_doc: int = Field(default=3, ge=1, le=10)
 
