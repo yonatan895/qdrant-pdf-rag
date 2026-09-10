@@ -36,7 +36,7 @@ def _require_rank(value: Any, row_id: str, leg: str) -> int | None:
     return value
 
 
-def replay_pool(rows: list[dict[str, Any]]) -> tuple[list, list, dict[str, float]]:
+def replay_pool(rows: list[dict[str, Any]]) -> tuple[list, list, dict[str, float | None]]:
     """Validate a recorded pool and rebuild (dense, sparse, ce_by_id) legs.
 
     Leg order follows recorded rank order, like real prefetch results.
@@ -49,7 +49,7 @@ def replay_pool(rows: list[dict[str, Any]]) -> tuple[list, list, dict[str, float
     seen_ranks: dict[str, set[int]] = {"dense": set(), "sparse": set()}
     dense_ranked: list[tuple[int, dict[str, Any]]] = []
     sparse_ranked: list[tuple[int, dict[str, Any]]] = []
-    ce_by_id: dict[str, float] = {}
+    ce_by_id: dict[str, float | None] = {}
     for pos, row in enumerate(rows):
         if not isinstance(row, dict):
             raise TypeError(f"replay row {pos}: must be a dict")
@@ -69,8 +69,12 @@ def replay_pool(rows: list[dict[str, Any]]) -> tuple[list, list, dict[str, float
                     raise ValueError(f"replay row {row_id!r}: duplicate {leg}_rank {rank}")
                 seen_ranks[leg].add(rank)
         ce = row.get("ce")
-        if isinstance(ce, bool) or not isinstance(ce, (int, float)) or not math.isfinite(ce):
-            raise ValueError(f"replay row {row_id!r}: 'ce' must be a finite number")
+        if ce is None:
+            ce_by_id[row_id] = None  # CE-less recording: RRF-only replay
+        else:
+            if isinstance(ce, bool) or not isinstance(ce, (int, float)) or not math.isfinite(ce):
+                raise ValueError(f"replay row {row_id!r}: 'ce' must be a finite number")
+            ce_by_id[row_id] = float(ce)
         chunk_type = row.get("chunk_type", "narrative")
         if chunk_type is None:
             chunk_type = "narrative"  # mirrors _to_hit defaulting
@@ -100,7 +104,6 @@ def replay_pool(rows: list[dict[str, Any]]) -> tuple[list, list, dict[str, float
             dense_ranked.append((dense_rank, {"point": point}))
         if sparse_rank is not None:
             sparse_ranked.append((sparse_rank, {"point": point}))
-        ce_by_id[row_id] = float(ce)
     dense = [entry["point"] for _, entry in sorted(dense_ranked, key=lambda t: t[0])]
     sparse = [entry["point"] for _, entry in sorted(sparse_ranked, key=lambda t: t[0])]
     return dense, sparse, ce_by_id
@@ -126,6 +129,9 @@ def replay_rank(
     fused = rrf_fuse(dense, sparse, weights=weights, k=k, limit=_RERANK_POOL, type_boosts=type_boosts)
     if not fused:
         return []
+    unscored = [hit.chunk_id for hit in fused if ce_by_id.get(hit.chunk_id) is None]
+    if unscored:
+        raise ValueError(f"replay pool has no CE score for {unscored!r}: RRF-only replay needed")
     score_map = {format_rerank_text(hit): ce_by_id[hit.chunk_id] for hit in fused}
     reranked = rerank_candidates("replay query", fused, MockReranker(score_map), alpha=alpha, top_k=limit)
     return diversify_hits(reranked, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
@@ -226,6 +232,35 @@ def test_replay_missing_chunk_type_defaults_narrative():
     assert hits[0].chunk_type == "narrative"
 
 
+def _celess_pool() -> list[dict[str, Any]]:
+    # Bypassed/--no-ce capture: no chunk carries a CE score.
+    return [
+        {"id": "u1", "doc_id": "U1", "page": "1", "dense_rank": 0, "sparse_rank": 1},
+        {"id": "u2", "doc_id": "U2", "page": "2", "dense_rank": 1, "sparse_rank": 0},
+    ]
+
+
+def test_replay_celess_pool_runs_rrf_only():
+    hits = replay_rank(_celess_pool(), rerank=False)
+    assert [h.chunk_id for h in hits] == ["u1", "u2"]
+    assert all(h.rerank_score is None for h in hits)
+
+
+def test_replay_celess_pool_refuses_rerank():
+    with pytest.raises(ValueError):
+        replay_rank(_celess_pool(), rerank=True)
+
+
+def test_replay_partially_scored_pool_refuses_rerank():
+    rows = [
+        {"id": "s1", "doc_id": "S1", "page": "1", "dense_rank": 0, "sparse_rank": 0, "ce": 0.9},
+        {"id": "s2", "doc_id": "S2", "page": "2", "dense_rank": 1, "sparse_rank": 1},
+    ]
+    with pytest.raises(ValueError):
+        replay_rank(rows, rerank=True)
+    assert [h.chunk_id for h in replay_rank(rows, rerank=False)] == ["s1", "s2"]
+
+
 @pytest.mark.parametrize(
     "rows",
     [
@@ -239,7 +274,6 @@ def test_replay_missing_chunk_type_defaults_narrative():
         [_row("neg", dense_rank=-1, ce=0.5)],
         [_row("flag", dense_rank=True, ce=0.5)],
         [_row("frac", dense_rank=0.5, ce=0.5)],
-        [{"id": "noce", "doc_id": "N", "page": "1", "dense_rank": 0}],
         [_row("badce", dense_rank=0, ce="high")],
         [_row("nance", dense_rank=0, ce=float("nan"))],
         [_row("infce", dense_rank=0, ce=float("inf"))],
