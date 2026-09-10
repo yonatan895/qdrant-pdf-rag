@@ -42,7 +42,7 @@ class Embedder(Protocol):
 @runtime_checkable
 class Reranker(Protocol):
     """Relevance scoring protocol for candidate chunks (issue #76 PR-02).
-    Implementations: HttpReranker (prod vLLM/TEI), OnnxReranker (local ONNX weights),
+    Implementations: HttpReranker (prod vLLM/TEI),
     HashReranker (CI/dev)."""
 
     def score(self, query: str, texts: list[str]) -> list[float]: ...
