@@ -144,6 +144,39 @@ An untested backup is not a backup. Re-snapshot after any ingest that must survi
 - Crashed vLLM inits can leak VRAM across container restarts; repeated launch failures with shrinking headroom mean stop retrying — a host reboot is the reset. Do §4 first.
 - `nvidia-smi` is the source of truth for free VRAM, not arithmetic.
 
+### 5.1 Profile → rung map (one pack per 8 GB card)
+
+Numbers live in `src/mainframe_rag/serve/profiles.py`; commands live in
+`docs/install_and_ops.md` §3.6. The launcher preflights the full pack
+(`--check-pack`) and explicit `GPU_MEM=`/`MAX_LEN=`/`SEQS=`/`ROLE=` always
+win. `OPENSHIFT_PROD` is sizing requirements for the platform team (this
+repo never deploys vLLM) — resolve with `--explain` for handoff, never run
+it locally.
+
+| Goal / rungs | `BUDGET_PROFILE` | What runs |
+|---|---|---|
+| Answer quality, rungs 5–6 (big reasoning + embed) | `LOCAL_RT_8GB` (default) | `:8000` E4B + `:8001` Qwen3-0.6B. No room for a third leg. |
+| Full topology plumbing, rungs 2–4 + 6 (weak answers OK) | `TRIPLE_8GB` | `:8000` 0.5B stand-in + `:8001` embed + `:8002` rerank. `LOCAL_RT_8GB` fails `ROLE=rerank` closed by design. |
+| Retrieval / rerank A/B, rungs 2–3 + 5 (no LLM VRAM) | `RANK_EMBED_8GB` | `:8001` embed + `:8002` rerank only. Consumer side still needs `RERANK_ENABLED=true RERANK_BASE_URL=http://127.0.0.1:8002`. |
+| Prod handoff (never local) | `OPENSHIFT_PROD` | 31B 8k + 4B-embed + reranker on 80 GB. SKU weights illustrative until the platform team confirms. |
+
+Launch order on a cold card: reasoning → embed → rerank (a 4k-context
+server fails KV init against leftovers; profiles declare this order).
+
+### 5.2 Baseline → environment map (never cross the streams)
+
+One gate, one file, one environment (`docs/testing.md` harness invariants;
+`docs/eval.md` §1–§2). Capturing in the wrong env fails closed by design —
+re-capture in the gate's own env instead of widening tolerances.
+
+| Baseline | Owner env | Local rule |
+|---|---|---|
+| `evals/baseline.json` (hash) / `baseline-vllm.json` (vllm) | Hash: any CPU. vLLM: lab/gap GPU stack (§2 block) | Hash ingest → hash-dim collection → hash eval; vLLM likewise. Mismatch exits 2, never 0. |
+| `evals/baseline-paraphrase[-vllm].json` | Same split, dedicated `paraphrase-manuals` collection | Fresh-ingest rung 3 before scoring; not in CI. |
+| `evals/holdout.jsonl` + `holdout-baseline.json` | RC-only vs `real_manuals` (`make eval-holdout`) | Never tune locally; sha-verified on RC. |
+| `benchmarks/baseline.json` | CI runner (`cpu_count`, `qdrant_image`) | Never gate a dev-machine capture; repeats ≥3. |
+| `benchmarks/harness[-vllm].json` + L3 perf | GPU RC host (4-key env check) | Never merge GPU numbers into the CI bench JSON. |
+
 ## 6. Shell safety
 
 - Never switch branches while an ingest runs: parse workers spawn fresh processes that re-import the working tree — a mid-run switch mixes code versions across documents or crashes workers. Finish or kill the ingest first.
