@@ -8,11 +8,15 @@ Owner: this file. Design overview: `docs/architecture.md` §4.3. Eval gates:
 
 ## 1. Query data-flow
 
-`search()` and `async_search()` in `retrieve/query.py` are near-verbatim
-twins pinned by a drift-guard test: identical fakes in, identical hits out.
-The async twin never runs sync I/O on the event loop — the dense-query,
+`async_search()` in `retrieve/query.py` is the single implementation; the
+sync `search()` is a thin `asyncio.run` wrapper for sync callers (evals,
+tooling, scripts — audited: no async-context caller) that fails closed
+inside a running loop. The drift-guard test pins identical outputs on
+identical fakes, so the wrapper cannot silently diverge from the core.
+The async core never runs sync I/O on the event loop — the dense-query,
 sparse, and cross-encoder legs go through `asyncio.to_thread`, and the
-Qdrant calls ride `isawaitable` shims so test doubles work on both twins.
+Qdrant calls ride `isawaitable` shims so test doubles work on both entry
+points.
 
 Stage order for both twins:
 
