@@ -271,6 +271,35 @@ def test_strip_angle_bracket_and_markdown_link_wrapping():
     assert strip_unauthorized_citations(prose, allowed) == prose
 
 
+def test_strip_drops_pasted_heading_path_fragments():
+    """Live probe: the model copied a related-documents table row
+    ("SC23-6878-00 ... Guide, About this document > Table 1. Related
+    documents") into the answer body. The line has no `, p. <page>` tail
+    so it is not citation-shaped — yet reads as a reference while
+    validating as nothing. Docno-led + " > " + no sentence punctuation
+    drops; prose and prefix/suffix mentions survive."""
+    from mainframe_rag.agent.cites import strip_unauthorized_citations
+
+    allowed = {_hit().cite}
+    paste = (
+        "SC23-6878-00 z/OS V2R2 DFSORT Application Programming Guide, "
+        "About this document > Table 1. Related documents"
+    )
+    assert strip_unauthorized_citations(paste, allowed) == ""
+    assert strip_unauthorized_citations("> " + paste, allowed) == ""
+    assert strip_unauthorized_citations("`" + paste + "`", allowed) == ""
+    # Allowed cites (docno-led with " > ") always survive.
+    assert strip_unauthorized_citations(_hit().cite, allowed) == _hit().cite
+    # Docno-led prose ending with sentence punctuation survives.
+    prose = "SC23-6858 covers tapes, books, and guides."
+    assert strip_unauthorized_citations(prose, allowed) == prose
+    # Inline mentions and prefix/suffix prose survive (standalone-line rule).
+    inline = "Refer to SA22-9999-99 Not Retrieved, Made Up > Path for details."
+    assert strip_unauthorized_citations(inline, allowed) == inline
+    prefixed = "Cited: <SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9>"
+    assert strip_unauthorized_citations(prefixed, allowed) == prefixed
+
+
 def test_answer_script_block_passes_through_unvalidated(client, monkeypatch):
     """script is code: citation-shaped lines inside the fence are returned
     verbatim (documented behavior, issue #20 PR C)."""

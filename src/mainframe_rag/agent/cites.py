@@ -29,6 +29,15 @@ _MARKER_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+|\[\d+\]:?\s*)+")
 # resolve cleanly): bold, italic/underscore, inline code, quotes.
 _WRAP_CHARS = "`\"'*_"
 
+# Pasted heading-path fragments: the model sometimes copies excerpt
+# boilerplate (related-document table rows, "About this document > Table
+# 1 ..." lists) into the answer as a standalone line. They are docno-led
+# and carry a " > " heading separator, but have no `, p. <page>` tail —
+# so they are not citations (handled above) yet read as one while
+# validating as nothing. Real prose either does not start with a docno
+# or ends with sentence punctuation; real citations are in `allowed`.
+_DOCNO_LED_RE = re.compile(r"^[A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?\s+\S")
+
 
 def normalize_citation_line(line: str) -> str:
     """One normalizer for both citation paths (the Citations: list parser and
@@ -131,6 +140,13 @@ def strip_unauthorized_citations(text: str, allowed: set[str]) -> str:
     for line in text.splitlines():
         candidate = _normalize_citation_line(line)
         if CITATION_LINE_RE.match(candidate) and candidate not in allowed:
+            continue
+        if (
+            candidate not in allowed
+            and _DOCNO_LED_RE.match(candidate)
+            and " > " in candidate
+            and candidate[-1:] not in (".", "!", "?")
+        ):
             continue
         kept.append(line)
     return "\n".join(kept)
