@@ -214,6 +214,9 @@ def handle_request(
             return _error(msg_id, INVALID_PARAMS, f"unknown tool: {tool_name!r}")
         if not isinstance(arguments, dict):
             return _error(msg_id, INVALID_PARAMS, "arguments must be an object")
+        # Access log: tool name only (never args, content, or credentials).
+        # Tests and operators grep this to prove what the bridge served.
+        print(f"mcp tools/call name={tool_name}", file=sys.stderr, flush=True)
         t0 = time.monotonic()
         with tracer.start_as_current_span(
             "tools.call",
