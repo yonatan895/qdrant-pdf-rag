@@ -50,6 +50,7 @@ from mainframe_rag.agent.sse import (
 )
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.tracing import parent_context, setup_tracing, shutdown_tracing
+from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.logs import configure_logging
@@ -61,6 +62,7 @@ from mainframe_rag.ports import (
     Reranker,
     Tokenizer,
     TokenUsage,
+    ZoweMCP,
 )
 from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
@@ -77,6 +79,7 @@ embedder: Embedder
 llm: LLMClient
 tokenizer: Tokenizer
 reranker: Reranker | None = None
+zowe_mcp: ZoweMCP | None = None
 # Tracer starts as the API proxy (no-op until a real provider is installed).
 # Lifespan reassigns it when tracing is enabled (issue #83); tests swap it
 # directly with a tracer backed by InMemorySpanExporter.
@@ -216,7 +219,7 @@ def _alert_finish_reason_non_stop(request_id: str, finish_reason: str) -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker
+    global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker, zowe_mcp
     settings = load_settings()
     configure_logging(settings.log_level)
     # Startup fail-fast (issue #20 PR D): the agent refuses to listen on a
@@ -267,6 +270,15 @@ async def lifespan(_app: FastAPI):
         probe_error = await asyncio.to_thread(probe_reranker, reranker)
         if probe_error is not None:
             log.warning(json_log("lifespan", "reranker_unreachable", error=probe_error[:200]))
+    # Live z/OS state (ADR-0002, phase 2): default-off client, built only
+    # when enabled. Same warn-only probe discipline as the reranker — a
+    # dead bridge or a surprising tool registration must not keep the
+    # agent from listening. No endpoint calls it yet (phase 3 wiring).
+    zowe_mcp = build_zowe_mcp(settings)
+    if zowe_mcp is not None:
+        probe_error = await asyncio.to_thread(probe_zowe_mcp, zowe_mcp)
+        if probe_error is not None:
+            log.warning(json_log("lifespan", "zowe_mcp_unreachable", error=probe_error[:200]))
     # Two names on purpose: tests swap the `llm` global after startup; shutdown
     # must close the pool THIS lifespan created, never a test double.
     llm_client = HttpxLLMClient(settings)
@@ -317,6 +329,9 @@ async def lifespan(_app: FastAPI):
         close_res = qdrant.close()
         if inspect.isawaitable(close_res):
             await close_res
+
+    if zowe_mcp is not None and hasattr(zowe_mcp, "close"):
+        zowe_mcp.close()
 
 
 app = FastAPI(title="mainframe-rag agent", version="0.1.0", lifespan=lifespan)
