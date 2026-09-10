@@ -275,7 +275,11 @@ these; widening changes both corpus extraction and query parsing at once.
 - **Doc numbers** `DOCNO_RE`: 2–4 letters, 2 digits, dash, 4 digits, optional
   2-digit suffix (`SA22-7592-05`). The filename-anchored variant used at
   parse time is deliberately separate (see `docs/ingest.md` §2) so pattern
-  changes cannot churn point ids.
+  changes cannot churn point ids. Query-side only (`filters.parse_query`):
+  a match immediately followed by `-` is a truncated edition suffix —
+  wildcard (`SC23-6858-xx`), partial (`SC23-6858-0`) — and is dropped from
+  the exact `doc_id` filter (it can only fail into the fallback under
+  identifier weights); the raw text still feeds BM25/dense.
 - **Message ids** `MSG_RE`: classic 3-letter form (`IEA500I`) plus the
   families it misses, added from real-corpus measurement — CICS `DFH` cards
   with 0–2 middle letters and no trailing severity (`DFHAC2006`,
