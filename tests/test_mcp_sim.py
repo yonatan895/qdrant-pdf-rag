@@ -4,13 +4,12 @@ The bridge runs as a real subprocess over loopback HTTP against a runtime
 mock z/OS tree; the agent boots against it with the flag on. No retrieval
 code is faked — fetch_live drives a real HttpZoweMCP over the wire. Like
 the rest of sim: fail-closed (no skips except a missing docker daemon for
-the agent-boot test, which needs a live Qdrant), corpus generated at
+the agent-boot test, which needs a live Qdrant), mock tree generated at
 runtime, nothing committed.
 """
 
 from __future__ import annotations
 
-import fcntl
 import os
 import socket
 import subprocess
@@ -124,12 +123,14 @@ def test_bridge_http_serves_mock_tools(bridge_url) -> None:
 def test_fetch_live_over_wire(bridge_url) -> None:
     """fetch_live drives a real HttpZoweMCP against the subprocess bridge:
     a job-failure query returns mock spool bytes; a manual query makes
-    zero bridge calls (proven by the access log, not by mocking)."""
+    zero bridge calls (proven by tools_used, not by mocking). The
+    access-log line itself is pinned hermetically in
+    test_mcp_ftp_bridge.py, not via this subprocess pipe."""
     from mainframe_rag.agent import live_state
     from mainframe_rag.agent.zowe_mcp import HttpZoweMCP
     from mainframe_rag.config import Settings
 
-    url, proc = bridge_url
+    url, _proc = bridge_url
     settings = Settings(
         zowe_mcp_enabled=True, zowe_mcp_base_url=url, zowe_mcp_max_bytes=100000, _env_file=None
     )
@@ -149,20 +150,6 @@ def test_fetch_live_over_wire(bridge_url) -> None:
         settings, client, "sim-2", "What does IEA500I mean?", "manual"
     )
     assert manual.texts == ()
-
-    # Drain the access log without killing the session-scoped subprocess:
-    # non-blocking read of whatever has accumulated is enough — the spool
-    # call above must be present, and no call may reference trap content.
-    fd = proc.stderr.fileno()
-    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-    try:
-        logged = proc.stderr.read() or ""
-    except (OSError, ValueError):
-        logged = ""
-    finally:
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags)
-    assert "mcp tools/call name=jes_spool_read" in logged
 
 
 @pytest.fixture(scope="session")
@@ -193,35 +180,11 @@ def _agent(monkeypatch, qdrant_url: str, bridge_url: str, collection: str):
         yield client
 
 
-def test_agent_boots_with_bridge_and_answers_without_fetch(
-    qdrant_url, bridge_url, tmp_path, monkeypatch
-) -> None:
-    """Agent lifespan probes the real bridge (warn-only path needs no
-    warnings here) and trap answers stay MCP-free end to end."""
-    from scripts.make_synthetic_pdf import build
-
-    from mainframe_rag.ingest import run_ingest
-
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    build(corpus / "SA22-0000-00.pdf")
-    monkeypatch.setenv("QDRANT_URL", qdrant_url)
-    monkeypatch.setenv("QDRANT_COLLECTION", "sim-mcp")
-    monkeypatch.setenv("EMBED_MODE", "hash")
-    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
-    # Parent-side worker globals leak across sim files: run_ingest keeps a
-    # process-global client that an earlier file's monkeypatch reverted to a
-    # live handle on ITS simulator (found as a sim-mcp 404 on the wrong
-    # port). Reset exactly like test_integration_sim._ingest does.
-    previous_qdrant = run_ingest._worker_qdrant
-    if previous_qdrant is not None:
-        previous_qdrant.close()
-    monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
-    monkeypatch.setattr(run_ingest, "_worker_embedder", None)
-    assert run_ingest.main(["--src", str(corpus), "--progress", str(tmp_path / "inv.jsonl"), "--workers", "1"]) == 0
-
+def test_agent_boots_with_bridge(qdrant_url, bridge_url, monkeypatch) -> None:
+    """Agent lifespan probes the real bridge over the wire; the warn-only
+    probe must never keep the agent from listening. Healthz alone proves
+    it — retrieval with the flag on is covered by test_integration_sim.py
+    and needs no second ingest here."""
     url, _proc = bridge_url
     with _agent(monkeypatch, qdrant_url, url, "sim-mcp") as client:
         assert client.get("/healthz").status_code == 200
-        body = client.post("/v1/search", json={"query": "IEA500I operator message"}).json()
-        assert body["hits"], "sim corpus must serve retrieval with the flag on"

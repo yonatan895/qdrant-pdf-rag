@@ -14,11 +14,11 @@ from mainframe_rag.mcp.mock import MockFTPSession, mock_session_factory
 REPO = Path(__file__).resolve().parents[1]
 
 
-def _mock_root(tmp_path: Path, preset: str = "default") -> Path:
+def _mock_root(tmp_path: Path) -> Path:
     from scripts.init_mock_zos import build_mock_tree
 
     root = tmp_path / "mock-zos"
-    build_mock_tree(root, minimal=(preset == "minimal"))
+    build_mock_tree(root)
     return root
 
 
@@ -73,13 +73,6 @@ def test_mock_uss_and_job_tools(tmp_path: Path) -> None:
     assert spool["content"][0]["text"].startswith("IEF142I")
     absent = bridge.jes_spool_read(_session(root), "JOB00023", "9")
     assert absent["isError"] is True
-
-
-def test_mock_minimal_preset(tmp_path: Path) -> None:
-    root = _mock_root(tmp_path, preset="minimal")
-    out = bridge.job_status(_session(root))
-    assert "PAYROLL" in out["content"][0]["text"]
-    assert "BACKUP" not in out["content"][0]["text"]
 
 
 def test_mock_factory_rejects_missing_root(tmp_path: Path) -> None:

@@ -287,6 +287,24 @@ def test_tools_call_unknown_and_bad_args_rejected() -> None:
     assert server.handle_request("garbage", config, connect)["error"]["code"] == -32600
 
 
+def test_tools_call_logs_tool_name_only(capsys) -> None:
+    """Access log (operators grep this): tool name on stderr, never args or
+    content. Hermetic pin — the sim tier proves the call, this proves the log."""
+    fake = FakeFTP()
+    fake.files["'A.B'"] = b"hello-mock-bytes\n"
+    reply = server.handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "params": {"name": "dataset_read", "arguments": {"dataset": "A.B"}}},
+        _config(),
+        lambda _cfg: fake,
+    )
+    assert reply["result"]["isError"] is False
+    logged = capsys.readouterr().err
+    assert "mcp tools/call name=dataset_read" in logged
+    assert "A.B" not in logged
+    assert "hello-mock-bytes" not in logged
+
+
 def test_stdio_loop_frames_replies_and_skips_blanks(monkeypatch) -> None:
     import sys
 
