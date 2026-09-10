@@ -197,7 +197,31 @@ competitors (sibling docs sharing vocabulary, intra-doc section pairs).
   corpus, ingest into the dedicated collection, then evaluate — `make
   eval-paraphrase` runs only the check, not the ingest. Not wired into CI
   (no cluster, no embed server there); never tune against the frozen
-  holdout.
+   holdout.
+
+### 6.1 Record-replay A/B (tune prod ranking from local)
+
+Paraphrase measures semantic movement on synthetic pools; record-replay
+measures ranking movement on real pools without needing prod models
+locally. Capture runs where the models live (RC/gap), replay runs
+anywhere (`tests/test_replay.py`, `scripts/capture_pool.py`):
+
+```bash
+# 1. Capture (RC/gap, live Qdrant + platform embed/rerank endpoints):
+.venv/bin/python scripts/capture_pool.py \
+  --golden evals/golden.jsonl --out /tmp/pools.jsonl
+# 2. Carry pools.jsonl back (ids/ranks/scores only, never chunk text —
+#    safe to move; still never tune against the frozen holdout).
+# 3. Replay locally (record_to_rows → replay_rank): sweep type-boosts,
+#    fusion alpha, and diversity caps hermetically, no GPU needed.
+```
+
+Rules: CE-less pools (bypassed queries, `--no-ce`) replay RRF-only —
+rerank refuses them fail-closed, never fabricate scores. Split
+recordings replay per-leg (`record_to_rows(record, leg=i)`); merging
+legs corrupts ranks. Deltas ship in the PR body like any retrieval
+change (`live-stack.md` rung 7); re-capture after any re-ingest (pools
+pin rank order, not content).
 
 ## 7. Golden corpus discipline
 
