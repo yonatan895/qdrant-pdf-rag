@@ -31,6 +31,25 @@ Supporting cast: `render_report.py` (text/md/HTML renders and comparators),
 `smoke_search.py` (in-cluster smoke: limit 8, `--min-hits 1`, substring
 `--expect` over lowercased cite/heading/text).
 
+**Dev venue provenance** — the shared dev collections are synthetic and
+rebuildable; never delete one without regenerating it in the same
+session. `mainframe_manuals` is the combined golden + holdout venue:
+regenerate in ONE pass (`gate_l1.generate_synthetic_golden_corpus` over
+`golden.jsonl` + `holdout.jsonl` concatenated — 28 doc_ids are shared, so
+separate passes would clobber each other's pages), then `run_ingest
+--reingest` with a fresh `--progress` file (`--reingest` bypasses
+inventory and Qdrant sha skips; doc_ids are stable across chunking
+changes, so delete-first is unnecessary). `paraphrase-manuals` is the
+`paraphrase.jsonl` venue (14 docs + generic-distractor), same rebuild.
+Both re-ingested 2026-09-10 under current rules (post-#216): 208 pts
+(160 narrative / 48 message) and 21 pts (16 narrative / 5 message).
+`real_manuals` (435k pts, 452 real books) is NOT managed here: never
+delete, re-ingest, or gate against it from dev workflows. Its sampled
+mix is ~95% narrative / ~2% message / ~3% syntax / ~0% table — and the
+dev venues hold no syntax/table chunks at all, so the #216 per-type BM25
+boost (default 1.0) is unmeasurable outside the real corpus; its ON
+decision stays deferred to real-corpus measurement.
+
 ## 2. Retrieval eval (`eval_retrieval.py`)
 
 Runs real `retrieve_search(limit=8)` — the 8 gives recall@5 headroom —
