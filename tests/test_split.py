@@ -125,16 +125,34 @@ def test_trap_query_never_splits():
     assert mode == "single"
 
 
-def test_identifier_comparative_bypasses_split():
-    # Exact-code path stays exact: member/doc-number comparatives keep the
-    # single filtered retrieval (filter + fallback), never two legs.
+def test_exact_anchor_comparatives_bypass_split():
+    # Exact-code path stays exact: doc-number / message-id comparatives
+    # keep the single filtered retrieval (filter + fallback), never two
+    # legs. Member mentions alone are filter context, not anchors.
     for query in (
-        "Compare MPFLSTxx versus MSGFLDxx settings for message flooding.",
-        "Compare SMFPRMxx SYS versus SUBSYS recording options for SMF volume.",
-        "Compare IEASYSxx versus the SET command for changing parameters.",
+        "Compare IEA500I versus IEA501I message text.",
+        "Compare SA22-7592-05 versus SA23-1379-02 initialization chapters.",
     ):
         _paths, mode = _split(query)
         assert mode == "single", query
+
+
+def test_member_only_comparatives_split():
+    # A member mention (IEASYSxx) is shared filter context, not the
+    # compared entity: both legs keep the original filter, so splitting
+    # is safe and covers both entities.
+    paths, mode = _split(
+        "Compare documented use of CSA versus ECSA when planning common-storage sizes in IEASYSxx."
+    )
+    assert mode == "comparative"
+    assert len(paths) == 2
+    assert all("IEASYSxx" in p for p in paths)
+    paths, mode = _split("Compare MPFLSTxx versus MSGFLDxx settings for message flooding.")
+    assert mode == "comparative"
+    assert paths == [
+        "MPFLSTxx settings for message flooding.",
+        "MSGFLDxx settings for message flooding.",
+    ]
 
 
 def test_factoid_with_signal_word_stays_single():
