@@ -185,6 +185,15 @@ def test_strip_identifiers_removes_all_families():
     assert "shortage" in stripped
 
 
+def test_strip_identifiers_removes_folded_lowercase_member():
+    """Issue #133 sibling sweep: a lowercase-typed member strips at the
+    same span its folded form filters on, so the diagnostic cause leg
+    broadens exactly like the uppercase-typed one."""
+    stripped = strip_identifiers("ieasysxx reports a CSA shortage, what recovery applies?")
+    assert "ieasysxx" not in stripped
+    assert "shortage" in stripped and "recovery" in stripped
+
+
 # ---------------------------------------------------------------- adversarial
 
 
