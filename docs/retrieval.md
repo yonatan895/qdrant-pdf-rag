@@ -286,7 +286,14 @@ these; widening changes both corpus extraction and query parsing at once.
   `DFHSI1579`), IMS `DFS` codes with optional severity (`DFS058` alongside
   `DFS058I`), and 4-letter-prefix codes (`DSNA670I`, `TSSC001E`).
 - **Members** `MEMBER_RE`: 3–8 uppercase letters ending in `xx` (PARMLIB
-  convention: `IEASYSxx`) or 2 digits. Case-sensitive by design.
+  convention: `IEASYSxx`) or 2 digits. Case-sensitive by design at ingest.
+  Query-side only (`filters.MEMBER_QUERY_RE`, issue #133): the same shape
+  matched case-insensitively, folded to payload-canonical case
+  (`ieasysxx`/`IEASYSXX` → `IEASYSxx`). The pattern lives in
+  `retrieve/filters.py` — not `regexes.py` — so ingest extraction and
+  `extraction_rules_version` are untouched (a corpus scan over 435k
+  points showed zero member case variance: no ingest normalization and
+  no re-ingest needed).
 - **Front/back-matter titles** `SKIP_ALWAYS_RE`: notices, trademarks,
   reader comments, bibliography, copyright, index — matched at title end
   because IBM titles carry prefixes ("Appendix A. Notices").

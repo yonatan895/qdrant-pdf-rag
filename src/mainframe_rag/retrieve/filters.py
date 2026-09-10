@@ -7,10 +7,21 @@ retrieval.md section 2.
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field
 from qdrant_client import models
 
 from mainframe_rag.regexes import DOCNO_RE, find_members, find_message_ids
+
+# Query-side member pattern (issue #133): case-insensitive twin of the
+# shared MEMBER_RE, defined HERE — not in regexes.py — so ingest
+# extraction (and extraction_rules_version) is untouched. Ingest must
+# stay precise (payload pollution is permanent until re-ingest); the
+# query side may over-match (a filter miss falls back to unfiltered,
+# never to a wrong answer). Matches are folded to payload-canonical
+# case by _fold_member_case before filtering.
+MEMBER_QUERY_RE = re.compile(r"\b([A-Za-z]{3,8}(?:[xX]{2}|\d{2}))\b")
 
 
 class QueryIdentifiers(BaseModel):
@@ -40,6 +51,28 @@ def _find_exact_docnos(text: str) -> set[str]:
             continue
         out.add(m.group(1))
     return out
+def _fold_member_case(token: str) -> str:
+    """Map a query-typed member to payload-canonical case. Ingest extracts
+    with case-sensitive MEMBER_RE, so payloads only ever hold UPPERCASE
+    stems with a lowercase `xx` suffix (`IEASYSxx`) or digit endings
+    (`EYUPLX01`) — verified zero case variance over 435k real-corpus
+    points / 16,686 distinct values (issue #133 scan), hence no ingest
+    normalization and no re-ingest. Operators type lowercase, so fold:
+    uppercase the token, then restore the lowercase `xx` suffix."""
+    up = token.upper()
+    if up.endswith("XX"):
+        up = up[:-2] + "xx"
+    return up
+
+
+def find_members_folded(query: str) -> list[str]:
+    """Exact members plus case-folded ones (issue #133). MEMBER_QUERY_RE
+    matches operator-typed case (`ieasysxx`, `IEASYSXX`); every match is
+    folded to payload-canonical case, so this only ADDS recall like the
+    #130 union. Both the exact and the folded form are emitted."""
+    exact = set(find_members(query))
+    folded = {_fold_member_case(m) for m in MEMBER_QUERY_RE.findall(query)}
+    return sorted(exact | folded)
 
 
 def parse_query(query: str) -> QueryIdentifiers:
@@ -52,11 +85,14 @@ def parse_query(query: str) -> QueryIdentifiers:
     # (IEASYSxx) matches payload case, and uppercasing would break it.
     # Match spans are case-stable, so the truncation check below sees the
     # same `-` boundary in both variants.
+    # Members fold to payload-canonical case via find_members_folded
+    # (issue #133): the corpus scan proved payloads hold a single case
+    # form, so both the exact and the folded form are emitted.
     upper = query.upper()
     return QueryIdentifiers(
         doc_ids=sorted(_find_exact_docnos(query) | _find_exact_docnos(upper)),
         message_ids=sorted(set(find_message_ids(query)) | set(find_message_ids(upper))),
-        members=find_members(query),
+        members=find_members_folded(query),
     )
 
 

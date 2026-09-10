@@ -59,12 +59,18 @@ def test_parse_query_unions_upper_and_lower_codes():
     assert ids.message_ids == ["DFHAC2006", "DSN9022I"]
 
 
-def test_parse_query_members_stay_case_sensitive():
-    """Issue #130 scope guard: MEMBER_RE's lowercase xx convention matches
-    payload case, so members are NOT folded (lowercase members are a
-    documented follow-up, not silently mangled into payload misses)."""
+def test_parse_query_members_fold_to_canonical_case():
+    """Issue #133 (the documented follow-up above, now implemented):
+    operators type lowercase, payloads hold a single canonical form
+    (zero case variance over 435k real-corpus points), so query members
+    fold — exact `IEASYSxx` still matches AND lowercase/all-caps fold
+    to it. Ingest is untouched: the fold lives query-side only."""
     assert "IEASYSxx" in parse_query("IEASYSxx LFAREA").members
-    assert parse_query("ieasysxx setting").members == []
+    assert parse_query("ieasysxx setting").members == ["IEASYSxx"]
+    assert parse_query("IEASYSXX LFAREA").members == ["IEASYSxx"]
+    assert parse_query("IEASYSxx and ieasysxx").members == ["IEASYSxx"]
+    # Digit-ending tokens were always case-stable; still identifiers.
+    assert parse_query("abc10 tuning").members == ["ABC10"]
 
 
 def test_parse_query_drops_truncated_docno_stems():
@@ -94,10 +100,14 @@ def test_parse_query_drops_truncated_docno_stems():
 
 
 def test_parse_query_lowercase_prose_stays_nl():
-    """Ordinary lowercase prose must not sprout identifiers."""
+    """Ordinary lowercase prose must not sprout identifiers — including
+    xx-words with too-short stems (`boxx`: only 2 letters before `xx`)
+    and short alphanumerics (`db2 v10`)."""
     assert not parse_query("compare the spool procedures").has_identifiers
     assert not parse_query("db2 v10 install steps").has_identifiers
     assert not parse_query("certificate key management").has_identifiers
+    assert not parse_query("about the boxx device").has_identifiers
+    assert not parse_query("How do I issue DISPLAY THREAD with LUWID options?").has_identifiers
 
 
 def test_build_filter_includes_all_context():

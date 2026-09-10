@@ -36,7 +36,7 @@ from __future__ import annotations
 import re
 
 from mainframe_rag.regexes import DOCNO_RE, MEMBER_RE, MSG_RE
-from mainframe_rag.retrieve.filters import parse_query
+from mainframe_rag.retrieve.filters import MEMBER_QUERY_RE, parse_query
 from mainframe_rag.retrieve.screen import screen_query
 
 SPLIT_MODES: tuple[str, str, str] = ("single", "comparative", "diagnostic")
@@ -362,9 +362,14 @@ def _identifier_spans(query: str) -> list[tuple[int, int]]:
             spans.append((m.start(), m.end()))
     # Also catch lowercase-typed codes: parse_query unions the uppercased
     # copy, so match those spans too (word-char class is case-stable).
+    # Members likewise via the query-side pattern: a lowercase-typed
+    # member (issue #133) strips at the same span its folded form
+    # filters on.
     for rx in (DOCNO_RE, MSG_RE):
         for m in rx.finditer(query.upper()):
             spans.append((m.start(), m.end()))
+    for m in MEMBER_QUERY_RE.finditer(query):
+        spans.append((m.start(), m.end()))
     return sorted(spans)
 
 
