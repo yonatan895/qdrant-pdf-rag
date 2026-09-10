@@ -146,19 +146,22 @@ An untested backup is not a backup. Re-snapshot after any ingest that must survi
 
 ### 5.1 Profile → rung map (one pack per 8 GB card)
 
-Numbers live in `src/mainframe_rag/serve/profiles.py`; commands live in
+Local GPU packs below are dev stand-ins only. Reasoning/embed/rerank
+models run in a platform-team-owned pool (separate resources, bigger
+models) — this repo never deploys or sizes that pool, so model
+VRAM/RAM/CPU is out of scope here. Numbers live in
+`src/mainframe_rag/serve/profiles.py`; commands live in
 `docs/install_and_ops.md` §3.6. The launcher preflights the full pack
 (`--check-pack`) and explicit `GPU_MEM=`/`MAX_LEN=`/`SEQS=`/`ROLE=` always
-win. `OPENSHIFT_PROD` is sizing requirements for the platform team (this
-repo never deploys vLLM) — resolve with `--explain` for handoff, never run
-it locally.
+win. The headroom that matters in this repo is Qdrant + agent + ingest
+CPU/RAM/disk (see `docs/deploy.md` §5), where prod has ≥10× local.
 
 | Goal / rungs | `BUDGET_PROFILE` | What runs |
 |---|---|---|
 | Answer quality, rungs 5–6 (big reasoning + embed) | `LOCAL_RT_8GB` (default) | `:8000` E4B + `:8001` Qwen3-0.6B. No room for a third leg. |
 | Full topology plumbing, rungs 2–4 + 6 (weak answers OK) | `TRIPLE_8GB` | `:8000` 0.5B stand-in + `:8001` embed + `:8002` rerank. `LOCAL_RT_8GB` fails `ROLE=rerank` closed by design. |
 | Retrieval / rerank A/B, rungs 2–3 + 5 (no LLM VRAM) | `RANK_EMBED_8GB` | `:8001` embed + `:8002` rerank only. Consumer side still needs `RERANK_ENABLED=true RERANK_BASE_URL=http://127.0.0.1:8002`. |
-| Prod handoff (never local) | `OPENSHIFT_PROD` | 31B 8k + 4B-embed + reranker on 80 GB. SKU weights illustrative until the platform team confirms. |
+| Prod model pool (never local, never sized here) | `OPENSHIFT_PROD` (illustrative) | Platform-owned reasoning/embed/rerank; not run or sized from this repo. |
 
 Launch order on a cold card: reasoning → embed → rerank (a 4k-context
 server fails KV init against leftovers; profiles declare this order).

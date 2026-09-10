@@ -129,6 +129,13 @@ checksums. Verify the tarball digest **before** unpacking, member checksums
 
 ## 5. Sizing and security
 
+Model servers (reasoning, dense embed, reranker) live in a
+platform-team-owned pool with its own resources — this repo neither
+deploys nor sizes them, so model VRAM/RAM/CPU is out of scope here.
+Everything below sizes this repo's workloads only (Qdrant, agent,
+ingest, Jaeger). Where this guide says prod has ≥10× local, that means
+CPU/RAM/disk for those workloads, not model GPU/VRAM.
+
 Prod values assume a real OpenShift cluster; the single-node Kind path
 shrinks them via overrides that must never reach prod (a 3×16Gi Qdrant
 cannot schedule on one node — proven).
