@@ -229,11 +229,21 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** #78, #79.
 
 ### PR-08 (issue #82): Query understanding — acronym expansion + HyDE (gated)
-> **Status: PARTIAL.** Deterministic acronym expansion shipped (`retrieve/rewrite.py` +
+> **Status: CLOSED (acronym shipped; HyDE/step-back measured harmful, will not pursue).**
+> Deterministic acronym expansion shipped (`retrieve/rewrite.py` +
 > `acronyms_v1.json`, `acronym_expansion_enabled=False`, identifier bypass;
-> tests `tests/test_rewrite.py`). Remaining: HyDE / step-back behind independent flags
-> with per-technique L1 deltas. The section below now describes the shipped part plus
-> the remaining HyDE scope.
+> tests `tests/test_rewrite.py`). The LLM-rewriting remainder was built and
+> measured in PR #175 (branch `feat/82-hyde-stepback`, closed unmerged):
+> paired A/B on the real corpus showed HyDE recall@1 −0.015 for +1 LLM
+> call per query, step-back −0.177 (strips the product/feature tokens that
+> select the right manual), combined −0.192 — full per-query attribution in
+> that PR body; implementation + `--ab` instrument remain salvageable from
+> the branch. The section below is retained as the acronym record only.
+>
+> **Reopening gate (all required):** per-query attribution shows failures
+> from vocabulary mismatch (query terms absent from relevant docs) on the
+> post-#214/#216 stack; paired A/B on a post-re-ingest real corpus; beats
+> the +1-call latency cost. Until then, do not re-propose.
 - **Scope:** new `src/mainframe_rag/retrieve/rewrite.py`, `agent/answer.py`
 - **Implementation:** Curated versioned acronym glossary (JSON) for deterministic
   expansion; HyDE / step-back behind independent flags; heuristic bypass when the query
