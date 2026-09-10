@@ -334,3 +334,127 @@ def test_main_refuses_without_credentials(monkeypatch, tmp_path) -> None:
     for key in ("MCP_FTP_HOST", "MCP_FTP_USER", "MCP_FTP_PASSWORD"):
         monkeypatch.delenv(key, raising=False)
     assert main(["--transport", "stdio"]) == 2
+
+
+# ------------------------------------------------------- Tracing (OTel path)
+
+
+def _test_tracer():
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return provider, exporter
+
+
+def test_tools_call_span_joins_parent_and_carries_bounded_attrs(monkeypatch) -> None:
+    """tools.call emits a span parented to the extracted W3C context with
+    ids/counts only — tool name, byte counts, elapsed, error flag."""
+    from opentelemetry import trace
+
+    from mainframe_rag.mcp import server as server_mod
+
+    provider, exporter = _test_tracer()
+    test_tracer = provider.get_tracer("test")
+    monkeypatch.setattr(server_mod, "tracer", test_tracer)
+    fake = FakeFTP()
+    fake.files["JOB00123.3"] = b"IEF142I PAYROLL ENDED RC=0\n"
+
+    parent = test_tracer.start_span("agent-live-fetch")
+    parent_ctx = trace.set_span_in_context(parent)
+    reply = server_mod.handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "params": {"name": "jes_spool_read",
+                    "arguments": {"job_id": "JOB00123", "spool_id": "3"}}},
+        _config(),
+        lambda _cfg: fake,
+        parent_context=parent_ctx,
+    )
+    parent.end()
+    assert reply["result"]["isError"] is False
+    child = next(s for s in exporter.get_finished_spans() if s.name == "tools.call")
+    assert child.parent is not None
+    assert child.parent.span_id == parent.get_span_context().span_id
+    attrs = dict(child.attributes or {})
+    assert attrs["mcp.tool"] == "jes_spool_read"
+    assert attrs["mcp.bytes_out"] == len(b"IEF142I PAYROLL ENDED RC=0\n")
+    assert attrs["mcp.is_error"] is False
+    assert isinstance(attrs["mcp.elapsed_ms"], int)
+
+
+def test_span_attrs_never_carry_content_or_secrets(monkeypatch) -> None:
+    """Adversarial: spool bytes containing secret-looking text must not
+    appear in any span attribute value."""
+    from mainframe_rag.mcp import server as server_mod
+
+    provider, exporter = _test_tracer()
+    monkeypatch.setattr(server_mod, "tracer", provider.get_tracer("test"))
+    fake = FakeFTP()
+    fake.files["'PAYROLL.DATA'"] = b"password hunter2\nSECRET=abc123\nsalary 99999\n"
+    server_mod.handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "params": {"name": "dataset_read", "arguments": {"dataset": "PAYROLL.DATA"}}},
+        _config(),
+        lambda _cfg: fake,
+    )
+    haystack = json.dumps(
+        [dict(s.attributes or {}) for s in exporter.get_finished_spans()], default=str
+    )
+    assert "hunter2" not in haystack
+    assert "abc123" not in haystack
+    assert "s3cret" not in haystack
+
+
+def test_tracing_off_by_default_serves_untraced(monkeypatch) -> None:
+    """No endpoint configured: the proxy tracer no-ops and serving is
+    byte-identical (this is also what the pre-tracing tests exercise)."""
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    fake = FakeFTP()
+    fake.files["/u/r/n.txt"] = b"hi\n"
+    reply = server.handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "params": {"name": "uss_read", "arguments": {"path": "/u/r/n.txt"}}},
+        _config(),
+        lambda _cfg: fake,
+    )
+    assert reply["result"]["content"][0]["text"] == "hi\n"
+
+
+def test_lifespan_wires_tracer_setup_and_shutdown(monkeypatch) -> None:
+    """HTTP app lifespan owns the tracer: setup with the env endpoint on
+    startup, flush on shutdown."""
+    from fastapi.testclient import TestClient
+
+    from mainframe_rag.agent import tracing as tracing_mod
+    from mainframe_rag.mcp import server as server_mod
+
+    calls: dict = {}
+    monkeypatch.setattr(
+        tracing_mod, "setup_tracing",
+        lambda endpoint, **kw: calls.setdefault("setup", endpoint),
+    )
+    monkeypatch.setattr(
+        tracing_mod, "shutdown_tracing", lambda: calls.setdefault("shutdown", True)
+    )
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318")
+    with TestClient(server_mod.create_app(_config(), lambda _cfg: FakeFTP())):
+        pass
+    assert calls == {"setup": "http://jaeger:4318", "shutdown": True}
+
+
+def test_sample_ratio_from_env_clamps_and_falls_back(monkeypatch) -> None:
+    from mainframe_rag.mcp.server import sample_ratio_from_env
+
+    monkeypatch.setenv("OTEL_SAMPLE_RATIO", "0.25")
+    assert sample_ratio_from_env() == 0.25
+    monkeypatch.setenv("OTEL_SAMPLE_RATIO", "9")
+    assert sample_ratio_from_env() == 1.0
+    monkeypatch.setenv("OTEL_SAMPLE_RATIO", "garbage")
+    assert sample_ratio_from_env() == 1.0
+    monkeypatch.delenv("OTEL_SAMPLE_RATIO", raising=False)
+    assert sample_ratio_from_env() == 1.0

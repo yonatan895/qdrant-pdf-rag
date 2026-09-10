@@ -10,8 +10,9 @@ import argparse
 import os
 import sys
 
+from mainframe_rag.agent import tracing as tracing_mod
 from mainframe_rag.mcp.bridge import FTPConfig, connect
-from mainframe_rag.mcp.server import create_app, serve_stdio
+from mainframe_rag.mcp.server import create_app, sample_ratio_from_env, serve_stdio
 
 
 def _config_from_env() -> FTPConfig:
@@ -50,7 +51,14 @@ def main(argv: list[str] | None = None) -> int:
         print("mcp bridge: MCP_FTP_HOST, MCP_FTP_USER, and MCP_FTP_PASSWORD must all be set", file=sys.stderr)
         return 2
     if args.transport == "stdio":
-        serve_stdio(config, connect)
+        tracing_mod.setup_tracing(
+            os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
+            sample_ratio=sample_ratio_from_env(),
+        )
+        try:
+            serve_stdio(config, connect)
+        finally:
+            tracing_mod.shutdown_tracing()
         return 0
     import uvicorn
 
