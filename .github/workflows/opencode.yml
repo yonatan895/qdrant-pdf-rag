@@ -96,6 +96,15 @@ jobs:
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           MODEL: opencode/muse-spark-1.3-contributor-free
+          # Non-interactive VM: nobody can answer permission asks, so an
+          # ask stalls the run until timeout. Allow-all (object form, not
+          # the scalar: OPENCODE_PERMISSION goes through mergeDeep, which
+          # only merges objects — verified against the v1.18.25 config
+          # source). The "*" global covers every tool; the guards are
+          # listed explicitly so a "*" semantic gap can never re-arm an
+          # ask. Safe here: ephemeral runner, same-repo PRs only (gate
+          # blocks forks), read-only GitHub permissions, no push creds.
+          OPENCODE_PERMISSION: '{"*":"allow","doom_loop":"allow","external_directory":"allow","question":"allow"}'
           SHARE: "false"
           USE_GITHUB_TOKEN: "false"
 
@@ -212,6 +221,10 @@ jobs:
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           MODEL: opencode/muse-spark-1.3-contributor-free
+          # Same non-interactive rationale as the /oc job above: an ask
+          # with nobody to answer stalls until the 20 min timeout.
+          # Object form (see the /oc job comment for why not scalar).
+          OPENCODE_PERMISSION: '{"*":"allow","doom_loop":"allow","external_directory":"allow","question":"allow"}'
           SHARE: "false"
           USE_GITHUB_TOKEN: "false"
           PROMPT: |
