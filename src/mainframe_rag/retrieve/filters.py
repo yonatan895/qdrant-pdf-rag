@@ -37,13 +37,15 @@ class QueryIdentifiers(BaseModel):
 def _find_exact_docnos(text: str) -> set[str]:
     """Doc numbers usable as exact `doc_id` filters. A match immediately
     followed by `-` is a truncated edition suffix — a wildcard
-    (`SC23-6858-xx`), a partial edition (`SC23-6858-0`), or a bare stem
-    (`SC23-6858`) — and matches no `doc_id` exactly. Emitting it would
-    force an exact filter that can only fail into the unfiltered
-    fallback under identifier weights; dropping it keeps the raw text
-    for BM25/dense and classifies honestly as NL. `DOCNO_RE` itself is
-    untouched (shared with ingest: changing it would churn
-    `rules_version` and force full re-ingest)."""
+    (`SC23-6858-xx`), a partial edition (`SC23-6858-0`), or an over-long
+    tail (`SA22-7592-05-03`) — and matches no `doc_id` exactly. (A bare
+    stem with no trailing dash is kept: it may match an edition-less
+    `doc_id`.) Emitting a truncated stem would force an exact filter
+    that can only fail into the unfiltered fallback under identifier
+    weights; dropping it keeps the raw text for BM25/dense and
+    classifies honestly as NL. `DOCNO_RE` itself is untouched (shared
+    with ingest: changing it would churn `rules_version` and force full
+    re-ingest)."""
     out: set[str] = set()
     for m in DOCNO_RE.finditer(text):
         end = m.end()
@@ -51,6 +53,8 @@ def _find_exact_docnos(text: str) -> set[str]:
             continue
         out.add(m.group(1))
     return out
+
+
 def _fold_member_case(token: str) -> str:
     """Map a query-typed member to payload-canonical case. Ingest extracts
     with case-sensitive MEMBER_RE, so payloads only ever hold UPPERCASE
@@ -80,11 +84,9 @@ def parse_query(query: str) -> QueryIdentifiers:
     # are canonical-uppercase on both sides (ingest source text is
     # uppercase), so also extract from an uppercased copy and union.
     # Case change preserves word-char class, so upper-casing only ADDS
-    # matches: pure-uppercase queries behave exactly as before.
-    # Members stay case-sensitive: MEMBER_RE's lowercase xx convention
-    # (IEASYSxx) matches payload case, and uppercasing would break it.
-    # Match spans are case-stable, so the truncation check below sees the
-    # same `-` boundary in both variants.
+    # matches: pure-uppercase queries behave exactly as before. Match
+    # spans are case-stable, so the truncation check below sees the same
+    # `-` boundary in both variants.
     # Members fold to payload-canonical case via find_members_folded
     # (issue #133): the corpus scan proved payloads hold a single case
     # form, so both the exact and the folded form are emitted.
