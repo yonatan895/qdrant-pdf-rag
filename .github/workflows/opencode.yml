@@ -137,17 +137,27 @@ jobs:
       # Live stack for the reviewer (load-tier composition, CPU-only):
       # docker Qdrant (images.txt pin via qdrant_pin.py) + stdlib mock
       # vLLM (embed + reasoning stand-in) + two synthetic PDFs ingested
-      # in hash mode + real uvicorn agent. No GPU needed. Fail-closed:
-      # a dead stack fails the job before the review runs — a reviewer
-      # without the stack would silently do a weaker review. The mock
-      # proves plumbing (shapes, citations, traps, SSE), never semantics
-      # (see docs/eval.md §9); the PROMPT below says so.
+      # in hash mode + real uvicorn agent + Jaeger v2 all-in-one
+      # (digest-pinned images.txt ref, defaults: in-memory store,
+      # OTLP/HTTP 4318, UI 16686 — ephemeral review data needs no
+      # volume). No GPU needed. Fail-closed: a dead stack fails the job
+      # before the review runs — a reviewer without the stack would
+      # silently do a weaker review. The mock proves plumbing (shapes,
+      # citations, traps, SSE), never semantics (see docs/eval.md §9);
+      # the PROMPT below says so.
       - name: Start live review stack
         run: |
           set -eu
           docker run -d --name qdrant-review --rm -p 127.0.0.1:6333:6333 "$(python3 scripts/qdrant_pin.py)"
+          docker run -d --name jaeger-review --rm -p 127.0.0.1:4318:4318 -p 127.0.0.1:16686:16686 "cr.jaegertracing.io/jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8"
           for i in $(seq 1 30); do
             if curl -s -m 2 http://127.0.0.1:6333/collections >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          for i in $(seq 1 30); do
+            if curl -s -m 2 http://127.0.0.1:16686/ >/dev/null; then
               break
             fi
             sleep 2
@@ -164,6 +174,7 @@ jobs:
           QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=review-corpus \
             EMBED_MODE=hash ALLOW_HASH_MODE=true \
             LLM_BASE_URL=http://127.0.0.1:8001/v1 LLM_MODEL_REASONING=mock-reasoning \
+            OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
             LLM_STREAM=true PYTHONUNBUFFERED=1 \
             nohup python3 -m uvicorn mainframe_rag.agent.app:app \
             --host 127.0.0.1 --port 8080 --log-level warning \
@@ -243,3 +254,9 @@ jobs:
               of refusing — cover the trap path via unit tests in
               tests/test_screen.py) and any recall/quality judgment
               (docs/eval.md §9).
+            - Jaeger v2 all-in-one is live (UI http://127.0.0.1:16686,
+              OTLP/HTTP already wired into the agent): one request = one
+              trace (`v1.search`/`v1.answer` root → retrieve/embed/
+              prefetch/rrf/rerank → prompt/llm). Attribute a latency or
+              stage failure from the trace before blaming code; spans
+              carry ids/counts/scores/timings, never PDF text or secrets.
