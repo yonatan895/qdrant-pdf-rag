@@ -1,6 +1,6 @@
 name: opencode
 
-# PR reviewer (Zen: opencode/muse-spark-1.3) + /oc comment agent.
+# PR reviewer (Zen: opencode/muse-spark-1.3-contributor-free) + /oc comment agent.
 # Reviewer is GitHub-only by design — never mirror into .gitlab-ci.yml.
 on:
   pull_request:
@@ -95,7 +95,7 @@ jobs:
         run: '"$HOME/.opencode/bin/opencode" github run'
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          MODEL: opencode/muse-spark-1.3
+          MODEL: opencode/muse-spark-1.3-contributor-free
           SHARE: "false"
           USE_GITHUB_TOKEN: "false"
 
@@ -155,7 +155,7 @@ jobs:
         run: '"$HOME/.opencode/bin/opencode" github run'
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          MODEL: opencode/muse-spark-1.3
+          MODEL: opencode/muse-spark-1.3-contributor-free
           SHARE: "false"
           USE_GITHUB_TOKEN: "false"
           PROMPT: |
