@@ -110,29 +110,9 @@ make loadtest-mock
 
 ### 3.4 Retrieval Evaluation Gates & Quality Tiers
 
-Mainframe RAG employs a layered testing and evaluation hierarchy across CPU and GPU environments:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ EVALUATION TIERS                                                            │
-│                                                                             │
-│ [L1] Retrieval Gate (Every PR / MR — CPU Only)                             │
-│      • Mode: EMBED_MODE=hash (CPU) against scripts/qdrant_sim.py            │
-│      • Data: Runtime-generated synthetic PDFs matching evals/golden.jsonl   │
-│      • Metrics: recall@1, recall@5, recall@8, MRR, nDCG@8, zero traps       │
-│      • CI: gate-l1 job in GitHub Actions (.github) and GitLab CI (.gitlab)  │
-│      • PR Feedback: Rendered markdown delta table posted directly to PR/MR  │
-│                                                                             │
-│ [L2] Answer Grounding & Faithfulness (Live GPU Stack)                       │
-│      • Models: Internal vLLM reasoning model + dense embedding              │
-│      • Metrics: Citation precision/recall, temp-0 NLI judge, truncation     │
-│      • Execution: make harness-l2 (RC gate / dedicated GPU runner)          │
-│                                                                             │
-│ [L3] Latency & TTFT Performance Tier (Live GPU Stack)                       │
-│      • Metrics: Per-stage p50/p95 (embed, qdrant, llm), TTFT, VRAM          │
-│      • Execution: make harness-l3 (RC gate / dedicated GPU runner)          │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+Tier map, thresholds, and gate semantics live in `eval.md` (§1–§4); the
+rungs your change class owes live in `live-stack.md` (§0, §3). This
+section keeps only the runnable commands.
 
 #### Automated L1 Retrieval Gate (`make gate-l1`)
 
@@ -147,12 +127,15 @@ python scripts/gate_l1.py --out bundles/eval-report.json --delta bundles/eval-de
 ```
 
 - **Execution Invariant:** Zero committed PDFs. An original synthetic PDF corpus covering the golden dataset expectations is generated at runtime in a temporary directory and ingested in hash mode.
-- **Fail-Closed Verification:** Fails nonzero if any query fails or if metrics regress beyond tolerance (strict no-drop `identifier.recall@1` ratio >= 1.0 vs baseline, `classes.message_id.recall@1` ratio >= 1.0, `recall@1 >= 0.90 * baseline`, `recall@5/8 >= 0.95 * baseline`, `mrr >= 0.95 * baseline`, `ndcg@8 >= 0.95 * baseline`, `must_not.violations == 0`).
+- **Fail-Closed Verification:** Fails nonzero on any query failure or metric regression — ratios in `eval.md` §2 (strict `identifier`/`message_id` recall@1, `must_not.violations == 0` absolute).
 - **PR Delta Reporting:** Automatically posts or updates a markdown delta table comment on the PR (GitHub) or merge request note (GitLab).
 
 #### Paraphrase Retrieval Instrument (`make eval-paraphrase`)
 
-The main golden set writes each query's text nearly verbatim into its target pages, so header-only retrieval saturates and semantic improvements (dense prefixes, reranking, contextual chunks) cannot register. `evals/paraphrase.jsonl` (22 entries) is the complementary instrument: operator-phrased queries whose answers live in the synthetic corpus **without** the query text appearing near-verbatim, over a corpus with deliberate lexical competitors (sibling docs sharing vocabulary, intra-doc section pairs). A hermetic test pins the no-echo contract on every entry.
+The main golden set echoes query text into target pages, so semantic
+improvements cannot register — `evals/paraphrase.jsonl` (22 entries) is the
+complementary instrument (rationale, no-echo contract, and baselines in
+`eval.md` §6; never tune against the frozen holdout).
 
 ```bash
 # 1. Generate the paraphrase corpus (runtime PDFs, never committed):
@@ -173,30 +156,32 @@ QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=paraphrase-manuals \
 QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=paraphrase-manuals make eval-paraphrase
 ```
 
-Baselines (`evals/baseline-paraphrase.json` hash, `evals/baseline-paraphrase-vllm.json` vllm) gate the same tolerances as the main set. The hash numbers are a plumbing anchor (lexical matching goes far on a small corpus); the vllm numbers are the semantic instrument — headroom below 1.0 with per-query variance is intentional. Uses: contextual-prefix A/B, reranker on/off A/B, dense-prefix tuning. Not wired into CI (no cluster, no embed server there); never iterate the frozen holdout to tune.
+Baselines (`evals/baseline-paraphrase.json` hash, `evals/baseline-paraphrase-vllm.json` vllm) gate the same tolerances as the main set (`eval.md` §2). Uses: contextual-prefix A/B, reranker on/off A/B, dense-prefix tuning. Not wired into CI (no cluster, no embed server there).
 
 #### GPU Story for L2 and L3 Tiers (Operational Strategy)
 
-Standard CI runners (`ubuntu-latest` on GitHub and air-gapped corporate GitLab runners) are CPU-only without GPU accelerators. Because L2 (NLI faithfulness judge) and L3 (Time To First Token and per-stage latency with concurrent VRAM tracking) require live GPU inference stacks:
+Standard CI runners are CPU-only; L2/L3 need the live GPU stack. Three
+options, cheapest first:
 
-1. **Pre-Release Release Candidate (RC) Gate (Primary):**
-   - L2 and L3 are executed on lab GPU workstations during the release candidate stabilization window (`make harness-l2`, `make harness-l3`).
-   - Standing-red known product debts (e.g. suffix-less doc-number gap) serve as explicit release-candidate debt tracking.
-2. **Dedicated GPU Self-Hosted Runner (Optional CI Integration):**
-   - For teams desiring continuous GPU evaluation, register an enterprise runner equipped with an NVIDIA GPU and tag it `gpu`.
-   - Workflows target `runs-on: [self-hosted, gpu]` in GitHub Actions or `tags: [gpu]` in GitLab CI.
-3. **Scheduled Nightly Benchmarks:**
-   - Run L2 and L3 on a nightly schedule against `main` on the dedicated GPU runner rather than gating every PR. This avoids runner queue bottlenecks while continuously tracking latency and grounding trends.
-   - Baselines (`benchmarks/harness-l3-vllm.json`) are captured in the runner's own hardware environment to eliminate environment-mismatch false alarms.
+1. **RC gate (primary):** run `make harness-l2` / `make harness-l3` on lab
+   GPU workstations during the release-candidate window. Standing-red
+   product debts are tracked as explicit RC debt.
+2. **Dedicated GPU runner (optional):** enterprise runner with an NVIDIA
+   GPU tagged `gpu`; workflows target `runs-on: [self-hosted, gpu]`
+   (GitHub) or `tags: [gpu]` (GitLab CI).
+3. **Nightly schedule:** L2/L3 against `main` on the GPU runner instead of
+   per-PR gating. Baselines (`benchmarks/harness-l3-vllm.json`) are
+   captured in the runner's own hardware environment.
 
 #### Manual Evaluation & Baseline Updates
 
+Eval/baseline/bench mechanics (mode-keyed baselines, mismatch skip
+semantics, dedicated-PR re-recording) live in `eval.md` §2; the rungs you
+owe live in `live-stack.md` §3:
+
 ```bash
-# Evaluate retrieval accuracy against golden set on a running Qdrant instance.
-# Baselines are mode-keyed: EMBED_MODE=hash scores against evals/baseline.json
-# (CI/dev); EMBED_MODE=vllm scores against evals/baseline-vllm.json (release
-# candidates, live embedder). Collection/embed-mode mismatch skips the gate
-# with a loud warning.
+# Evaluate retrieval accuracy against the golden set (mode-keyed baselines
+# per eval.md §2; mismatch skip semantics per eval.md §2).
 EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus make eval
 
 # Re-record committed accuracy baseline (dedicated PR only, per AGENTS.md)
@@ -322,27 +307,12 @@ Reranked search also needs `RERANK_ENABLED=true RERANK_BASE_URL=http://127.0.0.1
 
 ### 3.7 Reasoning Performance, Query Complexity & Context Budgeting
 
-The agent dynamically adapts its reasoning protocol and prompt allocation based on the technical nature of incoming inquiries.
-
-#### Query Classification Matrix
-The pipeline automatically classifies queries into two categories:
-* **Simple Inquiries (Factoids & Message Codes)**:
-  - Examples: `What does operator message IEA500I indicate?`, `What parameter in IEASYSxx defines 1MB large page frames?`, `What return code does NFS mount fail with?`
-  - Latency: ~4–8 seconds
-  - Reasoning Tokens: ~200–500 tokens
-  - Engine Settings: `LLM_REASONING_EFFORT_SIMPLE=low`, `PROMPT_MAX_CONTEXT_CHARS=8000`
-  - Operational Goal: Fast, concise, low-latency extraction without wasteful compute overhead.
-* **Complex Inquiries (Diagnostics, Procedures, Comparative Tuning)**:
-  - Examples: `How do I diagnose and recover when the DFSMShsm journal fills up during active migration?`, `Explain how to configure 1MB and 2GB large page frames with LFAREA in IEASYSxx...`, `Compare DFSORT memory options (HIPRMAX, MOSIZE, DSPSIZE)...`
-  - Latency: ~14–20 seconds
-  - Reasoning Tokens: ~800–1,250 tokens
-  - Engine Settings: `LLM_REASONING_EFFORT_COMPLEX=high`, `PROMPT_MAX_CONTEXT_CHARS_COMPLEX=4500`
-  - Operational Goal: Exhaustive technical analysis, cross-referencing parameters/messages across excerpts, and synthesizing actionable recovery steps and fenced JCL/operator command blocks.
-
-#### Context Length Budgeting: Root Cause & Solution
-* **The 4,096-Token Ceiling**: Local reasoning instances (e.g. Gemma-4) run with `--max-model-len 4096` to fit within 8GB VRAM cards alongside embedding models.
-* **The Truncation Bug**: If prompt context is allowed to reach 8,000 characters (~2,400 tokens), only ~1,600 tokens remain for both internal thinking and output generation. When the model thinks deeply (>1,000 reasoning tokens), it runs out of token budget before finishing the answer. This caused answers to be truncated mid-sentence (`Finish: length`) and dropped the `Citations:` section.
-* **The Solution**: Setting `PROMPT_MAX_CONTEXT_CHARS_COMPLEX=4500` caps complex retrieved passages at ~1,200 tokens. This guarantees **~2,600 tokens of headroom** exclusively for thinking tokens and comprehensive answer text, achieving a 100% completion rate (`Finish: stop`).
+Complexity classification, adaptive budgets, and the truncation analysis
+live in `architecture.md` §4.4 (design) and `agent.md` §4 (knobs) — one
+rule, one owner. Operational upshot: simple lookups stay fast and cheap;
+complex diagnostics/procedures think longer and cost more GPU time. Tune
+via the `LLM_REASONING_EFFORT_*` / `PROMPT_MAX_CONTEXT_CHARS*` Settings
+(`agent.md` §7), never by editing prompts.
 
 ---
 
@@ -481,7 +451,9 @@ QDRANT_URL=http://localhost:6333 \
 
 ### 3.11 Cross-Encoder Reranker (Optional, Default Off)
 
-Retrieval quality upgrade: fused RRF candidates (top-`RERANK_CANDIDATES`, default 50) are rescored by a cross-encoder before diversification. **Ships default-off** (`rerank_enabled=false`) — retrieval results are identical to the hybrid+RRF baseline until explicitly enabled.
+Dispatch, bypass rules, and failure mapping live in `retrieval.md` §6;
+knob defaults live in `agent.md` §7. Ships default-off — retrieval is
+identical to the hybrid+RRF baseline until explicitly enabled:
 
 ```bash
 # Enable against a vLLM /v1/score endpoint (falls back to /v1/rerank):
@@ -490,17 +462,6 @@ RERANK_BASE_URL=http://localhost:8001/v1 \
 RERANK_MODEL=BAAI/bge-reranker-v2-m3 \
 make run-agent
 ```
-
-| Variable | Default | Notes |
-|---|---|---|
-| `RERANK_ENABLED` | `false` | Master switch; nothing calls the cross-encoder when off |
-| `RERANK_BASE_URL` | falls back to `EMBED_BASE_URL` | vLLM or TEI scoring endpoint |
-| `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Must match the served reranker |
-| `RERANK_CANDIDATES` | `50` | Fused candidates rescored per query (10–100) |
-| `RERANK_BATCH_SIZE` | `32` | Texts scored per HTTP call |
-| `RERANK_TIMEOUT_S` | `5.0` | Per scoring call |
-
-Failures surface as `rerank_ms` in `/v1/search` `Server-Timing` and the agent log; a reranker outage fails the request like any other retrieval fault (`502 upstream_error`). CI/dev runs without a reranker endpoint can use `HashReranker` (lexical scoring) via `ALLOW_HASH_MODE=true` — dev only, never production.
 
 ---
 
@@ -578,7 +539,11 @@ The `bootstrap.sh` script automatically:
 Edit `airgap.env` to configure your cluster environment:
 
 > [!NOTE]
-> If the `AIRGAP_ENV` environment variable is exported in the calling shell, scripts load that file path directly, taking precedence over the local `./airgap.env`. Within either file, an explicitly exported non-empty variable in the calling environment always wins over the file value, so `VAR=x make airgap-*` overrides a stale key. Note the reverse for re-runs: a bare `make airgap-*` re-run reuses whatever the file still holds — after editing `airgap.env`, re-run `make airgap-validate` before touching the cluster.
+> Environment precedence (explicit env beats file, `AIRGAP_ENV` path beats
+> local `./airgap.env`) lives in `deploy.md` §2 — one rule, one owner. Two
+> re-run notes: `VAR=x make airgap-*` overrides a stale key, but a bare
+> `make airgap-*` reuses whatever the file still holds — re-run
+> `make airgap-validate` after editing `airgap.env` before touching the cluster.
 
 ```ini
 # Internal image registry accessible to cluster nodes
@@ -972,13 +937,14 @@ docker rm -f airgap-registry
 
 ### 5.1 Health Check API
 
-The agent exposes `/healthz` for OpenShift liveness/readiness probes:
+The agent exposes `/healthz` for OpenShift liveness/readiness probes
+(contract: `agent.md` §1 — `ok`/`degraded`/`503 qdrant_unready`, upstream
+bodies stay server-side):
 
 ```bash
 curl -s http://rag-agent.mainframe-rag.svc:8080/healthz
 ```
 
-Response format:
 ```json
 {
   "status": "ok",
@@ -987,9 +953,10 @@ Response format:
 }
 ```
 
-If Qdrant shards are unready or degraded, `/healthz` returns `503` with JSON error `{"code": "qdrant_unready", "message": "qdrant is not ready"}` (internal errors and raw upstream payloads remain in server logs only).
-
 ### 5.2 Agent Endpoints
+
+Endpoint shapes, error envelopes, SSE framing, and timing headers live in
+`agent.md` (§1–§3) — one rule, one owner. Copy-paste probes:
 
 #### `POST /v1/search`
 Retrieves ranked manual chunks with normalized citations without invoking an LLM.
@@ -999,8 +966,6 @@ curl -X POST http://rag-agent:8080/v1/search \
   -H "Content-Type: application/json" \
   -d '{"query": "IEA500I IOSCMDS COMMAND REJECTED", "limit": 5}'
 ```
-
-Stage timings are returned as `Server-Timing: embed;dur=..., qdrant;dur=..., rerank;dur=...` (the rerank stage appears only when the cross-encoder is enabled).
 
 #### `POST /v1/answer`
 Executes hybrid retrieval, constructs a citation-grounded prompt, and queries the reasoning LLM.
@@ -1015,14 +980,11 @@ curl -X POST http://rag-agent:8080/v1/answer \
   }'
 ```
 
-JSON-mode responses carry `Server-Timing: embed, qdrant, llm;dur=..., ttft;dur=...` (TTFT = time to first generated token; requires `LLM_STREAM=true` on the agent server for server-side reasoning SSE).
-
 #### Streaming (`?stream=true`)
-Both the query parameter and the body field (`"stream": true`) enable server-sent events; the query parameter wins when both are set. The response is `text/event-stream`:
-
-1. Zero or more `event: token` frames — incremental answer deltas.
-2. Exactly one terminal `event: final` — the full verified answer, validated citations, optional script, retrieval hits, query kind, `ttft_ms`, and token `usage`. The `final` schema is identical on the empty-hits path (zero citations, `ttft_ms: null`, zeroed usage).
-3. A mid-stream failure emits `event: error` and the stream ends **without** a `final` event — clients must treat stream-end-without-final as a failed request.
+Both the query parameter and the body field (`"stream": true`) enable
+server-sent events; the query parameter wins when both are set. Frame
+contract (`token*` → exactly one `final`; `error` ends without `final`):
+`agent.md` §3.
 
 Citation validation runs on the accumulated text exactly as in JSON mode: the citations in the `final` event are byte-identical to the non-streaming response for the same request.
 
