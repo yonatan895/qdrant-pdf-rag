@@ -75,6 +75,11 @@ def test_outbound_timeout_defaults_bounded():
     assert s.rerank_fusion_alpha == 1.0
     assert s.rrf_sparse_boost_syntax == 1.0
     assert s.rrf_sparse_boost_table == 1.0
+    assert s.zowe_mcp_enabled is False
+    assert s.zowe_mcp_base_url is None
+    assert s.zowe_mcp_timeout_s == 15.0
+    assert s.zowe_mcp_max_bytes == 262144
+    assert s.zowe_mcp_dry_run is False
 
 
 def test_hash_mode_requires_explicit_allow():

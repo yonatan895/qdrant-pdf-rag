@@ -200,6 +200,16 @@ class Settings(BaseSettings):
     # real-corpus holdout: CE-only promotes 3 but demotes 3).
     rerank_fusion_alpha: float = Field(default=1.0, ge=0.0, le=1.0)
 
+    # Zowe MCP live state (ADR-0002, phase 2: client + routing only — no
+    # prompt wiring yet). Default off; enabling without ZOWE_MCP_BASE_URL
+    # refuses at lifespan. Timeouts/caps are dedicated (short, bounded),
+    # never the 300s answer budget.
+    zowe_mcp_enabled: bool = False
+    zowe_mcp_base_url: str | None = None
+    zowe_mcp_timeout_s: float = Field(default=15.0, gt=0.0, le=120.0)
+    zowe_mcp_max_bytes: int = Field(default=262144, ge=1000, le=1000000)
+    zowe_mcp_dry_run: bool = False
+
     # Contextual retrieval (issue #78): an LLM-generated 1-2 sentence
     # situating prefix per chunk, embedded with the chunk. Default off —
     # enabling changes every dense vector, so the collection must be
