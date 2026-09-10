@@ -12,33 +12,23 @@ import json
 import os
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent
+from tests.helpers_airgap import (
+    REPO,
+    copy_chart,
+    gen_sign_keypair,
+    make_bin_tree,
+    run_sh,
+    skopeo_stub,
+    symlink_tools,
+)
 
 # Stub skopeo: materialize every docker-archive:DEST as a marker file;
 # answer inspect with a canned digest (pack binds it into MANIFEST, so the
 # self-consistency is what the test proves).
-STUB_SKOPEO = """#!/bin/sh
-if [ "$1" = "inspect" ]; then
-  printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n'
-  printf '%s\\n' "$@" >> "$SKOPEO_LOG"
-  exit 0
-fi
-for arg in "$@"; do
-  case "$arg" in
-    docker-archive:*)
-      dest="${arg#docker-archive:}"
-      mkdir -p "$(dirname "$dest")"
-      printf 'stub-image-tar\\n' > "$dest"
-      ;;
-  esac
-done
-printf '%s\\n' "$@" >> "$SKOPEO_LOG"
-exit 0
-"""
+STUB_SKOPEO = skopeo_stub("a", materialize=True)
 
 STUB_DIGEST = "sha256:" + "a" * 64
 
@@ -72,14 +62,11 @@ TOOLS = (
 
 @pytest.fixture
 def pack_tree(tmp_path):
-    (tmp_path / "bin").mkdir()
-    (tmp_path / "scripts" / "airgap").mkdir(parents=True)
-    for f in ("common.sh", "pack.sh", "bootstrap.sh"):
-        shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
+    make_bin_tree(tmp_path, ["common.sh", "pack.sh", "bootstrap.sh"])
     shutil.copy(REPO / "images.txt", tmp_path / "images.txt")
     shutil.copy(REPO / "requirements.lock.txt", tmp_path / "requirements.lock.txt")
-    (tmp_path / "charts").mkdir()
-    shutil.copy(next(REPO.glob("charts/qdrant-*.tgz")), tmp_path / "charts")
+    (tmp_path / "charts").mkdir(exist_ok=True)
+    copy_chart(tmp_path)
 
     # Throwaway git repo so IMAGE_SHA resolves to a real HEAD.
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
@@ -93,23 +80,14 @@ def pack_tree(tmp_path):
     ).stdout.strip()
 
     skopeo_log = tmp_path / "skopeo-args.log"
-    for tool in TOOLS:
-        src = shutil.which(tool)
-        if src and not (tmp_path / "bin" / tool).exists():
-            (tmp_path / "bin" / tool).symlink_to(src)
+    symlink_tools(tmp_path, TOOLS)
     p = tmp_path / "bin" / "skopeo"
     p.write_text(STUB_SKOPEO)
     p.chmod(0o755)
 
     # Throwaway signing key (mirrors the rehearsal flow: pack signs, the
     # bundle carries the derived pub, verification is self-consistent).
-    key = tmp_path / "signing.key"
-    subprocess.run(
-        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
-         "-out", str(key)],
-        check=True,
-        capture_output=True,
-    )
+    key = gen_sign_keypair(tmp_path)
     return tmp_path, skopeo_log, head, key
 
 
@@ -124,14 +102,7 @@ def _run_pack(tree, *extra_env):
     for k, v in extra_env:
         env[k] = v
     return (
-        subprocess.run(
-            ["sh", str(tmp_path / "scripts" / "airgap" / "pack.sh")],
-            capture_output=True,
-            text=True,
-            env=env,
-            cwd=tmp_path,
-            check=False,
-        ),
+        run_sh(tmp_path / "scripts" / "airgap" / "pack.sh", env, tmp_path),
         head,
     )
 

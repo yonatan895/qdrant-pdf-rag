@@ -7,16 +7,13 @@ Tests pipeline.sh in dry-run mode against hermetic stubs:
 - Flag --skip-ingest skips ingest stage.
 """
 
-import shutil
-import subprocess
-from pathlib import Path
-
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent
+from tests.helpers_airgap import copy_chart, make_bin_tree, write_stub
+
 IMAGE_SHA = "e" * 40
 
-STUB_TOOL = """#!/bin/sh
+STUB_PIPE_TOOL = """#!/bin/sh
 if [ "$1" = "kustomize" ] || [ "$1" = "build" ]; then
     echo "apiVersion: v1"
     echo "kind: ConfigMap"
@@ -29,21 +26,20 @@ exit 0
 
 @pytest.fixture
 def pipe_tree(tmp_path):
-    (tmp_path / "bin").mkdir()
-    (tmp_path / "charts").mkdir()
-    (tmp_path / "scripts" / "airgap").mkdir(parents=True)
-    for f in ("common.sh", "validate.sh", "load.sh", "deploy.sh", "ingest.sh", "smoke.sh", "pipeline.sh"):
-        shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
-    shutil.copy(next(REPO.glob("charts/qdrant-*.tgz")), tmp_path / "charts")
+    make_bin_tree(
+        tmp_path,
+        ["common.sh", "validate.sh", "load.sh", "deploy.sh", "ingest.sh", "smoke.sh", "pipeline.sh"],
+    )
+    copy_chart(tmp_path)
 
     for name in ("skopeo", "helm", "kubectl", "oc", "kustomize"):
-        p = tmp_path / "bin" / name
-        p.write_text(STUB_TOOL)
-        p.chmod(0o755)
+        write_stub(tmp_path / "bin" / name, STUB_PIPE_TOOL)
     return tmp_path
 
 
 def _run_pipeline(pipe_tree, *args, extra_env=None):
+    import subprocess as _sp
+
     env = {
         "PATH": f"{pipe_tree / 'bin'}:/usr/bin:/bin",
         "AIRGAP_DRYRUN": "1",
@@ -59,7 +55,7 @@ def _run_pipeline(pipe_tree, *args, extra_env=None):
     if extra_env:
         for k, v in extra_env.items():
             env[k] = v
-    return subprocess.run(
+    return _sp.run(
         ["sh", str(pipe_tree / "scripts" / "airgap" / "pipeline.sh"), *args],
         capture_output=True,
         text=True,

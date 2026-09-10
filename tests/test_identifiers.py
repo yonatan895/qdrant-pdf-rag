@@ -7,12 +7,11 @@ One shared regex serves ingest payloads and query parsing, so these pins
 hold on both sides by construction.
 """
 
-import json
 import re
-from pathlib import Path
 
 from mainframe_rag.regexes import find_message_ids
 from mainframe_rag.retrieve.filters import parse_query
+from tests.fakes import iter_golden_queries
 
 CLASSIC = re.compile(r"\b([A-Z]{3}\d{2,5}[A-Z])\b")
 
@@ -71,16 +70,12 @@ def test_golden_sweep_flips_are_real_codes() -> None:
         "Look up CSQJ001I for IBM MQ for z/OS. What startup or log-manager condition does it report?": ["CSQJ001I"],
         "What does message HASP310I report after a JES2 checkpoint reconfiguration?": ["HASP310I"],
     }
-    root = Path(__file__).resolve().parent.parent
     total = 0
-    for name in ("evals/golden.jsonl", "evals/paraphrase.jsonl", "evals/holdout.jsonl"):
-        with open(root / name) as f:
-            for line in f:
-                query = json.loads(line).get("query") or ""
-                total += 1
-                old = sorted(set(CLASSIC.findall(query)))
-                new = find_message_ids(query)
-                if new != old:
-                    assert expected.get(query[:95]) == new, f"{name}: {query[:95]} -> {new}"
+    for name, query in iter_golden_queries():
+        total += 1
+        old = sorted(set(CLASSIC.findall(query)))
+        new = find_message_ids(query)
+        if new != old:
+            assert expected.get(query[:95]) == new, f"{name}: {query[:95]} -> {new}"
     assert total == 209
     assert len(expected) == 7

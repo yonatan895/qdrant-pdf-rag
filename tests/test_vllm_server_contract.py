@@ -11,56 +11,29 @@ exact-API proof.
 Hermetic: fake transports, no network, no GPU.
 """
 
-from contextlib import asynccontextmanager
 
 import pytest
 
 from mainframe_rag.agent.answer import HttpxLLMClient
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage
+from tests.fakes import HttpxStreamFake, settings_kw
 
 
 def _settings_kwargs(**overrides):
-    base = {
-        "llm_base_url": "http://llm.internal:8000/v1",
-        "llm_model_reasoning": "trial-reasoning-model",
-        "_env_file": None,
-    }
-    base.update(overrides)
-    return base
+    return settings_kw(**overrides)
 
 
 def _msgs():
     return [ChatMessage(role="user", content="What does IEA500I mean?")]
 
 
-class _StreamResp:
-    def __init__(self, lines):
-        self._lines = lines
-
-    def raise_for_status(self):
-        return None
-
-    async def aiter_lines(self):
-        for line in self._lines:
-            yield line
-
-    def __iter__(self):
-        return iter(self._lines)
-
-    def iter_lines(self):
-        return iter(self._lines)
+def _stream_lines(lines):
+    return HttpxStreamFake(lines=lines)
 
 
-class _PostResp:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def raise_for_status(self):
-        return None
-
-    def json(self):
-        return self._payload
+def _post_payload(payload):
+    return HttpxStreamFake(payload=payload)
 
 
 @pytest.mark.anyio
@@ -69,22 +42,16 @@ async def test_stream_request_shape_targets_completions_with_usage_ask():
     stream_options.include_usage — the client cannot build TokenUsage when a
     server silently ignores the usage ask."""
     seen = {}
+    fake = _stream_lines(
+        [
+            'data: {"choices": [{"delta": {"content": "hi"}}]}',
+            'data: {"choices": [{"finish_reason": "stop"}], "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}}',
+            "data: [DONE]",
+        ]
+    )
+    fake.capture = seen
 
-    class FakeHttp:
-        @asynccontextmanager
-        async def stream(self, method, url, json=None):
-            seen["method"] = method
-            seen["url"] = url
-            seen["json"] = json
-            yield _StreamResp(
-                [
-                    'data: {"choices": [{"delta": {"content": "hi"}}]}',
-                    'data: {"choices": [{"finish_reason": "stop"}], "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}}',
-                    "data: [DONE]",
-                ]
-            )
-
-    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=FakeHttp())
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
     result = await llm.achat(_msgs())
     assert seen["method"] == "POST"
     assert seen["url"] == "http://llm.internal:8000/v1/chat/completions"
@@ -107,13 +74,9 @@ async def test_stream_tolerates_sse_keepalives_and_done_spacing():
         'data:{"choices": [{"delta": {"content": "B"}}]}',
         "data:  [DONE]  ",
     ]
+    fake = _stream_lines(lines)
 
-    class FakeHttp:
-        @asynccontextmanager
-        async def stream(self, method, url, json=None):
-            yield _StreamResp(lines)
-
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=FakeHttp())
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
     items = [item async for item in llm.chat_stream(_msgs())]
     assert "".join(i["delta"] for i in items if i["type"] == "token") == "AB"
     assert items[-1] == {
@@ -134,13 +97,9 @@ async def test_stream_without_usage_chunk_yields_zero_usage():
         'data: {"choices": [{"finish_reason": "stop"}]}',
         "data: [DONE]",
     ]
+    fake = _stream_lines(lines)
 
-    class FakeHttp:
-        @asynccontextmanager
-        async def stream(self, method, url, json=None):
-            yield _StreamResp(lines)
-
-    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=FakeHttp())
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
     result = await llm.achat(_msgs())
     assert result.content == "hi"
     assert (
@@ -154,14 +113,10 @@ def test_nonstream_post_shape_and_stop_default():
     """llm_stream=False posts WITHOUT a stream key; a null finish_reason
     and absent usage must default, never KeyError."""
     seen = {}
+    fake = _post_payload({"choices": [{"message": {"content": "ans"}, "finish_reason": None}]})
+    fake.capture = seen
 
-    class FakeHttp:
-        def post(self, url, json=None):
-            seen["url"] = url
-            seen["json"] = json
-            return _PostResp({"choices": [{"message": {"content": "ans"}, "finish_reason": None}]})
-
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=FakeHttp())
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
     result = llm.chat(_msgs())
     assert seen["url"] == "http://llm.internal:8000/v1/chat/completions"
     assert "stream" not in seen["json"]
@@ -181,16 +136,14 @@ def test_nonstream_nested_reasoning_tokens_mapped():
         "completion_tokens_details": {"reasoning_tokens": 12},
     }
 
-    class FakeHttp:
-        def post(self, url, json=None):
-            return _PostResp(
-                {
-                    "choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}],
-                    "usage": usage,
-                }
-            )
+    fake = _post_payload(
+        {
+            "choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}],
+            "usage": usage,
+        }
+    )
 
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=FakeHttp())
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
     result = llm.chat(_msgs())
     assert result.usage.reasoning_tokens == 12
     assert result.usage.total_tokens == 15
@@ -201,30 +154,17 @@ async def test_stream_and_nonstream_bodies_agree_on_model_and_messages():
     """The streaming twin must ask for the same model/messages as the
     non-streaming POST — a trial server must serve both identically."""
 
-    class FakeHttp:
-        def __init__(self):
-            self.stream_json = None
-            self.post_json = None
-
-        @asynccontextmanager
-        async def stream(self, method, url, json=None):
-            self.stream_json = json
-            yield _StreamResp(["data: [DONE]"])
-
-        async def post(self, url, json=None):
-            self.post_json = json
-            return _PostResp(
-                {"choices": [{"message": {"content": "recovered"}, "finish_reason": "stop"}]}
-            )
-
-    fake = FakeHttp()
+    fake = HttpxStreamFake(
+        lines=["data: [DONE]"],
+        payload={"choices": [{"message": {"content": "recovered"}, "finish_reason": "stop"}]},
+    )
     llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
     await llm.achat(_msgs())  # empty stream -> recovery POST fires
-    assert fake.stream_json is not None and fake.post_json is not None
+    assert fake.capture["json"] is not None and fake.post_bodies[-1] is not None
     for key in ("model", "messages"):
-        assert fake.stream_json[key] == fake.post_json[key]
-    assert fake.stream_json["stream"] is True
-    assert "stream" not in fake.post_json
+        assert fake.stream_bodies[0][key] == fake.post_bodies[-1][key]
+    assert fake.stream_bodies[0]["stream"] is True
+    assert "stream" not in fake.post_bodies[-1]
 
 
 @pytest.mark.anyio
@@ -232,23 +172,18 @@ async def test_reasoning_effort_and_temperature_sent_only_when_set():
     """Effort routing (low/high) depends on the server accepting the
     vLLM-specific reasoning_effort field; unset params must be absent so
     servers with strict schemas are not broken by nulls."""
-    bodies = []
+    fake = _stream_lines(
+        [
+            'data: {"choices": [{"delta": {"content": "x"}}]}',
+            'data: {"choices": [{"finish_reason": "stop"}]}',
+            "data: [DONE]",
+        ]
+    )
 
-    class FakeHttp:
-        @asynccontextmanager
-        async def stream(self, method, url, json=None):
-            bodies.append(json)
-            yield _StreamResp(
-                [
-                    'data: {"choices": [{"delta": {"content": "x"}}]}',
-                    'data: {"choices": [{"finish_reason": "stop"}]}',
-                    "data: [DONE]",
-                ]
-            )
-
-    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=FakeHttp())
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
     await llm.achat(_msgs(), reasoning_effort="high", temperature=0.2)
     await llm.achat(_msgs())
+    bodies = fake.stream_bodies
     assert bodies[0]["reasoning_effort"] == "high"
     assert bodies[0]["temperature"] == 0.2
     assert "reasoning_effort" not in bodies[1]
@@ -259,16 +194,10 @@ def test_trailing_slash_base_url_builds_clean_completions_url():
     """A trailing slash in LLM_BASE_URL must not produce //chat/completions
     (some servers 404 the doubled slash while vLLM tolerates it)."""
 
-    class FakeHttp:
-        def post(self, url, json=None):
-            self.url = url
-            return _PostResp(
-                {"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]}
-            )
+    fake = _post_payload({"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]})
 
-    fake = FakeHttp()
     llm = HttpxLLMClient(
         Settings(**_settings_kwargs(llm_base_url="http://llm.internal:8000/v1/")), client=fake
     )
     llm.chat(_msgs())
-    assert fake.url == "http://llm.internal:8000/v1/chat/completions"
+    assert fake.capture["url"] == "http://llm.internal:8000/v1/chat/completions"

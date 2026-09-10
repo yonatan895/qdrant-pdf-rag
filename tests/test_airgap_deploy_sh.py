@@ -8,12 +8,18 @@ name must never reach a cluster.
 
 import re
 import shutil
-import subprocess
-from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent
+from tests.helpers_airgap import (
+    REPO,
+    assert_no_placeholders,
+    assert_pull_secret_wired,
+    copy_chart,
+    make_bin_tree,
+    run_sh,
+)
+
 IMAGE_SHA = "a" * 40  # full-sha shaped; deploy.sh only rejects "" / "HEAD"
 
 # Minimal manifest the stub kustomize prints (sed substitutes these).
@@ -99,14 +105,10 @@ exit 0
 
 @pytest.fixture
 def tree(tmp_path):
-    (tmp_path / "bin").mkdir()
-    (tmp_path / "charts").mkdir()
-    (tmp_path / "overlays" / "openshift").mkdir(parents=True)
-    (tmp_path / "deploy" / "kustomize").mkdir(parents=True)
-    (tmp_path / "scripts" / "airgap").mkdir(parents=True)
-    for f in ("common.sh", "deploy.sh"):
-        shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
-    shutil.copy(next(REPO.glob("charts/qdrant-*.tgz")), tmp_path / "charts")
+    make_bin_tree(tmp_path, ["common.sh", "deploy.sh"])
+    (tmp_path / "overlays" / "openshift").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "deploy" / "kustomize").mkdir(parents=True, exist_ok=True)
+    copy_chart(tmp_path)
     shutil.copy(REPO / "overlays" / "openshift" / "values.yaml", tmp_path / "overlays" / "openshift")
     shutil.copytree(REPO / "deploy" / "kustomize" / "jaeger", tmp_path / "deploy" / "kustomize" / "jaeger")
     shutil.copytree(REPO / "deploy" / "kustomize" / "servicemonitor", tmp_path / "deploy" / "kustomize" / "servicemonitor")
@@ -139,10 +141,7 @@ def _run(tree, *extra_env):
     }
     for k, v in extra_env:
         env[k] = v
-    return subprocess.run(
-        ["sh", str(tmp_path / "scripts" / "airgap" / "deploy.sh")],
-        capture_output=True, text=True, env=env, cwd=tmp_path, check=False,
-    )
+    return run_sh(tmp_path / "scripts" / "airgap" / "deploy.sh", env, tmp_path)
 
 
 def _helm_log(tree):
@@ -171,11 +170,7 @@ def test_pull_secret_wired_agent_render_keeps_mapping(tree):
     r = _run(tree, ("PULL_SECRET", "ghcr-pull"))
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert re.search(
-        r"^([ ]*)imagePullSecrets:\n\1  - name: ghcr-pull$",
-        rendered,
-        re.MULTILINE,
-    )
+    assert_pull_secret_wired(rendered, "ghcr-pull")
 
 
 def test_storage_size_knob_covers_persistence_and_snapshot(tree):
@@ -206,7 +201,7 @@ def test_rendered_manifest_substituted_and_written(tree):
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     assert "reg.internal/qdrant-pdf-rag-agent" in rendered
-    assert "__" not in rendered
+    assert_no_placeholders(rendered)
 
 
 # ------------------------------------------------------- Jaeger / tracing (#83)
@@ -230,9 +225,9 @@ def test_tracing_enabled_deploys_jaeger_and_wires_endpoint(tree):
     assert "reg.internal/jaegertracing/jaeger:v2.20.0" in jaeger
     assert "storageClassName: standard" in jaeger
     assert "namespace: ns" in jaeger
-    assert "__" not in jaeger
+    assert_no_placeholders(jaeger)
     assert 'value: http://jaeger:4318' in agent
-    assert "__" not in agent
+    assert_no_placeholders(agent)
 
 
 def test_tracing_jaeger_pull_secret_wired_when_set(tree):
@@ -244,11 +239,7 @@ def test_tracing_jaeger_pull_secret_wired_when_set(tree):
     assert r.returncode == 0, r.stderr
     jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
     assert "name: ghcr-pull" in jaeger
-    assert re.search(
-        r"^([ ]*)imagePullSecrets:\n\1  - name: ghcr-pull$",
-        jaeger,
-        re.MULTILINE,
-    )
+    assert_pull_secret_wired(jaeger, "ghcr-pull")
 
 
 def test_tracing_jaeger_pull_secret_stays_absent_when_unset(tree):
@@ -308,9 +299,9 @@ def test_metrics_enabled_deploys_servicemonitor_and_wires_env(tree):
     assert "kind: ServiceMonitor" in sm
     assert "path: /metrics" in sm
     assert "namespace: ns" in sm
-    assert "__" not in sm
+    assert_no_placeholders(sm)
     assert re.search(r'METRICS_ENABLED\n\s+value: "true"', agent, re.MULTILINE)
-    assert "__" not in agent
+    assert_no_placeholders(agent)
 
 
 def test_metrics_non_true_value_skips_servicemonitor(tree):

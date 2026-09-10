@@ -6,10 +6,8 @@ shape flags, and no answerable query in any golden file flags (a false
 positive would silently drop rerank gains on a legit query).
 """
 
-import json
-from pathlib import Path
-
 from mainframe_rag.retrieve.screen import QueryClass, screen_query
+from tests.fakes import iter_golden_queries
 
 # The two injection-shaped trap queries present in the golden files, pinned
 # verbatim: the screen must catch them even though the main one carries a
@@ -171,13 +169,9 @@ def test_golden_sweep_only_known_traps_flag() -> None:
     """209 queries across dev/holdout/paraphrase: exactly the two pinned trap
     texts flag. Any other flag is a false positive that would cost rerank
     gains; any miss is a hole in the gate."""
-    root = Path(__file__).resolve().parent.parent
     total = 0
-    for name in ("evals/golden.jsonl", "evals/paraphrase.jsonl", "evals/holdout.jsonl"):
-        with open(root / name) as f:
-            for line in f:
-                query = json.loads(line).get("query") or ""
-                total += 1
-                want: QueryClass = "trap" if query in (GOLDEN_TRAP, PARAPHRASE_TRAP) else "answerable"
-                assert screen_query(query) == want, f"{name}: {query[:100]}"
+    for name, query in iter_golden_queries():
+        total += 1
+        want: QueryClass = "trap" if query in (GOLDEN_TRAP, PARAPHRASE_TRAP) else "answerable"
+        assert screen_query(query) == want, f"{name}: {query[:100]}"
     assert total > 200

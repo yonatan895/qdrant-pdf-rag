@@ -17,8 +17,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mainframe_rag.agent import app as app_mod
-from mainframe_rag.agent.answer import TruncatedStreamError
+from mainframe_rag.agent.answer import HttpxLLMClient, TruncatedStreamError
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
+from mainframe_rag.config import Settings
+from mainframe_rag.ports import ChatMessage
+from tests.fakes import HttpxStreamFake, settings_kw
 
 TRUNCATED_LINES = [
     'data: {"choices": [{"delta": {"role": "assistant", "content": "Partial "}}]}',
@@ -26,15 +29,14 @@ TRUNCATED_LINES = [
     # No [DONE]: the connection died here.
 ]
 
+_COMPLETE_PAYLOAD = {
+    "choices": [{"message": {"content": "Complete answer"}, "finish_reason": "stop"}],
+    "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+}
+
 
 def _settings_kwargs(**overrides):
-    base = {
-        "llm_base_url": "http://llm.internal/v1",
-        "llm_model_reasoning": "test-reasoning-model",
-        "_env_file": None,
-    }
-    base.update(overrides)
-    return base
+    return settings_kw(llm_base_url="http://llm.internal/v1", **overrides)
 
 
 @pytest.mark.anyio
@@ -42,26 +44,9 @@ async def test_chat_stream_truncated_raises_after_tokens():
     """chat_stream yields what arrived, then raises: tokens already went to
     the client, so recovery (which would duplicate them) is impossible and
     the app must take its event: error path."""
-    from contextlib import asynccontextmanager
-
-    from mainframe_rag.agent.answer import HttpxLLMClient
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ports import ChatMessage
-
-    class TruncatedStreamResp:
-        def raise_for_status(self):
-            return None
-
-        async def aiter_lines(self):
-            for line in TRUNCATED_LINES:
-                yield line
-
-    class FakeAsyncHttpClient:
-        @asynccontextmanager
-        async def stream(self, method, url, json=None):
-            yield TruncatedStreamResp()
-
-    client = HttpxLLMClient(Settings(**_settings_kwargs()), client=FakeAsyncHttpClient())
+    client = HttpxLLMClient(
+        Settings(**_settings_kwargs()), client=HttpxStreamFake(lines=TRUNCATED_LINES)
+    )
     items = []
     with pytest.raises(TruncatedStreamError):
         async for item in client.chat_stream([ChatMessage(role="user", content="hi")]):
@@ -75,47 +60,11 @@ async def test_achat_truncated_stream_falls_back_to_complete_post():
     """achat has yielded nothing: a truncated stream re-asks via the
     non-streaming POST, so the caller gets a COMPLETE answer — never the
     partial prefix labeled stop."""
-    from contextlib import asynccontextmanager
-
-    from mainframe_rag.agent.answer import HttpxLLMClient
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ports import ChatMessage
-
-    class TruncatedStreamResp:
-        def raise_for_status(self):
-            return None
-
-        async def aiter_lines(self):
-            for line in TRUNCATED_LINES:
-                yield line
-
-    class PostResp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "choices": [{"message": {"content": "Complete answer"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-            }
-
-    class FakeClient:
-        def __init__(self):
-            self.posts = 0
-
-        @asynccontextmanager
-        async def stream(self, method, url, json=None):
-            yield TruncatedStreamResp()
-
-        async def post(self, url, json=None):
-            self.posts += 1
-            return PostResp()
-
-    fake = FakeClient()
+    fake = HttpxStreamFake(lines=TRUNCATED_LINES, payload=_COMPLETE_PAYLOAD)
     settings = Settings(**_settings_kwargs(llm_stream=True))
     llm = HttpxLLMClient(settings, client=fake)
     result = await llm.achat([ChatMessage(role="user", content="hi")])
-    assert fake.posts == 1
+    assert len(fake.post_bodies) == 1
     assert result.content == "Complete answer"
     assert result.finish_reason == "stop"
 
@@ -124,38 +73,22 @@ def test_chat_sync_truncated_stream_falls_back_to_complete_post():
     """Sync mirror of the achat case: truncation recovers through POST."""
     from contextlib import contextmanager
 
-    from mainframe_rag.agent.answer import HttpxLLMClient
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ports import ChatMessage
-
-    class TruncatedStreamResp:
-        def raise_for_status(self):
-            return None
-
-        def iter_lines(self):
-            return iter(TRUNCATED_LINES)
-
-    class PostResp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "choices": [{"message": {"content": "Complete answer"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-            }
+    from tests.fakes import PostResp, StreamResp
 
     class FakeClient:
+        """Stays local: the sync leg needs a sync .stream, while the shared
+        HttpxStreamFake.stream is async-only (async client legs)."""
+
         def __init__(self):
             self.posts = 0
 
         @contextmanager
         def stream(self, method, url, json=None):
-            yield TruncatedStreamResp()
+            yield StreamResp(TRUNCATED_LINES)
 
         def post(self, url, json=None):
             self.posts += 1
-            return PostResp()
+            return PostResp(_COMPLETE_PAYLOAD)
 
     fake = FakeClient()
     settings = Settings(**_settings_kwargs(llm_stream=True))
@@ -170,46 +103,16 @@ def test_chat_sync_truncated_stream_falls_back_to_complete_post():
 async def test_chat_stream_truncated_empty_still_recovers_via_post():
     """Boundary: truncation before any byte is indistinguishable from the
     empty-content defect — recovery still fires (nothing to duplicate)."""
-    from contextlib import asynccontextmanager
-
-    from mainframe_rag.agent.answer import HttpxLLMClient
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ports import ChatMessage
-
-    class DeadStreamResp:
-        def raise_for_status(self):
-            return None
-
-        async def aiter_lines(self):
-            return
-            yield  # pragma: no cover - empty async generator
-
-    class PostResp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "choices": [{"message": {"content": "Recovered answer"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-            }
-
-    class FakeClient:
-        def __init__(self):
-            self.posts = 0
-
-        @asynccontextmanager
-        async def stream(self, method, url, json=None):
-            yield DeadStreamResp()
-
-        async def post(self, url, json=None):
-            self.posts += 1
-            return PostResp()
-
-    fake = FakeClient()
+    fake = HttpxStreamFake(
+        lines=[],
+        payload={
+            "choices": [{"message": {"content": "Recovered answer"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        },
+    )
     llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
     items = [item async for item in llm.chat_stream([ChatMessage(role="user", content="hi")])]
-    assert fake.posts == 1
+    assert len(fake.post_bodies) == 1
     assert items[0]["type"] == "token" and items[0]["delta"] == "Recovered answer"
     assert items[-1]["type"] == "done" and items[-1]["finish_reason"] == "stop"
 
@@ -218,31 +121,16 @@ async def test_chat_stream_truncated_empty_still_recovers_via_post():
 async def test_chat_stream_length_finish_with_done_is_not_truncation():
     """A length-limited stream terminates properly ([DONE] + finish_reason):
     it must NOT raise — length handling downstream is unchanged."""
-    from contextlib import asynccontextmanager
-
-    from mainframe_rag.agent.answer import HttpxLLMClient
-    from mainframe_rag.config import Settings
-    from mainframe_rag.ports import ChatMessage
-
-    class LengthStreamResp:
-        def raise_for_status(self):
-            return None
-
-        async def aiter_lines(self):
-            yield 'data: {"choices": [{"delta": {"content": "Cut "}}]}'
-            yield 'data: {"choices": [{"delta": {"content": "off"}, "finish_reason": "length"}]}'
-            yield "data: [DONE]"
-
-    class FakeAsyncHttpClient:
-        @asynccontextmanager
-        async def stream(self, method, url, json=None):
-            yield LengthStreamResp()
-
-        async def post(self, url, json=None):
-            raise AssertionError("no recovery POST on a terminated stream")
-
-    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=FakeAsyncHttpClient())
+    fake = HttpxStreamFake(
+        lines=[
+            'data: {"choices": [{"delta": {"content": "Cut "}}]}',
+            'data: {"choices": [{"delta": {"content": "off"}, "finish_reason": "length"}]}',
+            "data: [DONE]",
+        ]
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
     items = [item async for item in llm.chat_stream([ChatMessage(role="user", content="hi")])]
+    assert fake.post_bodies == []  # no recovery POST on a terminated stream
     assert items[-1]["type"] == "done" and items[-1]["finish_reason"] == "length"
 
 

@@ -5,31 +5,32 @@ checksum verification, MANIFEST sha validation, skopeo copy invocations,
 and SKOPEO_ARGS / INSECURE_REGISTRY flag propagation without network or live registries.
 """
 
-import hashlib
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent
+from tests.helpers_airgap import (
+    REPO,
+    gen_other_pub,
+    make_bin_tree,
+    run_sh,
+    sha256_bytes,
+    sign_sums,
+    skopeo_stub,
+    write_stub,
+)
+
 IMAGE_SHA = "b" * 40
 
-STUB_SKOPEO = """#!/bin/sh
-if [ "$1" = "inspect" ]; then
-  printf 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\n'
-  printf '%s\\n' "$@" >> "$SKOPEO_LOG"
-  exit 0
-fi
-printf '%s\\n' "$@" >> "$SKOPEO_LOG"
-exit 0
-"""
+STUB_SKOPEO = skopeo_stub("b")
 
 STUB_DIGEST = "sha256:" + "b" * 64
 
 
 def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+    return sha256_bytes(data)
 
 
 def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False):
@@ -61,37 +62,17 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False):
 
 def _sign_artifacts(artdir: Path) -> None:
     """Throwaway keypair + offline signature, mirroring pack.sh output."""
-    key = artdir / "signing.key"
-    subprocess.run(
-        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
-         "-out", str(key)],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["openssl", "pkey", "-in", str(key), "-pubout",
-         "-out", str(artdir / "sneakernet-signing.pub")],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["openssl", "dgst", "-sha256", "-sign", str(key),
-         "-out", str(artdir / "SHA256SUMS.sig"), str(artdir / "SHA256SUMS")],
-        check=True,
-        capture_output=True,
-    )
+    from tests.helpers_airgap import gen_sign_keypair
+
+    gen_sign_keypair(artdir)
+    sign_sums(artdir)
 
 
 @pytest.fixture
 def load_tree(tmp_path):
-    (tmp_path / "bin").mkdir()
-    (tmp_path / "scripts" / "airgap").mkdir(parents=True)
-    for f in ("common.sh", "load.sh"):
-        shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
+    make_bin_tree(tmp_path, ["common.sh", "load.sh"])
     skopeo_log = tmp_path / "skopeo-args.log"
-    p = tmp_path / "bin" / "skopeo"
-    p.write_text(STUB_SKOPEO)
-    p.chmod(0o755)
+    write_stub(tmp_path / "bin" / "skopeo", STUB_SKOPEO)
     return tmp_path, skopeo_log
 
 
@@ -105,14 +86,7 @@ def _run_load(tree, *extra_env, cwd=None):
     }
     for k, v in extra_env:
         env[k] = v
-    return subprocess.run(
-        ["sh", str(tmp_path / "scripts" / "airgap" / "load.sh")],
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=cwd or tmp_path,
-        check=False,
-    )
+    return run_sh(tmp_path / "scripts" / "airgap" / "load.sh", env, cwd or tmp_path)
 
 
 def test_load_missing_artifacts_fails_closed(load_tree):
@@ -226,14 +200,9 @@ def test_load_image_digest_mismatch_fails_closed(load_tree):
     sums = []
     for line in (artdir / "SHA256SUMS").read_text().splitlines():
         name = line.split("  ", 1)[1]
-        sums.append(f"{hashlib.sha256((artdir / name).read_bytes()).hexdigest()}  {name}\n")
+        sums.append(f"{_sha256((artdir / name).read_bytes())}  {name}\n")
     (artdir / "SHA256SUMS").write_text("".join(sums))
-    subprocess.run(
-        ["openssl", "dgst", "-sha256", "-sign", str(artdir / "signing.key"),
-         "-out", str(artdir / "SHA256SUMS.sig"), str(artdir / "SHA256SUMS")],
-        check=True,
-        capture_output=True,
-    )
+    sign_sums(artdir)
     r = _run_load(load_tree)
     assert r.returncode == 1
     assert "does not match MANIFEST" in r.stderr
@@ -242,19 +211,7 @@ def test_load_image_digest_mismatch_fails_closed(load_tree):
 def test_load_trusted_pub_mismatch_refuses(load_tree):
     tmp_path, _ = load_tree
     _make_artifacts(tmp_path / "dist", sha=IMAGE_SHA)
-    other = tmp_path / "other.key"
-    subprocess.run(
-        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
-         "-out", str(other)],
-        check=True,
-        capture_output=True,
-    )
-    other_pub = tmp_path / "other.pub"
-    subprocess.run(
-        ["openssl", "pkey", "-in", str(other), "-pubout", "-out", str(other_pub)],
-        check=True,
-        capture_output=True,
-    )
+    other_pub = gen_other_pub(tmp_path)
     r = _run_load(load_tree, ("SNEAKERNET_TRUSTED_PUB", str(other_pub)))
     assert r.returncode != 0
     assert "does not match SNEAKERNET_TRUSTED_PUB" in r.stderr

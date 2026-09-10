@@ -37,6 +37,10 @@ from tests.conftest import FakeEmbedder, MockReranker, PromotingReranker, _make_
 
 
 class FakeQdrantPoints:
+    """Single-pool double with limit slicing. Stays local on purpose: unlike
+    tests.fakes.QdrantFake (dense/sparse legs, ignores limit), this pins the
+    rerank path against one pool where prefetch limit actually truncates."""
+
     def __init__(self, points: list[models.ScoredPoint]) -> None:
         self.points = points
         self.queries_made: list[dict[str, Any]] = []
@@ -56,25 +60,48 @@ class FakeQdrantPoints:
 
 
 # ---------------------------------------------------------------- Tests
-def test_format_rerank_text():
-    hit = _make_hit("c1", "SA23-1380-70", 0.8, heading="Parmlib > IEASYSxx", text="LFAREA=2G parameter")
-    text = format_rerank_text(hit)
-    assert "SA23-1380-70" in text
-    assert "Manual" in text
-    assert "Parmlib > IEASYSxx" in text
-    assert "LFAREA=2G parameter" in text
-    assert "[narrative]" in text.splitlines()[0]
+@pytest.mark.parametrize(
+    ("chunk_type", "message_ids", "doc", "heading", "text", "expected"),
+    [
+        (
+            "narrative", (), "SA23-1380-70", "Parmlib > IEASYSxx", "LFAREA=2G parameter",
+            "SA23-1380-70 [narrative]\nManual\nParmlib > IEASYSxx\nLFAREA=2G parameter",
+        ),
+        # Issue #215: message keeps the prose shape (no template label) so
+        # previously enriched message passages stay byte-identical; the
+        # header fences the type tag + bare codes (substring pin subsumed).
+        (
+            "message", ("IEA500I",), "SA22-7592-05", "Messages", "IEA500I explanation",
+            "SA22-7592-05 [message] IEA500I\nManual\nMessages\nIEA500I explanation",
+        ),
+        (
+            "unknown-thing", (), "D1", "H", "Body",
+            "D1 [unknown-thing]\nManual\nH\nBody",
+        ),
+        (
+            "table", (), "D1", "H", "PARM1  VALUE1  DESCRIPTION",
+            "D1 [table]\nManual\nH\nTable:\nPARM1  VALUE1  DESCRIPTION",
+        ),
+        (
+            "syntax", (), "D1", "H", "PARM1  VALUE1  DESCRIPTION",
+            "D1 [syntax]\nManual\nH\nSyntax:\nPARM1  VALUE1  DESCRIPTION",
+        ),
+    ],
+)
+def test_format_rerank_text_shapes(chunk_type, message_ids, doc, heading, text, expected):
+    hit = _make_hit("c1", doc, 0.5, heading=heading, text=text)
+    hit = hit.model_copy(update={"chunk_type": chunk_type, "message_ids": message_ids})
+    assert format_rerank_text(hit) == expected
 
 
-def test_format_rerank_text_carries_type_and_message_ids():
-    """Issue #215: the header fences the chunk_type tag and bare message
-    codes so the cross-encoder grades a declared template, not prose."""
-    hit = _make_hit("c9", "SA22-7592-05", 0.7, heading="Messages", text="IEA500I explanation")
-    hit = hit.model_copy(update={"chunk_type": "message", "message_ids": ("IEA500I",)})
-    lines = format_rerank_text(hit).splitlines()
-    assert "[message]" in lines[0]
-    assert "IEA500I" in lines[0]
-    assert "SA22-7592-05" in lines[0]
+def test_format_rerank_text_table_syntax_differ_from_prose():
+    """Same body, different chunk_type, must produce different passages."""
+    body = "PARM1  VALUE1  DESCRIPTION"
+    texts = set()
+    for chunk_type in ("narrative", "table", "syntax"):
+        hit = _make_hit("c1", "D1", 0.5, heading="H", text=body)
+        texts.add(format_rerank_text(hit.model_copy(update={"chunk_type": chunk_type})))
+    assert len(texts) == 3
 
 
 def test_format_rerank_text_caps_oversize_body():
@@ -88,45 +115,6 @@ def test_format_rerank_text_caps_oversize_body():
     assert len(text) == RERANK_PASSAGE_MAX_CHARS
     assert text.splitlines()[0].startswith("SA22-7592-05")
     assert "Messages" in text
-    # Short passages are byte-identical to uncapped formatting.
-    short = _make_hit("c1", "D1", 0.5, heading="H", text="Body")
-    assert format_rerank_text(short) == "D1 [narrative]\nManual\nH\nBody"
-
-
-def test_format_rerank_text_table_syntax_distinct_templates():
-    """Issue #215: table/syntax bodies get a declared template label, not
-    the bare prose shape. Same body text, different chunk_type, must
-    produce different passages."""
-    body = "PARM1  VALUE1  DESCRIPTION"
-    narrative = _make_hit("c1", "D1", 0.5, heading="H", text=body)
-    table = narrative.model_copy(update={"chunk_type": "table"})
-    syntax = narrative.model_copy(update={"chunk_type": "syntax"})
-    narrative_text = format_rerank_text(narrative)
-    table_text = format_rerank_text(table)
-    syntax_text = format_rerank_text(syntax)
-    assert narrative_text == f"D1 [narrative]\nManual\nH\n{body}"
-    assert table_text == f"D1 [table]\nManual\nH\nTable:\n{body}"
-    assert syntax_text == f"D1 [syntax]\nManual\nH\nSyntax:\n{body}"
-    assert table_text != narrative_text
-    assert syntax_text != narrative_text
-    assert table_text != syntax_text
-
-
-def test_format_rerank_text_message_keeps_prose_shape():
-    """Issue #215: message keeps the prose shape (no template label) so
-    previously enriched message passages stay byte-identical."""
-    hit = _make_hit("c9", "SA22-7592-05", 0.7, heading="Messages", text="IEA500I explanation")
-    hit = hit.model_copy(update={"chunk_type": "message", "message_ids": ("IEA500I",)})
-    assert format_rerank_text(hit) == (
-        "SA22-7592-05 [message] IEA500I\nManual\nMessages\nIEA500I explanation"
-    )
-
-
-def test_format_rerank_text_unknown_type_keeps_prose_shape():
-    """Unknown chunk_type values must not invent a template: prose shape."""
-    hit = _make_hit("c1", "D1", 0.5, heading="H", text="Body")
-    hit = hit.model_copy(update={"chunk_type": "unknown-thing"})
-    assert format_rerank_text(hit) == "D1 [unknown-thing]\nManual\nH\nBody"
 
 
 def test_format_rerank_text_cap_keeps_template_label_whole():
@@ -207,23 +195,39 @@ def _blend_hits() -> tuple[list[SearchHit], dict[str, float]]:
     return [hit1, hit2, hit3], {t1: 0.0, t2: 0.7, t3: 1.0}
 
 
-def test_rerank_alpha_one_reproduces_legacy_order():
-    """alpha=1.0 is byte-identical legacy: strictly monotonic rescale of the
-    CE score plus the same raw-score tie-breaks."""
+@pytest.mark.parametrize(
+    ("alpha", "expected_order"),
+    [
+        # alpha=1.0 is byte-identical legacy: strictly monotonic rescale of
+        # the CE score plus the same raw-score tie-breaks.
+        (1.0, ["c3", "c2", "c1"]),
+        # alpha=0.0: RRF decides exactly, but rerank_score is still attached
+        # (ablation isolates the cross-encoder signal without losing it).
+        (0.0, ["c1", "c2", "c3"]),
+        # alpha=0.5 on maximally-disagreeing legs: RRF norms [1, 0.5, 0],
+        # CE norms [0, 0.7, 1] blend to [0.5, 0.6, 0.5] — c2 wins, and the
+        # 0.5 tie breaks on raw CE toward c3. Neither extreme gives this.
+        (0.5, ["c2", "c3", "c1"]),
+        # Out-of-range clamps to the nearer extreme.
+        (2.0, ["c3", "c2", "c1"]),
+        (-0.5, ["c1", "c2", "c3"]),
+    ],
+)
+def test_rerank_alpha_regimes(alpha, expected_order):
     hits, score_map = _blend_hits()
-    reranked = rerank_candidates("test query", hits, MockReranker(score_map), alpha=1.0)
-    assert [h.chunk_id for h in reranked] == ["c3", "c2", "c1"]
-    assert [h.rerank_score for h in reranked] == [1.0, 0.7, 0.0]
+    reranked = rerank_candidates("test query", hits, MockReranker(score_map), alpha=alpha)
+    assert [h.chunk_id for h in reranked] == expected_order
 
 
-def test_rerank_alpha_zero_keeps_rrf_order():
-    """alpha=0.0: RRF decides exactly, but rerank_score is still attached
-    (ablation isolates the cross-encoder signal without losing its payload
-    field)."""
+def test_rerank_alpha_attaches_raw_ce_scores():
+    """rerank_score always carries the raw cross-encoder score, even when
+    RRF decides the order (alpha=0.0 ablation keeps the signal)."""
     hits, score_map = _blend_hits()
-    reranked = rerank_candidates("test query", hits, MockReranker(score_map), alpha=0.0)
-    assert [h.chunk_id for h in reranked] == ["c1", "c2", "c3"]
-    assert [h.rerank_score for h in reranked] == [0.0, 0.7, 1.0]
+    legacy = rerank_candidates("test query", hits, MockReranker(score_map), alpha=1.0)
+    assert [h.rerank_score for h in legacy] == [1.0, 0.7, 0.0]
+    kept = rerank_candidates("test query", hits, MockReranker(score_map), alpha=0.0)
+    assert [h.chunk_id for h in kept] == ["c1", "c2", "c3"]
+    assert [h.rerank_score for h in kept] == [0.0, 0.7, 1.0]
 
 
 def test_rerank_alpha_zero_rrf_tie_ignores_ce():
@@ -242,23 +246,6 @@ def test_rerank_alpha_zero_rrf_tie_ignores_ce():
     kept = rerank_candidates("test", [hit1, hit2], prefers_c2, alpha=0.0)
     assert [h.chunk_id for h in kept] == ["c1", "c2"]
     assert [h.rerank_score for h in kept] == [0.0, 1.0]
-
-
-def test_rerank_alpha_half_blends_to_middle_order():
-    """alpha=0.5 on maximally-disagreeing legs: RRF norms [1, 0.5, 0], CE
-    norms [0, 0.7, 1] blend to [0.5, 0.6, 0.5] — c2 wins, and the 0.5 tie
-    breaks on raw CE score toward c3. Neither extreme produces [c2, c3, c1]."""
-    hits, score_map = _blend_hits()
-    reranked = rerank_candidates("test query", hits, MockReranker(score_map), alpha=0.5)
-    assert [h.chunk_id for h in reranked] == ["c2", "c3", "c1"]
-
-
-def test_rerank_alpha_clamps_out_of_range():
-    hits, score_map = _blend_hits()
-    hi = rerank_candidates("test query", hits, MockReranker(score_map), alpha=2.0)
-    assert [h.chunk_id for h in hi] == ["c3", "c2", "c1"]
-    lo = rerank_candidates("test query", hits, MockReranker(score_map), alpha=-0.5)
-    assert [h.chunk_id for h in lo] == ["c1", "c2", "c3"]
 
 
 def test_rerank_alpha_flat_leg_abstains():

@@ -22,6 +22,7 @@ from mainframe_rag.retrieve.rewrite import (
     expand_query,
     should_rewrite,
 )
+from tests.fakes import iter_golden_queries
 
 
 def _glossary() -> dict[str, str]:
@@ -137,16 +138,11 @@ def test_golden_sweep_identifiers_byte_identical() -> None:
     without the call-site bypass."""
     from mainframe_rag.retrieve.filters import parse_query
 
-    root = Path(__file__).resolve().parent.parent
-    total = identified = 0
-    for name in ("evals/golden.jsonl", "evals/paraphrase.jsonl", "evals/holdout.jsonl"):
-        with open(root / name) as f:
-            for line in f:
-                query = json.loads(line).get("query") or ""
-                total += 1
-                if parse_query(query).has_identifiers:
-                    identified += 1
-                    assert expand_query(query) == query, f"{name}: {query[:80]}"
+    identified = 0
+    for name, query in iter_golden_queries():
+        if parse_query(query).has_identifiers:
+            identified += 1
+            assert expand_query(query) == query, f"{name}: {query[:80]}"
     assert identified > 40, "sweep must cover a real identifier population"
 
 

@@ -7,6 +7,7 @@ same PR.
 
 Jump list: [hermetic](#unit-tests-are-hermetic) ·
 [claimed-path](#tests-must-lock-the-claimed-path) ·
+[shared-doubles](#shared-doubles-share-builders-pin-behavior) ·
 [airgap-tier](#air-gap-deployment-tier-make-airgap-dryrun-teststest_airgap_py-local-kind) ·
 [golden](#golden-corpus-devholdout) · [sim](#simulation-tier-marker-integration-make-sim) ·
 [load](#load-tier-marker-integration-make-loadtest-mock-pr-gated-by-githubworkflowsloadyml-on-agentretrieveingestmock-paths) ·
@@ -37,6 +38,25 @@ tests use `--dry-run`.
 - Do not mutate module-global state (routes on the global app, leftover `os.environ`) that later tests inherit.
 - Pin public contracts, not private internals (`client._transport._pool._retries` dies on the next lockfile bump).
 - Remove unused fixtures and parameters when touching a test.
+
+## Shared doubles: share builders, pin behavior
+
+Pure builders live in `tests/fakes.py` (`make_hit`, `make_point`,
+`TokenizerPostFake`, `HttpxStreamFake` + `PostResp`/`StreamResp`,
+`QdrantFake`, `EmbedderFake`, `RerankerFake`, `settings_kw`,
+`iter_golden_queries`) and `tests/helpers_airgap.py` (`make_bin_tree`,
+`run_sh`, `sign_sums`, `skopeo_stub`, `assert_pull_secret_wired`).
+`tests/conftest.py` re-exports the retrieval doubles as
+backwards-compatible aliases — import from either, define in neither.
+
+Behavior pins stay explicit via arguments, never subclasses: the
+sequential-fallback pin needs a double with NO `query_batch_points`
+method (`LegacyQdrantFake` — retrieve dispatches on `hasattr`, so a
+raising stub would error instead of falling back); `str` vs `ChatResult`
+LLM returns lock different coercion paths (do not normalize to one);
+limit-slicing, dim-16 recording, and per-file cite shapes stay local
+with a comment saying why. A shared-helper change must never silently
+flip a fallback pin into a success pin.
 
 ## Tests must lock the claimed path
 

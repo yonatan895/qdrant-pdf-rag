@@ -9,33 +9,29 @@ Tests validate.sh in dry-run mode against hermetic stubs:
 """
 
 import os
-import shutil
-import subprocess
-from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent
-IMAGE_SHA = "b" * 40
+from tests.helpers_airgap import (
+    REPO,
+    STUB_TOOL,
+    copy_chart,
+    make_bin_tree,
+    run_sh,
+    symlink_tools,
+    write_stub,
+)
 
-STUB_TOOL = """#!/bin/sh
-exit 0
-"""
+IMAGE_SHA = "b" * 40
 
 
 @pytest.fixture
 def tree(tmp_path):
-    (tmp_path / "bin").mkdir()
-    (tmp_path / "charts").mkdir()
-    (tmp_path / "scripts" / "airgap").mkdir(parents=True)
-    for f in ("common.sh", "validate.sh"):
-        shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
-    shutil.copy(next(REPO.glob("charts/qdrant-*.tgz")), tmp_path / "charts")
+    make_bin_tree(tmp_path, ["common.sh", "validate.sh"])
+    copy_chart(tmp_path)
 
     for name in ("skopeo", "helm", "kubectl", "oc"):
-        p = tmp_path / "bin" / name
-        p.write_text(STUB_TOOL)
-        p.chmod(0o755)
+        write_stub(tmp_path / "bin" / name, STUB_TOOL)
     return tmp_path
 
 
@@ -58,14 +54,7 @@ def _run(tree, extra_env=None):
                 env.pop(k, None)
             else:
                 env[k] = v
-    return subprocess.run(
-        ["sh", str(tree / "scripts" / "airgap" / "validate.sh")],
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=tree,
-        check=False,
-    )
+    return run_sh(tree / "scripts" / "airgap" / "validate.sh", env, tree)
 
 
 def test_validate_clean_exits_zero(tree):
@@ -113,10 +102,7 @@ def test_validate_vllm_url_bad_scheme_refused(tree):
 
 def test_validate_missing_skopeo_fails(tree):
     os.remove(tree / "bin" / "skopeo")
-    for tool in ("sh", "dirname", "awk", "sed", "head", "ls"):
-        src = shutil.which(tool)
-        if src and not (tree / "bin" / tool).exists():
-            (tree / "bin" / tool).symlink_to(src)
+    symlink_tools(tree, ("sh", "dirname", "awk", "sed", "head", "ls"))
     r = _run(tree, {"PATH": str(tree / "bin")})
     assert r.returncode != 0
     assert "skopeo is required" in r.stderr
