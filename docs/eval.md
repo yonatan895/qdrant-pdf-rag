@@ -47,8 +47,9 @@ Both re-ingested 2026-09-10 under current rules (post-#216): 208 pts
 delete, re-ingest, or gate against it from dev workflows. Its sampled
 mix is ~95% narrative / ~2% message / ~3% syntax / ~0% table — and the
 dev venues hold no syntax/table chunks at all, so the #216 per-type BM25
-boost (default 1.0) is unmeasurable outside the real corpus; its ON
-decision stays deferred to real-corpus measurement.
+boost (default 1.0) was unmeasurable outside the real corpus; its ON
+decision has since been measured OFF on real-corpus record-replay pools
+(see `retrieval.md` §4 for the verdict and reopen gate).
 
 ## 2. Retrieval eval (`eval_retrieval.py`)
 

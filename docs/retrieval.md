@@ -128,10 +128,19 @@ top is extremely heavy compared to the industry-default `k=60`.
   contribution of a `syntax`/`table` chunk multiplies by
   `Settings.rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` (read off
   the point payload's `chunk_type`, already indexed; unknown/missing types
-  score 1.0). Dense-leg contributions are never boosted. `_type_boosts` is
-  the single dispatch both twins share (`None` when off, so fusion stays
-  byte-identical legacy); an active boost lands on the trace as
-  `rag.rrf_type_boosts` (bounded `type=factor` pairs, never free text).
+   score 1.0). Dense-leg contributions are never boosted. `_type_boosts` is
+   the single dispatch both twins share (`None` when off, so fusion stays
+   byte-identical legacy); an active boost lands on the trace as
+   `rag.rrf_type_boosts` (bounded `type=factor` pairs, never free text).
+   Measured verdict (real-corpus record-replay, 18 operator queries over
+   `real_manuals`: 9 tune / 9 held-back, factors 1.5/2.0/3.0 per type):
+   stays default-off — tune saturated at rank 1 (no headroom), validation
+   recall@1 never moved, a syntax boost demoted one sibling-edition query
+   (rank 3→5 at ×3.0: type-only multipliers amplify same-type competitors,
+   they cannot break same-type ties), table boosts were byte-identical
+   everywhere. Reopen
+   gate: fresh pools with per-query attribution showing type-confusion
+   losses the boost repairs.
 - The non-rerank fuse keeps only `max(limit*3, 24)` candidates — with the
   default limit of 8, 24 of up to 80 prefetched points survive to
   diversification. This truncation is the real recall knob: it has no
