@@ -52,11 +52,12 @@ The agent returns **answers grounded strictly in citations** (doc number, title,
 │              (dense only)      reasoning LLM   (REST/SPL)       │
 │                                                                    │
 │  ┌────────────────┐  MCP/HTTP   ┌────────────────┐                │
-│  │ Zowe MCP server│◀────────────│ Agent svc      │                │
-│  │ (Deployment,   │ read-only   │ (fetches live  │                │
-│  │ ClusterIP only)│ tools only  │ state, ADR-02) │                │
+│  │ FTP MCP bridge │◀────────────│ Agent svc      │                │
+│  │ (agent-image   │ read-only   │ (fetches live  │                │
+│  │ sidecar, stdio │ tools only  │ state, ADR-02) │                │
+│  │ or localhost)  │             │                │                │
 │  └───────▲────────┘             └────────────────┘                │
-│          │ z/OSMF / API ML (read-only SAF profile)               │
+│          │ FTP port 21 (read-only SAF profile)                   │
 │          ▼                                                       │
 │   z/OS live state (datasets, JES spool, USS, job status)         │
 └──────────────────────────────────────────────────────────────────┘
@@ -78,7 +79,7 @@ The agent returns **answers grounded strictly in citations** (doc number, title,
 | `qdrant` | StatefulSet (vendored chart) | 3 | Cluster mode, P2P 6335 (TLS off), HTTP 6333, gRPC 6334, `restricted-v2` SCC |
 | `rag-agent` | Deployment | 2 | FastAPI, unprivileged, no GPU |
 | `rag-ingest` | One-Shot Job | 1 | High CPU, worker pool, RWO scratch |
-| `zowe-mcp` | Deployment (ADR-0002, default-off) | 1 | MCP server (vendored pin), ClusterIP only, `restricted-v2` SCC, read-only tools registered, credentials via mounted secret |
+| `zowe-mcp` | Sidecar in agent pod (ADR-0002, default-off) | 1 per agent | Same agent image, `--mcp-serve` entrypoint, localhost only, `restricted-v2` SCC, read-only tools registered, credentials via mounted secret |
 | `jaeger` | Deployment (optional) | 1 | Jaeger v2 all-in-one, Badger RWO block PVC, opt-in tracing backend |
 | `bm25-weights` | Baked in images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 

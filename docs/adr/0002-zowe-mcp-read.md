@@ -7,9 +7,26 @@
   cannot answer ("why did JOB123 fail last night", "what is in
   `SYS1.PARMLIB(IEASYS00)` on SYSA"). Letting the AGENT fetch live
   state supersedes ADR-0001 for this scope, so this ADR exists.
-  Reframing from #90: the interface is Zowe MCP (official `zowe-mcp`
-  server: datasets, JES spool, USS, job status), not Splunk REST/SPL —
-  Splunk stays caller-supplied context exactly as ADR-0001 says.
+  Reframing from #90: the interface is Zowe MCP (datasets, JES spool,
+  USS, job status), not Splunk REST/SPL — Splunk stays caller-supplied
+  context exactly as ADR-0001 says.
+- **Backend (amended pre-merge):** a minimal in-repo FTP bridge
+  (`mcp/` package, Python stdlib `ftplib` only), NOT the official
+  `zowe-mcp` server tarball — verified from its README that its only
+  live backend is SSH (via `zowex-sdk`), and the target z/OS 2.2 has no
+  sshd and none may be started. The MCP interface (initialize /
+  tools-list / tools-call over stdio + Streamable HTTP, the four
+  allowlisted tools) is unchanged, so agent code stays
+  transport-agnostic and a future SSH backend swaps without agent
+  changes. z/OS FTP covers all four tools natively (dataset RETR,
+  `SITE JESINTERFACELEVEL=2` spool/status, USS CWD+RETR).
+- **Accepted risk:** plain FTP on the wire inside the isolated network
+  (no probe path to verify FTPS; sshd unavailable). Bounded by the
+  read-only SAF profile (a sniffed credential can still only read),
+  secret-mounted credentials, and per-call byte caps. Revisit if the
+  network posture changes. z/OS 2.2 EOS (2020, unpatched FTP daemon)
+  is a flagged environmental risk with the same mitigations; periodic
+  review.
 - **Decision:** the agent may fetch bounded read-only live context
   through the vendored Zowe MCP server and inject it as delimited
   untrusted blocks (the `splunk_context` precedent); manual citations
@@ -36,8 +53,10 @@
   default-off (`zowe_mcp_enabled=false`).
 - **Migration:** caller-supplied `splunk_context` unchanged; live MCP
   context is a sibling block, never a replacement.
-- **Consequences:** new vendored server pin (SHA + tarball sha256 +
-  LICENSE/NOTICE, air-gap sneakernet like BM25 weights), new MCP-server
-  Deployment + ClusterIP, golden entries with live-state expectations,
-  mock-mode backend for hermetic CI. Supersedes ADR-0001 only for
-  agent-fetched Zowe state; everything else in ADR-0001 stands.
+- **Consequences:** new `mcp/` bridge package (stdlib-only: no wheelhouse
+  pin, no Node tarball, no new image — sidecar runs the agent image with
+  an `--mcp-serve` entrypoint), fake-`ftplib` hermetic tests plus mock
+  mode for sim/CI, golden entries with live-state expectations.
+  Per-tool degradation when the site's FTP JES interface is limited.
+  Supersedes ADR-0001 only for agent-fetched Zowe state; everything
+  else in ADR-0001 stands.
