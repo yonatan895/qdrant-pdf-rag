@@ -67,6 +67,32 @@ def test_parse_query_members_stay_case_sensitive():
     assert parse_query("ieasysxx setting").members == []
 
 
+def test_parse_query_drops_truncated_docno_stems():
+    """A doc-number match followed by `-` is a truncated edition suffix —
+    wildcard (`SC23-6858-xx`), partial (`SC23-6858-0`), or over-long
+    (`SA22-7592-05-03`) — and matches no `doc_id` exactly. Emitting it
+    would force an exact filter that can only fail into the unfiltered
+    fallback under identifier weights; dropping keeps the raw text for
+    BM25/dense and classifies honestly."""
+    assert parse_query("SC23-6858-xx JES2 Initialization and Tuning Reference").doc_ids == []
+    assert not parse_query("SC23-6858-xx JES2 tuning").has_identifiers
+    assert parse_query("SC23-6858-0 JES2 tuning").doc_ids == []
+    # Lowercase wildcard drops too (spans are case-stable).
+    assert parse_query("sc23-6858-xx jes2 tuning?").doc_ids == []
+    # Wrapped/truncated forms drop the same way.
+    assert parse_query("(SC23-6858-xx) JES2 tuning").doc_ids == []
+    assert parse_query("`SC23-6858-xx` JES2 tuning").doc_ids == []
+    # Mixed: the exact docno stays, the wildcard goes.
+    ids = parse_query("compare SC23-6858-01 with SC23-6858-xx editions")
+    assert ids.doc_ids == ["SC23-6858-01"]
+    # Exact docnos (with or without edition suffix) are untouched.
+    assert parse_query("in SA22-7592-05 about dumps").doc_ids == ["SA22-7592-05"]
+    assert parse_query("in sa38-0673-70 about dumps").doc_ids == ["SA38-0673-70"]
+    # A bare stem with no trailing dash may still match an edition-less
+    # doc_id, so it keeps the legacy exact-filter path.
+    assert parse_query("SC23-6858 JES2 tuning").doc_ids == ["SC23-6858"]
+
+
 def test_parse_query_lowercase_prose_stays_nl():
     """Ordinary lowercase prose must not sprout identifiers."""
     assert not parse_query("compare the spool procedures").has_identifiers

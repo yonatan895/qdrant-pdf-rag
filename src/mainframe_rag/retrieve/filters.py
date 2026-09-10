@@ -10,7 +10,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 from qdrant_client import models
 
-from mainframe_rag.regexes import find_docnos, find_members, find_message_ids
+from mainframe_rag.regexes import DOCNO_RE, find_members, find_message_ids
 
 
 class QueryIdentifiers(BaseModel):
@@ -23,6 +23,25 @@ class QueryIdentifiers(BaseModel):
         return bool(self.doc_ids or self.message_ids or self.members)
 
 
+def _find_exact_docnos(text: str) -> set[str]:
+    """Doc numbers usable as exact `doc_id` filters. A match immediately
+    followed by `-` is a truncated edition suffix — a wildcard
+    (`SC23-6858-xx`), a partial edition (`SC23-6858-0`), or a bare stem
+    (`SC23-6858`) — and matches no `doc_id` exactly. Emitting it would
+    force an exact filter that can only fail into the unfiltered
+    fallback under identifier weights; dropping it keeps the raw text
+    for BM25/dense and classifies honestly as NL. `DOCNO_RE` itself is
+    untouched (shared with ingest: changing it would churn
+    `rules_version` and force full re-ingest)."""
+    out: set[str] = set()
+    for m in DOCNO_RE.finditer(text):
+        end = m.end()
+        if end < len(text) and text[end] == "-":
+            continue
+        out.add(m.group(1))
+    return out
+
+
 def parse_query(query: str) -> QueryIdentifiers:
     # Issue #130: operators type lowercase. Message codes and doc numbers
     # are canonical-uppercase on both sides (ingest source text is
@@ -31,9 +50,11 @@ def parse_query(query: str) -> QueryIdentifiers:
     # matches: pure-uppercase queries behave exactly as before.
     # Members stay case-sensitive: MEMBER_RE's lowercase xx convention
     # (IEASYSxx) matches payload case, and uppercasing would break it.
+    # Match spans are case-stable, so the truncation check below sees the
+    # same `-` boundary in both variants.
     upper = query.upper()
     return QueryIdentifiers(
-        doc_ids=sorted(set(find_docnos(query)) | set(find_docnos(upper))),
+        doc_ids=sorted(_find_exact_docnos(query) | _find_exact_docnos(upper)),
         message_ids=sorted(set(find_message_ids(query)) | set(find_message_ids(upper))),
         members=find_members(query),
     )
