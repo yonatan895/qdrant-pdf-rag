@@ -103,7 +103,8 @@ def test_trace_disabled_without_endpoint(monkeypatch):
     assert tracing_mod._provider is None
 
 
-def test_setup_tracing_builds_provider_and_appends_traces_path(monkeypatch):
+def _setup_with_capture(monkeypatch):
+    """Install the hermetic exporter/provider stack; return seen-endpoint dict."""
     seen: dict[str, object] = {}
     original_exporter_init = FakeOTLPExporter.__init__
 
@@ -121,6 +122,11 @@ def test_setup_tracing_builds_provider_and_appends_traces_path(monkeypatch):
     )
     set_calls: list[object] = []
     monkeypatch.setattr(tracing_mod.trace, "set_tracer_provider", lambda p: set_calls.append(p))
+    return seen, set_calls
+
+
+def test_setup_tracing_builds_provider_and_appends_traces_path(monkeypatch):
+    seen, set_calls = _setup_with_capture(monkeypatch)
 
     tracer = tracing_mod.setup_tracing("http://collector.internal:4318/")
     assert tracer is not None
@@ -138,21 +144,7 @@ def test_setup_tracing_builds_provider_and_appends_traces_path(monkeypatch):
 
 
 def test_setup_tracing_accepts_full_traces_url_without_doubling(monkeypatch):
-    seen: dict[str, object] = {}
-    original_init = FakeOTLPExporter.__init__
-
-    def exporter_init(self, endpoint=None, **kw):
-        seen["endpoint"] = endpoint
-        original_init(self, endpoint=None, **kw)
-
-    monkeypatch.setattr(FakeOTLPExporter, "__init__", exporter_init)
-    monkeypatch.setattr(tracing_mod, "OTLPSpanExporter", FakeOTLPExporter)
-    monkeypatch.setattr(tracing_mod, "TracerProvider", FakeProvider)
-    monkeypatch.setattr(
-        tracing_mod,
-        "BatchSpanProcessor",
-        lambda exporter, **kw: SimpleSpanProcessor(exporter),
-    )
+    seen, _ = _setup_with_capture(monkeypatch)
     tracing_mod.setup_tracing("http://collector.internal:4318/v1/traces")
     assert seen["endpoint"] == "http://collector.internal:4318/v1/traces"
 
@@ -177,45 +169,31 @@ def test_settings_knobs_reach_batch_processor(monkeypatch):
     assert captured["export_timeout_millis"] == 1234
 
 
-def test_shutdown_tracing_flushes_and_swallows_errors(monkeypatch):
+@pytest.mark.parametrize(
+    ("op", "expect_shutdowns", "provider_cleared"),
+    [("shutdown_tracing", 1, True), ("flush_tracing", 0, False)],
+)
+def test_lifecycle_flush_and_swallows_errors(monkeypatch, op, expect_shutdowns, provider_cleared):
     provider = FakeProvider()
     monkeypatch.setattr(tracing_mod, "_provider", provider)
-    tracing_mod.shutdown_tracing()
+    getattr(tracing_mod, op)()
     assert provider.flushes == 1
-    assert provider.shutdowns == 1
-    assert tracing_mod._provider is None
+    assert provider.shutdowns == expect_shutdowns
+    assert (tracing_mod._provider is None) == provider_cleared
 
     class ExplodingProvider(FakeProvider):
         def force_flush(self, timeout_millis=30000):
             raise RuntimeError("collector gone")
 
     monkeypatch.setattr(tracing_mod, "_provider", ExplodingProvider())
-    tracing_mod.shutdown_tracing()  # must not raise
-    assert tracing_mod._provider is None
+    getattr(tracing_mod, op)()  # must not raise
+    if provider_cleared:
+        assert tracing_mod._provider is None
 
 
-def test_shutdown_tracing_noop_when_never_enabled():
+def test_lifecycle_noop_when_never_enabled():
     tracing_mod.shutdown_tracing()  # no provider installed: must not raise
-
-
-def test_flush_tracing_flushes_and_swallows_errors(monkeypatch):
-    provider = FakeProvider()
-    monkeypatch.setattr(tracing_mod, "_provider", provider)
     tracing_mod.flush_tracing()
-    assert provider.flushes == 1
-    assert provider.shutdowns == 0
-    assert tracing_mod._provider is provider
-
-    class ExplodingProvider(FakeProvider):
-        def force_flush(self, timeout_millis=30000):
-            raise RuntimeError("collector timeout")
-
-    monkeypatch.setattr(tracing_mod, "_provider", ExplodingProvider())
-    tracing_mod.flush_tracing()  # must not raise
-
-
-def test_flush_tracing_noop_when_never_enabled():
-    tracing_mod.flush_tracing()  # no provider installed: must not raise
 
 
 # ---------------------------------------------------------------- resource identity
@@ -645,46 +623,41 @@ def _remote_context(ctx):
     return span.get_span_context()
 
 
-def test_parent_context_joins_upstream():
-    ctx = tracing_mod.parent_context({"traceparent": _traceparent()})
-    remote = _remote_context(ctx)
-    assert remote.is_valid and remote.is_remote
-    assert remote.trace_id == _UP_TRACE_ID
-    assert remote.span_id == _UP_SPAN_ID
+@pytest.mark.parametrize(
+    ("headers", "expect_valid", "expect_ids"),
+    [
+        ({"traceparent": _traceparent()}, True, True),
+        ({}, False, False),
+        ({"traceparent": "bogus"}, False, False),
+    ],
+)
+def test_parent_context_headers(headers, expect_valid, expect_ids):
+    # A bad header never raises: it degrades to today's new-root behavior.
+    remote = _remote_context(tracing_mod.parent_context(headers))
+    assert remote.is_valid == expect_valid
+    if expect_ids:
+        assert remote.is_remote
+        assert remote.trace_id == _UP_TRACE_ID
+        assert remote.span_id == _UP_SPAN_ID
 
 
-def test_parent_context_empty_without_header():
-    assert not _remote_context(tracing_mod.parent_context({})).is_valid
-
-
-def test_parent_context_malformed_header_starts_new_root():
-    # Never raises: a bad header degrades to today's new-root behavior.
-    ctx = tracing_mod.parent_context({"traceparent": "bogus"})
-    assert not _remote_context(ctx).is_valid
-
-
-def test_search_joins_upstream_trace(client):
+@pytest.mark.parametrize(
+    ("endpoint", "span_name", "join"),
+    [
+        ("/v1/search", "v1.search", True),
+        ("/v1/search", "v1.search", False),
+        ("/v1/answer", "v1.answer", True),
+    ],
+)
+def test_upstream_trace_join_or_root(client, endpoint, span_name, join):
     c, exporter = client
-    resp = c.post("/v1/search", json={"query": "IEA500I"}, headers={"traceparent": _traceparent()})
+    headers = {"traceparent": _traceparent()} if join else {}
+    resp = c.post(endpoint, json={"query": "IEA500I"}, headers=headers)
     assert resp.status_code == 200
-    root = _spans(exporter)["v1.search"][0]
-    assert root.context.trace_id == _UP_TRACE_ID
-    assert root.parent is not None and root.parent.span_id == _UP_SPAN_ID
-
-
-def test_search_without_header_starts_root(client):
-    c, exporter = client
-    resp = c.post("/v1/search", json={"query": "IEA500I"})
-    assert resp.status_code == 200
-    root = _spans(exporter)["v1.search"][0]
-    assert root.context.trace_id != _UP_TRACE_ID
-    assert root.parent is None
-
-
-def test_answer_joins_upstream_trace(client):
-    c, exporter = client
-    resp = c.post("/v1/answer", json={"query": "IEA500I"}, headers={"traceparent": _traceparent()})
-    assert resp.status_code == 200
-    root = _spans(exporter)["v1.answer"][0]
-    assert root.context.trace_id == _UP_TRACE_ID
-    assert root.parent is not None and root.parent.span_id == _UP_SPAN_ID
+    root = _spans(exporter)[span_name][0]
+    if join:
+        assert root.context.trace_id == _UP_TRACE_ID
+        assert root.parent is not None and root.parent.span_id == _UP_SPAN_ID
+    else:
+        assert root.context.trace_id != _UP_TRACE_ID
+        assert root.parent is None

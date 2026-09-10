@@ -6,18 +6,22 @@ Tests bootstrap.sh against a mock sneakernet extraction directory:
 - Successful verification clones the bundle, populates dist/, and initializes airgap.env.
 """
 
-import hashlib
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent
+from tests.helpers_airgap import (
+    REPO,
+    gen_other_pub,
+    gen_sign_keypair,
+    sha256_bytes,
+    sign_sums,
+)
 
 
 def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+    return sha256_bytes(data)
 
 
 @pytest.fixture
@@ -40,12 +44,7 @@ def bundle_dir(tmp_path):
     subprocess.run(["git", "bundle", "create", str(extract_dir / "repo.bundle"), "HEAD", "--all"], cwd=src_repo, check=True)
 
     # Add mock image files
-    subprocess.run(
-        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
-         "-out", str(extract_dir / "signing.key")],
-        check=True,
-        capture_output=True,
-    )
+    gen_sign_keypair(extract_dir)
     subprocess.run(
         ["openssl", "pkey", "-in", str(extract_dir / "signing.key"),
          "-pubout", "-out", str(extract_dir / "sneakernet-signing.pub")],
@@ -70,12 +69,7 @@ def bundle_dir(tmp_path):
         p.write_bytes(content)
         sums.append(f"{_sha256(content)}  {name}\n")
     (extract_dir / "SHA256SUMS").write_text("".join(sums))
-    subprocess.run(
-        ["openssl", "dgst", "-sha256", "-sign", str(extract_dir / "signing.key"),
-         "-out", str(extract_dir / "SHA256SUMS.sig"), str(extract_dir / "SHA256SUMS")],
-        check=True,
-        capture_output=True,
-    )
+    sign_sums(extract_dir)
 
     return extract_dir
 
@@ -103,19 +97,7 @@ def test_bootstrap_tampered_sums_fails_signature(bundle_dir):
 
 
 def test_bootstrap_trusted_pub_mismatch_refuses(bundle_dir):
-    other = bundle_dir / "other.key"
-    subprocess.run(
-        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
-         "-out", str(other)],
-        check=True,
-        capture_output=True,
-    )
-    other_pub = bundle_dir / "other.pub"
-    subprocess.run(
-        ["openssl", "pkey", "-in", str(other), "-pubout", "-out", str(other_pub)],
-        check=True,
-        capture_output=True,
-    )
+    other_pub = gen_other_pub(bundle_dir)
     env = {
         "PATH": "/usr/bin:/bin",
         "AIRGAP_WORKSPACE": "workspace",

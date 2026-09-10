@@ -10,7 +10,7 @@ from mainframe_rag.config import Settings
 from mainframe_rag.ports import Embedder
 from mainframe_rag.retrieve.filters import build_filter, parse_query
 from mainframe_rag.retrieve.query import format_citation, rrf_fuse, search
-from tests.conftest import FakeEmbedder, FakeQdrant, _point, _typed_point
+from tests.conftest import FakeEmbedder, FakeQdrant, LegacyFakeQdrant, _point, _typed_point
 
 
 def _settings(dim: int | None = 768) -> Settings:
@@ -101,18 +101,6 @@ def test_format_citation_round_trips_through_citation_line_re():
     assert m is not None
     assert m.group("doc_id") == "SA22-7592-05"
     assert m.group("page") == "1-17"
-
-
-class LegacyFakeQdrant:
-    """Client double lacking query_batch_points to test graceful fallback."""
-    def __init__(self, dense, sparse):
-        self._dense, self._sparse = dense, sparse
-        self.queries = []
-
-    def query_points(self, collection, query, using, limit, query_filter, with_payload, **_):
-        self.queries.append({"using": using, "filter": query_filter, "with_payload": with_payload})
-        points = self._dense if using == "dense" else self._sparse
-        return SimpleNamespace(points=list(points))
 
 
 @pytest.fixture

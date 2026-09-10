@@ -5,14 +5,16 @@ NFS storage refusal, INGEST_WORKERS, contextual embed placeholders,
 PULL_SECRET wiring, and strategic merge patches without a cluster.
 """
 
-import re
-import shutil
-import subprocess
-from pathlib import Path
-
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent
+from tests.helpers_airgap import (
+    assert_no_placeholders,
+    assert_pull_secret_wired,
+    make_bin_tree,
+    run_sh,
+    write_stub,
+)
+
 IMAGE_SHA = "d" * 40
 
 STUB_BIN = """#!/bin/sh
@@ -75,22 +77,20 @@ spec:
 
 @pytest.fixture
 def ingest_tree(tmp_path):
-    (tmp_path / "bin").mkdir()
-    (tmp_path / "scripts" / "airgap").mkdir(parents=True)
-    (tmp_path / "deploy" / "kustomize" / "overlays" / "openshift-ingest").mkdir(parents=True)
-    for f in ("common.sh", "ingest.sh"):
-        shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
+    make_bin_tree(tmp_path, ["common.sh", "ingest.sh"])
+    (tmp_path / "deploy" / "kustomize" / "overlays" / "openshift-ingest").mkdir(
+        parents=True, exist_ok=True
+    )
     stub_yaml = tmp_path / "stub-ingest.yaml"
     stub_yaml.write_text(STUB_INGEST_KUSTOMIZE)
     stub_patched_yaml = tmp_path / "stub-patched-ingest.yaml"
     stub_patched_yaml.write_text(STUB_INGEST_KUSTOMIZE.replace("cpu: 4", "cpu: 1"))
     kc_log = tmp_path / "kc.log"
     for name in ("kubectl", "oc", "kustomize"):
-        p = tmp_path / "bin" / name
-        p.write_text(
-            STUB_BIN.format(stub_yaml=stub_yaml, stub_patched_yaml=stub_patched_yaml)
+        write_stub(
+            tmp_path / "bin" / name,
+            STUB_BIN.format(stub_yaml=stub_yaml, stub_patched_yaml=stub_patched_yaml),
         )
-        p.chmod(0o755)
     return tmp_path, kc_log
 
 
@@ -111,21 +111,14 @@ def _run_ingest(tree, *extra_env):
     }
     for k, v in extra_env:
         env[k] = v
-    return subprocess.run(
-        ["sh", str(tmp_path / "scripts" / "airgap" / "ingest.sh")],
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=tmp_path,
-        check=False,
-    )
+    return run_sh(tmp_path / "scripts" / "airgap" / "ingest.sh", env, tmp_path)
 
 
 def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     r = _run_ingest(ingest_tree)
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert "__" not in rendered
+    assert_no_placeholders(rendered)
     assert "reg.internal:5000/qdrant-pdf-rag-ingest:" in rendered
     assert "claimName: my-manuals-pvc" in rendered
     assert 'value: "4"' in rendered or "value: 4" in rendered
@@ -161,11 +154,7 @@ def test_ingest_pull_secret_wired_when_set(ingest_tree):
     # The wired item must stay inside the pod-spec mapping: a fixed 2-space
     # insert broke out of it and kubectl rejected the manifest
     # ("did not find expected key" in the Kind rehearsal).
-    assert re.search(
-        r"^([ ]*)imagePullSecrets:\n\1  - name: custom-registry-secret$",
-        rendered,
-        re.MULTILINE,
-    )
+    assert_pull_secret_wired(rendered, "custom-registry-secret")
 
 
 def test_ingest_pull_secret_stays_empty_when_unset(ingest_tree):

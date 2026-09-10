@@ -14,6 +14,7 @@ from scripts.query_demo import (
 
 from mainframe_rag.config import Settings
 from mainframe_rag.retrieve.query import SearchHit
+from tests.fakes import embedding_mock, vllm_models_mock
 
 
 def _sample_hit() -> SearchHit:
@@ -192,20 +193,10 @@ def test_resolve_runtime_settings_auto_detect_vllm_and_probing(monkeypatch):
     monkeypatch.delenv("EMBED_BASE_URL", raising=False)
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
 
-    def mock_get(url, timeout=None):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        if "8001" in url:
-            mock_resp.json.return_value = {"data": [{"id": "Qwen/Qwen3-Embedding-0.6B"}]}
-        elif "8000" in url:
-            mock_resp.json.return_value = {"data": [{"id": "google/gemma-4-E4B-it-qat-mobile-ct"}]}
-        return mock_resp
-
-    def mock_post(url, json=None, timeout=None):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"data": [{"embedding": [0.1] * 1024}]}
-        return mock_resp
+    mock_get = vllm_models_mock(
+        {"8001": ["Qwen/Qwen3-Embedding-0.6B"], "8000": ["google/gemma-4-E4B-it-qat-mobile-ct"]}
+    )
+    mock_post = embedding_mock(1024)
 
     with patch("httpx2.get", side_effect=mock_get), patch("httpx2.post", side_effect=mock_post):
         settings = resolve_runtime_settings()
@@ -218,14 +209,9 @@ def test_resolve_runtime_settings_auto_detect_vllm_and_probing(monkeypatch):
 
 
 def test_resolve_runtime_settings_explicit_cli_overrides_with_multi_model_discovery():
-    def mock_get(url, timeout=None):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        if "9000" in url:
-            mock_resp.json.return_value = {"data": [{"id": "served-embed-1"}, {"id": "served-embed-2"}]}
-        elif "9001" in url:
-            mock_resp.json.return_value = {"data": [{"id": "served-reasoner-1"}, {"id": "served-reasoner-2"}]}
-        return mock_resp
+    mock_get = vllm_models_mock(
+        {"9000": ["served-embed-1", "served-embed-2"], "9001": ["served-reasoner-1", "served-reasoner-2"]}
+    )
 
     with patch("httpx2.get", side_effect=mock_get):
         settings = resolve_runtime_settings(
@@ -247,14 +233,12 @@ def test_resolve_runtime_settings_explicit_cli_overrides_with_multi_model_discov
 
 
 def test_resolve_runtime_settings_explicit_model_matching_served_basename():
-    def mock_get(url, timeout=None):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        if "8001" in url:
-            mock_resp.json.return_value = {"data": [{"id": "Qwen/Qwen3-Embedding-0.6B"}, {"id": "unrelated/model"}]}
-        elif "8000" in url:
-            mock_resp.json.return_value = {"data": [{"id": "google/gemma-4-E4B-it-qat-mobile-ct"}, {"id": "unrelated/model"}]}
-        return mock_resp
+    mock_get = vllm_models_mock(
+        {
+            "8001": ["Qwen/Qwen3-Embedding-0.6B", "unrelated/model"],
+            "8000": ["google/gemma-4-E4B-it-qat-mobile-ct", "unrelated/model"],
+        }
+    )
 
     with patch("httpx2.get", side_effect=mock_get):
         settings = resolve_runtime_settings(
@@ -277,19 +261,10 @@ def test_resolve_runtime_settings_malformed_json_fallback():
 
 
 def _vllm_1024_mocks():
-    def mock_get(url, timeout=None):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"data": [{"id": "Qwen/Qwen3-Embedding-0.6B"}]}
-        return mock_resp
-
-    def mock_post(url, json=None, timeout=None):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"data": [{"embedding": [0.1] * 1024}]}
-        return mock_resp
-
-    return mock_get, mock_post
+    return (
+        vllm_models_mock({"": ["Qwen/Qwen3-Embedding-0.6B"]}),
+        embedding_mock(1024),
+    )
 
 
 def test_resolve_runtime_settings_explicit_dense_dim_mismatch_fails_closed(monkeypatch):
