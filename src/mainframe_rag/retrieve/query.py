@@ -107,27 +107,6 @@ def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:
     )
 
 
-def _prefetch_one(
-    client: QdrantPoints,
-    collection: str,
-    query_vec,
-    using: str,
-    flt: models.Filter | None,
-    limit: int,
-) -> list[models.ScoredPoint]:
-    """Single-vector query against one named vector/sparse space; payload
-    restricted to required citation and ranking fields."""
-    result = client.query_points(
-        collection,
-        query=query_vec,
-        using=using,
-        limit=limit,
-        query_filter=flt,
-        with_payload=list(RETRIEVE_PAYLOAD_FIELDS),
-    )
-    return result.points
-
-
 def rrf_fuse(
     dense: list[models.ScoredPoint],
     sparse: list[models.ScoredPoint],
@@ -516,174 +495,37 @@ def search(
     settings: Settings | None = None,
     reranker: Reranker | None = None,
 ) -> tuple[list[SearchHit], str, dict[str, int]]:
-    """Returns (hits, query_kind, timing_ms). Filters applied inside prefetch.
+    """Sync entry point: runs the async core to completion.
 
-    Dense and sparse prefetch queries execute concurrently in a single HTTP
-    batch call via query_batch_points (falling back to query_points if unsupported).
-    When reranking is enabled, fused candidates (top-50) are scored by the cross-encoder."""
-    identifiers = parse_query(query)
-    flt = build_filter(identifiers, product=product, version=version)
+    Returns (hits, query_kind, timing_ms). Filters applied inside prefetch.
 
-    active_reranker, rerank_active, bypass_reason = _resolve_active_reranker(
-        settings, reranker, query, identifiers.has_identifiers
-    )
-    # Split on the operator's words (expansion never adds markers or ids);
-    # each leg is expanded independently below. Single path short-circuits
-    # so flags-off stays byte-identical legacy (no double expansion).
-    sub_queries, split_mode = _split_paths_for(settings, query)
-    query = _effective_query(settings, query)
-    eff_legs = (
-        [_effective_query(settings, p) for p in sub_queries] if split_mode != "single" else [query]
-    )
-
-    prefetch_limit = _prefetch_limit_for(settings, rerank_active)
-
-    timings: dict[str, int] = {}
-    span_attrs = _retrieve_span_attrs(
-        query, limit, rerank_active, prefetch_limit, flt, bypass_reason, len(eff_legs), split_mode
-    )
-
-    with tracer.start_as_current_span("retrieve.search", attributes=span_attrs) as span:
-        with tracer.start_as_current_span(
-            "retrieve.embed", attributes={"rag.embedder": type(embedder).__name__}
-        ):
-            t0 = time.monotonic()
-            # One embed per retrieval leg (single path: exactly today's call).
-            leg_vecs: list[tuple[list[float], list[int], list[float]]] = []
-            for eq in eff_legs:
-                dense_vec = embedder.dense_query([eq])[0]
-                sparse_idx, sparse_val = embedder.sparse([eq])[0]
-                leg_vecs.append((dense_vec, sparse_idx, sparse_val))
-            timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
-
-        with tracer.start_as_current_span(
-            "retrieve.prefetch",
-            attributes={
-                "rag.batch": hasattr(client, "query_batch_points"),
-                "rag.prefetch_limit": prefetch_limit,
-            },
-        ):
-            t0 = time.monotonic()
-            # Every leg shares the ORIGINAL filter: splitting changes ranking
-            # text only, never the constraint allowlist (a stripped cause leg
-            # must not surface must_not docs the symptom filter excluded).
-            leg_dense_points: list[list[models.ScoredPoint]] = []
-            leg_sparse_points: list[list[models.ScoredPoint]] = []
-            filter_fallback = False
-            for dense_vec, sparse_idx, sparse_val in leg_vecs:
-                dense_req, sparse_req = _build_prefetch_requests(
-                    dense_vec, sparse_idx, sparse_val, flt, prefetch_limit
-                )
-
-                if hasattr(client, "query_batch_points"):
-                    responses = client.query_batch_points(collection, requests=[dense_req, sparse_req])
-                    dense_points = responses[0].points
-                    sparse_points = responses[1].points
-                else:
-                    dense_points = _prefetch_one(client, collection, dense_vec, "dense", flt, prefetch_limit)
-                    sparse_points = _prefetch_one(
-                        client,
-                        collection,
-                        models.SparseVector(indices=sparse_idx, values=sparse_val),
-                        "bm25",
-                        flt,
-                        prefetch_limit,
-                    )
-                # Empty-filtered recovery: an exact doc-id stem (SC23-6858 vs
-                # SC23-6858-01) or a multi-identifier AND can match zero points
-                # while the unfiltered legs score. Retry once unfiltered — a
-                # single retry only, so non-empty filtered results never pay it.
-                leg_fallback = _needs_filter_fallback(dense_points, sparse_points, flt)
-                if leg_fallback:
-                    dense_req, sparse_req = _build_prefetch_requests(
-                        dense_vec, sparse_idx, sparse_val, None, prefetch_limit
-                    )
-                    if hasattr(client, "query_batch_points"):
-                        responses = client.query_batch_points(
-                            collection, requests=[dense_req, sparse_req]
-                        )
-                        dense_points = responses[0].points
-                        sparse_points = responses[1].points
-                    else:
-                        dense_points = _prefetch_one(
-                            client, collection, dense_vec, "dense", None, prefetch_limit
-                        )
-                        sparse_points = _prefetch_one(
-                            client,
-                            collection,
-                            models.SparseVector(indices=sparse_idx, values=sparse_val),
-                            "bm25",
-                            None,
-                            prefetch_limit,
-                        )
-                leg_dense_points.append(dense_points)
-                leg_sparse_points.append(sparse_points)
-                filter_fallback = filter_fallback or leg_fallback
-            timings["qdrant_ms"] = int((time.monotonic() - t0) * 1000)
-
-        weights, k, max_per_page, max_per_doc = _ranking_params(settings, identifiers.has_identifiers)
-        boosts = _type_boosts(settings)
-        if split_mode == "single":
-            leg_weights = [weights]
-        else:
-            # Per-leg ranking text, shared constraint filter: comparative
-            # legs are NL; the diagnostic cause leg is identifier-stripped.
-            leg_weights = [
-                _ranking_params(settings, parse_query(sub).has_identifiers)[0]
-                for sub in sub_queries
-            ]
-
-        if rerank_active and active_reranker is not None:
-            from mainframe_rag.retrieve.rerank import rerank_candidates
-
-            rrf_limit = settings.rerank_candidates if settings else 50
-            fused_lists = [
-                _fuse_with_span(dp, sp, w, k, rrf_limit, type_boosts=boosts)
-                for (dp, sp), w in zip(zip(leg_dense_points, leg_sparse_points), leg_weights)
-            ]
-            if split_mode == "single":
-                fused = fused_lists[0]
-            elif split_mode == "comparative":
-                fused = max_split_hits(fused_lists, k, rrf_limit)
-            else:
-                fused = merge_split_hits(fused_lists, SPLIT_MERGE_DIAGNOSTIC, k, rrf_limit)
-            t_rr = time.monotonic()
-            with tracer.start_as_current_span(
-                "retrieve.rerank", attributes={"rag.candidates": len(fused)}
-            ) as rr_span:
-                fusion_alpha = settings.rerank_fusion_alpha if settings else 1.0
-                reranked = rerank_candidates(query, fused, active_reranker, alpha=fusion_alpha)
-                rr_span.set_attributes(
-                    {
-                        "rag.rerank_scores": ",".join(f"{h.score:.3f}" for h in reranked[:5]),
-                        "rag.rerank_alpha": fusion_alpha,
-                    }
-                )
-            timings["rerank_ms"] = int((time.monotonic() - t_rr) * 1000)
-            fused = reranked
-        else:
-            fuse_limit = max(limit * 3, 24)
-            fused_lists = [
-                _fuse_with_span(dp, sp, w, k, fuse_limit, type_boosts=boosts)
-                for (dp, sp), w in zip(zip(leg_dense_points, leg_sparse_points), leg_weights)
-            ]
-            if split_mode == "single":
-                fused = fused_lists[0]
-            elif split_mode == "comparative":
-                fused = max_split_hits(fused_lists, k, fuse_limit)
-            else:
-                fused = merge_split_hits(fused_lists, SPLIT_MERGE_DIAGNOSTIC, k, fuse_limit)
-
-        hits = _diversify_with_span(fused, limit, max_per_page, max_per_doc)
-        span.set_attributes(
-            {
-                "rag.query_kind": query_kind(identifiers),
-                "rag.hits": len(hits),
-                "rag.filter_fallback": filter_fallback,
-            }
+    `async_search()` is the single implementation; this wrapper exists for
+    sync callers only (evals, tooling, scripts — audited: no async-context
+    caller). Fail-closed inside a running loop: nesting `asyncio.run`
+    deadlocks, so async callers must await `async_search()` instead.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError(
+            "search() cannot run inside a running event loop "
+            "(asyncio.run would deadlock); await async_search() instead."
         )
-
-    return hits, query_kind(identifiers), timings
+    return asyncio.run(
+        async_search(
+            client,
+            embedder,
+            collection,
+            query,
+            product=product,
+            version=version,
+            limit=limit,
+            settings=settings,
+            reranker=reranker,
+        )
+    )
 
 
 async def _async_prefetch_one(

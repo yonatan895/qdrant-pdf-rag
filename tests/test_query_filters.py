@@ -577,3 +577,45 @@ def test_search_filter_fallback_adversarial_wrappings(embedder, wrapped):
     assert fake.batch_calls == 2, wrapped
 
 
+
+
+def test_search_delegates_to_async_core_exactly_once(monkeypatch):
+    """Slice 3: search() is a thin wrapper — it forwards every argument to
+    async_search untouched and returns its triple verbatim (one call)."""
+    import mainframe_rag.retrieve.query as query_mod
+    from mainframe_rag.retrieve.query import search
+
+    seen: dict = {}
+
+    async def spy(client, embedder, collection, query, **kwargs):
+        seen.update(
+            {"client": client, "embedder": embedder, "collection": collection, "query": query, **kwargs}
+        )
+        return ([], "nl", {"embed_ms": 1})
+
+    monkeypatch.setattr(query_mod, "async_search", spy)
+    client, embedder = object(), object()
+    out = search(
+        client, embedder, "coll", "sizing lookaside",
+        product="z/OS", version="3.1", limit=5, settings=None, reranker=None,
+    )
+    assert out == ([], "nl", {"embed_ms": 1})
+    assert seen == {
+        "client": client, "embedder": embedder, "collection": "coll",
+        "query": "sizing lookaside", "product": "z/OS", "version": "3.1",
+        "limit": 5, "settings": None, "reranker": None,
+    }
+
+
+def test_search_fails_closed_inside_running_loop():
+    """Slice 3: nesting asyncio.run deadlocks, so search() inside a running
+    loop raises a directing error instead of hanging."""
+    import pytest
+
+    from mainframe_rag.retrieve.query import search
+
+    async def main():
+        with pytest.raises(RuntimeError, match="await async_search"):
+            search(object(), object(), "coll", "sizing lookaside")
+
+    asyncio.run(main())
