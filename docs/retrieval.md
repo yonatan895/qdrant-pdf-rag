@@ -99,8 +99,11 @@ no LLM. Both flags (`comparative_split_enabled`,
 `diagnostic_dualpath_enabled`) ship default-off.
 
 - Comparative (`versus`/`vs`/`difference(s) between` + paired `and`/
-  `between`-`and`/narrow `X and/or Y`): NL queries only. Identifier-heavy
-  comparatives bypass — the exact-code path stays exact. Slash pairs
+  `between`-`and`/narrow `X and/or Y`): blocked only by exact anchors
+  (doc numbers / message ids) — the exact-code path stays exact. A lone
+  member mention (IEASYSxx) is shared filter context, not the anchor:
+  member-only comparatives split, every leg keeping the original filter.
+  Slash pairs
   (`A/B`) deliberately never split (ambiguous joint-"both" vs "versus").
   Sub-queries are built by removal (original minus marker minus the other
   entity), so shared context is verbatim; first marker only, cap 2 paths.

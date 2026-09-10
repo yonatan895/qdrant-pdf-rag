@@ -9,8 +9,11 @@ Firing rules (in order, first match wins):
 
 - ``trap`` (screen) → single path, always. Expansion must never alter the
   text the screen and refusal path reason about.
-- Comparative text-split → two paths. NL queries only (identifier-heavy
-  queries bypass: the exact-code path stays exact). Markers carry explicit
+- Comparative text-split → two paths. Blocked only by exact anchors
+  (doc numbers / message ids): those queries stay on the exact-code path.
+  Member-only queries split — a member mention (IEASYSxx) is filter
+  context, not the compared entity (CSA vs ECSA vs SQA), and every leg
+  keeps the original filter. Markers carry explicit
   comparison intent: ``versus`` / ``vs`` / ``difference(s) between`` (+
   paired ``and``) / ``compare``-family with two entity-shaped sides /
   narrow ``X or Y`` / narrow ``X and Y`` (both sides single entity-shaped
@@ -396,7 +399,12 @@ def split_query(
     if screen_query(query) == "trap":
         return ([query], "single")
     identifiers = parse_query(query)
-    if comparative_enabled and not identifiers.has_identifiers:
+    # Exact anchors (doc numbers, message ids) keep the single exact-code
+    # path: the cross-encoder/rerank lesson (#117) applies — splitting an
+    # exact-code comparison shreds the anchor. Member mentions alone do
+    # not block: they are filter context shared verbatim by both legs
+    # (filters always come from the original query), not the anchor.
+    if comparative_enabled and not (identifiers.doc_ids or identifiers.message_ids):
         subs = _comparative_paths(query)
         if subs:
             return (subs, "comparative")
