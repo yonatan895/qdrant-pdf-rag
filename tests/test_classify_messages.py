@@ -98,3 +98,23 @@ def test_strip_page_keeps_inner_dot_numbers():
     out = strip_page("intro\n1.2\n2.10\n12-34", set())
     assert "1.2" in out and "2.10" in out
     assert "12-34" not in out
+
+
+def test_chunk_type_vocabulary_is_frozen():
+    """AGENTS.md lethal rule: no new chunk_type values. The Literal annotation
+    makes mypy reject a new return; this pins the exact vocabulary and fires
+    classify() on each member."""
+    from typing import get_args
+
+    from mainframe_rag.ingest.classify import ChunkType, classify
+
+    assert set(get_args(ChunkType)) == {"message", "syntax", "table", "narrative"}
+    samples = [
+        ("IEA500I Message text here.", "message"),
+        ("Syntax: ::= with a parm <name>", "syntax"),
+        ("NAME     TYPE    LEN\nALPHA    CHAR    10\nBETA     NUM     4", "table"),
+        ("This is a plain narrative paragraph about system concepts.", "narrative"),
+    ]
+    for text, expected in samples:
+        assert classify(text) == expected
+        assert classify(text) in get_args(ChunkType)

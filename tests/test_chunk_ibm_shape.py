@@ -527,6 +527,23 @@ def test_make_chunks_span_label_range():
     assert chunks[0].chunk_id == make_chunk_id("SA22-0000-01", "Only chapter", 0, 0)
 
 
+def test_chunk_id_pins_uuid5_namespace_and_key():
+    """The point-id contract is UUID5(NAMESPACE_URL, "doc|heading|page|ordinal").
+    A literal expected value catches a namespace or key-format change that the
+    self-referential comparison above cannot (AGENTS.md lethal-mistake rule)."""
+    import uuid
+
+    from mainframe_rag.ingest.chunk import make_chunk_id
+
+    key = "SA22-0000-01|Only chapter|0|0"
+    assert make_chunk_id("SA22-0000-01", "Only chapter", 0, 0) == str(
+        uuid.uuid5(uuid.NAMESPACE_URL, key)
+    )
+    assert make_chunk_id("SA22-0000-01", "Only chapter", 0, 0) == (
+        "88bf0502-bc81-5dc1-8165-99b55e6a7835"
+    )
+
+
 def test_fallback_sections_split_no_toc_book():
     """No TOC: heading leads open sections instead of one whole-doc blob;
     deterministic across runs; long headingless runs window every 10 pages."""
