@@ -41,6 +41,12 @@ Judging contract (inherits the answer-tier eval's rules)
         and the answer body. Unparseable judge output is a structural FAIL
         (judge infrastructure must never silently pass a row); the label
         distribution is trend data, not a gate.
+    relevance (L4 only, `relevance_enabled=True`)
+        A second temp-0 judge labels the answer relevant/partial/irrelevant
+        to the question — without excerpts, so it says nothing about
+        grounding. L2 itself keeps its four measurements; harness_l4.py
+        requests this leg and owns its thresholds. Unparseable output is a
+        structural FAIL like faithfulness.
     truncation rate
         The app alerts finish_reason != stop per request in its logs (the
         response contract deliberately does not expose it). L2 runs the app
@@ -103,6 +109,7 @@ JUDGE_MAX_EVIDENCE_CHARS = 6000
 
 CITE_PREFIX_RE = re.compile(r"^\s*\[\d+\]\s*")
 JUDGE_LABELS = ("entailed", "neutral", "contradiction")
+RELEVANCE_LABELS = ("relevant", "partial", "irrelevant")
 JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
@@ -170,18 +177,52 @@ def judge_messages(answer: str, evidence: str) -> list[ChatMessage]:
     ]
 
 
-def parse_judge_label(text: str) -> str:
-    """Extract the judge's label from its reply (tolerates fences/prose
-    around the JSON object; anything else fails closed)."""
+def relevance_messages(question: str, answer: str) -> list[ChatMessage]:
+    """Answer-relevance prompt: does the ANSWER address the QUESTION.
+
+    Separate from faithfulness by design (one label per prompt): relevance
+    needs no excerpts, so the judge never sees manual text or citation
+    markers here. Returns ChatMessage rows for the production client.
+    """
+    return [
+        ChatMessage(
+            role="system",
+            content=(
+                "You are a strict answer-relevance judge for a "
+                "retrieval-augmented question answering system. Given a "
+                "QUESTION and an ANSWER, reply with exactly one JSON object: "
+                '{"label": "relevant"} when the ANSWER directly addresses the '
+                'QUESTION, {"label": "partial"} when it addresses only part '
+                'of the QUESTION or drifts off-topic, {"label": "irrelevant"} '
+                "when it does not address the QUESTION. No other text."
+            ),
+        ),
+        ChatMessage(role="user", content=f"QUESTION:\n{question}\n\nANSWER:\n{answer}"),
+    ]
+
+
+def _parse_label(text: str, labels: tuple[str, ...]) -> str:
+    """Extract one label from the judge's JSON reply (tolerates fences/prose
+    around the object; anything else fails closed)."""
     m = JSON_BLOCK_RE.search(text)
     if m:
         try:
             label = json.loads(m.group(0)).get("label")
         except json.JSONDecodeError:
             label = None
-        if label in JUDGE_LABELS:
+        if label in labels:
             return label
     raise JudgeError(f"unparseable judge reply: {text[:120]!r}")
+
+
+def parse_judge_label(text: str) -> str:
+    """Faithfulness label (entailed/neutral/contradiction)."""
+    return _parse_label(text, JUDGE_LABELS)
+
+
+def parse_relevance_label(text: str) -> str:
+    """Relevance label (relevant/partial/irrelevant)."""
+    return _parse_label(text, RELEVANCE_LABELS)
 
 
 def evidence_for_citations(citations: list[str], hits: list[dict[str, Any]]) -> tuple[str, list[str]]:
@@ -251,6 +292,8 @@ def summarize_l2(results: list[dict[str, Any]]) -> dict[str, Any]:
     recs = [r["citation_recall"] for r in judged if r.get("citation_recall") is not None]
     labels = [r["judge_label"] for r in judged if r.get("judge_label") in JUDGE_LABELS]
     judge_errs = sum(1 for r in judged if r.get("judge_error"))
+    relevances = [r["relevance_label"] for r in judged if r.get("relevance_label") in RELEVANCE_LABELS]
+    relevance_errs = sum(1 for r in judged if r.get("relevance_error"))
     n_answer = len(answer_llm)
     metrics: dict[str, Any] = {
         "queries": len(results),
@@ -272,6 +315,14 @@ def summarize_l2(results: list[dict[str, Any]]) -> dict[str, Any]:
             "judge_errors": judge_errs,
             **{lbl: rate(sum(1 for l in labels if l == lbl), len(labels)) for lbl in JUDGE_LABELS},
         },
+        "relevance": {
+            "judged": len(relevances),
+            "judge_errors": relevance_errs,
+            **{
+                lbl: rate(sum(1 for l in relevances if l == lbl), len(relevances))
+                for lbl in RELEVANCE_LABELS
+            },
+        },
         "unmapped_citations": sum(len(r.get("unmatched_citations") or []) for r in judged),
     }
     return metrics
@@ -286,7 +337,9 @@ def gate_l2(metrics: dict[str, Any]) -> tuple[str, list[str]]:
     if metrics["errors"]:
         reasons.append(f"{metrics['errors']} request error(s)")
     if metrics["faithfulness"]["judge_errors"]:
-        reasons.append(f"{metrics['faithfulness']['judge_errors']} judge error(s)")
+        reasons.append(f"{metrics['faithfulness']['judge_errors']} faithfulness judge error(s)")
+    if metrics["relevance"]["judge_errors"]:
+        reasons.append(f"{metrics['relevance']['judge_errors']} relevance judge error(s)")
     return ("hold" if reasons else "pass"), reasons
 
 
@@ -417,10 +470,12 @@ def run_l2(
     entries: list[dict[str, Any]],
     max_queries: int | None,
     judge_enabled: bool = True,
+    relevance_enabled: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Live run: search rows (deterministic, same pool the agent answers
     from), /v1/answer per entry, then the L2 measurements. Returns (rows,
-    metrics)."""
+    metrics). ``relevance_enabled`` adds the answer-relevance judge (L4);
+    L2 itself runs faithfulness only."""
     from fastapi.testclient import TestClient
 
     import mainframe_rag.agent.app as app_mod
@@ -477,11 +532,34 @@ def run_l2(
                         row.setdefault("failures", []).append(f"faithfulness judge failed: {row['judge_error']}")
                         row["verdict"] = "fail"
 
+                # Relevance judge (L4 only): same grounded, non-failed rows;
+                # it sees only question + answer, never excerpts or markers.
+                if (
+                    relevance_enabled
+                    and judge_client is not None
+                    and row.get("path") == "llm"
+                    and row["expected_behavior"] == "answer"
+                    and row.get("citations")
+                    and not row.get("failures")
+                ):
+                    try:
+                        chat = judge_client.chat(
+                            relevance_messages(entry["query"], row["answer"]),
+                            temperature=0.0,
+                        )
+                        row["relevance_label"] = parse_relevance_label(chat.content)
+                    except Exception as exc:  # noqa: BLE001 — judge infra fails closed
+                        row["relevance_error"] = f"{type(exc).__name__}: {exc}"
+                        row.setdefault("failures", []).append(f"relevance judge failed: {row['relevance_error']}")
+                        row["verdict"] = "fail"
+
                 results.append(row)
                 marker = row.get("verdict", "?").upper()
                 extra = ""
                 if row.get("judge_label"):
                     extra = f" judge={row['judge_label'][:4]}"
+                if row.get("relevance_label"):
+                    extra += f" rel={row['relevance_label'][:3]}"
                 print(
                     f"[{i:>3}/{len(sample)}] {marker:5s} {row['id']:8s} {row['query'][:52]}{extra}",
                     file=sys.stderr,

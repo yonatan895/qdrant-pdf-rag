@@ -221,11 +221,13 @@ HARNESS_GOLDEN = $(if $(filter vllm,$(EMBED_MODE)),,--golden evals/golden.jsonl)
 HARNESS_L3_BASELINE ?= $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-l3-vllm.json,benchmarks/harness-l3.json)
 eval eval-baseline eval-draft eval-answers eval-report eval-html eval-compare \
 	eval-paraphrase capture-pool \
-	gate-l1 harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline: \
+	gate-l1 harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline \
+	harness-l4 harness-l4-record: \
 	export EMBED_MODE := $(EMBED_MODE)
 eval eval-baseline eval-draft eval-answers eval-report eval-html eval-compare \
 	eval-paraphrase capture-pool \
-	gate-l1 harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline: \
+	gate-l1 harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline \
+	harness-l4 harness-l4-record: \
 	export VENUE := $(VENUE)
 eval-holdout: export EMBED_MODE := $(EMBED_MODE)
 eval-holdout: export VENUE := rc
@@ -356,6 +358,25 @@ harness-l3-baseline: | .venv
 	  --update-baseline \
 	  --out $(BUNDLE_DIR)/harness-l3-report.json --summary $(BUNDLE_DIR)/harness-l3-summary.md
 
+# Harness L4 (answer-quality gate, issue #268): L2 measurements plus the
+# answer-relevance judge, repeated REPEATS times (sampling noise), gated
+# against the committed reference (evals/harness-l4-thresholds.json) with
+# its tolerance band. Structural fails/errors/judge errors always fail;
+# rates inside the band hold for human review and write a queue. Live GPU
+# stack, RC-only (declare VENUE=rc for the holdout venue), never a PR gate.
+.PHONY: harness-l4 harness-l4-record
+harness-l4: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/harness_l4.py --max-queries $(or $(N),24) --repeats $(or $(REPEATS),3) \
+	  --out $(BUNDLE_DIR)/harness-l4-report.json --summary $(BUNDLE_DIR)/harness-l4-summary.md \
+	  --queue $(BUNDLE_DIR)/harness-l4-review-queue.json
+
+harness-l4-record: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/harness_l4.py --max-queries $(or $(N),24) --repeats $(or $(REPEATS),3) \
+	  --update-thresholds \
+	  --out $(BUNDLE_DIR)/harness-l4-report.json --summary $(BUNDLE_DIR)/harness-l4-summary.md
+
 # Draft golden-set candidates from a collection's payload (edit the queries).
 eval-draft: | .venv
 	.venv/bin/python scripts/eval_retrieval.py --label-draft --docs 40
@@ -483,7 +504,7 @@ help:
 	@echo "Connected host : venv wheelhouse bm25-weights pull-chart helm-lint helm-template build-images"
 	@echo "Air-gap happy path : airgap-pack (connected) | airgap-load airgap-deploy airgap-ingest airgap-smoke (inside the gap)"
 	@echo "Simulation     : sim (pytest integration tier; docker Qdrant) | sim-qdrant sim-clean | loadtest-mock (load tier: same composition, absolute contracts under concurrency)"
-	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest | harness-l3"
+	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest | harness-l3 | harness-l4 (answer-quality gate, RC)"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper) | capture-pool (record prefetch pools, RC)"
 	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"
 	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | local-gateway (LiteLLM in front of all three backends on :4000) | local-gateway-stop | local-jaeger (OTLP/Jaeger v2 on :4318, UI :16686) | local-jaeger-stop | local-stack (full prod simulation: Qdrant + gateway + Jaeger + agent) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
