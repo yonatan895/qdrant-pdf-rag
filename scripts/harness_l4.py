@@ -340,8 +340,11 @@ def save_thresholds(path: Path, summary: dict[str, Any], settings: Any, repeats:
         "_meta": {
             "note": (
                 "L4 answer-quality reference rates; record with `make harness-l4-record` "
-                "(dedicated PR, AGENTS.md). Gate compares repeat means against these "
-                "with _meta.tolerance."
+                "(dedicated PR, AGENTS.md). Gate compares repeat means against these with "
+                "_meta.tolerance (default 0.15 = ~2.3 sigma of the 3-repeat mean at N=24; "
+                "raise N to tighten). An uncomputed metric fails. Structural fails gate "
+                "independently of the rate reference and are stored for context; grounding "
+                "counts explicit citations only (#269)."
             ),
             "updated": time.strftime("%Y-%m-%d", time.gmtime()),
             "venue": settings.qdrant_collection,

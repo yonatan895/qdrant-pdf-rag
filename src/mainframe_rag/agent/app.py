@@ -362,6 +362,10 @@ class AnswerResponse(BaseModel):
     request_id: str
     answer: str
     citations: list[str]
+    # Provenance (issue #269): true when every citation was mapped from bare
+    # bracket markers with no explicit citation line — surfaced so clients
+    # and the eval never mistake inferred provenance for grounding.
+    citations_inferred: bool = False
     script: str | None
 
 
@@ -690,6 +694,7 @@ async def v1_answer(
             request_id=request_id,
             answer=empty_hits_answer(req.query),
             citations=[],
+            citations_inferred=False,
             script=None,
         )
 
@@ -811,6 +816,7 @@ async def v1_answer(
             request_id=request_id,
             answer=parsed.answer,
             citations=parsed.citations,
+            citations_inferred=parsed.citations_inferred,
             script=parsed.script,
         )
 
@@ -937,6 +943,7 @@ async def v1_answer(
             request_id,
             parsed.answer,
             parsed.citations,
+            parsed.citations_inferred,
             parsed.script,
             kind,
             hits,

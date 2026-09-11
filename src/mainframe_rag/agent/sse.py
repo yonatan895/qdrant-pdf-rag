@@ -51,6 +51,7 @@ def empty_final_payload(request_id: str, answer: str, query_kind: str) -> dict[s
         "request_id": request_id,
         "answer": answer,
         "citations": [],
+        "citations_inferred": False,
         "script": None,
         "query_kind": query_kind,
         "hits": [],
@@ -69,6 +70,7 @@ def final_payload(
     request_id: str,
     answer: str,
     citations: list[str],
+    citations_inferred: bool,
     script: str | None,
     query_kind: str,
     hits: list[SearchHit],
@@ -77,12 +79,16 @@ def final_payload(
     usage: TokenUsage,
 ) -> dict[str, Any]:
     """Terminal `final` for the streamed answer: verified citations/script
-    identical in shape to the JSON mode and the empty-hits path."""
+    identical in shape to the JSON mode and the empty-hits path.
+    `citations_inferred` is the provenance flag (issue #269): true when the
+    cites were mapped from bare bracket markers, never from an explicit
+    citation line."""
     return {
         "type": "final",
         "request_id": request_id,
         "answer": answer,
         "citations": citations,
+        "citations_inferred": citations_inferred,
         "script": script,
         "query_kind": query_kind,
         "hits": [h.model_dump() for h in hits],

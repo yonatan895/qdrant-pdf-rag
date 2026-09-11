@@ -1,6 +1,6 @@
 {
  "_meta": {
-  "note": "L4 answer-quality reference rates; record with `make harness-l4-record` (dedicated PR, AGENTS.md). Gate compares repeat means against these with _meta.tolerance (0.15 = ~2.3 sigma of the 3-repeat mean at n=24; raise N to tighten). Structural fails gate independently and are stored for context.",
+  "note": "L4 answer-quality reference rates; record with `make harness-l4-record` (dedicated PR, AGENTS.md). Gate compares repeat means against these with _meta.tolerance (default 0.15 = ~2.3 sigma of the 3-repeat mean at N=24; raise N to tighten). An uncomputed metric fails. Structural fails gate independently of the rate reference and are stored for context; grounding counts explicit citations only (#269).",
   "updated": "2026-09-11",
   "venue": "real_manuals",
   "embed_mode": "vllm",
@@ -8,17 +8,17 @@
   "tolerance": 0.15,
   "repeats": 3,
   "queries_per_run": 24,
-  "structural_fails": 31
+  "structural_fails": 37
  },
  "metrics": {
-  "grounded_rate": 0.6984,
-  "citation_precision": 0.6002,
-  "citation_recall": 0.4021,
-  "truncation_rate": 0.4286,
-  "syntax_compliance": 0.3333,
-  "faithfulness.entailed": 0.3485,
-  "faithfulness.contradiction": 0.0,
-  "relevance.relevant": 0.9697,
+  "grounded_rate": 0.4762,
+  "citation_precision": 0.6255,
+  "citation_recall": 0.3915,
+  "truncation_rate": 0.4921,
+  "syntax_compliance": 0.4444,
+  "faithfulness.entailed": 0.2879,
+  "faithfulness.contradiction": 0.0303,
+  "relevance.relevant": 0.9583,
   "relevance.irrelevant": 0.0
  }
 }
