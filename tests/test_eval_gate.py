@@ -476,3 +476,33 @@ def test_synthetic_baseline_keeps_absolute_floor():
     rep["identifier"]["recall@1"] = 0.99
     regressions = check_baseline(rep, baseline)
     assert any("absolute gate" in r for r in regressions)
+
+
+# --- table query class (issue #270 step 4) ---------------------------------
+
+def test_table_query_class_is_valid():
+    """`table` joins the class vocabulary; unknown classes stay rejected."""
+    import pydantic
+    import pytest
+    from scripts.eval_retrieval import QUERY_CLASSES, GoldenEntry
+
+    assert "table" in QUERY_CLASSES
+    entry = GoldenEntry(
+        query="Which table lists the traced fields?", expected_doc_ids=["D"], query_class="table"
+    )
+    assert entry.query_class == "table"
+    with pytest.raises(pydantic.ValidationError):
+        GoldenEntry(query="q", expected_doc_ids=["D"], query_class="not_a_class")
+
+
+def test_table_class_entries_are_authored_and_well_formed():
+    """The authored TBL series binds real docs/headings for the class; the
+    re-freeze that lands them in golden/holdout is a dedicated commit."""
+    from scripts import build_golden_corpus as bgc
+
+    tbl = [entry for entry in bgc.E if str(entry["id"]).startswith("TBL-")]
+    assert len(tbl) == 6
+    assert all(entry["query_class"] == "table" for entry in tbl)
+    assert all(entry["expected_doc_ids"] and entry["expected_heading"] for entry in tbl)
+    ids = [entry["id"] for entry in bgc.E]
+    assert len(ids) == len(set(ids))
