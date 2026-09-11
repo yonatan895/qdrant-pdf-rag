@@ -39,6 +39,7 @@ done
 unset _url_var _url
 
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
+check_secret_name "${PULL_SECRET:-}" PULL_SECRET
 
 case "${RERANK_ENDPOINT_ORDER:-score_first}" in
     score_first|rerank_first) ;;
