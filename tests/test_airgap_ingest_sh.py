@@ -5,6 +5,8 @@ NFS storage refusal, INGEST_WORKERS, contextual embed placeholders,
 PULL_SECRET wiring, and strategic merge patches without a cluster.
 """
 
+import re
+
 import pytest
 
 from tests.helpers_airgap import (
@@ -60,6 +62,12 @@ spec:
               value: __EMBED_MODEL__
             - name: DENSE_DIM
               value: __DENSE_DIM__
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_EXPORTER_OTLP_ENDPOINT__
+            - name: OTEL_SERVICE_NAME
+              value: mainframe-rag-ingest
+            - name: OTEL_DEPLOYMENT_ENVIRONMENT
+              value: __OTEL_DEPLOYMENT_ENVIRONMENT__
             - name: INGEST_WORKERS
               value: "__INGEST_WORKERS__"
             - name: CONTEXTUAL_EMBED_ENABLED
@@ -154,6 +162,29 @@ def test_ingest_dryrun_contextual_embed_propagation(ingest_tree):
     assert 'value: "true"' in rendered or "value: true" in rendered
     assert 'value: "http://context-llm:8000/v1"' in rendered or "value: http://context-llm:8000/v1" in rendered
     assert 'value: "meta-llama/Llama-3-8B"' in rendered or "value: meta-llama/Llama-3-8B" in rendered
+
+
+def test_ingest_otel_off_by_default(ingest_tree):
+    # Unset endpoint renders empty = tracing off; the service name is fixed
+    # so the Job can never merge into the agent service in one Jaeger.
+    r = _run_ingest(ingest_tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert re.search(r"OTEL_EXPORTER_OTLP_ENDPOINT\n\s+value:\s*$", rendered, re.MULTILINE)
+    assert "value: mainframe-rag-ingest" in rendered
+
+
+def test_ingest_otel_endpoint_and_environment_wired(ingest_tree):
+    r = _run_ingest(
+        ingest_tree,
+        ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"),
+        ("OTEL_DEPLOYMENT_ENVIRONMENT", "prod"),
+    )
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert "value: http://jaeger:4318" in rendered
+    assert "value: prod" in rendered
+    assert_no_placeholders(rendered)
 
 
 def test_ingest_pull_secret_wired_when_set(ingest_tree):

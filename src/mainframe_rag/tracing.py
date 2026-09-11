@@ -90,10 +90,15 @@ def setup_tracing(
     sample_ratio: float = 1.0,
     export_queue_size: int = 2048,
     export_timeout_ms: int = 5000,
+    service_name: str | None = None,
 ) -> trace.Tracer:
     """Build the tracer for the agent's lifespan. Idempotent: the second call
     returns a tracer on the same provider (a redeploy of config within one
     process must not stack exporters).
+
+    service_name resolves explicit argument -> OTEL_SERVICE_NAME env ->
+    DEFAULT_SERVICE_NAME, so callers like ingest can default to their own
+    service without losing the standard operator override.
 
     sample_ratio is the head sampler ratio — 0.0 disables span production
     entirely, 1.0 keeps every trace (the default; this service's request
@@ -111,7 +116,7 @@ def setup_tracing(
     if _provider is not None:
         return _provider.get_tracer("mainframe-rag")
 
-    service_name = os.environ.get("OTEL_SERVICE_NAME", DEFAULT_SERVICE_NAME)
+    service_name = service_name or os.environ.get("OTEL_SERVICE_NAME", DEFAULT_SERVICE_NAME)
     # Deploy identity (OTel Phase 2b): version is the packed IMAGE_SHA the
     # image already runs as; environment is operator-set and optional.
     # Unset values are omitted, never rendered as empty attributes.

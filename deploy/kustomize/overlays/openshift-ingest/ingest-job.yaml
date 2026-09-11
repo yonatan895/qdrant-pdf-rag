@@ -40,6 +40,15 @@ spec:
               value: __EMBED_MODEL__
             - name: DENSE_DIM
               value: __DENSE_DIM__
+            # OTel (issue #83): endpoint substituted from
+            # OTEL_EXPORTER_OTLP_ENDPOINT in airgap.env (empty = off).
+            # Parent-process spans only; parse workers stay untraced.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_EXPORTER_OTLP_ENDPOINT__
+            - name: OTEL_SERVICE_NAME
+              value: mainframe-rag-ingest
+            - name: OTEL_DEPLOYMENT_ENVIRONMENT
+              value: __OTEL_DEPLOYMENT_ENVIRONMENT__
             - name: INGEST_WORKERS
               value: "__INGEST_WORKERS__"
             - name: CONTEXTUAL_EMBED_ENABLED

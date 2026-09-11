@@ -49,7 +49,6 @@ from mainframe_rag.agent.sse import (
     format_sse_event,
 )
 from mainframe_rag.agent.tokenizer import build_tokenizer
-from mainframe_rag.agent.tracing import parent_context, setup_tracing, shutdown_tracing
 from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
 from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
 from mainframe_rag.ingest.embed import build_embedder
@@ -68,6 +67,7 @@ from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import async_search as retrieve_search
 from mainframe_rag.retrieve.rerank import build_reranker, probe_reranker
+from mainframe_rag.tracing import parent_context, setup_tracing, shutdown_tracing
 
 log = logging.getLogger("agent")
 

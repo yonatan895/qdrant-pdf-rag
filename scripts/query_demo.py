@@ -33,16 +33,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mainframe_rag.agent.answer import ParsedAnswer
 from mainframe_rag.agent.tokenizer import build_tokenizer
-from mainframe_rag.agent.tracing import (
+from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
+from mainframe_rag.ingest.embed import build_embedder
+from mainframe_rag.retrieve.query import SearchHit
+from mainframe_rag.retrieve.query import search as retrieve_search
+from mainframe_rag.tracing import (
     flush_tracing,
     setup_tracing,
     shutdown_tracing,
     trace_enabled,
 )
-from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
-from mainframe_rag.ingest.embed import build_embedder
-from mainframe_rag.retrieve.query import SearchHit
-from mainframe_rag.retrieve.query import search as retrieve_search
 
 tracer: trace.Tracer = trace.get_tracer("mainframe-rag")
 

@@ -15,6 +15,7 @@ import concurrent.futures
 import json
 import logging
 import multiprocessing as mp
+import os
 import sys
 import threading
 import time
@@ -22,6 +23,10 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from opentelemetry import context as otel_context
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
 if TYPE_CHECKING:
     import pymupdf
@@ -56,6 +61,7 @@ from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
 from mainframe_rag.logs import configure_logging
 from mainframe_rag.ports import SparseVector
+from mainframe_rag.tracing import setup_tracing, shutdown_tracing
 
 log = logging.getLogger("ingest")
 
@@ -330,7 +336,52 @@ def run(
     version: str | None = None,
     force_reingest: bool = False,
 ) -> int:
+    """Public entry: OTel tracing around the ingest body (issue #83).
+
+    Parent-process spans only: parse workers are spawn processes that return
+    records to the parent (they never inherit the log handler either), so
+    per-document detail lives in the inventory/log stream. Tracing is
+    default-off — with no OTEL_EXPORTER_OTLP_ENDPOINT the tracer is a no-op.
+    """
     settings = load_settings()
+    tracer = setup_tracing(
+        settings.otel_exporter_otlp_endpoint,
+        sample_ratio=settings.otel_sample_ratio,
+        export_queue_size=settings.otel_export_queue_size,
+        export_timeout_ms=settings.otel_export_timeout_ms,
+        service_name=os.environ.get("OTEL_SERVICE_NAME") or "mainframe-rag-ingest",
+    )
+    root = tracer.start_span("ingest.run")
+    token = otel_context.attach(trace.set_span_in_context(root))
+    try:
+        return _run_impl(
+            src, progress, workers, limit, dry_run, settings, tracer, root,
+            vendor=vendor, product=product, version=version, force_reingest=force_reingest,
+        )
+    except Exception as exc:
+        root.set_attribute("ingest.error_type", type(exc).__name__)
+        root.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+        raise
+    finally:
+        otel_context.detach(token)
+        root.end()
+        shutdown_tracing()
+
+
+def _run_impl(
+    src: Path,
+    progress: Path,
+    workers: int | None,
+    limit: int | None,
+    dry_run: bool,
+    settings: Settings,
+    tracer: trace.Tracer,
+    root: trace.Span,
+    vendor: str | None = None,
+    product: str | None = None,
+    version: str | None = None,
+    force_reingest: bool = False,
+) -> int:
     workers = resolve_workers(workers, settings)
     rules_v = extraction_rules_version()
     started = time.monotonic()
@@ -388,33 +439,39 @@ def run(
             set_bulk_indexing(client, settings.qdrant_collection, bulk=True)
             bulk_active = True
     try:
-        pdfs = walk_pdfs(src)
-        if limit:
-            pdfs = pdfs[:limit]
-        inventory = load_inventory(progress)
+        with tracer.start_as_current_span("ingest.plan") as plan_span:
+            pdfs = walk_pdfs(src)
+            if limit:
+                pdfs = pdfs[:limit]
+            inventory = load_inventory(progress)
 
-        tasks: list[tuple[str, str | None, str | None, str | None, str, str, bool, str | None]] = []
-        for path in pdfs:
-            record = inventory.get(str(path))
-            sha = sha256_file(path)
-            if record and should_skip(
-                record, sha, allow_dry=dry_run, rules_version=rules_v,
-                force_reingest=force_reingest,
-            ):
-                files_ok += 1  # already ingested — an ok outcome
-                log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
-                continue
-            # sha passes through: the parent hashed for the skip check, so the
-            # worker never re-reads the file for hashing. Embedding flag keeps
-            # the --dry-run contract (parse + chunk only, no embeddings).
-            # Cache path travels with the task because spawn workers share no
-            # memory with the parent (None when contextual ingest is off).
-            tasks.append(
-                (
-                    str(path), vendor or detect_vendor(path), product, version, str(src), sha,
-                    not dry_run, str(cache_path) if cache_path is not None else None,
+            tasks: list[tuple[str, str | None, str | None, str | None, str, str, bool, str | None]] = []
+            for path in pdfs:
+                record = inventory.get(str(path))
+                sha = sha256_file(path)
+                if record and should_skip(
+                    record, sha, allow_dry=dry_run, rules_version=rules_v,
+                    force_reingest=force_reingest,
+                ):
+                    files_ok += 1  # already ingested — an ok outcome
+                    log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
+                    continue
+                # sha passes through: the parent hashed for the skip check, so the
+                # worker never re-reads the file for hashing. Embedding flag keeps
+                # the --dry-run contract (parse + chunk only, no embeddings).
+                # Cache path travels with the task because spawn workers share no
+                # memory with the parent (None when contextual ingest is off).
+                tasks.append(
+                    (
+                        str(path), vendor or detect_vendor(path), product, version, str(src), sha,
+                        not dry_run, str(cache_path) if cache_path is not None else None,
+                    )
                 )
-            )
+            plan_span.set_attribute("ingest.pdfs", len(pdfs))
+            plan_span.set_attribute("ingest.todo", len(tasks))
+            root.set_attribute("ingest.workers", workers)
+            root.set_attribute("ingest.pdfs", len(pdfs))
+            root.set_attribute("ingest.todo", len(tasks))
 
         log.info(
             json.dumps(
@@ -430,6 +487,9 @@ def run(
         )
         if not tasks:
             # Nothing to do (all skipped): still emit the run summary.
+            root.set_attribute("ingest.files_ok", files_ok)
+            root.set_attribute("ingest.files_failed", 0)
+            root.set_attribute("ingest.chunks_upserted", chunks_upserted)
             _log_summary(
                 started, files_ok, files_failed, chunks_upserted, failures=0,
                 parse_seconds=parse_seconds, upsert_seconds=upsert_seconds,
@@ -604,6 +664,12 @@ def run(
                     )
                 )
 
+    root.set_attribute("ingest.files_ok", files_ok)
+    root.set_attribute("ingest.files_failed", files_failed)
+    root.set_attribute("ingest.chunks_upserted", chunks_upserted)
+    root.set_attribute("ingest.pages", pages_seen)
+    if failures:
+        root.set_status(Status(StatusCode.ERROR, "document failures"))
     _log_summary(
         started, files_ok, files_failed, chunks_upserted, failures,
         parse_seconds=parse_seconds, upsert_seconds=upsert_seconds,

@@ -8,9 +8,11 @@ EMBED_MODE=hash is a CI/dev-only in-process embedder (issue #8): deterministic
 feature hashing, no network, no model weights. Never the default in prod.
 """
 
+import contextlib
 import multiprocessing
 from typing import Literal
 
+from opentelemetry import propagate
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -20,19 +22,29 @@ HASH_EMBED_DIM = 256
 
 
 def bearer_auth_headers(api_key: str | None) -> dict[str, str]:
-    """Authorization header for gateway-guarded model endpoints (LiteLLM
-    virtual keys, `Bearer sk-...`).
+    """Headers for every outbound model call: Bearer virtual key + W3C trace
+    context (LiteLLM keys, `Bearer sk-...`).
 
     Single helper for every outbound model call (reasoning LLM, dense embed,
-    reranker, tokenizer verify, contextual gist) so auth semantics cannot
-    diverge copies. Unset, empty, or whitespace-only keys yield no header —
-    never `Bearer None` — keeping the keyless path byte-identical to the
-    pre-gateway wire shape. The key is stripped: pasted secrets often trail
-    a newline. Values here must never reach logs; callers pass only the
-    returned mapping to httpx."""
-    if not api_key or not api_key.strip():
-        return {}
-    return {"Authorization": f"Bearer {api_key.strip()}"}
+    reranker, tokenizer verify, contextual gist) so auth and propagation
+    semantics cannot diverge. Unset, empty, or whitespace-only keys yield no
+    Authorization header — never `Bearer None` — keeping the keyless path
+    byte-identical to the pre-gateway wire shape. The key is stripped: pasted
+    secrets often trail a newline.
+
+    A valid active span adds `traceparent`/`tracestate` so a tracing-enabled
+    platform gateway can correlate its own spans with ours (platform-side
+    monitoring stays theirs); with tracing off nothing is injected and the
+    mapping is byte-identical to the auth-only shape. Injection is fail-open:
+    telemetry never breaks a request. Values here must never reach logs;
+    callers pass only the returned mapping to httpx."""
+    headers: dict[str, str] = {}
+    if api_key and api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+    # Telemetry must never fail a request; tracing off injects nothing.
+    with contextlib.suppress(Exception):
+        propagate.inject(headers)
+    return headers
 
 
 class Settings(BaseSettings):

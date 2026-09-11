@@ -25,17 +25,35 @@ def test_dryrun_plan_order_and_stages():
     r = _run()
     assert r.returncode == 0, r.stderr
     lines = [ln for ln in r.stdout.splitlines() if ln.startswith("[plan]")]
-    assert len(lines) == 7
-    # The prod topology order: backends -> Qdrant -> gateway -> probe ->
-    # ingest -> agent -> smoke. Models are never addressed straight from
-    # the agent; the plan hands the container host.docker.internal URLs.
+    assert len(lines) == 9
+    # The prod topology order: backends -> Qdrant -> Jaeger -> gateway ->
+    # probe -> ingest -> agent -> smoke -> trace check. Models are never
+    # addressed straight from the agent; the plan hands the container
+    # host.docker.internal URLs, and tracing is part of the stack.
     assert "backends" in lines[0] and "127.0.0.1:8000" in lines[0]
     assert "qdrant" in lines[1]
-    assert "run_local_gateway.sh" in lines[2]
-    assert "probe_gateway.py" in lines[3]
-    assert "ingest" in lines[4] and "skipped" in lines[4]
-    assert "uvicorn" in lines[5]
-    assert "/v1/search" in lines[6]
+    assert "jaeger" in lines[2] and "run_local_jaeger.sh" in lines[2]
+    assert "run_local_gateway.sh" in lines[3]
+    assert "probe_gateway.py" in lines[4]
+    assert "ingest" in lines[5] and "skipped" in lines[5]
+    assert "uvicorn" in lines[6] and "OTEL_EXPORTER_OTLP_ENDPOINT" in lines[6]
+    assert "/v1/search" in lines[7]
+    assert "v1.search" in lines[8] and "mainframe-rag-agent" in lines[8]
+
+
+def test_dryrun_ingest_names_its_own_service(tmp_path):
+    # A shared OTEL_SERVICE_NAME would merge agent and ingest in one Jaeger;
+    # the plan pins the ingest service name explicitly.
+    r = _run({"CORPUS_DIR": str(tmp_path)})
+    assert r.returncode == 0, r.stderr
+    ingest = next(ln for ln in r.stdout.splitlines() if "ingest" in ln)
+    assert "OTEL_SERVICE_NAME=mainframe-rag-ingest" in ingest
+
+
+def test_dryrun_trace_timeout_override_reflected():
+    r = _run({"OTEL_TRACE_TIMEOUT": "7"})
+    assert r.returncode == 0, r.stderr
+    assert "timeout 7s" in r.stdout
 
 
 def test_dryrun_plan_includes_ingest_when_corpus_set(tmp_path):
@@ -52,7 +70,10 @@ def test_local_agent_port_override_reflected(tmp_path):
     assert "http://127.0.0.1:9099/v1/search" in r.stdout
 
 
-@pytest.mark.parametrize("var", ["GATEWAY_PORT", "LOCAL_AGENT_PORT", "DENSE_DIM"])
+@pytest.mark.parametrize(
+    "var",
+    ["GATEWAY_PORT", "LOCAL_AGENT_PORT", "DENSE_DIM", "JAEGER_PORT", "JAEGER_OTLP_PORT", "OTEL_TRACE_TIMEOUT"],
+)
 @pytest.mark.parametrize("bad", ["not-a-number", "0"])
 def test_bad_numeric_fails_closed(var, bad):
     r = _run({var: bad})

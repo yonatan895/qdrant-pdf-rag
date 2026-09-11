@@ -305,18 +305,20 @@ Reranked search also needs `RERANK_ENABLED=true RERANK_BASE_URL=http://127.0.0.1
 
 #### Local Production Simulation (`make local-stack`)
 
-The ownership contract is explicit: in production the platform team owns the model tier (vLLM + LiteLLM) and this repo owns Qdrant + ingest + retrieval + the agent, reaching every model leg only over the gateway HTTP contract. `make local-stack` reproduces that **complete topology on one machine** — pinned Qdrant + the real LiteLLM gateway (digest-pinned) in front of the three local vLLM backends + the FastAPI agent — and probes every leg through the gateway before declaring the stack up. Agent and ingest never call vLLM directly, so the wire contract under test is the production one.
+The ownership contract is explicit: in production the platform team owns the model tier (vLLM + LiteLLM) and this repo owns Qdrant + ingest + retrieval + the agent, reaching every model leg only over the gateway HTTP contract. `make local-stack` reproduces that **complete topology on one machine** — pinned Qdrant + Jaeger + the real LiteLLM gateway (digest-pinned) in front of the three local vLLM backends + the FastAPI agent — and probes every leg through the gateway **and verifies a trace landed in Jaeger** before declaring the stack up. Agent and ingest never call vLLM directly, so the wire contract under test is the production one.
 
 Prerequisites: Docker, the three backends already running (`make local-vllm` :8000, `make local-vllm-embed` :8001, `make local-vllm-rerank` :8002), and `.venv`. Qdrant is started via `make sim-qdrant` (the pinned-image owner) when unreachable; `make sim-clean` stops it.
 
 ```bash
-# Full stack: Qdrant -> gateway -> probe -> (optional ingest) -> agent -> smoke
+# Full stack: Qdrant -> Jaeger -> gateway -> probe -> (optional ingest) -> agent -> smoke -> trace check
 make local-stack
 CORPUS_DIR=output/demo-pdfs make local-stack     # also ingest through the gateway
 LOCAL_STACK_DRYRUN=1 make local-stack            # ordered plan only; no docker/network
 ```
 
-On exit (Ctrl-C) the agent and the gateway stop; Qdrant stays for `make sim-clean`. Ports: agent 8080 (`LOCAL_AGENT_PORT`), gateway 4000 (`GATEWAY_PORT`), Qdrant `QDRANT_URL` (default `http://127.0.0.1:6333`). Ephemeral keys are written mode 600 to a temp env file (`GATEWAY_ENV_FILE`, default `/tmp/local-stack-gateway-<port>.env`) — never inside the repo, never committed.
+Tracing is part of the stack, not a flag: the agent and (when `CORPUS_DIR` is set) the ingest run export OTLP to Jaeger, and a `v1.search` span must land before the stack reports up. Jaeger reuses an instance already answering on the UI port (an operator-managed one is left alone) or starts the digest-pinned owner (`scripts/run_local_jaeger.sh`); the local LiteLLM stand-in also exports its spans there so the gateway hop appears in the waterfall. The browser UI is at `http://127.0.0.1:16686`.
+
+On exit (Ctrl-C) the agent, the gateway, and an owned Jaeger stop; Qdrant stays for `make sim-clean`. Ports: agent 8080 (`LOCAL_AGENT_PORT`), gateway 4000 (`GATEWAY_PORT`), Jaeger UI 16686 / OTLP 4318 (`JAEGER_PORT`, `JAEGER_OTLP_PORT`), Qdrant `QDRANT_URL` (default `http://127.0.0.1:6333`). Ephemeral keys are written mode 600 to a temp env file (`GATEWAY_ENV_FILE`, default `/tmp/local-stack-gateway-<port>.env`) — never inside the repo, never committed.
 
 The gateway contract the stack exercises:
 
@@ -325,7 +327,7 @@ The gateway contract the stack exercises:
 * **Both rerank legs**: native `/v1/rerank` via the `hosted_vllm/` provider, plus a `/v1/score` pass-through to the vLLM backend (LiteLLM has no native score route). `scripts/probe_gateway.py` prints the recommended `RERANK_ENDPOINT_ORDER` after probing both.
 * **Tokenizer**: `/tokenize` stays 404 behind the gateway — the agent pins its in-process estimator after one warning (expected, not a fault).
 
-For single-leg debugging, `make local-gateway` keeps the gateway in the foreground (`make local-gateway-stop` stops it and its key store); then export the printed keys and run `scripts/probe_gateway.py --stream` and `make run-agent` yourself. The key store is a throwaway Postgres container + named volume (LiteLLM `/key/generate` needs a database): env-passed keys survive restarts, minted keys rotate per start (`GATEWAY_RESET_KEYS=1` wipes the store). `scripts/run_local_gateway.sh` owns config rendering; the LiteLLM image is pinned by digest there. These simulation scripts are local-dev only — never a product path, never in CI or the air gap.
+For single-component debugging, `make local-jaeger` / `make local-jaeger-stop` manage just the trace backend, and `make local-gateway` keeps the gateway in the foreground (`make local-gateway-stop` stops it and its key store); then export the printed keys and run `scripts/probe_gateway.py --stream` and `make run-agent` yourself. The key store is a throwaway Postgres container + named volume (LiteLLM `/key/generate` needs a database): env-passed keys survive restarts, minted keys rotate per start (`GATEWAY_RESET_KEYS=1` wipes the store). `scripts/run_local_gateway.sh` owns gateway config rendering; the LiteLLM image is pinned by digest there. These simulation scripts are local-dev only — never a product path, never in CI or the air gap.
 
 ---
 

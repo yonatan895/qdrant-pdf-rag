@@ -65,6 +65,16 @@ def test_render_carries_master_key_and_score_passthrough():
     assert 'methods: ["POST"]' in text
 
 
+def test_render_otel_callback_only_when_endpoint_set():
+    # The local waterfall includes the platform stand-in: LiteLLM exports
+    # spans when the stack found a local Jaeger. No endpoint (standalone
+    # dry-run) keeps the pre-tracing config byte-identical.
+    off = _read_cfg(_render())
+    assert "litellm_settings" not in off
+    on = _read_cfg(_render({"GATEWAY_OTEL_ENDPOINT": "http://host.docker.internal:4318"}))
+    assert 'callbacks: ["otel"]' in on
+
+
 def test_render_honors_url_and_model_overrides():
     text = _read_cfg(
         _render(

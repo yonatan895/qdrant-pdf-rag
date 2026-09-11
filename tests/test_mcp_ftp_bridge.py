@@ -448,7 +448,7 @@ def test_lifespan_wires_tracer_setup_and_shutdown(monkeypatch) -> None:
     startup, flush on shutdown."""
     from fastapi.testclient import TestClient
 
-    from mainframe_rag.agent import tracing as tracing_mod
+    from mainframe_rag import tracing as tracing_mod
     from mainframe_rag.mcp import server as server_mod
 
     calls: dict = {}
