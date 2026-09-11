@@ -12,6 +12,7 @@
 enforce_product_rules
 resolve_aliases
 require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM VLLM_BASE_URL
+check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -97,6 +98,17 @@ kustomize_render deploy/kustomize/overlays/openshift | sed -E 's|"(__[A-Z0-9_]+_
     -e "s|__RERANK_BASE_URL__|${RERANK_BASE_URL:-}|g" \
     -e "s|__RERANK_MODEL__|${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}|g" \
     > dist/agent-rendered.yaml
+# Gateway virtual keys (LiteLLM): one operator-created Secret read via
+# secretKeyRef, or nothing at all. A set name substitutes into the overlay's
+# key entries; unset strips those entries so keyless deployments reference
+# no secret (a dangling secretKeyRef would wedge every pod start).
+if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
+    sed -i -e "s|__GATEWAY_API_KEY_SECRET__|$GATEWAY_API_KEY_SECRET|g" dist/agent-rendered.yaml
+    echo "==> Gateway keys wired (Secret $GATEWAY_API_KEY_SECRET: LLM/EMBED/RERANK_API_KEY via secretKeyRef)"
+else
+    strip_gateway_key_entries dist/agent-rendered.yaml LLM_API_KEY EMBED_API_KEY RERANK_API_KEY
+    echo "==> Gateway keys off (GATEWAY_API_KEY_SECRET unset): keyless model endpoints"
+fi
 wire_pull_secret dist/agent-rendered.yaml
 fail_on_placeholders dist/agent-rendered.yaml agent
 run $KC apply -f dist/agent-rendered.yaml

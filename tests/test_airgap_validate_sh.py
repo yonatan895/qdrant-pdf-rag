@@ -100,6 +100,15 @@ def test_validate_vllm_url_bad_scheme_refused(tree):
     assert "VLLM_BASE_URL must begin with http:// or https://" in r.stderr
 
 
+@pytest.mark.parametrize(
+    "var", ["EMBED_BASE_URL", "LLM_BASE_URL", "RERANK_BASE_URL", "CONTEXT_LLM_BASE_URL"]
+)
+def test_validate_optional_model_url_bad_scheme_refused(tree, var):
+    r = _run(tree, {var: "gateway.internal:4000/v1"})
+    assert r.returncode != 0
+    assert f"{var} must begin with http:// or https://" in r.stderr
+
+
 def test_validate_missing_skopeo_fails(tree):
     os.remove(tree / "bin" / "skopeo")
     symlink_tools(tree, ("sh", "dirname", "awk", "sed", "head", "ls"))
@@ -115,6 +124,7 @@ STORAGE_CLASS=nfs-client
 EMBED_MODEL=file-model
 DENSE_DIM=not-a-number
 VLLM_BASE_URL=ftp://file-vllm:8000
+GATEWAY_API_KEY_SECRET=file-secret-should-lose
 """
 
 VALID_ENV_FILE = """\
@@ -136,10 +146,19 @@ def _write_env_file(tree, content):
 def test_explicit_env_beats_env_file(tree):
     # Every file value here would fail validation on its own (NFS storage,
     # non-http URL, non-integer dim); exit 0 proves the explicit environment
-    # won on all keys.
-    r = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, POISON_ENV_FILE)})
+    # won on all keys. The secret name is charset-valid either way, so
+    # precedence is pinned by echoing the winner instead.
+    r = _run(
+        tree,
+        {
+            "AIRGAP_ENV": _write_env_file(tree, POISON_ENV_FILE),
+            "GATEWAY_API_KEY_SECRET": "explicit-secret",
+        },
+    )
     assert r.returncode == 0, r.stderr
     assert "SUCCESS: Pre-flight validation passed (dry-run mode)." in r.stdout
+    assert "GATEWAY_API_KEY_SECRET: explicit-secret" in r.stdout
+    assert "file-secret-should-lose" not in r.stdout
 
 
 def test_env_file_still_feeds_unset_vars(tree):
@@ -175,3 +194,56 @@ def test_makefile_does_not_include_airgap_env():
     # file themselves (see common.sh OPERATOR_ENV_KEYS).
     text = (REPO / "Makefile").read_text()
     assert "include airgap.env" not in text
+
+
+# ------------------------------------------------------- gateway keys (LiteLLM)
+
+
+@pytest.mark.parametrize(
+    "var", ["LLM_API_KEY", "EMBED_API_KEY", "RERANK_API_KEY", "CONTEXT_LLM_API_KEY"]
+)
+def test_validate_refuses_plaintext_gateway_key_in_env_file(tree, var):
+    r = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, f"{var}=sk-plaintext-must-die\n")})
+    assert r.returncode != 0
+    assert "plaintext gateway virtual key" in r.stderr
+
+
+def test_validate_allows_empty_and_commented_gateway_keys(tree):
+    r = _run(
+        tree,
+        {"AIRGAP_ENV": _write_env_file(tree, "LLM_API_KEY=\n#EMBED_API_KEY=sk-commented\n")},
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_validate_gateway_secret_bad_name_fails_closed(tree):
+    r = _run(tree, {"GATEWAY_API_KEY_SECRET": "Bad_Name!"})
+    assert r.returncode != 0
+    assert "GATEWAY_API_KEY_SECRET must be a DNS-subdomain name" in r.stderr
+
+
+def test_validate_live_verifies_gateway_secret(tree):
+    # Non-dry-run against all-zero stubs: namespace + Secret resolve.
+    r = _run(tree, {"AIRGAP_DRYRUN": "0", "GATEWAY_API_KEY_SECRET": "gateway-api-keys"})
+    assert r.returncode == 0, r.stderr
+    assert "Gateway key Secret 'gateway-api-keys' verified" in r.stdout
+
+
+def test_validate_live_missing_gateway_secret_fails(tree):
+    write_stub(
+        tree / "bin" / "kubectl",
+        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"secret\" ]; then exit 1; fi\ndone\nexit 0\n",
+    )
+    r = _run(tree, {"AIRGAP_DRYRUN": "0", "GATEWAY_API_KEY_SECRET": "gateway-api-keys"})
+    assert r.returncode != 0
+    assert "Secret 'gateway-api-keys' not found" in r.stderr
+
+
+def test_validate_live_missing_namespace_notices_secret(tree):
+    write_stub(
+        tree / "bin" / "kubectl",
+        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"namespace\" ]; then exit 1; fi\ndone\nexit 0\n",
+    )
+    r = _run(tree, {"AIRGAP_DRYRUN": "0", "GATEWAY_API_KEY_SECRET": "gateway-api-keys"})
+    assert r.returncode == 0, r.stderr
+    assert "does not exist yet" in r.stdout

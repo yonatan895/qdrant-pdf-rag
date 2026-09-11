@@ -561,6 +561,10 @@ EMBED_MODEL=ibm-granite/granite-embedding-278m-multilingual
 DENSE_DIM=768
 LLM_MODEL_REASONING=ibm-granite/granite-20b-code-instruct
 
+# Gateway virtual keys: name of ONE operator-created Secret holding the
+# platform team's LiteLLM keys (unset = keyless). Never put key values here.
+#GATEWAY_API_KEY_SECRET=gateway-api-keys
+
 # Optional pull secret name (if registry requires credentials)
 PULL_SECRET=internal-registry-pull-secret
 ```
@@ -571,9 +575,21 @@ The platform team serves three model endpoints; this repo never hardcodes model 
 
 | Role | URL key | Model key | Notes |
 |---|---|---|---|
-| Reasoning (`/v1/answer` only) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). |
-| Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `VLLM_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. |
-| Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `EMBED_BASE_URL`) | `RERANK_MODEL` | Served via vLLM `--task score` (`/v1/score`, TEI `/v1/rerank` fallback). Point it at the reranker server — the embed default only fits single-server deployments. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. |
+| Reasoning (`/v1/answer` only) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
+| Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `VLLM_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
+| Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `EMBED_BASE_URL`) | `RERANK_MODEL` | Served via vLLM `--task score` (`/v1/score`, TEI `/v1/rerank` fallback). Point it at the reranker server — the embed default only fits single-server deployments. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. |
+
+Create the key Secret **before** `make airgap-deploy` (one Secret, four data keys; the contextual-gist key rides the ingest Job):
+
+```bash
+kubectl -n mainframe-rag create secret generic gateway-api-keys \
+  --from-literal=llm-api-key='<platform-key>' \
+  --from-literal=embed-api-key='<platform-key>' \
+  --from-literal=rerank-api-key='<platform-key>' \
+  --from-literal=context-llm-api-key='<platform-key>'
+```
+
+`make airgap-validate` verifies the Secret exists (when the namespace does) and refuses plaintext `*_API_KEY` values in `airgap.env`. Rotate by updating the Secret, then rollout-restart the agent (or re-run the ingest Job).
 
 #### Pre-Flight Validation (`make airgap-validate`)
 

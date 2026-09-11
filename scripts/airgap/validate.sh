@@ -25,6 +25,21 @@ case "$VLLM_BASE_URL" in
     *) die "VLLM_BASE_URL must begin with http:// or https://, got '$VLLM_BASE_URL'" ;;
 esac
 
+# Optional model-endpoint overrides: empty means "derived/disabled", anything
+# else must be an http(s) URL — a gateway hostname without a scheme fails
+# here, not as a cryptic connect error inside the cluster.
+for _url_var in EMBED_BASE_URL LLM_BASE_URL RERANK_BASE_URL CONTEXT_LLM_BASE_URL; do
+    eval "_url=\${$_url_var:-}"
+    case "$_url" in
+        "") ;;
+        http://*|https://*) ;;
+        *) die "$_url_var must begin with http:// or https://, got '$_url'" ;;
+    esac
+done
+unset _url_var _url
+
+check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
+
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -36,6 +51,9 @@ echo "    EMBED_MODEL:       $EMBED_MODEL"
 echo "    DENSE_DIM:         $DENSE_DIM"
 echo "    VLLM_BASE_URL:     $VLLM_BASE_URL"
 echo "    IMAGE_SHA:         $IMAGE_SHA"
+if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
+    echo "    GATEWAY_API_KEY_SECRET: $GATEWAY_API_KEY_SECRET"
+fi
 
 echo "==> 2. Validating required CLI tools"
 command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the air-gap bastion"
@@ -81,6 +99,16 @@ if ! $KC get storageclass "$STORAGE_CLASS" >/dev/null 2>&1; then
     die "StorageClass '$STORAGE_CLASS' must exist before deployment"
 fi
 echo "    StorageClass '$STORAGE_CLASS' verified in cluster"
+
+if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
+    if $KC get namespace "$NAMESPACE" >/dev/null 2>&1; then
+        $KC -n "$NAMESPACE" get secret "$GATEWAY_API_KEY_SECRET" >/dev/null 2>&1 || \
+            die "Secret '$GATEWAY_API_KEY_SECRET' not found in namespace '$NAMESPACE' — create it before deploying (see airgap.env.example)"
+        echo "    Gateway key Secret '$GATEWAY_API_KEY_SECRET' verified in namespace '$NAMESPACE'"
+    else
+        echo "    Notice: namespace '$NAMESPACE' does not exist yet — create Secret '$GATEWAY_API_KEY_SECRET' there before 'make airgap-deploy'"
+    fi
+fi
 
 echo "==> 5. Checking OpenShift Security Context Constraints (SCC)"
 if command -v oc >/dev/null 2>&1 && oc get scc >/dev/null 2>&1; then
