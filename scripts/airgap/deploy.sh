@@ -97,6 +97,7 @@ kustomize_render deploy/kustomize/overlays/openshift | sed -E 's|"(__[A-Z0-9_]+_
     -e "s|__RERANK_ENABLED__|\"${RERANK_ENABLED:-false}\"|g" \
     -e "s|__RERANK_BASE_URL__|${RERANK_BASE_URL:-}|g" \
     -e "s|__RERANK_MODEL__|${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}|g" \
+    -e "s|__RERANK_ENDPOINT_ORDER__|${RERANK_ENDPOINT_ORDER:-score_first}|g" \
     > dist/agent-rendered.yaml
 # Gateway virtual keys (LiteLLM): one operator-created Secret read via
 # secretKeyRef, or nothing at all. A set name substitutes into the overlay's

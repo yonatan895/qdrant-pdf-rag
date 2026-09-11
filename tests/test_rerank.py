@@ -519,6 +519,81 @@ def test_http_reranker_length_mismatch_raises():
         reranker.score("query", ["text0", "text1"])
 
 
+def _order_settings(**overrides):
+    base = {
+        "rerank_base_url": "http://rerank.test/v1",
+        "rerank_model": "BAAI/bge-reranker-v2-m3",
+        "rerank_batch_size": 2,
+        "_env_file": None,
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
+def test_http_reranker_rerank_first_prefers_rerank_leg():
+    """Gateway order: when both legs answer, rerank_first takes the
+    gateway-native leg and never spends a call on /v1/score."""
+    settings = _order_settings(rerank_endpoint_order="rerank_first")
+    paths: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/v1/rerank":
+            return httpx2.Response(
+                200,
+                json={"results": [{"index": 0, "score": 0.3}, {"index": 1, "score": 0.9}]},
+            )
+        if request.url.path == "/v1/score":
+            return httpx2.Response(
+                200,
+                json={"data": [{"index": 0, "score": 0.42}, {"index": 1, "score": 0.88}]},
+            )
+        return httpx2.Response(500)
+
+    reranker = HttpReranker(settings, client=httpx2.Client(transport=httpx2.MockTransport(handler)))
+    assert reranker.score("query", ["text0", "text1"]) == [0.3, 0.9]
+    assert paths == ["/v1/rerank"]
+
+
+def test_http_reranker_rerank_first_falls_back_to_score():
+    """Gateway order keeps the symmetric fallback: a dead /v1/rerank drops
+    to /v1/score instead of failing the search."""
+    settings = _order_settings(rerank_endpoint_order="rerank_first")
+    paths: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/v1/rerank":
+            return httpx2.Response(404, json={"error": "not found"})
+        if request.url.path == "/v1/score":
+            return httpx2.Response(
+                200,
+                json={"data": [{"index": 0, "score": 0.42}, {"index": 1, "score": 0.88}]},
+            )
+        return httpx2.Response(500)
+
+    reranker = HttpReranker(settings, client=httpx2.Client(transport=httpx2.MockTransport(handler)))
+    assert reranker.score("query", ["text0", "text1"]) == [0.42, 0.88]
+    assert paths == ["/v1/rerank", "/v1/score"]
+
+
+def test_http_reranker_rerank_first_both_spent_fails_closed():
+    """Gateway order with both legs unusable fails closed (never empty
+    scores), like the legacy order does."""
+    settings = _order_settings(rerank_endpoint_order="rerank_first")
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/v1/rerank":
+            return httpx2.Response(200, json={"results": [{"index": 0, "score": 0.5}]})
+        if request.url.path == "/v1/score":
+            return httpx2.Response(200, json={"data": [{"index": 0, "score": 0.5}]})
+        return httpx2.Response(500)
+
+    reranker = HttpReranker(settings, client=httpx2.Client(transport=httpx2.MockTransport(handler)))
+    with pytest.raises(RuntimeError, match="no usable scores"):
+        reranker.score("query", ["text0", "text1"])
+
+
 def test_build_reranker_dispatch():
     # 1. Disabled
     s_off = Settings(rerank_enabled=False, _env_file=None)

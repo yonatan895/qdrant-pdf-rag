@@ -55,6 +55,8 @@ spec:
               value: "__RERANK_BASE_URL__"
             - name: RERANK_MODEL
               value: "__RERANK_MODEL__"
+            - name: RERANK_ENDPOINT_ORDER
+              value: __RERANK_ENDPOINT_ORDER__
             - name: LLM_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -353,6 +355,21 @@ def test_reranker_configured_when_enabled(tree):
     assert "__RERANK_" not in rendered
 
 
+def test_reranker_endpoint_order_defaults_score_first(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert re.search(r"RERANK_ENDPOINT_ORDER\n\s+value: score_first", rendered, re.MULTILINE)
+    assert "__RERANK_ENDPOINT_ORDER__" not in rendered
+
+
+def test_reranker_endpoint_order_rerank_first_renders(tree):
+    r = _run(tree, ("RERANK_ENDPOINT_ORDER", "rerank_first"))
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert re.search(r"RERANK_ENDPOINT_ORDER\n\s+value: rerank_first", rendered, re.MULTILINE)
+
+
 # ------------------------------------------------------- gateway keys (LiteLLM)
 
 
@@ -412,3 +429,9 @@ def test_gateway_overlay_block_matches_stub_contract():
         assert f"- name: {env_name}" in real
         assert f"key: {data_key}" in real
     assert "__GATEWAY_API_KEY_SECRET__" in real
+
+
+def test_gateway_overlay_renders_endpoint_order_token():
+    """The real prod overlay carries the order token deploy.sh substitutes."""
+    real = (REPO / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml").read_text()
+    assert re.search(r"- name: RERANK_ENDPOINT_ORDER\n\s+value: __RERANK_ENDPOINT_ORDER__", real)

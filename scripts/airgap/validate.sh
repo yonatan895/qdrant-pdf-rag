@@ -40,6 +40,11 @@ unset _url_var _url
 
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 
+case "${RERANK_ENDPOINT_ORDER:-score_first}" in
+    score_first|rerank_first) ;;
+    *) die "RERANK_ENDPOINT_ORDER must be score_first or rerank_first, got '${RERANK_ENDPOINT_ORDER}'" ;;
+esac
+
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac

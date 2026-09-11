@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 import httpx2
@@ -139,56 +139,111 @@ class HttpReranker:
         headers = bearer_auth_headers(self._settings.rerank_api_key)
         scores: list[float] = []
         client = self._http()
+        if self._settings.rerank_endpoint_order == "rerank_first":
+            legs: tuple[
+                Callable[[httpx2.Client, str, dict[str, str], str, list[str]], list[float] | None],
+                Callable[[httpx2.Client, str, dict[str, str], str, list[str]], list[float] | None],
+            ] = (self._rerank_batch, self._score_batch)
+        else:
+            legs = (self._score_batch, self._rerank_batch)
 
         for i in range(0, len(texts), self._batch_size):
             batch_texts = texts[i : i + self._batch_size]
-            url = f"{base}/score" if base.endswith("/v1") else f"{base}/v1/score"
-            payload = {
-                "model": self._model,
-                "text_1": query,
-                "text_2": batch_texts,
-            }
             batch_scores: list[float] | None = None
-            try:
-                resp = client.post(url, json=payload, timeout=self._timeout, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-                if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
-                    items = data["data"]
-                    if len(items) == len(batch_texts):
-                        sorted_items = sorted(items, key=lambda d: d.get("index", 0))
-                        batch_scores = [float(d["score"]) for d in sorted_items]
-            except (httpx2.HTTPStatusError, httpx2.RequestError, ValueError, KeyError):
-                batch_scores = None
-
-            if batch_scores is not None:
-                scores.extend(batch_scores)
-                continue
-
-            # Fallback to Cohere/TEI standard (/v1/rerank or /rerank)
-            rerank_url = f"{base}/rerank" if base.endswith("/v1") else f"{base}/v1/rerank"
-            rerank_payload = {
-                "model": self._model,
-                "query": query,
-                "documents": batch_texts,
-            }
-            resp = client.post(rerank_url, json=rerank_payload, timeout=self._timeout, headers=headers)
-            resp.raise_for_status()
-            r_data = resp.json()
-            results = r_data.get("results") if isinstance(r_data, dict) else None
-            if not isinstance(results, list) or len(results) != len(batch_texts):
+            for index, leg in enumerate(legs):
+                last = index == len(legs) - 1
+                try:
+                    batch_scores = leg(client, base, headers, query, batch_texts)
+                except (
+                    httpx2.HTTPStatusError,
+                    httpx2.RequestError,
+                    ValueError,
+                    KeyError,
+                    RuntimeError,
+                ):
+                    # A spent leg falls through to the next one; the last
+                    # leg failing fails the search closed, exactly as the
+                    # legacy single-fallback path did.
+                    if last:
+                        raise
+                    batch_scores = None
+                if batch_scores is not None:
+                    break
+            if batch_scores is None:
+                # Reachable only when the trailing leg yields None instead
+                # of raising (the score leg never raises): both legs are
+                # spent, so fail closed rather than scoring silently empty.
                 raise RuntimeError(
-                    f"Reranker endpoint {rerank_url} returned invalid or mismatched results: {r_data}"
+                    f"Reranker endpoints under {base} returned no usable scores "
+                    f"for a batch of {len(batch_texts)} texts"
                 )
-            batch_scores = [0.0] * len(batch_texts)
-            for res in results:
-                idx = res.get("index")
-                if idx is None or not (0 <= idx < len(batch_texts)):
-                    raise RuntimeError(f"Reranker returned out-of-bounds index: {idx}")
-                batch_scores[idx] = float(res.get("relevance_score", res.get("score", 0.0)))
             scores.extend(batch_scores)
 
         return scores
+
+    def _score_batch(
+        self,
+        client: httpx2.Client,
+        base: str,
+        headers: dict[str, str],
+        query: str,
+        batch_texts: list[str],
+    ) -> list[float] | None:
+        """vLLM proprietary leg (`/v1/score`). None means unusable here —
+        transport failure or unexpected shape — so the caller tries the
+        next leg. Never raises for server behavior."""
+        url = f"{base}/score" if base.endswith("/v1") else f"{base}/v1/score"
+        payload = {
+            "model": self._model,
+            "text_1": query,
+            "text_2": batch_texts,
+        }
+        batch_scores: list[float] | None = None
+        try:
+            resp = client.post(url, json=payload, timeout=self._timeout, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+                items = data["data"]
+                if len(items) == len(batch_texts):
+                    sorted_items = sorted(items, key=lambda d: d.get("index", 0))
+                    batch_scores = [float(d["score"]) for d in sorted_items]
+        except (httpx2.HTTPStatusError, httpx2.RequestError, ValueError, KeyError):
+            batch_scores = None
+        return batch_scores
+
+    def _rerank_batch(
+        self,
+        client: httpx2.Client,
+        base: str,
+        headers: dict[str, str],
+        query: str,
+        batch_texts: list[str],
+    ) -> list[float]:
+        """Cohere/TEI standard leg (`/v1/rerank` or `/rerank`). Raises on
+        anything unusable — the caller only catches it when another leg
+        remains, otherwise it fails the search closed with the diagnosis."""
+        rerank_url = f"{base}/rerank" if base.endswith("/v1") else f"{base}/v1/rerank"
+        rerank_payload = {
+            "model": self._model,
+            "query": query,
+            "documents": batch_texts,
+        }
+        resp = client.post(rerank_url, json=rerank_payload, timeout=self._timeout, headers=headers)
+        resp.raise_for_status()
+        r_data = resp.json()
+        results = r_data.get("results") if isinstance(r_data, dict) else None
+        if not isinstance(results, list) or len(results) != len(batch_texts):
+            raise RuntimeError(
+                f"Reranker endpoint {rerank_url} returned invalid or mismatched results: {r_data}"
+            )
+        batch_scores = [0.0] * len(batch_texts)
+        for res in results:
+            idx = res.get("index")
+            if idx is None or not (0 <= idx < len(batch_texts)):
+                raise RuntimeError(f"Reranker returned out-of-bounds index: {idx}")
+            batch_scores[idx] = float(res.get("relevance_score", res.get("score", 0.0)))
+        return batch_scores
 
 
 # ------------------------------------------------------- Dispatch and candidate scoring
