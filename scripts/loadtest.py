@@ -118,11 +118,14 @@ def run_load(
     concurrency: int,
     duration_s: float,
     limit: int = 8,
+    request_timeout_s: float = 30.0,
 ) -> dict[str, Any]:
     """Run the load and return the metrics dict. Thread-per-worker, each with
     its own connection pool; round-robin over the deterministic query set.
     Captures overall latency, per-stage timings from Server-Timing headers,
-    and VRAM footprint."""
+    and VRAM footprint. ``request_timeout_s`` bounds one request: reasoning
+    answers under concurrency can legitimately exceed 30s on a small GPU, and
+    a client-side give-up is a recordable fault, not a latency sample."""
     path = "/v1/search" if endpoint == "search" else "/v1/answer"
     url = f"{base_url.rstrip('/')}{path}"
     latencies: list[float] = []
@@ -136,7 +139,7 @@ def run_load(
 
     def worker() -> None:
         nonlocal errors, missing_timings
-        client = httpx2.Client(timeout=30.0)
+        client = httpx2.Client(timeout=request_timeout_s)
         try:
             while time.monotonic() < deadline:
                 with lock:
@@ -298,6 +301,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--duration", type=float, default=30.0, help="seconds of load")
     parser.add_argument(
+        "--request-timeout", type=float, default=30.0,
+        help="per-request client timeout in seconds (reasoning answers under load can exceed 30s)",
+    )
+    parser.add_argument(
         "--query", action="append", default=None,
         help="query to send (repeatable); defaults to a fixed mixed set",
     )
@@ -325,7 +332,8 @@ def main(argv: list[str] | None = None) -> int:
     results: dict[str, Any] = {}
 
     for ep in endpoints:
-        res = run_load(args.url, ep, queries, args.concurrency, args.duration)
+        res = run_load(args.url, ep, queries, args.concurrency, args.duration,
+                       request_timeout_s=args.request_timeout)
         results[ep] = res
         lat = res["latency_ms"]
         print(

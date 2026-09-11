@@ -178,7 +178,7 @@ re-capture in the gate's own env instead of widening tolerances.
 | `evals/baseline-paraphrase[-vllm].json` | Same split, dedicated `paraphrase-manuals` collection | Fresh-ingest rung 3 before scoring; not in CI. |
 | `evals/holdout.jsonl` + `holdout-baseline.json` | RC-only vs `real_manuals` (`make eval-holdout` declares `VENUE=rc`) | Never tune locally; sha-verified on RC. |
 | `benchmarks/baseline.json` | CI runner (`cpu_count`, `qdrant_image`) | Never gate a dev-machine capture; repeats ≥3. |
-| `benchmarks/harness[-vllm].json` + L3 perf | GPU RC host (4-key env check) | Never merge GPU numbers into the CI bench JSON. |
+| `benchmarks/harness[-vllm].json` + L3 perf | GPU RC host (5-key env check, `concurrency` included) | Never merge GPU numbers into the CI bench JSON. |
 
 `VENUE=rc` is the operator declaration for every real-corpus row above:
 the frozen holdout and `real_manuals` fail closed without it, and dev
