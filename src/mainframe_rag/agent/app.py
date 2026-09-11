@@ -693,11 +693,12 @@ async def v1_answer(
             script=None,
         )
 
-    # Prompt construction is local CPU work (estimate + optional /tokenize
-    # verify that pins its own fallback) — deliberately OUTSIDE the upstream
-    # try below: a build failure is an internal fault and surfaces as 500
-    # "internal", never mislabeled as 502 "answer failed" (review S5; pinned
-    # by test_prompt_build_failure_maps_to_internal).
+    # Prompt construction is local CPU work plus the optional /tokenize
+    # verify RPC (the tokenizer protocol is sync), dispatched via
+    # asyncio.to_thread so neither blocks the event loop. A build failure is
+    # an internal fault and surfaces as 500 "internal", never mislabeled as
+    # 502 "answer failed" (review S5; pinned by
+    # test_prompt_build_failure_maps_to_internal).
     complexity = classify_query_complexity(req.query)
     max_context = (
         settings.prompt_max_context_chars_complex
@@ -719,12 +720,18 @@ async def v1_answer(
             "rag.max_context_chars": max_context,
         },
     ):
-        messages = build_messages(
-            req.query, hits,
-            product=req.product, version=req.version, splunk_context=req.splunk_context,
+        messages = await asyncio.to_thread(
+            build_messages,
+            req.query,
+            hits,
+            product=req.product,
+            version=req.version,
+            splunk_context=req.splunk_context,
             max_context_chars=max_context,
             max_chunk_chars=settings.prompt_max_chunk_chars,
-            max_chunk_chars_narrative=settings.prompt_max_chunk_chars_complex if complexity == "complex" else None,
+            max_chunk_chars_narrative=(
+                settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
+            ),
             splunk_context_max_chars=settings.splunk_context_max_chars,
             complexity=complexity,
             tokenizer=tokenizer,
