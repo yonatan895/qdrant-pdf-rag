@@ -74,8 +74,12 @@ over a live collection and scores doc-level against the golden entries.
   per-class blocks, abstain top-score stats, `must_not` checked/violations,
   page stats.
 - **Gates (ratios vs the mode-keyed baseline):** recall@1 ≥ 0.90,
-  recall@5/8 ≥ 0.95, MRR ≥ 0.95, nDCG@8 ≥ 0.95, identifier recall@1 and
-  `message_id`-class recall@1 exactly 1.0 — plus the absolute invariant:
+  recall@5/8 ≥ 0.95, MRR ≥ 0.95, nDCG@8 ≥ 0.95. Identifier recall@1 and
+  `message_id`-class recall@1 are no-drop gates: exactly 1.0 on the
+  synthetic venue (where the recorded baseline is saturated), and "not
+  below the recorded baseline" on a real-corpus instrument
+  (`baseline._meta.collection` in `venue.RC_ONLY_COLLECTIONS`, issue #286)
+  where the baseline itself is below 1.0 — plus the absolute invariant:
   `must_not.violations == 0` regardless of baseline.
 - **Skip semantics:** missing metric or baseline warns and never gates; a
   **collection** mismatch skips the gate (baseline dropped); an

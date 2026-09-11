@@ -54,7 +54,7 @@ sys.path.insert(0, str(_REPO / "src"))
 if str(_REPO / "scripts") not in sys.path:
     sys.path.insert(0, str(_REPO / "scripts"))
 
-from venue import VenueError, require_rc_for_collection, require_rc_for_golden
+from venue import RC_ONLY_COLLECTIONS, VenueError, require_rc_for_collection, require_rc_for_golden
 
 from mainframe_rag.config import load_settings
 from mainframe_rag.manifest import write_run_manifest
@@ -422,6 +422,10 @@ EVAL_GATED_METRICS = {
 
 # Absolute floors, independent of the recorded baseline: identifier and
 # message-ID lookups are safety-critical, so 1.0 means 1.0 (AGENTS.md).
+# The 1.0 floor encodes the synthetic venue's saturation; a real-corpus
+# baseline (venue.RC_ONLY_COLLECTIONS) is itself below 1.0 by construction,
+# so there the same dotted metrics gate as "no drop vs the recorded value"
+# (issue #286) — an always-red gate would mask the real signal.
 EVAL_ABSOLUTE_GATED_METRICS = {
     "identifier.recall@1": 1.0,
     "classes.message_id.recall@1": 1.0,
@@ -456,6 +460,19 @@ def _set(target: dict, dotted: str, value) -> None:
     node[parts[-1]] = value
 
 
+def _absolute_floors_apply(baseline: dict) -> bool:
+    """Strict 1.0 floors apply to the synthetic instrument only (issue #286).
+
+    The real-corpus holdout baseline records identifier recall below 1.0
+    (real manuals, real queries); applying the saturated floor there made
+    every gated holdout run red at its own baseline. Baselines without a
+    venue meta keep the strict floors (dev/CI and ad-hoc callers).
+    """
+    meta = baseline.get("_meta")
+    collection = meta.get("collection") if isinstance(meta, dict) else None
+    return collection not in RC_ONLY_COLLECTIONS
+
+
 def check_baseline(report: dict, baseline: dict | None) -> list[str]:
     if baseline is None:
         return []
@@ -469,10 +486,22 @@ def check_baseline(report: dict, baseline: dict | None) -> list[str]:
             continue
         if current > 0:
             regressions.append(f"{dotted}: {current} > 0 (absolute gate: must_not hits in the top-{MUST_NOT_WINDOW})")
+    absolute_floors = _absolute_floors_apply(baseline)
     for dotted, floor in EVAL_ABSOLUTE_GATED_METRICS.items():
         current = _get(report, dotted)
         if current is None:
             print(f"warn: {dotted} not scored in this run; not gated", file=sys.stderr)
+            continue
+        if not absolute_floors:
+            base_val = _get(baseline, dotted)
+            if base_val is None:
+                print(f"warn: baseline has no {dotted}; not gated", file=sys.stderr)
+                continue
+            if current < base_val:
+                regressions.append(
+                    f"{dotted}: {current} < baseline {base_val} "
+                    "(real-corpus gate: identifier lookups must not drop)"
+                )
             continue
         if current < floor:
             regressions.append(
