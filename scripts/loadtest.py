@@ -260,7 +260,7 @@ def export_to_baseline(
 
     if "_meta" not in baseline:
         baseline["_meta"] = {
-            "note": "Re-baseline via `make harness-l3 --update-baseline`; dedicated PR (AGENTS.md).",
+            "note": "Re-baseline via `make harness-l3-baseline`; dedicated PR (AGENTS.md).",
             "updated": time.strftime("%Y-%m-%d"),
         }
     else:

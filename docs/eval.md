@@ -166,8 +166,9 @@ verdict.
   (recorded in `_meta.env`); a slow reasoning model under concurrency needs
   `REQUEST_TIMEOUT` above the 30s default or every request is a client-side
   error, not a latency sample. `benchmarks/harness-l3-vllm.json` is
-  recorded (2026-09-11, RC GPU host); the hash file is intentionally not
-  recorded — L3 is a GPU RC tier and the CI bench owns CPU-mode perf.
+  recorded (2026-09-11, RC stand-in host, `_meta.env` pins the tier); the
+  hash file is intentionally not recorded — L3 is a GPU tier and the CI
+  bench owns CPU-mode perf.
 - **L4 (answer-quality gate):** `harness_l4.py` runs the L2 runner
   (`run_l2(..., relevance_enabled=True)`, one judging path) K times
   (`--repeats`, default 3) over the same deterministic sample and adds the
