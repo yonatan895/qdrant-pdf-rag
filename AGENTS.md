@@ -59,7 +59,7 @@ If CI fails, fix the production cause. Do not delete or weaken tests to go green
 - Qdrant data PVC is RWO block, not NFS. Corpus may be NFS read-only. Ingest-work scratch on prod is also RWO block.
 - Unprivileged Qdrant image, `restricted-v2` SCC, ClusterIP only, no public Route to Qdrant. Agent Route only if `AGENT_ROUTE=true`.
 - Qdrant server is **1.19.0** `*-unprivileged`; `qdrant-client` in the lockfile must match; Helm chart is vendored at `charts/qdrant-1.19.0.tgz`. Do not `helm repo add` on the air-gap host.
-- This repository does **not** install vLLM, LiteLLM, Splunk, or GPU operators. Dense embed is the other team's in-cluster vLLM (`VLLM_BASE_URL`). Sparse is local FastEmbed with baked weights. Never Qdrant Cloud inference.
+- **Model ownership contract.** Prod/air-gap: the platform team owns vLLM + the LiteLLM gateway; this repo consumes the model tier over HTTP only (`*_BASE_URL` + per-leg `*_API_KEY`, `secretKeyRef`) and never installs, deploys, or Helm-charts vLLM / LiteLLM / Splunk / GPU operators on a product path. Local dev/test: `make local-stack` simulates the complete prod topology — local vLLM backends behind the real LiteLLM gateway (`scripts/run_local_gateway.sh`, digest-pinned) plus our Qdrant + agent — so agent/ingest always exercise the gateway wire shape, never a straight-to-vLLM shortcut. The local model/gateway simulation scripts are local-only: never in the air gap or Helm (CI's separate `airgap-rehearsal` uses the documented `scripts/mock_vllm.py` stand-in). Sparse is local FastEmbed with baked weights. Never Qdrant Cloud inference.
 - `EMBED_MODE=hash` is **CI/dev only**. Prod requires internal vLLM. Never set `EMBED_MODE` in prod manifests or the default image env. Agent refuses hash without `ALLOW_HASH_MODE=true`.
 - `DENSE_DIM` / `EMBED_MODEL` / `LLM_MODEL_REASONING` come from the owning team. Do not hardcode a model.
 - No git submodules (they break `git bundle`). Vendor third-party trees by copy at a pinned SHA, LICENSE + NOTICE + pin file, dedicated pin-bump PRs only.
@@ -108,6 +108,7 @@ User-supplied `--embed-model`, `--model`, `--embed-url`, `--vllm-url`, `--embed-
 - Pin vLLM image tags that actually implement the flags you pass (`gemma4` parsers, `--runner pooling --convert embed`). `:latest` and stale minors are production bugs. vLLM v0.28.0 removed `--task`.
 - Local 8GB launch flags are resolved, not hardcoded: `scripts/run_local_vllm.sh` evals `mainframe_rag.serve resolve --profile LOCAL_RT_8GB --role <reasoning|embed>` (reasoning `GPU_MEM=0.64`; embed `GPU_MEM=0.33` with `--runner pooling --convert embed --enforce-eager`; both `MAX_LEN=4096`) and fails closed when resolve does. `make local-vllm*` passes `ROLE` + venv `BUDGET_PYTHON` per-recipe and carries `| .venv`; explicit `GPU_MEM=`/`MAX_LEN=`/`SEQS=`/`ROLE=` always win. `--enable-prefix-caching` resolves from Budget `prefix_cache` (on for LOCAL reasoning — vLLM v0.28 already caches by default, the pin guards flips; embed off, unmeasured). Solo reasoning `GPU_MEM=0.85` is an explicit override. A 2048 embed window was rejected by the #99 tokenizer sweep (worst case 2043 tokens, ~2.0 chars/token on syntax-dense text). The embed budget is pinned hermetically by `tests/test_embed_budget.py` — re-run the sweep before changing chunk constants or the embed-text header.
 - `scripts/qdrant_sim.py` / `scripts/qdrant_pin.py` remain the only docker-lifecycle and pin-parse owners.
+- `make local-stack` is the canonical full local simulation entry (`scripts/run_local_stack.sh`: Qdrant → gateway → probe → optional ingest → agent → smoke; `LOCAL_STACK_DRYRUN=1` is hermetic). `local-vllm*`, `local-gateway`, `make run-agent`, and `test-vllm-e2e` are component-level debugging paths — they must not become a straight-to-vLLM consumer path: agent/ingest always take gateway URLs + per-leg keys. Gateway lifecycle is owned by `scripts/run_local_gateway.sh` (`make local-gateway-stop`); local-stack sources its `GATEWAY_ENV_FILE` handoff instead of re-deriving keys.
 - Never `pkill`/`pgrep -f` a pattern that appears in your own command line: the invoking shell's cmdline matches itself and dies before subsequent commands run (killed a probe-agent teardown mid-command in #199). Bracket-trick the pattern (`[u]vicorn`) or kill by PID from a pidfile.
 
 ## Error contract
@@ -215,7 +216,7 @@ Re-ingesting a regenerated corpus (new doc_id generation) requires deleting the 
 - Rebuilding Containerfiles inside the air-gap (mirrored UBI + wheelhouse).
 - GitLab jobs that `helm upgrade`, `skopeo copy`, or pack sneakernet tarballs.
 - MCP / live `skills.qdrant.tech` snippet server.
-- Installing vLLM, LiteLLM, Splunk, or GPU operators in this repo.
+- Installing vLLM, LiteLLM, Splunk, or GPU operators on a **product path** (local simulation scripts are the standing exception — see the ownership contract above).
 
 ## Standing bug rules
 

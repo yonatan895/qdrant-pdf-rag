@@ -303,6 +303,30 @@ One server per `make` invocation (each blocks its shell — run each in its own 
 
 Reranked search also needs `RERANK_ENABLED=true RERANK_BASE_URL=http://127.0.0.1:8002 RERANK_MODEL=BAAI/bge-reranker-v2-m3` on the consumer side (`query-demo`, eval `--rerank`, agent env). Launch order on a cold card: reasoning → embed → rerank (a 4k-context server fails KV init against leftovers; the profiles declare this allocation order).
 
+#### Local Production Simulation (`make local-stack`)
+
+The ownership contract is explicit: in production the platform team owns the model tier (vLLM + LiteLLM) and this repo owns Qdrant + ingest + retrieval + the agent, reaching every model leg only over the gateway HTTP contract. `make local-stack` reproduces that **complete topology on one machine** — pinned Qdrant + the real LiteLLM gateway (digest-pinned) in front of the three local vLLM backends + the FastAPI agent — and probes every leg through the gateway before declaring the stack up. Agent and ingest never call vLLM directly, so the wire contract under test is the production one.
+
+Prerequisites: Docker, the three backends already running (`make local-vllm` :8000, `make local-vllm-embed` :8001, `make local-vllm-rerank` :8002), and `.venv`. Qdrant is started via `make sim-qdrant` (the pinned-image owner) when unreachable; `make sim-clean` stops it.
+
+```bash
+# Full stack: Qdrant -> gateway -> probe -> (optional ingest) -> agent -> smoke
+make local-stack
+CORPUS_DIR=output/demo-pdfs make local-stack     # also ingest through the gateway
+LOCAL_STACK_DRYRUN=1 make local-stack            # ordered plan only; no docker/network
+```
+
+On exit (Ctrl-C) the agent and the gateway stop; Qdrant stays for `make sim-clean`. Ports: agent 8080 (`LOCAL_AGENT_PORT`), gateway 4000 (`GATEWAY_PORT`), Qdrant `QDRANT_URL` (default `http://127.0.0.1:6333`). Ephemeral keys are written mode 600 to a temp env file (`GATEWAY_ENV_FILE`, default `/tmp/local-stack-gateway-<port>.env`) — never inside the repo, never committed.
+
+The gateway contract the stack exercises:
+
+* **One origin per leg, model-id routing**: `EMBED_BASE_URL`, `LLM_BASE_URL`, and `RERANK_BASE_URL` all point at `http://localhost:4000/v1`; the requested `model` id selects the backend.
+* **Per-leg Bearer virtual keys**: the agent/ingest `*_API_KEY` values are LiteLLM virtual keys; missing/unknown keys get 401 on every route (including the rerank legs), so key wiring is exercised for real.
+* **Both rerank legs**: native `/v1/rerank` via the `hosted_vllm/` provider, plus a `/v1/score` pass-through to the vLLM backend (LiteLLM has no native score route). `scripts/probe_gateway.py` prints the recommended `RERANK_ENDPOINT_ORDER` after probing both.
+* **Tokenizer**: `/tokenize` stays 404 behind the gateway — the agent pins its in-process estimator after one warning (expected, not a fault).
+
+For single-leg debugging, `make local-gateway` keeps the gateway in the foreground (`make local-gateway-stop` stops it and its key store); then export the printed keys and run `scripts/probe_gateway.py --stream` and `make run-agent` yourself. The key store is a throwaway Postgres container + named volume (LiteLLM `/key/generate` needs a database): env-passed keys survive restarts, minted keys rotate per start (`GATEWAY_RESET_KEYS=1` wipes the store). `scripts/run_local_gateway.sh` owns config rendering; the LiteLLM image is pinned by digest there. These simulation scripts are local-dev only — never a product path, never in CI or the air gap.
+
 ---
 
 ### 3.7 Reasoning Performance, Query Complexity & Context Budgeting
