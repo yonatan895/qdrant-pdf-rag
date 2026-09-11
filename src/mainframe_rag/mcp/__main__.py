@@ -12,7 +12,7 @@ import argparse
 import os
 import sys
 
-from mainframe_rag.agent import tracing as tracing_mod
+from mainframe_rag import tracing as tracing_mod
 from mainframe_rag.mcp.bridge import FTPConfig, connect
 from mainframe_rag.mcp.server import create_app, sample_ratio_from_env, serve_stdio
 

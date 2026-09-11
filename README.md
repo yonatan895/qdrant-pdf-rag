@@ -4,7 +4,7 @@
 
 Citation-first expert mainframe agent: hybrid retrieval over ~100 GB of IBM-style manuals (IBM, Broadcom/CA, BMC, Precisely) on **air-gapped OpenShift**, answering operational questions with exact citations — document number, title, heading path, printed page label — plus optional JCL/REXX/operator steps from a reasoning model.
 
-Models (reasoning, dense embed, reranker) are served by the **platform team's internal vLLM / LiteLLM gateway** on a separate cluster — in production this repo only consumes that tier over HTTP; locally `make local-stack` simulates the full topology (vLLM behind the real LiteLLM gateway + Qdrant + agent). See [Model Gateway & Ownership Contract](#model-gateway--ownership-contract) below.
+Models (reasoning, dense embed, reranker) are served by the **platform team's internal vLLM / LiteLLM gateway** on a separate cluster — in production this repo only consumes that tier over HTTP; locally `make local-stack` simulates the full topology (vLLM behind the real LiteLLM gateway + Qdrant + Jaeger + agent, with tracing verified end to end). See [Model Gateway & Ownership Contract](#model-gateway--ownership-contract) below.
 
 - **Design & Architecture:** [docs/architecture.md](docs/architecture.md) (source of truth)
 - **Installation & Operations Guide:** [docs/install_and_ops.md](docs/install_and_ops.md) (step-by-step local & air-gap runbook)
@@ -34,7 +34,7 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 
 **Production (air-gap):** the platform team owns the model tier — reasoning, dense embed, and rerank served by vLLM behind a LiteLLM gateway on a separate cluster. This repo owns Qdrant + ingest + retrieval + the FastAPI agent and consumes the model tier **over HTTP only**; it never installs, deploys, or Helm-charts vLLM / LiteLLM / GPU operators on a product path. All model legs go through the gateway — there is no direct-to-vLLM product path.
 
-**Local dev/test:** `make local-stack` simulates the *complete* production topology on one machine — this repo's Qdrant + agent, plus a **platform stand-in**: local vLLM backends behind the **real** (digest-pinned) LiteLLM gateway. Agent and ingest still reach models through the gateway, so the production wire contract (single origin, model-id routing, per-leg virtual keys) is what gets tested. The local model/gateway simulation scripts are local-only — never in the air gap or Helm (CI's separate `airgap-rehearsal` uses the documented `scripts/mock_vllm.py` stand-in). See [docs/install_and_ops.md](docs/install_and_ops.md) §3.6.
+**Local dev/test:** `make local-stack` simulates the *complete* production topology on one machine — this repo's Qdrant + agent + Jaeger, plus a **platform stand-in**: local vLLM backends behind the **real** (digest-pinned) LiteLLM gateway. Agent and ingest still reach models through the gateway, so the production wire contract (single origin, model-id routing, per-leg virtual keys) is what gets tested, and a `v1.search` span must land in the local Jaeger before the stack reports up. The local model/gateway simulation scripts are local-only — never in the air gap or Helm (CI's separate `airgap-rehearsal` uses the documented `scripts/mock_vllm.py` stand-in). See [docs/install_and_ops.md](docs/install_and_ops.md) §3.6.
 
 Production wiring — all three legs in `airgap.env` (see [docs/install_and_ops.md](docs/install_and_ops.md) §4.3):
 

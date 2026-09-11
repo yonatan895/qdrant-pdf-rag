@@ -16,7 +16,7 @@ import json
 import logging
 import time
 
-from mainframe_rag.agent.tracing import current_trace_ids
+from mainframe_rag.tracing import current_trace_ids
 
 
 class JsonFormatter(logging.Formatter):

@@ -31,7 +31,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from opentelemetry import trace
 
-from mainframe_rag.agent import tracing as tracing_mod
+from mainframe_rag import tracing as tracing_mod
 from mainframe_rag.mcp import bridge
 from mainframe_rag.mcp.bridge import FTPConfig
 

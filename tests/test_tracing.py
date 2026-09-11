@@ -14,8 +14,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from mainframe_rag import tracing as tracing_mod
 from mainframe_rag.agent import app as app_mod
-from mainframe_rag.agent import tracing as tracing_mod
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.retrieve import query as query_mod
 from mainframe_rag.retrieve.query import async_search, search
@@ -222,6 +222,27 @@ def test_setup_tracing_omits_identity_when_unset(monkeypatch):
     attrs = dict(tracing_mod._provider.resource.attributes)
     assert "service.version" not in attrs
     assert "deployment.environment" not in attrs
+
+
+def test_setup_tracing_service_name_precedence(monkeypatch):
+    """explicit argument > OTEL_SERVICE_NAME > module default (ingest relies
+    on this to name itself without losing the operator override)."""
+    monkeypatch.setattr(tracing_mod, "OTLPSpanExporter", FakeOTLPExporter)
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "from-env")
+    tracing_mod.setup_tracing("http://collector.internal:4318")
+    assert dict(tracing_mod._provider.resource.attributes)["service.name"] == "from-env"
+
+    tracing_mod._provider = None
+    tracing_mod.setup_tracing("http://collector.internal:4318", service_name="explicit")
+    assert dict(tracing_mod._provider.resource.attributes)["service.name"] == "explicit"
+
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    tracing_mod._provider = None
+    tracing_mod.setup_tracing("http://collector.internal:4318")
+    assert (
+        dict(tracing_mod._provider.resource.attributes)["service.name"]
+        == tracing_mod.DEFAULT_SERVICE_NAME
+    )
 
 
 # ---------------------------------------------------------------- app spans
@@ -661,3 +682,31 @@ def test_upstream_trace_join_or_root(client, endpoint, span_name, join):
     else:
         assert root.context.trace_id != _UP_TRACE_ID
         assert root.parent is None
+
+
+# ------------------------------------------- outbound propagation (model legs)
+
+
+def test_bearer_headers_carry_traceparent_only_inside_span():
+    from mainframe_rag.config import bearer_auth_headers
+
+    provider, _ = _provider()
+    tracer = provider.get_tracer("test")
+    with tracer.start_as_current_span("outbound"):
+        inside = bearer_auth_headers("sk-x")
+        assert inside["Authorization"] == "Bearer sk-x"
+        assert inside["traceparent"].startswith("00-")
+        # Keyless legs still propagate (trace correlation is independent of auth).
+        keyless = bearer_auth_headers(None)
+        assert "Authorization" not in keyless
+        assert keyless["traceparent"].startswith("00-")
+    # No active span: byte-identical to the auth-only shape.
+    assert bearer_auth_headers("sk-x") == {"Authorization": "Bearer sk-x"}
+    assert bearer_auth_headers(None) == {}
+
+
+def test_bearer_headers_trims_key_without_propagation_context():
+    from mainframe_rag.config import bearer_auth_headers
+
+    assert bearer_auth_headers("  sk-x\n") == {"Authorization": "Bearer sk-x"}
+    assert bearer_auth_headers("   ") == {}

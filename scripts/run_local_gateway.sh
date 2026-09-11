@@ -56,6 +56,14 @@ GATEWAY_DEBUG="${GATEWAY_DEBUG:-0}"
 # the leg env (URLs, model ids, per-leg keys) is written there mode 600.
 # Contains ephemeral keys — never a repo path, never committed.
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-}"
+# Gateway-side tracing (local simulation only): when a Jaeger OTLP port is
+# reachable, LiteLLM's otel callback exports its spans there so the local
+# waterfall shows the platform-stand-in hop. Prod platform config is theirs
+# and untouched. GATEWAY_OTEL_ENDPOINT overrides the auto-detect (container
+# address — host.docker.internal); empty means tracing off.
+GATEWAY_OTEL_ENDPOINT="${GATEWAY_OTEL_ENDPOINT:-}"
+GATEWAY_OTEL_OTLP_PORT="${GATEWAY_OTEL_OTLP_PORT:-4318}"
+GATEWAY_OTEL_SERVICE_NAME="${GATEWAY_OTEL_SERVICE_NAME:-litellm-local}"
 BASE="http://localhost:${GATEWAY_PORT}"
 
 die() { echo "ERROR: $1" >&2; exit 1; }
@@ -121,6 +129,14 @@ case "$_SCORE_BASE" in */v1) ;; *) _SCORE_BASE="${_SCORE_BASE}/v1" ;; esac
 SCORE_TARGET="${_SCORE_BASE}/score"
 unset _SCORE_BASE
 
+# Gateway-side tracing (local only): auto-detect the local Jaeger OTLP port
+# when no explicit endpoint was given. Dry-run stays hermetic (no probe).
+if [ -z "$GATEWAY_OTEL_ENDPOINT" ] && [ "$GATEWAY_DRYRUN" != "1" ]; then
+    if curl -s -m 2 -o /dev/null "http://127.0.0.1:${GATEWAY_OTEL_OTLP_PORT}/v1/traces" 2>/dev/null; then
+        GATEWAY_OTEL_ENDPOINT="http://host.docker.internal:${GATEWAY_OTEL_OTLP_PORT}"
+    fi
+fi
+
 CFG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/local-gateway.XXXXXX")"
 cat > "${CFG_DIR}/config.yaml" <<EOF
 # Rendered by scripts/run_local_gateway.sh (local-dev only, never committed).
@@ -153,6 +169,12 @@ general_settings:
       target: "${SCORE_TARGET}"
       methods: ["POST"]
 EOF
+if [ -n "$GATEWAY_OTEL_ENDPOINT" ]; then
+    cat >> "${CFG_DIR}/config.yaml" <<EOF
+litellm_settings:
+  callbacks: ["otel"]
+EOF
+fi
 
 # Leg env handoff (one writer; local-stack sources it). Nothing here is a
 # consumer setting beyond the gateway legs — rerank_enabled is included
@@ -222,12 +244,20 @@ if [ "$_OK" != "1" ]; then
 fi
 
 echo "==> Starting local LiteLLM gateway ($GATEWAY_NAME on :$GATEWAY_PORT)"
+# OTel env only when a local Jaeger was found: container reaches the host
+# collector via the host.docker.internal mapping added above.
+OTEL_RUN_ARGS=""
+if [ -n "$GATEWAY_OTEL_ENDPOINT" ]; then
+    echo "==> Gateway tracing on: OTLP $GATEWAY_OTEL_ENDPOINT (service $GATEWAY_OTEL_SERVICE_NAME)"
+    OTEL_RUN_ARGS="-e OTEL_EXPORTER_OTLP_ENDPOINT=$GATEWAY_OTEL_ENDPOINT -e OTEL_SERVICE_NAME=$GATEWAY_OTEL_SERVICE_NAME"
+fi
 # shellcheck disable=SC2086
 docker run --rm --name "$GATEWAY_NAME" --network "$PG_NET" \
     --add-host=host.docker.internal:host-gateway \
     -p "${GATEWAY_PORT}:4000" \
     -v "${CFG_DIR}:/app/gateway:ro" \
     -e "DATABASE_URL=postgresql://litellm:${PG_PASSWORD}@${PG_NAME}:5432/litellm" \
+    ${OTEL_RUN_ARGS} \
     "$LITELLM_IMAGE" \
     --config /app/gateway/config.yaml ${GATEWAY_DEBUG:+--detailed_debug} \
     >/tmp/"$GATEWAY_NAME".log 2>&1 &

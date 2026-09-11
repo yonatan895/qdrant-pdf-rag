@@ -416,13 +416,24 @@ local-gateway-stop:
 	-docker stop $(or $(GATEWAY_NAME),local-litellm-gateway) $(or $(PG_NAME),local-litellm-gateway-pg) 2>/dev/null
 	-docker network rm $(or $(PG_NET),local-litellm-gateway-net) 2>/dev/null
 
+# Local Jaeger v2 backend (same digest the air-gap pack mirrors): OTLP/HTTP
+# :4318 + UI :16686, in-memory. Starts only when nothing answers on :16686
+# (an already-running Jaeger is reused); `make local-stack` owns it there.
+.PHONY: local-jaeger local-jaeger-stop
+local-jaeger:
+	sh scripts/run_local_jaeger.sh
+local-jaeger-stop:
+	-docker stop $(or $(JAEGER_NAME),local-jaeger) 2>/dev/null
+
 # Full local production simulation: pinned Qdrant + the real LiteLLM gateway
 # in front of the three local vLLM backends + the agent, probed end to end.
 # Mirrors prod ownership (platform: vLLM+LiteLLM; this repo: Qdrant+agent).
-# Prereqs: docker, the three 'make local-vllm*' backends serving, .venv.
+# Jaeger is part of the stack: agent/ingest export OTLP and a v1.search span
+# must land before the stack is declared up. Prereqs: docker, the three
+# 'make local-vllm*' backends serving, .venv.
 .PHONY: local-stack
 local-stack:
-	$(if $(CORPUS_DIR),CORPUS_DIR="$(CORPUS_DIR)",) $(if $(GATEWAY_PORT),GATEWAY_PORT=$(GATEWAY_PORT),) $(if $(LOCAL_AGENT_PORT),LOCAL_AGENT_PORT=$(LOCAL_AGENT_PORT),) sh scripts/run_local_stack.sh
+	$(if $(CORPUS_DIR),CORPUS_DIR="$(CORPUS_DIR)",) $(if $(GATEWAY_PORT),GATEWAY_PORT=$(GATEWAY_PORT),) $(if $(LOCAL_AGENT_PORT),LOCAL_AGENT_PORT=$(LOCAL_AGENT_PORT),) $(if $(JAEGER_PORT),JAEGER_PORT=$(JAEGER_PORT),) sh scripts/run_local_stack.sh
 
 test-vllm-e2e: | .venv
 	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",)
@@ -453,6 +464,6 @@ help:
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest | harness-l3"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper)"
 	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"
-	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | local-gateway (LiteLLM in front of all three backends on :4000) | local-gateway-stop | local-stack (full prod simulation: Qdrant + gateway + agent) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
+	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | local-gateway (LiteLLM in front of all three backends on :4000) | local-gateway-stop | local-jaeger (OTLP/Jaeger v2 on :4318, UI :16686) | local-jaeger-stop | local-stack (full prod simulation: Qdrant + gateway + Jaeger + agent) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."

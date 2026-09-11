@@ -75,7 +75,7 @@ def test_trace_ids_stamped_under_active_span():
 
     from opentelemetry.sdk.trace import TracerProvider
 
-    from mainframe_rag.agent import tracing as tracing_mod
+    from mainframe_rag import tracing as tracing_mod
 
     tracer = TracerProvider().get_tracer("test")
     with tracer.start_as_current_span("op") as span:
