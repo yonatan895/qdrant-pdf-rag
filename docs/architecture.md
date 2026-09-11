@@ -22,6 +22,15 @@ Build a **citation-first expert mainframe agent** that answers operational quest
 
 The agent returns **answers grounded strictly in citations** (doc number, title, heading path, printed page label) and, when asked, JCL/REXX/operator steps verified against those citations. Agent-fetched live state (ADR-0003) cites distinctly as live sources — never as manual citations — and degrades to manuals-only when unreachable.
 
+### 1.1 Ownership contract (prod vs local simulation)
+
+| Environment | Model tier (reasoning / embed / rerank) | Qdrant + ingest + retrieval + agent |
+|---|---|---|
+| **Production (air-gap OpenShift)** | **Platform team owns it**: vLLM servers behind the LiteLLM gateway. This repo consumes it over HTTP only (`*_BASE_URL` + per-leg virtual keys) — it never installs, deploys, or Helm-charts vLLM / LiteLLM / GPU operators on a product path. | **This repo owns it.** |
+| **Local dev/test** | **Simulated by this repo** (`make local-stack`): local vLLM backends behind the real, digest-pinned LiteLLM gateway (`scripts/run_local_gateway.sh`) — a stand-in for the platform team's tier. | **Same code as prod**, same wire contract. |
+
+Local simulation exists so agent/ingest always exercise the production gateway wire shape (single origin, model-id routing, per-leg Bearer virtual keys, native `/rerank` + `/v1/score` pass-through) — never a straight-to-vLLM shortcut. The local model/gateway simulation scripts (`scripts/run_local_gateway.sh`, `scripts/run_local_stack.sh`, `scripts/run_local_vllm.sh`) are local-only: never in the air gap or Helm. CI's `airgap-rehearsal` is a deployment-config rehearsal and uses the documented `scripts/mock_vllm.py` stand-in instead.
+
 ---
 
 ## 2. System Context & Boundaries

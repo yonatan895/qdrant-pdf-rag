@@ -410,6 +410,20 @@ local-vllm-rerank: | .venv
 local-gateway:
 	GATEWAY_PORT=$(or $(GATEWAY_PORT),4000) sh scripts/run_local_gateway.sh
 
+# Stop the local gateway + its key-store (the script's own cleanup names).
+.PHONY: local-gateway-stop
+local-gateway-stop:
+	-docker stop $(or $(GATEWAY_NAME),local-litellm-gateway) $(or $(PG_NAME),local-litellm-gateway-pg) 2>/dev/null
+	-docker network rm $(or $(PG_NET),local-litellm-gateway-net) 2>/dev/null
+
+# Full local production simulation: pinned Qdrant + the real LiteLLM gateway
+# in front of the three local vLLM backends + the agent, probed end to end.
+# Mirrors prod ownership (platform: vLLM+LiteLLM; this repo: Qdrant+agent).
+# Prereqs: docker, the three 'make local-vllm*' backends serving, .venv.
+.PHONY: local-stack
+local-stack:
+	$(if $(CORPUS_DIR),CORPUS_DIR="$(CORPUS_DIR)",) $(if $(GATEWAY_PORT),GATEWAY_PORT=$(GATEWAY_PORT),) $(if $(LOCAL_AGENT_PORT),LOCAL_AGENT_PORT=$(LOCAL_AGENT_PORT),) sh scripts/run_local_stack.sh
+
 test-vllm-e2e: | .venv
 	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",)
 
@@ -439,6 +453,6 @@ help:
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest | harness-l3"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper)"
 	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"
-	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | local-gateway (LiteLLM in front of all three backends on :4000) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
+	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | local-gateway (LiteLLM in front of all three backends on :4000) | local-gateway-stop | local-stack (full prod simulation: Qdrant + gateway + agent) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."

@@ -31,7 +31,7 @@ def _render(extra_env: dict[str, str] | None = None) -> subprocess.CompletedProc
 
 def _read_cfg(proc: subprocess.CompletedProcess) -> str:
     assert proc.returncode == 0, proc.stderr
-    cfg_dir = Path(proc.stdout.strip())
+    cfg_dir = Path(proc.stdout.strip().splitlines()[-1])
     try:
         return (cfg_dir / "config.yaml").read_text()
     finally:
@@ -87,6 +87,36 @@ def test_render_generates_keys_when_unset():
     # Generated values are terminal-only material: distinct per start, and
     # the committed tree must never contain one.
     assert "sk-test-" not in text
+
+
+def test_env_file_handoff_written_mode_600(tmp_path):
+    env_file = tmp_path / "gateway.env"
+    proc = _render({"GATEWAY_ENV_FILE": str(env_file)})
+    assert proc.returncode == 0, proc.stderr
+    _read_cfg(proc)  # also cleans the render dir
+    body = env_file.read_text()
+    # Every leg is routed at the gateway with its own key; the master key
+    # never leaves the process.
+    for line in (
+        "export LLM_BASE_URL=http://localhost:4000/v1",
+        "export LLM_MODEL_REASONING=google/gemma-4-E4B-it-qat-mobile-ct",
+        "export LLM_API_KEY=sk-test-llm",
+        "export EMBED_BASE_URL=http://localhost:4000/v1",
+        "export EMBED_API_KEY=sk-test-embed",
+        "export RERANK_ENABLED=true",
+        "export RERANK_BASE_URL=http://localhost:4000/v1",
+        "export RERANK_API_KEY=sk-test-rerank",
+    ):
+        assert line in body, line
+    assert "master_key" not in body and "sk-test-master" not in body
+    assert (env_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_env_file_absent_when_unset(tmp_path):
+    proc = _render({"TMPDIR": str(tmp_path)})
+    assert proc.returncode == 0, proc.stderr
+    _read_cfg(proc)
+    assert list(tmp_path.glob("*.env")) == []
 
 
 @pytest.mark.parametrize("var", ["GATEWAY_MASTER_KEY", "GATEWAY_LLM_KEY", "GATEWAY_EMBED_KEY", "GATEWAY_RERANK_KEY"])
