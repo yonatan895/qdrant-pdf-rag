@@ -398,3 +398,32 @@ def test_repo_golden_set_is_sha_pinned():
 
     assert _verify_golden_sha(Path("evals/golden.jsonl")) is None
     assert Path("evals/golden.jsonl.sha256").exists()
+
+
+# --- absolute identifier gates (AGENTS.md: "identifier recall@1 strict 1.0") ---
+
+def test_identifier_gate_is_absolute_not_ratio():
+    baseline = {"identifier": {"recall@1": 0.5}}
+    rep = _report()
+    rep["identifier"]["recall@1"] = 0.99
+
+    regressions = check_baseline(rep, baseline)
+
+    assert any("identifier.recall@1" in r and "absolute gate" in r for r in regressions)
+
+
+def test_message_id_gate_is_absolute_not_ratio():
+    baseline = {"classes": {"message_id": {"recall@1": 0.5}}}
+    rep = _report()
+    rep["classes"] = {"message_id": {"recall@1": 0.99}}
+
+    regressions = check_baseline(rep, baseline)
+
+    assert any("classes.message_id.recall@1" in r and "absolute gate" in r for r in regressions)
+
+
+def test_identifier_gates_pass_at_one():
+    rep = _report()
+    rep["classes"] = {"message_id": {"recall@1": 1.0}}
+
+    assert check_baseline(rep, {}) == []

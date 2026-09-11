@@ -413,8 +413,13 @@ EVAL_GATED_METRICS = {
     "recall@8": 0.95,
     "mrr": 0.95,
     "ndcg@8": 0.95,
-    "identifier.recall@1": 1.0,  # identifier queries must never drop
-    "classes.message_id.recall@1": 1.0,  # safety-critical message ID lookups must never drop
+}
+
+# Absolute floors, independent of the recorded baseline: identifier and
+# message-ID lookups are safety-critical, so 1.0 means 1.0 (AGENTS.md).
+EVAL_ABSOLUTE_GATED_METRICS = {
+    "identifier.recall@1": 1.0,
+    "classes.message_id.recall@1": 1.0,
 }
 
 # Absolute invariants: must be exactly zero whenever baseline checking runs,
@@ -459,6 +464,15 @@ def check_baseline(report: dict, baseline: dict | None) -> list[str]:
             continue
         if current > 0:
             regressions.append(f"{dotted}: {current} > 0 (absolute gate: must_not hits in the top-{MUST_NOT_WINDOW})")
+    for dotted, floor in EVAL_ABSOLUTE_GATED_METRICS.items():
+        current = _get(report, dotted)
+        if current is None:
+            print(f"warn: {dotted} not scored in this run; not gated", file=sys.stderr)
+            continue
+        if current < floor:
+            regressions.append(
+                f"{dotted}: {current} < {floor} (absolute gate: identifier lookups must not drop)"
+            )
     for dotted, min_ratio in EVAL_GATED_METRICS.items():
         current = _get(report, dotted)
         if current is None:
