@@ -73,30 +73,35 @@ def test_parse_query_members_fold_to_canonical_case():
     assert parse_query("abc10 tuning").members == ["ABC10"]
 
 
-def test_parse_query_drops_truncated_docno_stems():
-    """A doc-number match followed by `-` is a truncated edition suffix —
-    wildcard (`SC23-6858-xx`), partial (`SC23-6858-0`), or over-long
-    (`SA22-7592-05-03`) — and matches no `doc_id` exactly. Emitting it
-    would force an exact filter that can only fail into the unfiltered
-    fallback under identifier weights; dropping keeps the raw text for
-    BM25/dense and classifies honestly."""
-    assert parse_query("SC23-6858-xx JES2 Initialization and Tuning Reference").doc_ids == []
-    assert not parse_query("SC23-6858-xx JES2 tuning").has_identifiers
-    assert parse_query("SC23-6858-0 JES2 tuning").doc_ids == []
-    # Lowercase wildcard drops too (spans are case-stable).
-    assert parse_query("sc23-6858-xx jes2 tuning?").doc_ids == []
-    # Wrapped/truncated forms drop the same way.
-    assert parse_query("(SC23-6858-xx) JES2 tuning").doc_ids == []
-    assert parse_query("`SC23-6858-xx` JES2 tuning").doc_ids == []
-    # Mixed: the exact docno stays, the wildcard goes.
-    ids = parse_query("compare SC23-6858-01 with SC23-6858-xx editions")
-    assert ids.doc_ids == ["SC23-6858-01"]
+def test_parse_query_expands_docno_families():
+    """Issue #270: a suffix-less or wildcard form number expands to its
+    edition family so the exact-shaped keyword filter can hit
+    edition-suffixed `doc_id`s; a partial tail narrows the family, a full
+    edition stays exact, and only an over-long compound tail is dropped.
+    `DOCNO_RE` is untouched (no rules_version / re-ingest)."""
+    family = sorted(["SC23-6858"] + [f"SC23-6858-{n:02d}" for n in range(100)])
+    partial = sorted(["SC23-6858"] + [f"SC23-6858-0{n}" for n in range(10)])
+
+    ids = parse_query("SC23-6858-xx JES2 Initialization and Tuning Reference")
+    assert ids.doc_ids == family
+    assert ids.has_identifiers
+    # Lowercase and wrapped wildcards expand the same way (case-stable spans).
+    assert parse_query("sc23-6858-xx jes2 tuning?").doc_ids == family
+    assert parse_query("(SC23-6858-xx) JES2 tuning").doc_ids == family
+    assert parse_query("`SC23-6858-xx` JES2 tuning").doc_ids == family
+    # Partial edition: one leading digit.
+    assert parse_query("SC23-6858-0 JES2 tuning").doc_ids == partial
+    # Bare stem: the full family (it may be edition-less, or any edition).
+    assert parse_query("SC23-6858 JES2 tuning").doc_ids == family
+    # Mixed: the exact edition stays exact and the wildcard family joins.
+    ids = parse_query("compare SA22-7592-05 with SC23-6858-xx editions")
+    assert ids.doc_ids == sorted(["SA22-7592-05", *family])
     # Exact docnos (with or without edition suffix) are untouched.
     assert parse_query("in SA22-7592-05 about dumps").doc_ids == ["SA22-7592-05"]
     assert parse_query("in sa38-0673-70 about dumps").doc_ids == ["SA38-0673-70"]
-    # A bare stem with no trailing dash may still match an edition-less
-    # doc_id, so it keeps the legacy exact-filter path.
-    assert parse_query("SC23-6858 JES2 tuning").doc_ids == ["SC23-6858"]
+    # Over-long compound tails map to no doc_id and stay dropped.
+    assert parse_query("SA22-7592-05-03 dumps").doc_ids == []
+    assert parse_query("SA22-7592-05-03 dumps").has_identifiers is False
 
 
 def test_parse_query_lowercase_prose_stays_nl():
@@ -592,8 +597,11 @@ def test_search_filter_fallback_adversarial_wrappings(embedder, wrapped):
     """Input-handling matrix: wrapping must not shield the identifier from
     the filter (which then empties) nor from the fallback that recovers it."""
     ids = parse_query(wrapped)
-    # Case folding + inline/non-anchored extraction must still find the stem.
-    assert ids.doc_ids == ["SC23-6862"], wrapped
+    # Case folding + inline/non-anchored extraction must still find the stem
+    # and expand its edition family (issue #270).
+    assert "SC23-6862" in ids.doc_ids, wrapped
+    assert f"SC23-6862-{99:02d}" in ids.doc_ids, wrapped
+    assert len(ids.doc_ids) == 101, wrapped
     fake = FilterAwareFakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
     hits, kind, _ = search(fake, embedder, "mainframe_manuals", wrapped, limit=5)
     assert kind == "identifier", wrapped

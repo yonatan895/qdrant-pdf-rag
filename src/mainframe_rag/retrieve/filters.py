@@ -34,24 +34,51 @@ class QueryIdentifiers(BaseModel):
         return bool(self.doc_ids or self.message_ids or self.members)
 
 
-def _find_exact_docnos(text: str) -> set[str]:
-    """Doc numbers usable as exact `doc_id` filters. A match immediately
-    followed by `-` is a truncated edition suffix — a wildcard
-    (`SC23-6858-xx`), a partial edition (`SC23-6858-0`), or an over-long
-    tail (`SA22-7592-05-03`) — and matches no `doc_id` exactly. (A bare
-    stem with no trailing dash is kept: it may match an edition-less
-    `doc_id`.) Emitting a truncated stem would force an exact filter
-    that can only fail into the unfiltered fallback under identifier
-    weights; dropping it keeps the raw text for BM25/dense and
-    classifies honestly as NL. `DOCNO_RE` itself is untouched (shared
-    with ingest: changing it would churn `rules_version` and force full
-    re-ingest)."""
+# Edition space of a form number (issue #270). IBM doc ids carry a
+# two-digit edition suffix (`SC23-6858-01`); a suffix-less or wildcard
+# query means any edition, a partial tail (`-0`) means one leading digit.
+# Enumerating the family keeps the filter exactly shaped (keyword
+# MatchAny) without touching the shared DOCNO_RE — no rules_version bump,
+# no re-ingest.
+_WILDCARD_TAIL_RE = re.compile(r"^-[xX]{1,2}(?![\w-])")
+_PARTIAL_TAIL_RE = re.compile(r"^-(\d)(?![\d-])")
+
+
+def _doc_family(stem: str, prefix: str = "") -> list[str]:
+    """The stem plus every edition id it resolves to. The stem stays in
+    the list so an edition-less `doc_id` still matches."""
+    width = 2 - len(prefix)
+    return [stem] + [f"{stem}-{prefix}{n:0{width}d}" for n in range(10**width)]
+
+
+def _find_doc_filter_ids(text: str) -> set[str]:
+    """Doc ids usable as exact `doc_id` filters, edition-aware (issue #270).
+
+    `DOCNO_RE` yields either a full id (`SC23-6858-01` — kept exactly
+    unless a further dash makes it a compound reference) or a stem
+    (`SC23-6858`). A stem with a wildcard (`-xx`) or partial (`-0`) tail
+    expands to that part of the edition space; a bare stem expands to the
+    full family (it may be edition-less, or any edition of the form
+    number). An over-long tail (`SA22-7592-05-03`) maps to no `doc_id` and
+    stays dropped. `DOCNO_RE` itself is untouched (shared with ingest;
+    changing it would churn `rules_version` and force full re-ingest)."""
     out: set[str] = set()
     for m in DOCNO_RE.finditer(text):
+        token = m.group(1)
         end = m.end()
-        if end < len(text) and text[end] == "-":
-            continue
-        out.add(m.group(1))
+        if token.count("-") == 1:  # stem: no edition in the match
+            if end < len(text) and text[end] == "-":
+                tail = text[end:]
+                if _WILDCARD_TAIL_RE.match(tail):
+                    out.update(_doc_family(token))
+                else:
+                    partial = _PARTIAL_TAIL_RE.match(tail)
+                    if partial:
+                        out.update(_doc_family(token, partial.group(1)))
+                continue
+            out.update(_doc_family(token))
+        elif not (end < len(text) and text[end] == "-"):
+            out.add(token)
     return out
 
 
@@ -92,7 +119,7 @@ def parse_query(query: str) -> QueryIdentifiers:
     # form, so both the exact and the folded form are emitted.
     upper = query.upper()
     return QueryIdentifiers(
-        doc_ids=sorted(_find_exact_docnos(query) | _find_exact_docnos(upper)),
+        doc_ids=sorted(_find_doc_filter_ids(query) | _find_doc_filter_ids(upper)),
         message_ids=sorted(set(find_message_ids(query)) | set(find_message_ids(upper))),
         members=find_members_folded(query),
     )
