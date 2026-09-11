@@ -58,9 +58,10 @@ def test_query_kind_flips_only_for_real_codes() -> None:
 
 
 def test_golden_sweep_flips_are_real_codes() -> None:
-    """All 209 golden queries: the only queries gaining message_ids vs
-    the classic shape are the 7 reviewed real codes below. Any other flip
-    is a precision regression."""
+    """All 215 golden queries (193 golden+holdout after the #270 re-freeze,
+    plus 22 paraphrase): the only queries gaining message_ids vs the classic
+    shape are the 7 reviewed real codes below. Any other flip is a precision
+    regression."""
     expected = {
         "A CICS TS 3.1 transaction abended and DFHAC2006 is in the message log. What does the message te": ["DFHAC2006"],
         "DFHAP0001 was issued on CICSP1. What does the message indicate and where are the dump/take-acti": ["DFHAP0001"],
@@ -77,5 +78,5 @@ def test_golden_sweep_flips_are_real_codes() -> None:
         new = find_message_ids(query)
         if new != old:
             assert expected.get(query[:95]) == new, f"{name}: {query[:95]} -> {new}"
-    assert total == 209
+    assert total == 215
     assert len(expected) == 7

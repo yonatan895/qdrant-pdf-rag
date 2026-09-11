@@ -41,8 +41,9 @@ separate passes would clobber each other's pages), then `run_ingest
 inventory and Qdrant sha skips; doc_ids are stable across chunking
 changes, so delete-first is unnecessary). `paraphrase-manuals` is the
 `paraphrase.jsonl` venue (14 docs + generic-distractor), same rebuild.
-Both re-ingested 2026-09-10 under current rules (post-#216): 208 pts
-(160 narrative / 48 message) and 21 pts (16 narrative / 5 message).
+Both re-ingested 2026-09-10 under current rules (post-#216); `mainframe_manuals`
+was rebuilt in one pass during the 2026-09-12 re-freeze: 214 pts
+(166 narrative / 48 message, 82 docs) and 21 pts (16 narrative / 5 message).
 `real_manuals` (435k pts, 452 real books) is NOT managed here: never
 delete, re-ingest, or gate against it from dev workflows. Its sampled
 mix is ~95% narrative / ~2% message / ~3% syntax / ~0% table — and the
@@ -271,7 +272,7 @@ committed (the real-corpus venue guard refuses `real_manuals` without
 
 ## 7. Golden corpus discipline
 
-`golden.jsonl` (117 dev) and `holdout.jsonl` (70, sha256-pinned, verified
+`golden.jsonl` (121 dev) and `holdout.jsonl` (72, sha256-pinned, verified
 with `sha256sum -c` on RC-only `make eval-holdout`) are built from
 `expert_golden_seed.jsonl` plus payload mining by `build_golden_corpus.py`:
 manual bindings for out-of-pattern families, authored corrections,
