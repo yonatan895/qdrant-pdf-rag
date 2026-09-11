@@ -102,6 +102,27 @@ def test_gate_verdict_env_mismatch_fails_closed():
     assert any("baseline env mismatch: cpu_count 4 != runner 8" in r for r in reasons)
 
 
+def test_gate_verdict_concurrency_mismatch_fails_closed():
+    """A p95 recorded at concurrency 2 must not gate a concurrency-8 run."""
+    report = _sample_report()
+    report["env"] = {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a", "concurrency": 8}
+    baseline = _sample_baseline()
+    baseline["_meta"] = {"env": {"cpu_count": 8, "embed_mode": "vllm", "qdrant_image": "pin-a", "concurrency": 2}}
+    verdict, reasons = gate_verdict_l3(report, baseline)
+    assert verdict == "hold"
+    assert any("baseline env mismatch: concurrency 2 != runner 8" in r for r in reasons)
+
+
+def test_env_snapshot_records_run_provenance(monkeypatch):
+    from scripts import harness_l3
+
+    monkeypatch.setattr(harness_l3, "query_gpu_name", lambda: "RTX 5060")
+    env = harness_l3.env_snapshot(concurrency=4, duration_s=15, request_timeout_s=120)
+    assert env["concurrency"] == 4
+    assert env["duration_s"] == 15
+    assert env["request_timeout_s"] == 120
+
+
 def test_gate_verdict_gpu_name_mismatch_fails():
     """Gate fails closed if both baseline and runner have non-null differing GPUs."""
     report = _sample_report()
