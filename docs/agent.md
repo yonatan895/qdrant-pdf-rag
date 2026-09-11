@@ -199,7 +199,7 @@ readers:
 
 | Setting | Default | Read by |
 |---|---|---|
-| `qdrant_url` / `qdrant_api_key` / `qdrant_collection` | `http://localhost:6333` / unset / `mainframe_manuals` | lifespan, healthz readyZ, retrieve calls, manifests |
+| `qdrant_url` / `qdrant_api_key` / `qdrant_collection` / `qdrant_snapshots_dir` | `http://localhost:6333` / unset / `mainframe_manuals` / `/qdrant/snapshots` | lifespan, healthz readyZ, retrieve calls, manifests, harness snapshot restore |
 | `qdrant_timeout_s` / `qdrant_ingest_timeout_s` | 30 / 120 | query path / ingest path (split: different call shapes) |
 | `embed_mode` | `vllm` (normalized lower/strip) | lifespan fail-fast, embedder dispatch, ingest |
 | `embed_base_url` / `embed_model` / `dense_dim` / `embed_api_key` | unset (endpoint trio required in vLLM; key unset = keyless) | endpoint+model validation, healthz ping, dim check, `Authorization` on embed calls |
@@ -214,15 +214,16 @@ readers:
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | low / high / 0.2 | answer path |
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 4096 / 1536 / 128 / 350 / 5.0 | tokenizer-path budgeting |
 | `llm_stream` | `false` | server-side reasoning SSE |
-| `http_connect_retries` / `http_max_connections` / `http_max_keepalive` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
+| `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
 | `allow_hash_mode` / `log_level` | `false` / INFO | lifespan hash gate / logging |
-| `otel_exporter_otlp_endpoint` (+ sample/queue/timeout) | unset = tracing off | tracing setup |
+| `otel_exporter_otlp_endpoint` / `otel_sample_ratio` / `otel_export_queue_size` / `otel_export_timeout_ms` | unset = tracing off / 1.0 / 2048 / 5000 | tracing setup |
 | `metrics_enabled` | `false` = /metrics 404s | Prometheus exposition for UWM scrapes |
-| `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / bge-reranker-v2-m3 / embed URL / unset (keyless) / `score_first` (`rerank_first` for gateways) / 50 / 32 / 5.0 | rerank dispatch → retrieve |
-| `rrf_k` / `rrf_weight_*` / `retrieve_max_chunks_per_page|doc` | 2 / 1.0,1.0 – 1.0,3.0 / 1, 3 | retrieve fusion + diversification |
-| `acronym_expansion_enabled` | `false` | rewrite (not agent) |
-| ingest-only (`ingest_workers` = CPU-1, `batch_size` 128, `ingest_upsert_streams` 4, `ingest_bulk_load` false, `bm25_model`, `contextual_*`) | — | ingest; see `docs/ingest.md` §§6–9 |
+| `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_fusion_alpha` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / bge-reranker-v2-m3 / embed URL / unset (keyless) / `score_first` (`rerank_first` for gateways) / 1.0 / 50 / 32 / 5.0 | rerank dispatch → retrieve (see `retrieval.md` §6) |
+| `rrf_k` / `rrf_weight_*` / `rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` / `retrieve_max_chunks_per_page|doc` | 2 / 1.0,1.0 – 1.0,3.0 / 1.0 / 1.0 / 1, 3 | retrieve fusion + diversification |
+| `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | all `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |
+| ingest-only (`ingest_workers` = CPU-1, `batch_size` 128, `ingest_upsert_streams` 4, `ingest_bulk_load` false, `bm25_model`, `bm25_cache_dir` unset, `contextual_*` incl. `context_llm_timeout_s` 30.0 / `context_max_chars` 500 / `context_cache_path` unset) | — | ingest; see `docs/ingest.md` §§6–9 |
+| `zowe_mcp_enabled` / `zowe_mcp_base_url` / `zowe_mcp_timeout_s` / `zowe_mcp_max_bytes` / `zowe_mcp_dry_run` | `false` (client unbuilt) / unset / 15.0 / 262144 / `false` | live-state client (default off; see `architecture.md`) |
 
 ## 8. Log and trace contract
 

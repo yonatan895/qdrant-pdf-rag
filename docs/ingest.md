@@ -211,16 +211,16 @@ Opt-in via `CONTEXTUAL_EMBED_ENABLED` (default off).
 
 - Per-chunk 1–2 sentence gist from a cheap chat model (never the reasoning
   model): `CONTEXT_LLM_BASE_URL` / `CONTEXT_LLM_MODEL` with a short,
-  dedicated timeout distinct from the 300s answer timeout.
-  `CONTEXT_LLM_API_KEY` (unset = keyless) rides the gist calls as a Bearer
-  virtual key behind a gateway.
+  dedicated timeout (`CONTEXT_LLM_TIMEOUT_S`, 30.0s) distinct from the 300s
+  answer timeout. `CONTEXT_LLM_API_KEY` (unset = keyless) rides the gist
+  calls as a Bearer virtual key behind a gateway.
 - Cache key `v2:sha:chunk_id` under `CONTEXT_PROMPT_VERSION = "v2"` (v1
   duplicated the header and echoed instructions).
-- Model budget 256 completion tokens; deterministic 500-char cap with
-  collapse-and-rstrip normalization; empty gists raise (never stored
-  silent-empty).
-- Cache file: explicit `context_cache_path` wins, else a sibling
-  `<stem>.contexts.jsonl`; last-wins load, corrupt lines warn and
+- Model budget 256 completion tokens; deterministic `CONTEXT_MAX_CHARS`
+  (500) cap with collapse-and-rstrip normalization; empty gists raise
+  (never stored silent-empty).
+- Cache file: explicit `CONTEXT_CACHE_PATH` (unset = sibling
+  `<stem>.contexts.jsonl`); last-wins load, corrupt lines warn and
   regenerate; the parent is the single-writer appender (no lock); workers
   take a snapshot (sibling docs invisible by design); chunks scored
   sequentially.
@@ -255,7 +255,10 @@ One `Embedder` (`dense`, `dense_query`, `sparse`) built once by
   input}`, results resorted by `index`.
 - `dense_query` prepends `Settings.dense_query_prefix` when set — query
   vectors only, never document chunks.
-- The sparse BM25 model is a process-wide single (one-entry cache).
+- The sparse BM25 model is a process-wide single (one-entry cache) loaded
+  from `BM25_MODEL` (`Qdrant/bm25`); `BM25_CACHE_DIR` overrides the weight
+  location (images set it to the baked `/opt/bm25`, unset = library
+  default cache).
 - Timeouts: embed calls 60s (`embed_timeout_s`); ingest-side Qdrant calls
   use a 120s timeout vs 30s on the query side — split because the call
   shapes differ.

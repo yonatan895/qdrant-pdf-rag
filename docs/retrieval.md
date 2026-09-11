@@ -210,12 +210,14 @@ fetch for a leg that will not run. The bypass reason lands on the trace.
 Reranker construction (`build_reranker`, the single dispatch point): off →
 `None`; hash mode → lexical `HashReranker` (token overlap over query length
 plus log passage length); an embed/rerank base URL → `HttpReranker`, which
-tries `{base}/v1/score` (or `{base}/score` when the base already ends in
-`/v1`) with batch size 32 and a 5s timeout, falls back to the
-Cohere/TEI-style `/rerank` shape on narrowly-defined failures
-(bad-status/request/shape errors), and raises strictly when the second leg
-fails or returns mismatched/out-of-bounds indexes. Anything else raises
-fail-closed. Rerank input passages are `product/version/doc_id` plus a
+tries two scoring legs in `RERANK_ENDPOINT_ORDER` (`score_first` default:
+`{base}/v1/score` — or `{base}/score` when the base already ends in `/v1`
+— then the Cohere/TEI-style `/rerank` shape; `rerank_first` reverses them
+for gateways, which 404 the vLLM-only `/v1/score`). A spent leg falls
+through to the next on transport/shape errors; the last leg failing raises
+strictly (mismatched/out-of-bounds indexes included), so a wrong order
+choice costs one failed call per batch, never a wrong ranking. Batch size
+32 and a 5s timeout. Anything else raises fail-closed. Rerank input passages are `product/version/doc_id` plus a
 `[chunk_type]` tag and bare `message_ids` header, then title/heading, then
 a type-distinct body template (`Table:`/`Syntax:` label line for table/syntax
 bodies; message/narrative keep the bare prose shape), then text

@@ -60,16 +60,19 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
   re-appends that suffix when `useUnprivilegedImage` is set — passing the
   suffix through would double-append. The tag is always set explicitly so
   deploy matches what load pushed.
-- The agent render unquotes `"__TOKEN__"` first (so integer/boolean env
-  vars like `DENSE_DIM` and `RERANK_ENABLED` render unquoted), then
-  substitutes each key; `RERANK_ENABLED` defaults to `false` and the rerank
-  model default is baked in, while LLM/rerank-base/OTEL values default to
-  empty.
+- The agent render unquotes `"__TOKEN__"` first, then substitutes each key;
+  integer/boolean env vars render explicitly quoted (`value: "768"`,
+  `value: "false"` — the quoting `testing.md` pins, so manifests never hit
+  Kubernetes integer/boolean type errors). `RERANK_ENABLED` defaults to
+  `false` and the rerank model default is baked in, while LLM/rerank-base/
+  OTEL values default to empty.
 - `wire_pull_secret` reuses the matched line's indent when replacing
   `imagePullSecrets: []` — every overlay nests it inside the pod spec, and
   a fixed-indent insert breaks out of the mapping (kubectl rejects the
-  manifest). `PULL_SECRET` must be a DNS-subdomain name (no sed-active
-  characters); unset renders `imagePullSecrets: []` (kustomize) and
+  manifest). `PULL_SECRET` should be a DNS-subdomain name (sed-active
+  characters would rewrite the manifest — unlike the gateway secret name,
+  nothing gates this one, so keep it to lowercase alphanumerics, `-`, `.`);
+  unset renders `imagePullSecrets: []` (kustomize) and
   `imagePullSecrets=null` (Helm, so the chart's placeholder name never
   reaches the cluster).
 - Gateway virtual keys (LiteLLM) render by strip-or-substitute: the agent
@@ -83,11 +86,13 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
   env name, never by comments: kustomize drops YAML comments and sorts
   mapping keys, so the `# gateway-api-keys-begin/end` markers in the
   overlays are documentation only (unit-test stubs mirror the comment-free
-  sorted kustomize output for this reason). The name passes the same
-  DNS-subdomain charset gate as the pull secret (`check_secret_name`);
+  sorted kustomize output for this reason). The gateway name passes a
+  DNS-subdomain charset gate (`check_secret_name` in `common.sh`);
   plaintext `*_API_KEY` values in the env file die in
-  `refuse_plaintext_gateway_keys` (every script, via
-  `enforce_product_rules`).
+  `refuse_plaintext_gateway_keys`, enforced by the pack/load/deploy/ingest/
+  validate scripts via `enforce_product_rules` (smoke only resolves
+  aliases, pipeline inherits the checks from its stages, and bootstrap
+  cannot source `common.sh` before the clone exists).
 - The Qdrant service URL is derived as plaintext
   `http://<QDRANT_RELEASE>:6333` (in-cluster DNS). The `<release>-apikey`
   secret name follows `QDRANT_RELEASE` — renaming the release without a
@@ -179,9 +184,10 @@ cannot schedule on one node — proven).
   port-forward only, no archive store (debug data, not records).
 - Validate is read-only pre-flight: required keys, `DENSE_DIM` positive
   integer, `http(s)` vLLM URL, `http(s)` scheme on any set optional model
-  URL (`EMBED/LLM/RERANK/CONTEXT_LLM_BASE_URL`), `GATEWAY_API_KEY_SECRET`
-  charset gate, plaintext `*_API_KEY` refusal in the env file (every script,
-  not only validate), `IMAGE_SHA` not empty/`HEAD`, tool presence
+  URL (`EMBED/LLM/RERANK/CONTEXT_LLM_BASE_URL`), `RERANK_ENDPOINT_ORDER`
+  limited to `score_first`/`rerank_first`, `GATEWAY_API_KEY_SECRET`
+  charset gate, plaintext `*_API_KEY` refusal in the env file (pack, load,
+  deploy, ingest, and validate — not smoke), `IMAGE_SHA` not empty/`HEAD`, tool presence
   (even for dry-run), manifest cross-check (missing manifest is a notice,
   not a failure), storage-class existence, gateway key Secret existence
   (notice when the namespace does not exist yet), and OpenShift-detected SCC
