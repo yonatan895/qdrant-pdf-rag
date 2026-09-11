@@ -1,5 +1,6 @@
 """Unit tests for the retrieval evaluation regression gate (pure functions, no docker/network)."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -323,3 +324,77 @@ def test_generate_synthetic_golden_corpus(tmp_path: Path):
     assert "MSG100I" in text
     assert "termA" in text
     doc_a.close()
+
+
+# --- gate_l1 fail-closed contract (issue #267): a skipped gate is not a pass ---
+
+def _tmp_golden(tmp_path: Path) -> Path:
+    golden = tmp_path / "golden.jsonl"
+    golden.write_text(Path("evals/golden.jsonl").read_text(encoding="utf-8").splitlines()[0] + "\n")
+    return golden
+
+
+def test_gate_missing_baseline_exits_2(tmp_path: Path, capfd):
+    from scripts.gate_l1 import run_gate
+
+    rc, md = run_gate(golden_path=_tmp_golden(tmp_path), baseline_path=tmp_path / "missing.json")
+
+    assert rc == 2
+    assert "cannot be applied" in capfd.readouterr().err
+    assert "**ERROR:**" in md
+
+
+def test_gate_non_hash_baseline_exits_2(tmp_path: Path, capfd):
+    from scripts.gate_l1 import run_gate
+
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"_meta": {"embed_mode": "vllm"}}))
+
+    rc, _ = run_gate(golden_path=_tmp_golden(tmp_path), baseline_path=baseline)
+
+    assert rc == 2
+    assert "not a hash-mode baseline" in capfd.readouterr().err
+
+
+def test_gate_missing_meta_baseline_exits_2(tmp_path: Path, capfd):
+    from scripts.gate_l1 import run_gate
+
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"recall@1": 1.0}))
+
+    rc, _ = run_gate(golden_path=_tmp_golden(tmp_path), baseline_path=baseline)
+
+    assert rc == 2
+    assert "not a hash-mode baseline" in capfd.readouterr().err
+
+
+def test_gate_golden_sha_mismatch_exits_2(tmp_path: Path, capfd):
+    from scripts.gate_l1 import run_gate
+
+    golden = _tmp_golden(tmp_path)
+    Path(f"{golden}.sha256").write_text("0" * 64 + "  golden.jsonl\n")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"_meta": {"embed_mode": "hash"}}))
+
+    rc, _ = run_gate(golden_path=golden, baseline_path=baseline)
+
+    assert rc == 2
+    assert "sha256 mismatch" in capfd.readouterr().err
+
+
+def test_verify_golden_sha_accepts_matching_pin(tmp_path: Path):
+    from scripts.gate_l1 import _verify_golden_sha
+
+    golden = tmp_path / "g.jsonl"
+    golden.write_text('{"query": "x"}\n')
+    digest = hashlib.sha256(golden.read_bytes()).hexdigest()
+    Path(f"{golden}.sha256").write_text(f"{digest}  g.jsonl\n")
+
+    assert _verify_golden_sha(golden) is None
+
+
+def test_repo_golden_set_is_sha_pinned():
+    from scripts.gate_l1 import _verify_golden_sha
+
+    assert _verify_golden_sha(Path("evals/golden.jsonl")) is None
+    assert Path("evals/golden.jsonl.sha256").exists()

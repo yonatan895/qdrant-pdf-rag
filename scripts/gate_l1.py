@@ -12,12 +12,14 @@ verification:
      evals/baseline.json.
   5. Renders a markdown delta table via scripts/render_report.py for PR comments / MR notes.
   6. Cleans up collections and stops the simulator container.
-  7. Exits nonzero if any regression or query failure occurs.
+  7. Exits nonzero if any regression or query failure occurs, or 2 when the
+     gate cannot be applied (missing/wrong-mode baseline, golden sha mismatch).
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -50,6 +52,30 @@ from render_report import render_eval
 
 from mainframe_rag.config import load_settings
 from mainframe_rag.ingest import run_ingest
+from mainframe_rag.manifest import write_run_manifest
+
+
+def _verify_golden_sha(golden_path: Path) -> str | None:
+    """Return an error message when the golden set violates its sha pin.
+
+    The dev golden set is pinned by a sibling `<golden>.sha256` file (the
+    frozen holdout already has one). Custom golden sets without a sidecar stay
+    allowed for tests and tooling; the repo default venue must be pinned so
+    the gate cannot silently score a different ruler.
+    """
+    sha_path = Path(f"{golden_path}.sha256")
+    if sha_path.exists():
+        expected = sha_path.read_text(encoding="utf-8").split()[0]
+        actual = hashlib.sha256(golden_path.read_bytes()).hexdigest()
+        if actual != expected:
+            return (
+                f"golden set sha256 mismatch: {golden_path} is {actual}, "
+                f"pin {sha_path.name} says {expected}"
+            )
+        return None
+    if golden_path.resolve() == (REPO_ROOT / "evals" / "golden.jsonl").resolve():
+        return f"golden set {golden_path} has no sha256 pin ({sha_path.name} missing)"
+    return None
 
 
 def generate_synthetic_golden_corpus(
@@ -168,6 +194,32 @@ def run_gate(
     entries = load_golden(golden_path)
     sim_url = qdrant_url or os.environ.get("QDRANT_SIM_URL") or os.environ.get("QDRANT_URL")
 
+    # A skipped gate is not a pass: a missing or wrong-mode baseline, or a
+    # golden set that does not match its pin, exits 2 before any container runs.
+    if not update_baseline_flag:
+        if not baseline_path.exists():
+            msg = (
+                f"FAIL: baseline {baseline_path} missing; the gate cannot be applied — "
+                "re-record it via `make eval-baseline` in a dedicated PR (issue #267)"
+            )
+            print(msg, file=sys.stderr)
+            return 2, f"## Retrieval Evaluation Gate (L1)\n\n**ERROR:** {msg}\n"
+        baseline_meta = (json.loads(baseline_path.read_text(encoding="utf-8")).get("_meta") or {})
+        if baseline_meta.get("embed_mode") != "hash":
+            msg = (
+                f"FAIL: baseline {baseline_path} is not a hash-mode baseline "
+                f"(embed_mode={baseline_meta.get('embed_mode')!r}); this gate runs hash mode "
+                "and the numbers would not be comparable (issue #267)"
+            )
+            print(msg, file=sys.stderr)
+            return 2, f"## Retrieval Evaluation Gate (L1)\n\n**ERROR:** {msg}\n"
+
+    golden_error = _verify_golden_sha(golden_path)
+    if golden_error is not None:
+        msg = f"FAIL: {golden_error} (issue #267)"
+        print(msg, file=sys.stderr)
+        return 2, f"## Retrieval Evaluation Gate (L1)\n\n**ERROR:** {msg}\n"
+
     try:
         sim = start_simulator(REPO_ROOT, sim_url)
     except QdrantSimError as exc:
@@ -213,6 +265,22 @@ def run_gate(
             f"[*] evaluation completed in {ev_time}s (n={report['n']}, failures={report['failures']})",
             file=sys.stderr,
         )
+
+        # PR-gate runs are recorded like eval runs so gate history is
+        # inspectable (evals/runs is gitignored; manifests are diagnostics).
+        try:
+            metrics = {
+                k: report[k]
+                for k in (
+                    "n", "failures", "recall@1", "recall@3", "recall@5", "recall@8", "mrr",
+                    "ndcg@8", "identifier", "nl", "classes", "abstain", "must_not", "page",
+                )
+                if k in report
+            }
+            manifest = write_run_manifest("gate_l1", settings, metrics)
+            print(f"[*] run manifest appended (sha={manifest['git_sha'][:8]})", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[*] warn: failed to append run manifest: {exc}", file=sys.stderr)
 
         baseline: dict[str, Any] | None = None
         regressions: list[str] = []
