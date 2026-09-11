@@ -144,8 +144,9 @@ e("MSG-34", "IGD17002I during SMS allocation: what does it report?", "message_id
 e("MSG-35", "IEE892I was displayed at the console. What does the message book say about it?", "message_id", ["SA38-0674-06"], heading="IEE892I")
 e("MSG-36", "IXC207A from XCF: what does the message document?", "message_id", ["SA38-0677-04"])
 
-# --- new: doc_number identifiers (full suffix form; suffix-less numbers hit the
-# exact-match doc_id filter gap and are documented as a follow-up).
+# --- new: doc_number identifiers (full suffix form; the suffix-less/wildcard
+# filter gap these seed entries probe was closed at retrieval in #270 by
+# expanding a form number to its edition family).
 # One rule: every doc_number query names a LOADED edition in full suffix
 # form (re-pointed at each re-bind). Edition-agnostic phrasing (suffix-less
 # or -xx numbers) is reserved for the seed's deliberate cross-edition gap

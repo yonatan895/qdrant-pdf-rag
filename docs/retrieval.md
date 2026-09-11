@@ -70,12 +70,20 @@ so lexical and semantic candidates are scoped identically before any fusion.
 - `build_filter` ANDs its clauses: exact `product`, exact `version`, and
   `MatchAny` within each identifier field (`doc_id`, `message_ids`,
   `members`). Empty input yields no filter rather than a match-nothing.
+- Doc-number filters are edition-aware (issue #270): a full edition
+  (`SC23-6858-01`) filters exactly; a suffix-less stem (`SC23-6858`), a
+  wildcard (`-xx`), or a partial edition (`-0`, narrowed to `-00..-09`)
+  expands to the form number's edition family (`stem` + `-00..-99`) so the
+  keyword filter hits edition-suffixed `doc_id`s instead of forcing the
+  empty-filtered retry. Over-long compound tails (`SA22-7592-05-03`) stay
+  dropped — they map to no `doc_id`. `DOCNO_RE` is untouched, so
+  `rules_version` and ingest are unaffected.
 - Empty-filtered recovery: when a filter was applied and both prefetch legs
-  return zero points (exact doc-id stem vs edition suffix, multi-identifier
-  AND with no co-carrying chunk), the retrieval path retries once unfiltered
-  at the same prefetch depth and fuses that pool. Non-empty filtered results
-  never pay the second call. The retry lands on the trace as boolean
-  `rag.filter_fallback` (bounded, never free text).
+  return zero points (multi-identifier AND with no co-carrying chunk, or a
+  filter with no match in this corpus), the retrieval path retries once
+  unfiltered at the same prefetch depth and fuses that pool. Non-empty
+  filtered results never pay the second call. The retry lands on the trace
+  as boolean `rag.filter_fallback` (bounded, never free text).
 - The legs are named `dense` and `bm25`, dense first.
 
 ## 3. Identifiers and query kind
@@ -83,9 +91,10 @@ so lexical and semantic candidates are scoped identically before any fusion.
 `parse_query` unions matches from the raw query and its uppercased copy for
 doc numbers and message ids — operators type lowercase, payloads are
 canonical-uppercase, and uppercasing only adds word-char matches, so
-pure-uppercase queries behave exactly as before. Member extraction stays
-case-sensitive: the lowercase `xx` convention (`IEASYSxx`) matches payload
-case, and uppercasing would break it.
+pure-uppercase queries behave exactly as before. Form numbers without a
+pinned edition expand to their edition family (§2, issue #270). Member
+extraction stays case-sensitive: the lowercase `xx` convention
+(`IEASYSxx`) matches payload case, and uppercasing would break it.
 
 `query_kind` is `identifier` when any of the three lists is non-empty (a
 lone member code flips it too), else `nl`. The kind drives RRF weights and
