@@ -110,7 +110,7 @@ legs; gateway-order A/Bs run the same gate with the env var set, after
 `probe_gateway.py` recommends it). The paraphrase branch builds pages from
 `answer_text` without echoing the query (see §6).
 
-## 4. Layered harness (`harness.py`, `harness_l1/l2/l3.py`)
+## 4. Layered harness (`harness.py`, `harness_l1/l2/l3/l4.py`)
 
 Release-candidate promotion gate, never a PR gate. Fingerprint, restore, or
 pin a Qdrant snapshot; run L1; deliver a `merge` / `hold` / `baseline`
@@ -161,6 +161,23 @@ verdict.
   concurrent load, against dedicated mode-keyed baselines — never the CI
   bench file. Gates fail closed on env mismatch (4 keys), demand zero
   errors and zero missing timings, and cap stage p95 at 3× baseline.
+- **L4 (answer-quality gate):** `harness_l4.py` runs the L2 runner
+  (`run_l2(..., relevance_enabled=True)`, one judging path) K times
+  (`--repeats`, default 3) over the same deterministic sample and adds the
+  answer-relevance judge (relevant/partial/irrelevant, no excerpts, no
+  citation markers; unparseable output is a structural fail). Structural
+  fails, request errors, and judge-infra errors fail in **any** repeat;
+  per-metric means are compared against `evals/harness-l4-thresholds.json`
+  with `_meta.tolerance`: at/better than the reference passes, inside the
+  band holds and writes a human-review queue (`--queue`), outside fails.
+  The default tolerance is 0.15 — ~2.3σ of the 3-repeat mean at N=24
+  (measured: a 0.05 band flagged run-to-run sampling noise as rate
+  regressions); raise N to tighten it, and treat sub-band movement as
+  trend data, not a verdict.
+  An uncomputed metric fails rather than vanishing. The reference records
+  the venue/embed mode/reasoning model and the gate refuses (exit 2) when
+  the live tier differs; record it with `make harness-l4-record`
+  (dedicated PR). RC-only, never a PR gate.
 - Harness clients use a hardcoded 60s Qdrant timeout (distinct from the
   eval's settings timeout). Bootstrap CIs use linear-interpolated
   percentiles — note the load-tier percentile below is nearest-rank, so
@@ -329,14 +346,15 @@ scored. `scripts/venue.py` owns the rule.
 | 1. holdout semantics | `make eval-holdout` | `$(BUNDLE_DIR)/eval-holdout-{report.json,summary.md}` + manifest |
 | 2. L1 promotion | `VENUE=rc make harness-gate` | report + manifest; `merge`/`hold` |
 | 3. answer tier | `VENUE=rc make harness-l2` | report + summary + manifest; structural fails gate |
-| 4. perf tier | `VENUE=rc make harness-l3` | report + manifest vs the L3 baseline |
-| 5. pool capture | `VENUE=rc make capture-pool` | dated `pools-YYYYMMDD.jsonl` (never committed) |
-| 6. hermetic replay | `pytest tests/test_replay.py` + a replay sweep | A/B deltas in the PR body |
+| 4. judge gate | `VENUE=rc make harness-l4` | report + summary + review queue; `pass`/`hold`/`fail` |
+| 5. perf tier | `VENUE=rc make harness-l3` | report + manifest vs the L3 baseline |
+| 6. pool capture | `VENUE=rc make capture-pool` | dated `pools-YYYYMMDD.jsonl` (never committed) |
+| 7. hermetic replay | `pytest tests/test_replay.py` + a replay sweep | A/B deltas in the PR body |
 
-The L4 judge row joins this table with #268's L4 PR; until then L2's
-structural verdict plus the judge label distribution are the answer-tier
-signal. L2 standing red on known product debt is an RC debt signal, not
-a broken target.
+L4's reference (`evals/harness-l4-thresholds.json`) is recorded with
+`VENUE=rc make harness-l4-record` on the RC tier and ships in a dedicated
+PR. L2/L4 standing red on known product debt is an RC debt signal, not a
+broken target.
 
 **Dated record.** Each battery run appends a row here in the same PR or
 RC checklist that runs it (`$BUNDLE_DIR` reports are local). Run
@@ -347,3 +365,4 @@ committed row is the pointer, the manifest is the detail.
 | Date | Git SHA | Venue | Steps | Result |
 |---|---|---|---|---|
 | 2026-09-02 | pre-#268 | `real_manuals` | `harness-l2` N=24 | 10 structural fails; grounded 0.76, citation precision 0.16, truncation 0.59 — standing red debt (`testing.md` harness section) |
+| 2026-09-11 | this PR | `real_manuals` | `harness-l4-record` N=24×3, then `harness-l4` gate | reference recorded (grounded 0.70, citation P/R 0.60/0.40, truncation 0.43, syntax 0.33, entailment 0.35, relevance 0.97); gate fail on 32 structural fails with no rate outside the 0.15 band, 20-row review queue — standing RC debt |

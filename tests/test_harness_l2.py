@@ -21,7 +21,9 @@ from scripts.harness_l2 import (
     gate_l2,
     judge_messages,
     parse_judge_label,
+    parse_relevance_label,
     precision_recall,
+    relevance_messages,
     summarize_l2,
     syntax_check,
 )
@@ -121,6 +123,29 @@ def test_evidence_bounded_for_judge_prompt():
     evidence, unmapped = evidence_for_citations([f"[{i}] c{i}" for i in range(4)], hits)
     assert len(evidence) <= JUDGE_MAX_EVIDENCE_CHARS + 40
     assert unmapped == []
+
+
+# ---------------------------------------------------------------- relevance judge
+
+def test_parse_relevance_label_plain_and_fenced():
+    assert parse_relevance_label('{"label": "relevant"}') == "relevant"
+    assert parse_relevance_label('```json\n{"label": "irrelevant"}\n```') == "irrelevant"
+
+
+def test_parse_relevance_label_fails_closed_on_unknown():
+    with pytest.raises(JudgeError):
+        parse_relevance_label('{"label": "mostly_right"}')
+    with pytest.raises(JudgeError):
+        parse_relevance_label("Looks relevant to me.")
+
+
+def test_relevance_messages_see_question_and_answer_only():
+    msgs = relevance_messages("What is LFAREA?", "Set LFAREA=(1M).")
+    assert "What is LFAREA?" in msgs[1].content
+    assert "Set LFAREA=(1M)." in msgs[1].content
+    assert all(re.search(r"\[\d+\]", m.content) is None for m in msgs)
+    assert msgs[0].role == "system" and msgs[1].role == "user"
+    assert "irrelevant" in msgs[0].content
 
 
 # ---------------------------------------------------------------- syntax gold
@@ -291,6 +316,24 @@ def test_gate_holds_on_judge_error_alone():
     verdict, reasons = gate_l2(m)
     assert verdict == "hold"
     assert any("judge" in r for r in reasons)
+
+
+def test_summarize_relevance_block():
+    m = summarize_l2([
+        _row("A", relevance_label="relevant"),
+        _row("B", relevance_label="partial"),
+    ])
+    assert m["relevance"]["judged"] == 2
+    assert m["relevance"]["relevant"] == 0.5
+    assert m["relevance"]["partial"] == 0.5
+    assert m["relevance"]["irrelevant"] == 0.0
+
+
+def test_gate_holds_on_relevance_judge_error():
+    m = summarize_l2([_row("A", relevance_error="JudgeError: unparseable")])
+    verdict, reasons = gate_l2(m)
+    assert verdict == "hold"
+    assert any("relevance judge error" in r for r in reasons)
 
 
 def test_apply_fails_vacuous_body_with_validated_citations():

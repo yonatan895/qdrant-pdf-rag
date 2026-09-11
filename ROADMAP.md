@@ -290,6 +290,12 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** #77.
 
 ### PR-10 (issue #84): LLM-as-a-judge eval stage
+> **Status: DONE (via #268 L4).** Engine `scripts/harness_l4.py` reuses the
+> L2 runner (`harness_l2.py` adds the relevance leg), reference
+> `evals/harness-l4-thresholds.json` with a tolerance band and a
+> human-review queue; the deterministic gate-l1/L1 checks stay the gate.
+> RC-only by design (`VENUE=rc`), never a PR gate — PR-10's "runs in CI"
+> wording is superseded by the RC-gate decision.
 - **Scope:** `scripts/` (new `judge_answers.py`), `evals/`, both CI files
 - **Implementation:** Local reasoning model judges faithfulness (claims supported by cited
   chunks), relevance, citation precision. Deterministic harness checks still gate; judge
