@@ -48,6 +48,24 @@ spec:
               value: "__CONTEXT_LLM_BASE_URL__"
             - name: CONTEXT_LLM_MODEL
               value: "__CONTEXT_LLM_MODEL__"
+            # Gateway virtual keys (LiteLLM): optional block. ingest.sh keeps
+            # these entries only when GATEWAY_API_KEY_SECRET names an
+            # operator-created Secret in the namespace (data keys
+            # embed-api-key, context-llm-api-key); when unset they are
+            # stripped by env-entry name (markers are documentation only —
+            # kustomize drops comments and sorts mapping keys).
+            # gateway-api-keys-begin
+            - name: EMBED_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __GATEWAY_API_KEY_SECRET__
+                  key: embed-api-key
+            - name: CONTEXT_LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __GATEWAY_API_KEY_SECRET__
+                  key: context-llm-api-key
+            # gateway-api-keys-end
           resources:
             requests: { cpu: "4", memory: 8Gi }
             limits: { cpu: "16", memory: 32Gi }

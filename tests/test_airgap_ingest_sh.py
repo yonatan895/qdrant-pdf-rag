@@ -68,6 +68,16 @@ spec:
               value: "__CONTEXT_LLM_BASE_URL__"
             - name: CONTEXT_LLM_MODEL
               value: "__CONTEXT_LLM_MODEL__"
+            - name: EMBED_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: embed-api-key
+                  name: __GATEWAY_API_KEY_SECRET__
+            - name: CONTEXT_LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: context-llm-api-key
+                  name: __GATEWAY_API_KEY_SECRET__
       volumes:
         - name: corpus
           persistentVolumeClaim:
@@ -185,3 +195,75 @@ def test_ingest_cli_corpus_pvc_beats_env_file(ingest_tree):
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert "claimName: my-manuals-pvc" in rendered
     assert "file-pvc-should-lose" not in rendered
+
+
+def test_ingest_gateway_keys_off_strips_secret_block(ingest_tree):
+    r = _run_ingest(ingest_tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    # No gateway secret reference: the only secretKeyRef left is the
+    # chart-managed QDRANT_API_KEY. The neighboring plain entries and the
+    # volumes section survive the strip.
+    assert rendered.count("secretKeyRef") == 1
+    assert "EMBED_API_KEY" not in rendered
+    assert "CONTEXT_LLM_API_KEY" not in rendered
+    assert "RERANK_API_KEY" not in rendered
+    assert "CONTEXT_LLM_MODEL" in rendered
+    assert "volumes:" in rendered
+    assert "__GATEWAY_API_KEY_SECRET__" not in rendered
+    assert_no_placeholders(rendered)
+    assert "Gateway keys off" in r.stdout
+
+
+def test_ingest_gateway_keys_wired_when_secret_set(ingest_tree):
+    import re
+
+    r = _run_ingest(ingest_tree, ("GATEWAY_API_KEY_SECRET", "gateway-api-keys"))
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    for env_name, data_key in (
+        ("EMBED_API_KEY", "embed-api-key"),
+        ("CONTEXT_LLM_API_KEY", "context-llm-api-key"),
+    ):
+        assert re.search(
+            rf"- name: {env_name}\n\s+valueFrom:\n\s+secretKeyRef:\n\s+key: {data_key}\n\s+name: gateway-api-keys",
+            rendered,
+        ), env_name
+    # The ingest Job never touches the reasoning/rerank legs (anchored:
+    # CONTEXT_LLM_API_KEY contains LLM_API_KEY as a substring).
+    assert not re.search(r"^- name: LLM_API_KEY$", rendered, re.MULTILINE)
+    assert "RERANK_API_KEY" not in rendered
+    assert "__GATEWAY_API_KEY_SECRET__" not in rendered
+    assert_no_placeholders(rendered)
+    assert "Gateway keys wired" in r.stdout
+
+
+def test_ingest_gateway_secret_bad_name_fails_closed(ingest_tree):
+    r = _run_ingest(ingest_tree, ("GATEWAY_API_KEY_SECRET", "Bad_Name!"))
+    assert r.returncode == 1
+    assert "GATEWAY_API_KEY_SECRET must be a DNS-subdomain name" in r.stderr
+
+
+def test_ingest_gateway_overlay_block_matches_stub_contract():
+    """The stub kustomize above mirrors the real ingest overlay by hand —
+    pin the real file to the same contract so the two cannot diverge."""
+    from tests.helpers_airgap import REPO
+
+    real = (
+        REPO
+        / "deploy"
+        / "kustomize"
+        / "overlays"
+        / "openshift-ingest"
+        / "ingest-job.yaml"
+    ).read_text()
+    assert "# gateway-api-keys-begin" in real
+    assert "# gateway-api-keys-end" in real
+    assert real.index("# gateway-api-keys-begin") < real.index("# gateway-api-keys-end")
+    for env_name, data_key in (
+        ("EMBED_API_KEY", "embed-api-key"),
+        ("CONTEXT_LLM_API_KEY", "context-llm-api-key"),
+    ):
+        assert f"- name: {env_name}" in real
+        assert f"key: {data_key}" in real
+    assert "__GATEWAY_API_KEY_SECRET__" in real

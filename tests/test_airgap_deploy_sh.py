@@ -22,7 +22,10 @@ from tests.helpers_airgap import (
 
 IMAGE_SHA = "a" * 40  # full-sha shaped; deploy.sh only rejects "" / "HEAD"
 
-# Minimal manifest the stub kustomize prints (sed substitutes these).
+# Minimal manifest the stub kustomize prints (sed substitutes these). Shaped
+# like real `kubectl kustomize` output: no comments, mapping keys sorted
+# (secretKeyRef key before name) — the strip logic must work on this shape,
+# not on the overlay source shape.
 STUB_KUSTOMIZE = """apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,6 +55,21 @@ spec:
               value: "__RERANK_BASE_URL__"
             - name: RERANK_MODEL
               value: "__RERANK_MODEL__"
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: llm-api-key
+                  name: __GATEWAY_API_KEY_SECRET__
+            - name: EMBED_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: embed-api-key
+                  name: __GATEWAY_API_KEY_SECRET__
+            - name: RERANK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: rerank-api-key
+                  name: __GATEWAY_API_KEY_SECRET__
 """
 
 # Jaeger stub: mirrors the real render's placeholder surface (issue #83).
@@ -333,3 +351,64 @@ def test_reranker_configured_when_enabled(tree):
     assert 'value: "http://rerank:8002/v1"' in rendered or "value: http://rerank:8002/v1" in rendered
     assert 'value: "my-reranker-model"' in rendered or "value: my-reranker-model" in rendered
     assert "__RERANK_" not in rendered
+
+
+# ------------------------------------------------------- gateway keys (LiteLLM)
+
+
+def test_gateway_keys_off_strips_secret_block(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    # No secret reference at all: no secretKeyRef, no key env names, no
+    # surviving token — while the neighboring plain entries survive the
+    # strip (an end-anchored range running past its entry would eat them).
+    assert "secretKeyRef" not in rendered
+    assert "API_KEY" not in rendered
+    assert "__GATEWAY_API_KEY_SECRET__" not in rendered
+    assert "RERANK_MODEL" in rendered
+    assert_no_placeholders(rendered)
+    assert "Gateway keys off" in r.stdout
+
+
+def test_gateway_keys_wired_when_secret_set(tree):
+    r = _run(tree, ("GATEWAY_API_KEY_SECRET", "gateway-api-keys"))
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    for env_name, data_key in (
+        ("LLM_API_KEY", "llm-api-key"),
+        ("EMBED_API_KEY", "embed-api-key"),
+        ("RERANK_API_KEY", "rerank-api-key"),
+    ):
+        # Sorted-key order (key before name), as kustomize renders mappings.
+        assert re.search(
+            rf"- name: {env_name}\n\s+valueFrom:\n\s+secretKeyRef:\n\s+key: {data_key}\n\s+name: gateway-api-keys",
+            rendered,
+        ), env_name
+    assert "__GATEWAY_API_KEY_SECRET__" not in rendered
+    assert_no_placeholders(rendered)
+    assert "Gateway keys wired" in r.stdout
+
+
+def test_gateway_secret_bad_name_fails_closed(tree):
+    r = _run(tree, ("GATEWAY_API_KEY_SECRET", "Bad_Name!"))
+    assert r.returncode != 0
+    assert "GATEWAY_API_KEY_SECRET must be a DNS-subdomain name" in r.stderr
+
+
+def test_gateway_overlay_block_matches_stub_contract():
+    """The stub kustomize above mirrors the real prod overlay by hand — pin
+    the real file to the same contract (markers, env names, secret token,
+    data keys) so the two cannot silently diverge."""
+    real = (REPO / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml").read_text()
+    assert "# gateway-api-keys-begin" in real
+    assert "# gateway-api-keys-end" in real
+    assert real.index("# gateway-api-keys-begin") < real.index("# gateway-api-keys-end")
+    for env_name, data_key in (
+        ("LLM_API_KEY", "llm-api-key"),
+        ("EMBED_API_KEY", "embed-api-key"),
+        ("RERANK_API_KEY", "rerank-api-key"),
+    ):
+        assert f"- name: {env_name}" in real
+        assert f"key: {data_key}" in real
+    assert "__GATEWAY_API_KEY_SECRET__" in real

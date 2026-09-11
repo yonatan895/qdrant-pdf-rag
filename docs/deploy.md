@@ -72,6 +72,22 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
   characters); unset renders `imagePullSecrets: []` (kustomize) and
   `imagePullSecrets=null` (Helm, so the chart's placeholder name never
   reaches the cluster).
+- Gateway virtual keys (LiteLLM) render by strip-or-substitute: the agent
+  and ingest overlays carry an optional `secretKeyRef` block
+  (agent: `LLM/EMBED/RERANK_API_KEY`; ingest: `EMBED/CONTEXT_LLM_API_KEY`
+  from data keys `llm/embed/rerank/context-llm-api-key`). A set
+  `GATEWAY_API_KEY_SECRET` substitutes the Secret name into the block;
+  unset deletes the entries via `strip_gateway_key_entries` in `common.sh`
+  so keyless deployments reference no secret (a dangling secretKeyRef
+  would wedge every pod start). The strip matches the five-line entries by
+  env name, never by comments: kustomize drops YAML comments and sorts
+  mapping keys, so the `# gateway-api-keys-begin/end` markers in the
+  overlays are documentation only (unit-test stubs mirror the comment-free
+  sorted kustomize output for this reason). The name passes the same
+  DNS-subdomain charset gate as the pull secret (`check_secret_name`);
+  plaintext `*_API_KEY` values in the env file die in
+  `refuse_plaintext_gateway_keys` (every script, via
+  `enforce_product_rules`).
 - The Qdrant service URL is derived as plaintext
   `http://<QDRANT_RELEASE>:6333` (in-cluster DNS). The `<release>-apikey`
   secret name follows `QDRANT_RELEASE` — renaming the release without a
@@ -162,9 +178,13 @@ cannot schedule on one node — proven).
   `grpcio` is not in the wheelhouse, so 4317 stays closed), UI on
   port-forward only, no archive store (debug data, not records).
 - Validate is read-only pre-flight: required keys, `DENSE_DIM` positive
-  integer, `http(s)` vLLM URL, `IMAGE_SHA` not empty/`HEAD`, tool presence
+  integer, `http(s)` vLLM URL, `http(s)` scheme on any set optional model
+  URL (`EMBED/LLM/RERANK/CONTEXT_LLM_BASE_URL`), `GATEWAY_API_KEY_SECRET`
+  charset gate, plaintext `*_API_KEY` refusal in the env file (every script,
+  not only validate), `IMAGE_SHA` not empty/`HEAD`, tool presence
   (even for dry-run), manifest cross-check (missing manifest is a notice,
-  not a failure), storage-class existence, and OpenShift-detected SCC
+  not a failure), storage-class existence, gateway key Secret existence
+  (notice when the namespace does not exist yet), and OpenShift-detected SCC
   advice. It probes no inference endpoint — a bad vLLM URL passes
   validation and fails later.
 - Smoke needs only a namespace: it execs into the agent pod (no Route or

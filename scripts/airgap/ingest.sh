@@ -12,6 +12,7 @@
 enforce_product_rules
 resolve_aliases
 require_env INTERNAL_REGISTRY NAMESPACE IMAGE_SHA CORPUS_PVC EMBED_MODEL DENSE_DIM VLLM_BASE_URL STORAGE_CLASS
+check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -61,6 +62,16 @@ kustomize_render deploy/kustomize/overlays/openshift-ingest | sed -E 's|"(__[A-Z
     -e "s|__CONTEXT_LLM_BASE_URL__|${CONTEXT_LLM_BASE_URL:-}|g" \
     -e "s|__CONTEXT_LLM_MODEL__|${CONTEXT_LLM_MODEL:-}|g" \
     > dist/ingest-rendered.yaml
+# Gateway virtual keys (LiteLLM): same strip-or-substitute contract as the
+# agent render in deploy.sh (Secret holds embed-api-key + context-llm-api-key
+# for this Job).
+if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
+    sed -i -e "s|__GATEWAY_API_KEY_SECRET__|$GATEWAY_API_KEY_SECRET|g" dist/ingest-rendered.yaml
+    echo "==> Gateway keys wired (Secret $GATEWAY_API_KEY_SECRET: EMBED/CONTEXT_LLM_API_KEY via secretKeyRef)"
+else
+    strip_gateway_key_entries dist/ingest-rendered.yaml EMBED_API_KEY CONTEXT_LLM_API_KEY
+    echo "==> Gateway keys off (GATEWAY_API_KEY_SECRET unset): keyless model endpoints"
+fi
 wire_pull_secret dist/ingest-rendered.yaml
 fail_on_placeholders dist/ingest-rendered.yaml ingest
 # CI-rehearsal knob (never set in the air gap): strategic-merge a patch into

@@ -60,3 +60,27 @@ spec:
               value: "__RERANK_BASE_URL__"
             - name: RERANK_MODEL
               value: "__RERANK_MODEL__"
+            # Gateway virtual keys (LiteLLM): optional block. deploy.sh keeps
+            # these entries only when GATEWAY_API_KEY_SECRET names an
+            # operator-created Secret in the namespace (data keys
+            # llm-api-key, embed-api-key, rerank-api-key); when unset they
+            # are stripped by env-entry name. The markers are documentation
+            # only: kustomize drops comments and sorts mapping keys, so
+            # scripts must never match on them.
+            # gateway-api-keys-begin
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __GATEWAY_API_KEY_SECRET__
+                  key: llm-api-key
+            - name: EMBED_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __GATEWAY_API_KEY_SECRET__
+                  key: embed-api-key
+            - name: RERANK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __GATEWAY_API_KEY_SECRET__
+                  key: rerank-api-key
+            # gateway-api-keys-end

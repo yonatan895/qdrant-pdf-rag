@@ -13,7 +13,7 @@ cd "$REPO_ROOT"
 # the snapshot over whatever the file assigned — so `VAR=x make airgap-*`
 # beats a stale key in airgap.env instead of being silently overridden by it.
 # Empty stays unset, matching the ${VAR:-default} idiom used everywhere below.
-OPERATOR_ENV_KEYS="AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL GHCR_OWNER IMAGE_SHA INGEST_EXTRA_PATCH INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY KC LLM_BASE_URL LLM_MODEL_REASONING METRICS_ENABLED NAMESPACE OPENSHIFT_NAMESPACE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_STORAGE_SIZE QDRANT_TAG QUERY REGISTRY_INTERNAL RERANK_BASE_URL RERANK_ENABLED RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB STORAGE_CLASS VLLM_BASE_URL"
+OPERATOR_ENV_KEYS="AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL GATEWAY_API_KEY_SECRET GHCR_OWNER IMAGE_SHA INGEST_EXTRA_PATCH INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY KC LLM_BASE_URL LLM_MODEL_REASONING METRICS_ENABLED NAMESPACE OPENSHIFT_NAMESPACE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_STORAGE_SIZE QDRANT_TAG QUERY REGISTRY_INTERNAL RERANK_BASE_URL RERANK_ENABLED RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB STORAGE_CLASS VLLM_BASE_URL"
 _cli_saved_keys=""
 for _k in $OPERATOR_ENV_KEYS; do
     eval "_is_set=\${$_k:+set}"
@@ -59,6 +59,58 @@ require_env() {
 # Product rules that every air-gap step enforces (AGENTS.md).
 enforce_product_rules() {
     [ "${EMBED_MODE:-}" != "hash" ] || die "EMBED_MODE=hash is CI/dev only; air-gap uses the in-cluster vLLM endpoint"
+    refuse_plaintext_gateway_keys
+}
+
+# Gateway virtual keys must arrive via an operator-created Secret
+# (GATEWAY_API_KEY_SECRET + secretKeyRef), never as plaintext in the env
+# file: the file travels on sneakernet media and lingers on bastions, while
+# the new Settings knobs (PR1) would happily send a leaked value as a
+# Bearer header. Scans the same file the sourcing above selected; commented
+# lines and empty assignments are not keys. Plaintext keys stay usable for
+# local `make ask` via process env — they just can never enter manifests.
+refuse_plaintext_gateway_keys() {
+    _env_file=""
+    if [ -n "${AIRGAP_ENV:-}" ]; then
+        [ -f "$AIRGAP_ENV" ] && _env_file="$AIRGAP_ENV"
+    elif [ -f airgap.env ]; then
+        _env_file="airgap.env"
+    fi
+    if [ -n "$_env_file" ]; then
+        _leaked=$(grep -E "^[[:space:]]*(LLM_API_KEY|EMBED_API_KEY|RERANK_API_KEY|CONTEXT_LLM_API_KEY)=[^[:space:]]" "$_env_file" || true)
+        [ -z "$_leaked" ] || die "plaintext gateway virtual key in $_env_file — keys live only in the cluster Secret named by GATEWAY_API_KEY_SECRET (see airgap.env.example); delete the plaintext assignment"
+    fi
+    unset _env_file _leaked
+}
+
+# Secret names land inside sed replacements and k8s manifests: restrict to
+# the DNS-subdomain charset so neither the render nor the apply can break
+# (a sed-active char like & would silently rewrite the manifest).
+# $1 = value, $2 = variable name for the error. Empty is allowed (opt-in).
+check_secret_name() {
+    case "$1" in
+        "") ;;
+        *[!a-z0-9.-]*) die "$2 must be a DNS-subdomain name (lowercase alphanumerics, '-', '.'), got '$1'" ;;
+    esac
+}
+
+# Delete gateway key entries from a rendered manifest (used when
+# GATEWAY_API_KEY_SECRET is unset). Each entry is exactly five lines
+# (`- name:` + valueFrom/secretKeyRef/key/name in either mapping order),
+# so awk skips a fixed count anchored on the entry name — never on
+# comments (kustomize drops them) and never on inner line order (kustomize
+# sorts mapping keys). Entry shape is pinned by the render tests.
+# $1 = file, $2... = env entry names.
+strip_gateway_key_entries() {
+    _strip_file=$1; shift
+    for _entry in "$@"; do
+        awk -v entry="$_entry" '
+            $0 ~ "- name: " entry "$" { skip=5 }
+            skip > 0 { skip--; next }
+            { print }
+        ' "$_strip_file" > "$_strip_file.tmp" && mv "$_strip_file.tmp" "$_strip_file"
+    done
+    unset _strip_file _entry
 }
 
 resolve_aliases() {
