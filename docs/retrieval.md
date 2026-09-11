@@ -95,8 +95,15 @@ the rerank bypass — but never the filter shape.
 
 `split_query` (`retrieve/split.py`, issue #214) decomposes comparative and
 diagnostic queries into at most two retrieval paths — deterministic regexes,
-no LLM. Both flags (`comparative_split_enabled`,
-`diagnostic_dualpath_enabled`) ship default-off.
+no LLM. **Measured verdict (issue #270, frozen holdout 2026-09-12,
+`real_manuals` vllm, rerank off, same-day 2×2, pre-registered adoption
+rule):** comparative ships **default-ON** — comparative r@1 0.286→0.429,
+class MRR 0.429→0.536, overall r@1 0.603→0.619, overall MRR 0.700→0.712,
+r@5 unchanged, identifier classes unchanged, `must_not` 0 (per-query:
+CMP-08 r@1 0→1; CMP-03 MRR 0.333→0.25 with nDCG 0.387→0.544; CMP-09 MRR
+0.333→0.5). Diagnostic stays **default-OFF** — class r@1 flat 0.571, class
+MRR 0.655→0.643, overall r@5 0.873→0.857, overall MRR 0.700→0.697
+(DIA-03 r@5 1→0; DIA-24 MRR 0.143→0).
 
 - Comparative (`versus`/`vs`/`difference(s) between` + paired `and`/
   `between`-`and`/narrow `X and/or Y`): blocked only by exact anchors

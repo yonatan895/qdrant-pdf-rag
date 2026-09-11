@@ -30,8 +30,9 @@ Items marked **[amended]** changed with the merged P0 PRs.
   (RRF order stands). Detail lives in `docs/retrieval.md` §6.
   No SPLADE, no ColBERT, no HyDE (PR-14/PR-19 still open). Deterministic acronym
   expansion shipped default-off (`retrieve/rewrite.py` + `acronyms_v1.json`, PR-08 partial).
-  Multi-path splitting shipped default-off (comparative `X versus Y` legs +
-  diagnostic dual-path, `comparative_split_enabled` / `diagnostic_dualpath_enabled`).
+  Multi-path splitting: comparative measured ON (#270, frozen-holdout win) —
+  `comparative_split_enabled` defaults true; diagnostic dual-path measured
+  neutral-negative and stays default-off (`diagnostic_dualpath_enabled`).
 - **Serving:** FastAPI. **[amended]** All routes (`/healthz`, `/v1/search`, `/v1/answer`)
   are `async def` on `AsyncQdrantClient` + `httpx2.AsyncClient`; the sync embed and
   cross-encoder legs run via `asyncio.to_thread`, and the pooled sync retrieval-leg
