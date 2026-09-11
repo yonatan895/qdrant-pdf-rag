@@ -422,6 +422,49 @@ def test_http_reranker_v1_score_success():
     assert scores == [0.42, 0.88]
 
 
+def test_http_reranker_sends_bearer_when_key_set():
+    """A gateway-guarded rerank endpoint must see the virtual key."""
+    settings = Settings(
+        rerank_base_url="http://rerank.test/v1",
+        rerank_model="BAAI/bge-reranker-v2-m3",
+        rerank_batch_size=2,
+        rerank_api_key="sk-test-rerank",
+        _env_file=None,
+    )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/v1/score"
+        assert request.headers.get("authorization") == "Bearer sk-test-rerank"
+        return httpx2.Response(
+            200,
+            json={"data": [{"index": 0, "score": 0.42}, {"index": 1, "score": 0.88}]},
+        )
+
+    reranker = HttpReranker(settings, client=httpx2.Client(transport=httpx2.MockTransport(handler)))
+    assert reranker.score("query", ["text0", "text1"]) == [0.42, 0.88]
+
+
+def test_http_reranker_omits_auth_when_key_unset():
+    """Keyless setups send no Authorization header on the rerank legs."""
+    settings = Settings(
+        rerank_base_url="http://rerank.test/v1",
+        rerank_model="BAAI/bge-reranker-v2-m3",
+        rerank_batch_size=2,
+        _env_file=None,
+    )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/v1/score"
+        assert "authorization" not in request.headers
+        return httpx2.Response(
+            200,
+            json={"data": [{"index": 0, "score": 0.42}, {"index": 1, "score": 0.88}]},
+        )
+
+    reranker = HttpReranker(settings, client=httpx2.Client(transport=httpx2.MockTransport(handler)))
+    assert reranker.score("query", ["text0", "text1"]) == [0.42, 0.88]
+
+
 def test_http_reranker_malformed_200_missing_data_falls_back():
     """R3: When /v1/score returns 200 without 'data', it must fall back to /v1/rerank."""
     settings = Settings(

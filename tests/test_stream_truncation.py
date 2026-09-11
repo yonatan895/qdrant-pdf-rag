@@ -83,10 +83,10 @@ def test_chat_sync_truncated_stream_falls_back_to_complete_post():
             self.posts = 0
 
         @contextmanager
-        def stream(self, method, url, json=None):
+        def stream(self, method, url, json=None, headers=None):
             yield StreamResp(TRUNCATED_LINES)
 
-        def post(self, url, json=None):
+        def post(self, url, json=None, headers=None):
             self.posts += 1
             return PostResp(_COMPLETE_PAYLOAD)
 

@@ -19,6 +19,22 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 HASH_EMBED_DIM = 256
 
 
+def bearer_auth_headers(api_key: str | None) -> dict[str, str]:
+    """Authorization header for gateway-guarded model endpoints (LiteLLM
+    virtual keys, `Bearer sk-...`).
+
+    Single helper for every outbound model call (reasoning LLM, dense embed,
+    reranker, tokenizer verify, contextual gist) so auth semantics cannot
+    diverge copies. Unset, empty, or whitespace-only keys yield no header —
+    never `Bearer None` — keeping the keyless path byte-identical to the
+    pre-gateway wire shape. The key is stripped: pasted secrets often trail
+    a newline. Values here must never reach logs; callers pass only the
+    returned mapping to httpx."""
+    if not api_key or not api_key.strip():
+        return {}
+    return {"Authorization": f"Bearer {api_key.strip()}"}
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -41,6 +57,10 @@ class Settings(BaseSettings):
     embed_mode: str = "vllm"
     embed_base_url: str | None = None
     embed_model: str | None = None
+    # Gateway virtual key for the dense-embed endpoint (LiteLLM). Unset keeps
+    # the keyless wire shape; never logged, never committed — deployment
+    # delivers it via secretKeyRef, never plaintext in airgap.env.
+    embed_api_key: str | None = None
     dense_dim: int | None = None
     embed_timeout_s: float = 60.0
 
@@ -55,6 +75,9 @@ class Settings(BaseSettings):
     # Reasoning LLM (LiteLLM / vLLM)
     llm_base_url: str | None = None
     llm_model_reasoning: str | None = None
+    # Gateway virtual key for the reasoning endpoint (LiteLLM). Unset keeps
+    # the keyless wire shape; never logged, never committed.
+    llm_api_key: str | None = None
     # Reasoning models think; the long timeout is the retry policy — /v1/answer
     # never retries (issue #20 PR C).
     answer_timeout_s: float = 300.0
@@ -187,6 +210,8 @@ class Settings(BaseSettings):
     rerank_enabled: bool = False
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_base_url: str | None = None
+    # Gateway virtual key for the rerank endpoint. Unset keeps keyless shape.
+    rerank_api_key: str | None = None
     rerank_candidates: int = Field(default=50, ge=10, le=100)
     rerank_batch_size: int = Field(default=32, ge=1, le=128)
     rerank_timeout_s: float = Field(default=5.0, ge=0.5, le=30.0)
@@ -219,6 +244,9 @@ class Settings(BaseSettings):
     contextual_embed_enabled: bool = False
     context_llm_base_url: str | None = None
     context_llm_model: str | None = None
+    # Gateway virtual key for the contextual-gist endpoint. Unset keeps
+    # the keyless wire shape.
+    context_llm_api_key: str | None = None
     # Short-call budget, distinct from the 300s answer timeout: context
     # generation is a 1-2 sentence completion, never a reasoning trace.
     context_llm_timeout_s: float = Field(default=30.0, gt=0.0, le=300.0)

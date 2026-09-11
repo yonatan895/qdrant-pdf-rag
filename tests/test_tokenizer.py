@@ -56,6 +56,46 @@ def test_vllm_tokenizer_calls_origin_root():
     assert captured["json"]["model"] == "mock-reasoning"
 
 
+def test_vllm_tokenizer_sends_bearer_when_key_set():
+    """A gateway-guarded /tokenize must see the reasoning leg's virtual key."""
+    captured = {}
+    client = TokenizerPostFake(count=7, capture=captured)
+
+    tok = VllmTokenizer(
+        base_url="http://mock-llm:8000/v1", model="m", client=client, api_key="sk-test-llm"
+    )
+    assert tok.count_tokens("abc") == 7
+    assert captured["headers"] == {"Authorization": "Bearer sk-test-llm"}
+
+
+def test_vllm_tokenizer_omits_auth_when_key_unset():
+    """Keyless setups keep the pre-gateway /tokenize shape: no header."""
+    captured = {}
+    client = TokenizerPostFake(count=7, capture=captured)
+
+    tok = VllmTokenizer(base_url="http://mock-llm:8000/v1", model="m", client=client)
+    assert tok.count_tokens("abc") == 7
+    assert captured["headers"] == {}
+
+
+def test_build_tokenizer_wires_llm_api_key():
+    """build_tokenizer passes the reasoning leg's key into the client."""
+    captured = {}
+    client = TokenizerPostFake(count=7, capture=captured)
+
+    tok = build_tokenizer(
+        Settings(
+            llm_base_url="http://mock-llm:8000/v1",
+            llm_model_reasoning="m",
+            llm_api_key="sk-test-llm",
+            _env_file=None,
+        ),
+        client=client,
+    )
+    assert tok.count_tokens("abc") == 7
+    assert captured["headers"] == {"Authorization": "Bearer sk-test-llm"}
+
+
 def test_vllm_tokenizer_base_without_v1_unchanged():
     captured = {}
     client = TokenizerPostFake(count=3, capture=captured)

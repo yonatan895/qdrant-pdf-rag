@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 log = logging.getLogger(__name__)
 
 from mainframe_rag.agent.tokenizer import estimate_tokens
-from mainframe_rag.config import Settings
+from mainframe_rag.config import Settings, bearer_auth_headers
 from mainframe_rag.ports import ChatMessage, ChatResult, Tokenizer, TokenUsage
 from mainframe_rag.regexes import find_message_ids
 from mainframe_rag.retrieve.query import SearchHit
@@ -647,6 +647,7 @@ class HttpxLLMClient:
         temperature: float | None = None,
     ) -> ChatResult:
         base_url, model = assert_reasoning_model(self._settings)
+        headers = bearer_auth_headers(self._settings.llm_api_key)
         serialized = [m.model_dump() for m in messages]
         body = _chat_body(model, serialized, reasoning_effort, temperature, stream=False)
         if getattr(self._settings, "llm_stream", False):
@@ -658,6 +659,7 @@ class HttpxLLMClient:
                     "POST",
                     f"{base_url.rstrip('/')}/chat/completions",
                     json=body_stream,
+                    headers=headers,
                 ) as stream_resp:
                     stream_resp.raise_for_status()
                     async for line in stream_resp.aiter_lines():
@@ -689,6 +691,7 @@ class HttpxLLMClient:
         resp = await self._async_http().post(
             f"{base_url.rstrip('/')}/chat/completions",
             json=body,
+            headers=headers,
         )
         resp.raise_for_status()
         return _chat_result_from_response(resp.json())
@@ -700,6 +703,7 @@ class HttpxLLMClient:
         temperature: float | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         base_url, model = assert_reasoning_model(self._settings)
+        headers = bearer_auth_headers(self._settings.llm_api_key)
         serialized = [m.model_dump() for m in messages]
         body = _chat_body(model, serialized, reasoning_effort, temperature, stream=True)
 
@@ -710,6 +714,7 @@ class HttpxLLMClient:
             "POST",
             f"{base_url.rstrip('/')}/chat/completions",
             json=body,
+            headers=headers,
         ) as stream_resp:
             stream_resp.raise_for_status()
             async for line in stream_resp.aiter_lines():
@@ -740,6 +745,7 @@ class HttpxLLMClient:
             resp = await self._async_http().post(
                 f"{base_url.rstrip('/')}/chat/completions",
                 json=body,
+                headers=headers,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -766,6 +772,7 @@ class HttpxLLMClient:
         temperature: float | None = None,
     ) -> ChatResult:
         base_url, model = assert_reasoning_model(self._settings)
+        headers = bearer_auth_headers(self._settings.llm_api_key)
         serialized = [m.model_dump() for m in messages]
         body = _chat_body(model, serialized, reasoning_effort, temperature, stream=False)
         if getattr(self._settings, "llm_stream", False) and hasattr(self._sync_http(), "stream"):
@@ -777,6 +784,7 @@ class HttpxLLMClient:
                     "POST",
                     f"{base_url.rstrip('/')}/chat/completions",
                     json=body_stream,
+                    headers=headers,
                 ) as stream_resp:
                     stream_resp.raise_for_status()
                     for line in stream_resp.iter_lines():
@@ -800,6 +808,7 @@ class HttpxLLMClient:
         resp = self._sync_http().post(
             f"{base_url.rstrip('/')}/chat/completions",
             json=body,
+            headers=headers,
         )
         resp.raise_for_status()
         return _chat_result_from_response(resp.json())

@@ -39,7 +39,7 @@ from mainframe_rag.agent.tracing import (
     shutdown_tracing,
     trace_enabled,
 )
-from mainframe_rag.config import Settings, load_settings
+from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import search as retrieve_search
@@ -364,7 +364,11 @@ def resolve_runtime_settings(
         and "EMBED_BASE_URL" not in os.environ
     ):
         try:
-            m_resp = httpx2.get(f"{target_embed_url.rstrip('/')}/models", timeout=1.5)
+            m_resp = httpx2.get(
+                f"{target_embed_url.rstrip('/')}/models",
+                timeout=1.5,
+                headers=bearer_auth_headers(settings.embed_api_key),
+            )
             if m_resp.status_code == 200:
                 raw_json = m_resp.json()
                 avail = [
@@ -397,6 +401,7 @@ def resolve_runtime_settings(
                             f"{target_embed_url.rstrip('/')}/embeddings",
                             json={"model": chosen_embed_model, "input": "probe"},
                             timeout=3.0,
+                            headers=bearer_auth_headers(settings.embed_api_key),
                         )
                         if p_resp.status_code == 200:
                             p_json = p_resp.json()
@@ -467,7 +472,11 @@ def resolve_runtime_settings(
         updates["llm_base_url"] = vllm_url
 
     try:
-        m_resp = httpx2.get(f"{target_llm_url.rstrip('/')}/models", timeout=1.5)
+        m_resp = httpx2.get(
+            f"{target_llm_url.rstrip('/')}/models",
+            timeout=1.5,
+            headers=bearer_auth_headers(settings.llm_api_key),
+        )
         if m_resp.status_code == 200:
             raw_json = m_resp.json()
             avail = [
