@@ -1,4 +1,4 @@
-"""FTP transport for the read-only Zowe MCP bridge (ADR-0002).
+"""FTP transport for the read-only Zowe MCP bridge (ADR-0003).
 
 All four allowlisted tools speak the z/OS FTP server; nothing here opens
 any other connection. Text reads use TYPE A so the server converts

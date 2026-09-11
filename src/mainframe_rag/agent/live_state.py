@@ -1,4 +1,4 @@
-"""Deterministic live-state routing + fetch orchestration (ADR-0002, phase 2).
+"""Deterministic live-state routing + fetch orchestration (ADR-0003, phase 2).
 
 classify_live_need routes manual/live/hybrid with deterministic signals;
 trap queries always route manual (injection must not steer mainframe
@@ -47,7 +47,7 @@ _LIVE_NOUNS = (
 )
 _HYBRID_VERBS = ("failed", "fails", "abend", "dump", "ended", "rejected", "hang")
 
-# Hard ceiling per fetch plan (ADR-0002: bounded calls).
+# Hard ceiling per fetch plan (ADR-0003: bounded calls).
 MAX_TOOL_CALLS = 2
 
 
@@ -195,7 +195,7 @@ def fetch_live(
                     )
                 )
                 break
-            except Exception:  # noqa: BLE001 — degrade, never raise (ADR-0002 fallback)
+            except Exception:  # noqa: BLE001 — degrade, never raise (ADR-0003 fallback)
                 degraded = "upstream_error"
                 log.warning(
                     json.dumps(

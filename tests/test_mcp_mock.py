@@ -1,4 +1,4 @@
-"""Mock z/OS backend tests (ADR-0002 mock phase). Hermetic except the sim
+"""Mock z/OS backend tests (ADR-0003 mock phase). Hermetic except the sim
 tier file below: fixtures generate at runtime (never committed), the mock
 session replaces the wire, and a hygiene test keeps mock mode out of prod
 manifests (the EMBED_MODE=hash scoping precedent)."""

@@ -1,4 +1,4 @@
-"""Agent-side MCP client for the read-only FTP bridge (ADR-0002, phase 2).
+"""Agent-side MCP client for the read-only FTP bridge (ADR-0003, phase 2).
 
 Minimal Streamable-HTTP JSON-RPC over httpx2 — initialize, tools/list,
 tools/call only. No new dependency. Sync by protocol (callers offload
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("agent")
 
-# Closed allowlist, mirrored from the bridge dispatch table (ADR-0002: adding
+# Closed allowlist, mirrored from the bridge dispatch table (ADR-0003: adding
 # a tool is a new ADR, never a flag flip). Startup asserts the server's
 # tools/list is a subset — a server registering more refuses to serve.
 ALLOWLIST = ("dataset_read", "uss_read", "job_status", "jes_spool_read")

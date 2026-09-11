@@ -231,7 +231,7 @@ class Settings(BaseSettings):
     # real-corpus holdout: CE-only promotes 3 but demotes 3).
     rerank_fusion_alpha: float = Field(default=1.0, ge=0.0, le=1.0)
 
-    # Zowe MCP live state (ADR-0002, phase 2: client + routing only — no
+    # Zowe MCP live state (ADR-0003, phase 2: client + routing only — no
     # prompt wiring yet). Default off; enabling without ZOWE_MCP_BASE_URL
     # refuses at lifespan. Timeouts/caps are dedicated (short, bounded),
     # never the 300s answer budget.

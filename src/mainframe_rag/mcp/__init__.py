@@ -1,4 +1,4 @@
-"""Read-only Zowe MCP bridge over FTP (ADR-0002, phase 1).
+"""Read-only Zowe MCP bridge over FTP (ADR-0003, phase 1).
 
 MCP interface, FTP transport: stdio + Streamable HTTP framing around the
 four allowlisted read tools in `bridge.py`. The dispatch table IS the

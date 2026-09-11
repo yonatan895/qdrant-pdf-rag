@@ -1,4 +1,4 @@
-"""Agent-side MCP wiring tests (ADR-0002 phase 2). Hermetic: the bridge is
+"""Agent-side MCP wiring tests (ADR-0003 phase 2). Hermetic: the bridge is
 faked at the httpx2 transport (exact JSON-RPC frames asserted) or replaced
 by a recording double — no network, no credentials, no mainframe."""
 

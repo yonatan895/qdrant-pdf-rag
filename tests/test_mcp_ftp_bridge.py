@@ -1,4 +1,4 @@
-"""FTP MCP bridge tests (ADR-0002 phase 1). Hermetic: FakeFTP replaces the
+"""FTP MCP bridge tests (ADR-0003 phase 1). Hermetic: FakeFTP replaces the
 wire — no network, no credentials, no mainframe. No binary fixtures."""
 
 from __future__ import annotations
