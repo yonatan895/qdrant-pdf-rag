@@ -443,3 +443,36 @@ def test_identifier_gates_pass_at_one():
     rep["classes"] = {"message_id": {"recall@1": 1.0}}
 
     assert check_baseline(rep, {}) == []
+
+
+def test_real_corpus_baseline_uses_no_drop_floor():
+    """Issue #286: the real-corpus baseline sits below 1.0; the gate must go
+    green at its own baseline and still flag any identifier/message-id drop."""
+    baseline = {
+        "_meta": {"collection": "real_manuals", "embed_mode": "vllm"},
+        "identifier": {"recall@1": 0.692},
+        "classes": {"message_id": {"recall@1": 0.8}},
+    }
+    rep = _report()
+    rep["identifier"]["recall@1"] = 0.692
+    rep["classes"] = {"message_id": {"recall@1": 0.8}}
+    assert check_baseline(rep, baseline) == []
+
+    dropped = _report()
+    dropped["identifier"]["recall@1"] = 0.65
+    dropped["classes"] = {"message_id": {"recall@1": 0.75}}
+    regressions = check_baseline(dropped, baseline)
+    assert any("identifier.recall@1" in r and "real-corpus gate" in r for r in regressions)
+    assert any(
+        "classes.message_id.recall@1" in r and "real-corpus gate" in r for r in regressions
+    )
+
+
+def test_synthetic_baseline_keeps_absolute_floor():
+    """A synthetic collection name keeps 1.0-must-mean-1.0 (no-venue-meta
+    baselines keep it too; see test_identifier_gate_is_absolute_not_ratio)."""
+    baseline = {"_meta": {"collection": "gate-l1-123"}, "identifier": {"recall@1": 0.5}}
+    rep = _report()
+    rep["identifier"]["recall@1"] = 0.99
+    regressions = check_baseline(rep, baseline)
+    assert any("absolute gate" in r for r in regressions)
