@@ -48,6 +48,13 @@ spec:
               value: __IMAGE_SHA__
             - name: OTEL_DEPLOYMENT_ENVIRONMENT
               value: __OTEL_DEPLOYMENT_ENVIRONMENT__
+            # Service name for trace resource attributes (issue #250):
+            # substituted from OTEL_SERVICE_NAME in airgap.env; stripped
+            # when unset so the agent default (mainframe-rag-agent) stands
+            # — a blank value would override it with "" (tracing.py reads
+            # the var with no empty-string fallback).
+            - name: OTEL_SERVICE_NAME
+              value: __OTEL_SERVICE_NAME__
             # Prometheus /metrics for UWM scrapes (issue #187): "true" serves
             # exposition, anything else 404s (fail-closed default). deploy.sh
             # also deploys the ServiceMonitor only in that case.

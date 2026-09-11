@@ -47,6 +47,8 @@ spec:
               value: __IMAGE_SHA__
             - name: OTEL_DEPLOYMENT_ENVIRONMENT
               value: __OTEL_DEPLOYMENT_ENVIRONMENT__
+            - name: OTEL_SERVICE_NAME
+              value: __OTEL_SERVICE_NAME__
             - name: METRICS_ENABLED
               value: "__METRICS_ENABLED__"
             - name: RERANK_ENABLED
@@ -296,6 +298,23 @@ def test_deploy_identity_environment_wired_when_set(tree):
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     assert re.search(r"OTEL_DEPLOYMENT_ENVIRONMENT\n\s+value: lab$", rendered, re.MULTILINE)
+
+
+def test_service_name_stripped_when_unset(tree):
+    # Unset must leave no entry at all: a blank value would override the
+    # agent default (mainframe-rag-agent) with "" (tracing.py: no fallback).
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert "OTEL_SERVICE_NAME" not in rendered
+    assert "__OTEL_SERVICE_NAME__" not in rendered
+
+
+def test_service_name_wired_when_set(tree):
+    r = _run(tree, ("OTEL_SERVICE_NAME", "my-rag-prod"))
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert re.search(r"OTEL_SERVICE_NAME\n\s+value: my-rag-prod$", rendered, re.MULTILINE)
 
 
 # ------------------------------------------------------- ServiceMonitor (#187)
