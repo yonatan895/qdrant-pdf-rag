@@ -113,7 +113,7 @@ INTERNAL_REGISTRY=wrong.invalid:5000
 NAMESPACE=file-ns
 STORAGE_CLASS=nfs-client
 EMBED_MODEL=file-model
-DENSE_DIM=9999
+DENSE_DIM=not-a-number
 VLLM_BASE_URL=ftp://file-vllm:8000
 """
 
@@ -135,7 +135,8 @@ def _write_env_file(tree, content):
 
 def test_explicit_env_beats_env_file(tree):
     # Every file value here would fail validation on its own (NFS storage,
-    # non-http URL); exit 0 proves the explicit environment won on all keys.
+    # non-http URL, non-integer dim); exit 0 proves the explicit environment
+    # won on all keys.
     r = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, POISON_ENV_FILE)})
     assert r.returncode == 0, r.stderr
     assert "SUCCESS: Pre-flight validation passed (dry-run mode)." in r.stdout
