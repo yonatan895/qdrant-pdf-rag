@@ -4,7 +4,7 @@
 > MUST read: the issue, this document, `AGENTS.md`, `docs/architecture.md`, and
 > `docs/adr/0001-baseline-decisions.md` before writing code.
 
-## Verified repo facts (audit of 2026-09-02; amended 2026-09-03 after PR-01/PR-02/PR-03 merged; amended 2026-09-05 in docs-epic PR-A: PR-04/PR-05/PR-06/PR-09 marked shipped, PR-08 partial)
+## Verified repo facts (audit of 2026-09-02; amended 2026-09-03 after PR-01/PR-02/PR-03 merged; amended 2026-09-05 in docs-epic PR-A: PR-04/PR-05/PR-06/PR-09 marked shipped, PR-08 partial; amended 2026-09-11 in docs-epic PR-B: gateway trio, MCP, splits, replay verdicts recorded below)
 
 These were verified against code and docs, not assumed. Agent tasks below reference them.
 Items marked **[amended]** changed with the merged P0 PRs.
@@ -23,8 +23,15 @@ Items marked **[amended]** changed with the merged P0 PRs.
   reranker exists (`retrieve/rerank.py`, `bge-reranker-v2-m3` via `HttpReranker`) but
   ships **default-off** (`rerank_enabled=False`); fused top-50 are rescored only when
   `RERANK_ENABLED=true`. `search()` and `async_search()` are drift-guard-pinned twins.
+  Shipped since: cross-encoder/RRF blend (`rerank_fusion_alpha`, default 1.0);
+  type-templated passages (`Table:`/`Syntax:` labels); leg order
+  (`RERANK_ENDPOINT_ORDER`: `score_first` default, `rerank_first` for
+  gateways, symmetric fallback); trap and identifier queries bypass rerank
+  (RRF order stands). Detail lives in `docs/retrieval.md` §6.
   No SPLADE, no ColBERT, no HyDE (PR-14/PR-19 still open). Deterministic acronym
   expansion shipped default-off (`retrieve/rewrite.py` + `acronyms_v1.json`, PR-08 partial).
+  Multi-path splitting shipped default-off (comparative `X versus Y` legs +
+  diagnostic dual-path, `comparative_split_enabled` / `diagnostic_dualpath_enabled`).
 - **Serving:** FastAPI. **[amended]** All routes (`/healthz`, `/v1/search`, `/v1/answer`)
   are `async def` on `AsyncQdrantClient` + `httpx2.AsyncClient`; the sync embed and
   cross-encoder legs run via `asyncio.to_thread`, and the pooled sync retrieval-leg
@@ -37,6 +44,14 @@ Items marked **[amended]** changed with the merged P0 PRs.
   Embeddings via HTTP: `POST {embed_base_url}/embeddings` with the asymmetric
   `dense_query_prefix` on query vectors only.
   LLM via `HttpxLLMClient` (sync + async + SSE) in `agent/answer.py`.
+  **[amended]** Every model leg optionally sends `Authorization: Bearer`
+  from its `*_API_KEY` Setting through the one helper `bearer_auth_headers`
+  (unset = keyless, wire-identical to before); keys reach the cluster only
+  via the `GATEWAY_API_KEY_SECRET` Secret + `secretKeyRef` (plaintext in
+  `airgap.env` dies fail-closed). Cutover order comes from
+  `scripts/probe_gateway.py` (embed dim/auth, chat incl. SSE `[DONE]`,
+  per-leg rerank reachability with an order recommendation, `/tokenize`
+  presence note).
 - **Splunk:** Already in scope as *caller-supplied* context: `/v1/answer` accepts
   `splunk_context` (see `app.py`, `answer.py`, `tests/test_agent_api.py`). ADR 0001:
   "Splunk stays system of record (context in, not crawl)."
@@ -64,7 +79,10 @@ Items marked **[amended]** changed with the merged P0 PRs.
   PDFs.
 - **Constraints (AGENTS.md / ADR 0001):** Qdrant 1.19.0 `*-unprivileged`, vendored Helm
   chart, no `helm repo add` on air-gap host. This repo does NOT install vLLM/LiteLLM/
-  Splunk/GPU operators. Dense embed = other team's in-cluster vLLM (`VLLM_BASE_URL`).
+  Splunk/GPU operators — the platform LiteLLM gateway is *consumed* over HTTP, never
+  installed (default `LLM_BASE_URL` already points at it; virtual keys via
+  `GATEWAY_API_KEY_SECRET`, Bearer on the wire, `probe_gateway.py` before cutover).
+  Dense embed = other team's in-cluster vLLM (`VLLM_BASE_URL`).
   `EMBED_MODE=hash` is CI/dev only; prod refuses hash without `ALLOW_HASH_MODE=true`.
   Corpus never leaves the enterprise. GitHub repo is a public mirror imported AS-IS
   into air-gapped GitLab — **any CI change must be made in both** `ci.yml` **and**
@@ -113,6 +131,10 @@ Items marked **[amended]** changed with the merged P0 PRs.
 ### PR-02 (issue #76): Cross-encoder reranking
 > **Status: DONE — merged as PR #97.** `retrieve/rerank.py`, default-off
 > (`rerank_enabled=False`); see the amended facts above.
+> Shipped since: `rerank_fusion_alpha` blend, `Table:`/`Syntax:` passage
+> templates, `RERANK_ENDPOINT_ORDER` (`score_first` legacy wire order,
+> `rerank_first` for gateways), trap/identifier bypass. `probe_gateway.py`
+> recommends the order per deployment.
 
 - **Why:** RRF is fusion, not scoring. Largest single retrieval-quality win.
 - **Scope:** new `src/mainframe_rag/retrieve/rerank.py`, `retrieve/query.py`, `config.py`
@@ -330,6 +352,11 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** #75, #84.
 
 ### PR-16 (issue #90): ADR 0002 — agent-initiated live-state retrieval (rescoped)
+> **Status: PARTIAL — ADR proposed (`docs/adr/0002-zowe-mcp-read.md`) and a
+> read-only Zowe bridge + agent wiring + mock backend shipped behind
+> `zowe_mcp_enabled=false` (PRs #228–#231: `src/mainframe_rag/mcp/`,
+> routing/fetch orchestration, sim-tier mock).** Tool-result prompt wiring
+> and any Splunk-connector work remain open.
 - **Why:** ADR 0001 decided "Splunk: context in, not crawl" and `/v1/answer` already
   accepts caller-supplied `splunk_context`. Letting the AGENT fetch live state
   supersedes ADR 0001 → per repo policy this REQUIRES a new ADR + `architecture.md`
@@ -343,6 +370,9 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** none (document only).
 
 ### PR-17 (issue #91): Read-only ops tool-calling
+> **Status: OPEN — transport exists** (read-only Zowe bridge + mock backend
+> from #228–#231, default-off); allowlisted function-calling, audit logging,
+> and tool-result prompt wiring are still to do.
 - **Scope:** new `agent/tools/`, feature-flagged, allowlisted tools only
 - **Implementation:** Function-calling against the #90 connector interface; every call
   audit-logged with request id; disabled by default; tool results wrapped as untrusted
@@ -371,6 +401,37 @@ Items marked **[amended]** changed with the merged P0 PRs.
   cross-references at ingest (deterministic, no LLM community summaries); 1-hop expansion
   at retrieval. Full GraphRAG out of scope unless this proves the direction.
 - **Depends on:** measured failure after #82, #86.
+
+---
+
+## Shipped after 2026-09-05 without an issue slot
+
+Work that landed outside the #75–#94 numbering. New scope still needs an
+issue first — this section records what exists so agents stop re-proposing it.
+
+- **LiteLLM-gateway trio (PRs #246–#248):** per-leg `*_API_KEY` virtual
+  keys sent as `Authorization: Bearer` via the one helper
+  `bearer_auth_headers` (keyless = wire-identical); delivery through the
+  operator-created `GATEWAY_API_KEY_SECRET` Secret + `secretKeyRef`
+  (plaintext in `airgap.env` dies fail-closed); `RERANK_ENDPOINT_ORDER`
+  (`score_first` legacy, `rerank_first` for gateways, symmetric fallback);
+  `scripts/probe_gateway.py` proves each leg in-cluster and recommends the
+  order. No `litellm` dependency — the gateway is consumed over HTTP.
+- **Air-gap precedence fix (#245):** `DENSE_DIM` joined `OPERATOR_ENV_KEYS`,
+  so explicit env beats a stale `airgap.env`.
+- **Multi-path retrieval (issue #214, PR #217):** deterministic comparative
+  split (`X versus Y`) + diagnostic dual-path, both default-off.
+- **Table/syntax fidelity (issue #216, PR #220) + type-boost OFF (#239):** atomic table
+  rows, widened message detector, page-label spans; real-corpus replay
+  verdict recorded in `docs/eval.md`.
+- **Capture-pool + record-replay (#237/#238):** prefetch-pool capture and a
+  runbook for production ranking tuning without re-ingesting.
+- **Explicit rerank URL in hash mode (issue #193, PR #195):** `RERANK_BASE_URL` opts a
+  hash-mode stack into the live cross-encoder.
+- **Serving profiles:** `LOCAL_RT_8GB` / `TRIPLE_8GB` / `RANK_EMBED_8GB`
+  VRAM budgets + `serve resolve` CLI (`src/mainframe_rag/serve/`).
+- **Retrieval precision (#240–#242):** member-case canonicalization,
+  doc-number prefix matching, heading-fragment stripping.
 
 ---
 
