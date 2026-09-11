@@ -691,19 +691,34 @@ Acceptance Criteria:
 - All PVCs `Bound` with block storage class.
 - Security Context: running unprivileged under `restricted-v2` SCC.
 
-### 4.4.1 Tracing (optional, issue #83)
+### 4.4.1 Tracing (active by default, issue #83)
 
-Tracing is opt-in: set `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318` in
-`airgap.env` **before** `make airgap-deploy`. deploy.sh then also renders and
-applies `deploy/kustomize/jaeger` (Jaeger v2 all-in-one, badger storage on a
-10Gi RWO block PVC, 14-day span TTL, ClusterIP only) and wires the endpoint
-into the agent. Without the variable the agent keeps tracing off and no
-Jaeger is deployed.
+Tracing is **on by default**: leaving `OTEL_EXPORTER_OTLP_ENDPOINT` unset
+resolves to the in-cluster `http://jaeger:4318`, and `make airgap-deploy`
+renders and applies `deploy/kustomize/jaeger` (Jaeger v2 all-in-one, badger
+storage on a 10Gi RWO block PVC, 14-day span TTL, ClusterIP only) and wires
+the endpoint into the agent and the ingest Job. To disable tracing — and skip
+the Jaeger deployment entirely — set `OTEL_EXPORTER_OTLP_ENDPOINT=off` (also
+`none`, `false`, or `0`) in `airgap.env`. A custom `http(s)` OTLP/HTTP
+collector origin is accepted in place of the in-cluster Jaeger; anything else
+fails closed before a manifest is rendered. `make airgap-validate` prints the
+resolved mode.
+
+This traces **this repo's components only** (agent, retrieval, ingest); the
+platform team's model tier keeps its own monitoring. Outbound model calls
+carry W3C `traceparent` so their gateway can correlate its spans with ours
+when it is tracing-enabled — nothing from this repo configures or deploys
+their monitoring.
 
 The sneakernet bundle always carries the Jaeger image (`images.txt` is a
-pack-wide contract — every pinned image is mirrored on every pack), even
-when tracing stays off; only the deployment is opt-in. The endpoint may be
-given with or without the `/v1/traces` path — the agent accepts both.
+pack-wide contract — every pinned image is mirrored on every pack), so the
+default-on path works in a disconnected install. The endpoint may be given
+with or without the `/v1/traces` path — the agent accepts both.
+`make airgap-smoke` proves a `v1.search` span landed before reporting
+acceptance (empty-collection runs report tracing as skipped); it polls the
+Jaeger query API at `JAEGER_QUERY_URL` (default `http://jaeger:16686`) —
+change that only when a custom collector exposes a Jaeger-compatible query
+API.
 
 Every exported span carries deploy identity as resource attributes:
 `service.version` is the packed `IMAGE_SHA` automatically, and

@@ -32,7 +32,7 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 
 ## Model Gateway & Ownership Contract
 
-**Production (air-gap):** the platform team owns the model tier — reasoning, dense embed, and rerank served by vLLM behind a LiteLLM gateway on a separate cluster. This repo owns Qdrant + ingest + retrieval + the FastAPI agent and consumes the model tier **over HTTP only**; it never installs, deploys, or Helm-charts vLLM / LiteLLM / GPU operators on a product path. All model legs go through the gateway — there is no direct-to-vLLM product path.
+**Production (air-gap):** the platform team owns the model tier — reasoning, dense embed, and rerank served by vLLM behind a LiteLLM gateway on a separate cluster. This repo owns Qdrant + ingest + retrieval + the FastAPI agent and consumes the model tier **over HTTP only**; it never installs, deploys, or Helm-charts vLLM / LiteLLM / GPU operators on a product path. All model legs go through the gateway — there is no direct-to-vLLM product path. Tracing is **on by default**: the deploy ships Jaeger for this repo's components (agent + ingest) and `airgap.env` can set `OTEL_EXPORTER_OTLP_ENDPOINT` to a custom collector or to `off` to disable; the model tier's monitoring stays the platform team's.
 
 **Local dev/test:** `make local-stack` simulates the *complete* production topology on one machine — this repo's Qdrant + agent + Jaeger, plus a **platform stand-in**: local vLLM backends behind the **real** (digest-pinned) LiteLLM gateway. Agent and ingest still reach models through the gateway, so the production wire contract (single origin, model-id routing, per-leg virtual keys) is what gets tested, and a `v1.search` span must land in the local Jaeger before the stack reports up. The local model/gateway simulation scripts are local-only — never in the air gap or Helm (CI's separate `airgap-rehearsal` uses the documented `scripts/mock_vllm.py` stand-in). See [docs/install_and_ops.md](docs/install_and_ops.md) §3.6.
 
@@ -187,7 +187,7 @@ The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `air
 
    # Option B: Or execute step-by-step:
    make airgap-load                   # Push 4 image archives to internal registry
-   make airgap-deploy                 # Deploy Qdrant StatefulSet + Agent (opt-in Jaeger with tracing)
+   make airgap-deploy                 # Deploy Qdrant StatefulSet + Agent + Jaeger (tracing on by default)
    # Prove the gateway from inside the cluster, apply its leg-order recommendation:
    kubectl -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py
    make airgap-ingest CORPUS_PVC=<pvc># Ingest corpus from storage PVC

@@ -64,8 +64,9 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
   integer/boolean env vars render explicitly quoted (`value: "768"`,
   `value: "false"` — the quoting `testing.md` pins, so manifests never hit
   Kubernetes integer/boolean type errors). `RERANK_ENABLED` defaults to
-  `false` and the rerank model default is baked in, while LLM/rerank-base/
-  OTEL values default to empty.
+  `false` and the rerank model default is baked in; the OTEL endpoint
+  resolves to the in-cluster Jaeger when unset (`off` disables), and
+  LLM/rerank-base values default to empty.
 - `wire_pull_secret` reuses the matched line's indent when replacing
   `imagePullSecrets: []` — every overlay nests it inside the pod spec, and
   a fixed-indent insert breaks out of the mapping (kubectl rejects the
@@ -178,7 +179,9 @@ cannot schedule on one node — proven).
   (Jobs are immutable); completion waits up to `INGEST_TIMEOUT` (default
   1h) while a background tailer streams pod logs, dumping logs and events
   on timeout.
-- Jaeger is opt-in only (`OTEL_EXPORTER_OTLP_ENDPOINT` set): 1 replica,
+- Jaeger is on by default (unset `OTEL_EXPORTER_OTLP_ENDPOINT` resolves to
+  `http://jaeger:4318`; the off sentinel disables both tracing and this
+  deployment): 1 replica,
   `fsGroup 10001` (upstream container user, group-writable RWO for
   Badger), 10Gi volume with 14-day span TTL, OTLP/HTTP 4318 only (no gRPC —
   `grpcio` is not in the wheelhouse, so 4317 stays closed), UI on

@@ -40,6 +40,7 @@ unset _url_var _url
 
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
+resolve_otel_endpoint
 
 case "${RERANK_ENDPOINT_ORDER:-score_first}" in
     score_first|rerank_first) ;;
@@ -57,6 +58,11 @@ echo "    EMBED_MODEL:       $EMBED_MODEL"
 echo "    DENSE_DIM:         $DENSE_DIM"
 echo "    VLLM_BASE_URL:     $VLLM_BASE_URL"
 echo "    IMAGE_SHA:         $IMAGE_SHA"
+if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+    echo "    Tracing:           ON ($OTEL_ENDPOINT_RESOLVED)"
+else
+    echo "    Tracing:           OFF (OTEL_EXPORTER_OTLP_ENDPOINT=off)"
+fi
 if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
     echo "    GATEWAY_API_KEY_SECRET: $GATEWAY_API_KEY_SECRET"
 fi

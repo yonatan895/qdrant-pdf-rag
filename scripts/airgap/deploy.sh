@@ -14,6 +14,7 @@ resolve_aliases
 require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM VLLM_BASE_URL
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
+resolve_otel_endpoint
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -92,7 +93,7 @@ kustomize_render deploy/kustomize/overlays/openshift | sed -E 's|"(__[A-Z0-9_]+_
     -e "s|__DENSE_DIM__|\"$DENSE_DIM\"|g" \
     -e "s|__LLM_BASE_URL__|${LLM_BASE_URL:-}|g" \
     -e "s|__LLM_MODEL_REASONING__|${LLM_MODEL_REASONING:-}|g" \
-    -e "s|__OTEL_EXPORTER_OTLP_ENDPOINT__|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|g" \
+    -e "s|__OTEL_EXPORTER_OTLP_ENDPOINT__|${OTEL_ENDPOINT_RESOLVED}|g" \
     -e "s|__OTEL_DEPLOYMENT_ENVIRONMENT__|${OTEL_DEPLOYMENT_ENVIRONMENT:-}|g" \
     -e "s|__METRICS_ENABLED__|\"${METRICS_ENABLED:-false}\"|g" \
     -e "s|__RERANK_ENABLED__|\"${RERANK_ENABLED:-false}\"|g" \
@@ -122,12 +123,12 @@ wire_pull_secret dist/agent-rendered.yaml
 fail_on_placeholders dist/agent-rendered.yaml agent
 run $KC apply -f dist/agent-rendered.yaml
 
-# Jaeger v2 trace backend (issue #83): opt-in via OTEL_EXPORTER_OTLP_ENDPOINT
-# in airgap.env. The agent env var is always rendered (empty = tracing off);
-# the Jaeger deployment only exists when tracing is on. Badger on RWO block,
-# ClusterIP only, UI via port-forward — no Route, ever.
+# Jaeger v2 trace backend (issue #83): ON by default — unset
+# OTEL_EXPORTER_OTLP_ENDPOINT resolves to the in-cluster Jaeger; an explicit
+# off sentinel disables it. The Jaeger deployment only exists when tracing is
+# on. Badger on RWO block, ClusterIP only, UI via port-forward — no Route.
 JAEGER_UI_HINT=""
-if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then
+if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
     echo "==> Kustomize: Jaeger v2 all-in-one (badger on RWO block, ClusterIP)"
     kustomize_render deploy/kustomize/jaeger | sed \
         -e "s|__INTERNAL_REGISTRY__|$INTERNAL_REGISTRY|g" \
@@ -139,7 +140,7 @@ if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then
     run $KC apply -f dist/jaeger-rendered.yaml
     JAEGER_UI_HINT="   |   traces UI: $KC -n $NAMESPACE port-forward svc/jaeger 16686:16686"
 else
-    echo "==> Tracing off (OTEL_EXPORTER_OTLP_ENDPOINT unset): Jaeger not deployed"
+    echo "==> Tracing off (OTEL_EXPORTER_OTLP_ENDPOINT=off): Jaeger not deployed"
 fi
 
 # Prometheus ServiceMonitor for UWM scrapes (issue #187): opt-in via
@@ -175,11 +176,11 @@ wait_rollout() {
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE rollout status statefulset/$QDRANT_RELEASE --timeout=600s"
     echo "[dryrun] $KC -n $NAMESPACE rollout status deploy/rag-agent --timeout=300s"
-    [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] && \
+    [ "$OTEL_TRACING_ENABLED" = "1" ] && \
         echo "[dryrun] $KC -n $NAMESPACE rollout status deploy/jaeger --timeout=120s"
     [ "${AGENT_ROUTE:-false}" = "true" ] && echo "[dryrun] oc create route edge rag-agent --service=rag-agent -n $NAMESPACE"
     echo "[dryrun] rendered manifest kept at dist/agent-rendered.yaml"
-    [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] && \
+    [ "$OTEL_TRACING_ENABLED" = "1" ] && \
         echo "[dryrun] Jaeger manifest kept at dist/jaeger-rendered.yaml"
     [ "${METRICS_ENABLED:-false}" = "true" ] && \
         echo "[dryrun] ServiceMonitor manifest kept at dist/servicemonitor-rendered.yaml"
@@ -187,7 +188,7 @@ else
     echo "==> Wait for Qdrant + agent Ready"
     wait_rollout "statefulset/$QDRANT_RELEASE" 600
     wait_rollout "deploy/rag-agent" 300
-    if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then
+    if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
         wait_rollout "deploy/jaeger" 120
     fi
     if [ "${AGENT_ROUTE:-false}" = "true" ]; then

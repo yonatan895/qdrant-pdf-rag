@@ -14,6 +14,7 @@ resolve_aliases
 require_env INTERNAL_REGISTRY NAMESPACE IMAGE_SHA CORPUS_PVC EMBED_MODEL DENSE_DIM VLLM_BASE_URL STORAGE_CLASS
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
+resolve_otel_endpoint
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -62,7 +63,7 @@ kustomize_render deploy/kustomize/overlays/openshift-ingest | sed -E 's|"(__[A-Z
     -e "s|__CONTEXTUAL_EMBED_ENABLED__|\"${CONTEXTUAL_EMBED_ENABLED:-false}\"|g" \
     -e "s|__CONTEXT_LLM_BASE_URL__|${CONTEXT_LLM_BASE_URL:-}|g" \
     -e "s|__CONTEXT_LLM_MODEL__|${CONTEXT_LLM_MODEL:-}|g" \
-    -e "s|__OTEL_EXPORTER_OTLP_ENDPOINT__|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|g" \
+    -e "s|__OTEL_EXPORTER_OTLP_ENDPOINT__|${OTEL_ENDPOINT_RESOLVED}|g" \
     -e "s|__OTEL_DEPLOYMENT_ENVIRONMENT__|${OTEL_DEPLOYMENT_ENVIRONMENT:-}|g" \
     > dist/ingest-rendered.yaml
 # Gateway virtual keys (LiteLLM): same strip-or-substitute contract as the

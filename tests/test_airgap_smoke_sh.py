@@ -148,11 +148,20 @@ def test_smoke_kc_env_override_respected(smoke_tree):
     assert "Smoke query returned hits" in r.stdout
 
 
-def test_smoke_tracing_off_skips_trace_check(smoke_tree):
+def test_smoke_tracing_off_sentinel_skips_trace_check(smoke_tree):
     _setup_stub(smoke_tree, health_exit=0, search_exit=0)
-    r = _run_smoke(smoke_tree)
+    r = _run_smoke(smoke_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"))
     assert r.returncode == 0, r.stderr
-    assert "Tracing:       OFF (skipped — OTEL_EXPORTER_OTLP_ENDPOINT unset)" in r.stdout
+    assert "Tracing:       OFF (disabled)" in r.stdout
+
+
+def test_smoke_tracing_on_by_default_runs_check(smoke_tree):
+    # Unset endpoint now resolves to the in-cluster Jaeger: the trace check
+    # must run (and fail closed when no span landed).
+    _setup_stub(smoke_tree, health_exit=0, search_exit=0, trace_exit=1)
+    r = _run_smoke(smoke_tree)
+    assert r.returncode == 1
+    assert "no v1.search span landed in Jaeger" in r.stderr
 
 
 def test_smoke_tracing_ok_when_span_landed(smoke_tree):
@@ -160,6 +169,26 @@ def test_smoke_tracing_ok_when_span_landed(smoke_tree):
     r = _run_smoke(smoke_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"))
     assert r.returncode == 0, r.stderr
     assert "Tracing:       OK (recent v1.search span in Jaeger)" in r.stdout
+
+
+def test_smoke_tracing_custom_query_url_reaches_pod(smoke_tree):
+    # The Jaeger query API URL is operator-overridable: prove the custom
+    # value is what the trace poll passes to the pod.
+    url_log = smoke_tree / "trace-url.log"
+    script = f"""#!/bin/sh
+for arg in "$@"; do
+    case "$arg" in
+        *obs-ui*) echo "$arg" > {url_log}; exit 0 ;;
+    esac
+done
+cat >/dev/null
+exit 0
+"""
+    for name in ("kubectl", "oc"):
+        write_stub(smoke_tree / "bin" / name, script)
+    r = _run_smoke(smoke_tree, ("JAEGER_QUERY_URL", "http://obs-ui:16686"))
+    assert r.returncode == 0, r.stderr
+    assert "obs-ui:16686" in url_log.read_text()
 
 
 def test_smoke_tracing_fails_when_no_span_landed(smoke_tree):
