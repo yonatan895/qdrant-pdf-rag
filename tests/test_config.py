@@ -163,12 +163,13 @@ def test_acronym_expansion_defaults_off():
     assert s.acronym_expansion_enabled is False
 
 
-def test_multipath_split_defaults_off():
-    """Issue #214: comparative split + diagnostic dual-path ship default-off
-    (no behavior change until enabled); every leg shares the original
-    filter, so enabling never widens the constraint allowlist."""
+def test_multipath_split_defaults():
+    """Issue #214/#270: comparative split ships ON (measured holdout win);
+    diagnostic dual-path stays OFF (measured neutral-negative). Every leg
+    shares the original filter, so enabling never widens the constraint
+    allowlist."""
     s = Settings(_env_file=None)
-    assert s.comparative_split_enabled is False
+    assert s.comparative_split_enabled is True
     assert s.diagnostic_dualpath_enabled is False
 
 
@@ -264,7 +265,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
         "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "
     ),
     "acronym_expansion_enabled": False,
-    "comparative_split_enabled": False,
+    "comparative_split_enabled": True,
     "diagnostic_dualpath_enabled": False,
     "rrf_k": 2,
     "rrf_weight_dense_nl": 1.0,

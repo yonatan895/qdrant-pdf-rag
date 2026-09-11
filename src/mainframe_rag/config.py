@@ -126,11 +126,15 @@ class Settings(BaseSettings):
     # Multi-path retrieval (issue #214): deterministic comparative split
     # (``X versus Y`` → two entity-focused paths) and diagnostic dual-path
     # (symptom leg + identifier-stripped cause leg, symptom-favoring merge).
-    # Both default off (no behavior change until enabled); trap and
-    # identifier-heavy comparative queries bypass splitting entirely, and
-    # every leg shares the original query's filter (splitting changes
-    # ranking text only, never the constraint allowlist).
-    comparative_split_enabled: bool = False
+    # Comparative ships ON (issue #270): measured on the frozen holdout
+    # (2026-09-12, real_manuals vllm, rerank off, 2x2) comparative r@1
+    # 0.286->0.429, MRR 0.429->0.536, overall r@1 0.603->0.619, overall MRR
+    # 0.700->0.712, r@5 unchanged, 0 must_not violations. Diagnostic stays
+    # OFF: class r@1 flat 0.571, class MRR 0.655->0.643, overall r@5
+    # 0.873->0.857. Trap and identifier-heavy comparative queries bypass
+    # splitting entirely, and every leg shares the original query's filter
+    # (splitting changes ranking text only, never the constraint allowlist).
+    comparative_split_enabled: bool = True
     diagnostic_dualpath_enabled: bool = False
 
     # Hybrid retrieval fusion (local RRF) and diversity parameters
