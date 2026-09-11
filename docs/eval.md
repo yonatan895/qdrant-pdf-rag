@@ -104,10 +104,11 @@ afterward.
 
 Fails on regressions **or** any query failure. `--rerank` flips reranking
 on for A/B runs (leg order stays `RERANK_ENDPOINT_ORDER`, default
-`score_first` — there is no gate flag for the order; gateway-order A/Bs
-run the same gate with the env var set, after `probe_gateway.py`
-recommends it). The paraphrase branch builds pages from `answer_text`
-without echoing the query (see §6).
+`score_first` — there is no gate flag for the order, by design (#252):
+the gate forces hash mode, so leg-order numbers there would compare stub
+legs; gateway-order A/Bs run the same gate with the env var set, after
+`probe_gateway.py` recommends it). The paraphrase branch builds pages from
+`answer_text` without echoing the query (see §6).
 
 ## 4. Layered harness (`harness.py`, `harness_l1/l2/l3.py`)
 
