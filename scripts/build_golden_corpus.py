@@ -316,6 +316,32 @@ e("NEG-10", "What does message HASP310I report after a JES2 checkpoint reconfigu
      note="sibling near-miss: HASP310I does not exist in the corpus while checkpoint sibling HASP309 does (unparseable by MSG_RE, so it cannot gate must_not); the wrong sibling must never supply the answer",
      trap_type="sibling_near_miss")
 
+# --- new: table-intent gold (issue #270 step 4) ----------------------------------
+# Queries whose expected answer is tabular data, so table retrieval regressions
+# become gateable per class. Bindings verified against the live payload
+# (2026-09-12); the re-freeze that lands them in golden/holdout + baselines is
+# its own dedicated commit. Heading expectations point at table-bearing sections;
+# pages stay out (synthetic-venue dev entries cannot verify them).
+
+e("TBL-01", "In z/Architecture Principles of Operation, which table documents the SYSIB 2.2.2 fields that describe logical-partition CPUs and cores?", "table",
+     ["SA22-7832-10"], heading="SYSIB 2.2.2",
+     note="table answer: system-information-block layout for the logical-partition CPU/core count")
+e("TBL-02", "Which table in z/Architecture Principles of Operation lays out the parameters logged for multiple program-interruption conditions?", "table",
+     ["SA22-7832-10"], heading="Multiple Program-Interruption",
+     note="table answer: multiple program-interruption parameter layout")
+e("TBL-03", "Which z/Architecture table lists the fields an entry occupies in the program tracing facility?", "table",
+     ["SA22-7832-10"], heading="Trace Entries",
+     note="table answer: trace-entry field layout")
+e("TBL-04", "Which PDSMAN report tabulates the Active Directory Lookaside options and their current settings?", "table",
+     ["ca-pdsman-pds-library-management-7-7"], heading="ADL Options Report",
+     note="table answer: ADL options report")
+e("TBL-05", "The PDSMAN member compare facility: which table documents the fields reported when members are compared?", "table",
+     ["ca-pdsman-pds-library-management-7-7"], heading="Member Compare and Update Control",
+     note="table answer: member compare report fields")
+e("TBL-06", "Which PDSMAN display tabulates the resources PRM-View tracks and their current values?", "table",
+     ["ca-pdsman-pds-library-management-7-7"], heading="PRM-View Resource Information Display",
+     note="table answer: PRM-View resource display")
+
 # ---------------------------------------------------------------- seed absorption
 # L2 syntax-shape gold for the seed syntax entries (scripts/harness_l2.py asserts
 # the produced answer/script names the construct the query asks to code). The

@@ -9,7 +9,7 @@ module + a real Qdrant - directly, without the agent HTTP hop.
 Golden set (evals/golden.jsonl = dev, evals/holdout.jsonl = frozen holdout),
 one JSON object per line:
     {"id": "msg-iec130i-01", "query": "...",
-     "query_class": "message_id|doc_number|syntax|diagnostic|comparative|version|negative",
+     "query_class": "message_id|doc_number|syntax|diagnostic|comparative|version|negative|table",
      "expected_behavior": "answer|abstain",
      "expected_doc_ids": ["SA22-0000-00"],
      "expected_heading": "optional heading substring",
@@ -72,6 +72,7 @@ QUERY_CLASSES = (
     "comparative",
     "version",
     "negative",
+    "table",
 )
 
 

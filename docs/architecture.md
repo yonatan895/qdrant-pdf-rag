@@ -224,7 +224,7 @@ The agent is async end to end: all routes are `async def` on `AsyncQdrantClient`
 ## 5. Evaluation, Benchmarking & Tooling
 
 ### 5.1 Retrieval Accuracy Gates (`evals/`)
-- **Golden Dataset:** `evals/golden.jsonl` (dev set, 117 entries) and the frozen `evals/holdout.jsonl` (70 entries, sha256-pinned at `evals/holdout.jsonl.sha256`). Entries carry `query_class` (message_id / doc_number / syntax / diagnostic / comparative / version / negative), `expected_behavior` (answer / abstain), and `must_not_retrieve` trap guards. The holdout is never iterated against: it runs on release candidates only (`make eval-holdout`). Corpus entries are mechanically verified against the live collection (`make verify-golden`).
+- **Golden Dataset:** `evals/golden.jsonl` (dev set, 117 entries) and the frozen `evals/holdout.jsonl` (70 entries, sha256-pinned at `evals/holdout.jsonl.sha256`). Entries carry `query_class` (message_id / doc_number / syntax / diagnostic / comparative / version / negative / table), `expected_behavior` (answer / abstain), and `must_not_retrieve` trap guards. The holdout is never iterated against: it runs on release candidates only (`make eval-holdout`). Corpus entries are mechanically verified against the live collection (`make verify-golden`).
 - **Regression Gate:** `make eval` evaluates retrieval recall and MRR against the **mode-keyed baseline**: `evals/baseline.json` in hash mode (CI/dev), `evals/baseline-vllm.json` in vllm mode (release candidates, live embedder). Re-baselining is a dedicated PR (`make eval-baseline`).
 - **Recorded vllm baseline:** `evals/baseline-vllm.json` (mode-keyed, dev set; current numbers live in the file's `_meta` — never inline them here, snapshots rot).
 - **Regression Bounds:**
