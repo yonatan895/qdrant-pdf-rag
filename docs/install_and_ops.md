@@ -456,7 +456,9 @@ knob defaults live in `agent.md` §7. Ships default-off — retrieval is
 identical to the hybrid+RRF baseline until explicitly enabled:
 
 ```bash
-# Enable against a vLLM /v1/score endpoint (falls back to /v1/rerank):
+# Enable against a scorer endpoint (default order tries vLLM /v1/score,
+# then falls back to /v1/rerank; set RERANK_ENDPOINT_ORDER=rerank_first
+# for gateways — see probe_gateway.py below):
 RERANK_ENABLED=true \
 RERANK_BASE_URL=http://localhost:8001/v1 \
 RERANK_MODEL=BAAI/bge-reranker-v2-m3 \
@@ -555,8 +557,10 @@ NAMESPACE=mainframe-rag
 # Persistent storage class (Must be RWO Block, e.g. ocs-storagecluster-ceph-rbd)
 STORAGE_CLASS=gp3-csi
 
-# In-cluster inference endpoints (provided by LLM platform team)
-VLLM_BASE_URL=http://vllm.inference.svc.cluster.local:8000/v1
+# In-cluster inference endpoints (provided by LLM platform team).
+# VLLM_BASE_URL takes the bare server origin (a trailing /v1 is tolerated:
+# the deploy scripts strip it before deriving EMBED_BASE_URL).
+VLLM_BASE_URL=http://vllm.inference.svc.cluster.local:8000
 EMBED_MODEL=ibm-granite/granite-embedding-278m-multilingual
 DENSE_DIM=768
 LLM_MODEL_REASONING=ibm-granite/granite-20b-code-instruct
@@ -577,7 +581,7 @@ The platform team serves three model endpoints; this repo never hardcodes model 
 |---|---|---|---|
 | Reasoning (`/v1/answer` only) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
 | Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `VLLM_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
-| Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `EMBED_BASE_URL`) | `RERANK_MODEL` | Served via vLLM `--task score` (`/v1/score`, TEI `/v1/rerank` fallback). Point it at the reranker server — the embed default only fits single-server deployments. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: `RERANK_ENDPOINT_ORDER=rerank_first` for gateways (run `probe_gateway.py` below to decide). |
+| Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `EMBED_BASE_URL`) | `RERANK_MODEL` | Served via a vLLM pooling server (`--runner pooling`, `/v1/score`; TEI `/v1/rerank` fallback). Point it at the reranker server — the embed default only fits single-server deployments. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: `RERANK_ENDPOINT_ORDER=rerank_first` for gateways (run `probe_gateway.py` below to decide). |
 
 Create the key Secret **before** `make airgap-deploy` (one Secret, four data keys; the contextual-gist key rides the ingest Job):
 
@@ -661,7 +665,7 @@ Acceptance Criteria:
 - All PVCs `Bound` with block storage class.
 - Security Context: running unprivileged under `restricted-v2` SCC.
 
-### 4.3.1 Tracing (optional, issue #83)
+### 4.4.1 Tracing (optional, issue #83)
 
 Tracing is opt-in: set `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318` in
 `airgap.env` **before** `make airgap-deploy`. deploy.sh then also renders and
@@ -688,7 +692,9 @@ View traces (port-forward only — Jaeger has no public Route, like Qdrant):
 
 ```bash
 oc -n mainframe-rag port-forward svc/jaeger 16686:16686
-# open http://localhost:16686, service "rag-agent-..." (set OTEL_SERVICE_NAME to rename)
+# open http://localhost:16686, service "rag-agent-..." (rename via OTEL_SERVICE_NAME
+# in the agent pod's environment — deploy.sh does not render it, so set it with
+# `kubectl set env deploy/rag-agent OTEL_SERVICE_NAME=<name>` or a local overlay patch)
 ```
 
 Backend posture (single-replica debug-grade, sample-all retention math,

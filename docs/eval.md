@@ -103,7 +103,10 @@ via `QDRANT_SIM_URL`/`QDRANT_URL` is reused; the environment is restored
 afterward.
 
 Fails on regressions **or** any query failure. `--rerank` flips reranking
-on for A/B runs. The paraphrase branch builds pages from `answer_text`
+on for A/B runs (leg order stays `RERANK_ENDPOINT_ORDER`, default
+`score_first` — there is no gate flag for the order; gateway-order A/Bs
+run the same gate with the env var set, after `probe_gateway.py`
+recommends it). The paraphrase branch builds pages from `answer_text`
 without echoing the query (see §6).
 
 ## 4. Layered harness (`harness.py`, `harness_l1/l2/l3.py`)

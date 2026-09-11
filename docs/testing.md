@@ -33,7 +33,7 @@ disabled on short docs on purpose.
 Do not call live Qdrant, vLLM, or the internet. Fake the client. Ingest
 tests use `--dry-run`.
 
-- Patch `httpx2.get` / `httpx2.post` in every unit test that can reach them. Hostnames like `embed-host:9000` are live network. A test that “works because connect failed” is invalid.
+- Patch `httpx2.get` / `httpx2.post` in every unit test that can reach them. Hostnames like `embed-host:9000` are live network. A test that “works because connect failed” is invalid. For scripts that also stream, patch `httpx2.stream` too — or swap the whole `httpx2` module attribute for a URL-keyed fake (the `FakeGateway` pattern in `tests/test_probe_gateway.py`: first-match-wins routes, a `(method, url, headers)` call log, canned-server failures only).
 - Requesting the `monkeypatch` fixture does nothing by itself. Register every mutated env key with `monkeypatch.setenv` / `monkeypatch.delenv` **before** the code under test runs, or snapshot with `monkeypatch.setattr(os, "environ", dict(os.environ))`. Autouse fixtures must call `monkeypatch`.
 - Do not mutate module-global state (routes on the global app, leftover `os.environ`) that later tests inherit.
 - Pin public contracts, not private internals (`client._transport._pool._retries` dies on the next lockfile bump).
@@ -43,8 +43,9 @@ tests use `--dry-run`.
 
 Pure builders live in `tests/fakes.py` (`make_hit`, `make_point`,
 `TokenizerPostFake`, `HttpxStreamFake` + `PostResp`/`StreamResp`,
-`QdrantFake`, `EmbedderFake`, `RerankerFake`, `settings_kw`,
-`iter_golden_queries`) and `tests/helpers_airgap.py` (`make_bin_tree`,
+`QdrantFake`, `LegacyQdrantFake`, `EmbedderFake`, `RerankerFake`,
+`PromotingRerankerFake`, `settings_kw`, `iter_golden_queries`,
+`vllm_models_mock`, `embedding_mock`) and `tests/helpers_airgap.py` (`make_bin_tree`,
 `run_sh`, `sign_sums`, `skopeo_stub`, `assert_pull_secret_wired`).
 `tests/conftest.py` re-exports the retrieval doubles as
 backwards-compatible aliases — import from either, define in neither.
@@ -63,6 +64,8 @@ flip a fallback pin into a success pin.
 If the PR claims “CLI override”, “auto-detect”, “unwrap fence”, “sandbox env”, “IPC isolation”, or “dimension recreate”, the test must still pass when the **success** path is forced with mocks.
 
 Do not assert an outcome the fallback would also produce.
+
+Auth-header changes pin both directions on the success leg: header sent when the key is set, header absent (not empty) when unset — the fakes capture `headers` (`TokenizerPostFake`, `HttpxStreamFake`, `FakeGateway` call log) for exactly this.
 
 Minimum matrix for any auto-detect / resolve helper:
 
@@ -90,7 +93,7 @@ Collection-dimension logic: missing, matching, and mismatched (named `dense` dic
 ### Air-gap deployment tier (`make airgap-dryrun`, `tests/test_airgap_*.py`, local Kind)
 
 The canonical 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is verified across three complementary tiers:
-1. **Hermetic Test Suite (`pytest tests/test_airgap_*.py`):** Fast unit tests running without a cluster or Docker daemon. Exercises `scripts/airgap/*.sh` via stubs for `helm`, `kubectl`, `oc`, `kustomize`, and `skopeo`. Verifies pre-flight environment validation (`validate.sh`), sneakernet extraction and bootstrap (`bootstrap.sh`), pipeline orchestration (`pipeline.sh`), manifest rendering, string quoting of integers and booleans (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`), storage class checks (refusing NFS), Jaeger v2 wiring, and fail-closed behavior on `/healthz` probe failures.
+1. **Hermetic Test Suite (`pytest tests/test_airgap_*.py`):** Fast unit tests running without a cluster or Docker daemon. Exercises `scripts/airgap/*.sh` via stubs for `helm`, `kubectl`, `oc`, `kustomize`, and `skopeo`. Verifies pre-flight environment validation (`validate.sh`), sneakernet extraction and bootstrap (`bootstrap.sh`), pipeline orchestration (`pipeline.sh`), manifest rendering, string quoting of integers and booleans (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`), storage class checks (refusing NFS), Jaeger v2 wiring, gateway key strip-or-substitute rendering plus plaintext-key refusal and Secret verification, and fail-closed behavior on `/healthz` probe failures.
 2. **CI Pre-Flight Dry-Run (`make airgap-dryrun`):** Automated PR gate in GitHub Actions. Renders production Helm templates and Kustomize overlays using test parameters, verifying that all placeholders are substituted and zero leftover `__[A-Z0-9_]+__` patterns remain.
 3. **Local Cluster & E2E Rehearsal:** In local development, operators test the complete pipeline against a single-node Kind cluster and local registry container on port 5000 (`localhost:5000`). In CI, `airgap-rehearsal` runs on `main` against an ephemeral namespace in the lab OpenShift cluster, validating the real sneakernet tarball unpack, image push, StatefulSet rollout, and smoke queries.
 

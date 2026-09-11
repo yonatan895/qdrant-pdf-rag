@@ -106,16 +106,16 @@ This architectural standard ensures local cluster testing exercises the real pro
 3. **Chunk Construction:** Sections partitioned by outline hierarchy. Sections $> 3500$ characters are split on blank lines with a 400-character overlap (`SECTION_MAX_CHARS = 3500`). This ensures dense tables, character code matrices (e.g. AFP fonts), and message documentation never exceed the 4,096-token context limit of dense embedding models.
 4. **Multiprocessing Worker IPC Isolation:** Ingest worker processes trap exceptions locally inside `_parse_one` and serialize plain-data `InventoryRecord(status="error")` payloads, preventing unpicklable exception instances (such as `httpx2.HTTPStatusError` with attached response/request references) from crashing the `ProcessPoolExecutor`.
 5. **Point ID Generation:** UUID5 derived from document and chunk keys (guaranteeing deterministic, idempotency-safe IDs without invalid hex strings).
-6. **Payload Slimming:** Points store only essential query and citation attributes (`doc_id`, `title`, `heading_path`, `page_label`, `chunk_type`, `product`, `version`, `message_ids`, `text`). Redundant `embed_text` is omitted from storage.
+6. **Payload Slimming:** Points store only essential query, citation, and filter attributes (`vendor`, `product`, `version`, `doc_id`, `title`, `heading_path`, `page_label`, `page_start`, `chunk_type`, `message_ids`, `members`, `sha256`, `rules_v`, `text`, plus optional `context` when contextual prefixes are enabled). Redundant `embed_text` is omitted from storage.
 
 ### 4.2 Hybrid Embeddings & Collection Configuration
 
-- **Dense Embeddings:** Ingest and query embed via internal vLLM at `POST ${EMBED_BASE_URL}/embeddings` (supporting arbitrary embedding dimensions, e.g. 1024-dim `Qwen3-Embedding-0.6B` or 768-dim models). Operators configure `VLLM_BASE_URL`; deploy scripts derive `EMBED_BASE_URL=${VLLM_BASE_URL%/}/v1` (`scripts/airgap/common.sh`); the agent only reads `EMBED_BASE_URL`. `DENSE_DIM` is a fail-fast setting in vLLM mode: the agent and ingest validate it before any collection or embed call, and collection creation verifies the stored dimension matches. Query embeddings prepend the asymmetric query prefix (`Settings.dense_query_prefix`) on the dense query vector only; document chunks and the CI/dev hash embedder stay raw text.
+- **Dense Embeddings:** Ingest and query embed at `POST ${EMBED_BASE_URL}/embeddings` against the internal vLLM stack or the platform LiteLLM gateway (supporting arbitrary embedding dimensions, e.g. 1024-dim `Qwen3-Embedding-0.6B` or 768-dim models; an `*_API_KEY` virtual key rides as a Bearer header when configured, keyless otherwise). Operators configure `VLLM_BASE_URL`; deploy scripts derive `EMBED_BASE_URL` by stripping trailing slashes and an existing `/v1` before appending `/v1` (`scripts/airgap/common.sh`), so both suffixed and bare `VLLM_BASE_URL` forms work; the agent only reads `EMBED_BASE_URL`. `DENSE_DIM` is a fail-fast setting in vLLM mode: the agent and ingest validate it before any collection or embed call, and collection creation verifies the stored dimension matches. Query embeddings prepend the asymmetric query prefix (`Settings.dense_query_prefix`) on the dense query vector only; document chunks and the CI/dev hash embedder stay raw text.
 - **Sparse BM25 Embeddings:** Computed in-process via FastEmbed using pre-baked `Qdrant/bm25` weights.
 - **Collection Configuration (`mainframe_manuals`):**
-  - Dense: `${DENSE_DIM}` dimensions, Cosine distance, on-disk HNSW ($M=16, ef\_construct=128$), int8 scalar quantization in RAM. Test runners automatically recreate collections if vector dimensions differ between test runs.
+  - Dense: `${DENSE_DIM}` dimensions, Cosine distance, on-disk HNSW ($M=16, ef\_construct=128$), int8 scalar quantization in RAM. Collection creation verifies the stored dimension and refuses mismatches (`DimMismatchError`); dimension changes across runs are a caller/harness concern, never silent.
   - Sparse: `modifier=idf`, on-disk storage.
-  - Payload indexes: `doc_id`, `product`, `version`, `vendor`, `chunk_type`, `message_ids`, `members`, `sha256` (keyword indexes).
+  - Payload indexes: `doc_id`, `product`, `version`, `vendor`, `chunk_type`, `message_ids`, `members`, `sha256` (keyword indexes) plus integer `page_start`.
 - **Embed window budget:** the worst-case embedded string (chunk header + a `SECTION_MAX_CHARS = 3500` body carrying the `SPLIT_OVERLAP_CHARS = 400` split seed) is pinned by `tests/test_embed_budget.py`; local embed servers keep `--max-model-len 4096` (a 2048 window was rejected by tokenizer sweep — the worst case measures ~2,043 tokens at ~2.0 chars/token on syntax-dense text).
 
 ### 4.3 Hybrid Retrieval: Batched Prefetch, RRF Fusion, Rerank & Diversification
@@ -139,10 +139,14 @@ User / Splunk Query
    │     Weights: [1.0, 3.0] (Dense, BM25) for Identifiers
    │     Weights: [1.0, 1.0] for Natural Language
    │
-   ├── Optional cross-encoder rerank (default OFF — `rerank_enabled=False`):
-   │     fused top-`rerank_candidates` (50) scored by `bge-reranker-v2-m3`
-   │     via `HttpReranker` (vLLM /v1/score with /rerank fallback), batched
-   │     by `rerank_batch_size` (32) under `rerank_timeout_s`
+    ├── Optional cross-encoder rerank (default OFF — `rerank_enabled=False`):
+    │     fused top-`rerank_candidates` (50) scored by `bge-reranker-v2-m3`
+    │     via `HttpReranker`, batched by `rerank_batch_size` (32) under
+    │     `rerank_timeout_s`. Leg order follows `RERANK_ENDPOINT_ORDER`:
+    │     `score_first` tries vLLM `/v1/score` then `/rerank`;
+    │     `rerank_first` reverses them for gateways (LiteLLM serves
+    │     `/rerank`, not `/v1/score`). The other leg stays the fallback
+    │     either way; exhaustion fails closed.
    │
    └── Hit diversification → Top-K Ranked Hits with Strict Citation Formatting:
          max 1 chunk per page, max 3 per doc, 3-phase backfill
