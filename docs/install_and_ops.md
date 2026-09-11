@@ -577,7 +577,7 @@ The platform team serves three model endpoints; this repo never hardcodes model 
 |---|---|---|---|
 | Reasoning (`/v1/answer` only) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
 | Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `VLLM_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
-| Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `EMBED_BASE_URL`) | `RERANK_MODEL` | Served via vLLM `--task score` (`/v1/score`, TEI `/v1/rerank` fallback). Point it at the reranker server — the embed default only fits single-server deployments. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. |
+| Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `EMBED_BASE_URL`) | `RERANK_MODEL` | Served via vLLM `--task score` (`/v1/score`, TEI `/v1/rerank` fallback). Point it at the reranker server — the embed default only fits single-server deployments. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: `RERANK_ENDPOINT_ORDER=rerank_first` for gateways (run `probe_gateway.py` below to decide). |
 
 Create the key Secret **before** `make airgap-deploy` (one Secret, four data keys; the contextual-gist key rides the ingest Job):
 
@@ -695,6 +695,27 @@ Backend posture (single-replica debug-grade, sample-all retention math,
 exemplar deferral) is recorded in `docs/adr/0002-otel-backend-posture.md`.
 
 ### 4.5 Corpus Ingestion
+
+#### Gateway readiness probe
+
+After `make airgap-deploy` and before ingesting, prove the platform
+gateway answers every configured leg from inside the cluster (same network
+as the agent — the bastion itself may not reach it):
+
+```bash
+# Embed + reasoning + rerank reachability, dim match, auth diagnosis:
+kubectl -n mainframe-rag exec deploy/rag-agent -- \
+  python3 /app/scripts/probe_gateway.py
+# Add --stream to also verify SSE [DONE] (needed only for ?stream=true TTFT).
+```
+
+The probe exits nonzero when a required leg fails (a 401 names the missing
+`*_API_KEY`; a dim mismatch fails — ingest would refuse it too) and prints
+the recommended `RERANK_ENDPOINT_ORDER` when reranking is enabled
+(`score_first` for raw vLLM, `rerank_first` for gateways). Set the
+recommendation in `airgap.env` and re-run `make airgap-deploy` before
+ingesting. A missing `/tokenize` is informational only — the agent pins
+its in-process estimator (expected behind LiteLLM).
 
 Once the manual PDF corpus PVC is provisioned and populated:
 

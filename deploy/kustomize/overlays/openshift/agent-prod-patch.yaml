@@ -60,6 +60,11 @@ spec:
               value: "__RERANK_BASE_URL__"
             - name: RERANK_MODEL
               value: "__RERANK_MODEL__"
+            # Gateway-native leg first (LiteLLM serves /v1/rerank, not
+            # vLLM's /v1/score): rerank_first saves one failed call per
+            # batch. Default keeps the legacy score-first wire order.
+            - name: RERANK_ENDPOINT_ORDER
+              value: __RERANK_ENDPOINT_ORDER__
             # Gateway virtual keys (LiteLLM): optional block. deploy.sh keeps
             # these entries only when GATEWAY_API_KEY_SECRET names an
             # operator-created Secret in the namespace (data keys

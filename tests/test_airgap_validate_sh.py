@@ -94,6 +94,17 @@ def test_validate_dense_dim_zero_refused(tree):
     assert "DENSE_DIM must be greater than 0" in r.stderr
 
 
+def test_validate_rerank_endpoint_order_bad_value_refused(tree):
+    r = _run(tree, {"RERANK_ENDPOINT_ORDER": "bogus"})
+    assert r.returncode != 0
+    assert "RERANK_ENDPOINT_ORDER must be score_first or rerank_first" in r.stderr
+
+
+def test_validate_rerank_endpoint_order_rerank_first_accepted(tree):
+    r = _run(tree, {"RERANK_ENDPOINT_ORDER": "rerank_first"})
+    assert r.returncode == 0, r.stderr
+
+
 def test_validate_vllm_url_bad_scheme_refused(tree):
     r = _run(tree, {"VLLM_BASE_URL": "ftp://vllm:8000"})
     assert r.returncode != 0

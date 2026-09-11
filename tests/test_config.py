@@ -69,6 +69,7 @@ def test_outbound_timeout_defaults_bounded():
     assert s.rerank_enabled is False
     assert s.rerank_model == "BAAI/bge-reranker-v2-m3"
     assert s.rerank_base_url is None
+    assert s.rerank_endpoint_order == "score_first"
     assert s.rerank_candidates == 50
     assert s.rerank_batch_size == 32
     assert s.rerank_timeout_s == 5.0
@@ -133,6 +134,16 @@ def test_reasoning_effort_validation():
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None, llm_reasoning_effort_complex="extreme")  # type: ignore[arg-type]
+
+
+def test_rerank_endpoint_order_validation():
+    """rerank_endpoint_order accepts only the two known legs; anything else
+    fails at startup, never as a silent score-first at request time."""
+    from pydantic import ValidationError
+
+    assert Settings(_env_file=None, rerank_endpoint_order="rerank_first").rerank_endpoint_order == "rerank_first"
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, rerank_endpoint_order="bogus")  # type: ignore[arg-type]
 
 
 def test_request_size_guardrail_defaults():

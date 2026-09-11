@@ -212,6 +212,12 @@ class Settings(BaseSettings):
     rerank_base_url: str | None = None
     # Gateway virtual key for the rerank endpoint. Unset keeps keyless shape.
     rerank_api_key: str | None = None
+    # Which scoring leg HttpReranker tries first: vLLM's proprietary
+    # `/v1/score` or the Cohere/TEI-standard `/v1/rerank` that gateways
+    # (LiteLLM) serve. The other leg stays the fallback either way, so a
+    # wrong choice costs one failed call per batch, never a wrong ranking.
+    # Default keeps the legacy wire order byte-identical.
+    rerank_endpoint_order: Literal["score_first", "rerank_first"] = "score_first"
     rerank_candidates: int = Field(default=50, ge=10, le=100)
     rerank_batch_size: int = Field(default=32, ge=1, le=128)
     rerank_timeout_s: float = Field(default=5.0, ge=0.5, le=30.0)
