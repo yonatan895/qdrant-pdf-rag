@@ -18,11 +18,13 @@ handler, and the response.
   query_kind, hits}`. No LLM involved.
 - `POST /v1/answer` — `AnswerRequest{query, product?, version?,
   splunk_context?, stream (default false)}` → `AnswerResponse{request_id,
-  answer, citations, script}`. Retrieval always runs with a hardcoded
-  `limit=8` (tuning the search `limit` does not change answers); the JSON
-  response deliberately omits `query_kind`, `hits`, `usage`,
-  `finish_reason`, and `ttft` (those live on spans, logs, and the SSE
-  `final` event).
+  answer, citations, citations_inferred, script}`. Retrieval always runs
+  with a hardcoded `limit=8` (tuning the search `limit` does not change
+  answers); the JSON response deliberately omits `query_kind`, `hits`,
+  `usage`, `finish_reason`, and `ttft` (those live on spans, logs, and the
+  SSE `final` event). `citations_inferred` is the provenance flag (issue
+  #269): true when every returned cite was mapped from bare bracket markers
+  with no explicit citation line — the eval never counts those as grounded.
 - `GET /healthz` — `HealthzResponse{status, qdrant, embed?}`. Qdrant is
   checked by GET-ting the pooled client's `{base}/readyz` and requiring
   exactly `200` plus the body `all shards are ready` (case/space
@@ -67,13 +69,15 @@ mislabeled as retrieval.
 
 `GET/POST /v1/answer?stream=true` yields zero or more `event: token` deltas,
 then exactly one terminal `event: final` carrying the full answer, validated
-citations, optional script, retrieval hits, query kind, `ttft_ms`, and token
-usage. A mid-stream failure emits `event: error` and ends **without** a
-`final` — clients must treat stream-end-without-final as a failed request.
+citations, the `citations_inferred` provenance flag, optional script,
+retrieval hits, query kind, `ttft_ms`, and token usage. A mid-stream failure
+emits `event: error` and ends **without** a `final` — clients must treat
+stream-end-without-final as a failed request.
 
 - The `final` schema is identical on the empty-hits path: zero citations,
-  `ttft_ms: null`, zeroed usage. The empty-hits short-circuit happens before
-  prompt build and any LLM call, on both JSON and SSE.
+  `citations_inferred: false`, `ttft_ms: null`, zeroed usage. The empty-hits
+  short-circuit happens before prompt build and any LLM call, on both JSON
+  and SSE.
 - `Server-Timing` on SSE responses carries the retrieval legs only;
   `llm`/`ttft` timings ride the `final` event (JSON responses carry all of
   them as headers).

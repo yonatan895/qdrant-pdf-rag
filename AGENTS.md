@@ -223,7 +223,7 @@ Re-ingesting a regenerated corpus (new doc_id generation) requires deleting the 
 
 - Chrome: `max(1, 0.35*n)` wipes short PDFs. Min 8 pages and min 3 hits.
 - Classify `message` if `XXXnnnY` appears in the first few lines, not only line 1.
-- Citation inference is `[n]` / `[n, m]` only. Parentheses are IBM-manual noise.
+- Citation inference is `[n]` / `[n, m]` only. Parentheses are IBM-manual noise. Inferred bracket-only cites surface as `citations_inferred` on `/v1/answer` (JSON + SSE `final`) and never count as grounding in the eval/L2 (issue #269).
 - `SECTION_MAX_CHARS = 3500` (not 6000): table-dense / code pages must stay inside 4096-token embedders.
 - Context budgeting: complex reasoning queries cap prompt manual excerpts at 4,500 chars (Settings.prompt_max_context_chars_complex) with type-aware chunk caps: syntax, message, and table chunks preserve full fidelity up to 3,000 chars, while narrative prose is capped at 1,100 chars (Settings.prompt_max_chunk_chars_complex).
 - Dense query prefix: asymmetric query embeddings prepend Settings.dense_query_prefix on dense query vectors only; document chunks stay raw; HashEmbedder remains plain text.

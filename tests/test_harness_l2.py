@@ -329,6 +329,16 @@ def test_summarize_relevance_block():
     assert m["relevance"]["irrelevant"] == 0.0
 
 
+def test_summarize_grounded_rate_excludes_inferred_citations():
+    # Issue #269: bracket-mapped cites are surfaced but never "grounded".
+    m = summarize_l2([
+        _row("A"),
+        _row("B", citations=["[1] c"], citations_inferred=True),
+    ])
+    assert m["grounded_rate"] == 0.5
+    assert m["inferred_citations"] == 1
+
+
 def test_gate_holds_on_relevance_judge_error():
     m = summarize_l2([_row("A", relevance_error="JudgeError: unparseable")])
     verdict, reasons = gate_l2(m)

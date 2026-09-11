@@ -115,6 +115,14 @@ class FabricatingScriptLLM:
         )
 
 
+class InferredOnlyLLM:
+    """Bare bracket markers, no explicit Citations: block (the cheapest
+    fabrication path, issue #269)."""
+
+    def chat(self, messages, *args, **kwargs):
+        return "Reissue the command after initialization completes [1]."
+
+
 def test_search_returns_cite_fields(client):
     resp = client.post("/v1/search", json={"query": "IEA500I", "product": "z/OS"})
     assert resp.status_code == 200
@@ -142,8 +150,20 @@ def test_answer_validates_citations_and_script(client):
     body = resp.json()
     # Only the retrieved citation survives; the fabricated one is dropped.
     assert body["citations"] == [_hit().cite]
+    assert body["citations_inferred"] is False
     assert body["script"] is not None and "IOSCMDS LIST" in body["script"]
     assert "Citations:" not in body["answer"]
+
+
+def test_answer_surfaces_inferred_citation_provenance(client, monkeypatch):
+    """Issue #269: bracket-only cites stay validated but are flagged, so no
+    client or eval has to guess the provenance."""
+    monkeypatch.setattr(app_mod, "llm", InferredOnlyLLM())
+    resp = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["citations"] == [_hit().cite]
+    assert body["citations_inferred"] is True
 
 
 def test_answer_refuses_without_reasoning_model(monkeypatch):
@@ -1489,6 +1509,7 @@ def test_v1_answer_streaming_sse_token_deltas_and_final_event(client, monkeypatc
     assert final_data["type"] == "final"
     assert "request_id" in final_data
     assert final_data["citations"] == ["SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"]
+    assert final_data["citations_inferred"] is False
     assert final_data["script"] == "// example only\nIOSCMDS LIST"
     assert final_data["query_kind"] == "identifier"
     assert len(final_data["hits"]) == 1
@@ -1695,9 +1716,10 @@ def test_sse_final_schemas_match_across_paths():
 
     hit = _make_hit("c1", "SA22-7592-05", 0.9, text="Body")
     usage = TokenUsage(prompt_tokens=10, completion_tokens=5, reasoning_tokens=3, total_tokens=15)
-    full = final_payload("req-1", "Answer text.", ["cite one"], None, "nl", [hit], "stop", 12, usage)
+    full = final_payload("req-1", "Answer text.", ["cite one"], False, None, "nl", [hit], "stop", 12, usage)
     empty = empty_final_payload("req-1", "No supporting manual excerpts were found.", "nl")
     assert set(empty) == set(full)
+    assert full["citations_inferred"] is False
     assert full["hits"] == [hit.model_dump()]
     assert full["usage"] == {
         "prompt_tokens": 10, "completion_tokens": 5, "reasoning_tokens": 3, "total_tokens": 15,

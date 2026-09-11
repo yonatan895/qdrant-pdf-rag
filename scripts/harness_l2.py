@@ -14,9 +14,11 @@ Judging contract (inherits the answer-tier eval's rules)
     The agent's citation validator (agent/cites.py via parse_answer) is the
     single source of truth for grounding; /v1/answer only ever returns
     validated citations, so this harness NEVER re-parses model text for
-    citations. Structural verdicts (refusal on answer rows, trap answered,
-    zero validated citations on the LLM path, gold substrings) come from
-    scripts/eval_answers.py's runner — one judging path, not two.
+    citations.     Structural verdicts (refusal on answer rows, trap answered,
+    zero validated citations on the LLM path, gold substrings, inferred-only
+    citations) come from scripts/eval_answers.py's runner — one judging path,
+    not two. Grounding is explicit-provenance only (issue #269): the
+    `citations_inferred` flag never counts toward `grounded_rate`.
 
     L2 adds four measurements, all pure additions to those rows:
 
@@ -301,7 +303,11 @@ def summarize_l2(results: list[dict[str, Any]]) -> dict[str, Any]:
         "errors": sum(1 for r in results if r.get("verdict") == "error"),
         "structural_fails": sum(1 for r in judged if r["verdict"] == "fail"),
         "answer_llm_n": n_answer,
-        "grounded_rate": rate(sum(1 for r in answer_llm if r.get("citations")), n_answer),
+        "grounded_rate": rate(
+            sum(1 for r in answer_llm if r.get("citations") and not r.get("citations_inferred")),
+            n_answer,
+        ),
+        "inferred_citations": sum(1 for r in judged if r.get("citations_inferred")),
         "citation_precision": round(sum(precs) / len(precs), 4) if precs else None,
         "citation_recall": round(sum(recs) / len(recs), 4) if recs else None,
         "truncation_rate": rate(sum(1 for r in answer_llm if r.get("truncated")), n_answer),

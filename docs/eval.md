@@ -198,7 +198,10 @@ round-robin sampling (sorted classes and ids, no RNG, small classes
 revisited first; default 24 queries, `--all` for full runs), then judge:
 
 - Answer behavior fails on empty bodies, explicit refusals (7 case-fold
-  markers), or zero validated citations; abstain behavior fails only when
+  markers), zero validated citations, or **only inferred citations** (the
+  agent mapped bare `[n]` markers with no explicit citation line; issue
+  #269). The run report counts `inferred_citations` so fabrication is
+  visible, never silently grounded. Abstain behavior fails only when
   grounded *and* unrefusing (hedged or silent answers warn). Gold
   substring/identifier checks are case-fold literals, suppressed on the
   canned zero-hits path (judging fixed strings teaches nothing about the
@@ -375,3 +378,4 @@ committed row is the pointer, the manifest is the detail.
 | 2026-09-02 | pre-#268 | `real_manuals` | `harness-l2` N=24 | 10 structural fails; grounded 0.76, citation precision 0.16, truncation 0.59 — standing red debt (`testing.md` harness section) |
 | 2026-09-11 | 9469d4f | `real_manuals` | `harness-l4-record` N=24×3, then `harness-l4` gate | reference recorded (grounded 0.70, citation P/R 0.60/0.40, truncation 0.43, syntax 0.33, entailment 0.35, relevance 0.97); gate fail on 32 structural fails with no rate outside the 0.15 band, 20-row review queue — standing RC debt |
 | 2026-09-11 | 4db737a | `real_manuals` | `harness-l3-baseline` + `harness-l3` gate (C=8, request timeout 300s) | vllm baseline recorded (search p95 151 ms; answer p95 110 s, ttft p95 108 s under 8-way concurrency on the 8 GB stand-in); gate pass |
+| 2026-09-11 | this PR | `real_manuals` | `harness-l4-record` N=24×3 under strict grounding (#269) | reference re-recorded: grounded 0.48 (was 0.70 — inferred cites no longer count), citation P/R 0.63/0.39, truncation 0.49, entailment 0.29, relevance 0.96; 37 structural fails — standing RC debt |

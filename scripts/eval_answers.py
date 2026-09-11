@@ -13,11 +13,15 @@ Why this tier exists
 
 Judging contract (structural first)
     The agent's citation validator (agent/cites.py via parse_answer) is the
-    single source of truth for grounding: "grounded" means >=1 citation that
-    survived validation against the retrieved hit set. This eval never
-    re-parses model text with its own citation regex — one rule per concept.
-      - answer entry  -> FAIL on: empty body, explicit refusal, or zero
-                         validated citations.
+    single source of truth for citations: it returns validated cite strings
+    plus a `citations_inferred` flag for cites it mapped from bare bracket
+    markers with no explicit citation line (issue #269). Grounding is
+    explicit-provenance only — an answer row whose only cites are inferred
+    FAILS; the flag is surfaced in the JSON report so fabrication is visible
+    rather than silently grounded. This eval never re-parses model text with
+    its own citation regex — one rule per concept.
+      - answer entry  -> FAIL on: empty body, explicit refusal, zero
+                         validated citations, or only inferred citations.
       - abstain entry -> FAIL only when the model cites excerpts AND does not
                          explicitly decline (the trap was answered). Zero
                          citations always passes; citing-but-declining is a
@@ -108,12 +112,19 @@ def judge(
     answer: str,
     citations: list[str],
     judge_gold: bool = True,
+    citations_inferred: bool = False,
 ) -> tuple[str, list[str], list[str]]:
     """Judge one /v1/answer response against a golden entry.
 
     Returns (verdict, failures, warns); verdict is "pass" or "fail".
     Pure function — no I/O, no stack access — so hermetic tests can fire
     every branch.
+
+    Grounding is explicit-provenance only (issue #269): `citations_inferred`
+    marks citations the agent mapped from bare bracket markers with no
+    explicit `Citations:` block, the cheapest fabrication path. Those rows
+    are surfaced in the report and FAIL the answer verdict — a validated
+    cite must come from an explicit citation line to count as grounded.
 
     judge_gold=False suppresses the gold-substring and must_cite_identifier
     checks: they judge MODEL phrasing, and the agent's fixed zero-hits
@@ -130,8 +141,10 @@ def judge(
             failures.append("empty answer body")
         elif refusal:
             failures.append("explicit refusal on an answer-tier query")
-        if not grounded and not refusal and body:
+        elif not grounded:
             failures.append("zero validated citations")
+        elif citations_inferred:
+            failures.append("only inferred citations (no explicit Citations: block)")
     else:  # abstain
         if grounded and not refusal:
             failures.append(f"trap answered: {len(citations)} validated citation(s)")
@@ -205,6 +218,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "failures": sum(1 for r in judged if r["verdict"] == "fail"),
         "warns": sum(len(r.get("warns") or []) for r in judged),
         "zero_hits": sum(1 for r in results if r.get("path") == "zero_hits"),
+        "inferred_citations": sum(1 for r in judged if r.get("citations_inferred")),
         "citations_per_answer": (
             round(sum(len(r.get("citations") or []) for r in answer_rows) / len(answer_rows), 3)
             if answer_rows
@@ -255,12 +269,19 @@ def run_query(client: Any, entry: dict[str, Any]) -> dict[str, Any]:
     data = resp.json()
     answer = str(data.get("answer") or "")
     citations = list(data.get("citations") or [])
+    citations_inferred = bool(data.get("citations_inferred", False))
     zero_hits = is_zero_hits_answer(answer)
     # Zero-hits is the agent's canned message (no model text): gold-substring
     # checks would judge the canned string, not the model — suppress them and
     # record why. The structural verdict still fires (refusal on an answer
     # entry remains a FAIL: that is the retrieval gap showing through).
-    verdict, failures, warns = judge(entry, answer, citations, judge_gold=not zero_hits)
+    verdict, failures, warns = judge(
+        entry,
+        answer,
+        citations,
+        judge_gold=not zero_hits,
+        citations_inferred=citations_inferred,
+    )
     if zero_hits:
         warns.append("zero-hits path: gold substrings not judged (canned agent message)")
     row.update(
@@ -269,6 +290,7 @@ def run_query(client: Any, entry: dict[str, Any]) -> dict[str, Any]:
         warns=warns,
         answer=answer,
         citations=citations,
+        citations_inferred=citations_inferred,
         script=data.get("script"),
         # joins server-side alert logs (finish_reason != stop) to this row —
         # the response contract deliberately does not expose finish_reason
@@ -287,6 +309,7 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
     lines.append(f"- answer pass rate: {metrics['answer_pass_rate']} (n={metrics['answer_n']})")
     lines.append(f"- abstain pass rate: {metrics['abstain_pass_rate']} (n={metrics['abstain_n']})")
     lines.append(f"- failures: {metrics['failures']}, warns: {metrics['warns']}, zero-hits paths: {metrics['zero_hits']}")
+    lines.append(f"- inferred-citation rows (not grounded): {metrics['inferred_citations']}")
     lines.append(f"- citations per answer (mean): {metrics['citations_per_answer']}")
     lines.append("")
     lines.append("| class | n | pass |")

@@ -66,6 +66,26 @@ def test_answer_zero_citations_fails() -> None:
     assert any("zero validated citations" in f for f in fails)
 
 
+def test_answer_inferred_citations_fail_grounding() -> None:
+    # Issue #269: cites mapped from bare bracket markers with no explicit
+    # citation line are surfaced as citations_inferred — never grounded.
+    verdict, fails, _ = judge(
+        _entry(), "LFAREA is set in IEASYSxx [1].",
+        ["SA23-1380-70 ref, p. 1"], citations_inferred=True,
+    )
+    assert verdict == "fail"
+    assert any("only inferred citations" in f for f in fails)
+
+
+def test_answer_explicit_citations_still_pass() -> None:
+    verdict, fails, _ = judge(
+        _entry(), "LFAREA is set in IEASYSxx.",
+        ["SA23-1380-70 ref, p. 1"], citations_inferred=False,
+    )
+    assert verdict == "pass"
+    assert fails == []
+
+
 def test_answer_refusal_fails() -> None:
     verdict, fails, _ = judge(_entry(), "The excerpts do not cover LFAREA.", ["SA23-1380-70 ref, p. 1"])
     assert verdict == "fail"
@@ -271,3 +291,13 @@ def test_summarize_rates_and_counts() -> None:
 def test_summarize_empty() -> None:
     m = summarize([])
     assert m["queries"] == 0 and m["answer_pass_rate"] is None and m["citations_per_answer"] is None
+
+
+def test_summarize_counts_inferred_rows() -> None:
+    results = [
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "syntax",
+         "citations": ["c1"], "citations_inferred": True},
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax",
+         "citations": ["c1"], "citations_inferred": False},
+    ]
+    assert summarize(results)["inferred_citations"] == 1
