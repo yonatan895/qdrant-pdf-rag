@@ -145,6 +145,20 @@ def test_record_to_rows_split_leg_selection():
         record_to_rows(record, leg=2)
 
 
+def test_record_to_rows_max_rank_trims_each_leg():
+    """Sweeps trim a deep capture to the replayed config's prefetch depth,
+    per leg (a chunk outside one leg's depth loses only that rank)."""
+    record = legs_to_record("q", "nl", _legs(), {}, {})
+    rows = record_to_rows(record, max_rank=1)
+    assert [row["id"] for row in rows] == ["p1", "p2"]
+    by_id = {row["id"]: row for row in rows}
+    assert by_id["p2"]["dense_rank"] is None and by_id["p2"]["sparse_rank"] == 0
+    assert [row["id"] for row in record_to_rows(record, max_rank=2)] == ["p1", "p2", "p3"]
+    for bad in (0, -1, True, 1.5):
+        with pytest.raises(ValueError):
+            record_to_rows(record, max_rank=bad)
+
+
 def test_record_to_rows_rejects_unknown_chunk():
     record = legs_to_record("q", "nl", _legs(), {}, {})
     record["legs"][0]["dense"].append("ghost")

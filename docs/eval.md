@@ -250,14 +250,20 @@ VENUE=rc make capture-pool          # records into bundles/pools-YYYYMMDD.jsonl
 #    (the raw script also takes --no-ce / --max-queries; see its --help)
 # 2. Carry pools.jsonl back (ids/ranks/scores only, never chunk text —
 #    safe to move; still never tune against the frozen holdout).
-# 3. Replay locally (record_to_rows → replay_rank): sweep type-boosts,
-#    fusion alpha, and diversity caps hermetically, no GPU needed.
+# 3. Replay locally (record_to_rows → replay_pool → replay_rank): sweep
+#    type-boosts, fusion alpha, and diversity caps hermetically, no GPU.
+#    The sweep CLI runs the production chain per config and scores
+#    doc-level recall/MRR against the tune golden:
+#      python scripts/replay_sweep.py --pools bundles/pools.jsonl \
+#        --golden evals/golden.jsonl --json bundles/sweep.json
 ```
 
 Rules: CE-less pools (bypassed queries, `--no-ce`) replay RRF-only —
 rerank refuses them fail-closed, never fabricate scores. Split
 recordings replay per-leg (`record_to_rows(record, leg=i)`); merging
-legs corrupts ranks. Deltas ship in the PR body like any retrieval
+legs corrupts ranks. The sweep's ruler is doc-level only (pools carry no
+headings/message ids), so a swept gain is a candidate: adoption requires
+the live eval/holdout. Deltas ship in the PR body like any retrieval
 change (`live-stack.md` rung 7); re-capture after any re-ingest (pools
 pin rank order, not content). Pools stay in `bundles/`/scratch — never
 committed (the real-corpus venue guard refuses `real_manuals` without
