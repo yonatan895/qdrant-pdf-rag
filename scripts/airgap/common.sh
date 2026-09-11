@@ -13,7 +13,7 @@ cd "$REPO_ROOT"
 # the snapshot over whatever the file assigned — so `VAR=x make airgap-*`
 # beats a stale key in airgap.env instead of being silently overridden by it.
 # Empty stays unset, matching the ${VAR:-default} idiom used everywhere below.
-OPERATOR_ENV_KEYS="AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL GATEWAY_API_KEY_SECRET GHCR_OWNER IMAGE_SHA INGEST_EXTRA_PATCH INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY KC LLM_BASE_URL LLM_MODEL_REASONING METRICS_ENABLED NAMESPACE OPENSHIFT_NAMESPACE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_STORAGE_SIZE QDRANT_TAG QUERY REGISTRY_INTERNAL RERANK_BASE_URL RERANK_ENABLED RERANK_ENDPOINT_ORDER RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB STORAGE_CLASS VLLM_BASE_URL"
+OPERATOR_ENV_KEYS="AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL GATEWAY_API_KEY_SECRET GHCR_OWNER IMAGE_SHA INGEST_EXTRA_PATCH INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY KC LLM_BASE_URL LLM_MODEL_REASONING METRICS_ENABLED NAMESPACE OPENSHIFT_NAMESPACE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT OTEL_SERVICE_NAME PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_STORAGE_SIZE QDRANT_TAG QUERY REGISTRY_INTERNAL RERANK_BASE_URL RERANK_ENABLED RERANK_ENDPOINT_ORDER RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB STORAGE_CLASS VLLM_BASE_URL"
 _cli_saved_keys=""
 for _k in $OPERATOR_ENV_KEYS; do
     eval "_is_set=\${$_k:+set}"
@@ -106,6 +106,23 @@ strip_gateway_key_entries() {
     for _entry in "$@"; do
         awk -v entry="$_entry" '
             $0 ~ "- name: " entry "$" { skip=5 }
+            skip > 0 { skip--; next }
+            { print }
+        ' "$_strip_file" > "$_strip_file.tmp" && mv "$_strip_file.tmp" "$_strip_file"
+    done
+    unset _strip_file _entry
+}
+
+# Delete a plain two-line env entry (`- name: X` + `value: ...`) from a
+# rendered manifest (used for optional entries whose unset state must leave
+# no trace — a blank value would override an in-code default, as with
+# OTEL_SERVICE_NAME vs the agent's DEFAULT_SERVICE_NAME in tracing.py).
+# $1 = file, $2... = env entry names.
+strip_env_entry() {
+    _strip_file=$1; shift
+    for _entry in "$@"; do
+        awk -v entry="$_entry" '
+            $0 ~ "- name: " entry "$" { skip=2 }
             skip > 0 { skip--; next }
             { print }
         ' "$_strip_file" > "$_strip_file.tmp" && mv "$_strip_file.tmp" "$_strip_file"

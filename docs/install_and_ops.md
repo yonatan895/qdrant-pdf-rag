@@ -692,9 +692,9 @@ View traces (port-forward only — Jaeger has no public Route, like Qdrant):
 
 ```bash
 oc -n mainframe-rag port-forward svc/jaeger 16686:16686
-# open http://localhost:16686, service "rag-agent-..." (rename via OTEL_SERVICE_NAME
-# in the agent pod's environment — deploy.sh does not render it, so set it with
-# `kubectl set env deploy/rag-agent OTEL_SERVICE_NAME=<name>` or a local overlay patch)
+# open http://localhost:16686, service "mainframe-rag-agent" (rename via OTEL_SERVICE_NAME
+# in airgap.env — deploy.sh renders it, and strips the entry when unset so the
+# agent default stands)
 ```
 
 Backend posture (single-replica debug-grade, sample-all retention math,

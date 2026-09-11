@@ -100,6 +100,13 @@ kustomize_render deploy/kustomize/overlays/openshift | sed -E 's|"(__[A-Z0-9_]+_
     -e "s|__RERANK_MODEL__|${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}|g" \
     -e "s|__RERANK_ENDPOINT_ORDER__|${RERANK_ENDPOINT_ORDER:-score_first}|g" \
     > dist/agent-rendered.yaml
+# Service name for trace resource attributes (issue #250): substituted from
+# OTEL_SERVICE_NAME, or stripped when unset so the agent default stands.
+if [ -n "${OTEL_SERVICE_NAME:-}" ]; then
+    sed -i -e "s|__OTEL_SERVICE_NAME__|$OTEL_SERVICE_NAME|g" dist/agent-rendered.yaml
+else
+    strip_env_entry dist/agent-rendered.yaml OTEL_SERVICE_NAME
+fi
 # Gateway virtual keys (LiteLLM): one operator-created Secret read via
 # secretKeyRef, or nothing at all. A set name substitutes into the overlay's
 # key entries; unset strips those entries so keyless deployments reference
