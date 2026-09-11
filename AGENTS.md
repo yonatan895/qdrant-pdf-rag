@@ -145,7 +145,7 @@ New behavior belongs in the layer that already owns that decision. Do not thread
 | `classify` | `message` / `syntax` / `table` / `narrative` |
 | `embed` | Dense from internal vLLM or the platform LiteLLM gateway; sparse local (no Cloud inference) |
 | `qdrant_io` | Collection + payload indexes **before** load; dim fail-fast |
-| `retrieve` | Filters in prefetch; hybrid dense+BM25; cross-encoder rerank dispatch (`rerank.py`, default off, leg order via `RERANK_ENDPOINT_ORDER`); query-class screen (`screen.py`: trap checked before identifiers, sibling must_nots stay answerable; trap queries bypass rerank in both search twins, RRF order stands) |
+| `retrieve` | Filters in prefetch; hybrid dense+BM25; cross-encoder rerank dispatch (`rerank.py`, default off, leg order via `RERANK_ENDPOINT_ORDER`); query-class screen (`screen.py`: trap checked before identifiers, sibling must_nots stay answerable; trap queries bypass rerank on both entry points, RRF order stands) |
 | `agent` | HTTP API; citation validation; request-size guardrails (`query_max_chars` 422s closed, `splunk_context_max_chars` truncates with suffix) |
 
 Standing #20 rules: embed / Qdrant points / LLM are `Protocol`s in `ports.py`; upserts are batched (`Settings.batch_size`); payload indexes exist before load; every outbound call has a Settings timeout.
@@ -227,7 +227,7 @@ Re-ingesting a regenerated corpus (new doc_id generation) requires deleting the 
 - Context budgeting: complex reasoning queries cap prompt manual excerpts at 4,500 chars (Settings.prompt_max_context_chars_complex) with type-aware chunk caps: syntax, message, and table chunks preserve full fidelity up to 3,000 chars, while narrative prose is capped at 1,100 chars (Settings.prompt_max_chunk_chars_complex).
 - Dense query prefix: asymmetric query embeddings prepend Settings.dense_query_prefix on dense query vectors only; document chunks stay raw; HashEmbedder remains plain text.
 - Hit diversification: retrieve_max_chunks_per_page=1 and retrieve_max_chunks_per_doc=3 with 3-phase backfill prevent near-duplicate consecutive chunks from monopolizing prompt context slots.
-- Rerank ships default-off (`rerank_enabled=False`): fused top-`rerank_candidates` (50) go through the cross-encoder only when explicitly enabled. `search()` and `async_search()` must return identical hits for identical fakes — the drift-guard test is the contract (query.py carries a near-verbatim twin by design).
+- Rerank ships default-off (`rerank_enabled=False`): fused top-`rerank_candidates` (50) go through the cross-encoder only when explicitly enabled. `search()` and `async_search()` must return identical hits for identical fakes; `async_search()` is the single implementation and `search()` is a fail-closed sync wrapper (the wrapper tests pin that contract).
 - Async handlers never run sync I/O on the event loop: the embed (`dense_query`/`sparse`) and cross-encoder (`rerank_candidates`) legs execute via `asyncio.to_thread`; the pooled sync retrieval-leg client is built and closed in lifespan.
 - Runtime paths never sniff monkeypatched module attributes to pick clients (no `__name__`/`<lambda>` checks). Construct the production class explicitly; test doubles ride the `isawaitable` shims.
 - SSE contract on `/v1/answer?stream=true`: token deltas → exactly one terminal `final` whose schema is identical on every path (the empty-hits path carries `finish_reason`/`ttft_ms`/`usage` too); a mid-stream failure emits `event: error` and ends WITHOUT `final` — no final = failed.

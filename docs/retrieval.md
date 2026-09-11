@@ -11,14 +11,14 @@ Owner: this file. Design overview: `docs/architecture.md` §4.3. Eval gates:
 `async_search()` in `retrieve/query.py` is the single implementation; the
 sync `search()` is a thin `asyncio.run` wrapper for sync callers (evals,
 tooling, scripts — audited: no async-context caller) that fails closed
-inside a running loop. The drift-guard test pins identical outputs on
-identical fakes, so the wrapper cannot silently diverge from the core.
+inside a running loop. Wrapper tests pin identical outputs on identical
+fakes.
 The async core never runs sync I/O on the event loop — the dense-query,
 sparse, and cross-encoder legs go through `asyncio.to_thread`, and the
 Qdrant calls ride `isawaitable` shims so test doubles work on both entry
 points.
 
-Stage order for both twins:
+Stage order:
 
 1. `parse_query` extracts identifiers; `build_filter` turns them (plus
    product/version) into a Qdrant filter, or `None` when empty.
@@ -29,7 +29,7 @@ Stage order for both twins:
    Identifiers, the filter, and the returned `query_kind` always stay on the
    operator's original query.
 5. `embedder.dense_query` + `embedder.sparse` embed each leg (one embed per
-   path, sequential on the async twin for parity).
+   path, sequential for determinism).
 6. `_build_prefetch_requests` issues one dense + one BM25 prefetch per leg
    in batched `query_batch_points` calls (falling back to sequential
    `query_points` when the server lacks batching). Every leg shares the
@@ -72,9 +72,9 @@ so lexical and semantic candidates are scoped identically before any fusion.
   `members`). Empty input yields no filter rather than a match-nothing.
 - Empty-filtered recovery: when a filter was applied and both prefetch legs
   return zero points (exact doc-id stem vs edition suffix, multi-identifier
-  AND with no co-carrying chunk), both twins retry once unfiltered at the
-  same prefetch depth and fuse that pool. Non-empty filtered results never
-  pay the second call. The retry lands on the trace as boolean
+  AND with no co-carrying chunk), the retrieval path retries once unfiltered
+  at the same prefetch depth and fuses that pool. Non-empty filtered results
+  never pay the second call. The retry lands on the trace as boolean
   `rag.filter_fallback` (bounded, never free text).
 - The legs are named `dense` and `bm25`, dense first.
 
@@ -132,8 +132,8 @@ top is extremely heavy compared to the industry-default `k=60`.
   `Settings.rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` (read off
   the point payload's `chunk_type`, already indexed; unknown/missing types
    score 1.0). Dense-leg contributions are never boosted. `_type_boosts` is
-   the single dispatch both twins share (`None` when off, so fusion stays
-   byte-identical legacy); an active boost lands on the trace as
+   the single dispatch the retrieval path uses (`None` when off, so fusion
+   stays byte-identical legacy); an active boost lands on the trace as
    `rag.rrf_type_boosts` (bounded `type=factor` pairs, never free text).
    Measured verdict (real-corpus record-replay, 18 operator queries over
    `real_manuals`: 9 tune / 9 held-back, factors 1.5/2.0/3.0 per type):
