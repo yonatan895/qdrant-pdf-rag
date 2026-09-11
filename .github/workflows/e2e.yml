@@ -709,6 +709,11 @@ jobs:
           test -f dist/agent-rendered.yaml
           grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-agent:${SHA}" dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml
+          # Tracing defaults ON: an unset endpoint resolves to the in-cluster
+          # Jaeger (issue #83), so the default deploy renders it too.
+          test -f dist/jaeger-rendered.yaml
+          grep -q 'value: http://jaeger:4318' dist/agent-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml
 
       - name: airgap-deploy dry-run with PULL_SECRET + extra values
         env:
@@ -779,10 +784,13 @@ jobs:
           DENSE_DIM: "768"
           VLLM_BASE_URL: http://vllm:8000
           METRICS_ENABLED: "true"
+          OTEL_EXPORTER_OTLP_ENDPOINT: off
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
-          # Hermetic w.r.t. sibling dry-run steps sharing this workspace:
-          # prove metrics-on does not drag Jaeger along.
+          # Hermetic w.r.t. sibling dry-run steps sharing this workspace, and
+          # focused: tracing defaults ON (asserted by the prod-render step), so
+          # this step uses the off sentinel — metrics-on does not depend on
+          # tracing and must not drag Jaeger along.
           rm -f dist/jaeger-rendered.yaml
           make airgap-deploy
           test -f dist/servicemonitor-rendered.yaml

@@ -236,14 +236,33 @@ def test_rendered_manifest_substituted_and_written(tree):
 # ------------------------------------------------------- Jaeger / tracing (#83)
 
 
-def test_tracing_off_skips_jaeger_and_keeps_endpoint_empty(tree):
+def test_tracing_on_by_default_deploys_jaeger(tree):
+    # Unset OTEL_EXPORTER_OTLP_ENDPOINT resolves to the in-cluster Jaeger:
+    # tracing is active in production unless explicitly disabled.
     r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    assert (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert "value: http://jaeger:4318" in rendered
+    assert_no_placeholders(rendered)
+    assert "Tracing off" not in r.stdout
+
+
+@pytest.mark.parametrize("token", ["off", "none", "false", "0", "OFF", "Off"])
+def test_tracing_off_sentinel_skips_jaeger(tree, token):
+    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", token))
     assert r.returncode == 0, r.stderr
     assert not (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    # Endpoint env var always rendered; empty value = tracing off (fail-closed).
+    # Endpoint env var always rendered; empty value = tracing off.
     assert re.search(r"OTEL_EXPORTER_OTLP_ENDPOINT\n\s+value:\s*$", rendered, re.MULTILINE)
     assert "Tracing off" in r.stdout
+
+
+def test_tracing_bad_endpoint_fails_closed(tree):
+    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "jaeger:4318"))
+    assert r.returncode != 0
+    assert "must be http(s) or off" in r.stderr
 
 
 def test_tracing_enabled_deploys_jaeger_and_wires_endpoint(tree):

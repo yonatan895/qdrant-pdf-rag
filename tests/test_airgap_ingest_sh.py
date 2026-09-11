@@ -164,14 +164,21 @@ def test_ingest_dryrun_contextual_embed_propagation(ingest_tree):
     assert 'value: "meta-llama/Llama-3-8B"' in rendered or "value: meta-llama/Llama-3-8B" in rendered
 
 
-def test_ingest_otel_off_by_default(ingest_tree):
-    # Unset endpoint renders empty = tracing off; the service name is fixed
-    # so the Job can never merge into the agent service in one Jaeger.
+def test_ingest_otel_on_by_default(ingest_tree):
+    # Unset endpoint resolves to the in-cluster Jaeger (tracing ON); the
+    # service name is fixed so the Job never merges into the agent service.
     r = _run_ingest(ingest_tree)
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert re.search(r"OTEL_EXPORTER_OTLP_ENDPOINT\n\s+value:\s*$", rendered, re.MULTILINE)
+    assert "value: http://jaeger:4318" in rendered
     assert "value: mainframe-rag-ingest" in rendered
+
+
+def test_ingest_otel_off_sentinel(ingest_tree):
+    r = _run_ingest(ingest_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"))
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert re.search(r"OTEL_EXPORTER_OTLP_ENDPOINT\n\s+value:\s*$", rendered, re.MULTILINE)
 
 
 def test_ingest_otel_endpoint_and_environment_wired(ingest_tree):

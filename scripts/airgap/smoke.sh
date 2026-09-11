@@ -6,18 +6,20 @@
 . "$(dirname -- "$0")/common.sh"
 
 resolve_aliases
+resolve_otel_endpoint
 require_env NAMESPACE
 KC=${KC:-$(kc)}
 QUERY=${QUERY:-IEA500I operator message}
 TRACE_TIMEOUT=${TRACE_TIMEOUT:-60}
+JAEGER_QUERY_URL=${JAEGER_QUERY_URL:-http://jaeger:16686}
 
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 -c '... check /healthz ...'"
     echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 - \"$QUERY\""
-    if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then
-        echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 - '... poll jaeger:16686 for a v1.search trace ...'"
+    if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+        echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 - '... poll $JAEGER_QUERY_URL for a v1.search trace ...'"
     else
-        echo "[dryrun] tracing check skipped (OTEL_EXPORTER_OTLP_ENDPOINT unset)"
+        echo "[dryrun] tracing check skipped (OTEL_EXPORTER_OTLP_ENDPOINT=off)"
     fi
     exit 0
 fi
@@ -59,10 +61,10 @@ fi
 
 if [ "$status" -eq 3 ]; then
     echo "SKIP: nothing ingested yet — run make airgap-ingest CORPUS_PVC=<pvc> first"
-    if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then
+    if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
         TRACING_LINE="Tracing:       SKIPPED (nothing ingested — no request traced yet)"
     else
-        TRACING_LINE="Tracing:       OFF (skipped — OTEL_EXPORTER_OTLP_ENDPOINT unset)"
+        TRACING_LINE="Tracing:       OFF (disabled)"
     fi
     echo ""
     echo "================================================================================"
@@ -79,28 +81,29 @@ elif [ "$status" -ne 0 ]; then
     die "search request failed (status $status)"
 fi
 
-# Tracing check (OTel Phase 3): when tracing is on, the search above must
-# have landed a v1.search span in Jaeger — /healthz alone renders green
-# with a broken endpoint/URL. Polls the Jaeger query API from the agent
-# pod (same net as the OTLP exporter); the export batch interval means
-# spans arrive seconds after the request. Skipped when tracing is off.
-if [ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then
-    TRACING_LINE="Tracing:       OFF (skipped — OTEL_EXPORTER_OTLP_ENDPOINT unset)"
-elif $KC -n "$NAMESPACE" exec -i deploy/rag-agent -- python3 - "$TRACE_TIMEOUT" <<'PYEOF'
+# Tracing check (OTel Phase 3): tracing is ON by default, so the search above
+# must have landed a v1.search span in the Jaeger query API — /healthz alone
+# renders green with a broken endpoint/URL. Polls from the agent pod (same net
+# as the OTLP exporter); the export batch interval means spans arrive seconds
+# after the request. Only an explicit off sentinel skips the check.
+if [ "$OTEL_TRACING_ENABLED" != "1" ]; then
+    TRACING_LINE="Tracing:       OFF (disabled)"
+elif $KC -n "$NAMESPACE" exec -i deploy/rag-agent -- python3 - "$TRACE_TIMEOUT" "$JAEGER_QUERY_URL" <<'PYEOF'
 import httpx2
 import sys
 import time
 
 timeout_s = float(sys.argv[1])
+base = sys.argv[2].rstrip("/")
 deadline = time.time() + timeout_s
 while time.time() < deadline:
     try:
-        services = httpx2.get("http://jaeger:16686/api/services", timeout=10).json().get("data", [])
+        services = httpx2.get(f"{base}/api/services", timeout=10).json().get("data", [])
         names = [s for s in services if "rag-agent" in s or "mainframe-rag" in s]
         if names:
             svc = "mainframe-rag-agent" if "mainframe-rag-agent" in names else names[0]
             traces = httpx2.get(
-                "http://jaeger:16686/api/traces",
+                f"{base}/api/traces",
                 params={"service": svc, "operation": "v1.search"},
                 timeout=10,
             ).json().get("data", [])

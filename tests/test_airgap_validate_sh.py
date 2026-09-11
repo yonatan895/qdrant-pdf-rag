@@ -63,6 +63,24 @@ def test_validate_clean_exits_zero(tree):
     assert "SUCCESS: Pre-flight validation passed (dry-run mode)." in r.stdout
 
 
+def test_validate_tracing_on_by_default(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Tracing:           ON (http://jaeger:4318)" in r.stdout
+
+
+def test_validate_tracing_off_sentinel(tree):
+    r = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "off"})
+    assert r.returncode == 0, r.stderr
+    assert "Tracing:           OFF" in r.stdout
+
+
+def test_validate_tracing_bad_endpoint_fails_closed(tree):
+    r = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "jaeger:4318"})
+    assert r.returncode != 0
+    assert "must be http(s) or off" in r.stderr
+
+
 def test_validate_missing_registry_fails(tree):
     r = _run(tree, {"INTERNAL_REGISTRY": None, "REGISTRY_INTERNAL": None})
     assert r.returncode != 0
