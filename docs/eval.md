@@ -250,14 +250,20 @@ VENUE=rc make capture-pool          # records into bundles/pools-YYYYMMDD.jsonl
 #    (the raw script also takes --no-ce / --max-queries; see its --help)
 # 2. Carry pools.jsonl back (ids/ranks/scores only, never chunk text —
 #    safe to move; still never tune against the frozen holdout).
-# 3. Replay locally (record_to_rows → replay_rank): sweep type-boosts,
-#    fusion alpha, and diversity caps hermetically, no GPU needed.
+# 3. Replay locally (record_to_rows → replay_pool → replay_rank): sweep
+#    type-boosts, fusion alpha, and diversity caps hermetically, no GPU.
+#    The sweep CLI runs the production chain per config and scores
+#    doc-level recall/MRR against the tune golden:
+#      python scripts/replay_sweep.py --pools bundles/pools.jsonl \
+#        --golden evals/golden.jsonl --json bundles/sweep.json
 ```
 
 Rules: CE-less pools (bypassed queries, `--no-ce`) replay RRF-only —
 rerank refuses them fail-closed, never fabricate scores. Split
 recordings replay per-leg (`record_to_rows(record, leg=i)`); merging
-legs corrupts ranks. Deltas ship in the PR body like any retrieval
+legs corrupts ranks. The sweep's ruler is doc-level only (pools carry no
+headings/message ids), so a swept gain is a candidate: adoption requires
+the live eval/holdout. Deltas ship in the PR body like any retrieval
 change (`live-stack.md` rung 7); re-capture after any re-ingest (pools
 pin rank order, not content). Pools stay in `bundles/`/scratch — never
 committed (the real-corpus venue guard refuses `real_manuals` without
@@ -385,3 +391,4 @@ committed row is the pointer, the manifest is the detail.
 | 2026-09-11 | 632ad3e | `real_manuals` | `harness-l4-record` N=24×3 under strict grounding (#269) | reference re-recorded: grounded 0.48 (was 0.70 — inferred cites no longer count), citation P/R 0.63/0.39, truncation 0.49, entailment 0.29, relevance 0.96; 37 structural fails — standing RC debt |
 | 2026-09-12 | d15fbca | `real_manuals` | `eval_retrieval --no-check` split 2×2, 70-query frozen holdout (vllm, rerank off) | comparative split ON: class r@1 0.286→0.429, class MRR 0.429→0.536, overall r@1 0.603→0.619, overall MRR 0.700→0.712, 0 must_not violations → flipped default-ON; diagnostic neutral-negative (class r@1 flat 0.571, class MRR 0.655→0.643, overall r@5 0.873→0.857) → stays off |
 | 2026-09-12 | 5a952b7 | `real_manuals` | `make eval-holdout` (70-query frozen holdout, vllm, rerank off) | doc-family filter ON: `doc_number` r@1 0.667→1.0 (DOC-03 0→1.0, DOC-04 0→1.0); overall r@1 0.619→0.651, r@5 0.873→0.889, MRR 0.712→0.739; only those two queries moved; 0 violations; gate green |
+| 2026-09-12 | 96f013d | `real_manuals` | `replay_sweep` over dev golden, pools captured with CE at depth 80 | tune baseline (n=104) r@1 0.683 / r@5 0.923 / MRR 0.792; fuse 24→32→40 identical, `page2` r@5 0.904/MRR 0.769, `doc4` neutral, `doc2` +1/104, rerank alphas r@1 ≤0.673 — no adoption, production config stands |

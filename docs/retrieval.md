@@ -164,7 +164,13 @@ top is extremely heavy compared to the industry-default `k=60`.
   default limit of 8, 24 of up to 80 prefetched points survive to
   diversification. This truncation is the real recall knob: it has no
   setting, so changing `limit` is what moves it. The rerank path instead
-  fuses the top `rerank_candidates` (default 50).
+  fuses the top `rerank_candidates` (default 50). Measured verdict
+  (issue #270, dev-golden record-replay over `real_manuals`, production
+  chain): widening 24→32→40 is **byte-identical on the top-8** (the 24
+  survivors already fill the diverse head; backfill past rank 24 never
+  fired), so the constant stays. The same sweep kept `max_per_page=1`
+  (`page2` r@5 0.923→0.904, MRR 0.792→0.769) and `max_per_doc=3`
+  (`doc4` neutral, `doc2` +1/104 hit — noise, not adoption material).
 
 ## 5. Injection screen
 
@@ -207,7 +213,13 @@ score, `chunk_id` — except at `alpha=0.0`, where blend ties break by RRF
 score only and the stable sort keeps input order (already RRF order), so an
 RRF tie never reorders by the cross-encoder or `chunk_id`.
 Length mismatches raise rather than misalign. The alpha lands on
-the trace as `rag.rerank_alpha` (bounded float, never free text).
+the trace as `rag.rerank_alpha` (bounded float, never free text). Measured
+verdict (issue #270, dev-golden record-replay over `real_manuals`, NL
+pools only — identifier queries bypass): every blend loses to RRF on
+recall@1 for the NL head (`alpha` 1.0/0.75/0.5/0.25/0.0 → 0.635/0.615/
+0.635/0.635/0.673 vs 0.683 RRF-only), so **rerank stays default-off and
+the alpha stays 1.0**; reopen with real-corpus pools where CE ordering
+beats RRF's head.
 
 Dispatch (`_resolve_active_reranker`): an explicitly passed reranker wins,
 else the flag-built memoized one. Then the bypass applies — and it

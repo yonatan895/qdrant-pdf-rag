@@ -13,11 +13,10 @@ schema is specific to this module, like other per-file shapes.
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import pytest
-from qdrant_client.http import models
+from scripts.capture_pool import replay_pool
 
 from mainframe_rag.retrieve.query import diversify_hits, rrf_fuse
 from mainframe_rag.retrieve.rerank import format_rerank_text, rerank_candidates
@@ -26,87 +25,6 @@ from tests.conftest import MockReranker
 # Production truncation mirrored here: the non-rerank path keeps
 # max(limit*3, 24) fused candidates; the rerank path fuses the top-50 pool.
 _RERANK_POOL = 50
-
-
-def _require_rank(value: Any, row_id: str, leg: str) -> int | None:
-    if value is None:
-        return None
-    if type(value) is not int or value < 0:
-        raise ValueError(f"replay row {row_id!r}: {leg}_rank must be a non-negative int")
-    return value
-
-
-def replay_pool(rows: list[dict[str, Any]]) -> tuple[list, list, dict[str, float | None]]:
-    """Validate a recorded pool and rebuild (dense, sparse, ce_by_id) legs.
-
-    Leg order follows recorded rank order, like real prefetch results.
-    Fail-closed: corrupt captures raise (TypeError for wrong shapes,
-    ValueError for bad values), never silently rank.
-    """
-    if not isinstance(rows, list):
-        raise TypeError("replay pool must be a list of row dicts")
-    seen_ids: set[str] = set()
-    seen_ranks: dict[str, set[int]] = {"dense": set(), "sparse": set()}
-    dense_ranked: list[tuple[int, dict[str, Any]]] = []
-    sparse_ranked: list[tuple[int, dict[str, Any]]] = []
-    ce_by_id: dict[str, float | None] = {}
-    for pos, row in enumerate(rows):
-        if not isinstance(row, dict):
-            raise TypeError(f"replay row {pos}: must be a dict")
-        row_id = row.get("id")
-        if not isinstance(row_id, str) or not row_id:
-            raise ValueError(f"replay row {pos}: 'id' must be a non-empty string")
-        if row_id in seen_ids:
-            raise ValueError(f"replay row {row_id!r}: duplicate id")
-        seen_ids.add(row_id)
-        dense_rank = _require_rank(row.get("dense_rank"), row_id, "dense")
-        sparse_rank = _require_rank(row.get("sparse_rank"), row_id, "sparse")
-        if dense_rank is None and sparse_rank is None:
-            raise ValueError(f"replay row {row_id!r}: needs a rank on at least one leg")
-        for leg, rank in (("dense", dense_rank), ("sparse", sparse_rank)):
-            if rank is not None:
-                if rank in seen_ranks[leg]:
-                    raise ValueError(f"replay row {row_id!r}: duplicate {leg}_rank {rank}")
-                seen_ranks[leg].add(rank)
-        ce = row.get("ce")
-        if ce is None:
-            ce_by_id[row_id] = None  # CE-less recording: RRF-only replay
-        else:
-            if isinstance(ce, bool) or not isinstance(ce, (int, float)) or not math.isfinite(ce):
-                raise ValueError(f"replay row {row_id!r}: 'ce' must be a finite number")
-            ce_by_id[row_id] = float(ce)
-        chunk_type = row.get("chunk_type", "narrative")
-        if chunk_type is None:
-            chunk_type = "narrative"  # mirrors _to_hit defaulting
-        if not isinstance(chunk_type, str):
-            raise TypeError(f"replay row {row_id!r}: 'chunk_type' must be a string")
-        doc_id = row.get("doc_id", row_id)
-        if not isinstance(doc_id, str) or not doc_id:
-            raise ValueError(f"replay row {row_id!r}: 'doc_id' must be a non-empty string")
-        page = row.get("page", "1")
-        if not isinstance(page, str) or not page:
-            raise ValueError(f"replay row {row_id!r}: 'page' must be a non-empty string")
-        point = models.ScoredPoint(
-            id=row_id,
-            version=1,
-            score=1.0,
-            payload={
-                "doc_id": doc_id,
-                "title": f"Replay {doc_id}",
-                "heading_path": f"Replay > {row_id}",
-                "page_label": page,
-                "chunk_type": chunk_type,
-                "message_ids": [],
-                "text": "",
-            },
-        )
-        if dense_rank is not None:
-            dense_ranked.append((dense_rank, {"point": point}))
-        if sparse_rank is not None:
-            sparse_ranked.append((sparse_rank, {"point": point}))
-    dense = [entry["point"] for _, entry in sorted(dense_ranked, key=lambda t: t[0])]
-    sparse = [entry["point"] for _, entry in sorted(sparse_ranked, key=lambda t: t[0])]
-    return dense, sparse, ce_by_id
 
 
 def replay_rank(
