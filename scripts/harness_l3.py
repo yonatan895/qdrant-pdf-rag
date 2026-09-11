@@ -34,6 +34,7 @@ if str(REPO / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO / "scripts"))
 
 from loadtest import DEFAULT_QUERIES, export_to_baseline, query_gpu_name, query_vram_mb, run_load
+from venue import VenueError, require_rc_for_collection
 
 EMBED_MODE = os.environ.get("EMBED_MODE", "hash").lower()
 DEFAULT_L3_BASELINE = (
@@ -213,6 +214,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=None, help="write JSON report here")
     parser.add_argument("--summary", type=Path, default=None, help="write Markdown summary here")
     args = parser.parse_args(argv)
+
+    from mainframe_rag.config import load_settings
+
+    try:
+        # Venue rule (issue #268): the real-corpus collection is an RC-only
+        # instrument even for the perf tier.
+        require_rc_for_collection(load_settings().qdrant_collection)
+    except VenueError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
 
     baseline: dict[str, Any] | None = None
     if args.baseline and args.baseline.exists():

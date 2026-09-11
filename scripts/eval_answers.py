@@ -71,6 +71,10 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
+if str(REPO / "scripts") not in sys.path:
+    # script-path imports (venue) must resolve both when run as
+    # `python scripts/eval_answers.py` and when imported as scripts.eval_answers
+    sys.path.insert(0, str(REPO / "scripts"))
 
 # The agent's fixed zero-hits response (agent/app.py) — quoted, not imported,
 # to keep the eval importable without the fastapi/qdrant stack for its pure
@@ -91,9 +95,12 @@ def is_zero_hits_answer(answer: str) -> bool:
     return body == ZERO_HITS_ANSWER or _ZERO_HITS_NAMED_RE.match(body) is not None
 
 
+from venue import VenueError, require_rc_for_collection, resolve_golden_paths
+
 # Refusal interpretation is the agent's single helper (issue #135): the eval's
 # abstain verdicts and the agent's zero-citation rule must never diverge.
 from mainframe_rag.agent.answer import is_refusal as is_explicit_refusal
+from mainframe_rag.config import load_settings
 
 
 def judge(
@@ -314,7 +321,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--summary", type=Path, default=None, help="markdown summary path")
     args = parser.parse_args(argv)
 
-    golden_paths = args.golden or [REPO / "evals" / "golden.jsonl", REPO / "evals" / "holdout.jsonl"]
+    try:
+        # Venue rule (issue #268): dev defaults to the golden set only; the
+        # holdout and the real-corpus collection require VENUE=rc.
+        golden_paths = resolve_golden_paths(args.golden)
+        require_rc_for_collection(load_settings().qdrant_collection)
+    except VenueError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
     entries: list[dict[str, Any]] = []
     for p in golden_paths:
         for line in p.read_text(encoding="utf-8").splitlines():
@@ -361,7 +375,6 @@ def main(argv: list[str] | None = None) -> int:
     # Trend manifest (gitignored evals/runs/) — same helper as the retrieval
     # eval so dashboards see one shape. run_type "eval_answers".
     try:
-        from mainframe_rag.config import load_settings
         from mainframe_rag.manifest import write_run_manifest
 
         manifest = write_run_manifest("eval_answers", load_settings(), metrics)

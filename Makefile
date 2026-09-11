@@ -203,6 +203,10 @@ loadtest: | .venv
 # into airgap-deploy and failed the CI dry-run). The eval family below is
 # the only consumer of the default.
 EMBED_MODE ?= hash
+# Venue pin (issue #268): dev by default — the frozen holdout and the real
+# corpus require an explicit `VENUE=rc`. The eval-holdout recipe declares it
+# itself (target-scoped, same reason as EMBED_MODE; never a global export).
+VENUE ?= dev
 EVAL_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-vllm.json,evals/baseline.json)
 PARAPHRASE_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),evals/baseline-paraphrase-vllm.json,evals/baseline-paraphrase.json)
 HARNESS_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-vllm.json,benchmarks/harness.json)
@@ -211,13 +215,20 @@ HARNESS_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-vllm.jso
 # (the real-corpus semantic gate is `make eval-holdout`, not the harness).
 # The vllm harness runs golden + holdout over the snapshot-pinned synthetic
 # venue: a determinism guard, mostly saturated, with little discriminating
-# power. Empty for vllm: the harness default (golden + holdout) stands.
+# power. Empty for vllm: the harness default stands (golden + holdout under
+# VENUE=rc; dev goldens only without the declaration — issue #268).
 HARNESS_GOLDEN = $(if $(filter vllm,$(EMBED_MODE)),,--golden evals/golden.jsonl)
 HARNESS_L3_BASELINE ?= $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-l3-vllm.json,benchmarks/harness-l3.json)
-eval eval-baseline eval-draft eval-holdout eval-answers eval-report eval-html eval-compare \
-	eval-paraphrase \
+eval eval-baseline eval-draft eval-answers eval-report eval-html eval-compare \
+	eval-paraphrase capture-pool \
 	gate-l1 harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline: \
 	export EMBED_MODE := $(EMBED_MODE)
+eval eval-baseline eval-draft eval-answers eval-report eval-html eval-compare \
+	eval-paraphrase capture-pool \
+	gate-l1 harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline: \
+	export VENUE := $(VENUE)
+eval-holdout: export EMBED_MODE := $(EMBED_MODE)
+eval-holdout: export VENUE := rc
 
 # Eval against a running Qdrant (sim-qdrant or QDRANT_SIM_URL); scores
 # the dev golden set (evals/golden.jsonl) through the real pipeline
@@ -273,6 +284,17 @@ eval-baseline: | .venv
 	@mkdir -p $(BUNDLE_DIR)
 	.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --update-baseline $(EVAL_BASELINE) \
 	  --out $(BUNDLE_DIR)/eval-report.json --summary $(BUNDLE_DIR)/eval-summary.md
+
+# Record live prefetch pools for offline replay (docs/eval.md §6.1): runs
+# where the real models live (RC/gap), against the live collection, and
+# carries ids/ranks/scores only — never chunk text. Keep the output in
+# bundles/ or scratch; never commit (AGENTS.md).
+.PHONY: capture-pool
+capture-pool: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/capture_pool.py \
+	  --golden $(or $(GOLDEN),evals/golden.jsonl) \
+	  --out $(or $(OUT),$(BUNDLE_DIR)/pools-$(shell date +%Y%m%d).jsonl)
 
 # Answer-tier golden eval: /v1/answer grounding honesty (answer entries must
 # ground; abstain/trap entries must not be answered). Needs the LIVE GPU
@@ -462,7 +484,7 @@ help:
 	@echo "Air-gap happy path : airgap-pack (connected) | airgap-load airgap-deploy airgap-ingest airgap-smoke (inside the gap)"
 	@echo "Simulation     : sim (pytest integration tier; docker Qdrant) | sim-qdrant sim-clean | loadtest-mock (load tier: same composition, absolute contracts under concurrency)"
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest | harness-l3"
-	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper)"
+	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper) | capture-pool (record prefetch pools, RC)"
 	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"
 	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | local-gateway (LiteLLM in front of all three backends on :4000) | local-gateway-stop | local-jaeger (OTLP/Jaeger v2 on :4318, UI :16686) | local-jaeger-stop | local-stack (full prod simulation: Qdrant + gateway + Jaeger + agent) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
 	@echo "Quality        : test lint typecheck check"

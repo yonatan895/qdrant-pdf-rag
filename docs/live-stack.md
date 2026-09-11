@@ -176,9 +176,14 @@ re-capture in the gate's own env instead of widening tolerances.
 |---|---|---|
 | `evals/baseline.json` (hash) / `baseline-vllm.json` (vllm) | Hash: any CPU. vLLM: lab/gap GPU stack (§2 block) | Hash ingest → hash-dim collection → hash eval; vLLM likewise. Mismatch exits 2, never 0. |
 | `evals/baseline-paraphrase[-vllm].json` | Same split, dedicated `paraphrase-manuals` collection | Fresh-ingest rung 3 before scoring; not in CI. |
-| `evals/holdout.jsonl` + `holdout-baseline.json` | RC-only vs `real_manuals` (`make eval-holdout`) | Never tune locally; sha-verified on RC. |
+| `evals/holdout.jsonl` + `holdout-baseline.json` | RC-only vs `real_manuals` (`make eval-holdout` declares `VENUE=rc`) | Never tune locally; sha-verified on RC. |
 | `benchmarks/baseline.json` | CI runner (`cpu_count`, `qdrant_image`) | Never gate a dev-machine capture; repeats ≥3. |
 | `benchmarks/harness[-vllm].json` + L3 perf | GPU RC host (4-key env check) | Never merge GPU numbers into the CI bench JSON. |
+
+`VENUE=rc` is the operator declaration for every real-corpus row above:
+the frozen holdout and `real_manuals` fail closed without it, and dev
+runs default to `evals/golden.jsonl` only (`docs/eval.md` §10, issue #268).
+The full RC battery and its dated record live there.
 
 ## 6. Shell safety
 

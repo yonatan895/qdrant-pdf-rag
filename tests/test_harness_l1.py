@@ -246,6 +246,25 @@ def test_gate_small_regression_within_floor_merges():
     assert verdict == "merge"
 
 
+def test_gate_golden_entry_mismatch_holds():
+    # A dev run (golden only) must not be scored against an RC baseline
+    # (golden + holdout): the paired deltas would cover a truncated venue.
+    base = _baseline(_summary())
+    base["_meta"]["golden_entries"] = 177
+    cand = _summary(recall5=0.9, mrr=0.8)
+    verdict, reasons = gate_verdict(cand, base, resamples=400)
+    assert verdict == "hold"
+    assert any("golden entry-set mismatch" in r for r in reasons)
+
+
+def test_gate_matching_golden_count_still_gates():
+    base = _baseline(_summary(recall5=0.6, mrr=0.5))
+    base["_meta"]["golden_entries"] = 10
+    cand = _summary(recall5=0.8, mrr=0.7)
+    verdict, reasons = gate_verdict(cand, base, resamples=400)
+    assert verdict == "merge", reasons
+
+
 # ------------------------------------------------------- baseline round-trip
 def test_baseline_round_trip(tmp_path):
     summary = _summary()
@@ -256,6 +275,7 @@ def test_baseline_round_trip(tmp_path):
     assert loaded is not None
     assert loaded["_meta"]["embed_mode"] == "vllm"
     assert loaded["_meta"]["snapshot"]["points_count"] == 840396
+    assert loaded["_meta"]["golden_entries"] == summary["traps"]["checked"]
     assert loaded["per_query"] == summary["per_query"]
     # the stored per-query values must be exactly what the gate pairs against
     verdict, _ = gate_verdict(_summary(recall5=0.95, mrr=0.9), loaded, resamples=300)

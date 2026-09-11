@@ -42,6 +42,7 @@ if str(REPO / "scripts") not in sys.path:
 
 from bootstrap_ci import ci95_paired, ci_excludes_zero
 from eval_retrieval import load_golden
+from venue import VenueError, require_rc_for_collection, resolve_golden_paths
 
 PRIMARY_METRICS = ("recall@5", "mrr")
 DEFAULT_CLASS_FLOOR = 0.05
@@ -63,6 +64,16 @@ def gate_verdict(
     aggregates)."""
     if baseline is None:
         return "baseline", ["no baseline recorded; candidate stored as the first baseline"]
+
+    recorded_n = (baseline.get("_meta") or {}).get("golden_entries")
+    checked = (candidate.get("traps") or {}).get("checked")
+    if recorded_n is not None and checked is not None and recorded_n != checked:
+        return "hold", [
+            (
+                f"golden entry-set mismatch: baseline {recorded_n}, candidate {checked} — "
+                "a truncated venue must not be scored (declare VENUE=rc for the holdout venue)"
+            )
+        ]
 
     reasons: list[str] = []
 
@@ -132,6 +143,7 @@ def save_baseline(path: Path, summary: dict[str, Any], *, embed_mode: str, snaps
             "embed_mode": embed_mode,
             "snapshot": snapshot,
             "class_regression_floor": DEFAULT_CLASS_FLOOR,
+            "golden_entries": (summary.get("traps") or {}).get("checked"),
             "updated": time.strftime("%Y-%m-%d"),
         },
         **summary,
@@ -323,7 +335,15 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings()
     collection = args.collection or settings.qdrant_collection
     baseline_path = args.baseline or baseline_path_for(REPO, settings.embed_mode)
-    golden_paths = args.golden or [REPO / "evals" / "golden.jsonl", REPO / "evals" / "holdout.jsonl"]
+    try:
+        # Venue rule (issue #268): dev defaults to the golden set only; the
+        # frozen holdout joins the run only under VENUE=rc, and the real
+        # corpus collection requires the same declaration.
+        golden_paths = resolve_golden_paths(args.golden)
+        require_rc_for_collection(collection)
+    except VenueError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
     entries: list = []
     for p in golden_paths:
         entries.extend(load_golden(p))
