@@ -69,9 +69,10 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
 - `wire_pull_secret` reuses the matched line's indent when replacing
   `imagePullSecrets: []` — every overlay nests it inside the pod spec, and
   a fixed-indent insert breaks out of the mapping (kubectl rejects the
-  manifest). `PULL_SECRET` should be a DNS-subdomain name (sed-active
-  characters would rewrite the manifest — unlike the gateway secret name,
-  nothing gates this one, so keep it to lowercase alphanumerics, `-`, `.`);
+  manifest). `PULL_SECRET` passes the same DNS-subdomain charset gate as the
+  gateway secret name (`check_secret_name` in `common.sh`, enforced
+  fail-closed by deploy/validate/ingest — sed-active characters die before
+  any render, so keep it to lowercase alphanumerics, `-`, `.`);
   unset renders `imagePullSecrets: []` (kustomize) and
   `imagePullSecrets=null` (Helm, so the chart's placeholder name never
   reaches the cluster).

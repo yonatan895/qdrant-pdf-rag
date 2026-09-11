@@ -233,6 +233,15 @@ def test_validate_gateway_secret_bad_name_fails_closed(tree):
     assert "GATEWAY_API_KEY_SECRET must be a DNS-subdomain name" in r.stderr
 
 
+@pytest.mark.parametrize("bad_name", ["Bad_Name!", "a&b", "a|b"])
+def test_validate_pull_secret_bad_name_fails_closed(tree, bad_name):
+    # Same gate as the gateway secret name: sed-active chars (&, |) would
+    # silently rewrite the manifest via wire_pull_secret / Helm --set.
+    r = _run(tree, {"PULL_SECRET": bad_name})
+    assert r.returncode != 0
+    assert "PULL_SECRET must be a DNS-subdomain name" in r.stderr
+
+
 def test_validate_live_verifies_gateway_secret(tree):
     # Non-dry-run against all-zero stubs: namespace + Secret resolve.
     r = _run(tree, {"AIRGAP_DRYRUN": "0", "GATEWAY_API_KEY_SECRET": "gateway-api-keys"})

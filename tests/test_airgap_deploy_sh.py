@@ -193,6 +193,13 @@ def test_pull_secret_wired_agent_render_keeps_mapping(tree):
     assert_pull_secret_wired(rendered, "ghcr-pull")
 
 
+@pytest.mark.parametrize("bad_name", ["Bad_Name!", "a&b", "a|b"])
+def test_pull_secret_bad_name_fails_closed(tree, bad_name):
+    r = _run(tree, ("PULL_SECRET", bad_name))
+    assert r.returncode != 0
+    assert "PULL_SECRET must be a DNS-subdomain name" in r.stderr
+
+
 def test_storage_size_knob_covers_persistence_and_snapshot(tree):
     _run(tree, ("QDRANT_STORAGE_SIZE", "1Gi"))
     log = _helm_log(tree)

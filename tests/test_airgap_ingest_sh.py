@@ -167,6 +167,12 @@ def test_ingest_pull_secret_wired_when_set(ingest_tree):
     assert_pull_secret_wired(rendered, "custom-registry-secret")
 
 
+def test_ingest_pull_secret_bad_name_fails_closed(ingest_tree):
+    r = _run_ingest(ingest_tree, ("PULL_SECRET", "Bad_Name!"))
+    assert r.returncode != 0
+    assert "PULL_SECRET must be a DNS-subdomain name" in r.stderr
+
+
 def test_ingest_pull_secret_stays_empty_when_unset(ingest_tree):
     r = _run_ingest(ingest_tree)
     assert r.returncode == 0, r.stderr
