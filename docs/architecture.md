@@ -62,8 +62,8 @@ Local simulation exists so agent/ingest always exercise the production gateway w
 │                                                                    │
 │  ┌────────────────┐  MCP/HTTP   ┌────────────────┐                │
 │  │ FTP MCP bridge │◀────────────│ Agent svc      │                │
-│  │ (agent-image   │ read-only   │ (fetches live  │                │
-│  │ sidecar, stdio │ tools only  │ state, ADR-02) │                │
+│  │ (agent-image   │ read-only   │ fetches live   │                │
+│  │ sidecar, stdio │ tools only  │ (ADR-0003)     │                │
 │  │ or localhost)  │             │                │                │
 │  └───────▲────────┘             └────────────────┘                │
 │          │ FTP port 21 (read-only SAF profile)                   │
@@ -283,10 +283,10 @@ src/mainframe_rag/
   logs.py             # One-JSON-object-per-line logging
   manifest.py         # Run manifests (git sha, model ids, settings hash)
   regexes.py          # Shared identifier regexes (MSG_RE, DOCNO_RE)
-  tracing.py          # OTel export: agent + ingest, default off (deploy/local defaults)
+  tracing.py          # OTel export: agent + ingest; library default off, deploy default on
 ```
 
-**Allowed Dependencies:** Python 3.14 GIL, `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`, `pydantic-settings`.
+**Allowed Dependencies:** Python 3.14 GIL, `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`, `uvicorn`, `pydantic`, `pydantic-settings`, `opentelemetry-api`/`-sdk` plus the OTLP-HTTP and Prometheus exporters.
 
 ### Per-area reference docs
 

@@ -275,9 +275,11 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** #75.
 
 ### PR-09 (issue #83): OpenTelemetry tracing
-> **Status: DONE.** `agent/tracing.py` (opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`, default off;
-> fail-open bounded export) + Jaeger v2 all-in-one overlay (`deploy/kustomize/jaeger`).
-> Tests: `tests/test_tracing.py`.
+> **Status: DONE.** Owner moved to `src/mainframe_rag/tracing.py`; library default off,
+> air-gap deploy default ON — an unset endpoint resolves to the in-cluster Jaeger and the
+> `off` sentinel disables tracing and the deployment together. Fail-open bounded export +
+> Jaeger v2 all-in-one overlay (`deploy/kustomize/jaeger`).
+> Tests: `tests/test_tracing.py`, `tests/test_ingest_tracing.py`.
 - **Scope:** `agent/`, `retrieve/`, `deploy/` (collector config)
 - **Implementation:** Spans: tokenize → embed (HTTP) → qdrant prefetch → RRF → rerank →
   LLM (TTFT, tokens/s). Attrs: scores, rerank rank deltas, doc ids, cache hits. OTLP
