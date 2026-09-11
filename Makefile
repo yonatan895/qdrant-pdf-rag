@@ -400,6 +400,16 @@ local-vllm-embed: | .venv
 local-vllm-rerank: | .venv
 	BUDGET_PROFILE=$(or $(BUDGET_PROFILE),TRIPLE_8GB) BUDGET_PYTHON="$(CURDIR)/.venv/bin/python" ROLE=$(or $(ROLE),rerank) MODEL=$(or $(MODEL),BAAI/bge-reranker-v2-m3) PORT=$(or $(PORT),8002) sh scripts/run_local_vllm.sh
 
+# Local LiteLLM gateway (real image, pinned digest) in front of the three
+# local-vllm backends: single :4000 origin, model-id routing, per-leg Bearer
+# virtual keys, native /rerank + /v1/score pass-through. Keys ride the recipe
+# environment (per-recipe, never exported): pass GATEWAY_MASTER_KEY (and the
+# per-leg keys to reuse them) or the script mints per-start keys and prints
+# them once. Foreground: Ctrl-C stops the container. Needs the backends up.
+.PHONY: local-gateway
+local-gateway:
+	GATEWAY_PORT=$(or $(GATEWAY_PORT),4000) sh scripts/run_local_gateway.sh
+
 test-vllm-e2e: | .venv
 	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",)
 
@@ -429,6 +439,6 @@ help:
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest | harness-l3"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper)"
 	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"
-	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
+	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | local-gateway (LiteLLM in front of all three backends on :4000) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."

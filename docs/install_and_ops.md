@@ -303,6 +303,41 @@ One server per `make` invocation (each blocks its shell — run each in its own 
 
 Reranked search also needs `RERANK_ENABLED=true RERANK_BASE_URL=http://127.0.0.1:8002 RERANK_MODEL=BAAI/bge-reranker-v2-m3` on the consumer side (`query-demo`, eval `--rerank`, agent env). Launch order on a cold card: reasoning → embed → rerank (a 4k-context server fails KV init against leftovers; the profiles declare this allocation order).
 
+#### Local LiteLLM Gateway Simulation (`make local-gateway`)
+
+The production topology puts all three model legs behind the platform team's LiteLLM gateway. To rehearse that wire shape on one machine, `make local-gateway` runs the real LiteLLM proxy (digest-pinned image) on `:4000` in front of the three `local-vllm*` backends:
+
+* **One origin per leg, model-id routing**: `EMBED_BASE_URL`, `LLM_BASE_URL`, and `RERANK_BASE_URL` all point at `http://localhost:4000/v1`; the requested `model` id selects the backend.
+* **Per-leg Bearer virtual keys**: the agent/ingest `*_API_KEY` values are LiteLLM virtual keys; missing/unknown keys get 401 on every route (including the rerank legs), so key wiring is exercised for real.
+* **Both rerank legs**: native `/v1/rerank` via the `hosted_vllm/` provider, plus a `/v1/score` pass-through to the vLLM backend (LiteLLM has no native score route). `scripts/probe_gateway.py` prints the recommended `RERANK_ENDPOINT_ORDER` after probing both.
+* **Tokenizer**: `/tokenize` stays 404 behind the gateway — the agent pins its in-process estimator after one warning (expected, not a fault).
+
+Prerequisites: Docker, and the backends already running (`make local-vllm` :8000, `make local-vllm-embed` :8001, `make local-vllm-rerank` :8002).
+
+```bash
+# Start the gateway (foreground; Ctrl-C stops the gateway and its key store)
+make local-gateway
+
+# Optional knobs (per-invocation, never exported globally):
+#   GATEWAY_PORT=4000
+#   GATEWAY_REASONING_URL / GATEWAY_EMBED_URL / GATEWAY_RERANK_URL
+#   GATEWAY_REASONING_MODEL / GATEWAY_EMBED_MODEL / GATEWAY_RERANK_MODEL
+#   GATEWAY_MASTER_KEY / GATEWAY_LLM_KEY / GATEWAY_EMBED_KEY / GATEWAY_RERANK_KEY
+#   GATEWAY_RESET_KEYS=1   (wipe the key-store volume before starting)
+```
+
+Keys are minted when unset (`sk-local-…`) and printed once at startup; nothing is committed. They live in a throwaway Postgres container + named volume (LiteLLM `/key/generate` needs a database): env-passed values survive restarts, unset values rotate per start. Point the consumer at the gateway with the exports the script prints, then verify:
+
+```bash
+# Probe every leg through the gateway (PASSED + order recommendation)
+.venv/bin/python scripts/probe_gateway.py --stream
+
+# Agent against the gateway (search, rerank, grounded SSE answer)
+make run-agent   # with the printed EMBED_/LLM_/RERANK_ exports in the environment
+```
+
+`scripts/run_local_gateway.sh` owns config rendering (model routing, keys, pass-through); the LiteLLM image is pinned by digest there. Local-dev only — never a product path, never in CI or the air gap.
+
 ---
 
 ### 3.7 Reasoning Performance, Query Complexity & Context Budgeting
