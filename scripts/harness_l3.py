@@ -41,17 +41,17 @@ DEFAULT_L3_BASELINE = (
     REPO / "benchmarks" / ("harness-l3-vllm.json" if EMBED_MODE == "vllm" else "harness-l3.json")
 )
 
-_ENV_GATE_KEYS = ("cpu_count", "embed_mode", "qdrant_image")
+_ENV_GATE_KEYS = ("cpu_count", "embed_mode", "qdrant_image", "concurrency")
 
 
-def env_snapshot() -> dict[str, Any]:
+def env_snapshot(**run: Any) -> dict[str, Any]:
     try:
         from qdrant_pin import qdrant_image_pin
 
         pin = qdrant_image_pin(REPO / "images.txt")
     except Exception:  # noqa: BLE001
         pin = "unavailable"
-    return {
+    snapshot: dict[str, Any] = {
         "platform": platform.platform(),
         "python": platform.python_version(),
         "cpu_count": os.cpu_count(),
@@ -59,6 +59,10 @@ def env_snapshot() -> dict[str, Any]:
         "qdrant_image": pin,
         "gpu_name": query_gpu_name(),
     }
+    # Run-shape provenance (concurrency is gated; duration/timeout document
+    # the load window a p95 was recorded under).
+    snapshot.update({key: value for key, value in run.items() if value is not None})
+    return snapshot
 
 
 def _get_nested(data: dict[str, Any] | None, dotted: str) -> Any:
@@ -206,6 +210,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--concurrency", type=int, default=8, help="worker concurrency")
     parser.add_argument("--duration", type=float, default=30.0, help="seconds of load per endpoint")
     parser.add_argument(
+        "--request-timeout", type=float, default=30.0,
+        help="per-request client timeout (reasoning answers under load can exceed 30s on small GPUs)",
+    )
+    parser.add_argument(
         "--baseline", type=Path, default=DEFAULT_L3_BASELINE,
         help="path to dedicated L3 baseline JSON file (default: mode-keyed)",
     )
@@ -234,15 +242,21 @@ def main(argv: list[str] | None = None) -> int:
 
     vram_initial = query_vram_mb()
     print(f"[*] Driving load against {args.url}/v1/search (concurrency={args.concurrency}, duration={args.duration}s)...", file=sys.stderr)
-    search_res = run_load(args.url, "search", DEFAULT_QUERIES, args.concurrency, args.duration)
+    search_res = run_load(args.url, "search", DEFAULT_QUERIES, args.concurrency, args.duration,
+                          request_timeout_s=args.request_timeout)
 
     print(f"[*] Driving load against {args.url}/v1/answer (concurrency={args.concurrency}, duration={args.duration}s)...", file=sys.stderr)
-    answer_res = run_load(args.url, "answer", DEFAULT_QUERIES, args.concurrency, args.duration)
+    answer_res = run_load(args.url, "answer", DEFAULT_QUERIES, args.concurrency, args.duration,
+                          request_timeout_s=args.request_timeout)
 
     vram_final = query_vram_mb()
     vram = vram_final or vram_initial
 
-    env = env_snapshot()
+    env = env_snapshot(
+        concurrency=args.concurrency,
+        duration_s=args.duration,
+        request_timeout_s=args.request_timeout,
+    )
     report: dict[str, Any] = {
         "env": env,
         "search": search_res,

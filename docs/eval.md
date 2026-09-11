@@ -159,8 +159,16 @@ verdict.
 - **L3 (perf tier):** per-stage p50/p95 from `Server-Timing` plus TTFT
   (requires `LLM_STREAM=true` on the agent) and `nvidia-smi` VRAM under
   concurrent load, against dedicated mode-keyed baselines — never the CI
-  bench file. Gates fail closed on env mismatch (4 keys), demand zero
+  bench file. Gates fail closed on env mismatch (5 keys: `cpu_count`,
+  `embed_mode`, `qdrant_image`, `gpu_name`, `concurrency`), demand zero
   errors and zero missing timings, and cap stage p95 at 3× baseline.
+  `CONCURRENCY`/`DURATION`/`REQUEST_TIMEOUT` Make variables shape the load
+  (recorded in `_meta.env`); a slow reasoning model under concurrency needs
+  `REQUEST_TIMEOUT` above the 30s default or every request is a client-side
+  error, not a latency sample. `benchmarks/harness-l3-vllm.json` is
+  recorded (2026-09-11, RC stand-in host, `_meta.env` pins the tier); the
+  hash file is intentionally not recorded — L3 is a GPU tier and the CI
+  bench owns CPU-mode perf.
 - **L4 (answer-quality gate):** `harness_l4.py` runs the L2 runner
   (`run_l2(..., relevance_enabled=True)`, one judging path) K times
   (`--repeats`, default 3) over the same deterministic sample and adds the
@@ -366,3 +374,4 @@ committed row is the pointer, the manifest is the detail.
 |---|---|---|---|---|
 | 2026-09-02 | pre-#268 | `real_manuals` | `harness-l2` N=24 | 10 structural fails; grounded 0.76, citation precision 0.16, truncation 0.59 — standing red debt (`testing.md` harness section) |
 | 2026-09-11 | 9469d4f | `real_manuals` | `harness-l4-record` N=24×3, then `harness-l4` gate | reference recorded (grounded 0.70, citation P/R 0.60/0.40, truncation 0.43, syntax 0.33, entailment 0.35, relevance 0.97); gate fail on 32 structural fails with no rate outside the 0.15 band, 20-row review queue — standing RC debt |
+| 2026-09-11 | 4db737a | `real_manuals` | `harness-l3-baseline` + `harness-l3` gate (C=8, request timeout 300s) | vllm baseline recorded (search p95 151 ms; answer p95 110 s, ttft p95 108 s under 8-way concurrency on the 8 GB stand-in); gate pass |
