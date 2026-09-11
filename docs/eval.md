@@ -213,8 +213,9 @@ anywhere (`tests/test_replay.py`, `scripts/capture_pool.py`):
 
 ```bash
 # 1. Capture (RC/gap, live Qdrant + platform embed/rerank endpoints):
-.venv/bin/python scripts/capture_pool.py \
-  --golden evals/golden.jsonl --out /tmp/pools.jsonl
+VENUE=rc make capture-pool          # records into bundles/pools-YYYYMMDD.jsonl
+#    overrides: GOLDEN=evals/golden.jsonl OUT=/path/pools.jsonl
+#    (the raw script also takes --no-ce / --max-queries; see its --help)
 # 2. Carry pools.jsonl back (ids/ranks/scores only, never chunk text —
 #    safe to move; still never tune against the frozen holdout).
 # 3. Replay locally (record_to_rows → replay_rank): sweep type-boosts,
@@ -226,7 +227,9 @@ rerank refuses them fail-closed, never fabricate scores. Split
 recordings replay per-leg (`record_to_rows(record, leg=i)`); merging
 legs corrupts ranks. Deltas ship in the PR body like any retrieval
 change (`live-stack.md` rung 7); re-capture after any re-ingest (pools
-pin rank order, not content).
+pin rank order, not content). Pools stay in `bundles/`/scratch — never
+committed (the real-corpus venue guard refuses `real_manuals` without
+`VENUE=rc`; §10).
 
 ## 7. Golden corpus discipline
 
@@ -295,3 +298,52 @@ evidence, not quality evidence:
 - Knobs (`MOCK_TTFT_MS`, interval/jitter/seed, `MOCK_ERROR_RATE`,
   `mock_finish_reason` backdoor) default to byte-identical zeros; scope is
   chat-only, with embeddings/tokenize/health/models instant and infallible.
+
+## 10. Real-corpus cadence (RC)
+
+The per-PR gate runs hash mode on a synthetic corpus that saturates; the
+real-corpus holdout is the only discriminating semantic instrument, and
+the answer tiers are the only grounding instruments. They run on a
+schedule, never as a PR gate (`live-stack.md` §0/§5.2).
+
+**Venue declaration.** Every eval/harness entry point defaults to the dev
+venue: `evals/golden.jsonl` only, synthetic collections only. The frozen
+holdout (`evals/holdout.jsonl`) and the real-corpus collection
+(`real_manuals`) require `VENUE=rc` — set by the `make eval-holdout`
+recipe itself, and by operators for the harness tiers
+(`VENUE=rc make harness-l2`). Without the declaration the scripts exit 2
+("frozen holdout … requires VENUE=rc"), so a truncated venue is never
+scored. `scripts/venue.py` owns the rule.
+
+**Triggers** — run the battery when any of these fires:
+
+- an RC cut (the promotion decision);
+- a re-ingest or golden/holdout re-freeze on the real corpus;
+- a model or gateway change (embed, rerank, reasoning);
+- a ranking-constant change (capture → replay A/B before merge).
+
+**Battery** (retrieval before answer quality):
+
+| Step | Command | Artifact / verdict |
+|---|---|---|
+| 1. holdout semantics | `make eval-holdout` | `$(BUNDLE_DIR)/eval-holdout-{report.json,summary.md}` + manifest |
+| 2. L1 promotion | `VENUE=rc make harness-gate` | report + manifest; `merge`/`hold` |
+| 3. answer tier | `VENUE=rc make harness-l2` | report + summary + manifest; structural fails gate |
+| 4. perf tier | `VENUE=rc make harness-l3` | report + manifest vs the L3 baseline |
+| 5. pool capture | `VENUE=rc make capture-pool` | dated `pools-YYYYMMDD.jsonl` (never committed) |
+| 6. hermetic replay | `pytest tests/test_replay.py` + a replay sweep | A/B deltas in the PR body |
+
+The L4 judge row joins this table with #268's L4 PR; until then L2's
+structural verdict plus the judge label distribution are the answer-tier
+signal. L2 standing red on known product debt is an RC debt signal, not
+a broken target.
+
+**Dated record.** Each battery run appends a row here in the same PR or
+RC checklist that runs it (`$BUNDLE_DIR` reports are local). Run
+manifests (`evals/runs/*.jsonl`, gitignored) carry the timestamp, git
+SHA, settings hash, model ids, Qdrant version, and snapshot id — the
+committed row is the pointer, the manifest is the detail.
+
+| Date | Git SHA | Venue | Steps | Result |
+|---|---|---|---|---|
+| 2026-09-02 | pre-#268 | `real_manuals` | `harness-l2` N=24 | 10 structural fails; grounded 0.76, citation precision 0.16, truncation 0.59 — standing red debt (`testing.md` harness section) |

@@ -89,6 +89,7 @@ if str(REPO / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO / "scripts"))
 
 from eval_answers import run_query, select_sample
+from venue import VenueError, require_rc_for_collection, resolve_golden_paths
 
 # Shared citation-index shape ([n] / [n, m]); see the inference rule in
 # agent/answer.py — parentheses are IBM-manual noise, never markers.
@@ -508,7 +509,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--summary", type=Path, default=None, help="markdown summary path")
     args = parser.parse_args(argv)
 
-    golden_paths = args.golden or [REPO / "evals" / "golden.jsonl", REPO / "evals" / "holdout.jsonl"]
+    from mainframe_rag.config import load_settings
+
+    try:
+        golden_paths = resolve_golden_paths(args.golden)
+        require_rc_for_collection(load_settings().qdrant_collection)
+    except VenueError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
     entries: list[dict[str, Any]] = []
     for p in golden_paths:
         for line in p.read_text(encoding="utf-8").splitlines():

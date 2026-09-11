@@ -153,6 +153,22 @@ def test_main_exit_2_when_check_file_missing(tmp_path, monkeypatch, capfd):
     assert "cannot be applied" in capfd.readouterr().err
 
 
+def test_main_exit_2_when_holdout_without_rc_declaration(tmp_path, monkeypatch, capfd):
+    """The frozen holdout is an RC instrument (issue #268): a dev run that
+    points at it fails closed instead of tuning against it."""
+    _hermetic_main(monkeypatch, tmp_path)
+    monkeypatch.delenv("VENUE", raising=False)
+    rc = main(["--golden", "evals/holdout.jsonl", "--no-check"])
+    assert rc == 2
+    assert "frozen holdout" in capfd.readouterr().err
+
+
+def test_main_allows_holdout_with_rc_declaration(tmp_path, monkeypatch):
+    _hermetic_main(monkeypatch, tmp_path)
+    monkeypatch.setenv("VENUE", "rc")
+    assert main(["--golden", "evals/holdout.jsonl", "--no-check"]) == 0
+
+
 def test_main_exit_0_when_gate_applied_and_green(tmp_path, monkeypatch):
     golden = _hermetic_main(monkeypatch, tmp_path)
     baseline = tmp_path / "baseline.json"

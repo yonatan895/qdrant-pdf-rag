@@ -94,6 +94,7 @@ All of these must hold. Self-review the **diff**, not the PR body.
 ## Testing (checklist; rules live in `docs/testing.md`)
 
 - `pytest` is the gate; tests generate original PDFs at runtime, no binary fixtures; CI fails on committed `.pdf` / `.pdx` / `.idx`.
+- Dev runs default to `evals/golden.jsonl` only; the frozen holdout and `real_manuals` require `VENUE=rc` and fail closed (exit 2) without it (`scripts/venue.py`; the `make eval-holdout` recipe declares itself). Pools/results stay out of git (`bundles/`, `evals/runs/`).
 - Unit tests are hermetic: no live Qdrant / vLLM / internet; fake the client; patch `httpx2`; never mutate module-global state; pin contracts, not internals.
 - Tests lock the claimed path: force the success path with mocks; never assert what the fallback would also produce. Adversarial matrices and the parser/citation/fence case lists are in `docs/testing.md` — apply the ones your change touches.
 - Tier commands and their green conditions are the ladder in `docs/live-stack.md`; tier mechanics (golden/holdout discipline, sim/load/bench/harness invariants) are in `docs/testing.md`.

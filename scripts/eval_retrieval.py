@@ -49,7 +49,12 @@ from typing import Any, Literal
 import httpx2
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+_REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO / "src"))
+if str(_REPO / "scripts") not in sys.path:
+    sys.path.insert(0, str(_REPO / "scripts"))
+
+from venue import VenueError, require_rc_for_collection, require_rc_for_golden
 
 from mainframe_rag.config import load_settings
 from mainframe_rag.manifest import write_run_manifest
@@ -642,6 +647,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--check and --update-baseline are mutually exclusive")
 
     settings = load_settings()
+    try:
+        # Venue rule (issue #268): the frozen holdout and the real-corpus
+        # collection are RC-only instruments.
+        require_rc_for_golden([args.golden])
+        require_rc_for_collection(settings.qdrant_collection)
+    except VenueError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
     if args.rerank:
         settings = settings.model_copy(update={"rerank_enabled": True})
     if args.label_draft:

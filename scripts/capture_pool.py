@@ -25,8 +25,18 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 import time
+from pathlib import Path
 from typing import Any
+
+REPO = Path(__file__).resolve().parents[1]
+if str(REPO / "scripts") not in sys.path:
+    # script-path imports (venue) must resolve both when run as
+    # `python scripts/capture_pool.py` and when imported as scripts.capture_pool
+    sys.path.insert(0, str(REPO / "scripts"))
+
+from venue import VenueError, require_rc_for_collection, require_rc_for_golden
 
 # Pure record helpers below are unit-tested in tests/test_capture_pool.py
 # (precedent: tests import pure helpers from scripts/).
@@ -300,6 +310,14 @@ def main(argv: list[str] | None = None) -> int:
     from mainframe_rag.ingest.embed import build_embedder
 
     settings = load_settings()
+    try:
+        # Venue rule (issue #268): the frozen holdout and the real-corpus
+        # collection are RC-only instruments; capture runs where models live.
+        require_rc_for_golden([args.golden])
+        require_rc_for_collection(settings.qdrant_collection)
+    except VenueError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
     client = QdrantClient(
         url=settings.qdrant_url,
         api_key=settings.qdrant_api_key,
