@@ -4,7 +4,7 @@ These are the only types layers may use to talk to each other for embed,
 Qdrant points, and LLM access. Implementations: VllmEmbedder / HashEmbedder
 (ingest.embed), qdrant_client.QdrantClient (satisfies QdrantPoints
 structurally — parameter names/returns mirror the real client), HttpxLLMClient
-(agent.answer), HttpZoweMCP (agent.zowe_mcp, ADR-0002).
+(agent.answer), HttpZoweMCP (agent.zowe_mcp, ADR-0003).
 """
 
 from __future__ import annotations
@@ -236,7 +236,7 @@ class Tokenizer(Protocol):
 
 @runtime_checkable
 class ZoweMCP(Protocol):
-    """Read-only live z/OS state over the MCP bridge (ADR-0002).
+    """Read-only live z/OS state over the MCP bridge (ADR-0003).
     Implementation: HttpZoweMCP (agent.zowe_mcp, Streamable HTTP). Sync by
     protocol — callers offload with asyncio.to_thread like the reranker.
     Tool results are untrusted data; screening happens at the call site."""

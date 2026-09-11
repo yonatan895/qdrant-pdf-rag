@@ -15,12 +15,12 @@ Build a **citation-first expert mainframe agent** that answers operational quest
 | Layer | System | Job |
 |---|---|---|
 | Live state (caller-supplied) | Splunk (existing) | Events, jobs, messages *now* (context in, not crawl — ADR-0001) |
-| Live state (agent-fetched) | Zowe MCP server, read-only (ADR-0002) | Datasets, JES spool, USS, job status — bounded, audited, default-off |
+| Live state (agent-fetched) | Zowe MCP server, read-only (ADR-0003) | Datasets, JES spool, USS, job status — bounded, audited, default-off |
 | Knowledge | Qdrant (self-hosted) | Manuals, precedent, "what does this mean / how is this supposed to work" |
 | Reasoning | Internal vLLM / LiteLLM (platform team) | Thinking model for citation + solution / script generation |
 | Embeddings | Internal vLLM stack | Dense vectors only; OpenAI-compatible endpoint |
 
-The agent returns **answers grounded strictly in citations** (doc number, title, heading path, printed page label) and, when asked, JCL/REXX/operator steps verified against those citations. Agent-fetched live state (ADR-0002) cites distinctly as live sources — never as manual citations — and degrades to manuals-only when unreachable.
+The agent returns **answers grounded strictly in citations** (doc number, title, heading path, printed page label) and, when asked, JCL/REXX/operator steps verified against those citations. Agent-fetched live state (ADR-0003) cites distinctly as live sources — never as manual citations — and degrades to manuals-only when unreachable.
 
 ---
 
@@ -66,7 +66,7 @@ The agent returns **answers grounded strictly in citations** (doc number, title,
 ### 2.1 Trust and Legal Boundaries
 - **Zero Internet Access:** Runtime is completely disconnected. All container images, wheelhouses, and BM25 weights are mirrored into the enterprise.
 - **Corpus Protection:** Real PDFs, manual text, Qdrant snapshots, and customer JCL are **never** committed to Git. Public GitHub hosts code, tests against synthetic PDFs, and deployment recipes only.
-- **Live-state reads (ADR-0002):** the agent fetches only the allowlisted read tools over ClusterIP; credentials never enter git; tool results are untrusted data screened like retrieved chunks; every fetch is audit-logged (ids/counts, never dataset/spool text).
+- **Live-state reads (ADR-0003):** the agent fetches only the allowlisted read tools over ClusterIP; credentials never enter git; tool results are untrusted data screened like retrieved chunks; every fetch is audit-logged (ids/counts, never dataset/spool text).
 
 ---
 
@@ -79,7 +79,7 @@ The agent returns **answers grounded strictly in citations** (doc number, title,
 | `qdrant` | StatefulSet (vendored chart) | 3 | Cluster mode, P2P 6335 (TLS off), HTTP 6333, gRPC 6334, `restricted-v2` SCC |
 | `rag-agent` | Deployment | 2 | FastAPI, unprivileged, no GPU |
 | `rag-ingest` | One-Shot Job | 1 | High CPU, worker pool, RWO scratch |
-| `zowe-mcp` | Sidecar in agent pod (ADR-0002, default-off) | 1 per agent | Same agent image, `--mcp-serve` entrypoint, localhost only, `restricted-v2` SCC, read-only tools registered, credentials via mounted secret |
+| `zowe-mcp` | Sidecar in agent pod (ADR-0003, default-off) | 1 per agent | Same agent image, `--mcp-serve` entrypoint, localhost only, `restricted-v2` SCC, read-only tools registered, credentials via mounted secret |
 | `jaeger` | Deployment (optional) | 1 | Jaeger v2 all-in-one, Badger RWO block PVC, opt-in tracing backend |
 | `bm25-weights` | Baked in images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 
@@ -186,7 +186,7 @@ The agent enforces strict grounding guarantees and adaptive reasoning depth befo
 6. **Body Stripping & Verification:**
    Any hallucinated citation lines that match the citation regex but are not in `allowed_citations` are stripped from the response text before transmission. Mid-sentence narrative text mentioning document IDs is preserved under the standalone-line rule.
 
-7. **Live-State Enrichment (ADR-0002, default-off):**
+7. **Live-State Enrichment (ADR-0003, default-off):**
    `live`/`hybrid` queries fetch bounded read-only context via the Zowe MCP
    server (max 2 calls, byte-capped, dedicated short timeout) before prompt
    assembly. Live excerpts enter as a named `live_context` block under the

@@ -351,8 +351,8 @@ Items marked **[amended]** changed with the merged P0 PRs.
   otherwise skip Matryoshka, use #92.
 - **Depends on:** #75, #84.
 
-### PR-16 (issue #90): ADR 0002 — agent-initiated live-state retrieval (rescoped)
-> **Status: PARTIAL — ADR proposed (`docs/adr/0002-zowe-mcp-read.md`) and a
+### PR-16 (issue #90): ADR 0003 — agent-initiated live-state retrieval (rescoped)
+> **Status: PARTIAL — ADR proposed (`docs/adr/0003-zowe-mcp-read.md`) and a
 > read-only Zowe bridge + agent wiring + mock backend shipped behind
 > `zowe_mcp_enabled=false` (PRs #228–#231: `src/mainframe_rag/mcp/`,
 > routing/fetch orchestration, sim-tier mock).** Tool-result prompt wiring
@@ -361,7 +361,7 @@ Items marked **[amended]** changed with the merged P0 PRs.
   accepts caller-supplied `splunk_context`. Letting the AGENT fetch live state
   supersedes ADR 0001 → per repo policy this REQUIRES a new ADR + `architecture.md`
   update in the same PR. No code in this PR.
-- **Scope:** `docs/adr/0002-*.md`, `docs/architecture.md`
+- **Scope:** `docs/adr/0003-*.md`, `docs/architecture.md`
 - **Implementation:** ADR covering: routing taxonomy (static-manual vs live-state vs
   hybrid questions); read-only Splunk REST/SPL connector interface; auth; audit logging;
   dry-run mode; fallback when telemetry is unreachable; explicit "no job control, no
@@ -376,7 +376,7 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Scope:** new `agent/tools/`, feature-flagged, allowlisted tools only
 - **Implementation:** Function-calling against the #90 connector interface; every call
   audit-logged with request id; disabled by default; tool results wrapped as untrusted
-  data per #87. Must satisfy ADR 0002 exactly.
+  data per #87. Must satisfy ADR 0003 exactly.
 - **Gate:** tool calls visible in OTel traces (#83) and audit log; non-allowlisted calls
   rejected; flag off = zero tool surface.
 - **Depends on:** #90, #83, #87.

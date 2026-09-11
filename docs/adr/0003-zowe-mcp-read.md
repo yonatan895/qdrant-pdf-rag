@@ -1,4 +1,4 @@
-# ADR-0002: agent-fetched live z/OS state via read-only Zowe MCP (issue #90)
+# ADR-0003: agent-fetched live z/OS state via read-only Zowe MCP (issue #90)
 
 - **Status:** proposed
 - **Context:** ADR-0001 decided "Splunk stays system of record (context
@@ -11,7 +11,7 @@
   USS, job status), not Splunk REST/SPL — Splunk stays caller-supplied
   context exactly as ADR-0001 says.
 - **Backend (amended pre-merge):** a minimal in-repo FTP bridge
-  (`mcp/` package, Python stdlib `ftplib` only), NOT the official
+  (`src/mainframe_rag/mcp/` package, Python stdlib `ftplib` only), NOT the official
   `zowe-mcp` server tarball — verified from its README that its only
   live backend is SSH (via `zowex-sdk`), and the target z/OS 2.2 has no
   sshd and none may be started. The MCP interface (initialize /
@@ -53,7 +53,7 @@
   default-off (`zowe_mcp_enabled=false`).
 - **Migration:** caller-supplied `splunk_context` unchanged; live MCP
   context is a sibling block, never a replacement.
-- **Consequences:** new `mcp/` bridge package (stdlib-only: no wheelhouse
+- **Consequences:** new `src/mainframe_rag/mcp/` bridge package (stdlib-only: no wheelhouse
   pin, no Node tarball, no new image — sidecar runs the agent image with
   an `--mcp-serve` entrypoint), fake-`ftplib` hermetic tests plus mock
   mode for sim/CI, golden entries with live-state expectations.

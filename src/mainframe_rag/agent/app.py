@@ -270,7 +270,7 @@ async def lifespan(_app: FastAPI):
         probe_error = await asyncio.to_thread(probe_reranker, reranker)
         if probe_error is not None:
             log.warning(json_log("lifespan", "reranker_unreachable", error=probe_error[:200]))
-    # Live z/OS state (ADR-0002, phase 2): default-off client, built only
+    # Live z/OS state (ADR-0003, phase 2): default-off client, built only
     # when enabled. Same warn-only probe discipline as the reranker — a
     # dead bridge or a surprising tool registration must not keep the
     # agent from listening. No endpoint calls it yet (phase 3 wiring).
