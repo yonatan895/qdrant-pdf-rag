@@ -5,6 +5,7 @@ retrieved hit set.
 """
 
 import json
+import threading
 import time
 
 import pytest
@@ -1965,3 +1966,33 @@ def test_lifespan_reranker_unreachable_warns_but_still_listens(monkeypatch, caps
     # configure_logging replaces root handlers, so pytest's caplog stays
     # empty — assert on the real stderr stream instead.
     assert "reranker_unreachable" in capsys.readouterr().err
+
+
+def test_prompt_build_runs_off_the_event_loop(client, monkeypatch):
+    """The tokenizer's /tokenize verify is a sync RPC; prompt construction must
+    run on a worker thread so it cannot stall every in-flight request. The
+    handler calls classify_query_complexity on the event-loop thread, so
+    comparing thread ids proves the offload (issue #269)."""
+    loop_threads: list[int] = []
+    build_threads: list[int] = []
+
+    real_classify = app_mod.classify_query_complexity
+    real_build = app_mod.build_messages
+
+    def recording_classify(query: str) -> str:
+        loop_threads.append(threading.get_ident())
+        return real_classify(query)
+
+    def recording_build(*args, **kwargs):
+        build_threads.append(threading.get_ident())
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(app_mod, "classify_query_complexity", recording_classify)
+    monkeypatch.setattr(app_mod, "build_messages", recording_build)
+
+    resp = client.post("/v1/answer", json={"query": "IEA500I"})
+
+    assert resp.status_code == 200
+    assert loop_threads, "classify never ran"
+    assert build_threads, "build_messages never ran"
+    assert build_threads[0] != loop_threads[0]

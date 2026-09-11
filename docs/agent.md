@@ -122,9 +122,9 @@ select `complex`. Default is `simple`.
   excerpts to untrusted data.
 - Tokenizer path (when a tokenizer is configured): plans with the
   in-process estimator (`≈3.5` chars/token, 350-token narrative cap), then
-  verifies the packed prompt **once** against the whole-message count and
-  trims up to 4 rounds (64-char overcut, drop under 80 chars, else suffix).
-  Never per-chunk tokenize RPCs.
+  verifies the packed prompt against the whole-message count per trim round
+  and trims up to 4 rounds (64-char overcut, drop under 80 chars, else
+  suffix). Never per-chunk tokenize RPCs.
 - `splunk_context` truncates at 4000 chars with a suffix before packing, so
   caller context can never starve excerpts.
 - The system prompt's six rules (ground-only, synthesize-from-templates,

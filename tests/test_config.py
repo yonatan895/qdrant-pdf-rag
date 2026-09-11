@@ -230,3 +230,113 @@ def test_gateway_api_keys_load_from_env(monkeypatch):
     assert s.embed_api_key == "sk-embed"
     assert s.rerank_api_key == "sk-rerank"
     assert s.context_llm_api_key == "sk-context"
+
+
+# AGENTS.md lethal rule: no default flips. Every Settings field must appear
+# here with its exact default, so a changed or added field fails CI instead of
+# depending on reviewer vigilance. `ingest_workers` is host-dependent and pins
+# its factory instead of a value (asserted separately).
+PINNED_SETTING_DEFAULTS: dict[str, object] = {
+    "qdrant_url": "http://localhost:6333",
+    "qdrant_api_key": None,
+    "qdrant_collection": "mainframe_manuals",
+    "qdrant_snapshots_dir": "/qdrant/snapshots",
+    "qdrant_timeout_s": 30,
+    "qdrant_ingest_timeout_s": 120,
+    "embed_mode": "vllm",
+    "embed_base_url": None,
+    "embed_model": None,
+    "embed_api_key": None,
+    "dense_dim": None,
+    "embed_timeout_s": 60.0,
+    "llm_base_url": None,
+    "llm_model_reasoning": None,
+    "llm_api_key": None,
+    "answer_timeout_s": 300.0,
+    "prompt_max_context_chars": 8000,
+    "prompt_max_context_chars_complex": 4500,
+    "prompt_max_chunk_chars": 3000,
+    "prompt_max_chunk_chars_complex": 1100,
+    "query_max_chars": 2000,
+    "splunk_context_max_chars": 4000,
+    "prompt_order": "retrieval",
+    "dense_query_prefix": (
+        "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "
+    ),
+    "acronym_expansion_enabled": False,
+    "comparative_split_enabled": False,
+    "diagnostic_dualpath_enabled": False,
+    "rrf_k": 2,
+    "rrf_weight_dense_nl": 1.0,
+    "rrf_weight_sparse_nl": 1.0,
+    "rrf_weight_dense_identifier": 1.0,
+    "rrf_weight_sparse_identifier": 3.0,
+    "rrf_sparse_boost_syntax": 1.0,
+    "rrf_sparse_boost_table": 1.0,
+    "retrieve_max_chunks_per_page": 1,
+    "retrieve_max_chunks_per_doc": 3,
+    "llm_reasoning_effort_simple": "low",
+    "llm_reasoning_effort_complex": "high",
+    "llm_temperature": 0.2,
+    "llm_max_model_len": 4096,
+    "llm_reserved_output_tokens": 1536,
+    "llm_token_safety_margin": 128,
+    "llm_max_chunk_tokens_narrative": 350,
+    "llm_tokenize_timeout_s": 5.0,
+    "llm_stream": False,
+    "http_connect_retries": 2,
+    "http_max_connections": 200,
+    "http_max_keepalive_connections": 100,
+    "health_qdrant_timeout_s": 5.0,
+    "health_embed_timeout_s": 10.0,
+    "allow_hash_mode": False,
+    "log_level": "INFO",
+    "otel_exporter_otlp_endpoint": None,
+    "otel_sample_ratio": 1.0,
+    "otel_export_queue_size": 2048,
+    "otel_export_timeout_ms": 5000,
+    "metrics_enabled": False,
+    "batch_size": 128,
+    "ingest_upsert_streams": 4,
+    "ingest_bulk_load": False,
+    "bm25_model": "Qdrant/bm25",
+    "bm25_cache_dir": None,
+    "rerank_enabled": False,
+    "rerank_model": "BAAI/bge-reranker-v2-m3",
+    "rerank_base_url": None,
+    "rerank_api_key": None,
+    "rerank_endpoint_order": "score_first",
+    "rerank_candidates": 50,
+    "rerank_batch_size": 32,
+    "rerank_timeout_s": 5.0,
+    "rerank_fusion_alpha": 1.0,
+    "zowe_mcp_enabled": False,
+    "zowe_mcp_base_url": None,
+    "zowe_mcp_timeout_s": 15.0,
+    "zowe_mcp_max_bytes": 262144,
+    "zowe_mcp_dry_run": False,
+    "contextual_embed_enabled": False,
+    "context_llm_base_url": None,
+    "context_llm_model": None,
+    "context_llm_api_key": None,
+    "context_llm_timeout_s": 30.0,
+    "context_max_chars": 500,
+    "context_cache_path": None,
+}
+
+
+def test_every_setting_default_is_pinned():
+    import multiprocessing
+
+    fields = Settings.model_fields
+    factory_fields = {name for name, f in fields.items() if f.default_factory is not None}
+    assert factory_fields == {"ingest_workers"}, (
+        f"unexpected default_factory fields: {factory_fields - {'ingest_workers'}}"
+    )
+    assert set(fields) == set(PINNED_SETTING_DEFAULTS) | factory_fields
+    for name, want in PINNED_SETTING_DEFAULTS.items():
+        got = fields[name].get_default()
+        assert got == want, f"{name} default changed: {got!r} != pinned {want!r}"
+    # Host-dependent by design: pin the factory, not the machine's core count.
+    workers = fields["ingest_workers"].get_default(call_default_factory=True)
+    assert workers == max(1, (multiprocessing.cpu_count() or 2) - 1)

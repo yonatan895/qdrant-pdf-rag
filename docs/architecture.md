@@ -177,8 +177,8 @@ The agent enforces strict grounding guarantees and adaptive reasoning depth befo
 
 2. **Adaptive Context Length Budgeting (`prompt_max_context_chars_complex`):**
    - **Context Truncation Vulnerability:** Reasoning models running on a 4,096-token maximum context window (`max_model_len=4096`) are vulnerable to context exhaustion. A default 8,000-character prompt context consumes ~2,400 prompt tokens, leaving only ~1,600 tokens total for *both* reasoning thinking tokens and generated response content. When the model deliberated deeply (>1,000 reasoning tokens), generation hit `Finish: length`, resulting in answers truncated mid-sentence and omitted `Citations:` sections.
-   - **Solution:** For complex queries, prompt manual excerpts are capped at 4,500 characters (`Settings.prompt_max_context_chars_complex = 4500`). This preserves ~1,200 tokens for the prompt, reserving **~2,600 tokens of headroom** exclusively for thinking tokens and comprehensive answer text, completely eliminating truncation faults (`Finish: stop` guaranteed).
-   - **Tokenizer discipline:** budget planning uses the in-process estimator (zero RPCs); the packed prompt is verified **once** per answer via the vLLM `/tokenize` endpoint at the server *origin* (`/v1` stripped). First `/tokenize` failure logs one warning and pins the in-process estimator for the life of the instance — never a silent per-call fallback, never per-chunk tokenize RPCs.
+   - **Solution:** For complex queries, prompt manual excerpts are capped at 4,500 characters (`Settings.prompt_max_context_chars_complex = 4500`). This preserves ~1,200 tokens for the prompt, reserving **~2,600 tokens of headroom** exclusively for thinking tokens and comprehensive answer text, greatly reducing truncation faults; the agent emits an alert when a response still finishes with `finish_reason=length` (never a silent mid-sentence cut).
+   - **Tokenizer discipline:** budget planning uses the in-process estimator (zero RPCs); the packed prompt is verified against the whole-message `/tokenize` count per trim round (up to 4), at the server *origin* (`/v1` stripped). First `/tokenize` failure logs one warning and pins the in-process estimator for the life of the instance — never a silent per-call fallback, never per-chunk tokenize RPCs.
 
 3. **Reasoning Protocol & Engine Control:**
    - **System Prompt Extension (`SYSTEM_PROMPT_COMPLEX_EXTENSION`):** Injected dynamically on complex queries. Instructs the reasoning model to conduct multi-phase internal deliberation: problem decomposition, cross-examining manual excerpts for parameters and return codes, constructing verified JCL/operator commands in fenced blocks, and auditing claims against cited manuals.
@@ -195,15 +195,19 @@ The agent enforces strict grounding guarantees and adaptive reasoning depth befo
 6. **Body Stripping & Verification:**
    Any hallucinated citation lines that match the citation regex but are not in `allowed_citations` are stripped from the response text before transmission. Mid-sentence narrative text mentioning document IDs is preserved under the standalone-line rule.
 
-7. **Live-State Enrichment (ADR-0003, default-off):**
-   `live`/`hybrid` queries fetch bounded read-only context via the Zowe MCP
-   server (max 2 calls, byte-capped, dedicated short timeout) before prompt
-   assembly. Live excerpts enter as a named `live_context` block under the
-   prompt-order policy, wrapped with the same delimited,
-   instruction-isolated framing as retrieved chunks; trap queries never
-   trigger a fetch, and an unreachable backend degrades to manuals-only
-   with an honest marker. Live sources cite distinctly (never as manual
-   citations) and never count toward manual grounding.
+7. **Live-State Enrichment (ADR-0003, phase 3 — not yet wired):**
+   The routing/fetch layer shipped in phase 2 (`agent/live_state.py`,
+   default-off; nothing calls `fetch_live` from an endpoint yet). When the
+   prompt wiring lands (ADR-0003 phase 3; ROADMAP PR-17), `live`/`hybrid`
+   queries will fetch bounded
+   read-only context via the Zowe MCP server (max 2 calls, byte-capped,
+   dedicated short timeout) before prompt assembly. Live excerpts will enter
+   as a named `live_context` block under the prompt-order policy, wrapped
+   with the same delimited, instruction-isolated framing as retrieved
+   chunks; trap queries never trigger a fetch, and an unreachable backend
+   degrades to manuals-only with an honest marker. Live sources cite
+   distinctly (never as manual citations) and never count toward manual
+   grounding.
 
 ### 4.5 Outbound HTTP, Agent Lifespan & API Contracts
 

@@ -7,6 +7,12 @@ short heading. Syntax sections use diagrams (>>-, box drawing, ::=, <parm>).
 from __future__ import annotations
 
 import re
+from typing import Literal
+
+# Frozen `chunk_type` vocabulary (AGENTS.md: no new values). The Literal
+# annotation makes mypy reject a new return value; the vocabulary test pins
+# the exact set.
+ChunkType = Literal["message", "syntax", "table", "narrative"]
 
 _BOX_CHARS = set("\u2500\u2502\u250c\u2510\u2514\u2518\u251c\u2524\u252c\u2534\u253c\u2501\u2503\u250f\u2513\u2517\u251b")
 _SYNTAX_RE = re.compile(r"(::=|>>-|>>\+|<--|--\+|-\+-|--\\-)")
@@ -43,7 +49,7 @@ def is_table_block(text: str) -> bool:
     return columnish / len(lines) >= 0.6
 
 
-def classify(text: str) -> str:
+def classify(text: str) -> ChunkType:
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if not lines:
         return "narrative"
