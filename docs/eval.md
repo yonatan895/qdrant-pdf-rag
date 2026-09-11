@@ -365,4 +365,4 @@ committed row is the pointer, the manifest is the detail.
 | Date | Git SHA | Venue | Steps | Result |
 |---|---|---|---|---|
 | 2026-09-02 | pre-#268 | `real_manuals` | `harness-l2` N=24 | 10 structural fails; grounded 0.76, citation precision 0.16, truncation 0.59 — standing red debt (`testing.md` harness section) |
-| 2026-09-11 | this PR | `real_manuals` | `harness-l4-record` N=24×3, then `harness-l4` gate | reference recorded (grounded 0.70, citation P/R 0.60/0.40, truncation 0.43, syntax 0.33, entailment 0.35, relevance 0.97); gate fail on 32 structural fails with no rate outside the 0.15 band, 20-row review queue — standing RC debt |
+| 2026-09-11 | 9469d4f | `real_manuals` | `harness-l4-record` N=24×3, then `harness-l4` gate | reference recorded (grounded 0.70, citation P/R 0.60/0.40, truncation 0.43, syntax 0.33, entailment 0.35, relevance 0.97); gate fail on 32 structural fails with no rate outside the 0.15 band, 20-row review queue — standing RC debt |
