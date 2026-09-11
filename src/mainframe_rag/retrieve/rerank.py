@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 
 import httpx2
 
+from mainframe_rag.config import bearer_auth_headers
+
 if TYPE_CHECKING:
     from mainframe_rag.config import Settings
     from mainframe_rag.retrieve.query import SearchHit
@@ -134,6 +136,7 @@ class HttpReranker:
             raise RuntimeError("RERANK_BASE_URL (or EMBED_BASE_URL) must be set for HttpReranker")
 
         base = self._base_url.rstrip("/")
+        headers = bearer_auth_headers(self._settings.rerank_api_key)
         scores: list[float] = []
         client = self._http()
 
@@ -147,7 +150,7 @@ class HttpReranker:
             }
             batch_scores: list[float] | None = None
             try:
-                resp = client.post(url, json=payload, timeout=self._timeout)
+                resp = client.post(url, json=payload, timeout=self._timeout, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
                 if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
@@ -169,7 +172,7 @@ class HttpReranker:
                 "query": query,
                 "documents": batch_texts,
             }
-            resp = client.post(rerank_url, json=rerank_payload, timeout=self._timeout)
+            resp = client.post(rerank_url, json=rerank_payload, timeout=self._timeout, headers=headers)
             resp.raise_for_status()
             r_data = resp.json()
             results = r_data.get("results") if isinstance(r_data, dict) else None

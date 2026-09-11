@@ -431,6 +431,35 @@ def test_healthz_qdrant_unready_structured(client, monkeypatch):
     assert "refused" not in resp.text  # diagnostics stay in logs
 
 
+def test_healthz_embed_probe_forwards_gateway_key(client, monkeypatch):
+    """The /healthz embed ping hits the same gateway endpoint as retrieval,
+    so it must carry the embed leg's virtual key when set."""
+    from types import SimpleNamespace
+
+    class Ready:
+        status_code = 200
+        text = "all shards are ready"
+
+    posts: list = []
+
+    class RecordingPool:
+        async def get(self, *a, **k):
+            return Ready()
+
+        async def post(self, *a, **k):
+            posts.append(k)
+            return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(app_mod, "http", RecordingPool())
+    monkeypatch.setattr(app_mod.settings, "embed_base_url", "http://embed.internal/v1")
+    monkeypatch.setattr(app_mod.settings, "embed_model", "test-embed")
+    monkeypatch.setattr(app_mod.settings, "embed_api_key", "sk-test-embed")
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json()["embed"] is True
+    assert posts[0]["headers"] == {"Authorization": "Bearer sk-test-embed"}
+
+
 def test_error_shape_is_structured(client, monkeypatch):
     """Stable {"code", "message"} JSON — no stack traces to the client."""
 
@@ -838,7 +867,7 @@ def test_httpx_llm_client_passes_reasoning_params(monkeypatch):
             }
 
     class MockHttpClient:
-        def post(self, url, json=None, timeout=None):
+        def post(self, url, json=None, timeout=None, headers=None):
             recorded_payload.update(json or {})
             return MockHttpResp()
 
@@ -1194,7 +1223,7 @@ def test_chat_content_none_becomes_empty_string():
             }
 
     class FakeClient:
-        def post(self, url, json=None):
+        def post(self, url, json=None, headers=None):
             return FakeResp()
 
     settings = Settings(
@@ -1265,7 +1294,7 @@ def test_httpx_llm_client_streaming_measures_ttft_on_first_content_token():
 
     class FakeStreamingClient:
         @contextmanager
-        def stream(self, method, url, json=None):
+        def stream(self, method, url, json=None, headers=None):
             yield FakeStreamResp()
 
     settings = Settings(
@@ -1311,11 +1340,11 @@ def test_httpx_llm_client_streaming_empty_content_falls_back_to_post():
             self.post_called = False
 
         @contextmanager
-        def stream(self, method, url, json=None):
+        def stream(self, method, url, json=None, headers=None):
             self.stream_called = True
             yield FakeEmptyStreamResp()
 
-        def post(self, url, json=None):
+        def post(self, url, json=None, headers=None):
             self.post_called = True
             return FakePostResp()
 
@@ -1357,12 +1386,12 @@ def test_httpx_llm_client_streaming_error_falls_back_to_post():
             self.post_called = False
 
         @contextmanager
-        def stream(self, method, url, json=None):
+        def stream(self, method, url, json=None, headers=None):
             if False:
                 yield None
             raise httpx2.ConnectError("Connection dropped during streaming")
 
-        def post(self, url, json=None):
+        def post(self, url, json=None, headers=None):
             self.post_called = True
             return FakePostResp()
 
@@ -1756,7 +1785,7 @@ async def test_httpx_llm_client_chat_stream_async():
 
     class FakeAsyncHttpClient:
         @asynccontextmanager
-        async def stream(self, method, url, json=None):
+        async def stream(self, method, url, json=None, headers=None):
             yield FakeAsyncStreamResp()
 
     settings = Settings(
@@ -1811,10 +1840,10 @@ async def test_httpx_llm_client_chat_stream_empty_content_recovers_via_post():
             self.posts = 0
 
         @asynccontextmanager
-        async def stream(self, method, url, json=None):
+        async def stream(self, method, url, json=None, headers=None):
             yield EmptyStreamResp()
 
-        async def post(self, url, json=None):
+        async def post(self, url, json=None, headers=None):
             self.posts += 1
             return PostResp()
 

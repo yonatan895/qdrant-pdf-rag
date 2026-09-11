@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 
 import httpx2
 
-from mainframe_rag.config import Settings
+from mainframe_rag.config import Settings, bearer_auth_headers
 from mainframe_rag.ports import ChatMessage
 
 if TYPE_CHECKING:
@@ -187,6 +187,7 @@ class ContextLLMClient:
                 "temperature": 0.0,
                 "max_tokens": MAX_COMPLETION_TOKENS,
             },
+            headers=bearer_auth_headers(self._settings.context_llm_api_key),
         )
         resp.raise_for_status()
         data = resp.json()

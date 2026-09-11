@@ -212,6 +212,8 @@ Opt-in via `CONTEXTUAL_EMBED_ENABLED` (default off).
 - Per-chunk 1–2 sentence gist from a cheap chat model (never the reasoning
   model): `CONTEXT_LLM_BASE_URL` / `CONTEXT_LLM_MODEL` with a short,
   dedicated timeout distinct from the 300s answer timeout.
+  `CONTEXT_LLM_API_KEY` (unset = keyless) rides the gist calls as a Bearer
+  virtual key behind a gateway.
 - Cache key `v2:sha:chunk_id` under `CONTEXT_PROMPT_VERSION = "v2"` (v1
   duplicated the header and echoed instructions).
 - Model budget 256 completion tokens; deterministic 500-char cap with

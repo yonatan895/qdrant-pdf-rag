@@ -201,3 +201,62 @@ def test_trailing_slash_base_url_builds_clean_completions_url():
     )
     llm.chat(_msgs())
     assert fake.capture["url"] == "http://llm.internal:8000/v1/chat/completions"
+
+
+@pytest.mark.anyio
+async def test_bearer_header_sent_on_stream_leg_when_key_set():
+    """A gateway-guarded endpoint must see the virtual key on the SSE leg."""
+    seen = {}
+    fake = _stream_lines(
+        [
+            'data: {"choices": [{"delta": {"content": "hi"}}]}',
+            'data: {"choices": [{"finish_reason": "stop"}], "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}}',
+            "data: [DONE]",
+        ]
+    )
+    fake.capture = seen
+
+    llm = HttpxLLMClient(
+        Settings(**_settings_kwargs(llm_stream=True, llm_api_key="sk-test-llm")), client=fake
+    )
+    await llm.achat(_msgs())
+    assert seen["headers"] == {"Authorization": "Bearer sk-test-llm"}
+
+
+def test_bearer_header_sent_on_nonstream_post_when_key_set():
+    """The non-streaming POST (and the stream-fallback leg) carries the key."""
+    seen = {}
+    fake = _post_payload({"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]})
+    fake.capture = seen
+
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_api_key="sk-test-llm")), client=fake)
+    llm.chat(_msgs())
+    assert seen["headers"] == {"Authorization": "Bearer sk-test-llm"}
+
+
+@pytest.mark.anyio
+async def test_no_auth_header_sent_on_stream_leg_when_key_unset():
+    """Keyless setups keep the pre-gateway wire shape: no Authorization
+    header on the SSE leg."""
+    stream_seen: dict = {}
+    stream_fake = _stream_lines(
+        [
+            'data: {"choices": [{"delta": {"content": "hi"}}]}',
+            "data: [DONE]",
+        ]
+    )
+    stream_fake.capture = stream_seen
+    stream_llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=stream_fake)
+    await stream_llm.achat(_msgs())
+    assert stream_seen["headers"] == {}
+
+
+def test_no_auth_header_sent_on_nonstream_post_when_key_unset():
+    """Keyless setups keep the pre-gateway wire shape: no Authorization
+    header on the non-streaming POST."""
+    post_seen: dict = {}
+    post_fake = _post_payload({"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]})
+    post_fake.capture = post_seen
+    post_llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=post_fake)
+    post_llm.chat(_msgs())
+    assert post_seen["headers"] == {}

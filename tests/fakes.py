@@ -222,7 +222,7 @@ class TokenizerPostFake:
     """Capturing POST double for VllmTokenizer tests.
 
     count: returned {"count": N}; status/exc/payload override for
-    downgrade pins; capture dict records url/json.
+    downgrade pins; capture dict records url/json/headers.
     """
 
     def __init__(
@@ -240,13 +240,14 @@ class TokenizerPostFake:
         self.capture = capture if capture is not None else {}
         self.calls: list[str] = []
 
-    def post(self, url, json, timeout=5.0):
+    def post(self, url, json, timeout=5.0, headers=None):
         if self.raises is not None:
             self.calls.append(url)
             raise self.raises
         self.calls.append(url)
         self.capture["url"] = url
         self.capture["json"] = json
+        self.capture["headers"] = headers
         payload = dict(self.extra)
         if self.count is not None:
             payload = {"count": self.count, **payload}
@@ -264,24 +265,27 @@ class HttpxStreamFake:
         self.post_bodies: list = []
 
     @asynccontextmanager
-    async def stream(self, method, url, json=None):
+    async def stream(self, method, url, json=None, headers=None):
         self.capture["method"] = method
         self.capture["url"] = url
         self.capture["json"] = json
+        self.capture["headers"] = headers
         self.stream_bodies.append(json)
         yield StreamResp(self.lines)
 
     @contextmanager
-    def stream_sync(self, method, url, json=None):
+    def stream_sync(self, method, url, json=None, headers=None):
         self.capture["method"] = method
         self.capture["url"] = url
         self.capture["json"] = json
+        self.capture["headers"] = headers
         self.stream_bodies.append(json)
         yield StreamResp(self.lines)
 
-    def post(self, url, json=None, timeout=None):
+    def post(self, url, json=None, timeout=None, headers=None):
         self.capture["url"] = url
         self.capture["json"] = json
+        self.capture["headers"] = headers
         self.post_bodies.append(json)
         return PostResp(self.payload)
 
@@ -306,7 +310,7 @@ def vllm_models_mock(routes: dict[str, list[str]]):
     list of served ids. Unmatched urls (e.g. the OTEL collector probe the
     resolver also fires) answer 404, which probes tolerate."""
 
-    def mock_get(url, timeout=None):
+    def mock_get(url, timeout=None, headers=None):
         from unittest.mock import MagicMock
 
         for substr, ids in routes.items():
@@ -325,7 +329,7 @@ def vllm_models_mock(routes: dict[str, list[str]]):
 def embedding_mock(dim: int = 1024):
     """httpx2.post double for the embeddings probe (dim discovery)."""
 
-    def mock_post(url, json=None, timeout=None):
+    def mock_post(url, json=None, timeout=None, headers=None):
         from unittest.mock import MagicMock
 
         mock_resp = MagicMock()

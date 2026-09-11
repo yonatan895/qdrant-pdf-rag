@@ -107,3 +107,45 @@ def test_vllm_embedder_dense_query_prepends_prefix():
     # dense_query() MUST prepend prefix
     embedder.dense_query(["user search query"])
     assert captured_inputs == ["Instruct: query prefix\nQuery: user search query"]
+
+
+def _header_capturing_embedder(api_key):
+    """VllmEmbedder double recording the headers kwarg of its /embeddings POST."""
+    from types import SimpleNamespace
+
+    from mainframe_rag.ingest.embed import VllmEmbedder
+
+    seen: dict = {}
+
+    class FakeHttp:
+        def post(self, url, json, **kwargs):
+            seen.update(kwargs)
+            return SimpleNamespace(
+                status_code=200,
+                raise_for_status=lambda: None,
+                json=lambda: {
+                    "data": [{"index": i, "embedding": [0.1] * 8} for i in range(len(json["input"]))]
+                },
+            )
+
+    settings = Settings(
+        embed_mode="vllm",
+        embed_base_url="http://mock:8000/v1",
+        embed_model="mock-model",
+        dense_dim=8,
+        embed_api_key=api_key,
+        _env_file=None,
+    )
+    return VllmEmbedder(settings, client=FakeHttp()), seen
+
+
+def test_vllm_embedder_sends_bearer_when_key_set():
+    embedder, seen = _header_capturing_embedder("sk-test-embed")
+    embedder.dense(["hi"])
+    assert seen["headers"] == {"Authorization": "Bearer sk-test-embed"}
+
+
+def test_vllm_embedder_omits_auth_when_key_unset():
+    embedder, seen = _header_capturing_embedder(None)
+    embedder.dense(["hi"])
+    assert seen["headers"] == {}

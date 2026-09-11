@@ -208,6 +208,46 @@ def test_resolve_runtime_settings_auto_detect_vllm_and_probing(monkeypatch):
         assert settings.llm_model_reasoning == "google/gemma-4-E4B-it-qat-mobile-ct"
 
 
+def test_resolve_runtime_settings_probes_send_gateway_keys(monkeypatch):
+    """Gateway-guarded discovery probes (/models, /embeddings) must carry
+    the matching leg's virtual key so auto-detect works through LiteLLM."""
+    monkeypatch.delenv("EMBED_MODE", raising=False)
+    monkeypatch.delenv("EMBED_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.setenv("EMBED_API_KEY", "sk-test-embed")
+    monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
+
+    inner_get = vllm_models_mock(
+        {"8001": ["Qwen/Qwen3-Embedding-0.6B"], "8000": ["google/gemma-4-E4B-it-qat-mobile-ct"]}
+    )
+    get_headers: dict = {}
+
+    def mock_get(url, timeout=None, headers=None):
+        get_headers[url] = headers
+        return inner_get(url, timeout=timeout)
+
+    inner_post = embedding_mock(1024)
+    post_headers: dict = {}
+
+    def mock_post(url, json=None, timeout=None, headers=None):
+        post_headers[url] = headers
+        return inner_post(url, json=json, timeout=timeout)
+
+    with patch("httpx2.get", side_effect=mock_get), patch("httpx2.post", side_effect=mock_post):
+        settings = resolve_runtime_settings()
+        assert settings.embed_mode == "vllm"
+
+    assert get_headers["http://localhost:8001/v1/models"] == {
+        "Authorization": "Bearer sk-test-embed"
+    }
+    assert post_headers["http://localhost:8001/v1/embeddings"] == {
+        "Authorization": "Bearer sk-test-embed"
+    }
+    assert get_headers["http://localhost:8000/v1/models"] == {
+        "Authorization": "Bearer sk-test-llm"
+    }
+
+
 def test_resolve_runtime_settings_explicit_cli_overrides_with_multi_model_discovery():
     mock_get = vllm_models_mock(
         {"9000": ["served-embed-1", "served-embed-2"], "9001": ["served-reasoner-1", "served-reasoner-2"]}

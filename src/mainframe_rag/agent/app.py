@@ -51,7 +51,7 @@ from mainframe_rag.agent.sse import (
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.tracing import parent_context, setup_tracing, shutdown_tracing
 from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
-from mainframe_rag.config import Settings, load_settings
+from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.logs import configure_logging
 from mainframe_rag.ports import (
@@ -534,6 +534,7 @@ async def healthz() -> HealthzResponse:
                 f"{settings.embed_base_url.rstrip('/')}/embeddings",
                 json={"model": settings.embed_model, "input": ["ping"]},
                 timeout=settings.health_embed_timeout_s,
+                headers=bearer_auth_headers(settings.embed_api_key),
             )
             embed_ok = resp.status_code == 200
         except Exception as exc:  # noqa: BLE001

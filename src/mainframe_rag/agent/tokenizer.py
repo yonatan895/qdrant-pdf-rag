@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx2
 
+from mainframe_rag.config import bearer_auth_headers
 from mainframe_rag.ports import ChatMessage
 
 if TYPE_CHECKING:
@@ -63,6 +64,7 @@ class VllmTokenizer:
         model: str,
         timeout_s: float = 5.0,
         client: httpx2.Client | None = None,
+        api_key: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         # vLLM serves /tokenize at the server root; /v1/tokenize is a 404.
@@ -70,6 +72,7 @@ class VllmTokenizer:
         self._model = model
         self._timeout_s = timeout_s
         self._client = client
+        self._api_key = api_key
         self._fallback = FallbackTokenizer()
         self._downgraded = False
 
@@ -101,11 +104,12 @@ class VllmTokenizer:
         if self._downgraded:
             return None
         url = f"{self._origin}/tokenize"
+        headers = bearer_auth_headers(self._api_key)
         try:
             if self._client is not None:
-                resp = self._client.post(url, json=payload, timeout=self._timeout_s)
+                resp = self._client.post(url, json=payload, timeout=self._timeout_s, headers=headers)
             else:
-                resp = httpx2.post(url, json=payload, timeout=self._timeout_s)
+                resp = httpx2.post(url, json=payload, timeout=self._timeout_s, headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, dict):
@@ -138,5 +142,6 @@ def build_tokenizer(
             model=settings.llm_model_reasoning,
             timeout_s=settings.llm_tokenize_timeout_s,
             client=client,
+            api_key=settings.llm_api_key,
         )
     return FallbackTokenizer()

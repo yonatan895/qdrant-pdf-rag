@@ -202,14 +202,14 @@ readers:
 | `qdrant_url` / `qdrant_api_key` / `qdrant_collection` | `http://localhost:6333` / unset / `mainframe_manuals` | lifespan, healthz readyZ, retrieve calls, manifests |
 | `qdrant_timeout_s` / `qdrant_ingest_timeout_s` | 30 / 120 | query path / ingest path (split: different call shapes) |
 | `embed_mode` | `vllm` (normalized lower/strip) | lifespan fail-fast, embedder dispatch, ingest |
-| `embed_base_url` / `embed_model` / `dense_dim` | unset (all required in vLLM) | endpoint+model validation, healthz ping, dim check |
+| `embed_base_url` / `embed_model` / `dense_dim` / `embed_api_key` | unset (endpoint trio required in vLLM; key unset = keyless) | endpoint+model validation, healthz ping, dim check, `Authorization` on embed calls |
 | `embed_timeout_s` | 60.0 | both HTTP pools |
 | `dense_query_prefix` | asymmetric instruct prefix | dense query vectors only |
 | `prompt_max_context_chars` / `_complex` | 8000 / 4500 | `build_messages` by complexity |
 | `prompt_max_chunk_chars` / `prompt_max_chunk_chars_complex` | 3000 / 1100 | per-type packing caps |
 | `query_max_chars` / `splunk_context_max_chars` | 2000 (422s) / 4000 (truncate+suffix) | length guard / prompt packing |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
-| `llm_base_url` / `llm_model_reasoning` | unset (answer stays disabled) | per-request assertion, LLM client, tokenizer |
+| `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
 | `answer_timeout_s` | 300.0 | reasoning client, never retried |
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | low / high / 0.2 | answer path |
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 4096 / 1536 / 128 / 350 / 5.0 | tokenizer-path budgeting |
@@ -219,7 +219,7 @@ readers:
 | `allow_hash_mode` / `log_level` | `false` / INFO | lifespan hash gate / logging |
 | `otel_exporter_otlp_endpoint` (+ sample/queue/timeout) | unset = tracing off | tracing setup |
 | `metrics_enabled` | `false` = /metrics 404s | Prometheus exposition for UWM scrapes |
-| `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / bge-reranker-v2-m3 / embed URL / 50 / 32 / 5.0 | rerank dispatch → retrieve |
+| `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / bge-reranker-v2-m3 / embed URL / unset (keyless) / 50 / 32 / 5.0 | rerank dispatch → retrieve |
 | `rrf_k` / `rrf_weight_*` / `retrieve_max_chunks_per_page|doc` | 2 / 1.0,1.0 – 1.0,3.0 / 1, 3 | retrieve fusion + diversification |
 | `acronym_expansion_enabled` | `false` | rewrite (not agent) |
 | ingest-only (`ingest_workers` = CPU-1, `batch_size` 128, `ingest_upsert_streams` 4, `ingest_bulk_load` false, `bm25_model`, `contextual_*`) | — | ingest; see `docs/ingest.md` §§6–9 |

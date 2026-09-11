@@ -48,8 +48,8 @@ class FakeHttpClient:
         self.responses = list(responses)
         self.posts = []
 
-    def post(self, url, json=None):
-        self.posts.append({"url": url, "json": json})
+    def post(self, url, json=None, headers=None):
+        self.posts.append({"url": url, "json": json, "headers": headers})
         if not self.responses:
             raise AssertionError("unexpected extra LLM call")
         return self.responses.pop(0)
@@ -132,6 +132,24 @@ def test_complete_posts_short_deterministic_completion():
     assert post["json"]["model"] == "test-gist-model"
     assert post["json"]["temperature"] == 0.0
     assert post["json"]["max_tokens"] == ctx_mod.MAX_COMPLETION_TOKENS
+
+
+def test_complete_sends_bearer_when_key_set():
+    http = FakeHttpClient([FakeResp("Gist.")])
+    client = ctx_mod.ContextLLMClient(
+        _settings(context_llm_api_key="sk-test-context"), client=http
+    )
+    client.complete([ChatMessage(role="user", content="hi")])
+    (post,) = http.posts
+    assert post["headers"] == {"Authorization": "Bearer sk-test-context"}
+
+
+def test_complete_omits_auth_when_key_unset():
+    http = FakeHttpClient([FakeResp("Gist.")])
+    client = ctx_mod.ContextLLMClient(_settings(), client=http)
+    client.complete([ChatMessage(role="user", content="hi")])
+    (post,) = http.posts
+    assert post["headers"] == {}
 
 
 def test_complete_http_error_propagates():

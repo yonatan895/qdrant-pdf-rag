@@ -185,3 +185,37 @@ def test_metrics_defaults_off():
     s = Settings(_env_file=None)
     assert s.metrics_enabled is False
     assert Settings(_env_file=None, metrics_enabled=True).metrics_enabled is True
+
+
+def test_gateway_api_key_defaults_unset():
+    """LiteLLM gateway virtual keys ship unset: the keyless wire shape stays
+    byte-identical to the pre-gateway path until an operator sets one."""
+    s = Settings(_env_file=None)
+    assert s.llm_api_key is None
+    assert s.embed_api_key is None
+    assert s.rerank_api_key is None
+    assert s.context_llm_api_key is None
+
+
+def test_bearer_auth_headers_matrix():
+    """Single auth helper for every model leg: unset/empty/whitespace-only
+    keys yield no header (never `Bearer None`); a pasted key is stripped."""
+    from mainframe_rag.config import bearer_auth_headers
+
+    assert bearer_auth_headers(None) == {}
+    assert bearer_auth_headers("") == {}
+    assert bearer_auth_headers("   ") == {}
+    assert bearer_auth_headers("sk-test-key") == {"Authorization": "Bearer sk-test-key"}
+    assert bearer_auth_headers("  sk-test-key\n") == {"Authorization": "Bearer sk-test-key"}
+
+
+def test_gateway_api_keys_load_from_env(monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "sk-llm")
+    monkeypatch.setenv("EMBED_API_KEY", "sk-embed")
+    monkeypatch.setenv("RERANK_API_KEY", "sk-rerank")
+    monkeypatch.setenv("CONTEXT_LLM_API_KEY", "sk-context")
+    s = Settings(_env_file=None)
+    assert s.llm_api_key == "sk-llm"
+    assert s.embed_api_key == "sk-embed"
+    assert s.rerank_api_key == "sk-rerank"
+    assert s.context_llm_api_key == "sk-context"

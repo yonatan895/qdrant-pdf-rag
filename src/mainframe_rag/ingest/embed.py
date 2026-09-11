@@ -20,7 +20,7 @@ import re
 
 import httpx2
 
-from mainframe_rag.config import HASH_EMBED_DIM, Settings
+from mainframe_rag.config import HASH_EMBED_DIM, Settings, bearer_auth_headers
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ports import Embedder, SparseVector
 
@@ -156,6 +156,7 @@ class VllmEmbedder:
         resp = self._http().post(
             f"{base_url.rstrip('/')}/embeddings",
             json={"model": model, "input": texts},
+            headers=bearer_auth_headers(self._settings.embed_api_key),
         )
         resp.raise_for_status()
         data = resp.json()["data"]
