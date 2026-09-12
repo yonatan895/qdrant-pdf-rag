@@ -8,17 +8,17 @@
   "tolerance": 0.15,
   "repeats": 3,
   "queries_per_run": 24,
-  "structural_fails": 37
+  "structural_fails": 45
  },
  "metrics": {
-  "grounded_rate": 0.4762,
-  "citation_precision": 0.6255,
-  "citation_recall": 0.3915,
-  "truncation_rate": 0.4921,
-  "syntax_compliance": 0.4444,
-  "faithfulness.entailed": 0.2879,
-  "faithfulness.contradiction": 0.0303,
-  "relevance.relevant": 0.9583,
+  "grounded_rate": 0.4603,
+  "citation_precision": 0.5932,
+  "citation_recall": 0.4206,
+  "truncation_rate": 0.4445,
+  "syntax_compliance": 0.3333,
+  "faithfulness.entailed": 0.6825,
+  "faithfulness.contradiction": 0.0,
+  "relevance.relevant": 0.9524,
   "relevance.irrelevant": 0.0
  }
 }

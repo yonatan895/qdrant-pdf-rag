@@ -1,23 +1,23 @@
 {
   "_meta": {
     "note": "Re-baseline via `make eval-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/eval_retrieval.py.",
-    "n": 117,
+    "n": 121,
     "collection": "mainframe_manuals",
     "embed_mode": "vllm",
-    "updated": "2026-09-06"
+    "updated": "2026-09-12"
   },
-  "recall@1": 0.971,
-  "recall@3": 0.971,
-  "recall@5": 0.971,
-  "recall@8": 0.971,
-  "mrr": 0.971,
-  "ndcg@8": 0.971,
+  "recall@1": 1.0,
+  "recall@3": 1.0,
+  "recall@5": 1.0,
+  "recall@8": 1.0,
+  "mrr": 1.0,
+  "ndcg@8": 1.0,
   "identifier": {
-    "recall@1": 0.952,
-    "recall@5": 0.952,
-    "recall@8": 0.952,
-    "mrr": 0.952,
-    "ndcg@8": 0.952
+    "recall@1": 1.0,
+    "recall@5": 1.0,
+    "recall@8": 1.0,
+    "mrr": 1.0,
+    "ndcg@8": 1.0
   },
   "nl": {
     "recall@1": 1.0,
@@ -50,12 +50,12 @@
     "doc_number": {
       "n": 14,
       "scored": 14,
-      "recall@1": 0.786,
-      "recall@3": 0.786,
-      "recall@5": 0.786,
-      "recall@8": 0.786,
-      "mrr": 0.786,
-      "ndcg@8": 0.786
+      "recall@1": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0,
+      "recall@8": 1.0,
+      "mrr": 1.0,
+      "ndcg@8": 1.0
     },
     "message_id": {
       "n": 23,
@@ -87,6 +87,16 @@
       "mrr": 1.0,
       "ndcg@8": 1.0
     },
+    "table": {
+      "n": 4,
+      "scored": 4,
+      "recall@1": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0,
+      "recall@8": 1.0,
+      "mrr": 1.0,
+      "ndcg@8": 1.0
+    },
     "version": {
       "n": 8,
       "scored": 5,
@@ -100,7 +110,7 @@
   },
   "abstain": {
     "n": 13,
-    "top_score_mean": 0.6124,
+    "top_score_mean": 0.7631,
     "top_score_max": 1.3333
   },
   "page": {

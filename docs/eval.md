@@ -41,8 +41,9 @@ separate passes would clobber each other's pages), then `run_ingest
 inventory and Qdrant sha skips; doc_ids are stable across chunking
 changes, so delete-first is unnecessary). `paraphrase-manuals` is the
 `paraphrase.jsonl` venue (14 docs + generic-distractor), same rebuild.
-Both re-ingested 2026-09-10 under current rules (post-#216): 208 pts
-(160 narrative / 48 message) and 21 pts (16 narrative / 5 message).
+Both re-ingested 2026-09-10 under current rules (post-#216); `mainframe_manuals`
+was rebuilt in one pass during the 2026-09-12 re-freeze: 214 pts
+(166 narrative / 48 message, 82 docs) and 21 pts (16 narrative / 5 message).
 `real_manuals` (435k pts, 452 real books) is NOT managed here: never
 delete, re-ingest, or gate against it from dev workflows. Its sampled
 mix is ~95% narrative / ~2% message / ~3% syntax / ~0% table — and the
@@ -128,18 +129,19 @@ verdict.
   name-and-count match. Re-adoption creates a new snapshot and prunes
   strays. Restore verifies the post-restore point count.
 - **Mode-keyed venues:** `benchmarks/harness-vllm.json` (vllm venue: golden
-  + holdout over the snapshot-pinned **synthetic** corpus — the regenerated
-  dev venue, not the real books) and `benchmarks/harness.json`
+  + holdout, 193 entries, over the snapshot-pinned **real** corpus
+  `real_manuals` — 435057 pts, `VENUE=rc` + `QDRANT_COLLECTION=real_manuals`,
+  re-recorded 2026-09-12 on the re-frozen set) and `benchmarks/harness.json`
   (hash venue: **dev golden set only**, `evals/golden.jsonl`, over the
   snapshot-pinned synthetic hash corpus — the Makefile harness targets pin
-  `--golden` per mode, issue #158). Venue architecture: dev ↔ synthetic
-  (determinism and promotion signal), holdout ↔ real (`real_manuals` via
-  `make eval-holdout` — the honest real-corpus semantic gate). The vLLM
-  harness over 211 synthetic points saturates most classes at 1.0 and has
-  accordingly little discriminating power; it guards determinism, not
-  real-corpus quality. The holdout runs only under vllm mode — inside the
-  vllm harness (synthetic venue) and as `make eval-holdout` against
-  `real_manuals` (the semantic gate). The hash harness stays dev-only per
+  `--golden` per mode, issue #158). Venue architecture: harness ↔ real
+  (`real_manuals` promotion signal with discriminating power) alongside
+  holdout ↔ real (`real_manuals` via `make eval-holdout` — the honest
+  real-corpus semantic gate); the synthetic dev venue (`mainframe_manuals`,
+  214 pts) currently has no vLLM harness pin, so a synthetic `harness-gate`
+  fails closed until one is re-recorded. The holdout runs only under vllm
+  mode — inside the vllm harness (real venue) and as `make eval-holdout`
+  against `real_manuals` (the semantic gate). The hash harness stays dev-only per
   #158: the synthetic hash venue's sibling pages carry near-identical
   query text by corpus design ("deliberate lexical competitors"). Both venues: collection + hash-vs-vllm pairing is
   operator env (the baseline pins the snapshot, not the collection name).
@@ -271,7 +273,7 @@ committed (the real-corpus venue guard refuses `real_manuals` without
 
 ## 7. Golden corpus discipline
 
-`golden.jsonl` (117 dev) and `holdout.jsonl` (70, sha256-pinned, verified
+`golden.jsonl` (121 dev) and `holdout.jsonl` (72, sha256-pinned, verified
 with `sha256sum -c` on RC-only `make eval-holdout`) are built from
 `expert_golden_seed.jsonl` plus payload mining by `build_golden_corpus.py`:
 manual bindings for out-of-pattern families, authored corrections,
@@ -392,3 +394,5 @@ committed row is the pointer, the manifest is the detail.
 | 2026-09-12 | d15fbca | `real_manuals` | `eval_retrieval --no-check` split 2×2, 70-query frozen holdout (vllm, rerank off) | comparative split ON: class r@1 0.286→0.429, class MRR 0.429→0.536, overall r@1 0.603→0.619, overall MRR 0.700→0.712, 0 must_not violations → flipped default-ON; diagnostic neutral-negative (class r@1 flat 0.571, class MRR 0.655→0.643, overall r@5 0.873→0.857) → stays off |
 | 2026-09-12 | 5a952b7 | `real_manuals` | `make eval-holdout` (70-query frozen holdout, vllm, rerank off) | doc-family filter ON: `doc_number` r@1 0.667→1.0 (DOC-03 0→1.0, DOC-04 0→1.0); overall r@1 0.619→0.651, r@5 0.873→0.889, MRR 0.712→0.739; only those two queries moved; 0 violations; gate green |
 | 2026-09-12 | 96f013d | `real_manuals` | `replay_sweep` over dev golden, pools captured with CE at depth 80 | tune baseline (n=104) r@1 0.683 / r@5 0.923 / MRR 0.792; fuse 24→32→40 identical, `page2` r@5 0.904/MRR 0.769, `doc4` neutral, `doc2` +1/104, rerank alphas r@1 ≤0.673 — no adoption, production config stands |
+| 2026-09-12 | dff83f8 | `real_manuals` + synthetic venues | golden/holdout re-freeze (#270 table class) + all baseline re-records | 193 entries (121 dev / 72 holdout), `verify-golden` 0 FAIL/0 WARN; `mainframe_manuals` rebuilt one-pass (82 docs / 214 pts); hash + vllm + holdout baselines re-recorded (holdout r@1 0.631, r@5 0.892, MRR 0.726; table class block present in all); L1 harness baseline re-recorded (new snapshot pin, recall@5 0.908, traps 0); gate-l1/l1-gate/eval/holdout green |
+| 2026-09-12 | dff83f8 | `real_manuals` | `harness-l4-record` N=24×3 on the re-frozen holdout | reference re-recorded: grounded 0.46, citation P/R 0.59/0.42, truncation 0.44, syntax 0.33, entailment 0.68, relevance 0.95; 45 structural fails — standing RC debt (recording gates through product debt) |

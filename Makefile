@@ -213,9 +213,12 @@ HARNESS_BASELINE = $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-vllm.jso
 # Venue pin (issue #158): the hash venue evaluates the dev golden set only —
 # the holdout binds real-corpus books, so the holdout is vllm-venue-only
 # (the real-corpus semantic gate is `make eval-holdout`, not the harness).
-# The vllm harness runs golden + holdout over the snapshot-pinned synthetic
-# venue: a determinism guard, mostly saturated, with little discriminating
-# power. Empty for vllm: the harness default stands (golden + holdout under
+# The vllm harness runs golden + holdout (193 entries) over the snapshot-pinned
+# real corpus `real_manuals` (435057 pts; VENUE=rc + QDRANT_COLLECTION=real_manuals):
+# a discriminating promotion signal, not the synthetic determinism guard.
+# A synthetic `harness-gate` against `mainframe_manuals` (214 pts) fails closed
+# on the pin mismatch until a synthetic baseline is re-recorded.
+# Empty for vllm: the harness default stands (golden + holdout under
 # VENUE=rc; dev goldens only without the declaration — issue #268).
 HARNESS_GOLDEN = $(if $(filter vllm,$(EMBED_MODE)),,--golden evals/golden.jsonl)
 HARNESS_L3_BASELINE ?= $(if $(filter vllm,$(EMBED_MODE)),benchmarks/harness-l3-vllm.json,benchmarks/harness-l3.json)

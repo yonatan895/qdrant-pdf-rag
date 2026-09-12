@@ -3,52 +3,53 @@
   "note": "Harness promotion baseline; re-record via `make harness-baseline` (dedicated PR, AGENTS.md).",
   "embed_mode": "vllm",
   "snapshot": {
-   "points_count": 208,
-   "snapshot_name": "mainframe_manuals-2007008481010860-2026-09-06-06-06-42.snapshot"
+   "points_count": 435057,
+   "snapshot_name": "real_manuals-6382072208288527-2026-09-11-22-22-52.snapshot"
   },
   "class_regression_floor": 0.05,
-  "updated": "2026-09-06"
+  "golden_entries": 193,
+  "updated": "2026-09-12"
  },
  "overall": {
-  "n": 167,
-  "scored": 167,
-  "recall@5": 0.9701,
-  "recall@8": 0.9701,
-  "mrr": 0.9701,
-  "ndcg@8": 0.9701
+  "n": 173,
+  "scored": 173,
+  "recall@5": 0.9075,
+  "recall@8": 0.9422,
+  "mrr": 0.763,
+  "ndcg@8": 0.7955
  },
  "classes": {
   "comparative": {
    "n": 19,
    "scored": 19,
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.7895,
+   "recall@8": 0.8421,
+   "mrr": 0.5412,
+   "ndcg@8": 0.6112
   },
   "diagnostic": {
    "n": 41,
    "scored": 41,
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.8293,
+   "recall@8": 0.878,
+   "mrr": 0.7187,
+   "ndcg@8": 0.7153
   },
   "doc_number": {
    "n": 20,
    "scored": 20,
-   "recall@5": 0.75,
-   "recall@8": 0.75,
-   "mrr": 0.75,
-   "ndcg@8": 0.75
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "message_id": {
    "n": 38,
    "scored": 37,
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.8464,
+   "ndcg@8": 0.8713
   },
   "negative": {
    "n": 14,
@@ -61,67 +62,75 @@
   "syntax": {
    "n": 41,
    "scored": 39,
-   "recall@5": 1.0,
+   "recall@5": 0.9487,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.7844,
+   "ndcg@8": 0.8465
+  },
+  "table": {
+   "n": 6,
+   "scored": 6,
+   "recall@5": 0.8333,
+   "recall@8": 1.0,
+   "mrr": 0.5417,
+   "ndcg@8": 0.6667
   },
   "version": {
    "n": 14,
    "scored": 11,
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.8182,
+   "recall@8": 0.8182,
+   "mrr": 0.6439,
+   "ndcg@8": 0.6761
   }
  },
  "traps": {
-  "checked": 187,
+  "checked": 193,
   "failed": [],
   "precision": 1.0
  },
  "per_query": {
   "CMP-01": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "CMP-02": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6934
   },
   "CMP-03": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.25,
+   "ndcg@8": 0.5438
   },
   "CMP-04": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "CMP-05": {
-   "recall@5": 1.0,
+   "recall@5": 0.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.16666666666666666,
+   "ndcg@8": 0.4556
   },
   "CMP-06": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.3333333333333333,
+   "ndcg@8": 0.5438
   },
   "CMP-07": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "CMP-08": {
    "recall@5": 1.0,
@@ -132,32 +141,32 @@
   "CMP-09": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6934
   },
   "CMP-10": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.3333333333333333,
+   "ndcg@8": 0.5
   },
   "CMP-11": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "CMP-12": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.8772
   },
   "CMP-13": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "CMP-14": {
    "recall@5": 1.0,
@@ -180,63 +189,63 @@
   "CMP-17": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.2,
+   "ndcg@8": 0.4307
   },
   "CMP-18": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.6131
   },
   "DIA-01": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.9197
   },
   "DIA-02": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.3333333333333333,
+   "ndcg@8": 0.6309
   },
   "DIA-03": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.2,
+   "ndcg@8": 0.5438
   },
   "DIA-04": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.7039
   },
   "DIA-05": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.3333333333333333,
+   "ndcg@8": 0.6934
   },
   "DIA-06": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.7039
   },
   "DIA-07": {
-   "recall@5": 1.0,
+   "recall@5": 0.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.125,
+   "ndcg@8": 0.4307
   },
   "DIA-08": {},
   "DIA-09": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.3333333333333333,
+   "ndcg@8": 0.6309
   },
   "DIA-10": {
    "recall@5": 1.0,
@@ -260,7 +269,7 @@
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.6131
   },
   "DIA-14": {
    "recall@5": 1.0,
@@ -269,10 +278,10 @@
    "ndcg@8": 1.0
   },
   "DIA-15": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "DIA-16": {
    "recall@5": 1.0,
@@ -284,19 +293,19 @@
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.6131
   },
   "DIA-18": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "DIA-19": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "DIA-20": {
    "recall@5": 1.0,
@@ -307,8 +316,8 @@
   "DIA-21": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "DIA-22": {
    "recall@5": 1.0,
@@ -320,25 +329,25 @@
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.6131
   },
   "DIA-24": {
-   "recall@5": 1.0,
+   "recall@5": 0.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.14285714285714285,
+   "ndcg@8": 0.2641
   },
   "DIA-25": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.6131
   },
   "DIA-26": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "DIA-27": {
    "recall@5": 1.0,
@@ -347,16 +356,16 @@
    "ndcg@8": 1.0
   },
   "DIA-28": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.2153
   },
   "DIA-29": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.6131
   },
   "DIA-30": {
    "recall@5": 1.0,
@@ -379,8 +388,8 @@
   "DIA-33": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "DIA-34": {
    "recall@5": 1.0,
@@ -391,38 +400,38 @@
   "DIA-35": {
    "recall@5": 1.0,
    "recall@8": 1.0,
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
+  },
+  "DOC-01": {
+   "recall@5": 1.0,
+   "recall@8": 1.0,
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
-  "DOC-01": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
-  },
   "DOC-02": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-03": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-04": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-05": {
-   "recall@5": 0.0,
-   "recall@8": 0.0,
-   "mrr": 0.0,
-   "ndcg@8": 0.0
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
   },
   "DOC-07": {
    "recall@5": 1.0,
@@ -559,8 +568,8 @@
   "LEG-11": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "LEG-12": {
    "recall@5": 1.0,
@@ -572,8 +581,8 @@
   "MSG-02": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "MSG-03": {
    "recall@5": 1.0,
@@ -584,27 +593,27 @@
   "MSG-04": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.2,
+   "ndcg@8": 0.4367
   },
   "MSG-05": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.25,
+   "ndcg@8": 0.5
   },
   "MSG-06": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.2,
+   "ndcg@8": 0.5
   },
   "MSG-07": {},
   "MSG-08": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.6131
   },
   "MSG-09": {
    "recall@5": 1.0,
@@ -639,8 +648,8 @@
   "MSG-14": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "MSG-15": {
    "recall@5": 1.0,
@@ -687,8 +696,8 @@
   "MSG-22": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "MSG-23": {
    "recall@5": 1.0,
@@ -713,7 +722,7 @@
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.6131
   },
   "MSG-28": {
    "recall@5": 1.0,
@@ -730,8 +739,8 @@
   "MSG-30": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.3333333333333333,
+   "ndcg@8": 0.5
   },
   "MSG-31": {
    "recall@5": 1.0,
@@ -772,8 +781,8 @@
   "MSG-37": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.3333333333333333,
+   "ndcg@8": 0.6309
   },
   "MSG-38": {
    "recall@5": 1.0,
@@ -784,14 +793,14 @@
   "MSG-39": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "MSG-40": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.9197
   },
   "NEG-01": {},
   "NEG-02": {},
@@ -806,14 +815,14 @@
   "SYN-01": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "SYN-02": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.3869
   },
   "SYN-03": {
    "recall@5": 1.0,
@@ -824,8 +833,8 @@
   "SYN-04": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.2,
+   "ndcg@8": 0.5
   },
   "SYN-05": {
    "recall@5": 1.0,
@@ -834,16 +843,16 @@
    "ndcg@8": 1.0
   },
   "SYN-06": {
-   "recall@5": 1.0,
+   "recall@5": 0.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.16666666666666666,
+   "ndcg@8": 0.3869
   },
   "SYN-07": {
-   "recall@5": 1.0,
+   "recall@5": 0.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.14285714285714285,
+   "ndcg@8": 0.4307
   },
   "SYN-08": {
    "recall@5": 1.0,
@@ -866,20 +875,20 @@
   "SYN-11": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "SYN-12": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.25,
+   "ndcg@8": 0.6309
   },
   "SYN-13": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "SYN-14": {
    "recall@5": 1.0,
@@ -896,14 +905,14 @@
   "SYN-16": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "SYN-17": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "SYN-18": {
    "recall@5": 1.0,
@@ -926,8 +935,8 @@
   "SYN-21": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "SYN-22": {
    "recall@5": 1.0,
@@ -968,8 +977,8 @@
   "SYN-28": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "SYN-29": {
    "recall@5": 1.0,
@@ -994,8 +1003,8 @@
   "SYN-34": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.3333333333333333,
+   "ndcg@8": 0.6309
   },
   "SYN-35": {
    "recall@5": 1.0,
@@ -1018,8 +1027,8 @@
   "SYN-38": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "SYN-39": {
    "recall@5": 1.0,
@@ -1033,6 +1042,42 @@
    "mrr": 1.0,
    "ndcg@8": 1.0
   },
+  "TBL-01": {
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
+  },
+  "TBL-02": {
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 1.0,
+   "ndcg@8": 1.0
+  },
+  "TBL-03": {
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 0.3333333333333333,
+   "ndcg@8": 0.5
+  },
+  "TBL-04": {
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 0.25,
+   "ndcg@8": 0.5
+  },
+  "TBL-05": {
+   "recall@5": 0.0,
+   "recall@8": 1.0,
+   "mrr": 0.16666666666666666,
+   "ndcg@8": 0.5
+  },
+  "TBL-06": {
+   "recall@5": 1.0,
+   "recall@8": 1.0,
+   "mrr": 0.5,
+   "ndcg@8": 0.5
+  },
   "VER-01": {
    "recall@5": 1.0,
    "recall@8": 1.0,
@@ -1042,27 +1087,27 @@
   "VER-02": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.25,
+   "ndcg@8": 0.5
   },
   "VER-03": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.3333333333333333,
+   "ndcg@8": 0.3869
   },
   "VER-04": {},
   "VER-05": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "VER-06": {
    "recall@5": 1.0,
    "recall@8": 1.0,
    "mrr": 1.0,
-   "ndcg@8": 1.0
+   "ndcg@8": 0.9197
   },
   "VER-07": {},
   "VER-08": {},
@@ -1075,8 +1120,8 @@
   "VER-10": {
    "recall@5": 1.0,
    "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "mrr": 0.5,
+   "ndcg@8": 0.6309
   },
   "VER-11": {},
   "VER-12": {
@@ -1092,10 +1137,10 @@
    "ndcg@8": 1.0
   },
   "VER-14": {
-   "recall@5": 1.0,
-   "recall@8": 1.0,
-   "mrr": 1.0,
-   "ndcg@8": 1.0
+   "recall@5": 0.0,
+   "recall@8": 0.0,
+   "mrr": 0.0,
+   "ndcg@8": 0.0
   },
   "VER-15": {
    "recall@5": 1.0,
