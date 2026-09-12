@@ -502,12 +502,13 @@ local-stack:
 test-vllm-e2e: | .venv
 	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",)
 
-# Run agent locally under uvicorn (LLM_STREAM=true enables TTFT streaming for L3)
+# Run agent locally under uvicorn (LLM_STREAM=true enables TTFT streaming for
+# L3). The operator console (ADR-0004) is served by the agent itself: call it
+# in with the model env you already use, open http://localhost:$(or $(PORT),8080)/ui.
+# UI_ENABLED defaults to true for this local runner; pass UI_ENABLED=false to
+# exercise the fail-closed route set.
 run-agent: | .venv
-	LLM_STREAM=true .venv/bin/python -m uvicorn mainframe_rag.agent.app:app --host 0.0.0.0 --port $(or $(PORT),8080)
-
-# Operator console (ADR-0004) is served by the agent itself: run it with
-# UI_ENABLED=true make run-agent, then open http://localhost:$(or $(PORT),8080)/ui.
+	LLM_STREAM=true UI_ENABLED="$(or $(UI_ENABLED),true)" .venv/bin/python -m uvicorn mainframe_rag.agent.app:app --host 0.0.0.0 --port $(or $(PORT),8080)
 
 
 # ---------------------------------------------------------------- e2e demo
@@ -531,6 +532,6 @@ help:
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest | harness-l3 | harness-l4 (answer-quality gate, RC)"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper) | capture-pool (record prefetch pools, RC)"
 	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"
-	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | local-gateway (LiteLLM in front of all three backends on :4000) | local-gateway-stop | local-jaeger (OTLP/Jaeger v2 on :4318, UI :16686) | local-jaeger-stop | local-stack (full prod simulation: Qdrant + gateway + Jaeger + agent) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
+	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | local-gateway (LiteLLM in front of all three backends on :4000) | local-gateway-stop | local-jaeger (OTLP/Jaeger v2 on :4318, UI :16686) | local-jaeger-stop | local-stack (full prod simulation: Qdrant + gateway + Jaeger + agent + /ui console) | run-agent (uvicorn with LLM_STREAM=true + /ui) | test-vllm-e2e (automated end-to-end suite)"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."
