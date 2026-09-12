@@ -974,7 +974,10 @@ def parse_answer(
     )
 
 
-_ABEND_RE = re.compile(r"\b(?:abend\s+)?[su][0-9a-f]{3,4}\b", re.IGNORECASE)
+_ABEND_RE = re.compile(
+    r"\b(?:abend\s*=?\s*(?=[0-9a-f]*\d)[su]?[0-9a-f]{3,4}|[su](?=[0-9a-f]{0,3}\d)[0-9a-f]{3,4})\b",
+    re.IGNORECASE,
+)
 _MAX_PRIOR_TURN_CHARS = 1000
 
 
@@ -1058,6 +1061,8 @@ def build_chat_messages(
       to preserve token budget.
     - Active turn (last user message): injected with current sysplex/splunk context,
       freshly retrieved manual excerpts for the active question, and citation tail instructions.
+    - Tokenizer-aware verification: verifies whole prompt [system, *history, active]
+      against verify_limit with two-tier trimming (Tier 1: active excerpts; Tier 2: history turns).
     """
     if not messages:
         return []
@@ -1074,36 +1079,163 @@ def build_chat_messages(
         else SYSTEM_PROMPT
     )
 
-    active_turn_messages = build_messages(
-        query=active_query,
-        hits=hits,
-        product=product,
-        version=version,
-        splunk_context=splunk_context,
-        max_context_chars=max_context_chars,
-        max_chunk_chars=max_chunk_chars,
-        max_chunk_chars_narrative=max_chunk_chars_narrative,
-        splunk_context_max_chars=splunk_context_max_chars,
-        complexity=complexity,
-        tokenizer=tokenizer,
-        settings=settings,
-        order=order,
+    max_turns = settings.chat_max_turns if settings is not None else 10
+    max_prior_chars = (
+        settings.chat_max_prior_turn_chars if settings is not None else _MAX_PRIOR_TURN_CHARS
     )
-    active_user_content = active_turn_messages[1].content
 
     prior_messages: list[ChatMessage] = []
-    raw_history = [m for m in messages[:-1] if m.role != "system"][-6:]
+    raw_history = [m for m in messages[:-1] if m.role != "system"][-max_turns:]
     for m in raw_history:
         text = m.content.strip()
         if m.role == "assistant" and "Retrieved manual excerpts:" in text:
             parts = text.split("Retrieved manual excerpts:")
             text = parts[0].strip()
-        if len(text) > _MAX_PRIOR_TURN_CHARS:
-            text = text[:_MAX_PRIOR_TURN_CHARS] + " ... [history truncated]"
+        if len(text) > max_prior_chars:
+            text = text[:max_prior_chars] + " ... [history truncated]"
         prior_messages.append(ChatMessage(role=m.role, content=text))
 
+    context_entries: list[str] = []
+    context_bits = []
+    if product:
+        context_bits.append(f"product: {product}")
+    if version:
+        context_bits.append(f"version: {version}")
+    if context_bits:
+        context_entries.append("Sysplex context: " + ", ".join(context_bits))
+    if splunk_context:
+        splunk_text = splunk_context.strip()
+        if len(splunk_text) > splunk_context_max_chars:
+            splunk_text = splunk_text[:splunk_context_max_chars].rstrip() + _TRUNCATED_SUFFIX
+        context_entries.append(
+            "Splunk context (live system observation; join key is the message ID):\n"
+            + splunk_text
+        )
+    question_text = "Question: " + active_query
+    example_cite = (
+        hits[0].cite
+        if hits
+        else "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17"
+    )
+    tail_part = (
+        "Please answer based strictly on the retrieved manual excerpts above and conclude with the 'Citations:' section copying the exact citation line for each excerpt used, for example:\n"
+        f"Citations:\n{example_cite}"
+    )
+
+    packed: list[tuple[str, str]] = []
+    if tokenizer is not None:
+        if settings is None:
+            raise ValueError("settings is required when a tokenizer is provided")
+        model_len = settings.llm_max_model_len
+        reserved = settings.llm_reserved_output_tokens
+        margin = settings.llm_token_safety_margin
+        narrative_token_cap = settings.llm_max_chunk_tokens_narrative
+        thinking_reserve = (
+            settings.llm_thinking_reserve_tokens_complex if complexity == "complex" else 0
+        )
+
+        history_tokens = sum(estimate_tokens(m.content) for m in prior_messages)
+        fixed_tokens = (
+            estimate_tokens(
+                system_content
+                + "\n"
+                + "\n".join(context_entries)
+                + "\n"
+                + question_text
+                + "\n"
+                + tail_part
+            )
+            + history_tokens
+        )
+
+        budget_tokens = max(100, model_len - reserved - thinking_reserve - margin - fixed_tokens)
+
+        total_tokens = 0
+        for i, hit in enumerate(hits, 1):
+            text = hit.text.strip()
+            if hit.chunk_type not in ("syntax", "message", "table"):
+                if max_chunk_chars_narrative is not None and len(text) > max_chunk_chars_narrative:
+                    text = text[:max_chunk_chars_narrative].rstrip() + _TRUNCATED_SUFFIX
+                elif complexity == "complex" and estimate_tokens(text) > narrative_token_cap:
+                    text = text[: int(narrative_token_cap * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX
+            elif len(text) > max_chunk_chars:
+                text = text[:max_chunk_chars].rstrip() + _TRUNCATED_SUFFIX
+            header = f"[{i}] {hit.cite}"
+            chunk_tokens = estimate_tokens(f"{header}\n{text}")
+            if total_tokens + chunk_tokens > budget_tokens and packed:
+                rem_tokens = budget_tokens - total_tokens
+                body_rem_tokens = rem_tokens - estimate_tokens(header)
+                if body_rem_tokens > 60:
+                    packed.append(
+                        (
+                            header,
+                            text[: int(body_rem_tokens * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX,
+                        )
+                    )
+                break
+            packed.append((header, text))
+            total_tokens += chunk_tokens
+
+        verify_limit = model_len - reserved - thinking_reserve - margin
+        max_rounds = _MAX_TRIM_ROUNDS * 2 + len(prior_messages)
+        for _ in range(max_rounds):
+            candidate = [
+                ChatMessage(role="system", content=system_content),
+                *prior_messages,
+                ChatMessage(
+                    role="user",
+                    content=_user_content(
+                        _assemble_blocks(context_entries, question_text, packed, tail_part)
+                    ),
+                ),
+            ]
+            used = tokenizer.count_messages(candidate)
+            if used <= verify_limit:
+                break
+            overshoot = used - verify_limit
+            if packed:
+                cut = int(overshoot * _APPROX_CHARS_PER_TOKEN) + _TRIM_OVERCUT_CHARS
+                header, body = packed[-1]
+                trimmed = body[:-cut] if cut < len(body) else ""
+                if len(trimmed.rstrip()) < _MIN_TAIL_CHARS:
+                    packed.pop()
+                else:
+                    packed[-1] = (header, trimmed.rstrip() + _TRUNCATED_SUFFIX)
+            elif prior_messages:
+                prior_messages.pop(0)
+            else:
+                break
+    else:
+        total_chars = 0
+        for i, hit in enumerate(hits, 1):
+            text = hit.text.strip()
+            narrative_cap = (
+                max_chunk_chars_narrative
+                if max_chunk_chars_narrative is not None
+                else max_chunk_chars
+            )
+            chunk_cap = (
+                max_chunk_chars
+                if hit.chunk_type in ("syntax", "message", "table")
+                else min(max_chunk_chars, narrative_cap)
+            )
+            if len(text) > chunk_cap:
+                text = text[:chunk_cap].rstrip() + _TRUNCATED_SUFFIX
+            header = f"[{i}] {hit.cite}"
+            chunk_len = len(header) + len(text) + 2
+            if total_chars + chunk_len > max_context_chars:
+                rem = max_context_chars - total_chars - len(header) - 2
+                if rem > 200:
+                    packed.append((header, text[:rem].rstrip() + _TRUNCATED_SUFFIX))
+                break
+            packed.append((header, text))
+            total_chars += chunk_len
+
+    ordered = order_prompt_blocks(
+        _assemble_blocks(context_entries, question_text, packed, tail_part), order
+    )
     return [
         ChatMessage(role="system", content=system_content),
         *prior_messages,
-        ChatMessage(role="user", content=active_user_content),
+        ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),
     ]

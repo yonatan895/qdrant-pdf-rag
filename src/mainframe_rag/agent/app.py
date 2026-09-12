@@ -23,6 +23,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Self
 
 import httpx2
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -30,7 +31,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mainframe_rag.agent.answer import (
     HttpxLLMClient,
@@ -117,6 +118,15 @@ def _require_query_length(request_id: str, query: str) -> None:
     failure, and no new client-visible shape is introduced."""
     if len(query) > settings.query_max_chars:
         log.warning(json_log(request_id, "query_too_long", chars=len(query)))
+        raise AppError(422, "invalid_request", "request body failed validation")
+
+
+def _require_chat_body_length(request_id: str, req: ChatRequest) -> None:
+    total_chars = sum(len(m.content) for m in req.messages)
+    if req.splunk_context:
+        total_chars += len(req.splunk_context)
+    if total_chars > settings.chat_max_body_chars:
+        log.warning(json_log(request_id, "chat_body_too_long", chars=total_chars))
         raise AppError(422, "invalid_request", "request body failed validation")
 
 
@@ -391,7 +401,9 @@ class AnswerResponse(BaseModel):
     script: str | None
 
 
-class ChatCompletionsRequest(BaseModel):
+class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     messages: list[ChatMessage] = Field(min_length=1)
     model: str | None = None
     stream: bool = False
@@ -403,6 +415,19 @@ class ChatCompletionsRequest(BaseModel):
     splunk_context: str | None = None
     product: str | None = None
     version: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_body_size(self) -> Self:
+        total_chars = sum(len(m.content) for m in self.messages)
+        if self.splunk_context:
+            total_chars += len(self.splunk_context)
+        max_chars = getattr(settings, "chat_max_body_chars", 32768)
+        if total_chars > max_chars:
+            raise ValueError(f"chat body length {total_chars} exceeds max {max_chars}")
+        return self
+
+
+ChatCompletionsRequest = ChatRequest
 
 
 class ChatMessageResponse(BaseModel):
@@ -427,6 +452,9 @@ class ChatCompletionsResponse(BaseModel):
     citations_inferred: bool = False
     inferred_indices: list[int] = Field(default_factory=list)
     hits: list[SearchHit] = Field(default_factory=list)
+
+
+ChatResponse = ChatCompletionsResponse
 
 
 class HealthzResponse(BaseModel):

@@ -148,3 +148,11 @@ def format_openai_chunk(
 def format_openai_done() -> str:
     """Terminal marker for OpenAI chat completion streams."""
     return "data: [DONE]\n\n"
+
+
+def format_openai_error(code: str = SSE_ERROR_CODE, message: str = SSE_ERROR_MESSAGE) -> str:
+    """Format an SSE error event for OpenAI-compatible chat streams:
+    data: {"error": {"code": "...", "message": "..."}}\n\n
+    """
+    payload = {"error": {"code": code, "message": message}}
+    return f"data: {json.dumps(payload)}\n\n"

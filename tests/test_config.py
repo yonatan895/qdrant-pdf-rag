@@ -200,6 +200,28 @@ def test_metrics_defaults_off():
     assert Settings(_env_file=None, metrics_enabled=True).metrics_enabled is True
 
 
+def test_chat_and_ui_defaults_and_bounds():
+    s = Settings(_env_file=None)
+    assert s.chat_condense_enabled is False
+    assert s.chat_max_body_chars == 32768
+    assert s.chat_max_turns == 10
+    assert s.chat_max_prior_turn_chars == 1000
+    assert s.ui_enabled is False
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, chat_max_body_chars=500)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, chat_max_body_chars=200000)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, chat_max_turns=0)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, chat_max_turns=51)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, chat_max_prior_turn_chars=100)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, chat_max_prior_turn_chars=6000)
+
+
 def test_gateway_api_key_defaults_unset():
     """LiteLLM gateway virtual keys ship unset: the keyless wire shape stays
     byte-identical to the pre-gateway path until an operator sets one."""
@@ -287,6 +309,11 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "llm_max_chunk_tokens_narrative": 350,
     "llm_tokenize_timeout_s": 5.0,
     "llm_stream": False,
+    "chat_condense_enabled": False,
+    "chat_max_body_chars": 32768,
+    "chat_max_turns": 10,
+    "chat_max_prior_turn_chars": 1000,
+    "ui_enabled": False,
     "http_connect_retries": 2,
     "http_max_connections": 200,
     "http_max_keepalive_connections": 100,
