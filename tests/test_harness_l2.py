@@ -340,6 +340,26 @@ def test_summarize_grounded_rate_excludes_inferred_citations():
     assert m["inferred_citations"] == 1
 
 
+def test_summarize_answer_completeness_over_gold_rows():
+    # Issue #305: the gate is gold in the fetched pool; complete means the
+    # validated citations cover every expected doc (recall 1.0). Rows without
+    # the join stay out of the denominator.
+    m = summarize_l2([
+        _row("A", gold_retrieved=True, citation_recall=1.0),
+        _row("B", gold_retrieved=True, citation_recall=0.5),
+        _row("C", gold_retrieved=False, citation_recall=0.0),
+        _row("D"),  # no pool join at all
+    ])
+    assert m["answer_completeness_n"] == 2
+    assert m["answer_completeness"] == 0.5
+
+
+def test_summarize_answer_completeness_none_without_pool_join():
+    m = summarize_l2([_row("A")])
+    assert m["answer_completeness_n"] == 0
+    assert m["answer_completeness"] is None
+
+
 def test_gate_holds_on_relevance_judge_error():
     m = summarize_l2([_row("A", relevance_error="JudgeError: unparseable")])
     verdict, reasons = gate_l2(m)

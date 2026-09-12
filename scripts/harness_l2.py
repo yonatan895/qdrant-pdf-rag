@@ -98,6 +98,7 @@ if str(REPO / "scripts") not in sys.path:
 
 from eval_answers import (
     _AnswerCapture,
+    answer_completeness,
     failure_bucket,
     inferred_index_off_gold,
     run_query,
@@ -351,6 +352,11 @@ def summarize_l2(results: list[dict[str, Any]]) -> dict[str, Any]:
         "by_why": _by_why(judged),
         "inferred_index_off_gold": sum(1 for r in judged if inferred_index_off_gold(r)),
     }
+    # Answer completeness (issue #305): the share of gold-retrieved answer
+    # rows whose validated citations cover every expected doc. This is the
+    # issue's fix gate — a refusal or partial answer over retrieved gold is
+    # incomplete. None when no judged row carried the pool join.
+    metrics["answer_completeness_n"], metrics["answer_completeness"] = answer_completeness(judged)
     return metrics
 
 
@@ -439,6 +445,11 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
         "",
         f"- queries: {metrics['queries']} (judged {metrics['judged']}, errors {metrics['errors']})",
         f"- grounded rate: {metrics['grounded_rate']} (n={metrics['answer_llm_n']} LLM-path answers)",
+        (
+            f"- answer completeness (gold in pool): {metrics.get('answer_completeness')} "
+            f"(n={metrics.get('answer_completeness_n')}: answer rows whose expected docs were "
+            "retrieved; share whose validated citations cover all of them)"
+        ),
         (
             "- citation precision/recall (doc-level): "
             f"{metrics['citation_precision']} / {metrics['citation_recall']}  "

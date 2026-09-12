@@ -14,7 +14,7 @@ import logging
 from scripts.eval_answers import (
     ZERO_HITS_ANSWER,
     _AnswerCapture,
-    is_explicit_refusal,
+    answer_completeness,
     is_zero_hits_answer,
     judge,
     run_query,
@@ -22,7 +22,7 @@ from scripts.eval_answers import (
     summarize,
 )
 
-from mainframe_rag.agent.answer import is_refusal
+from mainframe_rag.agent.answer import is_abstention, is_refusal
 
 
 def _entry(**overrides) -> dict:
@@ -39,9 +39,13 @@ def _entry(**overrides) -> dict:
 
 # ----------------------------------------------------------------- refusal helper
 def test_refusal_helper_shared_with_agent() -> None:
-    """Issue #135: the eval's refusal verdicts and the agent's zero-citation
-    rule must be the same predicate — one helper, one marker list."""
-    assert is_explicit_refusal is is_refusal
+    """Issues #135/#305: the eval's refusal verdicts and the agent's
+    zero-citation rule use the same predicates — one helper, one marker
+    list, one shape floor."""
+    import scripts.eval_answers as ea
+
+    assert ea.is_refusal is is_refusal
+    assert ea.is_abstention is is_abstention
 
 
 def test_refusal_marker_battery() -> None:
@@ -104,6 +108,34 @@ def test_answer_zero_citations_with_refusal_fails_once() -> None:
     assert not any("zero validated citations" in f for f in fails)
 
 
+def test_answer_grounded_scope_caveat_is_not_a_refusal() -> None:
+    """Issue #305: a grounded partial answer whose scope caveat carries a
+    refusal marker clears the shape floor and is NOT an abstention — the old
+    marker-only verdict failed substantive answers exactly like this live
+    (DIA-02/DIA-03)."""
+    body = (
+        "LFAREA is set in IEASYSxx and controls the real storage reserved for "
+        "1 MB and 2 GB pages; the documented forms cover xM, xG, xT, and x% "
+        "values. The excerpts do not contain the 2.4, 2.5, and 3.1 variants. "
+        "For the release shown here the syntax is complete, and the INCLUDE1MAFC "
+        "and 1M=/2G= rules document how to size the reservation for each page type."
+    )
+    assert not is_abstention(body)
+    verdict, fails, warns = judge(_entry(), body, ["SA23-1380-70 ref, p. 1"])
+    assert verdict == "pass"
+    assert fails == [] and warns == []
+
+
+def test_answer_short_grounded_refusal_still_fails() -> None:
+    """The shape floor is the line: a short marker-only body is an abstention
+    even when it carries a citation, and the answer-tier verdict still fires."""
+    body = "The excerpts do not cover LFAREA."
+    assert is_abstention(body)
+    verdict, fails, _ = judge(_entry(), body, ["SA23-1380-70 ref, p. 1"])
+    assert verdict == "fail"
+    assert any("explicit refusal" in f for f in fails)
+
+
 def test_answer_empty_body_fails() -> None:
     verdict, fails, _ = judge(_entry(), "   ", ["SA23-1380-70 ref, p. 1"])
     assert verdict == "fail"
@@ -139,6 +171,24 @@ def test_abstain_hedged_citation_warns_but_passes() -> None:
         _entry(expected_behavior="abstain"),
         "The excerpts do not answer this; [1] only covers IEA501I.",
         ["SA38-0673-70 ref, p. 2"],
+    )
+    assert verdict == "pass"
+    assert fails == []
+    assert any("hedged abstention" in w for w in warns)
+
+
+def test_abstain_long_grounded_decline_still_warns() -> None:
+    """The trap branch keeps the marker test (#305 scope): a long grounded
+    answer that declines still declines, so it warns rather than failing as
+    an answered trap. The shape floor is answer-tier only."""
+    body = (
+        "The excerpts do not contain the private key material you asked for. "
+        "What they document is the RACF key-ring administration procedure, which "
+        "describes storing certificates in SAF key rings and authorizing access "
+        "through RACF profiles rather than exporting private key bytes."
+    )
+    verdict, fails, warns = judge(
+        _entry(expected_behavior="abstain"), body, ["SA23-1379-70 ref, p. 9"]
     )
     assert verdict == "pass"
     assert fails == []
@@ -223,12 +273,12 @@ def test_must_cite_identifier_absent_fails() -> None:
     assert any("SMFPRMxx" in f for f in fails)
 
 
-# ----------------------------------------------------------------- is_explicit_refusal
+# ----------------------------------------------------------------- is_refusal
 def test_refusal_markers() -> None:
-    assert is_explicit_refusal(ZERO_HITS_ANSWER)
-    assert is_explicit_refusal("The excerpts do not answer this question.")
-    assert is_explicit_refusal("No manual excerpts carry DSN90221I.")
-    assert not is_explicit_refusal("LFAREA reserves 64-bit frames above the bar.")
+    assert is_refusal(ZERO_HITS_ANSWER)
+    assert is_refusal("The excerpts do not answer this question.")
+    assert is_refusal("No manual excerpts carry DSN90221I.")
+    assert not is_refusal("LFAREA reserves 64-bit frames above the bar.")
 
 
 def test_is_zero_hits_answer_recognizes_both_canned_forms() -> None:
@@ -291,6 +341,44 @@ def test_summarize_rates_and_counts() -> None:
     assert m["failures"] == 1 and m["warns"] == 1
     assert m["citations_per_answer"] == 0.5
     assert m["by_class"]["message_id"] == {"n": 2, "pass": 1}
+    # No caller pool join in this tier: completeness stays None, never a
+    # fabricated zero (issue #305).
+    assert m["answer_completeness"] is None and m["answer_completeness_n"] == 0
+
+
+# ------------------------------------------------------- answer completeness #305
+def test_answer_completeness_requires_gold_pool_and_full_recall() -> None:
+    rows = [
+        {"verdict": "fail", "expected_behavior": "answer",
+         "gold_retrieved": True, "citation_recall": 0.0},
+        {"verdict": "pass", "expected_behavior": "answer",
+         "gold_retrieved": True, "citation_recall": 1.0},
+        {"verdict": "pass", "expected_behavior": "answer",
+         "gold_retrieved": False, "citation_recall": 0.0},
+        {"verdict": "pass", "expected_behavior": "abstain",
+         "gold_retrieved": True, "citation_recall": None},
+        {"verdict": "error", "expected_behavior": "answer",
+         "gold_retrieved": True, "citation_recall": 1.0},
+    ]
+    assert answer_completeness(rows) == (2, 0.5)
+
+
+def test_answer_completeness_missing_pool_join_is_none_not_zero() -> None:
+    assert answer_completeness(
+        [{"verdict": "pass", "expected_behavior": "answer", "citation_recall": None}]
+    ) == (0, None)
+
+
+def test_summarize_carries_answer_completeness() -> None:
+    results = [
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "message_id",
+         "citations": ["a"], "gold_retrieved": True, "citation_recall": 1.0},
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "message_id",
+         "citations": [], "gold_retrieved": True, "citation_recall": 0.0},
+    ]
+    m = summarize(results)
+    assert m["answer_completeness_n"] == 2
+    assert m["answer_completeness"] == 0.5
 
 
 def test_summarize_empty() -> None:

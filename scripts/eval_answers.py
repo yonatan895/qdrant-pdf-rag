@@ -20,8 +20,12 @@ Judging contract (structural first)
     FAILS; the flag is surfaced in the JSON report so fabrication is visible
     rather than silently grounded. This eval never re-parses model text with
     its own citation regex — one rule per concept.
-      - answer entry  -> FAIL on: empty body, explicit refusal, zero
-                         validated citations, or only inferred citations.
+      - answer entry  -> FAIL on: empty body, abstention (the shared
+                         marker+shape predicate, #135), zero validated
+                         citations, or only inferred citations. A grounded
+                         partial answer carrying a scope caveat is NOT an
+                         abstention and passes the refusal check; gold
+                         substrings still judge its completeness.
       - abstain entry -> FAIL only when the model cites excerpts AND does not
                          explicitly decline (the trap was answered). Zero
                          citations always passes; citing-but-declining is a
@@ -143,7 +147,10 @@ from venue import VenueError, require_rc_for_collection, resolve_golden_paths
 
 # Refusal interpretation is the agent's single helper (issue #135): the eval's
 # abstain verdicts and the agent's zero-citation rule must never diverge.
-from mainframe_rag.agent.answer import is_abstention, is_refusal as is_explicit_refusal
+# The trap branch keeps the marker test (any decline phrase = declined, even
+# a long one); the answer branch needs the shape floor so a grounded partial
+# answer's scope caveat is not scored as a refusal (#305).
+from mainframe_rag.agent.answer import is_abstention, is_refusal
 from mainframe_rag.config import load_settings
 
 
@@ -166,6 +173,16 @@ def judge(
     are surfaced in the report and FAIL the answer verdict — a validated
     cite must come from an explicit citation line to count as grounded.
 
+    Refusal on an answer row is judged with the agent's own abstention
+    predicate (`is_abstention`, #135/#305): a marker-bearing answer whose
+    non-refusal remainder clears the shape floor is a grounded partial
+    answer, not a refusal. Marker presence alone (the old verdict) failed
+    substantive answers that scope what the excerpts do not cover — the
+    #305 gap report measured that artifact as a refusal share. True refusals
+    (nothing left after the marker sentences) still FAIL. On a trap row the
+    marker test stays (any decline phrase counts as declining; a grounded
+    decline warns), because there a long answer means the trap was answered.
+
     judge_gold=False suppresses the gold-substring and must_cite_identifier
     checks: they judge MODEL phrasing, and the agent's fixed zero-hits
     message contains no model text (citing a canned string can never teach
@@ -173,24 +190,25 @@ def judge(
     failures: list[str] = []
     warns: list[str] = []
     body = answer.strip()
-    refusal = is_explicit_refusal(body)
+    refuses = is_refusal(body)
+    abstained = is_abstention(body)
     grounded = bool(citations)
 
     if entry["expected_behavior"] == "answer":
         if not body:
             failures.append("empty answer body")
-        elif refusal:
+        elif abstained:
             failures.append("explicit refusal on an answer-tier query")
         elif not grounded:
             failures.append("zero validated citations")
         elif citations_inferred:
             failures.append("only inferred citations (no explicit Citations: block)")
     else:  # abstain
-        if grounded and not refusal:
+        if grounded and not refuses:
             failures.append(f"trap answered: {len(citations)} validated citation(s)")
-        elif grounded and refusal:
+        elif grounded and refuses:
             warns.append("hedged abstention: cites excerpts but declines")
-        elif not grounded and not refusal:
+        elif not grounded and not refuses:
             warns.append("silent abstention: no citations and no explicit refusal phrase")
 
     if judge_gold:
@@ -236,6 +254,26 @@ def select_sample(entries: list[dict[str, Any]], max_queries: int) -> list[dict[
             break
         depth += 1
     return picked
+
+
+def answer_completeness(judged: list[dict[str, Any]]) -> tuple[int, float | None]:
+    """Answer-completeness gate (issue #305): (eligible, rate) over judged
+    answer rows whose expected docs were in the fetched pool. Complete means
+    the validated citations cover every expected doc (doc-level citation
+    recall 1.0) — a refusal or partial answer over retrieved gold is
+    incomplete. Rows without the pool join never enter the denominator: a
+    missing signal must not fabricate a miss. Pure; shared by both
+    summaries so the rate can never diverge between reports."""
+    gold_rows = [
+        r for r in judged
+        if r.get("verdict") in ("pass", "fail")
+        and r.get("expected_behavior") == "answer"
+        and r.get("gold_retrieved")
+    ]
+    if not gold_rows:
+        return 0, None
+    complete = sum(1 for r in gold_rows if r.get("citation_recall") == 1.0)
+    return len(gold_rows), round(complete / len(gold_rows), 4)
 
 
 def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -299,6 +337,10 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     # inferred-path wrong-index counter the contract addition unlocked.
     metrics["by_why"] = dict(sorted(Counter(why_mode(r) for r in judged).items()))
     metrics["inferred_index_off_gold"] = sum(1 for r in judged if inferred_index_off_gold(r))
+    # Answer completeness (issue #305): the gate the refusal track parks on.
+    completeness_n, completeness_rate = answer_completeness(judged)
+    metrics["answer_completeness"] = completeness_rate
+    metrics["answer_completeness_n"] = completeness_n
     return metrics
 
 
@@ -512,6 +554,11 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
     lines.append(f"- failures: {metrics['failures']}, warns: {metrics['warns']}, zero-hits paths: {metrics['zero_hits']}")
     lines.append(f"- inferred-citation rows (not grounded): {metrics['inferred_citations']}")
     lines.append(f"- citations per answer (mean): {metrics['citations_per_answer']}")
+    lines.append(
+        f"- answer completeness: {metrics.get('answer_completeness')} "
+        f"(n={metrics.get('answer_completeness_n')}: expected docs retrieved; share whose "
+        "validated citations cover all of them; None = caller had no pool join)"
+    )
     lines.append("")
     lines.append("| class | n | pass |")
     lines.append("|---|---|---|")

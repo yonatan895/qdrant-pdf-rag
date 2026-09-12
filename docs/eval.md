@@ -208,15 +208,25 @@ In-process `/v1/answer` grounding honesty: deterministic stratified
 round-robin sampling (sorted classes and ids, no RNG, small classes
 revisited first; default 24 queries, `--all` for full runs), then judge:
 
-- Answer behavior fails on empty bodies, explicit refusals (7 case-fold
-  markers), zero validated citations, or **only inferred citations** (the
-  agent mapped bare `[n]` markers with no explicit citation line; issue
-  #269). The run report counts `inferred_citations` so fabrication is
-  visible, never silently grounded. Abstain behavior fails only when
-  grounded *and* unrefusing (hedged or silent answers warn). Gold
-  substring/identifier checks are case-fold literals, suppressed on the
-  canned zero-hits path (judging fixed strings teaches nothing about the
-  model).
+- Answer behavior fails on empty bodies, true abstentions (the shared
+  marker + shape-floor predicate that also zeroes citations, #135/#305: a
+  grounded partial answer whose scope caveat carries a refusal phrase is
+  not an abstention; a short marker-only body still fails), zero validated
+  citations, or **only inferred citations** (the agent mapped bare `[n]`
+  markers with no explicit citation line; issue #269). The run report
+  counts `inferred_citations` so fabrication is visible, never silently
+  grounded. Abstain behavior keeps the marker test: fails only when
+  grounded *and* unrefusing; a grounded decline (hedged) or a silent
+  abstention warns. Gold substring/identifier checks are case-fold
+  literals, suppressed on the canned zero-hits path (judging fixed strings
+  teaches nothing about the model).
+- `answer_completeness` (issue #305): over judged answer rows whose
+  expected docs were in the fetched pool, the share whose validated
+  citations cover every expected doc (doc-level recall 1.0). A refusal or
+  partial answer over retrieved gold is incomplete; rows without the pool
+  join stay out of the denominator. This is the gate for the reader-side
+  refusal/partial-answer track, reported by the answer eval and both
+  harness summaries.
 - Non-200 responses record the error code only (no bodies); transport
   exceptions record errors. Exit 0 iff zero failures and zero errors.
   Deliberate non-features: no retries, no `finish_reason` checks, and the
