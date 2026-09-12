@@ -498,7 +498,7 @@ run-agent: | .venv
 
 # Run interactive chat UI locally under streamlit
 run-ui: | .venv
-	.venv/bin/streamlit run src/mainframe_rag/ui/app.py --server.port $(or $(UI_PORT),8501)
+	.venv/bin/streamlit run src/mainframe_rag/ui/app.py --server.port "$(or $(UI_PORT),8501)"
 
 
 # ---------------------------------------------------------------- e2e demo

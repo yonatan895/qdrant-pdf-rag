@@ -7,6 +7,7 @@ log/abend inspection, verified citation exploration, and persistent sessions.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -14,6 +15,8 @@ from typing import Any
 
 import httpx2
 import streamlit as st
+
+log = logging.getLogger(__name__)
 
 from mainframe_rag.ui.components.drawer import render_incident_drawer
 from mainframe_rag.ui.components.sidebar import render_sidebar
@@ -25,11 +28,17 @@ from mainframe_rag.ui.db import (
 from mainframe_rag.ui.styles import get_theme_css
 
 
-def _get_env_config() -> tuple[str, Path]:
-    agent_url = os.getenv("AGENT_BASE_URL", "http://localhost:8000/v1").rstrip("/")
+def _get_env_config() -> tuple[str, str, Path]:
+    raw_url = os.getenv("AGENT_URL", os.getenv("AGENT_BASE_URL", "http://localhost:8080")).rstrip("/")
+    if raw_url.endswith("/v1"):
+        host_url = raw_url[:-3]
+        api_v1_url = raw_url
+    else:
+        host_url = raw_url
+        api_v1_url = f"{raw_url}/v1"
     data_dir = Path(os.getenv("UI_DATA_DIR", "/tmp/mainframe_rag_ui"))
     db_path = data_dir / "copilot_sessions.db"
-    return agent_url, db_path
+    return host_url, api_v1_url, db_path
 
 
 def _render_citations_and_hits(citations: list[str], hits: list[dict[str, Any]]) -> None:
@@ -61,10 +70,10 @@ def main() -> None:
         initial_sidebar_state="expanded",
     )
 
-    agent_url, db_path = _get_env_config()
+    host_url, api_v1_url, db_path = _get_env_config()
     init_db(db_path)
 
-    session_id = render_sidebar(db_path, agent_url)
+    session_id = render_sidebar(db_path, host_url)
 
     # Invalidate session cache if session changed
     active_theme = st.session_state.get("theme", "Modern Engineering Dark")
@@ -130,7 +139,7 @@ def main() -> None:
 
             def stream_generator() -> Iterator[str]:
                 nonlocal full_response_text, final_citations, final_hits
-                target_url = f"{agent_url}/chat/completions"
+                target_url = f"{api_v1_url}/chat/completions"
                 timeout = httpx2.Timeout(120.0, connect=5.0)
 
                 try:
@@ -169,7 +178,8 @@ def main() -> None:
                                     final_hits = choice["hits"]
 
                 except Exception as exc:  # noqa: BLE001 — show friendly streaming error to operator
-                    err_msg = f"\n\n**Agent Communication Fault:** `{exc}`"
+                    log.error("Streaming error from agent: %s", exc)
+                    err_msg = "\n\n**Agent Communication Fault:** Unable to retrieve response from reasoning agent."
                     full_response_text += err_msg
                     yield err_msg
 

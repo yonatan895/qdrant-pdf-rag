@@ -396,7 +396,10 @@ class ChatCompletionsRequest(BaseModel):
     model: str | None = None
     stream: bool = False
     temperature: float | None = None
-    max_tokens: int | None = None
+    max_tokens: int | None = Field(
+        default=None,
+        description="OpenAI-compat parameter; token limits are managed server-side by the reasoning profile.",
+    )
     splunk_context: str | None = None
     product: str | None = None
     version: str | None = None
@@ -1042,14 +1045,21 @@ async def chat_completions(req: ChatCompletionsRequest, request: Request, respon
     """
     request_id = getattr(request.state, "request_id", uuid.uuid4().hex[:12])
     started = getattr(request.state, "started", time.monotonic())
-    parent_ctx = parent_context(request)
-    llm_model = req.model or settings.llm_model_reasoning or "reasoning-model"
+    parent_ctx = parent_context(request.headers)
 
     latest_user_msgs = [m for m in req.messages if m.role == "user"]
     if not latest_user_msgs:
         raise AppError(422, "invalid_request", "at least one user message is required")
     latest_query = latest_user_msgs[-1].content.strip()
     _require_query_length(request_id, latest_query)
+
+    try:
+        assert_reasoning_model(settings)
+    except RuntimeError as exc:
+        _record_endpoint(request, "chat", "not_configured", started)
+        log.warning(json_log(request_id, "chat", error=str(exc)[:200]))
+        raise AppError(503, "not_configured", "reasoning model is not configured") from exc
+    llm_model = req.model or settings.require_reasoning_model()
 
     is_stream = req.stream
     root_span = tracer.start_span("v1.chat", context=parent_ctx, attributes={"rag.stream": is_stream})
@@ -1081,6 +1091,45 @@ async def chat_completions(req: ChatCompletionsRequest, request: Request, respon
         _record_endpoint(request, "chat", "upstream_error", started)
         log.error(json_log(request_id, "chat_retrieval", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "retrieval failed") from exc
+
+    if not hits:
+        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
+        root_span.end()
+        _record_endpoint(request, "chat", "ok", started, query_class=kind, hits=0)
+        empty_text = empty_hits_answer(latest_query)
+        if is_stream:
+            chat_id = f"chatcmpl-{request_id}"
+
+            async def _empty_chat_sse() -> AsyncIterator[str]:
+                yield format_openai_chunk(chat_id, llm_model, delta_content=empty_text)
+                extra_meta = {
+                    "citations": [],
+                    "citations_inferred": False,
+                    "inferred_indices": [],
+                    "hits": [],
+                }
+                yield format_openai_chunk(chat_id, llm_model, finish_reason="stop", extra=extra_meta)
+                yield format_openai_done()
+
+            return StreamingResponse(_empty_chat_sse(), media_type="text/event-stream")
+
+        return ChatCompletionsResponse(
+            id=f"chatcmpl-{request_id}",
+            created=int(time.time()),
+            model=llm_model,
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatMessageResponse(role="assistant", content=empty_text),
+                    finish_reason="stop",
+                )
+            ],
+            usage=TokenUsage(),
+            citations=[],
+            citations_inferred=False,
+            inferred_indices=[],
+            hits=[],
+        )
 
     complexity = classify_query_complexity(latest_query)
     effort = (

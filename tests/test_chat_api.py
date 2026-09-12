@@ -1,8 +1,9 @@
 """Unit tests for /v1/chat/completions OpenAI-compatible endpoint.
 
 Hermetic tests: Qdrant, embedder, and LLM are faked.
-Tests cover single-turn, multi-turn condensation, condensation bypass,
-streaming SSE formatting, input validation guardrails, and context pruning.
+Tests cover single-turn, multi-turn condensation, condensation bypass (message codes & abends),
+streaming SSE formatting, empty-hits short circuit, config fail-fast, input validation,
+and context pruning.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mainframe_rag.agent import app as app_mod
-from mainframe_rag.agent.answer import build_chat_messages, condense_query
+from mainframe_rag.agent.answer import _ABEND_RE, build_chat_messages, condense_query
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
@@ -41,8 +42,9 @@ def _hit(
 
 
 class MockSearch:
-    def __init__(self):
+    def __init__(self, return_hits: bool = True):
         self.calls = []
+        self.return_hits = return_hits
 
     def search(
         self,
@@ -57,7 +59,8 @@ class MockSearch:
         **kwargs,
     ):
         self.calls.append({"query": query, "product": product, "version": version})
-        return [_hit()], "identifier", {"embed_ms": 1, "qdrant_ms": 2}
+        hits = [_hit()] if self.return_hits else []
+        return hits, "identifier", {"embed_ms": 1, "qdrant_ms": 2}
 
 
 class ChatFakeLLM:
@@ -195,6 +198,72 @@ def test_chat_completions_multi_turn_bypass_condensation(chat_client):
     assert search_calls[0]["query"] == "What about message IEE400I?"
 
 
+def test_chat_completions_abend_code_bypass(chat_client):
+    # Abend codes (e.g. S0C4, U4038) bypass query condensation via _ABEND_RE
+    messages = [
+        {"role": "user", "content": "System had a crash."},
+        {"role": "assistant", "content": "What error occurred?"},
+        {"role": "user", "content": "We received abend S0C4 in module XYZ"},
+    ]
+    res = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": messages, "stream": False},
+    )
+    assert res.status_code == 200
+    search_calls = chat_client.mock_search.calls
+    assert len(search_calls) == 1
+    assert search_calls[0]["query"] == "We received abend S0C4 in module XYZ"
+
+
+def test_chat_completions_traceparent_header_propagation(chat_client):
+    headers = {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
+    res = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "What is IEA500I?"}]},
+        headers=headers,
+    )
+    assert res.status_code == 200
+
+
+def test_chat_completions_empty_hits_short_circuit(chat_client, monkeypatch):
+    # When retrieval yields 0 hits, endpoint short-circuits without calling LLM
+    empty_search = MockSearch(return_hits=False)
+    monkeypatch.setattr(app_mod, "retrieve_search", empty_search.search)
+
+    # 1. Non-streaming
+    res = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "What is unknown ABC999I?"}], "stream": False},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert "No manual excerpts carry ABC999I." in data["choices"][0]["message"]["content"]
+    assert data["citations"] == []
+    assert data["hits"] == []
+    # LLM should never have been called
+    assert chat_client.fake_llm.chat_calls == []
+
+    # 2. Streaming
+    res_stream = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "What is unknown ABC999I?"}], "stream": True},
+    )
+    assert res_stream.status_code == 200
+    assert "text/event-stream" in res_stream.headers["content-type"]
+    assert "No manual excerpts carry ABC999I." in res_stream.text
+    assert "[DONE]" in res_stream.text
+
+
+def test_chat_completions_not_configured_fail_fast(chat_client, monkeypatch):
+    monkeypatch.setattr(app_mod.settings, "llm_model_reasoning", None)
+    res = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "What is IEA500I?"}]},
+    )
+    assert res.status_code == 503
+    assert res.json()["code"] == "not_configured"
+
+
 def test_chat_completions_streaming_sse(chat_client):
     messages = [{"role": "user", "content": "What is IEA500I?"}]
     res = chat_client.post(
@@ -249,12 +318,13 @@ def test_chat_completions_validation_errors(chat_client):
     assert r3.json()["code"] == "invalid_request"
 
 
-def test_build_chat_messages_pruning():
+def test_build_chat_messages_pruning_and_cap():
+    huge_prev_answer = "Here is the explanation.\n" + ("x" * 2000) + "\nRetrieved manual excerpts:\n[1] Chunk\n[2] Chunk2"
     past_messages = [
         ChatMessage(role="user", content="Explain IEA500I"),
         ChatMessage(
             role="assistant",
-            content="Here is the explanation.\n\nRetrieved manual excerpts:\n[1] Chunk text\n[2] More text",
+            content=huge_prev_answer,
         ),
         ChatMessage(role="user", content="How do I resolve it?"),
     ]
@@ -266,9 +336,12 @@ def test_build_chat_messages_pruning():
     assert assembled[1].role == "user"
     assert assembled[1].content == "Explain IEA500I"
     assert assembled[2].role == "assistant"
-    # Verify retrieved manual excerpts were pruned from historical assistant message
+    # Verify retrieved manual excerpts were pruned
     assert "Retrieved manual excerpts:" not in assembled[2].content
-    assert assembled[2].content == "Here is the explanation."
+    # Verify history was capped
+    assert "[history truncated]" in assembled[2].content
+    assert len(assembled[2].content) <= 1100
+
     # Active user message contains the fresh excerpts
     assert assembled[3].role == "user"
     assert "Retrieved manual excerpts:" in assembled[3].content
@@ -288,3 +361,20 @@ async def test_condense_query_direct_bypass():
     ]
     res = await condense_query(NoOpLLM(), msg)  # type: ignore[arg-type]
     assert res == "What does message DFS058I mean?"
+
+    # Abend code bypass
+    msg_abend = [
+        ChatMessage(role="user", content="Hello"),
+        ChatMessage(role="assistant", content="Hi"),
+        ChatMessage(role="user", content="We encountered abend S0C4 in step 1"),
+    ]
+    res_abend = await condense_query(NoOpLLM(), msg_abend)  # type: ignore[arg-type]
+    assert res_abend == "We encountered abend S0C4 in step 1"
+
+
+def test_abend_regex():
+    assert _ABEND_RE.search("ABEND S0C4")
+    assert _ABEND_RE.search("s0c4")
+    assert _ABEND_RE.search("abend U4038")
+    assert _ABEND_RE.search("System abend S013 occurred")
+    assert not _ABEND_RE.search("How do I fix this error?")

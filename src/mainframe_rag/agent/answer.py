@@ -974,25 +974,32 @@ def parse_answer(
     )
 
 
+_ABEND_RE = re.compile(r"\b(?:abend\s+)?[su][0-9a-f]{3,4}\b", re.IGNORECASE)
+_MAX_PRIOR_TURN_CHARS = 1000
+
+
 async def condense_query(
     llm: LLMClient,
     messages: list[ChatMessage],
     settings: Settings | None = None,
+    reasoning_effort: str | None = None,
+    temperature: float | None = None,
 ) -> str:
     """Condense a multi-turn follow-up into a standalone search query.
-    Bypasses LLM rewrite if the latest turn already contains explicit identifiers."""
+    Bypasses LLM rewrite if the latest turn already contains explicit message,
+    abend, or member identifiers."""
     if not messages:
         return ""
     latest_text = messages[-1].content
     from mainframe_rag.retrieve.filters import parse_query
 
-    # Heuristic bypass: If message contains explicit codes (e.g. IEE400I, S0C4, DSN9022I), search directly
-    if parse_query(latest_text).has_identifiers:
+    # Heuristic bypass: If message contains explicit codes (e.g. IEE400I, S0C4, DFS058I), search directly
+    if parse_query(latest_text).has_identifiers or bool(_ABEND_RE.search(latest_text)):
         return latest_text
 
     history_turns = []
     for m in [msg for msg in messages[:-1] if msg.role != "system"][-4:]:
-        history_turns.append(f"{m.role.capitalize()}: {m.content}")
+        history_turns.append(f"{m.role.capitalize()}: {m.content[:_MAX_PRIOR_TURN_CHARS]}")
 
     if not history_turns:
         return latest_text
@@ -1013,8 +1020,10 @@ async def condense_query(
             content=f"Conversation history:\n{history_str}\n\nFollow-up question: {latest_text}\n\nStandalone search query:",
         ),
     ]
+    effort = reasoning_effort or (settings.llm_reasoning_effort_simple if settings else "low")
+    temp = temperature if temperature is not None else (settings.llm_temperature if settings else 0.0)
     try:
-        res = llm.chat(prompt, reasoning_effort="low", temperature=0.0)
+        res = llm.chat(prompt, reasoning_effort=effort, temperature=temp)
         if inspect.isawaitable(res):
             res = await res
         condensed = res.content.strip() if hasattr(res, "content") else str(res).strip()
@@ -1045,7 +1054,8 @@ def build_chat_messages(
 
     - System message: authoritative system prompt (with complex extension if applicable).
     - Prior turns: user and assistant messages from history (sliding window).
-      Raw manual excerpts in past assistant messages are pruned to preserve token budget.
+      Raw manual excerpts in past assistant messages are pruned and character-capped
+      to preserve token budget.
     - Active turn (last user message): injected with current sysplex/splunk context,
       freshly retrieved manual excerpts for the active question, and citation tail instructions.
     """
@@ -1088,6 +1098,8 @@ def build_chat_messages(
         if m.role == "assistant" and "Retrieved manual excerpts:" in text:
             parts = text.split("Retrieved manual excerpts:")
             text = parts[0].strip()
+        if len(text) > _MAX_PRIOR_TURN_CHARS:
+            text = text[:_MAX_PRIOR_TURN_CHARS] + " ... [history truncated]"
         prior_messages.append(ChatMessage(role=m.role, content=text))
 
     return [
