@@ -1,0 +1,63 @@
+{
+  "_meta": {
+    "note": "Re-baseline via `make harness-l3-baseline`; dedicated PR (AGENTS.md).",
+    "updated": "2026-09-12",
+    "env": {
+      "platform": "Linux-6.6.114.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+      "python": "3.14.5",
+      "cpu_count": 24,
+      "embed_mode": "hash",
+      "qdrant_image": "docker.io/qdrant/qdrant:v1.19.0-unprivileged",
+      "gpu_name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+      "concurrency": 8,
+      "duration_s": 30.0,
+      "request_timeout_s": 300.0
+    }
+  },
+  "agent": {
+    "search": {
+      "latency_ms": {
+        "p50": 37.51,
+        "p95": 74.89
+      },
+      "stages": {
+        "embed_ms": {
+          "p50": 5.0,
+          "p95": 9.0
+        },
+        "qdrant_ms": {
+          "p50": 21.0,
+          "p95": 58.0
+        }
+      }
+    },
+    "answer": {
+      "latency_ms": {
+        "p50": 47378.74,
+        "p95": 64761.07
+      },
+      "stages": {
+        "embed_ms": {
+          "p50": 3.0,
+          "p95": 5.0
+        },
+        "llm_ms": {
+          "p50": 47250.0,
+          "p95": 64615.0
+        },
+        "qdrant_ms": {
+          "p50": 22.0,
+          "p95": 73.0
+        },
+        "ttft_ms": {
+          "p50": 47003.0,
+          "p95": 63785.0
+        }
+      }
+    }
+  },
+  "vram": {
+    "used_mb": 7707.0,
+    "total_mb": 8151.0
+  }
+}
