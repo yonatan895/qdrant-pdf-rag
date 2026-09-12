@@ -10,6 +10,7 @@ dependencies = [
     "fastembed",
     "httpx2",
     "fastapi",
+    "jinja2",
     "uvicorn",
     "pydantic",
     "pydantic-settings",
@@ -21,7 +22,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "mypy", "ruff"]
-ui = ["streamlit>=1.40.0"]
 
 [build-system]
 requires = ["setuptools>=75"]
