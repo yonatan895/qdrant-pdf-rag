@@ -175,9 +175,16 @@ def _answer_log_fields(
     ttft_ms: int | None,
     started: float,
     stream: bool = False,
+    inline_bracket_present: bool = False,
+    citations_header_present: bool = False,
+    cites_rejected_shape_bad: int = 0,
+    cites_rejected_unmapped: int = 0,
 ) -> dict:
     """Answer-leg log fields shared by the JSON and SSE finals: identical
-    keys so log consumers see one shape; stream=True only marks the SSE one."""
+    keys so log consumers see one shape; stream=True only marks the SSE one.
+    The citation-attempt counters (issue #299) let the eval split zero-cite
+    rows into malformed vs fabricated vs never-attempted without putting
+    model output on the wire."""
     fields: dict = {
         "query_kind": kind,
         "query_complexity": complexity,
@@ -193,6 +200,10 @@ def _answer_log_fields(
         "completion_tokens": usage.completion_tokens,
         "reasoning_tokens": usage.reasoning_tokens,
         "total_tokens": usage.total_tokens,
+        "inline_bracket_present": inline_bracket_present,
+        "citations_header_present": citations_header_present,
+        "cites_rejected_shape_bad": cites_rejected_shape_bad,
+        "cites_rejected_unmapped": cites_rejected_unmapped,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
     if stream:
@@ -367,6 +378,11 @@ class AnswerResponse(BaseModel):
     # bracket markers with no explicit citation line — surfaced so clients
     # and the eval never mistake inferred provenance for grounding.
     citations_inferred: bool = False
+    # Which prompt excerpt indices the inferred citations came from, 1-based
+    # (issue #299): the bool says the cites were inferred, this says from
+    # where, so right-doc/wrong-index is measurable. Empty on every other
+    # path, so the schema is identical on JSON and SSE.
+    inferred_indices: list[int] = Field(default_factory=list)
     script: str | None
 
 
@@ -696,6 +712,7 @@ async def v1_answer(
             answer=empty_hits_answer(req.query),
             citations=[],
             citations_inferred=False,
+            inferred_indices=[],
             script=None,
         )
 
@@ -802,6 +819,10 @@ async def v1_answer(
                     kind, complexity, hits, timings,
                     len(parsed.citations), parsed.script is not None,
                     finish_reason, usage, llm_ms, ttft_ms, started,
+                    inline_bracket_present=parsed.inline_bracket_present,
+                    citations_header_present=parsed.citations_header_present,
+                    cites_rejected_shape_bad=parsed.cites_rejected_shape_bad,
+                    cites_rejected_unmapped=parsed.cites_rejected_unmapped,
                 ),
             )
         )
@@ -818,6 +839,7 @@ async def v1_answer(
             answer=parsed.answer,
             citations=parsed.citations,
             citations_inferred=parsed.citations_inferred,
+            inferred_indices=parsed.inferred_indices,
             script=parsed.script,
         )
 
@@ -936,6 +958,10 @@ async def v1_answer(
                     len(parsed.citations), parsed.script is not None,
                     finish_reason, usage, llm_ms, ttft_ms, started,
                     stream=True,
+                    inline_bracket_present=parsed.inline_bracket_present,
+                    citations_header_present=parsed.citations_header_present,
+                    cites_rejected_shape_bad=parsed.cites_rejected_shape_bad,
+                    cites_rejected_unmapped=parsed.cites_rejected_unmapped,
                 ),
             )
         )
@@ -945,6 +971,7 @@ async def v1_answer(
             parsed.answer,
             parsed.citations,
             parsed.citations_inferred,
+            parsed.inferred_indices,
             parsed.script,
             kind,
             hits,

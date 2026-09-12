@@ -96,7 +96,14 @@ if str(REPO / "scripts") not in sys.path:
     # `python scripts/harness_l2.py` and when imported as scripts.harness_l2
     sys.path.insert(0, str(REPO / "scripts"))
 
-from eval_answers import _AnswerCapture, failure_bucket, run_query, select_sample
+from eval_answers import (
+    _AnswerCapture,
+    failure_bucket,
+    inferred_index_off_gold,
+    run_query,
+    select_sample,
+    why_mode,
+)
 from venue import VenueError, require_rc_for_collection, resolve_golden_paths
 
 # Shared citation-index shape ([n] / [n, m]); see the inference rule in
@@ -339,8 +346,21 @@ def summarize_l2(results: list[dict[str, Any]]) -> dict[str, Any]:
         # which mode dominates instead of grepping row strings.
         "by_class": _by_class_pr(judged),
         "by_failure": _by_failure_histogram(judged),
+        # Citation WHY shares (issue #299): one dominant mode per row plus
+        # the inferred-path wrong-index counter.
+        "by_why": _by_why(judged),
+        "inferred_index_off_gold": sum(1 for r in judged if inferred_index_off_gold(r)),
     }
     return metrics
+
+
+def _by_why(judged: list[dict[str, Any]]) -> dict[str, int]:
+    """Dominant citation-WHY mode per row, template-stable. Pure."""
+    hist: dict[str, int] = {}
+    for r in judged:
+        mode = why_mode(r)
+        hist[mode] = hist.get(mode, 0) + 1
+    return dict(sorted(hist.items()))
 
 
 def _by_class_pr(judged: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -452,6 +472,11 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
         + ", ".join(
             f"{bucket} x{count}" for bucket, count in (metrics.get("by_failure") or {}).items()
         ),
+        "- by citation WHY mode: "
+        + ", ".join(
+            f"{mode} x{count}" for mode, count in (metrics.get("by_why") or {}).items()
+        )
+        + f"; inferred indices off gold: {metrics.get('inferred_index_off_gold')}",
         "",
     ]
     fails = [r for r in results if r.get("verdict") in ("fail", "error")]

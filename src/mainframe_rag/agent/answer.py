@@ -30,6 +30,11 @@ from mainframe_rag.retrieve.query import SearchHit
 FENCE_RE = re.compile(r"```([a-zA-Z0-9_-]*)\n(.*?)```", re.DOTALL)
 SCRIPT_LANGS = frozenset({"jcl", "rexx", "sh", "bash", "shell", "python", "py", "yaml", "yml", "json", "ops", "rule", "parmlib"})
 
+# Bare excerpt-index markers the fallback inferrer reads: [1], [2], [1, 2].
+# One regex for both the inference scan and the inline-present signal (issue
+# #299) so the report can never disagree with what the parser actually saw.
+_INLINE_INDEX_RE = re.compile(r"\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]")
+
 # Prompt-packing heuristics (tokenizer path). Chars-per-token bridges the
 # estimator's token budget to char-space cuts; the verification loop against
 # the real tokenizer is what actually guarantees the window.
@@ -46,6 +51,17 @@ class ParsedAnswer(BaseModel):
     script: str | None = None
     citations_inferred: bool = False
     inferred_indices: list[int] = Field(default_factory=list)
+    # Citation WHY telemetry (issue #299): parse-time attempt counters the
+    # response contract keeps out (the eval joins them from the answer log).
+    # shape_bad = citation-block lines that never matched the citation
+    # shape; unmapped = shape-valid lines rejected as not in the hit set.
+    # `citations_header_present` is read from the raw model content — the
+    # returned body has the header stripped, so a body search is always
+    # False (the #303 field bug this replaces).
+    inline_bracket_present: bool = False
+    citations_header_present: bool = False
+    cites_rejected_shape_bad: int = 0
+    cites_rejected_unmapped: int = 0
 
 
 class TruncatedStreamError(RuntimeError):
@@ -837,8 +853,10 @@ def parse_answer(
     unvalidated — stripping citation-looking lines would corrupt examples.
     Documented behavior, pinned by test (issue #20 PR C)."""
     from mainframe_rag.agent.cites import (
+        CITATION_LINE_RE,
+        CITATIONS_HEADER_RE,
         extract_body_and_citations,
-        strip_unauthorized_citations,
+        split_unauthorized_citations,
     )
 
     # 1. Process code fences: extract scripts, drop thinking blocks, unwrap prose fences
@@ -862,9 +880,19 @@ def parse_answer(
     body, raw_cite_lines = extract_body_and_citations(text_processed)
 
     citations: list[str] = []
+    rejected_seen: set[str] = set()
+    cites_rejected_shape_bad = 0
+    cites_rejected_unmapped = 0
     for c in raw_cite_lines:
-        if c in allowed_citations and c not in citations:
-            citations.append(c)
+        if c in allowed_citations:
+            if c not in citations:
+                citations.append(c)
+        elif c not in rejected_seen:
+            rejected_seen.add(c)
+            if CITATION_LINE_RE.match(c):
+                cites_rejected_unmapped += 1
+            else:
+                cites_rejected_shape_bad += 1
 
     citations_inferred = False
     inferred_indices: list[int] = []
@@ -893,10 +921,13 @@ def parse_answer(
             citations = trailing_cites
             body = "\n".join(body_lines)
 
+    inline_bracket_present = bool(_INLINE_INDEX_RE.search(content))
+    citations_header_present = bool(CITATIONS_HEADER_RE.search(content))
+
     if not citations and ordered_cites:
         # Strictly match bracketed numbers like [1], [2], [1, 2] corresponding to [{i}] prompt excerpts.
         # Parentheses (e.g. "z/OS (3.1)", "(2)", "APARs (1, 2)") are ignored to avoid false inference.
-        for match in re.finditer(r"\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]", content):
+        for match in _INLINE_INDEX_RE.finditer(content):
             for num_str in re.findall(r"\b\d+\b", match.group(1)):
                 idx = int(num_str) - 1
                 if 0 <= idx < len(ordered_cites):
@@ -907,7 +938,14 @@ def parse_answer(
                         citations_inferred = True
 
     # 3. Clean up unauthorized citations in body
-    body = strip_unauthorized_citations(body, allowed_citations)
+    body, body_rejected = split_unauthorized_citations(body, allowed_citations)
+    for c in body_rejected:
+        # Docno-led pasted fragments are noise, not citation attempts; only
+        # shape-valid lines count as fabricated-unmapped (issue #299).
+        if c in rejected_seen or not CITATION_LINE_RE.match(c):
+            continue
+        rejected_seen.add(c)
+        cites_rejected_unmapped += 1
 
     # 4. Zero citations on abstention (issue #135): a correct refusal that
     # ships citations to real-but-unsupporting chunks looks grounded while
@@ -927,4 +965,8 @@ def parse_answer(
         script=script,
         citations_inferred=citations_inferred,
         inferred_indices=inferred_indices,
+        inline_bracket_present=inline_bracket_present,
+        citations_header_present=citations_header_present,
+        cites_rejected_shape_bad=cites_rejected_shape_bad,
+        cites_rejected_unmapped=cites_rejected_unmapped,
     )

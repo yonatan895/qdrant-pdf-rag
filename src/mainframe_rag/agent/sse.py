@@ -52,6 +52,7 @@ def empty_final_payload(request_id: str, answer: str, query_kind: str) -> dict[s
         "answer": answer,
         "citations": [],
         "citations_inferred": False,
+        "inferred_indices": [],
         "script": None,
         "query_kind": query_kind,
         "hits": [],
@@ -71,6 +72,7 @@ def final_payload(
     answer: str,
     citations: list[str],
     citations_inferred: bool,
+    inferred_indices: list[int],
     script: str | None,
     query_kind: str,
     hits: list[SearchHit],
@@ -82,13 +84,15 @@ def final_payload(
     identical in shape to the JSON mode and the empty-hits path.
     `citations_inferred` is the provenance flag (issue #269): true when the
     cites were mapped from bare bracket markers, never from an explicit
-    citation line."""
+    citation line. `inferred_indices` (issue #299) carries which prompt
+    excerpt indices those markers pointed at, 1-based; empty otherwise."""
     return {
         "type": "final",
         "request_id": request_id,
         "answer": answer,
         "citations": citations,
         "citations_inferred": citations_inferred,
+        "inferred_indices": inferred_indices,
         "script": script,
         "query_kind": query_kind,
         "hits": [h.model_dump() for h in hits],
