@@ -878,6 +878,21 @@ def test_build_messages_complexity():
     assert SYSTEM_PROMPT_COMPLEX_EXTENSION in complex_msgs[0].content
 
 
+def test_system_prompt_demands_partial_answers_and_identifier_handling():
+    """Issue #305: rule 4 must demand the supported part of a question
+    (reserving the explicit refusal for true no-support) and refuse secret
+    extraction; rule 6 must cover identifier-only queries — the live refusal
+    modes the gap report measured, without inviting exhaustive enumeration
+    (the first wording of this rule truncated 3/3 LFAREA probes)."""
+    from mainframe_rag.agent.answer import SYSTEM_PROMPT
+
+    assert "answer part of the question, give that part with citations" in SYSTEM_PROMPT
+    assert "only when nothing in the excerpts answers the question" in SYSTEM_PROMPT
+    assert "Never supply secrets, credentials, or key material" in SYSTEM_PROMPT
+    assert "only a document number, message identifier, or short name" in SYSTEM_PROMPT
+    assert "identify it from the excerpt citations" in SYSTEM_PROMPT
+
+
 def test_build_messages_context_budgeting_complex_vs_simple():
     from mainframe_rag.agent.answer import build_messages
 
@@ -1221,9 +1236,10 @@ def test_build_messages_tokenizer_budget_respected():
             cite=f"SA22-0000-0{i} Manual, p. {i}",
             heading=f"Heading {i}",
             text="word " * 160,  # ~175 tokens with the [i] header; the
-            # refusal-anchored system prompt (issue #135) grew the fixed
-            # overhead, so the fixture excerpts shrank to keep the knife-edge
-            # scenario (5 excerpts fit, the last truncated) reachable.
+            # refusal-anchored system prompt (issue #135, regrown by #305's
+            # partial-answer/identifier rules) grew the fixed overhead, so the
+            # fixture window widened to keep the knife-edge scenario (5
+            # excerpts fit, the last truncated) reachable.
             doc_id=f"DOC{i}",
             title="Title",
             page_label=str(i),
@@ -1234,7 +1250,7 @@ def test_build_messages_tokenizer_budget_respected():
     ]
 
     settings = Settings(
-        llm_max_model_len=1500,
+        llm_max_model_len=1580,
         llm_reserved_output_tokens=250,
         llm_token_safety_margin=100,
         _env_file=None,

@@ -119,7 +119,7 @@ Operator-phrased queries whose answers exist in the synthetic corpus WITHOUT the
 
 ### Answer tier (`make eval-answers`, live GPU stack, in-process TestClient like `scripts/test_local_e2e_vllm.py`)
 
-/v1/answer` grounding honesty — answer entries must produce ≥1 explicit (non-inferred) validated citation and must not refuse; abstain/trap entries must not be answered (zero validated citations). Gold substrings judge model phrasing and are suppressed on the canned zero-hits path. The judge never re-parses citations (the agent's validator is the single source of truth). No retries, no finish_reason checks (not in the response contract; the app alerts non-stop per request). Deterministic stratified round-robin sample (`N=24` default, `N=all` full run); reasoning sampling is not run-deterministic — structural FAILs gate, rates are trend data in the manifest.
+/v1/answer` grounding honesty — answer entries must produce ≥1 explicit (non-inferred) validated citation and must not abstain (the agent's shared marker + shape predicate, #135/#305); abstain/trap entries must not be answered (zero validated citations). Gold substrings judge model phrasing and are suppressed on the canned zero-hits path. The judge never re-parses citations (the agent's validator is the single source of truth). No retries, no finish_reason checks (not in the response contract; the app alerts non-stop per request). Deterministic stratified round-robin sample (`N=24` default, `N=all` full run); reasoning sampling is not run-deterministic — structural FAILs gate, rates are trend data in the manifest.
 
 ### Bench (`make bench`; `.github/workflows/bench.yml`; GitHub-only; never a PR gate)
 

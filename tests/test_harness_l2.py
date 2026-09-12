@@ -12,6 +12,7 @@ import re
 import pytest
 from scripts.harness_l2 import (
     JUDGE_MAX_EVIDENCE_CHARS,
+    JUDGE_REASONING_EFFORT,
     JudgeError,
     _AlertCapture,
     _by_complexity_truncation,
@@ -20,6 +21,7 @@ from scripts.harness_l2 import (
     cited_doc_ids,
     evidence_for_citations,
     gate_l2,
+    judge_chat,
     judge_messages,
     parse_judge_label,
     parse_relevance_label,
@@ -117,6 +119,24 @@ def test_judge_messages_never_contain_citation_markers():
     assert evidence in msgs[1].content and answer in msgs[1].content
     assert msgs[0].role == "system" and msgs[1].role == "user"
     assert "contradiction" in msgs[0].content
+
+
+def test_judge_chat_pins_temperature_and_reasoning_effort():
+    # Issue #305: the judge must not run on the server-default effort — at
+    # default the model put its CoT in the content channel and the JSON label
+    # never appeared (judge infra fail). Both judge legs share this one call
+    # shape.
+    calls: list[tuple[list, dict]] = []
+
+    class _Client:
+        def chat(self, messages, **kwargs):
+            calls.append((messages, kwargs))
+            return object()
+
+    msgs = judge_messages("A.", "E.")
+    judge_chat(_Client(), msgs)
+    assert calls == [(msgs, {"temperature": 0.0, "reasoning_effort": JUDGE_REASONING_EFFORT})]
+    assert JUDGE_REASONING_EFFORT == "low"
 
 
 def test_evidence_bounded_for_judge_prompt():
@@ -338,6 +358,26 @@ def test_summarize_grounded_rate_excludes_inferred_citations():
     ])
     assert m["grounded_rate"] == 0.5
     assert m["inferred_citations"] == 1
+
+
+def test_summarize_answer_completeness_over_gold_rows():
+    # Issue #305: the gate is gold in the fetched pool; complete means the
+    # validated citations cover every expected doc (recall 1.0). Rows without
+    # the join stay out of the denominator.
+    m = summarize_l2([
+        _row("A", gold_retrieved=True, citation_recall=1.0),
+        _row("B", gold_retrieved=True, citation_recall=0.5),
+        _row("C", gold_retrieved=False, citation_recall=0.0),
+        _row("D"),  # no pool join at all
+    ])
+    assert m["answer_completeness_n"] == 2
+    assert m["answer_completeness"] == 0.5
+
+
+def test_summarize_answer_completeness_none_without_pool_join():
+    m = summarize_l2([_row("A")])
+    assert m["answer_completeness_n"] == 0
+    assert m["answer_completeness"] is None
 
 
 def test_gate_holds_on_relevance_judge_error():
