@@ -131,6 +131,10 @@ class _AnswerCapture(logging.Handler):
                 "completion_tokens",
                 "reasoning_tokens",
                 "total_tokens",
+                "inline_bracket_present",
+                "citations_header_present",
+                "cites_rejected_shape_bad",
+                "cites_rejected_unmapped",
             )
         }
 
@@ -140,7 +144,6 @@ from venue import VenueError, require_rc_for_collection, resolve_golden_paths
 # Refusal interpretation is the agent's single helper (issue #135): the eval's
 # abstain verdicts and the agent's zero-citation rule must never diverge.
 from mainframe_rag.agent.answer import is_abstention, is_refusal as is_explicit_refusal
-from mainframe_rag.agent.cites import CITATIONS_HEADER_RE
 from mainframe_rag.config import load_settings
 
 
@@ -292,6 +295,10 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         complexity: {"n": by_complexity[complexity], "pass": by_complexity_pass[complexity]}
         for complexity in sorted(by_complexity)
     }
+    # Citation WHY shares (issue #299): one dominant mode per row, plus the
+    # inferred-path wrong-index counter the contract addition unlocked.
+    metrics["by_why"] = dict(sorted(Counter(why_mode(r) for r in judged).items()))
+    metrics["inferred_index_off_gold"] = sum(1 for r in judged if inferred_index_off_gold(r))
     return metrics
 
 
@@ -333,6 +340,18 @@ def run_query(
     answer = str(data.get("answer") or "")
     citations = list(data.get("citations") or [])
     citations_inferred = bool(data.get("citations_inferred", False))
+    # A malformed provenance field is a contract violation, not a citation
+    # signal: fail the row closed like every other bad-response path instead
+    # of raising through the runner (issue #299 review).
+    try:
+        inferred_indices = [int(i) for i in (data.get("inferred_indices") or [])]
+    except (TypeError, ValueError):
+        row.update(
+            verdict="error",
+            failures=["malformed inferred_indices in response"],
+            elapsed_ms=elapsed_ms,
+        )
+        return row
     zero_hits = is_zero_hits_answer(answer)
     # Zero-hits is the agent's canned message (no model text): gold-substring
     # checks would judge the canned string, not the model — suppress them and
@@ -361,6 +380,9 @@ def run_query(
         answer=answer,
         citations=citations,
         citations_inferred=citations_inferred,
+        # Provenance detail (issue #299): 1-based prompt excerpt indices the
+        # inferred citations came from, straight off the response contract.
+        inferred_indices=inferred_indices,
         script=data.get("script"),
         # joins server-side alert logs (finish_reason != stop) to this row —
         # the response contract deliberately does not expose finish_reason
@@ -377,8 +399,10 @@ def run_query(
         reasoning_tokens=signals.get("reasoning_tokens"),
         total_tokens=signals.get("total_tokens"),
         # Whether the model emitted a Citations: header at all — separates
-        # truncated-before-cites from chose-not-to-cite downstream.
-        citations_header_present=bool(CITATIONS_HEADER_RE.search(answer)),
+        # truncated-before-cites from chose-not-to-cite downstream. The
+        # signal is parse-time (the returned body has the header stripped);
+        # None when the caller has no capture handler.
+        citations_header_present=signals.get("citations_header_present"),
         # WHY attribution (issue #299): gold + sibling-pool doc ids travel
         # with the row so P/R misses split into retriever blame (gold never
         # in the pool) vs reader blame (gold present, uncited) without
@@ -394,6 +418,12 @@ def run_query(
         # predicate (one helper, shared) — recomputed here so a cited-then-
         # zeroed row reads distinctly from a never-cited one.
         abstention_zeroed=bool(is_abstention(answer) and not citations),
+        # Citation WHY telemetry (issue #299): parse-time attempt counters
+        # joined from the answer log; None when the caller has no capture
+        # handler — a missing signal, never fabricated.
+        inline_bracket_present=signals.get("inline_bracket_present"),
+        cites_rejected_shape_bad=signals.get("cites_rejected_shape_bad"),
+        cites_rejected_unmapped=signals.get("cites_rejected_unmapped"),
     )
     return row
 
@@ -412,6 +442,64 @@ def failure_bucket(failure: str) -> str:
     redacted = _FAILURE_DETAIL_RE.sub("…", failure)
     redacted = _FAILURE_LEAD_COUNT_RE.sub("N ", redacted)
     return redacted.split(":")[0].strip() or failure
+
+
+def why_mode(row: dict[str, Any]) -> str:
+    """Dominant citation-WHY mode for one row (issue #299), most specific
+    first. Pure; shared by both summaries so the shares can never diverge.
+    A truncated row that still cites (or whose Citations: header survived)
+    is not 'truncated before cites' — the cut did not lose the cite block.
+    A missing telemetry signal (no answer-log join) never asserts a negative:
+    the row reads 'unknown', not 'truncated_before_cites' or 'absent'."""
+    if row.get("verdict") == "error":
+        return "error"
+    if row.get("path") == "zero_hits":
+        return "zero_hits"
+    if row.get("abstention_zeroed"):
+        return "abstention_zeroed"
+    if row.get("citations"):
+        return "cited_inferred" if row.get("citations_inferred") else "cited_explicit"
+    header = row.get("citations_header_present")
+    if row.get("truncated"):
+        if header is False:
+            return "truncated_before_cites"
+        if header is None:
+            return "unknown"
+        # header True: the cut happened after the cite block; classify the
+        # attempt shape below.
+    if row.get("cites_rejected_unmapped"):
+        return "fabricated_unmapped"
+    if row.get("cites_rejected_shape_bad"):
+        return "malformed_shape_bad"
+    if row.get("inline_bracket_present"):
+        return "bracket_unmatched"
+    if (
+        row.get("inline_bracket_present") is None
+        or row.get("cites_rejected_shape_bad") is None
+        or row.get("cites_rejected_unmapped") is None
+    ):
+        return "unknown"
+    return "absent"
+
+
+def inferred_index_off_gold(row: dict[str, Any]) -> bool:
+    """True when every inferred citation's 1-based excerpt index points at a
+    hit whose doc id is not in the expected set — the measurable slice of
+    right-doc/wrong-index on the inferred path (issue #299). Pure; False
+    when the inputs are missing or uncoercible (never fabricated)."""
+    indices = row.get("inferred_indices") or []
+    expected = set(row.get("expected_doc_ids") or [])
+    hits = row.get("hit_doc_ids")
+    if not indices or not expected or not hits:
+        return False
+    for i in indices:
+        try:
+            idx = int(i)
+        except (TypeError, ValueError):
+            return False
+        if 1 <= idx <= len(hits) and str(hits[idx - 1]) in expected:
+            return False
+    return True
 
 
 def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, Any]) -> None:
@@ -435,6 +523,13 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
         lines.append("|---|---|")
         for bucket, count in metrics["by_failure"].items():
             lines.append(f"| {bucket} | {count} |")
+    if metrics.get("by_why"):
+        lines.append("")
+        lines.append("| citation WHY mode | count |")
+        lines.append("|---|---|")
+        for mode, count in metrics["by_why"].items():
+            lines.append(f"| {mode} | {count} |")
+        lines.append(f"- inferred indices off gold: {metrics.get('inferred_index_off_gold')}")
     lines.append("")
     fails = [r for r in results if r.get("verdict") in ("fail", "error")]
     if fails:

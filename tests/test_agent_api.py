@@ -165,6 +165,9 @@ def test_answer_surfaces_inferred_citation_provenance(client, monkeypatch):
     body = resp.json()
     assert body["citations"] == [_hit().cite]
     assert body["citations_inferred"] is True
+    # Issue #299: the response carries which prompt excerpt the marker
+    # pointed at, 1-based, so right-index/wrong-index is measurable.
+    assert body["inferred_indices"] == [1]
 
 
 def test_answer_refuses_without_reasoning_model(monkeypatch):
@@ -569,6 +572,11 @@ def test_parse_answer_shape():
     assert parsed.citations == [_hit().cite]
     assert parsed.script is None
     assert parsed.citations_inferred is False
+    # Issue #299 telemetry: the bulleted non-citation is a shape-bad attempt.
+    assert parsed.cites_rejected_shape_bad == 1
+    assert parsed.cites_rejected_unmapped == 0
+    assert parsed.inline_bracket_present is False
+    assert parsed.citations_header_present is True
 
 
 def test_parse_answer_bracketed_fallback():
@@ -604,6 +612,48 @@ def test_parse_answer_bracketed_fallback():
     res5 = parse_answer("See [99].", allowed, ordered_cites=ordered)
     assert res5.citations == []
     assert res5.citations_inferred is False
+    # Issue #299: the attempt is visible through the shared inline regex
+    # even though the index resolves to nothing.
+    assert res5.inline_bracket_present is True
+
+
+def test_parse_answer_records_rejected_cite_attempts():
+    """Issue #299: shape-bad vs shape-valid-unmapped attempts are counted so
+    the WHY report can split zero-cite rows without shipping model text."""
+    from mainframe_rag.agent.answer import parse_answer
+
+    cite = _hit().cite
+    allowed = {cite}
+    content = (
+        "Answer text.\n\nCitations:\n"
+        "- SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
+        "- malformed citation-ish line\n"
+    )
+    parsed = parse_answer(content, allowed)
+    assert parsed.citations == []
+    assert parsed.cites_rejected_unmapped == 1
+    assert parsed.cites_rejected_shape_bad == 1
+
+    # A body-level fabricated standalone line is stripped by the shared
+    # split helper and counted as unmapped — one predicate for strip+count.
+    body_fab = "Answer text.\nSA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\nMore prose."
+    parsed2 = parse_answer(body_fab, allowed)
+    assert parsed2.cites_rejected_unmapped == 1
+    assert "SA22-9999-99" not in parsed2.answer
+
+
+def test_parse_answer_rejected_counts_survive_abstention_zeroing():
+    """Abstention zeroes citations, not the attempt telemetry: a refused
+    answer that attempted a fabricated cite still reports the attempt."""
+    from mainframe_rag.agent.answer import parse_answer
+
+    content = (
+        "The excerpts do not contain the private key.\n\nCitations:\n"
+        "- SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
+    )
+    parsed = parse_answer(content, {_hit().cite})
+    assert parsed.citations == []
+    assert parsed.cites_rejected_unmapped == 1
 
 
 def test_parse_answer_refusal_zeroes_citations():
@@ -1085,6 +1135,38 @@ def test_answer_audit_log_with_chat_result(client, monkeypatch, caplog):
     assert audit["completion_tokens"] == 45
     assert audit["reasoning_tokens"] == 20
     assert audit["total_tokens"] == 165
+    # Issue #299 telemetry rides the same line (counts only, no model text).
+    assert audit["inline_bracket_present"] is False
+    assert audit["citations_header_present"] is True
+    assert audit["cites_rejected_shape_bad"] == 0
+    assert audit["cites_rejected_unmapped"] == 0
+
+
+def test_answer_audit_log_carries_citation_attempt_counters(client, monkeypatch, caplog):
+    """A fabricated body cite reaches the eval as an unmapped-attempt count
+    on the answer log line, not as model text on the wire (issue #299)."""
+    import json
+    import logging
+
+    monkeypatch.setattr(app_mod, "llm", FabricatingBodyLLM())
+
+    with caplog.at_level(logging.INFO):
+        resp = client.post("/v1/answer", json={"query": "IEA500I"})
+
+    assert resp.status_code == 200
+    records = []
+    for r in caplog.records:
+        try:
+            d = json.loads(r.message)
+            if d.get("action") == "answer":
+                records.append(d)
+        except ValueError:
+            pass
+    audit = records[-1]
+    assert audit["cites_rejected_unmapped"] == 1
+    assert audit["cites_rejected_shape_bad"] == 0
+    assert audit["inline_bracket_present"] is False
+    assert audit["citations_header_present"] is True
 
 
 def test_answer_alert_on_non_stop_finish_reason(client, monkeypatch, caplog):
@@ -1783,10 +1865,20 @@ def test_sse_final_schemas_match_across_paths():
 
     hit = _make_hit("c1", "SA22-7592-05", 0.9, text="Body")
     usage = TokenUsage(prompt_tokens=10, completion_tokens=5, reasoning_tokens=3, total_tokens=15)
-    full = final_payload("req-1", "Answer text.", ["cite one"], False, None, "nl", [hit], "stop", 12, usage)
+    full = final_payload(
+        "req-1", "Answer text.", ["cite one"], False, None, "nl", [hit], "stop", 12, usage
+    )
     empty = empty_final_payload("req-1", "No supporting manual excerpts were found.", "nl")
     assert set(empty) == set(full)
     assert full["citations_inferred"] is False
+    assert full["inferred_indices"] == []
+    assert empty["inferred_indices"] == []
+    # The pre-#299 positional signature still builds a full payload, and an
+    # explicit list lands as a list copy.
+    assert final_payload(
+        "req-2", "A.", ["c"], True, None, "nl", [hit], "stop", None, usage,
+        inferred_indices=[2],
+    )["inferred_indices"] == [2]
     assert full["hits"] == [hit.model_dump()]
     assert full["usage"] == {
         "prompt_tokens": 10, "completion_tokens": 5, "reasoning_tokens": 3, "total_tokens": 15,

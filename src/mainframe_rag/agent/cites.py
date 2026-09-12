@@ -125,21 +125,23 @@ def valid_citations(text: str, allowed: set[str]) -> list[str]:
     return result
 
 
-def strip_unauthorized_citations(text: str, allowed: set[str]) -> str:
-    """Remove citation-shaped lines from the answer body that are not in the
-    retrieved hit set. The trailing Citations: list is validated separately;
-    this closes the same hole for a fabricated cite quoted mid-answer —
-    including wrapped forms (markup, blockquote, quotes) via the shared
-    normalizer. Same exact-match rule as valid_citations.
+def split_unauthorized_citations(text: str, allowed: set[str]) -> tuple[str, list[str]]:
+    """Body-level citation hygiene, one predicate for strip and count.
+
+    Returns (kept_text, rejected). Rejected entries are the normalized
+    standalone citation lines that are not in the hit set, plus docno-led
+    heading-path fragments. Same exact-match rule as valid_citations.
 
     Operates on standalone citation lines only: a mid-sentence inline mention
     ("refer to SA22-9999-99 ... for details") never matches the full line
     shape and is deliberately left untouched — stripping mid-prose would
     corrupt the answer."""
     kept: list[str] = []
+    rejected: list[str] = []
     for line in text.splitlines():
         candidate = _normalize_citation_line(line)
         if CITATION_LINE_RE.match(candidate) and candidate not in allowed:
+            rejected.append(candidate)
             continue
         if (
             candidate not in allowed
@@ -147,9 +149,19 @@ def strip_unauthorized_citations(text: str, allowed: set[str]) -> str:
             and " > " in candidate
             and candidate[-1:] not in (".", "!", "?")
         ):
+            rejected.append(candidate)
             continue
         kept.append(line)
-    return "\n".join(kept)
+    return "\n".join(kept), rejected
+
+
+def strip_unauthorized_citations(text: str, allowed: set[str]) -> str:
+    """Remove citation-shaped lines from the answer body that are not in the
+    retrieved hit set. The trailing Citations: list is validated separately;
+    this closes the same hole for a fabricated cite quoted mid-answer —
+    including wrapped forms (markup, blockquote, quotes) via the shared
+    normalizer."""
+    return split_unauthorized_citations(text, allowed)[0]
 
 
 __all__ = [
@@ -157,6 +169,7 @@ __all__ = [
     "extract_body_and_citations",
     "extract_citation_lines",
     "normalize_citation_line",
+    "split_unauthorized_citations",
     "strip_unauthorized_citations",
     "valid_citations",
 ]

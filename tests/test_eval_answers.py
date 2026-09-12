@@ -319,13 +319,21 @@ def test_answer_capture_keeps_answer_lines_only() -> None:
     cap = _AnswerCapture()
     cap.emit(_answer_log_record(query_complexity="complex", finish_reason="length",
                                 prompt_tokens=2500, completion_tokens=1500,
-                                reasoning_tokens=1100, total_tokens=4000))
+                                reasoning_tokens=1100, total_tokens=4000,
+                                inline_bracket_present=False,
+                                citations_header_present=True,
+                                cites_rejected_shape_bad=1,
+                                cites_rejected_unmapped=2))
     cap.emit(_answer_log_record(action="answer_alert", alert="finish_reason_non_stop"))
     cap.emit(logging.LogRecord("agent", logging.INFO, __file__, 0, "not json", None, None))
     cap.emit(_answer_log_record(request_id="", query_complexity="simple"))
     assert cap.signals == {"r1": {"query_complexity": "complex", "finish_reason": "length",
                                   "prompt_tokens": 2500, "completion_tokens": 1500,
-                                  "reasoning_tokens": 1100, "total_tokens": 4000}}
+                                  "reasoning_tokens": 1100, "total_tokens": 4000,
+                                  "inline_bracket_present": False,
+                                  "citations_header_present": True,
+                                  "cites_rejected_shape_bad": 1,
+                                  "cites_rejected_unmapped": 2}}
 
 
 class _StubClient:
@@ -353,6 +361,7 @@ def _answer_payload(**overrides) -> dict:
         "answer": "LFAREA reserves frames above the bar.\nCitations:\nSA23-1380-70 ref, p. 1",
         "citations": ["SA23-1380-70 ref, p. 1"],
         "citations_inferred": False,
+        "inferred_indices": [],
         "script": None,
     }
     base.update(overrides)
@@ -362,7 +371,11 @@ def _answer_payload(**overrides) -> dict:
 def test_run_query_joins_answer_signals() -> None:
     signals = {"r1": {"query_complexity": "simple", "finish_reason": "stop",
                        "prompt_tokens": 900, "completion_tokens": 120,
-                       "reasoning_tokens": 60, "total_tokens": 1020}}
+                       "reasoning_tokens": 60, "total_tokens": 1020,
+                       "inline_bracket_present": True,
+                       "citations_header_present": True,
+                       "cites_rejected_shape_bad": 1,
+                       "cites_rejected_unmapped": 2}}
     row = run_query(_StubClient(_answer_payload()), _entry(), signals)
     assert row["verdict"] == "pass"
     assert row["query_complexity"] == "simple"
@@ -370,14 +383,22 @@ def test_run_query_joins_answer_signals() -> None:
     assert (row["prompt_tokens"], row["completion_tokens"],
             row["reasoning_tokens"], row["total_tokens"]) == (900, 120, 60, 1020)
     assert row["citations_header_present"] is True
+    assert row["inline_bracket_present"] is True
+    assert (row["cites_rejected_shape_bad"], row["cites_rejected_unmapped"]) == (1, 2)
+    assert row["inferred_indices"] == []
 
 
-def test_run_query_without_signals_leaves_nones_but_flags_header() -> None:
+def test_run_query_without_signals_leaves_nones() -> None:
     row = run_query(_StubClient(_answer_payload(answer="Plain prose, no header.")), _entry())
     assert row["query_complexity"] is None
     assert row["finish_reason"] is None
     assert row["prompt_tokens"] is None
-    assert row["citations_header_present"] is False
+    # Parse-time signal (issue #299): the returned body never carries the
+    # header, so without the log join the field is unknown, not False.
+    assert row["citations_header_present"] is None
+    assert row["inline_bracket_present"] is None
+    assert row["cites_rejected_shape_bad"] is None
+    assert row["cites_rejected_unmapped"] is None
 
 
 def test_run_query_error_row_has_no_signal_fields() -> None:
@@ -464,3 +485,90 @@ def test_summarize_by_failure_histogram() -> None:
     assert summarize(results)["by_failure"] == {
         "trap answered": 2, "zero validated citations": 1,
     }
+
+
+# --------------------------------------------- issue #299 citation WHY modes
+def test_why_mode_precedence_and_branches() -> None:
+    """Every mode fires on its claimed shape; most-specific wins."""
+    from scripts.eval_answers import why_mode
+
+    assert why_mode({"verdict": "error"}) == "error"
+    assert why_mode({"verdict": "pass", "path": "zero_hits"}) == "zero_hits"
+    assert why_mode({"verdict": "pass", "abstention_zeroed": True}) == "abstention_zeroed"
+    assert why_mode({"verdict": "pass", "citations": ["c"]}) == "cited_explicit"
+    assert why_mode({"verdict": "pass", "citations": ["c"], "citations_inferred": True}) == "cited_inferred"
+    # Missing header signal on a truncated row never asserts the cut shape.
+    assert why_mode({"verdict": "fail", "truncated": True}) == "unknown"
+    assert why_mode({"verdict": "fail", "truncated": True,
+                     "citations_header_present": False,
+                     "inline_bracket_present": False,
+                     "cites_rejected_shape_bad": 0,
+                     "cites_rejected_unmapped": 0}) == "truncated_before_cites"
+    # A truncated row whose header survived is not cut before cites.
+    assert why_mode({"verdict": "fail", "truncated": True,
+                     "citations_header_present": True,
+                     "cites_rejected_unmapped": 1}) == "fabricated_unmapped"
+    assert why_mode({"verdict": "fail", "cites_rejected_unmapped": 1,
+                     "cites_rejected_shape_bad": 2}) == "fabricated_unmapped"
+    assert why_mode({"verdict": "fail", "cites_rejected_shape_bad": 1}) == "malformed_shape_bad"
+    assert why_mode({"verdict": "fail", "inline_bracket_present": True}) == "bracket_unmatched"
+    # Missing attempt signals: 'absent' is a claim, so the row reads unknown.
+    assert why_mode({"verdict": "fail"}) == "unknown"
+    # Every attempt signal present and negative: genuinely absent.
+    assert why_mode({"verdict": "fail", "inline_bracket_present": False,
+                     "cites_rejected_shape_bad": 0,
+                     "cites_rejected_unmapped": 0}) == "absent"
+
+
+def test_inferred_index_off_gold_maps_indices_to_pool_order() -> None:
+    from scripts.eval_answers import inferred_index_off_gold
+
+    gold_pool = {"verdict": "pass", "inferred_indices": [2],
+                 "expected_doc_ids": ["SA23-1380-09"],
+                 "hit_doc_ids": ["OTHER-01", "SA23-1380-09"]}
+    assert inferred_index_off_gold(gold_pool) is False
+    off = {"verdict": "pass", "inferred_indices": [1],
+           "expected_doc_ids": ["SA23-1380-09"],
+           "hit_doc_ids": ["OTHER-01", "SA23-1380-09"]}
+    assert inferred_index_off_gold(off) is True
+    out_of_range = {"verdict": "pass", "inferred_indices": [9],
+                    "expected_doc_ids": ["SA23-1380-09"],
+                    "hit_doc_ids": ["SA23-1380-09"]}
+    assert inferred_index_off_gold(out_of_range) is True
+    # Missing or uncoercible inputs never fabricate a verdict.
+    assert inferred_index_off_gold({"verdict": "pass"}) is False
+    assert inferred_index_off_gold(
+        {"verdict": "pass", "inferred_indices": [1], "hit_doc_ids": ["SA23-1380-09"]}
+    ) is False
+    assert inferred_index_off_gold(
+        {"verdict": "pass", "inferred_indices": ["x"],
+         "expected_doc_ids": ["SA23-1380-09"], "hit_doc_ids": ["SA23-1380-09"]}
+    ) is False
+
+
+def test_run_query_malformed_inferred_indices_is_an_error_row() -> None:
+    """A malformed provenance field fails the row closed instead of raising
+    through the runner (issue #299 review)."""
+    row = run_query(_StubClient(_answer_payload(inferred_indices=["not-a-number"])), _entry())
+    assert row["verdict"] == "error"
+    assert row["failures"] == ["malformed inferred_indices in response"]
+
+
+def test_summarize_by_why_and_off_gold() -> None:
+    results = [
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax",
+         "citations": ["c1"]},
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax",
+         "citations": ["c1"], "citations_inferred": True, "inferred_indices": [1],
+         "expected_doc_ids": ["DOC-1"], "hit_doc_ids": ["OTHER", "DOC-1"]},
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "syntax",
+         "citations": [], "cites_rejected_unmapped": 2},
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "syntax",
+         "citations": [], "cites_rejected_shape_bad": 1},
+    ]
+    metrics = summarize(results)
+    assert metrics["by_why"] == {
+        "cited_explicit": 1, "cited_inferred": 1,
+        "fabricated_unmapped": 1, "malformed_shape_bad": 1,
+    }
+    assert metrics["inferred_index_off_gold"] == 1
