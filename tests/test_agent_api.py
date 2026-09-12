@@ -1866,13 +1866,19 @@ def test_sse_final_schemas_match_across_paths():
     hit = _make_hit("c1", "SA22-7592-05", 0.9, text="Body")
     usage = TokenUsage(prompt_tokens=10, completion_tokens=5, reasoning_tokens=3, total_tokens=15)
     full = final_payload(
-        "req-1", "Answer text.", ["cite one"], False, [], None, "nl", [hit], "stop", 12, usage
+        "req-1", "Answer text.", ["cite one"], False, None, "nl", [hit], "stop", 12, usage
     )
     empty = empty_final_payload("req-1", "No supporting manual excerpts were found.", "nl")
     assert set(empty) == set(full)
     assert full["citations_inferred"] is False
     assert full["inferred_indices"] == []
     assert empty["inferred_indices"] == []
+    # The pre-#299 positional signature still builds a full payload, and an
+    # explicit list lands as a list copy.
+    assert final_payload(
+        "req-2", "A.", ["c"], True, None, "nl", [hit], "stop", None, usage,
+        inferred_indices=[2],
+    )["inferred_indices"] == [2]
     assert full["hits"] == [hit.model_dump()]
     assert full["usage"] == {
         "prompt_tokens": 10, "completion_tokens": 5, "reasoning_tokens": 3, "total_tokens": 15,

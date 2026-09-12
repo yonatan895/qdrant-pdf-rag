@@ -340,6 +340,18 @@ def run_query(
     answer = str(data.get("answer") or "")
     citations = list(data.get("citations") or [])
     citations_inferred = bool(data.get("citations_inferred", False))
+    # A malformed provenance field is a contract violation, not a citation
+    # signal: fail the row closed like every other bad-response path instead
+    # of raising through the runner (issue #299 review).
+    try:
+        inferred_indices = [int(i) for i in (data.get("inferred_indices") or [])]
+    except (TypeError, ValueError):
+        row.update(
+            verdict="error",
+            failures=["malformed inferred_indices in response"],
+            elapsed_ms=elapsed_ms,
+        )
+        return row
     zero_hits = is_zero_hits_answer(answer)
     # Zero-hits is the agent's canned message (no model text): gold-substring
     # checks would judge the canned string, not the model — suppress them and
@@ -370,7 +382,7 @@ def run_query(
         citations_inferred=citations_inferred,
         # Provenance detail (issue #299): 1-based prompt excerpt indices the
         # inferred citations came from, straight off the response contract.
-        inferred_indices=[int(i) for i in (data.get("inferred_indices") or [])],
+        inferred_indices=inferred_indices,
         script=data.get("script"),
         # joins server-side alert logs (finish_reason != stop) to this row —
         # the response contract deliberately does not expose finish_reason
@@ -474,15 +486,20 @@ def inferred_index_off_gold(row: dict[str, Any]) -> bool:
     """True when every inferred citation's 1-based excerpt index points at a
     hit whose doc id is not in the expected set — the measurable slice of
     right-doc/wrong-index on the inferred path (issue #299). Pure; False
-    when the inputs are missing (never fabricated)."""
+    when the inputs are missing or uncoercible (never fabricated)."""
     indices = row.get("inferred_indices") or []
     expected = set(row.get("expected_doc_ids") or [])
     hits = row.get("hit_doc_ids")
     if not indices or not expected or not hits:
         return False
-    return not any(
-        1 <= int(i) <= len(hits) and str(hits[int(i) - 1]) in expected for i in indices
-    )
+    for i in indices:
+        try:
+            idx = int(i)
+        except (TypeError, ValueError):
+            return False
+        if 1 <= idx <= len(hits) and str(hits[idx - 1]) in expected:
+            return False
+    return True
 
 
 def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, Any]) -> None:

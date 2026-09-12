@@ -72,27 +72,29 @@ def final_payload(
     answer: str,
     citations: list[str],
     citations_inferred: bool,
-    inferred_indices: list[int],
     script: str | None,
     query_kind: str,
     hits: list[SearchHit],
     finish_reason: str,
     ttft_ms: int | None,
     usage: TokenUsage,
+    inferred_indices: list[int] | None = None,
 ) -> dict[str, Any]:
     """Terminal `final` for the streamed answer: verified citations/script
     identical in shape to the JSON mode and the empty-hits path.
     `citations_inferred` is the provenance flag (issue #269): true when the
     cites were mapped from bare bracket markers, never from an explicit
     citation line. `inferred_indices` (issue #299) carries which prompt
-    excerpt indices those markers pointed at, 1-based; empty otherwise."""
+    excerpt indices those markers pointed at, 1-based; it is optional and
+    defaults to empty so callers built against the pre-#299 signature keep
+    working, and the payload always carries a list."""
     return {
         "type": "final",
         "request_id": request_id,
         "answer": answer,
         "citations": citations,
         "citations_inferred": citations_inferred,
-        "inferred_indices": inferred_indices,
+        "inferred_indices": list(inferred_indices or []),
         "script": script,
         "query_kind": query_kind,
         "hits": [h.model_dump() for h in hits],

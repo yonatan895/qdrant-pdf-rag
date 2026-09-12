@@ -535,11 +535,23 @@ def test_inferred_index_off_gold_maps_indices_to_pool_order() -> None:
                     "expected_doc_ids": ["SA23-1380-09"],
                     "hit_doc_ids": ["SA23-1380-09"]}
     assert inferred_index_off_gold(out_of_range) is True
-    # Missing inputs never fabricate a verdict.
+    # Missing or uncoercible inputs never fabricate a verdict.
     assert inferred_index_off_gold({"verdict": "pass"}) is False
     assert inferred_index_off_gold(
         {"verdict": "pass", "inferred_indices": [1], "hit_doc_ids": ["SA23-1380-09"]}
     ) is False
+    assert inferred_index_off_gold(
+        {"verdict": "pass", "inferred_indices": ["x"],
+         "expected_doc_ids": ["SA23-1380-09"], "hit_doc_ids": ["SA23-1380-09"]}
+    ) is False
+
+
+def test_run_query_malformed_inferred_indices_is_an_error_row() -> None:
+    """A malformed provenance field fails the row closed instead of raising
+    through the runner (issue #299 review)."""
+    row = run_query(_StubClient(_answer_payload(inferred_indices=["not-a-number"])), _entry())
+    assert row["verdict"] == "error"
+    assert row["failures"] == ["malformed inferred_indices in response"]
 
 
 def test_summarize_by_why_and_off_gold() -> None:

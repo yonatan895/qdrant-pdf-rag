@@ -971,13 +971,13 @@ async def v1_answer(
             parsed.answer,
             parsed.citations,
             parsed.citations_inferred,
-            parsed.inferred_indices,
             parsed.script,
             kind,
             hits,
             finish_reason,
             ttft_ms,
             usage,
+            inferred_indices=parsed.inferred_indices,
         )
         root_span.set_attributes(
             _answer_span_attrs(kind, hits, len(parsed.citations), parsed.script is not None)
