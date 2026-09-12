@@ -167,10 +167,19 @@ top is extremely heavy compared to the industry-default `k=60`.
   fuses the top `rerank_candidates` (default 50). Measured verdict
   (issue #270, dev-golden record-replay over `real_manuals`, production
   chain): widening 24→32→40 is **byte-identical on the top-8** (the 24
-  survivors already fill the diverse head; backfill past rank 24 never
-  fired), so the constant stays. The same sweep kept `max_per_page=1`
-  (`page2` r@5 0.923→0.904, MRR 0.792→0.769) and `max_per_doc=3`
-  (`doc4` neutral, `doc2` +1/104 hit — noise, not adoption material).
+   survivors already fill the diverse head; backfill past rank 24 never
+   fired), so the constant stays. The same sweep kept `max_per_page=1`
+   (`page2` r@5 0.923→0.904, MRR 0.792→0.769) and `max_per_doc=3`
+   (`doc4` neutral, `doc2` +1/104 hit — noise, not adoption material).
+- The fused top-1/top-2 margin is not a confidence signal. Measured
+  verdict (issue #86, dev-golden replay over `real_manuals`, leg-0 main
+  path, n=108 answer queries / 26 recall@1 misses): margin medians are
+  0.045 (hits) vs 0.033 (misses), and at T=0.10 a margin-gated retry
+  fires on 22/26 misses but also 58/82 hits; top-score s1 behaves the
+  same (T=0.45: 0.69 vs 0.44). RRF scores are rank-quantized and too
+  coarse to gate a corrective retry — margin never decides re-search.
+  Reopen gate: a signal with measured hit/miss separation on
+  post-freeze pools.
 
 ## 5. Injection screen
 
@@ -283,6 +292,16 @@ never reach rewriting because the screen runs first, but the trap check is
 not enforced on this path — an identifier-free trap query containing an
 acronym is still expanded for the embed legs. This section documents actual
 behavior.
+
+Measured verdict (issue #86, live `real_manuals` A/B, 121 golden answer
+queries): acronym expansion as a retry variant fixes 2 recall@1 misses
+(DIA-02, VER-02) but breaks 4 hits (CMP-07, DIA-23, SYN-30, VER-12) —
+net −2 on the 25 queries where it fires (83 no-op). Expansion stays a
+caller-opted-in global flag; it is not a retry path. Combined with the
+§4 margin result, corrective retry has no measured trigger and no
+measured variant: PR-12 stays will-not-pursue. Reopen gate: a variant
+with measured positive headroom plus a trigger with measured separation,
+with per-query attribution on post-freeze pools.
 
 ## 8. Diversification
 
