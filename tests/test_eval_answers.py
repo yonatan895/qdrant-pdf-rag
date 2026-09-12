@@ -8,11 +8,16 @@ scripts/test_local_e2e_vllm.py, never part of plain pytest)."""
 
 from __future__ import annotations
 
+import json
+import logging
+
 from scripts.eval_answers import (
     ZERO_HITS_ANSWER,
+    _AnswerCapture,
     is_explicit_refusal,
     is_zero_hits_answer,
     judge,
+    run_query,
     select_sample,
     summarize,
 )
@@ -301,3 +306,101 @@ def test_summarize_counts_inferred_rows() -> None:
          "citations": ["c1"], "citations_inferred": False},
     ]
     assert summarize(results)["inferred_citations"] == 1
+
+
+# ------------------------------------------------- issue #298 attribution fields
+def _answer_log_record(**payload) -> logging.LogRecord:
+    base = {"request_id": "r1", "action": "answer"}
+    base.update(payload)
+    return logging.LogRecord("agent", logging.INFO, __file__, 0, json.dumps(base), None, None)
+
+
+def test_answer_capture_keeps_answer_lines_only() -> None:
+    cap = _AnswerCapture()
+    cap.emit(_answer_log_record(query_complexity="complex", finish_reason="length",
+                                prompt_tokens=2500, completion_tokens=1500,
+                                reasoning_tokens=1100, total_tokens=4000))
+    cap.emit(_answer_log_record(action="answer_alert", alert="finish_reason_non_stop"))
+    cap.emit(logging.LogRecord("agent", logging.INFO, __file__, 0, "not json", None, None))
+    cap.emit(_answer_log_record(request_id="", query_complexity="simple"))
+    assert cap.signals == {"r1": {"query_complexity": "complex", "finish_reason": "length",
+                                  "prompt_tokens": 2500, "completion_tokens": 1500,
+                                  "reasoning_tokens": 1100, "total_tokens": 4000}}
+
+
+class _StubClient:
+    def __init__(self, payload: dict | Exception):
+        self.payload = payload
+
+    def post(self, *args, **kwargs):
+        if isinstance(self.payload, Exception):
+            raise self.payload
+        return _StubResponse(self.payload)
+
+
+class _StubResponse:
+    def __init__(self, payload: dict):
+        self.payload = payload
+        self.status_code = 200
+
+    def json(self) -> dict:
+        return self.payload
+
+
+def _answer_payload(**overrides) -> dict:
+    base = {
+        "request_id": "r1",
+        "answer": "LFAREA reserves frames above the bar.\nCitations:\nSA23-1380-70 ref, p. 1",
+        "citations": ["SA23-1380-70 ref, p. 1"],
+        "citations_inferred": False,
+        "script": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_run_query_joins_answer_signals() -> None:
+    signals = {"r1": {"query_complexity": "simple", "finish_reason": "stop",
+                       "prompt_tokens": 900, "completion_tokens": 120,
+                       "reasoning_tokens": 60, "total_tokens": 1020}}
+    row = run_query(_StubClient(_answer_payload()), _entry(), signals)
+    assert row["verdict"] == "pass"
+    assert row["query_complexity"] == "simple"
+    assert row["finish_reason"] == "stop"
+    assert (row["prompt_tokens"], row["completion_tokens"],
+            row["reasoning_tokens"], row["total_tokens"]) == (900, 120, 60, 1020)
+    assert row["citations_header_present"] is True
+
+
+def test_run_query_without_signals_leaves_nones_but_flags_header() -> None:
+    row = run_query(_StubClient(_answer_payload(answer="Plain prose, no header.")), _entry())
+    assert row["query_complexity"] is None
+    assert row["finish_reason"] is None
+    assert row["prompt_tokens"] is None
+    assert row["citations_header_present"] is False
+
+
+def test_run_query_error_row_has_no_signal_fields() -> None:
+    row = run_query(_StubClient(ConnectionError("down")), _entry())
+    assert row["verdict"] == "error"
+    assert row.get("query_complexity") is None
+    assert row.get("citations_header_present") is None
+
+
+def test_summarize_by_complexity_counts_pass() -> None:
+    results = [
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax",
+         "query_complexity": "simple"},
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "syntax",
+         "query_complexity": "simple", "failures": ["x"]},
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "message_id",
+         "query_complexity": "complex"},
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "message_id",
+         "failures": ["x"]},
+    ]
+    by_complexity = summarize(results)["by_complexity"]
+    assert by_complexity["simple"] == {"n": 2, "pass": 1}
+    assert by_complexity["complex"] == {"n": 1, "pass": 1}
+    # error rows never reach the judged set; a judged row without the join
+    # lands in unknown rather than a third complexity.
+    assert by_complexity["unknown"] == {"n": 1, "pass": 0}

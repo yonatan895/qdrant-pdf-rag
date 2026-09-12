@@ -96,7 +96,7 @@ if str(REPO / "scripts") not in sys.path:
     # `python scripts/harness_l2.py` and when imported as scripts.harness_l2
     sys.path.insert(0, str(REPO / "scripts"))
 
-from eval_answers import run_query, select_sample
+from eval_answers import _AnswerCapture, run_query, select_sample
 from venue import VenueError, require_rc_for_collection, resolve_golden_paths
 
 # Shared citation-index shape ([n] / [n, m]); see the inference rule in
@@ -330,8 +330,29 @@ def summarize_l2(results: list[dict[str, Any]]) -> dict[str, Any]:
             },
         },
         "unmapped_citations": sum(len(r.get("unmatched_citations") or []) for r in judged),
+        # Truncation attribution (issue #298): truncated share per served
+        # query complexity. Unknown covers rows without the answer log join
+        # (error rows, zero-hits path) — a missing signal, never a verdict.
+        "by_complexity": _by_complexity_truncation(answer_llm, rate),
     }
     return metrics
+
+
+def _by_complexity_truncation(
+    answer_llm: list[dict[str, Any]], rate: Any
+) -> dict[str, dict[str, int | float | None]]:
+    """Truncated share per served query complexity (issue #298). Pure."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in answer_llm:
+        groups.setdefault(row.get("query_complexity") or "unknown", []).append(row)
+    return {
+        complexity: {
+            "n": len(crows),
+            "truncated": sum(1 for r in crows if r.get("truncated")),
+            "truncation_rate": rate(sum(1 for r in crows if r.get("truncated")), len(crows)),
+        }
+        for complexity, crows in sorted(groups.items())
+    }
 
 
 def gate_l2(metrics: dict[str, Any]) -> tuple[str, list[str]]:
@@ -363,6 +384,14 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
             "with gold, zero cites = 0 — recall is the stricter half)"
         ),
         f"- truncation rate: {metrics['truncation_rate']} (non-stop finishes, from the app's alert logs)",
+        (
+            "- by complexity (served query complexity from the answer log line; "
+            "unknown = rows without the join): "
+            + ", ".join(
+                f"{complexity} {block['truncated']}/{block['n']} ({block['truncation_rate']})"
+                for complexity, block in (metrics.get("by_complexity") or {}).items()
+            )
+        ),
         (
             f"- syntax compliance: {metrics['syntax_compliance']} (n={metrics['syntax_n']})  "
             "(keyword-presence gold: the construct was NAMED, not that valid syntax was produced)"
@@ -494,6 +523,8 @@ def run_l2(
 
     capture = _AlertCapture()
     logging.getLogger("agent").addHandler(capture)
+    answers = _AnswerCapture()
+    logging.getLogger("agent").addHandler(answers)
 
     judge_client: Any = None
     if judge_enabled:
@@ -514,7 +545,7 @@ def run_l2(
                 return search_cache[query]
 
             for i, entry in enumerate(sample, 1):
-                row = run_query(client, entry)
+                row = run_query(client, entry, answers.signals)
                 hits = hits_for(entry["query"])
                 apply_l2_measurements(row, entry, hits, capture.alerts)
 
@@ -574,6 +605,7 @@ def run_l2(
                     print(f"        FAIL {failure}", file=sys.stderr)
     finally:
         logging.getLogger("agent").removeHandler(capture)
+        logging.getLogger("agent").removeHandler(answers)
         if judge_client is not None:
             judge_client.close()
 

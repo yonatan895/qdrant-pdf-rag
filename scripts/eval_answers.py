@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import sys
 import time
@@ -99,11 +100,47 @@ def is_zero_hits_answer(answer: str) -> bool:
     return body == ZERO_HITS_ANSWER or _ZERO_HITS_NAMED_RE.match(body) is not None
 
 
+class _AnswerCapture(logging.Handler):
+    """Buffer the app's per-request answer log lines (logger 'agent') so
+    rows can carry the token budget facts the response contract
+    deliberately omits (issue #298): query complexity, finish reason,
+    and prompt/completion/reasoning/total usage, joined by request_id.
+    Sibling to harness_l2._AlertCapture, which joins the non-stop alert
+    subset; this one keeps the full answer line for attribution."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        self.signals: dict[str, dict[str, Any]] = {}
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            payload = json.loads(record.getMessage())
+        except json.JSONDecodeError:
+            return
+        if payload.get("action") != "answer":
+            return
+        rid = str(payload.get("request_id") or "")
+        if not rid:
+            return
+        self.signals[rid] = {
+            key: payload.get(key)
+            for key in (
+                "query_complexity",
+                "finish_reason",
+                "prompt_tokens",
+                "completion_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+            )
+        }
+
+
 from venue import VenueError, require_rc_for_collection, resolve_golden_paths
 
 # Refusal interpretation is the agent's single helper (issue #135): the eval's
 # abstain verdicts and the agent's zero-citation rule must never diverge.
 from mainframe_rag.agent.answer import is_refusal as is_explicit_refusal
+from mainframe_rag.agent.cites import CITATIONS_HEADER_RE
 from mainframe_rag.config import load_settings
 
 
@@ -234,10 +271,24 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     metrics["by_class"] = {
         cls: {"n": by_class[cls], "pass": by_class_pass[cls]} for cls in sorted(by_class)
     }
+    # Truncation attribution (issue #298): pass counts per served query
+    # complexity. Unknown covers error rows and callers without the answer
+    # log join — a missing signal, never a third complexity.
+    by_complexity: Counter = Counter()
+    by_complexity_pass: Counter = Counter()
+    for r in judged:
+        complexity = r.get("query_complexity") or "unknown"
+        by_complexity[complexity] += 1
+        if r["verdict"] == "pass":
+            by_complexity_pass[complexity] += 1
+    metrics["by_complexity"] = {
+        complexity: {"n": by_complexity[complexity], "pass": by_complexity_pass[complexity]}
+        for complexity in sorted(by_complexity)
+    }
     return metrics
 
 
-def run_query(client: Any, entry: dict[str, Any]) -> dict[str, Any]:
+def run_query(client: Any, entry: dict[str, Any], answer_signals: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """One live /v1/answer call + verdict. Records everything the report and
     the manifest need, including the failure detail (the answer body is the
     model's own output — kept in the JSON report for debugging, never
@@ -284,6 +335,7 @@ def run_query(client: Any, entry: dict[str, Any]) -> dict[str, Any]:
     )
     if zero_hits:
         warns.append("zero-hits path: gold substrings not judged (canned agent message)")
+    signals = (answer_signals or {}).get(str(data.get("request_id") or ""), {})
     row.update(
         verdict=verdict,
         failures=failures,
@@ -297,6 +349,18 @@ def run_query(client: Any, entry: dict[str, Any]) -> dict[str, Any]:
         request_id=data.get("request_id"),
         path="zero_hits" if zero_hits else "llm",
         elapsed_ms=elapsed_ms,
+        # Token-budget attribution (issue #298): present when the caller
+        # joined the app's answer log line, else None (error rows, or a
+        # caller without the capture handler — never fabricated).
+        query_complexity=signals.get("query_complexity"),
+        finish_reason=signals.get("finish_reason"),
+        prompt_tokens=signals.get("prompt_tokens"),
+        completion_tokens=signals.get("completion_tokens"),
+        reasoning_tokens=signals.get("reasoning_tokens"),
+        total_tokens=signals.get("total_tokens"),
+        # Whether the model emitted a Citations: header at all — separates
+        # truncated-before-cites from chose-not-to-cite downstream.
+        citations_header_present=bool(CITATIONS_HEADER_RE.search(answer)),
     )
     return row
 
@@ -373,18 +437,23 @@ def main(argv: list[str] | None = None) -> int:
     import mainframe_rag.agent.app as app_mod
 
     results: list[dict[str, Any]] = []
-    with TestClient(app_mod.app) as client:
-        for i, entry in enumerate(sample, 1):
-            row = run_query(client, entry)
-            results.append(row)
-            marker = row.get("verdict", "?").upper()
-            print(
-                f"[{i:>3}/{len(sample)}] {marker:5s} {row['id']:8s} "
-                f"{row['query'][:58]}",
-                file=sys.stderr,
-            )
-            for f in row.get("failures") or []:
-                print(f"        FAIL {f}", file=sys.stderr)
+    capture = _AnswerCapture()
+    logging.getLogger("agent").addHandler(capture)
+    try:
+        with TestClient(app_mod.app) as client:
+            for i, entry in enumerate(sample, 1):
+                row = run_query(client, entry, capture.signals)
+                results.append(row)
+                marker = row.get("verdict", "?").upper()
+                print(
+                    f"[{i:>3}/{len(sample)}] {marker:5s} {row['id']:8s} "
+                    f"{row['query'][:58]}",
+                    file=sys.stderr,
+                )
+                for f in row.get("failures") or []:
+                    print(f"        FAIL {f}", file=sys.stderr)
+    finally:
+        logging.getLogger("agent").removeHandler(capture)
 
     metrics = summarize(results)
     report = {"metrics": metrics, "results": results}
