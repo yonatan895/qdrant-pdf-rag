@@ -4,6 +4,7 @@ Qdrant and the LLM are faked; citation enforcement is checked against the
 retrieved hit set.
 """
 
+import contextlib
 import json
 import threading
 import time
@@ -2018,3 +2019,56 @@ def test_prompt_build_runs_off_the_event_loop(client, monkeypatch):
     assert loop_threads, "classify never ran"
     assert build_threads, "build_messages never ran"
     assert build_threads[0] != loop_threads[0]
+
+
+class SlowBlockingTokenizer(FallbackTokenizer):
+    """Tokenizer double with a slow sync verify: stands in for a real
+    /tokenize RPC (llm_tokenize_timeout_s=5.0 per round, up to 4 rounds)."""
+
+    def __init__(self, delay_s: float = 0.3):
+        self.delay_s = delay_s
+
+    def count_messages(self, messages):
+        time.sleep(self.delay_s)
+        return super().count_messages(messages)
+
+
+def test_slow_tokenizer_verify_keeps_loop_responsive(client, monkeypatch):
+    """Issue #269: a slow count_messages must not serialize in-flight
+    requests. 4 concurrent answers each burn 1x0.3s in the sync verify;
+    on the event loop that is >= 1.2s wall and every concurrent poll
+    stalls with it; offloaded via asyncio.to_thread they overlap (~0.3s).
+    The probe is GET /nope: the pinned 404 shape touches no network, so
+    its latency is a pure event-loop tick (a /healthz probe would measure
+    the Qdrant client's retry latency instead — that sunk this test on
+    CI once)."""
+    import concurrent.futures
+
+    monkeypatch.setattr(app_mod, "tokenizer", SlowBlockingTokenizer())
+
+    probe_latencies: list[float] = []
+    probe_codes: list[int] = []
+
+    def poll_loop():
+        t0 = time.monotonic()
+        with contextlib.suppress(Exception):
+            probe_codes.append(client.get("/nope").status_code)
+            probe_latencies.append(time.monotonic() - t0)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+        t0 = time.monotonic()
+        answers = [pool.submit(client.post, "/v1/answer", json={"query": f"IEA500I {i}"}) for i in range(4)]
+        time.sleep(0.05)  # let the slow verifies get in flight first
+        for _ in range(6):
+            poll_loop()
+            time.sleep(0.05)
+        resps = [f.result(timeout=30) for f in answers]
+        elapsed = time.monotonic() - t0
+
+    assert [r.status_code for r in resps] == [200] * 4
+    # Serialized on the loop, 4x0.3s verifies alone cost >= 1.2s wall.
+    assert elapsed < 0.9
+    assert probe_codes, "no loop probes ran"
+    assert all(c == 404 for c in probe_codes)
+    # The loop stayed responsive while the sync verifies were in flight.
+    assert max(probe_latencies) < 0.9
