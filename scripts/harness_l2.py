@@ -122,9 +122,25 @@ JUDGE_LABELS = ("entailed", "neutral", "contradiction")
 RELEVANCE_LABELS = ("relevant", "partial", "irrelevant")
 JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 
+# Judge calls run at temp 0 with an explicit low reasoning effort. Measured
+# (#305): with the server-default effort the judge burned 1200+ reasoning
+# tokens on long answers and put its chain-of-thought in the content channel,
+# so the JSON label never appeared and the row failed as a judge infra error.
+# Low effort parses and keeps the label decision (DOC-02/VER-03: neutral both
+# ways). The production answer path already sends this knob; the judge must
+# too — a judge that flips with server defaults is not an instrument.
+JUDGE_REASONING_EFFORT = "low"
+
 
 class JudgeError(RuntimeError):
     """Judge output could not be parsed into a label — structural FAIL."""
+
+
+def judge_chat(client: Any, messages: list[ChatMessage]) -> Any:
+    """One judge call shape: temperature 0 + bounded reasoning effort. Every
+    judge leg (faithfulness, relevance) funnels through here so the call
+    parameters cannot diverge between the two labels."""
+    return client.chat(messages, temperature=0.0, reasoning_effort=JUDGE_REASONING_EFFORT)
 
 
 def citation_to_hit(citation: str, hits: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -650,10 +666,7 @@ def run_l2(
                 ):
                     evidence, _unmapped = evidence_for_citations(row["citations"], hits)
                     try:
-                        chat = judge_client.chat(
-                            judge_messages(row["answer"], evidence),
-                            temperature=0.0,
-                        )
+                        chat = judge_chat(judge_client, judge_messages(row["answer"], evidence))
                         row["judge_label"] = parse_judge_label(chat.content)
                     except Exception as exc:  # noqa: BLE001 — judge infra fails closed
                         row["judge_error"] = f"{type(exc).__name__}: {exc}"
@@ -671,9 +684,8 @@ def run_l2(
                     and not row.get("failures")
                 ):
                     try:
-                        chat = judge_client.chat(
-                            relevance_messages(entry["query"], row["answer"]),
-                            temperature=0.0,
+                        chat = judge_chat(
+                            judge_client, relevance_messages(entry["query"], row["answer"])
                         )
                         row["relevance_label"] = parse_relevance_label(chat.content)
                     except Exception as exc:  # noqa: BLE001 — judge infra fails closed

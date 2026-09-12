@@ -159,9 +159,12 @@ verdict.
   row), a temp-0 NLI faithfulness judge over capped evidence
   (entailed/neutral/contradiction; unparseable output is a structural
   fail), truncation joined from `answer_alert` log lines by request id, and
-  syntax-pattern checks. Only structural fails gate; rates are trend data.
-  The L1-pinned-collection rule is operator discipline (unenforced in
-  code).
+  syntax-pattern checks. The judge runs at an explicit low reasoning effort
+  (#305): with the server-default effort the model put its chain-of-thought
+  in the content channel on long answers and the JSON label never appeared,
+  failing rows as judge infra errors. Only structural fails gate; rates are
+  trend data. The L1-pinned-collection rule is operator discipline
+  (unenforced in code).
 - **L3 (perf tier):** per-stage p50/p95 from `Server-Timing` plus TTFT
   (requires `LLM_STREAM=true` on the agent) and `nvidia-smi` VRAM under
   concurrent load, against dedicated mode-keyed baselines — never the CI

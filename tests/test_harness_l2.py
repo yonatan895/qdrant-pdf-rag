@@ -12,6 +12,7 @@ import re
 import pytest
 from scripts.harness_l2 import (
     JUDGE_MAX_EVIDENCE_CHARS,
+    JUDGE_REASONING_EFFORT,
     JudgeError,
     _AlertCapture,
     _by_complexity_truncation,
@@ -20,6 +21,7 @@ from scripts.harness_l2 import (
     cited_doc_ids,
     evidence_for_citations,
     gate_l2,
+    judge_chat,
     judge_messages,
     parse_judge_label,
     parse_relevance_label,
@@ -117,6 +119,24 @@ def test_judge_messages_never_contain_citation_markers():
     assert evidence in msgs[1].content and answer in msgs[1].content
     assert msgs[0].role == "system" and msgs[1].role == "user"
     assert "contradiction" in msgs[0].content
+
+
+def test_judge_chat_pins_temperature_and_reasoning_effort():
+    # Issue #305: the judge must not run on the server-default effort — at
+    # default the model put its CoT in the content channel and the JSON label
+    # never appeared (judge infra fail). Both judge legs share this one call
+    # shape.
+    calls: list[tuple[list, dict]] = []
+
+    class _Client:
+        def chat(self, messages, **kwargs):
+            calls.append((messages, kwargs))
+            return object()
+
+    msgs = judge_messages("A.", "E.")
+    judge_chat(_Client(), msgs)
+    assert calls == [(msgs, {"temperature": 0.0, "reasoning_effort": JUDGE_REASONING_EFFORT})]
+    assert JUDGE_REASONING_EFFORT == "low"
 
 
 def test_evidence_bounded_for_judge_prompt():
