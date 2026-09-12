@@ -36,14 +36,24 @@ case "$ARTDIR" in
     *) ARTDIR="$(pwd)/$ARTDIR" ;;
 esac
 
+# Operator console (ADR-0004): the oauth-proxy member exists only when the
+# connected pack host had a recorded digest; older bundles simply lack it.
+OAUTH_TAR=""
+[ -f "$ARTDIR/oauth-proxy-image.tar" ] && OAUTH_TAR="oauth-proxy-image.tar"
+LOADED_COUNT=4
+[ -n "$OAUTH_TAR" ] && LOADED_COUNT=5
+
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "==> [dryrun] Member checksum verification skipped"
     echo "[dryrun] skopeo copy docker-archive:$ARTDIR/qdrant-image.tar docker://$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged"
     echo "[dryrun] skopeo copy docker-archive:$ARTDIR/jaeger-image.tar docker://$INTERNAL_REGISTRY/jaegertracing/jaeger:v2.20.0"
     echo "[dryrun] skopeo copy docker-archive:$ARTDIR/app-ingest-$IMAGE_SHA.tar docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA"
     echo "[dryrun] skopeo copy docker-archive:$ARTDIR/app-agent-$IMAGE_SHA.tar docker://$INTERNAL_REGISTRY/qdrant-pdf-rag-agent:$IMAGE_SHA"
+    if [ -n "$OAUTH_TAR" ]; then
+        echo "[dryrun] skopeo copy docker-archive:$ARTDIR/$OAUTH_TAR docker://$INTERNAL_REGISTRY/openshift4/ose-oauth-proxy:v4.14"
+    fi
     echo ""
-    echo "Loaded 4 images into $INTERNAL_REGISTRY (dry-run)."
+    echo "Loaded $LOADED_COUNT images into $INTERNAL_REGISTRY (dry-run)."
     next_step "make airgap-deploy"
     exit 0
 fi
@@ -77,6 +87,9 @@ check_image_digest qdrant-image.tar qdrant_digest
 check_image_digest jaeger-image.tar jaeger_digest
 check_image_digest "app-ingest-$IMAGE_SHA.tar" ingest_digest
 check_image_digest "app-agent-$IMAGE_SHA.tar" agent_digest
+if [ -n "$OAUTH_TAR" ]; then
+    check_image_digest "$OAUTH_TAR" oauth_proxy_digest
+fi
 
 load() {
     src=$1
@@ -95,7 +108,11 @@ load qdrant-image.tar "$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged"
 load jaeger-image.tar "$INTERNAL_REGISTRY/jaegertracing/jaeger:v2.20.0"
 load "app-ingest-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA"
 load "app-agent-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-agent:$IMAGE_SHA"
+if [ -n "$OAUTH_TAR" ]; then
+    # ADR-0004 console Route: same tag the prod overlay renders for the sidecar.
+    load "$OAUTH_TAR" "$INTERNAL_REGISTRY/openshift4/ose-oauth-proxy:v4.14"
+fi
 
 echo ""
-echo "Loaded 4 images into $INTERNAL_REGISTRY (SHA tag: $IMAGE_SHA)."
+echo "Loaded $LOADED_COUNT images into $INTERNAL_REGISTRY (SHA tag: $IMAGE_SHA)."
 next_step "make airgap-deploy"

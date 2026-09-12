@@ -8,6 +8,7 @@ settings.llm_model_reasoning; there is deliberately no other model knob.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -23,7 +24,7 @@ log = logging.getLogger(__name__)
 
 from mainframe_rag.agent.tokenizer import estimate_tokens
 from mainframe_rag.config import Settings, bearer_auth_headers
-from mainframe_rag.ports import ChatMessage, ChatResult, Tokenizer, TokenUsage
+from mainframe_rag.ports import ChatMessage, ChatResult, LLMClient, Tokenizer, TokenUsage
 from mainframe_rag.regexes import find_message_ids
 from mainframe_rag.retrieve.query import SearchHit
 
@@ -971,3 +972,270 @@ def parse_answer(
         cites_rejected_shape_bad=cites_rejected_shape_bad,
         cites_rejected_unmapped=cites_rejected_unmapped,
     )
+
+
+_ABEND_RE = re.compile(
+    r"\b(?:abend\s*=?\s*(?=[0-9a-f]*\d)[su]?[0-9a-f]{3,4}|[su](?=[0-9a-f]{0,3}\d)[0-9a-f]{3,4})\b",
+    re.IGNORECASE,
+)
+_MAX_PRIOR_TURN_CHARS = 1000
+
+
+async def condense_query(
+    llm: LLMClient,
+    messages: list[ChatMessage],
+    settings: Settings | None = None,
+    reasoning_effort: str | None = None,
+    temperature: float | None = None,
+) -> str:
+    """Condense a multi-turn follow-up into a standalone search query.
+    Bypasses LLM rewrite if the latest turn already contains explicit message,
+    abend, or member identifiers."""
+    if not messages:
+        return ""
+    latest_text = messages[-1].content
+    from mainframe_rag.retrieve.filters import parse_query
+
+    # Heuristic bypass: If message contains explicit codes (e.g. IEE400I, S0C4, DFS058I), search directly
+    if parse_query(latest_text).has_identifiers or bool(_ABEND_RE.search(latest_text)):
+        return latest_text
+
+    history_turns = []
+    for m in [msg for msg in messages[:-1] if msg.role != "system"][-4:]:
+        history_turns.append(f"{m.role.capitalize()}: {m.content[:_MAX_PRIOR_TURN_CHARS]}")
+
+    if not history_turns:
+        return latest_text
+
+    history_str = "\n".join(history_turns)
+    prompt = [
+        ChatMessage(
+            role="system",
+            content=(
+                "Given the conversation history and a follow-up question, rephrase the follow-up "
+                "into a standalone search query for mainframe technical manuals. "
+                "Preserve all technical keywords, subsystem names, and error context. "
+                "Do NOT answer the question. Return ONLY the search query string."
+            ),
+        ),
+        ChatMessage(
+            role="user",
+            content=f"Conversation history:\n{history_str}\n\nFollow-up question: {latest_text}\n\nStandalone search query:",
+        ),
+    ]
+    effort = reasoning_effort or (settings.llm_reasoning_effort_simple if settings else "low")
+    temp = temperature if temperature is not None else (settings.llm_temperature if settings else 0.0)
+    try:
+        res = llm.chat(prompt, reasoning_effort=effort, temperature=temp)
+        if inspect.isawaitable(res):
+            res = await res
+        condensed = res.content.strip() if hasattr(res, "content") else str(res).strip()
+        condensed = re.sub(r'^(Standalone (search )?query:|"|\')\s*', "", condensed, flags=re.IGNORECASE)
+        condensed = condensed.strip('"\'')
+        return condensed or latest_text
+    except Exception as exc:  # noqa: BLE001 — coreference fallback must not abort chat
+        log.warning("query condensation failed (%s); using raw latest text", exc)
+        return latest_text
+
+
+def build_chat_messages(
+    messages: list[ChatMessage],
+    hits: list[SearchHit],
+    product: str | None = None,
+    version: str | None = None,
+    splunk_context: str | None = None,
+    max_context_chars: int = 8000,
+    max_chunk_chars: int = 3000,
+    max_chunk_chars_narrative: int | None = None,
+    splunk_context_max_chars: int = 4000,
+    complexity: str | None = None,
+    tokenizer: Tokenizer | None = None,
+    settings: Settings | None = None,
+    order: Literal["retrieval", "stable_cache"] = "retrieval",
+) -> list[ChatMessage]:
+    """Build multi-turn chat message list for reasoning chat completions.
+
+    - System message: authoritative system prompt (with complex extension if applicable).
+    - Prior turns: user and assistant messages from history (sliding window).
+      Raw manual excerpts in past assistant messages are pruned and character-capped
+      to preserve token budget.
+    - Active turn (last user message): injected with current sysplex/splunk context,
+      freshly retrieved manual excerpts for the active question, and citation tail instructions.
+    - Tokenizer-aware verification: verifies whole prompt [system, *history, active]
+      against verify_limit with two-tier trimming (Tier 1: active excerpts; Tier 2: history turns).
+    """
+    if not messages:
+        return []
+
+    latest_user_msg = messages[-1]
+    active_query = latest_user_msg.content
+
+    if complexity is None:
+        complexity = classify_query_complexity(active_query)
+
+    system_content = (
+        SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
+        if complexity == "complex"
+        else SYSTEM_PROMPT
+    )
+
+    max_turns = settings.chat_max_turns if settings is not None else 10
+    max_prior_chars = (
+        settings.chat_max_prior_turn_chars if settings is not None else _MAX_PRIOR_TURN_CHARS
+    )
+
+    prior_messages: list[ChatMessage] = []
+    raw_history = [m for m in messages[:-1] if m.role != "system"][-max_turns:]
+    for m in raw_history:
+        text = m.content.strip()
+        if m.role == "assistant" and "Retrieved manual excerpts:" in text:
+            parts = text.split("Retrieved manual excerpts:")
+            text = parts[0].strip()
+        if len(text) > max_prior_chars:
+            text = text[:max_prior_chars] + " ... [history truncated]"
+        prior_messages.append(ChatMessage(role=m.role, content=text))
+
+    context_entries: list[str] = []
+    context_bits = []
+    if product:
+        context_bits.append(f"product: {product}")
+    if version:
+        context_bits.append(f"version: {version}")
+    if context_bits:
+        context_entries.append("Sysplex context: " + ", ".join(context_bits))
+    if splunk_context:
+        splunk_text = splunk_context.strip()
+        if len(splunk_text) > splunk_context_max_chars:
+            splunk_text = splunk_text[:splunk_context_max_chars].rstrip() + _TRUNCATED_SUFFIX
+        context_entries.append(
+            "Splunk context (live system observation; join key is the message ID):\n"
+            + splunk_text
+        )
+    question_text = "Question: " + active_query
+    example_cite = (
+        hits[0].cite
+        if hits
+        else "SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17"
+    )
+    tail_part = (
+        "Please answer based strictly on the retrieved manual excerpts above and conclude with the 'Citations:' section copying the exact citation line for each excerpt used, for example:\n"
+        f"Citations:\n{example_cite}"
+    )
+
+    packed: list[tuple[str, str]] = []
+    if tokenizer is not None:
+        if settings is None:
+            raise ValueError("settings is required when a tokenizer is provided")
+        model_len = settings.llm_max_model_len
+        reserved = settings.llm_reserved_output_tokens
+        margin = settings.llm_token_safety_margin
+        narrative_token_cap = settings.llm_max_chunk_tokens_narrative
+        thinking_reserve = (
+            settings.llm_thinking_reserve_tokens_complex if complexity == "complex" else 0
+        )
+
+        history_tokens = sum(estimate_tokens(m.content) for m in prior_messages)
+        fixed_tokens = (
+            estimate_tokens(
+                system_content
+                + "\n"
+                + "\n".join(context_entries)
+                + "\n"
+                + question_text
+                + "\n"
+                + tail_part
+            )
+            + history_tokens
+        )
+
+        budget_tokens = max(100, model_len - reserved - thinking_reserve - margin - fixed_tokens)
+
+        total_tokens = 0
+        for i, hit in enumerate(hits, 1):
+            text = hit.text.strip()
+            if hit.chunk_type not in ("syntax", "message", "table"):
+                if max_chunk_chars_narrative is not None and len(text) > max_chunk_chars_narrative:
+                    text = text[:max_chunk_chars_narrative].rstrip() + _TRUNCATED_SUFFIX
+                elif complexity == "complex" and estimate_tokens(text) > narrative_token_cap:
+                    text = text[: int(narrative_token_cap * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX
+            elif len(text) > max_chunk_chars:
+                text = text[:max_chunk_chars].rstrip() + _TRUNCATED_SUFFIX
+            header = f"[{i}] {hit.cite}"
+            chunk_tokens = estimate_tokens(f"{header}\n{text}")
+            if total_tokens + chunk_tokens > budget_tokens and packed:
+                rem_tokens = budget_tokens - total_tokens
+                body_rem_tokens = rem_tokens - estimate_tokens(header)
+                if body_rem_tokens > 60:
+                    packed.append(
+                        (
+                            header,
+                            text[: int(body_rem_tokens * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX,
+                        )
+                    )
+                break
+            packed.append((header, text))
+            total_tokens += chunk_tokens
+
+        verify_limit = model_len - reserved - thinking_reserve - margin
+        max_rounds = _MAX_TRIM_ROUNDS * 2 + len(prior_messages)
+        for _ in range(max_rounds):
+            candidate = [
+                ChatMessage(role="system", content=system_content),
+                *prior_messages,
+                ChatMessage(
+                    role="user",
+                    content=_user_content(
+                        _assemble_blocks(context_entries, question_text, packed, tail_part)
+                    ),
+                ),
+            ]
+            used = tokenizer.count_messages(candidate)
+            if used <= verify_limit:
+                break
+            overshoot = used - verify_limit
+            if packed:
+                cut = int(overshoot * _APPROX_CHARS_PER_TOKEN) + _TRIM_OVERCUT_CHARS
+                header, body = packed[-1]
+                trimmed = body[:-cut] if cut < len(body) else ""
+                if len(trimmed.rstrip()) < _MIN_TAIL_CHARS:
+                    packed.pop()
+                else:
+                    packed[-1] = (header, trimmed.rstrip() + _TRUNCATED_SUFFIX)
+            elif prior_messages:
+                prior_messages.pop(0)
+            else:
+                break
+    else:
+        total_chars = 0
+        for i, hit in enumerate(hits, 1):
+            text = hit.text.strip()
+            narrative_cap = (
+                max_chunk_chars_narrative
+                if max_chunk_chars_narrative is not None
+                else max_chunk_chars
+            )
+            chunk_cap = (
+                max_chunk_chars
+                if hit.chunk_type in ("syntax", "message", "table")
+                else min(max_chunk_chars, narrative_cap)
+            )
+            if len(text) > chunk_cap:
+                text = text[:chunk_cap].rstrip() + _TRUNCATED_SUFFIX
+            header = f"[{i}] {hit.cite}"
+            chunk_len = len(header) + len(text) + 2
+            if total_chars + chunk_len > max_context_chars:
+                rem = max_context_chars - total_chars - len(header) - 2
+                if rem > 200:
+                    packed.append((header, text[:rem].rstrip() + _TRUNCATED_SUFFIX))
+                break
+            packed.append((header, text))
+            total_chars += chunk_len
+
+    ordered = order_prompt_blocks(
+        _assemble_blocks(context_entries, question_text, packed, tail_part), order
+    )
+    return [
+        ChatMessage(role="system", content=system_content),
+        *prior_messages,
+        ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),
+    ]

@@ -10,6 +10,8 @@ dependencies = [
     "fastembed",
     "httpx2",
     "fastapi",
+    "jinja2",
+    "python-multipart",
     "uvicorn",
     "pydantic",
     "pydantic-settings",

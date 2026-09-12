@@ -15,6 +15,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from mainframe_rag import tracing as tracing_mod
+from mainframe_rag.agent import answer_core as answer_core_mod
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.retrieve import query as query_mod
@@ -300,6 +301,10 @@ def client(monkeypatch):
         monkeypatch.setattr(app_mod, "llm", FakeLLM())
         monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
         monkeypatch.setattr(app_mod, "tracer", provider.get_tracer("test"))
+        # answer_core owns prompt.build/llm.chat now; its import-time proxy
+        # tracer only resolves to a globally registered provider, and these
+        # tests never register one (same pattern as retrieve.query above).
+        monkeypatch.setattr(answer_core_mod, "tracer", provider.get_tracer("test"))
         yield c, exporter
 
 

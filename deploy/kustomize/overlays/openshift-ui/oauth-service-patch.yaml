@@ -1,0 +1,14 @@
+# Service port for the oauth-proxy (ADR-0004). The serving-cert annotation
+# makes the Service CA controller create `rag-agent-tls` (mounted by the
+# sidecar); the Route targets port 8443 with reencrypt termination.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-agent
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: rag-agent-tls
+spec:
+  ports:
+    - name: oauth
+      port: 8443
+      targetPort: oauth

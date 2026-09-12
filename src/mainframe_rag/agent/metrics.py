@@ -58,7 +58,11 @@ HITS_BOUNDARIES: tuple[float, ...] = (0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 
 
 # The only endpoints RED instruments observe. Anything else (scrapes,
 # healthz, unknown paths) must not pollute request series.
-_METRIC_ENDPOINTS = {"search": "/v1/search", "answer": "/v1/answer"}
+_METRIC_ENDPOINTS: dict[str, tuple[str, ...]] = {
+    "search": ("/v1/search",),
+    "answer": ("/v1/answer",),
+    "chat": ("/v1/chat", "/v1/chat/completions"),
+}
 
 _provider: MeterProvider | None = None
 _platform_collectors_registered = False
@@ -129,8 +133,8 @@ def endpoint_for_path(path: str) -> str | None:
     is not a product endpoint (scrapes, probes, and unknown routes stay out
     of request series). One mapping, shared by every error handler."""
     clean = path.rstrip("/") or "/"
-    for endpoint, route in _METRIC_ENDPOINTS.items():
-        if clean == route:
+    for endpoint, routes in _METRIC_ENDPOINTS.items():
+        if clean in routes:
             return endpoint
     return None
 

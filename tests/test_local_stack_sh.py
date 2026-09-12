@@ -37,8 +37,25 @@ def test_dryrun_plan_order_and_stages():
     assert "probe_gateway.py" in lines[4]
     assert "ingest" in lines[5] and "skipped" in lines[5]
     assert "uvicorn" in lines[6] and "OTEL_EXPORTER_OTLP_ENDPOINT" in lines[6]
-    assert "/v1/search" in lines[7]
+    assert "UI_ENABLED=true" in lines[6]
+    assert "/v1/search" in lines[7] and "/ui" in lines[7]
     assert "v1.search" in lines[8] and "mainframe-rag-agent" in lines[8]
+
+
+def test_dryrun_ui_enabled_by_default():
+    r = _run()
+    assert r.returncode == 0, r.stderr
+    agent = next(ln for ln in r.stdout.splitlines() if "uvicorn" in ln)
+    assert "UI_ENABLED=true" in agent
+
+
+def test_dryrun_ui_disabled_override_reflected():
+    r = _run({"UI_ENABLED": "false"})
+    assert r.returncode == 0, r.stderr
+    agent = next(ln for ln in r.stdout.splitlines() if "uvicorn" in ln)
+    assert "UI_ENABLED=false" in agent
+    smoke = next(ln for ln in r.stdout.splitlines() if "/v1/search" in ln)
+    assert "/ui" not in smoke and "UI disabled" in smoke
 
 
 def test_dryrun_ingest_names_its_own_service(tmp_path):

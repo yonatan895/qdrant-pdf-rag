@@ -30,6 +30,10 @@ LOCAL_AGENT_PORT="${LOCAL_AGENT_PORT:-8080}"
 QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:6333}"
 QDRANT_COLLECTION="${QDRANT_COLLECTION:-mainframe_manuals}"
 DENSE_DIM="${DENSE_DIM:-1024}"
+# Operator console (ADR-0004): on for the local stack, which stands in for
+# the prod overlay (UI_ENABLED=true there too); set UI_ENABLED=false to
+# exercise the fail-closed route set locally.
+UI_ENABLED="${UI_ENABLED:-true}"
 GATEWAY_PORT="${GATEWAY_PORT:-4000}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${TMPDIR:-/tmp}/local-stack-gateway-${GATEWAY_PORT}.env}"
 JAEGER_PORT="${JAEGER_PORT:-16686}"
@@ -97,8 +101,12 @@ if [ "$DRYRUN" = "1" ]; then
     else
         echo "[plan] 6. ingest:  skipped (CORPUS_DIR unset)"
     fi
-    echo "[plan] 7. agent:   OTEL_EXPORTER_OTLP_ENDPOINT=$OTEL_ENDPOINT $PY -m uvicorn mainframe_rag.agent.app:app --port $LOCAL_AGENT_PORT"
-    echo "[plan] 8. smoke:   POST http://127.0.0.1:$LOCAL_AGENT_PORT/v1/search"
+    echo "[plan] 7. agent:   UI_ENABLED=$UI_ENABLED OTEL_EXPORTER_OTLP_ENDPOINT=$OTEL_ENDPOINT $PY -m uvicorn mainframe_rag.agent.app:app --port $LOCAL_AGENT_PORT"
+    if [ "$UI_ENABLED" = "true" ]; then
+        echo "[plan] 8. smoke:   POST http://127.0.0.1:$LOCAL_AGENT_PORT/v1/search + GET /ui"
+    else
+        echo "[plan] 8. smoke:   POST http://127.0.0.1:$LOCAL_AGENT_PORT/v1/search (UI disabled)"
+    fi
     echo "[plan] 9. trace:   poll $JAEGER_UI_URL for service $AGENT_SERVICE_NAME + a v1.search span (timeout ${OTEL_TRACE_TIMEOUT}s)"
     exit 0
 fi
@@ -234,7 +242,7 @@ if [ "$_health_code" = "200" ]; then
     die "port $LOCAL_AGENT_PORT already serves — stop the other agent or set LOCAL_AGENT_PORT"
 fi
 step "Starting agent on :$LOCAL_AGENT_PORT (OTLP $OTEL_ENDPOINT)"
-OTEL_SERVICE_NAME="$AGENT_SERVICE_NAME" LLM_STREAM=true "$PY" -m uvicorn mainframe_rag.agent.app:app \
+OTEL_SERVICE_NAME="$AGENT_SERVICE_NAME" LLM_STREAM=true UI_ENABLED="$UI_ENABLED" "$PY" -m uvicorn mainframe_rag.agent.app:app \
     --host 127.0.0.1 --port "$LOCAL_AGENT_PORT" >"$LOG_DIR/local-stack-agent.log" 2>&1 &
 AGENT_PID=$!
 
@@ -254,6 +262,12 @@ _smoke_code="$(curl -s -m 30 -o /dev/null -w '%{http_code}' -X POST \
     -H 'Content-Type: application/json' \
     -d '{"query": "system parameter syntax", "top_k": 3}' 2>/dev/null || true)"
 [ "$_smoke_code" = "200" ] || die "smoke search returned HTTP $_smoke_code — see $LOG_DIR/local-stack-agent.log"
+
+if [ "$UI_ENABLED" = "true" ]; then
+    step "Smoke: GET /ui (operator console)"
+    _ui_code="$(curl -s -m 10 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$LOCAL_AGENT_PORT/ui" 2>/dev/null || true)"
+    [ "$_ui_code" = "200" ] || die "console /ui returned HTTP $_ui_code — see $LOG_DIR/local-stack-agent.log"
+fi
 
 # Tracing is only "active" when a span actually landed: poll the Jaeger
 # query API (batch export means spans arrive seconds after the request).
@@ -276,12 +290,19 @@ if [ -n "$CORPUS_DIR" ]; then
     step "Trace check: ingest traces present (service $INGEST_SERVICE_NAME)"
 fi
 
+if [ "$UI_ENABLED" = "true" ]; then
+    CONSOLE_LINE=" Console (ours)      : http://127.0.0.1:$LOCAL_AGENT_PORT/ui  (ADR-0004, UI_ENABLED=true)"
+else
+    CONSOLE_LINE=" Console (ours)      : disabled (UI_ENABLED=$UI_ENABLED)"
+fi
+
 cat <<EOF
 
 ============================================================================
  FULL LOCAL PRODUCTION SIMULATION UP
 ============================================================================
  Agent (ours)        : http://127.0.0.1:$LOCAL_AGENT_PORT  (log $LOG_DIR/local-stack-agent.log)
+$CONSOLE_LINE
  Qdrant (ours)       : $QDRANT_URL  collection '$QDRANT_COLLECTION'
  Gateway (platform)  : http://localhost:$GATEWAY_PORT/v1  (log $LOG_DIR/local-stack-gateway.log)
  Jaeger (ours)       : $JAEGER_UI_URL  (OTLP $OTEL_ENDPOINT, service $AGENT_SERVICE_NAME)

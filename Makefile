@@ -228,12 +228,12 @@ CONCURRENCY ?= 8
 DURATION ?= 30
 REQUEST_TIMEOUT ?= 30
 eval eval-baseline eval-draft eval-answers eval-report eval-html eval-compare \
-	eval-paraphrase capture-pool \
+	eval-paraphrase eval-chat capture-pool \
 	gate-l1 harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline \
 	harness-l4 harness-l4-record: \
 	export EMBED_MODE := $(EMBED_MODE)
 eval eval-baseline eval-draft eval-answers eval-report eval-html eval-compare \
-	eval-paraphrase capture-pool \
+	eval-paraphrase eval-chat capture-pool \
 	gate-l1 harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline \
 	harness-l4 harness-l4-record: \
 	export VENUE := $(VENUE)
@@ -316,6 +316,16 @@ eval-answers: | .venv
 	@mkdir -p $(BUNDLE_DIR)
 	.venv/bin/python scripts/eval_answers.py --max-queries $(or $(N),24) \
 	  --out $(BUNDLE_DIR)/eval-answers-report.json --summary $(BUNDLE_DIR)/eval-answers-summary.md
+
+# Multi-turn condensation A/B (ADR-0004): literal vs condensed follow-up
+# retrieval on the dev golden set. Live stack only (Qdrant + embed + reasoning);
+# the report is evidence for a future CHAT_CONDENSE_ENABLED decision, never a
+# PR gate (default flips are dedicated-PR work, AGENTS.md).
+.PHONY: eval-chat
+eval-chat: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/eval_chat.py --limit $(or $(N),12) \
+	  --out $(BUNDLE_DIR)/eval-chat-report.json --summary $(BUNDLE_DIR)/eval-chat-summary.md
 
 # Layered harness (PR A: L1 retrieval + promotion gate). Snapshot-pinned
 # index, per-class recall@5/@8 + MRR + nDCG@8, paired-bootstrap CIs against
@@ -492,9 +502,13 @@ local-stack:
 test-vllm-e2e: | .venv
 	PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py $(if $(MODEL),--model "$(MODEL)",) $(if $(VLLM_URL),--vllm-url "$(VLLM_URL)",) $(if $(EMBED_MODEL),--embed-model "$(EMBED_MODEL)",) $(if $(EMBED_URL),--embed-url "$(EMBED_URL)",) $(if $(DENSE_DIM),--dense-dim "$(DENSE_DIM)",) $(if $(EMBED_MODE),--embed-mode "$(EMBED_MODE)",)
 
-# Run agent locally under uvicorn (LLM_STREAM=true enables TTFT streaming for L3)
+# Run agent locally under uvicorn (LLM_STREAM=true enables TTFT streaming for
+# L3). The operator console (ADR-0004) is served by the agent itself: the full
+# stack (`make local-stack`) enables it by default; this component runner
+# honors UI_ENABLED -- `UI_ENABLED=true make run-agent` opens
+# http://localhost:$(or $(PORT),8080)/ui, unset keeps the app fail-closed.
 run-agent: | .venv
-	LLM_STREAM=true .venv/bin/python -m uvicorn mainframe_rag.agent.app:app --host 0.0.0.0 --port $(or $(PORT),8080)
+	LLM_STREAM=true $(if $(UI_ENABLED),UI_ENABLED="$(UI_ENABLED)",) .venv/bin/python -m uvicorn mainframe_rag.agent.app:app --host 0.0.0.0 --port $(or $(PORT),8080)
 
 
 # ---------------------------------------------------------------- e2e demo
@@ -518,6 +532,6 @@ help:
 	@echo "Benchmarks     : bench (regression gate vs baseline) | bench-baseline (re-record) | loadtest | harness-l3 | harness-l4 (answer-quality gate, RC)"
 	@echo "Accuracy       : eval (golden-set recall/MRR) | eval-baseline (re-record) | eval-draft (label helper) | capture-pool (record prefetch pools, RC)"
 	@echo "Reports & Demo : eval-report eval-html eval-compare | bench-report bench-html bench-compare | query-demo ask"
-	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | local-gateway (LiteLLM in front of all three backends on :4000) | local-gateway-stop | local-jaeger (OTLP/Jaeger v2 on :4318, UI :16686) | local-jaeger-stop | local-stack (full prod simulation: Qdrant + gateway + Jaeger + agent) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
+	@echo "Local vLLM / GPU : local-vllm (serve reasoning model) | local-vllm-embed (serve embedding model) | local-vllm-rerank (serve reranker, needs BUDGET_PROFILE with a rerank role) | local-gateway (LiteLLM in front of all three backends on :4000) | local-gateway-stop | local-jaeger (OTLP/Jaeger v2 on :4318, UI :16686) | local-jaeger-stop | local-stack (full prod simulation: Qdrant + gateway + Jaeger + agent + /ui console) | run-agent (uvicorn with LLM_STREAM=true) | test-vllm-e2e (automated end-to-end suite)"
 	@echo "Quality        : test lint typecheck check"
 	@echo "See README 'Air-gap workflow' section and docs/architecture.md."

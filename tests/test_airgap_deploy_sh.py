@@ -116,6 +116,7 @@ if [ "$1" = "kustomize" ] || [ "$1" = "build" ]; then
   case "$2" in
     *jaeger*) cat {jaeger_stub} ;;
     *servicemonitor*) cat {servicemonitor_stub} ;;
+    *openshift-ui*) cat {oauth_stub} ;;
     *) cat {stub_yaml} ;;
   esac
   exit 0
@@ -134,16 +135,22 @@ def tree(tmp_path):
     shutil.copy(REPO / "overlays" / "openshift" / "values.yaml", tmp_path / "overlays" / "openshift")
     shutil.copytree(REPO / "deploy" / "kustomize" / "jaeger", tmp_path / "deploy" / "kustomize" / "jaeger")
     shutil.copytree(REPO / "deploy" / "kustomize" / "servicemonitor", tmp_path / "deploy" / "kustomize" / "servicemonitor")
+    shutil.copy(REPO / "images.txt", tmp_path / "images.txt")
     stub_yaml = tmp_path / "stub-kustomize.yaml"
     stub_yaml.write_text(STUB_KUSTOMIZE)
     jaeger_stub = tmp_path / "stub-jaeger.yaml"
     jaeger_stub.write_text(STUB_JAEGER)
     servicemonitor_stub = tmp_path / "stub-servicemonitor.yaml"
     servicemonitor_stub.write_text(STUB_SERVICEMONITOR)
+    oauth_stub = tmp_path / "stub-kustomize-ui.yaml"
+    oauth_stub.write_text(
+        STUB_KUSTOMIZE
+        + "        - name: oauth-proxy\n          image: __OAUTH_PROXY_IMAGE__\n"
+    )
     helm_log = tmp_path / "helm-args.log"
     for name in ("helm", "kubectl", "oc", "kustomize"):
         p = tmp_path / "bin" / name
-        p.write_text(STUB_BIN.format(stub_yaml=stub_yaml, jaeger_stub=jaeger_stub, servicemonitor_stub=servicemonitor_stub))
+        p.write_text(STUB_BIN.format(stub_yaml=stub_yaml, jaeger_stub=jaeger_stub, servicemonitor_stub=servicemonitor_stub, oauth_stub=oauth_stub))
         p.chmod(0o755)
     return tmp_path, helm_log
 
@@ -480,3 +487,27 @@ def test_gateway_overlay_renders_endpoint_order_token():
     """The real prod overlay carries the order token deploy.sh substitutes."""
     real = (REPO / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml").read_text()
     assert re.search(r"- name: RERANK_ENDPOINT_ORDER\n\s+value: __RERANK_ENDPOINT_ORDER__", real)
+
+
+def test_agent_route_renders_oauth_sidecar_and_reencrypt_route(tree):
+    """ADR-0004: AGENT_ROUTE=true renders the openshift-ui overlay (oauth
+    sidecar on the internal registry ref) and applies a reencrypt Route to
+    the console port; the dry-run keeps rendering cluster-free."""
+    tmp_path, _ = tree
+    images = (tmp_path / "images.txt").read_text()
+    (tmp_path / "images.txt").write_text(images.replace("sha256:PENDING", "sha256:" + "b" * 64))
+    r = _run(tree, ("AGENT_ROUTE", "true"), ("AIRGAP_DRYRUN", "1"))
+    assert r.returncode == 0, r.stderr
+    rendered = (tmp_path / "dist" / "agent-rendered.yaml").read_text()
+    assert "reg.internal/openshift4/ose-oauth-proxy:v4.14" in rendered
+    assert "__OAUTH_PROXY_IMAGE__" not in rendered
+    assert "Route rag-agent -> svc port oauth, reencrypt, timeout 300s" in r.stdout
+
+
+def test_agent_route_fails_closed_on_pending_oauth_pin(tree):
+    """The repo images.txt ships sha256:PENDING: enabling the console Route
+    without a recorded digest must stop the deploy with the fix spelled out."""
+    r = _run(tree, ("AGENT_ROUTE", "true"))
+    assert r.returncode != 0
+    assert "oauth-proxy digest recorded" in r.stderr
+    assert "sha256:PENDING" in r.stderr

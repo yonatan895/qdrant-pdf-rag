@@ -1,0 +1,47 @@
+# oauth-proxy sidecar (ADR-0004): terminates the external Route on 8443 and
+# forwards authenticated requests over loopback to FastAPI on 8080. The TLS
+# serving cert is provisioned by the Service CA controller from the Service
+# annotation (service.beta.openshift.io/serving-cert-secret-name); the cookie
+# secret is operator-created (deploy.sh fails closed without it).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-agent
+spec:
+  template:
+    spec:
+      serviceAccountName: rag-agent
+      containers:
+        - name: oauth-proxy
+          image: __OAUTH_PROXY_IMAGE__
+          imagePullPolicy: IfNotPresent
+          args:
+            - --provider=openshift
+            - --https-address=:8443
+            - --upstream=http://127.0.0.1:8080
+            - --tls-cert=/etc/tls/private/tls.crt
+            - --tls-key=/etc/tls/private/tls.key
+            - --cookie-secret-file=/etc/oauth/cookie-secret
+            - --email-domain=*
+            - --openshift-service-account=rag-agent
+            - --skip-auth-regex=^/healthz.*$
+          ports:
+            - name: oauth
+              containerPort: 8443
+          volumeMounts:
+            - name: oauth-tls
+              mountPath: /etc/tls/private
+              readOnly: true
+            - name: oauth-cookie
+              mountPath: /etc/oauth
+              readOnly: true
+          resources:
+            requests: { cpu: "50m", memory: 64Mi }
+            limits: { cpu: "200m", memory: 128Mi }
+      volumes:
+        - name: oauth-tls
+          secret:
+            secretName: rag-agent-tls
+        - name: oauth-cookie
+          secret:
+            secretName: rag-agent-oauth-cookie

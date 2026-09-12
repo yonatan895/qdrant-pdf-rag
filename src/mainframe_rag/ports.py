@@ -10,7 +10,7 @@ structurally — parameter names/returns mirror the real client), HttpxLLMClient
 from __future__ import annotations
 
 from collections.abc import Awaitable
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,8 +22,10 @@ SparseVector = tuple[list[int], list[float]]
 
 
 class ChatMessage(BaseModel):
-    role: str
-    content: str
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["system", "user", "assistant"]
+    content: str = Field(min_length=1)
 
 
 @runtime_checkable

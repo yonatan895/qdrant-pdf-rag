@@ -176,6 +176,13 @@ class Settings(BaseSettings):
     llm_tokenize_timeout_s: float = Field(default=5.0, gt=0.0, le=60.0)
     llm_stream: bool = Field(default=False, description="Stream chat completions to measure TTFT")
 
+    # Multi-turn chat engine and operator console
+    chat_condense_enabled: bool = False
+    chat_max_body_chars: int = Field(default=32768, ge=1000, le=100000)
+    chat_max_turns: int = Field(default=10, ge=1, le=50)
+    chat_max_prior_turn_chars: int = Field(default=1000, ge=200, le=5000)
+    ui_enabled: bool = False
+
     # Bounded httpx2 connection-establishment retries (0-5). These fire only
     # when the request was never sent (DNS/refused), so they are safe for any
     # method. There is deliberately no request-level retry anywhere.

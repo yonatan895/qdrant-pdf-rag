@@ -9,3 +9,11 @@ docker.io/qdrant/qdrant:v1.19.0-unprivileged                           sha256:a0
 # Upstream Jaeger tag is 2.20.0; load.sh and jaeger kustomize use v2.20.0.
 cr.jaegertracing.io/jaegertracing/jaeger:2.20.0                         sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8
 registry.access.redhat.com/ubi9/python-314-minimal:9.8                 sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba
+# ADR-0004 operator console: Red Hat oauth-proxy sidecar terminates external
+# ingress on 8443. Pulling it needs a Red Hat registry login (unlike the
+# access.redhat.com UBI pin above), so record the digest on the connected host
+# after `skopeo login registry.redhat.io`:
+#   skopeo inspect --no-tags docker://registry.redhat.io/openshift4/ose-oauth-proxy:v4.14 | jq -r .Digest
+# While this stays sha256:PENDING, pack.sh skips the image (CI has no Red Hat
+# credentials) and `AGENT_ROUTE=true` deploy fails closed.
+registry.redhat.io/openshift4/ose-oauth-proxy:v4.14                     sha256:PENDING

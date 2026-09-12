@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
 from mainframe_rag.agent.answer import as_chat_result
@@ -115,3 +116,43 @@ async def fallback_stream(llm: LLMClient, messages: list, reasoning_effort: str,
     cr = as_chat_result(await chat_call if inspect.isawaitable(chat_call) else chat_call)
     yield {"type": "token", "delta": cr.content, "token": cr.content, "ttft_ms": cr.ttft_ms}
     yield {"type": "done", "finish_reason": cr.finish_reason, "usage": cr.usage, "ttft_ms": cr.ttft_ms}
+
+
+def format_openai_chunk(
+    request_id: str,
+    model: str,
+    delta_content: str | None = None,
+    finish_reason: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> str:
+    """Format an SSE event in standard OpenAI chat.completion.chunk format:
+    data: {"id": "...", "object": "chat.completion.chunk", ...}\n\n
+    """
+    choice: dict[str, Any] = {
+        "index": 0,
+        "delta": {"content": delta_content} if delta_content is not None else {},
+        "finish_reason": finish_reason,
+    }
+    if extra:
+        choice.update(extra)
+    payload = {
+        "id": request_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [choice],
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def format_openai_done() -> str:
+    """Terminal marker for OpenAI chat completion streams."""
+    return "data: [DONE]\n\n"
+
+
+def format_openai_error(code: str = SSE_ERROR_CODE, message: str = SSE_ERROR_MESSAGE) -> str:
+    """Format an SSE error event for OpenAI-compatible chat streams:
+    data: {"error": {"code": "...", "message": "..."}}\n\n
+    """
+    payload = {"error": {"code": code, "message": message}}
+    return f"data: {json.dumps(payload)}\n\n"

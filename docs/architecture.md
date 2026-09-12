@@ -93,7 +93,7 @@ Local simulation exists so agent/ingest always exercise the production gateway w
 | `bm25-weights` | Baked in images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 
 - **Storage Constraint:** Qdrant persistent data volume **must** be RWO Block storage (NFS and object storage are refused). Ingest work volume is also RWO Block. The corpus volume may be mounted as read-only NFS or PVC.
-- **Networking:** ClusterIP services only. No public Route to Qdrant. Agent Route is optional (`AGENT_ROUTE=true`). Inter-node Qdrant gossip is plaintext on the CNI (`config.cluster.p2p.enable_tls: false` in `values.yaml`) because cluster certificates are not mounted.
+- **Networking:** ClusterIP services only. No public Route to Qdrant. The agent console Route is optional (`AGENT_ROUTE=true`): when enabled, a Red Hat `oauth-proxy` sidecar terminates external ingress on 8443 (Service CA serving cert, `reencrypt` Route, `/healthz` probe bypass) while the ClusterIP 8080 API port stays available for in-cluster tools. Inter-node Qdrant gossip is plaintext on the CNI (`config.cluster.p2p.enable_tls: false` in `values.yaml`) because cluster certificates are not mounted.
 
 ### 3.2 Canonical Deployment Standard Across Environments
 
@@ -217,6 +217,7 @@ The agent is async end to end: all routes are `async def` on `AsyncQdrantClient`
 - **Reasoning answer calls (`/v1/answer`):** single-shot with a 300s timeout on the LLM client's own pool; connection-level retries are explicitly disabled (`retries=0`) — answers are not idempotent and a retry would re-ask a model that may already be thinking.
 - **Streaming:** `/v1/answer?stream=true` (or body `stream: true`) returns `text/event-stream`: `event: token` deltas, then exactly one terminal `event: final` carrying the verified answer, citations, `citations_inferred` provenance, `inferred_indices`, script, hits, query kind, `ttft_ms`, and token usage. The final schema is identical on the empty-hits path. A mid-stream failure emits `event: error` and ends **without** `final` — clients must treat stream-end-without-final as failure. Non-streaming JSON remains the default. Server-side reasoning SSE is toggled by `LLM_STREAM` (default off; `make run-agent` enables it); TTFT is measured on the first content token and surfaced both in the `final` event and as `Server-Timing: ttft;dur=...` on the JSON path.
 - **Error Contract:** Standard JSON error envelopes (`{"code": "...", "message": "..."}`). Internal exceptions and upstream response bodies are never leaked to clients; registered handlers pin 404/405/422/500 shapes. Retrieval failures read `502 upstream_error / "retrieval failed"`, LLM failures `502 upstream_error / "answer failed"`; prompt-construction failures are local faults and map to 500 `internal` — never mislabeled as upstream.
+- **Multi-turn chat & operator console (ADR-0004):** `POST /v1/chat` (native) and `POST /v1/chat/completions` (OpenAI-compatible alias) share one core with `/v1/answer` — `answer_core` owns prompt planning/verification, LLM inference, and citation parsing; handlers own validation, retrieval, SSE formatting, telemetry, and the error map. Chat clients manage history; follow-up condensation is off by default (`CHAT_CONDENSE_ENABLED`). The operator console is served by the same agent at `/ui` (Jinja2 + vendored HTMX 1.9.12 + SSE, strict `script-src 'self'` CSP, all assets local) and is fail-closed behind `UI_ENABLED` (unset → stable 404 envelope). Dialogue state lives only in the browser `localStorage`; the agent stays stateless and deploys with no UI volume, service, or secret.
 - **Distributed tracing (issue #83):** OTel spans, one owner `src/mainframe_rag/tracing.py`; the library default is OFF — a process only exports when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (bare collector origin; OTLP/HTTP, the exporter appends `/v1/traces`; Jaeger v2 all-in-one is the reference backend, Phoenix-compatible since both speak OTLP). The production deploy is ON by default: an unset endpoint resolves to the in-cluster Jaeger via `resolve_otel_endpoint` (`common.sh`), and the `off` sentinel disables tracing and the deployment together. One request renders as one trace: `v1.search`/`v1.answer` root → `retrieve.search` → `embed` → `prefetch` → `rrf` → `rerank` (or `rerank_bypass_reason=trap|identifier` on the parent) → `prompt.build` → `llm.chat` (TTFT, token usage, finish_reason). The SSE stream holds the root span open until the terminal `final`/`error` event so the LLM leg stays a child of the same trace. Ingest traces parent-process stages only (`ingest.run` → `ingest.plan`, service `mainframe-rag-ingest`); spawn parse workers stay untraced and report through the inventory/log stream like logs. Outbound model calls carry W3C `traceparent` via `bearer_auth_headers` (no-op when tracing is off) so a tracing-enabled platform gateway can correlate its own spans — the platform tier's monitoring is theirs and is never configured here. Export is bounded (queue + timeout) and fail-open: collector outages log and drop, never fail a request. Span attributes mirror the log contract (ids, counts, scores, timings) with one deliberate exception: the bounded query text is carried on request spans for debugging — PDF/manual text and secrets never enter spans, and the never-log-query-text rule for JSON logs is unchanged.
 
 ---
@@ -280,8 +281,13 @@ src/mainframe_rag/
   agent/
     app.py            # FastAPI service (async routes, SSE) & lifespan client management
     answer.py         # Reasoning LLM client (sync/async/SSE), prompt construction & citation grounding
+    answer_core.py    # Shared engine: retrieval(optional), prompt budget, LLM, citation parse
     tokenizer.py      # vLLM /tokenize counting with estimator fallback
     cites.py          # Citation shape validation & extraction
+  webui/
+    routes.py         # Operator console routes (/ui): fail-closed gate, HTMX form/SSE, CSP
+    templates/        # Jinja2 shell + message pair (server-rendered, no external assets)
+    static/           # Local CSS/JS + vendored htmx/sse with SHA256SUMS pin
   serve/              # Local vLLM VRAM budget profiles (LOCAL_RT_8GB) + resolve CLI
   config.py           # Pydantic Settings & environment validation
   logs.py             # One-JSON-object-per-line logging
@@ -290,7 +296,7 @@ src/mainframe_rag/
   tracing.py          # OTel export: agent + ingest; library default off, deploy default on
 ```
 
-**Allowed Dependencies:** Python 3.14 GIL, `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`, `uvicorn`, `pydantic`, `pydantic-settings`, `opentelemetry-api`/`-sdk` plus the OTLP-HTTP and Prometheus exporters.
+**Allowed Dependencies:** Python 3.14 GIL, `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`, `jinja2` (operator console templates), `uvicorn`, `pydantic`, `pydantic-settings`, `opentelemetry-api`/`-sdk` plus the OTLP-HTTP and Prometheus exporters.
 
 ### Per-area reference docs
 

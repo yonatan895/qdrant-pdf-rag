@@ -9,7 +9,8 @@ operations: `docs/install_and_ops.md` §5. Retrieval contracts:
 
 ## 1. Endpoints
 
-Three async routes in `agent/app.py`. Every request gets a 12-hex-char
+Async routes in `agent/app.py` (search/answer/chat plus the operator console).
+Every request gets a 12-hex-char
 `request_id` from middleware, shared by all logs, the unhandled-error
 handler, and the response.
 
@@ -38,6 +39,20 @@ handler, and the response.
   boolean result. `status` is `ok` only when Qdrant is ok and embed is not
   `False`, else `degraded` (still HTTP 200). Any Qdrant exception becomes
   `503 qdrant_unready`.
+- `POST /v1/chat` (native) and `POST /v1/chat/completions` (OpenAI-compatible
+  alias) — `ChatRequest{messages (client-managed history), product?, version?,
+  splunk_context?, stream?, temperature?, model?, max_tokens?}`. Same shared
+  core as `/v1/answer`; the response carries the answer on
+  `choices[0].message` plus top-level `citations`/`hits`. Follow-up turns
+  condense only when `CHAT_CONDENSE_ENABLED=true` (default off); the request
+  body is capped by `chat_max_body_chars` and the latest user turn by the
+  shared `query_max_chars` guard.
+- `GET /ui` — operator console (ADR-0004), a thin adapter over the same core:
+  Jinja2 shell + HTMX form/fragment + SSE stream (`/ui/chat`, `/ui/chat/stream`,
+  `/ui/healthz`, `/ui/static/*`), browser-only `localStorage` state, strict CSP.
+  Every `/ui` path serves the stable `404 not_found` envelope while
+  `UI_ENABLED` is false; the oauth-proxy sidecar authenticates external ingress
+  when `AGENT_ROUTE=true` (ADR-0004 §3).
 
 Per-endpoint flow: `search` runs the length guard, then retrieval under a
 root span — faults become `502 upstream_error / retrieval failed`, timings
@@ -58,7 +73,7 @@ no exception text, no upstream bodies, no internals, on any status:
 | `upstream_error` / `retrieval failed` | 502 | Any retrieval fault, identical on both endpoints |
 | `upstream_error` / `answer failed` | 502 | LLM call or response-parse fault |
 | `internal` / `internal error` | 500 | Prompt-build failure and any unhandled exception |
-| `not_configured` / `reasoning model…` | 503 | `/v1/answer` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
+| `not_configured` / `reasoning model…` | 503 | `/v1/answer` or `/v1/chat` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
 | `invalid_request` / `request body failed validation` | 422 | Pydantic failure and the shared query-length guard (one helper, same code, both endpoints) |
 | `not_found` / `not found` | 404 | Unknown route |

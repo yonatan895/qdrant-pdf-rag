@@ -270,6 +270,25 @@ pin_from_images_txt() {
     echo "$_pin_ref"
 }
 
+# True (0) only when images.txt records a real digest for the needle; the
+# documented sha256:PENDING placeholder must never be treated as pinned.
+pin_recorded() {
+    _pin_needle=$1
+    while IFS= read -r line; do
+        case "$line" in
+            \#*|"") continue ;;
+            *"$_pin_needle"*)
+                _pin_d=$(echo "$line" | awk '{print $2}')
+                case "$_pin_d" in
+                    ""|sha256:PENDING) return 1 ;;
+                    *) return 0 ;;
+                esac
+                ;;
+        esac
+    done < images.txt
+    return 1
+}
+
 # Trust anchor (optional, strict): when SNEAKERNET_TRUSTED_PUB names a
 # pubkey file obtained out of band (org-published fingerprint, HTTPS
 # Actions artifact), the bundle is refused unless its bundled pub matches
