@@ -44,6 +44,7 @@ from mainframe_rag.agent.answer_core import (
     AnswerCoreDeps,
     AnswerCoreInput,
     LLMChatError,
+    chat_body_chars,
     execute_answer_core,
     execute_answer_core_stream,
     resolve_search_query,
@@ -126,9 +127,7 @@ def _require_query_length(request_id: str, query: str) -> None:
 
 
 def _require_chat_body_length(request_id: str, req: ChatRequest) -> None:
-    total_chars = sum(len(m.content) for m in req.messages)
-    if req.splunk_context:
-        total_chars += len(req.splunk_context)
+    total_chars = chat_body_chars(req.messages, req.splunk_context)
     if total_chars > settings.chat_max_body_chars:
         log.warning(json_log(request_id, "chat_body_too_long", chars=total_chars))
         raise AppError(422, "invalid_request", "request body failed validation")

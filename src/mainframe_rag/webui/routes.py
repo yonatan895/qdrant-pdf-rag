@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mainframe_rag.agent.answer_core import (
     AnswerCoreInput,
+    chat_body_chars,
     execute_answer_core,
     execute_answer_core_stream,
 )
@@ -160,11 +161,14 @@ def _render_pair(
     turns: list[dict[str, Any]],
     *,
     history_json: str,
+    error: str | None = None,
 ) -> Response:
     body = "".join(
         templates.get_template("_message_pair.html").render(request=request, turn=turn)
         for turn in turns
     )
+    if error:
+        body += f'<div class="error-banner" role="alert">{error}</div>'
     # The form's hidden history must advance with the fragment, swapped out
     # of band so a later plain POST (no-JS) still carries the conversation.
     body += (
@@ -183,7 +187,7 @@ async def _run_turn(request: Request, req: UiChatRequest):
     latest = [m for m in req.messages if m.role == "user"][-1].content.strip()
     if len(latest) > settings.query_max_chars:
         raise app_mod.AppError(422, "invalid_request", "request body failed validation")
-    if sum(len(m.content) for m in req.messages) > settings.chat_max_body_chars:
+    if chat_body_chars(req.messages, req.splunk_context) > settings.chat_max_body_chars:
         raise app_mod.AppError(422, "invalid_request", "request body failed validation")
 
     request_id = getattr(request.state, "request_id", "ui")
@@ -262,7 +266,12 @@ async def ui_chat(
     except Exception as exc:  # noqa: BLE001 — fixed banner to the operator, detail to logs
         log.error("ui_chat failed: %s", str(exc)[:200])
         if is_htmx:
-            return _render_pair(request, [user_turn], history_json=_history_json(turns[:-1]))
+            return _render_pair(
+                request,
+                [user_turn],
+                history_json=_history_json(turns[:-1]),
+                error=_ERROR_TEXT,
+            )
         return _render_page(request, turns, error=_ERROR_TEXT, form=form, status_code=502)
 
     assistant_turn = _turn(
@@ -284,7 +293,7 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
     latest = [m for m in req.messages if m.role == "user"][-1].content.strip()
     if len(latest) > app_mod.settings.query_max_chars:
         raise app_mod.AppError(422, "invalid_request", "request body failed validation")
-    if sum(len(m.content) for m in req.messages) > app_mod.settings.chat_max_body_chars:
+    if chat_body_chars(req.messages, req.splunk_context) > app_mod.settings.chat_max_body_chars:
         raise app_mod.AppError(422, "invalid_request", "request body failed validation")
 
     request_id = getattr(request.state, "request_id", "ui")

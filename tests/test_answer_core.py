@@ -14,6 +14,7 @@ from mainframe_rag.agent.answer_core import (
     AnswerCoreInput,
     LLMChatError,
     RetrievalError,
+    chat_body_chars,
     execute_answer_core,
     execute_answer_core_stream,
     resolve_search_query,
@@ -75,6 +76,16 @@ def _deps(settings: Settings, llm, retrieve) -> AnswerCoreDeps:
         embedder=None,
         retrieve_search_fn=retrieve,
     )
+
+
+def test_chat_body_chars_counts_messages_and_context():
+    messages = [
+        ChatMessage(role="user", content="abc"),
+        ChatMessage(role="assistant", content="de"),
+    ]
+    assert chat_body_chars(messages) == 5
+    assert chat_body_chars(messages, "xyz") == 8
+    assert chat_body_chars(messages, "") == 5
 
 
 @pytest.mark.anyio

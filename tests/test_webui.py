@@ -228,6 +228,43 @@ def test_ui_chat_retrieval_failure_renders_fixed_banner(ui_client, monkeypatch):
     assert "qdrant exploded" not in resp.text
 
 
+def test_ui_chat_htmx_retrieval_failure_renders_error_fragment(ui_client, monkeypatch):
+    """Review fix: the HTMX path must surface the failure, not silently swap
+    only the user turn (the pre-fix behavior)."""
+
+    def boom(*_a, **_k):
+        raise RuntimeError("qdrant exploded: internal detail")
+
+    monkeypatch.setattr(app_mod, "retrieve_search", boom)
+    resp = ui_client.post(
+        "/ui/chat",
+        data={"message": "What is IEA500I?", "messages": ""},
+        headers={"HX-Request": "true"},
+    )
+    assert resp.status_code == 200
+    assert "error-banner" in resp.text
+    assert "The reasoning agent could not complete this request." in resp.text
+    assert "qdrant exploded" not in resp.text
+    assert "<html" not in resp.text
+
+
+def test_ui_chat_body_cap_counts_splunk_context(ui_client, monkeypatch):
+    """Review fix: the UI cap must match /v1/chat and include the attached
+    context, so an oversized drawer is rejected the same way."""
+    monkeypatch.setattr(app_mod.settings, "chat_max_body_chars", 40)
+    payload = {"message": "hi", "messages": "", "splunk_context": "x" * 60}
+    resp = ui_client.post("/ui/chat", data=payload)
+    assert resp.status_code == 502
+    assert "The reasoning agent could not complete this request." in resp.text
+
+    resp = ui_client.post(
+        "/ui/chat/stream",
+        json={"messages": [{"role": "user", "content": "hi"}], "splunk_context": "x" * 60},
+    )
+    assert resp.status_code == 422
+    assert resp.json() == {"code": "invalid_request", "message": "request body failed validation"}
+
+
 def test_ui_healthz_badge_reflects_agent_status(ui_client, monkeypatch):
     async def ok_health():
         return app_mod.HealthzResponse(status="ok", qdrant=True, embed=True)

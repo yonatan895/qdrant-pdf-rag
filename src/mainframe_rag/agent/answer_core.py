@@ -40,6 +40,12 @@ log = logging.getLogger(__name__)
 _EMPTY_ANSWER_MAX_TERMS = 5
 
 
+def chat_body_chars(messages: list[ChatMessage], splunk_context: str | None = None) -> int:
+    """Body-size arithmetic shared by /v1/chat and the /ui console so one cap
+    cannot cover the messages but not the attached incident context."""
+    return sum(len(m.content) for m in messages) + (len(splunk_context) if splunk_context else 0)
+
+
 def empty_hits_answer(query: str) -> str:
     """Message for the no-hits path (issue #132).
 
@@ -278,9 +284,7 @@ async def execute_answer_core(
 
     # 4. LLM inference
     temperature = (
-        input_data.temperature
-        if input_data.temperature is not None
-        else settings.llm_temperature
+        input_data.temperature if input_data.temperature is not None else settings.llm_temperature
     )
     t0 = time.monotonic()
     with tracer.start_as_current_span(
@@ -294,7 +298,9 @@ async def execute_answer_core(
                 reasoning_effort=effort,
                 temperature=temperature,
             )
-            chat_res = as_chat_result(await chat_call if inspect.isawaitable(chat_call) else chat_call)
+            chat_res = as_chat_result(
+                await chat_call if inspect.isawaitable(chat_call) else chat_call
+            )
             llm_span.set_attributes(
                 {
                     "llm.ttft_ms": chat_res.ttft_ms if chat_res.ttft_ms is not None else 0,
@@ -466,9 +472,7 @@ async def execute_answer_core_stream(
 
     # 4. LLM streaming
     temperature = (
-        input_data.temperature
-        if input_data.temperature is not None
-        else settings.llm_temperature
+        input_data.temperature if input_data.temperature is not None else settings.llm_temperature
     )
     t0 = time.monotonic()
     ttft_ms: int | None = None
