@@ -497,8 +497,14 @@ def test_why_mode_precedence_and_branches() -> None:
     assert why_mode({"verdict": "pass", "abstention_zeroed": True}) == "abstention_zeroed"
     assert why_mode({"verdict": "pass", "citations": ["c"]}) == "cited_explicit"
     assert why_mode({"verdict": "pass", "citations": ["c"], "citations_inferred": True}) == "cited_inferred"
-    assert why_mode({"verdict": "fail", "truncated": True}) == "truncated_before_cites"
-    # A truncated row that emitted a header is not cut before cites.
+    # Missing header signal on a truncated row never asserts the cut shape.
+    assert why_mode({"verdict": "fail", "truncated": True}) == "unknown"
+    assert why_mode({"verdict": "fail", "truncated": True,
+                     "citations_header_present": False,
+                     "inline_bracket_present": False,
+                     "cites_rejected_shape_bad": 0,
+                     "cites_rejected_unmapped": 0}) == "truncated_before_cites"
+    # A truncated row whose header survived is not cut before cites.
     assert why_mode({"verdict": "fail", "truncated": True,
                      "citations_header_present": True,
                      "cites_rejected_unmapped": 1}) == "fabricated_unmapped"
@@ -506,7 +512,12 @@ def test_why_mode_precedence_and_branches() -> None:
                      "cites_rejected_shape_bad": 2}) == "fabricated_unmapped"
     assert why_mode({"verdict": "fail", "cites_rejected_shape_bad": 1}) == "malformed_shape_bad"
     assert why_mode({"verdict": "fail", "inline_bracket_present": True}) == "bracket_unmatched"
-    assert why_mode({"verdict": "fail"}) == "absent"
+    # Missing attempt signals: 'absent' is a claim, so the row reads unknown.
+    assert why_mode({"verdict": "fail"}) == "unknown"
+    # Every attempt signal present and negative: genuinely absent.
+    assert why_mode({"verdict": "fail", "inline_bracket_present": False,
+                     "cites_rejected_shape_bad": 0,
+                     "cites_rejected_unmapped": 0}) == "absent"
 
 
 def test_inferred_index_off_gold_maps_indices_to_pool_order() -> None:

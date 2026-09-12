@@ -435,8 +435,10 @@ def failure_bucket(failure: str) -> str:
 def why_mode(row: dict[str, Any]) -> str:
     """Dominant citation-WHY mode for one row (issue #299), most specific
     first. Pure; shared by both summaries so the shares can never diverge.
-    A truncated row that still cites (or emitted a Citations: header) is
-    not 'truncated before cites' — the cut did not lose the cite block."""
+    A truncated row that still cites (or whose Citations: header survived)
+    is not 'truncated before cites' — the cut did not lose the cite block.
+    A missing telemetry signal (no answer-log join) never asserts a negative:
+    the row reads 'unknown', not 'truncated_before_cites' or 'absent'."""
     if row.get("verdict") == "error":
         return "error"
     if row.get("path") == "zero_hits":
@@ -445,14 +447,26 @@ def why_mode(row: dict[str, Any]) -> str:
         return "abstention_zeroed"
     if row.get("citations"):
         return "cited_inferred" if row.get("citations_inferred") else "cited_explicit"
-    if row.get("truncated") and not row.get("citations_header_present"):
-        return "truncated_before_cites"
+    header = row.get("citations_header_present")
+    if row.get("truncated"):
+        if header is False:
+            return "truncated_before_cites"
+        if header is None:
+            return "unknown"
+        # header True: the cut happened after the cite block; classify the
+        # attempt shape below.
     if row.get("cites_rejected_unmapped"):
         return "fabricated_unmapped"
     if row.get("cites_rejected_shape_bad"):
         return "malformed_shape_bad"
     if row.get("inline_bracket_present"):
         return "bracket_unmatched"
+    if (
+        row.get("inline_bracket_present") is None
+        or row.get("cites_rejected_shape_bad") is None
+        or row.get("cites_rejected_unmapped") is None
+    ):
+        return "unknown"
     return "absent"
 
 

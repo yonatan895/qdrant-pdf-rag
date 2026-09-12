@@ -464,14 +464,16 @@ def test_summarize_by_why_modes_and_off_gold():
     from scripts.harness_l2 import _by_why
     rows = [
         _row("A"),
-        _row("B", citations=[], truncated=True),
+        _row("B", citations=[], truncated=True, citations_header_present=False),
         _row("C", citations=[], cites_rejected_shape_bad=1),
         _row("D", citations=["[1] c"], citations_inferred=True, inferred_indices=[1],
              expected_doc_ids=["D1"], hit_doc_ids=["D1"]),
+        # Truncated with no capture signal: unknown, never 'before cites'.
+        _row("E", citations=[], truncated=True),
     ]
     assert _by_why(rows) == {
         "cited_explicit": 1, "cited_inferred": 1,
-        "truncated_before_cites": 1, "malformed_shape_bad": 1,
+        "truncated_before_cites": 1, "malformed_shape_bad": 1, "unknown": 1,
     }
     m = summarize_l2(rows)
     assert m["by_why"]["cited_explicit"] == 1
