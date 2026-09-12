@@ -2037,29 +2037,30 @@ def test_slow_tokenizer_verify_keeps_loop_responsive(client, monkeypatch):
     """Issue #269: a slow count_messages must not serialize in-flight
     requests. 4 concurrent answers each burn 1x0.3s in the sync verify;
     on the event loop that is >= 1.2s wall and every concurrent poll
-    stalls with it; offloaded via asyncio.to_thread they overlap (~0.3s)
-    and /healthz keeps answering in milliseconds (status ignored — no
-    live Qdrant here — latency is the signal)."""
+    stalls with it; offloaded via asyncio.to_thread they overlap (~0.3s).
+    The probe is GET /nope: the pinned 404 shape touches no network, so
+    its latency is a pure event-loop tick (a /healthz probe would measure
+    the Qdrant client's retry latency instead — that sunk this test on
+    CI once)."""
     import concurrent.futures
 
     monkeypatch.setattr(app_mod, "tokenizer", SlowBlockingTokenizer())
 
-    health_latencies: list[float] = []
+    probe_latencies: list[float] = []
+    probe_codes: list[int] = []
 
-    def poll_health():
-        # Latency, not status, is the signal (/healthz has no live Qdrant
-        # here) — a blocked loop stalls even the refusal.
+    def poll_loop():
         t0 = time.monotonic()
         with contextlib.suppress(Exception):
-            client.get("/healthz")
-        health_latencies.append(time.monotonic() - t0)
+            probe_codes.append(client.get("/nope").status_code)
+            probe_latencies.append(time.monotonic() - t0)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
         t0 = time.monotonic()
         answers = [pool.submit(client.post, "/v1/answer", json={"query": f"IEA500I {i}"}) for i in range(4)]
         time.sleep(0.05)  # let the slow verifies get in flight first
         for _ in range(6):
-            poll_health()
+            poll_loop()
             time.sleep(0.05)
         resps = [f.result(timeout=30) for f in answers]
         elapsed = time.monotonic() - t0
@@ -2067,6 +2068,7 @@ def test_slow_tokenizer_verify_keeps_loop_responsive(client, monkeypatch):
     assert [r.status_code for r in resps] == [200] * 4
     # Serialized on the loop, 4x0.3s verifies alone cost >= 1.2s wall.
     assert elapsed < 0.9
-    assert health_latencies, "no health polls ran"
+    assert probe_codes, "no loop probes ran"
+    assert all(c == 404 for c in probe_codes)
     # The loop stayed responsive while the sync verifies were in flight.
-    assert max(health_latencies) < 0.9
+    assert max(probe_latencies) < 0.9
