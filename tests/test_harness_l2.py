@@ -14,6 +14,7 @@ from scripts.harness_l2 import (
     JUDGE_MAX_EVIDENCE_CHARS,
     JudgeError,
     _AlertCapture,
+    _by_complexity_truncation,
     apply_l2_measurements,
     citation_to_hit,
     cited_doc_ids,
@@ -399,3 +400,30 @@ def test_apply_abstain_entry_exempt_from_floor():
         row, _entry(behavior="abstain", gold=["SC34-6428-08"]), HITS, alerts={}
     )
     assert not any("no substantive prose" in f for f in row["failures"])
+
+
+# --------------------------------------------- issue #298 by-complexity slice
+def test_by_complexity_truncation_groups_unknown_last():
+    def rate(n, d):
+        return round(n / d, 4) if d else None
+
+    rows = [
+        _row("A", query_complexity="simple", truncated=False),
+        _row("B", query_complexity="simple", truncated=True),
+        _row("C", query_complexity="complex", truncated=True),
+        _row("D", truncated=False),  # no join -> unknown
+    ]
+    assert _by_complexity_truncation(rows, rate) == {
+        "complex": {"n": 1, "truncated": 1, "truncation_rate": 1.0},
+        "simple": {"n": 2, "truncated": 1, "truncation_rate": 0.5},
+        "unknown": {"n": 1, "truncated": 0, "truncation_rate": 0.0},
+    }
+
+
+def test_summarize_carries_by_complexity_slice():
+    rows = [
+        _row("A", query_complexity="complex", truncated=True),
+        _row("B", query_complexity="complex", truncated=False),
+    ]
+    m = summarize_l2(rows)
+    assert m["by_complexity"]["complex"] == {"n": 2, "truncated": 1, "truncation_rate": 0.5}
