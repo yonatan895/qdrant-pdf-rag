@@ -239,9 +239,17 @@ competitors (sibling docs sharing vocabulary, intra-doc section pairs).
   anchor, the vllm numbers the semantic instrument — headroom below 1.0 is
   intentional. Same ratio tolerances as the main set. Runbook: generate the
   corpus, ingest into the dedicated collection, then evaluate — `make
-  eval-paraphrase` runs only the check, not the ingest. Not wired into CI
-  (no cluster, no embed server there); never tune against the frozen
-   holdout.
+   eval-paraphrase` runs only the check, not the ingest. Not wired into CI
+   (no cluster, no embed server there); never tune against the frozen
+    holdout.
+- Measured verdict (issue #300, paraphrase vLLM A/B 2026-09-12, header-only
+  vs `CONTEXTUAL_EMBED_ENABLED=true` over gateway-routed E4B gists, same
+  model/dim/collection-shape): 22/22 queries byte-identical (r@1/mrr, both
+  arms saturated at 1.0 under current defaults) — no headroom for a gain
+  and none observed, so no holdout/RC escalation. Contextual stays
+  default-off. Note: both arms beat the committed `baseline-paraphrase-
+  vllm.json` (r@1 0.90), which no longer reproduces under the post-#270
+  defaults — re-recording it is a separate dedicated PR, not this one.
 
 ### 6.1 Record-replay A/B (tune prod ranking from local)
 
@@ -403,3 +411,4 @@ committed row is the pointer, the manifest is the detail.
 | 2026-09-12 | dff83f8 | `real_manuals` | `harness-l4-record` N=24×3 on the re-frozen holdout | reference re-recorded: grounded 0.46, citation P/R 0.59/0.42, truncation 0.44, syntax 0.33, entailment 0.68, relevance 0.95; 45 structural fails — standing RC debt (recording gates through product debt) |
 | 2026-09-12 | e0de04a | `real_manuals` | full §10 battery on the re-frozen set (#268 close-out) | `eval-holdout` green (r@1 0.631, r@5 0.892, MRR 0.726, 0 fail, 0 viol, table r@5 1.0); L1 `hold` (no metric beyond CI overlap; `RESTORE=never` — the 09-11 pin file is absent on this host, same 435057 pts); L2 `hold` (13 structural fails); L4 `fail` on 38 structural fails with every rate pass/borderline (ref 45); L3 vllm `pass` (search p95 163 ms, answer p95 98.8 s, 0 err); capture 121q 0 fail; replay sweep no adoption (production stands) |
 | 2026-09-12 | e0de04a | `real_manuals_hash` | `harness-l3-baseline` (hash) + `harness-l3` gate (C=8, request timeout 300s) | hash-vector mirror of `real_manuals` built (435057 pts, ids + payload identical, production hash builders); hash baseline recorded (search p95 75 ms, answer p95 64.8 s, 0 err, 0 missing); same-data gate `pass` |
+| 2026-09-12 | 053c1ab | synthetic paraphrase venue | contextual-embeddings A/B (#300): header-only vs contextual ingests, vllm, gateway-routed E4B gists | 22/22 queries byte-identical (both arms r@1 1.0 — saturated under post-#270 defaults, no headroom); vectors confirmed changed (cosine 0.969, `context` in payload); no RC escalation, stays default-off |
