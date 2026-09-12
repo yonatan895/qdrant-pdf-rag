@@ -21,6 +21,7 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx2
@@ -840,7 +841,7 @@ async def v1_answer(
         finally:
             root_span.end()
 
-    async def _sse_events():
+    async def _sse_events() -> AsyncIterator[str]:
         t0 = time.monotonic()
         ttft_ms: int | None = None
         content_parts: list[str] = []
