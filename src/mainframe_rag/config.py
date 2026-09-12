@@ -164,6 +164,13 @@ class Settings(BaseSettings):
     # budget = max_model_len - reserved_output_tokens - measured_system_prompt - safety_margin
     llm_max_model_len: int = Field(default=4096, ge=512, le=131072)
     llm_reserved_output_tokens: int = Field(default=1536, ge=128, le=16384)
+    # Thinking reserve, complex path only (issue #298): high-effort thinking
+    # draws from the same window as the answer, but the single 1536-token
+    # output bucket priced none of it — 0.81 of complex L4 rows truncated at
+    # prompt+completion = 4096 with reasoning p50 1120. Pricing 1000 of it
+    # into the complex prompt budget trades excerpt chars for a prompt that
+    # can actually finish; the simple path packs with a zero thinking term.
+    llm_thinking_reserve_tokens_complex: int = Field(default=1000, ge=0, le=16384)
     llm_token_safety_margin: int = Field(default=128, ge=0, le=1024)
     llm_max_chunk_tokens_narrative: int = Field(default=350, ge=50, le=2048)
     llm_tokenize_timeout_s: float = Field(default=5.0, gt=0.0, le=60.0)

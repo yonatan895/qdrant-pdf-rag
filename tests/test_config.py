@@ -62,6 +62,7 @@ def test_outbound_timeout_defaults_bounded():
     assert s.llm_temperature == 0.2
     assert s.llm_max_model_len == 4096
     assert s.llm_reserved_output_tokens == 1536
+    assert s.llm_thinking_reserve_tokens_complex == 1000
     assert s.llm_token_safety_margin == 128
     assert s.llm_max_chunk_tokens_narrative == 350
     assert s.llm_tokenize_timeout_s == 5.0
@@ -281,6 +282,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "llm_temperature": 0.2,
     "llm_max_model_len": 4096,
     "llm_reserved_output_tokens": 1536,
+    "llm_thinking_reserve_tokens_complex": 1000,
     "llm_token_safety_margin": 128,
     "llm_max_chunk_tokens_narrative": 350,
     "llm_tokenize_timeout_s": 5.0,

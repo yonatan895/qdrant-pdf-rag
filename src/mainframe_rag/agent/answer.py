@@ -172,6 +172,7 @@ SYSTEM_PROMPT_COMPLEX_EXTENSION = (
     "   - Provide concrete, verified syntax, parmlib statements, rule definitions, or JCL examples in fenced code blocks whenever procedures or configurations are discussed.\n"
     "   - Explain the derivation of each parameter from the documented syntax rules.\n"
     "   - Detail both diagnosis (what happened and how to verify) and recovery (exact remediation steps).\n"
+    "   - Keep the response tight: complete diagnosis plus recovery in as few words as accuracy allows, and never let the 'Citations:' section be cut off — a complete short answer with citations beats a long answer without them.\n"
     "3. Explicit Citations:\n"
     "   - You MUST end your reply with the 'Citations:' section explicitly listing each excerpt citation used.\n"
 )
@@ -338,6 +339,13 @@ def build_messages(
         reserved = settings.llm_reserved_output_tokens
         margin = settings.llm_token_safety_margin
         narrative_token_cap = settings.llm_max_chunk_tokens_narrative
+        # Thinking reserve, complex path only (issue #298): high-effort
+        # thinking consumes the same window as the answer, so the complex
+        # prompt budget prices part of it. The simple path packs with the
+        # legacy math (zero thinking term).
+        thinking_reserve = (
+            settings.llm_thinking_reserve_tokens_complex if complexity == "complex" else 0
+        )
 
         # Planning is estimator-only (zero RPC): the budget for chunk bodies
         # after the fixed preamble (system prompt + context + question +
@@ -345,7 +353,7 @@ def build_messages(
         fixed_tokens = estimate_tokens(
             system_content + "\n" + "\n".join(parts) + "\n" + tail_part
         )
-        budget_tokens = max(100, model_len - reserved - margin - fixed_tokens)
+        budget_tokens = max(100, model_len - reserved - thinking_reserve - margin - fixed_tokens)
 
         total_tokens = 0
         for i, hit in enumerate(hits, 1):
@@ -377,9 +385,12 @@ def build_messages(
 
         # Verification is the only tokenizer work: count the packed prompt
         # once, chat-template aware, and trim the tail if the estimator
-        # drifted past the window. Bounded rounds; a prompt that still does
-        # not fit surfaces later as finish_reason=length (alerted in app).
-        verify_limit = model_len - reserved
+        # drifted past the window. The verify limit prices the same terms as
+        # the plan (reserved + thinking reserve + safety margin), so a prompt
+        # that verifies can never eat the margin the plan kept. Bounded
+        # rounds; a prompt that still does not fit surfaces later as
+        # finish_reason=length (alerted in app).
+        verify_limit = model_len - reserved - thinking_reserve - margin
         for _ in range(_MAX_TRIM_ROUNDS):
             if not packed:
                 break

@@ -216,7 +216,7 @@ readers:
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
 | `answer_timeout_s` | 300.0 | reasoning client, never retried |
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | low / high / 0.2 | answer path |
-| `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 4096 / 1536 / 128 / 350 / 5.0 | tokenizer-path budgeting |
+| `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 4096 / 1536 / 1000 / 128 / 350 / 5.0 | tokenizer-path budgeting (complex prompt budget prices high-effort thinking, issue #298) |
 | `llm_stream` | `false` | server-side reasoning SSE |
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
