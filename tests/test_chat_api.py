@@ -163,8 +163,10 @@ def test_chat_completions_single_turn_json(chat_client):
     assert len(data["hits"]) == 1
 
 
-def test_chat_completions_multi_turn_with_condensation(chat_client):
-    # Second turn has no identifier ("How do I resolve this?") -> triggers condense_query
+def test_chat_completions_multi_turn_with_condensation(chat_client, monkeypatch):
+    # Second turn has no identifier ("How do I resolve this?") -> triggers
+    # condense_query only when the gated setting is on (ADR-0004: default off).
+    monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", True)
     messages = [
         {"role": "user", "content": "What causes IEA500I?"},
         {"role": "assistant", "content": "IEA500I occurs during IOS initialization."},
@@ -213,6 +215,60 @@ def test_chat_completions_abend_code_bypass(chat_client):
     search_calls = chat_client.mock_search.calls
     assert len(search_calls) == 1
     assert search_calls[0]["query"] == "We received abend S0C4 in module XYZ"
+
+
+def test_chat_completions_condensation_default_off(chat_client):
+    # ADR-0004: the condensation rewrite ships gated off; a follow-up without
+    # identifiers searches its literal text and never rewrites.
+    messages = [
+        {"role": "user", "content": "What causes IEA500I?"},
+        {"role": "assistant", "content": "IEA500I occurs during IOS initialization."},
+        {"role": "user", "content": "How do I resolve this issue?"},
+    ]
+    res = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": messages, "stream": False},
+    )
+    assert res.status_code == 200
+    search_calls = chat_client.mock_search.calls
+    assert len(search_calls) == 1
+    assert search_calls[0]["query"] == "How do I resolve this issue?"
+
+
+def test_chat_native_route_matches_openai_alias(chat_client):
+    # Native POST /v1/chat and the OpenAI alias share one handler and shape.
+    payload = {"messages": [{"role": "user", "content": "What is IEA500I?"}]}
+    native = chat_client.post("/v1/chat", json=payload)
+    alias = chat_client.post("/v1/chat/completions", json=payload)
+    assert native.status_code == 200
+    assert alias.status_code == 200
+    assert native.json()["object"] == alias.json()["object"] == "chat.completion"
+    assert native.json()["choices"][0]["message"] == alias.json()["choices"][0]["message"]
+    assert native.json()["citations"] == alias.json()["citations"]
+    assert native.json()["hits"] == alias.json()["hits"]
+
+
+class ExplodingChatLLM:
+    """Streams one token, then fails: the stream must terminate with the
+    OpenAI error object + [DONE], never a fake finish_reason="error" chunk."""
+
+    async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+        yield {"type": "token", "delta": "partial answer", "ttft_ms": 5}
+        raise RuntimeError("stream exploded")
+
+
+def test_chat_completions_stream_error_is_openai_error(chat_client, monkeypatch):
+    monkeypatch.setattr(app_mod, "llm", ExplodingChatLLM())
+    res = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "What is IEA500I?"}], "stream": True},
+    )
+    assert res.status_code == 200
+    assert "partial answer" in res.text
+    assert '"error"' in res.text
+    assert "upstream_error" in res.text
+    assert "[DONE]" in res.text
+    assert '"finish_reason": "error"' not in res.text
 
 
 def test_chat_completions_traceparent_header_propagation(chat_client):

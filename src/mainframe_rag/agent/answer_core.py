@@ -98,6 +98,36 @@ class LLMChatError(Exception):
         self.original = original
 
 
+class RetrievalError(Exception):
+    """Raised when the retrieval leg fails. Handlers map it to the same
+    502 "retrieval failed" shape as /v1/search (one fault, one code)."""
+
+    def __init__(self, original: Exception) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
+async def resolve_search_query(
+    input_data: AnswerCoreInput,
+    deps: AnswerCoreDeps,
+    parent_span: trace.Span | None = None,
+) -> str:
+    """The one owner of the follow-up condensation rule: chat turns after the
+    first condense only when CHAT_CONDENSE_ENABLED is on; every other turn
+    searches its literal text. Both the core retrieval branch and the route
+    handlers call this so the flag cannot be honored on one path only."""
+    if (
+        input_data.is_chat
+        and input_data.messages
+        and len(input_data.messages) > 1
+        and deps.settings.chat_condense_enabled
+    ):
+        ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
+        with tracer.start_as_current_span("chat.condense", context=ctx):
+            return await condense_query(deps.llm, input_data.messages, deps.settings)
+    return input_data.query
+
+
 @dataclass
 class AnswerCoreOutput:
     answer: str
@@ -135,32 +165,27 @@ async def execute_answer_core(
 
     # 1. Retrieval
     if input_data.hits is None:
-        search_query = input_data.query
-        if (
-            input_data.is_chat
-            and input_data.messages
-            and len(input_data.messages) > 1
-            and settings.chat_condense_enabled
-        ):
-            with tracer.start_as_current_span("chat.condense", context=root_ctx):
-                search_query = await condense_query(deps.llm, input_data.messages, settings)
+        search_query = await resolve_search_query(input_data, deps, parent_span)
 
         retrieve_fn = deps.retrieve_search_fn
         if retrieve_fn is None:
             from mainframe_rag.retrieve.query import async_search as retrieve_fn
 
-        res = retrieve_fn(
-            deps.qdrant,
-            deps.embedder,
-            settings.qdrant_collection,
-            search_query,
-            product=input_data.product,
-            version=input_data.version,
-            limit=8,
-            settings=settings,
-            reranker=deps.reranker,
-        )
-        hits, kind, timings = await _await_retrieval(res)
+        try:
+            res = retrieve_fn(
+                deps.qdrant,
+                deps.embedder,
+                settings.qdrant_collection,
+                search_query,
+                product=input_data.product,
+                version=input_data.version,
+                limit=8,
+                settings=settings,
+                reranker=deps.reranker,
+            )
+            hits, kind, timings = await _await_retrieval(res)
+        except Exception as exc:
+            raise RetrievalError(exc) from exc
     else:
         hits = input_data.hits
         kind = input_data.query_kind or "unknown"
@@ -323,32 +348,27 @@ async def execute_answer_core_stream(
 
     # 1. Retrieval
     if input_data.hits is None:
-        search_query = input_data.query
-        if (
-            input_data.is_chat
-            and input_data.messages
-            and len(input_data.messages) > 1
-            and settings.chat_condense_enabled
-        ):
-            with tracer.start_as_current_span("chat.condense", context=root_ctx):
-                search_query = await condense_query(deps.llm, input_data.messages, settings)
+        search_query = await resolve_search_query(input_data, deps, parent_span)
 
         retrieve_fn = deps.retrieve_search_fn
         if retrieve_fn is None:
             from mainframe_rag.retrieve.query import async_search as retrieve_fn
 
-        res = retrieve_fn(
-            deps.qdrant,
-            deps.embedder,
-            settings.qdrant_collection,
-            search_query,
-            product=input_data.product,
-            version=input_data.version,
-            limit=8,
-            settings=settings,
-            reranker=deps.reranker,
-        )
-        hits, kind, timings = await _await_retrieval(res)
+        try:
+            res = retrieve_fn(
+                deps.qdrant,
+                deps.embedder,
+                settings.qdrant_collection,
+                search_query,
+                product=input_data.product,
+                version=input_data.version,
+                limit=8,
+                settings=settings,
+                reranker=deps.reranker,
+            )
+            hits, kind, timings = await _await_retrieval(res)
+        except Exception as exc:
+            raise RetrievalError(exc) from exc
     else:
         hits = input_data.hits
         kind = input_data.query_kind or "unknown"
@@ -357,7 +377,10 @@ async def execute_answer_core_stream(
     classify_fn = deps.classify_query_complexity_fn or classify_query_complexity
     complexity = classify_fn(input_data.query)
 
-    # 2. Empty hits short-circuit
+    # 2. Empty hits short-circuit: only the terminal record is yielded. The
+    # empty answer is not a streamed token — /v1/answer's contract is a
+    # single `final` (schema parity, review S6) and the chat routes emit the
+    # canned text from the final output themselves.
     if not hits:
         empty_text = empty_hits_answer(input_data.query)
         output = AnswerCoreOutput(
@@ -376,7 +399,6 @@ async def execute_answer_core_stream(
             complexity=complexity,
             parsed=ParsedAnswer(answer=empty_text),
         )
-        yield {"type": "token", "delta": empty_text, "ttft_ms": None}
         yield {"type": "final", "output": output}
         return
 

@@ -23,7 +23,6 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Self
 
 import httpx2
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -31,27 +30,32 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from mainframe_rag.agent.answer import (
     HttpxLLMClient,
     TruncatedStreamError,
-    as_chat_result,
     assert_reasoning_model,
     build_chat_messages,
     build_messages,
     classify_query_complexity,
-    condense_query,
-    parse_answer,
+)
+from mainframe_rag.agent.answer_core import (
+    AnswerCoreDeps,
+    AnswerCoreInput,
+    LLMChatError,
+    execute_answer_core,
+    execute_answer_core_stream,
+    resolve_search_query,
 )
 from mainframe_rag.agent.metrics import endpoint_for_path, record_request, setup_metrics
 from mainframe_rag.agent.sse import (
     empty_final_payload,
     error_payload,
-    fallback_stream,
     final_payload,
     format_openai_chunk,
     format_openai_done,
+    format_openai_error,
     format_sse_event,
 )
 from mainframe_rag.agent.tokenizer import build_tokenizer
@@ -70,7 +74,6 @@ from mainframe_rag.ports import (
     TokenUsage,
     ZoweMCP,
 )
-from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import async_search as retrieve_search
 from mainframe_rag.retrieve.rerank import build_reranker, probe_reranker
@@ -137,6 +140,24 @@ async def _await_retrieval(res) -> tuple:
     if inspect.isawaitable(res):
         return await res
     return res
+
+
+def _core_deps() -> AnswerCoreDeps:
+    """Build the shared-engine dependency bag from the module globals at call
+    time, so tests that monkeypatch app_mod (llm, retrieve_search,
+    build_messages) drive the core through the same seam as production."""
+    return AnswerCoreDeps(
+        settings=settings,
+        llm=llm,
+        qdrant=qdrant,
+        embedder=embedder,
+        reranker=reranker,
+        tokenizer=tokenizer,
+        retrieve_search_fn=retrieve_search,
+        build_messages_fn=build_messages,
+        build_chat_messages_fn=build_chat_messages,
+        classify_query_complexity_fn=classify_query_complexity,
+    )
 
 
 def _timing_parts(
@@ -253,9 +274,7 @@ async def lifespan(_app: FastAPI):
     # misconfigured embed path rather than failing per-request. Hash mode is
     # CI/dev only and must be explicitly allowed.
     if settings.embed_mode not in ("hash", "vllm"):
-        raise RuntimeError(
-            f"EMBED_MODE={settings.embed_mode!r} is not one of hash|vllm"
-        )
+        raise RuntimeError(f"EMBED_MODE={settings.embed_mode!r} is not one of hash|vllm")
     if settings.embed_mode == "hash" and not settings.allow_hash_mode:
         raise RuntimeError(
             "EMBED_MODE=hash is CI/dev only; set ALLOW_HASH_MODE=true (CI overlay) to allow it"
@@ -416,16 +435,6 @@ class ChatRequest(BaseModel):
     product: str | None = None
     version: str | None = None
 
-    @model_validator(mode="after")
-    def _validate_body_size(self) -> Self:
-        total_chars = sum(len(m.content) for m in self.messages)
-        if self.splunk_context:
-            total_chars += len(self.splunk_context)
-        max_chars = getattr(settings, "chat_max_body_chars", 32768)
-        if total_chars > max_chars:
-            raise ValueError(f"chat body length {total_chars} exceeds max {max_chars}")
-        return self
-
 
 ChatCompletionsRequest = ChatRequest
 
@@ -517,16 +526,23 @@ def _record_endpoint(
     AppError that follows a recorded raise."""
     request.state.red_recorded = True
     record_request(
-        endpoint, outcome, query_class=query_class,
-        elapsed_s=time.monotonic() - started, hits=hits,
-        ttft_ms=ttft_ms, llm_model=llm_model,
+        endpoint,
+        outcome,
+        query_class=query_class,
+        elapsed_s=time.monotonic() - started,
+        hits=hits,
+        ttft_ms=ttft_ms,
+        llm_model=llm_model,
     )
 
 
 @app.exception_handler(AppError)
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     _record_handler_error(request, exc.code)
-    return JSONResponse(status_code=exc.status, content=ErrorEnvelope(code=exc.code, message=exc.message).model_dump())
+    return JSONResponse(
+        status_code=exc.status,
+        content=ErrorEnvelope(code=exc.code, message=exc.message).model_dump(),
+    )
 
 
 @app.exception_handler(HTTPException)
@@ -536,7 +552,8 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     # client body (the "no internals" rule is structural, not incidental).
     _record_handler_error(request, "http_error")
     return JSONResponse(
-        status_code=exc.status_code, content=ErrorEnvelope(code="http_error", message="request failed").model_dump()
+        status_code=exc.status_code,
+        content=ErrorEnvelope(code="http_error", message="request failed").model_dump(),
     )
 
 
@@ -545,7 +562,9 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     _record_handler_error(request, "invalid_request")
     return JSONResponse(
         status_code=422,
-        content=ErrorEnvelope(code="invalid_request", message="request body failed validation").model_dump(),
+        content=ErrorEnvelope(
+            code="invalid_request", message="request body failed validation"
+        ).model_dump(),
     )
 
 
@@ -559,7 +578,8 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
     request_id = getattr(request.state, "request_id", "unknown")
     log.exception(json_log(request_id, "unhandled", error=str(exc)[:200]))
     return JSONResponse(
-        status_code=500, content=ErrorEnvelope(code="internal", message="internal error").model_dump()
+        status_code=500,
+        content=ErrorEnvelope(code="internal", message="internal error").model_dump(),
     )
 
 
@@ -649,9 +669,15 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
     ) as span:
         try:
             res = retrieve_search(
-                qdrant, embedder, settings.qdrant_collection, req.query,
-                product=req.product, version=req.version, limit=req.limit,
-                settings=settings, reranker=reranker,
+                qdrant,
+                embedder,
+                settings.qdrant_collection,
+                req.query,
+                product=req.product,
+                version=req.version,
+                limit=req.limit,
+                settings=settings,
+                reranker=reranker,
             )
             hits, kind, timings = await _await_retrieval(res)
         except Exception as exc:
@@ -666,8 +692,12 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
     _record_endpoint(request, "search", "ok", started, query_class=kind, hits=len(hits))
     log.info(
         json_log(
-            request_id, "search", query_kind=kind, hits=len(hits),
-            embed_ms=timings.get("embed_ms"), qdrant_ms=timings.get("qdrant_ms"),
+            request_id,
+            "search",
+            query_kind=kind,
+            hits=len(hits),
+            embed_ms=timings.get("embed_ms"),
+            qdrant_ms=timings.get("qdrant_ms"),
             rerank_ms=timings.get("rerank_ms"),
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
@@ -677,28 +707,6 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
         query_kind=kind,
         hits=hits,
     )
-
-
-_EMPTY_ANSWER_MAX_TERMS = 5
-
-
-def empty_hits_answer(query: str) -> str:
-    """Message for the no-hits path (issue #132).
-
-    Identifier queries name the missing codes so typo users can spot and
-    retype them; unknown codes get the truth instead of a generic empty.
-    Unfiltered-serve fallback is deliberately NOT the mechanism: NEG-08
-    proves it would serve the must_not sibling. Capped — a code-salad
-    query must not echo unbounded input.
-    """
-    ids = parse_query(query)
-    terms = ids.message_ids + ids.doc_ids + ids.members
-    if not terms:
-        return "No supporting manual excerpts were found for this question."
-    shown = ", ".join(terms[:_EMPTY_ANSWER_MAX_TERMS])
-    if len(terms) > _EMPTY_ANSWER_MAX_TERMS:
-        shown += f", +{len(terms) - _EMPTY_ANSWER_MAX_TERMS} more"
-    return f"No manual excerpts carry {shown}."
 
 
 @app.post("/v1/answer", response_model=None)
@@ -743,9 +751,15 @@ async def v1_answer(
         # not created "as current" — the SSE generator outlives this block).
         with trace.use_span(root_span, end_on_exit=False):
             res = retrieve_search(
-                qdrant, embedder, settings.qdrant_collection, req.query,
-                product=req.product, version=req.version, limit=8,
-                settings=settings, reranker=reranker,
+                qdrant,
+                embedder,
+                settings.qdrant_collection,
+                req.query,
+                product=req.product,
+                version=req.version,
+                limit=8,
+                settings=settings,
+                reranker=reranker,
             )
             hits, kind, timings = await _await_retrieval(res)
     except Exception as exc:
@@ -755,130 +769,68 @@ async def v1_answer(
         log.error(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "retrieval failed") from exc
 
-    if not hits:
-        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
-        root_span.end()
-        _record_endpoint(request, "answer", "ok", started, query_class=kind, hits=0)
-        timing_parts = _timing_parts(timings)
-        if timing_parts:
-            response.headers["Server-Timing"] = ", ".join(timing_parts)
-        log.info(json_log(request_id, "answer", query_kind=kind, hits=0, rerank_ms=timings.get("rerank_ms")))
-        if is_stream:
-            async def empty_sse():
-                # Schema parity with the normal final event (review S6): the
-                # empty-hits path carries the same keys; no tokens were
-                # streamed, so ttft_ms stays null and usage is all zeros.
-                yield format_sse_event(
-                    "final",
-                    empty_final_payload(request_id, empty_hits_answer(req.query), kind),
-                )
-
-            headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-            if timing_parts:
-                headers["Server-Timing"] = ", ".join(timing_parts)
-            return StreamingResponse(empty_sse(), media_type="text/event-stream", headers=headers)
-
-        return AnswerResponse(
-            request_id=request_id,
-            answer=empty_hits_answer(req.query),
-            citations=[],
-            citations_inferred=False,
-            inferred_indices=[],
-            script=None,
-        )
-
-    # Prompt construction is local CPU work plus the optional /tokenize
-    # verify RPC (the tokenizer protocol is sync), dispatched via
-    # asyncio.to_thread so neither blocks the event loop. A build failure is
-    # an internal fault and surfaces as 500 "internal", never mislabeled as
-    # 502 "answer failed" (review S5; pinned by
-    # test_prompt_build_failure_maps_to_internal).
-    complexity = classify_query_complexity(req.query)
-    max_context = (
-        settings.prompt_max_context_chars_complex
-        if complexity == "complex"
-        else settings.prompt_max_context_chars
+    core_input = AnswerCoreInput(
+        query=req.query,
+        product=req.product,
+        version=req.version,
+        splunk_context=req.splunk_context,
+        stream=is_stream,
+        request_id=request_id,
+        is_chat=False,
+        hits=hits,
+        query_kind=kind,
+        timings=timings,
     )
-    effort = (
-        settings.llm_reasoning_effort_complex
-        if complexity == "complex"
-        else settings.llm_reasoning_effort_simple
-    )
-    root_ctx = trace.set_span_in_context(root_span)
-    with tracer.start_as_current_span(
-        "prompt.build",
-        context=root_ctx,
-        attributes={
-            "rag.query_complexity": complexity,
-            "rag.reasoning_effort": effort,
-            "rag.max_context_chars": max_context,
-        },
-    ):
-        messages = await asyncio.to_thread(
-            build_messages,
-            req.query,
-            hits,
-            product=req.product,
-            version=req.version,
-            splunk_context=req.splunk_context,
-            max_context_chars=max_context,
-            max_chunk_chars=settings.prompt_max_chunk_chars,
-            max_chunk_chars_narrative=(
-                settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
-            ),
-            splunk_context_max_chars=settings.splunk_context_max_chars,
-            complexity=complexity,
-            tokenizer=tokenizer,
-            settings=settings,
-            order=settings.prompt_order,
-        )
+    deps = _core_deps()
 
     if not is_stream:
+        # The shared core owns prompt planning/verification, LLM inference,
+        # and parse. A model failure maps to "answer failed" (never a
+        # retrieval code); a prompt-build failure stays an internal 500.
         try:
-            t0 = time.monotonic()
-            with tracer.start_as_current_span(
-                "llm.chat", context=root_ctx,
-                attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
-            ) as llm_span:
-                chat_call = llm.chat(
-                    messages,
-                    reasoning_effort=effort,
-                    temperature=settings.llm_temperature,
-                )
-                chat_res = as_chat_result(await chat_call if inspect.isawaitable(chat_call) else chat_call)
-                llm_span.set_attributes(
-                    {
-                        "llm.ttft_ms": chat_res.ttft_ms if chat_res.ttft_ms is not None else 0,
-                        "llm.finish_reason": chat_res.finish_reason,
-                        "llm.prompt_tokens": chat_res.usage.prompt_tokens,
-                        "llm.completion_tokens": chat_res.usage.completion_tokens,
-                        "llm.reasoning_tokens": chat_res.usage.reasoning_tokens,
-                        "llm.total_tokens": chat_res.usage.total_tokens,
-                    }
-                )
-            llm_ms = int((time.monotonic() - t0) * 1000)
-            ttft_ms = chat_res.ttft_ms
-            content = chat_res.content
-            finish_reason = chat_res.finish_reason
-            usage = chat_res.usage
-            parsed = parse_answer(
-                content,
-                {h.cite for h in hits},
-                ordered_cites=[h.cite for h in hits],
-            )
-        except Exception as exc:
-            _span_error(root_span, exc)
+            output = await execute_answer_core(core_input, deps, parent_span=root_span)
+        except LLMChatError as exc:
+            _span_error(root_span, exc.original)
             root_span.end()
             _record_endpoint(
-                request, "answer", "upstream_error", started,
-                query_class=kind, hits=len(hits),
+                request,
+                "answer",
+                "upstream_error",
+                started,
+                query_class=kind,
+                hits=len(hits),
             )
             log.error(json_log(request_id, "answer", error=str(exc)[:200]))
             raise AppError(502, "upstream_error", "answer failed") from exc
 
-        _alert_finish_reason_non_stop(request_id, finish_reason)
+        _alert_finish_reason_non_stop(request_id, output.finish_reason)
 
-        timing_parts = _timing_parts(timings, llm_ms=llm_ms, ttft_ms=ttft_ms)
+        if not output.hits:
+            root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
+            root_span.end()
+            _record_endpoint(request, "answer", "ok", started, query_class=kind, hits=0)
+            timing_parts = _timing_parts(timings)
+            if timing_parts:
+                response.headers["Server-Timing"] = ", ".join(timing_parts)
+            log.info(
+                json_log(
+                    request_id,
+                    "answer",
+                    query_kind=kind,
+                    hits=0,
+                    rerank_ms=timings.get("rerank_ms"),
+                )
+            )
+            return AnswerResponse(
+                request_id=request_id,
+                answer=output.answer,
+                citations=[],
+                citations_inferred=False,
+                inferred_indices=[],
+                script=None,
+            )
+
+        timing_parts = _timing_parts(timings, llm_ms=output.llm_ms, ttft_ms=output.ttft_ms)
         if timing_parts:
             response.headers["Server-Timing"] = ", ".join(timing_parts)
 
@@ -887,31 +839,45 @@ async def v1_answer(
                 request_id,
                 "answer",
                 **_answer_log_fields(
-                    kind, complexity, hits, timings,
-                    len(parsed.citations), parsed.script is not None,
-                    finish_reason, usage, llm_ms, ttft_ms, started,
-                    inline_bracket_present=parsed.inline_bracket_present,
-                    citations_header_present=parsed.citations_header_present,
-                    cites_rejected_shape_bad=parsed.cites_rejected_shape_bad,
-                    cites_rejected_unmapped=parsed.cites_rejected_unmapped,
+                    kind,
+                    output.complexity,
+                    output.hits,
+                    timings,
+                    len(output.citations),
+                    output.script is not None,
+                    output.finish_reason,
+                    output.usage,
+                    output.llm_ms,
+                    output.ttft_ms,
+                    started,
+                    inline_bracket_present=output.parsed.inline_bracket_present,
+                    citations_header_present=output.parsed.citations_header_present,
+                    cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
+                    cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
                 ),
             )
         )
         root_span.set_attributes(
-            _answer_span_attrs(kind, hits, len(parsed.citations), parsed.script is not None)
+            _answer_span_attrs(kind, output.hits, len(output.citations), output.script is not None)
         )
         root_span.end()
         _record_endpoint(
-            request, "answer", "ok", started, query_class=kind,
-            hits=len(hits), ttft_ms=ttft_ms, llm_model=llm_model,
+            request,
+            "answer",
+            "ok",
+            started,
+            query_class=kind,
+            hits=len(output.hits),
+            ttft_ms=output.ttft_ms,
+            llm_model=llm_model,
         )
         return AnswerResponse(
             request_id=request_id,
-            answer=parsed.answer,
-            citations=parsed.citations,
-            citations_inferred=parsed.citations_inferred,
-            inferred_indices=parsed.inferred_indices,
-            script=parsed.script,
+            answer=output.answer,
+            citations=output.citations,
+            citations_inferred=output.citations_inferred,
+            inferred_indices=output.inferred_indices,
+            script=output.script,
         )
 
     # SSE streaming path
@@ -935,51 +901,90 @@ async def v1_answer(
             root_span.end()
 
     async def _sse_events() -> AsyncIterator[str]:
-        t0 = time.monotonic()
-        ttft_ms: int | None = None
-        content_parts: list[str] = []
-        finish_reason = "stop"
-        usage = TokenUsage()
-
-        if hasattr(llm, "chat_stream"):
-            stream_gen = llm.chat_stream(
-                messages,
-                reasoning_effort=effort,
-                temperature=settings.llm_temperature,
-            )
-        else:
-            stream_gen = fallback_stream(llm, messages, effort, settings.llm_temperature)
-
         try:
-            with tracer.start_as_current_span(
-                "llm.chat", context=root_ctx,
-                attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
-            ) as llm_span:
-                async for item in stream_gen:
-                    itype = item.get("type")
-                    if itype == "token":
-                        delta = item.get("delta") or ""
-                        if delta:
-                            if ttft_ms is None:
-                                ttft_ms = item.get("ttft_ms") or int((time.monotonic() - t0) * 1000)
-                            content_parts.append(delta)
-                            yield format_sse_event("token", {"type": "token", "delta": delta, "token": delta})
-                    elif itype == "done":
-                        finish_reason = item.get("finish_reason") or "stop"
-                        if item.get("usage"):
-                            usage = item["usage"]
-                        if ttft_ms is None and item.get("ttft_ms") is not None:
-                            ttft_ms = item["ttft_ms"]
-                llm_span.set_attributes(
-                    {
-                        "llm.ttft_ms": ttft_ms if ttft_ms is not None else 0,
-                        "llm.finish_reason": finish_reason,
-                        "llm.prompt_tokens": usage.prompt_tokens,
-                        "llm.completion_tokens": usage.completion_tokens,
-                        "llm.reasoning_tokens": usage.reasoning_tokens,
-                        "llm.total_tokens": usage.total_tokens,
-                    }
-                )
+            async for item in execute_answer_core_stream(core_input, deps, parent_span=root_span):
+                itype = item.get("type")
+                if itype == "token":
+                    delta = item.get("delta") or ""
+                    if delta:
+                        yield format_sse_event(
+                            "token", {"type": "token", "delta": delta, "token": delta}
+                        )
+                elif itype == "final":
+                    output = item["output"]
+                    if not output.hits:
+                        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
+                        _record_endpoint(request, "answer", "ok", started, query_class=kind, hits=0)
+                        log.info(
+                            json_log(
+                                request_id,
+                                "answer",
+                                query_kind=kind,
+                                hits=0,
+                                rerank_ms=timings.get("rerank_ms"),
+                            )
+                        )
+                        yield format_sse_event(
+                            "final", empty_final_payload(request_id, output.answer, kind)
+                        )
+                        continue
+
+                    _alert_finish_reason_non_stop(request_id, output.finish_reason)
+
+                    log.info(
+                        json_log(
+                            request_id,
+                            "answer",
+                            **_answer_log_fields(
+                                kind,
+                                output.complexity,
+                                output.hits,
+                                timings,
+                                len(output.citations),
+                                output.script is not None,
+                                output.finish_reason,
+                                output.usage,
+                                output.llm_ms,
+                                output.ttft_ms,
+                                started,
+                                stream=True,
+                                inline_bracket_present=output.parsed.inline_bracket_present,
+                                citations_header_present=output.parsed.citations_header_present,
+                                cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
+                                cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
+                            ),
+                        )
+                    )
+
+                    final = final_payload(
+                        request_id,
+                        output.answer,
+                        output.citations,
+                        output.citations_inferred,
+                        output.script,
+                        kind,
+                        output.hits,
+                        output.finish_reason,
+                        output.ttft_ms,
+                        output.usage,
+                        inferred_indices=output.inferred_indices,
+                    )
+                    root_span.set_attributes(
+                        _answer_span_attrs(
+                            kind, output.hits, len(output.citations), output.script is not None
+                        )
+                    )
+                    _record_endpoint(
+                        request,
+                        "answer",
+                        "ok",
+                        started,
+                        query_class=kind,
+                        hits=len(output.hits),
+                        ttft_ms=output.ttft_ms,
+                        llm_model=llm_model,
+                    )
+                    yield format_sse_event("final", final)
         except TruncatedStreamError as exc:
             # Truncation observability: the partial prefix already went out
             # as token events, so the answer_alert carries counts only —
@@ -994,92 +999,52 @@ async def v1_answer(
                 )
             )
             _record_endpoint(
-                request, "answer", "upstream_error", started,
-                query_class=kind, hits=len(hits),
+                request,
+                "answer",
+                "upstream_error",
+                started,
+                query_class=kind,
+                hits=len(hits),
             )
             log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
             yield format_sse_event("error", error_payload())
-            return
         except Exception as exc:  # noqa: BLE001
             _span_error(root_span, exc)
             _record_endpoint(
-                request, "answer", "upstream_error", started,
-                query_class=kind, hits=len(hits),
+                request,
+                "answer",
+                "upstream_error",
+                started,
+                query_class=kind,
+                hits=len(hits),
             )
             log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
             yield format_sse_event("error", error_payload())
-            return
-
-        full_content = "".join(content_parts)
-        parsed = parse_answer(
-            full_content,
-            {h.cite for h in hits},
-            ordered_cites=[h.cite for h in hits],
-        )
-
-        _alert_finish_reason_non_stop(request_id, finish_reason)
-
-        llm_ms = int((time.monotonic() - t0) * 1000)
-        log.info(
-            json_log(
-                request_id,
-                "answer",
-                **_answer_log_fields(
-                    kind, complexity, hits, timings,
-                    len(parsed.citations), parsed.script is not None,
-                    finish_reason, usage, llm_ms, ttft_ms, started,
-                    stream=True,
-                    inline_bracket_present=parsed.inline_bracket_present,
-                    citations_header_present=parsed.citations_header_present,
-                    cites_rejected_shape_bad=parsed.cites_rejected_shape_bad,
-                    cites_rejected_unmapped=parsed.cites_rejected_unmapped,
-                ),
-            )
-        )
-
-        final = final_payload(
-            request_id,
-            parsed.answer,
-            parsed.citations,
-            parsed.citations_inferred,
-            parsed.script,
-            kind,
-            hits,
-            finish_reason,
-            ttft_ms,
-            usage,
-            inferred_indices=parsed.inferred_indices,
-        )
-        root_span.set_attributes(
-            _answer_span_attrs(kind, hits, len(parsed.citations), parsed.script is not None)
-        )
-        _record_endpoint(
-            request, "answer", "ok", started, query_class=kind,
-            hits=len(hits), ttft_ms=ttft_ms, llm_model=llm_model,
-        )
-        yield format_sse_event("final", final)
 
     return StreamingResponse(sse_event_generator(), media_type="text/event-stream", headers=headers)
 
 
+@app.post("/v1/chat", response_model=None)
 @app.post("/v1/chat/completions", response_model=None)
-async def chat_completions(req: ChatCompletionsRequest, request: Request, response: Response):
-    """OpenAI-compatible multi-turn chat completions route.
+async def chat_completions(req: ChatRequest, request: Request, response: Response):
+    """Multi-turn chat completions: native POST /v1/chat and its
+    OpenAI-compatible alias POST /v1/chat/completions.
 
-    Supports non-streaming JSON and streaming SSE (data: {...}\n\ndata: [DONE]\n\n).
-    Executes low-effort query condensation for follow-up turns (>1), hybrid retrieval against
-    Qdrant, sliding-window context assembly with excerpt pruning, reasoning LLM generation,
-    and turn-local citation validation.
+    Supports non-streaming JSON and streaming SSE (OpenAI `data: {...}` chunks
+    terminated by `data: [DONE]`). Follow-up turns condense only when
+    CHAT_CONDENSE_ENABLED is on; retrieval, prompt assembly, reasoning
+    generation, and turn-local citation validation all run through the shared
+    answer core.
     """
     request_id = getattr(request.state, "request_id", uuid.uuid4().hex[:12])
     started = getattr(request.state, "started", time.monotonic())
-    parent_ctx = parent_context(request.headers)
 
     latest_user_msgs = [m for m in req.messages if m.role == "user"]
     if not latest_user_msgs:
         raise AppError(422, "invalid_request", "at least one user message is required")
     latest_query = latest_user_msgs[-1].content.strip()
     _require_query_length(request_id, latest_query)
+    _require_chat_body_length(request_id, req)
 
     try:
         assert_reasoning_model(settings)
@@ -1090,17 +1055,29 @@ async def chat_completions(req: ChatCompletionsRequest, request: Request, respon
     llm_model = req.model or settings.require_reasoning_model()
 
     is_stream = req.stream
-    root_span = tracer.start_span("v1.chat", context=parent_ctx, attributes={"rag.stream": is_stream})
-    root_ctx = trace.set_span_in_context(root_span, parent_ctx)
+    root_span = tracer.start_span(
+        "v1.chat",
+        context=parent_context(request.headers),
+        attributes={"rag.stream": is_stream},
+    )
+
+    core_input = AnswerCoreInput(
+        query=latest_query,
+        messages=req.messages,
+        product=req.product,
+        version=req.version,
+        splunk_context=req.splunk_context,
+        stream=is_stream,
+        temperature=req.temperature,
+        model=req.model,
+        request_id=request_id,
+        is_chat=True,
+    )
+    deps = _core_deps()
 
     try:
-        if len(req.messages) > 1:
-            with tracer.start_as_current_span("chat.condense", context=root_ctx):
-                search_query = await condense_query(llm, req.messages, settings)
-        else:
-            search_query = latest_query
-
-        with tracer.start_as_current_span("chat.retrieve", context=root_ctx):
+        with trace.use_span(root_span, end_on_exit=False):
+            search_query = await resolve_search_query(core_input, deps, parent_span=root_span)
             retrieval_coro = retrieve_search(
                 qdrant,
                 embedder,
@@ -1112,7 +1089,7 @@ async def chat_completions(req: ChatCompletionsRequest, request: Request, respon
                 settings=settings,
                 reranker=reranker,
             )
-            hits, kind, _timings = await _await_retrieval(retrieval_coro)
+            hits, kind, timings = await _await_retrieval(retrieval_coro)
     except Exception as exc:
         _span_error(root_span, exc)
         root_span.end()
@@ -1120,119 +1097,59 @@ async def chat_completions(req: ChatCompletionsRequest, request: Request, respon
         log.error(json_log(request_id, "chat_retrieval", error=str(exc)[:200]))
         raise AppError(502, "upstream_error", "retrieval failed") from exc
 
-    if not hits:
-        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
-        root_span.end()
-        _record_endpoint(request, "chat", "ok", started, query_class=kind, hits=0)
-        empty_text = empty_hits_answer(latest_query)
-        if is_stream:
-            chat_id = f"chatcmpl-{request_id}"
-
-            async def _empty_chat_sse() -> AsyncIterator[str]:
-                yield format_openai_chunk(chat_id, llm_model, delta_content=empty_text)
-                extra_meta = {
-                    "citations": [],
-                    "citations_inferred": False,
-                    "inferred_indices": [],
-                    "hits": [],
-                }
-                yield format_openai_chunk(chat_id, llm_model, finish_reason="stop", extra=extra_meta)
-                yield format_openai_done()
-
-            return StreamingResponse(_empty_chat_sse(), media_type="text/event-stream")
-
-        return ChatCompletionsResponse(
-            id=f"chatcmpl-{request_id}",
-            created=int(time.time()),
-            model=llm_model,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=ChatMessageResponse(role="assistant", content=empty_text),
-                    finish_reason="stop",
-                )
-            ],
-            usage=TokenUsage(),
-            citations=[],
-            citations_inferred=False,
-            inferred_indices=[],
-            hits=[],
-        )
-
-    complexity = classify_query_complexity(latest_query)
-    effort = (
-        settings.llm_reasoning_effort_complex
-        if complexity == "complex"
-        else settings.llm_reasoning_effort_simple
-    )
-    max_context = (
-        settings.prompt_max_context_chars_complex
-        if complexity == "complex"
-        else settings.prompt_max_context_chars
-    )
-
-    chat_messages = await asyncio.to_thread(
-        build_chat_messages,
-        req.messages,
-        hits,
-        product=req.product,
-        version=req.version,
-        splunk_context=req.splunk_context,
-        max_context_chars=max_context,
-        max_chunk_chars=settings.prompt_max_chunk_chars,
-        max_chunk_chars_narrative=(
-            settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
-        ),
-        splunk_context_max_chars=settings.splunk_context_max_chars,
-        complexity=complexity,
-        tokenizer=tokenizer,
-        settings=settings,
-        order=settings.prompt_order,
-    )
+    core_input.hits = hits
+    core_input.query_kind = kind
+    core_input.timings = timings
 
     if not is_stream:
         try:
-            with tracer.start_as_current_span(
-                "llm.chat", context=root_ctx,
-                attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
-            ) as llm_span:
-                chat_call = llm.chat(
-                    chat_messages,
-                    reasoning_effort=effort,
-                    temperature=req.temperature if req.temperature is not None else settings.llm_temperature,
-                )
-                chat_res = as_chat_result(await chat_call if inspect.isawaitable(chat_call) else chat_call)
-                llm_span.set_attributes(
-                    {
-                        "llm.ttft_ms": chat_res.ttft_ms if chat_res.ttft_ms is not None else 0,
-                        "llm.finish_reason": chat_res.finish_reason,
-                        "llm.prompt_tokens": chat_res.usage.prompt_tokens,
-                        "llm.completion_tokens": chat_res.usage.completion_tokens,
-                        "llm.reasoning_tokens": chat_res.usage.reasoning_tokens,
-                        "llm.total_tokens": chat_res.usage.total_tokens,
-                    }
-                )
-            parsed = parse_answer(
-                chat_res.content,
-                {h.cite for h in hits},
-                ordered_cites=[h.cite for h in hits],
-            )
-        except Exception as exc:
-            _span_error(root_span, exc)
+            output = await execute_answer_core(core_input, deps, parent_span=root_span)
+        except LLMChatError as exc:
+            _span_error(root_span, exc.original)
             root_span.end()
-            _record_endpoint(request, "chat", "upstream_error", started, query_class=kind, hits=len(hits))
+            _record_endpoint(
+                request, "chat", "upstream_error", started, query_class=kind, hits=len(hits)
+            )
             log.error(json_log(request_id, "chat_answer", error=str(exc)[:200]))
             raise AppError(502, "upstream_error", "answer failed") from exc
 
-        _alert_finish_reason_non_stop(request_id, chat_res.finish_reason)
+        _alert_finish_reason_non_stop(request_id, output.finish_reason)
 
-        content = parsed.answer
-        if parsed.citations:
-            content += "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in parsed.citations)
+        if not output.hits:
+            root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
+            root_span.end()
+            _record_endpoint(request, "chat", "ok", started, query_class=kind, hits=0)
+            return ChatCompletionsResponse(
+                id=f"chatcmpl-{request_id}",
+                created=int(time.time()),
+                model=llm_model,
+                choices=[
+                    ChatCompletionChoice(
+                        index=0,
+                        message=ChatMessageResponse(role="assistant", content=output.answer),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=TokenUsage(),
+                citations=[],
+                citations_inferred=False,
+                inferred_indices=[],
+                hits=[],
+            )
+
+        content = output.answer
+        if output.citations:
+            content += "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in output.citations)
 
         _record_endpoint(
-            request, "chat", "ok", started, query_class=kind,
-            hits=len(hits), ttft_ms=chat_res.ttft_ms, llm_model=llm_model,
+            request,
+            "chat",
+            "ok",
+            started,
+            query_class=kind,
+            hits=len(output.hits),
+            ttft_ms=output.ttft_ms,
+            llm_model=llm_model,
         )
         root_span.end()
 
@@ -1244,98 +1161,94 @@ async def chat_completions(req: ChatCompletionsRequest, request: Request, respon
                 ChatCompletionChoice(
                     index=0,
                     message=ChatMessageResponse(role="assistant", content=content),
-                    finish_reason=chat_res.finish_reason,
+                    finish_reason=output.finish_reason,
                 )
             ],
-            usage=chat_res.usage,
-            citations=parsed.citations,
-            citations_inferred=parsed.citations_inferred,
-            inferred_indices=parsed.inferred_indices,
-            hits=hits,
+            usage=output.usage,
+            citations=output.citations,
+            citations_inferred=output.citations_inferred,
+            inferred_indices=output.inferred_indices,
+            hits=output.hits,
         )
+
+    chat_id = f"chatcmpl-{request_id}"
 
     async def _chat_sse_events() -> AsyncIterator[str]:
-        t0 = time.monotonic()
-        ttft_ms: int | None = None
-        content_parts: list[str] = []
-        finish_reason = "stop"
-        usage = TokenUsage()
-        chat_id = f"chatcmpl-{request_id}"
-
-        if hasattr(llm, "chat_stream"):
-            stream_gen = llm.chat_stream(
-                chat_messages,
-                reasoning_effort=effort,
-                temperature=req.temperature if req.temperature is not None else settings.llm_temperature,
-            )
-        else:
-            stream_gen = fallback_stream(
-                llm, chat_messages, effort,
-                req.temperature if req.temperature is not None else settings.llm_temperature,
-            )
-
         try:
-            with tracer.start_as_current_span(
-                "llm.chat", context=root_ctx,
-                attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
-            ) as llm_span:
-                async for item in stream_gen:
-                    itype = item.get("type")
-                    if itype == "token":
-                        delta = item.get("delta") or ""
-                        if delta:
-                            if ttft_ms is None:
-                                ttft_ms = item.get("ttft_ms") or int((time.monotonic() - t0) * 1000)
-                            content_parts.append(delta)
-                            yield format_openai_chunk(chat_id, llm_model, delta_content=delta)
-                    elif itype == "done":
-                        finish_reason = item.get("finish_reason") or "stop"
-                        if item.get("usage"):
-                            usage = item["usage"]
-                        if ttft_ms is None and item.get("ttft_ms") is not None:
-                            ttft_ms = item["ttft_ms"]
-                llm_span.set_attributes(
-                    {
-                        "llm.ttft_ms": ttft_ms if ttft_ms is not None else 0,
-                        "llm.finish_reason": finish_reason,
-                        "llm.prompt_tokens": usage.prompt_tokens,
-                        "llm.completion_tokens": usage.completion_tokens,
-                        "llm.reasoning_tokens": usage.reasoning_tokens,
-                        "llm.total_tokens": usage.total_tokens,
+            async for item in execute_answer_core_stream(core_input, deps, parent_span=root_span):
+                itype = item.get("type")
+                if itype == "token":
+                    delta = item.get("delta") or ""
+                    if delta:
+                        yield format_openai_chunk(chat_id, llm_model, delta_content=delta)
+                elif itype == "final":
+                    output = item["output"]
+                    if not output.hits:
+                        yield format_openai_chunk(chat_id, llm_model, delta_content=output.answer)
+                        extra_meta = {
+                            "citations": [],
+                            "citations_inferred": False,
+                            "inferred_indices": [],
+                            "hits": [],
+                        }
+                        yield format_openai_chunk(
+                            chat_id, llm_model, finish_reason="stop", extra=extra_meta
+                        )
+                        yield format_openai_done()
+                        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
+                        _record_endpoint(request, "chat", "ok", started, query_class=kind, hits=0)
+                        continue
+
+                    if output.citations:
+                        cites_delta = "\n\n**Citations:**\n" + "\n".join(
+                            f"- {c}" for c in output.citations
+                        )
+                        yield format_openai_chunk(chat_id, llm_model, delta_content=cites_delta)
+
+                    extra_meta = {
+                        "citations": output.citations,
+                        "citations_inferred": output.citations_inferred,
+                        "inferred_indices": output.inferred_indices,
+                        "hits": [h.model_dump() for h in output.hits],
                     }
+                    yield format_openai_chunk(
+                        chat_id, llm_model, finish_reason=output.finish_reason, extra=extra_meta
+                    )
+                    yield format_openai_done()
+                    _record_endpoint(
+                        request,
+                        "chat",
+                        "ok",
+                        started,
+                        query_class=kind,
+                        hits=len(output.hits),
+                        ttft_ms=output.ttft_ms,
+                        llm_model=llm_model,
+                    )
+        except TruncatedStreamError as exc:
+            _span_error(root_span, exc)
+            log.warning(
+                json_log(
+                    request_id,
+                    "answer_alert",
+                    alert="stream_truncated",
+                    detail=str(exc)[:200],
                 )
+            )
+            _record_endpoint(
+                request, "chat", "upstream_error", started, query_class=kind, hits=len(hits)
+            )
+            log.error(json_log(request_id, "chat_stream", error=str(exc)[:200]))
+            yield format_openai_error()
+            yield format_openai_done()
         except Exception as exc:  # noqa: BLE001 — streaming SSE generator traps upstream error
             _span_error(root_span, exc)
-            _record_endpoint(request, "chat", "upstream_error", started, query_class=kind, hits=len(hits))
+            _record_endpoint(
+                request, "chat", "upstream_error", started, query_class=kind, hits=len(hits)
+            )
             log.error(json_log(request_id, "chat_stream", error=str(exc)[:200]))
-            yield format_openai_chunk(chat_id, llm_model, finish_reason="error")
+            yield format_openai_error()
             yield format_openai_done()
-            return
-
-        full_content = "".join(content_parts)
-        parsed = parse_answer(
-            full_content,
-            {h.cite for h in hits},
-            ordered_cites=[h.cite for h in hits],
-        )
-
-        if parsed.citations:
-            cites_delta = "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in parsed.citations)
-            yield format_openai_chunk(chat_id, llm_model, delta_content=cites_delta)
-
-        extra_meta = {
-            "citations": parsed.citations,
-            "citations_inferred": parsed.citations_inferred,
-            "inferred_indices": parsed.inferred_indices,
-            "hits": [h.model_dump() for h in hits],
-        }
-        yield format_openai_chunk(chat_id, llm_model, finish_reason=finish_reason, extra=extra_meta)
-        yield format_openai_done()
-
-        _record_endpoint(
-            request, "chat", "ok", started, query_class=kind,
-            hits=len(hits), ttft_ms=ttft_ms, llm_model=llm_model,
-        )
 
     async def sse_event_generator() -> AsyncIterator[str]:
         try:
