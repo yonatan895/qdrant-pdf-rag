@@ -24,6 +24,17 @@ check_manifest_sha
 require_kc
 command -v helm >/dev/null 2>&1 || die "helm is required on the air-gap bastion"
 
+# Operator console Route (ADR-0004): rendering the oauth sidecar overlay and
+# the reencrypt Route needs the oauth-proxy image pin to be recorded, not the
+# sha256:PENDING placeholder.
+AGENT_ROUTE=${AGENT_ROUTE:-false}
+OAUTH_PROXY_REF=""
+if [ "$AGENT_ROUTE" = "true" ]; then
+    pin_recorded oauth-proxy || die "AGENT_ROUTE=true needs the oauth-proxy digest recorded in images.txt (currently sha256:PENDING); record it on the connected host and repack"
+    # Air-gap ref: load.sh pushes the packed image under this internal tag.
+    OAUTH_PROXY_REF="$INTERNAL_REGISTRY/openshift4/ose-oauth-proxy:v4.14"
+fi
+
 refuse_nfs_storage
 SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
 # Chart appends "-unprivileged" to the tag when useUnprivilegedImage=true;
@@ -82,7 +93,11 @@ fi
 run "$@"
 
 echo "==> Kustomize: agent (prod overlay, placeholders substituted from airgap.env)"
-kustomize_render deploy/kustomize/overlays/openshift | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
+AGENT_OVERLAY=deploy/kustomize/overlays/openshift
+if [ "$AGENT_ROUTE" = "true" ]; then
+    AGENT_OVERLAY=deploy/kustomize/overlays/openshift-ui
+fi
+kustomize_render "$AGENT_OVERLAY" | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
     -e "s|__INTERNAL_REGISTRY__|$INTERNAL_REGISTRY|g" \
     -e "s|__IMAGE_SHA__|$IMAGE_SHA|g" \
     -e "s|namespace: mainframe-rag|namespace: $NAMESPACE|g" \
@@ -100,6 +115,7 @@ kustomize_render deploy/kustomize/overlays/openshift | sed -E 's|"(__[A-Z0-9_]+_
     -e "s|__RERANK_BASE_URL__|${RERANK_BASE_URL:-}|g" \
     -e "s|__RERANK_MODEL__|${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}|g" \
     -e "s|__RERANK_ENDPOINT_ORDER__|${RERANK_ENDPOINT_ORDER:-score_first}|g" \
+    -e "s|__OAUTH_PROXY_IMAGE__|$OAUTH_PROXY_REF|g" \
     > dist/agent-rendered.yaml
 # Service name for trace resource attributes (issue #250): substituted from
 # OTEL_SERVICE_NAME, or stripped when unset so the agent default stands.
@@ -121,6 +137,12 @@ else
 fi
 wire_pull_secret dist/agent-rendered.yaml
 fail_on_placeholders dist/agent-rendered.yaml agent
+# oauth-proxy cookie encryption (ADR-0004): operator-created secret, fail
+# closed rather than booting a console whose session cookies are unencrypted.
+if [ "$AGENT_ROUTE" = "true" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
+    $KC -n "$NAMESPACE" get secret rag-agent-oauth-cookie >/dev/null 2>&1 || \
+        die "Secret rag-agent-oauth-cookie is missing (oauth-proxy cookie encryption). Create it, then re-run: $KC -n $NAMESPACE create secret generic rag-agent-oauth-cookie --from-literal=cookie-secret=\"\$(openssl rand -base64 32 | head -c 32)\""
+fi
 run $KC apply -f dist/agent-rendered.yaml
 
 # Jaeger v2 trace backend (issue #83): ON by default — unset
@@ -178,7 +200,8 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE rollout status deploy/rag-agent --timeout=300s"
     [ "$OTEL_TRACING_ENABLED" = "1" ] && \
         echo "[dryrun] $KC -n $NAMESPACE rollout status deploy/jaeger --timeout=120s"
-    [ "${AGENT_ROUTE:-false}" = "true" ] && echo "[dryrun] oc create route edge rag-agent --service=rag-agent -n $NAMESPACE"
+    [ "$AGENT_ROUTE" = "true" ] && \
+        echo "[dryrun] oc apply -f dist/agent-route.yaml (Route rag-agent -> svc port oauth, reencrypt, timeout 300s)"
     echo "[dryrun] rendered manifest kept at dist/agent-rendered.yaml"
     [ "$OTEL_TRACING_ENABLED" = "1" ] && \
         echo "[dryrun] Jaeger manifest kept at dist/jaeger-rendered.yaml"
@@ -191,10 +214,36 @@ else
     if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
         wait_rollout "deploy/jaeger" 120
     fi
-    if [ "${AGENT_ROUTE:-false}" = "true" ]; then
-        $KC -n "$NAMESPACE" get route rag-agent >/dev/null 2>&1 || \
-            oc create route edge rag-agent --service=rag-agent -n "$NAMESPACE"
-        echo "Agent Route: $KC -n $NAMESPACE get route rag-agent"
+    if [ "$AGENT_ROUTE" = "true" ]; then
+        # Reencrypt Route to the oauth-proxy port (ADR-0004): the router must
+        # trust the Service CA that signs the sidecar's serving cert, so the
+        # namespace CA bundle is inlined into the Route manifest.
+        if ! $KC -n "$NAMESPACE" get route rag-agent >/dev/null 2>&1; then
+            DEST_CA=$($KC -n "$NAMESPACE" get configmap openshift-service-ca.crt -o jsonpath='{.data.service-ca\.crt}' 2>/dev/null || true)
+            [ -n "$DEST_CA" ] || die "namespace service CA bundle (openshift-service-ca.crt) not found — cannot build the reencrypt Route"
+            {
+                echo "apiVersion: route.openshift.io/v1"
+                echo "kind: Route"
+                echo "metadata:"
+                echo "  name: rag-agent"
+                echo "  namespace: $NAMESPACE"
+                echo "  annotations:"
+                echo "    haproxy.router.openshift.io/timeout: 300s"
+                echo "spec:"
+                echo "  to:"
+                echo "    kind: Service"
+                echo "    name: rag-agent"
+                echo "  port:"
+                echo "    targetPort: oauth"
+                echo "  tls:"
+                echo "    termination: reencrypt"
+                echo "    insecureEdgeTerminationPolicy: Redirect"
+                echo "    destinationCACertificate: |"
+                echo "$DEST_CA" | sed 's/^/      /'
+            } > dist/agent-route.yaml
+            run $KC apply -f dist/agent-route.yaml
+        fi
+        echo "Agent Route (reencrypt via oauth-proxy): $KC -n $NAMESPACE get route rag-agent"
     fi
 fi
 

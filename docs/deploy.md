@@ -106,17 +106,22 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
   prod.
 - Rollout waits: Qdrant StatefulSet 600s, agent Deployment 300s, Jaeger
   120s — on failure the script prints pods, warning events, and container
-  logs before dying. `AGENT_ROUTE=true` creates an edge Route via `oc`
-  (OpenShift only — it shells to `oc` even when `KC=kubectl`), default
-  `false` keeps ClusterIP only.
+  logs before dying. `AGENT_ROUTE=true` renders the `openshift-ui` overlay
+  (oauth-proxy sidecar on Service port 8443, Service CA serving cert) and
+  applies a `reencrypt` Route with `haproxy.router.openshift.io/timeout:
+  300s`; it requires the oauth-proxy digest recorded in `images.txt` (the
+  shipped `sha256:PENDING` fails closed) and the operator-created Secret
+  `rag-agent-oauth-cookie`, and defaults `false` (ClusterIP only, console
+  reachable in-cluster).
 
 ## 4. Signing and provenance
 
 The connected host packs one tarball: git bundle, Qdrant + Jaeger + ingest
-+ agent image archives, vendored chart, bootstrap script, `MANIFEST.txt`,
-`PACKING_RECORD.txt`, digest enumeration, offline signature, and member
-checksums. Verify the tarball digest **before** unpacking, member checksums
-**after**.
++ agent image archives (plus the oauth-proxy sidecar image once its
+`images.txt` digest is recorded), vendored chart, bootstrap script,
+`MANIFEST.txt`, `PACKING_RECORD.txt`, digest enumeration, offline signature,
+and member checksums. Verify the tarball digest **before** unpacking, member
+checksums **after**.
 
 - Pack pulls (never builds) the app images from the registry tags of the
   checked-out SHA and fails closed on missing tags — pack only works on a

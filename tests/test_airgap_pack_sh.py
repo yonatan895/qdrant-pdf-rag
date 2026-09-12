@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import tarfile
 
 import pytest
 
@@ -197,6 +198,48 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert sbom["image_sha"] == head
     assert {img["name"] for img in sbom["images"]} == {"qdrant", "jaeger", "app-ingest", "app-agent"}
     assert sbom["images"][2]["digest"] == STUB_DIGEST
+
+
+def test_pack_skips_pending_oauth_proxy_pin(pack_tree):
+    """ADR-0004: the oauth-proxy pin ships sha256:PENDING (CI has no Red Hat
+    credentials); pack must stay green and leave the image out of the bundle."""
+    tmp_path, skopeo_log, _head, _key = pack_tree
+    r, _ = _run_pack(pack_tree)
+    assert r.returncode == 0, r.stderr
+    dist = tmp_path / "dist"
+    assert "sha256:PENDING: not bundled" in r.stdout
+    assert not (dist / "oauth-proxy-image.tar").exists()
+    manifest = (dist / "MANIFEST.txt").read_text()
+    assert "oauth_proxy" not in manifest
+    assert skopeo_log.read_text().splitlines().count("copy") == 4
+    sbom = json.loads((dist / "sbom.json").read_text())
+    assert "oauth-proxy" not in {img["name"] for img in sbom["images"]}
+
+
+def test_pack_bundles_oauth_proxy_once_digest_recorded(pack_tree):
+    """Once the connected host records a digest, the sidecar image joins the
+    bundle, MANIFEST, SBOM and member checksums."""
+    tmp_path, _skopeo_log, head, _key = pack_tree
+    images = (tmp_path / "images.txt").read_text()
+    (tmp_path / "images.txt").write_text(images.replace("sha256:PENDING", "sha256:" + "b" * 64))
+    r, _ = _run_pack(pack_tree)
+    assert r.returncode == 0, r.stderr
+    dist = tmp_path / "dist"
+    assert (dist / "oauth-proxy-image.tar").is_file()
+    manifest = (dist / "MANIFEST.txt").read_text()
+    assert "oauth_proxy: registry.redhat.io/openshift4/ose-oauth-proxy@sha256:" + "b" * 64 in manifest
+    assert f"oauth_proxy_digest: {STUB_DIGEST}" in manifest
+    assert "oauth-proxy-image.tar" in (dist / "SHA256SUMS").read_text()
+    with tarfile.open(dist / f"qdrant-pdf-rag-{head}.tar") as tf:
+        assert "oauth-proxy-image.tar" in tf.getnames()
+    sbom = json.loads((dist / "sbom.json").read_text())
+    assert {img["name"] for img in sbom["images"]} == {
+        "qdrant",
+        "jaeger",
+        "app-ingest",
+        "app-agent",
+        "oauth-proxy",
+    }
 
     # Offline signature verifies against the derived pubkey.
     sig = subprocess.run(

@@ -1,0 +1,19 @@
+# OpenShift console overlay (ADR-0004): authenticate external ingress at the
+# oauth-proxy sidecar and expose it as Service port 8443. Layered on the prod
+# overlay; only rendered when AGENT_ROUTE=true (ClusterIP-only installs keep
+# the unauthenticated 8080 API port for in-cluster tools).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mainframe-rag
+resources:
+  - ../openshift
+  - serviceaccount.yaml
+patches:
+  - path: oauth-sidecar-patch.yaml
+    target:
+      kind: Deployment
+      name: rag-agent
+  - path: oauth-service-patch.yaml
+    target:
+      kind: Service
+      name: rag-agent

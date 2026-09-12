@@ -93,7 +93,7 @@ Local simulation exists so agent/ingest always exercise the production gateway w
 | `bm25-weights` | Baked in images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 
 - **Storage Constraint:** Qdrant persistent data volume **must** be RWO Block storage (NFS and object storage are refused). Ingest work volume is also RWO Block. The corpus volume may be mounted as read-only NFS or PVC.
-- **Networking:** ClusterIP services only. No public Route to Qdrant. Agent Route is optional (`AGENT_ROUTE=true`). Inter-node Qdrant gossip is plaintext on the CNI (`config.cluster.p2p.enable_tls: false` in `values.yaml`) because cluster certificates are not mounted.
+- **Networking:** ClusterIP services only. No public Route to Qdrant. The agent console Route is optional (`AGENT_ROUTE=true`): when enabled, a Red Hat `oauth-proxy` sidecar terminates external ingress on 8443 (Service CA serving cert, `reencrypt` Route, `/healthz` probe bypass) while the ClusterIP 8080 API port stays available for in-cluster tools. Inter-node Qdrant gossip is plaintext on the CNI (`config.cluster.p2p.enable_tls: false` in `values.yaml`) because cluster certificates are not mounted.
 
 ### 3.2 Canonical Deployment Standard Across Environments
 
