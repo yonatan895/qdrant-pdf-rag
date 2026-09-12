@@ -139,7 +139,7 @@ from venue import VenueError, require_rc_for_collection, resolve_golden_paths
 
 # Refusal interpretation is the agent's single helper (issue #135): the eval's
 # abstain verdicts and the agent's zero-citation rule must never diverge.
-from mainframe_rag.agent.answer import is_refusal as is_explicit_refusal
+from mainframe_rag.agent.answer import is_abstention, is_refusal as is_explicit_refusal
 from mainframe_rag.agent.cites import CITATIONS_HEADER_RE
 from mainframe_rag.config import load_settings
 
@@ -271,6 +271,13 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     metrics["by_class"] = {
         cls: {"n": by_class[cls], "pass": by_class_pass[cls]} for cls in sorted(by_class)
     }
+    # Failure histogram (issue #299): template-bucketed so the WHY report
+    # reads off this metric instead of grepping row strings.
+    by_failure: Counter = Counter()
+    for r in judged:
+        for f in r.get("failures") or []:
+            by_failure[failure_bucket(f)] += 1
+    metrics["by_failure"] = dict(sorted(by_failure.items()))
     # Truncation attribution (issue #298): pass counts per served query
     # complexity. Unknown covers error rows and callers without the answer
     # log join — a missing signal, never a third complexity.
@@ -288,7 +295,12 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     return metrics
 
 
-def run_query(client: Any, entry: dict[str, Any], answer_signals: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+def run_query(
+    client: Any,
+    entry: dict[str, Any],
+    answer_signals: dict[str, dict[str, Any]] | None = None,
+    hits: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """One live /v1/answer call + verdict. Records everything the report and
     the manifest need, including the failure detail (the answer body is the
     model's own output — kept in the JSON report for debugging, never
@@ -336,6 +348,12 @@ def run_query(client: Any, entry: dict[str, Any], answer_signals: dict[str, dict
     if zero_hits:
         warns.append("zero-hits path: gold substrings not judged (canned agent message)")
     signals = (answer_signals or {}).get(str(data.get("request_id") or ""), {})
+    gold_ids = sorted({str(d) for d in (entry.get("expected_doc_ids") or [])})
+    hit_ids = (
+        None
+        if hits is None
+        else [str(h.get("doc_id") or "") for h in hits]
+    )
     row.update(
         verdict=verdict,
         failures=failures,
@@ -361,8 +379,39 @@ def run_query(client: Any, entry: dict[str, Any], answer_signals: dict[str, dict
         # Whether the model emitted a Citations: header at all — separates
         # truncated-before-cites from chose-not-to-cite downstream.
         citations_header_present=bool(CITATIONS_HEADER_RE.search(answer)),
+        # WHY attribution (issue #299): gold + sibling-pool doc ids travel
+        # with the row so P/R misses split into retriever blame (gold never
+        # in the pool) vs reader blame (gold present, uncited) without
+        # rejoining the golden set. None when the caller has no pool.
+        expected_doc_ids=gold_ids,
+        hit_doc_ids=hit_ids,
+        gold_retrieved=(
+            None
+            if hit_ids is None or not gold_ids
+            else bool(set(hit_ids) & set(gold_ids))
+        ),
+        # The server zeroes cites on abstentions via the same is_abstention
+        # predicate (one helper, shared) — recomputed here so a cited-then-
+        # zeroed row reads distinctly from a never-cited one.
+        abstention_zeroed=bool(is_abstention(answer) and not citations),
     )
     return row
+
+
+_FAILURE_DETAIL_RE = re.compile(r"\([^()]*:[^()]*\)|\[[^\[\]]*\]|'[^']*'")
+_FAILURE_LEAD_COUNT_RE = re.compile(r"^\d+ ")
+
+
+def failure_bucket(failure: str) -> str:
+    """Histogram key for a failure string (issue #299): parenthesized,
+    bracketed, and quoted details are redacted and a leading count is
+    normalized, so templates bucket stably ('trap answered: 3 …' and
+    '…: 5 …' are one bucket; the '(no explicit Citations: block)'
+    qualifier does not split the inferred bucket on its inner colon).
+    Pure."""
+    redacted = _FAILURE_DETAIL_RE.sub("…", failure)
+    redacted = _FAILURE_LEAD_COUNT_RE.sub("N ", redacted)
+    return redacted.split(":")[0].strip() or failure
 
 
 def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, Any]) -> None:
@@ -380,6 +429,12 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
     lines.append("|---|---|---|")
     for cls, m in metrics["by_class"].items():
         lines.append(f"| {cls} | {m['n']} | {m['pass']} |")
+    if metrics.get("by_failure"):
+        lines.append("")
+        lines.append("| failure | count |")
+        lines.append("|---|---|")
+        for bucket, count in metrics["by_failure"].items():
+            lines.append(f"| {bucket} | {count} |")
     lines.append("")
     fails = [r for r in results if r.get("verdict") in ("fail", "error")]
     if fails:

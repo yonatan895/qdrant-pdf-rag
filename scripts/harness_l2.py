@@ -96,7 +96,7 @@ if str(REPO / "scripts") not in sys.path:
     # `python scripts/harness_l2.py` and when imported as scripts.harness_l2
     sys.path.insert(0, str(REPO / "scripts"))
 
-from eval_answers import _AnswerCapture, run_query, select_sample
+from eval_answers import _AnswerCapture, failure_bucket, run_query, select_sample
 from venue import VenueError, require_rc_for_collection, resolve_golden_paths
 
 # Shared citation-index shape ([n] / [n, m]); see the inference rule in
@@ -334,8 +334,50 @@ def summarize_l2(results: list[dict[str, Any]]) -> dict[str, Any]:
         # query complexity. Unknown covers rows without the answer log join
         # (error rows, zero-hits path) — a missing signal, never a verdict.
         "by_complexity": _by_complexity_truncation(answer_llm, rate),
+        # WHY slices (issue #299): P/R means per query class plus the
+        # template-bucketed failure histogram, so the report reads off
+        # which mode dominates instead of grepping row strings.
+        "by_class": _by_class_pr(judged),
+        "by_failure": _by_failure_histogram(judged),
     }
     return metrics
+
+
+def _by_class_pr(judged: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Mean P/R per query class over rows that have the metric. Pure."""
+    precs: dict[str, list[float]] = {}
+    recs: dict[str, list[float]] = {}
+    ns: dict[str, int] = {}
+    for r in judged:
+        cls = str(r.get("query_class") or "unknown")
+        ns[cls] = ns.get(cls, 0) + 1
+        if r.get("citation_precision") is not None:
+            precs.setdefault(cls, []).append(r["citation_precision"])
+        if r.get("citation_recall") is not None:
+            recs.setdefault(cls, []).append(r["citation_recall"])
+    out: dict[str, dict[str, Any]] = {}
+    for cls in sorted(ns):
+        out[cls] = {
+            "n": ns[cls],
+            "citation_precision": (
+                round(sum(precs[cls]) / len(precs[cls]), 4) if cls in precs else None
+            ),
+            "citation_recall": (
+                round(sum(recs[cls]) / len(recs[cls]), 4) if cls in recs else None
+            ),
+        }
+    return out
+
+
+def _by_failure_histogram(judged: list[dict[str, Any]]) -> dict[str, int]:
+    """Template-bucketed failure counts (shared bucketing with eval_answers).
+    Pure."""
+    hist: dict[str, int] = {}
+    for r in judged:
+        for f in r.get("failures") or []:
+            bucket = failure_bucket(f)
+            hist[bucket] = hist.get(bucket, 0) + 1
+    return dict(sorted(hist.items()))
 
 
 def _by_complexity_truncation(
@@ -401,6 +443,15 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
             f"contradiction {f['contradiction']} (judged {f['judged']}, judge errors {f['judge_errors']})"
         ),
         f"- structural fails: {metrics['structural_fails']} (gates), unmapped citations: {metrics['unmapped_citations']} (each fails its row)",
+        "- by class P/R (means over rows carrying the metric): "
+        + ", ".join(
+            f"{cls} n={b['n']} P/R {b['citation_precision']}/{b['citation_recall']}"
+            for cls, b in (metrics.get("by_class") or {}).items()
+        ),
+        "- by failure: "
+        + ", ".join(
+            f"{bucket} x{count}" for bucket, count in (metrics.get("by_failure") or {}).items()
+        ),
         "",
     ]
     fails = [r for r in results if r.get("verdict") in ("fail", "error")]
@@ -545,8 +596,12 @@ def run_l2(
                 return search_cache[query]
 
             for i, entry in enumerate(sample, 1):
-                row = run_query(client, entry, answers.signals)
                 hits = hits_for(entry["query"])
+                # WHY join (issue #299): the same sibling pool the
+                # measurements below use travels with the row, so
+                # retriever blame (gold never pooled) splits from reader
+                # blame (gold pooled, uncited) without rejoining gold.
+                row = run_query(client, entry, answers.signals, hits)
                 apply_l2_measurements(row, entry, hits, capture.alerts)
 
                 # Faithfulness judge: grounded, non-refused model text.

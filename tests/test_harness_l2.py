@@ -427,3 +427,34 @@ def test_summarize_carries_by_complexity_slice():
     ]
     m = summarize_l2(rows)
     assert m["by_complexity"]["complex"] == {"n": 2, "truncated": 1, "truncation_rate": 0.5}
+
+
+# --------------------------------------------- issue #299 WHY aggregations
+def test_summarize_by_class_pr_means():
+    from scripts.harness_l2 import _by_class_pr
+    rows = [
+        _row("A", query_class="syntax", citation_precision=1.0, citation_recall=0.5),
+        _row("B", query_class="syntax", citation_precision=0.5, citation_recall=0.5),
+        _row("C", query_class="negative"),
+    ]
+    by_class = _by_class_pr(rows)
+    assert by_class["syntax"] == {"n": 2, "citation_precision": 0.75, "citation_recall": 0.5}
+    assert by_class["negative"] == {"n": 1, "citation_precision": None, "citation_recall": None}
+
+
+def test_summarize_by_failure_histogram():
+    from scripts.harness_l2 import _by_failure_histogram
+    rows = [
+        _row("A", verdict="fail", failures=["zero validated citations"]),
+        _row("B", verdict="fail", failures=["zero validated citations"]),
+        _row("C", verdict="pass"),
+    ]
+    assert _by_failure_histogram(rows) == {"zero validated citations": 2}
+
+
+def test_summarize_carries_why_slices():
+    rows = [_row("A", query_class="syntax", citation_precision=1.0, citation_recall=1.0,
+                 verdict="fail", failures=["zero validated citations"])]
+    m = summarize_l2(rows)
+    assert m["by_class"]["syntax"]["n"] == 1
+    assert m["by_failure"] == {"zero validated citations": 1}

@@ -404,3 +404,63 @@ def test_summarize_by_complexity_counts_pass() -> None:
     # error rows never reach the judged set; a judged row without the join
     # lands in unknown rather than a third complexity.
     assert by_complexity["unknown"] == {"n": 1, "pass": 0}
+
+
+# ------------------------------------------------- issue #299 WHY taxonomy
+def test_failure_bucket_redacts_quoted_substrings() -> None:
+    from scripts.eval_answers import failure_bucket
+    assert failure_bucket("trap answered: 3 validated citation(s)") == "trap answered"
+    assert failure_bucket("trap answered: 5 validated citation(s)") == "trap answered"
+    assert failure_bucket("missing required substring: 'LFAREA 1M'") == "missing required substring"
+    assert failure_bucket("zero validated citations") == "zero validated citations"
+    assert (
+        failure_bucket("only inferred citations (no explicit Citations: block)")
+        == "only inferred citations …"
+    )
+    assert (
+        failure_bucket("3 validated citation(s) not in the fetched hit set: ['c1', 'c2']")
+        == "N validated citation(s) not in the fetched hit set"
+    )
+
+
+def test_run_query_carries_gold_and_pool_join() -> None:
+    hits = [{"doc_id": "SA23-1380-09", "cite": "c1"}, {"doc_id": "OTHER-01", "cite": "c2"}]
+    row = run_query(_StubClient(_answer_payload()), _entry(expected_doc_ids=["SA23-1380-09"]), None, hits)
+    assert row["expected_doc_ids"] == ["SA23-1380-09"]
+    assert row["hit_doc_ids"] == ["SA23-1380-09", "OTHER-01"]
+    assert row["gold_retrieved"] is True
+    assert row["abstention_zeroed"] is False
+
+
+def test_run_query_gold_absent_from_pool_is_reader_blame_shape() -> None:
+    hits = [{"doc_id": "OTHER-01", "cite": "c2"}]
+    row = run_query(_StubClient(_answer_payload()), _entry(expected_doc_ids=["SA23-1380-09"]), None, hits)
+    assert row["gold_retrieved"] is False
+
+
+def test_run_query_without_pool_leaves_join_nones() -> None:
+    row = run_query(_StubClient(_answer_payload()), _entry(expected_doc_ids=["SA23-1380-09"]))
+    assert row["hit_doc_ids"] is None
+    assert row["gold_retrieved"] is None
+    assert row["expected_doc_ids"] == ["SA23-1380-09"]
+
+
+def test_run_query_flags_cited_then_zeroed_abstention() -> None:
+    body = "The excerpts do not contain this information."
+    row = run_query(_StubClient(_answer_payload(answer=body, citations=[])), _entry())
+    assert row["abstention_zeroed"] is True
+
+
+def test_summarize_by_failure_histogram() -> None:
+    results = [
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "syntax",
+         "failures": ["zero validated citations"]},
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "syntax",
+         "failures": ["trap answered: 3 validated citation(s)"]},
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "syntax",
+         "failures": ["trap answered: 1 validated citation(s)"]},
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax"},
+    ]
+    assert summarize(results)["by_failure"] == {
+        "trap answered": 2, "zero validated citations": 1,
+    }
