@@ -37,8 +37,10 @@ from mainframe_rag.agent.answer import (
     TruncatedStreamError,
     as_chat_result,
     assert_reasoning_model,
+    build_chat_messages,
     build_messages,
     classify_query_complexity,
+    condense_query,
     parse_answer,
 )
 from mainframe_rag.agent.metrics import endpoint_for_path, record_request, setup_metrics
@@ -47,6 +49,8 @@ from mainframe_rag.agent.sse import (
     error_payload,
     fallback_stream,
     final_payload,
+    format_openai_chunk,
+    format_openai_done,
     format_sse_event,
 )
 from mainframe_rag.agent.tokenizer import build_tokenizer
@@ -56,6 +60,7 @@ from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.logs import configure_logging
 from mainframe_rag.ports import (
     AsyncQdrantPoints,
+    ChatMessage,
     Embedder,
     LLMClient,
     QdrantPoints,
@@ -384,6 +389,41 @@ class AnswerResponse(BaseModel):
     # path, so the schema is identical on JSON and SSE.
     inferred_indices: list[int] = Field(default_factory=list)
     script: str | None
+
+
+class ChatCompletionsRequest(BaseModel):
+    messages: list[ChatMessage] = Field(min_length=1)
+    model: str | None = None
+    stream: bool = False
+    temperature: float | None = None
+    max_tokens: int | None = None
+    splunk_context: str | None = None
+    product: str | None = None
+    version: str | None = None
+
+
+class ChatMessageResponse(BaseModel):
+    role: str = "assistant"
+    content: str
+
+
+class ChatCompletionChoice(BaseModel):
+    index: int = 0
+    message: ChatMessageResponse
+    finish_reason: str = "stop"
+
+
+class ChatCompletionsResponse(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    choices: list[ChatCompletionChoice]
+    usage: TokenUsage = Field(default_factory=TokenUsage)
+    citations: list[str] = Field(default_factory=list)
+    citations_inferred: bool = False
+    inferred_indices: list[int] = Field(default_factory=list)
+    hits: list[SearchHit] = Field(default_factory=list)
 
 
 class HealthzResponse(BaseModel):
@@ -989,6 +1029,245 @@ async def v1_answer(
         yield format_sse_event("final", final)
 
     return StreamingResponse(sse_event_generator(), media_type="text/event-stream", headers=headers)
+
+
+@app.post("/v1/chat/completions", response_model=None)
+async def chat_completions(req: ChatCompletionsRequest, request: Request, response: Response):
+    """OpenAI-compatible multi-turn chat completions route.
+
+    Supports non-streaming JSON and streaming SSE (data: {...}\n\ndata: [DONE]\n\n).
+    Executes low-effort query condensation for follow-up turns (>1), hybrid retrieval against
+    Qdrant, sliding-window context assembly with excerpt pruning, reasoning LLM generation,
+    and turn-local citation validation.
+    """
+    request_id = getattr(request.state, "request_id", uuid.uuid4().hex[:12])
+    started = getattr(request.state, "started", time.monotonic())
+    parent_ctx = parent_context(request)
+    llm_model = req.model or settings.llm_model_reasoning or "reasoning-model"
+
+    latest_user_msgs = [m for m in req.messages if m.role == "user"]
+    if not latest_user_msgs:
+        raise AppError(422, "invalid_request", "at least one user message is required")
+    latest_query = latest_user_msgs[-1].content.strip()
+    _require_query_length(request_id, latest_query)
+
+    is_stream = req.stream
+    root_span = tracer.start_span("v1.chat", context=parent_ctx, attributes={"rag.stream": is_stream})
+    root_ctx = trace.set_span_in_context(root_span, parent_ctx)
+
+    try:
+        if len(req.messages) > 1:
+            with tracer.start_as_current_span("chat.condense", context=root_ctx):
+                search_query = await condense_query(llm, req.messages, settings)
+        else:
+            search_query = latest_query
+
+        with tracer.start_as_current_span("chat.retrieve", context=root_ctx):
+            retrieval_coro = retrieve_search(
+                qdrant,
+                embedder,
+                settings.qdrant_collection,
+                search_query,
+                product=req.product,
+                version=req.version,
+                limit=8,
+                settings=settings,
+                reranker=reranker,
+            )
+            hits, kind, _timings = await _await_retrieval(retrieval_coro)
+    except Exception as exc:
+        _span_error(root_span, exc)
+        root_span.end()
+        _record_endpoint(request, "chat", "upstream_error", started)
+        log.error(json_log(request_id, "chat_retrieval", error=str(exc)[:200]))
+        raise AppError(502, "upstream_error", "retrieval failed") from exc
+
+    complexity = classify_query_complexity(latest_query)
+    effort = (
+        settings.llm_reasoning_effort_complex
+        if complexity == "complex"
+        else settings.llm_reasoning_effort_simple
+    )
+    max_context = (
+        settings.prompt_max_context_chars_complex
+        if complexity == "complex"
+        else settings.prompt_max_context_chars
+    )
+
+    chat_messages = await asyncio.to_thread(
+        build_chat_messages,
+        req.messages,
+        hits,
+        product=req.product,
+        version=req.version,
+        splunk_context=req.splunk_context,
+        max_context_chars=max_context,
+        max_chunk_chars=settings.prompt_max_chunk_chars,
+        max_chunk_chars_narrative=(
+            settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
+        ),
+        splunk_context_max_chars=settings.splunk_context_max_chars,
+        complexity=complexity,
+        tokenizer=tokenizer,
+        settings=settings,
+        order=settings.prompt_order,
+    )
+
+    if not is_stream:
+        try:
+            with tracer.start_as_current_span(
+                "llm.chat", context=root_ctx,
+                attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
+            ) as llm_span:
+                chat_call = llm.chat(
+                    chat_messages,
+                    reasoning_effort=effort,
+                    temperature=req.temperature if req.temperature is not None else settings.llm_temperature,
+                )
+                chat_res = as_chat_result(await chat_call if inspect.isawaitable(chat_call) else chat_call)
+                llm_span.set_attributes(
+                    {
+                        "llm.ttft_ms": chat_res.ttft_ms if chat_res.ttft_ms is not None else 0,
+                        "llm.finish_reason": chat_res.finish_reason,
+                        "llm.prompt_tokens": chat_res.usage.prompt_tokens,
+                        "llm.completion_tokens": chat_res.usage.completion_tokens,
+                        "llm.reasoning_tokens": chat_res.usage.reasoning_tokens,
+                        "llm.total_tokens": chat_res.usage.total_tokens,
+                    }
+                )
+            parsed = parse_answer(
+                chat_res.content,
+                {h.cite for h in hits},
+                ordered_cites=[h.cite for h in hits],
+            )
+        except Exception as exc:
+            _span_error(root_span, exc)
+            root_span.end()
+            _record_endpoint(request, "chat", "upstream_error", started, query_class=kind, hits=len(hits))
+            log.error(json_log(request_id, "chat_answer", error=str(exc)[:200]))
+            raise AppError(502, "upstream_error", "answer failed") from exc
+
+        _alert_finish_reason_non_stop(request_id, chat_res.finish_reason)
+
+        content = parsed.answer
+        if parsed.citations:
+            content += "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in parsed.citations)
+
+        _record_endpoint(
+            request, "chat", "ok", started, query_class=kind,
+            hits=len(hits), ttft_ms=chat_res.ttft_ms, llm_model=llm_model,
+        )
+        root_span.end()
+
+        return ChatCompletionsResponse(
+            id=f"chatcmpl-{request_id}",
+            created=int(time.time()),
+            model=llm_model,
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatMessageResponse(role="assistant", content=content),
+                    finish_reason=chat_res.finish_reason,
+                )
+            ],
+            usage=chat_res.usage,
+            citations=parsed.citations,
+            citations_inferred=parsed.citations_inferred,
+            inferred_indices=parsed.inferred_indices,
+            hits=hits,
+        )
+
+    async def _chat_sse_events() -> AsyncIterator[str]:
+        t0 = time.monotonic()
+        ttft_ms: int | None = None
+        content_parts: list[str] = []
+        finish_reason = "stop"
+        usage = TokenUsage()
+        chat_id = f"chatcmpl-{request_id}"
+
+        if hasattr(llm, "chat_stream"):
+            stream_gen = llm.chat_stream(
+                chat_messages,
+                reasoning_effort=effort,
+                temperature=req.temperature if req.temperature is not None else settings.llm_temperature,
+            )
+        else:
+            stream_gen = fallback_stream(
+                llm, chat_messages, effort,
+                req.temperature if req.temperature is not None else settings.llm_temperature,
+            )
+
+        try:
+            with tracer.start_as_current_span(
+                "llm.chat", context=root_ctx,
+                attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
+            ) as llm_span:
+                async for item in stream_gen:
+                    itype = item.get("type")
+                    if itype == "token":
+                        delta = item.get("delta") or ""
+                        if delta:
+                            if ttft_ms is None:
+                                ttft_ms = item.get("ttft_ms") or int((time.monotonic() - t0) * 1000)
+                            content_parts.append(delta)
+                            yield format_openai_chunk(chat_id, llm_model, delta_content=delta)
+                    elif itype == "done":
+                        finish_reason = item.get("finish_reason") or "stop"
+                        if item.get("usage"):
+                            usage = item["usage"]
+                        if ttft_ms is None and item.get("ttft_ms") is not None:
+                            ttft_ms = item["ttft_ms"]
+                llm_span.set_attributes(
+                    {
+                        "llm.ttft_ms": ttft_ms if ttft_ms is not None else 0,
+                        "llm.finish_reason": finish_reason,
+                        "llm.prompt_tokens": usage.prompt_tokens,
+                        "llm.completion_tokens": usage.completion_tokens,
+                        "llm.reasoning_tokens": usage.reasoning_tokens,
+                        "llm.total_tokens": usage.total_tokens,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 — streaming SSE generator traps upstream error
+            _span_error(root_span, exc)
+            _record_endpoint(request, "chat", "upstream_error", started, query_class=kind, hits=len(hits))
+            log.error(json_log(request_id, "chat_stream", error=str(exc)[:200]))
+            yield format_openai_chunk(chat_id, llm_model, finish_reason="error")
+            yield format_openai_done()
+            return
+
+        full_content = "".join(content_parts)
+        parsed = parse_answer(
+            full_content,
+            {h.cite for h in hits},
+            ordered_cites=[h.cite for h in hits],
+        )
+
+        if parsed.citations:
+            cites_delta = "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in parsed.citations)
+            yield format_openai_chunk(chat_id, llm_model, delta_content=cites_delta)
+
+        extra_meta = {
+            "citations": parsed.citations,
+            "citations_inferred": parsed.citations_inferred,
+            "inferred_indices": parsed.inferred_indices,
+            "hits": [h.model_dump() for h in hits],
+        }
+        yield format_openai_chunk(chat_id, llm_model, finish_reason=finish_reason, extra=extra_meta)
+        yield format_openai_done()
+
+        _record_endpoint(
+            request, "chat", "ok", started, query_class=kind,
+            hits=len(hits), ttft_ms=ttft_ms, llm_model=llm_model,
+        )
+
+    async def sse_event_generator() -> AsyncIterator[str]:
+        try:
+            async for chunk in _chat_sse_events():
+                yield chunk
+        finally:
+            root_span.end()
+
+    return StreamingResponse(sse_event_generator(), media_type="text/event-stream")
 
 
 def json_log(request_id: str, action: str, **fields) -> str:

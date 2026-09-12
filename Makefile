@@ -446,7 +446,7 @@ ask: | .venv
 # (serving-budget track PR-B): the | .venv prereq provides the resolver
 # python, passed per-recipe (never exported globally). ROLE defaults to the
 # target's server; explicit ROLE=/GPU_MEM=/MAX_LEN=/SEQS= win.
-.PHONY: local-vllm local-vllm-embed local-vllm-rerank test-vllm-e2e run-agent
+.PHONY: local-vllm local-vllm-embed local-vllm-rerank test-vllm-e2e run-agent run-ui
 local-vllm: | .venv
 	BUDGET_PYTHON="$(CURDIR)/.venv/bin/python" ROLE=$(or $(ROLE),reasoning) sh scripts/run_local_vllm.sh
 local-vllm-embed: | .venv
@@ -495,6 +495,10 @@ test-vllm-e2e: | .venv
 # Run agent locally under uvicorn (LLM_STREAM=true enables TTFT streaming for L3)
 run-agent: | .venv
 	LLM_STREAM=true .venv/bin/python -m uvicorn mainframe_rag.agent.app:app --host 0.0.0.0 --port $(or $(PORT),8080)
+
+# Run interactive chat UI locally under streamlit
+run-ui: | .venv
+	.venv/bin/streamlit run src/mainframe_rag/ui/app.py --server.port $(or $(UI_PORT),8501)
 
 
 # ---------------------------------------------------------------- e2e demo

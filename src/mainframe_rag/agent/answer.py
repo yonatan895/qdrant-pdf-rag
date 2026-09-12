@@ -8,6 +8,7 @@ settings.llm_model_reasoning; there is deliberately no other model knob.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -23,7 +24,7 @@ log = logging.getLogger(__name__)
 
 from mainframe_rag.agent.tokenizer import estimate_tokens
 from mainframe_rag.config import Settings, bearer_auth_headers
-from mainframe_rag.ports import ChatMessage, ChatResult, Tokenizer, TokenUsage
+from mainframe_rag.ports import ChatMessage, ChatResult, LLMClient, Tokenizer, TokenUsage
 from mainframe_rag.regexes import find_message_ids
 from mainframe_rag.retrieve.query import SearchHit
 
@@ -971,3 +972,126 @@ def parse_answer(
         cites_rejected_shape_bad=cites_rejected_shape_bad,
         cites_rejected_unmapped=cites_rejected_unmapped,
     )
+
+
+async def condense_query(
+    llm: LLMClient,
+    messages: list[ChatMessage],
+    settings: Settings | None = None,
+) -> str:
+    """Condense a multi-turn follow-up into a standalone search query.
+    Bypasses LLM rewrite if the latest turn already contains explicit identifiers."""
+    if not messages:
+        return ""
+    latest_text = messages[-1].content
+    from mainframe_rag.retrieve.filters import parse_query
+
+    # Heuristic bypass: If message contains explicit codes (e.g. IEE400I, S0C4, DSN9022I), search directly
+    if parse_query(latest_text).has_identifiers:
+        return latest_text
+
+    history_turns = []
+    for m in [msg for msg in messages[:-1] if msg.role != "system"][-4:]:
+        history_turns.append(f"{m.role.capitalize()}: {m.content}")
+
+    if not history_turns:
+        return latest_text
+
+    history_str = "\n".join(history_turns)
+    prompt = [
+        ChatMessage(
+            role="system",
+            content=(
+                "Given the conversation history and a follow-up question, rephrase the follow-up "
+                "into a standalone search query for mainframe technical manuals. "
+                "Preserve all technical keywords, subsystem names, and error context. "
+                "Do NOT answer the question. Return ONLY the search query string."
+            ),
+        ),
+        ChatMessage(
+            role="user",
+            content=f"Conversation history:\n{history_str}\n\nFollow-up question: {latest_text}\n\nStandalone search query:",
+        ),
+    ]
+    try:
+        res = llm.chat(prompt, reasoning_effort="low", temperature=0.0)
+        if inspect.isawaitable(res):
+            res = await res
+        condensed = res.content.strip() if hasattr(res, "content") else str(res).strip()
+        condensed = re.sub(r'^(Standalone (search )?query:|"|\')\s*', "", condensed, flags=re.IGNORECASE)
+        condensed = condensed.strip('"\'')
+        return condensed or latest_text
+    except Exception as exc:  # noqa: BLE001 — coreference fallback must not abort chat
+        log.warning("query condensation failed (%s); using raw latest text", exc)
+        return latest_text
+
+
+def build_chat_messages(
+    messages: list[ChatMessage],
+    hits: list[SearchHit],
+    product: str | None = None,
+    version: str | None = None,
+    splunk_context: str | None = None,
+    max_context_chars: int = 8000,
+    max_chunk_chars: int = 3000,
+    max_chunk_chars_narrative: int | None = None,
+    splunk_context_max_chars: int = 4000,
+    complexity: str | None = None,
+    tokenizer: Tokenizer | None = None,
+    settings: Settings | None = None,
+    order: Literal["retrieval", "stable_cache"] = "retrieval",
+) -> list[ChatMessage]:
+    """Build multi-turn chat message list for reasoning chat completions.
+
+    - System message: authoritative system prompt (with complex extension if applicable).
+    - Prior turns: user and assistant messages from history (sliding window).
+      Raw manual excerpts in past assistant messages are pruned to preserve token budget.
+    - Active turn (last user message): injected with current sysplex/splunk context,
+      freshly retrieved manual excerpts for the active question, and citation tail instructions.
+    """
+    if not messages:
+        return []
+
+    latest_user_msg = messages[-1]
+    active_query = latest_user_msg.content
+
+    if complexity is None:
+        complexity = classify_query_complexity(active_query)
+
+    system_content = (
+        SYSTEM_PROMPT + SYSTEM_PROMPT_COMPLEX_EXTENSION
+        if complexity == "complex"
+        else SYSTEM_PROMPT
+    )
+
+    active_turn_messages = build_messages(
+        query=active_query,
+        hits=hits,
+        product=product,
+        version=version,
+        splunk_context=splunk_context,
+        max_context_chars=max_context_chars,
+        max_chunk_chars=max_chunk_chars,
+        max_chunk_chars_narrative=max_chunk_chars_narrative,
+        splunk_context_max_chars=splunk_context_max_chars,
+        complexity=complexity,
+        tokenizer=tokenizer,
+        settings=settings,
+        order=order,
+    )
+    active_user_content = active_turn_messages[1].content
+
+    prior_messages: list[ChatMessage] = []
+    raw_history = [m for m in messages[:-1] if m.role != "system"][-6:]
+    for m in raw_history:
+        text = m.content.strip()
+        if m.role == "assistant" and "Retrieved manual excerpts:" in text:
+            parts = text.split("Retrieved manual excerpts:")
+            text = parts[0].strip()
+        prior_messages.append(ChatMessage(role=m.role, content=text))
+
+    return [
+        ChatMessage(role="system", content=system_content),
+        *prior_messages,
+        ChatMessage(role="user", content=active_user_content),
+    ]
