@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mainframe Operations Copilot</title>
+  <link rel="stylesheet" href="/ui/static/css/console.css">
+  <script src="/ui/static/vendor/htmx.min.js" defer></script>
+  <script src="/ui/static/js/console.js" defer></script>
+</head>
+<body class="theme-3270">
+  <header class="topbar">
+    <h1>Mainframe Operations Copilot</h1>
+    <div class="topbar-controls">
+      <label for="theme-select">Theme</label>
+      <select id="theme-select">
+        <option value="theme-3270">IBM 3270 Phosphor</option>
+        <option value="theme-dark">Modern Dark</option>
+      </select>
+      <button type="button" id="export-btn">Export incident (MD)</button>
+      <span id="health-badge" class="health" hx-get="/ui/healthz" hx-trigger="load, every 30s" hx-swap="innerHTML">
+        <span class="badge badge-unknown">&#9679; &#8230;</span>
+      </span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <button type="button" id="new-session-btn">&#10133; New incident</button>
+      <ul id="session-list" class="session-list"></ul>
+      <p class="sidebar-note">Sessions live in this browser only. Export before closing a shift.</p>
+    </aside>
+
+    <section class="console">
+      <details class="drawer">
+        <summary>Incident context &amp; subsystem filters</summary>
+        <label for="splunk-context">JES spool / SYSLOG / abend dump</label>
+        <textarea id="splunk-context" form="chat-form" name="splunk_context" rows="6"
+          placeholder="//STEP1 EXEC PGM=IEFBR14&#10;IEF450I JOB12345 STEP1 - ABEND=S0C4">{{ splunk_context }}</textarea>
+        <div class="filters">
+          <label>Subsystem
+            <input id="product" form="chat-form" name="product" value="{{ product }}" placeholder="z/OS">
+          </label>
+          <label>Version
+            <input id="version" form="chat-form" name="version" value="{{ version }}" placeholder="2.5">
+          </label>
+        </div>
+      </details>
+
+      <div id="messages" class="messages" aria-live="polite">
+        {% for turn in turns %}{% include "_message_pair.html" %}{% endfor %}
+      </div>
+
+      {% if error %}<div class="error-banner" role="alert">{{ error }}</div>{% endif %}
+
+      <form id="chat-form" class="composer" method="post" action="/ui/chat"
+            hx-post="/ui/chat" hx-target="#messages" hx-swap="beforeend">
+        <input type="hidden" name="messages" id="history-json" value="{{ history_json }}">
+        <label class="visually-hidden" for="message">Question</label>
+        <textarea id="message" name="message" rows="2" required
+          placeholder="Ask about a message code, abend, syntax, or procedure&#8230;"></textarea>
+        <button type="submit" id="send-btn">Send</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

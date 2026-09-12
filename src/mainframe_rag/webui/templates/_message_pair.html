@@ -1,0 +1,18 @@
+<article class="turn turn-{{ turn.role }}">
+  {% if turn.splunk_context %}
+  <details class="turn-context">
+    <summary>Attached incident context</summary>
+    <pre>{{ turn.splunk_context }}</pre>
+  </details>
+  {% endif %}
+  <div class="turn-role">{% if turn.role == "user" %}Operator{% else %}Copilot{% endif %}</div>
+  <pre class="turn-content">{{ turn.content }}</pre>
+  {% if turn.citations %}
+  <div class="citations">
+    <div class="citations-title">Verified manual citations</div>
+    <ul>
+      {% for cite in turn.citations %}<li>{{ cite }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+</article>

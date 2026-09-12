@@ -78,6 +78,7 @@ from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import async_search as retrieve_search
 from mainframe_rag.retrieve.rerank import build_reranker, probe_reranker
 from mainframe_rag.tracing import parent_context, setup_tracing, shutdown_tracing
+from mainframe_rag.webui.routes import router as webui_router
 
 log = logging.getLogger("agent")
 
@@ -142,10 +143,11 @@ async def _await_retrieval(res) -> tuple:
     return res
 
 
-def _core_deps() -> AnswerCoreDeps:
+def core_deps() -> AnswerCoreDeps:
     """Build the shared-engine dependency bag from the module globals at call
     time, so tests that monkeypatch app_mod (llm, retrieve_search,
-    build_messages) drive the core through the same seam as production."""
+    build_messages) drive the core through the same seam as production, and
+    the operator console reuses the identical retrieval/LLM wiring."""
     return AnswerCoreDeps(
         settings=settings,
         llm=llm,
@@ -381,6 +383,9 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="mainframe-rag agent", version="0.1.0", lifespan=lifespan)
+# ADR-0004 operator console: same process, same image, same Route. The router
+# fails closed (stable 404 envelope) while Settings.ui_enabled is False.
+app.include_router(webui_router)
 
 
 class SearchRequest(BaseModel):
@@ -781,7 +786,7 @@ async def v1_answer(
         query_kind=kind,
         timings=timings,
     )
-    deps = _core_deps()
+    deps = core_deps()
 
     if not is_stream:
         # The shared core owns prompt planning/verification, LLM inference,
@@ -1073,7 +1078,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         request_id=request_id,
         is_chat=True,
     )
-    deps = _core_deps()
+    deps = core_deps()
 
     try:
         with trace.use_span(root_span, end_on_exit=False):
