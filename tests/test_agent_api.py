@@ -1191,6 +1191,72 @@ def test_build_messages_tokenizer_budget_respected():
     assert tok.count_messages(msgs) <= settings.llm_max_model_len - settings.llm_reserved_output_tokens
 
 
+def test_build_messages_complex_budget_prices_thinking_reserve():
+    """Issue #298: the complex prompt budget subtracts the thinking reserve
+    (high-effort thinking shares the window with the answer) and the verify
+    pass prices the safety margin the plan already kept; the simple path
+    keeps the legacy budget/packing with a zero thinking term."""
+    from mainframe_rag.agent.answer import build_messages
+    from mainframe_rag.config import Settings
+
+    hits = [
+        SearchHit(
+            chunk_id=f"c{i}",
+            score=0.4,
+            cite=f"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. {i}",
+            heading="Chapter 2 > IEA500I",
+            text="IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy " * 40,
+            doc_id="SA22-0000-00",
+            title="Title",
+            page_label=str(i),
+            chunk_type="narrative",
+            product="z/OS",
+            version="9.9",
+            message_ids=("IEA500I",),
+        )
+        for i in range(1, 6)
+    ]
+    settings = Settings(
+        llm_max_model_len=1500,
+        llm_reserved_output_tokens=250,
+        llm_thinking_reserve_tokens_complex=300,
+        llm_token_safety_margin=100,
+        _env_file=None,
+    )
+    tok = FallbackTokenizer()
+    complex_msgs = build_messages(
+        "How to configure mainframe storage",
+        hits,
+        tokenizer=tok,
+        settings=settings,
+        complexity="complex",
+    )
+    assert tok.count_messages(complex_msgs) <= (
+        settings.llm_max_model_len
+        - settings.llm_reserved_output_tokens
+        - settings.llm_thinking_reserve_tokens_complex
+        - settings.llm_token_safety_margin
+    )
+    # The simple path prices no thinking and closes the same plan-vs-verify
+    # slack: the verify limit subtracts the safety margin too.
+    simple_msgs = build_messages(
+        "How to configure mainframe storage",
+        hits,
+        tokenizer=tok,
+        settings=settings,
+        complexity="simple",
+    )
+    assert tok.count_messages(simple_msgs) <= (
+        settings.llm_max_model_len
+        - settings.llm_reserved_output_tokens
+        - settings.llm_token_safety_margin
+    )
+    # Same inputs: the complex user block (excerpts) packs no more than the
+    # simple one — the reserve prices thinking out of excerpt chars. (System
+    # blocks differ by design: the complex extension adds fixed text.)
+    assert tok.count_tokens(complex_msgs[1].content) <= tok.count_tokens(simple_msgs[1].content)
+
+
 def test_build_messages_tokenizer_requires_settings():
     from mainframe_rag.agent.answer import build_messages
 
