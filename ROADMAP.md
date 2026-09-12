@@ -191,6 +191,12 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Tests:** extend `tests/test_chunk_ibm_shape.py` / `test_qdrant_io.py` for the new
   payload field; cache-hit test with unchanged fixture docs.
 - **Gate:** L1 recall must improve on golden; no regression on holdout.
+  Measured verdict (issue #300, 2026-09-12): paraphrase vLLM A/B
+  (header-only vs contextual, 22 entries) is 22/22 identical with both
+  arms saturated at 1.0 — no signal, stays default-off, no RC escalation.
+  (Gate-l1 itself cannot register this flag — hash-only, saturated, and
+  contextual refuses hash mode — so the paraphrase instrument is the
+  operative gate here.)
 - **Depends on:** #75.
 
 ### PR-05 (issue #79): Code-atomic chunking for JCL/REXX (rescoped)
