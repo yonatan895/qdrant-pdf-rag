@@ -228,12 +228,12 @@ CONCURRENCY ?= 8
 DURATION ?= 30
 REQUEST_TIMEOUT ?= 30
 eval eval-baseline eval-draft eval-answers eval-report eval-html eval-compare \
-	eval-paraphrase capture-pool \
+	eval-paraphrase eval-chat capture-pool \
 	gate-l1 harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline \
 	harness-l4 harness-l4-record: \
 	export EMBED_MODE := $(EMBED_MODE)
 eval eval-baseline eval-draft eval-answers eval-report eval-html eval-compare \
-	eval-paraphrase capture-pool \
+	eval-paraphrase eval-chat capture-pool \
 	gate-l1 harness-gate harness-baseline harness-l2 harness-l3 harness-l3-baseline \
 	harness-l4 harness-l4-record: \
 	export VENUE := $(VENUE)
@@ -316,6 +316,16 @@ eval-answers: | .venv
 	@mkdir -p $(BUNDLE_DIR)
 	.venv/bin/python scripts/eval_answers.py --max-queries $(or $(N),24) \
 	  --out $(BUNDLE_DIR)/eval-answers-report.json --summary $(BUNDLE_DIR)/eval-answers-summary.md
+
+# Multi-turn condensation A/B (ADR-0004): literal vs condensed follow-up
+# retrieval on the dev golden set. Live stack only (Qdrant + embed + reasoning);
+# the report is evidence for a future CHAT_CONDENSE_ENABLED decision, never a
+# PR gate (default flips are dedicated-PR work, AGENTS.md).
+.PHONY: eval-chat
+eval-chat: | .venv
+	@mkdir -p $(BUNDLE_DIR)
+	.venv/bin/python scripts/eval_chat.py --limit $(or $(N),12) \
+	  --out $(BUNDLE_DIR)/eval-chat-report.json --summary $(BUNDLE_DIR)/eval-chat-summary.md
 
 # Layered harness (PR A: L1 retrieval + promotion gate). Snapshot-pinned
 # index, per-class recall@5/@8 + MRR + nDCG@8, paired-bootstrap CIs against
