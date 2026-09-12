@@ -318,6 +318,18 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** #75, #79.
 
 ### PR-12 (issue #86): Corrective retrieval + abstention (CRAG-style)
+> **Status: CLOSED (will-not-pursue; measured negative 2026-09-12).**
+> RRF fused-score margin cannot separate recall@1 misses from hits
+> (dev-golden replay over `real_manuals`: T=0.10 catches 22/26 misses but
+> retries 58/82 hits), and acronym-expansion-as-retry fixes 2 misses while
+> breaking 4 (net −2 live on the queries where it fires). No trigger and
+> no variant measured; the deterministic harness stays the gate. Numbers
+> in `docs/retrieval.md` §4/§7.
+>
+> **Reopening gate (all required):** a confidence signal with measured
+> hit/miss separation plus a retry variant with measured positive
+> headroom, both with per-query attribution on post-freeze real pools.
+> Until then, do not re-propose.
 - **Scope:** `agent/answer.py`, `retrieve/query.py`
 - **Implementation:** Confidence from reranker score distribution (#76). Low → one
   rewrite + re-search (max 1 retry, hard latency budget — L3 watches p95). Still low →
