@@ -171,10 +171,15 @@ verdict.
   `CONCURRENCY`/`DURATION`/`REQUEST_TIMEOUT` Make variables shape the load
   (recorded in `_meta.env`); a slow reasoning model under concurrency needs
   `REQUEST_TIMEOUT` above the 30s default or every request is a client-side
-  error, not a latency sample. `benchmarks/harness-l3-vllm.json` is
-  recorded (2026-09-11, RC stand-in host, `_meta.env` pins the tier); the
-  hash file is intentionally not recorded — L3 is a GPU tier and the CI
-  bench owns CPU-mode perf.
+  error, not a latency sample.   `benchmarks/harness-l3-vllm.json` is
+  recorded (2026-09-11, RC stand-in host, `_meta.env` pins the tier) and
+  `benchmarks/harness-l3.json` (hash) was recorded 2026-09-12 against
+  `real_manuals_hash` — a hash-vector mirror of `real_manuals` (same
+  435057 ids and payload, vectors rebuilt with the production hash
+  builders; the 256-vs-1024 dim gap means hash can never query the vLLM
+  collection). The hash leg isolates agent/LLM/Qdrant perf from the embed
+  server (search p95 75ms vs 163ms vllm at record time); the CI bench
+  still owns CPU-mode perf trends.
 - **L4 (answer-quality gate):** `harness_l4.py` runs the L2 runner
   (`run_l2(..., relevance_enabled=True)`, one judging path) K times
   (`--repeats`, default 3) over the same deterministic sample and adds the
@@ -396,3 +401,5 @@ committed row is the pointer, the manifest is the detail.
 | 2026-09-12 | 96f013d | `real_manuals` | `replay_sweep` over dev golden, pools captured with CE at depth 80 | tune baseline (n=104) r@1 0.683 / r@5 0.923 / MRR 0.792; fuse 24→32→40 identical, `page2` r@5 0.904/MRR 0.769, `doc4` neutral, `doc2` +1/104, rerank alphas r@1 ≤0.673 — no adoption, production config stands |
 | 2026-09-12 | dff83f8 | `real_manuals` + synthetic venues | golden/holdout re-freeze (#270 table class) + all baseline re-records | 193 entries (121 dev / 72 holdout), `verify-golden` 0 FAIL/0 WARN; `mainframe_manuals` rebuilt one-pass (82 docs / 214 pts); hash + vllm + holdout baselines re-recorded (holdout r@1 0.631, r@5 0.892, MRR 0.726; table class block present in all); L1 harness baseline re-recorded (new snapshot pin, recall@5 0.908, traps 0); gate-l1/l1-gate/eval/holdout green |
 | 2026-09-12 | dff83f8 | `real_manuals` | `harness-l4-record` N=24×3 on the re-frozen holdout | reference re-recorded: grounded 0.46, citation P/R 0.59/0.42, truncation 0.44, syntax 0.33, entailment 0.68, relevance 0.95; 45 structural fails — standing RC debt (recording gates through product debt) |
+| 2026-09-12 | e0de04a | `real_manuals` | full §10 battery on the re-frozen set (#268 close-out) | `eval-holdout` green (r@1 0.631, r@5 0.892, MRR 0.726, 0 fail, 0 viol, table r@5 1.0); L1 `hold` (no metric beyond CI overlap; `RESTORE=never` — the 09-11 pin file is absent on this host, same 435057 pts); L2 `hold` (13 structural fails); L4 `fail` on 38 structural fails with every rate pass/borderline (ref 45); L3 vllm `pass` (search p95 163 ms, answer p95 98.8 s, 0 err); capture 121q 0 fail; replay sweep no adoption (production stands) |
+| 2026-09-12 | e0de04a | `real_manuals_hash` | `harness-l3-baseline` (hash) + `harness-l3` gate (C=8, request timeout 300s) | hash-vector mirror of `real_manuals` built (435057 pts, ids + payload identical, production hash builders); hash baseline recorded (search p95 75 ms, answer p95 64.8 s, 0 err, 0 missing); same-data gate `pass` |
