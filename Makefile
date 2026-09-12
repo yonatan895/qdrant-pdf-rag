@@ -385,7 +385,8 @@ harness-l4-record: | .venv
 	@mkdir -p $(BUNDLE_DIR)
 	.venv/bin/python scripts/harness_l4.py --max-queries $(or $(N),24) --repeats $(or $(REPEATS),3) \
 	  --update-thresholds \
-	  --out $(BUNDLE_DIR)/harness-l4-report.json --summary $(BUNDLE_DIR)/harness-l4-summary.md
+	  --out $(BUNDLE_DIR)/harness-l4-report.json --summary $(BUNDLE_DIR)/harness-l4-summary.md \
+	  --queue $(BUNDLE_DIR)/harness-l4-review-queue.json
 
 # Draft golden-set candidates from a collection's payload (edit the queries).
 eval-draft: | .venv

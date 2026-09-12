@@ -583,7 +583,7 @@ def run_l2(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Harness L2: answer tier on the live GPU stack")
     parser.add_argument("--golden", type=Path, action="append", default=None,
-                        help="golden JSONL path (repeatable; default: evals/golden.jsonl + evals/holdout.jsonl)")
+                        help="golden JSONL path (repeatable; default: dev golden, +holdout under VENUE=rc)")
     parser.add_argument("--max-queries", type=int, default=24,
                         help="deterministic stratified sample size (default 24)")
     parser.add_argument("--all", action="store_true", help="run every golden entry (slow: one reasoning call each)")
