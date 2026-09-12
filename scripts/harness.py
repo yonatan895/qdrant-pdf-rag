@@ -318,7 +318,7 @@ def restore_snapshot(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Layered harness: L1 retrieval + promotion gate")
     parser.add_argument("--golden", type=Path, action="append", default=None,
-                        help="golden JSONL (repeatable; default dev+holdout)")
+                        help="golden JSONL (repeatable; default: dev golden, +holdout under VENUE=rc)")
     parser.add_argument("--collection", default=None, help="Qdrant collection (default: settings)")
     parser.add_argument("--restore", choices=("drift", "always", "never"), default="drift",
                         help="snapshot restore policy (default drift: only when the fingerprint differs)")
