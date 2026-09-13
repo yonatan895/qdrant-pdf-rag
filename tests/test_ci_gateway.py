@@ -55,6 +55,11 @@ def test_gateway_fixture_keeps_local_pins_and_real_routing():
     assert {m['model_name'] for m in config['model_list']} == {'mock-reasoning', 'mock-embed'}
     assert all(m['litellm_params']['api_base'] == 'http://vllm-mock:8000/v1' for m in config['model_list'])
     assert config['router_settings']['num_retries'] == 0
+    assert config['litellm_settings']['custom_provider_map'] == [
+        {'provider': 'strict_openai', 'custom_handler': 'strict_finish.strict_openai'}
+    ]
+    assert config['model_list'][0]['litellm_params']['model'] == 'strict_openai/mock-reasoning'
+    assert config['model_list'][1]['litellm_params']['model'] == 'openai/mock-embed'
 
 
 @pytest.mark.parametrize('fail_at', ['', 'rollout', 'exec'])
@@ -81,6 +86,9 @@ if 'exec' in sys.argv:
     key_creation = [c for c in calls if 'test-gateway-keys' in c]
     assert bool(key_creation) == (not fail_at)
     assert 'sk-test' not in result.stdout + result.stderr
+    hooks = next(c for c in calls if 'test-gateway-hooks' in c)
+    hook_arg = next(arg for arg in hooks if arg.startswith('--from-file='))
+    assert Path(hook_arg.split('=', 2)[2]).resolve() == ROOT / 'scripts/gateway/strict_finish.py'
 
 
 def test_gateway_setup_refuses_unknown_arguments():

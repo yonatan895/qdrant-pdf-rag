@@ -7,7 +7,7 @@ data:
     model_list:
       - model_name: mock-reasoning
         litellm_params:
-          model: openai/mock-reasoning
+          model: strict_openai/mock-reasoning
           api_base: http://vllm-mock:8000/v1
           api_key: dummy
           allowed_openai_params: [reasoning_effort]
@@ -20,6 +20,10 @@ data:
       master_key: os.environ/GATEWAY_MASTER_KEY
     router_settings:
       num_retries: 0
+    litellm_settings:
+      custom_provider_map:
+        - provider: strict_openai
+          custom_handler: strict_finish.strict_openai
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -82,10 +86,12 @@ spec:
             httpGet: {path: /health/liveliness, port: 4000, scheme: HTTPS}
           volumeMounts:
             - {name: config, mountPath: /gateway, readOnly: true}
+            - {name: hooks, mountPath: /gateway/strict_finish.py, subPath: strict_finish.py, readOnly: true}
             - {name: tls, mountPath: /tls, readOnly: true}
             - {name: trust, mountPath: /trust, readOnly: true}
       volumes:
         - {name: config, configMap: {name: test-gateway}}
+        - {name: hooks, configMap: {name: test-gateway-hooks}}
         - {name: tls, secret: {secretName: test-gateway-tls}}
         - {name: trust, configMap: {name: test-gateway-ca}}
 ---

@@ -26,6 +26,8 @@ kubectl -n "$NS" create secret tls test-gateway-tls \
     --cert="$KEY_DIR/tls/tls.crt" --key="$KEY_DIR/tls/tls.key"
 kubectl -n "$NS" create configmap test-gateway-ca \
     --from-file="$KEY_DIR/tls/ca-bundle.crt"
+kubectl -n "$NS" create configmap test-gateway-hooks \
+    --from-file="strict_finish.py=$SCRIPT_DIR/../gateway/strict_finish.py"
 kubectl -n "$NS" apply -f "$SCRIPT_DIR/test-gateway.yaml"
 kubectl -n "$NS" rollout status deploy/test-gateway-pg --timeout=180s
 kubectl -n "$NS" rollout status deploy/test-gateway --timeout=300s
