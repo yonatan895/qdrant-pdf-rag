@@ -250,3 +250,4 @@ Re-ingesting a regenerated corpus (new doc_id generation) requires deleting the 
 
 Same PR as the work that taught the rule. Keep it short. Delete advice that is no longer true.
 Do not turn this file into a changelog of merged PRs — record the invariant, not the round number.
+Roadmap entries for completed or rejected work retain outcomes, evidence, and reopening gates; replace obsolete implementation recipes and duplicated contracts with links to their owning docs.
