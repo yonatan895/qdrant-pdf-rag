@@ -121,9 +121,32 @@ button:hover { background: var(--accent); color: var(--accent-text); }
 
 .messages { display: flex; flex-direction: column; gap: 0.8rem; }
 
-.turn { border: 1px solid var(--panel-border); border-left: 3px solid var(--accent); background: var(--panel); padding: 0.6rem 0.8rem; }
-.turn-user { border-left-color: var(--muted); }
-.turn-role { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 0.3rem; }
+.turn {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 0.7rem 0.9rem;
+}
+/* Operator turns read as compact right-aligned bubbles; copilot answers
+   keep the full-width card with the accent rail (P2 message design). */
+.turn-user {
+  border-left-color: var(--panel-border);
+  border-right: 3px solid var(--accent);
+  margin-left: auto;
+  max-width: 80%;
+}
+.turn-assistant { border-left: 3px solid var(--accent); }
+.turn-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
+.avatar {
+  flex-shrink: 0;
+  width: 1.5rem; height: 1.5rem; line-height: 1.5rem; text-align: center;
+  font-size: 0.8rem; font-weight: bold;
+  color: var(--accent-text); background: var(--accent);
+  border-radius: 50%;
+}
+.turn-user .avatar { background: var(--muted); color: var(--bg); }
+.turn-role { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; }
+.turn-time { margin-left: auto; color: var(--muted); font-size: 0.72rem; font-variant-numeric: tabular-nums; }
 .turn-content { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; }
 /* Rendered assistant markdown: normal flow inside the turn card (P2 owns
    the full message design; these rules only keep P1 output sane). */
@@ -150,12 +173,30 @@ button:hover { background: var(--accent); color: var(--accent-text); }
   border-radius: 3px; padding: 0.6rem 0.8rem; overflow-x: auto; margin: 0.5rem 0;
 }
 .turn-content.md pre code { background: none; border: 0; padding: 0; font-size: 0.85rem; }
+.turn-context { margin-bottom: 0.5rem; }
+.turn-context summary {
+  display: inline-block; cursor: pointer;
+  color: var(--muted); font-size: 0.75rem;
+  border: 1px solid var(--panel-border); border-radius: 999px;
+  padding: 0.15rem 0.7rem;
+}
 .turn-context pre { color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .citations { margin-top: 0.6rem; border-top: 1px solid var(--panel-border); padding-top: 0.4rem; }
 .citations-title { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1px; }
 .citations ul { margin: 0.3rem 0 0; padding-left: 1rem; }
-.citations li { font-size: 0.82rem; }
+.citations li { font-size: 0.82rem; margin: 0.25rem 0; }
+.citations li span { overflow-wrap: anywhere; }
+.copy-btn {
+  font-size: 0.7rem; padding: 0.1rem 0.45rem; margin-left: 0.5rem;
+  text-transform: uppercase; letter-spacing: 1px;
+  color: var(--muted); background: transparent;
+  border: 1px solid var(--panel-border); border-radius: 3px;
+  cursor: pointer; white-space: nowrap;
+}
+.copy-btn:hover { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.turn-content.md pre { position: relative; }
+.turn-content.md pre > .copy-btn { position: absolute; top: 0.35rem; right: 0.35rem; margin-left: 0; }
 
 .composer { display: flex; gap: 0.5rem; align-items: flex-end; position: sticky; bottom: 0; background: var(--bg); padding-top: 0.4rem; }
 .composer textarea { flex: 1 1 auto; min-width: 0; resize: vertical; }

@@ -343,11 +343,20 @@ _MD_CASES = [
     ("1. first\n2. second", ["<ol>", "<li>first</li>", "</ol>"], []),
     (
         "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```",
-        ['<pre><code class="language-jcl">//STEP1 EXEC PGM=IEFBR14</code></pre>'],
+        [
+            (
+                '<pre><button class="copy-btn" type="button">Copy</button>'
+                '<code class="language-jcl">//STEP1 EXEC PGM=IEFBR14</code></pre>'
+            )
+        ],
         ["```"],
     ),
     # Unclosed fence still renders (streaming midpoint), never leaks raw.
-    ("```\ncode here", ["<pre><code>code here</code></pre>"], ["```"]),
+    (
+        "```\ncode here",
+        ['<pre><button class="copy-btn" type="button">Copy</button><code>code here</code></pre>'],
+        ["```"],
+    ),
     # Code spans protect markup-like content.
     ("`**not bold**`", ["<code>**not bold**</code>"], ["<strong>"]),
     # Mainframe noise stays literal.
@@ -392,6 +401,7 @@ class MarkdownFakeLLM:
                 "### Program Function\n\n"
                 "* **IKJEFT01:** standard TMP\n"
                 "* plain item\n\n"
+                "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```\n\n"
                 "Citations:\n"
                 "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
             ),
@@ -438,3 +448,28 @@ def test_ui_nojs_page_renders_markdown(ui_client, monkeypatch):
     assistant = _assistant_html(resp.text)
     assert "<h3>Program Function</h3>" in assistant
     assert "###" not in assistant
+
+
+def test_ui_chat_fragment_message_design(ui_client, monkeypatch):
+    """P2: avatar header, timestamp, code copy button, citation count and
+    per-cite copy buttons arrive in the fragment."""
+    monkeypatch.setattr(app_mod, "llm", MarkdownFakeLLM())
+    resp = ui_client.post(
+        "/ui/chat",
+        data={"message": "What is IKJEFT01?", "messages": ""},
+        headers={"HX-Request": "true"},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert '<span class="avatar" aria-hidden="true">O</span>' in body
+    assert '<span class="avatar" aria-hidden="true">C</span>' in body
+    assert 'class="turn-time" data-ts="' in body
+    # The ```jcl block leaves the answer body as output.script and is
+    # re-attached as one unlabeled fence — operators must see the code.
+    assert "//STEP1 EXEC PGM=IEFBR14" in _assistant_html(body)
+    assert (
+        '<pre><button class="copy-btn" type="button">Copy</button>'
+        "<code>//STEP1 EXEC PGM=IEFBR14</code>" in body
+    )
+    assert "Verified manual citations (1)" in body
+    assert '<button class="copy-btn copy-cite" type="button">Copy</button>' in body

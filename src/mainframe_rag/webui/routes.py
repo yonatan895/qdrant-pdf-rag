@@ -21,6 +21,7 @@ import html
 import json
 import logging
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -187,7 +188,13 @@ def render_markdown_subset(text: str) -> str:
                 idx += 1
             idx += 1  # consume the closing fence, or run off the end (unclosed)
             cls = f' class="language-{lang}"' if lang else ""
-            out.append(f"<pre><code{cls}>{chr(10).join(body)}</code></pre>")
+            # Static label: the only words this renderer emits are our own.
+            # console.js copies from the sibling <code> node, so no payload
+            # travels in attributes.
+            out.append(
+                '<pre><button class="copy-btn" type="button">Copy</button>'
+                f"<code{cls}>{chr(10).join(body)}</code></pre>"
+            )
             continue
         heading = _MD_HEADING_RE.match(line)
         if heading:
@@ -236,6 +243,9 @@ def _turn(
         "citations": citations or [],
         "splunk_context": splunk_context,
         "history_content": history_content if history_content is not None else content,
+        # UTC instant; the template prints HH:MM UTC and console.js upgrades
+        # it to the operator's local time on load (P2).
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     # Assistant turns render the safe markdown subset; operator turns stay
     # plain <pre> (the operator's own keystrokes, never model output).
@@ -387,11 +397,17 @@ async def ui_chat(
             )
         return _render_page(request, turns, error=_ERROR_TEXT, form=form, status_code=502)
 
+    assistant_content = output.answer
+    if output.script:
+        # Tagged script fences (JCL/REXX/…) leave the answer body during
+        # citation parsing; the console shows them as one unlabeled fence so
+        # operators get the code with a copy button. History mirrors display.
+        assistant_content += "\n\n```\n" + output.script + "\n```"
     assistant_turn = _turn(
         "assistant",
-        output.answer,
+        assistant_content,
         citations=output.citations,
-        history_content=_assistant_content(output.answer, output.citations),
+        history_content=_assistant_content(assistant_content, output.citations),
     )
     turns.append(assistant_turn)
     if is_htmx:

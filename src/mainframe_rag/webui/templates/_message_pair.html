@@ -5,7 +5,13 @@
     <pre>{{ turn.splunk_context }}</pre>
   </details>
   {% endif %}
-  <div class="turn-role">{% if turn.role == "user" %}Operator{% else %}Copilot{% endif %}</div>
+  <div class="turn-head">
+    <span class="avatar" aria-hidden="true">{% if turn.role == "user" %}O{% else %}C{% endif %}</span>
+    <span class="turn-role">{% if turn.role == "user" %}Operator{% else %}Copilot{% endif %}</span>
+    {% if turn.created_at %}
+    <time class="turn-time" data-ts="{{ turn.created_at }}">{{ turn.created_at[11:16] }} UTC</time>
+    {% endif %}
+  </div>
   {% if turn.content_html %}
   <div class="turn-content md">{{ turn.content_html | safe }}</div>
   {% else %}
@@ -13,9 +19,9 @@
   {% endif %}
   {% if turn.citations %}
   <div class="citations">
-    <div class="citations-title">Verified manual citations</div>
+    <div class="citations-title">Verified manual citations ({{ turn.citations | length }})</div>
     <ul>
-      {% for cite in turn.citations %}<li>{{ cite }}</li>{% endfor %}
+      {% for cite in turn.citations %}<li><span>{{ cite }}</span><button class="copy-btn copy-cite" type="button">Copy</button></li>{% endfor %}
     </ul>
   </div>
   {% endif %}
