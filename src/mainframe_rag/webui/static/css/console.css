@@ -147,6 +147,32 @@ button:hover { background: var(--accent); color: var(--accent-text); }
 .turn-user .avatar { background: var(--muted); color: var(--bg); }
 .turn-role { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; }
 .turn-time { margin-left: auto; color: var(--muted); font-size: 0.72rem; font-variant-numeric: tabular-nums; }
+.turn-meta {
+  margin-top: 0.5rem; padding-top: 0.35rem;
+  border-top: 1px dashed var(--panel-border);
+  color: var(--muted); font-size: 0.72rem; font-variant-numeric: tabular-nums;
+}
+/* First-token placeholder while the reasoning model works. */
+.thinking { color: var(--muted); font-style: italic; animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .thinking { animation: none; opacity: 0.8; }
+}
+/* Send doubles as Stop while a turn streams. */
+.composer button.stop { background: var(--error); border-color: var(--error); color: #fff; }
+/* Sidebar session filter + inline rename + empty state (P3). */
+#session-filter { width: 100%; }
+.session-list .rename { flex: 1; min-width: 0; text-transform: none; letter-spacing: 0; }
+.empty-state {
+  border: 1px dashed var(--panel-border); border-radius: 8px;
+  background: var(--panel); padding: 1.4rem 1.2rem; text-align: center;
+  color: var(--muted);
+}
+.empty-state p { margin: 0 0 0.8rem; }
+.empty-state .example {
+  display: block; width: 100%; margin: 0.35rem 0;
+  text-transform: none; letter-spacing: 0; text-align: left;
+}
 .turn-content { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; }
 /* Rendered assistant markdown: normal flow inside the turn card (P2 owns
    the full message design; these rules only keep P1 output sane). */

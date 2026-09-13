@@ -27,6 +27,8 @@
   <main class="layout">
     <aside class="sidebar">
       <button type="button" id="new-session-btn">&#10133; New incident</button>
+      <label class="visually-hidden" for="session-filter">Filter incidents</label>
+      <input id="session-filter" type="search" placeholder="Filter incidents…" autocomplete="off">
       <ul id="session-list" class="session-list"></ul>
       <p class="sidebar-note">Sessions live in this browser only. Export before closing a shift.</p>
     </aside>
