@@ -101,6 +101,9 @@ All of these must hold. Self-review the **diff**, not the PR body.
 
 ## CLI, Makefile, and local vLLM
 
+Deployment CLI arguments fail closed on unknown flags before any stage runs; a misspelled skip flag must never trigger the operation it was meant to skip.
+The air-gap pipeline probes configured model legs from the agent pod before ingest; `/healthz` and retrieval smoke alone cannot establish reasoning readiness.
+
 User-supplied `--embed-model`, `--model`, `--embed-url`, `--vllm-url`, `--embed-mode`, `--dense-dim`, and matching Makefile/`ENV` values must be applied or fail nonzero with a message. Never silently keep `load_settings()` values after a `/models` probe. Ambiguous auto-detect (`len(avail) != 1` and no match) fails closed.
 
 - Quote every shell expansion. Never stash JSON flags in an unquoted `${MODEL_ARGS}` string.
