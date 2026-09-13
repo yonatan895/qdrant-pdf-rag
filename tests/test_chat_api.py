@@ -171,7 +171,7 @@ def test_chat_completions_caller_model_ignored_reports_reasoning_model(chat_clie
         "/v1/chat/completions",
         json={
             "messages": [{"role": "user", "content": "What is IEA500I?"}],
-            "model": "gpt-4o",
+            "model": "caller-chosen-model",
             "stream": False,
         },
     )
