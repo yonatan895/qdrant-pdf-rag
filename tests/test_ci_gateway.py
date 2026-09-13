@@ -126,3 +126,29 @@ if 'exec' in sys.argv:
     assert any('MOCK_CHAT_FAULT=healthy MOCK_EMBED_FAULT=healthy MOCK_TTFT_MS=0' in line for line in lines)
     if not result.returncode:
         assert sum('exec deploy/rag-agent' in line for line in lines) >= 17
+
+
+def test_installer_artifact_corruption_stops_before_installation(tmp_path):
+    workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
+    installers = [step['run'] for job in workflow['jobs'].values() for step in job['steps']
+                  if step.get('name', '').startswith(('Install checksum-pinned', 'Install pinned kubectl', 'Install pinned kind'))]
+    assert len(installers) >= 10
+    # Exercise the actual shell gates with corrupt downloaded bytes. The curl
+    # function avoids the network; sudo records any unsafe attempt to install.
+    harness = r"""curl() {
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = -o ]; then shift; printf corrupt > "$1"; return 0; fi
+            shift
+        done
+        return 1
+    }
+    sudo() { touch "$RUNNER_TEMP/install-attempt"; return 0; }
+    """
+    for index, installer in enumerate(installers):
+        directory = tmp_path / str(index)
+        directory.mkdir()
+        result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', harness + installer],
+            env={**os.environ, 'RUNNER_TEMP': str(directory)}, capture_output=True, text=True, check=False)
+        assert result.returncode != 0
+        assert 'FAILED' in result.stdout + result.stderr
+        assert not (directory / 'install-attempt').exists()
