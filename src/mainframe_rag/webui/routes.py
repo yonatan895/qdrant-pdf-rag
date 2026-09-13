@@ -37,6 +37,7 @@ from mainframe_rag.agent.answer_core import (
     execute_answer_core_stream,
 )
 from mainframe_rag.agent.sse import error_payload, final_payload, format_sse_event
+from mainframe_rag.ingest.chunk import detect_code_region
 from mainframe_rag.ports import ChatMessage
 
 log = logging.getLogger("agent.webui")
@@ -138,6 +139,221 @@ _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _MD_ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+?)\*(?!\*)")
 
 
+# Minimal JCL and REXX tokenizers (issue #337): spans for comments, strings,
+# keywords, and numbers. Other languages keep the language class with no spans.
+_JCL_KEYWORDS = (
+    # Statements / operations
+    "COMMAND",
+    "CNTL",
+    "DD",
+    "ELSE",
+    "ENDCNTL",
+    "ENDIF",
+    "EXEC",
+    "IF",
+    "INCLUDE",
+    "JCLLIB",
+    "JOB",
+    "OUTPUT",
+    "PEND",
+    "PROC",
+    "SET",
+    "THEN",
+    "XMIT",
+    # Parameters and dispositions
+    "AVGREC",
+    "BLKSIZE",
+    "CATLG",
+    "CLASS",
+    "COND",
+    "CONTIG",
+    "COPIES",
+    "CYL",
+    "DATACLAS",
+    "DCB",
+    "DELETE",
+    "DEST",
+    "DISP",
+    "DSN",
+    "DSNAME",
+    "DUMMY",
+    "EXPDT",
+    "FREE",
+    "HOLD",
+    "KEEP",
+    "LABEL",
+    "LIKE",
+    "LRECL",
+    "MGMTCLAS",
+    "MOD",
+    "MSGCLASS",
+    "MSGLEVEL",
+    "NEW",
+    "NOTIFY",
+    "OLD",
+    "PARM",
+    "PASS",
+    "PASSWORD",
+    "PGM",
+    "RECFM",
+    "REFDD",
+    "REGION",
+    "RESTART",
+    "RETPD",
+    "RLSE",
+    "SHR",
+    "SPACE",
+    "STORCLAS",
+    "SUBSYS",
+    "SYSOUT",
+    "TERM",
+    "TIME",
+    "TRK",
+    "TYPRUN",
+    "UNCATLG",
+    "UNIT",
+    "USER",
+    "VOL",
+    "VOLUME",
+)
+
+_REXX_KEYWORDS = (
+    # Instructions and control flow
+    "ADDRESS",
+    "ARG",
+    "BY",
+    "CALL",
+    "DIGITS",
+    "DO",
+    "DROP",
+    "ELSE",
+    "END",
+    "EXIT",
+    "EXPOSE",
+    "FOR",
+    "FOREVER",
+    "FORM",
+    "FUZZ",
+    "IF",
+    "INTERPRET",
+    "ITERATE",
+    "LEAVE",
+    "NOP",
+    "NUMERIC",
+    "OPTIONS",
+    "OTHERWISE",
+    "PARSE",
+    "PROCEDURE",
+    "PULL",
+    "PUSH",
+    "QUEUE",
+    "RETURN",
+    "SAY",
+    "SELECT",
+    "SIGNAL",
+    "THEN",
+    "TO",
+    "TRACE",
+    "UNTIL",
+    "UPPER",
+    "VALUE",
+    "VAR",
+    "WHEN",
+    "WHILE",
+    "WITH",
+    # Built-in functions
+    "ABBREV",
+    "CENTER",
+    "CENTRE",
+    "COPIES",
+    "C2D",
+    "C2X",
+    "DATATYPE",
+    "DATE",
+    "DELSTR",
+    "DELWORD",
+    "D2C",
+    "D2X",
+    "ERRORTEXT",
+    "FORMAT",
+    "INSERT",
+    "LASTPOS",
+    "LEFT",
+    "LENGTH",
+    "LINEIN",
+    "LINEOUT",
+    "LINES",
+    "OVERLAY",
+    "POS",
+    "QUEUED",
+    "RANDOM",
+    "REVERSE",
+    "RIGHT",
+    "SOURCELINE",
+    "SPACE",
+    "STRIP",
+    "SUBSTR",
+    "SUBWORD",
+    "SYMBOL",
+    "TIME",
+    "TRANSLATE",
+    "TRUNC",
+    "VERIFY",
+    "WORD",
+    "WORDINDEX",
+    "WORDLENGTH",
+    "WORDPOS",
+    "WORDS",
+    "X2C",
+    "X2D",
+)
+
+_JCL_KW_PATTERN = "|".join(sorted(_JCL_KEYWORDS, key=len, reverse=True))
+_REXX_KW_PATTERN = "|".join(sorted(_REXX_KEYWORDS, key=len, reverse=True))
+
+_JCL_TOKEN_RE = re.compile(
+    r"(?P<comment>^[ \t]*//\*.*$)"
+    r"|(?P<string>'(?:''|[^'\n])*')"
+    r"|(?P<keyword>\b(?:" + _JCL_KW_PATTERN + r")\b)"
+    r"|(?P<number>\b\d+\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+_REXX_TOKEN_RE = re.compile(
+    r"(?P<comment>/\*[\s\S]*?(?:\*/|$))"
+    r"|(?P<string>'(?:''|[^'\n])*'|\"(?:\"\"|[^\"\n])*\")"
+    r"|(?P<keyword>\b(?:" + _REXX_KW_PATTERN + r")\b)"
+    r"|(?P<number>\b\d+(?:\.\d+)?\b)",
+    re.IGNORECASE,
+)
+
+
+def _tokenize_code(code: str, lang: str) -> str:
+    """Tokenize JCL or REXX code into safe HTML spans.
+
+    Every slice of source code is HTML-escaped; tokens are wrapped in
+    .tok-{comment|string|keyword|number} spans. Unrecognized languages or
+    plain code are returned escaped with no spans.
+    """
+    regex = _JCL_TOKEN_RE if lang == "jcl" else (_REXX_TOKEN_RE if lang == "rexx" else None)
+    if regex is None:
+        return html.escape(code, quote=False)
+
+    out: list[str] = []
+    last = 0
+    for m in regex.finditer(code):
+        start, end = m.span()
+        if start > last:
+            out.append(html.escape(code[last:start], quote=False))
+        kind = m.lastgroup
+        text = html.escape(m.group(), quote=False)
+        out.append(f'<span class="tok-{kind}">{text}</span>')
+        last = end
+    if last < len(code):
+        out.append(html.escape(code[last:], quote=False))
+    return "".join(out)
+
+
 def _md_inline(escaped: str) -> str:
     """Inline subset over already-escaped text. Code spans are extracted to
     placeholders first so `**`/`*` inside code stay literal."""
@@ -172,7 +388,7 @@ def render_markdown_subset(text: str) -> str:
             out.append(f"</{in_list}>")
             in_list = None
 
-    lines = html.escape(text, quote=False).split("\n")
+    lines = text.split("\n")
     idx = 0
     while idx < len(lines):
         line = lines[idx]
@@ -180,20 +396,28 @@ def render_markdown_subset(text: str) -> str:
         if fence:
             flush_para()
             close_list()
-            lang = fence.group(1)
+            lang = fence.group(1).strip().lower() if fence.group(1) else None
             body: list[str] = []
             idx += 1
             while idx < len(lines) and not _MD_FENCE_RE.match(lines[idx]):
                 body.append(lines[idx])
                 idx += 1
             idx += 1  # consume the closing fence, or run off the end (unclosed)
+            raw_code = "\n".join(body)
+            if not lang:
+                lang = detect_code_region(raw_code)
             cls = f' class="language-{lang}"' if lang else ""
+            code_html = (
+                _tokenize_code(raw_code, lang)
+                if lang in ("jcl", "rexx")
+                else html.escape(raw_code, quote=False)
+            )
             # Static label: the only words this renderer emits are our own.
             # console.js copies from the sibling <code> node, so no payload
             # travels in attributes.
             out.append(
                 '<pre><button class="copy-btn" type="button">Copy</button>'
-                f"<code{cls}>{chr(10).join(body)}</code></pre>"
+                f"<code{cls}>{code_html}</code></pre>"
             )
             continue
         heading = _MD_HEADING_RE.match(line)
@@ -201,7 +425,8 @@ def render_markdown_subset(text: str) -> str:
             flush_para()
             close_list()
             level = len(heading.group(1))
-            out.append(f"<h{level}>{_md_inline(heading.group(2))}</h{level}>")
+            escaped_heading = html.escape(heading.group(2), quote=False)
+            out.append(f"<h{level}>{_md_inline(escaped_heading)}</h{level}>")
             idx += 1
             continue
         ul = _MD_UL_RE.match(line)
@@ -214,7 +439,8 @@ def render_markdown_subset(text: str) -> str:
                 close_list()
                 out.append(f"<{kind}>")
                 in_list = kind
-            out.append(f"<li>{_md_inline(match.group(1))}</li>")
+            escaped_item = html.escape(match.group(1), quote=False)
+            out.append(f"<li>{_md_inline(escaped_item)}</li>")
             idx += 1
             continue
         if not line.strip():
@@ -222,7 +448,7 @@ def render_markdown_subset(text: str) -> str:
             close_list()
             idx += 1
             continue
-        para.append(line.strip())
+        para.append(html.escape(line.strip(), quote=False))
         idx += 1
     flush_para()
     close_list()
@@ -400,9 +626,10 @@ async def ui_chat(
     assistant_content = output.answer
     if output.script:
         # Tagged script fences (JCL/REXX/…) leave the answer body during
-        # citation parsing; the console shows them as one unlabeled fence so
-        # operators get the code with a copy button. History mirrors display.
-        assistant_content += "\n\n```\n" + output.script + "\n```"
+        # citation parsing; the console renders them with their threaded
+        # language tag (issue #337), falling back to unlabeled when None.
+        tag = output.script_lang or ""
+        assistant_content += f"\n\n```{tag}\n{output.script}\n```"
     assistant_turn = _turn(
         "assistant",
         assistant_content,
@@ -470,6 +697,7 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
                             output.ttft_ms,
                             output.usage,
                             inferred_indices=output.inferred_indices,
+                            script_lang=output.script_lang,
                         ),
                     )
         except Exception as exc:  # noqa: BLE001 — mid-stream: error event, no final

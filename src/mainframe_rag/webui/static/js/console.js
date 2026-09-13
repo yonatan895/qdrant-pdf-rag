@@ -148,6 +148,109 @@
   const MD_OL = /^ {0,3}\d+[.)]\s+(.*)$/;
   const MD_INLINE = /(`[^`\n]+?`)|(\*\*(.+?)\*\*)|((?<!\*)\*([^*\n]+?)\*(?!\*))/g;
 
+  const JCL_CARD_RE = /^\/\//;
+  const JCL_DD_DATA_RE = /^\/\/\S+\s+DD\s+(\*|DATA)(?=[\s,]|$)/i;
+  const REXX_HEADER_RE = /\/\*\s*rexx/i;
+  const REXX_KEYWORD_RE = /^\s*(say|do|end|parse|pull|push|queue|exit|return|address|trace|signal|call|select|when|otherwise|nop|drop|interpret)\b/i;
+  const REXX_ASSIGN_RE = /^\s*[A-Za-z_][\w.]*\s*=[^=]/;
+
+  function detectCodeRegion(text) {
+    const lines = text.split("\n").filter((l) => l.trim().length > 0);
+    if (!lines.length) return null;
+    const stripped = lines.map((l) => l.trimStart());
+    if (stripped.filter((l) => JCL_CARD_RE.test(l)).length / lines.length >= 0.6) {
+      return "jcl";
+    }
+    if (stripped.some((l) => JCL_DD_DATA_RE.test(l))) {
+      return "jcl";
+    }
+    if (REXX_HEADER_RE.test(text) || lines.some((l) => (l.match(/\/\*/g) || []).length > (l.match(/\*\//g) || []).length)) {
+      return "rexx";
+    }
+    const kwLines = lines.filter((l) => REXX_KEYWORD_RE.test(l)).length;
+    if (kwLines >= 2 && (lines.some((l) => REXX_ASSIGN_RE.test(l)) || text.includes(";"))) {
+      return "rexx";
+    }
+    if (lines.filter((l) => /^\s/.test(l)).length / lines.length >= 0.6) {
+      return "console";
+    }
+    return null;
+  }
+
+  const JCL_KEYWORDS = [
+    "command", "cntl", "dd", "else", "endcntl", "endif", "exec", "if",
+    "include", "jcllib", "job", "output", "pend", "proc", "set", "then", "xmit",
+    "avgrec", "blksize", "catlg", "class", "cond", "contig", "copies", "cyl",
+    "dataclas", "dcb", "delete", "dest", "disp", "dsn", "dsname", "dummy",
+    "expdt", "free", "hold", "keep", "label", "like", "lrecl", "mgmtclas",
+    "mod", "msgclass", "msglevel", "new", "notify", "old", "parm", "pass",
+    "password", "pgm", "recfm", "refdd", "region", "restart", "retpd", "rlse",
+    "shr", "space", "storclas", "subsys", "sysout", "term", "time", "trk",
+    "typrun", "uncatlg", "unit", "user", "vol", "volume"
+  ].sort((a, b) => b.length - a.length);
+
+  const REXX_KEYWORDS = [
+    "address", "arg", "by", "call", "digits", "do", "drop", "else", "end",
+    "exit", "expose", "for", "forever", "form", "fuzz", "if", "interpret",
+    "iterate", "leave", "nop", "numeric", "options", "otherwise", "parse",
+    "procedure", "pull", "push", "queue", "return", "say", "select", "signal",
+    "then", "to", "trace", "until", "upper", "value", "var", "when", "while", "with",
+    "abbrev", "center", "centre", "copies", "c2d", "c2x", "datatype", "date",
+    "delstr", "delword", "d2c", "d2x", "errortext", "format", "insert",
+    "lastpos", "left", "length", "linein", "lineout", "lines", "overlay",
+    "pos", "queued", "random", "reverse", "right", "sourceline", "space",
+    "strip", "substr", "subword", "symbol", "time", "translate", "trunc",
+    "verify", "word", "wordindex", "wordlength", "wordpos", "words", "x2c", "x2d"
+  ].sort((a, b) => b.length - a.length);
+
+  const JCL_TOKEN = new RegExp(
+    "(^[ \\t]*\\/\\/\\*.*$)" +
+    "|('(?:''|[^'\\n])*')" +
+    "|(\\b(?:" + JCL_KEYWORDS.join("|") + ")\\b)" +
+    "|(\\b\\d+\\b)",
+    "gmi"
+  );
+
+  const REXX_TOKEN = new RegExp(
+    "(\\/\\*[\\s\\S]*?(?:\\*\\/|$))" +
+    "|('(?:''|[^'\\n])*'|\"(?:\"\"|[^\"\\n])*\")" +
+    "|(\\b(?:" + REXX_KEYWORDS.join("|") + ")\\b)" +
+    "|(\\b\\d+(?:\\.\\d+)?\\b)",
+    "gi"
+  );
+
+  function tokenizeCode(code, lang, parent) {
+    const re = lang === "jcl" ? JCL_TOKEN : (lang === "rexx" ? REXX_TOKEN : null);
+    if (!re) {
+      parent.appendChild(document.createTextNode(code));
+      return;
+    }
+    re.lastIndex = 0;
+    let last = 0;
+    let m = re.exec(code);
+    while (m !== null) {
+      if (m.index > last) {
+        parent.appendChild(document.createTextNode(code.slice(last, m.index)));
+      }
+      let kind = null;
+      if (m[1] !== undefined) kind = "tok-comment";
+      else if (m[2] !== undefined) kind = "tok-string";
+      else if (m[3] !== undefined) kind = "tok-keyword";
+      else if (m[4] !== undefined) kind = "tok-number";
+
+      if (!kind) {
+        parent.appendChild(document.createTextNode(m[0]));
+      } else {
+        parent.appendChild(el("span", kind, m[0]));
+      }
+      last = m.index + m[0].length;
+      m = re.exec(code);
+    }
+    if (last < code.length) {
+      parent.appendChild(document.createTextNode(code.slice(last)));
+    }
+  }
+
   function mdInline(text, parent) {
     let last = 0;
     MD_INLINE.lastIndex = 0;
@@ -199,6 +302,7 @@
       if (fence) {
         flushPara();
         closeList();
+        let lang = fence[1] ? fence[1].toLowerCase() : null;
         const body = [];
         i += 1;
         while (i < lines.length && !MD_FENCE.test(lines[i])) {
@@ -206,10 +310,19 @@
           i += 1;
         }
         i += 1; // consume the closing fence, or run off the end (unclosed)
+        const rawCode = body.join("\n");
+        if (!lang) {
+          lang = detectCodeRegion(rawCode);
+        }
         const pre = el("pre");
         pre.appendChild(el("button", "copy-btn", "Copy"));
         pre.lastChild.type = "button";
-        const code = el("code", fence[1] ? "language-" + fence[1] : null, body.join("\n"));
+        const code = el("code", lang ? "language-" + lang : null);
+        if (lang === "jcl" || lang === "rexx") {
+          tokenizeCode(rawCode, lang, code);
+        } else {
+          code.textContent = rawCode;
+        }
         pre.appendChild(code);
         frag.appendChild(pre);
         continue;
@@ -592,8 +705,10 @@
       assistantTurn.content = finalPayload.answer || assistantTurn.content;
       if (finalPayload.script) {
         // Tagged script fences leave the answer body during citation parsing;
-        // show them as one unlabeled fence, mirroring the server fragment.
-        assistantTurn.content += "\n\n```\n" + finalPayload.script + "\n```";
+        // render them with their threaded language tag (issue #337), falling
+        // back to unlabeled when None, mirroring the server fragment.
+        const tag = finalPayload.script_lang || "";
+        assistantTurn.content += "\n\n```" + tag + "\n" + finalPayload.script + "\n```";
       }
       assistantTurn.citations = finalPayload.citations || [];
       assistantTurn.meta = {
