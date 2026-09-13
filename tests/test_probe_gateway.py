@@ -57,6 +57,7 @@ class FakeGateway:
     def __init__(self, routes):
         self.routes = routes
         self.calls = []
+        self.bodies = []
 
     def _match(self, method, url):
         for route_method, suffix, status, payload in self.routes:
@@ -71,11 +72,13 @@ class FakeGateway:
 
     def post(self, url, json=None, timeout=None, headers=None):
         self.calls.append(("POST", url, headers))
+        self.bodies.append((url, json))
         status, payload = self._match("POST", url)
         return SimpleResp(url, "POST", status, payload)
 
     def stream(self, method, url, json=None, timeout=None, headers=None):
         self.calls.append(("STREAM", url, headers))
+        self.bodies.append((url, json))
         status, payload = self._match("STREAM", url)
         lines = payload if isinstance(payload, list) else []
         return StreamCtx(SimpleResp(url, method, status, {}), lines)
@@ -308,3 +311,10 @@ def test_stream_errors_never_pass(monkeypatch, status, lines):
 def test_unusable_json_chat_fails(monkeypatch, choices):
     _, rc = _run(monkeypatch, [("POST", "/chat/completions", 200, {"choices": choices}), *_healthy_routes()])
     assert rc == 1
+
+
+def test_probe_uses_application_simple_reasoning_effort(monkeypatch):
+    fake, rc = _run(monkeypatch, _healthy_routes(), argv=['--require-reasoning'],
+                    LLM_REASONING_EFFORT_SIMPLE='low')
+    assert rc == 0
+    assert [body['reasoning_effort'] for url, body in fake.bodies if url.endswith('/chat/completions')] == ['low']

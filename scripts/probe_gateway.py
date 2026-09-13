@@ -110,6 +110,8 @@ def check_chat(settings: Settings, timeout: float, stream: bool) -> tuple[str, s
         "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
         "temperature": 0,
         "max_tokens": 16,
+        # Match the application's simple-query reasoning contract.
+        "reasoning_effort": settings.llm_reasoning_effort_simple,
     }
     try:
         resp = httpx2.post(
