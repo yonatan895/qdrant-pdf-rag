@@ -231,6 +231,14 @@ async def test_core_reasoning_effort_explicit_override_sync():
     )
     assert llm3.calls[0]["reasoning_effort"] == "low"
 
+    # Invalid override ignored -> falls back to complexity default ("low" for simple)
+    llm4 = CoreFakeLLM()
+    await execute_answer_core(
+        AnswerCoreInput(query="simple query", reasoning_effort="ultra"),  # type: ignore[arg-type]
+        _deps(_settings(), llm4, retrieve),
+    )
+    assert llm4.calls[0]["reasoning_effort"] == "low"
+
 
 @pytest.mark.anyio
 async def test_core_reasoning_effort_explicit_override_stream():

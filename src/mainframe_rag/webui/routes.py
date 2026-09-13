@@ -23,7 +23,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mainframe_rag.agent.answer_core import (
     AnswerCoreInput,
+    ReasoningEffort,
     chat_body_chars,
     execute_answer_core,
     execute_answer_core_stream,
@@ -84,7 +85,7 @@ class UiChatRequest(BaseModel):
     splunk_context: str | None = None
     product: str | None = None
     version: str | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    reasoning_effort: ReasoningEffort | None = None
 
 
 def _secure(response: Response) -> Response:
@@ -595,18 +596,17 @@ async def ui_chat(
     splunk_context: str | None = Form(default=None),
     product: str | None = Form(default=None),
     version: str | None = Form(default=None),
-    reasoning_effort: str | None = Form(default=None),
+    reasoning_effort: ReasoningEffort | None = Form(default=None),  # noqa: B008
 ) -> Response:
     history = _parse_history(messages)
     context = splunk_context.strip() if splunk_context and splunk_context.strip() else None
     user_turn = _turn("user", message.strip(), splunk_context=context)
     turns = history_to_turns(history) + [user_turn]
-    norm_effort = reasoning_effort.strip().lower() if reasoning_effort and reasoning_effort.strip().lower() in ("low", "medium", "high") else None
     form = {
         "splunk_context": splunk_context or "",
         "product": product or "",
         "version": version or "",
-        "reasoning_effort": norm_effort or "low",
+        "reasoning_effort": reasoning_effort or "low",
     }
     is_htmx = request.headers.get("HX-Request") == "true"
 
@@ -616,7 +616,7 @@ async def ui_chat(
             splunk_context=context,
             product=(product or None),
             version=(version or None),
-            reasoning_effort=norm_effort,  # type: ignore[arg-type]
+            reasoning_effort=reasoning_effort,
         )
         output = await _run_turn(request, req)
     except Exception as exc:  # noqa: BLE001 — fixed banner to the operator, detail to logs

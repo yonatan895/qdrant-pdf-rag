@@ -880,7 +880,7 @@ def test_ui_chat_stream_passes_reasoning_effort(ui_client, monkeypatch):
 
 
 def test_ui_chat_stream_invalid_reasoning_effort_rejected(ui_client, monkeypatch):
-    """Invalid reasoning effort returns 422 validation error."""
+    """Invalid reasoning effort in stream returns 422 validation error."""
     resp = ui_client.post(
         "/ui/chat/stream",
         json={
@@ -891,18 +891,27 @@ def test_ui_chat_stream_invalid_reasoning_effort_rejected(ui_client, monkeypatch
     assert resp.status_code == 422
 
 
+def test_ui_chat_form_invalid_reasoning_effort_rejected(ui_client):
+    """Invalid reasoning effort in form post returns 422 validation error."""
+    resp = ui_client.post(
+        "/ui/chat",
+        data={"message": "What is IEA500I?", "reasoning_effort": "ultra"},
+    )
+    assert resp.status_code == 422
+
+
 def test_ui_index_renders_reasoning_effort_toggle(ui_client):
-    """GET /ui renders the reasoning effort segmented control toolbar."""
+    """GET /ui renders the reasoning effort slider control toolbar."""
     resp = ui_client.get("/ui")
     assert resp.status_code == 200
     body = resp.text
     assert "composer-toolbar" in body
     assert "reasoning-control" in body
-    assert "segmented-control" in body
+    assert "reasoning-slider" in body
+    assert "slider-ticks" in body
+    assert "reasoning-badge" in body
     assert 'name="reasoning_effort"' in body
     assert 'value="low"' in body
-    assert 'value="medium"' in body
-    assert 'value="high"' in body
 
 
 def test_console_js_reasoning_effort_parity():
@@ -916,15 +925,29 @@ def test_console_js_reasoning_effort_parity():
         "getReasoningEffort",
         "setReasoningEffort",
         "reasoning_effort",
+        "reasoning-slider",
+        "reasoning-badge",
+        "updateSendBtn",
     ):
         assert token in js, token
 
 
 def test_console_css_reasoning_control():
-    """console.css defines styles for composer-toolbar and reasoning segmented control."""
+    """console.css defines styles for composer-toolbar and reasoning slider control."""
     css = (
         Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
     ).read_text(encoding="utf-8")
     assert ".composer-toolbar" in css
     assert ".reasoning-control" in css
-    assert ".segmented-control" in css
+    assert ".reasoning-slider-wrap" in css
+    assert ".slider-ticks" in css
+    assert ".effort-badge" in css
+
+
+def test_console_send_button_visibility():
+    """Send button is hidden when textarea is empty and visible on input or streaming."""
+    css = (
+        Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
+    ).read_text(encoding="utf-8")
+    assert "#send-btn.hidden" in css
+    assert "placeholder-shown + #send-btn:not(.stop)" in css

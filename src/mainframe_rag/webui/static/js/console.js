@@ -476,6 +476,17 @@
   let streamAbort = null;
   let sessionFilter = "";
 
+  function updateSendBtn() {
+    if (!sendBtn) return;
+    const isStreaming = streamAbort !== null;
+    const hasText = promptEl ? promptEl.value.trim().length > 0 : false;
+    if (isStreaming || hasText) {
+      sendBtn.classList.remove("hidden");
+    } else {
+      sendBtn.classList.add("hidden");
+    }
+  }
+
   function setStreaming(active) {
     if (promptEl) {
       // The Stop glyph sits on a submit button, but after send the field
@@ -493,6 +504,7 @@
       sendBtn.setAttribute("aria-label", active ? "Stop" : "Send");
       sendBtn.classList.toggle("stop", active);
     }
+    updateSendBtn();
   }
 
   /* Sticky autoscroll: follow the stream only while the operator is already
@@ -521,6 +533,7 @@
         ex.type = "button";
         ex.addEventListener("click", () => {
           promptEl.value = text;
+          updateSendBtn();
           promptEl.focus();
         });
         empty.appendChild(ex);
@@ -604,16 +617,29 @@
     if (themeSelect) themeSelect.value = document.body.className;
   }
 
+  const EFFORT_LEVELS = ["low", "medium", "high"];
+  const EFFORT_LABELS = { low: "Low", medium: "Med", high: "High" };
+
   function getReasoningEffort() {
-    const checked = document.querySelector('input[name="reasoning_effort"]:checked');
-    return checked ? checked.value : "low";
+    const hidden = document.getElementById("reasoning-effort-input");
+    if (hidden && hidden.value) return hidden.value;
+    const slider = document.getElementById("reasoning-slider");
+    if (slider) return EFFORT_LEVELS[Number(slider.value)] || "low";
+    return "low";
   }
 
   function setReasoningEffort(effort) {
-    const valid = ["low", "medium", "high"];
-    const target = valid.includes(effort) ? effort : "low";
-    const radio = document.querySelector('input[name="reasoning_effort"][value="' + target + '"]');
-    if (radio) radio.checked = true;
+    const target = EFFORT_LEVELS.includes(effort) ? effort : "low";
+    const idx = EFFORT_LEVELS.indexOf(target);
+    const slider = document.getElementById("reasoning-slider");
+    const badge = document.getElementById("reasoning-badge");
+    const hidden = document.getElementById("reasoning-effort-input");
+    if (slider) slider.value = idx;
+    if (badge) badge.textContent = EFFORT_LABELS[target] || "Low";
+    if (hidden) hidden.value = target;
+    document.querySelectorAll(".slider-ticks .tick").forEach((tick) => {
+      tick.classList.toggle("active", tick.getAttribute("data-val") === String(idx));
+    });
   }
 
   function parseFrames(frame) {
@@ -792,6 +818,7 @@
     if (empty) empty.remove();
     messagesEl.appendChild(renderTurn(userTurn));
     promptEl.value = "";
+    updateSendBtn();
     stick = true;
     stickScroll();
     await streamTurn(store, session, userTurn);
@@ -889,22 +916,40 @@
       });
     }
 
+    const slider = document.getElementById("reasoning-slider");
+    if (slider) {
+      slider.addEventListener("input", () => {
+        const effort = EFFORT_LEVELS[Number(slider.value)] || "low";
+        setReasoningEffort(effort);
+        try {
+          window.localStorage.setItem(REASONING_KEY, effort);
+        } catch (err) {
+          /* storage loss is not an error */
+        }
+      });
+    }
+
+    document.querySelectorAll(".slider-ticks .tick").forEach((tick) => {
+      tick.addEventListener("click", () => {
+        const val = tick.getAttribute("data-val");
+        if (val !== null) {
+          const effort = EFFORT_LEVELS[Number(val)] || "low";
+          setReasoningEffort(effort);
+          try {
+            window.localStorage.setItem(REASONING_KEY, effort);
+          } catch (err) {
+            /* storage loss is not an error */
+          }
+        }
+      });
+    });
+
     try {
       const savedEffort = window.localStorage.getItem(REASONING_KEY);
       if (savedEffort) setReasoningEffort(savedEffort);
     } catch (err) {
       /* storage loss is not an error */
     }
-
-    document.querySelectorAll('input[name="reasoning_effort"]').forEach((radio) => {
-      radio.addEventListener("change", () => {
-        try {
-          window.localStorage.setItem(REASONING_KEY, radio.value);
-        } catch (err) {
-          /* storage loss is not an error */
-        }
-      });
-    });
 
     const exportBtn = document.getElementById("export-btn");
     if (exportBtn) {
@@ -935,6 +980,8 @@
     }
 
     if (promptEl) {
+      promptEl.addEventListener("input", updateSendBtn);
+      updateSendBtn();
       promptEl.addEventListener("keydown", (event) => {
         if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
           event.preventDefault();

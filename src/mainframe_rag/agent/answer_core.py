@@ -13,7 +13,11 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+ReasoningEffort = Literal["low", "medium", "high"]
+VALID_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset({"low", "medium", "high"})
+
 
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
@@ -79,7 +83,7 @@ class AnswerCoreInput:
     hits: list[SearchHit] | None = None
     query_kind: str | None = None
     timings: dict[str, int] | None = None
-    reasoning_effort: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
 
 
 @dataclass
@@ -229,7 +233,8 @@ async def execute_answer_core(
     )
     effort = (
         input_data.reasoning_effort
-        or (
+        if input_data.reasoning_effort in VALID_REASONING_EFFORTS
+        else (
             settings.llm_reasoning_effort_complex
             if complexity == "complex"
             else settings.llm_reasoning_effort_simple
@@ -421,7 +426,8 @@ async def execute_answer_core_stream(
     )
     effort = (
         input_data.reasoning_effort
-        or (
+        if input_data.reasoning_effort in VALID_REASONING_EFFORTS
+        else (
             settings.llm_reasoning_effort_complex
             if complexity == "complex"
             else settings.llm_reasoning_effort_simple

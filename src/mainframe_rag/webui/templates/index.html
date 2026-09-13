@@ -59,23 +59,32 @@
 
       <div class="composer-wrap">
         <div class="composer-toolbar">
-          <fieldset class="reasoning-control">
-            <legend class="visually-hidden">Reasoning effort</legend>
-            <span class="control-label" aria-hidden="true">Reasoning:</span>
-            <div class="segmented-control" role="radiogroup" aria-label="Reasoning effort">
-              <input type="radio" id="reasoning-low" name="reasoning_effort" value="low" form="chat-form" {% if reasoning_effort == 'low' or not reasoning_effort %}checked{% endif %}>
-              <label for="reasoning-low">Low</label>
-              <input type="radio" id="reasoning-medium" name="reasoning_effort" value="medium" form="chat-form" {% if reasoning_effort == 'medium' %}checked{% endif %}>
-              <label for="reasoning-medium">Med</label>
-              <input type="radio" id="reasoning-high" name="reasoning_effort" value="high" form="chat-form" {% if reasoning_effort == 'high' %}checked{% endif %}>
-              <label for="reasoning-high">High</label>
+          <div class="reasoning-control">
+            <label class="control-label" for="reasoning-slider">Reasoning:</label>
+            <div class="reasoning-slider-wrap">
+              <input
+                type="range"
+                id="reasoning-slider"
+                min="0"
+                max="2"
+                step="1"
+                value="{% if reasoning_effort == 'high' %}2{% elif reasoning_effort == 'medium' %}1{% else %}0{% endif %}"
+                aria-label="Reasoning effort"
+              >
+              <div class="slider-ticks" aria-hidden="true">
+                <span class="tick{% if not reasoning_effort or reasoning_effort == 'low' %} active{% endif %}" data-val="0">Low</span>
+                <span class="tick{% if reasoning_effort == 'medium' %} active{% endif %}" data-val="1">Med</span>
+                <span class="tick{% if reasoning_effort == 'high' %} active{% endif %}" data-val="2">High</span>
+              </div>
             </div>
-          </fieldset>
+            <span class="effort-badge" id="reasoning-badge">{% if reasoning_effort == 'high' %}High{% elif reasoning_effort == 'medium' %}Med{% else %}Low{% endif %}</span>
+          </div>
         </div>
 
         <form id="chat-form" class="composer" method="post" action="/ui/chat"
               hx-post="/ui/chat" hx-target="#messages" hx-swap="beforeend">
           <input type="hidden" name="messages" id="history-json" value="{{ history_json }}">
+          <input type="hidden" name="reasoning_effort" id="reasoning-effort-input" value="{{ reasoning_effort or 'low' }}">
           <label class="visually-hidden" for="message">Question</label>
           <textarea id="message" name="message" rows="2" required
             placeholder="Ask about a message code, abend, syntax, or procedure&#8230;"></textarea>
