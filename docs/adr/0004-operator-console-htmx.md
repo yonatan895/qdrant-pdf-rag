@@ -39,7 +39,7 @@
   agent application (`rag-agent` in `src/mainframe_rag/agent/app.py`), served at
   `/ui` (gated by `Settings.ui_enabled`) using server-rendered Jinja2 templates,
   vendored HTMX 1.9.12, and Server-Sent Events (SSE) streaming over the shared
-  `answer_core` engine (`src/mainframe_rag/agent/answer.py`).
+  `answer_core` engine (`src/mainframe_rag/agent/answer_core.py`).
   
   Decommission the prototype SQLite database and Streamlit container; persist all
   dialogue history, incident attachments, and session state strictly in the
@@ -66,8 +66,10 @@
      delegated entirely to the OpenShift `oauth-proxy` sidecar.
   5. **No remote asset retrieval:** Zero calls to external CDNs, Google Fonts, or
      third-party script/icon registries.
-  6. **No unauthenticated external console access:** Unauthenticated requests to `/ui`
-     or `/` redirect (HTTP 302) to OpenShift OAuth login.
+  6. **No unauthenticated external console access:** with the console Route enabled,
+     unauthenticated requests through it to `/ui` or `/` redirect (HTTP 302) to
+     OpenShift OAuth login at the oauth-proxy. The FastAPI app itself defines no `/`
+     route, and `/ui` returns the plain 404 envelope when `UI_ENABLED` is false.
 
 - **Consequences / rules:**
 
@@ -80,8 +82,8 @@
     (`{"code": "not_found", "message": "not found"}`) without disclosing route existence.
   - **Shared application core (`answer_core`):** WebUI routes do not maintain separate
     retrieval or prompt assembly logic. Single-turn `/v1/answer`, multi-turn `POST /v1/chat`,
-    and `/ui` thin routes invoke the shared `answer_core` engine in
-    `src/mainframe_rag/agent/answer.py`. This unifies input validation (`query_max_chars = 2000`),
+     and `/ui` thin routes invoke the shared `answer_core` engine in
+     `src/mainframe_rag/agent/answer_core.py`. This unifies input validation (`query_max_chars = 2000`),
     complexity modulation, prompt budgeting, hybrid retrieval (dense + BM25 with RRF),
     and reasoning model execution.
   - **Reasoning-model-only contract:** In strict adherence to ADR-0001, all conversational
@@ -114,10 +116,12 @@
     are deprecated and decommissioned. `streamlit` is removed from `pyproject.toml`.
 
   ### 3. OpenShift `oauth-proxy` Sidecar Route Termination
-  - **Sidecar topology:** In `deploy/kustomize/overlays/openshift/agent-prod-patch.yaml`,
-    the `rag-agent` pod is patched with an official `oauth-proxy` container listening
-    on port 8443 (HTTPS), forwarding authenticated requests to FastAPI on
-    `http://127.0.0.1:8080`.
+  - **Sidecar topology:** When `AGENT_ROUTE=true`, `scripts/airgap/deploy.sh` layers
+    `deploy/kustomize/overlays/openshift-ui/` on top of the prod overlay; the overlay's
+    sidecar patch adds an official `oauth-proxy` container to the `rag-agent` pod,
+    listening on port 8443 (HTTPS) and forwarding authenticated requests to FastAPI on
+    `http://127.0.0.1:8080`. Deploy fails closed while the oauth-proxy pin in
+    `images.txt` is `sha256:PENDING` or the `rag-agent-oauth-cookie` Secret is absent.
   - **Route termination & encryption in transit:** When `AGENT_ROUTE=true`, the OpenShift
     Route terminates with `tls.termination: reencrypt`. TLS certificates for port 8443
     are provisioned and automatically rotated by the OpenShift Service CA controller via:
@@ -132,11 +136,14 @@
   - **Route timeout configuration:** To accommodate deep reasoning deliberation by the
     underlying model without connection drops, the OpenShift Route manifest must include:
     `haproxy.router.openshift.io/timeout: 300s`
-    matching `settings.llm_timeout_s` (300 seconds).
+    matching `settings.answer_timeout_s` (300 seconds).
   - **Air-gap supply chain:** The `oauth-proxy` container image is pinned by full SHA256
     digest in `images.txt` (`registry.redhat.io/openshift4/ose-oauth-proxy:v4.14`),
     packaged into the sneakernet bundle by `scripts/airgap/pack.sh`, and loaded into
-    the internal disconnected registry by `scripts/airgap/load.sh`.
+    the internal disconnected registry by `scripts/airgap/load.sh`. **Known gap:** the
+    pin is still `sha256:PENDING` (needs a connected-host `skopeo login registry.redhat.io`
+    to record it); until then `pack.sh` skips the member and `AGENT_ROUTE=true` deploy
+    fails closed.
 
   ### 4. Zero External CDN/Font Assets & Strict Air-Gap Isolation
   - **Air-gap isolation invariant:** Disconnected enterprise clusters have no access
