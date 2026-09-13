@@ -71,14 +71,56 @@ def test_pipeline_help(pipe_tree):
     assert "Usage:" in r.stdout
 
 
+@pytest.mark.parametrize("argument", ["--skip-laod", "--skip-ingest=true", "unexpected"])
+def test_pipeline_unknown_argument_fails_before_stages(pipe_tree, argument):
+    r = _run_pipeline(pipe_tree, argument)
+    assert r.returncode != 0
+    assert f"unknown argument: {argument}" in r.stderr
+    assert "STAGE" not in r.stdout
+
+
 def test_pipeline_dryrun_full(pipe_tree):
     r = _run_pipeline(pipe_tree, "--skip-load", extra_env={"CORPUS_PVC": "test-corpus"})
     assert r.returncode == 0, r.stderr
     assert "STAGE 1/5: PRE-FLIGHT VALIDATION" in r.stdout
     assert "STAGE 3/5: STACK DEPLOYMENT" in r.stdout
+    assert "exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py" in r.stdout
     assert "STAGE 4/5: CORPUS INGESTION" in r.stdout
     assert "STAGE 5/5: ACCEPTANCE & SMOKE VERIFICATION" in r.stdout
     assert "PIPELINE ORCHESTRATION COMPLETE: AIR-GAP SYSTEM OPERATIONAL & ACCEPTED" in r.stdout
+
+
+@pytest.mark.parametrize("probe_exit", [0, 1])
+def test_pipeline_live_gateway_probe_gates_ingest(pipe_tree, probe_exit):
+    # Run the real orchestrator with stage recorders. The gateway command
+    # must run between deploy and ingest and use the selected cluster client.
+    log = pipe_tree / "stages.log"
+    for stage in ("validate", "load", "deploy", "ingest", "smoke"):
+        write_stub(
+            pipe_tree / "scripts" / "airgap" / f"{stage}.sh",
+            f'#!/bin/sh\necho {stage} >> "$STAGE_LOG"\n',
+        )
+    write_stub(
+        pipe_tree / "bin" / "custom-kc",
+        '#!/bin/sh\nprintf "probe %s\\n" "$*" >> "$STAGE_LOG"\n'
+        f'exit {probe_exit}\n',
+    )
+    r = _run_pipeline(pipe_tree, extra_env={
+        "AIRGAP_DRYRUN": "0", "CORPUS_PVC": "test-corpus",
+        "KC": "custom-kc", "STAGE_LOG": str(log),
+    })
+    stages = log.read_text().splitlines()
+    assert stages[:4] == [
+        "validate", "load", "deploy",
+        "probe -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py",
+    ]
+    if probe_exit:
+        assert r.returncode != 0
+        assert len(stages) == 4
+        assert "OPERATIONAL & ACCEPTED" not in r.stdout
+    else:
+        assert r.returncode == 0, r.stderr
+        assert stages[4:] == ["ingest", "smoke"]
 
 
 def test_pipeline_dryrun_including_load(pipe_tree):

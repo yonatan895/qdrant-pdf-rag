@@ -567,7 +567,7 @@ cd qdrant-pdf-rag
 The `bootstrap.sh` script automatically:
 - Verifies the bundle signature (`SNEAKERNET_TRUSTED_PUB` when provided) and then all member checksums in `SHA256SUMS`.
 - Clones the Git repository from `repo.bundle`.
-- Populates `./dist` with image archives and manifests. **Known gap (#312):** `oauth-proxy-image.tar` is not copied by the documented flow yet — copy it into `dist/` manually before `airgap-load` when the bundle carries it.
+- Populates `./dist` with image archives and manifests, including `oauth-proxy-image.tar` when the bundle contains it.
 - Initializes `airgap.env` from `airgap.env.example` if not already present.
 
 ### 4.3 Configure Environment & Pre-Flight Validation
@@ -804,7 +804,9 @@ Secret fails at deploy time.
 
 After `make airgap-deploy` and before ingesting, prove the platform
 gateway answers every configured leg from inside the cluster (same network
-as the agent — the bastion itself may not reach it):
+as the agent — the bastion itself may not reach it). `make airgap-pipeline`
+runs this probe automatically after deployment; the following command is for
+modular deployment and diagnosis:
 
 ```bash
 # Embed + reasoning + rerank reachability, dim match, auth diagnosis:
@@ -853,21 +855,18 @@ To test the deployment scripts and Kubernetes manifests locally without access t
 
 #### Step 1: Provision Local Registry & Kind Cluster
 
-Kind nodes pull images inside Docker; pulling from `airgap-registry:5000` over HTTP requires configuring containerd mirrors in Kind:
+Kind nodes pull images inside Docker. Configure a containerd mirror so image
+references under `localhost:5000` reach the registry container over HTTP:
 
 ```bash
 # 1. Start local container registry container
-docker run -d --restart=always -p 5000:5000 --name airgap-registry registry:2
+docker run -d --restart=always -p 127.0.0.1:5000:5000 --name airgap-registry registry:2
 
 # 2. Create Kind cluster with containerd mirrors for the local registry.
-# Two mirror keys, one registry: host-side pushes address it as
-# localhost:5000 (only localhost resolves on the host), while in-cluster
-# image refs use airgap-registry:5000 (deploy.sh renders app images under
-# INTERNAL_REGISTRY) AND localhost:5000 (the mock/corpus-gen manifests
-# below). Both keys point at the same registry container over plain HTTP —
-# drop either one and that naming family ErrImagePulls (proven 2026-09-06).
-mkdir -p scratch
-cat <<'EOF' > scratch/kind-config.yaml
+# Use localhost:5000 for both host pushes and every application image ref.
+# containerd resolves that name to the registry container through this mirror.
+SCRATCH_DIR=$(mktemp -d /tmp/mainframe-kind.XXXXXX)
+cat <<'EOF' > "$SCRATCH_DIR/kind-config.yaml"
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 containerdConfigPatches:
@@ -876,10 +875,8 @@ containerdConfigPatches:
     [plugins."io.containerd.grpc.v1.cri".registry.mirrors]
       [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5000"]
         endpoint = ["http://airgap-registry:5000"]
-      [plugins."io.containerd.grpc.v1.cri".registry.mirrors."airgap-registry:5000"]
-        endpoint = ["http://airgap-registry:5000"]
 EOF
-kind create cluster --name airgap --config scratch/kind-config.yaml
+kind create cluster --name airgap --config "$SCRATCH_DIR/kind-config.yaml"
 
 # 3. Connect local registry to Kind network (already connected on re-runs;
 # the redirect keeps the re-run output clean)
@@ -912,6 +909,11 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/signing.k
 SNEAKERNET_SIGNING_KEY=/tmp/signing.key make airgap-pack
 ```
 
+Rehearse the transfer and bootstrap in a fresh directory using §4.2, then
+continue below from the bootstrapped `qdrant-pdf-rag` directory. This checks
+that the bundle is sufficient without the connected clone's files. Keep the
+absolute `SCRATCH_DIR` path for the local-only Kind overrides.
+
 #### Step 3: Load & Push to Local Registry
 
 ```bash
@@ -921,12 +923,13 @@ INTERNAL_REGISTRY=localhost:5000 INSECURE_REGISTRY=true make airgap-load
 
 #### Step 4: Configure `airgap.env` & Deploy Stack to Kind
 
-Create a local single-replica override for Qdrant, copy `airgap.env.example` to `airgap.env`, and populate required values:
+Create a local single-replica override for Qdrant and populate the `airgap.env`
+seeded by bootstrap:
 
 ```bash
 # Create local sizing override (1 replica for Kind test node; the 3x16Gi
 # prod values cannot schedule on one node)
-cat > scratch/qdrant-local.yaml <<'EOF'
+cat > "$SCRATCH_DIR/qdrant-local.yaml" <<'EOF'
 replicaCount: 1
 resources:
   requests:
@@ -937,23 +940,40 @@ resources:
     memory: 2Gi
 EOF
 
-# Copy example and configure environment
-cp airgap.env.example airgap.env
 ```
 
 Ensure `airgap.env` contains:
 ```sh
-INTERNAL_REGISTRY=airgap-registry:5000
+INTERNAL_REGISTRY=localhost:5000
 NAMESPACE=mainframe-rag
 STORAGE_CLASS=standard
 QDRANT_STORAGE_SIZE=1Gi
-QDRANT_EXTRA_VALUES=scratch/qdrant-local.yaml
+QDRANT_EXTRA_VALUES=/absolute/path/to/qdrant-local.yaml
 IMAGE_SHA=$(awk '/^sha: /{print $2}' dist/MANIFEST.txt)
 VLLM_BASE_URL=http://vllm-mock:8000
 EMBED_MODEL=mock-embed
 DENSE_DIM=64
 ```
-`DENSE_DIM` must equal the mock's `MOCK_DIM` below (both 64 here); any pair works as long as they match — ingest fails closed on a mismatch. `LLM_BASE_URL` / `LLM_MODEL_REASONING` are intentionally left unset: the Kind path proves ingest + `/v1/search`; `/v1/answer` stays disabled without a reasoning endpoint (the mock does serve `/v1/chat/completions` deterministically, but wiring answers in-cluster is unproven — see the e2e rehearsal, which asserts search only).
+Use the absolute path printed by `echo "$SCRATCH_DIR/qdrant-local.yaml"` for
+`QDRANT_EXTRA_VALUES`. Keep `INTERNAL_REGISTRY=localhost:5000` throughout load,
+deploy, and pipeline runs: the host pushes there, and the Kind mirror routes node
+pulls to `airgap-registry:5000`. Using the Docker-only hostname as
+`INTERNAL_REGISTRY` makes the pipeline fail on the host with `no such host`.
+
+`DENSE_DIM` must equal the mock's `MOCK_DIM` below (both 64 here). Configure its
+reasoning endpoint too so the rehearsal covers the console, answers, and chat:
+
+```sh
+LLM_BASE_URL=http://vllm-mock:8000/v1
+LLM_MODEL_REASONING=mock-reasoning
+INSECURE_REGISTRY=true
+CORPUS_PVC=corpus
+INGEST_WORK_SIZE=2Gi
+```
+
+These are Kind-only entries in `airgap.env`; production uses the platform team's
+model IDs, gateway endpoints, and Secret. The mock proves wiring and citation
+contracts, not answer quality.
 
 Deploy the in-cluster mock vLLM **before** `make airgap-deploy` (pods resolve `vllm-mock` over cluster DNS — no host networking needed; the "point at the host" alternative does not work from Kind pods without extra setup):
 
@@ -961,7 +981,8 @@ Deploy the in-cluster mock vLLM **before** `make airgap-deploy` (pods resolve `v
 NS=mainframe-rag
 SHA=$(awk '/^sha: /{print $2}' dist/MANIFEST.txt)
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n "$NS" create configmap mock-vllm --from-file=mock_vllm.py=scripts/mock_vllm.py
+kubectl -n "$NS" create configmap mock-vllm --from-file=mock_vllm.py=scripts/mock_vllm.py \
+  --dry-run=client -o yaml | kubectl -n "$NS" apply -f -
 kubectl apply -n "$NS" -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
@@ -1056,17 +1077,42 @@ EOF
 kubectl -n "$NS" wait --for=condition=complete job/corpus-gen --timeout=300s
 ```
 
-Then launch ingest and smoke-test (shrink the prod-sized ingest scratch for the single Kind node):
+Then run the full pipeline with the same `airgap.env`. Loading images and applying
+the deployments again is safe; the ingest script replaces its immutable Job.
+On a rerun of the synthetic corpus generator, delete only `job/corpus-gen` before
+applying it again; retain the corpus PVC.
 
 ```bash
-# Launch one-shot ingest Job against corpus PVC:
-CORPUS_PVC=corpus INGEST_WORK_SIZE=2Gi make airgap-ingest
-
-# Run in-cluster smoke search:
-make airgap-smoke
+make airgap-pipeline
 ```
 
+#### Step 6: Verify answers and the operator console
+
+The pipeline checks the configured model legs, ingestion, search, and tracing.
+For the complete user experience, also verify streaming and open the console:
+
+```bash
+kubectl -n mainframe-rag exec deploy/rag-agent -- \
+  python3 /app/scripts/probe_gateway.py --stream
+kubectl -n mainframe-rag port-forward svc/rag-agent 8080:8080
+```
+
+Open `http://localhost:8080/ui`, confirm the health indicator is healthy, and
+ask `What does IEA500I mean?`. Expect an answer and a citation to the synthetic
+manual; send a follow-up and confirm it completes. The three CSS/JavaScript
+assets load from `/ui/static/`, with no public CDN. The mock answer is
+deterministic and demonstrates the transport and citation contract only.
+
+Kind uses this local port-forward because it has no OpenShift OAuth or Route
+controller. Production browser access follows §4.4.2; the OAuth image pin,
+cookie Secret, Service CA, and `restricted-v2` admission still need verification
+on OpenShift. A successful Kind rehearsal does not establish those properties.
+
 #### Teardown Local Test Cluster
+
+Deleting Kind destroys its PVC contents. Use this only for the synthetic rehearsal;
+back up and restore-test any real Qdrant collections first (see `docs/live-stack.md`
+§4), and retain the caller's original PDFs outside the cluster.
 
 ```bash
 kind delete cluster --name airgap

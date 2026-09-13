@@ -14,11 +14,21 @@ no rollback:
 
 - `--skip-load` / `--skip-ingest` skip their stage; `--dry-run` exports
   `AIRGAP_DRYRUN=1` (every script prints instead of executing);
-  `--help` usage; unknown arguments are silently ignored.
+  `--help` usage; unknown arguments fail before any pipeline stage runs.
 - Ingest runs only when `CORPUS_PVC` is non-empty and `--skip-ingest` is
   absent; otherwise the stage reports skipped.
+- After deployment, the pipeline runs `scripts/probe_gateway.py` inside the
+  agent pod before ingestion. Embeddings are required; reasoning and rerank
+  are checked when configured. A failed leg stops the pipeline. This uses
+  the pod's actual endpoints and Secret-backed keys, not bastion connectivity.
 - The final banner differs: `OPERATIONAL & ACCEPTED` when ingestion ran,
   `READY (Awaiting Corpus Ingest)` when it did not.
+
+Standalone `make airgap-deploy` only waits for workload readiness. The agent
+`/healthz` check covers Qdrant and embedding connectivity; it does not prove
+that reasoning works. Run the gateway probe before ingesting when using the
+modular commands. `make airgap-smoke` checks retrieval and tracing; use the
+console/answer checks in the operator runbook to verify the user experience.
 
 ## 2. Environment precedence
 
@@ -163,10 +173,8 @@ checksums **after**.
   repo already exists, copies (not links) the archives into `dist/`, and
   seeds `airgap.env` from the example only when absent — never overwriting
   operator edits. Artifact discovery searches `dist/` then the parent dir.
-  **Known gap (#312):** the `dist/` copy list currently omits
-  `oauth-proxy-image.tar`, so an `AGENT_ROUTE=true` bundle loses the sidecar
-  after the documented flow — copy that member into `dist/` manually before
-  `airgap-load` until #312 lands.
+  The copy list includes `oauth-proxy-image.tar` when the bundle contains it;
+  no manual sidecar-image copy is needed before `airgap-load`.
 
 ## 5. Sizing and security
 

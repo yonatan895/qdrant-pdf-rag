@@ -26,6 +26,7 @@ for arg in "$@"; do
             echo "Usage: $0 [--skip-load] [--skip-ingest] [--dry-run]"
             exit 0
             ;;
+        *) die "unknown argument: $arg (see --help)" ;;
     esac
 done
 
@@ -50,6 +51,11 @@ fi
 echo ""
 echo ">>> STAGE 3/5: STACK DEPLOYMENT"
 sh scripts/airgap/deploy.sh
+
+echo "==> Gateway readiness from the agent pod"
+KC=${KC:-$(kc)}
+resolve_aliases
+run "$KC" -n "$NAMESPACE" exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py
 
 INGEST_PERFORMED=0
 if [ "$SKIP_INGEST" -eq 1 ]; then
