@@ -326,6 +326,10 @@ def test_console_css_layout_survival_rules():
     assert ".layout > * { min-width: 0; }" in css
     assert ".topbar-controls { display: flex; align-items: center; flex-wrap: wrap;" in css
     assert "flex: 1 1 auto; min-width: 0; resize: vertical;" in css
+    # Sidebar owns its scroll instead of riding the page (follow-up: the
+    # tool section vanished off-screen on long conversations).
+    assert "position: sticky;" in css
+    assert "overflow-y: auto;" in css
 
 
 def test_console_css_theme_polish():
@@ -563,5 +567,7 @@ def test_console_js_streaming_ux_wiring():
         "aria-label",
         "■",
         "▲",
+        # Follow-up: Stop must survive native validation (required toggle).
+        'removeAttribute("required")',
     ):
         assert token in js, token

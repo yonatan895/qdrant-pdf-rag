@@ -118,6 +118,13 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
+  /* Sessions/tools stay put while the conversation scrolls (issue #332
+     follow-up): the sidebar owns its own scroll instead of riding the page. */
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  overflow-y: auto;
 }
 
 .session-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
@@ -296,5 +303,8 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
 
 @media (max-width: 720px) {
   .layout { grid-template-columns: 1fr; }
-  .sidebar { border-right: 0; border-bottom: 1px solid var(--panel-border); }
+  .sidebar {
+    border-right: 0; border-bottom: 1px solid var(--panel-border);
+    position: static; height: auto; overflow-y: visible;
+  }
 }

@@ -363,6 +363,15 @@
   let sessionFilter = "";
 
   function setStreaming(active) {
+    if (promptEl) {
+      // The Stop glyph sits on a submit button, but after send the field
+      // is empty + required — native validation would eat the click
+      // ("Please fill in this field") before our handler runs and the
+      // abort would never fire. Drop it while streaming; the no-JS form
+      // keeps native validation always.
+      if (active) promptEl.removeAttribute("required");
+      else promptEl.setAttribute("required", "");
+    }
     if (sendBtn) {
       // Glyphs carry the state (▲ send / ■ stop); the accessible name
       // carries the meaning for assistive tech.
