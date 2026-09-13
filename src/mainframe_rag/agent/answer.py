@@ -50,6 +50,12 @@ class ParsedAnswer(BaseModel):
     answer: str
     citations: list[str] = Field(default_factory=list)
     script: str | None = None
+    # Language tag of the first extracted script fence, normalized lowercase
+    # (issue #336): parse already knows it (SCRIPT_LANGS match) and the
+    # console needs it to render the re-appended fence as code. None when
+    # no script fence was extracted. Mixed-language scripts keep the first
+    # tag; bodies are joined unchanged.
+    script_lang: str | None = None
     citations_inferred: bool = False
     inferred_indices: list[int] = Field(default_factory=list)
     # Citation WHY telemetry (issue #299): parse-time attempt counters the
@@ -862,13 +868,13 @@ def parse_answer(
     )
 
     # 1. Process code fences: extract scripts, drop thinking blocks, unwrap prose fences
-    scripts: list[str] = []
+    scripts: list[tuple[str, str]] = []
     text_processed = content
     for match in FENCE_RE.finditer(content):
         lang = match.group(1).strip().lower()
         code = match.group(2).strip()
         if lang in SCRIPT_LANGS:
-            scripts.append(code)
+            scripts.append((lang, code))
             text_processed = text_processed.replace(match.group(0), "")
         elif lang in ("thought", "thinking"):
             text_processed = text_processed.replace(match.group(0), "")
@@ -876,7 +882,8 @@ def parse_answer(
             # Unlabeled or prose markdown code fence - unwrap into answer body
             text_processed = text_processed.replace(match.group(0), code)
 
-    script = "\n\n".join(scripts).strip() if scripts else None
+    script = "\n\n".join(code for _, code in scripts).strip() if scripts else None
+    script_lang = scripts[0][0] if scripts else None
 
     # 2. Extract citations & body prose
     body, raw_cite_lines = extract_body_and_citations(text_processed)
@@ -965,6 +972,7 @@ def parse_answer(
         answer=body.strip(),
         citations=citations,
         script=script,
+        script_lang=script_lang,
         citations_inferred=citations_inferred,
         inferred_indices=inferred_indices,
         inline_bracket_present=inline_bracket_present,

@@ -153,6 +153,7 @@ def test_answer_validates_citations_and_script(client):
     assert body["citations"] == [_hit().cite]
     assert body["citations_inferred"] is False
     assert body["script"] is not None and "IOSCMDS LIST" in body["script"]
+    assert body["script_lang"] == "jcl"
     assert "Citations:" not in body["answer"]
 
 
@@ -797,6 +798,37 @@ def test_parse_answer_code_fence_and_script_extraction():
     assert res_think.citations == [cite1]
     assert res_think.answer == "Final operational guidance."
     assert res_think.script == "/* REXX */\nSAY 'HELLO'"
+
+
+def test_parse_answer_script_lang():
+    """Issue #336: the extracted script's language tag survives parsing."""
+    cite1 = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
+    allowed = {cite1}
+
+    # Uppercase tag normalizes to lowercase
+    res = parse_answer(f"Fix:\n\n```JCL\n//JOB1 JOB\n```\n\nCitations:\n{cite1}", allowed)
+    assert res.script == "//JOB1 JOB"
+    assert res.script_lang == "jcl"
+
+    # Multiple scripts: bodies join, first tag wins
+    res_multi = parse_answer(
+        f"Both:\n\n```jcl\n//JOB1 JOB\n```\n\n```rexx\nSAY 'HI'\n```\n\nCitations:\n{cite1}",
+        allowed,
+    )
+    assert res_multi.script == "//JOB1 JOB\n\nSAY 'HI'"
+    assert res_multi.script_lang == "jcl"
+
+    # Bare fence unwraps to prose: no script, no lang
+    res_bare = parse_answer(f"```\nplain\n```\n\nCitations:\n{cite1}", allowed)
+    assert res_bare.script is None
+    assert res_bare.script_lang is None
+
+    # Thinking-only fence: dropped, no script, no lang
+    res_think = parse_answer(
+        f"```thought\nmulling\n```\nAnswer.\n\nCitations:\n{cite1}", allowed
+    )
+    assert res_think.script is None
+    assert res_think.script_lang is None
 
 
 def test_citation_validation():
@@ -1676,6 +1708,7 @@ def test_v1_answer_streaming_sse_token_deltas_and_final_event(client, monkeypatc
     assert final_data["citations"] == ["SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"]
     assert final_data["citations_inferred"] is False
     assert final_data["script"] == "// example only\nIOSCMDS LIST"
+    assert final_data["script_lang"] == "jcl"
     assert final_data["query_kind"] == "identifier"
     assert len(final_data["hits"]) == 1
     assert final_data["ttft_ms"] == 12
@@ -1703,6 +1736,7 @@ def test_v1_answer_streaming_citations_identical_to_non_streaming(client, monkey
     # Citations and script must match exactly
     assert data_stream["citations"] == data_sync["citations"]
     assert data_stream["script"] == data_sync["script"]
+    assert data_stream["script_lang"] == data_sync["script_lang"] == "jcl"
     assert data_stream["answer"] == data_sync["answer"]
 
 
@@ -1742,6 +1776,8 @@ def test_v1_answer_empty_hits_streaming(client, monkeypatch):
     assert event_type == "final"
     assert payload["answer"] == "No supporting manual excerpts were found for this question."
     assert payload["citations"] == []
+    assert payload["script"] is None
+    assert payload["script_lang"] is None
     assert payload["hits"] == []
     # Schema parity with the non-empty final event (review S6): same keys,
     # no tokens were streamed, usage is all zeros.
@@ -1786,6 +1822,8 @@ def test_v1_answer_empty_hits_json_identifier_names_codes(client, monkeypatch):
     body = resp.json()
     assert body["answer"] == "No manual excerpts carry DSN9999Z, SA23-9999-99."
     assert body["citations"] == []
+    assert body["script"] is None
+    assert body["script_lang"] is None
 
 
 def test_v1_answer_empty_hits_json_nl_unchanged(client, monkeypatch):

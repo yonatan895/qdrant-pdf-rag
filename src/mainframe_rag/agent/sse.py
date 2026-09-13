@@ -55,6 +55,7 @@ def empty_final_payload(request_id: str, answer: str, query_kind: str) -> dict[s
         "citations_inferred": False,
         "inferred_indices": [],
         "script": None,
+        "script_lang": None,
         "query_kind": query_kind,
         "hits": [],
         "finish_reason": "stop",
@@ -80,6 +81,7 @@ def final_payload(
     ttft_ms: int | None,
     usage: TokenUsage,
     inferred_indices: list[int] | None = None,
+    script_lang: str | None = None,
 ) -> dict[str, Any]:
     """Terminal `final` for the streamed answer: verified citations/script
     identical in shape to the JSON mode and the empty-hits path.
@@ -97,6 +99,7 @@ def final_payload(
         "citations_inferred": citations_inferred,
         "inferred_indices": list(inferred_indices or []),
         "script": script,
+        "script_lang": script_lang,
         "query_kind": query_kind,
         "hits": [h.model_dump() for h in hits],
         "finish_reason": finish_reason,
