@@ -12,12 +12,6 @@
   <header class="topbar">
     <h1>Mainframe Operations Copilot</h1>
     <div class="topbar-controls">
-      <label for="theme-select">Theme</label>
-      <select id="theme-select">
-        <option value="theme-3270">IBM 3270 Phosphor</option>
-        <option value="theme-dark">Modern Dark</option>
-      </select>
-      <button type="button" id="export-btn">Export incident (MD)</button>
       <span id="health-badge" class="health" hx-get="/ui/healthz" hx-trigger="load, every 30s" hx-swap="innerHTML">
         <span class="badge badge-unknown">&#9679; &#8230;</span>
       </span>
@@ -30,6 +24,14 @@
       <label class="visually-hidden" for="session-filter">Filter incidents</label>
       <input id="session-filter" type="search" placeholder="Filter incidents…" autocomplete="off">
       <ul id="session-list" class="session-list"></ul>
+      <div class="sidebar-tools">
+        <label for="theme-select">Theme</label>
+        <select id="theme-select">
+          <option value="theme-3270">IBM 3270 Phosphor</option>
+          <option value="theme-dark">Modern Dark</option>
+        </select>
+        <button type="button" id="export-btn">Export incident (MD)</button>
+      </div>
       <p class="sidebar-note">Sessions live in this browser only. Export before closing a shift.</p>
     </aside>
 
@@ -61,7 +63,7 @@
         <label class="visually-hidden" for="message">Question</label>
         <textarea id="message" name="message" rows="2" required
           placeholder="Ask about a message code, abend, syntax, or procedure&#8230;"></textarea>
-        <button type="submit" id="send-btn">Send</button>
+        <button type="submit" id="send-btn" aria-label="Send">&#9650;</button>
       </form>
     </section>
   </main>

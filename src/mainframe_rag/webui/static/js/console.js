@@ -309,6 +309,9 @@
       time.setAttribute("data-ts", new Date(ts).toISOString());
       head.appendChild(time);
     }
+    const copyTurn = el("button", "copy-btn copy-turn", "Copy");
+    copyTurn.type = "button";
+    head.appendChild(copyTurn);
     article.appendChild(head);
     if (turn.role === "assistant") {
       const content = el("div", "turn-content md");
@@ -360,8 +363,20 @@
   let sessionFilter = "";
 
   function setStreaming(active) {
+    if (promptEl) {
+      // The Stop glyph sits on a submit button, but after send the field
+      // is empty + required — native validation would eat the click
+      // ("Please fill in this field") before our handler runs and the
+      // abort would never fire. Drop it while streaming; the no-JS form
+      // keeps native validation always.
+      if (active) promptEl.removeAttribute("required");
+      else promptEl.setAttribute("required", "");
+    }
     if (sendBtn) {
-      sendBtn.textContent = active ? "Stop" : "Send";
+      // Glyphs carry the state (▲ send / ■ stop); the accessible name
+      // carries the meaning for assistive tech.
+      sendBtn.textContent = active ? "■" : "▲";
+      sendBtn.setAttribute("aria-label", active ? "Stop" : "Send");
       sendBtn.classList.toggle("stop", active);
     }
   }
@@ -658,14 +673,21 @@
    * listener covers streamed, restored, and server-fragment turns alike. */
   function copyFromButton(button) {
     let text = "";
-    const pre = button.closest("pre");
-    if (pre) {
-      const code = pre.querySelector("code");
-      text = code ? code.textContent : pre.textContent;
+    if (button.classList.contains("copy-turn")) {
+      // Whole-turn copy: the rendered plain text of the message card.
+      const turn = button.closest(".turn");
+      const content = turn ? turn.querySelector(".turn-content") : null;
+      text = content ? content.textContent : "";
     } else {
-      const li = button.closest("li");
-      const label = li ? li.querySelector("span") : null;
-      text = label ? label.textContent : "";
+      const pre = button.closest("pre");
+      if (pre) {
+        const code = pre.querySelector("code");
+        text = code ? code.textContent : pre.textContent;
+      } else {
+        const li = button.closest("li");
+        const label = li ? li.querySelector("span") : null;
+        text = label ? label.textContent : "";
+      }
     }
     if (!text || !navigator.clipboard) return;
     navigator.clipboard.writeText(text).then(

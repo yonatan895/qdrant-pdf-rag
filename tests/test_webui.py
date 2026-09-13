@@ -316,6 +316,15 @@ def test_dead_sse_extension_stays_removed(ui_client):
     assert "sse.js" not in shell
 
 
+def _css_rule(css: str, selector: str) -> str:
+    """Declaration block for an exact selector. Pins assert rule + property
+    together so a bare property passing from an unrelated rule cannot fool
+    them (review on #333). First match wins — base rules precede media
+    overrides in console.css by construction."""
+    start = css.index("{", css.index(selector))
+    return css[start : css.index("}", start)]
+
+
 def test_console_css_layout_survival_rules():
     """Issue #326 P0: narrow viewports clipped the topbar and SEND button
     because flex/grid children default to min-width: auto. Pin the
@@ -323,9 +332,13 @@ def test_console_css_layout_survival_rules():
     css = (
         Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
     ).read_text(encoding="utf-8")
-    assert ".layout > * { min-width: 0; }" in css
-    assert ".topbar-controls { display: flex; align-items: center; flex-wrap: wrap;" in css
-    assert ".composer textarea { flex: 1 1 auto; min-width: 0;" in css
+    assert "min-width: 0;" in _css_rule(css, ".layout > *")
+    assert "flex-wrap: wrap;" in _css_rule(css, ".topbar-controls")
+    assert "min-width: 0;" in _css_rule(css, ".composer textarea")
+    # Sidebar owns its scroll instead of riding the page (follow-up: the
+    # tool section vanished off-screen on long conversations).
+    assert "position: sticky;" in _css_rule(css, ".sidebar {")
+    assert "overflow-y: auto;" in _css_rule(css, ".sidebar {")
 
 
 def test_console_css_theme_polish():
@@ -342,6 +355,18 @@ def test_console_css_theme_polish():
     assert "#send-btn:not(.stop)" in css
     assert "prefers-reduced-motion" in css
     assert "::selection" in css
+
+
+def test_console_css_chrome_pass():
+    """Issue #332: sidebar tool section, circular glyph send, pill composer
+    with styled placeholder."""
+    css = (
+        Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
+    ).read_text(encoding="utf-8")
+    assert ".sidebar-tools {" in css
+    assert "border-radius: 50%" in _css_rule(css, "#send-btn {")
+    assert ".composer textarea::placeholder" in css
+    assert ".composer textarea:focus" in css
 
 
 # ---------------------------------------------------------------- markdown (P1)
@@ -497,6 +522,37 @@ def test_ui_shell_has_session_filter(ui_client):
     assert 'id="session-filter"' in body
 
 
+def test_ui_sidebar_tools_replace_topbar_controls(ui_client):
+    """Issue #332.1: theme + export live in the sidebar (reachable while
+    scrolled); the topbar keeps only the health badge. IDs are unchanged
+    so the client wiring is untouched."""
+    body = ui_client.get("/ui").text
+    topbar, _, rest = body.partition("<aside")
+    assert 'id="theme-select"' not in topbar
+    assert 'id="export-btn"' not in topbar
+    assert 'id="health-badge"' in topbar
+    assert 'id="theme-select"' in rest
+    assert 'id="export-btn"' in rest
+
+
+def test_ui_send_button_glyph(ui_client):
+    """Issue #332.3: glyph button with an accessible name, not a text label."""
+    body = ui_client.get("/ui").text
+    assert 'id="send-btn" aria-label="Send">&#9650;' in body
+
+
+def test_ui_chat_fragment_turn_copy_buttons(ui_client, monkeypatch):
+    """Issue #332.2: every turn header carries a Copy button."""
+    monkeypatch.setattr(app_mod, "llm", MarkdownFakeLLM())
+    resp = ui_client.post(
+        "/ui/chat",
+        data={"message": "What is IKJEFT01?", "messages": ""},
+        headers={"HX-Request": "true"},
+    )
+    assert resp.status_code == 200
+    assert resp.text.count('<button class="copy-btn copy-turn" type="button">Copy</button>') == 2
+
+
 def test_console_js_streaming_ux_wiring():
     """P3: streaming UX behaviors are wired in console.js — thinking
     placeholder, abort/stop, Ctrl+Enter submit, per-turn meta footer,
@@ -515,5 +571,12 @@ def test_console_js_streaming_ux_wiring():
         "startRename",
         "sessionFilter",
         "stickScroll",
+        # Issue #332: per-turn copy + glyph send/stop.
+        "copy-turn",
+        "aria-label",
+        "■",
+        "▲",
+        # Follow-up: Stop must survive native validation (required toggle).
+        'removeAttribute("required")',
     ):
         assert token in js, token
