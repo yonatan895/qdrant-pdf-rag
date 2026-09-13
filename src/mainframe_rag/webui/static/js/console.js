@@ -678,14 +678,16 @@
       const turn = button.closest(".turn");
       const content = turn ? turn.querySelector(".turn-content") : null;
       text = content ? content.textContent : "";
-    } else if (button.closest("pre")) {
-      const pre = button.closest("pre");
-      const code = pre.querySelector("code");
-      text = code ? code.textContent : pre.textContent;
     } else {
-      const li = button.closest("li");
-      const label = li ? li.querySelector("span") : null;
-      text = label ? label.textContent : "";
+      const pre = button.closest("pre");
+      if (pre) {
+        const code = pre.querySelector("code");
+        text = code ? code.textContent : pre.textContent;
+      } else {
+        const li = button.closest("li");
+        const label = li ? li.querySelector("span") : null;
+        text = label ? label.textContent : "";
+      }
     }
     if (!text || !navigator.clipboard) return;
     navigator.clipboard.writeText(text).then(

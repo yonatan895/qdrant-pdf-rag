@@ -316,6 +316,15 @@ def test_dead_sse_extension_stays_removed(ui_client):
     assert "sse.js" not in shell
 
 
+def _css_rule(css: str, selector: str) -> str:
+    """Declaration block for an exact selector. Pins assert rule + property
+    together so a bare property passing from an unrelated rule cannot fool
+    them (review on #333). First match wins — base rules precede media
+    overrides in console.css by construction."""
+    start = css.index("{", css.index(selector))
+    return css[start : css.index("}", start)]
+
+
 def test_console_css_layout_survival_rules():
     """Issue #326 P0: narrow viewports clipped the topbar and SEND button
     because flex/grid children default to min-width: auto. Pin the
@@ -323,13 +332,13 @@ def test_console_css_layout_survival_rules():
     css = (
         Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
     ).read_text(encoding="utf-8")
-    assert ".layout > * { min-width: 0; }" in css
-    assert ".topbar-controls { display: flex; align-items: center; flex-wrap: wrap;" in css
-    assert "flex: 1 1 auto; min-width: 0; resize: vertical;" in css
+    assert "min-width: 0;" in _css_rule(css, ".layout > *")
+    assert "flex-wrap: wrap;" in _css_rule(css, ".topbar-controls")
+    assert "min-width: 0;" in _css_rule(css, ".composer textarea")
     # Sidebar owns its scroll instead of riding the page (follow-up: the
     # tool section vanished off-screen on long conversations).
-    assert "position: sticky;" in css
-    assert "overflow-y: auto;" in css
+    assert "position: sticky;" in _css_rule(css, ".sidebar {")
+    assert "overflow-y: auto;" in _css_rule(css, ".sidebar {")
 
 
 def test_console_css_theme_polish():
@@ -355,7 +364,7 @@ def test_console_css_chrome_pass():
         Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
     ).read_text(encoding="utf-8")
     assert ".sidebar-tools {" in css
-    assert "border-radius: 50%" in css
+    assert "border-radius: 50%" in _css_rule(css, "#send-btn {")
     assert ".composer textarea::placeholder" in css
     assert ".composer textarea:focus" in css
 
