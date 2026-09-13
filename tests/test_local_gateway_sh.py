@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "run_local_gateway.sh"
@@ -41,7 +42,7 @@ def _read_cfg(proc: subprocess.CompletedProcess) -> str:
 def test_render_routes_three_legs_to_expected_backends():
     text = _read_cfg(_render())
     assert "model_name: google/gemma-4-E4B-it-qat-mobile-ct" in text
-    assert "model: openai/google/gemma-4-E4B-it-qat-mobile-ct" in text
+    assert "model: strict_openai/google/gemma-4-E4B-it-qat-mobile-ct" in text
     assert "api_base: http://host.docker.internal:8000/v1" in text
     # reasoning_effort must reach vLLM (the agent's control), not be dropped.
     assert 'allowed_openai_params: ["reasoning_effort"]' in text
@@ -68,11 +69,25 @@ def test_render_carries_master_key_and_score_passthrough():
 def test_render_otel_callback_only_when_endpoint_set():
     # The local waterfall includes the platform stand-in: LiteLLM exports
     # spans when the stack found a local Jaeger. No endpoint (standalone
-    # dry-run) keeps the pre-tracing config byte-identical.
-    off = _read_cfg(_render())
-    assert "litellm_settings" not in off
-    on = _read_cfg(_render({"GATEWAY_OTEL_ENDPOINT": "http://host.docker.internal:4318"}))
-    assert 'callbacks: ["otel"]' in on
+    # dry-run) keeps only the required upstream finish guard.
+    off = yaml.safe_load(_read_cfg(_render()))
+    assert off['litellm_settings']['custom_provider_map'] == [
+        {'provider': 'strict_openai', 'custom_handler': 'strict_finish.strict_openai'}
+    ]
+    assert 'callbacks' not in off['litellm_settings']
+    on = yaml.safe_load(_read_cfg(_render({"GATEWAY_OTEL_ENDPOINT": "http://host.docker.internal:4318"})))
+    assert on['litellm_settings']['custom_provider_map'] == off['litellm_settings']['custom_provider_map']
+    assert on['litellm_settings']['callbacks'] == ['otel']
+
+
+def test_render_includes_the_gateway_hook_beside_its_configuration():
+    proc = _render()
+    assert proc.returncode == 0
+    directory = Path(proc.stdout.strip().splitlines()[-1])
+    try:
+        assert (directory / 'strict_finish.py').read_bytes() == (SCRIPT.parent / 'gateway/strict_finish.py').read_bytes()
+    finally:
+        shutil.rmtree(directory)
 
 
 def test_render_honors_url_and_model_overrides():

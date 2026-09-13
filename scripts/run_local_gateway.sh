@@ -23,6 +23,7 @@
 # Never a product path; never in CI or the air gap.
 
 set -eu
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 GATEWAY_PORT="${GATEWAY_PORT:-4000}"
 GATEWAY_NAME="${GATEWAY_NAME:-local-litellm-gateway}"
@@ -138,12 +139,13 @@ if [ -z "$GATEWAY_OTEL_ENDPOINT" ] && [ "$GATEWAY_DRYRUN" != "1" ]; then
 fi
 
 CFG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/local-gateway.XXXXXX")"
+cp "$SCRIPT_DIR/gateway/strict_finish.py" "$CFG_DIR/strict_finish.py"
 cat > "${CFG_DIR}/config.yaml" <<EOF
 # Rendered by scripts/run_local_gateway.sh (local-dev only, never committed).
 model_list:
   - model_name: ${GATEWAY_REASONING_MODEL}
     litellm_params:
-      model: openai/${GATEWAY_REASONING_MODEL}
+      model: strict_openai/${GATEWAY_REASONING_MODEL}
       api_base: ${GATEWAY_REASONING_URL}
       api_key: dummy
       # The agent sends reasoning_effort; the openai adapter would reject it
@@ -168,10 +170,13 @@ general_settings:
     - path: "/v1/score"
       target: "${SCORE_TARGET}"
       methods: ["POST"]
+litellm_settings:
+  custom_provider_map:
+    - provider: strict_openai
+      custom_handler: strict_finish.strict_openai
 EOF
 if [ -n "$GATEWAY_OTEL_ENDPOINT" ]; then
     cat >> "${CFG_DIR}/config.yaml" <<EOF
-litellm_settings:
   callbacks: ["otel"]
 EOF
 fi

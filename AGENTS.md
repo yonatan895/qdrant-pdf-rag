@@ -101,6 +101,7 @@ All of these must hold. Self-review the **diff**, not the PR body.
 
 ## CLI, Makefile, and local vLLM
 
+Approved gateway-only exception: `scripts/gateway/strict_finish.py` may import LiteLLM solely inside the pinned local/CI gateway image. It requires an observed provider finish before forwarding a gateway terminal chunk, closes its stream, and fails closed when upstream state is unavailable. Keep it excluded from product images and keep LiteLLM absent from project dependencies. Production protection remains the platform team's responsibility; retain the clean-EOF truncation gate when changing gateway pins.
 Deployment CLI arguments fail closed on unknown flags before any stage runs; a misspelled skip flag must never trigger the operation it was meant to skip.
 CI fault transitions retire the old mock pod and verify the requested computation state through its Service from the gateway pod before testing failures or recovery. Deployment readiness alone does not establish which fault is being served.
 CI gateway setup waits for an authenticated, certificate-verified read through the Service before minting keys; pod readiness alone does not prove Service routing. Only transient connection startup failures are retried, within a fixed setup deadline; key creation and model requests are never retried.
@@ -188,7 +189,7 @@ Re-ingesting a regenerated corpus (new doc_id generation) requires deleting the 
 - One string, everywhere: `ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<full-git-sha>`. Full SHA is `git rev-parse HEAD` / `$GITHUB_SHA`, **never** `${GITHUB_SHA::7}`. That exact string is used for `docker tag`, `docker push`, kustomize sed, `airgap-pack`, and `airgap-load`.
 - Makefile local names are `mainframe-rag/{ingest,agent}` — retag to the GHCR ref **before** push.
 - Third-party pins live in `images.txt` (Qdrant unprivileged, Jaeger, UBI, oauth-proxy). OAuth packaging needs authenticated Red Hat registry access; Docker archives omit its unsupported upstream signature attachments while retaining digest pinning and the signed bundle contract. Tests set pending/recorded pins explicitly instead of assuming the production pin is pending. A `requirements.lock.txt` bump requires `make wheelhouse bm25-weights` on CPython 3.14 and a connected image rebuild. Dedicated PR, not drive-by. `qdrant-client` pin tracks the 1.19 server/chart.
-- Do not add unpublished extras (`types-httpx2`). `httpx2` ships types. A dependency no module imports is a phantom (`test_no_litellm_anywhere`). Audit `pyproject.toml` before adding.
+- Do not add unpublished extras (`types-httpx2`). `httpx2` ships types. A dependency no product module imports is a phantom; LiteLLM remains absent from project dependencies despite the explicit gateway-only adapter exception. Audit `pyproject.toml` before adding.
 - Images: UBI, non-root, `--no-index` from `/wheelhouse`. Bake BM25 weights (`make bm25-weights`).
 
 ## Overlays (never mix CI and prod — read only for deploy work)

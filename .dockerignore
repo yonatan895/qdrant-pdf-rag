@@ -27,3 +27,5 @@ LICENSE.qdrant-skills
 # ConfigMap in the rehearsal instead).
 scripts/mock_vllm.py
 scripts/ci
+# Gateway-only adapter: the platform owns this runtime, not product images.
+scripts/gateway
