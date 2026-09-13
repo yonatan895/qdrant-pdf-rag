@@ -12,7 +12,7 @@ operations: `docs/install_and_ops.md` §5. Retrieval contracts:
 Async routes in `agent/app.py` (search/answer/chat plus the operator console).
 Every request gets a 12-hex-char
 `request_id` from middleware, shared by all logs, the unhandled-error
-handler, and the response.
+handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
 
 - `POST /v1/search` — `SearchRequest{query (min 1 char), product?,
   version?, limit (default 8, 1–40)}` → `SearchResponse{request_id,
@@ -40,19 +40,45 @@ handler, and the response.
   `False`, else `degraded` (still HTTP 200). Any Qdrant exception becomes
   `503 qdrant_unready`.
 - `POST /v1/chat` (native) and `POST /v1/chat/completions` (OpenAI-compatible
-  alias) — `ChatRequest{messages (client-managed history), product?, version?,
-  splunk_context?, stream?, temperature?, model?, max_tokens?}`. Same shared
-  core as `/v1/answer`; the response carries the answer on
-  `choices[0].message` plus top-level `citations`/`hits`. Follow-up turns
-  condense only when `CHAT_CONDENSE_ENABLED=true` (default off); the request
-  body is capped by `chat_max_body_chars` and the latest user turn by the
-  shared `query_max_chars` guard.
+  alias) — `ChatRequest{messages (client-managed history; min 1, roles
+  `system`/`user`/`assistant`, `extra="forbid"`), product?, version?,
+  splunk_context?, stream?, temperature?, model?, max_tokens?}`. At least one
+  `user`-role message is required (`422 invalid_request` / `at least one user
+  message is required`); the latest user turn is stripped and length-guarded
+  by the shared `query_max_chars` rule, and the whole body is capped by
+  `chat_max_body_chars` (the same helper as `/ui`). `temperature` overrides
+  `Settings.llm_temperature`; `model` is accepted for OpenAI compatibility but
+  never routed — inference always uses `Settings.llm_model_reasoning`, and a
+  supplied value is echoed in the response `model` field; `max_tokens` is
+  accepted and ignored (token limits are server-side). The response is
+  `ChatCompletionsResponse{id: "chatcmpl-<request_id>", created, model,
+  choices[], usage, citations, citations_inferred, inferred_indices, hits}`;
+  `choices[0].message.content` carries the answer plus a trailing markdown
+  `**Citations:**` bullet list when cites exist. Empty hits return
+  `finish_reason: "stop"`, zeroed usage, and empty citations/hits. Provenance
+  (`citations_inferred`, `inferred_indices`, issues #269/#299) rides chat JSON
+  and the SSE finish chunk. Prior turns: the last `chat_max_turns` (10)
+  non-system messages, each cut to `chat_max_prior_turn_chars` (1000,
+  ` ... [history truncated]`); pasted `Retrieved manual excerpts:` tails are
+  pruned from prior assistant turns. Follow-up turns condense only when
+  `CHAT_CONDENSE_ENABLED=true` (default off): one low-effort reasoning call
+  rewrites the latest turn into a standalone search query (last 4 non-system
+  turns, 1000 chars each), bypasses the LLM entirely when the turn already
+  carries a message/member identifier or abend code, and falls back to the raw
+  latest text on any failure. The condensation A/B and its default-flip
+  decision live in `docs/eval.md` (`make eval-chat`).
 - `GET /ui` — operator console (ADR-0004), a thin adapter over the same core:
   Jinja2 shell + HTMX form/fragment + SSE stream (`/ui/chat`, `/ui/chat/stream`,
   `/ui/healthz`, `/ui/static/*`), browser-only `localStorage` state, strict CSP.
   Every `/ui` path serves the stable `404 not_found` envelope while
   `UI_ENABLED` is false; the oauth-proxy sidecar authenticates external ingress
-  when `AGENT_ROUTE=true` (ADR-0004 §3).
+  when `AGENT_ROUTE=true` (ADR-0004 §3). The production overlay sets
+  `UI_ENABLED=true`, so only the external Route is OAuth-protected — the
+  ClusterIP 8080 `/ui` stays reachable to in-cluster tools.
+- `GET /metrics` — Prometheus text exposition, opt-in via `metrics_enabled`
+  (disabled serves the stable `404 not_found` envelope; a scrape failure is
+  `503 metrics_unavailable` / `metrics are not available`). No trace span by
+  design (issue #187).
 
 Per-endpoint flow: `search` runs the length guard, then retrieval under a
 root span — faults become `502 upstream_error / retrieval failed`, timings
@@ -60,13 +86,17 @@ become `Server-Timing`, then the response. `answer` resolves streaming
 first (`?stream=` wins over the body field when set), runs the length
 guard, asserts the reasoning model is configured (`503 not_configured`,
 before any retrieval), retrieves under the root span (same `502` as
-search), short-circuits empty hits (§3), classifies complexity, builds the
-prompt, and either chats once (JSON) or streams (SSE).
+search), classifies complexity, short-circuits empty hits (§3), builds the
+prompt, and either chats once (JSON) or streams (SSE). `chat` runs the same
+assertion and retrieval (hardcoded `limit=8` for both endpoints), resolving
+the follow-up search query through `resolve_search_query` first so the
+condense gate cannot be honored on one path only.
 
 ## 2. Error contract
 
-Every client body is `ErrorEnvelope{code, message}` with a fixed message —
-no exception text, no upstream bodies, no internals, on any status:
+Every JSON client body is `ErrorEnvelope{code, message}` with a fixed
+message — no exception text, no upstream bodies, no internals, on any
+status (`/ui` failures render HTML banners instead, §1):
 
 | Code | Status | Trigger |
 |---|---|---|
@@ -76,6 +106,8 @@ no exception text, no upstream bodies, no internals, on any status:
 | `not_configured` / `reasoning model…` | 503 | `/v1/answer` or `/v1/chat` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
 | `invalid_request` / `request body failed validation` | 422 | Pydantic failure and the shared query-length guard (one helper, same code, both endpoints) |
+| `invalid_request` / `at least one user message is required` | 422 | `/v1/chat` + `/v1/chat/completions` with no `user`-role message |
+| `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
 | `method_not_allowed` / `method not allowed` | 405 | Wrong method |
 | `http_error` / `request failed` | framework's | Framework-raised `HTTPException` (nothing in `src/` raises it; `detail` is stripped) |
@@ -86,13 +118,25 @@ mislabeled as retrieval.
 
 ## 3. Streaming (SSE)
 
-`GET/POST /v1/answer?stream=true` yields zero or more `event: token` deltas,
+`POST /v1/answer?stream=true` yields zero or more `event: token` deltas,
 then exactly one terminal `event: final` carrying the full answer, validated
 citations, the `citations_inferred` provenance flag, the `inferred_indices`
 list, optional script,
 retrieval hits, query kind, `ttft_ms`, and token usage. A mid-stream failure
 emits `event: error` and ends **without** a `final` — clients must treat
-stream-end-without-final as a failed request.
+stream-end-without-final as a failed request. `/ui/chat/stream` consumes the
+same token→final contract with a UI-specific terminal event name.
+
+`/v1/chat` + `/v1/chat/completions` with `stream=true` instead stream OpenAI
+`chat.completion.chunk` frames (`data: {...}` content deltas), then one
+terminal chunk with `finish_reason` carrying `citations`,
+`citations_inferred`, `inferred_indices`, and `hits` (chat chunks carry no
+`usage`), then `data: [DONE]`. A mid-stream failure emits one
+`data: {"error": {"code": "upstream_error", "message": "stream failed"}}`
+frame **followed by** `data: [DONE]` — never a fake `finish_reason`; clients
+must treat an error frame as failure even though `[DONE]` still arrives. The
+strict stream-end rule above is the upstream reasoning wire and the
+`/v1/answer` / `/ui` contract, not the OpenAI-compatible chat contract.
 
 - The `final` schema is identical on the empty-hits path: zero citations,
   `citations_inferred: false`, empty `inferred_indices`, `ttft_ms: null`, zeroed usage. The empty-hits
@@ -107,10 +151,12 @@ stream-end-without-final as a failed request.
   (discarding the prefix); after tokens arrived the error surfaces and no
   `final` follows. A `length` finish *with* `[DONE]` is complete, not
   truncated.
-- Server-side reasoning SSE is gated by `LLM_STREAM` (default off;
-  `make run-agent` enables it for TTFT measurement). TTFT is measured on
-  the first content token. The SSE generator ends the root span in a
-  `finally` so disconnects stay in the same trace.
+- `LLM_STREAM` (default off) routes every server-side reasoning call over
+  the streaming wire and measures TTFT on the first content token; the JSON
+  paths still return one answer. `make run-agent` and `make local-stack` set
+  it; client-visible SSE is requested per call (`stream=true`). The SSE
+  generator ends the root span in a `finally` so disconnects stay in the
+  same trace.
 - The empty-hits answer echoes up to 5 parsed identifier terms (`, +N more`
   beyond that) for identifier queries, a generic line otherwise — and
   deliberately never falls back to unfiltered serving.
@@ -132,7 +178,9 @@ select `complex`. Default is `simple`.
   4096-token local window — the truncation bug it fixes (8k context starving
   generation, `finish: length`, dropped `Citations:`) must not be
   reintroduced by raising it.
-- Blocks are named (`context` / `question` / `excerpt` / `tail`) and packed
+- Blocks are named (`context`, `question`, `excerpt`, `tail`, the standalone
+  `excerpts` header when nothing is packed, and the `stable_cache`
+  `instructions` block) and packed
   per-type: syntax, message, and table chunks up to 3000 chars; narrative
   prose up to the narrative cap (1100 for complex queries); cuts marked
   with a truncation suffix; packing stops at the context budget with at
@@ -148,11 +196,15 @@ select `complex`. Default is `simple`.
   in-process estimator (`≈3.5` chars/token, 350-token narrative cap), then
   verifies the packed prompt against the whole-message count per trim round
   and trims up to 4 rounds (64-char overcut, drop under 80 chars, else
-  suffix). Never per-chunk tokenize RPCs.
+  suffix). Chat packing (`build_chat_messages`) uses the same discipline but
+  trims in two tiers for up to `4*2 + len(prior turns)` rounds: excerpt
+  bodies first, then it pops the oldest history turn. Never per-chunk
+  tokenize RPCs.
 - `splunk_context` truncates at 4000 chars with a suffix before packing, so
   caller context can never starve excerpts.
-- The system prompt's six rules (ground-only, synthesize-from-templates,
+- The system prompt's seven rules (ground-only, synthesize-from-templates,
   version-disagree attribution, admit-gap, fenced scripts as examples,
+  identify-a-doc-number/message-id/short-name query instead of refusing,
   mandatory `Citations:` with a few-shot example) plus the complex-query
   extension (decompose, cross-examine, verified fences,
   diagnose-and-recover headings) live in code by design — this file
@@ -168,7 +220,7 @@ trailing sweep in `cites.py` / `parse_answer`:
    first blank past seen cites — later prose is preserved as body.
 2. Trailing bare cites: a blank-tolerant tail scan for allowed cite lines
    without any header.
-3. Bracket fallback on raw content: `[n]` / `[n, m]` only, bounds-checked
+3. Bracket fallback on raw content (only when the passes above found no citation): `[n]` / `[n, m]` only, bounds-checked
    against retrieved hits, deduped, flagged inferred. **Parentheses are
    never inferred** — IBM-manual noise like `z/OS (3.1)` stays body text.
 
@@ -180,11 +232,17 @@ trailing sweep in `cites.py` / `parse_answer`:
   lines only — inline mentions (`refer to SA22-… for details`), dimensions
   (`3.5 inches`), and table pipes survive.
 - Fenced code blocks in `SCRIPT_LANGS` (`jcl, rexx, sh, bash, shell,
-  python, yaml, json, ops, rule, parmlib`, …) become `script` (joined,
+  python, py, yaml, yml, json, ops, rule, parmlib`) become `script` (joined,
   removed from body) and pass through **unvalidated** — cite-like lines
   inside code are kept; `thought`/`thinking` fences are dropped; other
   fences unwrap to body. Validating scripts would corrupt JCL/REXX;
   treating them as cited provenance would hallucinate it.
+- Abstention zero-cite (issues #135/#305): `parse_answer` clears citations
+  and inferred indices when `is_abstention` holds — at least one explicit
+  refusal marker **and** under 200 chars of non-refusal remainder. Marker
+  alone would zero a grounded answer that quotes one hedging sentence;
+  shape alone would miss a refusal citing real-but-unsupporting chunks. It
+  applies to every consumer (JSON, SSE final, chat, `/ui`).
 
 ## 6. Lifespan, pools, timeouts
 
@@ -207,8 +265,11 @@ the query timeout.
   if awaitable (sync doubles keep working).
 - No sync fallback on the event loop: healthz and retrieval use the pooled
   clients only; a missing pool is a startup bug.
-- The reasoning client never retries (sync and async, `retries=0`) —
-  answers are non-idempotent; a retry would re-think. Dispatch picks async
+- The reasoning client never retries at the transport (sync and async,
+  `retries=0`) — answers are non-idempotent; a retry would re-think. The
+  only second ask is the documented `LLM_STREAM` fallback: a stream that
+  truncates before any content is re-issued once as a non-streaming POST
+  (§3). Dispatch picks async
   client → running loop → sync, so injected async clients and bare test
   doubles (even plain `str` returns, normalized to chat results) all work.
 - Health timeouts are split from traffic timeouts (5s Qdrant, 10s embed);
@@ -231,7 +292,10 @@ readers:
 | `dense_query_prefix` | asymmetric instruct prefix | dense query vectors only |
 | `prompt_max_context_chars` / `_complex` | 8000 / 4500 | `build_messages` by complexity |
 | `prompt_max_chunk_chars` / `prompt_max_chunk_chars_complex` | 3000 / 1100 | per-type packing caps |
-| `query_max_chars` / `splunk_context_max_chars` | 2000 (422s) / 4000 (truncate+suffix) | length guard / prompt packing |
+| `query_max_chars` / `splunk_context_max_chars` | 2000 (422s) / 4000 (truncate+suffix) | length guard (search/answer, chat latest turn) / prompt packing |
+| `chat_condense_enabled` | `false` | follow-up condensation gate (`resolve_search_query`) |
+| `chat_max_body_chars` | 32768 (422) | `/v1/chat` + `/ui` body cap (shared `chat_body_chars` helper) |
+| `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 1000 | chat history packing caps |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
 | `answer_timeout_s` | 300.0 | reasoning client, never retried |
@@ -243,6 +307,7 @@ readers:
 | `allow_hash_mode` / `log_level` | `false` / INFO | lifespan hash gate / logging |
 | `otel_exporter_otlp_endpoint` / `otel_sample_ratio` / `otel_export_queue_size` / `otel_export_timeout_ms` | unset = tracing off / 1.0 / 2048 / 5000 | tracing setup |
 | `metrics_enabled` | `false` = /metrics 404s | Prometheus exposition for UWM scrapes |
+| `ui_enabled` | `false` (fail-closed 404) | webui router gate (`/ui*`); the prod overlay sets it true |
 | `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_fusion_alpha` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / bge-reranker-v2-m3 / embed URL / unset (keyless) / `score_first` (`rerank_first` for gateways) / 1.0 / 50 / 32 / 5.0 | rerank dispatch → retrieve (see `retrieval.md` §6) |
 | `rrf_k` / `rrf_weight_*` / `rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` / `retrieve_max_chunks_per_page|doc` | 2 / 1.0,1.0 – 1.0,3.0 / 1.0 / 1.0 / 1, 3 | retrieve fusion + diversification |
 | `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | `false` / `true` / `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |
@@ -254,13 +319,18 @@ readers:
 Logs are one JSON object per line via `configure_logging`: `search` logs
 query kind, hits, stage timings, elapsed; `answer` adds complexity, LLM
 timings, citation counts, script presence, finish reason, token usage
-(+ stream/TTFT marks on SSE). Errors log `str(exc)[:200]` server-side
-only. **Never query text, PDF/manual text, or secrets** — the JSON-log
-rule is unchanged by tracing.
+(+ stream/TTFT marks on SSE); `chat` uses actions `chat`, `chat_retrieval`,
+`chat_answer`, `chat_stream`, and the answer log also carries the citation
+WHY telemetry (`inline_bracket_present`, `citations_header_present`,
+`cites_rejected_shape_bad`, `cites_rejected_unmapped`). Errors log
+`str(exc)[:200]` server-side only. **Never query text, PDF/manual text, or
+secrets** — the JSON-log rule is unchanged by tracing.
 
-Spans mirror the log contract (one request = one trace: route span →
-retrieve embed/prefetch/RRF/rerank/diversify → prompt build → LLM chat
-with model/effort/TTFT/finish/tokens). The bounded query text is the one
+Spans mirror the log contract (one request = one trace: a
+`v1.search`/`v1.answer`/`v1.chat`/`ui.chat` root → (`chat.condense` before
+retrieval on an eligible chat follow-up) → retrieve
+embed/prefetch/RRF/rerank/diversify → prompt build → LLM chat with
+model/effort/TTFT/finish/tokens). The bounded query text is the one
 allowed free-text span attribute; PDF text and secrets never enter spans.
 Tracing ships default-off (endpoint unset → no exporter, no network),
 export is fail-open and bounded (collector outages log and drop, never fail
