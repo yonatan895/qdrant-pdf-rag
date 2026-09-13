@@ -30,38 +30,8 @@ kubectl -n "$NS" apply -f "$SCRIPT_DIR/test-gateway.yaml"
 kubectl -n "$NS" rollout status deploy/test-gateway-pg --timeout=180s
 kubectl -n "$NS" rollout status deploy/test-gateway --timeout=300s
 # Keys never enter command arguments or logs. Mint through the real gateway API.
-kubectl -n "$NS" exec -i deploy/test-gateway -- python3 - > "$KEY_DIR/keys.json" <<'PY'
-import json
-import os
-import urllib.error
-import urllib.request
-base = 'https://test-gateway:4000'
-master = os.environ['GATEWAY_MASTER_KEY']
-def call(path, key, payload=None):
-    req = urllib.request.Request(base + path,
-        data=None if payload is None else json.dumps(payload).encode(),
-        headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=30) as response:
-        return json.load(response)
-keys = {}
-for leg, model in [('llm', 'mock-reasoning'), ('embed', 'mock-embed')]:
-    key = call('/key/generate', master, {'models': [model]})['key']
-    call('/v1/models', key)
-    keys[leg + '-api-key'] = key
-# Both absent and wrong credentials must be refused by the real gateway.
-for key in ['', 'sk-wrong']:
-    try:
-        call('/v1/models', key)
-    except urllib.error.HTTPError as exc:
-        if exc.code not in (401, 403):
-            raise
-    else:
-        raise RuntimeError('gateway accepted invalid credentials')
-# Deploy's optional key Secret references all configured fields.
-keys['context-llm-api-key'] = keys['llm-api-key']
-keys['rerank-api-key'] = 'sk-unused-rerank-disabled'
-print(json.dumps(keys))
-PY
+kubectl -n "$NS" exec -i deploy/test-gateway -- python3 - > "$KEY_DIR/keys.json" \
+    < "$SCRIPT_DIR/mint_gateway_keys.py"
 python3 - "$KEY_DIR" <<'PY'
 import json
 import sys
