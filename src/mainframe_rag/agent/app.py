@@ -1056,7 +1056,10 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         _record_endpoint(request, "chat", "not_configured", started)
         log.warning(json_log(request_id, "chat", error=str(exc)[:200]))
         raise AppError(503, "not_configured", "reasoning model is not configured") from exc
-    llm_model = req.model or settings.require_reasoning_model()
+    # The response `model` reports what actually ran: inference is always
+    # the reasoning model (issue #313), so the caller-supplied OpenAI-compat
+    # field stays accepted-and-ignored, exactly like `max_tokens`.
+    llm_model = settings.require_reasoning_model()
 
     is_stream = req.stream
     root_span = tracer.start_span(
