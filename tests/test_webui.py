@@ -391,6 +391,12 @@ def test_console_css_beauty_pass():
     assert "color: var(--code-text);" in code
     assert "Courier" not in code
     assert "var(--font-code)" in _css_rule(css, ".turn-content.md pre code")
+    # Reduced-motion override must follow the base #send-btn rule: same
+    # specificity means file order decides (review on #335 caught the
+    # transition being re-enabled by the later base rule).
+    reduced = css.index("@media (prefers-reduced-motion: reduce)")
+    assert reduced > css.index("\n#send-btn {")
+    assert "transition: none;" in css[reduced:]
 
 
 # ---------------------------------------------------------------- markdown (P1)

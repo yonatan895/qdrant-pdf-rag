@@ -209,10 +209,6 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
 /* First-token placeholder while the reasoning model works. */
 .thinking { color: var(--muted); font-style: italic; animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) {
-  .thinking { animation: none; opacity: 0.8; }
-  #send-btn { transition: none; }
-}
 /* Send doubles as Stop while streaming: same neutral chrome, only the
    glyph flips (▲/■); the .stop class remains a state hook for tests. */
 .composer button.stop { background: var(--bg); border-color: var(--panel-border); color: var(--text); }
@@ -332,4 +328,10 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
     border-right: 0; border-bottom: 1px solid var(--panel-border);
     position: static; height: auto; overflow-y: visible;
   }
+}
+/* Motion overrides live last: same-specificity cascade means they must
+   follow the base rules they cancel (review on #335). */
+@media (prefers-reduced-motion: reduce) {
+  .thinking { animation: none; opacity: 0.8; }
+  #send-btn { transition: none; }
 }
