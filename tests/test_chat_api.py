@@ -163,6 +163,22 @@ def test_chat_completions_single_turn_json(chat_client):
     assert len(data["hits"]) == 1
 
 
+def test_chat_completions_caller_model_ignored_reports_reasoning_model(chat_client):
+    # Issue #313: a caller-supplied `model` is accepted-and-ignored; the
+    # response reports the reasoning model that actually ran. Fails before
+    # the fix (caller value echoed back).
+    res = chat_client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "What is IEA500I?"}],
+            "model": "caller-chosen-model",
+            "stream": False,
+        },
+    )
+    assert res.status_code == 200
+    assert res.json()["model"] == "test-reasoning-model"
+
+
 def test_chat_completions_multi_turn_with_condensation(chat_client, monkeypatch):
     # Second turn has no identifier ("How do I resolve this?") -> triggers
     # condense_query only when the gated setting is on (ADR-0004: default off).

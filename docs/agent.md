@@ -48,8 +48,8 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   by the shared `query_max_chars` rule, and the whole body is capped by
   `chat_max_body_chars` (the same helper as `/ui`). `temperature` overrides
   `Settings.llm_temperature`; `model` is accepted for OpenAI compatibility but
-  never routed — inference always uses `Settings.llm_model_reasoning`, and a
-  supplied value is echoed in the response `model` field; `max_tokens` is
+  ignored — inference always uses `Settings.llm_model_reasoning`, and the
+  response `model` field reports that reasoning model (issue #313); `max_tokens` is
   accepted and ignored (token limits are server-side). The response is
   `ChatCompletionsResponse{id: "chatcmpl-<request_id>", created, model,
   choices[], usage, citations, citations_inferred, inferred_indices, hits}`;
