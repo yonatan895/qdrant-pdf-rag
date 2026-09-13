@@ -200,6 +200,7 @@ Re-ingesting a regenerated corpus (new doc_id generation) requires deleting the 
 - When `PULL_SECRET` is set, it must reach Helm Qdrant **and** agent/ingest pods. Confirm rendered YAML indent is valid.
 - Helm `--set image.tag` is `v1.19.0` **without** `-unprivileged`; the chart appends that suffix when `useUnprivilegedImage=true`. `load.sh` still pushes `:v1.19.0-unprivileged`.
 - Kubernetes Jobs are immutable: delete before re-apply (`make airgap-ingest`).
+- Jaeger's single Badger writer uses `Recreate`: RWO permits multiple pods on one node, but Badger's directory lock does not. A replacement must release the old writer before opening the same PVC; verify a pre-replacement trace survives.
 
 ## Air-gap path (issue #15 — read only for air-gap work)
 

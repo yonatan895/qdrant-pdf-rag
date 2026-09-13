@@ -10,6 +10,11 @@ metadata:
     app: jaeger
 spec:
   replicas: 1
+  # Badger holds an exclusive directory lock on its persistent volume.
+  # Release it before starting the replacement, including on a single node.
+  strategy:
+    type: Recreate
+    rollingUpdate: null
   selector:
     matchLabels:
       app: jaeger
