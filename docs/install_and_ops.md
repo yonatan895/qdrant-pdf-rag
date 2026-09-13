@@ -673,22 +673,12 @@ make airgap-deploy
 ```
 
 #### OpenShift Security Context Constraints (SCC) Note
-Qdrant's unprivileged image specifies `runAsUser: 1000` and `fsGroup: 3000` in `overlays/openshift/values.yaml`. On OpenShift clusters enforcing `restricted-v2` with `MustRunAsRange` (where project UIDs are dynamically allocated, e.g. `1000670000/10000`), admission controllers will reject static UID 1000 unless:
-1. The `qdrant` ServiceAccount is granted `anyuid` SCC by a cluster admin:
-   ```bash
-   oc adm policy add-scc-to-user anyuid -z qdrant -n mainframe-rag
-   ```
-2. Or a project-specific override file is provided via `QDRANT_EXTRA_VALUES`:
-   ```bash
-   cat > qdrant-scc.yaml <<'EOF'
-   containerSecurityContext:
-     runAsUser: null
-     runAsGroup: null
-   podSecurityContext:
-     fsGroup: null
-   EOF
-   QDRANT_EXTRA_VALUES=qdrant-scc.yaml make airgap-deploy
-   ```
+The production and CI OpenShift values explicitly remove the chart's fixed UID,
+GID and fsGroup defaults. `restricted-v2` assigns the namespace identity and
+volume group. Jaeger also leaves IDs to admission. Do not grant `anyuid` or
+substitute IDs from a different project. Verify the admitted SCC and IDs on the
+actual pods, then prove data, snapshot, ingest-work and trace volume writes.
+Application images make only their cache and work directories group-0 writable.
 
 #### Qdrant Inter-Node Gossip (p2p TLS) Note
 In `overlays/openshift/values.yaml`, `config.cluster.p2p.enable_tls: false` is set because cluster gossip is plaintext on the CNI; we do not mount `./tls/cert.pem` (avoiding crashloops on startup).

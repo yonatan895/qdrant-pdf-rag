@@ -208,8 +208,7 @@ cannot schedule on one node — proven).
 - Jaeger is on by default (unset `OTEL_EXPORTER_OTLP_ENDPOINT` resolves to
   `http://jaeger:4318`; the off sentinel disables both tracing and this
   deployment): 1 replica,
-  `fsGroup 10001` (upstream container user, group-writable RWO for
-  Badger), 10Gi volume with 14-day span TTL, OTLP/HTTP 4318 only (no gRPC —
+  project-assigned UID and volume group from `restricted-v2` for Badger, 10Gi volume with 14-day span TTL, OTLP/HTTP 4318 only (no gRPC —
   `grpcio` is not in the wheelhouse, so 4317 stays closed), UI on
   port-forward only, no archive store (debug data, not records).
 - Validate is read-only pre-flight: required keys, `DENSE_DIM` positive
