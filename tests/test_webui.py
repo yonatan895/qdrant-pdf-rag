@@ -417,7 +417,7 @@ _MD_CASES = [
         [
             (
                 '<pre><button class="copy-btn" type="button">Copy</button>'
-                '<code class="language-jcl">//STEP1 EXEC PGM=IEFBR14</code></pre>'
+                '<code class="language-jcl">//STEP1 <span class="tok-keyword">EXEC</span> <span class="tok-keyword">PGM</span>=IEFBR14</code></pre>'
             )
         ],
         ["```"],
@@ -480,6 +480,23 @@ class MarkdownFakeLLM:
             usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
         )
 
+    async def chat_stream(self, messages, reasoning_effort=None, temperature=None) -> AsyncIterator[dict]:
+        yield {
+            "type": "token",
+            "delta": (
+                "Both `IKJEFT01` and `IKJEFT1B` are TMPs.\n\n"
+                "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```\n\n"
+                "Citations:\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            ),
+            "ttft_ms": 5,
+        }
+        yield {
+            "type": "done",
+            "finish_reason": "stop",
+            "usage": TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            "ttft_ms": 5,
+        }
+
 
 def _assistant_html(body: str) -> str:
     """The rendered assistant turn only. Raw markdown legitimately survives
@@ -536,11 +553,13 @@ def test_ui_chat_fragment_message_design(ui_client, monkeypatch):
     assert '<span class="avatar" aria-hidden="true">C</span>' in body
     assert 'class="turn-time" data-ts="' in body
     # The ```jcl block leaves the answer body as output.script and is
-    # re-attached as one unlabeled fence — operators must see the code.
-    assert "//STEP1 EXEC PGM=IEFBR14" in _assistant_html(body)
+    # re-attached with its threaded language tag (issue #337) — operators
+    # see the highlighted code.
+    assert "//STEP1" in _assistant_html(body)
     assert (
         '<pre><button class="copy-btn" type="button">Copy</button>'
-        "<code>//STEP1 EXEC PGM=IEFBR14</code>" in body
+        '<code class="language-jcl">//STEP1 <span class="tok-keyword">EXEC</span> <span class="tok-keyword">PGM</span>=IEFBR14</code></pre>'
+        in body
     )
     assert "Verified manual citations (1)" in body
     assert '<button class="copy-btn copy-cite" type="button">Copy</button>' in body
@@ -608,5 +627,201 @@ def test_console_js_streaming_ux_wiring():
         "▲",
         # Follow-up: Stop must survive native validation (required toggle).
         'removeAttribute("required")',
+    ):
+        assert token in js, token
+
+
+def test_markdown_subset_highlights_jcl():
+    """Issue #337: JCL code block renders highlighted comment, string, keyword, and number spans."""
+    from mainframe_rag.webui.routes import render_markdown_subset
+
+    source = (
+        "```jcl\n"
+        "//* Clean up old datasets\n"
+        "//STEP1   EXEC PGM=IEFBR14\n"
+        "//DD1     DD   DSN='SYS1.PARMLIB',DISP=SHR,SPACE=(CYL,(10,5))\n"
+        "```"
+    )
+    rendered = render_markdown_subset(source)
+    assert '<code class="language-jcl">' in rendered
+    assert '<span class="tok-comment">//* Clean up old datasets</span>' in rendered
+    assert '<span class="tok-keyword">EXEC</span>' in rendered
+    assert '<span class="tok-keyword">PGM</span>' in rendered
+    assert '<span class="tok-keyword">DD</span>' in rendered
+    assert '<span class="tok-keyword">DSN</span>' in rendered
+    assert '<span class="tok-string">\'SYS1.PARMLIB\'</span>' in rendered
+    assert '<span class="tok-keyword">DISP</span>' in rendered
+    assert '<span class="tok-keyword">SHR</span>' in rendered
+    assert '<span class="tok-keyword">SPACE</span>' in rendered
+    assert '<span class="tok-keyword">CYL</span>' in rendered
+    assert '<span class="tok-number">10</span>' in rendered
+    assert '<span class="tok-number">5</span>' in rendered
+
+
+def test_markdown_subset_highlights_rexx():
+    """Issue #337: REXX code block renders highlighted comment, string, keyword, and number spans."""
+    from mainframe_rag.webui.routes import render_markdown_subset
+
+    source = (
+        "```rexx\n"
+        "/* REXX sample */\n"
+        "say 'Hello, world!'\n"
+        "count = 42\n"
+        "do i = 1 to count\n"
+        '  say "item" i\n'
+        "end\n"
+        "```"
+    )
+    rendered = render_markdown_subset(source)
+    assert '<code class="language-rexx">' in rendered
+    assert '<span class="tok-comment">/* REXX sample */</span>' in rendered
+    assert '<span class="tok-string">\'Hello, world!\'</span>' in rendered
+    assert '<span class="tok-number">42</span>' in rendered
+    assert '<span class="tok-keyword">say</span>' in rendered or '<span class="tok-keyword">SAY</span>' in rendered
+    assert '<span class="tok-keyword">do</span>' in rendered
+    assert '<span class="tok-keyword">to</span>' in rendered
+    assert '<span class="tok-keyword">end</span>' in rendered
+    assert '<span class="tok-string">"item"</span>' in rendered
+
+
+def test_markdown_subset_unlabeled_fence_content_sniffing():
+    """Issue #337: unlabeled fences sniff content via detect_code_region."""
+    from mainframe_rag.webui.routes import render_markdown_subset
+
+    # Unlabeled fence with JCL cards -> sniffed as jcl with highlighting
+    jcl_unlabeled = "```\n//STEP1 EXEC PGM=IEFBR14\n//DD1 DD DSN='A.B',DISP=SHR\n```"
+    rendered_jcl = render_markdown_subset(jcl_unlabeled)
+    assert '<code class="language-jcl">' in rendered_jcl
+    assert '<span class="tok-keyword">EXEC</span>' in rendered_jcl
+
+    # Unlabeled fence with REXX header -> sniffed as rexx with highlighting
+    rexx_unlabeled = "```\n/* REXX */\nsay 'hi'\n```"
+    rendered_rexx = render_markdown_subset(rexx_unlabeled)
+    assert '<code class="language-rexx">' in rendered_rexx
+    assert '<span class="tok-comment">/* REXX */</span>' in rendered_rexx
+
+    # Unlabeled fence with console indent -> sniffed as console, NO spans
+    console_unlabeled = "```\n   IKJ56228I DATA SET NOT FOUND\n   READY\n```"
+    rendered_console = render_markdown_subset(console_unlabeled)
+    assert '<code class="language-console">' in rendered_console
+    assert "tok-" not in rendered_console
+
+    # Unlabeled fence with plain prose -> remains plain, NO language class, NO spans
+    prose_unlabeled = "```\nThis is just some plain text without any code markers.\n```"
+    rendered_prose = render_markdown_subset(prose_unlabeled)
+    assert "<code" in rendered_prose
+    assert "language-" not in rendered_prose
+    assert "tok-" not in rendered_prose
+
+
+def test_markdown_subset_other_languages_keep_class_no_spans():
+    """Issue #337: languages other than JCL/REXX keep their class but emit no spans."""
+    from mainframe_rag.webui.routes import render_markdown_subset
+
+    py_source = "```python\ndef hello():\n    return 42\n```"
+    rendered_py = render_markdown_subset(py_source)
+    assert '<code class="language-python">' in rendered_py
+    assert "tok-" not in rendered_py
+    assert "def hello():" in rendered_py
+
+    json_source = '```json\n{"status": "ok", "code": 200}\n```'
+    rendered_json = render_markdown_subset(json_source)
+    assert '<code class="language-json">' in rendered_json
+    assert "tok-" not in rendered_json
+
+
+def test_markdown_subset_code_adversarial():
+    """Issue #337: adversarial code cases — hostile markup, unclosed fence, empty body, unknown lang."""
+    from mainframe_rag.webui.routes import render_markdown_subset
+
+    # Hostile markup inside JCL code block stays strictly escaped
+    hostile = (
+        "```jcl\n"
+        "//STEP1 EXEC PGM=TEST,PARM='<script>alert(1)</script>'\n"
+        "//DD1 DD <img src=x onerror=alert(2)>\n"
+        "```"
+    )
+    rendered = render_markdown_subset(hostile)
+    assert "<script>" not in rendered
+    assert "<img" not in rendered
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
+    assert "&lt;img src=x onerror=alert(" in rendered
+
+    # Unclosed fence at EOF
+    unclosed = "```jcl\n//STEP1 EXEC PGM=IEFBR14"
+    rendered_unclosed = render_markdown_subset(unclosed)
+    assert '<code class="language-jcl">' in rendered_unclosed
+    assert '<span class="tok-keyword">EXEC</span>' in rendered_unclosed
+    assert "```" not in rendered_unclosed
+
+    # Empty body in labeled fence
+    empty_jcl = "```jcl\n```"
+    rendered_empty = render_markdown_subset(empty_jcl)
+    assert '<code class="language-jcl"></code>' in rendered_empty
+
+    # Empty body in unlabeled fence
+    empty_unlabeled = "```\n```"
+    rendered_empty_unlabeled = render_markdown_subset(empty_unlabeled)
+    assert "<code></code>" in rendered_empty_unlabeled
+
+    # Unknown language tag
+    unknown = "```unknownlang\nsome arbitrary text\n```"
+    rendered_unknown = render_markdown_subset(unknown)
+    assert '<code class="language-unknownlang">some arbitrary text</code>' in rendered_unknown
+    assert "tok-" not in rendered_unknown
+
+
+def test_ui_chat_stream_final_includes_script_lang(ui_client, monkeypatch):
+    """Issue #337 & #339 should-fix: UI chat stream final event payload carries script_lang."""
+    monkeypatch.setattr(app_mod, "llm", MarkdownFakeLLM())
+    resp = ui_client.post(
+        "/ui/chat/stream",
+        json={"messages": [{"role": "user", "content": "What is IKJEFT01?"}]},
+    )
+    assert resp.status_code == 200
+    events = [line for line in resp.text.split("\n\n") if line.strip()]
+    final_event = next(e for e in events if "event: final" in e)
+    payload_line = next(line for line in final_event.split("\n") if line.startswith("data: "))
+    payload = json.loads(payload_line[6:])
+    assert payload["script"] == "//STEP1 EXEC PGM=IEFBR14"
+    assert payload["script_lang"] == "jcl"
+
+
+def test_ui_chat_script_lang_fallback_unlabeled(ui_client, monkeypatch):
+    """Issue #337: when script_lang is None, script append falls back to unlabeled fence."""
+    class FakeLLMNoLang:
+        def chat(self, messages, reasoning_effort=None, temperature=None):
+            return ChatResult(
+                content="Here is code:\n\n```\n//UNLABELED EXEC PGM=IEFBR14\n```\n\nCitations:\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
+                finish_reason="stop",
+                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+
+    monkeypatch.setattr(app_mod, "llm", FakeLLMNoLang())
+    resp = ui_client.post(
+        "/ui/chat",
+        data={"message": "Show code", "messages": ""},
+        headers={"HX-Request": "true"},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    # Bare fence unwraps to prose in parse_answer (no script extracted, rendered directly)
+    assert "//UNLABELED" in _assistant_html(body)
+
+
+def test_console_js_code_tokenizer_parity():
+    """Issue #337: console.js contains client-side sniffing and tokenization mirroring server."""
+    js = (
+        Path(app_mod.__file__).parents[1] / "webui" / "static" / "js" / "console.js"
+    ).read_text(encoding="utf-8")
+    for token in (
+        "detectCodeRegion",
+        "tokenizeCode",
+        "JCL_TOKEN",
+        "REXX_TOKEN",
+        "tok-comment",
+        "tok-string",
+        "tok-keyword",
+        "tok-number",
     ):
         assert token in js, token

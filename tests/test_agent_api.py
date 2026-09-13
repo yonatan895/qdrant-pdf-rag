@@ -830,6 +830,30 @@ def test_parse_answer_script_lang():
     assert res_think.script is None
     assert res_think.script_lang is None
 
+    # Abstention with fence: citations zeroed, but script + script_lang preserved
+    res_abstain = parse_answer(
+        f"The excerpts do not contain documentation for this parameter.\n\n```jcl\n//JOB1 JOB\n```\n\nCitations:\n{cite1}",
+        allowed,
+    )
+    assert res_abstain.citations == []
+    assert res_abstain.script == "//JOB1 JOB"
+    assert res_abstain.script_lang == "jcl"
+
+
+def test_answer_response_script_lang_default():
+    """Hardened default (nit from #339): script_lang defaults to None."""
+    resp = app_mod.AnswerResponse(
+        request_id="req-123",
+        answer="ok",
+        citations=[],
+        query_kind="nl",
+        hits=[],
+        finish_reason="stop",
+        usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        script=None,
+    )
+    assert resp.script_lang is None
+
 
 def test_citation_validation():
     lines = extract_citation_lines(

@@ -424,7 +424,7 @@ class AnswerResponse(BaseModel):
     script: str | None
     # Language tag of the extracted script fence (issue #336), None when
     # no script was extracted. Additive: chat payloads carry no script.
-    script_lang: str | None
+    script_lang: str | None = None
 
 
 class ChatRequest(BaseModel):
