@@ -267,11 +267,12 @@ first proving the required multi-component repository paths work.
 
 ## 5. Release prerequisites and local sizing
 
-Resolve `sha256:PENDING` in [images.txt](../images.txt) in a **dedicated pin
-change**, using the authenticated inspection from section 1. Verify a pull
-by that digest. Merge/review through the normal process and obtain a new
-published-main bundle containing the OAuth archive; editing a downloaded
-bundle invalidates its signature. Do not bypass the pending-pin guard.
+Verify an authenticated pull of the OAuth digest recorded in
+[images.txt](../images.txt), using section 1. Future pin changes, including
+resolving `sha256:PENDING` in an older checkout, require a **dedicated pin
+change** through normal review and a new published-main bundle containing
+the OAuth archive. Editing a downloaded bundle invalidates its signature;
+do not bypass the pending-pin guard.
 
 Use [the production overlays](../overlays/openshift/values.yaml) and existing
 rehearsal override hooks. Keep local files outside the bootstrapped checkout.
@@ -302,9 +303,9 @@ section 1.1 and records mock computation explicitly; never use hash mode or
 claim that deterministic mock citations measure answer quality.
 
 **SCC prerequisite:** inspect admission with the unmodified security policy.
-Current production Qdrant values specify UID 1000, GID 2000, and fsGroup 3000;
-[Jaeger](../deploy/kustomize/jaeger/deployment.yaml) specifies fsGroup 10001.
-These require investigation against project-assigned ranges. A denied pod or
+Production Qdrant values remove the chart's fixed UID, GID and fsGroup;
+[Jaeger](../deploy/kustomize/jaeger/deployment.yaml) also leaves identities to
+admission. Verify the resulting project-assigned ranges. A denied pod or
 unwritable volume blocks the run. Fix demonstrated incompatibilities in the
 owning production configuration with `make check` and `make airgap-dryrun`,
 then obtain and retest a new main bundle. Never grant `anyuid`, disable SCC,

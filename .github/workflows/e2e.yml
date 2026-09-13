@@ -95,12 +95,18 @@ jobs:
 
   # ---------------------------------------------------- sneakernet packaging
   # Automates the sneakernet release factory (issue #15): packages the bundle
-  # and all recorded-digest pinned images (plus the oauth-proxy sidecar once
-  # its digest is recorded) on every merge to main (or manual dispatch),
+  # and all recorded-digest pinned images (including the authenticated Red Hat
+  # oauth-proxy sidecar) on every merge to main (or manual dispatch),
   # generating the transfer certificate and uploading the tarball + digests as
   # a downloadable workflow artifact.
   airgap-package:
     needs: [build]
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: airgap-package-${{ github.ref || github.run_id }}
+      cancel-in-progress: false
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -121,6 +127,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$GITHUB_TOKEN" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Log in to Red Hat registry
+        env:
+          REDHAT_REGISTRY_USER: ${{ secrets.REDHAT_REGISTRY_USER }}
+          REDHAT_REGISTRY_PASSWORD: ${{ secrets.REDHAT_REGISTRY_PASSWORD }}
+        run: |
+          if [ -z "$REDHAT_REGISTRY_USER" ] || [ -z "$REDHAT_REGISTRY_PASSWORD" ]; then
+            echo "::error::REDHAT_REGISTRY_USER and REDHAT_REGISTRY_PASSWORD are required to package the pinned OAuth image"
+            exit 1
+          fi
+          printf '%s' "$REDHAT_REGISTRY_PASSWORD" | skopeo login registry.redhat.io \
+            --username "$REDHAT_REGISTRY_USER" --password-stdin
 
       - name: airgap-pack
         env:
@@ -265,7 +283,14 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: kind-live-${{ github.ref || github.run_id }}
+      cancel-in-progress: false
     env:
+      SHARE: "false"
       SHA: ${{ needs.build.outputs.sha }}
     steps:
       - name: Install helm (vendored-chart deploy)
@@ -365,11 +390,18 @@ jobs:
             -e 's|^STORAGE_CLASS=.*|STORAGE_CLASS=local-path|' \
             -e 's|^IMAGE_SHA=.*|IMAGE_SHA='"$SHA"'|' \
             -e 's|^EMBED_MODEL=.*|EMBED_MODEL=mock-embed|' \
-            -e 's|^DENSE_DIM=.*|DENSE_DIM=64|' \
-            -e 's|^VLLM_BASE_URL=.*|VLLM_BASE_URL=http://vllm-mock:8000|' \
+            -e 's|^DENSE_DIM=.*|DENSE_DIM=1024|' \
+            -e 's|^VLLM_BASE_URL=.*|VLLM_BASE_URL=http://test-gateway:4000|' \
             -e 's|^CORPUS_PVC=.*|CORPUS_PVC=corpus|' \
             -e 's|^# INSECURE_REGISTRY=false.*|INSECURE_REGISTRY=true|' \
             airgap.env
+          cat >> airgap.env <<'EOF'
+          EMBED_BASE_URL=http://test-gateway:4000/v1
+          LLM_BASE_URL=http://test-gateway:4000/v1
+          LLM_MODEL_REASONING=mock-reasoning
+          RERANK_ENABLED=false
+          GATEWAY_API_KEY_SECRET=test-gateway-keys
+          EOF
           grep -E "^(INTERNAL_REGISTRY|NAMESPACE|STORAGE_CLASS|IMAGE_SHA|EMBED_MODEL|DENSE_DIM|VLLM_BASE_URL|CORPUS_PVC|INSECURE_REGISTRY)" airgap.env
 
       - name: Write Kind-scale Qdrant overrides (runner quota only; git prod values untouched)
@@ -378,6 +410,8 @@ jobs:
           # Rehearsal-only: a CI runner cannot schedule the 3x16Gi prod
           # Qdrant (Insufficient memory on one node — proven locally).
           replicaCount: 1
+          # Kind has no SCC to supply a volume group for the init emptyDir.
+          podSecurityContext: {fsGroup: 3000}
           resources:
             requests: {cpu: "500m", memory: 1Gi}
             limits: {cpu: "2", memory: 4Gi}
@@ -420,7 +454,7 @@ jobs:
                     image: localhost:5000/qdrant-pdf-rag-ingest:${SHA}
                     command: ["python3", "/cm/mock_vllm.py"]
                     env:
-                      - {name: MOCK_DIM, value: "64"}
+                      - {name: MOCK_DIM, value: "1024"}
                       - {name: PORT, value: "8000"}
                     ports: [{containerPort: 8000}]
                     readinessProbe:
@@ -460,6 +494,11 @@ jobs:
         run: |
           cd gapbox/qdrant-pdf-rag
           make airgap-validate
+
+      - name: Real test gateway and database (mock computation only)
+        run: |
+          cd gapbox/qdrant-pdf-rag
+          sh scripts/ci/deploy_test_gateway.sh "$NS"
 
       - name: Generate corpus PVC + demo PDFs (operator-supplied corpus step)
         run: |
@@ -511,6 +550,11 @@ jobs:
           # step above (mock and corpus-gen pods pulled them); skip the
           # second push — same flag an operator re-running pipeline uses.
           sh scripts/airgap/pipeline.sh --skip-load
+
+      - name: Require reasoning and complete streams from the application pod
+        run: |
+          kubectl -n "$NS" exec deploy/rag-agent -- \
+            python3 /app/scripts/probe_gateway.py --require-reasoning --stream
 
       - name: Expected-substring acceptance
         run: |

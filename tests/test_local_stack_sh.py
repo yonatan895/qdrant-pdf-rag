@@ -117,3 +117,52 @@ def test_missing_corpus_dir_fails_closed():
     r = _run({"CORPUS_DIR": "/nonexistent/corpus"})
     assert r.returncode != 0
     assert "CORPUS_DIR is not a directory" in r.stderr
+
+
+def test_rerank_false_selects_two_backend_plan():
+    r = _run({'RERANK_ENABLED': 'false'})
+    assert r.returncode == 0, r.stderr
+    backend_line = r.stdout.splitlines()[0]
+    assert '8000' in backend_line and '8001' in backend_line
+    assert '8002' not in backend_line
+
+
+def test_invalid_rerank_flag_fails_before_launch():
+    r = _run({'RERANK_ENABLED': 'flase'})
+    assert r.returncode != 0
+    assert 'RERANK_ENABLED' in r.stderr
+
+
+def test_two_backend_live_path_preserves_flag_after_gateway_handoff(tmp_path):
+    # Stop deliberately at the probe after recording its actual environment.
+    # This traverses real backend validation and the gateway handoff, without I/O.
+    scripts = tmp_path / 'checkout' / 'scripts'
+    scripts.mkdir(parents=True)
+    (scripts / SCRIPT.name).write_text(SCRIPT.read_text())
+    (scripts / 'run_local_gateway.sh').write_text('''#!/bin/sh
+printf 'export RERANK_ENABLED=true\\n' > "$GATEWAY_ENV_FILE"
+''')
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    log = tmp_path / 'calls'
+    (bindir / 'curl').write_text('''#!/bin/sh
+printf '%s\\n' "$*" >> "$CALLS"
+printf '200'
+''')
+    (bindir / 'docker').write_text('#!/bin/sh\nexit 99\n')
+    py = bindir / 'python'
+    py.write_text('''#!/bin/sh
+printf 'probe-rerank=%s\\n' "$RERANK_ENABLED" >> "$CALLS"
+exit 23
+''')
+    for file in bindir.iterdir():
+        file.chmod(0o755)
+    result = subprocess.run(['sh', str(scripts / SCRIPT.name)], capture_output=True, text=True, check=False,
+        env={**os.environ, 'PATH': str(bindir) + ':' + os.environ['PATH'], 'CALLS': str(log),
+             'LOCAL_STACK_DRYRUN': '0', 'RERANK_ENABLED': 'false', 'PY': str(py),
+             'GATEWAY_ENV_FILE': str(tmp_path / 'gateway.env'), 'LOCAL_STACK_LOG_DIR': str(tmp_path)})
+    assert result.returncode == 23, result.stderr
+    calls = log.read_text()
+    assert '8000/v1/models' in calls and '8001/v1/models' in calls
+    assert '8002' not in calls
+    assert 'probe-rerank=false' in calls

@@ -14,6 +14,7 @@ registry.access.redhat.com/ubi9/python-314-minimal:9.8                 sha256:1e
 # access.redhat.com UBI pin above), so record the digest on the connected host
 # after `skopeo login registry.redhat.io`:
 #   skopeo inspect --no-tags docker://registry.redhat.io/openshift4/ose-oauth-proxy:v4.14 | jq -r .Digest
-# While this stays sha256:PENDING, pack.sh skips the image (CI has no Red Hat
-# credentials) and `AGENT_ROUTE=true` deploy fails closed.
-registry.redhat.io/openshift4/ose-oauth-proxy:v4.14                     sha256:PENDING
+# Connected packaging requires Red Hat registry authentication. The archive
+# omits upstream signature attachments (unsupported by docker-archive);
+# source digest pinning and the signed bundle checksum contract remain enforced.
+registry.redhat.io/openshift4/ose-oauth-proxy:v4.14                     sha256:b86cefe58f2f74904a71d0c1a064beb7a2a94caa979f4c472e6b936eec79850d

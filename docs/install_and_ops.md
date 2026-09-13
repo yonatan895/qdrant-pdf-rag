@@ -546,7 +546,7 @@ This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-r
 4. Vendored Helm chart (`charts/qdrant-1.19.0.tgz`).
 5. Self-contained extraction bootstrap script (`bootstrap.sh`).
 6. Manifest (`MANIFEST.txt`), Packing Record (`PACKING_RECORD.txt`), digest enumeration (`sbom.json`), offline signature (`SHA256SUMS.sig` + `sneakernet-signing.pub`), and member `SHA256SUMS`.
-7. The console oauth-proxy sidecar image (`oauth-proxy-image.tar`) — included only once its digest is recorded in `images.txt` (see §4.4.2); CI cannot bundle it while the pin is `sha256:PENDING`.
+7. The console oauth-proxy sidecar image (`oauth-proxy-image.tar`) — pinned in `images.txt`; connected packaging needs Red Hat registry authentication (see §4.4.2).
 
 ### 4.2 Transfer & Automated Bootstrap
 
@@ -680,16 +680,18 @@ make airgap-deploy
 
 #### OpenShift Security Context Constraints (SCC) Note
 
-Qdrant's production values currently specify UID 1000, GID 2000, and fsGroup
-3000; Jaeger specifies fsGroup 10001. These static IDs can conflict with
-OpenShift project-assigned ranges. Require actual `restricted-v2` admission
-and successful PVC writes for every workload under
+The production and CI OpenShift values explicitly remove the chart's fixed UID,
+GID and fsGroup defaults. `restricted-v2` assigns the namespace identity and
+volume group. Jaeger also leaves IDs to admission. Application images make
+only their cache and work directories group-0 writable.
+
+Require actual `restricted-v2` admission and successful data, snapshot,
+ingest-work and trace volume writes under
 [the CRC procedure](crc-release-verification.md#5-release-prerequisites-and-local-sizing).
 An admission or storage failure blocks promotion and requires a fix in the
 owning production configuration followed by a new bundle and verification.
-Do not grant `anyuid` or hide security changes in `QDRANT_EXTRA_VALUES`.
-The current `validate.sh` output still suggests `anyuid`; that advice is
-superseded by this policy and is not evidence that admission works.
+Do not grant `anyuid`, substitute another project's IDs, or hide security
+changes in `QDRANT_EXTRA_VALUES`.
 
 #### Qdrant Inter-Node Gossip (p2p TLS) Note
 In `overlays/openshift/values.yaml`, `config.cluster.p2p.enable_tls: false` is set because cluster gossip is plaintext on the CNI; we do not mount `./tls/cert.pem` (avoiding crashloops on startup).
@@ -765,17 +767,24 @@ The agent serves the operator console at `/ui`, and the production overlay sets
 `http://rag-agent:8080/ui` even without a Route. Only the **external** Route is
 OAuth-protected; enable it with `AGENT_ROUTE=true`:
 
-1. Record the oauth-proxy digest on a connected host (this one needs a Red Hat
-   registry login) in a dedicated pin PR, then obtain a bundle from the
-   published-main SHA after that change is merged:
+1. Authenticate the connected packer to Red Hat's registry. The image digest
+   is already recorded in `images.txt`; inspect that exact digest when checking
+   access. Future pin updates require a dedicated pin PR and a new main bundle:
    ```bash
    skopeo login registry.redhat.io
-   skopeo inspect --no-tags docker://registry.redhat.io/openshift4/ose-oauth-proxy:v4.14 | jq -r .Digest
-   # Update images.txt in the dedicated pin PR.
-   # After merge, pack its green published-main SHA (see section 4.1).
+   OAUTH_IMAGE="$(awk '$1 ~ /^registry.redhat.io\/openshift4\/ose-oauth-proxy:/ {print $1 "@" $2}' images.txt)"
+   skopeo inspect --no-tags "docker://$OAUTH_IMAGE" | jq -r .Digest
+   # Package only a green published-main SHA, following section 4.1.
    ```
    While the pin is `sha256:PENDING`, `pack.sh` skips the sidecar and
    `AGENT_ROUTE=true` deploy fails closed.
+   The GitHub pack job requires repository secrets `REDHAT_REGISTRY_USER` and
+   `REDHAT_REGISTRY_PASSWORD` for a registry service account authorized to pull
+   this image. Provision those before merging a recorded-pin change; the job
+   fails closed when credentials are absent or rejected. Keep personal CRC
+   pull secrets on the workstation. The Docker archive omits unsupported
+   upstream signature attachments; image digests and the offline bundle
+   signature remain enforced.
 2. Create the cookie-encryption Secret (operator-owned; deploy fails closed
    without it):
    ```bash

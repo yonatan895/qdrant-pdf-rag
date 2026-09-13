@@ -1,0 +1,89 @@
+# CI-only platform stand-in. Never referenced by production overlays.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: test-gateway}
+data:
+  config.yaml: |
+    model_list:
+      - model_name: mock-reasoning
+        litellm_params:
+          model: openai/mock-reasoning
+          api_base: http://vllm-mock:8000/v1
+          api_key: dummy
+          allowed_openai_params: [reasoning_effort]
+      - model_name: mock-embed
+        litellm_params:
+          model: openai/mock-embed
+          api_base: http://vllm-mock:8000/v1
+          api_key: dummy
+    general_settings:
+      master_key: os.environ/GATEWAY_MASTER_KEY
+    router_settings:
+      num_retries: 0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: test-gateway-pg}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: test-gateway-pg}}
+  template:
+    metadata: {labels: {app: test-gateway-pg}}
+    spec:
+      containers:
+        - name: postgres
+          # Same database image as scripts/run_local_gateway.sh.
+          image: docker.io/library/postgres@sha256:67f41722b7a8cbdb868a44a4995c846eddfdc2973bccb291ce937dce88ad5675
+          env:
+            - {name: POSTGRES_USER, value: litellm}
+            - {name: POSTGRES_DB, value: litellm}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: test-gateway-admin, key: pg-password}}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: '1', memory: 512Mi}
+          readinessProbe:
+            exec: {command: [pg_isready, -U, litellm]}
+          volumeMounts: [{name: database, mountPath: /var/lib/postgresql/data}]
+      volumes: [{name: database, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: test-gateway-pg}
+spec:
+  selector: {app: test-gateway-pg}
+  ports: [{port: 5432, targetPort: 5432}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: test-gateway}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: test-gateway}}
+  template:
+    metadata: {labels: {app: test-gateway}}
+    spec:
+      containers:
+        - name: gateway
+          # Same real gateway image as scripts/run_local_gateway.sh.
+          image: ghcr.io/berriai/litellm@sha256:a3715fa7ad8387941ab697259bd2881d68931657247a41984f90fae6d11c62bf
+          args: [--config, /gateway/config.yaml, --port, '4000']
+          env:
+            - name: GATEWAY_MASTER_KEY
+              valueFrom: {secretKeyRef: {name: test-gateway-admin, key: master-key}}
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: test-gateway-admin, key: database-url}}
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: '2', memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/liveliness, port: 4000}
+          volumeMounts: [{name: config, mountPath: /gateway, readOnly: true}]
+      volumes: [{name: config, configMap: {name: test-gateway}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: test-gateway}
+spec:
+  selector: {app: test-gateway}
+  ports: [{port: 4000, targetPort: 4000}]

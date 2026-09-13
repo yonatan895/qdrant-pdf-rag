@@ -20,6 +20,17 @@ STUB_TOOL = "#!/bin/sh\nexit 0\n"
 PULL_SECRET_RE = re.compile(r"^([ ]*)imagePullSecrets:\n\1  - name: (\S+)$", re.MULTILINE)
 
 
+def set_oauth_proxy_pin(tree: Path, digest: str) -> None:
+    """Select an explicit OAuth pin state independently of the production pin."""
+    path = tree / "images.txt"
+    updated, count = re.subn(
+        r"^(registry\.redhat\.io/openshift4/ose-oauth-proxy:\S+)[ \t]+\S+$",
+        lambda match: f"{match[1]} {digest}", path.read_text(), flags=re.MULTILINE,
+    )
+    assert count == 1
+    path.write_text(updated)
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 

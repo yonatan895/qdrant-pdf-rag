@@ -95,6 +95,14 @@ class ModelSpec(BaseModel):
     # flag like runner/convert/eager, not sizing: off unless the profile
     # enables it; issue #80 measures the hit rate before enabling anywhere.
     prefix_cache: bool = False
+    # Opt-in experiment controls; existing profiles retain their declared facts.
+    enforce_eager: bool = False
+    chunked_prefill: bool | None = None
+    language_model_only: bool = False
+    mm_processor_cache_gb: float | None = Field(default=None, ge=0.0)
+    # A measured operating limit, not a resident-memory measurement. Resolve
+    # refuses limits below its footprint estimate; live headroom still gates fit.
+    gpu_memory_utilization: float | None = Field(default=None, gt=0.0, le=MAX_UTIL)
 
 
 class HostSpec(BaseModel):
@@ -123,6 +131,9 @@ class ServerPlan(BaseModel):
     max_num_seqs: int = Field(ge=1)
     enforce_eager: bool
     enable_prefix_caching: bool = False
+    enable_chunked_prefill: bool | None = None
+    language_model_only: bool = False
+    mm_processor_cache_gb: float | None = Field(default=None, ge=0.0)
     footprint_mib: float = Field(gt=0.0)
     notes: list[str] = Field(default_factory=list)
 
@@ -170,7 +181,8 @@ class DeploymentPlan(BaseModel):
                 f"--runner {s.runner}"
                 + (f" --convert {s.convert}" if s.convert != "none" else "")
                 + (" --enforce-eager" if s.enforce_eager else "")
-                + (" --enable-prefix-caching" if s.enable_prefix_caching else "")
+                + (" --enable-prefix-caching" if s.enable_prefix_caching else " --no-enable-prefix-caching")
+                + (" --language-model-only" if s.language_model_only else "")
             )
             lines.append(
                 f"  {s.role} {s.model_id}: footprint {s.footprint_mib:.0f} MiB "
@@ -243,7 +255,7 @@ def resolve(profile: ProfileBundle) -> DeploymentPlan:
             batched: int | None = spec.context_need
         else:
             compiled_footprint = spec.weight_mib + kv_pool_mib + _compiled_margin(spec)
-            if compiled_footprint <= free:
+            if compiled_footprint <= free and not spec.enforce_eager:
                 eager = False
                 margin = _compiled_margin(spec)
                 batched = None
@@ -258,13 +270,14 @@ def resolve(profile: ProfileBundle) -> DeploymentPlan:
                 eager = True
                 margin = EAGER_GENERATE_MARGIN_MIB
                 batched = None
-                note = (
+                note = ("Eager execution explicitly requested by profile." if spec.enforce_eager else (
                     f"{spec.model_id}: compiled workspace does not fit "
                     f"({compiled_footprint:.0f} MiB); falling back to "
                     "--enforce-eager. Expect lower decode throughput."
-                )
+                ))
                 notes.append(note)
-                warnings.append(note)
+                if not spec.enforce_eager:
+                    warnings.append(note)
         footprint = spec.weight_mib + kv_pool_mib + margin
         if footprint > free:
             raise BudgetDeficitError(
@@ -273,6 +286,14 @@ def resolve(profile: ProfileBundle) -> DeploymentPlan:
                 remedies=_remedies(spec, profile.host, "Deficit"),
             )
         util = _ceil_util(footprint, profile.host.total_vram_mib)
+        if spec.gpu_memory_utilization is not None:
+            if spec.gpu_memory_utilization * profile.host.total_vram_mib < footprint:
+                raise BudgetDeficitError(
+                    f"Declared GPU allocation for {spec.model_id} is below its estimated footprint.",
+                    remedies=["Raise the declared allocation or use a larger host."],
+                )
+            util = spec.gpu_memory_utilization
+            notes.append("Explicit GPU allocation limit; resident fit requires a measured workload.")
         if util > MAX_UTIL:
             raise BudgetDeficitError(
                 f"Deficit: {spec.model_id} alone claims {util:.2f} of the host.",
@@ -291,6 +312,9 @@ def resolve(profile: ProfileBundle) -> DeploymentPlan:
                 max_num_seqs=spec.max_num_seqs,
                 enforce_eager=eager,
                 enable_prefix_caching=spec.prefix_cache,
+                enable_chunked_prefill=spec.chunked_prefill,
+                language_model_only=spec.language_model_only,
+                mm_processor_cache_gb=spec.mm_processor_cache_gb,
                 footprint_mib=footprint,
                 notes=notes,
             )

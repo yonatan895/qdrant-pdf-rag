@@ -15,13 +15,14 @@ imagePullSecrets: []       # lab cluster pulls Docker Hub directly
 
 containerSecurityContext:
   runAsNonRoot: true
-  runAsUser: 1000
-  runAsGroup: 2000
+  # Null removes the chart defaults; restricted-v2 assigns the project identity.
+  runAsUser: null
+  runAsGroup: null
   allowPrivilegeEscalation: false
   readOnlyRootFilesystem: true
 
 podSecurityContext:
-  fsGroup: 3000
+  fsGroup: null
   fsGroupChangePolicy: Always
 
 persistence:

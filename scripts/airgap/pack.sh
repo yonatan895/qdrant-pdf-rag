@@ -87,8 +87,11 @@ skopeo copy $extra_args "docker://$INGEST_IMAGE" "docker-archive:$DIST/app-inges
 # shellcheck disable=SC2086
 skopeo copy $extra_args "docker://$AGENT_IMAGE" "docker-archive:$DIST/app-agent-$IMAGE_SHA.tar"
 if [ -n "$OAUTH_TAR" ]; then
+    # Red Hat images carry signature attachments that docker-archive cannot
+    # store. Omit those attachments, retaining the digest-pinned source and
+    # our archive-digest + signed-SHA256SUMS handoff contract below.
     # shellcheck disable=SC2086
-    skopeo copy $extra_args "docker://$OAUTH_PROXY_REF" "docker-archive:$DIST/$OAUTH_TAR"
+    skopeo copy $extra_args --remove-signatures "docker://$OAUTH_PROXY_REF" "docker-archive:$DIST/$OAUTH_TAR"
 fi
 
 echo "==> Image digests (bound into MANIFEST, verified on load)"

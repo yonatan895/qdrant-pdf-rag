@@ -40,6 +40,7 @@ unset _url_var _url
 
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
+check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
 resolve_otel_endpoint
 
 case "${RERANK_ENDPOINT_ORDER:-score_first}" in
@@ -121,6 +122,8 @@ if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
         echo "    Notice: namespace '$NAMESPACE' does not exist yet — create Secret '$GATEWAY_API_KEY_SECRET' there before 'make airgap-deploy'"
     fi
 fi
+
+check_gateway_ca
 
 echo "==> 5. Checking OpenShift Security Context Constraints (SCC)"
 if command -v oc >/dev/null 2>&1 && oc get scc >/dev/null 2>&1; then

@@ -48,7 +48,7 @@ def test_engine_margin_defaults():
 
 
 def test_profiles_registered():
-    assert list_profiles() == ["LOCAL_RT_8GB", "OPENSHIFT_PROD", "RANK_EMBED_8GB", "TRIPLE_8GB"]
+    assert list_profiles() == ["LOCAL_CRC_32GB", "LOCAL_RT_8GB", "OPENSHIFT_PROD", "RANK_EMBED_8GB", "TRIPLE_8GB"]
 
 
 def test_local_profile_resolves_to_validated_operating_points():
@@ -337,3 +337,23 @@ def test_big_reasoning_triple_refuses_closed():
     )
     with pytest.raises(BudgetDeficitError):
         resolve(pack)
+
+
+def test_crc_profile_preserves_models_and_windows():
+    from mainframe_rag.serve import LOCAL_CRC_32GB
+
+    reasoning, embed = resolve(LOCAL_CRC_32GB).servers
+    assert [s.model_id for s in LOCAL_CRC_32GB.servers] == [s.model_id for s in LOCAL_RT_8GB.servers]
+    assert all(s.max_model_len == 4096 and s.max_num_seqs == 1 and s.enforce_eager for s in (reasoning, embed))
+    assert reasoning.gpu_memory_utilization == 0.54
+    assert embed.gpu_memory_utilization == 0.43
+    assert reasoning.language_model_only and reasoning.mm_processor_cache_gb == 0
+    assert embed.enable_prefix_caching is False
+    assert embed.enable_chunked_prefill is False
+    assert GEMMA4_E4B_QAT.enforce_eager is False
+
+
+def test_explicit_allocation_below_footprint_refuses():
+    spec = GEMMA4_E4B_QAT.model_copy(update={'enforce_eager': True, 'gpu_memory_utilization': 0.1})
+    with pytest.raises(BudgetDeficitError, match='below its estimated footprint'):
+        resolve(ProfileBundle(name='underallocated', host=LOCAL_RT_8GB.host, servers=[spec]))
