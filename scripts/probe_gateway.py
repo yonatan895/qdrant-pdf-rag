@@ -25,6 +25,7 @@ otherwise. Run from inside the cluster, on the same network as the agent:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -109,6 +110,8 @@ def check_chat(settings: Settings, timeout: float, stream: bool) -> tuple[str, s
         "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
         "temperature": 0,
         "max_tokens": 16,
+        # Match the application's simple-query reasoning contract.
+        "reasoning_effort": settings.llm_reasoning_effort_simple,
     }
     try:
         resp = httpx2.post(
@@ -127,13 +130,23 @@ def check_chat(settings: Settings, timeout: float, stream: bool) -> tuple[str, s
         choices = resp.json()["choices"]
     except (ValueError, KeyError, TypeError):
         return "fail", "chat /chat/completions returned no choices"
-    if not choices:
-        return "fail", "chat /chat/completions returned empty choices"
+    if (
+        not isinstance(choices, list)
+        or len(choices) != 1
+        or not isinstance(choices[0], dict)
+        or choices[0].get("finish_reason") != "stop"
+        or not isinstance(choices[0].get("message"), dict)
+        or not isinstance(choices[0]["message"].get("content"), str)
+        or not choices[0]["message"]["content"].strip()
+    ):
+        return "fail", "chat /chat/completions returned no successfully completed answer"
     detail = f"chat /chat/completions: model={model} finish={choices[0].get('finish_reason')}"
     if not stream:
         return "ok", detail
     try:
         saw_done = False
+        saw_finish = False
+        saw_content = False
         with httpx2.stream(
             "POST",
             f"{base_url.rstrip('/')}/chat/completions",
@@ -143,14 +156,49 @@ def check_chat(settings: Settings, timeout: float, stream: bool) -> tuple[str, s
         ) as stream_resp:
             stream_resp.raise_for_status()
             for line in stream_resp.iter_lines():
-                if line.strip() == "data: [DONE]":
+                line = line.strip()
+                if line == "event: error":
+                    return "fail", detail + "; streaming error event"
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
                     saw_done = True
                     break
+                try:
+                    frame = json.loads(payload)
+                except ValueError:
+                    return "fail", detail + "; streaming non-JSON frame"
+                if not isinstance(frame, dict) or "error" in frame:
+                    return "fail", detail + "; streaming error or invalid frame"
+                chunks = frame.get("choices")
+                if not isinstance(chunks, list):
+                    return "fail", detail + "; streaming missing choices"
+                # OpenAI usage-only frames legitimately carry choices: [].
+                if not chunks and isinstance(frame.get("usage"), dict):
+                    continue
+                if len(chunks) != 1 or not isinstance(chunks[0], dict):
+                    return "fail", detail + "; streaming invalid choices"
+                chunk = chunks[0]
+                delta = chunk.get("delta")
+                if not isinstance(delta, dict) or saw_finish:
+                    return "fail", detail + "; streaming invalid delta or data after finish"
+                content = delta.get("content")
+                if content is not None and not isinstance(content, str):
+                    return "fail", detail + "; streaming invalid content"
+                saw_content = saw_content or bool(content and content.strip())
+                finish = chunk.get("finish_reason")
+                if finish is not None:
+                    if finish != "stop":
+                        return "fail", detail + "; streaming unsuccessful finish"
+                    saw_finish = True
     except (httpx2.HTTPError, OSError) as exc:
-        return "ok", detail + f"; streaming FAILED ({exc}) — JSON answers work, SSE TTFT will not"
+        return "fail", detail + f"; streaming FAILED ({exc})"
     if not saw_done:
-        return "ok", detail + "; streaming has no [DONE] — JSON answers work, SSE TTFT will not"
-    return "ok", detail + "; streaming [DONE] ok"
+        return "fail", detail + "; streaming has no [DONE]"
+    if not saw_finish or not saw_content:
+        return "fail", detail + "; streaming has no successfully completed answer"
+    return "ok", detail + "; streaming finish + [DONE] ok"
 
 
 def _leg_ok(
@@ -249,9 +297,12 @@ def check_tokenize(settings: Settings, timeout: float) -> tuple[str, str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Probe gateway model legs before cutover.")
     parser.add_argument("--timeout", type=float, default=PROBE_TIMEOUT_S)
-    parser.add_argument("--stream", action="store_true", help="also verify SSE [DONE] on chat")
+    parser.add_argument("--stream", action="store_true", help="require a successful chat stream ending in [DONE]")
+    parser.add_argument("--require-reasoning", action="store_true", help="fail when reasoning is not configured")
     parser.add_argument("--models", action="store_true", help="list served model ids and exit")
     args = parser.parse_args(argv)
+    if args.models and (args.stream or args.require_reasoning):
+        parser.error("--models cannot be combined with readiness requirements")
 
     settings = load_settings()
     failures = 0
@@ -284,6 +335,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{status.upper()}] {detail}")
         failures += status == "fail"
     status, detail = check_chat(settings, args.timeout, args.stream)
+    if status == "skip" and (args.require_reasoning or args.stream):
+        status, detail = "fail", "reasoning required but LLM_BASE_URL / LLM_MODEL_REASONING not configured"
     print(f"[{status.upper()}] {detail}")
     failures += status == "fail"
 
