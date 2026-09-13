@@ -41,27 +41,11 @@ fi
 HF_CACHE_DIR="${HF_HOME:-${HOME}/.cache/huggingface}"
 mkdir -p "${HF_CACHE_DIR}"
 
-# TTY flag: only allocate pseudo-TTY if stdin is connected to an interactive terminal
-if [ -t 0 ]; then
-    TTY_FLAG="-it"
-else
-    TTY_FLAG=""
-fi
-
-# Environment flags:
-# - VLLM_WSL2_ENABLE_PIN_MEMORY=1: Enables pinned host memory allocation on WSL2.
-# - HF_TOKEN: Forwarded safely via `-e HF_TOKEN` without exposing the secret token string on argv.
-ENV_ARGS="-e VLLM_WSL2_ENABLE_PIN_MEMORY=1"
-if [ -n "${HF_TOKEN:-}" ]; then
-    ENV_ARGS="${ENV_ARGS} -e HF_TOKEN"
-fi
-
 # Detect local model directory vs HuggingFace hub model ID
-LOCAL_MOUNT=""
+ABS_MODEL_DIR=""
 if [ -d "${MODEL}" ]; then
     ABS_MODEL_DIR="$(cd "${MODEL}" && pwd)"
     MODEL_NAME="${SERVED_NAME:-$(basename "${ABS_MODEL_DIR}")}"
-    LOCAL_MOUNT="-v ${ABS_MODEL_DIR}:/model:ro"
     SERVED_TARGET="/model"
     echo " Detected local model directory: ${ABS_MODEL_DIR}"
     echo " Serving as model name:         ${MODEL_NAME}"
@@ -184,12 +168,18 @@ case "${MODEL} ${MODEL_NAME} ${TASK:-}" in
         ;;
 esac
 
-# Single unified container execution
-exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
-    -p "${PORT}:${PORT}" \
+# Prepend runtime arguments as an argv vector; local paths may contain spaces.
+set -- --gpus all -p "${PORT}:${PORT}" \
     -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-    ${LOCAL_MOUNT} \
-    ${ENV_ARGS} \
-    --ipc=host \
-    "${IMAGE}" \
-    "$@"
+    -e VLLM_WSL2_ENABLE_PIN_MEMORY=1 --ipc=host "${IMAGE}" "$@"
+if [ -n "${ABS_MODEL_DIR}" ]; then
+    set -- -v "${ABS_MODEL_DIR}:/model:ro" "$@"
+fi
+# Forward the token by environment name, never by value on argv.
+if [ -n "${HF_TOKEN:-}" ]; then
+    set -- -e HF_TOKEN "$@"
+fi
+if [ -t 0 ]; then
+    set -- -it "$@"
+fi
+exec "${RUNTIME}" run --rm "$@"

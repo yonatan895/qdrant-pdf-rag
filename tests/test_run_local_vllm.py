@@ -8,7 +8,6 @@ only the venv python resolver and /bin/sh.
 """
 
 import os
-import shlex
 import stat
 import subprocess
 import sys
@@ -23,7 +22,7 @@ def _run_script(tmp_path: Path, extra_env: dict[str, str]) -> tuple[int, str, li
     bindir.mkdir()
     out_file = tmp_path / "docker-argv"
     stub = bindir / "docker"
-    stub.write_text(f"#!/bin/sh\necho \"$@\" > \"{out_file}\"\n")
+    stub.write_text(f"#!/bin/sh\nprintf '%s\\0' \"$@\" > \"{out_file}\"\n")
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     env = {
         **os.environ,
@@ -42,7 +41,7 @@ def _run_script(tmp_path: Path, extra_env: dict[str, str]) -> tuple[int, str, li
     )
     argv: list[str] = []
     if out_file.exists():
-        argv = shlex.split(out_file.read_text())
+        argv = out_file.read_bytes().decode().split('\0')[:-1]
     return proc.returncode, proc.stderr, argv
 
 
@@ -145,6 +144,20 @@ def test_budget_failure_fails_closed_before_docker(tmp_path: Path):
     assert argv == [], "container runtime must never exec on resolve failure"
 
 
+def test_local_model_path_is_one_mount_argument_and_token_stays_off_argv(tmp_path: Path):
+    model = tmp_path / 'model weights [local]'
+    model.mkdir()
+    rc, stderr, argv = _run_script(tmp_path, {
+        'MODEL': str(model), 'ROLE': 'reasoning', 'HF_TOKEN': 'private-test-token',
+        'HF_HOME': str(tmp_path / 'cache directory'),
+    })
+    assert rc == 0, stderr
+    assert str(model) + ':/model:ro' in argv
+    assert str(tmp_path / 'cache directory') + ':/root/.cache/huggingface' in argv
+    assert 'HF_TOKEN' in argv
+    assert 'private-test-token' not in ' '.join(argv) + stderr
+
+
 def _run_script_with_stub_resolver(tmp_path: Path, extra_env: dict[str, str]) -> tuple[int, str, list[str]]:
     """BUDGET_PYTHON stub emitting canned assignments: exercises the script's
     flag conditionals independently of the Budget table."""
@@ -152,7 +165,7 @@ def _run_script_with_stub_resolver(tmp_path: Path, extra_env: dict[str, str]) ->
     bindir.mkdir(exist_ok=True)
     out_file = tmp_path / "docker-argv"
     stub_docker = bindir / "docker"
-    stub_docker.write_text(f"#!/bin/sh\necho \"$@\" > \"{out_file}\"\n")
+    stub_docker.write_text(f"#!/bin/sh\nprintf '%s\\0' \"$@\" > \"{out_file}\"\n")
     stub_docker.chmod(stub_docker.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     stub_python = bindir / "stub-python"
     stub_python.write_text(
@@ -185,7 +198,7 @@ def _run_script_with_stub_resolver(tmp_path: Path, extra_env: dict[str, str]) ->
     )
     argv: list[str] = []
     if out_file.exists():
-        argv = shlex.split(out_file.read_text())
+        argv = out_file.read_bytes().decode().split('\0')[:-1]
     return proc.returncode, proc.stderr, argv
 
 
