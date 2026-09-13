@@ -302,3 +302,27 @@ def test_vendor_assets_match_pinned_sha256sums():
         digest, name = line.split(maxsplit=1)
         payload = (_VENDOR_DIR / name.strip()).read_bytes()
         assert hashlib.sha256(payload).hexdigest() == digest, name
+
+
+def test_dead_sse_extension_stays_removed(ui_client):
+    """Issue #326 P0: streaming uses native fetch — the unreferenced sse.js
+    must not come back as dead weight (file, manifest, or shell reference)."""
+    assert not (_VENDOR_DIR / "sse.js").exists()
+    manifest = (_VENDOR_DIR / "SHA256SUMS").read_text(encoding="utf-8")
+    assert "sse.js" not in manifest
+    resp = ui_client.get("/ui/static/vendor/sse.js")
+    assert resp.status_code == 404
+    shell = ui_client.get("/ui").text
+    assert "sse.js" not in shell
+
+
+def test_console_css_layout_survival_rules():
+    """Issue #326 P0: narrow viewports clipped the topbar and SEND button
+    because flex/grid children default to min-width: auto. Pin the
+    shrinkability rules so the fix cannot silently regress."""
+    css = (
+        Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
+    ).read_text(encoding="utf-8")
+    assert ".layout > * { min-width: 0; }" in css
+    assert ".topbar-controls { display: flex; align-items: center; flex-wrap: wrap;" in css
+    assert ".composer textarea { flex: 1 1 auto; min-width: 0;" in css

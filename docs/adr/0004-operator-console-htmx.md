@@ -160,8 +160,9 @@
     - `src/mainframe_rag/webui/static/vendor/htmx.min.js`: HTMX 1.9.12 vendored locally,
       pinned to SHA256 `449317ade7881e949510db614991e195c3a099c4c791c24dacec55f9f4a2a452`
       with upstream 0BSD `LICENSE`.
-    - `src/mainframe_rag/webui/static/vendor/sse.js`: HTMX SSE extension vendored locally,
-      pinned to SHA256 `be05b2e2265279f035271adbea0b72a356f20ce4dfa5870481bfe9c51b822fc1`.
+    - Streaming uses the browser-native `fetch` + `ReadableStream` reader in
+      `static/js/console.js` (no SSE-extension dependency; the formerly vendored
+      `sse.js` was dead weight and is removed — issue #326 P0).
     - Unit tests in `tests/test_webui.py` verify file presence and SHA256 digests.
   - **Content-Security-Policy (CSP) & security headers:** All HTML responses from `/ui`
     enforce strict security headers:
