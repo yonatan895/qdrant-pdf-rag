@@ -22,6 +22,7 @@ from tests.helpers_airgap import (
     gen_sign_keypair,
     make_bin_tree,
     run_sh,
+    set_oauth_proxy_pin,
     skopeo_stub,
     symlink_tools,
 )
@@ -65,6 +66,9 @@ TOOLS = (
 def pack_tree(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "pack.sh", "bootstrap.sh"])
     shutil.copy(REPO / "images.txt", tmp_path / "images.txt")
+    # Four-image tests exercise the pending state explicitly, even after a
+    # production pin is recorded. The recorded-pin test covers all five images.
+    set_oauth_proxy_pin(tmp_path, "sha256:PENDING")
     shutil.copy(REPO / "requirements.lock.txt", tmp_path / "requirements.lock.txt")
     (tmp_path / "charts").mkdir(exist_ok=True)
     copy_chart(tmp_path)
@@ -201,8 +205,7 @@ def test_pack_success_builds_verified_tarball(pack_tree):
 
 
 def test_pack_skips_pending_oauth_proxy_pin(pack_tree):
-    """ADR-0004: the oauth-proxy pin ships sha256:PENDING (CI has no Red Hat
-    credentials); pack must stay green and leave the image out of the bundle."""
+    """An explicitly pending pin leaves the sidecar out of the bundle."""
     tmp_path, skopeo_log, _head, _key = pack_tree
     r, _ = _run_pack(pack_tree)
     assert r.returncode == 0, r.stderr
@@ -219,13 +222,29 @@ def test_pack_skips_pending_oauth_proxy_pin(pack_tree):
 def test_pack_bundles_oauth_proxy_once_digest_recorded(pack_tree):
     """Once the connected host records a digest, the sidecar image joins the
     bundle, MANIFEST, SBOM and member checksums."""
-    tmp_path, _skopeo_log, head, _key = pack_tree
-    images = (tmp_path / "images.txt").read_text()
-    (tmp_path / "images.txt").write_text(images.replace("sha256:PENDING", "sha256:" + "b" * 64))
+    tmp_path, skopeo_log, head, _key = pack_tree
+    set_oauth_proxy_pin(tmp_path, "sha256:" + "b" * 64)
+    # Model signed-source export: without attachment omission, Docker
+    # archive export fails before the archive can be materialized.
+    guard = '''signed_source=0
+remove_signatures=0
+for arg in "$@"; do
+  case "$arg" in
+    docker://registry.redhat.io/openshift4/ose-oauth-proxy@*) signed_source=1 ;;
+    --remove-signatures) remove_signatures=1 ;;
+  esac
+done
+if [ "$signed_source" = 1 ] && [ "$remove_signatures" != 1 ]; then
+  echo "Docker archives cannot store signature attachments" >&2
+  exit 1
+fi
+'''
+    (tmp_path / "bin" / "skopeo").write_text(STUB_SKOPEO.replace("#!/bin/sh\n", "#!/bin/sh\n" + guard, 1))
     r, _ = _run_pack(pack_tree)
     assert r.returncode == 0, r.stderr
     dist = tmp_path / "dist"
     assert (dist / "oauth-proxy-image.tar").is_file()
+    assert skopeo_log.read_text().splitlines().count("--remove-signatures") == 1
     manifest = (dist / "MANIFEST.txt").read_text()
     assert "oauth_proxy: registry.redhat.io/openshift4/ose-oauth-proxy@sha256:" + "b" * 64 in manifest
     assert f"oauth_proxy_digest: {STUB_DIGEST}" in manifest
