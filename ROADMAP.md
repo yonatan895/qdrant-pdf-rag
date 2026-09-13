@@ -4,111 +4,42 @@
 > MUST read: the issue, this document, `AGENTS.md`, `docs/architecture.md`, and
 > `docs/adr/0001-baseline-decisions.md` before writing code.
 
-## Verified repo facts (audit of 2026-09-02; amended 2026-09-03 after PR-01/PR-02/PR-03 merged; amended 2026-09-05 in docs-epic PR-A: PR-04/PR-05/PR-06/PR-09 marked shipped, PR-08 partial; amended 2026-09-11 in docs-epic PR-B: gateway trio, MCP, splits, replay verdicts recorded below; amended 2026-09-13: ADR-0004 operator console + multi-turn chat shipped in PR #311)
+## Goal and decision basis
 
-These were verified against code and docs, not assumed. Agent tasks below reference them.
-Items marked **[amended]** changed with the merged P0 PRs.
+Deliver useful mainframe answers and procedures that operators can verify against
+indexed manuals, and abstain when the evidence is insufficient. Success means
+measured retrieval and answer quality within the site's latency and resource
+budget, while preserving offline operation, corpus confidentiality, platform
+ownership of model serving, and the ingestion/citation/API contracts.
 
-- **Parsing:** PyMuPDF is the baseline parser (ADR 0001). `.pdx`/`.idx` ignored.
-- **Chunking:** Section-outline aware. `chunk.py` builds chunks per section with
-  `heading_path`, threaded through `embed.py` → `qdrant_io.py` (payload) →
-  `retrieve/query.py` → `scripts/eval_retrieval.py` (`expected_heading` matching).
-  Point id = UUID5 of `{doc_id}|{heading_path}|{page_start}|{ordinal}`.
-  Code-atomic protection SHIPPED (PR-05): `chunk.py` detects JCL/REXX/console
-  regions (`detect_code_region`) and splits them at statement boundaries only
-  (`_split_jcl_statements`); `heading_path` is filterable in the Qdrant payload.
-- **Retrieval:** Hybrid dense + BM25 (FastEmbed, baked weights, `bm25-weights.sha256`),
-  local weighted RRF ([1,3] with identifiers, else [1,1], k=2) in `retrieve/query.py`,
-  fused in one batched `query_batch_points` HTTP call. **[amended]** A cross-encoder
-  reranker exists (`retrieve/rerank.py`, `bge-reranker-v2-m3` via `HttpReranker`) but
-  ships **default-off** (`rerank_enabled=False`); fused top-50 are rescored only when
-  `RERANK_ENABLED=true`. `search()` and `async_search()` are drift-guard-pinned twins.
-  Shipped since: cross-encoder/RRF blend (`rerank_fusion_alpha`, default 1.0);
-  type-templated passages (`Table:`/`Syntax:` labels); leg order
-  (`RERANK_ENDPOINT_ORDER`: `score_first` default, `rerank_first` for
-  gateways, symmetric fallback); trap and identifier queries bypass rerank
-  (RRF order stands). Detail lives in `docs/retrieval.md` §6.
-  No SPLADE, no ColBERT, no HyDE (PR-14/PR-19 still open). Deterministic acronym
-  expansion shipped default-off (`retrieve/rewrite.py` + `acronyms_v1.json`, PR-08 partial).
-  Multi-path splitting: comparative measured ON (#270, frozen-holdout win) —
-  `comparative_split_enabled` defaults true; diagnostic dual-path measured
-  neutral-negative and stays default-off (`diagnostic_dualpath_enabled`).
-- **Serving:** FastAPI. **[amended]** All routes (`GET /healthz`, `GET /metrics`, `POST /v1/search`, `POST /v1/answer`, `POST /v1/chat`, `POST /v1/chat/completions`, `GET/POST /ui*`)
-  are `async def` on `AsyncQdrantClient` + `httpx2.AsyncClient`; the sync embed and
-  cross-encoder legs run via `asyncio.to_thread`, and the pooled sync retrieval-leg
-  client is built and closed in lifespan. `/v1/answer` is POST-only and supports SSE streaming
-  (`?stream=true` / body `stream: true`): `event: token` deltas → one terminal
-  `event: final` (schema identical on the empty-hits path); a mid-stream failure emits
-  `event: error` and ends without `final`. TTFT is measured on the first content token
-  (`ttft_ms` in the final event, `Server-Timing: ttft;dur=` on the JSON path);
-  server-side reasoning streaming is gated by `LLM_STREAM` (default off). Native
-  `POST /v1/chat` and OpenAI-compatible `POST /v1/chat/completions` share the same
-  `answer_core` engine and stream `chat.completion.chunk` frames terminated by `[DONE]`
-   (an error frame precedes `[DONE]` on mid-stream failure); chat requires at least one
-   message with role `user` (missing user turn is a `422 invalid_request` /
-   `request body failed validation`, issue #314), reports the reasoning model
-   in the response `model` field while inference strictly runs `settings.llm_model_reasoning` (issue #313), accepts and ignores
-   `max_tokens`, and bounds payloads via `chat_max_body_chars` (default 32768); the operator console
-  at `/ui` is the same engine behind `UI_ENABLED` (fail-closed) with an optional oauth-proxy Route.
-  Embeddings via HTTP: `POST {embed_base_url}/embeddings` with the asymmetric
-  `dense_query_prefix` on query vectors only.
-  LLM via `HttpxLLMClient` (sync + async + SSE) in `agent/answer.py`, driven by the
-  shared `agent/answer_core.py` engine.
-  **[amended]** Every model leg optionally sends `Authorization: Bearer`
-  from its `*_API_KEY` Setting through the one helper `bearer_auth_headers`
-  (unset = keyless, wire-identical to before); keys reach the cluster only
-  via the `GATEWAY_API_KEY_SECRET` Secret + `secretKeyRef` (plaintext in
-  `airgap.env` dies fail-closed). Cutover order comes from
-  `scripts/probe_gateway.py` (embed dim/auth, chat incl. SSE `[DONE]`,
-  per-leg rerank reachability with an order recommendation, `/tokenize`
-  presence note).
-- **Splunk:** Already in scope as *caller-supplied* context: `/v1/answer`, `/v1/chat`,
-  and the console accept `splunk_context` (see `app.py`, `webui/routes.py`,
-  `tests/test_agent_api.py`). ADR 0001:
-  "Splunk stays system of record (context in, not crawl)."
-- **Eval gate [amended]:** `make gate-l1` (ephemeral Qdrant simulator, hash-mode
-  synthetic corpus) is a **required PR check in GitHub CI** (`gate-l1` job, rendered
-  report posted as a PR comment). The full harness remains available locally/RC-only:
-  `harness_l1` (snapshot-pinned retrieval gate), `harness_l2` (answers: citation
-  precision/recall + NLI faithfulness judge), `harness_l3` (perf: p95 regression +
-  VRAM, Server-Timing TTFT), `harness_l4` (repeated answer-relevance/faithfulness
-  gate). Support: `eval_retrieval.py`, `eval_answers.py`, `eval_chat.py`,
-  `verify_golden.py`, `render_report.py`, `bootstrap_ci.py`, `qdrant_sim.py`,
-  `loadtest.py`. Golden sets: `evals/golden.jsonl` (121), `evals/holdout.jsonl`
-  (72, sha-pinned), `evals/expert_golden_seed.jsonl`; baselines are mode-keyed
-  (`evals/baseline.json` hash, `evals/baseline-vllm.json` vllm).
-  Re-freeze process documented in `scripts/build_golden_corpus.py`.
-- **Local vLLM [amended]:** `scripts/run_local_vllm.sh` on image
-  `vllm/vllm-openai:v0.28.0` — v0.28.0 removed `--task`, so the embed branch passes
-  `--runner pooling --convert embed --enforce-eager` with `GPU_MEM=0.33`; both servers
-  keep `--max-model-len 4096` (a 2048 embed window was rejected by tokenizer sweep:
-  worst-case embedded string measures 2043 tokens, ~2.0 chars/token; pinned by
-  `tests/test_embed_budget.py`).
-- **CI:** `.github/workflows/ci.yml` + mirrored `.gitlab-ci.yml`. **[amended]** GitHub
-  CI runs the `gate-l1` retrieval gate, sim tier, build, and hygiene checks on PRs;
-  `load.yml` gates agent/retrieve/ingest paths on the load tier. GitLab mirrors
-  hygiene + pytest + `gate-l1` (no e2e, no sim). `bench.yml` benchmarks on
-  push to main. `e2e.yml` covers the connected path: image build, air-gap
-  package/acceptance/dry-run, and the Kind live rehearsal (lab OpenShift is
-  secret-gated).
-- **Constraints (AGENTS.md / ADR 0001):** Qdrant 1.19.0 `*-unprivileged`, vendored Helm
-  chart, no `helm repo add` on air-gap host. This repo does NOT install vLLM/LiteLLM/
-  Splunk/GPU operators — the platform LiteLLM gateway is *consumed* over HTTP, never
-  installed (the shipped `airgap.env.example` points at it; virtual keys via
-  `GATEWAY_API_KEY_SECRET`, Bearer on the wire, `probe_gateway.py` before cutover).
-  Dense embed = other team's in-cluster vLLM (`VLLM_BASE_URL`).
-  `EMBED_MODE=hash` is CI/dev only; prod refuses hash without `ALLOW_HASH_MODE=true`.
-  Corpus never leaves the enterprise. GitHub repo is a public mirror imported AS-IS
-  into air-gapped GitLab — **any CI change must be made in both** `ci.yml` **and**
-  `.gitlab-ci.yml`. Superseding an ADR 0001 decision requires a new ADR +
-  `architecture.md` update in the same PR.
+The proposals below are hypotheses, not a checklist required to be “SOTA”. Start
+with an observed failure and its per-query evidence; prefer removing unnecessary
+work or improving the existing path before adding a model, retrieval leg, service,
+or flag. Adopt added complexity only when measured benefit justifies its runtime,
+air-gap packaging, and maintenance costs. A saturated synthetic gate proves no
+semantic improvement; use the appropriate evidence venue in [docs/eval.md](docs/eval.md).
+
+This file owns roadmap status, decision evidence, and reopening conditions.
+Current implementation contracts live with their owners:
+
+- [docs/architecture.md](docs/architecture.md): system boundaries and module map.
+- [docs/ingest.md](docs/ingest.md): parsing, chunking, embedding, and point identity.
+- [docs/retrieval.md](docs/retrieval.md): retrieval flow, ranking, and measured verdicts.
+- [docs/agent.md](docs/agent.md): answers, chat, citations, and API contracts.
+- [docs/deploy.md](docs/deploy.md): packaging and air-gap deployment.
+- [docs/eval.md](docs/eval.md): evaluation instruments and their limits.
+
+Completed and rejected entries record outcomes rather than obsolete implementation
+steps. Open entries still require the linked issue's current scope and the
+applicable ADR before implementation; their dependencies do not override a
+rejection or its reopening gate.
 
 ## Global rules for every PR
 
-1. **Eval gate is law.** Every PR touching ingest, retrieval, ranking, or prompting MUST
-   pass `scripts/harness.py` (L1–L3 as applicable) and include the rendered delta table
-   (`scripts/render_report.py`) in the PR description. No regression beyond harness
-   epsilon without explicit sign-off.
+1. **Run the applicable gates.** [AGENTS.md](AGENTS.md) and
+   [docs/live-stack.md](docs/live-stack.md) define the required rungs by change class
+   and the A/B evidence owed in the PR. [docs/eval.md](docs/eval.md) owns the
+   dev/RC venue rules; the layered harness is RC-only, not a blanket PR requirement.
 2. **Feature flags, not rewrites.** New capabilities land behind a `Settings` flag
    (`src/mainframe_rag/config.py`), default-off where behavior changes.
 3. **Air-gap vendoring.** Any new model/binary: pinned version + sha256 + offline load
@@ -124,114 +55,48 @@ Items marked **[amended]** changed with the merged P0 PRs.
 > **Status: DONE — merged as PR #96.** `make gate-l1` is a required GitHub CI check;
 > do not re-implement.
 
-- **Why:** The harness exists and is statistically sound, but nothing enforces it on PRs.
-  Every PR below depends on automatic enforcement.
-- **Scope:** `.github/workflows/ci.yml`, `.gitlab-ci.yml`, `Makefile`,
-  `scripts/render_report.py`
-- **Implementation:**
-  1. Add a `gate-l1` job running the retrieval harness in hash mode against
-     `scripts/qdrant_sim.py` (fully CPU, no GPU runner needed). Command shape already
-     documented in `scripts/eval_retrieval.py` docstring.
-  2. Mirror the job in `.gitlab-ci.yml` (mirror parity is mandatory).
-  3. Decide the GPU story for L2/L3 (self-hosted runner or nightly schedule); document
-     in `docs/install_and_ops.md`.
-  4. Post the rendered delta table as a PR comment (GitHub) / MR note (GitLab).
-  5. Audit metric coverage: if recall@k / MRR / nDCG are missing from
-     `eval_retrieval.py` per-query metrics, add them there — do NOT build a parallel harness.
-- **Tests:** extend `tests/test_harness_l1.py` for any new metric.
-- **Acceptance:** A PR that degrades retrieval fails a required check automatically;
-  delta table renders without manual steps.
+Current gate and CI contracts: [docs/eval.md](docs/eval.md) and
+[docs/deploy.md](docs/deploy.md).
 
 ### PR-02 (issue #76): Cross-encoder reranking
 > **Status: DONE — merged as PR #97.** `retrieve/rerank.py`, default-off
-> (`rerank_enabled=False`); see the amended facts above.
+> (`rerank_enabled=False`).
 > Shipped since: `rerank_fusion_alpha` blend, `Table:`/`Syntax:` passage
 > templates, `RERANK_ENDPOINT_ORDER` (`score_first` legacy wire order,
 > `rerank_first` for gateways), trap/identifier bypass. `probe_gateway.py`
 > recommends the order per deployment.
 
-- **Why:** RRF is fusion, not scoring. Largest single retrieval-quality win.
-- **Scope:** new `src/mainframe_rag/retrieve/rerank.py`, `retrieve/query.py`, `config.py`
-- **Implementation:**
-  1. Vendor `bge-reranker-v2-m3` (pinned + sha256 + offline load).
-  2. After existing local RRF (keep weights/contract — see `query.py` docstring), take
-     fused top-50, score with the cross-encoder, return top-k (config, default 8).
-  3. Batch scoring; keep added latency <300ms p95 on target GPU (L3 gate watches this).
-  4. Add reranker score to the response payload (PR-12 consumes it for confidence).
-  5. Flag: `RERANK_ENABLED` (default off).
-- **Tests:** new `tests/test_rerank.py` (ordering, flag off = byte-identical old path);
-  extend `tests/test_query_filters.py` if filters interact.
-- **Gate:** L1 must not regress; expect nDCG/recall improvement on golden.
-- **Depends on:** #75.
+Current rerank behavior and gateway leg selection: [docs/retrieval.md](docs/retrieval.md).
+The platform owns model serving; this repo consumes its configured HTTP endpoint.
 
 ### PR-03 (issue #77): Async stack + SSE streaming
 > **Status: DONE — merged as PR #98.** Async routes + `AsyncQdrantClient`, SSE on
-> `/v1/answer` with TTFT; see the amended facts above.
+> `/v1/answer` with TTFT.
 
-- **Why:** Routes are sync `def`; LLM/embed clients are sync httpx. No streaming → TTFT
-  equals full generation time.
-- **Scope:** `agent/app.py`, `agent/answer.py`, `ingest/qdrant_io.py`, `retrieve/query.py`
-- **Implementation:**
-  1. Swap `QdrantClient` → `AsyncQdrantClient`; `httpx.Client` → `httpx.AsyncClient`
-     (including `HttpxLLMClient` and the `/embeddings` call in `app.py`).
-  2. Make route handlers `async def`.
-  3. `/v1/answer`: `stream=true` → `StreamingResponse` (`text/event-stream`): token
-     delta events, then one final event with citations + retrieval metadata.
-     Default (`stream=false`) unchanged — response contract is load-bearing
-     (see `scripts/eval_answers.py` "deliberate non-features").
-  4. Emit TTFT via the existing Server-Timing mechanism (L3 reads it).
-- **Tests:** extend `tests/test_agent_api.py` (both modes, identical citations);
-  `tests/test_integration_sim.py` still green.
-- **Gate:** L3 perf must not regress; add TTFT assertion.
-- **Depends on:** none. Land early — #80 and #83 build on it.
+Current async, streaming, and client-lifecycle contracts: [docs/agent.md](docs/agent.md).
 
 ### PR-04 (issue #78): Contextual retrieval (chunk context prefixes)
 > **Status: DONE.** Shipped as `ingest/context.py` (versioned `CONTEXT_PROMPT_VERSION=v2`
 > cache keyed by `v2:sha:chunk_id`, dense-only contexts) behind `CONTEXTUAL_EMBED_ENABLED`
 > (default off); enabling changes every dense vector so the collection must be recreated.
 > Tests: `tests/test_contextual.py`.
-- **Why:** Anthropic-style contextual prefixes cut retrieval failures; today bare chunks
-  are embedded.
-- **Scope:** `ingest/chunk.py`, `ingest/embed.py`, `ingest/run_ingest.py`
-- **Implementation:**
-  1. At ingest, generate a 1–2 sentence situating context per chunk via the reasoning
-     LLM: manual title + `heading_path` (already available!) + chunk gist.
-  2. Cache contexts keyed by (doc sha, chunk id) — chunk ids are deterministic UUID5,
-     so unchanged docs must produce zero LLM calls on re-ingest (manifest.py tracks docs).
-  3. Embed `context + chunk_text`; keep raw chunk text in payload for display/citation.
-  4. Version the context-generation prompt template in-repo.
-  5. Flag: `CONTEXTUAL_EMBED_ENABLED`; re-ingest required (see manifest versioning).
-- **Tests:** extend `tests/test_chunk_ibm_shape.py` / `test_qdrant_io.py` for the new
-  payload field; cache-hit test with unchanged fixture docs.
-- **Gate:** L1 recall must improve on golden; no regression on holdout.
-  Measured verdict (issue #300, 2026-09-12): paraphrase vLLM A/B
-  (header-only vs contextual, 22 entries) is 22/22 identical with both
-  arms saturated at 1.0 — no signal, stays default-off, no RC escalation.
-  (Gate-l1 itself cannot register this flag — hash-only, saturated, and
-  contextual refuses hash mode — so the paraphrase instrument is the
-  operative gate here.)
-- **Depends on:** #75.
+
+Measured verdict (issue #300, 2026-09-12): paraphrase vLLM A/B
+(header-only vs contextual, 22 entries) is 22/22 identical with both
+arms saturated at 1.0 — no signal, stays default-off, no RC escalation.
+Gate-l1 cannot register this flag: it is hash-only and saturated, while
+contextual embedding refuses hash mode. This result does not establish a
+quality benefit or prove that the feature is useless on other corpora.
+
+Current embedding and evaluation contracts: [docs/ingest.md](docs/ingest.md)
+and [docs/eval.md](docs/eval.md).
 
 ### PR-05 (issue #79): Code-atomic chunking for JCL/REXX (rescoped)
 > **Status: DONE.** `detect_code_region` + statement-boundary splitters in `ingest/chunk.py`;
 > `heading_path` filterable in the Qdrant payload (`qdrant_io.py`); UUID5 contract kept.
 > Tests: `tests/test_chunk_ibm_shape.py` (JCL/REXX fixtures, no-statement-split).
-- **Why:** Section-outline chunking with `heading_path` ALREADY exists — do not rebuild it.
-  The real gap: `_split_blocks` works on paragraphs and can split positional code
-  (JCL statements, col-72 continuations, REXX blocks) across chunks.
-- **Scope:** `ingest/chunk.py`, `ingest/classify.py`, `tests/fixtures/`
-- **Implementation:**
-  1. Add a code-region detector: JCL (`//` cards, `//*` comments, continuation col 72),
-     REXX (`/* */` comments, `/* REXX */` header), and monospaced/console blocks.
-  2. Treat detected regions as atomic units inside `_split_blocks`: never split;
-     on overflow, split at statement boundaries only (continuation-aware).
-  3. Verify `heading_path` is filterable/returned in the Qdrant payload (not only baked
-     into the point UUID); if missing from payload schema in `qdrant_io.py`, add it.
-  4. Keep the UUID5 point-id contract unchanged (id stability = incremental ingest).
-- **Tests:** NEW fixtures — JCL with continuations/inline comments, REXX with block
-  comments. Assert: no statement ever split. Extend `tests/test_chunk_ibm_shape.py`.
-- **Gate:** L1 must not regress on golden (esp. exact-code query class).
-- **Depends on:** none.
+
+Current code-atomic chunking and point-identity contracts: [docs/ingest.md](docs/ingest.md).
 
 ### PR-06 (issue #80): vLLM prefix caching + prompt ordering + injection hardening
 > **Status: DONE.** `order_prompt_blocks` (`retrieval`/`stable_cache` policies) in
@@ -239,23 +104,9 @@ Items marked **[amended]** changed with the merged P0 PRs.
 > documented for the LOCAL reasoning server (`install_and_ops.md` §3.6, Budget `prefix_cache`);
 > injection screening via `retrieve/screen.py` (trap before identifiers).
 > Tests: `tests/test_prompt_order.py`, `tests/test_screen.py`.
-- **Why:** Free GPU via KV-cache reuse; current prompt assembly (`answer.py`) must be
-  ordered for it.
-- **Scope:** `agent/answer.py`, deploy manifests (vLLM launch args are NOT in this repo —
-  coordinate with the embeddings/serving team; document required flag)
-- **Implementation:**
-  1. Reorder prompt assembly: [system + instructions] → [retrieved context, stable
-     ordering] → [splunk_context if present] → [user question]. Remove anything volatile
-     (timestamps, request ids) from prompt text. (`answer.py` already builds parts:
-     sysplex context, splunk_context, chunks — reorder and stabilize.)
-  2. Document `--enable-prefix-caching` as a requirement for the vLLM deployment in
-     `docs/install_and_ops.md` (this repo must not install vLLM — AGENTS.md).
-  3. Injection hardening: wrap retrieved chunks and `splunk_context` in delimited,
-     instruction-isolated blocks; system prompt demotes retrieved content to data.
-- **Tests:** prompt-fixture test asserting block order; injection fixture
-  ("ignore previous instructions" inside a chunk / splunk_context) does not alter output.
-- **Gate:** L2 answer eval must not regress; measure cache-hit rate in bench.
-- **Depends on:** #77.
+
+Current prompt-ordering and local serving contracts: [docs/agent.md](docs/agent.md)
+and [docs/live-stack.md](docs/live-stack.md).
 
 ---
 
@@ -265,7 +116,7 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Scope:** `ingest/chunk.py`, `ingest/qdrant_io.py`, `retrieve/query.py`
 - **Implementation:** Embed child chunks (~128–256 tokens); retrieve children, return
   parent (~512–1024 tokens) to the LLM; group via payload `parent_id`; dedupe multiple
-  children → same parent. Keep UUID5 id scheme (extend the f-string, don't replace it).
+  children → same parent. Keep the existing UUID5 point-id contract.
 - **Tests:** dedupe test; payload round-trip in `test_qdrant_io.py`.
 - **Gate:** L1 + L2 improvement vs PR-04 baseline.
 - **Depends on:** #78, #79.
@@ -280,19 +131,14 @@ Items marked **[amended]** changed with the merged P0 PRs.
 > call per query, step-back −0.177 (strips the product/feature tokens that
 > select the right manual), combined −0.192 — full per-query attribution in
 > that PR body; implementation + `--ab` instrument remain salvageable from
-> the branch. The section below is retained as the acronym record only.
+> the branch. The acronym implementation remains available.
 >
 > **Reopening gate (all required):** per-query attribution shows failures
 > from vocabulary mismatch (query terms absent from relevant docs) on the
 > post-#214/#216 stack; paired A/B on a post-re-ingest real corpus; beats
 > the +1-call latency cost. Until then, do not re-propose.
-- **Scope:** new `src/mainframe_rag/retrieve/rewrite.py`, `agent/answer.py`
-- **Implementation:** Curated versioned acronym glossary (JSON) for deterministic
-  expansion; HyDE / step-back behind independent flags; heuristic bypass when the query
-  is mostly identifiers/error codes (reuse `regexes.py` — the [1,3] identifier weighting
-  in `query.py` shows these patterns already exist). Eval each technique separately.
-- **Gate:** per-technique L1 deltas; identifier-heavy query class must not regress.
-- **Depends on:** #75.
+
+Current acronym behavior and measured retry verdicts: [docs/retrieval.md](docs/retrieval.md).
 
 ### PR-09 (issue #83): OpenTelemetry tracing
 > **Status: DONE.** Owner moved to `src/mainframe_rag/tracing.py`; library default off,
@@ -300,29 +146,18 @@ Items marked **[amended]** changed with the merged P0 PRs.
 > `off` sentinel disables tracing and the deployment together. Fail-open bounded export +
 > Jaeger v2 all-in-one overlay (`deploy/kustomize/jaeger`).
 > Tests: `tests/test_tracing.py`, `tests/test_ingest_tracing.py`.
-- **Scope:** `agent/`, `retrieve/`, `deploy/` (collector config)
-- **Implementation:** Spans: tokenize → embed (HTTP) → qdrant prefetch → RRF → rerank →
-  LLM (TTFT, tokens/s). Attrs: scores, rerank rank deltas, doc ids, cache hits. OTLP
-  export; vendored self-hosted Jaeger or Arize Phoenix overlay. Reuse the existing
-  request-id middleware as trace-id source.
-- **Acceptance:** one request = one trace with all stages; injected 5s spike attributable
-  to a stage from the trace alone.
-- **Depends on:** #77.
+
+Current tracing ownership and deployment contracts: [docs/architecture.md](docs/architecture.md)
+and [docs/deploy.md](docs/deploy.md).
 
 ### PR-10 (issue #84): LLM-as-a-judge eval stage
 > **Status: DONE (via #268 L4).** Engine `scripts/harness_l4.py` reuses the
 > L2 runner (`harness_l2.py` adds the relevance leg), reference
 > `evals/harness-l4-thresholds.json` with a tolerance band and a
 > human-review queue; the deterministic gate-l1/L1 checks stay the gate.
-> RC-only by design (`VENUE=rc`), never a PR gate — PR-10's "runs in CI"
-> wording is superseded by the RC-gate decision.
-- **Scope:** `scripts/` (new `judge_answers.py`), `evals/`, both CI files
-- **Implementation:** Local reasoning model judges faithfulness (claims supported by cited
-  chunks), relevance, citation precision. Deterministic harness checks still gate; judge
-  scores reported with thresholds + borderline human-review queue. Fully offline.
-  Integrate as harness L4, don't fork the harness.
-- **Tests:** seeded hallucinated answer fails faithfulness; `tests/test_harness_*` pattern.
-- **Depends on:** #75.
+> RC-only by design (`VENUE=rc`), never a PR gate.
+
+Current L4 instrument and RC-only evaluation contract: [docs/eval.md](docs/eval.md).
 
 ### PR-11 (issue #85): Layout-aware parsing pilot (Marker)
 - **Why:** PyMuPDF text extraction mangles IBM manual tables/diagrams (real concern) —
@@ -349,15 +184,8 @@ Items marked **[amended]** changed with the merged P0 PRs.
 > hit/miss separation plus a retry variant with measured positive
 > headroom, both with per-query attribution on post-freeze real pools.
 > Until then, do not re-propose.
-- **Scope:** `agent/answer.py`, `retrieve/query.py`
-- **Implementation:** Confidence from reranker score distribution (#76). Low → one
-  rewrite + re-search (max 1 retry, hard latency budget — L3 watches p95). Still low →
-  abstain: "insufficient context in indexed manuals" + closest citations. Add
-  unanswerable cases to the golden set (follow re-freeze process).
-  NOTE: `eval_answers.py` documents "single-shot by contract (issue #20)" — this PR
-  changes that contract; coordinate with issue #20 and update the eval's non-features.
-- **Gate:** seeded unanswerable → abstention, not hallucination.
-- **Depends on:** #76, #82.
+
+Decision evidence and reopening conditions: [docs/retrieval.md](docs/retrieval.md).
 
 ### PR-13 (issue #87): Prompt-injection & retrieved-content hygiene
 > **Status: PARTIAL.** Baseline regex injection screen shipped (`retrieve/screen.py`,
