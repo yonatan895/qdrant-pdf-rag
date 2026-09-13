@@ -33,19 +33,22 @@ Items marked **[amended]** changed with the merged P0 PRs.
   Multi-path splitting: comparative measured ON (#270, frozen-holdout win) —
   `comparative_split_enabled` defaults true; diagnostic dual-path measured
   neutral-negative and stays default-off (`diagnostic_dualpath_enabled`).
-- **Serving:** FastAPI. **[amended]** All routes (`/healthz`, `/v1/search`, `/v1/answer`, `/v1/chat`, `/v1/chat/completions`, `/metrics`, `/ui*`)
+- **Serving:** FastAPI. **[amended]** All routes (`GET /healthz`, `GET /metrics`, `POST /v1/search`, `POST /v1/answer`, `POST /v1/chat`, `POST /v1/chat/completions`, `GET/POST /ui*`)
   are `async def` on `AsyncQdrantClient` + `httpx2.AsyncClient`; the sync embed and
   cross-encoder legs run via `asyncio.to_thread`, and the pooled sync retrieval-leg
-  client is built and closed in lifespan. `/v1/answer` supports SSE streaming
+  client is built and closed in lifespan. `/v1/answer` is POST-only and supports SSE streaming
   (`?stream=true` / body `stream: true`): `event: token` deltas → one terminal
   `event: final` (schema identical on the empty-hits path); a mid-stream failure emits
   `event: error` and ends without `final`. TTFT is measured on the first content token
   (`ttft_ms` in the final event, `Server-Timing: ttft;dur=` on the JSON path);
-  server-side reasoning streaming is gated by `LLM_STREAM` (default off). `/v1/chat`
-  and its OpenAI-compatible alias share the same `answer_core` engine and stream
-  `chat.completion.chunk` frames terminated by `[DONE]` (an error frame precedes
-  `[DONE]` on mid-stream failure); the operator console at `/ui` is the same engine
-  behind `UI_ENABLED` (fail-closed) with an optional oauth-proxy Route.
+  server-side reasoning streaming is gated by `LLM_STREAM` (default off). Native
+  `POST /v1/chat` and OpenAI-compatible `POST /v1/chat/completions` share the same
+  `answer_core` engine and stream `chat.completion.chunk` frames terminated by `[DONE]`
+  (an error frame precedes `[DONE]` on mid-stream failure); chat requires at least one
+  message with role `user` (422 `"at least one user message is required"`), echoes the caller
+  `model` string while inference strictly runs `settings.llm_model_reasoning`, accepts and ignores
+  `max_tokens`, and bounds payloads via `chat_max_body_chars` (default 32768); the operator console
+  at `/ui` is the same engine behind `UI_ENABLED` (fail-closed) with an optional oauth-proxy Route.
   Embeddings via HTTP: `POST {embed_base_url}/embeddings` with the asymmetric
   `dense_query_prefix` on query vectors only.
   LLM via `HttpxLLMClient` (sync + async + SSE) in `agent/answer.py`, driven by the
@@ -356,7 +359,12 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** #76, #82.
 
 ### PR-13 (issue #87): Prompt-injection & retrieved-content hygiene
-- **Scope:** `agent/answer.py`, `ingest/` sanitization, `tests/security/`
+> **Status: PARTIAL.** Baseline regex injection screen shipped (`retrieve/screen.py`,
+> trap before identifiers), extract-time PDF sanitization shipped (`ibm_pdf.sanitize_page_text`),
+> and context bounding shipped (`max_context_chars`). Tests are distributed across
+> `tests/test_sanitize.py`, `tests/test_hygiene.py`, and `tests/test_screen.py`.
+> Advanced LLM-based hygiene / dual-LLM guards remain open.
+- **Scope:** `agent/answer.py`, `ingest/ibm_pdf.py` sanitization, `tests/test_sanitize.py`, `tests/test_screen.py`
 - **Implementation:** Anything not covered by #80: strip/neutralize control sequences in
   extracted PDF text at ingest; size-cap assembled context (respect
   `max_context_chars`); injection fixture battery (instruction overrides, fake system

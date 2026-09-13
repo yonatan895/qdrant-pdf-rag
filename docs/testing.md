@@ -90,6 +90,18 @@ Collection-dimension logic: missing, matching, and mismatched (named `dense` dic
 
 ## Tiers
 
+Verification tiers in this repository map directly to the 7-rung verification ladder defined in `docs/live-stack.md` §3:
+
+| Ladder Rung | Target / Command | Verification Tier | Scope & Gate |
+|---|---|---|---|
+| **Rung 1** | `make check` | Hermetic Unit Tier | `ruff check src tests`, `mypy src`, `pytest tests/` (mocked clients, fakes in `tests/fakes.py`) |
+| **Rung 2** | `make gate-l1` | Ephemeral Sim Retrieval Gate | Synthetic golden corpus in hash mode; required PR check in GitHub CI & GitLab CI |
+| **Rung 3** | `make eval-paraphrase` | Paraphrase Retrieval Tier | Scratch collection (`paraphrase-manuals`), non-verbatim semantic retrieval A/B |
+| **Rung 4** | `make sim` | Integration Sim Tier | Real PDFs, docker Qdrant (`images.txt` pin), `scripts/mock_vllm.py`; fail-closed |
+| **Rung 5** | `make eval EMBED_MODE=vllm` | Full Eval Tier | Dev golden set (121 queries) against mode-keyed baseline on live stack |
+| **Rung 6** | Live Agent Probes | Serving / Probe Tier | `/healthz`, injection trap refusal, grounded citation generation, body caps, `/ui` |
+| **Rung 7** | Feature A/B Numbers | Retrieval A/B Tier | 2×2 matrix and per-query attribution documented in PR body for ranking changes |
+
 ### Air-gap deployment tier (`make airgap-dryrun`, `tests/test_airgap_*.py`, local Kind)
 
 The canonical 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is verified across three complementary tiers:
@@ -99,7 +111,7 @@ The canonical 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `ai
 
 ### Golden corpus (dev/holdout)
 
-`evals/golden.jsonl` is the dev set; `evals/holdout.jsonl` is **frozen** (sha256-pinned at `evals/holdout.jsonl.sha256`). Tune against dev only; `make eval-holdout` runs on release candidates only. Every eval/harness script defaults to the dev venue (`evals/golden.jsonl` only); the frozen holdout and the `real_manuals` collection fail closed (exit 2) without `VENUE=rc` — `make eval-holdout` declares itself, the harness tiers need `VENUE=rc` from the operator (`scripts/venue.py`, issue #268). Both files are mechanically verified by `make verify-golden` (0 FAIL required; rebuild via `scripts/build_golden_corpus.py` from `evals/expert_golden_seed.jsonl` + payload mining). Entries carry `query_class` (message_id/doc_number/syntax/diagnostic/comparative/version/negative/table), `expected_behavior` (answer/abstain), `must_not_retrieve`/`must_not_message_ids` (gated hard-zero within top-5; a chunk co-carrying the query's own message id is the same documented page, not a violation — same sibling-allowance as the builder's trap assertion), `expected_page` (diagnostic), and answer-tier gold fields for the answer eval. Abstain entries carry no `expected_doc_ids` and stay out of recall/MRR denominators. Loading new vendor books (new domains/editions) triggers a re-bind: re-run `scripts/build_golden_corpus.py` (domain entries flip abstain→answer automatically when their identifiers bind), re-author for the new domains, `make verify-golden` 0 FAIL, then re-freeze the holdout (new sha) and re-record baselines in one dedicated commit.
+`evals/golden.jsonl` is the dev set; `evals/holdout.jsonl` is **frozen** (sha256-pinned at `evals/holdout.jsonl.sha256`). Tune against dev only; `make eval-holdout` runs on release candidates only. Every eval/harness script defaults to the dev venue (`evals/golden.jsonl` only); the frozen holdout and the `real_manuals` collection fail closed with exit code 2 across all 8 eval and harness scripts (`scripts/eval_retrieval.py`, `scripts/eval_answers.py`, `scripts/eval_chat.py`, `scripts/harness.py`, `scripts/harness_l2.py`, `scripts/harness_l3.py`, `scripts/harness_l4.py`, `scripts/capture_pool.py`) unless `VENUE=rc` is declared in the environment (`scripts/venue.py`, issue #268). Missing `VENUE=rc` prints `FAIL: ...` to stderr and terminates with exit 2 (`make eval-holdout` declares itself, harness tiers require `VENUE=rc` from the operator). Both files are mechanically verified by `make verify-golden` (0 FAIL required; rebuild via `scripts/build_golden_corpus.py` from `evals/expert_golden_seed.jsonl` + payload mining). Entries carry `query_class` (message_id/doc_number/syntax/diagnostic/comparative/version/negative/table), `expected_behavior` (answer/abstain), `must_not_retrieve`/`must_not_message_ids` (gated hard-zero within top-5; a chunk co-carrying the query's own message id is the same documented page, not a violation — same sibling-allowance as the builder's trap assertion), `expected_page` (diagnostic), and answer-tier gold fields for the answer eval. Abstain entries carry no `expected_doc_ids` and stay out of recall/MRR denominators. Loading new vendor books (new domains/editions) triggers a re-bind: re-run `scripts/build_golden_corpus.py` (domain entries flip abstain→answer automatically when their identifiers bind), re-author for the new domains, `make verify-golden` 0 FAIL, then re-freeze the holdout (new sha) and re-record baselines in one dedicated commit.
 
 ### Simulation tier (marker `integration`, `make sim`)
 
