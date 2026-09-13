@@ -21,6 +21,11 @@ password = secrets.token_hex(24)
 PY
 kubectl -n "$NS" create secret generic test-gateway-admin \
     --from-file="$KEY_DIR/master-key" --from-file="$KEY_DIR/pg-password" --from-file="$KEY_DIR/database-url"
+sh "$SCRIPT_DIR/create_test_tls.sh" "$KEY_DIR/tls" test-gateway
+kubectl -n "$NS" create secret tls test-gateway-tls \
+    --cert="$KEY_DIR/tls/tls.crt" --key="$KEY_DIR/tls/tls.key"
+kubectl -n "$NS" create configmap test-gateway-ca \
+    --from-file="$KEY_DIR/tls/ca-bundle.crt"
 kubectl -n "$NS" apply -f "$SCRIPT_DIR/test-gateway.yaml"
 kubectl -n "$NS" rollout status deploy/test-gateway-pg --timeout=180s
 kubectl -n "$NS" rollout status deploy/test-gateway --timeout=300s
@@ -30,7 +35,7 @@ import json
 import os
 import urllib.error
 import urllib.request
-base = 'http://127.0.0.1:4000'
+base = 'https://test-gateway:4000'
 master = os.environ['GATEWAY_MASTER_KEY']
 def call(path, key, payload=None):
     req = urllib.request.Request(base + path,

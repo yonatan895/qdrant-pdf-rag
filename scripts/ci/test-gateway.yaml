@@ -67,8 +67,10 @@ spec:
         - name: gateway
           # Same real gateway image as scripts/run_local_gateway.sh.
           image: ghcr.io/berriai/litellm@sha256:a3715fa7ad8387941ab697259bd2881d68931657247a41984f90fae6d11c62bf
-          args: [--config, /gateway/config.yaml, --port, '4000']
+          args: [--config, /gateway/config.yaml, --port, '4000',
+                 --ssl_certfile_path, /tls/tls.crt, --ssl_keyfile_path, /tls/tls.key]
           env:
+            - {name: SSL_CERT_FILE, value: /trust/ca-bundle.crt}
             - name: GATEWAY_MASTER_KEY
               valueFrom: {secretKeyRef: {name: test-gateway-admin, key: master-key}}
             - name: DATABASE_URL
@@ -77,13 +79,27 @@ spec:
             requests: {cpu: 250m, memory: 256Mi}
             limits: {cpu: '2', memory: 2Gi}
           readinessProbe:
-            httpGet: {path: /health/liveliness, port: 4000}
-          volumeMounts: [{name: config, mountPath: /gateway, readOnly: true}]
-      volumes: [{name: config, configMap: {name: test-gateway}}]
+            httpGet: {path: /health/liveliness, port: 4000, scheme: HTTPS}
+          volumeMounts:
+            - {name: config, mountPath: /gateway, readOnly: true}
+            - {name: tls, mountPath: /tls, readOnly: true}
+            - {name: trust, mountPath: /trust, readOnly: true}
+      volumes:
+        - {name: config, configMap: {name: test-gateway}}
+        - {name: tls, secret: {secretName: test-gateway-tls}}
+        - {name: trust, configMap: {name: test-gateway-ca}}
 ---
 apiVersion: v1
 kind: Service
 metadata: {name: test-gateway}
+spec:
+  selector: {app: test-gateway}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+# Same server, deliberately absent from the certificate for the negative probe.
+apiVersion: v1
+kind: Service
+metadata: {name: test-gateway-wrong-name}
 spec:
   selector: {app: test-gateway}
   ports: [{port: 4000, targetPort: 4000}]

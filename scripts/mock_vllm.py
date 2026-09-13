@@ -51,6 +51,14 @@ TOKEN_INTERVAL_MS = float(os.environ.get("MOCK_TOKEN_INTERVAL_MS", "0"))
 JITTER_MS = float(os.environ.get("MOCK_JITTER_MS", "0"))
 SEED = int(os.environ.get("MOCK_SEED", "0"))
 ERROR_RATE = float(os.environ.get("MOCK_ERROR_RATE", "0"))
+# Explicit deterministic faults for the gateway contract lane. Healthy is
+# byte-identical to the existing mock; no request-side control reaches prod.
+CHAT_FAULT = os.environ.get("MOCK_CHAT_FAULT", "healthy")
+EMBED_FAULT = os.environ.get("MOCK_EMBED_FAULT", "healthy")
+if CHAT_FAULT not in ("healthy", "upstream", "malformed", "truncated"):
+    raise ValueError("invalid MOCK_CHAT_FAULT")
+if EMBED_FAULT not in ("healthy", "upstream", "malformed", "dimension"):
+    raise ValueError("invalid MOCK_EMBED_FAULT")
 
 if TTFT_MS < 0 or TOKEN_INTERVAL_MS < 0 or JITTER_MS < 0 or not 0.0 <= ERROR_RATE <= 1.0:
     raise ValueError(
@@ -225,6 +233,12 @@ class Handler(BaseHTTPRequestHandler):
         req = self._read_json()
         if req is None:
             return
+        if CHAT_FAULT == "upstream":
+            self._send(503, _INJECTED_FAILURE)
+            return
+        if CHAT_FAULT == "malformed":
+            self._send(200, {"choices": [{"message": None}]})
+            return
         messages = req.get("messages")
         if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
             self._send(400, {"error": {"message": "'messages' must be a list of objects"}})
@@ -247,7 +261,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.send_header("X-Mock-Ttft-Ms", f"{ttft_ms:.1f}")
             self.end_headers()
-            abort = _should_fail()
+            abort = CHAT_FAULT == "truncated" or _should_fail()
             # One SSE chunk per piece with per-chunk flush: real TTFT plus
             # observable inter-token pacing (the old two-chunk split is
             # gone; reassembly is still byte-exact). Pieces keep their
@@ -340,6 +354,12 @@ class Handler(BaseHTTPRequestHandler):
         req = self._read_json()
         if req is None:
             return
+        if EMBED_FAULT == "upstream":
+            self._send(503, _INJECTED_FAILURE)
+            return
+        if EMBED_FAULT == "malformed":
+            self._send(200, {"data": []})
+            return
         inputs = req.get("input")
         if isinstance(inputs, str):
             inputs = [inputs]
@@ -352,7 +372,8 @@ class Handler(BaseHTTPRequestHandler):
                 "object": "list",
                 "model": req.get("model", "mock-embed"),
                 "data": [
-                    {"object": "embedding", "index": i, "embedding": _embed(text)}
+                    {"object": "embedding", "index": i,
+                     "embedding": _embed(text)[:-1] if EMBED_FAULT == "dimension" else _embed(text)}
                     for i, text in enumerate(inputs)
                 ],
                 "usage": {"prompt_tokens": sum(len(t.split()) for t in inputs), "total_tokens": 0},

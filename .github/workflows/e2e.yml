@@ -33,7 +33,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: e2e-${{ github.ref }}
+  group: e2e-${{ github.ref || github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -43,22 +43,31 @@ env:
 jobs:
   # ---------------------------------------------------------------- build
   build:
+    concurrency:
+      group: build-${{ github.ref || github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
       sha: ${{ steps.refs.outputs.sha }}
       ingest_image: ${{ steps.refs.outputs.ingest }}
       agent_image: ${{ steps.refs.outputs.agent }}
+    env:
+      SHARE: "false"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (pin does not cover runtime-fetched oc/skopeo below)
 
       # cp314 wheels require a 3.14 interpreter for the wheelhouse build.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0; runtime Python download remains upstream
         with:
           python-version: "3.14"
 
       - name: Build wheelhouse + BM25 weights + images (same Containerfiles as air-gap)
         run: |
+          export PATH="/usr/local/bin:$PATH"
           PYBIN="$(command -v python3.14 || command -v python)"
           echo "Using python: $PYBIN"
           make wheelhouse bm25-weights PY="$PYBIN"
@@ -66,6 +75,7 @@ jobs:
 
       - id: refs
         run: |
+          export PATH="/usr/local/bin:$PATH"
           SHA="$GITHUB_SHA"
           # Issue #8 scheme: ghcr.io/<owner-lowercase>/qdrant-pdf-rag-<name>:<sha>.
           # This exact string is used for docker tag, docker push, and the
@@ -87,6 +97,7 @@ jobs:
           INGEST_IMAGE: ${{ steps.refs.outputs.ingest }}
           AGENT_IMAGE: ${{ steps.refs.outputs.agent }}
         run: |
+          export PATH="/usr/local/bin:$PATH"
           docker tag "${INGEST_IMAGE_LOCAL}:${SHA}" "$INGEST_IMAGE"
           docker tag "${AGENT_IMAGE_LOCAL}:${SHA}" "$AGENT_IMAGE"
           echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -100,18 +111,20 @@ jobs:
   # generating the transfer certificate and uploading the tarball + digests as
   # a downloadable workflow artifact.
   airgap-package:
-    needs: [build]
-    permissions:
-      contents: read
-      packages: read
     concurrency:
       group: airgap-package-${{ github.ref || github.run_id }}
       cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+    needs: [build]
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      SHARE: "false"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -119,6 +132,7 @@ jobs:
 
       - name: Install skopeo
         run: |
+          export PATH="/usr/local/bin:$PATH"
           sudo apt-get update -qq
           sudo apt-get install -y -qq skopeo
           skopeo --version
@@ -149,6 +163,7 @@ jobs:
           # key so the sign/verify plumbing still executes end to end.
           SNEAKERNET_SIGNING_KEY: ${{ secrets.SNEAKERNET_SIGNING_KEY }}
         run: |
+          export PATH="/usr/local/bin:$PATH"
           if [ -z "$SNEAKERNET_SIGNING_KEY" ]; then
             echo "::warning::SNEAKERNET_SIGNING_KEY secret unset — packing with an ephemeral throwaway key (plumbing only, no trust; MANIFEST records signed: ephemeral)"
             openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$RUNNER_TEMP/signing.key"
@@ -182,10 +197,15 @@ jobs:
   # Consumes the sneakernet tarball EXACTLY like a bastion operator: fresh
   # empty dir, digest verify BEFORE unpack, bootstrap.sh, then the operator
   # runbook from the bootstrapped clone (validate + full pipeline dry-run).
-  # This is the only job that traverses pack -> tarball -> bootstrap.sh ->
-  # ARTDIR/MANIFEST discovery; airgap-rehearsal reuses the pack checkout's
-  # dist/ and never exercises this handoff. No secrets, no cluster.
+  # Every acceptance lane traverses pack -> tarball -> bootstrap.sh ->
+  # ARTDIR/MANIFEST discovery independently. This lane needs no cluster.
   airgap-acceptance:
+    concurrency:
+      group: airgap-acceptance-${{ github.ref || github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
     needs: [build, airgap-package]
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -193,20 +213,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      SHARE: "false"
       SHA: ${{ needs.build.outputs.sha }}
     steps:
-      - name: Install helm (vendored-chart deploy)
-        uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
+      - name: Install checksum-pinned Helm
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
+          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/helm-unpack"
+          tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
+          sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
+          /usr/local/bin/helm version --short
 
       - name: Install pinned kubectl (kustomize render + patch --local)
         run: |
-          KUBECTL_VERSION=v1.31.2
+          export PATH="/usr/local/bin:$PATH"
+          KUBECTL_VERSION=v1.37.0
           # sha256 recorded in-repo (AGENTS.md §6): dl.k8s.io checksum file.
-          KUBECTL_SHA256=399e9d1995da80b64d2ef3606c1a239018660d8b35209fba3f7b0bc11c631c68
+          KUBECTL_SHA256=6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f
           curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
-          kubectl version --client=true
+          /usr/local/bin/kubectl version --client=true
 
       - name: Download sneakernet bundle (this is what the operator receives)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0 (verified via API: v4 tag; fetches nothing at runtime — artifact bytes only)
@@ -218,6 +247,7 @@ jobs:
         env:
           IMAGE_SHA: ${{ env.SHA }}
         run: |
+          export PATH="/usr/local/bin:$PATH"
           cd gapbox
           sha256sum -c "qdrant-pdf-rag-${SHA}.tar.sha256"
           tar xf "qdrant-pdf-rag-${SHA}.tar"
@@ -267,10 +297,9 @@ jobs:
   # The layout-faithful tier: consumes the sneakernet tarball in a fresh
   # empty dir (verify, unpack, bootstrap.sh) and runs the REAL operator
   # runbook — live validate, live pipeline (load, deploy, ingest, smoke) —
-  # against an ephemeral Kind cluster with a local HTTP registry. No lab
-  # secrets (GITHUB_TOKEN is automatic and only mints the GHCR pull secret
-  # for the wired-PULL_SECRET branch); the tarball artifact plus public pins
-  # are the only other inputs. airgap-acceptance proves the handoff
+  # against an ephemeral Kind cluster with an authenticated TLS registry.
+  # Ephemeral credentials and a private CA exercise loader/node trust and
+  # the wired PULL_SECRET branch; no lab credentials are required. airgap-acceptance proves the handoff
   # statically (dry-run);
   # this job proves the deployment comes up from a bootstrapped clone.
   # CI-only sizing (single replica, Gi sizes): a CI runner cannot schedule
@@ -281,46 +310,66 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    name: kind-${{ matrix.lane }}
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [pipeline, gateway-faults, lifecycle]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
       actions: read
     concurrency:
-      group: kind-live-${{ github.ref || github.run_id }}
+      group: kind-${{ matrix.lane }}-${{ github.ref || github.run_id }}
       cancel-in-progress: false
     env:
       SHARE: "false"
       SHA: ${{ needs.build.outputs.sha }}
     steps:
-      - name: Install helm (vendored-chart deploy)
-        uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
+      - name: Record runner capacity
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          mkdir -p diagnostics
+          { nproc; free -h; df -h; } > diagnostics/runner-capacity.txt
+      - name: Install checksum-pinned Helm
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
+          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/helm-unpack"
+          tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
+          sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
+          /usr/local/bin/helm version --short
 
       - name: Install pinned kubectl (kustomize render + patch --local)
         run: |
-          KUBECTL_VERSION=v1.31.2
+          export PATH="/usr/local/bin:$PATH"
+          KUBECTL_VERSION=v1.37.0
           # sha256 recorded in-repo (AGENTS.md §6): dl.k8s.io checksum file.
-          KUBECTL_SHA256=399e9d1995da80b64d2ef3606c1a239018660d8b35209fba3f7b0bc11c631c68
+          KUBECTL_SHA256=6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f
           curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
-          kubectl version --client=true
+          /usr/local/bin/kubectl version --client=true
 
       - name: Install skopeo (pack/load)
         run: |
+          export PATH="/usr/local/bin:$PATH"
           sudo apt-get update -qq
           sudo apt-get install -y -qq skopeo
           skopeo --version
 
       - name: Install pinned kind (ephemeral air-gap-like cluster)
         run: |
+          export PATH="/usr/local/bin:$PATH"
           KIND_VERSION=v0.33.0
           # sha256 recorded in-repo (AGENTS.md §6): kind-linux-amd64 release asset digest.
           KIND_SHA256=aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
           curl -fsSL -o /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
           echo "${KIND_SHA256}  /tmp/kind" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kind /usr/local/bin/kind
-          kind version
+          /usr/local/bin/kind version
 
       - name: Download sneakernet bundle (this is what the operator receives)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0 (verified via API: v4 tag; fetches nothing at runtime — artifact bytes only)
@@ -328,43 +377,11 @@ jobs:
           name: sneakernet-bundle-${{ env.SHA }}
           path: gapbox/
 
-      - name: Start local registry + Kind (containerd mirror, digest-pinned node)
-        run: |
-          # CI-only scaffolding (same class as the curlimages/curl probe in
-          # openshift-e2e): an ephemeral localhost HTTP registry; prod uses
-          # the operator's INTERNAL_REGISTRY with TLS. Digest verified by
-          # local pull (distribution registry 2.8.3).
-          docker run -d --restart=always --name kind-registry -p 5000:5000 registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
-          cat > "$RUNNER_TEMP/kind-config.yaml" <<'EOF'
-          kind: Cluster
-          apiVersion: kind.x-k8s.io/v1alpha4
-          nodes:
-            - role: control-plane
-          containerdConfigPatches:
-            - |-
-              [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5000"]
-                endpoint = ["http://kind-registry:5000"]
-          EOF
-          # Digest-pinned node image (kind upstream insists on @sha256 for reproducibility).
-          kind create cluster --name gapbox --config "$RUNNER_TEMP/kind-config.yaml" \
-            --image "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
-          docker network connect kind kind-registry || true
-          kubectl cluster-info
-
-      - name: Install pinned local-path provisioner (explicit StorageClass)
-        run: |
-          # Pinned manifest (rancher local-path-provisioner v0.0.37): same
-          # namespace/deployment names as kind's built-in provisioner, so
-          # this upgrades it in place and adds the `local-path`
-          # StorageClass — no duplicate provisioner, no ambient defaults.
-          kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.37/deploy/local-path-storage.yaml
-          kubectl -n local-path-storage rollout status deploy/local-path-provisioner --timeout=180s
-          kubectl get storageclass local-path
-
       - name: Black-box handoff (verify, unpack, bootstrap)
         env:
           IMAGE_SHA: ${{ env.SHA }}
         run: |
+          export PATH="/usr/local/bin:$PATH"
           cd gapbox
           sha256sum -c "qdrant-pdf-rag-${SHA}.tar.sha256"
           tar xf "qdrant-pdf-rag-${SHA}.tar"
@@ -377,35 +394,102 @@ jobs:
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
           test "$(awk '/^sha: /{print $2}' qdrant-pdf-rag/dist/MANIFEST.txt)" = "$SHA"
 
+      - name: Start authenticated TLS registry + Kind
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          TLS_DIR="$RUNNER_TEMP/registry-tls"
+          sh gapbox/qdrant-pdf-rag/scripts/ci/create_test_tls.sh "$TLS_DIR" kind-registry
+          # Keep credentials out of arguments, logs and retained diagnostics.
+          umask 077
+          openssl rand -hex 24 > "$TLS_DIR/password"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apache2-utils
+          htpasswd -iBc "$TLS_DIR/htpasswd" rehearsal < "$TLS_DIR/password"
+          echo '127.0.0.1 kind-registry' | sudo tee -a /etc/hosts >/dev/null
+          sudo cp "$TLS_DIR/ca.crt" /usr/local/share/ca-certificates/rehearsal-registry.crt
+          sudo update-ca-certificates
+          mkdir -p "$TLS_DIR/node-trust/kind-registry:5000"
+          cp "$TLS_DIR/ca.crt" "$TLS_DIR/node-trust/kind-registry:5000/ca.crt"
+          cat > "$TLS_DIR/node-trust/kind-registry:5000/hosts.toml" <<'EOF'
+          server = "https://kind-registry:5000"
+          [host."https://kind-registry:5000"]
+            capabilities = ["pull", "resolve"]
+            ca = "/etc/containerd/certs.d/kind-registry:5000/ca.crt"
+          EOF
+          docker run -d --restart=always --name kind-registry -p 127.0.0.1:5000:5000 \
+            -v "$TLS_DIR/tls.crt:/tls/tls.crt:ro" -v "$TLS_DIR/tls.key:/tls/tls.key:ro" \
+            -v "$TLS_DIR/htpasswd:/auth/htpasswd:ro" \
+            -e REGISTRY_HTTP_TLS_CERTIFICATE=/tls/tls.crt -e REGISTRY_HTTP_TLS_KEY=/tls/tls.key \
+            -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=rehearsal \
+            -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          for attempt in $(seq 1 20); do
+            status="$(curl -sS --cacert "$TLS_DIR/ca.crt" -o /dev/null -w '%{http_code}' https://kind-registry:5000/v2/ || true)"
+            [ "$status" = 401 ] && break
+            [ "$attempt" != 20 ] || exit 1
+            sleep 1
+          done
+          skopeo login --authfile "$TLS_DIR/registry-auth.json" --username rehearsal \
+            --password-stdin kind-registry:5000 < "$TLS_DIR/password"
+          echo "REGISTRY_AUTH_FILE=$TLS_DIR/registry-auth.json" >> "$GITHUB_ENV"
+          python3 - "$RUNNER_TEMP/kind-config.yaml" "$TLS_DIR/node-trust" "${{ matrix.lane }}" <<'PY_KIND'
+          import json, sys
+          from pathlib import Path
+          roles = ['control-plane'] + (['worker'] * 3 if sys.argv[3] == 'lifecycle' else [])
+          config = {'kind': 'Cluster', 'apiVersion': 'kind.x-k8s.io/v1alpha4',
+                    'nodes': [{'role': role, 'extraMounts': [{'hostPath': sys.argv[2],
+                              'containerPath': '/etc/containerd/certs.d', 'readOnly': True}]} for role in roles]}
+          Path(sys.argv[1]).write_text(json.dumps(config))
+          PY_KIND
+          /usr/local/bin/kind create cluster --name gapbox --config "$RUNNER_TEMP/kind-config.yaml" \
+            --image "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+          docker network connect kind kind-registry
+          /usr/local/bin/kubectl cluster-info
+
+      - name: Install pinned local-path provisioner (explicit StorageClass)
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          # Pinned manifest (rancher local-path-provisioner v0.0.37): same
+          # namespace/deployment names as kind's built-in provisioner, so
+          # this upgrades it in place and adds the `local-path`
+          # StorageClass — no duplicate provisioner, no ambient defaults.
+          curl -fsSL -o "$RUNNER_TEMP/local-path.yaml" https://raw.githubusercontent.com/rancher/local-path-provisioner/49b2be8e26d6d34c9afaa21fa33108d2e82f8955/deploy/local-path-storage.yaml
+          echo "9781b39c24f3f651bd6d6e41b561e04e4904bbdb6d4f8c7a6009df3a702dcd65  $RUNNER_TEMP/local-path.yaml" | sha256sum -c -
+          /usr/local/bin/kubectl apply -f "$RUNNER_TEMP/local-path.yaml"
+          /usr/local/bin/kubectl -n local-path-storage rollout status deploy/local-path-provisioner --timeout=180s
+          /usr/local/bin/kubectl get storageclass local-path
+
       - name: Operator airgap.env (Kind stand-ins, never prod values)
         env:
           IMAGE_SHA: ${{ env.SHA }}
         run: |
+          export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
           NS="rag-kind-$(echo "$SHA" | cut -c1-12)"
           echo "NS=$NS" >> "$GITHUB_ENV"
           sed -i \
-            -e 's|^INTERNAL_REGISTRY=.*|INTERNAL_REGISTRY=localhost:5000|' \
+            -e 's|^INTERNAL_REGISTRY=.*|INTERNAL_REGISTRY=kind-registry:5000|' \
             -e "s|^NAMESPACE=.*|NAMESPACE=$NS|" \
             -e 's|^STORAGE_CLASS=.*|STORAGE_CLASS=local-path|' \
             -e 's|^IMAGE_SHA=.*|IMAGE_SHA='"$SHA"'|' \
             -e 's|^EMBED_MODEL=.*|EMBED_MODEL=mock-embed|' \
             -e 's|^DENSE_DIM=.*|DENSE_DIM=1024|' \
-            -e 's|^VLLM_BASE_URL=.*|VLLM_BASE_URL=http://test-gateway:4000|' \
+            -e 's|^VLLM_BASE_URL=.*|VLLM_BASE_URL=https://test-gateway:4000|' \
             -e 's|^CORPUS_PVC=.*|CORPUS_PVC=corpus|' \
-            -e 's|^# INSECURE_REGISTRY=false.*|INSECURE_REGISTRY=true|' \
             airgap.env
           cat >> airgap.env <<'EOF'
-          EMBED_BASE_URL=http://test-gateway:4000/v1
-          LLM_BASE_URL=http://test-gateway:4000/v1
+          EMBED_BASE_URL=https://test-gateway:4000/v1
+          LLM_BASE_URL=https://test-gateway:4000/v1
           LLM_MODEL_REASONING=mock-reasoning
           RERANK_ENABLED=false
           GATEWAY_API_KEY_SECRET=test-gateway-keys
+          GATEWAY_CA_CONFIGMAP=test-gateway-ca
           EOF
           grep -E "^(INTERNAL_REGISTRY|NAMESPACE|STORAGE_CLASS|IMAGE_SHA|EMBED_MODEL|DENSE_DIM|VLLM_BASE_URL|CORPUS_PVC|INSECURE_REGISTRY)" airgap.env
 
       - name: Write Kind-scale Qdrant overrides (runner quota only; git prod values untouched)
         run: |
+          export PATH="/usr/local/bin:$PATH"
           cat > "$RUNNER_TEMP/qdrant-kind-scale.yaml" <<'EOF'
           # Rehearsal-only: a CI runner cannot schedule the 3x16Gi prod
           # Qdrant (Insufficient memory on one node — proven locally).
@@ -413,13 +497,14 @@ jobs:
           # Kind has no SCC to supply a volume group for the init emptyDir.
           podSecurityContext: {fsGroup: 3000}
           resources:
-            requests: {cpu: "500m", memory: 1Gi}
-            limits: {cpu: "2", memory: 4Gi}
+            requests: {cpu: "200m", memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
           EOF
           echo "QDRANT_EXTRA_VALUES=$RUNNER_TEMP/qdrant-kind-scale.yaml" >> "$GITHUB_ENV"
 
       - name: Write Kind-scale ingest patch (same quota; prod Job asks 4cpu/8Gi)
         run: |
+          export PATH="/usr/local/bin:$PATH"
           cat > "$RUNNER_TEMP/ingest-kind-scale.json" <<'EOF'
           {"spec":{"template":{"spec":{"containers":[{"name":"ingest","resources":{"requests":{"cpu":"250m","memory":"512Mi"},"limits":{"cpu":"1","memory":"1Gi"}}}]}}}}
           EOF
@@ -427,15 +512,28 @@ jobs:
 
       - name: airgap-load (fill the Kind registry BEFORE any pod pulls it)
         run: |
+          export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
           make airgap-load
 
+      - name: Create registry pull secret before the first node pull
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/kubectl create namespace "$NS"
+          /usr/local/bin/kubectl -n "$NS" create secret generic rehearsal-pull \
+            --type=kubernetes.io/dockerconfigjson \
+            --from-file=.dockerconfigjson="$REGISTRY_AUTH_FILE"
+          /usr/local/bin/kubectl -n "$NS" patch serviceaccount default \
+            -p '{"imagePullSecrets":[{"name":"rehearsal-pull"}]}'
+          sed -i 's|^PULL_SECRET=.*|PULL_SECRET=rehearsal-pull|' gapbox/qdrant-pdf-rag/airgap.env
+
       - name: Deploy mock vLLM (deterministic embeddings stand-in)
         run: |
+          export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
-          kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
-          kubectl -n "$NS" create configmap mock-vllm --from-file=mock_vllm.py=scripts/mock_vllm.py
-          kubectl apply -n "$NS" -f - <<EOF
+          /usr/local/bin/kubectl create namespace "$NS" --dry-run=client -o yaml | /usr/local/bin/kubectl apply -f -
+          /usr/local/bin/kubectl -n "$NS" create configmap mock-vllm --from-file=mock_vllm.py=scripts/mock_vllm.py
+          /usr/local/bin/kubectl apply -n "$NS" -f - <<EOF
           apiVersion: apps/v1
           kind: Deployment
           metadata:
@@ -451,7 +549,7 @@ jobs:
                   - name: mock
                     # Tarball-faithful: loaded from the bundle, like the
                     # corpus-gen image below — never a GHCR pull.
-                    image: localhost:5000/qdrant-pdf-rag-ingest:${SHA}
+                    image: kind-registry:5000/qdrant-pdf-rag-ingest:${SHA}
                     command: ["python3", "/cm/mock_vllm.py"]
                     env:
                       - {name: MOCK_DIM, value: "1024"}
@@ -476,34 +574,25 @@ jobs:
             selector: {app: vllm-mock}
             ports: [{port: 8000, targetPort: 8000}]
           EOF
-          kubectl -n "$NS" rollout status deploy/vllm-mock --timeout=180s
-
-      - name: Create GHCR pull secret (wired PULL_SECRET branch, live)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cd gapbox/qdrant-pdf-rag
-          kubectl -n "$NS" create secret docker-registry ghcr-pull \
-            --docker-server=ghcr.io \
-            --docker-username="${{ github.actor }}" \
-            --docker-password="$GITHUB_TOKEN"
-          sed -i 's|^PULL_SECRET=.*|PULL_SECRET=ghcr-pull|' airgap.env
-          grep -q "^PULL_SECRET=ghcr-pull" airgap.env
-
-      - name: airgap-validate LIVE (cluster, StorageClass, MANIFEST match)
-        run: |
-          cd gapbox/qdrant-pdf-rag
-          make airgap-validate
+          /usr/local/bin/kubectl -n "$NS" rollout status deploy/vllm-mock --timeout=180s
 
       - name: Real test gateway and database (mock computation only)
         run: |
+          export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
           sh scripts/ci/deploy_test_gateway.sh "$NS"
 
+      - name: airgap-validate LIVE (cluster, StorageClass, MANIFEST match)
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd gapbox/qdrant-pdf-rag
+          make airgap-validate
+
       - name: Generate corpus PVC + demo PDFs (operator-supplied corpus step)
         run: |
+          export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
-          kubectl -n "$NS" apply -f - <<EOF
+          /usr/local/bin/kubectl -n "$NS" apply -f - <<EOF
           apiVersion: v1
           kind: PersistentVolumeClaim
           metadata: {name: corpus}
@@ -524,7 +613,7 @@ jobs:
                   - name: gen
                     # Tarball-faithful: this image came out of the sneakernet
                     # bundle via airgap-load, not from GHCR.
-                    image: localhost:5000/qdrant-pdf-rag-ingest:${SHA}
+                    image: kind-registry:5000/qdrant-pdf-rag-ingest:${SHA}
                     command: ["/bin/sh", "-ec"]
                     args:
                       - |
@@ -536,7 +625,7 @@ jobs:
                   - name: corpus
                     persistentVolumeClaim: {claimName: corpus}
           EOF
-          kubectl -n "$NS" wait --for=condition=complete job/corpus-gen --timeout=300s
+          /usr/local/bin/kubectl -n "$NS" wait --for=condition=complete job/corpus-gen --timeout=300s
 
       - name: airgap-pipeline LIVE (deploy, ingest, smoke; registry pre-loaded)
         env:
@@ -545,6 +634,7 @@ jobs:
           INGEST_WORK_SIZE: 2Gi
           INGEST_TIMEOUT: "900"
         run: |
+          export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
           # Images are already in the Kind registry from the airgap-load
           # step above (mock and corpus-gen pods pulled them); skip the
@@ -553,47 +643,102 @@ jobs:
 
       - name: Require reasoning and complete streams from the application pod
         run: |
-          kubectl -n "$NS" exec deploy/rag-agent -- \
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
             python3 /app/scripts/probe_gateway.py --require-reasoning --stream
+
+      - name: Cited answers, follow-up chat and every application stream
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/kubectl -n "$NS" exec -i deploy/rag-agent -- python3 - \
+            < gapbox/qdrant-pdf-rag/scripts/ci/application_contracts.py
 
       - name: Expected-substring acceptance
         run: |
+          export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
           NS="$(grep '^NAMESPACE=' airgap.env | cut -d= -f2)"
-          kubectl -n "$NS" exec deploy/rag-agent -- \
+          /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
             python3 /app/scripts/smoke_search.py \
               --url http://localhost:8080 --query "IEA500I operator message" --expect "IEA500I"
-          kubectl -n "$NS" exec deploy/rag-agent -- \
+          /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
             python3 /app/scripts/smoke_search.py \
               --url http://localhost:8080 --query "torque the widget screws" --expect "torque"
+
+      - name: Gateway fault contracts
+        if: matrix.lane == 'gateway-faults'
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd gapbox/qdrant-pdf-rag
+          sh scripts/ci/gateway_faults.sh "$NS"
+
+      - name: Three-worker lifecycle and repeated pipeline
+        if: matrix.lane == 'lifecycle'
+        env:
+          QDRANT_STORAGE_SIZE: 1Gi
+          INGEST_WORK_SIZE: 2Gi
+          INGEST_TIMEOUT: "900"
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd gapbox/qdrant-pdf-rag
+          test "$(/usr/local/bin/kubectl get nodes -l '!node-role.kubernetes.io/control-plane' --no-headers | wc -l)" -eq 3
+          sh scripts/ci/check_lifecycle.sh "$NS"
+          sh scripts/airgap/pipeline.sh --skip-load
 
       - name: Failure diagnostics (pods, events, logs)
         if: failure()
         run: |
+          export PATH="/usr/local/bin:$PATH"
           NS="$(grep '^NAMESPACE=' gapbox/qdrant-pdf-rag/airgap.env | cut -d= -f2)"
-          kubectl -n "$NS" get pods,pvc,svc,jobs -o wide || true
-          kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -40 || true
-          kubectl -n "$NS" logs statefulset/qdrant --all-containers --tail=50 || true
-          kubectl -n "$NS" logs deploy/rag-agent --all-containers --tail=100 || true
-          kubectl -n "$NS" logs job/ingest --tail=100 || true
+          /usr/local/bin/kubectl -n "$NS" get pods,pvc,svc,jobs -o wide || true
+          /usr/local/bin/kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -40 || true
+          /usr/local/bin/kubectl -n "$NS" logs statefulset/qdrant --all-containers --tail=50 || true
+          /usr/local/bin/kubectl -n "$NS" logs deploy/rag-agent --all-containers --tail=100 || true
+          /usr/local/bin/kubectl -n "$NS" logs job/ingest --tail=100 || true
+
+      - name: Retain sanitized cluster diagnostics
+        if: always()
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/kubectl get nodes -o wide > diagnostics/nodes.txt 2>&1 || true
+          /usr/local/bin/kubectl -n "$NS" get pods,pvc,svc,jobs -o wide > diagnostics/workloads.txt 2>&1 || true
+          /usr/local/bin/kubectl -n "$NS" get events --sort-by=.lastTimestamp > diagnostics/events.txt 2>&1 || true
+          test ! -f gapbox/qdrant-pdf-rag/dist/MANIFEST.txt || cp gapbox/qdrant-pdf-rag/dist/MANIFEST.txt diagnostics/
+          test ! -f "gapbox/qdrant-pdf-rag-${SHA}.tar.sha256" || cp "gapbox/qdrant-pdf-rag-${SHA}.tar.sha256" diagnostics/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2; artifact upload only
+        if: always()
+        with:
+          name: kind-${{ matrix.lane }}-evidence-${{ env.SHA }}
+          path: diagnostics/
+          retention-days: 30
 
       - name: Delete Kind cluster (ephemeral, always)
         if: always()
         run: |
-          kind delete cluster --name gapbox || true
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/kind delete cluster --name gapbox || true
           docker rm -f kind-registry || true
 
   # ------------------------------------------------- secret gate (fork-safe)
   e2e-secrets-check:
+    concurrency:
+      group: e2e-secrets-check-${{ github.ref || github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    timeout-minutes: 5
     runs-on: ubuntu-latest
     outputs:
       ok: ${{ steps.check.outputs.ok }}
+    env:
+      SHARE: "false"
     steps:
       - id: check
         env:
           SERVER: ${{ secrets.OPENSHIFT_SERVER }}
           TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
         run: |
+          export PATH="/usr/local/bin:$PATH"
           if [ -n "$SERVER" ] && [ -n "$TOKEN" ]; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
@@ -603,6 +748,11 @@ jobs:
 
   # ---------------------------------------------------------- lab OpenShift
   openshift-e2e:
+    concurrency:
+      group: openshift-e2e-${{ github.ref || github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
     needs: [build, e2e-secrets-check]
     if: >-
       needs.e2e-secrets-check.outputs.ok == 'true' &&
@@ -611,42 +761,59 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
+      SHARE: "false"
       OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
       OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
       SHA: ${{ needs.build.outputs.sha }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (pin does not cover runtime-fetched oc/skopeo below)
 
-      - name: Install helm + oc
-        uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
-      - name: Install oc
-        uses: redhat-actions/openshift-tools-installer@144527c7d98999f2652264c048c7a9bd103f8a82 # v1 (the installer fetches oc at run time — supply-chain surface, see AGENTS.md §6)
-        with:
-          oc: "4"
+      - name: Install checksum-pinned Helm
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
+          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/helm-unpack"
+          tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
+          sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
+          /usr/local/bin/helm version --short
+      - name: Install checksum-pinned OpenShift client
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          curl -fsSL -o "$RUNNER_TEMP/oc.tgz" https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.22.7/openshift-client-linux.tar.gz
+          echo "3d02d45ae5037a723afbbdda1063c08d4788a9b9ace6c6f44aa329764ee648a1  $RUNNER_TEMP/oc.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/oc-unpack"
+          tar xzf "$RUNNER_TEMP/oc.tgz" -C "$RUNNER_TEMP/oc-unpack" oc kubectl
+          sudo install -m 0755 "$RUNNER_TEMP/oc-unpack/oc" /usr/local/bin/oc
+          sudo install -m 0755 "$RUNNER_TEMP/oc-unpack/kubectl" /usr/local/bin/kubectl
+          /usr/local/bin/oc version --client=true
 
       - name: Log in to lab OpenShift
-        run: oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_TOKEN" --insecure-skip-tls-verify=true
+        run: /usr/local/bin/oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_TOKEN" --insecure-skip-tls-verify=true
 
       - name: Create ephemeral namespace
         run: |
+          export PATH="/usr/local/bin:$PATH"
           NS="rag-ci-${SHA}"
           echo "NS=$NS" >> "$GITHUB_ENV"
-          oc new-project "$NS"
-          oc label namespace "$NS" app.kubernetes.io/managed-by=e2e-workflow ephemeral=true
+          /usr/local/bin/oc new-project "$NS"
+          /usr/local/bin/oc label namespace "$NS" app.kubernetes.io/managed-by=e2e-workflow ephemeral=true
 
       - name: Deploy Qdrant (CI overlay — 1 replica, 1Gi, unprivileged, ClusterIP)
         run: |
-          helm upgrade -i qdrant charts/qdrant-*.tgz -n "$NS" -f overlays/ci/values.yaml
-          kubectl -n "$NS" rollout status statefulset/qdrant --timeout=300s
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/helm upgrade -i qdrant charts/qdrant-*.tgz -n "$NS" -f overlays/ci/values.yaml
+          /usr/local/bin/kubectl -n "$NS" rollout status statefulset/qdrant --timeout=300s
 
       - name: Wait for Qdrant readyz
         run: |
+          export PATH="/usr/local/bin:$PATH"
           for i in $(seq 1 30); do
-            if kubectl -n "$NS" run readycheck-"$i" --image=curlimages/curl --restart=Never \
+            if /usr/local/bin/kubectl -n "$NS" run readycheck-"$i" --image=curlimages/curl --restart=Never \
                  --command -- curl -sf http://qdrant:6333/readyz; then
               break
             fi
-            kubectl -n "$NS" delete pod readycheck-"$i" --ignore-not-found
+            /usr/local/bin/kubectl -n "$NS" delete pod readycheck-"$i" --ignore-not-found
             [ "$i" = 30 ] && exit 1
             sleep 10
           done
@@ -660,54 +827,60 @@ jobs:
           KUSTOMIZE_TAG_PLACEHOLDER: ":ci"
           KUSTOMIZE_NS_PLACEHOLDER: "namespace: rag-ci"
         run: |
+          export PATH="/usr/local/bin:$PATH"
           OWNER_LC="$(echo "${{ github.repository_owner }}" | tr 'A-Z' 'a-z')"
-          kubectl kustomize deploy/kustomize/overlays/ci \
+          /usr/local/bin/kubectl kustomize deploy/kustomize/overlays/ci \
             | sed -e "s|$KUSTOMIZE_OWNER_PLACEHOLDER|ghcr.io/${OWNER_LC}|g" \
                   -e "s|$KUSTOMIZE_TAG_PLACEHOLDER|:${SHA}|g" \
                   -e "s|$KUSTOMIZE_NS_PLACEHOLDER|namespace: rag-ci-${SHA}|g" \
-            | kubectl apply -f -
+            | /usr/local/bin/kubectl apply -f -
 
       - name: Wait for ingest Job (generates demo PDFs, ingests with EMBED_MODE=hash)
         run: |
-          if ! kubectl -n "$NS" wait --for=condition=complete job/ingest --timeout=600s; then
+          export PATH="/usr/local/bin:$PATH"
+          if ! /usr/local/bin/kubectl -n "$NS" wait --for=condition=complete job/ingest --timeout=600s; then
             echo "::error::ingest Job failed"
-            kubectl -n "$NS" logs job/ingest --tail=200 || true
-            kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -30 || true
+            /usr/local/bin/kubectl -n "$NS" logs job/ingest --tail=200 || true
+            /usr/local/bin/kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -30 || true
             exit 1
           fi
 
       - name: Wait for agent readiness
-        run: kubectl -n "$NS" rollout status deploy/rag-agent --timeout=300s
+        run: /usr/local/bin/kubectl -n "$NS" rollout status deploy/rag-agent --timeout=300s
 
       # Smoke 1: outline PDF — message id found (hybrid search, hash embeddings).
       - name: Smoke — IEA500I from outline demo PDF
         run: |
-          kubectl -n "$NS" exec deploy/rag-agent -- \
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
             python /app/scripts/smoke_search.py \
               --url http://rag-agent:8080 --query "IEA500I operator message" --expect "IEA500I"
 
       # Smoke 2: plain generic PDF — lexical hit for widget/torque prose.
       - name: Smoke — torque/widget text from plain demo PDF
         run: |
-          kubectl -n "$NS" exec deploy/rag-agent -- \
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
             python /app/scripts/smoke_search.py \
               --url http://rag-agent:8080 --query "torque the widget screws" --expect "torque"
 
       - name: Failure diagnostics (pods, events, logs)
         if: failure()
         run: |
-          kubectl -n "$NS" get pods,pvc,svc,jobs -o wide || true
-          kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -40 || true
-          kubectl -n "$NS" describe statefulset/qdrant deploy/rag-agent 2>/dev/null | tail -60 || true
-          kubectl -n "$NS" logs statefulset/qdrant --all-containers --tail=50 || true
-          kubectl -n "$NS" logs deploy/rag-agent --all-containers --tail=100 || true
-          kubectl -n "$NS" logs job/ingest --tail=100 || true
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/kubectl -n "$NS" get pods,pvc,svc,jobs -o wide || true
+          /usr/local/bin/kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -40 || true
+          /usr/local/bin/kubectl -n "$NS" describe statefulset/qdrant deploy/rag-agent 2>/dev/null | tail -60 || true
+          /usr/local/bin/kubectl -n "$NS" logs statefulset/qdrant --all-containers --tail=50 || true
+          /usr/local/bin/kubectl -n "$NS" logs deploy/rag-agent --all-containers --tail=100 || true
+          /usr/local/bin/kubectl -n "$NS" logs job/ingest --tail=100 || true
 
       - name: Delete ephemeral namespace
         if: always()
         run: |
-          oc delete project "$NS" --wait=false --ignore-not-found || \
-            kubectl delete namespace "$NS" --ignore-not-found --wait=false || true
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/oc delete project "$NS" --wait=false --ignore-not-found || \
+            /usr/local/bin/kubectl delete namespace "$NS" --ignore-not-found --wait=false || true
 
   # --------------------------------- air-gap config dry-run (no cluster, no secrets)
   # Runs the REAL airgap scripts with AIRGAP_DRYRUN=1 on every PR: renders the
@@ -718,25 +891,39 @@ jobs:
   # OpenShift is not feasible (CRC needs KVM; microshift-aio abandoned 2022),
   # so this is the PR-level gate for the air-gap path.
   airgap-dryrun:
+    concurrency:
+      group: airgap-dryrun-${{ github.ref || github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
+      SHARE: "false"
       SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install helm (vendored-chart deploy)
-        uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
+      - name: Install checksum-pinned Helm
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
+          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/helm-unpack"
+          tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
+          sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
+          /usr/local/bin/helm version --short
 
       - name: Install pinned kubectl (kustomize render + patch --local)
         run: |
-          KUBECTL_VERSION=v1.31.2
+          export PATH="/usr/local/bin:$PATH"
+          KUBECTL_VERSION=v1.37.0
           # sha256 recorded in-repo (AGENTS.md §6): dl.k8s.io checksum file.
-          KUBECTL_SHA256=399e9d1995da80b64d2ef3606c1a239018660d8b35209fba3f7b0bc11c631c68
+          KUBECTL_SHA256=6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f
           curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
-          kubectl version --client=true
+          /usr/local/bin/kubectl version --client=true
 
       - name: airgap-deploy dry-run (prod render, fail-closed placeholders, knobs)
         env:
@@ -750,6 +937,7 @@ jobs:
           VLLM_BASE_URL: http://vllm:8000
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
+          export PATH="/usr/local/bin:$PATH"
           make airgap-deploy
           test -f dist/agent-rendered.yaml
           grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-agent:${SHA}" dist/agent-rendered.yaml
@@ -773,6 +961,7 @@ jobs:
           PULL_SECRET: ci-pull
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
+          export PATH="/usr/local/bin:$PATH"
           printf 'resources:\n  requests: {cpu: "100m", memory: 256Mi}\n' > "$RUNNER_TEMP/vals.yaml"
           export QDRANT_EXTRA_VALUES="$RUNNER_TEMP/vals.yaml"
           out="$(make airgap-deploy)"
@@ -792,6 +981,7 @@ jobs:
           VLLM_BASE_URL: http://vllm:8000
           QDRANT_EXTRA_VALUES: /nonexistent/vals.yaml
         run: |
+          export PATH="/usr/local/bin:$PATH"
           if make airgap-deploy 2>err.log; then
             echo "::error::deploy.sh did not fail on a missing QDRANT_EXTRA_VALUES file"
             exit 1
@@ -811,6 +1001,7 @@ jobs:
           OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
+          export PATH="/usr/local/bin:$PATH"
           make airgap-deploy
           test -f dist/jaeger-rendered.yaml
           grep -q "ghcr.io/dryrun-standin/jaegertracing/jaeger:v2.20.0" dist/jaeger-rendered.yaml
@@ -832,6 +1023,7 @@ jobs:
           OTEL_EXPORTER_OTLP_ENDPOINT: off
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
+          export PATH="/usr/local/bin:$PATH"
           # Hermetic w.r.t. sibling dry-run steps sharing this workspace, and
           # focused: tracing defaults ON (asserted by the prod-render step), so
           # this step uses the off sentinel — metrics-on does not depend on
@@ -859,6 +1051,7 @@ jobs:
           VLLM_BASE_URL: http://vllm:8000
           INGEST_WORK_SIZE: 2Gi
         run: |
+          export PATH="/usr/local/bin:$PATH"
           cat > "$RUNNER_TEMP/ingest-patch.json" <<'EOF'
           {"spec":{"template":{"spec":{"containers":[{"name":"ingest","resources":{"requests":{"cpu":"250m","memory":"512Mi"},"limits":{"cpu":"1","memory":"1Gi"}}}]}}}}
           EOF
@@ -881,6 +1074,7 @@ jobs:
           VLLM_BASE_URL: http://vllm:8000
           CORPUS_PVC: corpus
         run: |
+          export PATH="/usr/local/bin:$PATH"
           make airgap-dryrun
           test -f dist/agent-rendered.yaml
           test -f dist/ingest-rendered.yaml
@@ -904,7 +1098,14 @@ jobs:
   #     qdrant image to a fresh (private) GHCR package, so anonymous pull
   #     would ImagePullBackoff.
   airgap-rehearsal:
-    needs: [build, e2e-secrets-check]
+    concurrency:
+      group: airgap-rehearsal-${{ github.ref || github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    needs: [build, airgap-package, e2e-secrets-check]
     if: >-
       needs.e2e-secrets-check.outputs.ok == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
@@ -912,45 +1113,73 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
+      SHARE: "false"
       OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
       OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
       SHA: ${{ needs.build.outputs.sha }}
       AGENT_IMAGE: ${{ needs.build.outputs.agent_image }}
       INGEST_IMAGE: ${{ needs.build.outputs.ingest_image }}
     steps:
-      # Full history: airgap-pack bundles the repo with `git bundle create
-      # ... HEAD --all`, and a --depth 1 clone produces a bundle whose clone
-      # fails to traverse parents — CI would certify an unclonable artifact.
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (pin does not cover runtime-fetched oc/skopeo below)
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0; artifact bytes only
         with:
-          fetch-depth: 0
+          name: sneakernet-bundle-${{ env.SHA }}
+          path: gapbox/
+      - name: Fresh published-bundle bootstrap
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd gapbox
+          sha256sum -c "qdrant-pdf-rag-${SHA}.tar.sha256"
+          tar xf "qdrant-pdf-rag-${SHA}.tar"
+          AIRGAP_WORKSPACE=qdrant-pdf-rag sh bootstrap.sh
+          test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
+          echo "BUNDLE_CHECKOUT=$GITHUB_WORKSPACE/gapbox/qdrant-pdf-rag" >> "$GITHUB_ENV"
 
-      - name: Install helm, oc, skopeo
-        uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
-      - uses: redhat-actions/openshift-tools-installer@144527c7d98999f2652264c048c7a9bd103f8a82 # v1 (the installer fetches oc at run time — supply-chain surface, see AGENTS.md §6)
-        with:
-          oc: "4"
+      - name: Install checksum-pinned Helm
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
+          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/helm-unpack"
+          tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
+          sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
+          /usr/local/bin/helm version --short
+      - name: Install checksum-pinned OpenShift client
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          curl -fsSL -o "$RUNNER_TEMP/oc.tgz" https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.22.7/openshift-client-linux.tar.gz
+          echo "3d02d45ae5037a723afbbdda1063c08d4788a9b9ace6c6f44aa329764ee648a1  $RUNNER_TEMP/oc.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/oc-unpack"
+          tar xzf "$RUNNER_TEMP/oc.tgz" -C "$RUNNER_TEMP/oc-unpack" oc kubectl
+          sudo install -m 0755 "$RUNNER_TEMP/oc-unpack/oc" /usr/local/bin/oc
+          sudo install -m 0755 "$RUNNER_TEMP/oc-unpack/kubectl" /usr/local/bin/kubectl
+          /usr/local/bin/oc version --client=true
       - name: Install skopeo (pack/load)
         run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
           sudo apt-get update -qq
           sudo apt-get install -y -qq skopeo
           skopeo --version
 
       - name: Log in to lab OpenShift
-        run: oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_TOKEN" --insecure-skip-tls-verify=true
+        run: /usr/local/bin/oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_TOKEN" --insecure-skip-tls-verify=true
 
       - name: Create ephemeral namespace
         run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
           NS="rag-gap-${SHA}"
           echo "NS=$NS" >> "$GITHUB_ENV"
-          oc new-project "$NS"
-          oc label namespace "$NS" app.kubernetes.io/managed-by=e2e-workflow ephemeral=true
+          /usr/local/bin/oc new-project "$NS"
+          /usr/local/bin/oc label namespace "$NS" app.kubernetes.io/managed-by=e2e-workflow ephemeral=true
 
       - name: Create GHCR pull secret (rehearsal loads private packages)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          kubectl -n "$NS" create secret docker-registry ghcr-pull \
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
+          /usr/local/bin/kubectl -n "$NS" create secret docker-registry ghcr-pull \
             --docker-server=ghcr.io \
             --docker-username="${{ github.actor }}" \
             --docker-password="$GITHUB_TOKEN"
@@ -961,10 +1190,12 @@ jobs:
       # prod image.
       - name: Deploy mock vLLM (deterministic embeddings stand-in)
         run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
           OWNER_LC="$(echo "${{ github.repository_owner }}" | tr 'A-Z' 'a-z')"
           echo "OWNER_LC=$OWNER_LC" >> "$GITHUB_ENV"
-          kubectl -n "$NS" create configmap mock-vllm --from-file=mock_vllm.py=scripts/mock_vllm.py
-          kubectl apply -n "$NS" -f - <<EOF
+          /usr/local/bin/kubectl -n "$NS" create configmap mock-vllm --from-file=mock_vllm.py=scripts/mock_vllm.py
+          /usr/local/bin/kubectl apply -n "$NS" -f - <<EOF
           apiVersion: apps/v1
           kind: Deployment
           metadata:
@@ -981,7 +1212,7 @@ jobs:
                     image: ${AGENT_IMAGE}
                     command: ["python3", "/cm/mock_vllm.py"]
                     env:
-                      - {name: MOCK_DIM, value: "64"}
+                      - {name: MOCK_DIM, value: "1024"}
                       - {name: PORT, value: "8000"}
                     ports: [{containerPort: 8000}]
                     readinessProbe:
@@ -1003,16 +1234,20 @@ jobs:
             selector: {app: vllm-mock}
             ports: [{port: 8000, targetPort: 8000}]
           EOF
-          kubectl -n "$NS" rollout status deploy/vllm-mock --timeout=180s
+          /usr/local/bin/kubectl -n "$NS" rollout status deploy/vllm-mock --timeout=180s
 
       - name: Detect default StorageClass
         run: |
-          SC="$(oc get sc -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{end}')"
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
+          SC="$(/usr/local/bin/oc get sc -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{end}')"
           [ -n "$SC" ] || { echo "::error::no default StorageClass on the lab cluster"; exit 1; }
           echo "SC=$SC" >> "$GITHUB_ENV"
 
       - name: Write CI-scale Qdrant overrides (lab quota only; git prod values untouched)
         run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
           cat > "$RUNNER_TEMP/qdrant-ci-scale.yaml" <<'EOF'
           # Rehearsal-only: prod values.yaml keeps 4cpu/16Gi requests; the lab
           # namespace quota cannot fit 3 replicas at prod size.
@@ -1024,28 +1259,20 @@ jobs:
 
       - name: Write CI-scale ingest patch (same quota; prod Job asks 4cpu/8Gi)
         run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
           cat > "$RUNNER_TEMP/ingest-ci-scale.json" <<'EOF'
           {"spec":{"template":{"spec":{"containers":[{"name":"ingest","resources":{"requests":{"cpu":"250m","memory":"512Mi"},"limits":{"cpu":"1","memory":"1Gi"}}}]}}}}
           EOF
           echo "INGEST_EXTRA_PATCH=$RUNNER_TEMP/ingest-ci-scale.json" >> "$GITHUB_ENV"
-
-      - name: airgap-pack (real sneakernet bundle at this SHA)
-        env:
-          IMAGE_SHA: ${{ env.SHA }}
-        run: |
-          make airgap-pack
-          ls -la dist/
-          cat dist/MANIFEST.txt
-          # Rehearse the runbook's first operator step: the bundle must clone.
-          rm -rf "$RUNNER_TEMP/bundle-clone"
-          git clone --quiet dist/repo.bundle "$RUNNER_TEMP/bundle-clone"
-          git -C "$RUNNER_TEMP/bundle-clone" log --oneline -1
 
       - name: airgap-load (GHCR stands in for INTERNAL_REGISTRY)
         env:
           IMAGE_SHA: ${{ env.SHA }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
           INTERNAL_REGISTRY="ghcr.io/${OWNER_LC}"
           echo "${GITHUB_TOKEN}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
           export INTERNAL_REGISTRY
@@ -1055,10 +1282,14 @@ jobs:
         env:
           IMAGE_SHA: ${{ env.SHA }}
           EMBED_MODEL: mock-embed
-          DENSE_DIM: "64"
+          DENSE_DIM: "1024"
           VLLM_BASE_URL: http://vllm-mock:8000
+          LLM_BASE_URL: http://vllm-mock:8000/v1
+          LLM_MODEL_REASONING: mock-reasoning
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
           export INTERNAL_REGISTRY="ghcr.io/${OWNER_LC}"
           export NAMESPACE="$NS"
           export STORAGE_CLASS="$SC"
@@ -1068,7 +1299,9 @@ jobs:
         env:
           STORAGE_CLASS: ${{ env.SC }}
         run: |
-          kubectl -n "$NS" apply -f - <<EOF
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
+          /usr/local/bin/kubectl -n "$NS" apply -f - <<EOF
           apiVersion: v1
           kind: PersistentVolumeClaim
           metadata: {name: corpus}
@@ -1099,18 +1332,22 @@ jobs:
                   - name: corpus
                     persistentVolumeClaim: {claimName: corpus}
           EOF
-          kubectl -n "$NS" wait --for=condition=complete job/corpus-gen --timeout=300s
+          /usr/local/bin/kubectl -n "$NS" wait --for=condition=complete job/corpus-gen --timeout=300s
 
       - name: airgap-ingest (PROD ingest Job, corpus PVC, vLLM-shaped endpoint)
         env:
           IMAGE_SHA: ${{ env.SHA }}
           CORPUS_PVC: corpus
           EMBED_MODEL: mock-embed
-          DENSE_DIM: "64"
+          DENSE_DIM: "1024"
           VLLM_BASE_URL: http://vllm-mock:8000
+          LLM_BASE_URL: http://vllm-mock:8000/v1
+          LLM_MODEL_REASONING: mock-reasoning
           INGEST_WORK_SIZE: 2Gi
           INGEST_TIMEOUT: "900"
         run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
           export INTERNAL_REGISTRY="ghcr.io/${OWNER_LC}"
           export NAMESPACE="$NS"
           export STORAGE_CLASS="$SC"
@@ -1118,16 +1355,20 @@ jobs:
 
       - name: airgap-smoke (operator smoke + expected-substring checks)
         run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
           NAMESPACE="$NS" QUERY="IEA500I operator message" make airgap-smoke
-          kubectl -n "$NS" exec deploy/rag-agent -- \
+          /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
             python /app/scripts/smoke_search.py \
               --url http://localhost:8080 --query "IEA500I operator message" --expect "IEA500I"
-          kubectl -n "$NS" exec deploy/rag-agent -- \
+          /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
             python /app/scripts/smoke_search.py \
               --url http://localhost:8080 --query "torque the widget screws" --expect "torque"
 
       - name: Delete ephemeral namespace
         if: always()
         run: |
-          oc delete project "$NS" --wait=false --ignore-not-found || \
-            kubectl delete namespace "$NS" --ignore-not-found --wait=false || true
+          export PATH="/usr/local/bin:$PATH"
+          cd "$BUNDLE_CHECKOUT"
+          /usr/local/bin/oc delete project "$NS" --wait=false --ignore-not-found || \
+            /usr/local/bin/kubectl delete namespace "$NS" --ignore-not-found --wait=false || true
