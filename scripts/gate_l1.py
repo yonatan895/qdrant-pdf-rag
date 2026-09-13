@@ -49,6 +49,7 @@ from eval_retrieval import (
 )
 from qdrant_sim import QdrantSimError, start_simulator
 from render_report import render_eval
+from venue import VenueError, require_rc_for_golden
 
 from mainframe_rag.config import load_settings
 from mainframe_rag.ingest import run_ingest
@@ -185,6 +186,14 @@ def run_gate(
 
     Returns (exit_code, delta_markdown).
     """
+    try:
+        # Venue rule (issue #316): the frozen holdout is an RC-only
+        # instrument, even through this gate. Fail closed before any I/O.
+        require_rc_for_golden([golden_path])
+    except VenueError as exc:
+        msg = f"FAIL: {exc}"
+        print(msg, file=sys.stderr)
+        return 2, f"## Retrieval Evaluation Gate (L1)\n\n**ERROR:** {msg}\n"
     target_collection = collection or f"gate-l1-{os.getpid()}"
     raw_entries: list[dict[str, Any]] = [
         json.loads(line)
