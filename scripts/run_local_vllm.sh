@@ -41,27 +41,11 @@ fi
 HF_CACHE_DIR="${HF_HOME:-${HOME}/.cache/huggingface}"
 mkdir -p "${HF_CACHE_DIR}"
 
-# TTY flag: only allocate pseudo-TTY if stdin is connected to an interactive terminal
-if [ -t 0 ]; then
-    TTY_FLAG="-it"
-else
-    TTY_FLAG=""
-fi
-
-# Environment flags:
-# - VLLM_WSL2_ENABLE_PIN_MEMORY=1: Enables pinned host memory allocation on WSL2.
-# - HF_TOKEN: Forwarded safely via `-e HF_TOKEN` without exposing the secret token string on argv.
-ENV_ARGS="-e VLLM_WSL2_ENABLE_PIN_MEMORY=1"
-if [ -n "${HF_TOKEN:-}" ]; then
-    ENV_ARGS="${ENV_ARGS} -e HF_TOKEN"
-fi
-
 # Detect local model directory vs HuggingFace hub model ID
-LOCAL_MOUNT=""
+ABS_MODEL_DIR=""
 if [ -d "${MODEL}" ]; then
     ABS_MODEL_DIR="$(cd "${MODEL}" && pwd)"
     MODEL_NAME="${SERVED_NAME:-$(basename "${ABS_MODEL_DIR}")}"
-    LOCAL_MOUNT="-v ${ABS_MODEL_DIR}:/model:ro"
     SERVED_TARGET="/model"
     echo " Detected local model directory: ${ABS_MODEL_DIR}"
     echo " Serving as model name:         ${MODEL_NAME}"
@@ -151,15 +135,27 @@ if [ "${BUDGET_RUNNER}" = "pooling" ]; then
     if [ -n "${BUDGET_BATCHED_TOKENS:-}" ]; then
         set -- "$@" --max-num-batched-tokens "${BUDGET_BATCHED_TOKENS}"
     fi
-    if [ "${BUDGET_EAGER:-0}" = "1" ]; then
-        set -- "$@" --enforce-eager
-    fi
+fi
+if [ "${BUDGET_EAGER:-0}" = "1" ]; then
+    set -- "$@" --enforce-eager
 fi
 # vLLM prefix caching (KV reuse across shared prompt prefixes): resolved
 # from the Budget profile, off unless the profile enables it. Issue #80
 # measures the hit rate before enabling it anywhere.
 if [ "${BUDGET_PREFIX_CACHE:-0}" = "1" ]; then
     set -- "$@" --enable-prefix-caching
+else
+    set -- "$@" --no-enable-prefix-caching
+fi
+case "${BUDGET_CHUNKED_PREFILL:-}" in
+    1) set -- "$@" --enable-chunked-prefill ;;
+    0) set -- "$@" --no-enable-chunked-prefill ;;
+esac
+if [ "${BUDGET_LANGUAGE_MODEL_ONLY:-0}" = "1" ]; then
+    set -- "$@" --language-model-only
+fi
+if [ -n "${BUDGET_MM_PROCESSOR_CACHE_GB:-}" ]; then
+    set -- "$@" --mm-processor-cache-gb "${BUDGET_MM_PROCESSOR_CACHE_GB}"
 fi
 # Add Gemma-4 reasoning parser flags
 case "${MODEL} ${MODEL_NAME} ${TASK:-}" in
@@ -172,12 +168,18 @@ case "${MODEL} ${MODEL_NAME} ${TASK:-}" in
         ;;
 esac
 
-# Single unified container execution
-exec "${RUNTIME}" run --rm ${TTY_FLAG} --gpus all \
-    -p "${PORT}:${PORT}" \
+# Prepend runtime arguments as an argv vector; local paths may contain spaces.
+set -- --gpus all -p "${PORT}:${PORT}" \
     -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-    ${LOCAL_MOUNT} \
-    ${ENV_ARGS} \
-    --ipc=host \
-    "${IMAGE}" \
-    "$@"
+    -e VLLM_WSL2_ENABLE_PIN_MEMORY=1 --ipc=host "${IMAGE}" "$@"
+if [ -n "${ABS_MODEL_DIR}" ]; then
+    set -- -v "${ABS_MODEL_DIR}:/model:ro" "$@"
+fi
+# Forward the token by environment name, never by value on argv.
+if [ -n "${HF_TOKEN:-}" ]; then
+    set -- -e HF_TOKEN "$@"
+fi
+if [ -t 0 ]; then
+    set -- -it "$@"
+fi
+exec "${RUNTIME}" run --rm "$@"

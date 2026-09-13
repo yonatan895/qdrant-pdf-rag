@@ -84,6 +84,11 @@ def _assignments(plan_server: ServerPlan) -> list[str]:
         ),
         _emit("BUDGET_EAGER", "1" if plan_server.enforce_eager else "0"),
         _emit("BUDGET_PREFIX_CACHE", "1" if plan_server.enable_prefix_caching else "0"),
+        _emit("BUDGET_CHUNKED_PREFILL", "" if plan_server.enable_chunked_prefill is None
+              else str(int(plan_server.enable_chunked_prefill))),
+        _emit("BUDGET_LANGUAGE_MODEL_ONLY", str(int(plan_server.language_model_only))),
+        _emit("BUDGET_MM_PROCESSOR_CACHE_GB", "" if plan_server.mm_processor_cache_gb is None
+              else str(plan_server.mm_processor_cache_gb)),
         _emit("BUDGET_SEQS", str(plan_server.max_num_seqs)),
     ]
 

@@ -47,6 +47,9 @@ def test_resolve_embed_assignments():
         "BUDGET_EAGER": "1",
         "BUDGET_PREFIX_CACHE": "0",
         "BUDGET_SEQS": "1",
+        "BUDGET_CHUNKED_PREFILL": "",
+        "BUDGET_LANGUAGE_MODEL_ONLY": "0",
+        "BUDGET_MM_PROCESSOR_CACHE_GB": "",
     }
 
 
@@ -61,6 +64,9 @@ def test_resolve_reasoning_assignments():
         "BUDGET_EAGER": "0",
         "BUDGET_PREFIX_CACHE": "1",
         "BUDGET_SEQS": "1",
+        "BUDGET_CHUNKED_PREFILL": "",
+        "BUDGET_LANGUAGE_MODEL_ONLY": "0",
+        "BUDGET_MM_PROCESSOR_CACHE_GB": "",
     }
 
 
