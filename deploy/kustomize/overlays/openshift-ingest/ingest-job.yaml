@@ -41,8 +41,11 @@ spec:
             - name: DENSE_DIM
               value: __DENSE_DIM__
             # OTel (issue #83): endpoint substituted from
-            # OTEL_EXPORTER_OTLP_ENDPOINT in airgap.env (empty = off).
+            # OTEL_EXPORTER_OTLP_ENDPOINT in airgap.env (unset resolves to the
+            # in-cluster Jaeger; the `off` sentinel renders empty).
             # Parent-process spans only; parse workers stay untraced.
+            # NOTE: no IMAGE_SHA here yet, so ingest spans carry no
+            # service.version (issue #315).
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
             - name: OTEL_SERVICE_NAME

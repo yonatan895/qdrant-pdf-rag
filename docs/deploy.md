@@ -100,19 +100,25 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
   secret name follows `QDRANT_RELEASE` — renaming the release without a
   reinstall orphans the agent/ingest key references (and reinstalls
   rotate the key: roll the agent afterward).
-- Snapshot storage class falls back to `STORAGE_CLASS`. `QDRANT_STORAGE_SIZE`
-  and `QDRANT_EXTRA_VALUES` empty means git prod values untouched (missing
-  override file dies); both are rehearsal-only knobs that must never reach
-  prod.
+- Snapshot storage class falls back to `STORAGE_CLASS`.
+  `QDRANT_STORAGE_SIZE`, `QDRANT_EXTRA_VALUES`, `QDRANT_TAG`,
+  `INGEST_WORK_SIZE`, and `INGEST_EXTRA_PATCH` are rehearsal-only knobs;
+  empty means git prod values untouched (missing override file dies), and
+  they must never reach prod.
 - Rollout waits: Qdrant StatefulSet 600s, agent Deployment 300s, Jaeger
   120s — on failure the script prints pods, warning events, and container
-  logs before dying. `AGENT_ROUTE=true` renders the `openshift-ui` overlay
-  (oauth-proxy sidecar on Service port 8443, Service CA serving cert) and
-  applies a `reencrypt` Route with `haproxy.router.openshift.io/timeout:
-  300s`; it requires the oauth-proxy digest recorded in `images.txt` (the
-  shipped `sha256:PENDING` fails closed) and the operator-created Secret
-  `rag-agent-oauth-cookie`, and defaults `false` (ClusterIP only, console
-  reachable in-cluster).
+  logs before dying. `AGENT_ROUTE=true` layers
+  `deploy/kustomize/overlays/openshift-ui` (oauth-proxy sidecar on Service
+  port 8443, Service CA serving cert, ServiceAccount redirect reference,
+  `/healthz` `skip-auth-regex` bypass) and creates a `reencrypt` Route only
+  when one does not already exist, inlining the namespace
+  `openshift-service-ca.crt` bundle as `destinationCACertificate`
+  (`haproxy.router.openshift.io/timeout: 300s`). It requires the
+  oauth-proxy digest recorded in `images.txt` (the shipped
+  `sha256:PENDING` fails closed) and the operator-created Secret
+  `rag-agent-oauth-cookie`; it defaults `false` (ClusterIP only, console
+  reachable in-cluster). `make airgap-validate` checks none of these — they
+  fail at deploy time.
 
 ## 4. Signing and provenance
 
@@ -141,19 +147,26 @@ checksums **after**.
   tarball. Without a pinned pubkey, verification is TOFU: it binds members
   together but proves nothing about *which* key signed.
 - Load re-verifies the signature, then checksums, then the `IMAGE_SHA`
-  against the manifest, then all four image digests — and pushes under
-  fixed names: `qdrant/qdrant:v1.19.0-unprivileged`,
+  against the manifest, then all four base image digests (plus the
+  oauth-proxy digest when the bundle carries it) — and pushes under fixed
+  names: `qdrant/qdrant:v1.19.0-unprivileged`,
   `jaegertracing/jaeger:v2.20.0` (retag note: upstream tag `2.20.0`),
-  `qdrant-pdf-rag-ingest:<SHA>`, `qdrant-pdf-rag-agent:<SHA>`. Full SHA
-  only, never `latest` or short SHAs. `INSECURE_REGISTRY=true` disables TLS
+  `qdrant-pdf-rag-ingest:<SHA>`, `qdrant-pdf-rag-agent:<SHA>`, and
+  `openshift4/ose-oauth-proxy:v4.14` when bundled. Full SHA only, never
+  `latest` or short SHAs. `INSECURE_REGISTRY=true` disables TLS
   verify on the pack-pull side *or* the load-push side depending on which
   script reads it.
 - `bootstrap.sh` cannot source `common.sh` (no clone exists yet), so it
-  carries an inline twin of the trust check. It clones into
+  carries an inline twin of the trust check (bundle signature honoring
+  `SNEAKERNET_TRUSTED_PUB`, then `SHA256SUMS`). It clones into
   `AIRGAP_WORKSPACE` (default `qdrant-pdf-rag`), skips the clone when a
   repo already exists, copies (not links) the archives into `dist/`, and
   seeds `airgap.env` from the example only when absent — never overwriting
   operator edits. Artifact discovery searches `dist/` then the parent dir.
+  **Known gap (#312):** the `dist/` copy list currently omits
+  `oauth-proxy-image.tar`, so an `AGENT_ROUTE=true` bundle loses the sidecar
+  after the documented flow — copy that member into `dist/` manually before
+  `airgap-load` until #312 lands.
 
 ## 5. Sizing and security
 
@@ -206,6 +219,9 @@ cannot schedule on one node — proven).
   port-forward required), fails closed on degraded `/healthz`, treats empty
   search results as SKIP (infrastructure ready, corpus not ingested) rather
   than failure, and never touches `/v1/answer` (needs a reasoning model).
+  With tracing on (the default) it also fails closed unless a `v1.search`
+  span lands in `JAEGER_QUERY_URL` within `TRACE_TIMEOUT`; the `off`
+  sentinel skips that assertion.
 
 ## 6. Images and pins
 
@@ -221,6 +237,19 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
 - `qdrant-client` in the lockfile must track the 1.19 server and chart.
   `make pull-chart` pulls latest unpinned — a drift risk if re-run without
   a `--version` pin; the committed tgz is the contract.
+- New runtime deps require a connected-host wheelhouse refresh before an
+  air-gap cut: a `requirements.lock.txt` bump (e.g. `jinja2` +
+  `python-multipart` for ADR-0004) means `make wheelhouse bm25-weights` plus
+  a connected image rebuild/push and a fresh pack. The air-gap images
+  install only from the baked wheelhouse (`--no-index`).
+- The oauth-proxy pin is `sha256:PENDING` (the Red Hat registry needs
+  `skopeo login registry.redhat.io`; record the digest on the connected host,
+  then repack). While PENDING, `pack.sh` skips the member and
+  `AGENT_ROUTE=true` deploy fails closed. A tag bump for `ose-oauth-proxy`
+  must change all three sites: `images.txt`, `deploy.sh`, `load.sh`.
+- `METRICS_ENABLED=true` additionally renders/applies
+  `deploy/kustomize/servicemonitor` so the OpenShift UWM stack scrapes
+  `/metrics` (prerequisite and sizing in `docs/install_and_ops.md`).
 - The `oc-mirror` config still uses tag form and is otherwise unreferenced
   (optional path) — reconcile to digests before relying on it.
 
@@ -232,8 +261,9 @@ deploys, GHCR, or PDFs/tokens/hostnames in file). Job meaning stays
 aligned across the two files; only e2e-scale jobs live in
 `.github/workflows/e2e.yml`.
 
-- Markdown-only changes (outside vendored docs) run no GitHub checks;
-  mixed changes run CI + E2E.
+- Markdown-only changes run no GitHub checks (`ci.yml`/`e2e.yml` paths-ignore
+  `**/*.md`); vendored-only bumps (including vendored docs) also run nothing.
+  Mixed changes run CI + E2E.
 - `ci.yml`: hygiene (refuse committed PDFs), pytest (integration
   deselected), sim (docker Qdrant, fail-closed on skips/zero-pass), gate-l1
   with PR delta comment. Least-privilege permissions, timeouts, and
@@ -254,8 +284,9 @@ aligned across the two files; only e2e-scale jobs live in
   jobs are secret-gated and PRs never touch the lab cluster.
 - Pinned third-party versions live in-repo (kubectl + sha256, helm, kind,
   node image); the local-path provisioner manifest is version-pinned in URL
-  only (v0.0.37, no sha256 check) — known supply-chain gap. The opencode reviewer workflow is
-  dispatch-only and GitHub-only.
+  only (v0.0.37, no sha256 check) — known supply-chain gap. The opencode
+  reviewer workflow is GitHub-only: it runs on pull requests plus `/oc`
+  comments, never mirrored to GitLab.
 - `run_local_vllm.sh` resolves (never probes) launch flags from the
   `serve` Budget `LOCAL_RT_8GB` profile: pinned `v0.28.0` image (which
   removed `--task`, hence `--runner pooling --convert embed`), reasoning

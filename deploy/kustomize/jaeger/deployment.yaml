@@ -1,9 +1,9 @@
 # Jaeger v2 all-in-one. Container runs as USER 10001 (upstream default);
 # fsGroup makes the RWO block volume group-writable for badger under the
 # restricted-v2 SCC (same mechanism the vendored Qdrant chart uses).
-# Storage config is baked (badger) — this deployment is prod-shaped; CI/lab
-# rehearsal uses the shrunk PVC knob via QDRANT-style env (tracing rehearsal
-# is optional and off by default).
+# Storage config is baked (badger) — no size knob. Tracing is on by default:
+# an unset OTEL_EXPORTER_OTLP_ENDPOINT resolves to this in-cluster Jaeger;
+# the `off` sentinel disables tracing and skips this dir.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
