@@ -550,6 +550,12 @@ This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-r
 
 ### 4.2 Transfer & Automated Bootstrap
 
+Before production transfer, complete [the Windows CRC release gate](crc-release-verification.md)
+and [verification record](crc-release-record.md) against the published-main
+bundle. Missing or failed checks block transfer. Send the identical tested
+tarball; do not rebuild or repack after verification. The steps below are also
+used for the fresh local CRC bootstrap rehearsal.
+
 Transfer the tarball and checksum file via approved sneakernet media to the air-gapped bastion host:
 
 ```bash
@@ -673,12 +679,19 @@ make airgap-deploy
 ```
 
 #### OpenShift Security Context Constraints (SCC) Note
+
 The production and CI OpenShift values explicitly remove the chart's fixed UID,
 GID and fsGroup defaults. `restricted-v2` assigns the namespace identity and
-volume group. Jaeger also leaves IDs to admission. Do not grant `anyuid` or
-substitute IDs from a different project. Verify the admitted SCC and IDs on the
-actual pods, then prove data, snapshot, ingest-work and trace volume writes.
-Application images make only their cache and work directories group-0 writable.
+volume group. Jaeger also leaves IDs to admission. Application images make
+only their cache and work directories group-0 writable.
+
+Require actual `restricted-v2` admission and successful data, snapshot,
+ingest-work and trace volume writes under
+[the CRC procedure](crc-release-verification.md#5-release-prerequisites-and-local-sizing).
+An admission or storage failure blocks promotion and requires a fix in the
+owning production configuration followed by a new bundle and verification.
+Do not grant `anyuid`, substitute another project's IDs, or hide security
+changes in `QDRANT_EXTRA_VALUES`.
 
 #### Qdrant Inter-Node Gossip (p2p TLS) Note
 In `overlays/openshift/values.yaml`, `config.cluster.p2p.enable_tls: false` is set because cluster gossip is plaintext on the CNI; we do not mount `./tls/cert.pem` (avoiding crashloops on startup).
@@ -759,7 +772,8 @@ OAuth-protected; enable it with `AGENT_ROUTE=true`:
    access. Future pin updates require a dedicated pin PR and a new main bundle:
    ```bash
    skopeo login registry.redhat.io
-   skopeo inspect --no-tags docker://registry.redhat.io/openshift4/ose-oauth-proxy:v4.14 | jq -r .Digest
+   OAUTH_IMAGE="$(awk '$1 ~ /^registry.redhat.io\/openshift4\/ose-oauth-proxy:/ {print $1 "@" $2}' images.txt)"
+   skopeo inspect --no-tags "docker://$OAUTH_IMAGE" | jq -r .Digest
    # Package only a green published-main SHA, following section 4.1.
    ```
    While the pin is `sha256:PENDING`, `pack.sh` skips the sidecar and
@@ -846,6 +860,11 @@ QUERY="IEA500I operator message" make airgap-smoke
 ### 4.7 Local Cluster Testing Standard (Kind + Local Registry)
 
 To test the deployment scripts and Kubernetes manifests locally without access to an OpenShift cluster, the project standardizes on **Kind** (Kubernetes-in-Docker) paired with a local registry container on port 5000.
+
+Kind remains the fast development rehearsal. Production release transfer
+requires [Windows CRC verification](crc-release-verification.md), including
+real OpenShift SCC, OAuth, Route, TLS, and isolation checks. Preserve Kind
+volumes and tested backups; stop its nodes while CRC runs.
 
 > [!NOTE]
 > Local cluster testing exercises the identical packaging scripts, container archives, Helm chart, and Kustomize overlays as production, but with adapted sizing and security contexts (1-replica Kind + mock/local vLLM rather than 3-replica OpenShift `restricted-v2`).
@@ -1198,8 +1217,8 @@ Citation validation runs on the accumulated text exactly as in JSON mode: the ci
 | **Qdrant Unready** | `/healthz` returns `503 qdrant_unready` | Check Qdrant pod logs (`oc logs qdrant-0`); check block PVC mount. |
 | **NFS Storage Refusal** | `make airgap-deploy` fails validation | Set `STORAGE_CLASS` to an RWO block driver (Ceph RBD / SAN / EBS). |
 | **Hash Mode in Prod** | Scripts fail closed with `EMBED_MODE=hash forbidden` | Remove `EMBED_MODE` from production environment; provide valid vLLM endpoint. |
-| **Registry Certificate Error** | `skopeo copy` fails with `x509: certificate signed by unknown authority` | Set `SKOPEO_ARGS=--dest-tls-verify=false` or `INSECURE_REGISTRY=true` in `airgap.env`. |
-| **OpenShift SCC Rejection** | Pod `qdrant-0` fails with `unable to validate against any security context constraint` | Grant `anyuid` SCC (`oc adm policy add-scc-to-user anyuid -z qdrant -n <ns>`) or supply `QDRANT_EXTRA_VALUES` to clear static `runAsUser`. |
+| **Registry Certificate Error** | `skopeo copy` fails with `x509: certificate signed by unknown authority` | Install the registry CA in the loader's trust store and configure node trust separately. Verify the certificate hostname; do not disable TLS verification for CRC release or production acceptance. The Kind HTTP registry is a development-only exception. |
+| **OpenShift SCC Rejection** | Pod `qdrant-0` fails with `unable to validate against any security context constraint` | Block promotion, capture admission evidence, and fix project-range compatibility in the owning production configuration. Verify PVC writes under `restricted-v2`; never grant `anyuid`. See [CRC verification](crc-release-verification.md). |
 | **PVC Multi-Attach Error** | `job/ingest` fails with `Multi-Attach error for volume` on corpus PVC | Ensure any previous writer pod has released the PVC, or use a ReadOnlyMany volume. |
 | **Qdrant P2P CrashLoop** | Pod `qdrant-0` fails with `No such file or directory` looking for `cert.pem` | Ensure `config.cluster.p2p.enable_tls: false` in `values.yaml` (gossip is plaintext on CNI without `./tls/cert.pem`). |
 | **K8s Manifest Integer/Boolean Error** | `Invalid value: "string", expected integer/boolean` | Ensure numeric/boolean env vars (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`) are explicitly quoted in rendered manifests. |

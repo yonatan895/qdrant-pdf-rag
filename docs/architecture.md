@@ -101,6 +101,7 @@ The 5-stage pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airg
 1. **Production (Air-Gapped OpenShift):** Full 3-replica Qdrant cluster, internal enterprise registry, `restricted-v2` SCC, cluster vLLM endpoints, sneakernet tarball verification.
 2. **Local Cluster Testing (Kind + Local Registry):** Local single-node Kind cluster using a local container registry (`localhost:5000` / `airgap-registry:5000`) and 1-replica overrides (`QDRANT_EXTRA_VALUES`). Runs the exact same packaging scripts, image archives, Helm chart, and Kustomize overlays, with adapted local sizing and SCC.
 3. **Continuous Integration (CI):** Mandatory `make airgap-dryrun` on every PR validating manifest rendering, variable quoting, and fail-closed placeholder rules without a cluster; `airgap-rehearsal` executes the end-to-end pipeline on `main`.
+4. **Release verification (Windows OpenShift Local / CRC):** Published-main bundles must pass [the manual CRC gate](crc-release-verification.md) before production transfer. WSL retains the authenticated model gateway and GPU servers; CRC exercises the production overlays, real SCC admission, OAuth/Route, persistence, and runtime isolation. Transfer the identical tested bundle. Production version, identity, storage, and multi-node acceptance remain separate.
 
 This architectural standard ensures local cluster testing exercises the real production packaging and deployment artifacts, avoiding custom or divergent test manifests.
 
