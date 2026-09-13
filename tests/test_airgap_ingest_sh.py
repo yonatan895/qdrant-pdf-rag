@@ -64,6 +64,8 @@ spec:
               value: __DENSE_DIM__
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
+            - name: IMAGE_SHA
+              value: __IMAGE_SHA__
             - name: OTEL_SERVICE_NAME
               value: mainframe-rag-ingest
             - name: OTEL_DEPLOYMENT_ENVIRONMENT
@@ -141,6 +143,15 @@ def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     assert "claimName: my-manuals-pvc" in rendered
     assert 'value: "4"' in rendered or "value: 4" in rendered
     assert "value: http://vllm:8000/v1" in rendered
+
+
+def test_ingest_identity_version_always_rendered(ingest_tree):
+    r = _run_ingest(ingest_tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    # service.version is the packed SHA: always set, ingest.sh fail-closes
+    # on empty/HEAD before rendering (issue #315).
+    assert re.search(r"IMAGE_SHA\n\s+value: " + IMAGE_SHA, rendered, re.MULTILINE)
 
 
 def test_ingest_dryrun_custom_workers(ingest_tree):
@@ -304,6 +315,9 @@ def test_ingest_gateway_overlay_block_matches_stub_contract():
     assert "# gateway-api-keys-begin" in real
     assert "# gateway-api-keys-end" in real
     assert real.index("# gateway-api-keys-begin") < real.index("# gateway-api-keys-end")
+    # Deploy identity (issue #315): ingest spans carry service.version.
+    assert "- name: IMAGE_SHA" in real
+    assert "value: __IMAGE_SHA__" in real
     for env_name, data_key in (
         ("EMBED_API_KEY", "embed-api-key"),
         ("CONTEXT_LLM_API_KEY", "context-llm-api-key"),

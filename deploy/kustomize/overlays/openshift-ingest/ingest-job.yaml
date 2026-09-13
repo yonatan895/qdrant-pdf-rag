@@ -44,8 +44,11 @@ spec:
             # OTEL_EXPORTER_OTLP_ENDPOINT in airgap.env (unset resolves to the
             # in-cluster Jaeger; the `off` sentinel renders empty).
             # Parent-process spans only; parse workers stay untraced.
-            # NOTE: no IMAGE_SHA here yet, so ingest spans carry no
-            # service.version (issue #315).
+            # Deploy identity for trace resource attributes (issue #315):
+            # service.version is the packed IMAGE_SHA (ingest.sh fail-closes
+            # on empty/HEAD before rendering, same as deploy.sh).
+            - name: IMAGE_SHA
+              value: __IMAGE_SHA__
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
             - name: OTEL_SERVICE_NAME
