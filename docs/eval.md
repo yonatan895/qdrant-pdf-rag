@@ -56,6 +56,9 @@ decision has since been measured OFF on real-corpus record-replay pools
 
 Runs real `retrieve_search(limit=8)` — the 8 gives recall@5 headroom —
 over a live collection and scores doc-level against the golden entries.
+Retrieval runs with `comparative_split_enabled=True` by default, activating
+multi-path retrieval for comparative queries with `max_split_hits` fusion,
+while `diagnostic_dualpath_enabled` remains default-off.
 
 - **Relevance:** doc id in `expected_doc_ids`, plus the heading substring
   (case-folded) when the entry sets one. Answer entries must set expected
@@ -192,6 +195,11 @@ verdict.
   per-metric means are compared against `evals/harness-l4-thresholds.json`
   with `_meta.tolerance`: at/better than the reference passes, inside the
   band holds and writes a human-review queue (`--queue`), outside fails.
+  Gating strictly enforces 9 metrics defined in `GATED_METRICS`: `grounded_rate`,
+  `citation_precision`, `citation_recall`, `truncation_rate`, `syntax_compliance`,
+  `faithfulness.entailed`, `faithfulness.contradiction`, `relevance.relevant`,
+  and `relevance.irrelevant`. Note that `answer_completeness` is excluded
+  from gating (it is reported only as observational trend data in run summaries).
   The default tolerance is 0.15 — ~2.3σ of the 3-repeat mean at N=24
   (measured: a 0.05 band flagged run-to-run sampling noise as rate
   regressions); raise N to tighten it, and treat sub-band movement as
@@ -227,9 +235,9 @@ revisited first; default 24 queries, `--all` for full runs), then judge:
   expected docs were in the fetched pool, the share whose validated
   citations cover every expected doc (doc-level recall 1.0). A refusal or
   partial answer over retrieved gold is incomplete; rows without the pool
-  join stay out of the denominator. This is the gate for the reader-side
-  refusal/partial-answer track, reported by the answer eval and both
-  harness summaries.
+  join stay out of the denominator. Reported by the answer eval and both
+  harness summaries for observational tracking of the reader-side
+  refusal/partial-answer track (excluded from `harness_l4` threshold gating).
 - Non-200 responses record the error code only (no bodies); transport
   exceptions record errors. Exit 0 iff zero failures and zero errors.
   Deliberate non-features: no retries, no `finish_reason` checks, and the

@@ -285,15 +285,15 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   never to `m=0` (which drops existing HNSW). Default **off**, load-bearing
   on single-node: a measured 371-doc/246k-point bulk load ran 3× slower
   with unindexed segments. Do not enable for initial loads on small nodes.
-- Point payload (13 fields + optional `context`): `vendor, product, version,
+- Point payload (14 fields + optional `context`): `vendor, product, version,
   doc_id, title, heading_path, page_label, page_start, chunk_type,
-  message_ids, members, sha256, text`; `context` only when present — never
+  message_ids, members, sha256, rules_v, text`; `context` only when present — never
   indexed, observability only. Point id = `chunk_id` (UUID5); vectors
   `{dense, bm25}`; upserts loop `batch_size` (default 128, bounds 16–256)
   with `wait=True`; idempotent by UUID5, no app-level retry — client
   timeouts bound the calls.
 - Downstream consumers: `doc_id/product/version/vendor/chunk_type/
-  message_ids/members/sha256/page_start` → filtered prefetch + keyword
+  message_ids/members/sha256/rules_v/page_start` → filtered prefetch + keyword
   indexes (`retrieve/`); `title/heading_path/page_label/text` →
   citations/prompt (`agent/`); `context` → observability only.
 - `doc_sha256` reads one payload (scroll limit 1, filter `doc_id`) for the
@@ -310,10 +310,16 @@ embed (hash embedding is GIL-bound — a thread pool would serialize it), so
 parsing runs in a `spawn` process pool while check-delete-upsert runs in a
 thread pool.
 
-- **Two-level skip** (independent — understand both): parent
-  `inventory.should_skip(path, sha)` (zero-parse) **and** upsert-stream
-  `doc_sha256(doc_id) == sha` (zero-write). A sha mismatch deletes by doc
-  and re-upserts.
+- **Two-level skip with rules versioning** (independent — understand both): parent
+  `inventory.should_skip(rec, sha, rules_version=extraction_rules_version())` (zero-parse)
+  **and** upsert-stream `stored_doc_state(client, doc_id) == (sha, rules_v)` (zero-write).
+  Extraction rules version (`rules_v`) is a 16-hex SHA-256 over the 5 payload-producing
+  modules (`regexes.py`, `ingest/ibm_pdf.py`, `ingest/chrome.py`, `ingest/chunk.py`,
+  `ingest/classify.py`). If either the PDF SHA or `rules_v` mismatches, skip is refused:
+  the document is re-parsed and existing points in Qdrant are deleted and re-upserted.
+  Additionally, `run_ingest` checks `stored_rules_version(client, settings)` at startup;
+  if a non-empty collection has mismatched `rules_v`, it fails closed unless `--reingest`
+  is passed.
 - **Stale-inventory hazard:** the inventory skip never consults Qdrant.
   Re-running with an old `inventory.jsonl` against an empty or recreated
   collection silently does nothing. Delete or re-point `--progress` when the
@@ -334,12 +340,12 @@ thread pool.
 - `_DocLocks`: per-`doc_id` threading locks (retained, bounded by unique
   doc ids) serialize colliding form-number check-delete-upsert sequences —
   two files may legitimately share one `doc_id`.
-- `_parse_one` traps everything into an error inventory record (message
-  capped at 500 chars, exception class name, doc id or filename stem, zero
-  pages/chunks) plus a dummy parsed doc; the future-exception path uses an
-  empty sha. One bad PDF never kills the run. Records must stay picklable
-  across spawn IPC (no exception objects — `httpx2.HTTPStatusError` is
-  unpicklable).
+- `_parse_one` traps everything and returns a plain `InventoryRecord(status="error")`
+  (message capped at 500 chars, exception class name in `error_type`, doc id or filename
+  stem, zero pages/chunks) plus a dummy parsed doc; the future-exception path uses an
+  empty sha. One bad PDF never kills the run. Records must stay picklable across spawn
+  IPC (no exception objects — unpicklable exceptions like `httpx2.HTTPStatusError` from
+  contextual LLM calls would crash `ProcessPoolExecutor` across process boundaries).
 - Result accounting: `skipped` + `upserted` both count as files-ok; only
   `upserted` adds upserted chunks. Bulk mode applies to real runs only,
   restored in a `finally`. The summary logs files-ok/failed/chunks/parse and

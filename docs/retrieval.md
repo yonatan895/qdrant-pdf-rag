@@ -31,10 +31,11 @@ Stage order:
 5. `embedder.dense_query` + `embedder.sparse` embed each leg (one embed per
    path, sequential for determinism).
 6. `_build_prefetch_requests` issues one dense + one BM25 prefetch per leg
-   in batched `query_batch_points` calls (falling back to sequential
-   `query_points` when the server lacks batching). Every leg shares the
-   ORIGINAL filter: splitting changes ranking text only, never the
-   constraint allowlist.
+   in batched `query_batch_points` calls (taking `filter=flt` on each
+   `QueryRequest`, falling back to sequential `query_points` taking
+   `query_filter=flt` per Qdrant Client 1.19+ conventions when the server
+   lacks batching). Every leg shares the ORIGINAL filter: splitting changes
+   ranking text only, never the constraint allowlist.
 7. `rrf_fuse` merges the legs per path (§4); paths merge when split —
    comparative peers by best evidence (`max_split_hits`: each doc's maximum
    `1/(k+rank+1)` across paths, so shared-context noise ranking mid in both
@@ -84,7 +85,10 @@ so lexical and semantic candidates are scoped identically before any fusion.
   unfiltered at the same prefetch depth and fuses that pool. Non-empty
   filtered results never pay the second call. The retry lands on the trace
   as boolean `rag.filter_fallback` (bounded, never free text).
-- The legs are named `dense` and `bm25`, dense first.
+- The legs are named `dense` and `bm25`, dense first. Batched calls pass
+  `requests=[QueryRequest(filter=flt, ...)]` into `query_batch_points`,
+  while the sequential fallback calls `query_points(..., query_filter=flt)`
+  per Qdrant Client 1.19+ conventions (`query.py:544`).
 
 ## 3. Identifiers and query kind
 
@@ -264,10 +268,11 @@ heading, and template label stay whole, the body tail is cut): oversize
 atomic chunks would otherwise 400 the scorer's 2048-token window and fail
 the whole search.
 
-The memoized reranker is keyed by `id(settings)` — a memory address, so a
-mutated `Settings` object never rebuilds it and GC address reuse can alias
-it. Treat settings as immutable once serving starts. (Tracked as a code
-issue; this section documents actual behavior.)
+The memoized reranker is keyed by `_reranker_config_key(settings)` (issue #156) —
+a tuple of 8 configuration values (`embed_mode`, `rerank_base_url`, `embed_base_url`,
+`rerank_model`, `rerank_batch_size`, `rerank_timeout_s`, `allow_hash_mode`,
+`http_connect_retries`) in `retrieve/query.py` consumed by `build_reranker()`
+and `HttpReranker`, resolving the GC address-reuse limitation of `id(settings)`.
 
 ## 7. Acronym rewrite
 

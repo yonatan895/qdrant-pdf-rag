@@ -31,7 +31,7 @@ Mainframe RAG is a citation-first retrieval-augmented generation engine designed
 
 ### Key Operational Rules
 - **Air-Gap Image Factory:** The air-gap environment never builds images. Connected `main` builds container images with baked wheelhouses and BM25 weights, tagging them with the full 40-character Git SHA.
-- **Data Storage:** Qdrant persistent volumes **must** use RWO block storage (NFS and object storage are refused).
+- **Data Storage:** Qdrant persistent volumes **must** use RWO block storage (NFS-looking `STORAGE_CLASS` values are refused; the snapshot storage class falls back to it and is not checked separately).
 - **Inference Separation:** Inference (embeddings and reasoning models) is provided by the cluster's internal vLLM endpoints (`VLLM_BASE_URL`).
 
 ---
@@ -240,6 +240,8 @@ When running local tooling (`make ask`, `make query-demo`, `test_local_e2e_vllm.
 | **`RERANK_BASE_URL`** | — | vLLM/TEI scoring endpoint (required when `RERANK_ENABLED=true`) |
 | **`RERANK_MODEL`** | `BAAI/bge-reranker-v2-m3` | Must match the served reranker model |
 | **`LLM_STREAM`** | `true` via `make run-agent` | `false` (production default; enable only where TTFT metrics are wanted) |
+| **`UI_ENABLED`** | `"true"` via `make local-stack`; unset via `make run-agent` (fail-closed 404) | `"true"` from the prod overlay (console served; only the external Route is OAuth-protected) |
+| **`CHAT_CONDENSE_ENABLED`** | `false` (default) | `false` (enabling is a dedicated default-flip PR; `make eval-chat` is the evidence) |
 
 #### REPL Controls & Options
 * **Interactive Mode Switch (`:mode`)**: Type `:mode` inside the REPL to toggle dynamically between `search` (pure vector/BM25 retrieval preview) and `answer` (retrieval + LLM reasoning generation).
@@ -316,7 +318,9 @@ CORPUS_DIR=output/demo-pdfs make local-stack     # also ingest through the gatew
 LOCAL_STACK_DRYRUN=1 make local-stack            # ordered plan only; no docker/network
 ```
 
-Tracing is part of the stack, not a flag: the agent and (when `CORPUS_DIR` is set) the ingest run export OTLP to Jaeger, and a `v1.search` span must land before the stack reports up. Jaeger reuses an instance already answering on the UI port (an operator-managed one is left alone) or starts the digest-pinned owner (`scripts/run_local_jaeger.sh`); the local LiteLLM stand-in also exports its spans there so the gateway hop appears in the waterfall. The browser UI is at `http://127.0.0.1:16686`.
+Tracing is part of the stack, not a flag: the agent and (when `CORPUS_DIR` is set) the ingest run export OTLP to Jaeger, and a `v1.search` span must land before the stack reports up. Jaeger reuses an instance already answering on the UI port (an operator-managed one is left alone) or starts the digest-pinned owner (`scripts/run_local_jaeger.sh`); the local LiteLLM stand-in also exports its spans there so the gateway hop appears in the waterfall. The Jaeger **browser UI** is at `http://127.0.0.1:16686`.
+
+The operator console (ADR-0004) is part of the stack by default: the agent starts with `UI_ENABLED=true`, the up sequence smoke-checks `GET /ui` (HTTP 200), and the banner prints the console URL (`http://127.0.0.1:8080/ui`). Set `UI_ENABLED=false` to exercise the fail-closed 404 route set; `make run-agent` alone honors `UI_ENABLED` without a default.
 
 On exit (Ctrl-C) the agent, the gateway, and an owned Jaeger stop; Qdrant stays for `make sim-clean`. Ports: agent 8080 (`LOCAL_AGENT_PORT`), gateway 4000 (`GATEWAY_PORT`), Jaeger UI 16686 / OTLP 4318 (`JAEGER_PORT`, `JAEGER_OTLP_PORT`), Qdrant `QDRANT_URL` (default `http://127.0.0.1:6333`). Ephemeral keys are written mode 600 to a temp env file (`GATEWAY_ENV_FILE`, default `/tmp/local-stack-gateway-<port>.env`) — never inside the repo, never committed.
 
@@ -379,6 +383,8 @@ curl -N -X POST "http://localhost:8080/v1/answer?stream=true" \
 ```
 The SSE response yields `event: token` deltas as the reasoning model generates, then exactly one terminal `event: final` carrying the full verified answer, citations, optional script, retrieval metadata, `ttft_ms`, and token usage. A mid-stream failure emits `event: error` and ends **without** a `final` event — treat stream-end-without-final as a failed request. `LLM_STREAM` (server-side reasoning SSE) defaults to `false` in production config; `make run-agent` enables it for TTFT measurement (also consumed by the L3 harness).
 
+This component runner honors `UI_ENABLED`: `UI_ENABLED=true make run-agent` serves the operator console at `http://localhost:8080/ui` (unset keeps `/ui` at the fail-closed 404). `make local-stack` sets it true by default; the multi-turn chat and console contracts live in `docs/agent.md` §1/§3.
+
 ---
 
 ### 3.9 Exporting Standalone Model Weights for Offline Bastions
@@ -438,8 +444,9 @@ QDRANT_COLLECTION=mainframe_manuals \
 #### 2. Incremental Ingestion: Adding New PDFs Without Re-ingesting
 Mainframe RAG supports native **idempotent incremental ingestion** via the inventory tracking file (`--progress inventory.jsonl`):
 
-* **SHA-256 Change Detection**: On every run, `run_ingest` computes the SHA-256 digest of each discovered PDF.
-* **Instant Skipping**: Any PDF whose SHA-256 digest is already marked as `upserted` in `inventory.jsonl` is skipped immediately (zero PDF parsing, zero embedding overhead).
+* **SHA-256 + rules-version detection**: On every run, `run_ingest` computes the SHA-256 digest of each discovered PDF and reads the stored `(sha256, rules_v)` pair via `stored_doc_state`.
+* **Instant skipping**: A PDF already `upserted` with the same SHA-256 **and** the same extraction rules version in `inventory.jsonl` is skipped immediately (zero PDF parsing, zero embedding overhead).
+* **Extraction-rules changes**: a stored point whose `rules_v` differs is deleted and re-ingested; a non-empty collection written by a different rules version fails closed unless `--reingest` is passed (details in `docs/ingest.md` §9).
 * **Deterministic UUID5 Point IDs**: New chunks are assigned deterministic UUID5 keys and inserted directly into the existing Qdrant collection without deleting or modifying previously indexed vectors.
 * **Corrupted / Partial File Safety**: If ingestion was interrupted midway or a PDF failed earlier with an error, re-running `run_ingest` will pick up right where it left off, only processing un-ingested files.
 
@@ -539,6 +546,7 @@ This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-r
 4. Vendored Helm chart (`charts/qdrant-1.19.0.tgz`).
 5. Self-contained extraction bootstrap script (`bootstrap.sh`).
 6. Manifest (`MANIFEST.txt`), Packing Record (`PACKING_RECORD.txt`), digest enumeration (`sbom.json`), offline signature (`SHA256SUMS.sig` + `sneakernet-signing.pub`), and member `SHA256SUMS`.
+7. The console oauth-proxy sidecar image (`oauth-proxy-image.tar`) — included only once its digest is recorded in `images.txt` (see §4.4.2); CI cannot bundle it while the pin is `sha256:PENDING`.
 
 ### 4.2 Transfer & Automated Bootstrap
 
@@ -557,9 +565,9 @@ cd qdrant-pdf-rag
 ```
 
 The `bootstrap.sh` script automatically:
-- Verifies all member checksums in `SHA256SUMS`.
+- Verifies the bundle signature (`SNEAKERNET_TRUSTED_PUB` when provided) and then all member checksums in `SHA256SUMS`.
 - Clones the Git repository from `repo.bundle`.
-- Populates `./dist` with image archives and manifests.
+- Populates `./dist` with image archives and manifests. **Known gap (#312):** `oauth-proxy-image.tar` is not copied by the documented flow yet — copy it into `dist/` manually before `airgap-load` when the bundle carries it.
 - Initializes `airgap.env` from `airgap.env.example` if not already present.
 
 ### 4.3 Configure Environment & Pre-Flight Validation
@@ -597,6 +605,12 @@ LLM_MODEL_REASONING=ibm-granite/granite-20b-code-instruct
 
 # Optional pull secret name (if registry requires credentials)
 PULL_SECRET=internal-registry-pull-secret
+
+# Optional: external OAuth-proxied console Route (ADR-0004). Requires the
+# oauth-proxy digest recorded in images.txt, a repack, and Secret
+# rag-agent-oauth-cookie (see §4.4.2). Without it the console is still served
+# in-cluster at /ui on the ClusterIP 8080 port.
+#AGENT_ROUTE=true
 ```
 
 #### Production model trio (reasoning / embed / rerank)
@@ -623,7 +637,7 @@ kubectl -n mainframe-rag create secret generic gateway-api-keys \
 
 #### Pre-Flight Validation (`make airgap-validate`)
 
-Before modifying any cluster state, run the pre-flight validation check to verify tools, required variables, storage class compliance (refusing NFS), and OpenShift SCC permissions:
+Before modifying any cluster state, run the pre-flight validation check to verify tools, required variables, storage class compliance (refusing NFS), and required keys — it prints OpenShift SCC guidance but does not verify SCC permissions:
 
 ```bash
 make airgap-validate
@@ -711,7 +725,8 @@ when it is tracing-enabled — nothing from this repo configures or deploys
 their monitoring.
 
 The sneakernet bundle always carries the Jaeger image (`images.txt` is a
-pack-wide contract — every pinned image is mirrored on every pack), so the
+pack-wide contract — every pin with a recorded digest is mirrored on every
+pack; the oauth-proxy pin is skipped while `sha256:PENDING`), so the
 default-on path works in a disconnected install. The endpoint may be given
 with or without the `/v1/traces` path — the agent accepts both.
 `make airgap-smoke` proves a `v1.search` span landed before reporting
@@ -721,13 +736,14 @@ change that only when a custom collector exposes a Jaeger-compatible query
 API.
 
 Every exported span carries deploy identity as resource attributes:
-`service.version` is the packed `IMAGE_SHA` automatically, and
+`service.version` is the packed `IMAGE_SHA` for the agent Deployment, and
 `deployment.environment` comes from the optional
 `OTEL_DEPLOYMENT_ENVIRONMENT` in `airgap.env` (e.g. `prod`; omitted when
 unset) — so traces from lab and prod sharing one backend stay
-unambiguous. The agent also honors the standard `OTEL_RESOURCE_ATTRIBUTES`
-mapping underneath these explicit keys, and joins an upstream W3C
-`traceparent` when the caller sends one.
+unambiguous. The ingest Job does not carry `IMAGE_SHA` yet, so its spans have
+no `service.version` (issue #315). The agent also honors the standard
+`OTEL_RESOURCE_ATTRIBUTES` mapping underneath these explicit keys, and joins
+an upstream W3C `traceparent` when the caller sends one.
 
 View traces (port-forward only — Jaeger has no public Route, like Qdrant):
 
@@ -740,6 +756,47 @@ oc -n mainframe-rag port-forward svc/jaeger 16686:16686
 
 Backend posture (single-replica debug-grade, sample-all retention math,
 exemplar deferral) is recorded in `docs/adr/0002-otel-backend-posture.md`.
+
+### 4.4.2 Operator Console Route (optional, ADR-0004)
+
+The agent serves the operator console at `/ui`, and the production overlay sets
+`UI_ENABLED=true` — so the console is reachable in-cluster at
+`http://rag-agent:8080/ui` even without a Route. Only the **external** Route is
+OAuth-protected; enable it with `AGENT_ROUTE=true`:
+
+1. Record the oauth-proxy digest on a connected host (this one needs a Red Hat
+   registry login) and repack:
+   ```bash
+   skopeo login registry.redhat.io
+   skopeo inspect --no-tags docker://registry.redhat.io/openshift4/ose-oauth-proxy:v4.14 | jq -r .Digest
+   # paste the digest into images.txt, then:
+   make airgap-pack
+   ```
+   While the pin is `sha256:PENDING`, `pack.sh` skips the sidecar and
+   `AGENT_ROUTE=true` deploy fails closed.
+2. Create the cookie-encryption Secret (operator-owned; deploy fails closed
+   without it):
+   ```bash
+   kubectl -n mainframe-rag create secret generic rag-agent-oauth-cookie \
+     --from-literal=cookie-secret="$(openssl rand -base64 32 | head -c 32)"
+   ```
+3. Set `AGENT_ROUTE=true` in `airgap.env` and deploy. `deploy.sh` layers
+   `deploy/kustomize/overlays/openshift-ui` and creates a `reencrypt` Route
+   when one does not already exist (an existing Route is left as-is), inlining
+   the namespace `openshift-service-ca.crt` bundle as the
+   `destinationCACertificate`.
+4. Reach it: `oc -n mainframe-rag get route rag-agent` → unauthenticated
+   browser requests redirect to OpenShift OAuth; `/healthz` bypasses OAuth for
+   probes. In-cluster tools keep using the ClusterIP 8080 port (unauthenticated
+   by design, no Route).
+
+`make airgap-validate` checks none of these prerequisites — a missing digest or
+Secret fails at deploy time.
+
+> **Connected-host follow-up before an air-gap cut:** a `requirements.lock.txt`
+> bump (e.g. the `jinja2` + `python-multipart` pins the console needs) requires
+> `make wheelhouse bm25-weights` plus a connected image rebuild/push and a
+> fresh pack — air-gap images install only from the baked wheelhouse.
 
 ### 4.5 Corpus Ingestion
 
@@ -758,8 +815,9 @@ kubectl -n mainframe-rag exec deploy/rag-agent -- \
 
 The probe exits nonzero when a required leg fails (a 401 names the missing
 `*_API_KEY`; a dim mismatch fails — ingest would refuse it too) and prints
-the recommended `RERANK_ENDPOINT_ORDER` when reranking is enabled
-(`score_first` for raw vLLM, `rerank_first` for gateways). Set the
+the recommended `RERANK_ENDPOINT_ORDER` (`score_first` whenever the score leg
+answers — a gateway exposing both legs still gets `score_first`;
+`rerank_first` only when the score leg is unavailable). Set the
 recommendation in `airgap.env` and re-run `make airgap-deploy` before
 ingesting. A missing `/tokenize` is informational only — the agent pins
 its in-process estimator (expected behind LiteLLM).
@@ -1064,6 +1122,23 @@ curl -X POST http://rag-agent:8080/v1/answer \
   }'
 ```
 
+#### `POST /v1/chat` and `POST /v1/chat/completions`
+Multi-turn chat over the same shared core as `/v1/answer`; the client owns the
+history. Request/response fields and the OpenAI-compatible SSE contract live in
+`agent.md` §1/§3.
+
+```bash
+curl -X POST http://rag-agent:8080/v1/chat \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "How do I resolve IEA500I command rejected?"}]}'
+```
+
+#### Operator console (`GET /ui`)
+Server-rendered console (ADR-0004: Jinja2 + HTMX + SSE, browser-only session
+state). `UI_ENABLED` unset/false returns the stable 404 envelope; the
+production overlay sets it true, and external access is the OAuth-proxied
+Route from §4.4.2.
+
 #### Streaming (`?stream=true`)
 Both the query parameter and the body field (`"stream": true`) enable
 server-sent events; the query parameter wins when both are set. Frame
@@ -1091,3 +1166,5 @@ Citation validation runs on the accumulated text exactly as in JSON mode: the ci
 | **Stale airgap.env IMAGE_SHA** | `make airgap-pack` / `-load` fail with `IMAGE_SHA=<sha> is not the checked-out commit` right after checking out a new SHA | `airgap.env` is gitignored local state from a previous rehearsal — its `IMAGE_SHA` no longer matches HEAD. Explicit env beats the file (`IMAGE_SHA=$(git rev-parse HEAD) make airgap-pack`), or update the file. |
 | **Stale dist/ tarballs fill disk** | `pack`/`load` fail with no-space errors after several rehearsals | Every pack leaves a ~1.5 GB `qdrant-pdf-rag-<sha>.tar` in gitignored `dist/`; only the MANIFEST-pinned one is live. Delete superseded tarballs (keep the `.tar.sha256` of the live one) — pack never prunes. |
 | **Kind ErrImagePull on localhost:5000** | mock/corpus-gen pods fail with `dial tcp [::1]:5000: connect: connection refused` | The Kind `containerdConfigPatches` in §4.7 must mirror **both** `localhost:5000` and `airgap-registry:5000` to the registry container — one key per naming family used by the manifests. Recreate the cluster with the documented config (containerd mirrors are set at creation). |
+| **Console Route deploy fail-close** | `make airgap-deploy` dies on the oauth-proxy `sha256:PENDING` pin or a missing `rag-agent-oauth-cookie` Secret | Record the digest in `images.txt` + repack and create the cookie Secret (§4.4.2); or deploy with `AGENT_ROUTE=false` (ClusterIP-only, `/ui` still served in-cluster). |
+| **`/ui` returns 404** | Console request returns the stable `404 not_found` envelope | `UI_ENABLED` is unset/false for the agent process. The prod overlay sets it true; for local runs use `UI_ENABLED=true make run-agent` or `make local-stack`. |

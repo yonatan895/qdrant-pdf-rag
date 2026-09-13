@@ -30,7 +30,7 @@ into the repo); `$SCRATCH_DIR` is scratch space outside the repo
 ## 1. Bring-up order
 
 There are two primary local runtime topologies:
-1. **Standalone Development / GPU Mode** (loopback services for rapid retrieval & prompt iteration): start Qdrant first, then embed, then reasoning. Each step has a health proof — do not proceed past a failed proof.
+1. **Standalone Development / GPU Mode** (loopback services for rapid retrieval & prompt iteration): start Qdrant first, then reasoning, then embed — the Budget profiles declare reasoning-first as the allocation order (a 4k-context server fails KV init against leftovers). Each step has a health proof — do not proceed past a failed proof.
 2. **Standard Local Cluster Mode** (Kind + local registry on port 5000): exercises the production air-gap deployment scripts (`make airgap-pack` -> `load` -> `deploy` -> `ingest` -> `smoke`) with local single-replica sizing overrides. See [docs/install_and_ops.md](install_and_ops.md#47-local-cluster-testing-standard-kind--local-registry) for step-by-step setup.
 
 ### Standalone Bring-Up (GPU / Dev)
@@ -40,14 +40,29 @@ There are two primary local runtime topologies:
 make sim-qdrant
 curl -s -m 5 http://127.0.0.1:6333/collections | head -c 200
 
+# Reasoning server first (docker via Budget launcher, port 8000)
+make local-vllm
+curl -s -m 10 http://127.0.0.1:8000/v1/models | head -c 200
+
 # Embed server (docker via Budget launcher, port 8001)
 make local-vllm-embed
 curl -s -m 10 http://127.0.0.1:8001/v1/models | head -c 200
 
-# Reasoning server (docker via Budget launcher, port 8000)
-make local-vllm
-curl -s -m 10 http://127.0.0.1:8000/v1/models | head -c 200
+# Reranker (only for the full-stack topology; port 8002)
+make local-vllm-rerank
+curl -s -m 10 http://127.0.0.1:8002/v1/models | head -c 200
 ```
+
+### Full local simulation (`make local-stack`)
+
+`make local-stack` is the canonical full-topology entry (pinned Qdrant +
+Jaeger + the real LiteLLM gateway + the agent; `LOCAL_STACK_DRYRUN=1` prints
+the ordered plan only). Prerequisites: Docker, the three backends above (all
+of `:8000`/`:8001`/`:8002` must answer `/v1/models`), and no gateway already
+running — stop a manual one first with `make local-gateway-stop` (local-stack
+starts and owns its own; an existing `local-litellm-gateway` container makes
+it fail closed). The agent runs with `UI_ENABLED=true` and the smoke step
+checks `GET /ui`.
 
 ## 2. Environment block
 
@@ -63,6 +78,10 @@ export DENSE_DIM=1024
 export QDRANT_URL=http://127.0.0.1:6333
 export QDRANT_COLLECTION=mainframe_manuals
 export RERANK_BASE_URL=http://127.0.0.1:8002/v1   # only when a reranker is served
+# Answer-tier / eval-chat also need the reasoning leg (through the gateway
+# when one is running; LLM_API_KEY only when the gateway requires keys):
+export LLM_BASE_URL=http://127.0.0.1:4000/v1
+export LLM_MODEL_REASONING=google/gemma-4-E4B-it-qat-mobile-ct
 ```
 
 Model ids must be fully qualified (`Qwen/Qwen3-Embedding-0.6B`, not
@@ -84,7 +103,7 @@ stops the push, no exceptions. *(Note: Deployment / air-gap / Helm / overlays ch
 3. Fresh-ingest `make eval-paraphrase` — re-ingest the paraphrase corpus into a scratch collection, then evaluate. Green: exit 0 with no regressions vs the mode-keyed paraphrase baseline tolerances (same ratios as the main set — not byte-exact).
 4. `make sim` — integration tier. Green: all pass, **0 skipped** (a skip fails the job; a skip on missing local weights means symlink or rebuild them, never ignore it).
 5. `make eval EMBED_MODE=vllm` (with the §2 block exported) — Green: 0 query failures; numbers at or above the mode-keyed baseline.
-6. Live agent probes — `make run-agent` (or equivalent uvicorn) against the real stack, then the four copy-paste probes below (agent on `:8087` in these examples; `Q` is the query). Green: trap refuses with zero validated citations, legit answers grounded with ≥1 citation, overlong 422s with the fixed envelope. `make local-stack` enables the operator console by default (`UI_ENABLED=true`, console at `/ui`, smoke-checked in the up sequence); `make run-agent` honors `UI_ENABLED` (`UI_ENABLED=true make run-agent`; unset keeps the app fail-closed).
+6. Live agent probes — `make run-agent` (or equivalent uvicorn) against the real stack, then the copy-paste probes below (agent on `:8087` in these examples; `Q` is the query). Green: trap refuses with zero validated citations, legit answers grounded with ≥1 citation, overlong 422s with the fixed envelope. `make local-stack` enables the operator console by default (`UI_ENABLED=true`, console at `/ui`, smoke-checked in the up sequence; the banner prints the URL, and `UI_ENABLED=false make local-stack` exercises the fail-closed route set); `make run-agent` honors `UI_ENABLED` (`UI_ENABLED=true make run-agent`; unset keeps the app fail-closed).
 7. Feature A/B numbers in the PR body — any retrieval/ranking change ships measured deltas (2×2 where applicable: off/on × base/context), per-query attribution for every moved query, must_not hard-zero.
 
 ### Rung 6 probes (exact)
@@ -109,6 +128,13 @@ python3 -c "print('{\"query\":\"' + 'x'*2001 + '\"}')" > "$SCRATCH_DIR/long-quer
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8087/v1/search \
   -H 'Content-Type: application/json' -d @"$SCRATCH_DIR/long-query.json"
 # expect: 422 with {"code":"invalid_request","message":"request body failed validation"}
+
+# e. multi-turn chat + console (when UI_ENABLED / the console is in scope)
+curl -s -X POST http://127.0.0.1:8087/v1/chat -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"What should the LFAREA parameter be set to in IEASYSxx?"}]}'
+# expect: choices[0].message with an answer and ≥1 top-level citation
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8087/ui
+# expect: 200 with UI_ENABLED=true; the 404 envelope when disabled
 ```
 
 ## 4. Qdrant persistence (read before rebooting or juggling GPUs)
@@ -139,7 +165,7 @@ An untested backup is not a backup. Re-snapshot after any ingest that must survi
 
 ## 5. GPU rules (8 GB box)
 
-- Co-residency budget is tight by design (reasoning 0.64 + embed 0.33). Never launch a third server alongside both: stop `:8000` before serving anything else (e.g. the reranker on `:8002`), restore afterwards with `make local-vllm`, verify `/v1/models`.
+- Co-residency budget is tight by design (reasoning 0.64 + embed 0.33). Never launch a third server alongside the `LOCAL_RT_8GB` pair: stop `:8000` before serving anything else (e.g. the reranker on `:8002`) — or run the `TRIPLE_8GB` pack (0.5B reasoning stand-in + embed + rerank) when the third leg is required. Restore afterwards with `make local-vllm`, verify `/v1/models`.
 - Reranker recipe (vLLM pooling, offline weights): mirror the embed container flags with `--runner pooling` and **no** `--convert` (v0.28 auto-detects sequence-classification); serve `/v1/score`; smoke-test discrimination (relevant vs irrelevant score gap, correct direction) before any A/B.
 - Crashed vLLM inits can leak VRAM across container restarts; repeated launch failures with shrinking headroom mean stop retrying — a host reboot is the reset. Do §4 first.
 - `nvidia-smi` is the source of truth for free VRAM, not arithmetic.
@@ -166,6 +192,19 @@ CPU/RAM/disk (see `docs/deploy.md` §5), where prod has ≥10× local.
 Launch order on a cold card: reasoning → embed → rerank (a 4k-context
 server fails KV init against leftovers; profiles declare this order).
 
+`MODEL` is **not** budget-resolved: the launcher defaults the reasoning role
+to Gemma-4, so `BUDGET_PROFILE=TRIPLE_8GB` alone runs Gemma at the 0.5B
+pack's 0.20 share and vLLM init fails. Pass it per recipe —
+`BUDGET_PROFILE=TRIPLE_8GB MODEL=Qwen/Qwen2.5-0.5B-Instruct make local-vllm`
+— and never export `MODEL` globally (`local-vllm-embed`/`local-vllm-rerank`
+default their own models and an exported value would hijack both).
+
+`make local-stack`'s gateway routes by model id and defaults the reasoning
+name to Gemma-4; when `:8000` serves anything else, pass
+`GATEWAY_REASONING_MODEL=Qwen/Qwen2.5-0.5B-Instruct make local-stack` (the
+env is inherited by `run_local_gateway.sh`) or the probe 404s on the
+reasoning leg.
+
 ### 5.2 Baseline → environment map (never cross the streams)
 
 One gate, one file, one environment (`docs/testing.md` harness invariants;
@@ -179,6 +218,7 @@ re-capture in the gate's own env instead of widening tolerances.
 | `evals/holdout.jsonl` + `holdout-baseline.json` | RC-only vs `real_manuals` (`make eval-holdout` declares `VENUE=rc`) | Never tune locally; sha-verified on RC. |
 | `benchmarks/baseline.json` | CI runner (`cpu_count`, `qdrant_image`) | Never gate a dev-machine capture; repeats ≥3. |
 | `benchmarks/harness[-vllm].json` + L3 perf | GPU RC host (5-key env check, `concurrency` included) | Never merge GPU numbers into the CI bench JSON. |
+| Chat condensation A/B (evidence only — no baseline gate) | Live GPU stack; `real_manuals` under `VENUE=rc` | `make eval-chat`; record the row in `docs/eval.md` before any `CHAT_CONDENSE_ENABLED` default flip. |
 
 `VENUE=rc` is the operator declaration for every real-corpus row above:
 the frozen holdout and `real_manuals` fail closed without it, and dev
@@ -195,15 +235,16 @@ The full RC battery and its dated record live there.
 
 Vendor corpora (point `$CORPUS_ROOT` at them) are read in place — never copied into the repo, never committed, never quoted at length outside the local machine. Ingest progress/inventory files go to `$SCRATCH_DIR` (persistent local disk), never the repo. Resume is the norm: re-running ingest skips completed docs (inventory + Qdrant sha check); transient embed timeouts under batch pile-up are retried, not debugged as parse bugs.
 
-## 8. PR-body template (12 lines)
+## 8. PR-body template
 
 ```md
 Fixes #<n> (<priority> <roadmap-id>). Single concern: <one line>.
 What changed: <files + behavior, one line per area>.
 Behavior changes called out: <defaults/caps/chunk bytes or NONE>.
 How tested: pytest <N> passed; mypy + ruff clean; gate-l1 <exit>;
-  paraphrase <exit>; sim <passed>/<skipped>; vllm eval <exit + numbers>.
-Live probes: <trap refuses / legit grounded / overlong 422s, or N/A with reason>.
+  paraphrase <exit>; sim <passed>/<skipped>; vllm eval <exit + numbers>;
+  eval-chat <literal vs condensed arms + condense p50, or N/A>.
+Live probes: <trap refuses / legit grounded / overlong 422s / /ui smoke, or N/A with reason>.
 Eval: <deltas vs mode-keyed baseline + per-query attribution, or N/A with reason>.
 Air-gap / copyright impact: none | <describe>.
 ```

@@ -1,6 +1,6 @@
 # Jaeger v2 all-in-one — trace backend for the agent (issue #83).
-# Applied only when OTEL_EXPORTER_OTLP_ENDPOINT is set in airgap.env
-# (scripts/airgap/deploy.sh renders + applies this dir, else skips it).
+# Applied whenever tracing resolves on (an unset OTEL_EXPORTER_OTLP_ENDPOINT
+# defaults to the in-cluster Jaeger; the `off` sentinel skips this dir).
 # Badger storage on RWO block (the same storage rule as Qdrant data; NFS is
 # refused). ClusterIP only — UI reaches operators via `oc port-forward`, the
 # same no-public-Route rule as Qdrant. Image is mirrored (images.txt pin,

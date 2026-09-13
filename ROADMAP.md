@@ -4,7 +4,7 @@
 > MUST read: the issue, this document, `AGENTS.md`, `docs/architecture.md`, and
 > `docs/adr/0001-baseline-decisions.md` before writing code.
 
-## Verified repo facts (audit of 2026-09-02; amended 2026-09-03 after PR-01/PR-02/PR-03 merged; amended 2026-09-05 in docs-epic PR-A: PR-04/PR-05/PR-06/PR-09 marked shipped, PR-08 partial; amended 2026-09-11 in docs-epic PR-B: gateway trio, MCP, splits, replay verdicts recorded below)
+## Verified repo facts (audit of 2026-09-02; amended 2026-09-03 after PR-01/PR-02/PR-03 merged; amended 2026-09-05 in docs-epic PR-A: PR-04/PR-05/PR-06/PR-09 marked shipped, PR-08 partial; amended 2026-09-11 in docs-epic PR-B: gateway trio, MCP, splits, replay verdicts recorded below; amended 2026-09-13: ADR-0004 operator console + multi-turn chat shipped in PR #311)
 
 These were verified against code and docs, not assumed. Agent tasks below reference them.
 Items marked **[amended]** changed with the merged P0 PRs.
@@ -33,18 +33,26 @@ Items marked **[amended]** changed with the merged P0 PRs.
   Multi-path splitting: comparative measured ON (#270, frozen-holdout win) —
   `comparative_split_enabled` defaults true; diagnostic dual-path measured
   neutral-negative and stays default-off (`diagnostic_dualpath_enabled`).
-- **Serving:** FastAPI. **[amended]** All routes (`/healthz`, `/v1/search`, `/v1/answer`)
+- **Serving:** FastAPI. **[amended]** All routes (`GET /healthz`, `GET /metrics`, `POST /v1/search`, `POST /v1/answer`, `POST /v1/chat`, `POST /v1/chat/completions`, `GET/POST /ui*`)
   are `async def` on `AsyncQdrantClient` + `httpx2.AsyncClient`; the sync embed and
   cross-encoder legs run via `asyncio.to_thread`, and the pooled sync retrieval-leg
-  client is built and closed in lifespan. `/v1/answer` supports SSE streaming
+  client is built and closed in lifespan. `/v1/answer` is POST-only and supports SSE streaming
   (`?stream=true` / body `stream: true`): `event: token` deltas → one terminal
   `event: final` (schema identical on the empty-hits path); a mid-stream failure emits
   `event: error` and ends without `final`. TTFT is measured on the first content token
   (`ttft_ms` in the final event, `Server-Timing: ttft;dur=` on the JSON path);
-  server-side reasoning SSE is gated by `LLM_STREAM` (default off).
+  server-side reasoning streaming is gated by `LLM_STREAM` (default off). Native
+  `POST /v1/chat` and OpenAI-compatible `POST /v1/chat/completions` share the same
+  `answer_core` engine and stream `chat.completion.chunk` frames terminated by `[DONE]`
+  (an error frame precedes `[DONE]` on mid-stream failure); chat requires at least one
+  message with role `user` (422 `"at least one user message is required"`), echoes the caller
+  `model` string while inference strictly runs `settings.llm_model_reasoning`, accepts and ignores
+  `max_tokens`, and bounds payloads via `chat_max_body_chars` (default 32768); the operator console
+  at `/ui` is the same engine behind `UI_ENABLED` (fail-closed) with an optional oauth-proxy Route.
   Embeddings via HTTP: `POST {embed_base_url}/embeddings` with the asymmetric
   `dense_query_prefix` on query vectors only.
-  LLM via `HttpxLLMClient` (sync + async + SSE) in `agent/answer.py`.
+  LLM via `HttpxLLMClient` (sync + async + SSE) in `agent/answer.py`, driven by the
+  shared `agent/answer_core.py` engine.
   **[amended]** Every model leg optionally sends `Authorization: Bearer`
   from its `*_API_KEY` Setting through the one helper `bearer_auth_headers`
   (unset = keyless, wire-identical to before); keys reach the cluster only
@@ -53,18 +61,20 @@ Items marked **[amended]** changed with the merged P0 PRs.
   `scripts/probe_gateway.py` (embed dim/auth, chat incl. SSE `[DONE]`,
   per-leg rerank reachability with an order recommendation, `/tokenize`
   presence note).
-- **Splunk:** Already in scope as *caller-supplied* context: `/v1/answer` accepts
-  `splunk_context` (see `app.py`, `answer.py`, `tests/test_agent_api.py`). ADR 0001:
+- **Splunk:** Already in scope as *caller-supplied* context: `/v1/answer`, `/v1/chat`,
+  and the console accept `splunk_context` (see `app.py`, `webui/routes.py`,
+  `tests/test_agent_api.py`). ADR 0001:
   "Splunk stays system of record (context in, not crawl)."
 - **Eval gate [amended]:** `make gate-l1` (ephemeral Qdrant simulator, hash-mode
   synthetic corpus) is a **required PR check in GitHub CI** (`gate-l1` job, rendered
   report posted as a PR comment). The full harness remains available locally/RC-only:
   `harness_l1` (snapshot-pinned retrieval gate), `harness_l2` (answers: citation
   precision/recall + NLI faithfulness judge), `harness_l3` (perf: p95 regression +
-  VRAM, Server-Timing TTFT). Support: `eval_retrieval.py`, `eval_answers.py`,
+  VRAM, Server-Timing TTFT), `harness_l4` (repeated answer-relevance/faithfulness
+  gate). Support: `eval_retrieval.py`, `eval_answers.py`, `eval_chat.py`,
   `verify_golden.py`, `render_report.py`, `bootstrap_ci.py`, `qdrant_sim.py`,
-  `loadtest.py`. Golden sets: `evals/golden.jsonl` (117), `evals/holdout.jsonl`
-  (70, sha-pinned), `evals/expert_golden_seed.jsonl`; baselines are mode-keyed
+  `loadtest.py`. Golden sets: `evals/golden.jsonl` (121), `evals/holdout.jsonl`
+  (72, sha-pinned), `evals/expert_golden_seed.jsonl`; baselines are mode-keyed
   (`evals/baseline.json` hash, `evals/baseline-vllm.json` vllm).
   Re-freeze process documented in `scripts/build_golden_corpus.py`.
 - **Local vLLM [amended]:** `scripts/run_local_vllm.sh` on image
@@ -75,13 +85,15 @@ Items marked **[amended]** changed with the merged P0 PRs.
   `tests/test_embed_budget.py`).
 - **CI:** `.github/workflows/ci.yml` + mirrored `.gitlab-ci.yml`. **[amended]** GitHub
   CI runs the `gate-l1` retrieval gate, sim tier, build, and hygiene checks on PRs;
-  GitLab mirrors hygiene + pytest only (no e2e, no sim). `bench.yml` benchmarks on
-  push to main. `e2e.yml` = connected-path smoke test on lab OpenShift with synthetic
-  PDFs.
+  `load.yml` gates agent/retrieve/ingest paths on the load tier. GitLab mirrors
+  hygiene + pytest + `gate-l1` (no e2e, no sim). `bench.yml` benchmarks on
+  push to main. `e2e.yml` covers the connected path: image build, air-gap
+  package/acceptance/dry-run, and the Kind live rehearsal (lab OpenShift is
+  secret-gated).
 - **Constraints (AGENTS.md / ADR 0001):** Qdrant 1.19.0 `*-unprivileged`, vendored Helm
   chart, no `helm repo add` on air-gap host. This repo does NOT install vLLM/LiteLLM/
   Splunk/GPU operators — the platform LiteLLM gateway is *consumed* over HTTP, never
-  installed (default `LLM_BASE_URL` already points at it; virtual keys via
+  installed (the shipped `airgap.env.example` points at it; virtual keys via
   `GATEWAY_API_KEY_SECRET`, Bearer on the wire, `probe_gateway.py` before cutover).
   Dense embed = other team's in-cluster vLLM (`VLLM_BASE_URL`).
   `EMBED_MODE=hash` is CI/dev only; prod refuses hash without `ALLOW_HASH_MODE=true`.
@@ -347,7 +359,12 @@ Items marked **[amended]** changed with the merged P0 PRs.
 - **Depends on:** #76, #82.
 
 ### PR-13 (issue #87): Prompt-injection & retrieved-content hygiene
-- **Scope:** `agent/answer.py`, `ingest/` sanitization, `tests/security/`
+> **Status: PARTIAL.** Baseline regex injection screen shipped (`retrieve/screen.py`,
+> trap before identifiers), extract-time PDF sanitization shipped (`ibm_pdf.sanitize_page_text`),
+> and context bounding shipped (`max_context_chars`). Tests are distributed across
+> `tests/test_sanitize.py`, `tests/test_hygiene.py`, and `tests/test_screen.py`.
+> Advanced LLM-based hygiene / dual-LLM guards remain open.
+- **Scope:** `agent/answer.py`, `ingest/ibm_pdf.py` sanitization, `tests/test_sanitize.py`, `tests/test_screen.py`
 - **Implementation:** Anything not covered by #80: strip/neutralize control sequences in
   extracted PDF text at ingest; size-cap assembled context (respect
   `max_context_chars`); injection fixture battery (instruction overrides, fake system
@@ -446,8 +463,10 @@ issue first — this section records what exists so agents stop re-proposing it.
   order. No `litellm` dependency — the gateway is consumed over HTTP.
 - **Air-gap precedence fix (#245):** `DENSE_DIM` joined `OPERATOR_ENV_KEYS`,
   so explicit env beats a stale `airgap.env`.
-- **Multi-path retrieval (issue #214, PR #217):** deterministic comparative
-  split (`X versus Y`) + diagnostic dual-path, both default-off.
+- **Multi-path retrieval (issue #214, PR #217, verdict #270):** deterministic
+  comparative split (`X versus Y`) measured ON (`comparative_split_enabled` defaults
+  true) + diagnostic dual-path measured neutral-negative and stays default-off
+  (`diagnostic_dualpath_enabled`).
 - **Table/syntax fidelity (issue #216, PR #220) + type-boost OFF (#239):** atomic table
   rows, widened message detector, page-label spans; real-corpus replay
   verdict recorded in `docs/eval.md`.
@@ -459,6 +478,14 @@ issue first — this section records what exists so agents stop re-proposing it.
   VRAM budgets + `serve resolve` CLI (`src/mainframe_rag/serve/`).
 - **Retrieval precision (#240–#242):** member-case canonicalization,
   doc-number prefix matching, heading-fragment stripping.
+- **Operator console + multi-turn chat (ADR-0004, PR #311):** the Streamlit
+  prototype is replaced by an agent-served `/ui` (Jinja2 + vendored HTMX/SSE,
+  browser-only `localStorage`, strict CSP, `UI_ENABLED` fail-closed); native
+  `POST /v1/chat` + OpenAI-compatible `/v1/chat/completions` share the new
+  `agent/answer_core.py` engine with `/v1/answer`; follow-up condensation is
+  default-off with its A/B recorded (`make eval-chat`); `AGENT_ROUTE=true`
+  renders the `openshift-ui` oauth-proxy overlay + reencrypt Route; new runtime
+  deps `jinja2` + `python-multipart`.
 
 ---
 

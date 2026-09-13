@@ -4,7 +4,7 @@
 # them as artifacts, never commit them (hygiene job enforces that).
 #
 # Image scheme (single source of truth, issue #8):
-#   ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<shortsha>
+#   ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<full-git-sha>
 # built via `docker tag` from the Makefile's local tags, pushed on
 # main/dispatch, and applied via the kustomize `ghcr.io/OWNER` sed.
 #
@@ -95,7 +95,8 @@ jobs:
 
   # ---------------------------------------------------- sneakernet packaging
   # Automates the sneakernet release factory (issue #15): packages the bundle
-  # and all 4 pinned images on every merge to main (or manual dispatch),
+  # and all recorded-digest pinned images (plus the oauth-proxy sidecar once
+  # its digest is recorded) on every merge to main (or manual dispatch),
   # generating the transfer certificate and uploading the tarball + digests as
   # a downloadable workflow artifact.
   airgap-package:
