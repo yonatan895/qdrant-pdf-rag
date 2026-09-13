@@ -378,6 +378,8 @@ jobs:
           # Rehearsal-only: a CI runner cannot schedule the 3x16Gi prod
           # Qdrant (Insufficient memory on one node — proven locally).
           replicaCount: 1
+          # Kind has no SCC to supply a volume group for the init emptyDir.
+          podSecurityContext: {fsGroup: 3000}
           resources:
             requests: {cpu: "500m", memory: 1Gi}
             limits: {cpu: "2", memory: 4Gi}

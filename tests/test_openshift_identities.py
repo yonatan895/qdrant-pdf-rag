@@ -29,3 +29,10 @@ def test_jaeger_accepts_assigned_identity_with_restricted_security():
         assert 'runAsUser' not in security and 'runAsGroup' not in security
         assert security['allowPrivilegeEscalation'] is False
         assert security['capabilities']['drop'] == ['ALL']
+
+
+def test_kind_supplies_its_own_volume_group_without_an_scc():
+    workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
+    steps = workflow['jobs']['kind-live-rehearsal']['steps']
+    scale = next(s['run'] for s in steps if s.get('name', '').startswith('Write Kind-scale Qdrant'))
+    assert 'podSecurityContext: {fsGroup: 3000}' in scale
