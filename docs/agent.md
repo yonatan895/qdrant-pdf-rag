@@ -43,8 +43,9 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   alias) — `ChatRequest{messages (client-managed history; min 1, roles
   `system`/`user`/`assistant`, `extra="forbid"`), product?, version?,
   splunk_context?, stream?, temperature?, model?, max_tokens?}`. At least one
-  `user`-role message is required (`422 invalid_request` / `at least one user
-  message is required`); the latest user turn is stripped and length-guarded
+   `user`-role message is required (missing user turn is a body-validation
+   failure: `422 invalid_request` / `request body failed validation`, issue
+   #314); the latest user turn is stripped and length-guarded
   by the shared `query_max_chars` rule, and the whole body is capped by
   `chat_max_body_chars` (the same helper as `/ui`). `temperature` overrides
   `Settings.llm_temperature`; `model` is accepted for OpenAI compatibility but
@@ -105,8 +106,7 @@ status (`/ui` failures render HTML banners instead, §1):
 | `internal` / `internal error` | 500 | Prompt-build failure and any unhandled exception |
 | `not_configured` / `reasoning model…` | 503 | `/v1/answer` or `/v1/chat` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
-| `invalid_request` / `request body failed validation` | 422 | Pydantic failure and the shared query-length guard (one helper, same code, both endpoints) |
-| `invalid_request` / `at least one user message is required` | 422 | `/v1/chat` + `/v1/chat/completions` with no `user`-role message |
+| `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query-length guard, and `/v1/chat` with no `user`-role message (one message, every 422 path) |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
 | `method_not_allowed` / `method not allowed` | 405 | Wrong method |

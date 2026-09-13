@@ -1045,7 +1045,10 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
 
     latest_user_msgs = [m for m in req.messages if m.role == "user"]
     if not latest_user_msgs:
-        raise AppError(422, "invalid_request", "at least one user message is required")
+        # Contract-consistent (issue #314): a missing user turn IS a body
+        # validation failure, so it shares the fixed 422 message every other
+        # 422 path uses — no new client-visible shape.
+        raise AppError(422, "invalid_request", "request body failed validation")
     latest_query = latest_user_msgs[-1].content.strip()
     _require_query_length(request_id, latest_query)
     _require_chat_body_length(request_id, req)

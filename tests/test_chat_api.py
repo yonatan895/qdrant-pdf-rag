@@ -373,12 +373,14 @@ def test_chat_completions_validation_errors(chat_client):
     r1 = chat_client.post("/v1/chat/completions", json={"messages": []})
     assert r1.status_code == 422
 
-    # Messages with no user role
+    # Messages with no user role: same fixed 422 envelope as every other
+    # body-validation failure (issue #314 — no distinct message).
     r2 = chat_client.post(
         "/v1/chat/completions",
         json={"messages": [{"role": "assistant", "content": "Hello"}]},
     )
     assert r2.status_code == 422
+    assert r2.json() == {"code": "invalid_request", "message": "request body failed validation"}
 
     # Query over limit
     huge_text = "A" * 5000
