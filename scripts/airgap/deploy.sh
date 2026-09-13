@@ -14,6 +14,7 @@ resolve_aliases
 require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM VLLM_BASE_URL
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
+check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
 resolve_otel_endpoint
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
@@ -44,6 +45,7 @@ QDRANT_TAG=${QDRANT_TAG:-$(echo "${QDRANT_IMAGE:-docker.io/qdrant/qdrant:v1.19.0
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 
 KC=${KC:-$(kc)}
+check_gateway_ca
 mkdir -p dist
 
 echo "==> Namespace: $NAMESPACE"
@@ -136,6 +138,7 @@ else
     echo "==> Gateway keys off (GATEWAY_API_KEY_SECRET unset): keyless model endpoints"
 fi
 wire_pull_secret dist/agent-rendered.yaml
+wire_gateway_ca dist/agent-rendered.yaml Deployment rag-agent agent
 fail_on_placeholders dist/agent-rendered.yaml agent
 # oauth-proxy cookie encryption (ADR-0004): operator-created secret, fail
 # closed rather than booting a console whose session cookies are unencrypted.

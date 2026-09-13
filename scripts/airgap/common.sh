@@ -13,7 +13,7 @@ cd "$REPO_ROOT"
 # the snapshot over whatever the file assigned — so `VAR=x make airgap-*`
 # beats a stale key in airgap.env instead of being silently overridden by it.
 # Empty stays unset, matching the ${VAR:-default} idiom used everywhere below.
-OPERATOR_ENV_KEYS="AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL GATEWAY_API_KEY_SECRET GHCR_OWNER IMAGE_SHA INGEST_EXTRA_PATCH INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY JAEGER_QUERY_URL KC LLM_BASE_URL LLM_MODEL_REASONING METRICS_ENABLED NAMESPACE OPENSHIFT_NAMESPACE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT OTEL_SERVICE_NAME PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_STORAGE_SIZE QDRANT_TAG QUERY REGISTRY_INTERNAL RERANK_BASE_URL RERANK_ENABLED RERANK_ENDPOINT_ORDER RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB STORAGE_CLASS VLLM_BASE_URL"
+OPERATOR_ENV_KEYS="AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL GATEWAY_API_KEY_SECRET GATEWAY_CA_CONFIGMAP GHCR_OWNER IMAGE_SHA INGEST_EXTRA_PATCH INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY JAEGER_QUERY_URL KC LLM_BASE_URL LLM_MODEL_REASONING METRICS_ENABLED NAMESPACE OPENSHIFT_NAMESPACE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT OTEL_SERVICE_NAME PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_STORAGE_SIZE QDRANT_TAG QUERY REGISTRY_INTERNAL RERANK_BASE_URL RERANK_ENABLED RERANK_ENDPOINT_ORDER RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB STORAGE_CLASS VLLM_BASE_URL"
 _cli_saved_keys=""
 for _k in $OPERATOR_ENV_KEYS; do
     eval "_is_set=\${$_k:+set}"
@@ -317,4 +317,64 @@ run() {
 next_step() {
     echo ""
     echo "Next: $*"
+}
+
+# Optional complete gateway trust bundle. A targeted kustomize patch preserves
+# Services/ServiceAccounts/OAuth sidecars in multi-document agent renders.
+wire_gateway_ca() (
+    [ -n "${GATEWAY_CA_CONFIGMAP:-}" ] || exit 0
+    check_secret_name "$GATEWAY_CA_CONFIGMAP" GATEWAY_CA_CONFIGMAP
+    _ca_file="$1"; _ca_kind="$2"; _ca_name="$3"; _ca_container="$4"
+    _ca_tmp="$(mktemp -d)"
+    trap 'rm -rf "$_ca_tmp"' EXIT HUP INT TERM
+    cp "$_ca_file" "$_ca_tmp/resources.yaml"
+    cat > "$_ca_tmp/kustomization.yaml" <<EOF_CA
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [resources.yaml]
+patches:
+  - target:
+      kind: $_ca_kind
+      name: $_ca_name
+    patch: |-
+      apiVersion: apps/v1
+      kind: $_ca_kind
+      metadata:
+        name: $_ca_name
+      spec:
+        template:
+          spec:
+            containers:
+              - name: $_ca_container
+                env:
+                  - name: SSL_CERT_FILE
+                    value: /etc/gateway-ca/ca-bundle.crt
+                volumeMounts:
+                  - name: gateway-ca
+                    mountPath: /etc/gateway-ca
+                    readOnly: true
+            volumes:
+              - name: gateway-ca
+                configMap:
+                  name: $GATEWAY_CA_CONFIGMAP
+                  items:
+                    - key: ca-bundle.crt
+                      path: ca-bundle.crt
+EOF_CA
+    if [ "$_ca_kind" = "Job" ]; then
+        sed -i 's|apiVersion: apps/v1|apiVersion: batch/v1|' "$_ca_tmp/kustomization.yaml"
+    fi
+    kustomize_render "$_ca_tmp" > "$_ca_tmp/rendered.yaml"
+    [ -s "$_ca_tmp/rendered.yaml" ] || die "gateway CA render produced empty output"
+    cp "$_ca_tmp/rendered.yaml" "$_ca_file"
+)
+
+check_gateway_ca() {
+    [ -n "${GATEWAY_CA_CONFIGMAP:-}" ] || return 0
+    check_secret_name "$GATEWAY_CA_CONFIGMAP" GATEWAY_CA_CONFIGMAP
+    [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
+    _ca_bundle="$("$KC" -n "$NAMESPACE" get configmap "$GATEWAY_CA_CONFIGMAP" \
+        -o 'jsonpath={.data.ca-bundle\.crt}')" || die "gateway CA ConfigMap is unavailable"
+    [ -n "$_ca_bundle" ] || die "gateway CA ConfigMap must contain nonempty ca-bundle.crt"
+    unset _ca_bundle
 }
