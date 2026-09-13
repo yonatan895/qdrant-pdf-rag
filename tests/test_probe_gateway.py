@@ -6,6 +6,7 @@ a canned server answer, never a connect error accident.
 """
 
 import httpx2
+import pytest
 import scripts.probe_gateway as probe_mod
 from scripts.probe_gateway import main
 
@@ -51,6 +52,8 @@ class FakeGateway:
     every method). Payload is a dict (JSON body) or, for the stream leg, a
     list of SSE lines."""
 
+    HTTPError = httpx2.HTTPError
+
     def __init__(self, routes):
         self.routes = routes
         self.calls = []
@@ -73,9 +76,9 @@ class FakeGateway:
 
     def stream(self, method, url, json=None, timeout=None, headers=None):
         self.calls.append(("STREAM", url, headers))
-        _, payload = self._match("STREAM", url)
+        status, payload = self._match("STREAM", url)
         lines = payload if isinstance(payload, list) else []
-        return StreamCtx(SimpleResp(url, method, 200, {}), lines)
+        return StreamCtx(SimpleResp(url, method, status, {}), lines)
 
 
 def _env(monkeypatch, **overrides):
@@ -220,7 +223,12 @@ def test_probe_stream_flag_verifies_done(monkeypatch, capsys):
             "STREAM",
             "/chat/completions",
             200,
-            ['data: {"choices": [{"delta": {"content": "o"}}]}', "data: [DONE]"],
+            [
+                'data: {"choices": [{"delta": {"content": "ok"}}]}',
+                'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
+                'data: {"choices": [], "usage": {"total_tokens": 2}}',
+                "data: [DONE]",
+            ],
         )
     )
     fake, rc = _run(monkeypatch, routes, argv=["--stream"])
@@ -229,7 +237,7 @@ def test_probe_stream_flag_verifies_done(monkeypatch, capsys):
     assert any(m == "STREAM" for m, _, _ in fake.calls)
 
 
-def test_probe_stream_without_done_warns_but_passes(monkeypatch, capsys):
+def test_probe_stream_without_done_fails(monkeypatch, capsys):
     routes = [r for r in _healthy_routes() if not (r[0] == "POST" and r[1] == "/chat/completions")]
     routes.append(
         (
@@ -248,5 +256,55 @@ def test_probe_stream_without_done_warns_but_passes(monkeypatch, capsys):
         )
     )
     _, rc = _run(monkeypatch, routes, argv=["--stream"])
-    assert rc == 0
-    assert "will not" in capsys.readouterr().out
+    assert rc == 1
+    assert "no [DONE]" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("flag", ["--require-reasoning", "--stream"])
+@pytest.mark.parametrize("missing", ["LLM_BASE_URL", "LLM_MODEL_REASONING"])
+def test_required_reasoning_cannot_skip(monkeypatch, capsys, flag, missing):
+    _, rc = _run(monkeypatch, _healthy_routes(), argv=[flag], **{missing: None})
+    assert rc == 1
+    assert "reasoning required" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("flag", ["--require-reasoning", "--stream"])
+def test_models_listing_cannot_bypass_required_checks(flag):
+    with pytest.raises(SystemExit) as exc:
+        main(["--models", flag])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("status,lines", [
+    (401, []),
+    (503, []),
+    (200, ["data: [DONE]"]),
+    (200, ['data: {"error": {"message": "injected"}}', "data: [DONE]"]),
+    (200, ["event: error", "data: [DONE]"]),
+    (200, ["data: broken", "data: [DONE]"]),
+    (200, ["data: []", "data: [DONE]"]),
+    (200, ["data: {}", "data: [DONE]"]),
+    (200, ['data: {"choices": []}', "data: [DONE]"]),
+    (200, ['data: {"choices": [null]}', "data: [DONE]"]),
+    (200, ['data: {"choices": [{"delta": null}]}', "data: [DONE]"]),
+    (200, ['data: {"choices": [{"delta": {"content": 7}}]}', "data: [DONE]"]),
+    (200, ['data: {"choices": [{"delta": {"content": "ok"}}]}', "data: [DONE]"]),
+    (200, ['data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}', "data: [DONE]"]),
+    (200, ['data: {"choices": [{"delta": {"content": "ok"}, "finish_reason": "length"}]}', "data: [DONE]"]),
+    (200, [
+        'data: {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}',
+        'data: {"choices": [{"delta": {"content": "late"}}]}',
+        "data: [DONE]",
+    ]),
+])
+def test_stream_errors_never_pass(monkeypatch, status, lines):
+    _, rc = _run(monkeypatch, [("STREAM", "/chat/completions", status, lines), *_healthy_routes()],
+                 argv=["--stream"])
+    assert rc == 1
+
+
+@pytest.mark.parametrize("choices", [None, [], {}, [None], [{"finish_reason": "length"}],
+    [{"finish_reason": "stop", "message": {"content": ""}}]])
+def test_unusable_json_chat_fails(monkeypatch, choices):
+    _, rc = _run(monkeypatch, [("POST", "/chat/completions", 200, {"choices": choices}), *_healthy_routes()])
+    assert rc == 1
