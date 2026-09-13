@@ -257,7 +257,9 @@
     try {
       const d = new Date(typeof ts === "number" ? ts : Date.parse(ts));
       if (Number.isNaN(d.getTime())) return null;
-      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      // Short zone label keeps local vs server-UTC unambiguous after
+      // localizeTimes rewrites the server-stamped UTC text.
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
     } catch (err) {
       return null;
     }
@@ -504,7 +506,8 @@
       text = code ? code.textContent : pre.textContent;
     } else {
       const li = button.closest("li");
-      text = li ? li.querySelector("span").textContent : "";
+      const label = li ? li.querySelector("span") : null;
+      text = label ? label.textContent : "";
     }
     if (!text || !navigator.clipboard) return;
     navigator.clipboard.writeText(text).then(
