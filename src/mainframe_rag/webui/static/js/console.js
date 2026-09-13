@@ -265,6 +265,27 @@
     }
   }
 
+  function renderMeta(turn) {
+    /* Per-turn receipt from the final payload (TTFT, cite count, tokens);
+     * persisted on the turn so restored sessions keep it. Absent on old
+     * turns and user turns — no footer then. */
+    const meta = turn.meta;
+    if (!meta) return null;
+    const foot = el("div", "turn-meta");
+    if (meta.stopped) {
+      foot.textContent = "Stopped — partial answer kept";
+      return foot;
+    }
+    const parts = [];
+    if (typeof meta.ttft_ms === "number") parts.push("TTFT " + (meta.ttft_ms / 1000).toFixed(1) + "s");
+    if (typeof meta.citations === "number") {
+      parts.push(meta.citations + (meta.citations === 1 ? " citation" : " citations"));
+    }
+    if (typeof meta.tokens === "number") parts.push(meta.tokens + " tokens");
+    foot.textContent = parts.join(" · ");
+    return foot;
+  }
+
   function renderTurn(turn) {
     const article = el("article", "turn turn-" + turn.role);
     if (turn.error) article.classList.add("turn-error");
@@ -311,8 +332,16 @@
       box.appendChild(list);
       article.appendChild(box);
     }
+    const meta = renderMeta(turn);
+    if (meta) article.appendChild(meta);
     return article;
   }
+
+  const EMPTY_EXAMPLES = [
+    "What does message IEA500I mean?",
+    "Explain abend S0C4",
+    "Show JCL to run IEFBR14",
+  ];
 
   const messagesEl = document.getElementById("messages");
   const sessionListEl = document.getElementById("session-list");
@@ -322,28 +351,107 @@
   const productEl = document.getElementById("product");
   const versionEl = document.getElementById("version");
   const themeSelect = document.getElementById("theme-select");
+  const sendBtn = document.getElementById("send-btn");
+  const filterEl = document.getElementById("session-filter");
+
+  /* Streaming UX state (P3): at most one in-flight turn. The Send button
+   * doubles as Stop while streaming; aborts keep partial content. */
+  let streamAbort = null;
+  let sessionFilter = "";
+
+  function setStreaming(active) {
+    if (sendBtn) {
+      sendBtn.textContent = active ? "Stop" : "Send";
+      sendBtn.classList.toggle("stop", active);
+    }
+  }
+
+  /* Sticky autoscroll: follow the stream only while the operator is already
+   * near the bottom; a manual scroll-up parks the view until they return. */
+  let stick = true;
+  function nearBottom() {
+    const root = document.documentElement;
+    return root.scrollHeight - window.scrollY - window.innerHeight < 96;
+  }
+  window.addEventListener("scroll", () => {
+    stick = nearBottom();
+  }, { passive: true });
+
+  function stickScroll() {
+    if (stick) window.scrollTo(0, document.documentElement.scrollHeight);
+  }
 
   function renderMessages(store) {
     const session = activeSession(store);
     messagesEl.replaceChildren();
+    if (!session.turns.length) {
+      const empty = el("div", "empty-state");
+      empty.appendChild(el("p", null, "Describe the abend, message ID, or procedure — answers cite the manual."));
+      EMPTY_EXAMPLES.forEach((text) => {
+        const ex = el("button", "example", text);
+        ex.type = "button";
+        ex.addEventListener("click", () => {
+          promptEl.value = text;
+          promptEl.focus();
+        });
+        empty.appendChild(ex);
+      });
+      messagesEl.appendChild(empty);
+    }
     session.turns.forEach((turn) => messagesEl.appendChild(renderTurn(turn)));
+    stick = true;
     messagesEl.scrollIntoView({ block: "end" });
+  }
+
+  function startRename(store, id, row, openBtn) {
+    const session = store.sessions[id];
+    if (!session) return;
+    const input = document.createElement("input");
+    input.value = session.title || "";
+    input.className = "rename";
+    input.maxLength = 60;
+    input.setAttribute("aria-label", "Rename incident");
+    row.replaceChild(input, openBtn);
+    input.focus();
+    input.select();
+    let done = false;
+    const commit = (save) => {
+      if (done) return;
+      done = true;
+      if (save && input.value.trim()) {
+        session.title = input.value.trim().slice(0, 60);
+        session.updated_at = Date.now();
+        saveStore(store);
+      }
+      renderSessions(store);
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") commit(true);
+      else if (event.key === "Escape") commit(false);
+    });
+    input.addEventListener("blur", () => commit(true));
   }
 
   function renderSessions(store) {
     sessionListEl.replaceChildren();
+    const needle = sessionFilter.trim().toLowerCase();
     Object.keys(store.sessions)
+      .filter((id) => !needle || (store.sessions[id].title || "").toLowerCase().includes(needle))
       .sort((a, b) => (store.sessions[b].updated_at || 0) - (store.sessions[a].updated_at || 0))
       .forEach((id) => {
         const session = store.sessions[id];
         const row = el("li", "row" + (id === store.active ? " active" : ""));
         const open = el("button", "open", session.title || "New Incident");
         open.type = "button";
+        open.title = "Open incident (double-click to rename)";
         open.addEventListener("click", () => {
           store.active = id;
           saveStore(store);
           renderMessages(store);
           renderSessions(store);
+        });
+        open.addEventListener("dblclick", () => {
+          startRename(store, id, row, open);
         });
         const del = el("button", "del", "\u2715");
         del.type = "button";
@@ -378,12 +486,19 @@
   }
 
   async function streamTurn(store, session, userTurn) {
-    const assistantTurn = { role: "assistant", content: "", citations: [], updated_at: Date.now() };
+    const assistantTurn = { role: "assistant", content: "", citations: [], ts: Date.now() };
     const article = renderTurn(assistantTurn);
     messagesEl.appendChild(article);
     const contentEl = article.querySelector(".turn-content");
+    contentEl.appendChild(el("span", "thinking", "Thinking…"));
+    stickScroll();
 
+    const controller = new AbortController();
+    streamAbort = controller;
+    setStreaming(true);
     let failed = false;
+    let stopped = false;
+    let started = false;
     let finalPayload = null;
     let frameBuffer = "";
 
@@ -398,6 +513,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
       if (!response.ok || !response.body) throw new Error("HTTP " + response.status);
 
@@ -420,8 +536,13 @@
               eventPayload = null;
             }
             if (eventPayload && parsed.name === "token") {
+              if (!started) {
+                started = true;
+                contentEl.replaceChildren();
+              }
               assistantTurn.content += eventPayload.delta || "";
               contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
+              stickScroll();
             } else if (eventPayload && parsed.name === "final") {
               finalPayload = eventPayload;
             } else if (eventPayload && parsed.name === "error") {
@@ -432,10 +553,19 @@
         }
       }
     } catch (err) {
-      failed = true;
+      if (err && err.name === "AbortError") stopped = true;
+      else failed = true;
+    } finally {
+      streamAbort = null;
+      setStreaming(false);
     }
 
-    if (failed || !finalPayload) {
+    if (stopped && !assistantTurn.content) {
+      // Stopped before the first token: leave no husk behind.
+      article.remove();
+      return;
+    }
+    if (failed || (!stopped && !finalPayload)) {
       assistantTurn.error = true;
       assistantTurn.content = assistantTurn.content || ERROR_TEXT;
       contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
@@ -443,13 +573,27 @@
       return;
     }
 
-    assistantTurn.content = finalPayload.answer || assistantTurn.content;
-    if (finalPayload.script) {
-      // Tagged script fences leave the answer body during citation parsing;
-      // show them as one unlabeled fence, mirroring the server fragment.
-      assistantTurn.content += "\n\n```\n" + finalPayload.script + "\n```";
+    if (finalPayload) {
+      assistantTurn.content = finalPayload.answer || assistantTurn.content;
+      if (finalPayload.script) {
+        // Tagged script fences leave the answer body during citation parsing;
+        // show them as one unlabeled fence, mirroring the server fragment.
+        assistantTurn.content += "\n\n```\n" + finalPayload.script + "\n```";
+      }
+      assistantTurn.citations = finalPayload.citations || [];
+      assistantTurn.meta = {
+        ttft_ms: typeof finalPayload.ttft_ms === "number" ? finalPayload.ttft_ms : null,
+        citations: assistantTurn.citations.length,
+        tokens:
+          finalPayload.usage && typeof finalPayload.usage.total_tokens === "number"
+            ? finalPayload.usage.total_tokens
+            : null,
+        stopped: false,
+      };
+    } else {
+      assistantTurn.meta = { stopped: true };
     }
-    assistantTurn.citations = finalPayload.citations || [];
+    assistantTurn.ts = Date.now();
     contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
     if (assistantTurn.citations.length) {
       const box = el("div", "citations");
@@ -466,6 +610,9 @@
       box.appendChild(list);
       article.appendChild(box);
     }
+    const meta = renderMeta(assistantTurn);
+    if (meta) article.appendChild(meta);
+    stickScroll();
     session.turns.push(assistantTurn);
     session.updated_at = Date.now();
     saveStore(store);
@@ -475,6 +622,11 @@
   async function onSubmit(event) {
     event.preventDefault();
     event.stopImmediatePropagation();
+    // The Send button doubles as Stop while a turn streams.
+    if (streamAbort) {
+      streamAbort.abort();
+      return;
+    }
     const text = promptEl.value.trim();
     if (!text) return;
     const store = loadStore();
@@ -483,6 +635,7 @@
       role: "user",
       content: text,
       splunk_context: splunkEl.value.trim() || null,
+      ts: Date.now(),
     };
     session.turns.push(userTurn);
     if (session.title === "New Incident") {
@@ -490,8 +643,13 @@
     }
     session.updated_at = Date.now();
     saveStore(store);
+    // A fresh question re-engages the follow; renderMessages resets stick.
+    const empty = messagesEl.querySelector(".empty-state");
+    if (empty) empty.remove();
     messagesEl.appendChild(renderTurn(userTurn));
     promptEl.value = "";
+    stick = true;
+    stickScroll();
     await streamTurn(store, session, userTurn);
   }
 
@@ -606,6 +764,22 @@
         formEl.removeAttribute("hx-swap");
         formEl.addEventListener("submit", onSubmit);
       }
+    }
+
+    if (promptEl) {
+      promptEl.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+          event.preventDefault();
+          formEl.requestSubmit();
+        }
+      });
+    }
+
+    if (filterEl) {
+      filterEl.addEventListener("input", () => {
+        sessionFilter = filterEl.value;
+        renderSessions(loadStore());
+      });
     }
   }
 

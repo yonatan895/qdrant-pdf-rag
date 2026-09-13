@@ -473,3 +473,31 @@ def test_ui_chat_fragment_message_design(ui_client, monkeypatch):
     )
     assert "Verified manual citations (1)" in body
     assert '<button class="copy-btn copy-cite" type="button">Copy</button>' in body
+
+
+def test_ui_shell_has_session_filter(ui_client):
+    """P3: the sidebar carries the incident filter input (browser-only)."""
+    body = ui_client.get("/ui").text
+    assert 'id="session-filter"' in body
+
+
+def test_console_js_streaming_ux_wiring():
+    """P3: streaming UX behaviors are wired in console.js — thinking
+    placeholder, abort/stop, Ctrl+Enter submit, per-turn meta footer,
+    session rename + filter, empty state. (No JS runtime in CI; this pins
+    presence, live probes exercise the behavior.)"""
+    js = (
+        Path(app_mod.__file__).parents[1] / "webui" / "static" / "js" / "console.js"
+    ).read_text(encoding="utf-8")
+    for token in (
+        "Thinking…",
+        "AbortController",
+        "requestSubmit",
+        "turn-meta",
+        "empty-state",
+        "EMPTY_EXAMPLES",
+        "startRename",
+        "sessionFilter",
+        "stickScroll",
+    ):
+        assert token in js, token
