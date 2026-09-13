@@ -74,7 +74,6 @@ class AnswerCoreInput:
     splunk_context: str | None = None
     stream: bool = False
     temperature: float | None = None
-    model: str | None = None
     request_id: str | None = None
     is_chat: bool = False
     hits: list[SearchHit] | None = None
@@ -166,7 +165,6 @@ async def execute_answer_core(
     """Execute the non-streaming core pipeline: retrieval, prompt build, LLM inference, and citation parsing."""
     settings = deps.settings
     _base_url, llm_model = assert_reasoning_model(settings)
-    active_model = input_data.model or llm_model
     root_ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
 
     # 1. Retrieval
@@ -290,7 +288,7 @@ async def execute_answer_core(
     with tracer.start_as_current_span(
         "llm.chat",
         context=root_ctx,
-        attributes={"llm.model": active_model, "llm.reasoning_effort": effort},
+        attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
     ) as llm_span:
         try:
             chat_call = deps.llm.chat(
@@ -349,7 +347,6 @@ async def execute_answer_core_stream(
     """Execute the streaming core pipeline: yields token deltas, then terminal citation/metadata record."""
     settings = deps.settings
     _base_url, llm_model = assert_reasoning_model(settings)
-    active_model = input_data.model or llm_model
     root_ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
 
     # 1. Retrieval
@@ -492,7 +489,7 @@ async def execute_answer_core_stream(
     with tracer.start_as_current_span(
         "llm.chat",
         context=root_ctx,
-        attributes={"llm.model": active_model, "llm.reasoning_effort": effort},
+        attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
     ) as llm_span:
         try:
             async for item in stream_gen:

@@ -1079,7 +1079,6 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         splunk_context=req.splunk_context,
         stream=is_stream,
         temperature=req.temperature,
-        model=req.model,
         request_id=request_id,
         is_chat=True,
     )

@@ -336,6 +336,26 @@ def test_answer_json_trace_tree(client):
     assert llm.attributes["llm.total_tokens"] >= 0
 
 
+def test_chat_caller_model_ignored_on_span_and_response(client):
+    """Issue #323: a caller-supplied `model` is accepted-and-ignored — the
+    `llm.chat` span and the response both report the reasoning model that
+    actually ran. Fails before the fix (the span echoed the caller value
+    while the response reported the reasoning model)."""
+    c, exporter = client
+    resp = c.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "What is IEA500I?"}],
+            "model": "caller-chosen-model",
+            "stream": False,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["model"] == "test-reasoning-model"
+    llm = _spans(exporter)["llm.chat"][0]
+    assert llm.attributes["llm.model"] == "test-reasoning-model"
+
+
 def test_answer_stream_same_trace_id(client):
     c, exporter = client
     with c.stream("POST", "/v1/answer", json={"query": "IEA500I", "stream": True}) as resp:
