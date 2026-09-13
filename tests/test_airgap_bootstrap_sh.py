@@ -58,6 +58,7 @@ def bundle_dir(tmp_path):
         "jaeger-image.tar": b"mock-jaeger",
         "app-ingest-test.tar": b"mock-ingest",
         "app-agent-test.tar": b"mock-agent",
+        "oauth-proxy-image.tar": b"mock-oauth-proxy",
         "MANIFEST.txt": b"sha: test\n",
         "PACKING_RECORD.txt": b"record\n",
         "sbom.json": b'{"images": []}\n',
@@ -133,8 +134,20 @@ def test_bootstrap_success(bundle_dir):
     assert (dist_dir / "bootstrap.sh").is_file()
     assert (dist_dir / "qdrant-image.tar").is_file()
     assert (dist_dir / "app-agent-test.tar").is_file()
+    assert (dist_dir / "oauth-proxy-image.tar").is_file()
     assert (dist_dir / "MANIFEST.txt").is_file()
     assert (dist_dir / "PACKING_RECORD.txt").is_file()
     assert (dist_dir / "sbom.json").is_file()
     assert (dist_dir / "sneakernet-signing.pub").is_file()
     assert (dist_dir / "SHA256SUMS.sig").is_file()
+
+    # The dist/ copy must stay verifiable: every SHA256SUMS member (now
+    # including oauth-proxy-image.tar) landed, so `sha256sum -c` passes there.
+    verify = subprocess.run(
+        ["sha256sum", "-c", "SHA256SUMS"],
+        cwd=dist_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verify.returncode == 0, verify.stdout + verify.stderr
