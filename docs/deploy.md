@@ -30,6 +30,11 @@ that reasoning works. Run the gateway probe before ingesting when using the
 modular commands. `make airgap-smoke` checks retrieval and tracing; use the
 console/answer checks in the operator runbook to verify the user experience.
 
+Production transfer additionally requires [the manual CRC release gate](crc-release-verification.md)
+and its [completed evidence record](crc-release-record.md). The existing scripts
+do not enforce that record; their success banner is pipeline acceptance only.
+Missing or failed CRC checks block transfer of the candidate bundle.
+
 ## 2. Environment precedence
 
 `common.sh` is sourced by every air-gap script and implements one rule:
@@ -190,10 +195,12 @@ shrinks them via overrides that must never reach prod (a 3×16Gi Qdrant
 cannot schedule on one node — proven).
 
 - Prod Qdrant: 3 replicas, 500Gi data + 500Gi snapshots on RWO block,
-  4 CPU/16Gi requests, 8 CPU/32Gi limits, `restricted-v2` UIDs
-  (`runAsUser 1000`, static — clusters with allocated UID ranges need the
-  `anyuid` grant or a `QDRANT_EXTRA_VALUES` override, which also silences
-  the validate-time SCC advice), `readOnlyApiKey`, PDB maxUnavailable 1,
+  4 CPU/16Gi requests, 8 CPU/32Gi limits, static UID 1000 / GID 2000 /
+  fsGroup 3000 (not proof of `restricted-v2` compatibility). Project-range
+  admission and volume writes must pass the CRC gate; fix demonstrated
+  incompatibilities in this production configuration, never by granting
+  `anyuid` or hiding security changes in a local sizing override.
+  `readOnlyApiKey`, PDB maxUnavailable 1,
   hostname spread. Inter-node gossip is plaintext on the CNI
   (`enable_tls: false`) — mounting no cert avoids startup crashloops.
   No public Route, ever.
@@ -223,6 +230,8 @@ cannot schedule on one node — proven).
   (notice when the namespace does not exist yet), and OpenShift-detected SCC
   advice. It probes no inference endpoint — a bad vLLM URL passes
   validation and fails later.
+  The current validator still suggests `anyuid`; that advice conflicts with
+  the release policy and must not be followed. It is not an SCC admission test.
 - Smoke needs only a namespace: it execs into the agent pod (no Route or
   port-forward required), fails closed on degraded `/healthz`, treats empty
   search results as SKIP (infrastructure ready, corpus not ingested) rather

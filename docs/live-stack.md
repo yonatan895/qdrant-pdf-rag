@@ -29,9 +29,10 @@ into the repo); `$SCRATCH_DIR` is scratch space outside the repo
 
 ## 1. Bring-up order
 
-There are two primary local runtime topologies:
+Local development and release verification use these environments:
 1. **Standalone Development / GPU Mode** (loopback services for rapid retrieval & prompt iteration): start Qdrant first, then reasoning, then embed — the Budget profiles declare reasoning-first as the allocation order (a 4k-context server fails KV init against leftovers). Each step has a health proof — do not proceed past a failed proof.
 2. **Standard Local Cluster Mode** (Kind + local registry on port 5000): exercises the production air-gap deployment scripts (`make airgap-pack` -> `load` -> `deploy` -> `ingest` -> `smoke`) with local single-replica sizing overrides. See [docs/install_and_ops.md](install_and_ops.md#47-local-cluster-testing-standard-kind--local-registry) for step-by-step setup.
+3. **Published-main release gate** (Windows OpenShift Local / CRC): required before transferring a production bundle. Follow [CRC release verification](crc-release-verification.md) with WSL model serving and the identical signed bundle. This manual gate is separate from the change-class PR ladder above; Kind and dry-run success do not replace it.
 
 ### Standalone Bring-Up (GPU / Dev)
 
