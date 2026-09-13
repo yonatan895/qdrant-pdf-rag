@@ -102,6 +102,7 @@ All of these must hold. Self-review the **diff**, not the PR body.
 ## CLI, Makefile, and local vLLM
 
 Deployment CLI arguments fail closed on unknown flags before any stage runs; a misspelled skip flag must never trigger the operation it was meant to skip.
+CI fault transitions retire the old mock pod and verify the requested computation state through its Service from the gateway pod before testing failures or recovery. Deployment readiness alone does not establish which fault is being served.
 CI gateway setup waits for an authenticated, certificate-verified read through the Service before minting keys; pod readiness alone does not prove Service routing. Only transient connection startup failures are retried, within a fixed setup deadline; key creation and model requests are never retried.
 Requested gateway stream probes must receive content, a successful finish, and `[DONE]`; errors and truncation fail the probe. CI rehearsal configures embedding and reasoning explicitly through its real test gateway.
 The air-gap pipeline probes configured model legs from the agent pod before ingest; `/healthz` and retrieval smoke alone cannot establish reasoning readiness.
