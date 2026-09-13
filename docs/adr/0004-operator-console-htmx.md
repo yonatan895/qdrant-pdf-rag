@@ -140,10 +140,10 @@
   - **Air-gap supply chain:** The `oauth-proxy` container image is pinned by full SHA256
     digest in `images.txt` (`registry.redhat.io/openshift4/ose-oauth-proxy:v4.14`),
     packaged into the sneakernet bundle by `scripts/airgap/pack.sh`, and loaded into
-    the internal disconnected registry by `scripts/airgap/load.sh`. **Known gap:** the
-    pin is still `sha256:PENDING` (needs a connected-host `skopeo login registry.redhat.io`
-    to record it); until then `pack.sh` skips the member and `AGENT_ROUTE=true` deploy
-    fails closed.
+    the internal disconnected registry by `scripts/airgap/load.sh`. Connected
+    packaging requires Red Hat registry authentication. Docker archives cannot
+    carry upstream signature attachments; the handoff retains source digest pins,
+    archive digests, and the signed bundle checksums (see `docs/deploy.md` §6).
 
   ### 4. Zero External CDN/Font Assets & Strict Air-Gap Isolation
   - **Air-gap isolation invariant:** Disconnected enterprise clusters have no access

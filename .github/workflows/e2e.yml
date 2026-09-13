@@ -95,12 +95,18 @@ jobs:
 
   # ---------------------------------------------------- sneakernet packaging
   # Automates the sneakernet release factory (issue #15): packages the bundle
-  # and all recorded-digest pinned images (plus the oauth-proxy sidecar once
-  # its digest is recorded) on every merge to main (or manual dispatch),
+  # and all recorded-digest pinned images (including the authenticated Red Hat
+  # oauth-proxy sidecar) on every merge to main (or manual dispatch),
   # generating the transfer certificate and uploading the tarball + digests as
   # a downloadable workflow artifact.
   airgap-package:
     needs: [build]
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: airgap-package-${{ github.ref || github.run_id }}
+      cancel-in-progress: false
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -121,6 +127,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$GITHUB_TOKEN" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Log in to Red Hat registry
+        env:
+          REDHAT_REGISTRY_USER: ${{ secrets.REDHAT_REGISTRY_USER }}
+          REDHAT_REGISTRY_PASSWORD: ${{ secrets.REDHAT_REGISTRY_PASSWORD }}
+        run: |
+          if [ -z "$REDHAT_REGISTRY_USER" ] || [ -z "$REDHAT_REGISTRY_PASSWORD" ]; then
+            echo "::error::REDHAT_REGISTRY_USER and REDHAT_REGISTRY_PASSWORD are required to package the pinned OAuth image"
+            exit 1
+          fi
+          printf '%s' "$REDHAT_REGISTRY_PASSWORD" | skopeo login registry.redhat.io \
+            --username "$REDHAT_REGISTRY_USER" --password-stdin
 
       - name: airgap-pack
         env:

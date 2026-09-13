@@ -124,8 +124,8 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
   when one does not already exist, inlining the namespace
   `openshift-service-ca.crt` bundle as `destinationCACertificate`
   (`haproxy.router.openshift.io/timeout: 300s`). It requires the
-  oauth-proxy digest recorded in `images.txt` (the shipped
-  `sha256:PENDING` fails closed) and the operator-created Secret
+  oauth-proxy digest recorded in `images.txt` (an unrecorded
+  `sha256:PENDING` still fails closed) and the operator-created Secret
   `rag-agent-oauth-cookie`; it defaults `false` (ClusterIP only, console
   reachable in-cluster). `make airgap-validate` checks none of these — they
   fail at deploy time.
@@ -249,10 +249,16 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
   `python-multipart` for ADR-0004) means `make wheelhouse bm25-weights` plus
   a connected image rebuild/push and a fresh pack. The air-gap images
   install only from the baked wheelhouse (`--no-index`).
-- The oauth-proxy pin is `sha256:PENDING` (the Red Hat registry needs
-  `skopeo login registry.redhat.io`; record the digest on the connected host,
-  then repack). While PENDING, `pack.sh` skips the member and
-  `AGENT_ROUTE=true` deploy fails closed. A tag bump for `ose-oauth-proxy`
+- The oauth-proxy digest is recorded in `images.txt`. Connected packaging
+  requires `skopeo login registry.redhat.io`; GitHub's `airgap-package` job
+  requires `REDHAT_REGISTRY_USER` and `REDHAT_REGISTRY_PASSWORD` secrets
+  belonging to a registry service account and fails closed if either is absent
+  or login fails. Personal CRC pull secrets stay local. The OAuth copy uses
+  `--remove-signatures` because Docker archives cannot store Red Hat's upstream
+  signature attachments. Source digest verification, archive digests, and the
+  offline bundle signature still apply; upstream signature attachments are not
+  part of the handoff. The explicit PENDING state still skips the member and
+  makes `AGENT_ROUTE=true` fail closed. A tag bump for `ose-oauth-proxy`
   must change all three sites: `images.txt`, `deploy.sh`, `load.sh`.
 - `METRICS_ENABLED=true` additionally renders/applies
   `deploy/kustomize/servicemonitor` so the OpenShift UWM stack scrapes

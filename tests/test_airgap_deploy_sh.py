@@ -18,6 +18,7 @@ from tests.helpers_airgap import (
     copy_chart,
     make_bin_tree,
     run_sh,
+    set_oauth_proxy_pin,
 )
 
 IMAGE_SHA = "a" * 40  # full-sha shaped; deploy.sh only rejects "" / "HEAD"
@@ -494,8 +495,7 @@ def test_agent_route_renders_oauth_sidecar_and_reencrypt_route(tree):
     sidecar on the internal registry ref) and applies a reencrypt Route to
     the console port; the dry-run keeps rendering cluster-free."""
     tmp_path, _ = tree
-    images = (tmp_path / "images.txt").read_text()
-    (tmp_path / "images.txt").write_text(images.replace("sha256:PENDING", "sha256:" + "b" * 64))
+    set_oauth_proxy_pin(tmp_path, "sha256:" + "b" * 64)
     r = _run(tree, ("AGENT_ROUTE", "true"), ("AIRGAP_DRYRUN", "1"))
     assert r.returncode == 0, r.stderr
     rendered = (tmp_path / "dist" / "agent-rendered.yaml").read_text()
@@ -505,8 +505,9 @@ def test_agent_route_renders_oauth_sidecar_and_reencrypt_route(tree):
 
 
 def test_agent_route_fails_closed_on_pending_oauth_pin(tree):
-    """The repo images.txt ships sha256:PENDING: enabling the console Route
+    """An explicitly pending pin: enabling the console Route
     without a recorded digest must stop the deploy with the fix spelled out."""
+    set_oauth_proxy_pin(tree[0], "sha256:PENDING")
     r = _run(tree, ("AGENT_ROUTE", "true"))
     assert r.returncode != 0
     assert "oauth-proxy digest recorded" in r.stderr
