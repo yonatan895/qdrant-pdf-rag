@@ -207,6 +207,8 @@
         }
         i += 1; // consume the closing fence, or run off the end (unclosed)
         const pre = el("pre");
+        pre.appendChild(el("button", "copy-btn", "Copy"));
+        pre.lastChild.type = "button";
         const code = el("code", fence[1] ? "language-" + fence[1] : null, body.join("\n"));
         pre.appendChild(code);
         frag.appendChild(pre);
@@ -251,6 +253,16 @@
     return frag;
   }
 
+  function fmtTime(ts) {
+    try {
+      const d = new Date(typeof ts === "number" ? ts : Date.parse(ts));
+      if (Number.isNaN(d.getTime())) return null;
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    } catch (err) {
+      return null;
+    }
+  }
+
   function renderTurn(turn) {
     const article = el("article", "turn turn-" + turn.role);
     if (turn.error) article.classList.add("turn-error");
@@ -260,7 +272,21 @@
       details.appendChild(el("pre", null, turn.splunk_context));
       article.appendChild(details);
     }
-    article.appendChild(el("div", "turn-role", turn.role === "user" ? "Operator" : "Copilot"));
+    const head = el("div", "turn-head");
+    const isUser = turn.role === "user";
+    head.appendChild(el("span", "avatar", isUser ? "O" : "C"));
+    head.firstChild.setAttribute("aria-hidden", "true");
+    head.appendChild(el("div", "turn-role", isUser ? "Operator" : "Copilot"));
+    // Stored turns (and server fragments) carry data-ts; fresh turns stamp now.
+    const ts = turn.ts || Date.now();
+    turn.ts = ts;
+    const local = fmtTime(ts);
+    if (local) {
+      const time = el("time", "turn-time", local);
+      time.setAttribute("data-ts", new Date(ts).toISOString());
+      head.appendChild(time);
+    }
+    article.appendChild(head);
     if (turn.role === "assistant") {
       const content = el("div", "turn-content md");
       content.appendChild(renderMarkdown(turn.content));
@@ -270,9 +296,16 @@
     }
     if (turn.citations && turn.citations.length) {
       const box = el("div", "citations");
-      box.appendChild(el("div", "citations-title", "Verified manual citations"));
+      box.appendChild(el("div", "citations-title", "Verified manual citations (" + turn.citations.length + ")"));
       const list = el("ul");
-      turn.citations.forEach((cite) => list.appendChild(el("li", null, cite)));
+      turn.citations.forEach((cite) => {
+        const li = el("li");
+        li.appendChild(el("span", null, cite));
+        const copy = el("button", "copy-btn copy-cite", "Copy");
+        copy.type = "button";
+        li.appendChild(copy);
+        list.appendChild(li);
+      });
       box.appendChild(list);
       article.appendChild(box);
     }
@@ -409,13 +442,25 @@
     }
 
     assistantTurn.content = finalPayload.answer || assistantTurn.content;
+    if (finalPayload.script) {
+      // Tagged script fences leave the answer body during citation parsing;
+      // show them as one unlabeled fence, mirroring the server fragment.
+      assistantTurn.content += "\n\n```\n" + finalPayload.script + "\n```";
+    }
     assistantTurn.citations = finalPayload.citations || [];
     contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
     if (assistantTurn.citations.length) {
       const box = el("div", "citations");
-      box.appendChild(el("div", "citations-title", "Verified manual citations"));
+      box.appendChild(el("div", "citations-title", "Verified manual citations (" + assistantTurn.citations.length + ")"));
       const list = el("ul");
-      assistantTurn.citations.forEach((cite) => list.appendChild(el("li", null, cite)));
+      assistantTurn.citations.forEach((cite) => {
+        const li = el("li");
+        li.appendChild(el("span", null, cite));
+        const copy = el("button", "copy-btn copy-cite", "Copy");
+        copy.type = "button";
+        li.appendChild(copy);
+        list.appendChild(li);
+      });
       box.appendChild(list);
       article.appendChild(box);
     }
@@ -448,8 +493,43 @@
     await streamTurn(store, session, userTurn);
   }
 
-  function download(text, filename) {
-    const blob = new Blob([text], { type: "text/markdown" });
+  /* Copy buttons read from the adjacent rendered node — no payload ever
+   * travels in attributes, so there is nothing to escape. One delegated
+   * listener covers streamed, restored, and server-fragment turns alike. */
+  function copyFromButton(button) {
+    let text = "";
+    const pre = button.closest("pre");
+    if (pre) {
+      const code = pre.querySelector("code");
+      text = code ? code.textContent : pre.textContent;
+    } else {
+      const li = button.closest("li");
+      text = li ? li.querySelector("span").textContent : "";
+    }
+    if (!text || !navigator.clipboard) return;
+    navigator.clipboard.writeText(text).then(
+      () => {
+        button.textContent = "Copied";
+        window.setTimeout(() => {
+          button.textContent = "Copy";
+        }, 1500);
+      },
+      () => {
+        button.textContent = "Copy failed";
+      }
+    );
+  }
+
+  /* Server fragments stamp UTC; upgrade to the operator's local time.
+   * Runs on boot (no-JS first paint) and after HTMX fragment swaps. */
+  function localizeTimes(root) {
+    (root || document).querySelectorAll("time[data-ts]").forEach((node) => {
+      const local = fmtTime(node.getAttribute("data-ts"));
+      if (local) node.textContent = local;
+    });
+  }
+
+  function download(text, filename) {    const blob = new Blob([text], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -461,11 +541,22 @@
   }
 
   function boot() {
-    const store = loadStore();
-    activeSession(store);
+    const store = loadStore();    activeSession(store);
     saveStore(store);
     renderMessages(store);
     renderSessions(store);
+    localizeTimes(document);
+
+    if (messagesEl) {
+      messagesEl.addEventListener("click", (event) => {
+        const button = event.target.closest ? event.target.closest(".copy-btn") : null;
+        if (button && messagesEl.contains(button)) copyFromButton(button);
+      });
+    }
+    // No-fetch fallback path renders server fragments via HTMX.
+    document.body.addEventListener("htmx:afterSwap", (event) => {
+      if (event.target) localizeTimes(event.target);
+    });
 
     const theme = (function () {
       try {
