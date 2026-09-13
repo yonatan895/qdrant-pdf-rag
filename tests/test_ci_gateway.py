@@ -231,3 +231,24 @@ def test_kind_tls_precedes_validation_and_first_pull():
     assert '--ssl_keyfile_path' in container['args']
     assert container['readinessProbe']['httpGet']['scheme'] == 'HTTPS'
     assert all('ca.key' not in str(v) for v in pod['volumes'])
+
+
+def test_gateway_configuration_and_provider_share_one_projected_directory():
+    docs = list(yaml.safe_load_all((ROOT / 'scripts/ci/test-gateway.yaml').read_text()))
+    deployment = next(d for d in docs if d['kind'] == 'Deployment'
+                      and d['metadata']['name'] == 'test-gateway')
+    pod = deployment['spec']['template']['spec']
+    container = pod['containers'][0]
+    config_path = Path(container['args'][container['args'].index('--config') + 1])
+    mounts = [m for m in container['volumeMounts']
+              if Path(m['mountPath']) == config_path.parent
+              or config_path.parent in Path(m['mountPath']).parents]
+    assert len(mounts) == 1, 'nested ConfigMap subPath mounts fail before gateway startup'
+    mount = mounts[0]
+    assert mount['readOnly'] is True and 'subPath' not in mount
+    volume = next(v for v in pod['volumes'] if v['name'] == mount['name'])
+    sources = volume['projected']['sources']
+    assert sources == [{'configMap': {'name': 'test-gateway'}},
+                       {'configMap': {'name': 'test-gateway-hooks'}}]
+    assert config_path.name in docs[0]['data']
+    assert (ROOT / 'scripts/gateway/strict_finish.py').is_file()
