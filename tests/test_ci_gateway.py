@@ -10,6 +10,21 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_workflow_has_no_duplicate_mapping_keys():
+    # safe_load silently keeps the last duplicate; GitHub rejects the entire
+    # workflow before creating any job/check. Inspect the YAML nodes instead.
+    def visit(node):
+        if isinstance(node, yaml.MappingNode):
+            keys = [key.value for key, _ in node.value]
+            assert len(keys) == len(set(keys)), f'duplicate keys at line {node.start_mark.line + 1}'
+            for _, value in node.value:
+                visit(value)
+        elif isinstance(node, yaml.SequenceNode):
+            for value in node.value:
+                visit(value)
+    visit(yaml.compose((ROOT / '.github/workflows/e2e.yml').read_text()))
+
+
 def test_kind_uses_real_gateway_for_both_legs():
     workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
     steps = workflow['jobs']['kind-live-rehearsal']['steps']

@@ -118,12 +118,6 @@ jobs:
       contents: read
       packages: read
     needs: [build]
-    permissions:
-      contents: read
-      packages: read
-    concurrency:
-      group: airgap-package-${{ github.ref || github.run_id }}
-      cancel-in-progress: false
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -835,7 +829,7 @@ jobs:
         run: |
           export PATH="/usr/local/bin:$PATH"
           OWNER_LC="$(echo "${{ github.repository_owner }}" | tr 'A-Z' 'a-z')"
-          kubectl kustomize deploy/kustomize/overlays/ci \
+          /usr/local/bin/kubectl kustomize deploy/kustomize/overlays/ci \
             | sed -e "s|$KUSTOMIZE_OWNER_PLACEHOLDER|ghcr.io/${OWNER_LC}|g" \
                   -e "s|$KUSTOMIZE_TAG_PLACEHOLDER|:${SHA}|g" \
                   -e "s|$KUSTOMIZE_NS_PLACEHOLDER|namespace: rag-ci-${SHA}|g" \
