@@ -116,3 +116,23 @@ def test_harness_l2_refuses_real_corpus_without_rc(monkeypatch, capfd):
     )
     assert l2_main([]) == 2
     assert "real-corpus RC venue" in capfd.readouterr().err
+
+
+def test_gate_l1_refuses_holdout_without_rc(monkeypatch, capfd):
+    from scripts.gate_l1 import run_gate
+
+    monkeypatch.delenv("VENUE", raising=False)
+    rc, md = run_gate(golden_path=HOLDOUT_PATH)
+    assert rc == 2
+    assert "frozen holdout" in capfd.readouterr().err
+    assert "**ERROR:**" in md
+
+
+def test_replay_sweep_refuses_holdout_without_rc(monkeypatch, capfd, tmp_path):
+    from scripts.replay_sweep import main as sweep_main
+
+    monkeypatch.delenv("VENUE", raising=False)
+    pools = tmp_path / "pools.jsonl"
+    pools.write_text("")
+    assert sweep_main(["--pools", str(pools), "--golden", str(HOLDOUT_PATH)]) == 2
+    assert "frozen holdout" in capfd.readouterr().err

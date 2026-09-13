@@ -233,6 +233,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", type=Path, default=None, help="write full per-query results here")
     args = parser.parse_args(argv)
 
+    from venue import VenueError, require_rc_for_golden
+
+    try:
+        # Venue rule (issue #316): the frozen holdout is an RC-only
+        # instrument, even for offline replays. Fail closed before any I/O.
+        require_rc_for_golden([args.golden])
+    except VenueError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+
     from mainframe_rag.config import load_settings
 
     settings = load_settings()
