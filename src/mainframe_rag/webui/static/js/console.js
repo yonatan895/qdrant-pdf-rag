@@ -309,6 +309,9 @@
       time.setAttribute("data-ts", new Date(ts).toISOString());
       head.appendChild(time);
     }
+    const copyTurn = el("button", "copy-btn copy-turn", "Copy");
+    copyTurn.type = "button";
+    head.appendChild(copyTurn);
     article.appendChild(head);
     if (turn.role === "assistant") {
       const content = el("div", "turn-content md");
@@ -361,7 +364,10 @@
 
   function setStreaming(active) {
     if (sendBtn) {
-      sendBtn.textContent = active ? "Stop" : "Send";
+      // Glyphs carry the state (▲ send / ■ stop); the accessible name
+      // carries the meaning for assistive tech.
+      sendBtn.textContent = active ? "■" : "▲";
+      sendBtn.setAttribute("aria-label", active ? "Stop" : "Send");
       sendBtn.classList.toggle("stop", active);
     }
   }
@@ -658,8 +664,13 @@
    * listener covers streamed, restored, and server-fragment turns alike. */
   function copyFromButton(button) {
     let text = "";
-    const pre = button.closest("pre");
-    if (pre) {
+    if (button.classList.contains("copy-turn")) {
+      // Whole-turn copy: the rendered plain text of the message card.
+      const turn = button.closest(".turn");
+      const content = turn ? turn.querySelector(".turn-content") : null;
+      text = content ? content.textContent : "";
+    } else if (button.closest("pre")) {
+      const pre = button.closest("pre");
       const code = pre.querySelector("code");
       text = code ? code.textContent : pre.textContent;
     } else {

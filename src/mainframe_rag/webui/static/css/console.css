@@ -125,7 +125,17 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
 .session-list .row button { flex: 1; text-align: left; text-transform: none; letter-spacing: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-list .row .del { flex: 0 0 2rem; text-align: center; }
 .session-list .row.active button.open { border-color: var(--accent); background: var(--bg); }
-.sidebar-note { color: var(--muted); font-size: 0.72rem; margin-top: auto; }
+/* Sidebar tool section: theme + export live here so they stay reachable
+   while the conversation scrolls (issue #332). */
+.sidebar-tools {
+  margin-top: auto;
+  display: flex; flex-direction: column; gap: 0.5rem;
+  border-top: 1px solid var(--panel-border);
+  padding-top: 0.7rem;
+}
+.sidebar-tools label { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1px; }
+.sidebar-tools select, .sidebar-tools button { width: 100%; }
+.sidebar-note { color: var(--muted); font-size: 0.72rem; margin: 0.4rem 0 0; }
 
 .console { padding: 1.25rem 1.25rem 1rem; display: flex; flex-direction: column; gap: 1rem; max-width: 70rem; }
 
@@ -181,8 +191,9 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
 @media (prefers-reduced-motion: reduce) {
   .thinking { animation: none; opacity: 0.8; }
 }
-/* Send doubles as Stop while a turn streams. */
-.composer button.stop { background: var(--error); border-color: var(--error); color: #fff; }
+/* Send doubles as Stop while streaming: same neutral chrome, only the
+   glyph flips (▲/■); the .stop class remains a state hook for tests. */
+.composer button.stop { background: var(--bg); border-color: var(--panel-border); color: var(--text); }
 /* Sidebar session filter + inline rename + empty state (P3). */
 #session-filter { width: 100%; }
 .session-list .rename { flex: 1; min-width: 0; text-transform: none; letter-spacing: 0; }
@@ -253,9 +264,22 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
 .turn-content.md pre > .copy-btn { position: absolute; top: 0.35rem; right: 0.35rem; margin-left: 0; }
 
 .composer { display: flex; gap: 0.6rem; align-items: flex-end; position: sticky; bottom: 0; background: var(--bg); padding: 0.6rem 0 0.4rem; }
-.composer textarea { flex: 1 1 auto; min-width: 0; resize: vertical; border-radius: 8px; padding: 0.6rem 0.8rem; }
+.composer textarea {
+  flex: 1 1 auto; min-width: 0; resize: vertical;
+  border-radius: 16px; padding: 0.7rem 1.1rem;
+  background: var(--panel); min-height: 3rem;
+  box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+.composer textarea::placeholder { color: var(--muted); opacity: 0.85; }
+.composer textarea:focus { border-color: var(--accent); outline: none; }
 .composer button { flex-shrink: 0; padding: 0.6rem 1.1rem; border-radius: 8px; }
 #send-btn:not(.stop) { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: bold; }
+/* Circular glyph button: ▲ send / ■ stop (aria-label carries meaning). */
+#send-btn {
+  width: 3rem; height: 3rem; padding: 0; border-radius: 50%;
+  font-size: 1.05rem; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+}
 
 .error-banner { border: 1px solid var(--error); color: var(--error); padding: 0.5rem 0.8rem; margin-top: 0.6rem; }
 .turn-error .turn-content { color: var(--error); }

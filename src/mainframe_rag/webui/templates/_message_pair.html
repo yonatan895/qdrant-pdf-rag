@@ -11,6 +11,7 @@
     {% if turn.created_at %}
     <time class="turn-time" data-ts="{{ turn.created_at }}">{{ turn.created_at[11:16] }} UTC</time>
     {% endif %}
+    <button class="copy-btn copy-turn" type="button">Copy</button>
   </div>
   {% if turn.content_html %}
   <div class="turn-content md">{{ turn.content_html | safe }}</div>
