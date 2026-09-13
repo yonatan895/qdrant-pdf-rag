@@ -140,6 +140,7 @@ class AnswerCoreOutput:
     citations_inferred: bool
     inferred_indices: list[int]
     script: str | None
+    script_lang: str | None
     query_kind: str
     hits: list[SearchHit]
     finish_reason: str
@@ -207,6 +208,7 @@ async def execute_answer_core(
             citations_inferred=False,
             inferred_indices=[],
             script=None,
+            script_lang=None,
             query_kind=kind,
             hits=[],
             finish_reason="stop",
@@ -327,6 +329,7 @@ async def execute_answer_core(
         citations_inferred=parsed.citations_inferred,
         inferred_indices=parsed.inferred_indices,
         script=parsed.script,
+        script_lang=parsed.script_lang,
         query_kind=kind,
         hits=hits,
         finish_reason=chat_res.finish_reason,
@@ -392,6 +395,7 @@ async def execute_answer_core_stream(
             citations_inferred=False,
             inferred_indices=[],
             script=None,
+            script_lang=None,
             query_kind=kind,
             hits=[],
             finish_reason="stop",
@@ -536,6 +540,7 @@ async def execute_answer_core_stream(
         citations_inferred=parsed.citations_inferred,
         inferred_indices=parsed.inferred_indices,
         script=parsed.script,
+        script_lang=parsed.script_lang,
         query_kind=kind,
         hits=hits,
         finish_reason=finish_reason,

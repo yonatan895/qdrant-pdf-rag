@@ -422,6 +422,9 @@ class AnswerResponse(BaseModel):
     # path, so the schema is identical on JSON and SSE.
     inferred_indices: list[int] = Field(default_factory=list)
     script: str | None
+    # Language tag of the extracted script fence (issue #336), None when
+    # no script was extracted. Additive: chat payloads carry no script.
+    script_lang: str | None
 
 
 class ChatRequest(BaseModel):
@@ -832,6 +835,7 @@ async def v1_answer(
                 citations_inferred=False,
                 inferred_indices=[],
                 script=None,
+                script_lang=None,
             )
 
         timing_parts = _timing_parts(timings, llm_ms=output.llm_ms, ttft_ms=output.ttft_ms)
@@ -882,6 +886,7 @@ async def v1_answer(
             citations_inferred=output.citations_inferred,
             inferred_indices=output.inferred_indices,
             script=output.script,
+            script_lang=output.script_lang,
         )
 
     # SSE streaming path
@@ -972,6 +977,7 @@ async def v1_answer(
                         output.ttft_ms,
                         output.usage,
                         inferred_indices=output.inferred_indices,
+                        script_lang=output.script_lang,
                     )
                     root_span.set_attributes(
                         _answer_span_attrs(
