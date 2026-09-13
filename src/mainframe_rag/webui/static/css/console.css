@@ -3,6 +3,8 @@
 
 :root {
   --font-mono: "Courier New", Courier, "Lucida Console", Monaco, "Liberation Mono", monospace;
+  /* Modern system mono for code: platform-native, no remote assets (offline-safe). */
+  --font-code: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
@@ -15,6 +17,12 @@ body.theme-3270 {
   --accent: #00ff66;
   --accent-text: #000000;
   --error: #ff6655;
+  --code-text: #00ff66;
+  --code-bg: #041004;
+  --send-hover: #66ff99;
+  --send-hover-text: #000000;
+  --stop-hover: #ff6655;
+  --stop-hover-text: #000000;
   --font-body: var(--font-mono);
   --glow: 0 0 2px var(--accent), 0 0 5px rgba(0, 255, 102, 0.35);
 }
@@ -28,6 +36,12 @@ body.theme-dark {
   --accent: #58a6ff;
   --accent-text: #0d1117;
   --error: #f85149;
+  --code-text: #e6edf3;
+  --code-bg: #2d333b;
+  --send-hover: #3fb950;
+  --send-hover-text: #0d1117;
+  --stop-hover: #f85149;
+  --stop-hover-text: #ffffff;
   --font-body: var(--font-ui);
   --glow: none;
 }
@@ -195,9 +209,6 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
 /* First-token placeholder while the reasoning model works. */
 .thinking { color: var(--muted); font-style: italic; animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) {
-  .thinking { animation: none; opacity: 0.8; }
-}
 /* Send doubles as Stop while streaming: same neutral chrome, only the
    glyph flips (▲/■); the .stop class remains a state hook for tests. */
 .composer button.stop { background: var(--bg); border-color: var(--panel-border); color: var(--text); }
@@ -232,10 +243,10 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
 .turn-content.md ul, .turn-content.md ol { margin: 0.55rem 0; padding-left: 1.4rem; }
 .turn-content.md li { margin: 0.3rem 0; line-height: 1.55; }
 .turn-content.md code {
-  font-family: var(--font-mono); font-size: 0.85em;
-  color: var(--accent);
-  background: var(--bg); border: 1px solid var(--panel-border);
-  border-radius: 4px; padding: 0.05rem 0.35rem;
+  font-family: var(--font-code); font-size: 0.85em;
+  color: var(--code-text);
+  background: var(--code-bg); border: 1px solid var(--panel-border);
+  border-radius: 6px; padding: 0.1rem 0.4rem;
   overflow-wrap: anywhere;
 }
 .turn-content.md pre {
@@ -243,7 +254,9 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
   border-radius: 6px; padding: 0.7rem 0.9rem; overflow-x: auto; margin: 0.6rem 0;
 }
 .turn-content.md pre code {
+  font-family: var(--font-code);
   color: var(--text); background: none; border: 0; padding: 0; font-size: 0.85rem;
+  line-height: 1.55;
 }
 .turn-context { margin-bottom: 0.5rem; }
 .turn-context summary {
@@ -286,6 +299,14 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
   width: 3rem; height: 3rem; padding: 0; border-radius: 50%;
   font-size: 1.05rem; line-height: 1;
   display: inline-flex; align-items: center; justify-content: center;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+/* Send previews green, Stop previews red; hover and keyboard focus agree. */
+#send-btn:not(.stop):hover, #send-btn:not(.stop):focus-visible {
+  background: var(--send-hover); border-color: var(--send-hover); color: var(--send-hover-text);
+}
+#send-btn.stop:hover, #send-btn.stop:focus-visible {
+  background: var(--stop-hover); border-color: var(--stop-hover); color: var(--stop-hover-text);
 }
 
 .error-banner { border: 1px solid var(--error); color: var(--error); padding: 0.5rem 0.8rem; margin-top: 0.6rem; }
@@ -307,4 +328,10 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
     border-right: 0; border-bottom: 1px solid var(--panel-border);
     position: static; height: auto; overflow-y: visible;
   }
+}
+/* Motion overrides live last: same-specificity cascade means they must
+   follow the base rules they cancel (review on #335). */
+@media (prefers-reduced-motion: reduce) {
+  .thinking { animation: none; opacity: 0.8; }
+  #send-btn { transition: none; }
 }

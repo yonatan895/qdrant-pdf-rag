@@ -319,8 +319,9 @@ def test_dead_sse_extension_stays_removed(ui_client):
 def _css_rule(css: str, selector: str) -> str:
     """Declaration block for an exact selector. Pins assert rule + property
     together so a bare property passing from an unrelated rule cannot fool
-    them (review on #333). First match wins — base rules precede media
-    overrides in console.css by construction."""
+    them (review on #333). Prefix the selector with "\\n" to anchor a
+    top-level rule and skip indented overrides inside @media blocks."""
+
     start = css.index("{", css.index(selector))
     return css[start : css.index("}", start)]
 
@@ -364,9 +365,38 @@ def test_console_css_chrome_pass():
         Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
     ).read_text(encoding="utf-8")
     assert ".sidebar-tools {" in css
-    assert "border-radius: 50%" in _css_rule(css, "#send-btn {")
+    assert "border-radius: 50%" in _css_rule(css, "\n#send-btn {")
     assert ".composer textarea::placeholder" in css
     assert ".composer textarea:focus" in css
+
+
+def test_console_css_beauty_pass():
+    """Issue #334: send previews green / stop previews red (hover and focus
+    agree), and code leaves Courier behind for a modern system mono stack
+    with per-theme chip tokens."""
+    css = (
+        Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
+    ).read_text(encoding="utf-8")
+    assert "ui-monospace" in _css_rule(css, ":root")
+    assert "--send-hover:" in _css_rule(css, "body.theme-dark {")
+    assert "--stop-hover:" in _css_rule(css, "body.theme-dark {")
+    assert "--send-hover:" in _css_rule(css, "body.theme-3270 {")
+    assert "--stop-hover:" in _css_rule(css, "body.theme-3270 {")
+    assert "var(--send-hover)" in _css_rule(css, "#send-btn:not(.stop):hover")
+    assert "var(--send-hover)" in _css_rule(css, "#send-btn:not(.stop):focus-visible")
+    assert "var(--stop-hover)" in _css_rule(css, "#send-btn.stop:hover")
+    assert "var(--stop-hover)" in _css_rule(css, "#send-btn.stop:focus-visible")
+    code = _css_rule(css, ".turn-content.md code")
+    assert "var(--font-code)" in code
+    assert "color: var(--code-text);" in code
+    assert "Courier" not in code
+    assert "var(--font-code)" in _css_rule(css, ".turn-content.md pre code")
+    # Reduced-motion override must follow the base #send-btn rule: same
+    # specificity means file order decides (review on #335 caught the
+    # transition being re-enabled by the later base rule).
+    reduced = css.index("@media (prefers-reduced-motion: reduce)")
+    assert reduced > css.index("\n#send-btn {")
+    assert "transition: none;" in css[reduced:]
 
 
 # ---------------------------------------------------------------- markdown (P1)
