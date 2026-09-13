@@ -17,11 +17,12 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 |---|---|
 | `charts/qdrant-*.tgz` | Vendored Qdrant Helm chart (Apache-2.0); never `helm repo add` in the air-gap |
 | `overlays/openshift/values.yaml` | Qdrant OpenShift values: 3-replica StatefulSet, unprivileged, RWO block, ClusterIP only |
-| `deploy/` | 2-replica agent Deployment, one-shot ingest Job, opt-in Jaeger; `AGENT_ROUTE=true` for an edge Route |
+| `deploy/` | 2-replica agent Deployment, one-shot ingest Job, Jaeger (tracing on by default); `AGENT_ROUTE=true` renders the oauth-proxy console overlay (`deploy/kustomize/overlays/openshift-ui`) and a reencrypt Route — fails closed while the oauth-proxy pin is `sha256:PENDING` |
 | `oc-mirror/` | `ImageSetConfiguration` for disconnected mirroring |
 | `src/mainframe_rag/ingest/` | PDF walk, IBM-style parse, chrome strip, chunk, classify, embed, Qdrant IO |
 | `src/mainframe_rag/retrieve/` | Hybrid search (dense + BM25 prefetch, batched query, weighted RRF), query-class screen, optional cross-encoder rerank (`RERANK_ENDPOINT_ORDER`), diversification, filters |
-| `src/mainframe_rag/agent/` | Async FastAPI `/healthz`, `/v1/search`, `/v1/answer` (reasoning model, optional SSE streaming), opt-in `GET /metrics` |
+| `src/mainframe_rag/agent/` | Async FastAPI `/healthz`, `/v1/search`, `/v1/answer`, multi-turn `/v1/chat` + `/v1/chat/completions` (shared `answer_core`, optional SSE streaming), opt-in `GET /metrics` |
+| `src/mainframe_rag/webui/` | Operator console served at `/ui` (ADR-0004): Jinja2 + vendored HTMX/SSE, browser-only state, strict CSP, `UI_ENABLED` fail-closed |
 | `src/mainframe_rag/mcp/` | Read-only Zowe live-state bridge (default off; mock backend for sim) |
 | `src/mainframe_rag/serve/` | Local vLLM VRAM budget profiles (`LOCAL_RT_8GB`, …) + `resolve` CLI |
 | `scripts/` | Benchmark suite, golden set eval, report renderer, query demo, gateway readiness probe (`probe_gateway.py`), air-gap ops |
@@ -34,13 +35,13 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 
 **Production (air-gap):** the platform team owns the model tier — reasoning, dense embed, and rerank served by vLLM behind a LiteLLM gateway on a separate cluster. This repo owns Qdrant + ingest + retrieval + the FastAPI agent and consumes the model tier **over HTTP only**; it never installs, deploys, or Helm-charts vLLM / LiteLLM / GPU operators on a product path. All model legs go through the gateway — there is no direct-to-vLLM product path. Tracing is **on by default**: the deploy ships Jaeger for this repo's components (agent + ingest) and `airgap.env` can set `OTEL_EXPORTER_OTLP_ENDPOINT` to a custom collector or to `off` to disable; the model tier's monitoring stays the platform team's.
 
-**Local dev/test:** `make local-stack` simulates the *complete* production topology on one machine — this repo's Qdrant + agent + Jaeger, plus a **platform stand-in**: local vLLM backends behind the **real** (digest-pinned) LiteLLM gateway. Agent and ingest still reach models through the gateway, so the production wire contract (single origin, model-id routing, per-leg virtual keys) is what gets tested, and a `v1.search` span must land in the local Jaeger before the stack reports up. The local model/gateway simulation scripts are local-only — never in the air gap or Helm (CI's separate `airgap-rehearsal` uses the documented `scripts/mock_vllm.py` stand-in). See [docs/install_and_ops.md](docs/install_and_ops.md) §3.6.
+**Local dev/test:** `make local-stack` simulates the *complete* production topology on one machine — this repo's Qdrant + agent + Jaeger, plus a **platform stand-in**: local vLLM backends behind the **real** (digest-pinned) LiteLLM gateway. Agent and ingest still reach models through the gateway, so the production wire contract (single origin, model-id routing, per-leg virtual keys) is what gets tested, and a `v1.search` span must land in the local Jaeger before the stack reports up. The console is on by default (`UI_ENABLED=true`, `GET /ui` smoke-checked; set `UI_ENABLED=false` for the fail-closed route set). The local model/gateway simulation scripts are local-only — never in the air gap or Helm (CI's separate `airgap-rehearsal` uses the documented `scripts/mock_vllm.py` stand-in). See [docs/install_and_ops.md](docs/install_and_ops.md) §3.6.
 
 Production wiring — all three legs in `airgap.env` (see [docs/install_and_ops.md](docs/install_and_ops.md) §4.3):
 
 | Role | URL key | Auth |
 |---|---|---|
-| Reasoning (`/v1/answer`) | `LLM_BASE_URL` + `LLM_MODEL_REASONING` | `llm-api-key` |
+| Reasoning (`/v1/answer`, `/v1/chat*`, `/ui`) | `LLM_BASE_URL` + `LLM_MODEL_REASONING` | `llm-api-key` |
 | Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (+ `EMBED_MODEL` + `DENSE_DIM`) | `embed-api-key` |
 | Rerank (default off) | `RERANK_BASE_URL` + `RERANK_MODEL` + `RERANK_ENDPOINT_ORDER` | `rerank-api-key` |
 
@@ -60,7 +61,7 @@ make local-stack                                      # or CORPUS_DIR=<dir> make
 
 ## Live State (Optional, Default Off)
 
-- **Splunk (system of record):** caller-supplied context — pass `splunk_context` with `/v1/answer`; the agent never crawls Splunk itself.
+- **Splunk (system of record):** caller-supplied context — pass `splunk_context` with `/v1/answer`, `/v1/chat`, or a console request; the agent never crawls Splunk itself.
 - **Zowe MCP (agent-fetched):** read-only datasets / JES spool / USS / job status via a sidecar bridge (`zowe_mcp_enabled=false` default; mock backend in sim). See [docs/architecture.md](docs/architecture.md).
 
 ---
@@ -93,13 +94,14 @@ make local-stack                                      # or CORPUS_DIR=<dir> make
 | | `make eval-answers` | Answer-tier grounding eval (`/v1/answer` must cite, abstain entries must not answer) — live GPU stack |
 | | `make eval-paraphrase` | Paraphrase retrieval instrument (semantic queries without near-verbatim echo) — dedicated collection |
 | | `make eval-holdout` | Score the frozen holdout (`evals/holdout.jsonl`, sha-pinned) — release candidates only |
+| | `make eval-chat` | Multi-turn condensation A/B (`scripts/eval_chat.py`) — live GPU stack, evidence-only, RC venue for real corpora |
 | | `make eval-baseline` | Re-record committed retrieval accuracy baseline (dedicated PR) |
 | | `make eval-draft` | Helper to draft golden-set candidate queries from collection payload |
 | | `make verify-golden` | Mechanically verify golden expectations against the live collection (gates the corpus) |
 | | `make eval-report` | Print terminal retrieval evaluation report |
 | | `make eval-html` | Generate self-contained offline HTML evaluation dashboard (`bundles/eval-report.html`) |
 | | `make eval-compare` | Compare evaluation runs with classification shifts and regression checks |
-| | `make harness-gate` / `make harness-l2` / `make harness-l3` | Layered harness tiers L1/L2/L3 — RC-only, live GPU stack |
+| | `make harness-gate` / `make harness-l2` / `make harness-l3` / `make harness-l4` | Layered harness tiers L1/L2/L3/L4 — RC-only, live GPU stack |
 | | `make harness-baseline` / `make harness-l3-baseline` | Re-record harness baselines (dedicated PR) |
 | **Benchmarks** | `make bench` | Benchmark ingest rate, peak RSS, Qdrant RAM/disk, and latency vs baseline |
 | | `make bench-baseline` | Re-record committed performance baseline (dedicated PR) |
@@ -114,7 +116,10 @@ make local-stack                                      # or CORPUS_DIR=<dir> make
 | **Local vLLM & GPU** | `make local-vllm` | Run local vLLM reasoning server on GPU (port 8000, Gemma-4, Budget `GPU_MEM=0.64`) |
 | | `make local-vllm-embed` | Run local vLLM dense embedding server on GPU (port 8001, Qwen3-Embedding-0.6B, `GPU_MEM=0.33`, `--runner pooling --convert embed --enforce-eager`) |
 | | `make local-vllm-rerank` | Run local vLLM reranker server on GPU (port 8002, `BAAI/bge-reranker-v2-m3`) |
-| | `make run-agent` | Start the agent with `LLM_STREAM=true` (reasoning SSE streaming for TTFT) on port 8080 |
+| | `make local-stack` | Canonical full local simulation (Qdrant + Jaeger + LiteLLM gateway + agent + console; `UI_ENABLED=true` by default) |
+| | `make local-gateway` / `make local-gateway-stop` | Foreground LiteLLM gateway (port 4000) / stop it and its key store |
+| | `make local-jaeger` / `make local-jaeger-stop` | Jaeger v2 trace backend (UI :16686) / stop it |
+| | `make run-agent` | Start the agent with `LLM_STREAM=true` (reasoning SSE streaming for TTFT) on port 8080; serves `/ui` when `UI_ENABLED=true` |
 | | `make test-vllm-e2e` | Run automated end-to-end suite against local vLLM & Qdrant with grounding validation |
 | **Cluster recipe** | `make pull-chart` / `make helm-template` / `make helm-lint` | Fetch / render / lint the vendored Qdrant chart against OpenShift values |
 | | `make wheelhouse` / `make bm25-weights` / `make build-images` | Build offline wheelhouse, cache BM25 weights, build UBI images (connected host) |
@@ -186,7 +191,7 @@ The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `air
    CORPUS_PVC=<pvc> make airgap-pipeline
 
    # Option B: Or execute step-by-step:
-   make airgap-load                   # Push 4 image archives to internal registry
+   make airgap-load                   # Push the 4 base image archives (+ oauth-proxy once bundled) to the internal registry
    make airgap-deploy                 # Deploy Qdrant StatefulSet + Agent + Jaeger (tracing on by default)
    # Prove the gateway from inside the cluster, apply its leg-order recommendation:
    kubectl -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py
@@ -223,7 +228,7 @@ See **[docs/install_and_ops.md](docs/install_and_ops.md#47-local-cluster-testing
 
 ## Endpoints
 
-The agent listens on port 8080 (ClusterIP `rag-agent:8080` in-cluster; edge Route only with `AGENT_ROUTE=true`). Local ports: Qdrant 6333, reasoning 8000, embed 8001, rerank 8002.
+The agent listens on port 8080 (ClusterIP `rag-agent:8080` in-cluster; the external console Route is `AGENT_ROUTE=true`). Local ports: Qdrant 6333, reasoning 8000, embed 8001, rerank 8002, LiteLLM gateway 4000 (`make local-stack`), Jaeger 16686.
 
 ```bash
 # Liveness: {"status":"ok","qdrant":true,"embed":true} (degraded/503 shapes documented)
@@ -244,15 +249,23 @@ curl -N -X POST 'http://localhost:8080/v1/answer?stream=true' \
   -H 'Content-Type: application/json' \
   -d '{"query":"What should LFAREA be set to in IEASYSxx?"}'
 
+# Multi-turn chat — client-managed history (OpenAI-compatible alias at /v1/chat/completions):
+curl -s -X POST http://localhost:8080/v1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"How do I resolve IEA500I command rejected?"}]}'
+
+# Operator console (ADR-0004) — served when UI_ENABLED=true (make local-stack does):
+#   http://localhost:8080/ui
+
 # Prometheus exposition (opt-in via METRICS_ENABLED, else 404):
 curl -s http://localhost:8080/metrics
 ```
 
-Errors use a stable `{"code","message"}` envelope (never stack traces or upstream bodies); overlong queries fail closed with `422 invalid_request`. Full contracts live in [docs/agent.md](docs/agent.md) and [docs/install_and_ops.md](docs/install_and_ops.md) §5.
+Errors use a stable `{"code","message"}` envelope (never stack traces or upstream bodies); overlong queries and oversized chat bodies (`chat_max_body_chars`) fail closed with `422 invalid_request`. Full contracts live in [docs/agent.md](docs/agent.md) and [docs/install_and_ops.md](docs/install_and_ops.md) §5.
 
 ---
 
 ## Library Scope
 
-- Core libraries: `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`, `pydantic-settings`.
+- Core libraries: `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`, `jinja2` (console templates), `python-multipart` (console forms), `pydantic-settings`.
 - No LangChain, LlamaIndex, or external vector databases.
