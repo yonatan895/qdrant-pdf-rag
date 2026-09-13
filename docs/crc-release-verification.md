@@ -59,8 +59,8 @@ operators. Keep production compatibility and capacity acceptance separate.
    ```
 
    Require a supported Windows edition, virtualization, administrator access for
-   installation/setup, and sufficient **available Windows memory** for 14 GiB
-   plus host overhead while WSL serves both models and the gateway. A WSL
+   installation/setup, and sufficient **available Windows memory** for the selected 12 GiB or 10.5 GiB CRC allocation
+   plus at least 2 GiB host headroom while WSL serves both models and the gateway. A WSL
    `free` result is not Windows free RAM. Reserve disk for the 50 GiB VM,
    installer/cache, bundle extraction, registry, and existing WSL virtual disk
    growth. Do not assume sparse virtual disks reserve their maximum size.
@@ -72,9 +72,81 @@ operators. Keep production compatibility and capacity acceptance separate.
 6. Once the credentials and backup checks pass, stop only the inventoried Kind
    node containers with `docker stop <node-name>` in WSL. Keep vLLM, LiteLLM,
    and its database running. Never use `kind delete cluster`, volume prune,
-   or `wsl --shutdown` for this transition. Repeat Windows memory preflight;
+   or an uncoordinated `wsl --shutdown` for this transition. Repeat Windows memory preflight;
    insufficient memory stops CRC startup. Record exact container names for
    recovery.
+
+## 1.1 Bounded simultaneous-fit attempt and complementary verification
+
+On the 32 GiB Windows/WSL host, try the complete live configuration before
+choosing complementary verification. Keep current Gemma reasoning and Qwen
+embedding weights/revisions, model IDs, 1024-dimensional vectors, 4096-token
+windows, and reranking disabled. Use opt-in `BUDGET_PROFILE=LOCAL_CRC_32GB`
+for both existing model launch targets; reasoning starts first. The profile
+requests eager execution, one sequence per model, text-only reasoning with
+zero multimodal processor cache, and explicit embedding prefix-cache and
+chunked-prefill disables. Initial GPU limits are 0.54/0.43. Record actual
+startup flags and RAM/VRAM: limits and Budget estimates do not establish fit.
+
+Prepare `%UserProfile%\.wslconfig` with the following settings, preserving a
+backup and any unrelated existing options. Apply during a controlled WSL
+restart with the development environment saved; a ceiling is not a reservation.
+
+```ini
+[wsl2]
+memory=12GB
+processors=8
+swap=2GB
+pageReporting=true
+[experimental]
+autoMemoryReclaim=gradual
+```
+
+Keep CRC at 8 CPUs / 50 GiB disk. With CRC stopped, start each model, prove its
+health through LiteLLM, and measure its settled footprint. Boot CRC at 12288
+MiB only when Windows has at least 14 GiB available; try 10752 MiB if needed,
+requiring 12.5 GiB available first. Stop/restart CRC for memory changes. Never
+reduce below the documented minimum. [CRC configuration](https://crc.dev/docs/configuring/).
+
+Require two cold starts and a 30-minute mixed synthetic ingest/query/chat run:
+no OOM, unexpected restart, failed request, sustained paging, or degraded
+operator; at least 2 GiB steady Windows headroom, 1 GiB available inside CRC,
+and 512 MiB free VRAM. Keep existing request deadlines. Include long embedding
+inputs and representative RAG prompts. Missing measurements remain NOT RUN.
+
+Before loading another release, inventory old archives and their provenance.
+Retain the current and last successful candidates. Remove only artifacts
+confirmed reproducible; preserve corpus, snapshots, credentials, CRC instance
+files, and the original Kind volumes. If deletion does not return Windows
+space, arrange offline VHD compaction during the controlled restart; never
+compact a mounted VHD.
+
+If neither supported allocation passes, record simultaneous operation as
+**unreliable under the agreed constraints**, with evidence. Do not claim
+mathematical impossibility or keep lowering limits. Require all these lanes
+against one original signed-bundle checksum:
+
+| Lane | Required real components and coverage |
+|---|---|
+| Windows CRC, GPU models stopped | OpenShift, product images, registry/TLS, Qdrant, ingest, two agents, OAuth, LiteLLM/PostgreSQL, Jaeger; SCC, Service CA, Route, volumes and network enforcement |
+| New disposable local Kind, CRC stopped | Same product images and pipeline, both real GPU models, authenticated TLS gateway, Qdrant, ingest, Jaeger; citations, follow-up chat and all streams; private access without the OpenShift Route |
+| Required GitHub jobs | Fresh bootstrap of the published bundle, real application containers, registry, gateway/database and Kubernetes; deterministic computation and failure contracts |
+
+In mock lanes replace only computation behind LiteLLM, using the existing mock
+with explicit model IDs and 1024 dimensions. Keep real and mock collections
+separate. The disposable Kind cluster must not reuse or delete the preserved
+Kind cluster. Every lane must pass; skipped lab jobs are not OpenShift evidence.
+The combined OpenShift/real-model test remains an explicit coverage gap.
+
+GitHub's standard public Linux runners provide 4 CPUs/16 GB each; split lanes
+across runners and record observed capacity. CRC is not a hosted-runner gate:
+nested virtualization is unsupported. [Runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
+[virtualization limits](https://docs.github.com/en/actions/concepts/runners/github-hosted-runners).
+
+Extract repeatable CRC steps into a shared command only after this manual
+procedure passes. Keep the existing deployment framework and avoid a laptop
+runner. A changed image or configuration requires a new candidate and new
+acceptance; never edit a signed bundle or repack separately per lane.
 
 ## 2. Install the pinned Windows CRC release
 
@@ -102,7 +174,7 @@ setup requests it. Configure before creating the instance:
 crc version
 crc config set preset openshift
 crc config set cpus 8
-crc config set memory 14336
+crc config set memory 12288
 crc config set disk-size 50
 crc config set consent-telemetry no
 crc config set host-network-access true
@@ -141,10 +213,11 @@ model ports or assume Windows localhost forwarding works from CRC.
 Use a TLS gateway endpoint with a certificate valid for the hostname used by
 the pods. Preserve Bearer authentication and certificate verification. If
 using a private CA, deliver its public trust bundle to both agent and ingest
-HTTP clients through reviewed deployment configuration; trusting the CA on
-Windows or the nodes alone does not make application clients trust it. If
-this is unsupported by the current overlays, record a deployment blocker and
-fix the owning configuration before continuing. Never use `verify=False`,
+HTTP clients using optional `GATEWAY_CA_CONFIGMAP` (key `ca-bundle.crt`,
+mounted read-only, `SSL_CERT_FILE` set for agent and ingest). Supply a complete
+bundle preserving every required root; trusting the CA on
+Windows or the nodes alone does not make application clients trust it. Verify the reviewed candidate supports this input, and prove correct CA, wrong
+CA, and hostname-mismatch behavior from the application pods. Never use `verify=False`,
 `curl -k`, or an HTTP downgrade to claim a pass.
 
 Use a dedicated WSL kubeconfig for CRC, leaving the Kind context intact.
@@ -223,9 +296,10 @@ not proof of production block-storage parity. Watch actual VM disk usage,
 including Jaeger's existing 10Gi claim, image layers, and snapshot duplication.
 
 Local overrides change only sizing and environment coordinates. Keep
-`AGENT_ROUTE=true`, a real reasoning model, live embeddings of the declared
-dimension, Secret-backed gateway keys, and tracing enabled. Never switch to
-hash embeddings or a mock model to pass this release gate.
+`AGENT_ROUTE=true`, Secret-backed gateway keys, and tracing enabled in CRC.
+Fully live mode requires both current real models. Complementary mode follows
+section 1.1 and records mock computation explicitly; never use hash mode or
+claim that deterministic mock citations measure answer quality.
 
 **SCC prerequisite:** inspect admission with the unmodified security policy.
 Current production Qdrant values specify UID 1000, GID 2000, and fsGroup 3000;

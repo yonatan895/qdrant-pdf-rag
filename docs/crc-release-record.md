@@ -10,6 +10,11 @@ browser captures out of Git. Link protected evidence using local artifact names.
 
 | Field | Value |
 |---|---|
+| Verification mode: fully live CRC / complementary fallback | NOT SELECTED |
+| Fit attempts: 12288 / 10752 MiB, two cold starts, 30-minute workload | NOT RECORDED |
+| Model revisions / actual launch flags / WSL settings and hashes | NOT RECORDED |
+| Per-lane original tarball checksum and image digests | NOT RECORDED |
+| Combined OpenShift + real-model coverage gap (fallback only) | NOT RECORDED |
 | Operator / UTC start and finish | NOT RECORDED |
 | Full published-main commit SHA / CI evidence | NOT RECORDED |
 | Original tarball filename / SHA256 | NOT RECORDED |
@@ -26,6 +31,23 @@ browser captures out of Git. Link protected evidence using local artifact names.
 | Sanitized local env / override files and hashes | NOT RECORDED |
 | Synthetic corpus generator / PDF hashes / collection and vector config | NOT RECORDED |
 | Original Kind containers / backup and restore evidence | NOT RECORDED |
+
+## Lane decisions
+
+| Lane | Status | Evidence / reason |
+|---|---|---|
+| Simultaneous-fit experiment and headroom/time series | NOT RUN | |
+| CRC: real model or explicitly declared mock computation | NOT RUN | |
+| Disposable Kind with both real models (required in fallback) | NOT RUN | |
+| CI bundle integrity and fresh bootstrap | NOT RUN | |
+| CI full pipeline | NOT RUN | |
+| CI gateway/fault contracts | NOT RUN | |
+| CI three-worker Kind lifecycle | NOT RUN | |
+
+Fallback requires CRC, real-model Kind, and all required CI jobs on the same
+bundle. A skip is not a pass. Attach the reason neither simultaneous allocation
+passed and explicitly retain the missing combined test. Synthetic mock citations
+prove interface behavior only.
 
 ## Required results
 
@@ -58,6 +80,9 @@ successful agent check cannot conceal an ingest or OAuth failure.
 | Egress policy / before-and-after public direct-IP negative controls | NOT RUN | |
 | Runtime checks repeated under egress restriction | NOT RUN | |
 | Separate uncached public-node-pull denial and local-pull success | NOT RUN | |
+| Missing/wrong keys, bad CA, hostname mismatch, upstream errors and timeouts | NOT RUN | |
+| Wrong embedding dimension, malformed replies, truncated streams fail closed | NOT RUN | |
+| Long embedding input / representative RAG prompt under selected profile | NOT RUN | |
 | Final tarball checksum unchanged | NOT RUN | |
 
 ## Production differences and remaining acceptance
