@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mainframe_rag.agent.answer_core import (
     AnswerCoreInput,
+    ReasoningEffort,
     chat_body_chars,
     execute_answer_core,
     execute_answer_core_stream,
@@ -84,6 +85,7 @@ class UiChatRequest(BaseModel):
     splunk_context: str | None = None
     product: str | None = None
     version: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
 
 
 def _secure(response: Response) -> Response:
@@ -501,6 +503,7 @@ def _render_page(
         splunk_context=(form or {}).get("splunk_context", ""),
         product=(form or {}).get("product", ""),
         version=(form or {}).get("version", ""),
+        reasoning_effort=(form or {}).get("reasoning_effort", "low"),
     )
     return _secure(HTMLResponse(body, status_code=status_code))
 
@@ -553,6 +556,7 @@ async def _run_turn(request: Request, req: UiChatRequest):
         splunk_context=req.splunk_context,
         request_id=request_id,
         is_chat=True,
+        reasoning_effort=req.reasoning_effort,
     )
     try:
         return await execute_answer_core(core_input, app_mod.core_deps(), parent_span=root_span)
@@ -592,6 +596,7 @@ async def ui_chat(
     splunk_context: str | None = Form(default=None),
     product: str | None = Form(default=None),
     version: str | None = Form(default=None),
+    reasoning_effort: ReasoningEffort | None = Form(default=None),  # noqa: B008
 ) -> Response:
     history = _parse_history(messages)
     context = splunk_context.strip() if splunk_context and splunk_context.strip() else None
@@ -601,6 +606,7 @@ async def ui_chat(
         "splunk_context": splunk_context or "",
         "product": product or "",
         "version": version or "",
+        "reasoning_effort": reasoning_effort or "low",
     }
     is_htmx = request.headers.get("HX-Request") == "true"
 
@@ -610,6 +616,7 @@ async def ui_chat(
             splunk_context=context,
             product=(product or None),
             version=(version or None),
+            reasoning_effort=reasoning_effort,
         )
         output = await _run_turn(request, req)
     except Exception as exc:  # noqa: BLE001 — fixed banner to the operator, detail to logs
@@ -667,6 +674,7 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
         request_id=request_id,
         is_chat=True,
         stream=True,
+        reasoning_effort=req.reasoning_effort,
     )
 
     async def events():
