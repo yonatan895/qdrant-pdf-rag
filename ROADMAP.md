@@ -44,10 +44,11 @@ Items marked **[amended]** changed with the merged P0 PRs.
   server-side reasoning streaming is gated by `LLM_STREAM` (default off). Native
   `POST /v1/chat` and OpenAI-compatible `POST /v1/chat/completions` share the same
   `answer_core` engine and stream `chat.completion.chunk` frames terminated by `[DONE]`
-  (an error frame precedes `[DONE]` on mid-stream failure); chat requires at least one
-  message with role `user` (422 `"at least one user message is required"`), echoes the caller
-  `model` string while inference strictly runs `settings.llm_model_reasoning`, accepts and ignores
-  `max_tokens`, and bounds payloads via `chat_max_body_chars` (default 32768); the operator console
+   (an error frame precedes `[DONE]` on mid-stream failure); chat requires at least one
+   message with role `user` (missing user turn is a `422 invalid_request` /
+   `request body failed validation`, issue #314), reports the reasoning model
+   in the response `model` field while inference strictly runs `settings.llm_model_reasoning` (issue #313), accepts and ignores
+   `max_tokens`, and bounds payloads via `chat_max_body_chars` (default 32768); the operator console
   at `/ui` is the same engine behind `UI_ENABLED` (fail-closed) with an optional oauth-proxy Route.
   Embeddings via HTTP: `POST {embed_base_url}/embeddings` with the asymmetric
   `dense_query_prefix` on query vectors only.
