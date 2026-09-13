@@ -71,3 +71,58 @@ def test_gateway_setup_refuses_unknown_arguments():
     result = subprocess.run(['sh', str(ROOT / 'scripts/ci/deploy_test_gateway.sh'), 'test', '--skip'],
                             capture_output=True, text=True, check=False)
     assert result.returncode == 2
+
+
+def test_rehearsal_lanes_share_published_bundle_and_bound_jobs():
+    workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
+    jobs = workflow['jobs']
+    kind = jobs['kind-live-rehearsal']
+    assert kind['strategy']['matrix']['lane'] == ['pipeline', 'gateway-faults', 'lifecycle']
+    assert kind['strategy']['fail-fast'] is False
+    lab = jobs['airgap-rehearsal']
+    assert 'airgap-package' in lab['needs']
+    assert any('download-artifact@' in s.get('uses', '') for s in lab['steps'])
+    assert not any('make airgap-pack' in s.get('run', '') for s in lab['steps'])
+    for job in jobs.values():
+        assert job['permissions'] and job['timeout-minutes'] > 0
+        assert 'github.run_id' in job['concurrency']['group']
+        assert job['env']['SHARE'] == 'false'
+
+
+@pytest.mark.parametrize('script', ['gateway_faults.sh', 'check_lifecycle.sh'])
+def test_acceptance_scripts_refuse_missing_namespace(script):
+    result = subprocess.run(['sh', str(ROOT / 'scripts/ci' / script)],
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize('bad_probe', ['false-success', 'unrelated-failure', 'expected-failure'])
+def test_fault_lane_requires_contract_failure_and_recovery(tmp_path, bad_probe):
+    log = tmp_path / 'calls'
+    kc = tmp_path / 'kubectl'
+    kc.write_text('''#!/usr/bin/env python3
+import os,sys
+from pathlib import Path
+root=Path(os.environ['FAKE_STATE'])
+with (root/'calls').open('a') as out: out.write(' '.join(sys.argv[1:])+'\\n')
+if 'set' in sys.argv:
+    values=[x for x in sys.argv if x.startswith('MOCK_')]
+    (root/'fault').write_text(' '.join(values))
+if 'exec' in sys.argv:
+    fault=(root/'fault').read_text() if (root/'fault').exists() else ''
+    failing=any(x in fault for x in ('upstream','malformed','truncated','dimension','5000')) or 'env' in sys.argv
+    if failing and os.environ['PROBE_MODE']=='expected-failure':
+        print('GATEWAY PROBE FAILED');sys.exit(1)
+    if failing and os.environ['PROBE_MODE']=='unrelated-failure':
+        print('pod disappeared');sys.exit(1)
+    print('GATEWAY PROBE PASSED')
+''')
+    kc.chmod(0o755)
+    result = subprocess.run(['sh', str(ROOT / 'scripts/ci/gateway_faults.sh'), 'test'],
+        env={**os.environ, 'PATH': str(tmp_path)+':'+os.environ['PATH'], 'FAKE_STATE': str(tmp_path), 'PROBE_MODE': bad_probe},
+        capture_output=True, text=True, check=False)
+    assert (result.returncode == 0) == (bad_probe == 'expected-failure'), result.stderr
+    lines = log.read_text().splitlines()
+    assert any('MOCK_CHAT_FAULT=healthy MOCK_EMBED_FAULT=healthy MOCK_TTFT_MS=0' in line for line in lines)
+    if not result.returncode:
+        assert sum('exec deploy/rag-agent' in line for line in lines) >= 17

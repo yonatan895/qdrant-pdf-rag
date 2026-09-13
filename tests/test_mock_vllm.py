@@ -254,3 +254,61 @@ def test_httpx_llm_client_returns_chat_result(base_url, monkeypatch):
         assert result.usage.total_tokens > 0
     finally:
         client.close()
+
+
+@pytest.fixture
+def fault_server(monkeypatch):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def serve(chat='healthy', embed='healthy'):
+        monkeypatch.setenv('MOCK_CHAT_FAULT', chat)
+        monkeypatch.setenv('MOCK_EMBED_FAULT', embed)
+        monkeypatch.setenv('MOCK_DIM', '1024')
+        mod = importlib.util.module_from_spec(SPEC)
+        SPEC.loader.exec_module(mod)
+        server = mod.ThreadingHTTPServer(('127.0.0.1', 0), mod.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f'http://127.0.0.1:{server.server_port}/v1'
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+    return serve
+
+
+@pytest.mark.parametrize('fault', ['healthy', 'upstream', 'malformed', 'dimension'])
+def test_explicit_embed_faults(fault_server, fault):
+    with fault_server(embed=fault) as url:
+        response = httpx2.post(url + '/embeddings', json={'model': 'mock-embed', 'input': ['TEST']})
+        if fault == 'upstream':
+            assert response.status_code == 503
+        elif fault == 'malformed':
+            assert response.json()['data'] == []
+        else:
+            assert len(response.json()['data'][0]['embedding']) == (1024 if fault == 'healthy' else 1023)
+
+
+@pytest.mark.parametrize('fault', ['healthy', 'upstream', 'malformed', 'truncated'])
+def test_explicit_chat_faults(fault_server, fault):
+    with fault_server(chat=fault) as url:
+        response = httpx2.post(url + '/chat/completions', json={
+            'model': 'mock-reasoning', 'messages': [{'role': 'user', 'content': 'TEST'}], 'stream': True})
+        if fault == 'upstream':
+            assert response.status_code == 503
+        elif fault == 'malformed':
+            assert response.json()['choices'][0]['message'] is None
+        elif fault == 'truncated':
+            assert 'data:' in response.text and '[DONE]' not in response.text and '"finish_reason": "stop"' not in response.text
+        else:
+            assert '"finish_reason": "stop"' in response.text and 'data: [DONE]' in response.text
+
+
+@pytest.mark.parametrize('variable', ['MOCK_CHAT_FAULT', 'MOCK_EMBED_FAULT'])
+def test_unknown_fault_fails_closed(monkeypatch, variable):
+    monkeypatch.setenv(variable, 'typo')
+    mod = importlib.util.module_from_spec(SPEC)
+    with pytest.raises(ValueError, match='invalid MOCK_'):
+        SPEC.loader.exec_module(mod)
