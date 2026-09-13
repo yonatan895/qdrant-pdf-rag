@@ -14,11 +14,12 @@ def test_kind_uses_real_gateway_for_both_legs():
     workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
     steps = workflow['jobs']['kind-live-rehearsal']['steps']
     env_step = next(s['run'] for s in steps if s.get('name', '').startswith('Operator airgap.env'))
-    assert 'VLLM_BASE_URL=http://test-gateway:4000' in env_step
-    assert 'EMBED_BASE_URL=http://test-gateway:4000/v1' in env_step
-    assert 'LLM_BASE_URL=http://test-gateway:4000/v1' in env_step
+    assert 'VLLM_BASE_URL=https://test-gateway:4000' in env_step
+    assert 'EMBED_BASE_URL=https://test-gateway:4000/v1' in env_step
+    assert 'LLM_BASE_URL=https://test-gateway:4000/v1' in env_step
     assert 'LLM_MODEL_REASONING=mock-reasoning' in env_step
     assert 'GATEWAY_API_KEY_SECRET=test-gateway-keys' in env_step
+    assert 'GATEWAY_CA_CONFIGMAP=test-gateway-ca' in env_step
     assert 'DENSE_DIM=1024' in env_step
     assert 'RERANK_ENABLED=false' in env_step
     gateway_index = next(i for i, s in enumerate(steps) if 'deploy_test_gateway.sh' in s.get('run', ''))
@@ -111,6 +112,10 @@ if 'set' in sys.argv:
 if 'exec' in sys.argv:
     fault=(root/'fault').read_text() if (root/'fault').exists() else ''
     failing=any(x in fault for x in ('upstream','malformed','truncated','dimension','5000')) or 'env' in sys.argv
+    if '-' in sys.argv:
+        if failing != ('--expect-failure' in sys.argv):
+            print('APPLICATION CONTRACT FAILED');sys.exit(1)
+        print('APPLICATION CONTRACT PASSED');sys.exit(0)
     if failing and os.environ['PROBE_MODE']=='expected-failure':
         print('GATEWAY PROBE FAILED');sys.exit(1)
     if failing and os.environ['PROBE_MODE']=='unrelated-failure':
@@ -152,3 +157,51 @@ def test_installer_artifact_corruption_stops_before_installation(tmp_path):
         assert result.returncode != 0
         assert 'FAILED' in result.stdout + result.stderr
         assert not (directory / 'install-attempt').exists()
+
+
+def test_generated_gateway_certificates_require_the_right_ca_and_hostname(tmp_path):
+    script = ROOT / 'scripts/ci/create_test_tls.sh'
+    roots = [tmp_path / 'right', tmp_path / 'wrong']
+    for root in roots:
+        subprocess.run(['sh', str(script), str(root), 'test-gateway'], check=True, capture_output=True)
+    root, wrong = roots
+    system_roots = Path('/etc/ssl/certs/ca-certificates.crt').read_bytes()
+    assert (root / 'ca-bundle.crt').read_bytes() == system_roots + (root / 'ca.crt').read_bytes()
+    for authority, hostname, valid in [(root, 'test-gateway', True),
+                                      (wrong, 'test-gateway', False),
+                                      (root, 'test-gateway-wrong-name', False)]:
+        result = subprocess.run(['openssl', 'verify', '-x509_strict', '-purpose', 'sslserver',
+            '-verify_hostname', hostname, '-CAfile', str(authority / 'ca.crt'), str(root / 'tls.crt')],
+            capture_output=True, text=True, check=False)
+        assert (result.returncode == 0) is valid
+    assert (root / 'tls.key').stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize('args', [[], ['dir'], ['dir', 'bad/name'], ['dir', 'name', '--skip']])
+def test_test_certificate_cli_fails_closed(args):
+    result = subprocess.run(['sh', str(ROOT / 'scripts/ci/create_test_tls.sh'), *args],
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 2
+
+
+def test_kind_tls_precedes_validation_and_first_pull():
+    steps = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())['jobs']['kind-live-rehearsal']['steps']
+    def index(prefix):
+        return next(i for i, step in enumerate(steps) if step.get('name', '').startswith(prefix))
+    assert index('Black-box handoff') < index('Start authenticated TLS registry')
+    assert index('Create registry pull secret') < index('Deploy mock vLLM')
+    assert index('Real test gateway') < index('airgap-validate LIVE')
+    registry = steps[index('Start authenticated TLS registry')]['run']
+    assert 'registry.mirrors' not in registry
+    assert 'REGISTRY_AUTH=htpasswd' in registry
+    assert '/etc/containerd/certs.d' in registry
+    assert 'tls-verify=false' not in registry and 'skip_verify' not in registry
+    env = steps[index('Operator airgap.env')]['run']
+    assert 'INSECURE_REGISTRY=true' not in env
+    docs = list(yaml.safe_load_all((ROOT / 'scripts/ci/test-gateway.yaml').read_text()))
+    pod = next(d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'] == 'test-gateway')['spec']['template']['spec']
+    container = pod['containers'][0]
+    assert '--ssl_certfile_path' in container['args']
+    assert '--ssl_keyfile_path' in container['args']
+    assert container['readinessProbe']['httpGet']['scheme'] == 'HTTPS'
+    assert all('ca.key' not in str(v) for v in pod['volumes'])

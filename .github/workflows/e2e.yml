@@ -303,10 +303,9 @@ jobs:
   # The layout-faithful tier: consumes the sneakernet tarball in a fresh
   # empty dir (verify, unpack, bootstrap.sh) and runs the REAL operator
   # runbook — live validate, live pipeline (load, deploy, ingest, smoke) —
-  # against an ephemeral Kind cluster with a local HTTP registry. No lab
-  # secrets (GITHUB_TOKEN is automatic and only mints the GHCR pull secret
-  # for the wired-PULL_SECRET branch); the tarball artifact plus public pins
-  # are the only other inputs. airgap-acceptance proves the handoff
+  # against an ephemeral Kind cluster with an authenticated TLS registry.
+  # Ephemeral credentials and a private CA exercise loader/node trust and
+  # the wired PULL_SECRET branch; no lab credentials are required. airgap-acceptance proves the handoff
   # statically (dry-run);
   # this job proves the deployment comes up from a bootstrapped clone.
   # CI-only sizing (single replica, Gi sizes): a CI runner cannot schedule
@@ -384,53 +383,6 @@ jobs:
           name: sneakernet-bundle-${{ env.SHA }}
           path: gapbox/
 
-      - name: Start local registry + Kind (containerd mirror, digest-pinned node)
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          # CI-only scaffolding (same class as the curlimages/curl probe in
-          # openshift-e2e): an ephemeral localhost HTTP registry; prod uses
-          # the operator's INTERNAL_REGISTRY with TLS. Digest verified by
-          # local pull (distribution registry 2.8.3).
-          docker run -d --restart=always --name kind-registry -p 5000:5000 registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
-          cat > "$RUNNER_TEMP/kind-config.yaml" <<'EOF'
-          kind: Cluster
-          apiVersion: kind.x-k8s.io/v1alpha4
-          nodes:
-            - role: control-plane
-          containerdConfigPatches:
-            - |-
-              [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5000"]
-                endpoint = ["http://kind-registry:5000"]
-          EOF
-          if [ "${{ matrix.lane }}" = lifecycle ]; then
-            python3 - "$RUNNER_TEMP/kind-config.yaml" <<'PY_KIND'
-          import sys
-          from pathlib import Path
-          path = Path(sys.argv[1])
-          text = path.read_text().replace('  - role: control-plane\n',
-              '  - role: control-plane\n' + '  - role: worker\n' * 3)
-          path.write_text(text)
-          PY_KIND
-          fi
-          # Digest-pinned node image (kind upstream insists on @sha256 for reproducibility).
-          /usr/local/bin/kind create cluster --name gapbox --config "$RUNNER_TEMP/kind-config.yaml" \
-            --image "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
-          docker network connect kind kind-registry || true
-          /usr/local/bin/kubectl cluster-info
-
-      - name: Install pinned local-path provisioner (explicit StorageClass)
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          # Pinned manifest (rancher local-path-provisioner v0.0.37): same
-          # namespace/deployment names as kind's built-in provisioner, so
-          # this upgrades it in place and adds the `local-path`
-          # StorageClass — no duplicate provisioner, no ambient defaults.
-          curl -fsSL -o "$RUNNER_TEMP/local-path.yaml" https://raw.githubusercontent.com/rancher/local-path-provisioner/49b2be8e26d6d34c9afaa21fa33108d2e82f8955/deploy/local-path-storage.yaml
-          echo "9781b39c24f3f651bd6d6e41b561e04e4904bbdb6d4f8c7a6009df3a702dcd65  $RUNNER_TEMP/local-path.yaml" | sha256sum -c -
-          /usr/local/bin/kubectl apply -f "$RUNNER_TEMP/local-path.yaml"
-          /usr/local/bin/kubectl -n local-path-storage rollout status deploy/local-path-provisioner --timeout=180s
-          /usr/local/bin/kubectl get storageclass local-path
-
       - name: Black-box handoff (verify, unpack, bootstrap)
         env:
           IMAGE_SHA: ${{ env.SHA }}
@@ -448,6 +400,71 @@ jobs:
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
           test "$(awk '/^sha: /{print $2}' qdrant-pdf-rag/dist/MANIFEST.txt)" = "$SHA"
 
+      - name: Start authenticated TLS registry + Kind
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          TLS_DIR="$RUNNER_TEMP/registry-tls"
+          sh gapbox/qdrant-pdf-rag/scripts/ci/create_test_tls.sh "$TLS_DIR" kind-registry
+          # Keep credentials out of arguments, logs and retained diagnostics.
+          umask 077
+          openssl rand -hex 24 > "$TLS_DIR/password"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apache2-utils
+          htpasswd -iBc "$TLS_DIR/htpasswd" rehearsal < "$TLS_DIR/password"
+          echo '127.0.0.1 kind-registry' | sudo tee -a /etc/hosts >/dev/null
+          sudo cp "$TLS_DIR/ca.crt" /usr/local/share/ca-certificates/rehearsal-registry.crt
+          sudo update-ca-certificates
+          mkdir -p "$TLS_DIR/node-trust/kind-registry:5000"
+          cp "$TLS_DIR/ca.crt" "$TLS_DIR/node-trust/kind-registry:5000/ca.crt"
+          cat > "$TLS_DIR/node-trust/kind-registry:5000/hosts.toml" <<'EOF'
+          server = "https://kind-registry:5000"
+          [host."https://kind-registry:5000"]
+            capabilities = ["pull", "resolve"]
+            ca = "/etc/containerd/certs.d/kind-registry:5000/ca.crt"
+          EOF
+          docker run -d --restart=always --name kind-registry -p 127.0.0.1:5000:5000 \
+            -v "$TLS_DIR/tls.crt:/tls/tls.crt:ro" -v "$TLS_DIR/tls.key:/tls/tls.key:ro" \
+            -v "$TLS_DIR/htpasswd:/auth/htpasswd:ro" \
+            -e REGISTRY_HTTP_TLS_CERTIFICATE=/tls/tls.crt -e REGISTRY_HTTP_TLS_KEY=/tls/tls.key \
+            -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=rehearsal \
+            -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          for attempt in $(seq 1 20); do
+            status="$(curl -sS --cacert "$TLS_DIR/ca.crt" -o /dev/null -w '%{http_code}' https://kind-registry:5000/v2/ || true)"
+            [ "$status" = 401 ] && break
+            [ "$attempt" != 20 ] || exit 1
+            sleep 1
+          done
+          skopeo login --authfile "$TLS_DIR/registry-auth.json" --username rehearsal \
+            --password-stdin kind-registry:5000 < "$TLS_DIR/password"
+          echo "REGISTRY_AUTH_FILE=$TLS_DIR/registry-auth.json" >> "$GITHUB_ENV"
+          python3 - "$RUNNER_TEMP/kind-config.yaml" "$TLS_DIR/node-trust" "${{ matrix.lane }}" <<'PY_KIND'
+          import json, sys
+          from pathlib import Path
+          roles = ['control-plane'] + (['worker'] * 3 if sys.argv[3] == 'lifecycle' else [])
+          config = {'kind': 'Cluster', 'apiVersion': 'kind.x-k8s.io/v1alpha4',
+                    'nodes': [{'role': role, 'extraMounts': [{'hostPath': sys.argv[2],
+                              'containerPath': '/etc/containerd/certs.d', 'readOnly': True}]} for role in roles]}
+          Path(sys.argv[1]).write_text(json.dumps(config))
+          PY_KIND
+          /usr/local/bin/kind create cluster --name gapbox --config "$RUNNER_TEMP/kind-config.yaml" \
+            --image "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+          docker network connect kind kind-registry
+          /usr/local/bin/kubectl cluster-info
+
+      - name: Install pinned local-path provisioner (explicit StorageClass)
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          # Pinned manifest (rancher local-path-provisioner v0.0.37): same
+          # namespace/deployment names as kind's built-in provisioner, so
+          # this upgrades it in place and adds the `local-path`
+          # StorageClass — no duplicate provisioner, no ambient defaults.
+          curl -fsSL -o "$RUNNER_TEMP/local-path.yaml" https://raw.githubusercontent.com/rancher/local-path-provisioner/49b2be8e26d6d34c9afaa21fa33108d2e82f8955/deploy/local-path-storage.yaml
+          echo "9781b39c24f3f651bd6d6e41b561e04e4904bbdb6d4f8c7a6009df3a702dcd65  $RUNNER_TEMP/local-path.yaml" | sha256sum -c -
+          /usr/local/bin/kubectl apply -f "$RUNNER_TEMP/local-path.yaml"
+          /usr/local/bin/kubectl -n local-path-storage rollout status deploy/local-path-provisioner --timeout=180s
+          /usr/local/bin/kubectl get storageclass local-path
+
       - name: Operator airgap.env (Kind stand-ins, never prod values)
         env:
           IMAGE_SHA: ${{ env.SHA }}
@@ -457,22 +474,22 @@ jobs:
           NS="rag-kind-$(echo "$SHA" | cut -c1-12)"
           echo "NS=$NS" >> "$GITHUB_ENV"
           sed -i \
-            -e 's|^INTERNAL_REGISTRY=.*|INTERNAL_REGISTRY=localhost:5000|' \
+            -e 's|^INTERNAL_REGISTRY=.*|INTERNAL_REGISTRY=kind-registry:5000|' \
             -e "s|^NAMESPACE=.*|NAMESPACE=$NS|" \
             -e 's|^STORAGE_CLASS=.*|STORAGE_CLASS=local-path|' \
             -e 's|^IMAGE_SHA=.*|IMAGE_SHA='"$SHA"'|' \
             -e 's|^EMBED_MODEL=.*|EMBED_MODEL=mock-embed|' \
             -e 's|^DENSE_DIM=.*|DENSE_DIM=1024|' \
-            -e 's|^VLLM_BASE_URL=.*|VLLM_BASE_URL=http://test-gateway:4000|' \
+            -e 's|^VLLM_BASE_URL=.*|VLLM_BASE_URL=https://test-gateway:4000|' \
             -e 's|^CORPUS_PVC=.*|CORPUS_PVC=corpus|' \
-            -e 's|^# INSECURE_REGISTRY=false.*|INSECURE_REGISTRY=true|' \
             airgap.env
           cat >> airgap.env <<'EOF'
-          EMBED_BASE_URL=http://test-gateway:4000/v1
-          LLM_BASE_URL=http://test-gateway:4000/v1
+          EMBED_BASE_URL=https://test-gateway:4000/v1
+          LLM_BASE_URL=https://test-gateway:4000/v1
           LLM_MODEL_REASONING=mock-reasoning
           RERANK_ENABLED=false
           GATEWAY_API_KEY_SECRET=test-gateway-keys
+          GATEWAY_CA_CONFIGMAP=test-gateway-ca
           EOF
           grep -E "^(INTERNAL_REGISTRY|NAMESPACE|STORAGE_CLASS|IMAGE_SHA|EMBED_MODEL|DENSE_DIM|VLLM_BASE_URL|CORPUS_PVC|INSECURE_REGISTRY)" airgap.env
 
@@ -505,6 +522,17 @@ jobs:
           cd gapbox/qdrant-pdf-rag
           make airgap-load
 
+      - name: Create registry pull secret before the first node pull
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/kubectl create namespace "$NS"
+          /usr/local/bin/kubectl -n "$NS" create secret generic rehearsal-pull \
+            --type=kubernetes.io/dockerconfigjson \
+            --from-file=.dockerconfigjson="$REGISTRY_AUTH_FILE"
+          /usr/local/bin/kubectl -n "$NS" patch serviceaccount default \
+            -p '{"imagePullSecrets":[{"name":"rehearsal-pull"}]}'
+          sed -i 's|^PULL_SECRET=.*|PULL_SECRET=rehearsal-pull|' gapbox/qdrant-pdf-rag/airgap.env
+
       - name: Deploy mock vLLM (deterministic embeddings stand-in)
         run: |
           export PATH="/usr/local/bin:$PATH"
@@ -527,7 +555,7 @@ jobs:
                   - name: mock
                     # Tarball-faithful: loaded from the bundle, like the
                     # corpus-gen image below — never a GHCR pull.
-                    image: localhost:5000/qdrant-pdf-rag-ingest:${SHA}
+                    image: kind-registry:5000/qdrant-pdf-rag-ingest:${SHA}
                     command: ["python3", "/cm/mock_vllm.py"]
                     env:
                       - {name: MOCK_DIM, value: "1024"}
@@ -554,30 +582,17 @@ jobs:
           EOF
           /usr/local/bin/kubectl -n "$NS" rollout status deploy/vllm-mock --timeout=180s
 
-      - name: Create GHCR pull secret (wired PULL_SECRET branch, live)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Real test gateway and database (mock computation only)
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
-          /usr/local/bin/kubectl -n "$NS" create secret docker-registry ghcr-pull \
-            --docker-server=ghcr.io \
-            --docker-username="${{ github.actor }}" \
-            --docker-password="$GITHUB_TOKEN"
-          sed -i 's|^PULL_SECRET=.*|PULL_SECRET=ghcr-pull|' airgap.env
-          grep -q "^PULL_SECRET=ghcr-pull" airgap.env
+          sh scripts/ci/deploy_test_gateway.sh "$NS"
 
       - name: airgap-validate LIVE (cluster, StorageClass, MANIFEST match)
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
           make airgap-validate
-
-      - name: Real test gateway and database (mock computation only)
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          cd gapbox/qdrant-pdf-rag
-          sh scripts/ci/deploy_test_gateway.sh "$NS"
 
       - name: Generate corpus PVC + demo PDFs (operator-supplied corpus step)
         run: |
@@ -604,7 +619,7 @@ jobs:
                   - name: gen
                     # Tarball-faithful: this image came out of the sneakernet
                     # bundle via airgap-load, not from GHCR.
-                    image: localhost:5000/qdrant-pdf-rag-ingest:${SHA}
+                    image: kind-registry:5000/qdrant-pdf-rag-ingest:${SHA}
                     command: ["/bin/sh", "-ec"]
                     args:
                       - |
@@ -637,6 +652,12 @@ jobs:
           export PATH="/usr/local/bin:$PATH"
           /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
             python3 /app/scripts/probe_gateway.py --require-reasoning --stream
+
+      - name: Cited answers, follow-up chat and every application stream
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          /usr/local/bin/kubectl -n "$NS" exec -i deploy/rag-agent -- python3 - \
+            < gapbox/qdrant-pdf-rag/scripts/ci/application_contracts.py
 
       - name: Expected-substring acceptance
         run: |
@@ -1107,7 +1128,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0; artifact bytes only
         with:
-          name: airgap-bundle-${{ env.SHA }}
+          name: sneakernet-bundle-${{ env.SHA }}
           path: gapbox/
       - name: Fresh published-bundle bootstrap
         run: |
