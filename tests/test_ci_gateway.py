@@ -112,7 +112,7 @@ def test_acceptance_scripts_refuse_missing_namespace(script):
     assert result.returncode == 2
 
 
-@pytest.mark.parametrize('bad_probe', ['false-success', 'unrelated-failure', 'expected-failure'])
+@pytest.mark.parametrize('bad_probe', ['false-success', 'unrelated-failure', 'state-not-ready', 'expected-failure'])
 def test_fault_lane_requires_contract_failure_and_recovery(tmp_path, bad_probe):
     log = tmp_path / 'calls'
     kc = tmp_path / 'kubectl'
@@ -124,6 +124,9 @@ with (root/'calls').open('a') as out: out.write(' '.join(sys.argv[1:])+'\\n')
 if 'set' in sys.argv:
     values=[x for x in sys.argv if x.startswith('MOCK_')]
     (root/'fault').write_text(' '.join(values))
+if 'exec' in sys.argv and 'deploy/test-gateway' in sys.argv:
+    print('MOCK STATE READY' if os.environ['PROBE_MODE']!='state-not-ready' else 'state did not converge')
+    sys.exit(1 if os.environ['PROBE_MODE']=='state-not-ready' else 0)
 if 'exec' in sys.argv:
     fault=(root/'fault').read_text() if (root/'fault').exists() else ''
     failing=any(x in fault for x in ('upstream','malformed','truncated','dimension','5000')) or 'env' in sys.argv

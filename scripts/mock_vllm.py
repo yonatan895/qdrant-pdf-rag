@@ -52,7 +52,7 @@ JITTER_MS = float(os.environ.get("MOCK_JITTER_MS", "0"))
 SEED = int(os.environ.get("MOCK_SEED", "0"))
 ERROR_RATE = float(os.environ.get("MOCK_ERROR_RATE", "0"))
 # Explicit deterministic faults for the gateway contract lane. Healthy is
-# byte-identical to the existing mock; no request-side control reaches prod.
+# byte-identical for model responses; health exposes CI control state only.
 CHAT_FAULT = os.environ.get("MOCK_CHAT_FAULT", "healthy")
 EMBED_FAULT = os.environ.get("MOCK_EMBED_FAULT", "healthy")
 if CHAT_FAULT not in ("healthy", "upstream", "malformed", "truncated"):
@@ -201,7 +201,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # http.server API requires this camelCase name
         if self.path in ("/healthz", "/health"):
-            self._send(200, {"status": "ok"})
+            self._send(200, {"status": "ok", "chat_fault": CHAT_FAULT,
+                             "embed_fault": EMBED_FAULT, "ttft_ms": TTFT_MS})
         elif self.path.endswith("/models"):
             self._send(
                 200,

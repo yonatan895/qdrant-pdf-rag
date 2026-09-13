@@ -541,6 +541,8 @@ jobs:
             labels: {app: vllm-mock}
           spec:
             replicas: 1
+            # A fault transition must retire the previous computation state.
+            strategy: {type: Recreate}
             selector: {matchLabels: {app: vllm-mock}}
             template:
               metadata: {labels: {app: vllm-mock}}

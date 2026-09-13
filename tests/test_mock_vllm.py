@@ -312,3 +312,12 @@ def test_unknown_fault_fails_closed(monkeypatch, variable):
     mod = importlib.util.module_from_spec(SPEC)
     with pytest.raises(ValueError, match='invalid MOCK_'):
         SPEC.loader.exec_module(mod)
+
+
+def test_health_reports_the_active_fault_state(fault_server, monkeypatch):
+    monkeypatch.setenv('MOCK_TTFT_MS', '17')
+    with fault_server(chat='upstream', embed='dimension') as url:
+        response = httpx2.get(url.removesuffix('/v1') + '/healthz')
+        assert response.status_code == 200
+        assert response.json() == {'status': 'ok', 'chat_fault': 'upstream',
+                                   'embed_fault': 'dimension', 'ttft_ms': 17.0}
