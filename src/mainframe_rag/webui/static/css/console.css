@@ -295,7 +295,46 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
 .turn-content.md pre { position: relative; }
 .turn-content.md pre > .copy-btn { position: absolute; top: 0.35rem; right: 0.35rem; margin-left: 0; }
 
-.composer { display: flex; gap: 0.6rem; align-items: flex-end; position: sticky; bottom: 0; background: var(--bg); padding: 0.6rem 0 0.4rem; }
+.composer-wrap {
+  position: sticky; bottom: 0; background: var(--bg);
+  padding: 0.4rem 0 0.4rem;
+}
+.composer-toolbar {
+  display: flex; align-items: center; justify-content: flex-end;
+  margin-bottom: 0.35rem; padding: 0 0.2rem;
+}
+.reasoning-control {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  margin: 0; padding: 0; border: 0;
+}
+.reasoning-control .control-label {
+  color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.segmented-control {
+  display: inline-flex; align-items: center;
+  background: var(--panel); border: 1px solid var(--panel-border);
+  border-radius: 6px; padding: 2px; gap: 2px;
+}
+.segmented-control input[type="radio"] {
+  position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;
+}
+.segmented-control label {
+  display: inline-block; padding: 0.18rem 0.55rem; border-radius: 4px;
+  font-size: 0.75rem; font-weight: 500; letter-spacing: 0.5px;
+  color: var(--muted); cursor: pointer; user-select: none;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.segmented-control label:hover {
+  color: var(--text);
+}
+.segmented-control input[type="radio"]:checked + label {
+  background: var(--accent); color: var(--accent-text); font-weight: bold;
+}
+.segmented-control input[type="radio"]:focus-visible + label {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+
+.composer { display: flex; gap: 0.6rem; align-items: flex-end; }
 .composer textarea {
   flex: 1 1 auto; min-width: 0; resize: vertical;
   border-radius: 16px; padding: 0.7rem 1.1rem;
@@ -346,4 +385,5 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
 @media (prefers-reduced-motion: reduce) {
   .thinking { animation: none; opacity: 0.8; }
   #send-btn { transition: none; }
+  .segmented-control label { transition: none; }
 }

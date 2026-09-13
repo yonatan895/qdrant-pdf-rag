@@ -79,6 +79,7 @@ class AnswerCoreInput:
     hits: list[SearchHit] | None = None
     query_kind: str | None = None
     timings: dict[str, int] | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass
@@ -227,9 +228,12 @@ async def execute_answer_core(
         else settings.prompt_max_context_chars
     )
     effort = (
-        settings.llm_reasoning_effort_complex
-        if complexity == "complex"
-        else settings.llm_reasoning_effort_simple
+        input_data.reasoning_effort
+        or (
+            settings.llm_reasoning_effort_complex
+            if complexity == "complex"
+            else settings.llm_reasoning_effort_simple
+        )
     )
 
     with tracer.start_as_current_span(
@@ -416,9 +420,12 @@ async def execute_answer_core_stream(
         else settings.prompt_max_context_chars
     )
     effort = (
-        settings.llm_reasoning_effort_complex
-        if complexity == "complex"
-        else settings.llm_reasoning_effort_simple
+        input_data.reasoning_effort
+        or (
+            settings.llm_reasoning_effort_complex
+            if complexity == "complex"
+            else settings.llm_reasoning_effort_simple
+        )
     )
 
     with tracer.start_as_current_span(

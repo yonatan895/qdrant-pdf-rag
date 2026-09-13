@@ -46,7 +46,16 @@ class MockSearch:
 
 
 class UiFakeLLM:
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.stream_calls: list[dict] = []
+
     def chat(self, messages, reasoning_effort=None, temperature=None):
+        self.calls.append({
+            "messages": messages,
+            "reasoning_effort": reasoning_effort,
+            "temperature": temperature,
+        })
         return ChatResult(
             content=(
                 "Reissue the command after initialization.\n\n"
@@ -58,6 +67,11 @@ class UiFakeLLM:
         )
 
     async def chat_stream(self, messages, reasoning_effort=None, temperature=None) -> AsyncIterator[dict]:
+        self.stream_calls.append({
+            "messages": messages,
+            "reasoning_effort": reasoning_effort,
+            "temperature": temperature,
+        })
         yield {"type": "token", "delta": "Reissue the ", "ttft_ms": 5}
         yield {
             "type": "token",
@@ -825,3 +839,92 @@ def test_console_js_code_tokenizer_parity():
         "tok-number",
     ):
         assert token in js, token
+
+
+def test_ui_chat_passes_reasoning_effort(ui_client, monkeypatch):
+    """Reasoning effort selected in UI form is forwarded to LLM chat call."""
+    fake_llm = UiFakeLLM()
+    monkeypatch.setattr(app_mod, "llm", fake_llm)
+
+    resp_high = ui_client.post(
+        "/ui/chat",
+        data={"message": "What is IEA500I?", "messages": "", "reasoning_effort": "high"},
+        headers={"HX-Request": "true"},
+    )
+    assert resp_high.status_code == 200
+    assert fake_llm.calls[-1]["reasoning_effort"] == "high"
+
+    resp_low = ui_client.post(
+        "/ui/chat",
+        data={"message": "What is IEA500I?", "messages": "", "reasoning_effort": "low"},
+        headers={"HX-Request": "true"},
+    )
+    assert resp_low.status_code == 200
+    assert fake_llm.calls[-1]["reasoning_effort"] == "low"
+
+
+def test_ui_chat_stream_passes_reasoning_effort(ui_client, monkeypatch):
+    """Reasoning effort selected in UI stream payload is forwarded to LLM chat_stream."""
+    fake_llm = UiFakeLLM()
+    monkeypatch.setattr(app_mod, "llm", fake_llm)
+
+    resp = ui_client.post(
+        "/ui/chat/stream",
+        json={
+            "messages": [{"role": "user", "content": "What is IEA500I?"}],
+            "reasoning_effort": "medium",
+        },
+    )
+    assert resp.status_code == 200
+    assert fake_llm.stream_calls[-1]["reasoning_effort"] == "medium"
+
+
+def test_ui_chat_stream_invalid_reasoning_effort_rejected(ui_client, monkeypatch):
+    """Invalid reasoning effort returns 422 validation error."""
+    resp = ui_client.post(
+        "/ui/chat/stream",
+        json={
+            "messages": [{"role": "user", "content": "What is IEA500I?"}],
+            "reasoning_effort": "ultra",
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_ui_index_renders_reasoning_effort_toggle(ui_client):
+    """GET /ui renders the reasoning effort segmented control toolbar."""
+    resp = ui_client.get("/ui")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "composer-toolbar" in body
+    assert "reasoning-control" in body
+    assert "segmented-control" in body
+    assert 'name="reasoning_effort"' in body
+    assert 'value="low"' in body
+    assert 'value="medium"' in body
+    assert 'value="high"' in body
+
+
+def test_console_js_reasoning_effort_parity():
+    """console.js contains client-side persistence and payload integration for reasoning effort."""
+    js = (
+        Path(app_mod.__file__).parents[1] / "webui" / "static" / "js" / "console.js"
+    ).read_text(encoding="utf-8")
+    for token in (
+        "REASONING_KEY",
+        "mainframe_rag_reasoning_effort",
+        "getReasoningEffort",
+        "setReasoningEffort",
+        "reasoning_effort",
+    ):
+        assert token in js, token
+
+
+def test_console_css_reasoning_control():
+    """console.css defines styles for composer-toolbar and reasoning segmented control."""
+    css = (
+        Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
+    ).read_text(encoding="utf-8")
+    assert ".composer-toolbar" in css
+    assert ".reasoning-control" in css
+    assert ".segmented-control" in css

@@ -199,3 +199,49 @@ async def test_resolve_search_query_condenses_only_when_enabled():
         == "IEA500I recovery procedure"
     )
     assert len(llm_on.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_core_reasoning_effort_explicit_override_sync():
+    """Explicit reasoning_effort overrides complexity-based default in execute_answer_core."""
+    def retrieve(*_a, **_k):
+        return [_hit()], "nl", {"embed_ms": 1, "qdrant_ms": 1}
+
+    # Query without override -> simple query defaults to "low"
+    llm1 = CoreFakeLLM()
+    await execute_answer_core(
+        AnswerCoreInput(query="simple query"),
+        _deps(_settings(), llm1, retrieve),
+    )
+    assert llm1.calls[0]["reasoning_effort"] == "low"
+
+    # Simple query with explicit override="high" -> gets "high"
+    llm2 = CoreFakeLLM()
+    await execute_answer_core(
+        AnswerCoreInput(query="simple query", reasoning_effort="high"),
+        _deps(_settings(), llm2, retrieve),
+    )
+    assert llm2.calls[0]["reasoning_effort"] == "high"
+
+    # Complex query with explicit override="low" -> gets "low"
+    llm3 = CoreFakeLLM()
+    await execute_answer_core(
+        AnswerCoreInput(query="diagnose abend S0C4 with registers and spool dump", reasoning_effort="low"),
+        _deps(_settings(), llm3, retrieve),
+    )
+    assert llm3.calls[0]["reasoning_effort"] == "low"
+
+
+@pytest.mark.anyio
+async def test_core_reasoning_effort_explicit_override_stream():
+    """Explicit reasoning_effort overrides complexity-based default in execute_answer_core_stream."""
+    def retrieve(*_a, **_k):
+        return [_hit()], "nl", {"embed_ms": 1, "qdrant_ms": 1}
+
+    llm = CoreFakeLLM()
+    async for _ in execute_answer_core_stream(
+        AnswerCoreInput(query="simple query", reasoning_effort="medium"),
+        _deps(_settings(), llm, retrieve),
+    ):
+        pass
+    assert llm.calls[0]["reasoning_effort"] == "medium"

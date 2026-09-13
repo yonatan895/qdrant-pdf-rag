@@ -19,6 +19,7 @@
 (function () {
   const STORAGE_KEY = "mainframe_rag_sessions";
   const THEME_KEY = "mainframe_rag_theme";
+  const REASONING_KEY = "mainframe_rag_reasoning_effort";
   const MAX_SAVED_SESSIONS = 30;
   const ERROR_TEXT = "The reasoning agent could not complete this request. Check the agent logs and retry.";
 
@@ -603,6 +604,18 @@
     if (themeSelect) themeSelect.value = document.body.className;
   }
 
+  function getReasoningEffort() {
+    const checked = document.querySelector('input[name="reasoning_effort"]:checked');
+    return checked ? checked.value : "low";
+  }
+
+  function setReasoningEffort(effort) {
+    const valid = ["low", "medium", "high"];
+    const target = valid.includes(effort) ? effort : "low";
+    const radio = document.querySelector('input[name="reasoning_effort"][value="' + target + '"]');
+    if (radio) radio.checked = true;
+  }
+
   function parseFrames(frame) {
     let name = "message";
     let data = "";
@@ -636,6 +649,7 @@
         splunk_context: userTurn.splunk_context || null,
         product: productEl.value.trim() || null,
         version: versionEl.value.trim() || null,
+        reasoning_effort: getReasoningEffort(),
       };
       const response = await fetch("/ui/chat/stream", {
         method: "POST",
@@ -874,6 +888,23 @@
         }
       });
     }
+
+    try {
+      const savedEffort = window.localStorage.getItem(REASONING_KEY);
+      if (savedEffort) setReasoningEffort(savedEffort);
+    } catch (err) {
+      /* storage loss is not an error */
+    }
+
+    document.querySelectorAll('input[name="reasoning_effort"]').forEach((radio) => {
+      radio.addEventListener("change", () => {
+        try {
+          window.localStorage.setItem(REASONING_KEY, radio.value);
+        } catch (err) {
+          /* storage loss is not an error */
+        }
+      });
+    });
 
     const exportBtn = document.getElementById("export-btn");
     if (exportBtn) {
