@@ -188,6 +188,8 @@ Re-ingesting a regenerated corpus (new doc_id generation) requires deleting the 
 
 ## Overlays (never mix CI and prod — read only for deploy work)
 
+- OpenShift Qdrant values explicitly null the chart UID/GID/fsGroup defaults; Jaeger leaves IDs to `restricted-v2`. Never repair admission by granting `anyuid`. Application cache and work directories are group-0 writable for project-assigned UIDs; application source stays read-only.
+
 - **CI (lab, connected only):** `overlays/ci/values.yaml` + `deploy/kustomize/overlays/ci` — 1 replica / 1Gi, `EMBED_MODE=hash`, synthetic PDFs generated in-cluster, GHCR pulls. Never copy the CI ingest Job into prod.
 - **Prod (air-gap):** `overlays/openshift/values.yaml` + `deploy/kustomize/overlays/openshift` (agent, `UI_ENABLED=true`) + `deploy/kustomize/overlays/openshift-ingest` (one-shot Job) + `deploy/kustomize/overlays/openshift-ui` (optional console Route, rendered only with `AGENT_ROUTE=true`; fails closed on the PENDING oauth-proxy pin or a missing cookie Secret). Qdrant 3 replicas / 500Gi / unprivileged / RWO (agent stays 2 replicas). No `EMBED_MODE` key. Corpus is a caller-supplied PVC. Do not shrink prod values to CI sizes.
 - Placeholders in git (`__TOKEN__`, `ghcr.io/OWNER`). Render must fail closed on leftover `__[A-Z][A-Z0-9_]*__`. No real registries, namespaces, or URLs in git. Helm values stay placeholders (`INTERNAL_REGISTRY` / `REGISTRY_INTERNAL`, `PULL_SECRET`, `STORAGE_CLASS`).

@@ -28,8 +28,8 @@ ENV PYTHONPATH=/app/src \
 USER root
 RUN useradd -u 1000 -M -s /sbin/nologin rag \
     && mkdir -p /work \
-    && chown -R rag:rag /work \
-    && chown -R rag:rag /opt/bm25
+    && chown -R rag:0 /work /opt/bm25 \
+    && chmod -R g=u /work /opt/bm25
 USER 1000
 WORKDIR /work
 

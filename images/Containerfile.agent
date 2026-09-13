@@ -21,7 +21,10 @@ ENV PYTHONPATH=/app/src \
 
 # The python-314-minimal base defaults to a non-root user; setup needs root.
 USER root
-RUN useradd -u 1000 -M -s /sbin/nologin rag && chown -R rag:rag /opt/bm25
+# OpenShift assigns an arbitrary UID in group 0. FastEmbed needs a writable cache.
+RUN useradd -u 1000 -M -s /sbin/nologin rag \
+    && chown -R rag:0 /opt/bm25 \
+    && chmod -R g=u /opt/bm25
 USER 1000
 WORKDIR /app
 

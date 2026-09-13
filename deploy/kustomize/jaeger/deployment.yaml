@@ -1,6 +1,4 @@
-# Jaeger v2 all-in-one. Container runs as USER 10001 (upstream default);
-# fsGroup makes the RWO block volume group-writable for badger under the
-# restricted-v2 SCC (same mechanism the vendored Qdrant chart uses).
+# Jaeger uses the project UID and volume group assigned by restricted-v2.
 # Storage config is baked (badger) — no size knob. Tracing is on by default:
 # an unset OTEL_EXPORTER_OTLP_ENDPOINT resolves to this in-cluster Jaeger;
 # the `off` sentinel disables tracing and skips this dir.
@@ -21,7 +19,9 @@ spec:
         app: jaeger
     spec:
       securityContext:
-        fsGroup: 10001
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       # [] by default; scripts/airgap/deploy.sh substitutes the PULL_SECRET
       # from airgap.env when the namespace cannot pull anonymously.
       imagePullSecrets: []
@@ -29,6 +29,10 @@ spec:
         - name: jaeger
           image: jaeger:ci
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
           args: ["--config", "/etc/jaeger/config-badger.yaml"]
           ports:
             - containerPort: 4318
