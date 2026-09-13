@@ -8,10 +8,10 @@
 
 body.theme-3270 {
   --bg: #000000;
-  --panel: #050d05;
-  --panel-border: #00aa44;
+  --panel: #041004;
+  --panel-border: #0e5c2e;
   --text: #00ff66;
-  --muted: #00aa44;
+  --muted: #2fbf62;
   --accent: #00ff66;
   --accent-text: #000000;
   --error: #ff6655;
@@ -23,8 +23,8 @@ body.theme-dark {
   --bg: #0d1117;
   --panel: #161b22;
   --panel-border: #30363d;
-  --text: #c9d1d9;
-  --muted: #8b949e;
+  --text: #d5dbe2;
+  --muted: #9aa7b4;
   --accent: #58a6ff;
   --accent-text: #0d1117;
   --error: #f85149;
@@ -34,13 +34,24 @@ body.theme-dark {
 
 * { box-sizing: border-box; }
 
+::selection { background: var(--accent); color: var(--accent-text); }
+
+/* Quiet scrollbars that match the theme (progressive enhancement). */
+* { scrollbar-color: var(--panel-border) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--panel-border); border-radius: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-body);
-  text-shadow: var(--glow);
+  font-size: 15px;
+  line-height: 1.6;
 }
+/* P4: the phosphor glow lives on headers only — body copy stays crisp. */
+.topbar h1 { text-shadow: var(--glow); }
 
 body.theme-3270::before {
   content: "";
@@ -78,15 +89,21 @@ a { color: var(--accent); }
 select, input, textarea, button {
   font-family: var(--font-body);
   font-size: 0.9rem;
+  line-height: 1.5;
   color: var(--text);
   background: var(--bg);
   border: 1px solid var(--panel-border);
-  border-radius: 3px;
-  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  padding: 0.45rem 0.65rem;
 }
 
 button { cursor: pointer; text-transform: uppercase; letter-spacing: 1px; }
-button:hover { background: var(--accent); color: var(--accent-text); }
+button:hover { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 .layout { display: grid; grid-template-columns: 230px 1fr; min-height: calc(100vh - 3rem); }
 /* Grid/flex children default to min-width: auto, which lets a wide textarea
@@ -107,25 +124,31 @@ button:hover { background: var(--accent); color: var(--accent-text); }
 .session-list .row { display: flex; gap: 0.3rem; }
 .session-list .row button { flex: 1; text-align: left; text-transform: none; letter-spacing: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-list .row .del { flex: 0 0 2rem; text-align: center; }
-.session-list .row.active button { border-color: var(--accent); }
+.session-list .row.active button.open { border-color: var(--accent); background: var(--bg); }
 .sidebar-note { color: var(--muted); font-size: 0.72rem; margin-top: auto; }
 
-.console { padding: 1rem; display: flex; flex-direction: column; gap: 0.8rem; max-width: 70rem; }
+.console { padding: 1.25rem 1.25rem 1rem; display: flex; flex-direction: column; gap: 1rem; max-width: 70rem; }
 
-.drawer { border: 1px dashed var(--panel-border); padding: 0.6rem; background: var(--panel); }
+.drawer {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 0.7rem 0.9rem;
+  background: var(--panel);
+}
 .drawer summary { cursor: pointer; color: var(--muted); }
 .drawer label { display: block; margin-top: 0.5rem; color: var(--muted); font-size: 0.8rem; }
 .drawer textarea, .drawer input { width: 100%; }
 .filters { display: flex; flex-wrap: wrap; gap: 1rem; }
 .filters label { flex: 1 1 12rem; }
 
-.messages { display: flex; flex-direction: column; gap: 0.8rem; }
+.messages { display: flex; flex-direction: column; gap: 1rem; }
 
 .turn {
   border: 1px solid var(--panel-border);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--panel);
-  padding: 0.7rem 0.9rem;
+  padding: 0.85rem 1.1rem;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
 /* Operator turns read as compact right-aligned bubbles; copilot answers
    keep the full-width card with the accent rail (P2 message design). */
@@ -136,7 +159,7 @@ button:hover { background: var(--accent); color: var(--accent-text); }
   max-width: 80%;
 }
 .turn-assistant { border-left: 3px solid var(--accent); }
-.turn-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
+.turn-head { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.5rem; }
 .avatar {
   flex-shrink: 0;
   width: 1.5rem; height: 1.5rem; line-height: 1.5rem; text-align: center;
@@ -186,19 +209,24 @@ button:hover { background: var(--accent); color: var(--accent-text); }
 .turn-content.md h2 { font-size: 1.08rem; }
 .turn-content.md h3 { font-size: 1rem; }
 .turn-content.md h4 { font-size: 0.92rem; }
-.turn-content.md p { margin: 0.4rem 0; }
-.turn-content.md ul, .turn-content.md ol { margin: 0.4rem 0; padding-left: 1.4rem; }
-.turn-content.md li { margin: 0.2rem 0; }
+.turn-content.md p { margin: 0.55rem 0; }
+.turn-content.md p:first-child { margin-top: 0.15rem; }
+.turn-content.md ul, .turn-content.md ol { margin: 0.55rem 0; padding-left: 1.4rem; }
+.turn-content.md li { margin: 0.3rem 0; line-height: 1.55; }
 .turn-content.md code {
   font-family: var(--font-mono); font-size: 0.85em;
+  color: var(--accent);
   background: var(--bg); border: 1px solid var(--panel-border);
-  border-radius: 3px; padding: 0.05rem 0.3rem;
+  border-radius: 4px; padding: 0.05rem 0.35rem;
+  overflow-wrap: anywhere;
 }
 .turn-content.md pre {
   background: var(--bg); border: 1px solid var(--panel-border);
-  border-radius: 3px; padding: 0.6rem 0.8rem; overflow-x: auto; margin: 0.5rem 0;
+  border-radius: 6px; padding: 0.7rem 0.9rem; overflow-x: auto; margin: 0.6rem 0;
 }
-.turn-content.md pre code { background: none; border: 0; padding: 0; font-size: 0.85rem; }
+.turn-content.md pre code {
+  color: var(--text); background: none; border: 0; padding: 0; font-size: 0.85rem;
+}
 .turn-context { margin-bottom: 0.5rem; }
 .turn-context summary {
   display: inline-block; cursor: pointer;
@@ -224,9 +252,10 @@ button:hover { background: var(--accent); color: var(--accent-text); }
 .turn-content.md pre { position: relative; }
 .turn-content.md pre > .copy-btn { position: absolute; top: 0.35rem; right: 0.35rem; margin-left: 0; }
 
-.composer { display: flex; gap: 0.5rem; align-items: flex-end; position: sticky; bottom: 0; background: var(--bg); padding-top: 0.4rem; }
-.composer textarea { flex: 1 1 auto; min-width: 0; resize: vertical; }
-.composer button { flex-shrink: 0; }
+.composer { display: flex; gap: 0.6rem; align-items: flex-end; position: sticky; bottom: 0; background: var(--bg); padding: 0.6rem 0 0.4rem; }
+.composer textarea { flex: 1 1 auto; min-width: 0; resize: vertical; border-radius: 8px; padding: 0.6rem 0.8rem; }
+.composer button { flex-shrink: 0; padding: 0.6rem 1.1rem; border-radius: 8px; }
+#send-btn:not(.stop) { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: bold; }
 
 .error-banner { border: 1px solid var(--error); color: var(--error); padding: 0.5rem 0.8rem; margin-top: 0.6rem; }
 .turn-error .turn-content { color: var(--error); }

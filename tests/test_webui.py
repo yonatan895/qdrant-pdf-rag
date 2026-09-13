@@ -328,6 +328,22 @@ def test_console_css_layout_survival_rules():
     assert ".composer textarea { flex: 1 1 auto; min-width: 0;" in css
 
 
+def test_console_css_theme_polish():
+    """Issue #326 P4: readability invariants — visible focus, glow scoped
+    off body copy, primary Send, reduced-motion respect."""
+    css = (
+        Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
+    ).read_text(encoding="utf-8")
+    assert ":focus-visible" in css
+    assert ".topbar h1 { text-shadow: var(--glow); }" in css
+    # Exactly one text-shadow in the sheet: the header glow. Body copy in
+    # the 3270 theme stays crisp (dark theme sets --glow: none anyway).
+    assert css.count("text-shadow") == 1
+    assert "#send-btn:not(.stop)" in css
+    assert "prefers-reduced-motion" in css
+    assert "::selection" in css
+
+
 # ---------------------------------------------------------------- markdown (P1)
 
 
