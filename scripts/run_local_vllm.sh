@@ -151,15 +151,27 @@ if [ "${BUDGET_RUNNER}" = "pooling" ]; then
     if [ -n "${BUDGET_BATCHED_TOKENS:-}" ]; then
         set -- "$@" --max-num-batched-tokens "${BUDGET_BATCHED_TOKENS}"
     fi
-    if [ "${BUDGET_EAGER:-0}" = "1" ]; then
-        set -- "$@" --enforce-eager
-    fi
+fi
+if [ "${BUDGET_EAGER:-0}" = "1" ]; then
+    set -- "$@" --enforce-eager
 fi
 # vLLM prefix caching (KV reuse across shared prompt prefixes): resolved
 # from the Budget profile, off unless the profile enables it. Issue #80
 # measures the hit rate before enabling it anywhere.
 if [ "${BUDGET_PREFIX_CACHE:-0}" = "1" ]; then
     set -- "$@" --enable-prefix-caching
+else
+    set -- "$@" --no-enable-prefix-caching
+fi
+case "${BUDGET_CHUNKED_PREFILL:-}" in
+    1) set -- "$@" --enable-chunked-prefill ;;
+    0) set -- "$@" --no-enable-chunked-prefill ;;
+esac
+if [ "${BUDGET_LANGUAGE_MODEL_ONLY:-0}" = "1" ]; then
+    set -- "$@" --language-model-only
+fi
+if [ -n "${BUDGET_MM_PROCESSOR_CACHE_GB:-}" ]; then
+    set -- "$@" --mm-processor-cache-gb "${BUDGET_MM_PROCESSOR_CACHE_GB}"
 fi
 # Add Gemma-4 reasoning parser flags
 case "${MODEL} ${MODEL_NAME} ${TASK:-}" in

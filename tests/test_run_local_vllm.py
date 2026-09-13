@@ -201,3 +201,26 @@ def test_prefix_cache_flag_absent_by_default(tmp_path: Path):
     rc, stderr, argv = _run_script_with_stub_resolver(tmp_path, {})
     assert rc == 0, stderr
     assert "--enable-prefix-caching" not in argv
+
+
+def test_crc_reasoning_launch_is_eager_and_text_only(tmp_path):
+    rc, stderr, argv = _run_script(tmp_path, {'BUDGET_PROFILE': 'LOCAL_CRC_32GB', 'ROLE': 'reasoning'})
+    assert rc == 0, stderr
+    pairs = _pairs(argv)
+    assert pairs['--gpu-memory-utilization'] == '0.54'
+    assert '--enforce-eager' in argv
+    assert '--language-model-only' in argv
+    assert pairs['--mm-processor-cache-gb'] == '0.0'
+    assert pairs['--max-model-len'] == '4096'
+    assert pairs['--max-num-seqs'] == '1'
+
+
+def test_crc_embed_explicitly_disables_caches(tmp_path):
+    rc, stderr, argv = _run_script(tmp_path, {'BUDGET_PROFILE': 'LOCAL_CRC_32GB', 'ROLE': 'embed',
+                                           'MODEL': 'Qwen/Qwen3-Embedding-0.6B'})
+    assert rc == 0, stderr
+    assert _pairs(argv)['--gpu-memory-utilization'] == '0.43'
+    assert '--enforce-eager' in argv
+    assert '--no-enable-prefix-caching' in argv
+    assert '--no-enable-chunked-prefill' in argv
+    assert '--language-model-only' not in argv

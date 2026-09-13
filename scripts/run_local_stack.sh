@@ -34,6 +34,12 @@ DENSE_DIM="${DENSE_DIM:-1024}"
 # the prod overlay (UI_ENABLED=true there too); set UI_ENABLED=false to
 # exercise the fail-closed route set locally.
 UI_ENABLED="${UI_ENABLED:-true}"
+# Preserve the existing full-topology default; an explicit false selects two backends.
+LOCAL_RERANK_ENABLED="${RERANK_ENABLED:-true}"
+case "$LOCAL_RERANK_ENABLED" in
+    true|false) ;;
+    *) echo "ERROR: RERANK_ENABLED must be true or false" >&2; exit 1 ;;
+esac
 GATEWAY_PORT="${GATEWAY_PORT:-4000}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${TMPDIR:-/tmp}/local-stack-gateway-${GATEWAY_PORT}.env}"
 JAEGER_PORT="${JAEGER_PORT:-16686}"
@@ -90,8 +96,13 @@ if [ -n "$CORPUS_DIR" ] && [ ! -d "$CORPUS_DIR" ]; then
     die "CORPUS_DIR is not a directory: $CORPUS_DIR"
 fi
 
+# The same backend list drives the dry run and actual readiness checks.
+set -- "reasoning:$REASONING_CHECK_URL" "embed:$EMBED_CHECK_URL"
+if [ "$LOCAL_RERANK_ENABLED" = "true" ]; then
+    set -- "$@" "rerank:$RERANK_CHECK_URL"
+fi
 if [ "$DRYRUN" = "1" ]; then
-    echo "[plan] 1. backends: check $REASONING_CHECK_URL + $EMBED_CHECK_URL + $RERANK_CHECK_URL (start with 'make local-vllm*')"
+    echo "[plan] 1. backends: check $* (start with 'make local-vllm*')"
     echo "[plan] 2. qdrant:  reuse $QDRANT_URL (start with 'make sim-qdrant' if unreachable)"
     echo "[plan] 3. jaeger:  reuse $JAEGER_UI_URL or start scripts/run_local_jaeger.sh (OTLP $OTEL_ENDPOINT)"
     echo "[plan] 4. gateway: GATEWAY_ENV_FILE=$GATEWAY_ENV_FILE sh scripts/run_local_gateway.sh"
@@ -117,7 +128,7 @@ command -v docker >/dev/null 2>&1 || die "docker is required for the local stack
 # The three vLLM backends are the platform-team stand-ins: they must already
 # serve, because starting GPU servers is a per-terminal operator action.
 _missing=""
-for _pair in "reasoning:$REASONING_CHECK_URL" "embed:$EMBED_CHECK_URL" "rerank:$RERANK_CHECK_URL"; do
+for _pair in "$@"; do
     _label="${_pair%%:*}"; _url="${_pair#*:}"
     _code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' "${_url%/}/models" 2>/dev/null || true)"
     if [ "$_code" != "200" ]; then
@@ -223,6 +234,8 @@ done
 [ -s "$GATEWAY_ENV_FILE" ] || die "gateway leg env not written within 180s — see $LOG_DIR/local-stack-gateway.log"
 # shellcheck disable=SC1090
 . "$GATEWAY_ENV_FILE"
+# The handoff defaults to a full gateway; retain the caller's consumer choice.
+export RERANK_ENABLED="$LOCAL_RERANK_ENABLED"
 export DENSE_DIM QDRANT_URL QDRANT_COLLECTION
 # Tracing is on for every process this stack starts (the local Jaeger above).
 export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_ENDPOINT"

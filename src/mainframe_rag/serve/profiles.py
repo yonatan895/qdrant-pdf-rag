@@ -61,6 +61,29 @@ LOCAL_RT_8GB = ProfileBundle(
     servers=[GEMMA4_E4B_QAT, QWEN3_EMBED_06B],
 )
 
+# Bounded 32 GiB Windows + WSL + CRC experiment. These are the previously
+# working GPU allocation limits, NOT proof of resident RAM/VRAM fit. Two
+# cold starts and the mixed workload must establish the required headroom.
+# Keep weights, model IDs, 4096-token windows and one sequence per model.
+LOCAL_CRC_32GB = ProfileBundle(
+    name="LOCAL_CRC_32GB",
+    host=LOCAL_RT_8GB.host,
+    servers=[
+        GEMMA4_E4B_QAT.model_copy(update={
+            "enforce_eager": True,
+            "language_model_only": True,
+            "mm_processor_cache_gb": 0.0,
+            "gpu_memory_utilization": 0.54,
+        }),
+        QWEN3_EMBED_06B.model_copy(update={
+            "enforce_eager": True,
+            "prefix_cache": False,
+            "chunked_prefill": False,
+            "gpu_memory_utilization": 0.43,
+        }),
+    ],
+)
+
 # Qwen2.5-0.5B-Instruct: sub-billion reasoning stand-in so all three legs
 # (reasoning + embed + rerank) co-reside on one 8GB card — the 4B reasoning
 # server leaves no room for a third. Weights ~= 1.0 GiB fp16 resident; KV
@@ -156,6 +179,7 @@ RANK_EMBED_8GB = ProfileBundle(
 )
 
 PROFILES: dict[str, ProfileBundle] = {
+    LOCAL_CRC_32GB.name: LOCAL_CRC_32GB,
     LOCAL_RT_8GB.name: LOCAL_RT_8GB,
     OPENSHIFT_PROD.name: OPENSHIFT_PROD,
     TRIPLE_8GB.name: TRIPLE_8GB,
