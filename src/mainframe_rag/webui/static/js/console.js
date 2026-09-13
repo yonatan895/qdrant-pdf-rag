@@ -7,6 +7,11 @@
  * POST /ui/chat/stream over the repo SSE contract (`event: token` deltas then
  * exactly one `event: final`; `event: error` and no final means failure).
  *
+ * Assistant turns render the same safe markdown subset as the server
+ * (routes.render_markdown_subset): headings, bold/italic, code spans,
+ * fenced blocks, unordered/ordered lists — built as DOM nodes via
+ * textContent, never innerHTML, so hostile markup stays inert.
+ *
  * No inline handlers or eval: the strict CSP (`script-src 'self'`) applies.
  */
 "use strict";
@@ -134,6 +139,118 @@
     return node;
   }
 
+  /* Safe markdown subset, mirroring routes.render_markdown_subset. Every
+   * string enters the DOM through textContent — no innerHTML anywhere —
+   * so the only elements that can exist are the ones built here. */
+  const MD_HEADING = /^(#{1,4})\s+(.*?)\s*$/;
+  const MD_FENCE = /^ {0,3}```([\w+-]*)\s*$/;
+  const MD_UL = /^ {0,3}[-*]\s+(.*)$/;
+  const MD_OL = /^ {0,3}\d+[.)]\s+(.*)$/;
+  const MD_INLINE = /(`[^`\n]+?`)|(\*\*(.+?)\*\*)|((?<!\*)\*([^*\n]+?)\*(?!\*))/g;
+
+  function mdInline(text, parent) {
+    let last = 0;
+    MD_INLINE.lastIndex = 0;
+    let match = MD_INLINE.exec(text);
+    while (match) {
+      if (match.index > last) parent.appendChild(document.createTextNode(text.slice(last, match.index)));
+      if (match[1] !== undefined) {
+        parent.appendChild(el("code", null, match[1].slice(1, -1)));
+      } else if (match[2] !== undefined) {
+        const strong = el("strong");
+        strong.appendChild(document.createTextNode(match[3]));
+        parent.appendChild(strong);
+      } else {
+        const em = el("em");
+        em.appendChild(document.createTextNode(match[5]));
+        parent.appendChild(em);
+      }
+      last = match.index + match[0].length;
+      match = MD_INLINE.exec(text);
+    }
+    if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+  }
+
+  function renderMarkdown(text) {
+    const frag = document.createDocumentFragment();
+    let para = [];
+    let list = null;
+
+    function flushPara() {
+      if (para.length) {
+        const p = el("p");
+        mdInline(para.join(" "), p);
+        frag.appendChild(p);
+        para = [];
+      }
+    }
+    function closeList() {
+      if (list) {
+        frag.appendChild(list);
+        list = null;
+      }
+    }
+
+    const lines = text.split("\n");
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      const fence = MD_FENCE.exec(line);
+      if (fence) {
+        flushPara();
+        closeList();
+        const body = [];
+        i += 1;
+        while (i < lines.length && !MD_FENCE.test(lines[i])) {
+          body.push(lines[i]);
+          i += 1;
+        }
+        i += 1; // consume the closing fence, or run off the end (unclosed)
+        const pre = el("pre");
+        const code = el("code", fence[1] ? "language-" + fence[1] : null, body.join("\n"));
+        pre.appendChild(code);
+        frag.appendChild(pre);
+        continue;
+      }
+      const heading = MD_HEADING.exec(line);
+      if (heading) {
+        flushPara();
+        closeList();
+        const h = el("h" + heading[1].length);
+        mdInline(heading[2], h);
+        frag.appendChild(h);
+        i += 1;
+        continue;
+      }
+      const ul = MD_UL.exec(line);
+      const ol = ul ? null : MD_OL.exec(line);
+      if (ul || ol) {
+        flushPara();
+        const kind = ul ? "ul" : "ol";
+        if (!list || list.tagName.toLowerCase() !== kind) {
+          closeList();
+          list = el(kind);
+        }
+        const li = el("li");
+        mdInline((ul || ol)[1], li);
+        list.appendChild(li);
+        i += 1;
+        continue;
+      }
+      if (!line.trim()) {
+        flushPara();
+        closeList();
+        i += 1;
+        continue;
+      }
+      para.push(line.trim());
+      i += 1;
+    }
+    flushPara();
+    closeList();
+    return frag;
+  }
+
   function renderTurn(turn) {
     const article = el("article", "turn turn-" + turn.role);
     if (turn.error) article.classList.add("turn-error");
@@ -144,7 +261,13 @@
       article.appendChild(details);
     }
     article.appendChild(el("div", "turn-role", turn.role === "user" ? "Operator" : "Copilot"));
-    article.appendChild(el("pre", "turn-content", turn.content));
+    if (turn.role === "assistant") {
+      const content = el("div", "turn-content md");
+      content.appendChild(renderMarkdown(turn.content));
+      article.appendChild(content);
+    } else {
+      article.appendChild(el("pre", "turn-content", turn.content));
+    }
     if (turn.citations && turn.citations.length) {
       const box = el("div", "citations");
       box.appendChild(el("div", "citations-title", "Verified manual citations"));
@@ -263,7 +386,7 @@
             }
             if (eventPayload && parsed.name === "token") {
               assistantTurn.content += eventPayload.delta || "";
-              contentEl.textContent = assistantTurn.content;
+              contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
             } else if (eventPayload && parsed.name === "final") {
               finalPayload = eventPayload;
             } else if (eventPayload && parsed.name === "error") {
@@ -280,14 +403,14 @@
     if (failed || !finalPayload) {
       assistantTurn.error = true;
       assistantTurn.content = assistantTurn.content || ERROR_TEXT;
-      contentEl.textContent = assistantTurn.content;
+      contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
       article.classList.add("turn-error");
       return;
     }
 
     assistantTurn.content = finalPayload.answer || assistantTurn.content;
     assistantTurn.citations = finalPayload.citations || [];
-    contentEl.textContent = assistantTurn.content;
+    contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
     if (assistantTurn.citations.length) {
       const box = el("div", "citations");
       box.appendChild(el("div", "citations-title", "Verified manual citations"));

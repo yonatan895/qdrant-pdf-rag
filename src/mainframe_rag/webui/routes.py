@@ -20,6 +20,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,112 @@ def _assistant_content(answer: str, citations: list[str]) -> str:
     return answer
 
 
+# Safe markdown subset for assistant turns (issue #326 P1). The reasoning
+# model speaks markdown but the console must never execute it: the whole
+# input is HTML-escaped FIRST and only our own generated tags exist in the
+# output (spool dumps / retrieved chunks may carry hostile markup; CSP is
+# the backstop, escaping is the guarantee). Subset, deliberately small:
+# ATX headings (#–####, space required), **bold**, *italic*, `code`,
+# fenced code blocks (``` + optional language, unclosed closes at EOF),
+# unordered (-/*) and ordered (1./1)) lists. No links, images, tables, or
+# raw HTML — anything outside the subset renders as inert text.
+# console.js implements the same subset for the streaming path; the fixture
+# battery in tests/test_webui.py pins both the rendering and the refusal
+# cases (server side — there is no JS runtime in CI).
+_MD_HEADING_RE = re.compile(r"^(#{1,4})\s+(.*?)\s*$")
+_MD_FENCE_RE = re.compile(r"^ {0,3}```([\w+-]*)\s*$")
+_MD_UL_RE = re.compile(r"^ {0,3}[-*]\s+(.*)$")
+_MD_OL_RE = re.compile(r"^ {0,3}\d+[.)]\s+(.*)$")
+_MD_CODE_RE = re.compile(r"`([^`\n]+?)`")
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+?)\*(?!\*)")
+
+
+def _md_inline(escaped: str) -> str:
+    """Inline subset over already-escaped text. Code spans are extracted to
+    placeholders first so `**`/`*` inside code stay literal."""
+    spans: list[str] = []
+
+    def stash(match: re.Match) -> str:
+        spans.append(f"<code>{match.group(1)}</code>")
+        return f"\ue000{len(spans) - 1}\ue001"
+
+    text = _MD_CODE_RE.sub(stash, escaped)
+    text = _MD_BOLD_RE.sub(r"<strong>\1</strong>", text)
+    text = _MD_ITALIC_RE.sub(r"<em>\1</em>", text)
+    for idx, rendered in enumerate(spans):
+        text = text.replace(f"\ue000{idx}\ue001", rendered)
+    return text
+
+
+def render_markdown_subset(text: str) -> str:
+    """Render the assistant-turn markdown subset to safe HTML."""
+    out: list[str] = []
+    para: list[str] = []
+    in_list: str | None = None  # "ul" | "ol" | None
+
+    def flush_para() -> None:
+        if para:
+            out.append(f"<p>{_md_inline(' '.join(para))}</p>")
+            para.clear()
+
+    def close_list() -> None:
+        nonlocal in_list
+        if in_list is not None:
+            out.append(f"</{in_list}>")
+            in_list = None
+
+    lines = html.escape(text, quote=False).split("\n")
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        fence = _MD_FENCE_RE.match(line)
+        if fence:
+            flush_para()
+            close_list()
+            lang = fence.group(1)
+            body: list[str] = []
+            idx += 1
+            while idx < len(lines) and not _MD_FENCE_RE.match(lines[idx]):
+                body.append(lines[idx])
+                idx += 1
+            idx += 1  # consume the closing fence, or run off the end (unclosed)
+            cls = f' class="language-{lang}"' if lang else ""
+            out.append(f"<pre><code{cls}>{chr(10).join(body)}</code></pre>")
+            continue
+        heading = _MD_HEADING_RE.match(line)
+        if heading:
+            flush_para()
+            close_list()
+            level = len(heading.group(1))
+            out.append(f"<h{level}>{_md_inline(heading.group(2))}</h{level}>")
+            idx += 1
+            continue
+        ul = _MD_UL_RE.match(line)
+        ol = _MD_OL_RE.match(line) if ul is None else None
+        match = ul if ul is not None else ol
+        if match is not None:
+            flush_para()
+            kind = "ul" if ul is not None else "ol"
+            if in_list != kind:
+                close_list()
+                out.append(f"<{kind}>")
+                in_list = kind
+            out.append(f"<li>{_md_inline(match.group(1))}</li>")
+            idx += 1
+            continue
+        if not line.strip():
+            flush_para()
+            close_list()
+            idx += 1
+            continue
+        para.append(line.strip())
+        idx += 1
+    flush_para()
+    close_list()
+    return "\n".join(out)
+
+
 def _turn(
     role: str,
     content: str,
@@ -123,13 +230,19 @@ def _turn(
     splunk_context: str | None = None,
     history_content: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    turn = {
         "role": role,
         "content": content,
         "citations": citations or [],
         "splunk_context": splunk_context,
         "history_content": history_content if history_content is not None else content,
     }
+    # Assistant turns render the safe markdown subset; operator turns stay
+    # plain <pre> (the operator's own keystrokes, never model output).
+    # history_content keeps the raw text for the LLM either way.
+    if role == "assistant":
+        turn["content_html"] = render_markdown_subset(content)
+    return turn
 
 
 def _history_json(turns: list[dict[str, Any]]) -> str:

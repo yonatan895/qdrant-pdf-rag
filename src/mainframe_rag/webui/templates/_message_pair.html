@@ -6,7 +6,11 @@
   </details>
   {% endif %}
   <div class="turn-role">{% if turn.role == "user" %}Operator{% else %}Copilot{% endif %}</div>
+  {% if turn.content_html %}
+  <div class="turn-content md">{{ turn.content_html | safe }}</div>
+  {% else %}
   <pre class="turn-content">{{ turn.content }}</pre>
+  {% endif %}
   {% if turn.citations %}
   <div class="citations">
     <div class="citations-title">Verified manual citations</div>

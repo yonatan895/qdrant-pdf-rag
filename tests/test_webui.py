@@ -326,3 +326,115 @@ def test_console_css_layout_survival_rules():
     assert ".layout > * { min-width: 0; }" in css
     assert ".topbar-controls { display: flex; align-items: center; flex-wrap: wrap;" in css
     assert ".composer textarea { flex: 1 1 auto; min-width: 0;" in css
+
+
+# ---------------------------------------------------------------- markdown (P1)
+
+
+_MD_CASES = [
+    # (source, must-contain, must-not-contain)
+    ("### Program Function", ["<h3>Program Function</h3>"], ["###"]),
+    ("## Tail", ["<h2>Tail</h2>"], ["## "]),
+    ("Use **IKJEFT01** now", ["<strong>IKJEFT01</strong>"], ["**"]),
+    ("a *b* c", ["<em>b</em>"], []),
+    ("Run `IKJEFT01` here", ["<code>IKJEFT01</code>"], ["`IKJEFT01`"]),
+    ("* one\n* two", ["<ul>", "<li>one</li>", "<li>two</li>", "</ul>"], []),
+    ("- **x:** y", ["<li><strong>x:</strong> y</li>"], []),
+    ("1. first\n2. second", ["<ol>", "<li>first</li>", "</ol>"], []),
+    (
+        "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```",
+        ['<pre><code class="language-jcl">//STEP1 EXEC PGM=IEFBR14</code></pre>'],
+        ["```"],
+    ),
+    # Unclosed fence still renders (streaming midpoint), never leaks raw.
+    ("```\ncode here", ["<pre><code>code here</code></pre>"], ["```"]),
+    # Code spans protect markup-like content.
+    ("`**not bold**`", ["<code>**not bold**</code>"], ["<strong>"]),
+    # Mainframe noise stays literal.
+    ("C# and a#b and 2*3", ["C# and a#b and 2*3"], ["<em>", "<strong>"]),
+]
+
+
+def test_markdown_subset_renders_blocks_and_inline():
+    from mainframe_rag.webui.routes import render_markdown_subset
+
+    for source, present, absent in _MD_CASES:
+        rendered = render_markdown_subset(source)
+        for needle in present:
+            assert needle in rendered, (source, needle)
+        for needle in absent:
+            assert needle not in rendered, (source, needle)
+
+
+def test_markdown_subset_neutralizes_hostile_markup():
+    """Spool dumps and retrieved chunks are untrusted: markup must render
+    inert — escaped text, our tags only, no links anywhere."""
+    from mainframe_rag.webui.routes import render_markdown_subset
+
+    rendered = render_markdown_subset(
+        '<script>alert(1)</script>\n'
+        '<img src=x onerror=alert(2)>\n'
+        '[click](javascript:alert(3))\n'
+        'AT&T stays & fine'
+    )
+    assert "<script>" not in rendered
+    assert "<img" not in rendered
+    assert "<a " not in rendered and "<a>" not in rendered
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
+    assert "AT&amp;T stays &amp; fine" in rendered
+
+
+class MarkdownFakeLLM:
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        return ChatResult(
+            content=(
+                "Both `IKJEFT01` and `IKJEFT1B` are TMPs.\n\n"
+                "### Program Function\n\n"
+                "* **IKJEFT01:** standard TMP\n"
+                "* plain item\n\n"
+                "Citations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+
+
+def _assistant_html(body: str) -> str:
+    """The rendered assistant turn only. Raw markdown legitimately survives
+    elsewhere (the hidden history input carries source text for the LLM),
+    so leak assertions must scope to this block. The subset emits no divs,
+    so the first close tag ends it."""
+    start = body.index('<div class="turn-content md">')
+    return body[start : body.index("</div>", start)]
+
+
+def test_ui_chat_fragment_renders_markdown_not_markers(ui_client, monkeypatch):
+    """HTMX path: assistant markdown arrives as HTML (no ### / * leaks),
+    user turns stay plain, citations keep their structured block."""
+    monkeypatch.setattr(app_mod, "llm", MarkdownFakeLLM())
+    resp = ui_client.post(
+        "/ui/chat",
+        data={"message": "Diff <b>bold</b>?", "messages": ""},
+        headers={"HX-Request": "true"},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assistant = _assistant_html(body)
+    assert "<h3>Program Function</h3>" in assistant
+    assert "<li><strong>IKJEFT01:</strong> standard TMP</li>" in assistant
+    assert "<code>IKJEFT01</code>" in assistant
+    assert "###" not in assistant
+    # The operator's own markup renders inert inside a plain <pre>.
+    assert '<pre class="turn-content">Diff &lt;b&gt;bold&lt;/b&gt;?</pre>' in body
+    assert "Verified manual citations" in body
+
+
+def test_ui_nojs_page_renders_markdown(ui_client, monkeypatch):
+    """Plain-form path renders the same safe HTML in the full page."""
+    monkeypatch.setattr(app_mod, "llm", MarkdownFakeLLM())
+    resp = ui_client.post("/ui/chat", data={"message": "What is IKJEFT01?", "messages": ""})
+    assert resp.status_code == 200
+    assistant = _assistant_html(resp.text)
+    assert "<h3>Program Function</h3>" in assistant
+    assert "###" not in assistant
