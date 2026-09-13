@@ -14,6 +14,7 @@ resolve_aliases
 require_env INTERNAL_REGISTRY NAMESPACE IMAGE_SHA CORPUS_PVC EMBED_MODEL DENSE_DIM VLLM_BASE_URL STORAGE_CLASS
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
+check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
 resolve_otel_endpoint
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
@@ -24,6 +25,7 @@ check_manifest_sha
 require_kc
 refuse_nfs_storage
 KC=${KC:-$(kc)}
+check_gateway_ca
 
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 INGEST_TIMEOUT=${INGEST_TIMEOUT:-3600}
@@ -77,6 +79,7 @@ else
     echo "==> Gateway keys off (GATEWAY_API_KEY_SECRET unset): keyless model endpoints"
 fi
 wire_pull_secret dist/ingest-rendered.yaml
+wire_gateway_ca dist/ingest-rendered.yaml Job ingest ingest
 fail_on_placeholders dist/ingest-rendered.yaml ingest
 # CI-rehearsal knob (never set in the air gap): strategic-merge a patch into
 # the rendered Job — e.g. lab-quota resources — without touching the prod
