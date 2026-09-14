@@ -68,6 +68,12 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _first_pages_text(doc: pymupdf.Document, pages: int = 4) -> str:
+    """One helper for every first-pages scan (doc numbers, product/version):
+    two regexes over one join will diverge, and the divergence is the bug."""
+    return "\n".join(doc[i].get_text() for i in range(min(pages, doc.page_count)))
+
+
 def _doc_id_from_text(text: str) -> str | None:
     matches = DOCNO_RE.findall(text)
     if not matches:
@@ -79,16 +85,48 @@ def _doc_id_from_text(text: str) -> str | None:
     return max(sorted(set(matches)), key=matches.count)
 
 
-def extract_doc_id(doc: pymupdf.Document, path: Path) -> str | None:
+def _doc_id_from_doc(doc: pymupdf.Document, path: Path) -> str | None:
     m = FILENAME_DOCNO_RE.match(path.stem.upper())
     if m:
         return m.group(1)
-    text = "\n".join(doc[i].get_text() for i in range(min(4, doc.page_count)))
-    return _doc_id_from_text(text)
+    return _doc_id_from_text(_first_pages_text(doc))
+
+
+def extract_doc_id(doc: pymupdf.Document, path: Path) -> str | None:
+    """Doc id from an open document (parse path)."""
+    return _doc_id_from_doc(doc, path)
+
+
+def resolve_doc_id(path: Path) -> str | None:
+    """Best-effort doc id for the planning prescan (issue #361): the
+    filename-form match needs no open; otherwise open and scan the first
+    pages through the same helper the parse path resolves through, so
+    prescan keys and worker doc_ids cannot diverge — including the
+    filename-stem fallback (``parse_pdf`` resolves
+    ``extract_doc_id(...) or path.stem``). Returns None only when the file
+    cannot be opened or read: prescan validates identity, never file
+    health, so it never raises — the parse worker owns that error, and an
+    unreadable file must neither cause nor hide a collision (a file that
+    cannot be read can never become a delete/upsert writer, so excluding
+    it misses nothing)."""
+    path = Path(path)
+    m = FILENAME_DOCNO_RE.match(path.stem.upper())
+    if m:
+        return m.group(1)
+    try:
+        doc = pymupdf.open(path)
+    except Exception:  # noqa: BLE001 — unreadable input is the worker's error, not prescan's
+        return None
+    try:
+        return _doc_id_from_text(_first_pages_text(doc)) or path.stem
+    except Exception:  # noqa: BLE001 — same: never fail planning on file health
+        return None
+    finally:
+        doc.close()
 
 
 def extract_product_version(doc: pymupdf.Document) -> tuple[str | None, str | None]:
-    text = "\n".join(doc[i].get_text() for i in range(min(4, doc.page_count)))
+    text = _first_pages_text(doc)
     m = PRODUCT_VERSION_RE.search(text)
     if m:
         product = "z/OS" if m.group(1).lower().replace("/", "") == "zos" else m.group(1)

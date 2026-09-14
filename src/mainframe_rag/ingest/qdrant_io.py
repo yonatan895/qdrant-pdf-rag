@@ -13,6 +13,7 @@ from qdrant_client import models
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+from mainframe_rag.ingest.identity import source_rev_key
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ports import QdrantPoints, SparseVector
 
@@ -24,7 +25,7 @@ HNSW_EF_CONSTRUCT = 128
 BULK_INDEXING_THRESHOLD_KB = 1 << 30
 DEFAULT_INDEXING_THRESHOLD_KB = 20000
 
-_KEYWORD_INDEXES = ("vendor", "product", "version", "doc_id", "chunk_type", "message_ids", "members", "sha256")
+_KEYWORD_INDEXES = ("vendor", "product", "version", "doc_id", "chunk_type", "message_ids", "members", "sha256", "source_rev")
 
 
 class DimMismatchError(RuntimeError):
@@ -299,6 +300,12 @@ def upsert_chunks(
             "product": parsed.product,
             "version": parsed.version,
             "doc_id": chunk.doc_id,
+            # Source-revision key (issue #361): additive payload + index in
+            # this PR; destructive selectors switch to it in the 361B
+            # migration. Computed from the same labels the planner gates on.
+            "source_rev": source_rev_key(
+                parsed.vendor, parsed.product, parsed.version, parsed.sha256
+            ),
             "title": parsed.title,
             "heading_path": chunk.heading_path,
             "page_label": chunk.page_label,
