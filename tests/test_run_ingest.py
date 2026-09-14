@@ -105,9 +105,26 @@ def test_summary_counters_failed_run(tmp_path, synthetic_pdf, capsys):
     assert done[0]["files_failed"] == 1
 
 
+def _filter_doc_id(filter_obj) -> str | None:
+    """Extract a doc_id equality value from a Filter/FilterSelector shape."""
+    filt = getattr(filter_obj, "filter", filter_obj)
+    must = getattr(filt, "must", None) or []
+    for cond in must:
+        if getattr(cond, "key", None) == "doc_id":
+            match = getattr(cond, "match", None)
+            value = getattr(match, "value", None)
+            if value is not None:
+                return str(value)
+    return None
+
+
 class _FakeQdrant:
     """QdrantPoints double for the parent-side run() path (review round on
-    PR D: the non-dry upsert branch had no coverage)."""
+    PR D: the non-dry upsert branch had no coverage).
+
+    Stores points per collection so the verified-completion contract
+    (issue #359) exercises the claimed path: skips require a written
+    completion plus verifiable points, never a single sampled marker."""
 
     def __init__(self, stored_sha: str | None = None, stored_rules_v: str | None = None,
                  sample_rules_v: str | None = None):
@@ -128,7 +145,10 @@ class _FakeQdrant:
             self.stored_rules_v if sample_rules_v is None else sample_rules_v
         )
         self.upserts: list[int] = []
+        self.upsert_calls: list[tuple[str, int]] = []
         self.deletes = 0
+        self._points: dict[str, list] = {}
+        self.created_collections: list[str] = []
 
     def collection_exists(self, collection_name):
         return True
@@ -144,33 +164,62 @@ class _FakeQdrant:
             )
         )
 
+    def create_collection(self, collection_name, **kwargs):
+        self.created_collections.append(collection_name)
+        return True
+
     def create_payload_index(self, *a, **k):
         from types import SimpleNamespace
 
         return SimpleNamespace()
 
+    def update_collection(self, collection_name, *, optimizer_config=None):
+        return True
+
     def scroll(self, collection_name, *, scroll_filter=None, limit=1, with_payload=None, offset=None):
         from types import SimpleNamespace
 
-        if with_payload == ["rules_v"]:
-            # Empty collection (stored_sha None) vs versioned points.
+        if with_payload == ["rules_v"] and _filter_doc_id(scroll_filter) is None:
+            # Startup rules gate sample (issue #124): empty collection vs
+            # versioned points. Doc-level reads below serve stored points.
+            if self.stored_sha is None and not self._points.get(collection_name):
+                return [], None
+            if self._points.get(collection_name):
+                return [self._points[collection_name][0]], None
+            return [SimpleNamespace(payload={"rules_v": self.sample_rules_v})], None
+        doc_id = _filter_doc_id(scroll_filter)
+        stored = self._points.get(collection_name, [])
+        if doc_id is not None:
+            stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
+        else:
+            # Legacy sampling callers (stored_doc_state pre-#359 shape):
+            # serve a stored point when one exists, else the seeded marker.
+            if stored:
+                return stored[:limit], None
             if self.stored_sha is None:
                 return [], None
-            return [SimpleNamespace(payload={"rules_v": self.sample_rules_v})], None
-        if self.stored_sha is None:
-            return [], None
-        return [
-            SimpleNamespace(payload={"sha256": self.stored_sha, "rules_v": self.stored_rules_v})
-        ], None
+            return [
+                SimpleNamespace(payload={"sha256": self.stored_sha, "rules_v": self.stored_rules_v})
+            ], None
+        return stored[:limit], None
 
     def upsert(self, collection_name, *, points, wait=True):
         self.upserts.append(len(points))
+        self.upsert_calls.append((collection_name, len(points)))
+        self._points.setdefault(collection_name, []).extend(points)
         from types import SimpleNamespace
 
         return SimpleNamespace()
 
     def delete(self, collection_name, *, points_selector, wait=True):
         self.deletes += 1
+        doc_id = _filter_doc_id(points_selector)
+        if doc_id is not None:
+            kept = [p for p in self._points.get(collection_name, [])
+                    if (p.payload or {}).get("doc_id") != doc_id]
+            self._points[collection_name] = kept
+        else:
+            self._points[collection_name] = []
         from types import SimpleNamespace
 
         return SimpleNamespace()
@@ -191,26 +240,39 @@ def test_upsert_path_counters_with_fake_qdrant(tmp_path, synthetic_pdf, capsys, 
     done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
     assert done[0]["files_ok"] == 1
     assert done[0]["chunks_upserted"] > 0
-    assert sum(fake.upserts) == done[0]["chunks_upserted"]
+    from mainframe_rag.config import Settings as _Settings
+
+    main_collection = _Settings(_env_file=None).qdrant_collection
+    main_sent = sum(n for collection, n in fake.upsert_calls if collection == main_collection)
+    assert main_sent == done[0]["chunks_upserted"]
 
 
 def test_qdrant_level_skip_counts_as_ok(tmp_path, synthetic_pdf, capsys, monkeypatch):
-    """Qdrant already holds doc_id at this sha256 (fresh inventory, warm
-    Qdrant): files_ok counts it, nothing is upserted or deleted."""
+    """Qdrant already holds a VERIFIED completion for this generation (second
+    run, fresh inventory, warm Qdrant): files_ok counts it, nothing is
+    upserted or deleted. A bare sampled point without a completion must
+    never skip (issue #359) — that case is pinned in
+    test_ingest_completion.py."""
     from mainframe_rag.ingest import run_ingest
-    from mainframe_rag.ingest.ibm_pdf import sha256_file
 
     monkeypatch.setenv("EMBED_MODE", "hash")
     monkeypatch.delenv("DENSE_DIM", raising=False)
-    fake = _FakeQdrant(stored_sha=sha256_file(synthetic_pdf))
+    fake = _FakeQdrant()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     progress = tmp_path / "inventory.jsonl"
+    assert main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"]) == 0
+    first_upserts = list(fake.upserts)
+    assert first_upserts, "first run must publish points + completion"
+    fake.upserts.clear()
+    deletes_after_first = fake.deletes
+    # Fresh inventory, warm Qdrant: parse again, verify completion, skip.
+    progress.unlink()
     rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"])
     assert rc == 0
     done = [l for l in _stderr_json(capsys) if l.get("action") == "done"]
-    assert done[0]["files_ok"] == 1
-    assert done[0]["chunks_upserted"] == 0
-    assert fake.upserts == [] and fake.deletes == 0
+    assert done[-1]["files_ok"] == 1
+    assert done[-1]["chunks_upserted"] == 0
+    assert fake.upserts == [] and fake.deletes == deletes_after_first
 
 
 def test_embed_failfast_upserts_nothing(tmp_path, synthetic_pdf, monkeypatch):

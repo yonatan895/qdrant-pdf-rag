@@ -292,6 +292,20 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   `{dense, bm25}`; upserts loop `batch_size` (default 128, bounds 16–256)
   with `wait=True`; idempotent by UUID5, no app-level retry — client
   timeouts bound the calls.
+- Pair-length contract (issue #359): `chunks` and `vectors` must align
+  exactly — a mismatch raises instead of zip-truncating.
+- Completion records (issue #359, `ingest/completion.py`): one point per
+  published document generation in `<collection>__completions`
+  (same dim, dummy vectors, keyword indexes on
+  `doc_id/sha256/rules_v/generation_id/target_collection`). The
+  generation binds source hash + representation fingerprint
+  (`rules_v|embed_mode|embed_model|dense_dim|context-flag`) + target
+  collection, with expected chunk count and chunk-ID/content digests.
+  Written only after every batch is acknowledged and the stored points
+  verify (count + per-point sha/rules + recomputed digests); refreshes
+  invalidate the old marker before deleting points, so a failed refresh
+  leaves no valid completion and retries safely. Zero-chunk docs are an
+  explicit `empty` outcome — never published, never skippable.
 - Downstream consumers: `doc_id/product/version/vendor/chunk_type/
   message_ids/members/sha256/rules_v/page_start` → filtered prefetch + keyword
   indexes (`retrieve/`); `title/heading_path/page_label/text` →
@@ -310,20 +324,38 @@ embed (hash embedding is GIL-bound — a thread pool would serialize it), so
 parsing runs in a `spawn` process pool while check-delete-upsert runs in a
 thread pool.
 
-- **Two-level skip with rules versioning** (independent — understand both): parent
-  `inventory.should_skip(rec, sha, rules_version=extraction_rules_version())` (zero-parse)
-  **and** upsert-stream `stored_doc_state(client, doc_id) == (sha, rules_v)` (zero-write).
+- **Bound two-level skip with verified completion** (issues #124 + #359,
+  independent — understand all three): parent
+  `inventory.should_skip(rec, sha, rules_version=extraction_rules_version())`
+  (zero-parse) **plus** a Qdrant completion check
+  (`completion.is_doc_complete`: valid marker for this target generation
+  **and** verified points) before skipping; the upsert stream skips only on
+  the same verified completion. A single sampled point proves nothing —
+  `stored_doc_state` is a delete probe only. Partial residue, wiped or
+  restored collections, and legacy marker-less state all re-ingest, never
+  skip. Inventory `upserted`/`skipped` lines carry the generation binding
+  (`generation_id`, `chunk_ids_digest`, `content_digest`); pre-#359 lines
+  without it re-verify in Qdrant.
   Extraction rules version (`rules_v`) is a 16-hex SHA-256 over the 5 payload-producing
   modules (`regexes.py`, `ingest/ibm_pdf.py`, `ingest/chrome.py`, `ingest/chunk.py`,
-  `ingest/classify.py`). If either the PDF SHA or `rules_v` mismatches, skip is refused:
-  the document is re-parsed and existing points in Qdrant are deleted and re-upserted.
+  `ingest/classify.py`). If either the PDF SHA, `rules_v`, or the representation
+  fingerprint mismatches, skip is refused: the document is re-parsed and existing
+  points in Qdrant are deleted and re-upserted.
   Additionally, `run_ingest` checks `stored_rules_version(client, settings)` at startup;
   if a non-empty collection has mismatched `rules_v`, it fails closed unless `--reingest`
   is passed.
-- **Stale-inventory hazard:** the inventory skip never consults Qdrant.
-  Re-running with an old `inventory.jsonl` against an empty or recreated
-  collection silently does nothing. Delete or re-point `--progress` when the
-  collection was wiped.
+- **Stale-inventory hazard (closed):** the planner re-verifies every
+  inventory skip against Qdrant, so an old `inventory.jsonl` against a
+  wiped collection re-ingests instead of silently doing nothing.
+- **Single writer:** one ingest run per progress directory (fcntl
+  `LOCK_EX|LOCK_NB` on `<progress>.lock`, fail-closed); disjoint Jobs
+  against one collection must still run serially. `_DocLocks` remains the
+  in-process per-`doc_id` guard only.
+- **Refresh visibility (first-aid):** delete-then-upsert still exposes a
+  no-completion window on crash — safe retry, but not atomic
+  old-or-new visibility. That needs the versioned-collection + alias
+  publication follow-up; rollback/GC stay deliberate operator actions,
+  never automatic recreation.
 - `should_skip`: exact-sha plus (`upserted` always, or `dry` only when the
   current run is also dry — a real run never skips prior `dry`).
 - `load_inventory`: latest record per path; torn lines ignored; appends
@@ -347,7 +379,8 @@ thread pool.
   IPC (no exception objects — unpicklable exceptions like `httpx2.HTTPStatusError` from
   contextual LLM calls would crash `ProcessPoolExecutor` across process boundaries).
 - Result accounting: `skipped` + `upserted` both count as files-ok; only
-  `upserted` adds upserted chunks. Bulk mode applies to real runs only,
+  `upserted` adds upserted chunks. `empty` (zero-chunk doc, issue #359) and
+  `error` count as failed and exit nonzero. Bulk mode applies to real runs only,
   restored in a `finally`. The summary logs files-ok/failed/chunks/parse and
   upsert seconds/pages-per-second/bulk/elapsed-ms and warns on failures;
   exit `1` iff any failure.

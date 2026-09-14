@@ -2,10 +2,14 @@
 
     python -m mainframe_rag.ingest.run_ingest --src /corpus --progress /work/inventory.jsonl
 
-Process pool, one PDF per worker (workers = CPU-1). Skip rules:
-- inventory says this sha256 already upserted
-- Qdrant already holds this doc_id with the same sha256
-If Qdrant holds the doc_id with a different sha256, delete by doc_id then re-upsert.
+Process pool, one PDF per worker (workers = CPU-1). Skip rules (issue #359):
+- inventory says this sha256 already upserted AND a valid completion record
+  tied to the actual target generation verifies in Qdrant
+- Qdrant completion + point verification passes for this doc generation
+Neither a single sampled point nor an unbound inventory line proves
+completeness. If Qdrant holds the doc_id with a different sha256/rules
+generation, invalidate its completion, delete by doc_id, then re-upsert and
+verify before writing the new completion.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from typing import TYPE_CHECKING
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 if TYPE_CHECKING:
     import pymupdf
@@ -34,6 +39,17 @@ if TYPE_CHECKING:
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import Chunk, make_chunks
+from mainframe_rag.ingest.completion import (
+    acquire_run_lock,
+    delete_completion,
+    doc_generation_id,
+    ensure_completion_collection,
+    expected_digests,
+    is_doc_complete,
+    release_run_lock,
+    verify_doc_points,
+    write_completion,
+)
 from mainframe_rag.ingest.context import (
     ContextLLMClient,
     append_context_entries,
@@ -287,30 +303,75 @@ def _upsert_one(
     contexts: dict[str, str] | None = None,
     force_reingest: bool = False,
 ) -> tuple[str, float]:
-    """Stage 2 (upsert stream): qdrant-level skip, delete-on-sha-mismatch,
-    batched upsert. Vectors arrive precomputed from the parse worker. The
-    doc_id lock keeps colliding docs from interleaving. Returns
-    (status, seconds). `force_reingest` (--reingest, issue #124) turns the
-    stored-sha-equal early return into delete+re-upsert: after a rules
-    change the payload content is stale even though the file bytes are
-    identical, so the sha check alone must never skip."""
+    """Stage 2 (upsert stream): verified-completion skip, invalidate-on-change,
+    batched upsert, verify-before-mark. Vectors arrive precomputed from the
+    parse worker. The doc_id lock keeps colliding docs from interleaving.
+    Returns (status, seconds) with status in upserted | skipped | empty.
+    `force_reingest` (--reingest, issue #124) bypasses the completion skip
+    and re-extracts every doc. Empty (zero-chunk) docs are an explicit
+    policy outcome (issue #359 req 7): nothing is deleted, upserted, or
+    marked complete — the caller records `empty` and fails the run."""
     started = time.perf_counter()
     client = _get_qdrant(settings)
+    rules_v = extraction_rules_version()
+    if len(chunks) == 0:
+        # Explicit policy, not accidental success: no completion, no skip.
+        return "empty", round(time.perf_counter() - started, 3)
+    if len(chunks) != len(vectors):
+        raise ValueError(
+            f"chunks/vectors length mismatch for {parsed.doc_id}: "
+            f"{len(chunks)} chunks vs {len(vectors)} vectors."
+        )
     with locks.get(parsed.doc_id):
-        stored_sha, stored_rules_v = stored_doc_state(client, settings, parsed.doc_id)
-        # Skip only when BOTH the file sha and the stored rules version
-        # match: a sha-equal doc extracted under older rules is stale
-        # (issue #124, live-found on the real_manuals re-stamp — the
-        # sha-only skip let unstamped points survive a plain rerun).
-        if (
-            stored_sha == parsed.sha256
-            and stored_rules_v == extraction_rules_version()
-            and not force_reingest
+        if not force_reingest and is_doc_complete(
+            client, settings, parsed.doc_id, sha256=parsed.sha256, rules_v=rules_v
         ):
             return "skipped", round(time.perf_counter() - started, 3)
+        stored_sha, _ = stored_doc_state(client, settings, parsed.doc_id)
+        # Invalidate any stale generation marker before touching points:
+        # a failed refresh must leave NO valid completion (safe retry),
+        # never a stale marker over partial data. Only a 404 (collection
+        # dropped between the exists-check and the delete) is tolerated —
+        # real Qdrant failures propagate so the doc errors instead of
+        # publishing alongside a stale marker.
+        try:
+            delete_completion(client, settings, parsed.doc_id)
+        except UnexpectedResponse as exc:
+            if exc.status_code != 404:
+                raise
         if stored_sha is not None:
             delete_by_doc(client, settings, parsed.doc_id)
         upserted = upsert_chunks(client, settings, parsed, chunks, vectors, contexts)
+        expected, ids_digest, content_digest = expected_digests(chunks)
+        if upserted != expected:
+            raise RuntimeError(
+                f"upserted {upserted} points for {parsed.doc_id}, expected "
+                f"{expected} — completion withheld, retry recovers."
+            )
+        if not verify_doc_points(
+            client,
+            settings,
+            parsed.doc_id,
+            sha256=parsed.sha256,
+            rules_v=rules_v,
+            expected_chunks=expected,
+            chunk_ids_digest=ids_digest,
+            content_digest=content_digest,
+        ):
+            raise RuntimeError(
+                f"post-upsert verification failed for {parsed.doc_id}: "
+                f"expected {expected} chunks — completion withheld, retry recovers."
+            )
+        write_completion(
+            client,
+            settings,
+            doc_id=parsed.doc_id,
+            sha256=parsed.sha256,
+            rules_v=rules_v,
+            expected_chunks=expected,
+            chunk_ids_digest=ids_digest,
+            content_digest=content_digest,
+        )
     log.info(
         json.dumps(
             {
@@ -407,9 +468,14 @@ def _run_impl(
     bulk = settings.ingest_bulk_load and not dry_run
     bulk_active = False
     client = None
+    run_lock = None
     if not dry_run:
+        # Single-writer guard (issue #359 req 6): a second concurrent run
+        # sharing the progress directory fails closed before any stage runs.
+        run_lock = acquire_run_lock(progress)
         client = _get_qdrant(settings)
         ensure_collection(client, settings)
+        ensure_completion_collection(client, settings)
         # Extraction-rules gate (issue #124): a non-empty collection whose
         # payloads were extracted under different rules must never be
         # appended to or skipped against — identifier regexes, chunking, or
@@ -453,9 +519,33 @@ def _run_impl(
                     record, sha, allow_dry=dry_run, rules_version=rules_v,
                     force_reingest=force_reingest,
                 ):
-                    files_ok += 1  # already ingested — an ok outcome
-                    log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
-                    continue
+                    if dry_run:
+                        files_ok += 1  # already ingested — an ok outcome
+                        log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
+                        continue
+                    # Bound skip (issue #359 req 3): an inventory line alone
+                    # never proves the target holds the generation. Require
+                    # a valid completion + verified points; otherwise
+                    # re-queue for parse+upsert+verify. Legacy records
+                    # without a doc_id re-ingest explicitly.
+                    assert client is not None
+                    bound_doc = record.doc_id
+                    if bound_doc and is_doc_complete(
+                        client, settings, bound_doc, sha256=sha, rules_v=rules_v
+                    ):
+                        files_ok += 1
+                        log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
+                        continue
+                    log.info(
+                        json.dumps(
+                            {
+                                "path": str(path),
+                                "sha256": sha[:16],
+                                "action": "requeue",
+                                "reason": "no_valid_completion",
+                            }
+                        )
+                    )
                 # sha passes through: the parent hashed for the skip check, so the
                 # worker never re-reads the file for hashing. Embedding flag keeps
                 # the --dry-run contract (parse + chunk only, no embeddings).
@@ -509,7 +599,13 @@ def _run_impl(
         # upload streams). Embedding is done in stage-1 workers; these
         # threads are I/O-bound against Qdrant. Skipped during dry runs.
         parse_pending: dict[concurrent.futures.Future, str] = {}
-        upsert_pending: dict[concurrent.futures.Future, InventoryRecord] = {}
+        # Upsert futures carry their inventory record plus the precomputed
+        # generation binding (parent has chunks before submitting; the
+        # worker thread must not recompute digests divergently).
+        upsert_pending: dict[
+            concurrent.futures.Future,
+            tuple[InventoryRecord, str | None, str | None, str | None],
+        ] = {}
 
         def submit_parse(task: tuple[str, str | None, str | None, str | None, str, str, bool, str | None]) -> None:
             parse_pending[pool.submit(_parse_one, task)] = task[0]
@@ -612,15 +708,26 @@ def _run_impl(
                             # generate when the parent validated + passed it).
                             assert cache_path is not None
                             append_context_entries(cache_path, parsed.sha256, contexts)
+                        if len(chunks) == 0:
+                            binding: tuple[str | None, str | None, str | None] = (None, None, None)
+                        else:
+                            n, ids_d, content_d = expected_digests(chunks)
+                            if n != len(chunks) or n != record.chunks:
+                                raise RuntimeError(
+                                    f"binding digest mismatch for {record.path}: "
+                                    f"{n} digested vs {len(chunks)} chunks vs "
+                                    f"{record.chunks} recorded — refusing to bind."
+                                )
+                            binding = (doc_generation_id(settings, parsed.sha256, rules_v), ids_d, content_d)
                         upsert_pending[
                             upsert_pool.submit(
                                 _upsert_one, parsed, chunks, vectors, settings, locks,
                                 contexts or None, force_reingest,
                             )
-                        ] = record
+                        ] = (record, *binding)
                         refill_parse()
                     else:  # upsert stream result
-                        record = upsert_pending.pop(future)
+                        record, generation_id, ids_digest, content_digest = upsert_pending.pop(future)
                         try:
                             status, seconds = future.result()
                         except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
@@ -643,15 +750,41 @@ def _run_impl(
                         else:
                             upsert_seconds += seconds
                             record.status = status
+                            if status in ("upserted", "skipped"):
+                                # Bind the inventory line to the committed
+                                # generation (req 3); legacy lines without a
+                                # binding never skip on their own.
+                                record.generation_id = generation_id
+                                record.chunk_ids_digest = ids_digest
+                                record.content_digest = content_digest
+                            elif status == "empty":
+                                failures += 1
+                                files_failed += 1
+                                record.error = "document produced zero chunks; nothing published"
+                                record.error_type = "EmptyDocument"
+                                log.error(
+                                    json.dumps(
+                                        {
+                                            "path": record.path,
+                                            "doc_id": record.doc_id,
+                                            "action": "empty",
+                                            "error_type": record.error_type,
+                                        }
+                                    )
+                                )
                         if record.status in ("upserted", "skipped"):
-                            # "skipped" = Qdrant already holds doc_id at this
-                            # sha256 — still an ok outcome.
+                            # "skipped" = verified completion for this
+                            # generation already committed — still ok.
                             files_ok += 1
+                        elif record.status == "empty":
+                            pass  # already counted as failed above
                         if record.status == "upserted":
                             chunks_upserted += record.chunks
                         append_record(progress, record)
                         refill_parse()
     finally:
+        if run_lock is not None:
+            release_run_lock(run_lock)
         if bulk_active and client is not None:
             # Restore the default indexing threshold; the optimizer rebuilds
             # HNSW in the background after the run (status yellow -> green).
