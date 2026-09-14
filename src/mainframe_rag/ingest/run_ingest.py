@@ -60,6 +60,13 @@ from mainframe_rag.ingest.context import (
 )
 from mainframe_rag.ingest.embed import build_embedder, embed_batch
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc, parse_pdf, sanitize_page_text, sha256_file
+from mainframe_rag.ingest.identity import (
+    RevisionCollisionError,
+    find_collisions,
+    plan_duplicates,
+    prescan_doc_ids,
+    source_rev_key,
+)
 from mainframe_rag.ingest.inventory import (
     InventoryRecord,
     append_record,
@@ -201,6 +208,10 @@ def _parse_one(
             chunks=len(chunks),
             seconds=round(time.monotonic() - started, 3),
             rules_version=extraction_rules_version(),
+            # Source-revision provenance (issue #361): stamped now so the
+            # 361B selector migration can map every committed doc without
+            # re-reading the corpus. Additive — older readers ignore it.
+            source_rev=source_rev_key(parsed.vendor, parsed.product, parsed.version, sha),
         )
         return record, parsed, chunks, vectors, contexts
     except Exception as exc:  # noqa: BLE001 — isolate worker crash from main pool
@@ -288,9 +299,13 @@ def _get_qdrant(settings: Settings):
 
 
 class _DocLocks:
-    """Per-doc_id locks for the upsert stage. Two files may legitimately
-    claim one doc_id (shared form numbers); their check-delete-upsert
-    sequence must not interleave across the parallel streams.
+    """Per-doc_id locks for the upsert stage. Two files may resolve to one
+    doc_id (shared form numbers); their check-delete-upsert sequence must
+    not interleave across the parallel streams. The planning gate
+    (_gate_planned_entries, issue #361) aborts such corpora before any
+    delete/upsert, so a lock collision at this stage is a same-revision
+    rerun, not a silent cross-revision overwrite (the 361B migration re-keys
+    these locks onto the source revision).
 
     Locks are retained in memory for the run: bounded by the unique doc_ids
     in the corpus (~hundreds of entries), so eviction is unnecessary."""
@@ -448,6 +463,31 @@ def run(
         shutdown_tracing()
 
 
+def _gate_planned_entries(
+    src: Path, walk_entries: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Identity planning gate (issue #361 req 3/4), shared by the in-place
+    plan span and the alias-publish prewalk: byte-identical copies collapse
+    onto the deterministic winner (logged, never ingested twice), and
+    distinct revisions claiming one doc_id abort fail-closed before any
+    parse worker spawns, delete runs, or point upserts. Unreadable files
+    never join the collision map — the parse worker owns that error."""
+    kept, duplicates = plan_duplicates(walk_entries, src)
+    for dup in duplicates:
+        log.info(
+            json.dumps(
+                {"path": dup.loser_rel, "winner": dup.winner_rel, "action": "duplicate"}
+            )
+        )
+    resolved = prescan_doc_ids([path_str for path_str, _ in kept])
+    collisions = find_collisions(
+        [(path_str, sha, resolved[path_str]) for path_str, sha in kept], src
+    )
+    if collisions:
+        raise RevisionCollisionError(collisions)
+    return kept
+
+
 def _run_impl(
     src: Path,
     progress: Path,
@@ -543,6 +583,10 @@ def _run_impl(
                 if limit is not None:
                     raise RuntimeError("pre-hashed walk and --limit are mutually exclusive.")
                 walk_entries = prewalked
+            # Identity gate (issue #361): dedup byte-identical copies and
+            # abort on cross-revision doc_id collisions before any parse,
+            # delete, or upsert. Deterministic for identical inputs.
+            walk_entries = _gate_planned_entries(src, walk_entries)
             inventory = load_inventory(progress)
 
             tasks: list[tuple[str, str | None, str | None, str | None, str, str, bool, str | None]] = []
@@ -882,6 +926,10 @@ def _run_publish(
             "would leave the alias serving an empty generation."
         )
     prewalked = [(str(p), sha256_file(p)) for p in pdfs]
+    # Identity gate (issue #361) before the corpus fingerprint and staging:
+    # publication certifies the gated corpus — a colliding or duplicated
+    # walk must fail here, never after a staging generation was cloned.
+    prewalked = _gate_planned_entries(src, prewalked)
     client = _get_qdrant(settings)
     live, legacy = resolve_live_collection(client, settings)
     staging = staging_name_for(

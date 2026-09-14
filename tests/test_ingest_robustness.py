@@ -19,7 +19,7 @@ from tests.test_qdrant_io import RecordingClient, _settings
 
 _INDEXED_FIELDS = {
     "vendor", "product", "version", "doc_id", "chunk_type",
-    "message_ids", "members", "sha256", "page_start",
+    "message_ids", "members", "sha256", "source_rev", "page_start",
 }
 
 

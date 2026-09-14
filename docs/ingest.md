@@ -352,6 +352,30 @@ thread pool.
   `LOCK_EX|LOCK_NB` on `<progress>.lock`, fail-closed); disjoint Jobs
   against one collection must still run serially. `_DocLocks` remains the
   in-process per-`doc_id` guard only.
+- **Source-revision identity gate** (issue #361 step 1, `ingest/identity.py`):
+  three identities — printed `doc_id` (family/citation key, still the
+  destructive selector until the 361B migration), `source_rev`
+  (`normalize(vendor)|normalize(product)|normalize(version)|sha256`,
+  stamped on every point payload + inventory record for the migration's
+  provenance), committed generation. Planning (in-place and alias-publish
+  prewalk alike) gates the walked corpus before any parse worker spawns:
+  byte-identical copies under several paths ingest exactly once (the
+  lexicographically smallest corpus-relpath wins; losers log
+  `action: duplicate` and take no inventory record, so reruns re-elect the
+  same winner with no stored state), and distinct revisions claiming one
+  `doc_id` abort fail-closed (`RevisionCollisionError`: doc id +
+  corpus-relative paths + sha16s, never manual text or absolute paths).
+  Unreadable files map to no key — prescan validates identity, never file
+  health (the worker still error-records them per file), so a corrupt twin
+  neither causes nor hides a collision. Prescan resolves through the same
+  `ibm_pdf.resolve_doc_id` helper the workers use (filename-form without
+  opening, else first-four-pages text), so prescan keys and worker doc ids
+  cannot diverge; cost is one serial open + short text scan per file on top
+  of the hashing the parent already does. Mount relocation changes nothing
+  (absolute paths are never identity). Step 2 (361B) switches destructive
+  selectors, locks, completions, and the chunk key onto `source_rev` with a
+  snapshot-gated migration; until then, same-`doc_id`/different-sha inputs
+  fail here instead of silently overwriting each other.
 - **Refresh visibility — alias publication** (`INGEST_ALIAS_PUBLISH=true`,
   default off; enabling by default is a dedicated follow-up PR; issue #359
   req 4/5, `ingest/publish.py` + `qdrant_io` alias/snapshot helpers):
@@ -397,8 +421,10 @@ thread pool.
   slow upserts never let the parent hold unbounded vectors in RAM;
   first-completed pump; upsert streams default 4 (bounds 1–8).
 - `_DocLocks`: per-`doc_id` threading locks (retained, bounded by unique
-  doc ids) serialize colliding form-number check-delete-upsert sequences —
-  two files may legitimately share one `doc_id`.
+  doc ids) serialize check-delete-upsert sequences — the planning identity
+  gate above aborts cross-revision sharing before any delete/upsert, so a
+  lock collision here is a same-revision rerun (locks re-key onto the
+  source revision in the 361B migration).
 - `_parse_one` traps everything and returns a plain `InventoryRecord(status="error")`
   (message capped at 500 chars, exception class name in `error_type`, doc id or filename
   stem, zero pages/chunks) plus a dummy parsed doc; the future-exception path uses an
@@ -419,4 +445,5 @@ Contract tests: `tests/test_run_ingest.py` (`main`, `resolve_workers`,
 `_DocLocks`, `_parse_one`), `tests/test_ingest_robustness.py`,
 `tests/test_ingest_completion.py` (failure boundaries),
 `tests/test_ingest_publish.py` (alias publication),
+`tests/test_ingest_identity.py` (dedup/collision planning gate),
 `testing.md` pickle round-trip.

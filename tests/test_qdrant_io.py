@@ -60,10 +60,10 @@ def test_ensure_collection_creates_all_payload_indexes_before_load():
     ensure_collection(client, _settings(768))
     by_name = dict(client.indexes)
     for kw in ("vendor", "product", "version", "doc_id", "chunk_type",
-               "message_ids", "members", "sha256"):
+               "message_ids", "members", "sha256", "source_rev"):
         assert by_name[kw] == models.PayloadSchemaType.KEYWORD, kw
     assert by_name["page_start"] == models.PayloadSchemaType.INTEGER
-    assert len(client.indexes) == 9
+    assert len(client.indexes) == 10
 
 
 def test_ensure_collection_fails_fast_on_dim_mismatch():
