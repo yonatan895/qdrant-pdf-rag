@@ -175,6 +175,17 @@ and inspect agent/Qdrant restarts, memory events and Windows/WSL/GPU headroom.
 Keep ordinary browser/manual content private. Run one interactive request at a
 time with this serving profile; finish gateway diagnostics before submitting it.
 
+For Jaeger, leave a second terminal running:
+
+```sh
+kubectl -n "$KIND_NAMESPACE" port-forward --address 127.0.0.1 svc/jaeger 16686:16686
+```
+
+Open **http://localhost:16686**, select service `mainframe-rag-agent`, and choose
+**Find Traces**. Console requests appear under `ui.chat`; retrieval, prompt and
+reasoning spans show where the time was spent. Jaeger uses the retained Badger
+PVC. Re-establish this port-forward after a pod replacement or cluster restart.
+
 This deployment is for ongoing use: do not run the disposable-rehearsal cleanup
 while it holds the active console. Keep its PVCs, kubeconfig, configuration files
 and backup. After an intentional stop or pod replacement, restart the recorded
