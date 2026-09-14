@@ -71,6 +71,30 @@ class QdrantPoints(Protocol):
         on_disk_payload: bool,
     ) -> bool: ...
 
+    def delete_collection(self, collection_name: str) -> bool: ...
+
+    def get_aliases(self) -> models.CollectionsAliasesResponse: ...
+
+    def update_collection_aliases(
+        self,
+        change_aliases_operations: list[
+            models.CreateAliasOperation | models.DeleteAliasOperation
+        ],
+    ) -> bool: ...
+
+    def create_snapshot(
+        self, collection_name: str, *, wait: bool = True
+    ) -> models.SnapshotDescription | None: ...
+
+    def recover_snapshot(
+        self,
+        collection_name: str,
+        location: str,
+        *,
+        priority: models.SnapshotPriority | None = None,
+        wait: bool = True,
+    ) -> bool | None: ...
+
     def create_payload_index(
         self,
         collection_name: str,
@@ -147,6 +171,30 @@ class AsyncQdrantPoints(Protocol):
         sparse_vectors_config: dict[str, models.SparseVectorParams],
         on_disk_payload: bool,
     ) -> bool: ...
+
+    async def delete_collection(self, collection_name: str) -> bool: ...
+
+    async def get_aliases(self) -> models.CollectionsAliasesResponse: ...
+
+    async def update_collection_aliases(
+        self,
+        change_aliases_operations: list[
+            models.CreateAliasOperation | models.DeleteAliasOperation
+        ],
+    ) -> bool: ...
+
+    async def create_snapshot(
+        self, collection_name: str, *, wait: bool = True
+    ) -> models.SnapshotDescription | None: ...
+
+    async def recover_snapshot(
+        self,
+        collection_name: str,
+        location: str,
+        *,
+        priority: models.SnapshotPriority | None = None,
+        wait: bool = True,
+    ) -> bool | None: ...
 
     async def create_payload_index(
         self,

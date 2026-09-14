@@ -100,6 +100,15 @@ def test_ingest_tuning_defaults():
     assert s.ingest_bulk_load is False
 
 
+def test_alias_publish_defaults_off(monkeypatch):
+    """Issue #359 publish path ships default-off (ROADMAP rule for new
+    capabilities); the env opt-in is exact, and enabling by default is a
+    dedicated follow-up PR."""
+    assert Settings(_env_file=None).ingest_alias_publish is False
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    assert Settings(_env_file=None).ingest_alias_publish is True
+
+
 def test_contextual_embed_defaults():
     """Contextual retrieval (issue #78): default off with bounded knobs; the
     context model endpoint is unset until an operator enables the flag."""
@@ -329,6 +338,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "batch_size": 128,
     "ingest_upsert_streams": 4,
     "ingest_bulk_load": False,
+    "ingest_alias_publish": False,
     "bm25_model": "Qdrant/bm25",
     "bm25_cache_dir": None,
     "rerank_enabled": False,

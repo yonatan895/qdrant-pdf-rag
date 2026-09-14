@@ -175,6 +175,96 @@ def delete_by_doc(client: QdrantPoints, settings: Settings, doc_id: str) -> None
     )
 
 
+def resolve_live_collection(client: QdrantPoints, settings: Settings) -> tuple[str | None, bool]:
+    """Physical collection behind the `<collection>` alias.
+
+    Returns (physical, legacy): (name, False) for the alias target, (None,
+    False) when neither alias nor collection exists (first publish), and
+    (name, True) when a physical collection carries the alias name with no
+    alias defined (pre-publication legacy layout — migration required). A
+    dangling alias (target deleted) resolves as absent so a fresh staging
+    can be published over it.
+    """
+    alias = settings.qdrant_collection
+    for desc in client.get_aliases().aliases:
+        if desc.alias_name == alias:
+            if client.collection_exists(desc.collection_name):
+                return desc.collection_name, False
+            return None, False
+    if client.collection_exists(alias):
+        return alias, True
+    return None, False
+
+
+def snapshot_collection(client: QdrantPoints, collection: str) -> str:
+    """Server-side snapshot; returns the server-assigned name. Snapshots are
+    the preservation mechanism for superseded generations (issue #359 req 5):
+    retained until an operator deletes them, never GC'd by ingest."""
+    snap = client.create_snapshot(collection, wait=True)
+    if snap is None or not snap.name:
+        raise RuntimeError(f"snapshot of {collection!r} returned no name — refusing to proceed.")
+    return snap.name
+
+
+def clone_collection(
+    client: QdrantPoints, settings: Settings, src: str, dst: str
+) -> None:
+    """Server-side copy src -> dst (created by recover) + count verification.
+
+    Fail closed on any count mismatch: a partial clone must never become a
+    publish base. The snapshot location is the server-side snapshots dir
+    (`Settings.qdrant_snapshots_dir`), the same formula the harness restore
+    uses.
+    """
+    snap = snapshot_collection(client, src)
+    location = f"file://{settings.qdrant_snapshots_dir.rstrip('/')}/{src}/{snap}"
+    client.recover_snapshot(dst, location, priority=models.SnapshotPriority.SNAPSHOT, wait=True)
+    want = client.get_collection(src).points_count
+    got = client.get_collection(dst).points_count
+    if got != want:
+        raise RuntimeError(
+            f"clone {src!r} -> {dst!r} unverified: {got} != {want} points — refusing to publish from it."
+        )
+
+
+def swap_alias_to(
+    client: QdrantPoints, settings: Settings, new_physical: str, old_physical: str | None
+) -> dict[str, str | None]:
+    """Point the `<collection>` alias at a verified generation (issue #359
+    req 4/5). The delete+create pair rides one atomic alias call, so readers
+    see the complete old or the complete new generation — a failed swap
+    leaves the previous live generation serving. The superseded physical is
+    KEPT (plus a safety snapshot): rollback and GC are operator actions.
+    A legacy physical squatting on the alias name must be snapshotted and
+    deleted by the caller first (a delete-alias op for a non-existent alias
+    would fail the batch). Returns the publication summary for the run log."""
+    alias = settings.qdrant_collection
+    safety_snapshot: str | None = None
+    if old_physical is not None:
+        safety_snapshot = snapshot_collection(client, old_physical)
+    # Alias existence is checked here (not trusted from resolve time): a
+    # dangling alias still occupies the name and needs the delete half.
+    alias_exists = any(desc.alias_name == alias for desc in client.get_aliases().aliases)
+    ops: list[models.CreateAliasOperation | models.DeleteAliasOperation] = []
+    if alias_exists:
+        ops.append(models.DeleteAliasOperation(delete_alias=models.DeleteAlias(alias_name=alias)))
+    ops.append(
+        models.CreateAliasOperation(
+            create_alias=models.CreateAlias(collection_name=new_physical, alias_name=alias)
+        )
+    )
+    if not client.update_collection_aliases(ops):
+        raise RuntimeError(
+            f"alias swap {alias!r} -> {new_physical!r} rejected — previous generation still live."
+        )
+    return {
+        "alias": alias,
+        "physical": new_physical,
+        "previous": old_physical,
+        "safety_snapshot": safety_snapshot,
+    }
+
+
 def upsert_chunks(
     client: QdrantPoints,
     settings: Settings,

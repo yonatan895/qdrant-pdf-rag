@@ -47,6 +47,7 @@ from mainframe_rag.ingest.completion import (
     expected_digests,
     is_doc_complete,
     release_run_lock,
+    source_labels,
     verify_doc_points,
     write_completion,
 )
@@ -65,12 +66,23 @@ from mainframe_rag.ingest.inventory import (
     load_inventory,
     should_skip,
 )
+from mainframe_rag.ingest.publish import (
+    PublishTarget,
+    corpus_fingerprint,
+    ensure_staging,
+    generation_fingerprint,
+    staging_name_for,
+    verify_all_complete,
+)
 from mainframe_rag.ingest.qdrant_io import (
     delete_by_doc,
     ensure_collection,
+    resolve_live_collection,
     set_bulk_indexing,
+    snapshot_collection,
     stored_doc_state,
     stored_rules_version,
+    swap_alias_to,
     upsert_chunks,
 )
 from mainframe_rag.ingest.rules_version import extraction_rules_version
@@ -302,6 +314,8 @@ def _upsert_one(
     locks: _DocLocks,
     contexts: dict[str, str] | None = None,
     force_reingest: bool = False,
+    *,
+    src_labels: str,
 ) -> tuple[str, float]:
     """Stage 2 (upsert stream): verified-completion skip, invalidate-on-change,
     batched upsert, verify-before-mark. Vectors arrive precomputed from the
@@ -310,7 +324,10 @@ def _upsert_one(
     `force_reingest` (--reingest, issue #124) bypasses the completion skip
     and re-extracts every doc. Empty (zero-chunk) docs are an explicit
     policy outcome (issue #359 req 7): nothing is deleted, upserted, or
-    marked complete — the caller records `empty` and fails the run."""
+    marked complete — the caller records `empty` and fails the run.
+    src_labels binds the CLI vendor/product/version triple: overrides change
+    payloads and embed headers, so a generation certified under one triple
+    never satisfies a run under another."""
     started = time.perf_counter()
     client = _get_qdrant(settings)
     rules_v = extraction_rules_version()
@@ -324,7 +341,8 @@ def _upsert_one(
         )
     with locks.get(parsed.doc_id):
         if not force_reingest and is_doc_complete(
-            client, settings, parsed.doc_id, sha256=parsed.sha256, rules_v=rules_v
+            client, settings, parsed.doc_id,
+            sha256=parsed.sha256, rules_v=rules_v, source_labels=src_labels,
         ):
             return "skipped", round(time.perf_counter() - started, 3)
         stored_sha, _ = stored_doc_state(client, settings, parsed.doc_id)
@@ -368,6 +386,7 @@ def _upsert_one(
             doc_id=parsed.doc_id,
             sha256=parsed.sha256,
             rules_v=rules_v,
+            source_labels=src_labels,
             expected_chunks=expected,
             chunk_ids_digest=ids_digest,
             content_digest=content_digest,
@@ -442,9 +461,12 @@ def _run_impl(
     product: str | None = None,
     version: str | None = None,
     force_reingest: bool = False,
+    prewalked: list[tuple[str, str]] | None = None,
+    _publish_target: PublishTarget | None = None,
 ) -> int:
     workers = resolve_workers(workers, settings)
     rules_v = extraction_rules_version()
+    src_labels = source_labels(vendor, product, version)
     started = time.monotonic()
     if settings.contextual_embed_enabled and not dry_run:
         # Fail the whole run before spawning the pool: a misconfigured flag
@@ -456,6 +478,12 @@ def _run_impl(
                 "hash mode cannot call an LLM."
             )
         settings.require_context_llm()
+    if settings.ingest_alias_publish and not dry_run and _publish_target is None:
+        return _run_publish(
+            src, progress, workers, limit, settings, tracer, root,
+            vendor=vendor, product=product, version=version,
+            force_reingest=force_reingest,
+        )
     cache_path = resolve_cache_path(settings, progress) if settings.contextual_embed_enabled else None
     # Progress counters (issue #20 PR D): files ok / failed / chunks upserted,
     # logged once per run. Logs carry ids and counts, never PDF text.
@@ -506,22 +534,27 @@ def _run_impl(
             bulk_active = True
     try:
         with tracer.start_as_current_span("ingest.plan") as plan_span:
-            pdfs = walk_pdfs(src)
-            if limit:
-                pdfs = pdfs[:limit]
+            if prewalked is None:
+                pdfs = walk_pdfs(src)
+                if limit:
+                    pdfs = pdfs[:limit]
+                walk_entries = [(str(p), sha256_file(p)) for p in pdfs]
+            else:
+                if limit is not None:
+                    raise RuntimeError("pre-hashed walk and --limit are mutually exclusive.")
+                walk_entries = prewalked
             inventory = load_inventory(progress)
 
             tasks: list[tuple[str, str | None, str | None, str | None, str, str, bool, str | None]] = []
-            for path in pdfs:
-                record = inventory.get(str(path))
-                sha = sha256_file(path)
+            for path_str, sha in walk_entries:
+                record = inventory.get(path_str)
                 if record and should_skip(
                     record, sha, allow_dry=dry_run, rules_version=rules_v,
                     force_reingest=force_reingest,
                 ):
                     if dry_run:
                         files_ok += 1  # already ingested — an ok outcome
-                        log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
+                        log.info(json.dumps({"path": path_str, "sha256": record.sha256, "action": "skip"}))
                         continue
                     # Bound skip (issue #359 req 3): an inventory line alone
                     # never proves the target holds the generation. Require
@@ -531,15 +564,16 @@ def _run_impl(
                     assert client is not None
                     bound_doc = record.doc_id
                     if bound_doc and is_doc_complete(
-                        client, settings, bound_doc, sha256=sha, rules_v=rules_v
+                        client, settings, bound_doc,
+                        sha256=sha, rules_v=rules_v, source_labels=src_labels,
                     ):
                         files_ok += 1
-                        log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
+                        log.info(json.dumps({"path": path_str, "sha256": record.sha256, "action": "skip"}))
                         continue
                     log.info(
                         json.dumps(
                             {
-                                "path": str(path),
+                                "path": path_str,
                                 "sha256": sha[:16],
                                 "action": "requeue",
                                 "reason": "no_valid_completion",
@@ -553,21 +587,21 @@ def _run_impl(
                 # memory with the parent (None when contextual ingest is off).
                 tasks.append(
                     (
-                        str(path), vendor or detect_vendor(path), product, version, str(src), sha,
+                        path_str, vendor or detect_vendor(Path(path_str)), product, version, str(src), sha,
                         not dry_run, str(cache_path) if cache_path is not None else None,
                     )
                 )
-            plan_span.set_attribute("ingest.pdfs", len(pdfs))
+            plan_span.set_attribute("ingest.pdfs", len(walk_entries))
             plan_span.set_attribute("ingest.todo", len(tasks))
             root.set_attribute("ingest.workers", workers)
-            root.set_attribute("ingest.pdfs", len(pdfs))
+            root.set_attribute("ingest.pdfs", len(walk_entries))
             root.set_attribute("ingest.todo", len(tasks))
 
         log.info(
             json.dumps(
                 {
                     "action": "start",
-                    "pdfs": len(pdfs),
+                    "pdfs": len(walk_entries),
                     "todo": len(tasks),
                     "workers": workers,
                     "upsert_streams": settings.ingest_upsert_streams,
@@ -718,11 +752,15 @@ def _run_impl(
                                     f"{n} digested vs {len(chunks)} chunks vs "
                                     f"{record.chunks} recorded — refusing to bind."
                                 )
-                            binding = (doc_generation_id(settings, parsed.sha256, rules_v), ids_d, content_d)
+                            binding = (
+                                doc_generation_id(settings, parsed.sha256, rules_v, src_labels),
+                                ids_d,
+                                content_d,
+                            )
                         upsert_pending[
                             upsert_pool.submit(
                                 _upsert_one, parsed, chunks, vectors, settings, locks,
-                                contexts or None, force_reingest,
+                                contexts or None, force_reingest, src_labels=src_labels,
                             )
                         ] = (record, *binding)
                         refill_parse()
@@ -809,6 +847,117 @@ def _run_impl(
         pages=pages_seen, bulk_load=bulk,
     )
     return 1 if failures else 0
+
+
+def _run_publish(
+    src: Path,
+    progress: Path,
+    workers: int | None,
+    limit: int | None,
+    settings: Settings,
+    tracer: trace.Tracer,
+    root: trace.Span,
+    vendor: str | None = None,
+    product: str | None = None,
+    version: str | None = None,
+    force_reingest: bool = False,
+) -> int:
+    """Alias-publication orchestration (issue #359 req 4/5): converge a    versioned staging generation, then atomically swap the alias to it.
+
+    Refuses `--limit` subsets and empty corpora fail-closed (publication
+    certifies the whole corpus). The inner pipeline runs unmodified against
+    staging settings; only a fully verified staging swaps, and the
+    superseded physical is kept for operator rollback/GC."""
+    rules_v = extraction_rules_version()
+    labels = source_labels(vendor, product, version)
+    if limit is not None:
+        raise RuntimeError(
+            "INGEST_ALIAS_PUBLISH refuses --limit: publication certifies the "
+            "whole corpus; rerun without --limit."
+        )
+    pdfs = walk_pdfs(src)
+    if not pdfs:
+        raise RuntimeError(
+            "INGEST_ALIAS_PUBLISH refuses an empty corpus: publishing nothing "
+            "would leave the alias serving an empty generation."
+        )
+    prewalked = [(str(p), sha256_file(p)) for p in pdfs]
+    client = _get_qdrant(settings)
+    live, legacy = resolve_live_collection(client, settings)
+    staging = staging_name_for(
+        settings.qdrant_collection,
+        generation_fingerprint(settings, rules_v, labels),
+        corpus_fingerprint(prewalked),
+    )
+    staging_settings = settings.model_copy(update={"qdrant_collection": staging})
+    if live == staging:
+        # Steady state: the derived generation is already live. Re-verify it
+        # read-only instead of cloning onto itself.
+        problems = verify_all_complete(
+            client, staging_settings, prewalked, load_inventory(progress), rules_v, labels,
+        )
+        if problems:
+            raise RuntimeError(
+                f"live generation {live!r} fails verification for {len(problems)} "
+                f"path(s) (e.g. {problems[0]!r}) — operator intervention required."
+            )
+        log.info(
+            json.dumps(
+                {
+                    "action": "publish",
+                    "alias": settings.qdrant_collection,
+                    "physical": live,
+                    "result": "already_live",
+                    "docs": len(prewalked),
+                }
+            )
+        )
+        return 0
+    mode = ensure_staging(client, settings, staging_settings, live)
+    log.info(
+        json.dumps(
+            {
+                "action": "publish_stage",
+                "alias": settings.qdrant_collection,
+                "staging": staging,
+                "live": live,
+                "mode": mode,
+            }
+        )
+    )
+    target = PublishTarget(alias=settings.qdrant_collection, staging=staging, live=live, legacy=legacy)
+    rc = _run_impl(
+        src, progress, workers, None, False, staging_settings, tracer, root,
+        vendor=vendor, product=product, version=version,
+        force_reingest=force_reingest, prewalked=prewalked, _publish_target=target,
+    )
+    if rc != 0:
+        return rc
+    problems = verify_all_complete(
+        client, staging_settings, prewalked, load_inventory(progress), rules_v, labels,
+    )
+    if problems:
+        raise RuntimeError(
+            f"staging {staging!r} incomplete for {len(problems)} path(s) "
+            f"(e.g. {problems[0]!r}) — alias untouched, {live!r} still live."
+        )
+    previous = live
+    migrated = None
+    if legacy and live is not None:
+        # A legacy physical squats on the alias name: preserve it, then clear
+        # the name (brief maintenance window, documented in docs/ingest.md).
+        snap = snapshot_collection(client, live)
+        log.info(json.dumps({"action": "publish_migrate", "legacy": live, "snapshot": snap}))
+        client.delete_collection(live)
+        migrated = live
+        previous = None
+    summary = swap_alias_to(client, settings, staging, previous)
+    summary["docs"] = str(len(prewalked))
+    summary["staging_mode"] = mode
+    if migrated is not None:
+        summary["migrated_legacy"] = migrated
+    log.info(json.dumps({"action": "publish", **{k: str(v) for k, v in summary.items()}}))
+    return 0
 
 
 def _log_summary(

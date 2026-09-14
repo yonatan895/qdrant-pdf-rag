@@ -12,10 +12,11 @@ and the stored points verify (count + chunk-ID/content digests). Every skip
 path requires a valid completion tied to the actual target generation;
 missing, legacy, or mismatched completions re-ingest, never skip.
 
-In-place first-aid only: a refresh still deletes before re-upserting, so a
-crash mid-refresh leaves no completion (safe retry) but no atomic
-old-or-new visibility — that needs the versioned-collection + alias
-publication follow-up. Rollback/GC are deliberate operator actions.
+In-place runs still delete before re-upserting, so a crash mid-refresh
+leaves no completion (safe retry) but no atomic old-or-new visibility —
+that needs the versioned-collection + alias publication path
+(`ingest/publish.py`, `INGEST_ALIAS_PUBLISH`). Rollback/GC are deliberate
+operator actions.
 """
 
 from __future__ import annotations
@@ -60,7 +61,12 @@ class CompletionRecord(BaseModel):
 
 def completion_collection_name(settings: Settings) -> str:
     """Separate collection tied to the actual target (req 3)."""
-    return f"{settings.qdrant_collection}{_COMPLETION_SUFFIX}"
+    return completion_collection_for(settings.qdrant_collection)
+
+
+def completion_collection_for(collection: str) -> str:
+    """Completion collection for an arbitrary physical name (publish staging)."""
+    return f"{collection}{_COMPLETION_SUFFIX}"
 
 
 def representation_fingerprint(settings: Settings, rules_v: str) -> str:
@@ -86,9 +92,22 @@ def representation_fingerprint(settings: Settings, rules_v: str) -> str:
     )
 
 
-def doc_generation_id(settings: Settings, sha256: str, rules_v: str) -> str:
-    """Bind a source revision to its representation generation."""
-    return f"{sha256}|{representation_fingerprint(settings, rules_v)}"
+def doc_generation_id(settings: Settings, sha256: str, rules_v: str, source_labels: str) -> str:
+    """Bind a source revision to its representation generation.
+
+    source_labels is the `source_labels()` CLI triple: vendor/product/version
+    overrides change point payloads AND embed headers, so a generation
+    certified under one triple must never satisfy a run under another.
+    Pre-triple markers carry a shorter id and mismatch exactly once
+    (fail-closed re-ingest, never a wrong skip)."""
+    return f"{sha256}|{representation_fingerprint(settings, rules_v)}|{source_labels}"
+
+
+def source_labels(vendor: str | None, product: str | None, version: str | None) -> str:
+    """CLI source triple (one rule per concept): the only ingest input that
+    varies independently of file bytes. Path/text-derived labels are
+    deterministic functions of (path, content) and need no separate binding."""
+    return f"{vendor or ''}|{product or ''}|{version or ''}"
 
 
 def expected_digests(chunks: list[Chunk]) -> tuple[int, str, str]:
@@ -179,13 +198,14 @@ def write_completion(
     doc_id: str,
     sha256: str,
     rules_v: str,
+    source_labels: str,
     expected_chunks: int,
     chunk_ids_digest: str,
     content_digest: str,
 ) -> CompletionRecord:
     """Persist the completion only after verification (caller verifies first)."""
     name = completion_collection_name(settings)
-    generation_id = doc_generation_id(settings, sha256, rules_v)
+    generation_id = doc_generation_id(settings, sha256, rules_v, source_labels)
     try:
         dim = settings.require_dense_dim()
     except RuntimeError:
@@ -291,6 +311,7 @@ def is_doc_complete(
     *,
     sha256: str,
     rules_v: str,
+    source_labels: str,
 ) -> bool:
     """Skip gate (req 3): valid completion + verified points, same generation."""
     completion = read_completion(client, settings, doc_id)
@@ -300,7 +321,7 @@ def is_doc_complete(
         return False
     if completion.sha256 != sha256 or completion.rules_v != rules_v:
         return False
-    if completion.generation_id != doc_generation_id(settings, sha256, rules_v):
+    if completion.generation_id != doc_generation_id(settings, sha256, rules_v, source_labels):
         return False
     return verify_doc_points(
         client,
