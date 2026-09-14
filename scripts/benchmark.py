@@ -335,6 +335,7 @@ def measure_once(
     collection from an earlier pass would inflate the disk/RAM footprint
     being measured), ingest, snapshot Qdrant footprints, run the load."""
     httpx2.delete(f"{sim.url}/collections/{collection}", timeout=10.0)
+    httpx2.delete(f"{sim.url}/collections/{collection}__completions", timeout=10.0)
     ingest = run_ingest(corpus_root, sim.url, collection)
     qdrant = qdrant_stats(sim, collection)
     agent = run_agent_phase(sim.url, collection, concurrency, search_s, answer_s)

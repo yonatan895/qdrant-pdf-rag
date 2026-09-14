@@ -3,7 +3,7 @@
     "note": "Re-baseline via `make bench-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/benchmark.py GATED_METRICS.",
     "env": {
       "cpu_count": 4,
-      "mem_total_mb": 15988.7,
+      "mem_total_mb": 15989.7,
       "kernel": "6.17.0-1022-azure",
       "python": "3.14.7",
       "qdrant_image": "docker.io/qdrant/qdrant:v1.19.0-unprivileged",
@@ -13,24 +13,24 @@
       "repeats": 3,
       "policy": "noise floor: min latency/footprint, max errors/throughput"
     },
-    "updated": "2026-09-02"
+    "updated": "2026-09-14"
   },
   "ingest": {
-    "peak_rss_mb": 173.0
+    "peak_rss_mb": 180.2
   },
   "qdrant": {
-    "mem_mb": 97.9,
-    "disk_mb": 1.7
+    "mem_mb": 100.4,
+    "disk_mb": 2.9
   },
   "agent": {
     "search": {
       "latency_ms": {
-        "p95": 61.33
+        "p95": 55.67
       }
     },
     "answer": {
       "latency_ms": {
-        "p95": 82.15
+        "p95": 77.24
       }
     }
   }
