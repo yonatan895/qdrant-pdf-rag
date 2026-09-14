@@ -106,6 +106,16 @@ class FailingFakeQdrant:
             stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
         return stored[:limit], None
 
+    def retrieve(self, collection_name, ids, *, with_payload=True):
+        from types import SimpleNamespace
+
+        wanted = {str(i) for i in ids}
+        return [
+            SimpleNamespace(id=p.id, payload=p.payload)
+            for p in self._points.get(collection_name, [])
+            if str(p.id) in wanted
+        ]
+
     def upsert(self, collection_name, *, points, wait=True):
         from types import SimpleNamespace
 
@@ -370,6 +380,38 @@ def test_malformed_completion_is_incomplete(monkeypatch):
                            rules_v=extraction_rules_version(), source_labels="||") is False
     status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings)
     assert status == "upserted"
+
+
+def test_pre_manifest_completion_reads_none_digest():
+    """A completion point predating the manifest (missing manifest_digest)
+    validates with manifest_digest=None (additive, backward-compatible)."""
+    from qdrant_client import models
+
+    settings = _settings(batch_size=16)
+    fake = FailingFakeQdrant()
+    fake.upsert(
+        completion_collection_name(settings),
+        points=[
+            models.PointStruct(
+                id="legacy-marker-valid",
+                vector={"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])},
+                payload={
+                    "doc_id": "DOC1",
+                    "sha256": "a" * 64,
+                    "rules_v": extraction_rules_version(),
+                    "target_collection": settings.qdrant_collection,
+                    "generation_id": "gen1",
+                    "source_labels": "||",
+                    "expected_chunks": 3,
+                    "chunk_ids_digest": "i" * 64,
+                    "content_digest": "c" * 64,
+                },
+            )
+        ],
+    )
+    c = read_completion(fake, settings, "DOC1")
+    assert c is not None
+    assert c.manifest_digest is None
 
 
 def test_delete_completion_real_error_propagates(monkeypatch):

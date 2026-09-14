@@ -29,6 +29,9 @@ class InventoryRecord(BaseModel):
     generation_id: str | None = None
     chunk_ids_digest: str | None = None
     content_digest: str | None = None
+    # Representation contract the doc was committed under (issue #362).
+    # Additive — records predating it carry None and lose nothing.
+    manifest_digest: str | None = None
     # Source-revision provenance (issue #361): vendor|product|version|sha256
     # (normalized) for the 361B selector migration. Additive — records
     # predating it carry None and lose nothing.

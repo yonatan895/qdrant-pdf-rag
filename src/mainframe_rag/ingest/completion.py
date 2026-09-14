@@ -35,6 +35,7 @@ from qdrant_client import models
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.qdrant_io import collection_vector_configs
+from mainframe_rag.ingest.representation import manifest_digest
 from mainframe_rag.ports import QdrantPoints
 
 _COMPLETION_SUFFIX = "__completions"
@@ -56,6 +57,10 @@ class CompletionRecord(BaseModel):
     embed_mode: str = ""
     embed_model: str | None = None
     dense_dim: int | None = None
+    # Representation contract this generation was verified under (issue
+    # #362): ties the completion to the manifest. Pre-manifest markers
+    # carry None — an explicit legacy outcome in the 362B gate, never a pass.
+    manifest_digest: str | None = None
     finished_at: float = Field(default_factory=time.time)
 
 
@@ -222,6 +227,7 @@ def write_completion(
         embed_mode=settings.embed_mode,
         embed_model=settings.embed_model,
         dense_dim=dim,
+        manifest_digest=manifest_digest(settings, rules_v),
     )
     dummy_dim = dim or 1
     point = models.PointStruct(

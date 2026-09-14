@@ -211,6 +211,16 @@ class _FakeQdrant:
 
         return SimpleNamespace()
 
+    def retrieve(self, collection_name, ids, *, with_payload=True):
+        from types import SimpleNamespace
+
+        wanted = {str(i) for i in ids}
+        return [
+            SimpleNamespace(id=p.id, payload=p.payload)
+            for p in self._points.get(collection_name, [])
+            if str(p.id) in wanted
+        ]
+
     def delete(self, collection_name, *, points_selector, wait=True):
         self.deletes += 1
         doc_id = _filter_doc_id(points_selector)
@@ -292,7 +302,13 @@ def test_embed_failfast_upserts_nothing(tmp_path, synthetic_pdf, monkeypatch):
     progress = tmp_path / "inventory.jsonl"
     rc = main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"])
     assert rc == 1
-    assert fake.upserts == [], "a doc whose embed failed must never be upserted"
+    # The run-level representation manifest still commits (contract, not
+    # doc data); what must never happen is a doc-point upsert.
+    from mainframe_rag.config import Settings as _Settings
+
+    main_collection = _Settings(_env_file=None).qdrant_collection
+    assert all(c != main_collection for c, _ in fake.upsert_calls), \
+        "a doc whose embed failed must never be upserted"
     records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
     assert records and all(r["status"] == "error" for r in records)
     assert all(r["error_type"] == "RuntimeError" for r in records)

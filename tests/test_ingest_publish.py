@@ -142,6 +142,14 @@ class PublishFake:
             stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
         return stored[:limit], None
 
+    def retrieve(self, collection, ids, *, with_payload=True):
+        wanted = {str(i) for i in ids}
+        return [
+            SimpleNamespace(id=p.id, payload=p.payload)
+            for p in self._resolve(collection)
+            if str(p.id) in wanted
+        ]
+
     def upsert(self, collection, *, points, wait=True):
         physical = self.aliases.get(collection, collection)
         self.collections.setdefault(physical, []).extend(points)
