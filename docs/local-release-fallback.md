@@ -327,6 +327,10 @@ network enforcement are covered in CRC, not inferred from Kind.
 
 ## 4. Retain evidence and recover the original environment
 
+For ongoing console access to your manuals, follow [the real-corpus restore](local-real-corpus.md)
+in a separate local deployment. Retain that deployment while it is in use; the
+cleanup below applies to the finished disposable synthetic rehearsal.
+
 Stop the private port-forward and observer after recording results. Export only
 the synthetic recovery evidence needed for the record. When the disposable
 rehearsal is finished, remove only its cluster and its two added network
