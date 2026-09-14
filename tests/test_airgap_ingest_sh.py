@@ -188,6 +188,28 @@ def test_ingest_qdrant_readonly_key_fails_closed(ingest_tree):
     assert "key api-key" in r.stderr
 
 
+def test_ingest_qdrant_copresent_readonly_key_fails_closed(ingest_tree):
+    """Anti-revert parity with the agent check: a read-only key smuggled
+    into the ingest render must stop the run even with api-key present."""
+    tmp_path, _ = ingest_tree
+    stub = (tmp_path / "stub-ingest.yaml").read_text()
+    anchor = "                  key: api-key\n"
+    assert anchor in stub
+    stub = stub.replace(
+        anchor,
+        anchor
+        + "            - name: QDRANT_READ_API_KEY\n"
+        + "              valueFrom:\n"
+        + "                secretKeyRef:\n"
+        + "                  key: read-only-api-key\n"
+        + "                  name: __QDRANT_RELEASE__-apikey\n",
+    )
+    (tmp_path / "stub-ingest.yaml").write_text(stub)
+    r = _run_ingest(ingest_tree)
+    assert r.returncode != 0
+    assert "read-only" in r.stderr
+
+
 def test_ingest_overlay_qdrant_contract():
     """Pin the real ingest overlay to the write-key contract so it cannot
     silently follow the agent to read-only."""

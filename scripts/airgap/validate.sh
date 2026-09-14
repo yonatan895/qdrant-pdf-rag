@@ -109,6 +109,9 @@ INGEST_OVERLAY=deploy/kustomize/overlays/openshift-ingest/ingest-job.yaml
 _ingest_block=$(grep -A8 -- "- name: QDRANT_API_KEY" "$INGEST_OVERLAY" || true)
 printf '%s\n' "$_ingest_block" | grep -Eq '^[[:space:]]*key: api-key$' || \
     die "ingest overlay must wire QDRANT_API_KEY to api-key (ingest owns corpus mutation)"
+if printf '%s\n' "$_ingest_block" | grep -Eq '^[[:space:]]*key: read-only-api-key$'; then
+    die "ingest overlay wires a read-only Qdrant key into the ingest path (issue #366)"
+fi
 unset _ingest_block
 echo "    Qdrant key separation verified (agent read-only, ingest write)"
 

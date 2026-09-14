@@ -265,6 +265,10 @@ check_ingest_qdrant_key() {
         unset _qdrant_block
         die "rendered $2 manifest must wire QDRANT_API_KEY to secretKeyRef key api-key (ingest owns corpus mutation)"
     fi
+    if printf '%s\n' "$_qdrant_block" | grep -Eq '^[[:space:]]*key: read-only-api-key$'; then
+        unset _qdrant_block
+        die "rendered $2 manifest wires a read-only Qdrant key into the ingest path (issue #366: ingest must keep api-key)"
+    fi
     unset _qdrant_block
 }
 

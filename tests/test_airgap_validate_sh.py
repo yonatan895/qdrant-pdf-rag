@@ -111,6 +111,36 @@ def test_validate_ingest_readonly_key_fails_closed(tree):
     assert "to api-key" in r.stderr
 
 
+def test_validate_ingest_copresent_readonly_key_fails_closed(tree):
+    """Anti-revert parity with the agent gate: a co-present read-only key
+    in the ingest overlay fails preflight even with api-key present."""
+    overlay = (
+        tree
+        / "deploy"
+        / "kustomize"
+        / "overlays"
+        / "openshift-ingest"
+        / "ingest-job.yaml"
+    )
+    text = overlay.read_text()
+    anchor = "key: api-key\n"
+    assert anchor in text
+    overlay.write_text(
+        text.replace(
+            anchor,
+            anchor
+            + "            - name: QDRANT_READ_API_KEY\n"
+            + "              valueFrom:\n"
+            + "                secretKeyRef:\n"
+            + "                  key: read-only-api-key\n"
+            + "                  name: __QDRANT_RELEASE__-apikey\n",
+        )
+    )
+    r = _run(tree)
+    assert r.returncode != 0
+    assert "read-only" in r.stderr
+
+
 def test_validate_tracing_on_by_default(tree):
     r = _run(tree)
     assert r.returncode == 0, r.stderr
