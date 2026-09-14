@@ -73,6 +73,15 @@ def _sparse_params() -> models.SparseVectorParams:
     )
 
 
+def collection_vector_configs(
+    dim: int,
+) -> tuple[dict[str, models.VectorParams], dict[str, models.SparseVectorParams]]:
+    """Named dense + BM25 sparse configs shared by the corpus collection and
+    the ingest completion collection (issue #359): one helper so the two
+    collections cannot drift apart."""
+    return {"dense": _dense_params(dim)}, {"bm25": _sparse_params()}
+
+
 def ensure_payload_indexes(client: QdrantPoints, collection: str) -> None:
     for field in _KEYWORD_INDEXES:
         client.create_payload_index(
@@ -106,10 +115,11 @@ def ensure_collection(client: QdrantPoints, settings: Settings) -> None:
         ensure_payload_indexes(client, collection)
         return
 
+    vectors_config, sparse_vectors_config = collection_vector_configs(dim)
     client.create_collection(
         collection,
-        vectors_config={"dense": _dense_params(dim)},
-        sparse_vectors_config={"bm25": _sparse_params()},
+        vectors_config=vectors_config,
+        sparse_vectors_config=sparse_vectors_config,
         on_disk_payload=True,
     )
     ensure_payload_indexes(client, collection)

@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 if TYPE_CHECKING:
     import pymupdf
@@ -329,17 +330,24 @@ def _upsert_one(
         stored_sha, _ = stored_doc_state(client, settings, parsed.doc_id)
         # Invalidate any stale generation marker before touching points:
         # a failed refresh must leave NO valid completion (safe retry),
-        # never a stale marker over partial data. Absent marker/collection
-        # is a no-op.
+        # never a stale marker over partial data. Only a 404 (collection
+        # dropped between the exists-check and the delete) is tolerated —
+        # real Qdrant failures propagate so the doc errors instead of
+        # publishing alongside a stale marker.
         try:
             delete_completion(client, settings, parsed.doc_id)
-        except Exception:  # noqa: BLE001, S110 — absent marker/collection is a safe no-op
-            pass
+        except UnexpectedResponse as exc:
+            if exc.status_code != 404:
+                raise
         if stored_sha is not None:
             delete_by_doc(client, settings, parsed.doc_id)
         upserted = upsert_chunks(client, settings, parsed, chunks, vectors, contexts)
         expected, ids_digest, content_digest = expected_digests(chunks)
-        assert upserted == expected, "upserted count must equal expected chunks"
+        if upserted != expected:
+            raise RuntimeError(
+                f"upserted {upserted} points for {parsed.doc_id}, expected "
+                f"{expected} — completion withheld, retry recovers."
+            )
         if not verify_doc_points(
             client,
             settings,
@@ -525,7 +533,6 @@ def _run_impl(
                     if bound_doc and is_doc_complete(
                         client, settings, bound_doc, sha256=sha, rules_v=rules_v
                     ):
-                        record.generation_id = doc_generation_id(settings, sha, rules_v)
                         files_ok += 1
                         log.info(json.dumps({"path": str(path), "sha256": record.sha256, "action": "skip"}))
                         continue
@@ -705,7 +712,12 @@ def _run_impl(
                             binding: tuple[str | None, str | None, str | None] = (None, None, None)
                         else:
                             n, ids_d, content_d = expected_digests(chunks)
-                            assert n == len(chunks) == record.chunks
+                            if n != len(chunks) or n != record.chunks:
+                                raise RuntimeError(
+                                    f"binding digest mismatch for {record.path}: "
+                                    f"{n} digested vs {len(chunks)} chunks vs "
+                                    f"{record.chunks} recorded — refusing to bind."
+                                )
                             binding = (doc_generation_id(settings, parsed.sha256, rules_v), ids_d, content_d)
                         upsert_pending[
                             upsert_pool.submit(

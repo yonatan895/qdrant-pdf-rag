@@ -72,6 +72,7 @@ class FailingFakeQdrant:
         self.deletes = 0
         self.fail_main_calls: set[int] = set()
         self.fail_completion = False
+        self.fail_delete: BaseException | None = None
 
     # -- collection surface -------------------------------------------
     def collection_exists(self, collection_name):
@@ -123,6 +124,8 @@ class FailingFakeQdrant:
     def delete(self, collection_name, *, points_selector, wait=True):
         from types import SimpleNamespace
 
+        if self.fail_delete is not None:
+            raise self.fail_delete
         self.deletes += 1
         doc_id = _filter_doc_id(points_selector)
         if doc_id is not None:
@@ -366,6 +369,52 @@ def test_malformed_completion_is_incomplete(monkeypatch):
                            sha256="a" * 64, rules_v=extraction_rules_version()) is False
     status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings)
     assert status == "upserted"
+
+
+def test_delete_completion_real_error_propagates(monkeypatch):
+    """A real Qdrant failure invalidating the marker must fail the doc —
+    never be swallowed leaving a stale marker next to a new one. The
+    refresh never starts, so a clean retry publishes exactly."""
+    settings = _settings(batch_size=16)
+    fake = FailingFakeQdrant()
+    status, _ = _upsert_one(monkeypatch, fake, _parsed(sha="1" * 64),
+                            _chunks(n=3, tag="v1"), settings)
+    assert status == "upserted"
+
+    fake.fail_delete = RuntimeError("connection reset")
+    with pytest.raises(RuntimeError, match="connection reset"):
+        _upsert_one(monkeypatch, fake, _parsed(sha="2" * 64),
+                    _chunks(n=4, tag="v2"), settings)
+    # Refresh never started: v1 points and the v1 marker are untouched, and
+    # no v2 completion exists.
+    assert len(fake.main_points(settings.qdrant_collection, "DOC1")) == 3
+    v1 = read_completion(fake, settings, "DOC1")
+    assert v1 is not None and v1.sha256 == "1" * 64
+
+    fake.fail_delete = None
+    status, _ = _upsert_one(monkeypatch, fake, _parsed(sha="2" * 64),
+                            _chunks(n=4, tag="v2"), settings)
+    assert status == "upserted"
+    points = fake.main_points(settings.qdrant_collection, "DOC1")
+    assert len(points) == 4
+    v2 = read_completion(fake, settings, "DOC1")
+    assert v2 is not None and v2.sha256 == "2" * 64
+
+
+def test_delete_completion_404_race_is_tolerated(monkeypatch):
+    """Collection dropped between the exists-check and the invalidation
+    delete (404) is a safe no-op — the doc still publishes."""
+    import httpx
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    settings = _settings(batch_size=16)
+    fake = FailingFakeQdrant()
+    fake.fail_delete = UnexpectedResponse(404, "Not Found", b"{}", httpx.Headers())
+
+    status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings)
+    assert status == "upserted"
+    assert len(fake.main_points(settings.qdrant_collection, "DOC1")) == 3
+    assert read_completion(fake, settings, "DOC1") is not None
 
 
 def test_concurrent_run_lock_rejects_second_writer(tmp_path):

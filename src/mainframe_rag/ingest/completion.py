@@ -33,7 +33,7 @@ from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
-from mainframe_rag.ingest.qdrant_io import _dense_params, _sparse_params
+from mainframe_rag.ingest.qdrant_io import collection_vector_configs
 from mainframe_rag.ports import QdrantPoints
 
 _COMPLETION_SUFFIX = "__completions"
@@ -130,10 +130,11 @@ def ensure_completion_collection(client: QdrantPoints, settings: Settings) -> st
             )
         return name
     dim = settings.require_dense_dim()
+    vectors_config, sparse_vectors_config = collection_vector_configs(dim)
     client.create_collection(
         name,
-        vectors_config={"dense": _dense_params(dim)},
-        sparse_vectors_config={"bm25": _sparse_params()},
+        vectors_config=vectors_config,
+        sparse_vectors_config=sparse_vectors_config,
         on_disk_payload=True,
     )
     for field in _COMPLETION_KEYWORD_INDEXES:
