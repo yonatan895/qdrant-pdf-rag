@@ -147,9 +147,9 @@ any of those, snapshot to persistent disk and restore-test one collection:
 ```sh
 mkdir -p "$SNAPSHOT_DIR"
 # per collection:
-curl -s -X POST http://127.0.0.1:6333/collections/<name>/snapshots
+curl -s -X POST "http://127.0.0.1:6333/collections/<name>/snapshots"
 curl -s -o "$SNAPSHOT_DIR/<name>.snapshot" \
-  http://127.0.0.1:6333/collections/<name>/snapshots/<snapshot-file>
+  "http://127.0.0.1:6333/collections/<name>/snapshots/<snapshot-file>"
 ```
 
 Restore-test (fresh container, throwaway port, verify point count, remove it):
@@ -158,7 +158,7 @@ Restore-test (fresh container, throwaway port, verify point count, remove it):
 docker run -d --name qdrant-restore-test -p 6334:6333 docker.io/qdrant/qdrant:v1.19.0-unprivileged
 curl -s -X POST "http://127.0.0.1:6334/collections/<name>/snapshots/upload?priority=snapshot" \
   -F "snapshot=@$SNAPSHOT_DIR/<name>.snapshot"
-curl -s http://127.0.0.1:6334/collections/<name>   # expect status green + full points_count
+curl -s "http://127.0.0.1:6334/collections/<name>"   # expect status green + full points_count
 docker stop qdrant-restore-test && docker rm qdrant-restore-test
 ```
 
@@ -249,3 +249,17 @@ Live probes: <trap refuses / legit grounded / overlong 422s / /ui smoke, or N/A 
 Eval: <deltas vs mode-keyed baseline + per-query attribution, or N/A with reason>.
 Air-gap / copyright impact: none | <describe>.
 ```
+
+## Windows CRC alongside both real models
+
+[local-crc-environment.md](local-crc-environment.md) owns the exact 32 GiB host
+setup: `LOCAL_CRC_32GB`, sequential model starts, WSL reclamation, authenticated
+TLS gateway/registry, Windows API clients and the approved small synthetic
+workload sizing. Reranking is explicitly disabled. This profile does not change
+production settings or model ownership.
+
+The release gate is [crc-release-verification.md](crc-release-verification.md).
+Require `probe_gateway.py --require-reasoning --stream` from an actual application
+pod and preserve the exact tested bundle. The local/CI strict-finish provider
+protects against LiteLLM converting a missing provider finish into success;
+the platform-owned production gateway needs equivalent failure behavior.

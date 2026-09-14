@@ -229,8 +229,10 @@ cannot schedule on one node — proven).
   (notice when the namespace does not exist yet), and OpenShift-detected SCC
   advice. It probes no inference endpoint — a bad vLLM URL passes
   validation and fails later.
-  The validator directs operators to project-assigned identities; its advice
-  is not an SCC admission test.
+  The current validator still contains legacy `anyuid` advice in its
+  no-extra-values branch. Do not follow that advice: the owning production
+  values remove fixed IDs and actual `restricted-v2` admission is required.
+  The CRC sizing-override path does not exercise that advisory branch.
 - Smoke needs only a namespace: it execs into the agent pod (no Route or
   port-forward required), fails closed on degraded `/healthz`, treats empty
   search results as SKIP (infrastructure ready, corpus not ingested) rather
@@ -300,13 +302,13 @@ aligned across the two files; only e2e-scale jobs live in
   skip). `airgap-acceptance` (main/dispatch): black-box handoff in a fresh
   dir — digest verify, unpack, bootstrap, manifest/SHA assertions, dry-run
   pipeline with standin env passed explicitly, both pull-secret branches.
-  `kind-live-rehearsal` (main/dispatch): the same handoff live against
-  ephemeral Kind + local registry (pre-loaded, `--skip-load`), mock vLLM,
-  generated corpus, search assertions; always tears down. Lab OpenShift
-  jobs are secret-gated and PRs never touch the lab cluster.
+  `kind-live-rehearsal` (main/dispatch) is a three-lane matrix described below.
+  Lab OpenShift jobs remain secret-gated, and PRs never touch the lab cluster.
+  `airgap-rehearsal` downloads and bootstraps the published bundle; it does not
+  independently repack. A skipped lab job supplies no OpenShift verification.
 - Pinned third-party versions live in-repo (kubectl + sha256, helm, kind,
-  node image); the local-path provisioner manifest is version-pinned in URL
-  only (v0.0.37, no sha256 check) — known supply-chain gap. The opencode
+  node image); the local-path provisioner manifest is pinned to a source commit and
+  sha256-verified before applying it. The opencode
   reviewer workflow is GitHub-only: it runs on pull requests plus `/oc`
   comments, never mirrored to GitLab.
 - `run_local_vllm.sh` resolves (never probes) launch flags from the
@@ -317,3 +319,55 @@ aligned across the two files; only e2e-scale jobs live in
   resolve with `--check-pack` preflight. Model names containing `embed`
   (either case) select the embed role; secrets pass via environment, never
   argv.
+
+### Release rehearsal lanes and fixes
+
+All acceptance lanes consume `sneakernet-bundle-<full-sha>` from the same factory
+run, verify its outer checksum, extract into a fresh directory and bootstrap its
+repository. Each Kind lane has its own runner and disposable cluster. Diagnostics
+include actual runner CPU, RAM and disk capacity; cleanup runs even after failure.
+
+| Job / lane | Real services and assertions |
+|---|---|
+| `airgap-acceptance` | Fresh bundle integrity/bootstrap, manifest SHA and both pull-secret render branches |
+| `kind-pipeline` | Authenticated registry, real product containers, real LiteLLM/PostgreSQL, synthetic ingest, search and application streams |
+| `kind-gateway-faults` | TLS/auth, both model legs, malformed/upstream/dimension/timeout/truncated-stream failures through LiteLLM, followed by healthy recovery |
+| `kind-lifecycle` | Three-worker Kind; synthetic snapshot recovery, PVC identity, Qdrant/agent/Jaeger replacement, old trace persistence and repeat pipeline |
+| Manual Windows CRC | Actual SCC, Service CA, OAuth, Routes, node trust/pulls and runtime egress; record the fit outcome and fallback mode separately |
+
+Only computation behind LiteLLM is deterministic in the Kind lanes. The existing
+`mock_vllm.py` uses explicit model IDs, 1024-dimensional embeddings, synthetic
+citation output and controlled faults. Mock citations establish interface
+behavior, not answer quality. The mock, CI deployment helpers and gateway module
+are excluded from application images and production manifests.
+
+The rehearsal now configures **both** embedding and reasoning URLs through the
+real test gateway. Service existence is awaited before readiness checks. Fault
+transitions wait for the requested mock state through the actual upstream Service,
+so a rollout's success cannot leave a test hitting the old backend state.
+The gateway's configuration and strict-finish module share a projected volume;
+there is no nested read-only `subPath` mount to fail during container creation.
+
+`probe_gateway.py --require-reasoning --stream` fails when reasoning is absent,
+the stream reports an error, no successful finish arrives, or `[DONE]` is missing.
+The local/CI `strict_openai` provider rejects missing provider finish state before
+LiteLLM can turn it into a successful finish. This is the approved gateway-only
+LiteLLM import exception. Served model IDs and application contracts remain the
+same; production's platform gateway must provide equivalent protection.
+
+The production SCC fixes remove fixed Qdrant/Jaeger identities and make the
+application's required cache/work paths group-0 writable. Jaeger uses `Recreate`
+for its single RWO volume, avoiding concurrent-writer locks during redeployment.
+The dedicated OAuth pin and registry service-account authentication make the
+sidecar part of the signed candidate, rather than an unresolved release input.
+
+### Image identity across archive and registry formats
+
+Record the requested upstream pin, platform/archive manifest digest, image config
+digest, loaded registry manifest digest and actual pod `imageID`. Docker archives
+can contain uncompressed layers while the registry stores compressed layers;
+those manifest digests can differ. Verify the archive signature/checksums and
+its manifest against the bundle first, then verify identical image config/rootfs
+diffIDs across the load, and the running digest against the loaded registry.
+Do not compare an archive digest blindly to a registry digest or accept a tag
+alone. Capture all five images, including every OAuth sidecar.

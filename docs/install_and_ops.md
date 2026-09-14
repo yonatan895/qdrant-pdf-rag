@@ -32,7 +32,7 @@ Mainframe RAG is a citation-first retrieval-augmented generation engine designed
 ### Key Operational Rules
 - **Air-Gap Image Factory:** The air-gap environment never builds images. Connected `main` builds container images with baked wheelhouses and BM25 weights, tagging them with the full 40-character Git SHA.
 - **Data Storage:** Qdrant persistent volumes **must** use RWO block storage (NFS-looking `STORAGE_CLASS` values are refused; the snapshot storage class falls back to it and is not checked separately).
-- **Inference Separation:** Inference (embeddings and reasoning models) is provided by the cluster's internal vLLM endpoints (`VLLM_BASE_URL`).
+- **Inference Separation:** The platform team owns the model servers and gateway. Agent and ingest consume its authenticated HTTP endpoints; this product does not deploy that tier.
 
 ---
 
@@ -53,6 +53,11 @@ Mainframe RAG is a citation-first retrieval-augmented generation engine designed
 ---
 
 ## 3. Local Development & Simulation Workflow
+
+For the measured Windows/WSL + real-model OpenShift topology, use
+[local-crc-environment.md](local-crc-environment.md). It includes the host memory
+profile, registry, TLS, Windows clients and local sizing. The selected operating
+mode is the [complementary CRC/Kind rehearsal](local-release-fallback.md).
 
 ### 3.1 Setup Environment
 
@@ -229,7 +234,7 @@ When running local tooling (`make ask`, `make query-demo`, `test_local_e2e_vllm.
 | **`QDRANT_COLLECTION`** | `mainframe_manuals` (or CLI `COLLECTION=...`) | `mainframe_manuals` |
 | **`EMBED_MODE`** | `"hash"` (auto-set if `EMBED_BASE_URL` is unset) | `"vllm"` (mandatory; prod fails closed on hash mode) |
 | **`ALLOW_HASH_MODE`** | `"true"` (auto-set for local test utilities) | `false` (fails closed to prevent hash retrieval in prod) |
-| **`LLM_BASE_URL`** | `http://localhost:8000/v1` (auto-detected if listening) | Internal vLLM platform endpoint from `airgap.env` |
+| **`LLM_BASE_URL`** | Source the real gateway's `GATEWAY_ENV_FILE` (`http://localhost:4000/v1`) | Platform gateway endpoint from `airgap.env` |
 | **`LLM_MODEL_REASONING`** | Auto-resolved from `/v1/models` on local server | Dedicated reasoning model specified in `airgap.env` |
 | **`LLM_REASONING_EFFORT_SIMPLE`** | `"low"` | `"low"` (preserves latency on factoid lookups) |
 | **`LLM_REASONING_EFFORT_COMPLEX`** | `"high"` | `"high"` (enforces deep multi-step deliberation) |
@@ -259,10 +264,10 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
 * **Dual-Model 8GB VRAM Co-Residency** (defaults resolved from the `mainframe_rag.serve` Budget `LOCAL_RT_8GB` profile — single source of truth, not script constants; the launcher preflights the full co-resident pack with `--check-pack` before starting either server):
   - **Reasoning Model (Port 8000)**: `GPU_MEM=0.64` (~5.2 GB VRAM allocation).
   - **Embedding Model (Port 8001)**: `GPU_MEM=0.33` with `--enforce-eager` (~2.7 GB VRAM budget; measured 1.29 GiB spare KV at startup). Explicit `GPU_MEM=`/`MAX_LEN=`/`SEQS=`/`ROLE=` always win.
-  - Fits comfortably within 8GB VRAM cards. With torch.compile enabled the embed server's profiled peak (compile + CUDA-graph workspace) went over budget — eager mode removes it, and embeddings are single-shot prefill so eager costs little.
+  - Verify actual residency and long inputs on the selected GPU. Eager execution removes compilation/CUDA-graph workspace, but allocations alone do not establish fit.
   - *Solo Runs*: For dedicated reasoning benchmarks, `GPU_MEM=0.85 make local-vllm` restores maximum KV cache capacity.
 * **8GB VRAM Optimizations**:
-  - `--limit-mm-per-prompt '{"image":0,"audio":0}'`: Disables multimodal vision/audio buffers in Gemma 4 to reclaim substantial VRAM.
+  - `--limit-mm-per-prompt '{"image":0,"audio":0}'` rejects those modalities; it does not establish the memory saving. The opt-in `LOCAL_CRC_32GB` profile additionally uses `--language-model-only` and a zero multimodal processor cache.
   - `--max-num-seqs 1`: Bounds concurrent sequence allocation to prevent out-of-memory spikes.
   - `--enable-prefix-caching`: on for the LOCAL reasoning server (Budget `prefix_cache`; vLLM already caches by default — the pin guards flips, hit rate measured for issue #80); off for embed.
   - `--max-num-batched-tokens` (embed server): capped at the Budget window so the memory-profiling peak stays bounded; it does not follow a `MAX_LEN` operator override (erring small is the safe side).
@@ -299,26 +304,27 @@ One server per `make` invocation (each blocks its shell — run each in its own 
 | Goal | Profile (default `LOCAL_RT_8GB`) | Commands | Notes |
 |---|---|---|---|
 | Answer quality (big reasoning + embedding) | `LOCAL_RT_8GB` | `make local-vllm` (:8000, E4B) + `make local-vllm-embed` (:8001) | Default pair. No room for a third leg (measured 7.0 GB resident). |
+| Windows CRC plus the current two models | `LOCAL_CRC_32GB` | Both launch targets with `BUDGET_PROFILE=LOCAL_CRC_32GB` | 0.54/0.43, eager, one sequence, 4096 tokens; [host setup and measurements](local-crc-environment.md). |
 | Full topology (reasoning + embedding + ranking) | `TRIPLE_8GB` | Above with `MODEL=Qwen/Qwen2.5-0.5B-Instruct GPU_MEM=0.20 MAX_LEN=4096 SEQS=1` on :8000, plus `make local-vllm-rerank` (:8002) | 0.5B answers are weak — plumbing/rerank coverage only. E4B triple demonstrably does not fit; resolve refuses it. |
 | Retrieval + ranking, no LLM | `RANK_EMBED_8GB` | `make local-vllm-embed` (:8001) + `make local-vllm-rerank` (:8002) | Rerank A/B and `--rerank` evals without spending VRAM on reasoning. |
 | Reasoning + ranking (no vLLM embed) | — | Unsupported | Hash embed mode pins `HashReranker` by design (determinism), so a GPU reranker is unreachable there — see issue #193. |
 
-Reranked search also needs `RERANK_ENABLED=true RERANK_BASE_URL=http://127.0.0.1:8002 RERANK_MODEL=BAAI/bge-reranker-v2-m3` on the consumer side (`query-demo`, eval `--rerank`, agent env). Launch order on a cold card: reasoning → embed → rerank (a 4k-context server fails KV init against leftovers; the profiles declare this allocation order).
+Reranked search also needs `RERANK_ENABLED=true RERANK_BASE_URL=http://127.0.0.1:4000/v1 RERANK_MODEL=BAAI/bge-reranker-v2-m3` on the consumer side (`query-demo`, eval `--rerank`, agent env). Launch order on a cold card: reasoning → embed → rerank (a 4k-context server fails KV init against leftovers; the profiles declare this allocation order).
 
 #### Local Production Simulation (`make local-stack`)
 
-The ownership contract is explicit: in production the platform team owns the model tier (vLLM + LiteLLM) and this repo owns Qdrant + ingest + retrieval + the agent, reaching every model leg only over the gateway HTTP contract. `make local-stack` reproduces that **complete topology on one machine** — pinned Qdrant + Jaeger + the real LiteLLM gateway (digest-pinned) in front of the three local vLLM backends + the FastAPI agent — and probes every leg through the gateway **and verifies a trace landed in Jaeger** before declaring the stack up. Agent and ingest never call vLLM directly, so the wire contract under test is the production one.
+The ownership contract is explicit: in production the platform team owns the model tier (vLLM + LiteLLM) and this repo owns Qdrant + ingest + retrieval + the agent, reaching every model leg only over the gateway HTTP contract. `make local-stack` reproduces that **complete topology on one machine** — pinned Qdrant + Jaeger + the real LiteLLM gateway (digest-pinned) in front of the enabled local vLLM backends + the FastAPI agent — and probes every leg through the gateway **and verifies a trace landed in Jaeger** before declaring the stack up. Agent and ingest never call vLLM directly, so the wire contract under test is the production one.
 
-Prerequisites: Docker, the three backends already running (`make local-vllm` :8000, `make local-vllm-embed` :8001, `make local-vllm-rerank` :8002), and `.venv`. Qdrant is started via `make sim-qdrant` (the pinned-image owner) when unreachable; `make sim-clean` stops it.
+Prerequisites: Docker, `.venv`, reasoning on :8000 and embeddings on :8001. Start reranking on :8002 only when enabled. The current two-model rehearsal explicitly uses `RERANK_ENABLED=false`. Qdrant is started via `make sim-qdrant` (the pinned-image owner) when unreachable; `make sim-clean` stops it.
 
 ```bash
 # Full stack: Qdrant -> Jaeger -> gateway -> probe -> (optional ingest) -> agent -> smoke -> trace check
-make local-stack
-CORPUS_DIR=output/demo-pdfs make local-stack     # also ingest through the gateway
+RERANK_ENABLED=false make local-stack
+RERANK_ENABLED=false CORPUS_DIR=output/demo-pdfs make local-stack     # also ingest through the gateway
 LOCAL_STACK_DRYRUN=1 make local-stack            # ordered plan only; no docker/network
 ```
 
-Tracing is part of the stack, not a flag: the agent and (when `CORPUS_DIR` is set) the ingest run export OTLP to Jaeger, and a `v1.search` span must land before the stack reports up. Jaeger reuses an instance already answering on the UI port (an operator-managed one is left alone) or starts the digest-pinned owner (`scripts/run_local_jaeger.sh`); the local LiteLLM stand-in also exports its spans there so the gateway hop appears in the waterfall. The Jaeger **browser UI** is at `http://127.0.0.1:16686`.
+Tracing is part of the stack, not a flag: the agent and (when `CORPUS_DIR` is set) the ingest run export OTLP to Jaeger, and a `v1.search` span must land before the stack reports up. Jaeger reuses an instance already answering on the UI port (an operator-managed one is left alone) or starts the digest-pinned owner (`scripts/run_local_jaeger.sh`); the real local LiteLLM gateway also exports its spans there so the gateway hop appears in the waterfall. The Jaeger **browser UI** is at `http://127.0.0.1:16686`.
 
 The operator console (ADR-0004) is part of the stack by default: the agent starts with `UI_ENABLED=true`, the up sequence smoke-checks `GET /ui` (HTTP 200), and the banner prints the console URL (`http://127.0.0.1:8080/ui`). Set `UI_ENABLED=false` to exercise the fail-closed 404 route set; `make run-agent` alone honors `UI_ENABLED` without a default.
 
@@ -331,7 +337,7 @@ The gateway contract the stack exercises:
 * **Both rerank legs**: native `/v1/rerank` via the `hosted_vllm/` provider, plus a `/v1/score` pass-through to the vLLM backend (LiteLLM has no native score route). `scripts/probe_gateway.py` prints the recommended `RERANK_ENDPOINT_ORDER` after probing both.
 * **Tokenizer**: `/tokenize` stays 404 behind the gateway — the agent pins its in-process estimator after one warning (expected, not a fault).
 
-For single-component debugging, `make local-jaeger` / `make local-jaeger-stop` manage just the trace backend, and `make local-gateway` keeps the gateway in the foreground (`make local-gateway-stop` stops it and its key store); then export the printed keys and run `scripts/probe_gateway.py --stream` and `make run-agent` yourself. The key store is a throwaway Postgres container + named volume (LiteLLM `/key/generate` needs a database): env-passed keys survive restarts, minted keys rotate per start (`GATEWAY_RESET_KEYS=1` wipes the store). `scripts/run_local_gateway.sh` owns gateway config rendering; the LiteLLM image is pinned by digest there. These simulation scripts are local-dev only — never a product path, never in CI or the air gap.
+For single-component debugging, `make local-jaeger` / `make local-jaeger-stop` manage just the trace backend, and `make local-gateway` keeps the gateway in the foreground (`make local-gateway-stop` stops it and its key store); then export the printed keys and run `scripts/probe_gateway.py --require-reasoning --stream` and `make run-agent` yourself. The key store is a throwaway Postgres container + named volume (LiteLLM `/key/generate` needs a database): env-passed keys survive restarts, minted keys rotate per start (`GATEWAY_RESET_KEYS=1` wipes the store). `scripts/run_local_gateway.sh` owns gateway config rendering; the LiteLLM image is pinned by digest there. The model/gateway launcher is local-only. CI supplies its own gateway deployment and deterministic model computation; neither deployment belongs on a product path. The shared strict-finish module has a gateway-only LiteLLM import exception and is excluded from application images.
 
 ---
 
@@ -351,16 +357,12 @@ via the `LLM_REASONING_EFFORT_*` / `PROMPT_MAX_CONTEXT_CHARS*` Settings
 To verify the entire RAG pipeline from PDF generation and dense/sparse ingestion to HTTP retrieval and grounded LLM reasoning:
 
 ```bash
-# Run automated end-to-end test against both local servers:
-make test-vllm-e2e
-
-# Or pass custom model parameters:
+# Start the real local gateway and source its private handoff first.
+. "$GATEWAY_ENV_FILE"
+export RERANK_ENABLED=false
 make test-vllm-e2e \
-  MODEL=gemma-4-E4B-it-qat-mobile-ct \
-  VLLM_URL=http://localhost:8000/v1 \
-  EMBED_MODEL=Qwen3-Embedding-0.6B \
-  EMBED_URL=http://localhost:8001/v1 \
-  DENSE_DIM=1024
+  MODEL="$LLM_MODEL_REASONING" VLLM_URL="$LLM_BASE_URL" \
+  EMBED_MODEL="$EMBED_MODEL" EMBED_URL="$EMBED_BASE_URL" DENSE_DIM=1024
 ```
 
 #### Test Execution Flow
@@ -368,7 +370,7 @@ make test-vllm-e2e \
 2. **Collection Dimension Validation**: If `--skip-ingest` is passed, validates that the collection exists and its dense vector dimension matches `dense_dim` (failing fast if mismatched). If ingesting, automatically recreates the collection if dimensions changed.
 3. **Corpus Generation & Ingest**: Builds synthetic IBM-shaped manual PDFs with specific message IDs (`IEA500I`, `LFAREA`) and ingests them into a local Qdrant collection using real dense + BM25 sparse vectors.
 4. **HTTP `/v1/search` Verification**: Queries the FastAPI endpoint and validates parallel prefetch fusion and hit ranking.
-5. **HTTP `/v1/answer` Verification**: Executes reasoning queries against the local vLLM server via FastAPI HTTP endpoints.
+5. **HTTP `/v1/answer` Verification**: Executes reasoning queries through the real gateway via FastAPI HTTP endpoints.
 6. **Strict Grounding Gate**: Fails closed if the model response returns zero validated citations or indicates ungrounded hallucination.
 
 #### Streaming Reasoning on the Local Stack (`make run-agent`)
@@ -389,7 +391,14 @@ This component runner honors `UI_ENABLED`: `UI_ENABLED=true make run-agent` serv
 
 ### 3.9 Exporting Standalone Model Weights for Offline Bastions
 
-To archive model weights and configurations for use in completely disconnected or air-gapped environments:
+This is a separate platform-team model handoff, outside the application bundle.
+The platform team chooses and verifies model revisions, mirrors weights, and owns
+serving and gateway acceptance. The product consumes the resulting URLs, model
+IDs, dimensions and per-leg keys. For the exact pinned local model views used in
+the rehearsal, follow [the local guide](local-crc-environment.md#3-pin-and-start-the-two-model-servers-sequentially).
+
+The following export uses the measured local revisions as an example. Production
+model selection remains with the platform team:
 
 ```bash
 # 1. Download Gemma-4 Reasoning Model:
@@ -401,8 +410,8 @@ target_dir = Path.home() / "models" / "gemma-4-E4B-it-qat-mobile-ct"
 target_dir.mkdir(parents=True, exist_ok=True)
 snapshot_download(
     repo_id="google/gemma-4-E4B-it-qat-mobile-ct",
+    revision="3624117cf04528e099519f93839f0f0b7a18913d",
     local_dir=str(target_dir),
-    local_dir_use_symlinks=False,
 )
 '
 
@@ -415,8 +424,8 @@ target_dir = Path.home() / "models" / "Qwen3-Embedding-0.6B"
 target_dir.mkdir(parents=True, exist_ok=True)
 snapshot_download(
     repo_id="Qwen/Qwen3-Embedding-0.6B",
+    revision="97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
     local_dir=str(target_dir),
-    local_dir_use_symlinks=False,
 )
 '
 ```
@@ -425,13 +434,14 @@ snapshot_download(
 
 ### 3.10 Managing Collections & Real-World Ingest
 
-When working with real PDF corpora (e.g. `z/OS 3.2` manuals, vendor books):
+When working with runtime-supplied PDF corpora, start the real gateway, source
+its private `GATEWAY_ENV_FILE`, and export `RERANK_ENABLED=false` for the two-model
+configuration. The examples inherit the gateway URLs, served model IDs and
+per-leg keys from that handoff; keep model computation behind the gateway.
 
 #### 1. Initial Ingestion with Dense Embeddings
 ```bash
 EMBED_MODE=vllm \
-EMBED_BASE_URL=http://localhost:8001/v1 \
-EMBED_MODEL=Qwen3-Embedding-0.6B \
 DENSE_DIM=1024 \
 QDRANT_URL=http://localhost:6333 \
 QDRANT_COLLECTION=mainframe_manuals \
@@ -456,8 +466,6 @@ Simply drop the new PDFs into your manuals directory (or specify a new `--src` d
 ```bash
 # Ingest only newly added or modified PDFs:
 EMBED_MODE=vllm \
-EMBED_BASE_URL=http://localhost:8001/v1 \
-EMBED_MODEL=Qwen3-Embedding-0.6B \
 DENSE_DIM=1024 \
 QDRANT_URL=http://localhost:6333 \
 QDRANT_COLLECTION=mainframe_manuals \
@@ -471,11 +479,7 @@ QDRANT_COLLECTION=mainframe_manuals \
 ```bash
 # Interactive reasoning assistant:
 EMBED_MODE=vllm \
-EMBED_BASE_URL=http://localhost:8001/v1 \
-EMBED_MODEL=Qwen3-Embedding-0.6B \
 DENSE_DIM=1024 \
-LLM_BASE_URL=http://localhost:8000/v1 \
-LLM_MODEL_REASONING=gemma-4-E4B-it-qat-mobile-ct \
 QDRANT_URL=http://localhost:6333 \
 .venv/bin/python scripts/query_demo.py --answer --query "Your question here"
 ```
@@ -493,7 +497,7 @@ identical to the hybrid+RRF baseline until explicitly enabled:
 # then falls back to /v1/rerank; set RERANK_ENDPOINT_ORDER=rerank_first
 # for gateways — see probe_gateway.py below):
 RERANK_ENABLED=true \
-RERANK_BASE_URL=http://localhost:8001/v1 \
+RERANK_BASE_URL=http://localhost:4000/v1 \
 RERANK_MODEL=BAAI/bge-reranker-v2-m3 \
 make run-agent
 ```
@@ -516,28 +520,28 @@ To build the package manually on a connected Linux workstation:
 ```bash
 git clone https://github.com/yonatan895/qdrant-pdf-rag.git
 cd qdrant-pdf-rag
-git checkout <main-sha>  # Full 40-character SHA matching built GHCR images
+git checkout "$IMAGE_SHA"  # Set to the full published-main SHA matching built GHCR images
 
-# Signing key: CI uses the SNEAKERNET_SIGNING_KEY secret (PEM private key),
-# with SNEAKERNET_KEY_TRUSTED=true so MANIFEST records signed: true.
-# Without the secret, CI packs with an ephemeral throwaway key and records
-# signed: ephemeral. A maintainer creates the production key once with
-# `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048` and stores
-# the PEM as the secret.
-# Trust model (read carefully): the offline signature binds the bundle
-# members together — any member swap invalidates it — but verification
-# against the in-bundle pubkey alone is TOFU and cannot prove which key
-# signed. Authenticity roots, strongest first: (1) set SNEAKERNET_TRUSTED_PUB
-# to a pubkey file obtained out of band and bootstrap.sh / load.sh refuse
-# any bundle whose pub differs; (2) compare the bundle pubkey fingerprint
-# against the org-published value (PACKING_RECORD.txt records the signing
-# key fingerprint: `openssl pkey -in <key> -pubout | openssl sha256`);
-# (3) download the tarball over HTTPS from GitHub Actions (TLS plus access
-# control). Local rehearsal generates a throwaway:
-#   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/signing.key
-# Build air-gap sneakernet package:
-SNEAKERNET_SIGNING_KEY=/tmp/signing.key make airgap-pack
+# Custodied release key supplied through the approved credential process.
+# CI reads PEM bytes from SNEAKERNET_SIGNING_KEY; the local pack command
+# takes the PATH to a protected PEM file.
+SNEAKERNET_SIGNING_KEY=/secure/release-signing.pem \
+SNEAKERNET_KEY_TRUSTED=true make airgap-pack
 ```
+
+A maintainer creates the signing key once in a protected directory, for example
+with `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out signing.pem`,
+and exports its public half with `openssl pkey -in signing.pem -pubout -out signing.pub`.
+Store the private PEM as the GitHub `SNEAKERNET_SIGNING_KEY` secret through the
+approved credential process; distribute the exact public PEM independently to
+operators. Back up the private key securely. A throwaway key tests signing
+mechanics only and does not authorize release transfer. Without a configured
+secret CI may label a package `signed: ephemeral`; reject it for promotion.
+
+`REDHAT_REGISTRY_USER` / `REDHAT_REGISTRY_PASSWORD` are the approved Red Hat
+registry service-account credentials. They are distinct from CRC's developer or
+kubeadmin credentials printed by `crc console --credentials`, and from the CRC
+pull-secret JSON. Do not paste any of these credentials into issue/PR text.
 
 This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-rag-<sha>.tar.sha256`, containing:
 1. Complete Git repository bundle (`repo.bundle`).
@@ -560,10 +564,15 @@ Transfer the tarball and checksum file via approved sneakernet media to the air-
 
 ```bash
 # 1. Verify tarball integrity BEFORE unpacking
-sha256sum -c qdrant-pdf-rag-<sha>.tar.sha256
+export BUNDLE=/absolute/path/to/qdrant-pdf-rag-FULL_SHA.tar
+export SNEAKERNET_TRUSTED_PUB=/secure/trusted-release-signing.pub
+cd "$(dirname "$BUNDLE")"
+sha256sum -c "$(basename "$BUNDLE").sha256"
 
 # 2. Extract tarball and run the automated bootstrap script:
-tar -xf qdrant-pdf-rag-<sha>.tar
+mkdir /absolute/path/to/new-candidate
+cd /absolute/path/to/new-candidate
+tar -xf "$BUNDLE"
 sh bootstrap.sh
 
 # 3. Enter the initialized workspace:
@@ -597,17 +606,25 @@ NAMESPACE=mainframe-rag
 # Persistent storage class (Must be RWO Block, e.g. ocs-storagecluster-ceph-rbd)
 STORAGE_CLASS=gp3-csi
 
-# In-cluster inference endpoints (provided by LLM platform team).
+# Caller-provisioned, populated corpus claim mounted read-only by ingest.
+CORPUS_PVC=manuals-corpus
+RERANK_ENABLED=false
+INSECURE_REGISTRY=false
+
+# Authenticated TLS gateway endpoints supplied by the platform team.
 # VLLM_BASE_URL takes the bare server origin (a trailing /v1 is tolerated:
 # the deploy scripts strip it before deriving EMBED_BASE_URL).
-VLLM_BASE_URL=http://vllm.inference.svc.cluster.local:8000
-EMBED_MODEL=ibm-granite/granite-embedding-278m-multilingual
-DENSE_DIM=768
-LLM_MODEL_REASONING=ibm-granite/granite-20b-code-instruct
+VLLM_BASE_URL=https://gateway.example.test
+EMBED_BASE_URL=https://gateway.example.test/v1
+LLM_BASE_URL=https://gateway.example.test/v1
+EMBED_MODEL=REPLACE_WITH_PLATFORM_EMBED_MODEL
+DENSE_DIM=REPLACE_WITH_PLATFORM_DIMENSION
+LLM_MODEL_REASONING=REPLACE_WITH_PLATFORM_REASONING_MODEL
 
 # Gateway virtual keys: name of ONE operator-created Secret holding the
 # platform team's LiteLLM keys (unset = keyless). Never put key values here.
-#GATEWAY_API_KEY_SECRET=gateway-api-keys
+GATEWAY_API_KEY_SECRET=gateway-api-keys
+GATEWAY_CA_CONFIGMAP=gateway-ca
 
 # Optional pull secret name (if registry requires credentials)
 PULL_SECRET=internal-registry-pull-secret
@@ -619,25 +636,46 @@ PULL_SECRET=internal-registry-pull-secret
 #AGENT_ROUTE=true
 ```
 
-#### Production model trio (reasoning / embed / rerank)
+#### Platform model endpoints (reasoning / embed / optional rerank)
 
-The platform team serves three model endpoints; this repo never hardcodes model names — wire all three in `airgap.env`:
+The platform team supplies embedding and reasoning endpoints and, when enabled,
+a reranker. Set the actual model IDs and dimensions in `airgap.env`; the example
+placeholders above are not deployment values. Keep reranking disabled unless
+the site explicitly enables it:
 
 | Role | URL key | Model key | Notes |
 |---|---|---|---|
-| Reasoning (`/v1/answer` only) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
+| Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
 | Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `VLLM_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
 | Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `EMBED_BASE_URL`) | `RERANK_MODEL` | Served via a vLLM pooling server (`--runner pooling`, `/v1/score`; TEI `/v1/rerank` fallback). Point it at the reranker server — the embed default only fits single-server deployments. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: `RERANK_ENDPOINT_ORDER=rerank_first` for gateways (run `probe_gateway.py` below to decide). |
+
+Set the namespace to the same value chosen in `airgap.env` and create it if the
+site has not already provisioned it. Do not source a local-development handoff in
+this operator shell. Environment exports override `airgap.env`.
+
+```sh
+export NAMESPACE=mainframe-rag
+oc create namespace "$NAMESPACE" --dry-run=client -o yaml | oc apply -f -
+```
 
 Create the key Secret **before** `make airgap-deploy` (one Secret, four data keys; the contextual-gist key rides the ingest Job):
 
 ```bash
-kubectl -n mainframe-rag create secret generic gateway-api-keys \
-  --from-literal=llm-api-key='<platform-key>' \
-  --from-literal=embed-api-key='<platform-key>' \
-  --from-literal=rerank-api-key='<platform-key>' \
-  --from-literal=context-llm-api-key='<platform-key>'
+# Files are mode 600, supplied through the platform credential process.
+# Include all referenced keys, even when an optional leg is disabled.
+oc -n "$NAMESPACE" create secret generic gateway-api-keys \
+  --from-file=llm-api-key=/secure/gateway/llm-api-key \
+  --from-file=embed-api-key=/secure/gateway/embed-api-key \
+  --from-file=rerank-api-key=/secure/gateway/rerank-api-key \
+  --from-file=context-llm-api-key=/secure/gateway/context-llm-api-key
+oc -n "$NAMESPACE" create configmap gateway-ca \
+  --from-file=ca-bundle.crt=/secure/gateway/ca-bundle.crt
 ```
+
+Supply a complete CA bundle containing every required root: `SSL_CERT_FILE`
+replaces the client's default bundle. Mounting this ConfigMap makes agent and
+ingest trust the gateway; node registry trust and browser ingress trust remain
+separate. Test correct CA, wrong CA and hostname mismatch from actual pods.
 
 `make airgap-validate` verifies the Secret exists (when the namespace does) and refuses plaintext `*_API_KEY` values in `airgap.env`. Rotate by updating the Secret, then rollout-restart the agent (or re-run the ingest Job).
 
@@ -654,6 +692,31 @@ To preview rendered templates and substitution rules without cluster credentials
 make airgap-dryrun
 ```
 
+Before loading, the registry administrator must configure authenticated TLS,
+install its CA for the loader and cluster nodes, and prove an uncached node pull.
+Authenticate the loader into a protected `REGISTRY_AUTH_FILE` using the approved
+registry credentials and its installed CA. For example, set the real registry
+authority (without a repository suffix) and let Skopeo prompt:
+
+```sh
+umask 077
+export REGISTRY_AUTH_FILE=/secure/registry-auth.json
+skopeo login --authfile "$REGISTRY_AUTH_FILE" registry.example.test:5000
+```
+
+Then create the namespace pull Secret without putting passwords in argv:
+
+```sh
+oc -n "$NAMESPACE" create secret generic internal-registry-pull-secret \
+  --type=kubernetes.io/dockerconfigjson \
+  --from-file=.dockerconfigjson="$REGISTRY_AUTH_FILE"
+```
+
+Set `INSECURE_REGISTRY=false`. Provision the operator-supplied corpus PVC and
+OAuth cookie Secret before deployment. Use production storage and sizing;
+`QDRANT_EXTRA_VALUES`, `INGEST_EXTRA_PATCH` and the tiny CRC claims are local
+rehearsal overrides. [The local guide](local-crc-environment.md) owns those values.
+
 ### 4.4 Load Images & Deploy Stack
 
 Operators can either run the complete automated pipeline in one command or execute each stage individually:
@@ -668,6 +731,16 @@ make airgap-pipeline
 CORPUS_PVC=my-corpus-pvc make airgap-pipeline
 ```
 
+The pipeline probes configured legs before ingest, but its built-in probe does
+not request the stricter streaming check. For first production acceptance use
+the modular sequence below so `--require-reasoning --stream` passes before ingest.
+Later repeat the full pipeline with identical configuration. Require a nonempty
+search, explicit cited answer, contextual follow-up and every streaming interface
+(including browser busy-state recovery), verified OAuth/Route certificates and
+persisted traces before declaring the installation operational. Preserve the
+site's SCC, identity, storage, registry and network acceptance evidence; a local
+CRC pass does not replace it.
+
 #### Option B: Step-by-Step Modular Execution
 
 ```bash
@@ -676,6 +749,15 @@ make airgap-load
 
 # 2. Deploy Qdrant 3-replica cluster and Agent deployment
 make airgap-deploy
+
+# 3. Require both real platform legs and a successful streaming finish
+# from the application's network, trust store and Secret-backed identity.
+oc -n "$NAMESPACE" exec deploy/rag-agent -c agent -- \
+  python3 /app/scripts/probe_gateway.py --require-reasoning --stream
+
+# 4. Only after that probe passes:
+make airgap-ingest
+make airgap-smoke
 ```
 
 #### OpenShift Security Context Constraints (SCC) Note
@@ -788,8 +870,11 @@ OAuth-protected; enable it with `AGENT_ROUTE=true`:
 2. Create the cookie-encryption Secret (operator-owned; deploy fails closed
    without it):
    ```bash
-   kubectl -n mainframe-rag create secret generic rag-agent-oauth-cookie \
-     --from-literal=cookie-secret="$(openssl rand -base64 32 | head -c 32)"
+   # First provisioning only; reuse the same protected file on restart.
+   umask 077
+   openssl rand -base64 24 | tr -d '\n' > /secure/oauth-cookie-secret
+   oc -n "$NAMESPACE" create secret generic rag-agent-oauth-cookie \
+     --from-file=cookie-secret=/secure/oauth-cookie-secret
    ```
 3. Set `AGENT_ROUTE=true` in `airgap.env` and deploy. `deploy.sh` layers
    `deploy/kustomize/overlays/openshift-ui` and creates a `reencrypt` Route
@@ -797,7 +882,8 @@ OAuth-protected; enable it with `AGENT_ROUTE=true`:
    the namespace `openshift-service-ca.crt` bundle as the
    `destinationCACertificate`.
 4. Reach it: `oc -n mainframe-rag get route rag-agent` → unauthenticated
-   browser requests redirect to OpenShift OAuth; `/healthz` bypasses OAuth for
+   browser requests may show a provider chooser (403); `/oauth/start` redirects
+   to OpenShift OAuth; `/healthz` bypasses OAuth for
    probes. In-cluster tools keep using the ClusterIP 8080 port (unauthenticated
    by design, no Route).
 
@@ -822,8 +908,8 @@ modular deployment and diagnosis:
 ```bash
 # Embed + reasoning + rerank reachability, dim match, auth diagnosis:
 kubectl -n mainframe-rag exec deploy/rag-agent -- \
-  python3 /app/scripts/probe_gateway.py
-# Add --stream to also verify SSE [DONE] (needed only for ?stream=true TTFT).
+  python3 /app/scripts/probe_gateway.py --require-reasoning --stream
+# Requires a successful finish and [DONE]; stream errors fail the probe.
 ```
 
 The probe exits nonzero when a required leg fails (a 401 names the missing
@@ -869,271 +955,66 @@ volumes and tested backups; stop its nodes while CRC runs.
 > [!NOTE]
 > Local cluster testing exercises the identical packaging scripts, container archives, Helm chart, and Kustomize overlays as production, but with adapted sizing and security contexts (1-replica Kind + mock/local vLLM rather than 3-replica OpenShift `restricted-v2`).
 
-#### Step 1: Provision Local Registry & Kind Cluster
-
-Kind nodes pull images inside Docker. Configure a containerd mirror so image
-references under `localhost:5000` reach the registry container over HTTP:
-
-```bash
-# 1. Start local container registry container
-docker run -d --restart=always -p 127.0.0.1:5000:5000 --name airgap-registry registry:2
-
-# 2. Create Kind cluster with containerd mirrors for the local registry.
-# Use localhost:5000 for both host pushes and every application image ref.
-# containerd resolves that name to the registry container through this mirror.
-SCRATCH_DIR=$(mktemp -d /tmp/mainframe-kind.XXXXXX)
-cat <<'EOF' > "$SCRATCH_DIR/kind-config.yaml"
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-containerdConfigPatches:
-- |-
-  [plugins."io.containerd.grpc.v1.cri".registry]
-    [plugins."io.containerd.grpc.v1.cri".registry.mirrors]
-      [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5000"]
-        endpoint = ["http://airgap-registry:5000"]
-EOF
-kind create cluster --name airgap --config "$SCRATCH_DIR/kind-config.yaml"
-
-# 3. Connect local registry to Kind network (already connected on re-runs;
-# the redirect keeps the re-run output clean)
-docker network connect "kind" airgap-registry 2>/dev/null || true
-
-# 4. Point kubectl at the new cluster and verify access (a fresh shell may
-# have no current-context, in which case every kubectl call fails against
-# localhost:8080)
-kubectl config use-context kind-airgap
-kubectl get nodes
-```
-
-#### Step 2: Pack Sneakernet Tarball
-
-Packing pulls the app images from the registry tags for the checked-out SHA — it never builds locally. That means this step only works on a **green `main` SHA whose CI images already exist** (check out `main` first; an unmerged branch fails closed with `manifest unknown`). It also requires a signing key (§4.1); for rehearsal generate a throwaway:
-
-```bash
-# Checkout a green main SHA first (pack bundles HEAD and pulls its GHCR tags).
-# Confirm the SHA's main workflows are green — e2e green means its images
-# were pushed; a missing tag still fails closed at pack time with a 404.
-# A stale local airgap.env IMAGE_SHA also fails closed here (explicit env
-# beats the file, or update the file):
-git checkout <green-main-sha>
-gh run list --branch main --limit 5   # ci + e2e green for the SHA
-
-# Rehearsal-only signing key (production uses the custodied key, §4.1):
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/signing.key
-
-# Build the complete image and bundle archive in dist/
-SNEAKERNET_SIGNING_KEY=/tmp/signing.key make airgap-pack
-```
-
-Rehearse the transfer and bootstrap in a fresh directory using §4.2, then
-continue below from the bootstrapped `qdrant-pdf-rag` directory. This checks
-that the bundle is sufficient without the connected clone's files. Keep the
-absolute `SCRATCH_DIR` path for the local-only Kind overrides.
-
-#### Step 3: Load & Push to Local Registry
-
-```bash
-# Load archives from dist/ and push to localhost:5000 (airgap-registry)
-INTERNAL_REGISTRY=localhost:5000 INSECURE_REGISTRY=true make airgap-load
-```
-
-#### Step 4: Configure `airgap.env` & Deploy Stack to Kind
-
-Create a local single-replica override for Qdrant and populate the `airgap.env`
-seeded by bootstrap:
-
-```bash
-# Create local sizing override (1 replica for Kind test node; the 3x16Gi
-# prod values cannot schedule on one node)
-cat > "$SCRATCH_DIR/qdrant-local.yaml" <<'EOF'
-replicaCount: 1
-resources:
-  requests:
-    cpu: 200m
-    memory: 512Mi
-  limits:
-    cpu: 2000m
-    memory: 2Gi
-EOF
-
-```
-
-Ensure `airgap.env` contains:
-```sh
-INTERNAL_REGISTRY=localhost:5000
-NAMESPACE=mainframe-rag
-STORAGE_CLASS=standard
-QDRANT_STORAGE_SIZE=1Gi
-QDRANT_EXTRA_VALUES=/absolute/path/to/qdrant-local.yaml
-IMAGE_SHA=$(awk '/^sha: /{print $2}' dist/MANIFEST.txt)
-VLLM_BASE_URL=http://vllm-mock:8000
-EMBED_MODEL=mock-embed
-DENSE_DIM=64
-```
-Use the absolute path printed by `echo "$SCRATCH_DIR/qdrant-local.yaml"` for
-`QDRANT_EXTRA_VALUES`. Keep `INTERNAL_REGISTRY=localhost:5000` throughout load,
-deploy, and pipeline runs: the host pushes there, and the Kind mirror routes node
-pulls to `airgap-registry:5000`. Using the Docker-only hostname as
-`INTERNAL_REGISTRY` makes the pipeline fail on the host with `no such host`.
-
-`DENSE_DIM` must equal the mock's `MOCK_DIM` below (both 64 here). Configure its
-reasoning endpoint too so the rehearsal covers the console, answers, and chat:
+The executable recipe for the current test environment is the
+[`kind-live-rehearsal` matrix](../.github/workflows/e2e.yml), with lane details in
+[deploy.md](deploy.md#release-rehearsal-lanes-and-fixes). To reproduce the complete
+CI environment, dispatch the existing workflow on published `main` and inspect
+all three lanes plus bundle acceptance:
 
 ```sh
-LLM_BASE_URL=http://vllm-mock:8000/v1
-LLM_MODEL_REASONING=mock-reasoning
-INSECURE_REGISTRY=true
-CORPUS_PVC=corpus
-INGEST_WORK_SIZE=2Gi
+gh workflow run e2e.yml --ref main
+gh run list --workflow e2e.yml --branch main --limit 5
+# Set RUN_ID to the dispatched run, then wait and retain its diagnostics.
+gh run watch "$RUN_ID" --exit-status
+gh run download "$RUN_ID" --dir /path/outside/git/rehearsal-evidence
 ```
 
-These are Kind-only entries in `airgap.env`; production uses the platform team's
-model IDs, gateway endpoints, and Secret. The mock proves wiring and citation
-contracts, not answer quality.
+This runs the connected main factory; it does not promote a bundle. All lanes
+use that run's published bundle instead of repacking it independently. For local
+Kind debugging, follow those same steps from a fresh bootstrap, using a **new
+uniquely named** disposable cluster and registry. If port 5000 or a cluster name
+belongs to the preserved development environment, choose a separate port/name
+and update the loader, node registry trust and image authority consistently.
+Do not delete, overwrite or reuse the preserved cluster's volumes.
 
-Deploy the in-cluster mock vLLM **before** `make airgap-deploy` (pods resolve `vllm-mock` over cluster DNS — no host networking needed; the "point at the host" alternative does not work from Kind pods without extra setup):
+The current recipe differs from older HTTP/direct-mock examples:
 
-```bash
-NS=mainframe-rag
-SHA=$(awk '/^sha: /{print $2}' dist/MANIFEST.txt)
-kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n "$NS" create configmap mock-vllm --from-file=mock_vllm.py=scripts/mock_vllm.py \
-  --dry-run=client -o yaml | kubectl -n "$NS" apply -f -
-kubectl apply -n "$NS" -f - <<EOF
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: vllm-mock
-  labels: {app: vllm-mock}
-spec:
-  replicas: 1
-  selector: {matchLabels: {app: vllm-mock}}
-  template:
-    metadata: {labels: {app: vllm-mock}}
-    spec:
-      containers:
-        - name: mock
-          # Tarball-faithful: loaded from the bundle via airgap-load, never pulled.
-          image: localhost:5000/qdrant-pdf-rag-ingest:${SHA}
-          command: ["python3", "/cm/mock_vllm.py"]
-          env:
-            - {name: MOCK_DIM, value: "64"}
-            - {name: PORT, value: "8000"}
-          ports: [{containerPort: 8000}]
-          readinessProbe:
-            httpGet: {path: /healthz, port: 8000}
-            initialDelaySeconds: 2
-          volumeMounts: [{name: mock, mountPath: /cm}]
-      volumes:
-        - name: mock
-          configMap: {name: mock-vllm}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: vllm-mock
-spec:
-  selector: {app: vllm-mock}
-  ports: [{port: 8000, targetPort: 8000}]
-EOF
-kubectl -n "$NS" rollout status deploy/vllm-mock --timeout=180s
-# Probe the mock before deploying: rollout only proves the pod is up, while a
-# dim mismatch (MOCK_DIM vs airgap.env DENSE_DIM) surfaces much later at
-# ingest, which fails closed. The lengths must agree (no wget in the image;
-# python3 + stdlib urllib instead):
-kubectl -n "$NS" exec deploy/vllm-mock -- python3 -c \
-  "import json,urllib.request;print(len(json.load(urllib.request.urlopen(urllib.request.Request('http://localhost:8000/v1/embeddings',data=json.dumps({'model':'mock-embed','input':'probe'}).encode(),headers={'Content-Type':'application/json'}),timeout=10))['data'][0]['embedding']))"
-# expect: 64 (== DENSE_DIM)
-```
-(This mirrors the `airgap-rehearsal` job in `.github/workflows/e2e.yml`, which is the proven reference when this section and CI disagree.)
+1. A digest-pinned registry uses TLS, bcrypt authentication and explicit node
+   trust. The loader's protected auth file supplies the Kubernetes pull Secret.
+2. Both `VLLM_BASE_URL` and `EMBED_BASE_URL`/`LLM_BASE_URL` point through the
+   real TLS test gateway. `scripts/ci/deploy_test_gateway.sh` owns the test
+   LiteLLM/PostgreSQL deployment, CA and virtual-key Secrets.
+3. Only model computation uses `scripts/mock_vllm.py`, mounted from the fresh
+   bundle's checkout. Set `MOCK_DIM=1024`, `EMBED_MODEL=mock-embed`,
+   `LLM_MODEL_REASONING=mock-reasoning`, `DENSE_DIM=1024` and
+   `RERANK_ENABLED=false`; consumer URLs are `https://test-gateway:4000/v1`.
+   Set `GATEWAY_API_KEY_SECRET=test-gateway-keys` and
+   `GATEWAY_CA_CONFIGMAP=test-gateway-ca`.
+4. Use the production deployment pipeline with small test resource overrides,
+   `AGENT_ROUTE=false`, and the loaded candidate ingest image to generate the
+   corpus. Kind needs its own volume-group override because it has no SCC.
+   Never copy that fixed group into the OpenShift production values.
+5. `application_contracts.py` checks real application responses and stream
+   endings. `gateway_faults.sh` verifies injected failures through LiteLLM and
+   recovery. `check_lifecycle.sh` verifies snapshot restore, replacement/PVCs
+   and persistence of an existing trace; repeat the pipeline afterward.
 
-Deploy the stack (Qdrant StatefulSet, Jaeger v2, Agent Deployment):
-```bash
-make airgap-deploy
-```
+The exact setup YAML, image/tool pins, resource patches, authenticated registry
+configuration, corpus generator and cleanup are kept together in the workflow.
+The CRC variant uses [the local runbook's generator](local-crc-environment.md#72-configure-and-deploy-the-same-candidate)
+with `restricted-v2` and project-assigned IDs. No mock or test gateway belongs
+in production overlays or application images.
 
-#### Step 5: Ingest Corpus & Run Smoke Test
+Access Kind privately with `kubectl -n "$NAMESPACE" port-forward svc/rag-agent
+8080:8080` and open `http://localhost:8080/ui`. Kind supplies no OpenShift OAuth,
+Route, Service CA or SCC evidence. Only remove the newly created disposable
+cluster after retaining diagnostics and synthetic recovery evidence.
 
-The ingest Job mounts a caller-supplied corpus PVC read-only — the scripts never create it. For rehearsal, create a `corpus` PVC and fill it with synthetic PDFs via a generator Job (same tarball-faithful ingest image as the mock above):
-
-```bash
-NS=mainframe-rag
-SHA=$(awk '/^sha: /{print $2}' dist/MANIFEST.txt)
-kubectl -n "$NS" apply -f - <<EOF
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata: {name: corpus}
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources: {requests: {storage: 1Gi}}
-  storageClassName: standard
----
-apiVersion: batch/v1
-kind: Job
-metadata: {name: corpus-gen}
-spec:
-  backoffLimit: 0
-  template:
-    spec:
-      restartPolicy: Never
-      containers:
-        - name: gen
-          image: localhost:5000/qdrant-pdf-rag-ingest:${SHA}
-          command: ["/bin/sh", "-ec"]
-          args:
-            - |
-              python3 /app/scripts/make_synthetic_pdf.py --out /corpus/SA22-0000-00_outline.pdf
-              python3 /app/scripts/make_synthetic_pdf.py --plain --out /corpus/plain-widget-notes.pdf
-              ls -la /corpus
-          volumeMounts: [{name: corpus, mountPath: /corpus}]
-      volumes:
-        - name: corpus
-          persistentVolumeClaim: {claimName: corpus}
-EOF
-kubectl -n "$NS" wait --for=condition=complete job/corpus-gen --timeout=300s
-```
-
-Then run the full pipeline with the same `airgap.env`. Loading images and applying
-the deployments again is safe; the ingest script replaces its immutable Job.
-On a rerun of the synthetic corpus generator, delete only `job/corpus-gen` before
-applying it again; retain the corpus PVC.
-
-```bash
-make airgap-pipeline
-```
-
-#### Step 6: Verify answers and the operator console
-
-The pipeline checks the configured model legs, ingestion, search, and tracing.
-For the complete user experience, also verify streaming and open the console:
-
-```bash
-kubectl -n mainframe-rag exec deploy/rag-agent -- \
-  python3 /app/scripts/probe_gateway.py --stream
-kubectl -n mainframe-rag port-forward svc/rag-agent 8080:8080
-```
-
-Open `http://localhost:8080/ui`, confirm the health indicator is healthy, and
-ask `What does IEA500I mean?`. Expect an answer and a citation to the synthetic
-manual; send a follow-up and confirm it completes. The three CSS/JavaScript
-assets load from `/ui/static/`, with no public CDN. The mock answer is
-deterministic and demonstrates the transport and citation contract only.
-
-Kind uses this local port-forward because it has no OpenShift OAuth or Route
-controller. Production browser access follows §4.4.2; the OAuth image pin,
-cookie Secret, Service CA, and `restricted-v2` admission still need verification
-on OpenShift. A successful Kind rehearsal does not establish those properties.
-
-#### Teardown Local Test Cluster
-
-Deleting Kind destroys its PVC contents. Use this only for the synthetic rehearsal;
-back up and restore-test any real Qdrant collections first (see `docs/live-stack.md`
-§4), and retain the caller's original PDFs outside the cluster.
-
-```bash
-kind delete cluster --name airgap
-docker rm -f airgap-registry
-```
+If the CRC fit fails, the separate real-model Kind lane uses the same original
+bundle, the two current GPU models through the authenticated TLS gateway, and a
+separate real-vector collection. It must pass alongside the CRC mock lane and CI;
+[the fallback gate](crc-release-verification.md#11-bounded-simultaneous-fit-attempt-and-complementary-verification)
+keeps the missing combined OpenShift/live-model coverage explicit.
 
 ---
 
