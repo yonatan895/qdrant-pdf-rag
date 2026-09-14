@@ -522,8 +522,9 @@ def _token_usage_from_dict(usage_data: dict[str, Any]) -> TokenUsage:
 
 def _chat_result_from_response(data: dict[str, Any]) -> ChatResult:
     """Single parser for non-streaming chat-completion payloads: content,
-    finish_reason, and usage. Both fallback legs (achat, _chat_sync) funnel
-    through here so response-shape handling cannot diverge copies."""
+    finish_reason, and usage. All fallback legs (achat, chat_stream,
+    _chat_sync) funnel through here so response-shape handling cannot
+    diverge copies."""
     choice = data["choices"][0]
     content = str(choice["message"].get("content") or "")
     finish_reason = str(choice.get("finish_reason") or "stop")
@@ -777,20 +778,32 @@ class HttpxLLMClient:
         ttft_ms = state.ttft_ms
         if not state.content_parts:
             log.warning("streaming chat returned empty content; falling back to non-streaming POST")
+            # Issue #363: the fallback must re-ask with stream=False. Reusing
+            # the streaming body makes a spec-compliant backend answer SSE,
+            # which resp.json() cannot parse.
+            fallback_body = _chat_body(model, serialized, reasoning_effort, temperature, stream=False)
             resp = await self._async_http().post(
                 f"{base_url.rstrip('/')}/chat/completions",
-                json=body,
+                json=fallback_body,
                 headers=headers,
             )
             resp.raise_for_status()
-            data = resp.json()
-            choice = data["choices"][0]
-            content = str(choice["message"].get("content") or "")
-            finish_reason = str(choice.get("finish_reason") or "stop")
-            usage_data = data.get("usage") or {}
-            if content:
-                ttft_ms = int((time.monotonic() - t0) * 1000)
-                yield {"type": "token", "delta": content, "token": content, "ttft_ms": ttft_ms}
+            result = _chat_result_from_response(resp.json())
+            if not result.content:
+                # No fabricated success: an empty fallback is a failed
+                # generation. Raising takes the app's event: error path
+                # (error frame then [DONE]), like malformed/rejected/timeout
+                # fallbacks whose exceptions propagate from above.
+                raise RuntimeError("non-streaming fallback returned empty content")
+            finish_reason = result.finish_reason
+            usage_data = {
+                "prompt_tokens": result.usage.prompt_tokens,
+                "completion_tokens": result.usage.completion_tokens,
+                "reasoning_tokens": result.usage.reasoning_tokens,
+                "total_tokens": result.usage.total_tokens,
+            }
+            ttft_ms = int((time.monotonic() - t0) * 1000)
+            yield {"type": "token", "delta": result.content, "token": result.content, "ttft_ms": ttft_ms}
 
         usage = _token_usage_from_dict(usage_data)
         yield {
