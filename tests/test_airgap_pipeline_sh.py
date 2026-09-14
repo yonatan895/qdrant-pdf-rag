@@ -7,9 +7,11 @@ Tests pipeline.sh in dry-run mode against hermetic stubs:
 - Flag --skip-ingest skips ingest stage.
 """
 
+import shutil
+
 import pytest
 
-from tests.helpers_airgap import copy_chart, make_bin_tree, write_stub
+from tests.helpers_airgap import REPO, copy_chart, make_bin_tree, write_stub
 
 IMAGE_SHA = "e" * 40
 
@@ -18,6 +20,17 @@ if [ "$1" = "kustomize" ] || [ "$1" = "build" ]; then
     echo "apiVersion: v1"
     echo "kind: ConfigMap"
     echo "metadata: {name: stub}"
+    # The Qdrant key contract differs per overlay (issue #366): the agent
+    # renders the read-only key, ingest the full-access one.
+    case "$2" in
+      *openshift-ingest*) _qkey="api-key" ;;
+      *) _qkey="read-only-api-key" ;;
+    esac
+    echo "            - name: QDRANT_API_KEY"
+    echo "              valueFrom:"
+    echo "                secretKeyRef:"
+    echo "                  key: $_qkey"
+    echo "                  name: stub-apikey"
     exit 0
 fi
 exit 0
@@ -31,6 +44,20 @@ def pipe_tree(tmp_path):
         ["common.sh", "validate.sh", "load.sh", "deploy.sh", "ingest.sh", "smoke.sh", "pipeline.sh"],
     )
     copy_chart(tmp_path)
+    # validate.sh pins the Qdrant key contract on the overlay sources
+    # (issue #366): the copied tree needs the real files it inspects.
+    agent_overlay = tmp_path / "deploy" / "kustomize" / "overlays" / "openshift"
+    agent_overlay.mkdir(parents=True, exist_ok=True)
+    ingest_overlay = tmp_path / "deploy" / "kustomize" / "overlays" / "openshift-ingest"
+    ingest_overlay.mkdir(parents=True, exist_ok=True)
+    shutil.copy(
+        REPO / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml",
+        agent_overlay,
+    )
+    shutil.copy(
+        REPO / "deploy" / "kustomize" / "overlays" / "openshift-ingest" / "ingest-job.yaml",
+        ingest_overlay,
+    )
 
     for name in ("skopeo", "helm", "kubectl", "oc", "kustomize"):
         write_stub(tmp_path / "bin" / name, STUB_PIPE_TOOL)

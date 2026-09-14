@@ -46,6 +46,11 @@ spec:
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
             - name: IMAGE_SHA
               value: __IMAGE_SHA__
+            - name: QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: read-only-api-key
+                  name: qdrant-apikey
             - name: OTEL_DEPLOYMENT_ENVIRONMENT
               value: __OTEL_DEPLOYMENT_ENVIRONMENT__
             - name: OTEL_SERVICE_NAME
@@ -208,6 +213,67 @@ def test_pull_secret_bad_name_fails_closed(tree, bad_name):
     r = _run(tree, ("PULL_SECRET", bad_name))
     assert r.returncode != 0
     assert "PULL_SECRET must be a DNS-subdomain name" in r.stderr
+
+
+# ------------------------------------------------------- Qdrant least privilege (#366)
+
+def _stub_with_qdrant_key(tree, key_line):
+    """Rewrite the stub kustomize output's QDRANT_API_KEY data key."""
+    tmp_path, _ = tree
+    stub = (tmp_path / "stub-kustomize.yaml").read_text()
+    assert "key: read-only-api-key" in stub
+    (tmp_path / "stub-kustomize.yaml").write_text(
+        stub.replace("key: read-only-api-key", key_line)
+    )
+
+
+def _qdrant_block(rendered):
+    lines = rendered.splitlines()
+    start = next(i for i, l in enumerate(lines) if "- name: QDRANT_API_KEY" in l)
+    return "\n".join(lines[start : start + 5])
+
+
+def test_agent_qdrant_key_wired_readonly(tree):
+    """Issue #366: the rendered agent must reference the chart's read-only
+    key — never the full-access one."""
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    block = _qdrant_block((tree[0] / "dist" / "agent-rendered.yaml").read_text())
+    assert re.search(r"(?m)^\s*key: read-only-api-key$", block)
+    assert not re.search(r"(?m)^\s*key: api-key$", block)
+
+
+def test_agent_qdrant_write_key_fails_closed(tree):
+    """A render wiring the full-access key must stop the deploy before apply."""
+    _stub_with_qdrant_key(tree, "key: api-key")
+    r = _run(tree)
+    assert r.returncode != 0
+    assert "read-only-api-key" in r.stderr
+
+
+def test_agent_qdrant_key_missing_fails_closed(tree):
+    """No QDRANT_API_KEY block at all must also stop the deploy."""
+    tmp_path, _ = tree
+    stub = (tmp_path / "stub-kustomize.yaml").read_text()
+    lines = stub.splitlines()
+    start = next(i for i, l in enumerate(lines) if "- name: QDRANT_API_KEY" in l)
+    del lines[start : start + 5]
+    (tmp_path / "stub-kustomize.yaml").write_text("\n".join(lines) + "\n")
+    r = _run(tree)
+    assert r.returncode != 0
+    assert "read-only-api-key" in r.stderr
+
+
+def test_agent_overlay_qdrant_contract():
+    """The stub above mirrors the real prod overlay by hand — pin the real
+    file to the same Qdrant contract so the two cannot silently diverge."""
+    real = (
+        REPO / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml"
+    ).read_text()
+    assert "- name: QDRANT_API_KEY" in real
+    assert re.search(r"(?m)^\s*key: read-only-api-key$", real)
+    assert not re.search(r"(?m)^\s*key: api-key$", real)
+    assert "__QDRANT_RELEASE__-apikey" in real
 
 
 def test_storage_size_knob_covers_persistence_and_snapshot(tree):
@@ -430,12 +496,15 @@ def test_gateway_keys_off_strips_secret_block(tree):
     r = _run(tree)
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    # No secret reference at all: no secretKeyRef, no key env names, no
-    # surviving token — while the neighboring plain entries survive the
-    # strip (an end-anchored range running past its entry would eat them).
-    assert "secretKeyRef" not in rendered
-    assert "API_KEY" not in rendered
+    # Gateway secret references are gone (no key env names, no surviving
+    # token) while the neighboring plain entries survive the strip (an
+    # end-anchored range running past its entry would eat them). The
+    # chart-managed QDRANT_API_KEY ref is not a gateway key and stays
+    # (issue #366).
+    for env_name in ("LLM_API_KEY", "EMBED_API_KEY", "RERANK_API_KEY"):
+        assert env_name not in rendered
     assert "__GATEWAY_API_KEY_SECRET__" not in rendered
+    assert "QDRANT_API_KEY" in rendered
     assert "RERANK_MODEL" in rendered
     assert_no_placeholders(rendered)
     assert "Gateway keys off" in r.stdout
