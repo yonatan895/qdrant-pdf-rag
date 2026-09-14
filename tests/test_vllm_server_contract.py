@@ -12,12 +12,15 @@ Hermetic: fake transports, no network, no GPU.
 """
 
 
+import json
+from contextlib import asynccontextmanager
+
 import pytest
 
 from mainframe_rag.agent.answer import HttpxLLMClient
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage
-from tests.fakes import HttpxStreamFake, settings_kw
+from tests.fakes import HttpxStreamFake, PostResp, StreamResp, settings_kw
 
 
 def _settings_kwargs(**overrides):
@@ -260,3 +263,107 @@ def test_no_auth_header_sent_on_nonstream_post_when_key_unset():
     post_llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=post_fake)
     post_llm.chat(_msgs())
     assert post_seen["headers"] == {}
+
+
+@pytest.mark.anyio
+async def test_chat_stream_empty_fallback_posts_without_stream_flag():
+    """Issue #363: the chat_stream empty-content recovery POST must carry
+    non-streaming semantics (no stream key, no stream_options) while keeping
+    model/messages/reasoning_effort/temperature identical to the SSE leg. A
+    protocol-aware backend answers stream=True with SSE, which resp.json()
+    cannot parse — so the flag is asserted on the wire body, not just the
+    parsed result. Fails on the pre-fix body reuse."""
+    fake = HttpxStreamFake(
+        lines=[
+            'data: {"choices": [{"delta": {}}]}',
+            'data: {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}',
+            "data: [DONE]",
+        ],
+        payload={
+            "choices": [{"message": {"content": "recovered"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        },
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    items = [
+        item
+        async for item in llm.chat_stream(_msgs(), reasoning_effort="high", temperature=0.2)
+    ]
+    assert fake.stream_bodies[0]["stream"] is True
+    fallback = fake.post_bodies[-1]
+    assert "stream" not in fallback
+    assert "stream_options" not in fallback
+    for key in ("model", "messages", "reasoning_effort", "temperature"):
+        assert fallback[key] == fake.stream_bodies[0][key]
+    assert [i["type"] for i in items] == ["token", "done"]
+    assert items[0]["delta"] == "recovered"
+    assert items[0]["ttft_ms"] is not None
+    assert items[-1]["finish_reason"] == "stop"
+    assert items[-1]["usage"].total_tokens == 8
+
+
+@pytest.mark.anyio
+async def test_chat_stream_fallback_sse_bytes_raise_without_fabricated_done():
+    """Issue #363: if the fallback answers SSE (the server honored a stale
+    stream=True), resp.json() fails — that must surface as an error, never a
+    token/done(stop) fabricated from unparsed bytes."""
+
+    def _sse_instead_of_json():
+        raise json.JSONDecodeError("Expecting value", "data: {", 0)
+
+    fake = HttpxStreamFake(
+        lines=['data: {"choices": [{"delta": {}}]}', "data: [DONE]"],
+        payload=_sse_instead_of_json,
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    items = []
+    with pytest.raises(json.JSONDecodeError):
+        async for item in llm.chat_stream(_msgs()):
+            items.append(item)
+    assert items == []
+
+
+@pytest.mark.anyio
+async def test_chat_stream_empty_fallback_result_raises_without_token_or_done():
+    """Issue #363: an empty fallback is a failed generation, not a silent
+    success — raising takes the app's event: error path instead of shipping
+    done(stop) with no content."""
+    fake = HttpxStreamFake(
+        lines=["data: [DONE]"],
+        payload={"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]},
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    items = []
+    with pytest.raises(RuntimeError, match="empty content"):
+        async for item in llm.chat_stream(_msgs()):
+            items.append(item)
+    assert items == []
+
+
+@pytest.mark.anyio
+async def test_chat_stream_rejected_fallback_propagates_without_done():
+    """Issue #363: a rejected fallback (auth/overload) must propagate as a
+    failure — no token, no done, exactly one fallback attempt."""
+
+    class _RejectingClient:
+        def __init__(self, lines):
+            self._lines = lines
+            self.post_bodies: list = []
+
+        @asynccontextmanager
+        async def stream(self, method, url, json=None, headers=None):
+            yield StreamResp(self._lines)
+
+        async def post(self, url, json=None, headers=None):
+            self.post_bodies.append(json)
+            return PostResp({"error": "overloaded"}, status_code=500)
+
+    fake = _RejectingClient(lines=["data: [DONE]"])
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    items = []
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        async for item in llm.chat_stream(_msgs()):
+            items.append(item)
+    assert items == []
+    assert len(fake.post_bodies) == 1
+    assert "stream" not in fake.post_bodies[0]
