@@ -119,6 +119,14 @@ class QdrantPoints(Protocol):
         with_payload: bool | list[str],
     ) -> tuple[list[models.Record], int | str | UUID | None]: ...
 
+    def retrieve(
+        self,
+        collection_name: str,
+        ids: list[str],
+        *,
+        with_payload: bool | list[str],
+    ) -> list[models.Record]: ...
+
     def delete(
         self,
         collection_name: str,
@@ -219,6 +227,14 @@ class AsyncQdrantPoints(Protocol):
         limit: int = 10,
         with_payload: bool | list[str],
     ) -> tuple[list[models.Record], int | str | UUID | None]: ...
+
+    async def retrieve(
+        self,
+        collection_name: str,
+        ids: list[str],
+        *,
+        with_payload: bool | list[str],
+    ) -> list[models.Record]: ...
 
     async def delete(
         self,

@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     embed_api_key: str | None = None
     dense_dim: int | None = None
     embed_timeout_s: float = 60.0
+    # Operator-declared immutable revision of the dense embedding model
+    # (issue #362): the gateway exposes only mutable aliases, so the
+    # application cannot infer weights it cannot inspect. Empty means
+    # unattested — recorded in the representation manifest; the 362B
+    # enforcement step fails closed without it. Never logged.
+    embed_model_revision: str = ""
 
     @field_validator("embed_mode")
     @classmethod
@@ -241,6 +247,11 @@ class Settings(BaseSettings):
     ingest_alias_publish: bool = False
     bm25_model: str = "Qdrant/bm25"
     bm25_cache_dir: str | None = None
+    # Pinned sparse-weights revision (issue #362): mirrors the `revision`
+    # line in bm25-weights.sha256 (a test pins them equal — bump together
+    # in a dedicated PR, never drive-by). Recorded in the manifest; weight
+    # changes alter every sparse vector, so this is re-embed-required.
+    bm25_weights_revision: str = "22b8d2af71a76161e18dd432d2cee0eefa66e412"
 
     # Cross-encoder reranker (issue #76 PR-02).
     # Feature flag, default off for byte-identical legacy path.

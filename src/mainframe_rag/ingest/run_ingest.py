@@ -41,6 +41,7 @@ from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import Chunk, make_chunks
 from mainframe_rag.ingest.completion import (
     acquire_run_lock,
+    completion_collection_name,
     delete_completion,
     doc_generation_id,
     ensure_completion_collection,
@@ -92,6 +93,7 @@ from mainframe_rag.ingest.qdrant_io import (
     swap_alias_to,
     upsert_chunks,
 )
+from mainframe_rag.ingest.representation import ensure_manifest, manifest_digest
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
 from mainframe_rag.logs import configure_logging
@@ -208,6 +210,10 @@ def _parse_one(
             chunks=len(chunks),
             seconds=round(time.monotonic() - started, 3),
             rules_version=extraction_rules_version(),
+            # Representation contract provenance (issue #362): computed in
+            # the worker from its own settings — zero plumbing, and the
+            # stamp provably equals the parent's manifest view. Additive.
+            manifest_digest=manifest_digest(settings, extraction_rules_version()),
             # Source-revision provenance (issue #361): stamped now so the
             # 361B selector migration can map every committed doc without
             # re-reading the corpus. Additive — older readers ignore it.
@@ -640,6 +646,28 @@ def _run_impl(
             root.set_attribute("ingest.workers", workers)
             root.set_attribute("ingest.pdfs", len(walk_entries))
             root.set_attribute("ingest.todo", len(tasks))
+
+        if not dry_run:
+            # Representation manifest (issue #362, record-only) AFTER the
+            # identity gate: a colliding corpus aborts in planning with zero
+            # Qdrant writes, and steady-state reruns stay zero-write (the
+            # manifest commits only when the stored contract differs).
+            # Enforcement arrives in 362B; this step only records.
+            assert client is not None
+            manifest_d, manifest_committed = ensure_manifest(
+                client, completion_collection_name(settings), settings, rules_v
+            )
+            log.info(
+                json.dumps(
+                    {
+                        "action": "representation",
+                        "collection": settings.qdrant_collection,
+                        "manifest_digest": manifest_d,
+                        "result": "committed" if manifest_committed else "already_current",
+                        "model_revision_attested": bool(settings.embed_model_revision),
+                    }
+                )
+            )
 
         log.info(
             json.dumps(

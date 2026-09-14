@@ -352,6 +352,24 @@ thread pool.
   `LOCK_EX|LOCK_NB` on `<progress>.lock`, fail-closed); disjoint Jobs
   against one collection must still run serially. `_DocLocks` remains the
   in-process per-`doc_id` guard only.
+- **Representation manifest, record-only** (issue #362 step 1,
+  `ingest/representation.py`): every non-dry run ensures one fixed-ID
+  manifest point in `<collection>__completions` (get-by-id, no index;
+  written only when the stored contract differs, so steady-state reruns
+  stay zero-write) plus an `action: representation` run-log line, and
+  inventory record carries the 16-hex `manifest_digest`. The manifest is
+  the stored-representation contract — extraction rules, identity schema
+  (`doc_id` until the 361B migration), dense mode/model/operator-revision/
+  dim, contextual block (enabled, LLM id, prompt version, max chars),
+  sparse model/weights revision — plus the record-only query prefix
+  (query-side drift is an evaluation event, never a re-embed trigger).
+  Enforcement is OFF: skips still follow the generation fingerprint, so a
+  mid-step representation change is recorded but not yet rejected — the
+  362B gate (ingest preflight + serving readiness, operator attestation
+  via `EMBED_MODEL_REVISION`, legacy/mixed explicit outcomes) closes that.
+  The gateway exposes only mutable aliases, so the dense revision is an
+  operator-declared fingerprint, never an inferred weight id; empty means
+  unattested.
 - **Source-revision identity gate** (issue #361 step 1, `ingest/identity.py`):
   three identities — printed `doc_id` (family/citation key, still the
   destructive selector until the 361B migration), `source_rev`
