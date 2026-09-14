@@ -225,12 +225,28 @@ def test_qdrant_skip_gates_on_rules_version(tmp_path, synthetic_pdf, monkeypatch
     ]) == 0
     assert fake.deletes >= 1 and fake.upserts, "stale sha-equal doc must re-upsert"
 
-    # Matching rules_v: skipped, nothing deleted.
-    fake2 = _FakeQdrant(stored_sha=sha, stored_rules_v=extraction_rules_version())
+    # Matching generation with a WRITTEN completion + verified points:
+    # publish once, then rerun with a fresh inventory — the second run
+    # parses again but skips at the verified-completion gate (no new
+    # main-collection upserts). A bare sha/rules marker without a
+    # completion must never skip (issue #359 — pinned separately in
+    # test_ingest_completion.py).
+    fake2 = _FakeQdrant()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake2)
     progress = tmp_path / "inv2.jsonl"
     assert run_ingest.main([
         "--src", str(synthetic_pdf.parent),
         "--progress", str(progress), "--workers", "1",
     ]) == 0
-    assert fake2.upserts == [] and fake2.deletes == 0
+    from mainframe_rag.config import Settings as _Settings
+
+    main_collection = _Settings(_env_file=None).qdrant_collection
+    first_main = [n for collection, n in fake2.upsert_calls if collection == main_collection]
+    assert first_main, "first run must publish main-collection points"
+    progress.unlink()  # fresh inventory, warm Qdrant
+    assert run_ingest.main([
+        "--src", str(synthetic_pdf.parent),
+        "--progress", str(progress), "--workers", "1",
+    ]) == 0
+    second_main = [n for collection, n in fake2.upsert_calls if collection == main_collection]
+    assert second_main == first_main, "verified completion must skip without new main upserts"

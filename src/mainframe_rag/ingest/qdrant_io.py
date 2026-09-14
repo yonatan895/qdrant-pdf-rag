@@ -117,10 +117,12 @@ def ensure_collection(client: QdrantPoints, settings: Settings) -> None:
 
 def stored_doc_state(client: QdrantPoints, settings: Settings, doc_id: str) -> tuple[str | None, str | None]:
     """(sha256, rules_v) for doc_id (first hit), or (None, None) if absent.
-    The third skip layer (issue #124, found live on the real_manuals
-    re-stamp): a sha-equal doc whose stored rules_v differs is stale —
-    same file bytes do not mean current payloads — so the skip decision
-    must gate on BOTH, exactly like the inventory skip."""
+
+    Sampling only — NEVER a completeness proof (issue #359): one surviving
+    point says nothing about the remaining batches. The skip decision must
+    additionally require a valid completion record plus point verification
+    (ingest.completion.is_doc_complete). Kept for the delete-on-mismatch
+    probe and backward-compatible callers."""
     points, _ = client.scroll(
         settings.qdrant_collection,
         scroll_filter=models.Filter(
@@ -179,9 +181,17 @@ def upsert_chunks(
     application-level retry loop; the client timeout bounds each call
     (issue #20 PR C). The contextual prefix (issue #78) is stored for
     observability when present; it is never filtered on, so it takes no
-    payload index."""
+    payload index.
+
+    Pair-length contract (issue #359): chunks and vectors must align exactly;
+    a mismatch raises instead of silently truncating via zip."""
     collection = settings.qdrant_collection
     rules_v = extraction_rules_version()
+    if len(chunks) != len(vectors):
+        raise ValueError(
+            f"chunks/vectors length mismatch: {len(chunks)} chunks vs "
+            f"{len(vectors)} vectors — refusing to truncate."
+        )
     points: list[models.PointStruct] = []
     for chunk, (dense, (sparse_idx, sparse_val)) in zip(chunks, vectors):
         payload = {

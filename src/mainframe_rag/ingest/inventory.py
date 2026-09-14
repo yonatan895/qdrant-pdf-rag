@@ -18,11 +18,17 @@ class InventoryRecord(BaseModel):
     doc_id: str | None = None
     pages: int = 0
     chunks: int = 0
-    status: str = "pending"  # upserted | skipped | dry | error (set before append)
+    status: str = "pending"  # upserted | skipped | dry | error | empty (set before append)
     seconds: float = 0.0
     error: str | None = None
     error_type: str | None = None  # exception class name, for typed triage
     rules_version: str | None = None  # extraction-rules version (issue #124)
+    # Completion binding (issue #359): the committed generation this record
+    # was verified against. Additive — records predating it carry None and
+    # never satisfy the bound skip; the planner re-verifies in Qdrant.
+    generation_id: str | None = None
+    chunk_ids_digest: str | None = None
+    content_digest: str | None = None
     finished_at: float = Field(default_factory=time.time)
 
 
