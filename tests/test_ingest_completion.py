@@ -142,14 +142,15 @@ class FailingFakeQdrant:
                 if (p.payload or {}).get("doc_id") == doc_id]
 
 
-def _upsert_one(monkeypatch, fake, parsed, chunks, settings=None, force_reingest=False):
+def _upsert_one(monkeypatch, fake, parsed, chunks, settings=None, force_reingest=False,
+                src_labels="||"):
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
 
     settings = settings or _settings(batch_size=16)
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
     return _upsert_one(parsed, chunks, _vectors(len(chunks)), settings, _DocLocks(),
-                       None, force_reingest)
+                       None, force_reingest, src_labels=src_labels)
 
 
 def test_pair_length_mismatch_raises_without_writes():
@@ -178,7 +179,7 @@ def test_upsert_one_rejects_mismatched_pairs(monkeypatch):
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
     with pytest.raises(ValueError, match="length mismatch"):
         _upsert_one(_parsed(), _chunks(n=3), _vectors(1),
-                    _settings(), _DocLocks(), None, False)
+                    _settings(), _DocLocks(), None, False, src_labels="||")
     assert fake.main_upserted_points == 0
     assert read_completion(fake, _settings(), "DOC1") is None
 
@@ -311,11 +312,11 @@ def test_completion_tied_to_target_generation(tmp_path, monkeypatch):
     status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=4), settings_a)
     assert status == "upserted"
     assert completion_collection_name(settings_a) != completion_collection_name(settings_b)
-    assert is_doc_complete(fake, settings_b, "DOC1",
-                           sha256="a" * 64, rules_v=extraction_rules_version()) is False
+    assert is_doc_complete(fake, settings_b, "DOC1", sha256="a" * 64,
+                           rules_v=extraction_rules_version(), source_labels="||") is False
     # Same target, wrong source hash: also incomplete.
-    assert is_doc_complete(fake, settings_a, "DOC1",
-                           sha256="b" * 64, rules_v=extraction_rules_version()) is False
+    assert is_doc_complete(fake, settings_a, "DOC1", sha256="b" * 64,
+                           rules_v=extraction_rules_version(), source_labels="||") is False
 
 
 def test_refresh_failure_leaves_no_stale_completion(monkeypatch):
@@ -365,8 +366,8 @@ def test_malformed_completion_is_incomplete(monkeypatch):
         ],
     )
     assert read_completion(fake, settings, "DOC1") is None
-    assert is_doc_complete(fake, settings, "DOC1",
-                           sha256="a" * 64, rules_v=extraction_rules_version()) is False
+    assert is_doc_complete(fake, settings, "DOC1", sha256="a" * 64,
+                           rules_v=extraction_rules_version(), source_labels="||") is False
     status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings)
     assert status == "upserted"
 
@@ -415,6 +416,52 @@ def test_delete_completion_404_race_is_tolerated(monkeypatch):
     assert status == "upserted"
     assert len(fake.main_points(settings.qdrant_collection, "DOC1")) == 3
     assert read_completion(fake, settings, "DOC1") is not None
+
+
+def test_cli_triple_change_forces_reingest(monkeypatch):
+    """Same file bytes under different --vendor/--product/--version overrides
+    produce different payloads AND embed headers: the previous generation
+    must never satisfy the new run."""
+    from mainframe_rag.ingest.completion import source_labels
+
+    settings = _settings(batch_size=16)
+    fake = FailingFakeQdrant()
+    status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings,
+                            src_labels=source_labels(None, None, None))
+    assert status == "upserted"
+    # Same sha/rules, different CLI triple: no skip, full re-publish.
+    status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings,
+                            src_labels=source_labels(None, "Solaris", None))
+    assert status == "upserted"
+    assert len(fake.main_points(settings.qdrant_collection, "DOC1")) == 3
+    completion = read_completion(fake, settings, "DOC1")
+    assert completion is not None
+    assert completion.generation_id.endswith(source_labels(None, "Solaris", None))
+    # And back under the original triple: the Solaris marker does not match.
+    status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings,
+                            src_labels=source_labels(None, None, None))
+    assert status == "upserted"
+
+
+def test_product_override_rerun_reingests_end_to_end(tmp_path, synthetic_pdf, monkeypatch):
+    """Through the real planner path: a second run with --product set must
+    re-ingest (new chunks_upserted), never report a verified skip."""
+    import json
+
+    from mainframe_rag.ingest import run_ingest
+    from tests.test_run_ingest import _FakeQdrant
+
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    progress = tmp_path / "inventory.jsonl"
+    args = ["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"]
+    assert run_ingest.main(args) == 0
+    assert run_ingest.main([*args, "--product", "Solaris"]) == 0
+    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
+    assert records[-1]["status"] == "upserted"
+    assert records[-1]["chunks"] > 0, "changed CLI triple must re-ingest, never skip"
 
 
 def test_concurrent_run_lock_rejects_second_writer(tmp_path):

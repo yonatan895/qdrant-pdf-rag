@@ -117,6 +117,7 @@ This architectural standard ensures local cluster testing exercises the real pro
 4. **Multiprocessing Worker IPC Isolation:** Ingest worker processes trap exceptions locally inside `_parse_one` and serialize plain-data `InventoryRecord(status="error")` payloads, preventing unpicklable exception instances (such as `httpx2.HTTPStatusError` with attached response/request references) from crashing the `ProcessPoolExecutor`.
 5. **Point ID Generation:** UUID5 derived from document and chunk keys (guaranteeing deterministic, idempotency-safe IDs without invalid hex strings).
 6. **Payload Slimming:** Points store only essential query, citation, and filter attributes (`vendor`, `product`, `version`, `doc_id`, `title`, `heading_path`, `page_label`, `page_start`, `chunk_type`, `message_ids`, `members`, `sha256`, `rules_v`, `text`, plus optional `context` when contextual prefixes are enabled). Redundant `embed_text` is omitted from storage.
+7. **Generation Publication (issue #359, `INGEST_ALIAS_PUBLISH` default-off):** ingest converges a versioned staging generation (snapshot-cloned from live) and swaps the `<collection>` alias to it in one atomic call only after every document verifies against its completion record — readers see a complete old or complete new generation. Superseded physicals plus safety snapshots are kept for operator rollback/GC. Details and runbook: `docs/ingest.md` §8/§9.
 
 ### 4.2 Hybrid Embeddings & Collection Configuration
 

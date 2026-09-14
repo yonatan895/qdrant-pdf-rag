@@ -299,7 +299,8 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   (same dim, dummy vectors, keyword indexes on
   `doc_id/sha256/rules_v/generation_id/target_collection`). The
   generation binds source hash + representation fingerprint
-  (`rules_v|embed_mode|embed_model|dense_dim|context-flag`) + target
+  (`rules_v|embed_mode|embed_model|dense_dim|context-flag`) + CLI source
+  triple (`vendor|product|version` overrides, `source_labels()`) + target
   collection, with expected chunk count and chunk-ID/content digests.
   Written only after every batch is acknowledged and the stored points
   verify (count + per-point sha/rules + recomputed digests); refreshes
@@ -351,11 +352,37 @@ thread pool.
   `LOCK_EX|LOCK_NB` on `<progress>.lock`, fail-closed); disjoint Jobs
   against one collection must still run serially. `_DocLocks` remains the
   in-process per-`doc_id` guard only.
-- **Refresh visibility (first-aid):** delete-then-upsert still exposes a
-  no-completion window on crash — safe retry, but not atomic
-  old-or-new visibility. That needs the versioned-collection + alias
-  publication follow-up; rollback/GC stay deliberate operator actions,
-  never automatic recreation.
+- **Refresh visibility — alias publication** (`INGEST_ALIAS_PUBLISH=true`,
+  default off; enabling by default is a dedicated follow-up PR; issue #359
+  req 4/5, `ingest/publish.py` + `qdrant_io` alias/snapshot helpers):
+  readers resolve `<collection>` through a Qdrant alias, so they see a
+  complete old or complete new generation, never an uncommitted mix.
+  Each publish run derives a deterministic staging generation
+  `<collection>__gen<genfp><corpusfp>` (representation fingerprint + CLI
+  source triple + walked-corpus content); an identical rerun converges the
+  same staging (crash-safe resume), changed inputs address a new one, and a
+  derived name equal to the live physical means "already published"
+  (read-only re-verify, no clone, no swap). Staging starts as a
+  server-side snapshot-clone of live (points AND completion markers, so
+  unchanged documents skip without re-embedding) and converges with the
+  standard parse/upsert/verify pipeline; the alias swaps in one atomic
+  delete+create call only after `verify_all_complete` passes every walked
+  document. Swap failure leaves the previous generation serving (job
+  fails, staging retained for retry). `--limit` subsets and empty corpora
+  are refused fail-closed. Corpus deletions are NOT swept (status quo —
+  stale points survive until an operator cleans them, same as in-place
+  runs). First-publish cutover from a legacy physical layout snapshots the
+  squatter, deletes it (brief documented maintenance window), then creates
+  the alias; stale-rules legacy content needs `--reingest` like any other
+  rules migration.
+- **Rollback / GC (operator actions, never automatic):** the superseded
+  physical and a safety snapshot are kept on every swap. Roll back by
+  re-pointing the alias (any Qdrant client):
+  `update_collection_aliases([DeleteAlias(alias), CreateAlias(prev, alias)])`.
+  When confident, delete the old physical, its `<old>__completions`, and
+  the safety snapshot (`delete_collection`, `delete_snapshot`). Verify
+  counts/dim against the run log (`action: publish` carries
+  alias/physical/previous/safety_snapshot/docs) before and after.
 - `should_skip`: exact-sha plus (`upserted` always, or `dry` only when the
   current run is also dry — a real run never skips prior `dry`).
 - `load_inventory`: latest record per path; torn lines ignored; appends
@@ -390,4 +417,6 @@ thread pool.
 
 Contract tests: `tests/test_run_ingest.py` (`main`, `resolve_workers`,
 `_DocLocks`, `_parse_one`), `tests/test_ingest_robustness.py`,
+`tests/test_ingest_completion.py` (failure boundaries),
+`tests/test_ingest_publish.py` (alias publication),
 `testing.md` pickle round-trip.
