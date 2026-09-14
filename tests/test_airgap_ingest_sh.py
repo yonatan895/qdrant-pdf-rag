@@ -10,6 +10,7 @@ import re
 import pytest
 
 from tests.helpers_airgap import (
+    REPO,
     assert_no_placeholders,
     assert_pull_secret_wired,
     make_bin_tree,
@@ -152,6 +153,73 @@ def test_ingest_identity_version_always_rendered(ingest_tree):
     # service.version is the packed SHA: always set, ingest.sh fail-closes
     # on empty/HEAD before rendering (issue #315).
     assert re.search(r"IMAGE_SHA\n\s+value: " + IMAGE_SHA, rendered, re.MULTILINE)
+
+
+# ------------------------------------------------------- Qdrant least privilege (#366)
+
+def _ingest_qdrant_block(rendered):
+    lines = rendered.splitlines()
+    start = next(i for i, l in enumerate(lines) if "- name: QDRANT_API_KEY" in l)
+    return "\n".join(lines[start : start + 5])
+
+
+def test_ingest_qdrant_key_keeps_write_access(ingest_tree):
+    """Issue #366 mirror: ingestion owns corpus mutation, so the rendered
+    Job keeps the full-access key while the agent goes read-only."""
+    r = _run_ingest(ingest_tree)
+    assert r.returncode == 0, r.stderr
+    block = _ingest_qdrant_block(
+        (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    )
+    assert re.search(r"(?m)^\s*key: api-key$", block)
+
+
+def test_ingest_qdrant_readonly_key_fails_closed(ingest_tree):
+    """A render downgrading ingest to the read-only key must stop the run."""
+    tmp_path, _ = ingest_tree
+    stub = (tmp_path / "stub-ingest.yaml").read_text()
+    lines = [
+        "key: read-only-api-key" if l.strip() == "key: api-key" else l
+        for l in stub.splitlines()
+    ]
+    (tmp_path / "stub-ingest.yaml").write_text("\n".join(lines) + "\n")
+    r = _run_ingest(ingest_tree)
+    assert r.returncode != 0
+    assert "key api-key" in r.stderr
+
+
+def test_ingest_qdrant_copresent_readonly_key_fails_closed(ingest_tree):
+    """Anti-revert parity with the agent check: a read-only key smuggled
+    into the ingest render must stop the run even with api-key present."""
+    tmp_path, _ = ingest_tree
+    stub = (tmp_path / "stub-ingest.yaml").read_text()
+    anchor = "                  key: api-key\n"
+    assert anchor in stub
+    stub = stub.replace(
+        anchor,
+        anchor
+        + "            - name: QDRANT_READ_API_KEY\n"
+        + "              valueFrom:\n"
+        + "                secretKeyRef:\n"
+        + "                  key: read-only-api-key\n"
+        + "                  name: __QDRANT_RELEASE__-apikey\n",
+    )
+    (tmp_path / "stub-ingest.yaml").write_text(stub)
+    r = _run_ingest(ingest_tree)
+    assert r.returncode != 0
+    assert "read-only" in r.stderr
+
+
+def test_ingest_overlay_qdrant_contract():
+    """Pin the real ingest overlay to the write-key contract so it cannot
+    silently follow the agent to read-only."""
+    real = (
+        REPO / "deploy" / "kustomize" / "overlays" / "openshift-ingest" / "ingest-job.yaml"
+    ).read_text()
+    assert "- name: QDRANT_API_KEY" in real
+    assert re.search(r"(?m)^\s*key: api-key$", real)
+    assert "read-only-api-key" not in real
+    assert "__QDRANT_RELEASE__-apikey" in real
 
 
 def test_ingest_dryrun_custom_workers(ingest_tree):

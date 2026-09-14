@@ -91,6 +91,7 @@ if [ -n "$INGEST_EXTRA_PATCH" ]; then
         -p "$(cat "$INGEST_EXTRA_PATCH")" -o yaml > dist/ingest-rendered-patched.yaml
     mv dist/ingest-rendered-patched.yaml dist/ingest-rendered.yaml
 fi
+check_ingest_qdrant_key dist/ingest-rendered.yaml ingest
 # Jobs are immutable: remove a previous run so re-ingest works.
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE delete job ingest --ignore-not-found"

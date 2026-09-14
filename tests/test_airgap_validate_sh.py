@@ -9,6 +9,7 @@ Tests validate.sh in dry-run mode against hermetic stubs:
 """
 
 import os
+import shutil
 
 import pytest
 
@@ -29,6 +30,20 @@ IMAGE_SHA = "b" * 40
 def tree(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "validate.sh"])
     copy_chart(tmp_path)
+    # validate.sh pins the Qdrant key contract on the overlay sources
+    # (issue #366): the copied tree needs the real files it inspects.
+    agent_overlay = tmp_path / "deploy" / "kustomize" / "overlays" / "openshift"
+    agent_overlay.mkdir(parents=True, exist_ok=True)
+    ingest_overlay = tmp_path / "deploy" / "kustomize" / "overlays" / "openshift-ingest"
+    ingest_overlay.mkdir(parents=True, exist_ok=True)
+    shutil.copy(
+        REPO / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml",
+        agent_overlay,
+    )
+    shutil.copy(
+        REPO / "deploy" / "kustomize" / "overlays" / "openshift-ingest" / "ingest-job.yaml",
+        ingest_overlay,
+    )
 
     for name in ("skopeo", "helm", "kubectl", "oc"):
         write_stub(tmp_path / "bin" / name, STUB_TOOL)
@@ -61,6 +76,69 @@ def test_validate_clean_exits_zero(tree):
     r = _run(tree)
     assert r.returncode == 0, r.stderr
     assert "SUCCESS: Pre-flight validation passed (dry-run mode)." in r.stdout
+
+
+def test_validate_agent_write_key_fails_closed(tree):
+    """Issue #366: a prod agent overlay wiring the full-access Qdrant key
+    must fail preflight before anything reaches the cluster."""
+    overlay = (
+        tree / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml"
+    )
+    overlay.write_text(overlay.read_text().replace("key: read-only-api-key", "key: api-key"))
+    r = _run(tree)
+    assert r.returncode != 0
+    assert "read-only-api-key" in r.stderr
+
+
+def test_validate_ingest_readonly_key_fails_closed(tree):
+    """Issue #366 mirror: downgrading the ingest overlay to read-only must
+    also fail preflight — ingest owns corpus mutation."""
+    overlay = (
+        tree
+        / "deploy"
+        / "kustomize"
+        / "overlays"
+        / "openshift-ingest"
+        / "ingest-job.yaml"
+    )
+    lines = [
+        "key: read-only-api-key" if line.strip() == "key: api-key" else line
+        for line in overlay.read_text().splitlines()
+    ]
+    overlay.write_text("\n".join(lines) + "\n")
+    r = _run(tree)
+    assert r.returncode != 0
+    assert "to api-key" in r.stderr
+
+
+def test_validate_ingest_copresent_readonly_key_fails_closed(tree):
+    """Anti-revert parity with the agent gate: a co-present read-only key
+    in the ingest overlay fails preflight even with api-key present."""
+    overlay = (
+        tree
+        / "deploy"
+        / "kustomize"
+        / "overlays"
+        / "openshift-ingest"
+        / "ingest-job.yaml"
+    )
+    text = overlay.read_text()
+    anchor = "key: api-key\n"
+    assert anchor in text
+    overlay.write_text(
+        text.replace(
+            anchor,
+            anchor
+            + "            - name: QDRANT_READ_API_KEY\n"
+            + "              valueFrom:\n"
+            + "                secretKeyRef:\n"
+            + "                  key: read-only-api-key\n"
+            + "                  name: __QDRANT_RELEASE__-apikey\n",
+        )
+    )
+    r = _run(tree)
+    assert r.returncode != 0
+    assert "read-only" in r.stderr
 
 
 def test_validate_tracing_on_by_default(tree):

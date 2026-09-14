@@ -115,6 +115,29 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
   secret name follows `QDRANT_RELEASE` — renaming the release without a
   reinstall orphans the agent/ingest key references (and reinstalls
   rotate the key: roll the agent afterward).
+- Qdrant credential separation (issue #366): the chart stores two keys in
+  `<release>-apikey` — full-access `api-key` and read-only
+  `read-only-api-key`. The serving agent wires `QDRANT_API_KEY` to the
+  read-only data key; ingest keeps the full-access one. Serving reads
+  (query/search, collection info/exists, snapshot listing, `/readyz`)
+  all succeed under the read-only key; mutations 403 and unknown keys
+  401 (pinned by `tests/test_qdrant_auth.py` against the vendored image).
+  Deploy and ingest preflight fail closed when the rendered manifests
+  reference the wrong key (`check_agent_qdrant_key` /
+  `check_ingest_qdrant_key` in `common.sh`); `make airgap-validate`
+  pins the same contract on the overlay sources. Key values never appear
+  in manifests, logs, or test output — only Secret names and data keys.
+- Qdrant key rotation (chart-native): the chart generates both keys with
+  `randAlphaNum 32` and reuses the existing Secret across `helm upgrade`
+  while it exists. To rotate: `kubectl -n $NAMESPACE delete secret
+  <release>-apikey`, re-run the Helm release step (`make airgap-deploy`
+  regenerates both keys on upgrade), then `rollout restart` the agent
+  Deployment and re-run ingest consumers so every pod picks up the new
+  Secret revision. Verify with a real search (smoke) plus a revoked-key
+  probe: the old key must 401 while the corpus (PVC-backed points) is
+  untouched. Do not render with `helm template --dry-run` and apply the
+  result: without cluster access the chart's Secret lookup misses and
+  every render mints fresh random keys.
 - Snapshot storage class falls back to `STORAGE_CLASS`.
   `QDRANT_STORAGE_SIZE`, `QDRANT_EXTRA_VALUES`, `QDRANT_TAG`,
   `INGEST_WORK_SIZE`, and `INGEST_EXTRA_PATCH` are rehearsal-only knobs;

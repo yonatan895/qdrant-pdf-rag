@@ -240,6 +240,38 @@ fail_on_placeholders() {
     fi
 }
 
+# Issue #366: the serving agent is read-only. Its rendered QDRANT_API_KEY
+# must reference the chart's `read-only-api-key` data key — never the
+# full-access `api-key`. Secret names only; values are never printed.
+# $1 = rendered agent manifest, $2 = label for the message.
+check_agent_qdrant_key() {
+    _qdrant_block=$(grep -A8 -- "- name: QDRANT_API_KEY" "$1" || true)
+    if ! printf '%s\n' "$_qdrant_block" | grep -Eq '^[[:space:]]*key: read-only-api-key$'; then
+        unset _qdrant_block
+        die "rendered $2 manifest must wire QDRANT_API_KEY to secretKeyRef key read-only-api-key (issue #366)"
+    fi
+    if printf '%s\n' "$_qdrant_block" | grep -Eq '^[[:space:]]*key: api-key$'; then
+        unset _qdrant_block
+        die "rendered $2 manifest wires QDRANT_API_KEY to the full-access key (issue #366: serving must use read-only-api-key)"
+    fi
+    unset _qdrant_block
+}
+
+# Issue #366 mirror: ingestion owns corpus mutation, so the rendered ingest
+# Job must keep the full-access `api-key` data key. $1 = file, $2 = label.
+check_ingest_qdrant_key() {
+    _qdrant_block=$(grep -A8 -- "- name: QDRANT_API_KEY" "$1" || true)
+    if ! printf '%s\n' "$_qdrant_block" | grep -Eq '^[[:space:]]*key: api-key$'; then
+        unset _qdrant_block
+        die "rendered $2 manifest must wire QDRANT_API_KEY to secretKeyRef key api-key (ingest owns corpus mutation)"
+    fi
+    if printf '%s\n' "$_qdrant_block" | grep -Eq '^[[:space:]]*key: read-only-api-key$'; then
+        unset _qdrant_block
+        die "rendered $2 manifest wires a read-only Qdrant key into the ingest path (issue #366: ingest must keep api-key)"
+    fi
+    unset _qdrant_block
+}
+
 # Third-party image pin from images.txt (name column); digest applies when
 # recorded. $1 = needle (e.g. qdrant, jaeger). Used by pack.sh only.
 pin_from_images_txt() {

@@ -140,6 +140,7 @@ fi
 wire_pull_secret dist/agent-rendered.yaml
 wire_gateway_ca dist/agent-rendered.yaml Deployment rag-agent agent
 fail_on_placeholders dist/agent-rendered.yaml agent
+check_agent_qdrant_key dist/agent-rendered.yaml agent
 # oauth-proxy cookie encryption (ADR-0004): operator-created secret, fail
 # closed rather than booting a console whose session cookies are unencrypted.
 if [ "$AGENT_ROUTE" = "true" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then

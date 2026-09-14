@@ -20,8 +20,11 @@ spec:
             - name: QDRANT_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: __QDRANT_RELEASE__-apikey   # created by the vendored chart (apiKey: true)
-                  key: api-key
+                  # Issue #366: serving is read-only — the vendored chart
+                  # (readOnlyApiKey: true) stores it as `read-only-api-key`
+                  # in the same Secret. Ingest keeps `api-key`.
+                  name: __QDRANT_RELEASE__-apikey
+                  key: read-only-api-key
             - name: EMBED_BASE_URL
               value: __EMBED_BASE_URL__
             - name: EMBED_MODEL
