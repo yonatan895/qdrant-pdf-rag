@@ -9,16 +9,68 @@ blocks transfer. The pipeline's `OPERATIONAL & ACCEPTED` banner alone does not
 pass this gate. Copy [the record template](crc-release-record.md) outside Git
 for each candidate; initialize every result as `NOT RUN`.
 
-**Implementation status:** the procedure below has not yet passed a live CRC
-rehearsal. Credentials, Windows resource preflight, registry provisioning,
-OAuth pinning, and SCC admission must be completed before any release is marked
-verified. Add a small local verification command only after this procedure
-works manually. No laptop GitHub runner or new deployment framework is needed.
+**Implementation status:** candidate `89e10d3926b2e7f6a2e6ad0c1450c68c60e1b5f8`
+passed its required CI lanes and a 32-minute fully live CRC workload, but the
+12GiB cold start failed the 2GiB Windows headroom gate (1.62GiB after successful
+streams). At 10752MiB, the required one-worker ingest remained unschedulable:
+existing requests were 10396Mi against 10233200Ki allocatable. Simultaneous
+operation is therefore unreliable under the agreed constraints. The [complementary
+CRC/mock and disposable Kind/real-model lanes](local-release-fallback.md) both passed
+against the same signed bundle, alongside all required CI checks. The local
+verification mode is **complementary fallback**; transfer still needs operator
+sign-off on the recorded bytes. Do not treat the workload result alone as a
+fully live CRC release pass. No laptop runner or new deployment framework is
+needed.
 
 CRC runs actual single-node OpenShift. It has no supported in-place OpenShift
 upgrade path and differs from production in storage, networking, and enabled
 operators. Keep production compatibility and capacity acceptance separate.
 [CRC limitations](https://crc.dev/docs/introducing/).
+
+## Recorded candidate: 14 September 2026
+
+The tested original tarball is
+`qdrant-pdf-rag-89e10d3926b2e7f6a2e6ad0c1450c68c60e1b5f8.tar`, SHA256
+`a715c531e7163de7316893ce63921345b9669ad718abcc295748e742f97febda`.
+The protected release record retains command logs, UTC boundaries, configuration
+hashes, model revisions, archive/registry image reconciliation and observations.
+No credentials, PDFs, snapshots or browser captures belong in this document.
+
+| Check | Measured result |
+|---|---|
+| Published bundle and required CI | PASS: [factory, bootstrap and three Kind lanes](https://github.com/yonatan895/qdrant-pdf-rag/actions/runs/34786949435); hosted OpenShift jobs skipped and excluded |
+| Fully live mixed workload | PASS for this workload only: 1933.948 seconds, 44 HTTP requests, four fresh one-worker ingests, no request failures or unexpected restarts; 129 samples |
+| Workload headroom minima | Windows 2.829GiB, CRC 3.843GiB, VRAM 627MiB; no WSL swap-out or Windows page-out during this window; about 68MiB WSL swap-in |
+| 12288MiB CRC formal cold start | FAIL: functional checks and all 24 operators passed, but Windows headroom settled below 2GiB; final 1.621GiB |
+| 10752MiB CRC attempt | FAIL: ingest Pending/Insufficient memory; node requests 10396Mi versus 10233200Ki allocatable |
+| CRC complementary lane | PASS: real OpenShift/LiteLLM/PostgreSQL with mock computation; two full pipelines, browser OAuth and streams, TLS/auth, SCC, egress, snapshot/PVC/trace recovery, eight separate synthetic points |
+| Real-model Kind complementary lane | PASS: two full pipelines, 11 successful application requests in 471.26 seconds, cited follow-ups/all streams, agent/ingest TLS controls, snapshot/PVC/prior-trace recovery, unchanged eight point IDs and credential fingerprints |
+
+The unsuccessful first cold start stopped the 12GiB fit qualification; a second
+cold start was not counted as passed or required to repeat an already failed
+configuration. The smaller supported allocation then failed scheduling. This is
+an observed reliability failure under the agreed constraints, not a proof that
+32GiB can never host such a stack.
+
+Setup archive/registry work caused additional memory pressure and historical
+swap usage outside the formal workload window. Record those separately; do not
+claim zero paging across the entire session. Jaeger's auxiliary query-service
+self-telemetry warned about localhost:4317 while application OTLP HTTP on 4318,
+trace queries and persistent trace recovery passed. Keep that observability
+limitation explicit for the site owner.
+
+The Kind application window had 31 observations: minimum Windows headroom
+12.434GiB and free VRAM 819MiB, no container OOM/restarts or Windows page-out;
+WSL recorded about 37.6MiB swap-in and 72.8MiB swap-out. The real-model CRC and Kind rehearsals each accepted a
+3994-token embedding input with dimension 1024. An additional gateway diagnostic
+run concurrently with chat hit its probe timeout; the unchanged idle probe then
+passed. Retain both logs and run single-sequence readiness probes before the
+interactive workload.
+
+Production transfer still uses operator sign-off on these exact bytes. Production
+OpenShift/storage/identity/network/capacity compatibility and actual platform
+model acceptance remain site-specific; no production deployment or transfer is
+claimed by the local results.
 
 ## 1. Credentials and host preflight
 
@@ -196,6 +248,9 @@ for CRC's disabled operators instead of claiming full production parity.
 
 ## 3. WSL gateway and cluster connectivity
 
+For the concrete host, TLS registry, Windows-client, Secret and generator commands,
+follow [local-crc-environment.md](local-crc-environment.md).
+
 Keep model serving in WSL behind the existing authenticated LiteLLM gateway
 ([local-stack ownership](live-stack.md#full-local-simulation-make-local-stack)).
 CRC host access exposes Windows services through `host.crc.testing`; it does
@@ -221,8 +276,10 @@ CA, and hostname-mismatch behavior from the application pods. Never use `verify=
 `curl -k`, or an HTTP downgrade to claim a pass.
 
 Use a dedicated WSL kubeconfig for CRC, leaving the Kind context intact.
-Verify the CRC API's hostname and certificate from WSL with the matching
-Linux `oc` client and cluster CA. Use `KC=oc` for the existing scripts and
+Verify the CRC API's hostname and certificate. If the API is Windows-loopback
+only, use the Windows-native `oc`/Helm adapters in
+[the local guide](local-crc-environment.md#6-windows-api-access-from-the-wsl-pipeline)
+with a dedicated Windows kubeconfig; a Linux client is not required. Use `KC=oc` for the existing scripts and
 verify `oc whoami --show-server` before each deployment. Do not work around
 WSL API/DNS failures by disabling TLS verification.
 
@@ -276,17 +333,21 @@ do not bypass the pending-pin guard.
 
 Use [the production overlays](../overlays/openshift/values.yaml) and existing
 rehearsal override hooks. Keep local files outside the bootstrapped checkout.
-Starting values for a tiny, generated corpus (unmeasured until the live run):
+Local values for a tiny generated corpus (never production defaults):
 
 | Setting | CRC starting value |
 |---|---|
-| Qdrant Helm override | 1 replica; requests 200m CPU / 512Mi; limits 2 CPU / 2Gi |
+| Qdrant Helm override | 1 replica; requests 200m CPU / 256Mi; limits 2 CPU / 2Gi |
 | `QDRANT_STORAGE_SIZE` | `1Gi` for each data and snapshot PVC |
 | `INGEST_WORK_SIZE` | `1Gi` |
 | `INGEST_WORKERS` | `1` |
 | Ingest resource patch | requests 500m CPU / 1Gi; limits 2 CPU / 2Gi |
 | Corpus PVC | `1Gi`, generated PDFs only |
 | Agent / Jaeger | Existing replica counts and resource settings |
+
+The 256Mi Qdrant request was explicitly approved after the initial 512Mi request
+left the 12GiB node 169Mi short in scheduler reservations despite actual free RAM.
+The 2Gi limit, two agents, OAuth and other acceptance criteria stayed in place.
 
 Use `QDRANT_EXTRA_VALUES` for Qdrant sizing and `INGEST_EXTRA_PATCH` for the
 ingest Job's resources; the latter is a strategic merge patch for `Job/ingest`,
@@ -331,15 +392,16 @@ including the OAuth container and completed Jobs.
    sizing hooks, model IDs/dimension, HTTPS gateway URLs, and Secret names.
    Populate the gateway and OAuth-cookie Secrets from local protected files.
    Do not put key values into the env file. Keep the exact bundle unmodified.
-5. Run `make airgap-validate`, then `make airgap-load`. Verify loaded digests
-   against the manifest's archive digests (not an upstream multi-arch index).
+5. Run `make airgap-validate`, then `make airgap-load`. Verify archive identity
+   against the signed manifest, then reconcile registry compression/config and
+   runtime digests using [the image-identity procedure](deploy.md#image-identity-across-archive-and-registry-formats).
 6. Before product deployment, run a temporary pod using the loaded agent
    image, the intended gateway env/Secret references and TLS trust, under
-   `restricted-v2`. Run `python3 /app/scripts/probe_gateway.py --stream` in
+   `restricted-v2`. Run `python3 /app/scripts/probe_gateway.py --require-reasoning --stream` in
    it. Require all configured legs, dimension, authentication, and streaming
    checks to pass. Remove only this temporary pod after recording results.
 7. Create the synthetic corpus PVC and generator Job using the
-   [existing generator recipe](install_and_ops.md#47-local-cluster-testing-standard-kind--local-registry).
+   [existing generator recipe](local-crc-environment.md#72-configure-and-deploy-the-same-candidate).
    Adapt only registry, storage class, namespace, pull Secret, and SCC-safe
    security context. Keep the original generated content and the loaded
    release ingest image. Require generator completion; set `CORPUS_PVC`.
@@ -357,12 +419,12 @@ IDs remain attributable. Use explicit pod/container names for `oc exec`.
 | Check | Required evidence |
 |---|---|
 | SCC and identities | Each product/generator pod's `openshift.io/scc` annotation is exactly `restricted-v2`; namespace UID/group ranges, admitted security contexts, actual process IDs, and no `anyuid` grants. Capture completed ingest/generator pods too. |
-| Images | Requested image refs and each running container's `imageID`, including OAuth, match loaded release artifacts. Account for manifest-list versus platform-manifest digests. |
+| Images | Requested image refs and each running container's `imageID`, including OAuth, match loaded release artifacts. Account for manifest-list/platform and archive/registry compression differences; verify image configs/rootfs identity and actual registry digests. |
 | Storage writes | Bound PVCs, actual provisioner/access modes, successful ingest scratch/data writes, Qdrant snapshot creation, and Jaeger span persistence. |
 | Pod replacement | Replace one Qdrant pod and one agent pod, recording old/new UIDs. PVC identity, exact point count, representative hit IDs/citations, and health survive. Restart Jaeger and verify an earlier trace remains queryable. |
 | Repeat deployment | Repeat `make airgap-pipeline` on the same bundle/env; require rollout, new ingest Job completion, unchanged synthetic point count/IDs, healthy search, and tracing. Detect API-key rotation or immutable-resource failures. |
 | Snapshot recovery | Snapshot only the CRC synthetic collection, export and checksum it outside Git, then restore into an isolated empty collection/instance using the same Qdrant version and vector config. Verify exact count, sampled payload/point IDs, and equivalent queries; retain the original collection. Record snapshot and restore evidence, never commit snapshot bytes. |
-| OAuth Route | Unauthenticated `GET /ui` redirects to OpenShift OAuth. Browser login returns to `/ui`; a fresh unauthenticated session still redirects. No accidental direct public API/Jaeger/Qdrant Route. |
+| OAuth Route | A fresh unauthenticated `GET /ui` may show the provider chooser (403); `/oauth/start` redirects to OpenShift OAuth. Browser login returns to `/ui`; a fresh session still requires authentication. No accidental direct public API/Jaeger/Qdrant Route. |
 | Certificates | Browser/CLI verifies Route hostname and ingress chain without bypass. Route is `reencrypt`, targets OAuth 8443, and trusts the Service CA; serving Secret is populated and matches its service identity. Existing Routes need inspection because deploy does not replace them. |
 | Cited answer | Ask `What does IEA500I mean?`; verify the answer and non-inferred citation against the generated PDF, with no error/degraded response. A transport-only success is insufficient. |
 | Follow-up | Send a contextual follow-up with browser history and verify it completes coherently with a valid synthetic citation. Record current condensation setting; do not flip its default. |
