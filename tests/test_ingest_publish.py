@@ -244,6 +244,10 @@ def test_generation_fingerprint_sensitive_to_inputs():
     assert generation_fingerprint(settings, rules_v, "||") == base
     assert generation_fingerprint(settings, rules_v, "|Solaris|") != base
     assert generation_fingerprint(settings, "0" * 16, "||") != base
+    # Issue #391 F2: the operator revision addresses a distinct staging
+    # generation, so a revision-only change can never reconverge live.
+    assert generation_fingerprint(_settings(embed_model_revision="rev-2"), rules_v, "||") != base
+    assert generation_fingerprint(_settings(dense_query_prefix="OTHER:"), rules_v, "||") == base
 
 
 # ---------------------------------------------------------------- publish
@@ -597,6 +601,33 @@ def test_verify_all_complete_matrix(monkeypatch):
     assert sorted(problems) == ["err.pdf", "ghost.pdf", "legacy.pdf", "missing.pdf", "stale.pdf"]
 
 
+def test_verify_all_complete_refuses_pending_contract(monkeypatch):
+    """Issue #391 F2: a pending migration contract blocks the swap even when
+    every walked document verifies — publication certifies a committed
+    generation, never an unfinished re-embed."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import (
+        STATE_COMMITTED,
+        STATE_PENDING,
+        read_manifest_record,
+        write_manifest,
+    )
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+    staging = _settings(qdrant_collection="stg-pending")
+    rules_v = extraction_rules_version()
+    write_manifest(fake, "stg-pending__completions", staging, rules_v, state=STATE_PENDING)
+    problems = verify_all_complete(fake, staging, [], {}, rules_v, "||")
+    assert problems == ["stg-pending: contract 'pending'"]
+    write_manifest(fake, "stg-pending__completions", staging, rules_v, state=STATE_COMMITTED)
+    assert verify_all_complete(fake, staging, [], {}, rules_v, "||") == []
+    record = read_manifest_record(fake, "stg-pending__completions")
+    assert record.state == STATE_COMMITTED
+
+
 def _parsed_doc(doc_id, sha):
     from pathlib import Path as _Path
 
@@ -672,11 +703,10 @@ def _live_manifest_revision(fake, live):
 
 
 def test_steady_live_with_drifted_revision_fails_closed(tmp_path, monkeypatch):
-    """Issue #362: a revision-only change keeps the same staging name
-    (generation fingerprints exclude the operator revision), so the
-    already-live branch would re-verify stale vectors as fine. The
-    read-only representation check must fail closed first — alias and
-    points untouched."""
+    """Issue #391 F2: a revision-only change derives a DIFFERENT staging
+    generation, so the unforced run clones live and fails in the inner
+    preflight (drift, `--reingest` remediation). Alias, live points, and
+    live metadata stay untouched — a failed migration leaves A serving."""
     from mainframe_rag.ingest import run_ingest
 
     _publish_env(monkeypatch)
@@ -688,21 +718,23 @@ def test_steady_live_with_drifted_revision_fails_closed(tmp_path, monkeypatch):
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
+    points_before = list(fake.collections[live])
     assert _live_manifest_revision(fake, live).embed_model_revision == ""
 
     monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-2")
     with pytest.raises(RuntimeError, match="representation drift on embed_model_revision"):
         _run_main(monkeypatch, corpus, progress)
-    assert fake.aliases[ALIAS] == live, "failed steady-state run moves no alias"
+    assert fake.aliases[ALIAS] == live, "failed run moves no alias"
+    assert fake.collections[live] == points_before, "failed run touches no live point"
     assert _live_manifest_revision(fake, live).embed_model_revision == "", \
         "failed run commits no manifest"
 
 
-def test_publish_force_reconverges_live_generation(tmp_path, monkeypatch):
-    """Publish-mode --reingest under a representation change reconverges
-    the live generation in place (same staging name): every doc
-    re-embeds, the manifest commits the new contract, the alias never
-    moves, and no self-swap snapshot churns."""
+def test_publish_force_same_contract_reconverges_live(tmp_path, monkeypatch):
+    """Publish-mode --reingest with an UNCHANGED contract reconverges the
+    live generation in place (same staging name): every doc re-embeds, the
+    alias never moves, and no self-swap snapshot churns. Issue #391 F2 keeps
+    this path open for same-generation repair only."""
     from mainframe_rag.ingest import run_ingest
 
     _publish_env(monkeypatch)
@@ -716,9 +748,47 @@ def test_publish_force_reconverges_live_generation(tmp_path, monkeypatch):
     live = fake.aliases[ALIAS]
     snaps_before = dict(fake.snapshots)
 
-    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-2")
     assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
     assert fake.aliases[ALIAS] == live
-    assert _live_manifest_revision(fake, live).embed_model_revision == "rev-2"
+    assert _live_manifest_revision(fake, live).embed_model_revision == ""
     assert fake.snapshots == snaps_before, "self-swap must not snapshot"
+    assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
+
+
+def test_publish_force_revision_change_migrates_to_new_generation(tmp_path, monkeypatch):
+    """Issue #391 F2: a revision-only change must never reconverge the live
+    physical. The versioned fingerprint embeds the operator revision, so
+    --reingest derives a distinct staging generation, re-embeds into it,
+    verifies, and swaps; the old generation keeps its points AND its rev-A
+    manifest for metadata rollback, and the serving generation's contract is
+    committed (never a half-rebuilt B)."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    old = fake.aliases[ALIAS]
+
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-2")
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    new = fake.aliases[ALIAS]
+    assert new != old, "a representation change must publish a distinct generation"
+    assert old in fake.collections, "old physical retained for rollback"
+    assert _live_manifest_revision(fake, old).embed_model_revision == "", \
+        "old generation keeps its own contract"
+    old_docs = {
+        (p.payload or {}).get("doc_id")
+        for p in fake.collections[old]
+        if (p.payload or {}).get("doc_id")
+    }
+    assert old_docs == {"SA22-0000-00"}, "old generation keeps its points"
+    assert _live_manifest_revision(fake, new).embed_model_revision == "rev-2"
+    record = read_manifest_record(fake, f"{new}__completions")
+    assert record is not None and record.state == STATE_COMMITTED
     assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}

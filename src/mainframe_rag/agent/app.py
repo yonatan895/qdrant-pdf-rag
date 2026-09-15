@@ -363,8 +363,9 @@ async def lifespan(_app: FastAPI):
         limits=http_limits,
     )
     # Representation gate (issue #362 req 4): refuse to serve queries
-    # against an incompatible stored generation. Evidence of drift or
-    # legacy refuses to listen; an unreachable store reports unknown
+    # against an incompatible stored generation. Evidence of drift, legacy,
+    # or a pending migration (issue #391 F2 — the contract was declared but
+    # not verified) refuses to listen; an unreachable store reports unknown
     # (warn-only — nothing can be served wrong from a store we cannot
     # read, and /healthz stays the live signal). /healthz re-evaluates
     # per scrape; query handlers trust this gate plus that signal rather
@@ -378,7 +379,7 @@ async def lifespan(_app: FastAPI):
         )
     except Exception as exc:  # noqa: BLE001 — exotic transports report unknown
         outcome, outcome_details = "unknown", [type(exc).__name__]
-    if outcome in ("reembed_required", "legacy"):
+    if outcome in ("reembed_required", "legacy", "pending"):
         raise RuntimeError(
             f"agent refuses a {outcome} collection "
             f"{settings.qdrant_collection!r} ({', '.join(outcome_details) or 'no contract'}): "

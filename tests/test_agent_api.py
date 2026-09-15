@@ -600,6 +600,45 @@ def test_healthz_representation_legacy_and_unknown_degrade(client, monkeypatch):
     assert "secret" not in resp.text
 
 
+def test_healthz_representation_pending_degrades(client, monkeypatch):
+    """Issue #391 F2: a pending migration contract is not servable — the
+    outcome is explicit and the status degrades (smoke.sh fails closed)."""
+    from mainframe_rag.ingest.completion import completion_collection_name
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from tests.fakes import ServingManifestQdrant, manifest_envelope
+
+    settings = app_mod.settings
+    envelope = manifest_envelope(
+        settings, extraction_rules_version(),
+        completion_collection_name(settings), state="pending",
+    )
+    monkeypatch.setattr(app_mod, "http", _ready_pool())
+    monkeypatch.setattr(app_mod, "qdrant", ServingManifestQdrant(envelope))
+    body = client.get("/healthz").json()
+    assert (body["status"], body["representation"]) == ("degraded", "pending")
+
+
+def test_lifespan_refuses_pending_contract(monkeypatch):
+    """Issue #391 F2: an interrupted migration blocks startup, not only the
+    live /healthz signal — the interval before a probe observes it must not
+    serve queries against a half-verified generation."""
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+
+    async def pending_outcome(*_a, **_k):
+        return "pending", []
+
+    monkeypatch.setattr(app_mod, "serving_outcome", pending_outcome)
+    with (
+        pytest.raises(RuntimeError, match="refuses a pending collection"),
+        TestClient(app_mod.app),
+    ):
+        pass
+
+
 def test_healthz_embed_probe_forwards_gateway_key(client, monkeypatch):
     """The /healthz embed ping hits the same gateway endpoint as retrieval,
     so it must carry the embed leg's virtual key when set."""

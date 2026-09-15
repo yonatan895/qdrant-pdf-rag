@@ -208,7 +208,12 @@ class _FakeQdrant:
     def upsert(self, collection_name, *, points, wait=True):
         self.upserts.append(len(points))
         self.upsert_calls.append((collection_name, len(points)))
-        self._points.setdefault(collection_name, []).extend(points)
+        # Production upsert overwrites same-id points (manifest recommit,
+        # marker rewrite); the double must too, or reads see stale firsts.
+        stored = self._points.setdefault(collection_name, [])
+        ids = {str(p.id) for p in points}
+        stored[:] = [p for p in stored if str(p.id) not in ids]
+        stored.extend(points)
         from types import SimpleNamespace
 
         return SimpleNamespace()
@@ -488,3 +493,265 @@ def test_parse_one_error_isolation_and_picklability(tmp_path):
     assert unpacked_contexts == {}
 
 
+
+
+# --------------------------------------- representation migration (391 F2) ---
+def _migration_args(corpus, progress, *extra):
+    return ["--src", str(corpus), "--progress", str(progress), "--workers", "1", *extra]
+
+
+def _marker_generations(fake, collection):
+    comp = f"{collection}__completions"
+    return {
+        (p.payload or {}).get("generation_id")
+        for p in fake._points.get(comp, [])
+        if (p.payload or {}).get("doc_id")
+    }
+
+
+def _second_doc(corpus):
+    from scripts.make_synthetic_pdf import build
+
+    build(
+        corpus / "SA22-7777-01.pdf",
+        doc_id="SA22-7777-01",
+        title="Synthetic Initialization and Tuning Reference",
+        message_id="IEB700I",
+    )
+
+
+def test_revision_change_blocks_skip_and_force_reembeds(tmp_path, synthetic_pdf, monkeypatch):
+    """Issue #391 F2 (revision-only change): the versioned fingerprint embeds
+    the operator revision, so A markers are ineligible under B — the run
+    refuses without --reingest and re-embeds every document with it. The
+    evidence is the marker generation id, never unchanged text or point ids."""
+    import pytest
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.completion import doc_generation_id
+    from mainframe_rag.ingest.ibm_pdf import sha256_file
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-A")
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    progress = tmp_path / "inventory.jsonl"
+    args = _migration_args(synthetic_pdf.parent, progress)
+    assert main(args) == 0
+    a_model = Settings(_env_file=None, embed_model_revision="rev-A")
+    b_model = Settings(_env_file=None, embed_model_revision="rev-B")
+    sha = sha256_file(synthetic_pdf)
+    rules_v = extraction_rules_version()
+    a_gen = doc_generation_id(a_model, sha, rules_v, "||")
+    b_gen = doc_generation_id(b_model, sha, rules_v, "||")
+    assert a_gen != b_gen, "revision-only change must alter the generation identity"
+    assert _marker_generations(fake, a_model.qdrant_collection) == {a_gen}
+
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-B")
+    with pytest.raises(RuntimeError, match="representation drift on embed_model_revision"):
+        main(list(args))
+    assert _marker_generations(fake, a_model.qdrant_collection) == {a_gen}, \
+        "refused run deletes or rewrites nothing"
+
+    assert main([*args, "--reingest"]) == 0
+    assert _marker_generations(fake, a_model.qdrant_collection) == {b_gen}
+    record = read_manifest_record(fake, f"{a_model.qdrant_collection}__completions")
+    assert record.state == STATE_COMMITTED
+    assert record.manifest.embed_model_revision == "rev-B"
+
+
+def test_force_reingest_still_requires_attested_revision(tmp_path, synthetic_pdf, monkeypatch):
+    """A force flag may bypass rejection of old data, never the requirement
+    to identify the new representation (issue #391 F2)."""
+    import pytest
+
+    from mainframe_rag.ingest import run_ingest
+
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    monkeypatch.setenv("EMBED_MODE", "vllm")
+    monkeypatch.setenv("DENSE_DIM", "256")
+    monkeypatch.delenv("EMBED_MODEL_REVISION", raising=False)
+    progress = tmp_path / "inventory.jsonl"
+    with pytest.raises(RuntimeError, match="EMBED_MODEL_REVISION"):
+        main(_migration_args(synthetic_pdf.parent, progress, "--reingest"))
+    assert fake.upserts == [], "attestation fails before any point write"
+
+
+def test_interrupted_migration_stays_pending_until_forced_resume(
+    tmp_path, synthetic_pdf, monkeypatch
+):
+    """A crash between the pending declaration and the first document rewrite
+    must not look compatible: a normal rerun refuses (A vectors must not skip
+    as B) and --reingest resumes to a committed B contract."""
+    import pytest
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import (
+        STATE_COMMITTED,
+        STATE_PENDING,
+        begin_manifest,
+        read_manifest_record,
+    )
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-A")
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    progress = tmp_path / "inventory.jsonl"
+    args = _migration_args(synthetic_pdf.parent, progress)
+    assert main(args) == 0
+    model_a = Settings(_env_file=None, embed_model_revision="rev-A")
+    markers_a = _marker_generations(fake, model_a.qdrant_collection)
+
+    model_b = Settings(_env_file=None, embed_model_revision="rev-B")
+    comp = f"{model_b.qdrant_collection}__completions"
+    begin_manifest(fake, comp, model_b, extraction_rules_version())
+    assert read_manifest_record(fake, comp).state == STATE_PENDING
+
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-B")
+    with pytest.raises(RuntimeError, match="unfinished representation migration"):
+        main(list(args))
+    assert _marker_generations(fake, model_a.qdrant_collection) == markers_a
+
+    assert main([*args, "--reingest"]) == 0
+    record = read_manifest_record(fake, comp)
+    assert record.state == STATE_COMMITTED
+    assert record.manifest.embed_model_revision == "rev-B"
+
+
+def test_partial_migration_failure_leaves_pending_then_resume_commits(
+    tmp_path, synthetic_pdf, monkeypatch
+):
+    """A failure after partial document work must never certify the new
+    contract: it stays pending (skips and serving blocked) and the forced
+    rerun completes it once the corpus is whole."""
+    import shutil
+
+    import pytest
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import (
+        STATE_COMMITTED,
+        STATE_PENDING,
+        read_manifest_record,
+    )
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    shutil.copy(synthetic_pdf, corpus / synthetic_pdf.name)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-A")
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    progress = tmp_path / "inventory.jsonl"
+    args = _migration_args(corpus, progress)
+    assert main(args) == 0
+    collection = Settings(_env_file=None).qdrant_collection
+    comp = f"{collection}__completions"
+
+    bad = corpus / "broken.pdf"
+    bad.write_bytes(b"not a pdf")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-B")
+    assert main([*args, "--reingest"]) == 1
+    record = read_manifest_record(fake, comp)
+    assert record.state == STATE_PENDING, "failures must not certify the contract"
+    with pytest.raises(RuntimeError, match="unfinished representation migration"):
+        main(list(args))
+
+    bad.unlink()
+    assert main([*args, "--reingest"]) == 0
+    record = read_manifest_record(fake, comp)
+    assert record.state == STATE_COMMITTED
+    assert record.manifest.embed_model_revision == "rev-B"
+
+
+def test_stale_generation_marker_blocks_commit(tmp_path, synthetic_pdf, monkeypatch):
+    """Commit-time scope proof (issue #391 F2): a source walk that no longer
+    covers every stored doc cannot commit the new contract while the old
+    representation's markers (and vectors) remain searchable."""
+    import shutil
+
+    import pytest
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import (
+        STATE_PENDING,
+        read_manifest_record,
+    )
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    shutil.copy(synthetic_pdf, corpus / synthetic_pdf.name)
+    _second_doc(corpus)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-A")
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    progress = tmp_path / "inventory.jsonl"
+    args = _migration_args(corpus, progress)
+    assert main(args) == 0
+    collection = Settings(_env_file=None).qdrant_collection
+    comp = f"{collection}__completions"
+    assert len(_marker_generations(fake, collection)) == 2
+
+    second = corpus / "SA22-7777-01.pdf"
+    second.unlink()
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-B")
+    with pytest.raises(RuntimeError, match="representation migration incomplete"):
+        main([*args, "--reingest"])
+    assert read_manifest_record(fake, comp).state == STATE_PENDING
+
+    shutil.copy(synthetic_pdf, corpus / synthetic_pdf.name)  # no-op keeper
+    _second_doc(corpus)
+    assert main([*args, "--reingest"]) == 0
+    assert len(_marker_generations(fake, collection)) == 2
+    assert read_manifest_record(fake, comp).state == "committed"
+
+
+def test_limit_allows_fresh_subset_but_refuses_revision_migration(
+    tmp_path, synthetic_pdf, monkeypatch
+):
+    """--limit on a fresh empty target is a deliberate subset bootstrap; the
+    same flag during a representation migration is refused (issue #391 F2)."""
+    import shutil
+
+    import pytest
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import (
+        STATE_COMMITTED,
+        read_manifest_record,
+    )
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    shutil.copy(synthetic_pdf, corpus / synthetic_pdf.name)
+    _second_doc(corpus)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    progress = tmp_path / "inventory.jsonl"
+    args = _migration_args(corpus, progress, "--limit", "1")
+    assert main(args) == 0
+    collection = Settings(_env_file=None).qdrant_collection
+    comp = f"{collection}__completions"
+    assert read_manifest_record(fake, comp).state == STATE_COMMITTED
+    assert len(_marker_generations(fake, collection)) == 1
+
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-B")
+    with pytest.raises(RuntimeError, match="--limit refuses a representation migration"):
+        main([*args, "--reingest"])

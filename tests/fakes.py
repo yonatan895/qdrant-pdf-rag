@@ -318,9 +318,11 @@ class HttpxStreamFake:
 # ---------------------------------------------------------------------------
 
 
-def manifest_envelope(settings, rules_v, completions, **manifest_overrides):
+def manifest_envelope(settings, rules_v, completions, *, state=None, **manifest_overrides):
     """Stored-manifest point payload for a chosen contract. Overrides apply
-    to the manifest model (e.g. embed_model_revision="rev-2" for drift)."""
+    to the manifest model (e.g. embed_model_revision="rev-2" for drift);
+    `state` adds the envelope state field (None = pre-state payload, which
+    reads as committed)."""
     from mainframe_rag.ingest.representation import (
         _MANIFEST_KEY_PREFIX,
         build_manifest,
@@ -330,12 +332,15 @@ def manifest_envelope(settings, rules_v, completions, **manifest_overrides):
     manifest = build_manifest(settings, rules_v)
     if manifest_overrides:
         manifest = manifest.model_copy(update=manifest_overrides)
-    return {
+    payload = {
         "record_type": _MANIFEST_KEY_PREFIX,
         "target_collection": completions,
         "manifest_digest": digest_of(manifest),
         "manifest": manifest.model_dump(mode="json"),
     }
+    if state is not None:
+        payload["state"] = state
+    return payload
 
 
 class ServingManifestQdrant:

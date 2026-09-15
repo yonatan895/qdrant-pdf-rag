@@ -117,7 +117,12 @@ class RevisionFake:
 
     def upsert(self, name, *, points, wait=True):
         self.upserts += 1
-        self._points.setdefault(name, []).extend(points)
+        # Production upsert overwrites same-id points (manifest recommit);
+        # a duplicated manifest id would read back as a stale first.
+        stored = self._points.setdefault(name, [])
+        ids = {str(p.id) for p in points}
+        stored[:] = [p for p in stored if str(p.id) not in ids]
+        stored.extend(points)
         return SimpleNamespace()
 
     def delete(self, name, *, points_selector, wait=True):
