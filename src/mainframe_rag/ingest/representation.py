@@ -1,19 +1,22 @@
-"""Collection representation manifest (issue #362, step 1: record-only).
+"""Collection representation manifest (issue #362, step 2: enforced).
 
 A stored collection is a contract: dense model + immutable revision,
 dimension, document-embedding recipe, sparse model/revision, extraction
 rules, and identity schema. Same-dimension-but-different-representation
-vectors must never silently mix — the 362B step enforces that at ingest
-preflight and serving readiness. This step defines the contract, records
-it, and ties completions/inventory to it; enforcement stays off.
+vectors must never silently mix — enforced at ingest preflight
+(`check_ingest_compatible`) and serving readiness (lifespan +
+`/healthz` via `serving_outcome`). Step 1 defined the contract and
+recorded it; this step turns mismatches into explicit outcomes.
 
-Compatibility policy (issue #362 req 2) — two classes, one table:
+Compatibility policy (issue #362 req 2) — two classes, one table
+(`compare_manifests` is the one rule; callers never open-code it):
 
 - RE-EMBED-REQUIRED: a change means the stored vectors are stale. The
-  362B gate rejects skips/serving until a deliberate migration re-embeds:
+  gate rejects skips/serving until a deliberate migration re-embeds:
   extraction rules, identity schema, embed mode/model/revision/dim,
   contextual block (enabled, LLM id, prompt version, max chars),
-  sparse model/weights revision.
+  sparse model/weights revision. Unknown schema versions count here —
+  an unreadable contract is a migration, never a pass.
 - RECORD-ONLY: a change never requires re-embedding. The manifest records
   it for audit and evaluation attribution; a mismatch asks for
   re-evaluation, never a re-ingest: dense query prefix (query-side only —
@@ -28,13 +31,23 @@ Storage: one fixed-ID point in `<collection>__completions` (a Qdrant
 collection carries no metadata KV of its own). The completions collection
 rides the #359 snapshot-clone, so publish staging inherits the live
 manifest and the inner run overwrites it with the newly converged one.
-Absent/unparseable manifest = legacy unversioned collection — an explicit
-362B outcome (attest-and-migrate), never a silent pass.
+Absent/unparseable manifest on a non-empty collection = legacy
+unversioned state — an explicit outcome (attest-and-migrate via
+`--reingest`), never a silent pass. An empty target needs no gate: the
+run commits its manifest at the end.
+
+Skip paths share the contract structurally, not per document: the
+preflight proves run-level compatibility before any skip is evaluated, so
+a stale completion can never cause a skip under a drifted
+representation; `--reingest` (the deliberate migration step) bypasses
+skips and re-embeds everything. Marker `manifest_digest` values are
+audit, not a second gate.
 """
 
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import uuid
 
@@ -43,7 +56,7 @@ from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.context import CONTEXT_PROMPT_VERSION
-from mainframe_rag.ports import QdrantPoints
+from mainframe_rag.ports import AsyncQdrantPoints, QdrantPoints
 
 MANIFEST_SCHEMA_VERSION = 1
 
@@ -85,7 +98,10 @@ def build_manifest(settings: Settings, rules_v: str) -> RepresentationManifest:
     """Pure function of (settings, rules): identical inputs digest
     identically on any machine, any mount, any PYTHONHASHSEED. `rules_v` is
     a parameter (not read here) so tests pin digests without depending on
-    the tree's rule files; callers pass `extraction_rules_version()`."""
+    the tree's rule files; callers pass `extraction_rules_version()`. The
+    operator revision is stripped: whitespace-only attestation is empty
+    attestation (same rule as bearer-auth headers — never `Bearer None`,
+    never `" "` as an identity)."""
     try:
         dim = settings.require_dense_dim()
     except RuntimeError:
@@ -94,7 +110,7 @@ def build_manifest(settings: Settings, rules_v: str) -> RepresentationManifest:
         extraction_rules=rules_v,
         embed_mode=settings.embed_mode,
         embed_model=settings.embed_model,
-        embed_model_revision=settings.embed_model_revision,
+        embed_model_revision=settings.embed_model_revision.strip(),
         dense_dim=dim,
         contextual_enabled=settings.contextual_embed_enabled,
         context_llm_model=settings.context_llm_model,
@@ -110,8 +126,15 @@ def manifest_digest(settings: Settings, rules_v: str) -> str:
     """16-hex identity of the representation contract (same width idiom as
     `rules_v`). Canonical JSON (sorted keys, compact separators) over the
     fixed model field order — digest equality means contract equality."""
+    return digest_of(build_manifest(settings, rules_v))
+
+
+def digest_of(manifest: RepresentationManifest) -> str:
+    """Digest of a manifest value (stored or wanted) — one rule with
+    `manifest_digest`, so error attribution recomputes instead of
+    re-reading the store."""
     canonical = json.dumps(
-        build_manifest(settings, rules_v).model_dump(mode="json"),
+        manifest.model_dump(mode="json"),
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -193,8 +216,239 @@ def ensure_manifest(
     """Commit the run's contract (idempotent): read the stored manifest and
     overwrite only when it differs, so steady-state reruns stay zero-write.
     Returns (digest, committed). The compare-then-write is one rule with
-    the write — callers never open-code it."""
+    the write — callers never open-code it. Under enforcement this is the
+    migration commit step: it only runs after the preflight proved
+    compatibility (or `--reingest` deliberately bypassed it)."""
     wanted = build_manifest(settings, rules_v)
     if read_manifest(client, completions_collection) == wanted:
         return manifest_digest(settings, rules_v), False
     return write_manifest(client, completions_collection, settings, rules_v), True
+
+
+# Re-embed-required manifest fields (issue #362 req 2): a change means the
+# stored vectors are stale — skips and serving stop until a deliberate
+# migration re-embeds. schema_version rides along: an unknown contract is
+# a migration, never a pass.
+REEMBED_FIELDS = (
+    "schema_version",
+    "extraction_rules",
+    "identity_schema",
+    "embed_mode",
+    "embed_model",
+    "embed_model_revision",
+    "dense_dim",
+    "contextual_enabled",
+    "context_llm_model",
+    "context_prompt_version",
+    "context_max_chars",
+    "sparse_model",
+    "sparse_weights_revision",
+)
+
+# Record-only manifest fields: audit + evaluation attribution, never a
+# re-embed trigger. dense_query_prefix drift asks for re-evaluation, and
+# endpoint URLs live outside the contract entirely (routing, not weights).
+RECORD_ONLY_FIELDS = ("dense_query_prefix",)
+
+COMPATIBLE = "compatible"
+RECORD_ONLY_DRIFT = "record_only_drift"
+REEMBED_REQUIRED = "reembed_required"
+
+
+def compare_manifests(
+    stored: RepresentationManifest, wanted: RepresentationManifest
+) -> tuple[str, list[str]]:
+    """One rule for the compatibility policy: (outcome, changed_fields).
+    `stored=None` never reaches here — absent manifests are legacy/empty
+    outcomes decided by the caller (they need target emptiness, which
+    differs per sync/async side). Field order follows the model."""
+    reembed = [f for f in REEMBED_FIELDS if getattr(stored, f) != getattr(wanted, f)]
+    if reembed:
+        return REEMBED_REQUIRED, reembed
+    record = [f for f in RECORD_ONLY_FIELDS if getattr(stored, f) != getattr(wanted, f)]
+    if record:
+        return RECORD_ONLY_DRIFT, record
+    return COMPATIBLE, []
+
+
+def require_attested_revision(settings: Settings) -> None:
+    """Operator attestation (issue #362 req 3): vllm mode needs a non-blank
+    `EMBED_MODEL_REVISION` — a mutable gateway alias or a dimension is not
+    an immutable model identity, and the application must never infer
+    weights it cannot inspect. Hash mode is exempt (CI/dev only; the hash
+    recipe never changes, and mode drift is itself re-embed-required).
+    Config error, so it raises before any store contact."""
+    if settings.embed_mode != "vllm":
+        return
+    if not settings.embed_model_revision.strip():
+        raise RuntimeError(
+            "ingest/serving refuses an unattested vllm embedding revision: set "
+            "EMBED_MODEL_REVISION to the platform team's immutable model/config "
+            f"revision for {settings.embed_model!r} (a gateway alias is mutable "
+            "and a dimension is not an identity). Without it, a same-dimension "
+            "model swap would silently mix stored and query vectors."
+        )
+
+
+def check_ingest_compatible(
+    client: QdrantPoints,
+    settings: Settings,
+    completions_collection: str,
+    rules_v: str,
+) -> tuple[str, list[str]]:
+    """Ingest preflight gate (issue #362 req 4/5): prove the target's stored
+    representation accepts this run before any parse, delete, or upsert.
+    Returns (wanted_digest, record_drift_fields); record-only drift
+    proceeds (caller logs the re-evaluation note). Raises RuntimeError
+    with the stable remediation otherwise:
+    - unattested vllm revision → declare EMBED_MODEL_REVISION;
+    - legacy unversioned target → `--reingest` to attest-and-migrate;
+    - re-embed drift → `--reingest` to re-embed every doc.
+    Callers bypass under `--reingest` (the one deliberate migration step,
+    same override idiom as the #124 rules gate); a bypassed run skips
+    nothing downstream, so it re-embeds everything instead of mixing.
+    Never recreates a collection, never downgrades modes."""
+    require_attested_revision(settings)
+    wanted = build_manifest(settings, rules_v)
+    digest = digest_of(wanted)
+    stored = read_manifest(client, completions_collection)
+    if stored is None:
+        points, _ = client.scroll(
+            settings.qdrant_collection, limit=1, with_payload=False
+        )
+        if not points:
+            return digest, []  # empty target: the run commits its manifest
+        raise RuntimeError(
+            f"collection {settings.qdrant_collection!r} predates the representation "
+            "manifest (stored points but no contract — legacy unversioned state). "
+            "Re-ingest required: re-run with --reingest to attest-and-migrate "
+            "(never skip against unattributed vectors)."
+        )
+    outcome, fields = compare_manifests(stored, wanted)
+    if outcome == REEMBED_REQUIRED:
+        raise RuntimeError(
+            f"representation drift on {', '.join(fields)}: collection "
+            f"{settings.qdrant_collection!r} was embedded under a different "
+            "contract (stored manifest digest "
+            f"{digest_of(stored)!r}, this run wants {digest!r}). "
+            "Re-ingest required: re-run with --reingest to re-embed every doc "
+            "(never skip against incompatible vectors)."
+        )
+    return digest, fields if outcome == RECORD_ONLY_DRIFT else []
+
+
+def rekey_manifest(
+    client: QdrantPoints, src_completions: str, dst_completions: str
+) -> bool:
+    """Carry the manifest across a snapshot-clone (publish staging): the
+    fixed point id embeds the collection name, so a byte copy is unreadable
+    under the new name. Re-keys live's contract VERBATIM (same model, same
+    vector, only the id and envelope target change) — never recomputes
+    from current settings, or a drifted run would see its own wanted
+    contract and sail through its preflight. Returns False when the source
+    carries no manifest (legacy live: the inner preflight then reports
+    legacy explicitly)."""
+    if not client.collection_exists(src_completions):
+        return False
+    points = client.retrieve(
+        src_completions,
+        ids=[manifest_point_id(src_completions)],
+        with_payload=True,
+    )
+    if not points:
+        return False
+    payload = points[0].payload or {}
+    if payload.get("record_type") != _MANIFEST_KEY_PREFIX or not isinstance(
+        payload.get("manifest"), dict
+    ):
+        return False
+    try:
+        stored = RepresentationManifest.model_validate(payload["manifest"])
+    except Exception:  # noqa: BLE001 — corrupt source reads as absent (legacy path)
+        return False
+    vector = getattr(points[0], "vector", None)
+    if vector is None:
+        return False
+    client.upsert(
+        dst_completions,
+        points=[
+            models.PointStruct(
+                id=manifest_point_id(dst_completions),
+                vector=vector,
+                payload={
+                    "record_type": _MANIFEST_KEY_PREFIX,
+                    "target_collection": dst_completions,
+                    "manifest_digest": digest_of(stored),
+                    "manifest": stored.model_dump(mode="json"),
+                },
+            )
+        ],
+        wait=True,
+    )
+    return True
+
+
+async def read_manifest_async(
+    async_client: AsyncQdrantPoints | QdrantPoints, completions_collection: str
+) -> RepresentationManifest | None:
+    """Async mirror of `read_manifest` for the serving path (lifespan +
+    `/healthz`): stored manifest, or None when absent/legacy/unparseable.
+    Never raises on stored content; transport errors propagate so the
+    caller can report `unknown` instead of guessing. Sync test doubles
+    resolve inline through the shared shim (same discipline as the
+    retrieval legs)."""
+    points = await _await_client(
+        async_client.retrieve(
+            completions_collection,
+            ids=[manifest_point_id(completions_collection)],
+            with_payload=True,
+        )
+    )
+    if not points:
+        return None
+    payload = points[0].payload or {}
+    if payload.get("record_type") != _MANIFEST_KEY_PREFIX:
+        return None
+    manifest = payload.get("manifest")
+    if not isinstance(manifest, dict):
+        return None
+    try:
+        return RepresentationManifest.model_validate(manifest)
+    except Exception:  # noqa: BLE001 — corrupt stored contract reads as legacy
+        return None
+
+
+async def serving_outcome(
+    async_client: AsyncQdrantPoints | QdrantPoints,
+    settings: Settings,
+    completions_collection: str,
+    rules_v: str,
+) -> tuple[str, list[str]]:
+    """One rule for serving readiness (lifespan + `/healthz` share it):
+    (outcome, details). Outcomes: `compatible`, `record_only_drift`,
+    `reembed_required`, `legacy` (non-empty target, no contract),
+    `empty` (nothing stored yet), `unknown` (store unreadable — a
+    transient, never a pass and never a rejection). Attestation raises
+    like the ingest path (config error, before contact)."""
+    require_attested_revision(settings)
+    try:
+        stored = await read_manifest_async(async_client, completions_collection)
+        if stored is None:
+            points, _ = await _await_client(
+                async_client.scroll(
+                    settings.qdrant_collection, limit=1, with_payload=False
+                )
+            )
+            return ("empty", []) if not points else ("legacy", [])
+        return compare_manifests(stored, build_manifest(settings, rules_v))
+    except Exception:  # noqa: BLE001 — an unreadable store is unknown, not incompatible
+        return "unknown", []
+
+
+async def _await_client(res):
+    """Sync/async client shim for the serving path: the pooled async client
+    awaits while sync test doubles resolve inline — one helper serves
+    lifespan + `/healthz` so the twin call sites cannot diverge."""
+    if inspect.isawaitable(res):
+        return await res
+    return res

@@ -128,6 +128,7 @@ def _ingest(
         assert mock_url, "the vLLM-shaped variant needs the mock endpoint URL"
         monkeypatch.setenv("EMBED_BASE_URL", f"{mock_url}/v1")
         monkeypatch.setenv("EMBED_MODEL", "mock-embed")
+        monkeypatch.setenv("EMBED_MODEL_REVISION", "mock-rev")
         monkeypatch.setenv("DENSE_DIM", str(MOCK_DIM))
         if bm25_cache:
             monkeypatch.setenv("BM25_CACHE_DIR", bm25_cache)
@@ -161,6 +162,7 @@ def _agent(monkeypatch, qdrant_url: str, mock_url: str, collection: str, *, embe
         monkeypatch.setenv("EMBED_MODE", "vllm")
         monkeypatch.setenv("EMBED_BASE_URL", f"{mock_url}/v1")
         monkeypatch.setenv("EMBED_MODEL", "mock-embed")
+        monkeypatch.setenv("EMBED_MODEL_REVISION", "mock-rev")
         monkeypatch.setenv("DENSE_DIM", str(MOCK_DIM))
         if bm25_cache:
             monkeypatch.setenv("BM25_CACHE_DIR", bm25_cache)
@@ -313,4 +315,9 @@ def test_vllm_shaped_embed_variant(qdrant_url, mock_url, corpus, tmp_path, monke
 
         health = client.get("/healthz")
         assert health.status_code == 200
-        assert health.json() == {"status": "ok", "qdrant": True, "embed": True}
+        assert health.json() == {
+            "status": "ok",
+            "qdrant": True,
+            "embed": True,
+            "representation": "compatible",
+        }

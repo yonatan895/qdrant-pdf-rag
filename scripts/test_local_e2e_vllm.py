@@ -192,6 +192,7 @@ def setup_local_corpus(settings: Settings, work_dir: Path | str) -> None:
     if settings.embed_mode == "vllm":
         os.environ["EMBED_BASE_URL"] = settings.embed_base_url or ""
         os.environ["EMBED_MODEL"] = settings.embed_model or ""
+        os.environ["EMBED_MODEL_REVISION"] = settings.embed_model_revision
         os.environ["DENSE_DIM"] = str(settings.dense_dim or 1024)
     else:
         os.environ["ALLOW_HASH_MODE"] = "true"
@@ -317,6 +318,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Dense embedding model name (default: Qwen/Qwen3-Embedding-0.6B)",
     )
     parser.add_argument(
+        "--embed-model-revision",
+        default=os.getenv("EMBED_MODEL_REVISION"),
+        help="Operator attestation for the embedding model (issue #362: "
+        "vllm ingest refuses unattested revisions). Defaults to the probed "
+        "model id — override when the serving weights change under one alias.",
+    )
+    parser.add_argument(
         "--dense-dim",
         type=int,
         default=int(os.getenv("DENSE_DIM", "0")) or None,
@@ -377,6 +385,10 @@ def main(argv: list[str] | None = None) -> int:
         allow_hash_mode=(args.embed_mode == "hash"),
         embed_base_url=args.embed_url if args.embed_mode == "vllm" else None,
         embed_model=actual_embed_model if args.embed_mode == "vllm" else None,
+        embed_model_revision=(
+            (args.embed_model_revision or actual_embed_model or "")
+            if args.embed_mode == "vllm" else ""
+        ),
         dense_dim=dense_dim if args.embed_mode == "vllm" else None,
         llm_base_url=args.vllm_url,
         llm_model_reasoning=actual_llm,

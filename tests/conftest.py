@@ -13,6 +13,34 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT))
 
 
+class _HermeticAsyncQdrant:
+    """Empty-store lifespan double (issue #362): the agent lifespan reads
+    the representation manifest at startup, so unit tests must never
+    depend on an ambient sim — refused, stale, or drifted. Empty reports
+    the `empty` outcome (proceed, no warnings); tests that need a verdict
+    patch `qdrant_client.AsyncQdrantClient` themselves (their patch wins:
+    fixtures apply first). Integration-marked tests keep the real class."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    async def retrieve(self, *a, **k):
+        return []
+
+    async def scroll(self, *a, **k):
+        return ([], None)
+
+    def close(self):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_qdrant_client(monkeypatch, request):
+    if request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setattr("qdrant_client.AsyncQdrantClient", _HermeticAsyncQdrant)
+
+
 
 @pytest.fixture(scope="session")
 def synthetic_pdf(tmp_path_factory) -> Path:

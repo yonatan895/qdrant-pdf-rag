@@ -93,7 +93,13 @@ def ensure_staging(
     clone_collection(client, settings, live, staging)
     live_completions = completion_collection_for(live)
     if client.collection_exists(live_completions):
+        from mainframe_rag.ingest.representation import rekey_manifest
+
         clone_collection(client, settings, live_completions, completion_collection_name(staging_settings))
+        # The fixed manifest id embeds the collection name: a byte copy is
+        # unreadable under the staging name, and without the re-key the
+        # inner preflight would misread inherited state as legacy.
+        rekey_manifest(client, live_completions, completion_collection_name(staging_settings))
     return "cloned"
 
 

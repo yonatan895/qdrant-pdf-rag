@@ -94,7 +94,11 @@ from mainframe_rag.ingest.qdrant_io import (
     swap_alias_to,
     upsert_chunks,
 )
-from mainframe_rag.ingest.representation import ensure_manifest, manifest_digest
+from mainframe_rag.ingest.representation import (
+    check_ingest_compatible,
+    ensure_manifest,
+    manifest_digest,
+)
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
 from mainframe_rag.logs import configure_logging
@@ -520,6 +524,24 @@ def _gate_planned_entries(
     return kept
 
 
+def _log_record_drift(settings: Settings, record_drift: list[str]) -> None:
+    """One rule for the record-only drift note (in-place preflight and the
+    publish read-only check share it): warn loudly, proceed — vectors are
+    unaffected, re-evaluation is owed."""
+    if record_drift:
+        log.warning(
+            json.dumps(
+                {
+                    "action": "representation_drift",
+                    "collection": settings.qdrant_collection,
+                    "fields": record_drift,
+                    "result": "record_only",
+                    "note": "re-evaluation owed, never a re-ingest",
+                }
+            )
+        )
+
+
 def _run_impl(
     src: Path,
     progress: Path,
@@ -600,6 +622,19 @@ def _run_impl(
                 "Re-ingest required: re-run with --reingest to re-extract every doc "
                 "(never serve mixed-rule payloads)."
             )
+        if not force_reingest:
+            # Representation preflight (issue #362): the rules gate proves
+            # extraction identity; this proves embedding identity — same
+            # dimension under a different model/revision must never be
+            # skipped against. Runs before any parse worker spawns (req 4:
+            # reject before expensive work, not in an offline report).
+            # Record-only drift (query prefix) proceeds with a warning;
+            # --reingest bypasses like the rules gate and re-embeds
+            # everything downstream, so a bypassed run cannot mix.
+            _, record_drift = check_ingest_compatible(
+                client, settings, completion_collection_name(settings), rules_v
+            )
+            _log_record_drift(settings, record_drift)
         if bulk:
             # Qdrant skill: HNSW builds must not compete with a bulk load.
             set_bulk_indexing(client, settings.qdrant_collection, bulk=True)
@@ -689,11 +724,12 @@ def _run_impl(
             root.set_attribute("ingest.todo", len(tasks))
 
         if not dry_run:
-            # Representation manifest (issue #362, record-only) AFTER the
-            # identity gate: a colliding corpus aborts in planning with zero
-            # Qdrant writes, and steady-state reruns stay zero-write (the
-            # manifest commits only when the stored contract differs).
-            # Enforcement arrives in 362B; this step only records.
+            # Representation manifest (issue #362) AFTER the identity gate:
+            # a colliding corpus aborts in planning with zero Qdrant writes,
+            # and steady-state reruns stay zero-write (the manifest commits
+            # only when the stored contract differs). The preflight above
+            # proved compatibility (or --reingest bypassed it), so this is
+            # the migration commit step.
             assert client is not None
             manifest_d, manifest_committed = ensure_manifest(
                 client, completion_collection_name(settings), settings, rules_v
@@ -1008,9 +1044,20 @@ def _run_publish(
         corpus_fingerprint(prewalked),
     )
     staging_settings = settings.model_copy(update={"qdrant_collection": staging})
-    if live == staging:
+    if live == staging and not force_reingest:
         # Steady state: the derived generation is already live. Re-verify it
-        # read-only instead of cloning onto itself.
+        # read-only instead of cloning onto itself. The representation
+        # read-only check rides along: a revision-only change keeps the
+        # same staging name (generation fingerprints exclude the operator
+        # revision), so without it this branch would re-verify stale
+        # vectors as fine and return 0 — the silent-mix hole.
+        _, record_drift = check_ingest_compatible(
+            client,
+            staging_settings,
+            completion_collection_name(staging_settings),
+            rules_v,
+        )
+        _log_record_drift(staging_settings, record_drift)
         problems = verify_all_complete(
             client, staging_settings, prewalked, load_inventory(progress), rules_v, labels,
         )
@@ -1059,6 +1106,25 @@ def _run_publish(
             f"staging {staging!r} incomplete for {len(problems)} path(s) "
             f"(e.g. {problems[0]!r}) — alias untouched, {live!r} still live."
         )
+    if staging == live:
+        # Forced reconverge of the live generation (publish-mode --reingest
+        # under a representation change): vectors re-embedded in place and
+        # the alias already points here — swapping onto itself would take
+        # a safety snapshot and churn the alias for nothing. Reached only
+        # via the explicit force flag, which relaxes publish atomicity the
+        # same way in-place mode does (documented in docs/ingest.md).
+        log.info(
+            json.dumps(
+                {
+                    "action": "publish",
+                    "alias": settings.qdrant_collection,
+                    "physical": staging,
+                    "result": "already_live_reconverged",
+                    "docs": len(prewalked),
+                }
+            )
+        )
+        return 0
     previous = live
     migrated = None
     if legacy and live is not None:

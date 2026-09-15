@@ -62,7 +62,10 @@ from mainframe_rag.agent.sse import (
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
 from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
+from mainframe_rag.ingest.completion import completion_collection_name
 from mainframe_rag.ingest.embed import build_embedder
+from mainframe_rag.ingest.representation import require_attested_revision, serving_outcome
+from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.logs import configure_logging
 from mainframe_rag.ports import (
     AsyncQdrantPoints,
@@ -283,6 +286,10 @@ async def lifespan(_app: FastAPI):
     if settings.embed_mode == "vllm":
         settings.require_dense_dim()
         settings.require_embed()
+        # Operator attestation (issue #362 req 3): a mutable gateway alias
+        # is not a model identity. Fail fast here (config error, before any
+        # client is built) like every other embed-path misconfiguration.
+        require_attested_revision(settings)
     http_limits = httpx2.Limits(
         max_keepalive_connections=settings.http_max_keepalive_connections,
         max_connections=settings.http_max_connections,
@@ -343,6 +350,38 @@ async def lifespan(_app: FastAPI):
         timeout=settings.qdrant_timeout_s,
         limits=http_limits,
     )
+    # Representation gate (issue #362 req 4): refuse to serve queries
+    # against an incompatible stored generation. Evidence of drift or
+    # legacy refuses to listen; an unreachable store reports unknown
+    # (warn-only — nothing can be served wrong from a store we cannot
+    # read, and /healthz stays the live signal). /healthz re-evaluates
+    # per scrape; query handlers trust this gate plus that signal rather
+    # than paying a Qdrant round-trip per request.
+    try:
+        outcome, outcome_details = await serving_outcome(
+            qdrant,
+            settings,
+            completion_collection_name(settings),
+            extraction_rules_version(),
+        )
+    except Exception as exc:  # noqa: BLE001 — exotic transports report unknown
+        outcome, outcome_details = "unknown", [type(exc).__name__]
+    if outcome in ("reembed_required", "legacy"):
+        raise RuntimeError(
+            f"agent refuses a {outcome} collection "
+            f"{settings.qdrant_collection!r} ({', '.join(outcome_details) or 'no contract'}): "
+            "re-run ingest with --reingest under these settings to re-embed, then restart "
+            "(never serve queries against incompatible vectors)."
+        )
+    if outcome in ("record_only_drift", "unknown"):
+        log.warning(
+            json_log(
+                "lifespan",
+                "representation_not_proven",
+                outcome=outcome,
+                details=",".join(outcome_details),
+            )
+        )
     # OTel tracing (issue #83): OFF unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
     # The provider/exporter live for the process; flush + shutdown at lifespan
     # exit so in-flight spans land even on graceful shutdown. Every bounded
@@ -477,6 +516,12 @@ class HealthzResponse(BaseModel):
     status: str = "ok"
     qdrant: bool
     embed: bool | None = None
+    # Stored-representation readiness (issue #362): compatible |
+    # record_only_drift | empty (servable) vs reembed_required | legacy |
+    # unknown (degraded — smoke.sh fails closed on degraded). Lifespan
+    # refuses the hard cases at startup; this is the live per-scrape
+    # signal for stores that change under a running agent.
+    representation: str | None = None
 
 
 class ErrorEnvelope(BaseModel):
@@ -660,8 +705,22 @@ async def healthz() -> HealthzResponse:
             embed_ok = False
             log.warning(json_log("healthz", "health", embed_error=str(exc)[:200]))
 
-    status = "ok" if qdrant_ok and embed_ok is not False else "degraded"
-    return HealthzResponse(status=status, qdrant=qdrant_ok, embed=embed_ok)
+    try:
+        representation, _ = await serving_outcome(
+            qdrant,
+            settings,
+            completion_collection_name(settings),
+            extraction_rules_version(),
+        )
+    except Exception as exc:  # noqa: BLE001 — exotic doubles report unknown
+        representation = "unknown"
+        log.warning(json_log("healthz", "health", representation_error=type(exc).__name__))
+
+    representation_ok = representation in ("compatible", "record_only_drift", "empty")
+    status = "ok" if qdrant_ok and embed_ok is not False and representation_ok else "degraded"
+    return HealthzResponse(
+        status=status, qdrant=qdrant_ok, embed=embed_ok, representation=representation
+    )
 
 
 @app.post("/v1/search", response_model=SearchResponse)

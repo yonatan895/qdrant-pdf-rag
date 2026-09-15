@@ -373,24 +373,34 @@ thread pool.
    `LOCK_EX|LOCK_NB` on `<progress>.lock`, fail-closed); disjoint Jobs
    against one collection must still run serially. `_DocLocks` remains the
    in-process per-revision guard only.
-- **Representation manifest, record-only** (issue #362 step 1,
+- **Representation manifest, enforced** (issue #362,
   `ingest/representation.py`): every non-dry run ensures one fixed-ID
   manifest point in `<collection>__completions` (get-by-id, no index;
   written only when the stored contract differs, so steady-state reruns
   stay zero-write) plus an `action: representation` run-log line, and
   every completion + inventory record carries the 16-hex `manifest_digest`. The manifest is
   the stored-representation contract — extraction rules, identity schema
-  (`source_rev` since the 361B migration), dense mode/model/operator-revision/
+  (`source_rev`), dense mode/model/operator-revision/
   dim, contextual block (enabled, LLM id, prompt version, max chars),
   sparse model/weights revision — plus the record-only query prefix
   (query-side drift is an evaluation event, never a re-embed trigger).
-  Enforcement is OFF: skips still follow the generation fingerprint, so a
-  mid-step representation change is recorded but not yet rejected — the
-  362B gate (ingest preflight + serving readiness, operator attestation
-  via `EMBED_MODEL_REVISION`, legacy/mixed explicit outcomes) closes that.
   The gateway exposes only mutable aliases, so the dense revision is an
-  operator-declared fingerprint, never an inferred weight id; empty means
-  unattested.
+  operator-declared fingerprint, never an inferred weight id; vllm mode
+  with a blank `EMBED_MODEL_REVISION` fails closed (hash mode exempt).
+- **Representation preflight (issue #362):** before any parse worker
+  spawns, the run proves the target accepts its contract
+  (`check_ingest_compatible`, one rule with the serving check). Explicit
+  outcomes: empty target proceeds (the run commits its manifest);
+  compatible or record-only drift proceeds (drift logs
+  `action: representation_drift` — re-evaluation owed, never a re-ingest);
+  re-embed drift or legacy unversioned state raises with the `--reingest`
+  remediation. `--reingest` is the one deliberate migration step (same
+  override idiom as the #124 rules gate, which runs first so its error
+  precedence is unchanged). Skip paths share the contract structurally:
+  the preflight proves run-level compatibility before any skip is
+  evaluated, so a stale completion can never cause a skip under a drifted
+  representation; marker `manifest_digest` values are audit, not a second
+  gate.
 - **Source-revision identity** (issue #361, `ingest/identity.py` +
   revision-keyed pipeline): three identities — printed `doc_id`
   (family/citation key), `source_rev`
@@ -447,12 +457,21 @@ thread pool.
   source triple + walked-corpus content); an identical rerun converges the
   same staging (crash-safe resume), changed inputs address a new one, and a
   derived name equal to the live physical means "already published"
-  (read-only re-verify, no clone, no swap). Staging starts as a
+  (read-only re-verify, no clone, no swap — plus the representation
+  read-only check, since a revision-only change keeps the same staging
+  name and would otherwise re-verify stale vectors as fine). Staging starts as a
   server-side snapshot-clone of live (points AND completion markers, so
-  unchanged documents skip without re-embedding) and converges with the
-  standard parse/upsert/verify pipeline; the alias swaps in one atomic
+  unchanged documents skip without re-embedding) and the manifest is
+  re-keyed onto the staging id verbatim (`rekey_manifest` — the fixed
+  point id embeds the collection name, so a byte copy is unreadable; the
+  contract is carried, never recomputed, or a drifted run would see its
+  own wanted contract and sail through its preflight); the inner run then
+  enforces the same preflight, so a cloned staging under a changed
+  representation fails closed until `--reingest` reconverges it. The alias swaps in one atomic
   delete+create call only after `verify_all_complete` passes every walked
-  document. Swap failure leaves the previous generation serving (job
+  document. Publish-mode `--reingest` against the live generation
+  reconverges it in place and skips the self-swap (`already_live_reconverged`
+  — explicit force relaxes publish atomicity like in-place mode). Swap failure leaves the previous generation serving (job
   fails, staging retained for retry). `--limit` subsets and empty corpora
   are refused fail-closed. Corpus deletions are NOT swept (status quo —
   stale points survive until an operator cleans them, same as in-place
