@@ -1,9 +1,8 @@
 # Testing reference
 
-Normative test rules for this repo. `AGENTS.md` states what to run before
-every push; this file states how to write the tests. The two files agree —
-if they ever conflict, `AGENTS.md` wins and this file gets fixed in the
-same PR.
+Normative test-design rules. [Live-stack](live-stack.md#verification-minimums)
+owns required verification; [agent workflow](agent-workflow.md#conflicts) owns
+conflict handling. Distinguish policy, implementation, acceptance and history.
 
 Jump list: [hermetic](#unit-tests-are-hermetic) ·
 [claimed-path](#tests-must-lock-the-claimed-path) ·
@@ -16,8 +15,8 @@ Jump list: [hermetic](#unit-tests-are-hermetic) ·
 [bench](#bench-make-bench-githubworkflowsbenchyml-github-only-never-a-pr-gate) ·
 [harness](#harness-invariants-all-harness-tiers-l1l2l3l4) · [reports](#reports)
 
-Read only the sections your change touches — L2/L3/L4 have no business in
-a splitter-change review.
+Read sections relevant to the actual impact, including affected unchanged
+consumers and interaction tests; unrelated expensive tiers are not useful.
 
 `pytest` is the gate. `make check` runs `ruff check`, `mypy src`, and the
 unit suite. Tests generate original PDFs at runtime
@@ -30,8 +29,9 @@ disabled on short docs on purpose.
 
 ## Unit tests are hermetic
 
-Do not call live Qdrant, vLLM, or the internet. Fake the client. Ingest
-tests use `--dry-run`.
+Do not call live Qdrant, vLLM, or the internet. Fake the client. Parse-only ingest
+tests can use `--dry-run`; persistence/publication regressions must exercise the
+real non-dry control path against faithful fakes so the claimed behavior runs.
 
 - Patch `httpx2.get` / `httpx2.post` in every unit test that can reach them. Hostnames like `embed-host:9000` are live network. A test that “works because connect failed” is invalid. For scripts that also stream, patch `httpx2.stream` too — or swap the whole `httpx2` module attribute for a URL-keyed fake (the `FakeGateway` pattern in `tests/test_probe_gateway.py`: first-match-wins routes, a `(method, url, headers)` call log, canned-server failures only).
 - Requesting the `monkeypatch` fixture does nothing by itself. Register every mutated env key with `monkeypatch.setenv` / `monkeypatch.delenv` **before** the code under test runs, or snapshot with `monkeypatch.setattr(os, "environ", dict(os.environ))`. Autouse fixtures must call `monkeypatch`.
@@ -107,17 +107,9 @@ Collection-dimension logic: missing, matching, and mismatched (named `dense` dic
 
 ## Tiers
 
-Verification tiers in this repository map directly to the 7-rung verification ladder defined in `docs/live-stack.md` §3:
-
-| Ladder Rung | Target / Command | Verification Tier | Scope & Gate |
-|---|---|---|---|
-| **Rung 1** | `make check` | Hermetic Unit Tier | `ruff check src tests`, `mypy src`, `pytest tests/` (mocked clients, fakes in `tests/fakes.py`) |
-| **Rung 2** | `make gate-l1` | Ephemeral Sim Retrieval Gate | Synthetic golden corpus in hash mode; required PR check in GitHub CI & GitLab CI |
-| **Rung 3** | `make eval-paraphrase` | Paraphrase Retrieval Tier | Scratch collection (`paraphrase-manuals`), non-verbatim semantic retrieval A/B |
-| **Rung 4** | `make sim` | Integration Sim Tier | Real PDFs, docker Qdrant (`images.txt` pin), `scripts/mock_vllm.py`; fail-closed |
-| **Rung 5** | `make eval EMBED_MODE=vllm` | Full Eval Tier | Dev golden set (121 queries) against mode-keyed baseline on live stack |
-| **Rung 6** | Live Agent Probes | Serving / Probe Tier | `/healthz` + `/livez`, injection trap refusal, grounded citation generation, body caps, `/ui` |
-| **Rung 7** | Feature A/B Numbers | Retrieval A/B Tier | 2×2 matrix and per-query attribution documented in PR body for ranking changes |
+Required tier selection and commands are maintained only in
+[live-stack](live-stack.md#verification-minimums). The sections below describe
+how those instruments work and what their results can establish.
 
 ### Air-gap deployment tier (`make airgap-dryrun`, `tests/test_airgap_*.py`, local Kind)
 
@@ -186,3 +178,43 @@ gate-l1/L1 checks stay the PR gate.
 ### Reports
 
 `scripts/render_report.py` (`make eval-report` / `eval-html` / `eval-compare` / `bench-report` / `bench-html` / `bench-compare`). `scripts/query_demo.py` (`make query-demo`, `make ask`) is inspection, not a substitute for eval.
+
+<a id="evidence-design"></a>
+## Counterexamples, evidence and consolidation
+
+**Policy authority:** #397 (15 September 2026); broader consolidation is #388,
+and general CI enforcement is #370. Required commands remain in live-stack.
+A documented obligation is not automatically enforced CI: the current `ci.yml`
+unit job invokes pytest, not the entire `make check` command.
+
+For a claimed invariant, retain an independent expected outcome. Ask what wrong
+implementation could pass the local assertion, then test that boundary. Metadata
+counts/digests can prove only the membership and semantics their assertions
+actually cover. Apply missing/corrupt data, interruption, retry, concurrent
+readers/writers, warm caches, rollback and configuration cases where relevant;
+record why exclusions do not affect the contract.
+
+Existing homes: completion/publication/representation/serving suites cover
+those boundaries; API/chat/webui/stream suites cover adapters and completion;
+air-gap shell suites cover configuration precedence and both render paths.
+Prefer adding a regression to these behavior-focused suites. Every new handler,
+branch and error shape needs a reachable case. Input handling should cover empty,
+multi-digit, wrapped (quotes, blockquotes, backticks, parentheses, bold, links,
+angle brackets), inline, top-placed, missing-blank-line and case-folded forms when
+those inputs are meaningful to the parser.
+
+Before consolidating tests, map `old case → retained behavior and owner` or give
+a reason to retire an implementation-only pin. Never delete/weaken a failing
+product test to get green. A fake must preserve the real operation's projection,
+capability, overwrite, filtering and alias semantics; do not normalize every
+return shape or invent a universal fake framework. Examples: omitted
+`with_vectors` must not return vectors; absent batch capability is different from
+a method that raises; upsert replaces an existing same-ID point. Read-only
+contracts must assert no writes, rather than merely successful return values.
+
+Evidence records separate observed execution (SHA, command, exit, counts and
+location), static reasoning, proposed tests and unavailable checks. A skipped
+required check is not a pass. Historical green runs are not current release
+evidence. The PR table can group related tests; do not fabricate a run or require
+a permanent artifact for every small assertion. New context-tool tests use
+temporary trees/mocked subprocesses, not live Docker, GPU or a private corpus.

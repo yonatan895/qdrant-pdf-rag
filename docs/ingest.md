@@ -110,7 +110,7 @@ Section-outline chunking with per-statement code protection. Point id =
 `UUID5(NAMESPACE_URL, "source_rev|heading_path|page_start|ordinal")`
 where `source_rev` is `normalize(vendor)|normalize(product)|normalize(version)|sha256`
 (issue #361): same-form-number revisions mint disjoint point ids, so a
-second writer's upsert can never collide with the first. The UUID5-of-key
+different revisions do not collide; same-revision writers still need coordination. The UUID5-of-key
 scheme never changes; the payload `doc_id` stays the printed family key
 for citations and filters.
 
@@ -311,8 +311,8 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   `source_rev`, so coexisting revisions under one `doc_id` verify
   independently and a refresh retires exactly its lineage's markers (plus
   sole-history legacy markers). The
-  generation binds source hash + representation fingerprint
-  (`rules_v|embed_mode|embed_model|dense_dim|context-flag`) + CLI source
+  generation binds source hash + the `representation_fingerprint` projection
+  (field policy owned by `representation.REEMBED_FIELDS`) + CLI source
   triple (`vendor|product|version` overrides, `source_labels()`) + target
   collection, with expected chunk count and chunk-ID/content digests.
   Written only after every batch is acknowledged and the stored points
@@ -396,10 +396,9 @@ thread pool.
   `pending` before any delete/upsert and flips it `committed` only on the
   success path: zero document failures AND a paginated residue scan
   proving no completion marker under another `manifest_digest` remains.
-  A partial source walk (a doc removed from the corpus, a retained
-  sibling revision, a crash partial) therefore blocks the commit and the
-  contract stays pending, so old vectors can never be certified as the
-  new representation; `--limit` is refused for any migration
+  Retained stale markers block the commit and leave the contract pending.
+  Unmarked old data is not covered by that scan; see the publication contract
+  below for the remaining #391 gap; `--limit` is refused for any migration
   (`refuse_limited_migration`) except a fresh empty-target bootstrap. A
   pending contract is never skippable (`check_ingest_compatible`),
   servable (`serving_outcome`/lifespan; `/healthz` degrades), or
@@ -447,8 +446,10 @@ thread pool.
   `ibm_pdf.resolve_doc_id` helper the workers use (filename-form without
   opening, else first-four-pages text), so prescan keys and worker doc ids
   cannot diverge; cost is one serial open + short text scan per file on top
-  of the hashing the parent already does. Mount relocation changes nothing
-  (absolute paths are never identity).
+  of the hashing the parent already does. Mount relocation does not change
+  source-revision keys. Publication currently hashes walked path strings in
+  `corpus_fingerprint`, so physical build names can change with a mount path;
+  this is a distinct identity and remains a #361/#391 design question.
 - **Refresh lineage rule:** a refresh replaces precisely the revision named
   by inventory lineage (the path's previous `source_rev`, threaded from
   the parent plan into the upsert stage). Committed coexisting revisions
@@ -479,8 +480,9 @@ thread pool.
 - **Refresh visibility — alias publication** (`INGEST_ALIAS_PUBLISH=true`,
   default off; enabling by default is a dedicated follow-up PR; issue #359
   req 4/5, `ingest/publish.py` + `qdrant_io` alias/snapshot helpers):
-  readers resolve `<collection>` through a Qdrant alias, so they see a
-  complete old or complete new generation, never an uncommitted mix.
+  readers resolve `<collection>` through a Qdrant alias. The ordinary
+  distinct-staging cutover keeps the old target during preparation; complete
+  coverage and immutable reader lifetime have the limitations below.
   Each publish run derives a deterministic staging generation
   `<collection>__gen<genfp><corpusfp>` (representation fingerprint + CLI
   source triple + walked-corpus content); an identical rerun converges the
@@ -494,8 +496,8 @@ thread pool.
   server-side snapshot-clone of live (points AND completion markers); a
   marker certifies its own `target_collection`, so the walked corpus
   re-embeds into the new generation rather than skipping across physicals
-  — the clone guarantees an untouched, complete old generation until the
-  swap, not incremental re-embedding. The manifest is
+  — the clone preserves the old physical during ordinary distinct-staging
+  preparation; it does not prove full coverage or incremental re-embedding. The manifest is
   re-keyed onto the staging id verbatim (`rekey_manifest` — the fixed
   point id embeds the collection name, so a byte copy is unreadable; the
   contract AND its pending/committed state are carried, never recomputed,
@@ -505,8 +507,8 @@ thread pool.
   under a changed representation fails closed until `--reingest`. With
   `--reingest` the contract opens `pending` on the staging, every walked
   doc re-embeds, the residue proof commits it, and only then does the
-  alias swap — the swap also requires the committed state
-  (`verify_all_complete`). Publish-mode `--reingest` reconverges the live
+  alias swap. `verify_all_complete` rejects a present pending record but
+  currently tolerates an absent final record (known gap below). Publish-mode `--reingest` reconverges the live
   physical in place **only** when its stored contract IS the wanted one
   (same-generation repair; `require_in_place_reconverge`) and skips the
   self-swap (`already_live_reconverged`); any representation change
@@ -528,7 +530,7 @@ thread pool.
   change) and re-ingest on the first run — unchanged docs included; fail
   closed, never a silent pass. Alias-publish deployments publish the
   re-ingest as a new staging generation and swap when it verifies; the old
-  physical keeps its complete old generation **and its own contract
+  physical retains its old data **and its own contract
   metadata** (`<old>__completions`), so an alias rollback selects matching
   metadata, not the new contract.
 - **Rollback / GC (operator actions, never automatic):** the superseded
@@ -579,3 +581,133 @@ Contract tests: `tests/test_run_ingest.py` (`main`, `resolve_workers`,
 `tests/test_ingest_identity.py` (dedup/collision planning gate),
 `tests/test_ingest_revisions.py` (revision coexistence/refresh/migration),
 `testing.md` pickle round-trip.
+
+<a id="identity-contract"></a>
+## Identity contract and proof boundaries
+
+**Status:** implemented with unit evidence for the named identity functions;
+complete publication safety remains partial. **Authority:** #361, #362 and #391;
+context/status clarification authorized by #397 (15 September 2026).
+**Decision owners:** `identity.source_rev_key`, `ibm_pdf.resolve_doc_id`,
+`chunk.make_chunks`, `completion.representation_fingerprint` and
+`publish.staging_name_for`.
+
+| Identity / input | Producer → persisted state → consumers | Lifetime / distinction |
+|---|---|---|
+| Printed document identity | Parser → payload `doc_id` → citation formatting, family filters, eval | A printed family key is not a destructive revision selector |
+| Source revision | `source_rev_key` → chunk payload, inventory, completion → locks/deletes/refresh planning | Normalized labels and source content; mount location is not identity |
+| Representation | `representation.build_manifest` and `compare_manifests` → fixed-ID contract and completion digest → ingest preflight, serving | `REEMBED_FIELDS` in code is the authoritative field policy; no second hash-field list here |
+| Physical build/publication | `doc_generation_id`, publication fingerprints → physical collection, its completion collection, alias → reader gate | Deterministic naming binds inputs; it neither makes storage immutable nor serializes publishers |
+| Query-only configuration | `compare_manifests` record-only classification → manifest/log evidence → query embedding/evaluation | Query-only drift can require evaluation without re-embedding stored documents |
+
+**Preconditions/failures:** identity attestation is supplied by the model owner;
+blank vLLM revision must fail even with force. Deduplication and collision checks
+precede destructive work; ambiguous legacy lineage fails rather than deleting a
+sibling. Revision-separated UUIDs prevent cross-revision collisions, but two
+writers of the same revision can still target the same points.
+**Evidence:** `tests/test_ingest_identity.py`, `tests/test_ingest_revisions.py`,
+`tests/test_representation.py::test_fingerprint_revision_only_change_alters_identity`
+and `test_fingerprint_rules_and_prefix_policy` pin identity behavior. They do not
+prove corpus-wide coverage or concurrent publication safety. #361 retains its
+acceptance ownership; publication/lifetime gaps belong to #391.
+
+<a id="publication-contract"></a>
+## Completeness, publication and writer coordination
+
+**Status: partially implemented.** **Authority:** #359/#391; #397 documents the
+remaining gap, not a runtime fix. **Decision owner:** `completion` verification,
+`run_ingest._commit_migration_representation`, `publish.verify_all_complete`,
+`run_ingest._run_publish`. Static inspection below is at
+`9fece72df92ca5da414bc8f5b05cb2f89fcd18c8`; it is not a newly executed reproduction.
+
+**Required invariant:** all searchable points in a published generation are
+attributable to verified generation coverage. A scan finding no stale completion
+markers does **not** establish coverage of unmarked points. Per-walked-document
+success does not establish coverage of retained, removed or unwalked data.
+
+**Inputs and transitions:** source walk + wanted representation + prior physical
+and inventory → resolve → prepare staging/metadata → ingest and verify documents
+→ verify complete target and contract → publish alias → retain old target for
+rollback. Producers are ingest/admin writers; persistent boundaries are data,
+completion records, manifest, inventory and alias; consumers include serving,
+readiness, retrieval, answer/chat/console, recovery tools and evaluation.
+
+**Current behavior and limits:**
+
+- `is_doc_complete` checks marker binding plus stored point counts/digests;
+  vector/chunk length mismatches fail before load; zero chunks are explicit
+  `empty`, never a successful document publication.
+- Representation migration writes `pending`, then commits after no document
+  failures and `stale_completion_markers` finds no differently stamped markers.
+  This detects marked residue. It does not inspect all unmarked searchable data.
+- `verify_all_complete` checks the walked inventory and rejects a present pending
+  contract. Its `record is not None` guard does not reject missing/corrupt/unreadable
+  final metadata by itself. Required metadata absence must not certify a populated
+  target; this is an outstanding #391 acceptance gap.
+- Distinct staging plus the alias update isolates ordinary generation cutover
+  only under the coverage and writer assumptions. In-place mode (default),
+  forced same-representation repair of live staging, and first legacy-name
+  conversion do not offer uninterrupted immutable-generation reads.
+- Corpus deletion is not automatic garbage collection. On a disposable synthetic
+  regenerated corpus, use an isolated fresh target; the legacy delete-and-rebuild
+  recipe is destructive and is not an instruction to delete a live collection.
+  Real-corpus recovery follows [its runbook](local-real-corpus.md).
+
+**Coordination/lifetime assumptions:** serialize the **entire** resolve/prepare/
+ingest/verify/publish interval across every writer/admin actor to the same target.
+The current `acquire_run_lock(progress)` is a local advisory file lock in the
+inner ingest path, released before the outer final verification/swap. Different
+progress paths/hosts and overlapping publishers are not covered; `_DocLocks`
+only serializes revisions inside one process. Supported operation requires
+operator-serialized jobs, not a claim of distributed lock enforcement. No HA
+claim follows from a single-node run.
+
+**Maintenance and rollback:** before in-place repair, operators must quiesce
+writers and drain affected readers; setting a manifest pending or waiting a TTL
+alone does not drain in-flight requests. Preserve a restorable backup and the old
+physical **and its own metadata**. Alias rollback still needs compatible settings
+and reader revalidation. Retain old state until readers have drained; GC is an
+explicit operator action, never automatic. See [serving lifetime](agent.md#serving-contract)
+and [release recovery](crc-release-verification.md).
+
+**Existing evidence:** `tests/test_ingest_completion.py` checks per-document failure
+boundaries; `tests/test_ingest_publish.py` includes staging visibility, failed
+swap recovery, pending refusal, forced same-contract reconvergence and rollback.
+Those tests are narrower than full coverage, immutable reader lifetime or complete
+publication serialization. Extend these homes for #391's unmarked-data, missing
+final-metadata, active-reader, warm-cache and overlapping-publisher counterexamples;
+retain independent expected membership and real client projection semantics.
+
+<a id="metadata-contract"></a>
+## Representation metadata outcomes
+
+**Status: partially implemented.** **Authority:** #362/#391; #397 status audit.
+**Decision owner:** `representation.read_manifest_record`, its async counterpart,
+`check_ingest_compatible`, `serving_outcome`, and the final publication check.
+**Inputs/producers:** operator-attested wanted contract and ingest-written
+manifest envelope → `<physical>__completions` → ingest, publication, reader gate.
+
+| State / observation | Required decision and currently visible distinction |
+|---|---|
+| Explicitly empty/bootstrap | Establish no searchable data; readiness may allow bootstrap, requests still refuse |
+| Compatible committed | Eligible under the coverage/lifetime preconditions, not proof of those preconditions |
+| Record-only drift | Existing policy permits reads; record and evaluate query behavior |
+| Pending | Refuse serving/skipping/publication; resume deliberately, never promote merely on startup |
+| Missing on a populated target | Must refuse certification; serving classifies legacy; final publication guard has the gap above |
+| Corrupt | Must not authorize a populated target; decoder folds malformed records into absent/legacy |
+| Unsupported schema/state | No dedicated unsupported outcome: a schema-version mismatch compares as re-embed drift; an unfamiliar envelope state is noncommitted/pending |
+| Unreadable store | Must not authorize a populated target; sync manifest retrieval folds fetch errors into absent (existence-check errors can propagate), async serving reports unknown |
+| Representation drift | Refuse until approved re-embedding migration; force never supplies missing model attestation |
+
+The desired distinctions above are not new implemented enum values. Missing,
+corrupt, unsupported and unreadable must stay separate in diagnosis even where
+current helpers collapse them. No new schema or defaults are introduced here.
+`begin_manifest` can retain an already committed same-contract record during
+forced repair; pending is not a universal mutation barrier. Cached validation
+has the [reader contract's limits](agent.md#serving-contract).
+
+**Evidence:** `tests/test_representation_gate.py` covers empty, compatible, drift,
+corrupt-as-legacy, pending and unreadable-serving paths; `tests/test_serving_gate.py`
+checks physical metadata binding. These do not close the final-verifier or
+whole-data coverage gaps under #391. Observability has a separate bounded fail-open
+policy ([agent logging/tracing](agent.md)); do not copy it into required metadata.
