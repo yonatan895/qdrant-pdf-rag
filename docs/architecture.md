@@ -192,14 +192,15 @@ The agent enforces strict grounding guarantees and adaptive reasoning depth befo
    The prompt dynamically includes a concrete few-shot example using `hits[0].cite` in the instructions to enforce uniform formatting from both large reasoning models and quantized edge models (e.g. Gemma 4 INT4 QAT).
 
 5. **Citation Resolution (three passes + abstention zero-cite):**
-   - **Primary Pass (Explicit Block):** Looks for a terminal `Citations:` section. Each listed citation is normalized and matched against the allowed search hit citations (`allowed_citations = {h.cite for h in hits}`).
+   - **Allowlist Provenance (issue #364):** The citation allowlist and the `[n]` label mapping come exclusively from `PromptEvidence`, the final supplied-evidence manifest returned by `build_messages`/`build_chat_messages` — the excerpts that survived packing and every verification trim. Retrieved hits omitted from the prompt, and the tail's worked example cite, are never eligible. The retrieval list is retained separately on the core output as retrieved candidates.
+   - **Primary Pass (Explicit Block):** Looks for a terminal `Citations:` section. Each listed citation is normalized and matched against `evidence.allowed_citations`.
    - **Trailing Bare Cites:** A blank-tolerant tail scan for allowed cite-shaped lines **without** any header.
-   - **Fallback Pass (Bracketed Index Resolution):** Only when the passes above found nothing, the parser scans for bracketed number references `\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]` (matching prompt tokens like `[1]`, `[2]`, `[1, 2]`) and resolves them to `ordered_cites[index - 1]`. Resolution sets `citations_inferred` (issue #269) and records the resolved 1-based indices as `inferred_indices` (issue #299): both ride `/v1/answer` JSON and the SSE `final`, and the eval/L2 never count inferred cites as grounding.
+   - **Fallback Pass (Bracketed Index Resolution):** Only when the passes above found nothing, the parser scans the fence-processed content for bracketed number references `\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]` (matching prompt tokens like `[1]`, `[2]`, `[1, 2]`) and resolves them through the manifest's prompt labels — not retrieval rank. Resolution sets `citations_inferred` (issue #269) and records the resolved 1-based labels as `inferred_indices` (issue #299): both ride `/v1/answer` JSON and the SSE `final`, and the eval/L2 never count inferred cites as grounding. Markers that occur only in dropped thinking/extracted script fences are never promoted.
    - **Parenthesis Immunity:** Parentheses `(...)` are deliberately excluded from inference to avoid false positives on standard mainframe technical notation such as `z/OS (3.1)`, `SYS1.PARMLIB(IEASYS00)`, `(2)`, or `APARs (1, 2)`.
    - **Abstention zero-cite (#135/#305):** `parse_answer` clears citations when `is_abstention` holds (refusal marker + under 200 chars of non-refusal remainder), so a refusal can never look grounded by citing real-but-unsupporting chunks.
 
 6. **Body Stripping & Verification:**
-   Any hallucinated citation lines that match the citation regex but are not in `allowed_citations` are stripped from the response text before transmission. Mid-sentence narrative text mentioning document IDs is preserved under the standalone-line rule.
+   Any hallucinated citation lines that match the citation regex but are not in the supplied-evidence allowlist are stripped from the response text before transmission. Mid-sentence narrative text mentioning document IDs is preserved under the standalone-line rule.
 
 7. **Live-State Enrichment (ADR-0003, phase 3 — not yet wired):**
    The routing/fetch layer shipped in phase 2 (`agent/live_state.py`,

@@ -24,6 +24,8 @@ from opentelemetry.trace import Status, StatusCode
 
 from mainframe_rag.agent.answer import (
     ParsedAnswer,
+    PreparedPrompt,
+    PromptEvidence,
     as_chat_result,
     assert_reasoning_model,
     build_chat_messages,
@@ -155,12 +157,133 @@ class AnswerCoreOutput:
     ttft_ms: int | None
     complexity: str
     parsed: ParsedAnswer
+    # Final supplied-evidence manifest (issue #364): `hits` stays the
+    # retrieval list (retrieved candidates for diagnostics); `evidence` is
+    # what the citation allowlist was actually derived from.
+    evidence: PromptEvidence
 
 
 async def _await_retrieval(res: Any) -> tuple[list[SearchHit], str, dict[str, int]]:
     if inspect.isawaitable(res):
         return await res
     return res
+
+
+def _resolve_reasoning_effort(
+    input_data: AnswerCoreInput, settings: Settings, complexity: str
+) -> ReasoningEffort:
+    """Explicit override wins when valid; else the complexity default. One
+    rule for both executors so JSON and SSE cannot pick different efforts."""
+    if input_data.reasoning_effort in VALID_REASONING_EFFORTS:
+        return input_data.reasoning_effort
+    return (
+        settings.llm_reasoning_effort_complex
+        if complexity == "complex"
+        else settings.llm_reasoning_effort_simple
+    )
+
+
+async def _build_prepared_prompt(
+    input_data: AnswerCoreInput,
+    deps: AnswerCoreDeps,
+    hits: list[SearchHit],
+    complexity: str,
+    effort: str,
+    root_ctx: Any,
+) -> PreparedPrompt:
+    """One prompt-build owner for the JSON and streaming executors: identical
+    budget inputs, identical evidence manifest, one prompt.build span."""
+    settings = deps.settings
+    max_context = (
+        settings.prompt_max_context_chars_complex
+        if complexity == "complex"
+        else settings.prompt_max_context_chars
+    )
+    with tracer.start_as_current_span(
+        "prompt.build",
+        context=root_ctx,
+        attributes={
+            "rag.query_complexity": complexity,
+            "rag.reasoning_effort": effort,
+            "rag.max_context_chars": max_context,
+        },
+    ):
+        if input_data.is_chat and input_data.messages:
+            build_chat_fn = deps.build_chat_messages_fn or build_chat_messages
+            return await asyncio.to_thread(
+                build_chat_fn,
+                input_data.messages,
+                hits,
+                product=input_data.product,
+                version=input_data.version,
+                splunk_context=input_data.splunk_context,
+                max_context_chars=max_context,
+                max_chunk_chars=settings.prompt_max_chunk_chars,
+                max_chunk_chars_narrative=(
+                    settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
+                ),
+                splunk_context_max_chars=settings.splunk_context_max_chars,
+                complexity=complexity,
+                tokenizer=deps.tokenizer,
+                settings=settings,
+                order=settings.prompt_order,
+            )
+        build_msg_fn = deps.build_messages_fn or build_messages
+        return await asyncio.to_thread(
+            build_msg_fn,
+            input_data.query,
+            hits,
+            product=input_data.product,
+            version=input_data.version,
+            splunk_context=input_data.splunk_context,
+            max_context_chars=max_context,
+            max_chunk_chars=settings.prompt_max_chunk_chars,
+            max_chunk_chars_narrative=(
+                settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
+            ),
+            splunk_context_max_chars=settings.splunk_context_max_chars,
+            complexity=complexity,
+            tokenizer=deps.tokenizer,
+            settings=settings,
+            order=settings.prompt_order,
+        )
+
+
+def _finalize_answer(
+    content: str,
+    prepared: PreparedPrompt,
+    *,
+    hits: list[SearchHit],
+    kind: str,
+    timings: dict[str, int],
+    complexity: str,
+    finish_reason: str,
+    usage: TokenUsage,
+    llm_ms: int,
+    ttft_ms: int | None,
+) -> AnswerCoreOutput:
+    """One finalize owner for the JSON and streaming executors: citation
+    parsing consumes the prepared evidence manifest, and the output carries
+    the retrieval list separately (issue #364)."""
+    parsed = parse_answer(content, prepared.evidence)
+    return AnswerCoreOutput(
+        answer=parsed.answer,
+        citations=parsed.citations,
+        citations_inferred=parsed.citations_inferred,
+        inferred_indices=parsed.inferred_indices,
+        script=parsed.script,
+        script_lang=parsed.script_lang,
+        query_kind=kind,
+        hits=hits,
+        finish_reason=finish_reason,
+        usage=usage,
+        timings=timings,
+        llm_ms=llm_ms,
+        ttft_ms=ttft_ms,
+        complexity=complexity,
+        parsed=parsed,
+        evidence=prepared.evidence,
+    )
 
 
 async def execute_answer_core(
@@ -223,73 +346,12 @@ async def execute_answer_core(
             ttft_ms=None,
             complexity=complexity,
             parsed=ParsedAnswer(answer=empty_text),
+            evidence=PromptEvidence(),
         )
 
-    # 3. Prompt building
-    max_context = (
-        settings.prompt_max_context_chars_complex
-        if complexity == "complex"
-        else settings.prompt_max_context_chars
-    )
-    effort = (
-        input_data.reasoning_effort
-        if input_data.reasoning_effort in VALID_REASONING_EFFORTS
-        else (
-            settings.llm_reasoning_effort_complex
-            if complexity == "complex"
-            else settings.llm_reasoning_effort_simple
-        )
-    )
-
-    with tracer.start_as_current_span(
-        "prompt.build",
-        context=root_ctx,
-        attributes={
-            "rag.query_complexity": complexity,
-            "rag.reasoning_effort": effort,
-            "rag.max_context_chars": max_context,
-        },
-    ):
-        if input_data.is_chat and input_data.messages:
-            build_chat_fn = deps.build_chat_messages_fn or build_chat_messages
-            prompt_messages = await asyncio.to_thread(
-                build_chat_fn,
-                input_data.messages,
-                hits,
-                product=input_data.product,
-                version=input_data.version,
-                splunk_context=input_data.splunk_context,
-                max_context_chars=max_context,
-                max_chunk_chars=settings.prompt_max_chunk_chars,
-                max_chunk_chars_narrative=(
-                    settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
-                ),
-                splunk_context_max_chars=settings.splunk_context_max_chars,
-                complexity=complexity,
-                tokenizer=deps.tokenizer,
-                settings=settings,
-                order=settings.prompt_order,
-            )
-        else:
-            build_msg_fn = deps.build_messages_fn or build_messages
-            prompt_messages = await asyncio.to_thread(
-                build_msg_fn,
-                input_data.query,
-                hits,
-                product=input_data.product,
-                version=input_data.version,
-                splunk_context=input_data.splunk_context,
-                max_context_chars=max_context,
-                max_chunk_chars=settings.prompt_max_chunk_chars,
-                max_chunk_chars_narrative=(
-                    settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
-                ),
-                splunk_context_max_chars=settings.splunk_context_max_chars,
-                complexity=complexity,
-                tokenizer=deps.tokenizer,
-                settings=settings,
-                order=settings.prompt_order,
-            )
+    # 3. Prompt building (shared with the streaming executor)
+    effort = _resolve_reasoning_effort(input_data, settings, complexity)
+    prepared = await _build_prepared_prompt(input_data, deps, hits, complexity, effort, root_ctx)
 
     # 4. LLM inference
     temperature = (
@@ -303,7 +365,7 @@ async def execute_answer_core(
     ) as llm_span:
         try:
             chat_call = deps.llm.chat(
-                prompt_messages,
+                prepared.messages,
                 reasoning_effort=effort,
                 temperature=temperature,
             )
@@ -326,28 +388,17 @@ async def execute_answer_core(
             raise LLMChatError(exc) from exc
 
     llm_ms = int((time.monotonic() - t0) * 1000)
-    parsed = parse_answer(
+    return _finalize_answer(
         chat_res.content,
-        {h.cite for h in hits},
-        ordered_cites=[h.cite for h in hits],
-    )
-
-    return AnswerCoreOutput(
-        answer=parsed.answer,
-        citations=parsed.citations,
-        citations_inferred=parsed.citations_inferred,
-        inferred_indices=parsed.inferred_indices,
-        script=parsed.script,
-        script_lang=parsed.script_lang,
-        query_kind=kind,
+        prepared,
         hits=hits,
+        kind=kind,
+        timings=timings,
+        complexity=complexity,
         finish_reason=chat_res.finish_reason,
         usage=chat_res.usage,
-        timings=timings,
         llm_ms=llm_ms,
         ttft_ms=chat_res.ttft_ms,
-        complexity=complexity,
-        parsed=parsed,
     )
 
 
@@ -414,75 +465,14 @@ async def execute_answer_core_stream(
             ttft_ms=None,
             complexity=complexity,
             parsed=ParsedAnswer(answer=empty_text),
+            evidence=PromptEvidence(),
         )
         yield {"type": "final", "output": output}
         return
 
-    # 3. Prompt building
-    max_context = (
-        settings.prompt_max_context_chars_complex
-        if complexity == "complex"
-        else settings.prompt_max_context_chars
-    )
-    effort = (
-        input_data.reasoning_effort
-        if input_data.reasoning_effort in VALID_REASONING_EFFORTS
-        else (
-            settings.llm_reasoning_effort_complex
-            if complexity == "complex"
-            else settings.llm_reasoning_effort_simple
-        )
-    )
-
-    with tracer.start_as_current_span(
-        "prompt.build",
-        context=root_ctx,
-        attributes={
-            "rag.query_complexity": complexity,
-            "rag.reasoning_effort": effort,
-            "rag.max_context_chars": max_context,
-        },
-    ):
-        if input_data.is_chat and input_data.messages:
-            build_chat_fn = deps.build_chat_messages_fn or build_chat_messages
-            prompt_messages = await asyncio.to_thread(
-                build_chat_fn,
-                input_data.messages,
-                hits,
-                product=input_data.product,
-                version=input_data.version,
-                splunk_context=input_data.splunk_context,
-                max_context_chars=max_context,
-                max_chunk_chars=settings.prompt_max_chunk_chars,
-                max_chunk_chars_narrative=(
-                    settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
-                ),
-                splunk_context_max_chars=settings.splunk_context_max_chars,
-                complexity=complexity,
-                tokenizer=deps.tokenizer,
-                settings=settings,
-                order=settings.prompt_order,
-            )
-        else:
-            build_msg_fn = deps.build_messages_fn or build_messages
-            prompt_messages = await asyncio.to_thread(
-                build_msg_fn,
-                input_data.query,
-                hits,
-                product=input_data.product,
-                version=input_data.version,
-                splunk_context=input_data.splunk_context,
-                max_context_chars=max_context,
-                max_chunk_chars=settings.prompt_max_chunk_chars,
-                max_chunk_chars_narrative=(
-                    settings.prompt_max_chunk_chars_complex if complexity == "complex" else None
-                ),
-                splunk_context_max_chars=settings.splunk_context_max_chars,
-                complexity=complexity,
-                tokenizer=deps.tokenizer,
-                settings=settings,
-                order=settings.prompt_order,
-            )
+    # 3. Prompt building (shared with the buffered executor)
+    effort = _resolve_reasoning_effort(input_data, settings, complexity)
+    prepared = await _build_prepared_prompt(input_data, deps, hits, complexity, effort, root_ctx)
 
     # 4. LLM streaming
     temperature = (
@@ -496,12 +486,12 @@ async def execute_answer_core_stream(
 
     if hasattr(deps.llm, "chat_stream"):
         stream_gen = deps.llm.chat_stream(
-            prompt_messages,
+            prepared.messages,
             reasoning_effort=effort,
             temperature=temperature,
         )
     else:
-        stream_gen = fallback_stream(deps.llm, prompt_messages, effort, temperature)
+        stream_gen = fallback_stream(deps.llm, prepared.messages, effort, temperature)
 
     with tracer.start_as_current_span(
         "llm.chat",
@@ -542,26 +532,16 @@ async def execute_answer_core_stream(
 
     full_content = "".join(content_parts)
     llm_ms = int((time.monotonic() - t0) * 1000)
-    parsed = parse_answer(
+    output = _finalize_answer(
         full_content,
-        {h.cite for h in hits},
-        ordered_cites=[h.cite for h in hits],
-    )
-    output = AnswerCoreOutput(
-        answer=parsed.answer,
-        citations=parsed.citations,
-        citations_inferred=parsed.citations_inferred,
-        inferred_indices=parsed.inferred_indices,
-        script=parsed.script,
-        script_lang=parsed.script_lang,
-        query_kind=kind,
+        prepared,
         hits=hits,
+        kind=kind,
+        timings=timings,
+        complexity=complexity,
         finish_reason=finish_reason,
         usage=usage,
-        timings=timings,
         llm_ms=llm_ms,
         ttft_ms=ttft_ms,
-        complexity=complexity,
-        parsed=parsed,
     )
     yield {"type": "final", "output": output}

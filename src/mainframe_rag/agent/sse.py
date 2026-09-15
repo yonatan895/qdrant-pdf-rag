@@ -87,10 +87,11 @@ def final_payload(
     identical in shape to the JSON mode and the empty-hits path.
     `citations_inferred` is the provenance flag (issue #269): true when the
     cites were mapped from bare bracket markers, never from an explicit
-    citation line. `inferred_indices` (issue #299) carries which prompt
-    excerpt indices those markers pointed at, 1-based; it is optional and
-    defaults to empty so callers built against the pre-#299 signature keep
-    working, and the payload always carries a list."""
+    citation line. `inferred_indices` (issue #299) carries which supplied
+    `[n]` prompt labels those markers pointed at, 1-based (issue #364: labels
+    come from the final evidence manifest, not retrieval rank); it is
+    optional and defaults to empty so callers built against the pre-#299
+    signature keep working, and the payload always carries a list."""
     return {
         "type": "final",
         "request_id": request_id,

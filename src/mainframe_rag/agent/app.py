@@ -192,10 +192,19 @@ def _search_span_attrs(kind: str, hits: list[SearchHit]) -> dict:
     }
 
 
-def _answer_span_attrs(kind: str, hits: list[SearchHit], citations: int, has_script: bool) -> dict:
+def _answer_span_attrs(
+    kind: str,
+    hits: list[SearchHit],
+    citations: int,
+    has_script: bool,
+    evidence: int = 0,
+) -> dict:
     return {
         "rag.query_kind": kind,
         "rag.hits": len(hits),
+        # Supplied excerpts (issue #364): counts only, never cite text. The
+        # gap between rag.hits and rag.evidence is packing/trim omission.
+        "rag.evidence": evidence,
         "rag.citations": citations,
         "rag.has_script": has_script,
         "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
@@ -215,6 +224,7 @@ def _answer_log_fields(
     ttft_ms: int | None,
     started: float,
     stream: bool = False,
+    evidence: int = 0,
     inline_bracket_present: bool = False,
     citations_header_present: bool = False,
     cites_rejected_shape_bad: int = 0,
@@ -224,11 +234,13 @@ def _answer_log_fields(
     keys so log consumers see one shape; stream=True only marks the SSE one.
     The citation-attempt counters (issue #299) let the eval split zero-cite
     rows into malformed vs fabricated vs never-attempted without putting
-    model output on the wire."""
+    model output on the wire. `evidence` is the supplied-excerpt count from
+    the final prompt manifest (issue #364) — counts only, never text."""
     fields: dict = {
         "query_kind": kind,
         "query_complexity": complexity,
         "hits": len(hits),
+        "evidence": evidence,
         "embed_ms": timings.get("embed_ms"),
         "qdrant_ms": timings.get("qdrant_ms"),
         "rerank_ms": timings.get("rerank_ms"),
@@ -455,10 +467,11 @@ class AnswerResponse(BaseModel):
     # bracket markers with no explicit citation line — surfaced so clients
     # and the eval never mistake inferred provenance for grounding.
     citations_inferred: bool = False
-    # Which prompt excerpt indices the inferred citations came from, 1-based
-    # (issue #299): the bool says the cites were inferred, this says from
-    # where, so right-doc/wrong-index is measurable. Empty on every other
-    # path, so the schema is identical on JSON and SSE.
+    # Which supplied [n] prompt labels the inferred citations came from,
+    # 1-based (issues #299/#364): the bool says the cites were inferred, this
+    # says from where, so right-doc/wrong-index is measurable. Labels come
+    # from the final evidence manifest, never the retrieval list. Empty on
+    # every other path, so the schema is identical on JSON and SSE.
     inferred_indices: list[int] = Field(default_factory=list)
     script: str | None
     # Language tag of the extracted script fence (issue #336), None when
@@ -917,6 +930,7 @@ async def v1_answer(
                     output.llm_ms,
                     output.ttft_ms,
                     started,
+                    evidence=output.evidence.supplied_count,
                     inline_bracket_present=output.parsed.inline_bracket_present,
                     citations_header_present=output.parsed.citations_header_present,
                     cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
@@ -925,7 +939,13 @@ async def v1_answer(
             )
         )
         root_span.set_attributes(
-            _answer_span_attrs(kind, output.hits, len(output.citations), output.script is not None)
+            _answer_span_attrs(
+                kind,
+                output.hits,
+                len(output.citations),
+                output.script is not None,
+                evidence=output.evidence.supplied_count,
+            )
         )
         root_span.end()
         _record_endpoint(
@@ -1016,6 +1036,7 @@ async def v1_answer(
                                 output.ttft_ms,
                                 started,
                                 stream=True,
+                                evidence=output.evidence.supplied_count,
                                 inline_bracket_present=output.parsed.inline_bracket_present,
                                 citations_header_present=output.parsed.citations_header_present,
                                 cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
@@ -1040,7 +1061,11 @@ async def v1_answer(
                     )
                     root_span.set_attributes(
                         _answer_span_attrs(
-                            kind, output.hits, len(output.citations), output.script is not None
+                            kind,
+                            output.hits,
+                            len(output.citations),
+                            output.script is not None,
+                            evidence=output.evidence.supplied_count,
                         )
                     )
                     _record_endpoint(

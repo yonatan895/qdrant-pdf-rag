@@ -226,7 +226,11 @@ revisited first; default 24 queries, `--all` for full runs), then judge:
   citations, or **only inferred citations** (the agent mapped bare `[n]`
   markers with no explicit citation line; issue #269). The run report
   counts `inferred_citations` so fabrication is visible, never silently
-  grounded. Abstain behavior keeps the marker test: fails only when
+  grounded. `inferred_index_off_gold` maps an inferred index to the sibling
+  `/v1/search` pool rank; since issue #364 only supplied excerpts can be
+  inferred and prompt labels are the retrieval ranks of the packed prefix,
+  that mapping stays exact — an omitted hit can no longer surface at all.
+  Abstain behavior keeps the marker test: fails only when
   grounded *and* unrefusing; a grounded decline (hedged) or a silent
   abstention warns. Gold substring/identifier checks are case-fold
   literals, suppressed on the canned zero-hits path (judging fixed strings

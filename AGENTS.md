@@ -241,6 +241,7 @@ Re-ingesting a regenerated corpus (new doc_id generation) requires deleting the 
 - Chrome: `max(1, 0.35*n)` wipes short PDFs. Min 8 pages and min 3 hits.
 - Classify `message` if `XXXnnnY` appears in the first few lines, not only line 1.
 - Citation inference is `[n]` / `[n, m]` only. Parentheses are IBM-manual noise. Inferred bracket-only cites surface as `citations_inferred` on `/v1/answer` (JSON + SSE `final`), `/v1/chat*` (JSON + SSE finish chunk), and the console, and never count as grounding in the eval/L2 (issue #269).
+- The citation allowlist and the `[n]` label mapping derive exclusively from the final supplied-evidence manifest returned by `build_messages`/`build_chat_messages` (issue #364), never from the retrieval list. Retrieved-but-omitted hits and the tail's example cite are not evidence; the bracket scan reads fence-processed content, so markers inside dropped thinking/script fences are never promoted.
 - `SECTION_MAX_CHARS = 3500` (not 6000): table-dense / code pages must stay inside 4096-token embedders.
 - Context budgeting: complex reasoning queries cap prompt manual excerpts at 4,500 chars (Settings.prompt_max_context_chars_complex) with type-aware chunk caps: syntax, message, and table chunks preserve full fidelity up to 3,000 chars, while narrative prose is capped at 1,100 chars (Settings.prompt_max_chunk_chars_complex).
 - Dense query prefix: asymmetric query embeddings prepend Settings.dense_query_prefix on dense query vectors only; document chunks stay raw; HashEmbedder remains plain text.

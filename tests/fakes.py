@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from qdrant_client import models
 
+from mainframe_rag.agent.answer import EvidenceEntry, PromptEvidence
 from mainframe_rag.retrieve.query import SearchHit
 
 # ---------------------------------------------------------------------------
@@ -89,6 +90,28 @@ def make_hit(
         chunk_type="narrative",
         message_ids=(),
         rerank_score=rerank_score,
+    )
+
+
+def make_evidence(cites: list[str] | set[str]) -> PromptEvidence:
+    """Parser-test manifest double (issue #364): prompt labels follow the
+    given order for sequences, arbitrary for sets. Identity fields are
+    synthetic — only `cite` and `prompt_index` are read by parse_answer."""
+    ordered = cites if isinstance(cites, list) else sorted(cites)
+    return PromptEvidence(
+        entries=tuple(
+            EvidenceEntry(
+                prompt_index=i,
+                chunk_id=f"chunk-{i}",
+                doc_id=f"DOC{i}",
+                cite=cite,
+                truncated=False,
+                included_chars=0,
+                source_chars=0,
+                est_tokens=0,
+            )
+            for i, cite in enumerate(ordered, 1)
+        )
     )
 
 

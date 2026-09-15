@@ -19,6 +19,7 @@ from mainframe_rag.agent.cites import extract_citation_lines, valid_citations
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.ports import TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
+from tests.fakes import make_evidence
 
 
 def _hit(cite_suffix: str = "p. 1-6", text: str = "IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy") -> SearchHit:
@@ -196,6 +197,77 @@ def test_answer_strips_fabricated_body_citation(client, monkeypatch):
     assert fabricated not in body["answer"]
     assert _hit().cite in body["answer"]  # retrieved cite survives mid-answer
     assert body["citations"] == [_hit().cite]
+
+
+def _eight_long_hits() -> list[SearchHit]:
+    """8 hits whose size makes a 1000-char context budget pack only two."""
+    return [
+        _hit(cite_suffix=f"p. 1-{i}", text="S" * 340).model_copy(
+            update={
+                "chunk_id": f"c{i}",
+                "cite": f"SA22-0000-0{i} Synthetic Reference, Chapter {i} > IEA500I, p. 1-{i}",
+                "doc_id": f"SA22-0000-0{i}",
+            }
+        )
+        for i in range(1, 9)
+    ]
+
+
+def test_answer_rejects_retrieved_but_unsupplied_citation(client, monkeypatch):
+    """Issue #364: a hit dropped by budget packing is not evidence, so citing
+    it is rejected even though retrieval found it."""
+    hits = _eight_long_hits()
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *a, **k: (hits, "identifier", {}))
+    monkeypatch.setattr(app_mod.settings, "prompt_max_context_chars", 1000)
+    # Char-budget path: the fixture's tokenizer would plan by window instead.
+    monkeypatch.setattr(app_mod, "tokenizer", None)
+
+    class CitingOmittedLLM:
+        def __init__(self):
+            self.messages = None
+
+        def chat(self, messages, *a, **k):
+            self.messages = messages
+            return f"Reissue the command.\n\nCitations:\n{hits[7].cite}\n"
+
+    llm = CitingOmittedLLM()
+    monkeypatch.setattr(app_mod, "llm", llm)
+    resp = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["citations"] == []
+    assert body["citations_inferred"] is False
+    # The prompt itself never contained excerpt 8.
+    prompt = llm.messages[-1].content
+    assert "[2]" in prompt and "[3]" not in prompt and "[8]" not in prompt
+
+
+def test_answer_stream_rejects_retrieved_but_unsupplied_citation(client, monkeypatch):
+    """The SSE final shares the manifest-backed finalize with JSON."""
+    hits = _eight_long_hits()
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *a, **k: (hits, "identifier", {}))
+    monkeypatch.setattr(app_mod.settings, "prompt_max_context_chars", 1000)
+    monkeypatch.setattr(app_mod, "tokenizer", None)
+
+    content = f"Reissue the command.\n\nCitations:\n{hits[7].cite}\n"
+
+    class StreamingCitingOmittedLLM:
+        def chat(self, messages, *a, **k):
+            return content
+
+        async def chat_stream(self, messages, *a, **k):
+            yield {"type": "token", "delta": content, "token": content, "ttft_ms": 1}
+            yield {"type": "done", "finish_reason": "stop", "usage": TokenUsage(), "ttft_ms": 1}
+
+    monkeypatch.setattr(app_mod, "llm", StreamingCitingOmittedLLM())
+    resp = client.post("/v1/answer?stream=true", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+
+    finals = [data for event, data in _parse_sse_events(resp.text) if event == "final"]
+    assert len(finals) == 1
+    assert finals[0]["citations"] == []
+    assert finals[0]["citations_inferred"] is False
+    assert finals[0]["inferred_indices"] == []
 
 
 def test_strip_unauthorized_handles_multi_digit_markers():
@@ -639,7 +711,7 @@ def test_parse_answer_shape():
         "- garbage line without format\n"
     )
     allowed = {_hit().cite}
-    parsed = parse_answer(content, allowed)
+    parsed = parse_answer(content, make_evidence(allowed))
     assert parsed.answer == "Answer text."
     assert parsed.citations == [_hit().cite]
     assert parsed.script is None
@@ -652,36 +724,36 @@ def test_parse_answer_shape():
 
 
 def test_parse_answer_bracketed_fallback():
-    """Item 1: [n] fallback resolves ordered_cites[n-1] when Citations: is absent."""
+    """Item 1: [n] fallback resolves the manifest's prompt label [n] when
+    Citations: is absent (issue #364)."""
     cite1 = "SA22-0000-00 Synthetic Reference, Chapter 1 > System parameters, p. 1-3"
     cite2 = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
-    allowed = {cite1, cite2}
     ordered = [cite1, cite2]
 
-    # 1. [2] only -> ordered_cites[1]
-    res1 = parse_answer("Details in [2].", allowed, ordered_cites=ordered)
+    # 1. [2] only -> manifest label 2 -> cite2
+    res1 = parse_answer("Details in [2].", make_evidence(ordered))
     assert res1.citations == [cite2]
     assert res1.citations_inferred is True
     assert res1.inferred_indices == [2]
 
     # 2. Citations: exact line still wins (not inferred)
-    res2 = parse_answer(f"Answer text based on [2].\n\nCitations:\n{cite1}", allowed, ordered_cites=ordered)
+    res2 = parse_answer(f"Answer text based on [2].\n\nCitations:\n{cite1}", make_evidence(ordered))
     assert res2.citations == [cite1]
     assert res2.citations_inferred is False
 
     # 3. z/OS (3.1), (2), APARs (1, 2) in parentheses with no Citations: -> zero inferred cites
-    res3 = parse_answer("Runs on z/OS (3.1) with APARs (1, 2) and option (2).", allowed, ordered_cites=ordered)
+    res3 = parse_answer("Runs on z/OS (3.1) with APARs (1, 2) and option (2).", make_evidence(ordered))
     assert res3.citations == []
     assert res3.citations_inferred is False
 
     # 4. Mixed [1] and [2] and [1, 2] -> both, de-duped
-    res4 = parse_answer("Points from [1] and [2], summarized in [1, 2].", allowed, ordered_cites=ordered)
+    res4 = parse_answer("Points from [1] and [2], summarized in [1, 2].", make_evidence(ordered))
     assert res4.citations == [cite1, cite2]
     assert res4.citations_inferred is True
     assert res4.inferred_indices == [1, 2]
 
     # 5. Out of bounds index [99] -> zero inferred
-    res5 = parse_answer("See [99].", allowed, ordered_cites=ordered)
+    res5 = parse_answer("See [99].", make_evidence(ordered))
     assert res5.citations == []
     assert res5.citations_inferred is False
     # Issue #299: the attempt is visible through the shared inline regex
@@ -701,7 +773,7 @@ def test_parse_answer_records_rejected_cite_attempts():
         "- SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
         "- malformed citation-ish line\n"
     )
-    parsed = parse_answer(content, allowed)
+    parsed = parse_answer(content, make_evidence(allowed))
     assert parsed.citations == []
     assert parsed.cites_rejected_unmapped == 1
     assert parsed.cites_rejected_shape_bad == 1
@@ -709,7 +781,7 @@ def test_parse_answer_records_rejected_cite_attempts():
     # A body-level fabricated standalone line is stripped by the shared
     # split helper and counted as unmapped — one predicate for strip+count.
     body_fab = "Answer text.\nSA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\nMore prose."
-    parsed2 = parse_answer(body_fab, allowed)
+    parsed2 = parse_answer(body_fab, make_evidence(allowed))
     assert parsed2.cites_rejected_unmapped == 1
     assert "SA22-9999-99" not in parsed2.answer
 
@@ -723,7 +795,7 @@ def test_parse_answer_rejected_counts_survive_abstention_zeroing():
         "The excerpts do not contain the private key.\n\nCitations:\n"
         "- SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
     )
-    parsed = parse_answer(content, {_hit().cite})
+    parsed = parse_answer(content, make_evidence({_hit().cite}))
     assert parsed.citations == []
     assert parsed.cites_rejected_unmapped == 1
 
@@ -740,14 +812,14 @@ def test_parse_answer_refusal_zeroes_citations():
         "excerpts.\n\nCitations:\n"
         f"- {cite}\n"
     )
-    parsed = parse_answer(raw, allowed)
+    parsed = parse_answer(raw, make_evidence(allowed))
     assert parsed.citations == []
     assert parsed.citations_inferred is False
     assert "private key" in parsed.answer
 
     # 2. Refusal + bracket inference -> zeroed, inference suppressed
     parsed2 = parse_answer(
-        "The excerpts do not contain that. See [1].", allowed, ordered_cites=[cite]
+        "The excerpts do not contain that. See [1].", make_evidence([cite])
     )
     assert parsed2.citations == []
     assert parsed2.citations_inferred is False
@@ -756,7 +828,7 @@ def test_parse_answer_refusal_zeroes_citations():
     # 3. Canonical anchored phrasing (prompt rule 4) fires the same zeroing
     parsed3 = parse_answer(
         f"The excerpts do not contain the requested parameter.\n\nCitations:\n{cite}",
-        allowed,
+        make_evidence(allowed),
     )
     assert parsed3.citations == []
 
@@ -764,7 +836,7 @@ def test_parse_answer_refusal_zeroes_citations():
     # over-strip (a narrative answer that mentions a marker phrase only as
     # a refusal does).
     parsed4 = parse_answer(
-        f"The procedure is documented.\n\nCitations:\n{cite}", allowed
+        f"The procedure is documented.\n\nCitations:\n{cite}", make_evidence(allowed)
     )
     assert parsed4.citations == [cite]
 
@@ -792,7 +864,7 @@ def test_parse_answer_grounded_answer_with_hedging_sentence_keeps_citations():
         f"- {cite1}\n"
         f"- {cite2}\n"
     )
-    parsed = parse_answer(hedging_answer, allowed)
+    parsed = parse_answer(hedging_answer, make_evidence(allowed))
     assert parsed.citations == [cite1, cite2]
     assert "LFAREA" in parsed.answer
 
@@ -802,7 +874,7 @@ def test_parse_answer_grounded_answer_with_hedging_sentence_keeps_citations():
         "The excerpts do not contain a specific value for the LFAREA "
         "parameter. Check with your capacity team."
     )
-    parsed2 = parse_answer(short_hedge + f"\n\nCitations:\n{cite1}", {cite1})
+    parsed2 = parse_answer(short_hedge + f"\n\nCitations:\n{cite1}", make_evidence({cite1}))
     assert parsed2.citations == []
 
 
@@ -815,7 +887,7 @@ def test_parse_answer_refusal_with_script_keeps_script():
         "```jcl\n// example only\nIOSCMDS LIST\n```\n\n"
         f"Citations:\n{cite}\n"
     )
-    parsed = parse_answer(raw, {cite})
+    parsed = parse_answer(raw, make_evidence({cite}))
     assert parsed.citations == []
     assert parsed.script == "// example only\nIOSCMDS LIST"
 
@@ -827,19 +899,19 @@ def test_parse_answer_citations_positions_and_case():
 
     # 1. Top-placed Citations: without blank line before prose
     raw_top = f"Citations:\n{cite1}\nActual explanation text here."
-    res_top = parse_answer(raw_top, allowed)
+    res_top = parse_answer(raw_top, make_evidence(allowed))
     assert res_top.citations == [cite1]
     assert res_top.answer == "Actual explanation text here."
 
     # 2. Middle-placed Citations: without blank line before subsequent prose
     raw_mid = f"Intro paragraph.\n\nCitations:\n{cite1}\nMore operational detail."
-    res_mid = parse_answer(raw_mid, allowed)
+    res_mid = parse_answer(raw_mid, make_evidence(allowed))
     assert res_mid.citations == [cite1]
     assert res_mid.answer == "Intro paragraph.\n\nMore operational detail."
 
     # 3. Uppercase CITATIONS: header
     raw_upper = f"Intro paragraph.\n\nCITATIONS:\n{cite1}\nMore detail."
-    res_upper = parse_answer(raw_upper, allowed)
+    res_upper = parse_answer(raw_upper, make_evidence(allowed))
     assert res_upper.citations == [cite1]
     assert res_upper.answer == "Intro paragraph.\n\nMore detail."
 
@@ -851,21 +923,21 @@ def test_parse_answer_code_fence_and_script_extraction():
 
     # 1. Labeled ```jcl block returns both non-empty answer and extracted script
     raw_jcl = f"To apply parameter updates:\n\n```jcl\n//JOB1 JOB ...\n//STEP1 EXEC PGM=IEFBR14\n```\n\nCitations:\n{cite1}"
-    res_jcl = parse_answer(raw_jcl, allowed)
+    res_jcl = parse_answer(raw_jcl, make_evidence(allowed))
     assert res_jcl.citations == [cite1]
     assert res_jcl.answer == "To apply parameter updates:"
     assert res_jcl.script == "//JOB1 JOB ...\n//STEP1 EXEC PGM=IEFBR14"
 
     # 2. Bare unlabeled fence unwraps to answer body; script is None
     raw_bare = f"```\nAll text in code fence\n```\n\nCitations:\n{cite1}"
-    res_bare = parse_answer(raw_bare, allowed)
+    res_bare = parse_answer(raw_bare, make_evidence(allowed))
     assert res_bare.citations == [cite1]
     assert res_bare.answer == "All text in code fence"
     assert res_bare.script is None
 
     # 3. Thinking block dropped, JCL script extracted, prose answer preserved
     raw_think = f"```thought\nAnalyzing parmlib member...\n```\nFinal operational guidance.\n```rexx\n/* REXX */\nSAY 'HELLO'\n```\nCitations:\n{cite1}"
-    res_think = parse_answer(raw_think, allowed)
+    res_think = parse_answer(raw_think, make_evidence(allowed))
     assert res_think.citations == [cite1]
     assert res_think.answer == "Final operational guidance."
     assert res_think.script == "/* REXX */\nSAY 'HELLO'"
@@ -877,26 +949,26 @@ def test_parse_answer_script_lang():
     allowed = {cite1}
 
     # Uppercase tag normalizes to lowercase
-    res = parse_answer(f"Fix:\n\n```JCL\n//JOB1 JOB\n```\n\nCitations:\n{cite1}", allowed)
+    res = parse_answer(f"Fix:\n\n```JCL\n//JOB1 JOB\n```\n\nCitations:\n{cite1}", make_evidence(allowed))
     assert res.script == "//JOB1 JOB"
     assert res.script_lang == "jcl"
 
     # Multiple scripts: bodies join, first tag wins
     res_multi = parse_answer(
         f"Both:\n\n```jcl\n//JOB1 JOB\n```\n\n```rexx\nSAY 'HI'\n```\n\nCitations:\n{cite1}",
-        allowed,
+        make_evidence(allowed),
     )
     assert res_multi.script == "//JOB1 JOB\n\nSAY 'HI'"
     assert res_multi.script_lang == "jcl"
 
     # Bare fence unwraps to prose: no script, no lang
-    res_bare = parse_answer(f"```\nplain\n```\n\nCitations:\n{cite1}", allowed)
+    res_bare = parse_answer(f"```\nplain\n```\n\nCitations:\n{cite1}", make_evidence(allowed))
     assert res_bare.script is None
     assert res_bare.script_lang is None
 
     # Thinking-only fence: dropped, no script, no lang
     res_think = parse_answer(
-        f"```thought\nmulling\n```\nAnswer.\n\nCitations:\n{cite1}", allowed
+        f"```thought\nmulling\n```\nAnswer.\n\nCitations:\n{cite1}", make_evidence(allowed)
     )
     assert res_think.script is None
     assert res_think.script_lang is None
@@ -904,7 +976,7 @@ def test_parse_answer_script_lang():
     # Abstention with fence: citations zeroed, but script + script_lang preserved
     res_abstain = parse_answer(
         f"The excerpts do not contain documentation for this parameter.\n\n```jcl\n//JOB1 JOB\n```\n\nCitations:\n{cite1}",
-        allowed,
+        make_evidence(allowed),
     )
     assert res_abstain.citations == []
     assert res_abstain.script == "//JOB1 JOB"
@@ -956,13 +1028,13 @@ def test_build_messages_context_budgeting():
     hit2 = _hit(cite_suffix="p. 1-7").model_copy(update={"text": "B" * 5000})
 
     # Per-chunk max caps chunk text to 100 chars
-    msgs1 = build_messages("test query", [hit1], max_chunk_chars=100, max_context_chars=1000)
+    msgs1 = build_messages("test query", [hit1], max_chunk_chars=100, max_context_chars=1000).messages
     user_prompt1 = msgs1[1].content
     assert "... [truncated]" in user_prompt1
     assert len(user_prompt1) < 500
 
     # Total context max truncates subsequent hits
-    msgs2 = build_messages("test query", [hit1, hit2], max_chunk_chars=400, max_context_chars=500)
+    msgs2 = build_messages("test query", [hit1, hit2], max_chunk_chars=400, max_context_chars=500).messages
     user_prompt2 = msgs2[1].content
     assert "[1]" in user_prompt2
     assert len(user_prompt2) < 1500
@@ -994,14 +1066,14 @@ def test_build_messages_complexity():
         build_messages,
     )
 
-    simple_msgs = build_messages("IEA500I", [_hit()], complexity="simple")
+    simple_msgs = build_messages("IEA500I", [_hit()], complexity="simple").messages
     assert simple_msgs[0].content == SYSTEM_PROMPT
 
     complex_msgs = build_messages(
         "How do I diagnose and recover when DFSMShsm journal fills up?",
         [_hit()],
         complexity="complex",
-    )
+    ).messages
     assert SYSTEM_PROMPT_COMPLEX_EXTENSION in complex_msgs[0].content
 
 
@@ -1028,14 +1100,14 @@ def test_build_messages_context_budgeting_complex_vs_simple():
         for i in range(3)
     ]
     # Simple query uses 8000 budget - all 3 hits fit
-    simple_msgs = build_messages("IEA500I", hits, complexity="simple", max_context_chars=8000)
+    simple_msgs = build_messages("IEA500I", hits, complexity="simple", max_context_chars=8000).messages
     user_content_simple = simple_msgs[1].content
     assert "[1]" in user_content_simple
     assert "[2]" in user_content_simple
     assert "[3]" in user_content_simple
 
     # Complex query uses 4500 budget - 3rd hit is truncated or omitted to stay within budget
-    complex_msgs = build_messages("How to configure large pages", hits, complexity="complex", max_context_chars=4500)
+    complex_msgs = build_messages("How to configure large pages", hits, complexity="complex", max_context_chars=4500).messages
     user_content_complex = complex_msgs[1].content
     assert len(user_content_complex) < len(user_content_simple)
     excerpts_part = user_content_complex.split("Retrieved manual excerpts:\n")[1].split("Please answer")[0]
@@ -1112,7 +1184,7 @@ def test_parse_answer_markdown_heading_citations():
         "### Citations:\n"
         "* SA22-7592-05 z/OS MVS Init, IEASYSxx > LFAREA, p. 1-17\n"
     )
-    parsed = parse_answer(content, allowed, ordered_cites=list(allowed))
+    parsed = parse_answer(content, make_evidence(list(allowed)))
     assert parsed.citations == ["SA22-7592-05 z/OS MVS Init, IEASYSxx > LFAREA, p. 1-17"]
     assert not parsed.citations_inferred
 
@@ -1130,7 +1202,7 @@ def test_parse_answer_trailing_citations_without_header():
         "ca-ops-14-0 OPS/MVS Using, p. 596\n"
         "ca-ops-14-0 OPS/MVS Using > Rules > TOD, p. 589\n"
     )
-    parsed = parse_answer(content, allowed, ordered_cites=list(allowed))
+    parsed = parse_answer(content, make_evidence(list(allowed)))
     assert len(parsed.citations) == 2
     assert "ca-ops-14-0 OPS/MVS Using, p. 596" in parsed.citations
     assert "ca-ops-14-0 OPS/MVS Using > Rules > TOD, p. 589" in parsed.citations
@@ -1148,7 +1220,7 @@ def test_parse_answer_does_not_strip_non_citation_trailing_lines():
         "ca-ops-14-0 OPS/MVS Using, p. 596\n\n"
         "Run DISPLAY M=CPU to verify."
     )
-    parsed = parse_answer(content, allowed, ordered_cites=list(allowed))
+    parsed = parse_answer(content, make_evidence(list(allowed)))
     # Last line is "Run DISPLAY M=CPU to verify." - must NOT be eaten or treated as a cite
     assert "Run DISPLAY M=CPU to verify." in parsed.answer
     assert parsed.citations == []
@@ -1158,7 +1230,7 @@ def test_script_langs_supports_ops_and_rule():
     from mainframe_rag.agent.answer import parse_answer
 
     content = "Here is the rule:\n```ops\n)TOD 00:10,4 HOURS\n```\nDone."
-    parsed = parse_answer(content, set())
+    parsed = parse_answer(content, make_evidence(set()))
     assert parsed.script == ")TOD 00:10,4 HOURS"
     assert "```ops" not in parsed.answer
 
@@ -1167,7 +1239,7 @@ def test_text_and_markdown_fences_unwrap_without_script():
     from mainframe_rag.agent.answer import parse_answer
 
     content = "Here is explanation:\n```text\nSome plain text prose\n```\nAnd:\n```markdown\n* bullet point\n```\nDone."
-    parsed = parse_answer(content, set())
+    parsed = parse_answer(content, make_evidence(set()))
     assert parsed.script is None
     assert "Some plain text prose" in parsed.answer
     assert "* bullet point" in parsed.answer
@@ -1226,7 +1298,7 @@ def test_build_messages_preserves_syntax_and_message_fidelity():
         max_context_chars=4500,
         max_chunk_chars=3000,
         max_chunk_chars_narrative=1100,
-    )
+    ).messages
     content = msgs[1].content
     # Syntax chunk was NOT truncated down to 1100 chars; kept full 1800+ chars
     assert "..." not in content.split("[1]")[1].split("[2]")[0]
@@ -1383,13 +1455,14 @@ def test_build_messages_tokenizer_budget_respected():
         _env_file=None,
     )
     tok = FallbackTokenizer()
-    msgs = build_messages(
+    prepared = build_messages(
         "How to configure mainframe storage",
         hits,
         tokenizer=tok,
         settings=settings,
         complexity="simple",
     )
+    msgs = prepared.messages
 
     user_content = msgs[1].content
     # All five excerpts survive packing; the last one is cut, not dropped.
@@ -1455,7 +1528,7 @@ def test_build_messages_complex_budget_prices_thinking_reserve():
         tokenizer=tok,
         settings=settings,
         complexity="complex",
-    )
+    ).messages
     assert tok.count_messages(complex_msgs) <= (
         settings.llm_max_model_len
         - settings.llm_reserved_output_tokens
@@ -1470,7 +1543,7 @@ def test_build_messages_complex_budget_prices_thinking_reserve():
         tokenizer=tok,
         settings=settings,
         complexity="simple",
-    )
+    ).messages
     assert tok.count_messages(simple_msgs) <= (
         settings.llm_max_model_len
         - settings.llm_reserved_output_tokens
@@ -1493,7 +1566,7 @@ def test_build_messages_ignores_none_settings_without_tokenizer():
     """The char path must be unaffected by the settings parameter."""
     from mainframe_rag.agent.answer import build_messages
 
-    msgs = build_messages("IEA500I", [_hit()], complexity="simple", settings=None)
+    msgs = build_messages("IEA500I", [_hit()], complexity="simple", settings=None).messages
     assert "[1]" in msgs[1].content
 
 
@@ -2240,7 +2313,9 @@ def test_build_messages_truncates_overlong_splunk_context():
     standard suffix instead of starving excerpts out of the window."""
     from mainframe_rag.agent.answer import build_messages
 
-    msgs = build_messages("IEA500I", [_hit()], splunk_context="y" * 5000, splunk_context_max_chars=100)
+    msgs = build_messages(
+        "IEA500I", [_hit()], splunk_context="y" * 5000, splunk_context_max_chars=100
+    ).messages
     user = msgs[1].content
     assert "... [truncated]" in user
     assert "y" * 101 not in user
@@ -2250,7 +2325,9 @@ def test_build_messages_leaves_bounded_splunk_context_alone():
     from mainframe_rag.agent.answer import build_messages
 
     splunk = "z" * 4000
-    msgs = build_messages("IEA500I", [_hit()], splunk_context=splunk, splunk_context_max_chars=4000)
+    msgs = build_messages(
+        "IEA500I", [_hit()], splunk_context=splunk, splunk_context_max_chars=4000
+    ).messages
     assert splunk in msgs[1].content
     assert "[truncated]" not in msgs[1].content
 

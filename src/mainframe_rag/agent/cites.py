@@ -9,6 +9,7 @@ to citations that match the format AND appear in the retrieved hit set.
 from __future__ import annotations
 
 import re
+from collections.abc import Set as AbstractSet
 
 # docno, title, heading path, printed page label
 CITATION_LINE_RE = re.compile(
@@ -116,7 +117,7 @@ def extract_citation_lines(text: str) -> list[str]:
     return lines
 
 
-def valid_citations(text: str, allowed: set[str]) -> list[str]:
+def valid_citations(text: str, allowed: AbstractSet[str]) -> list[str]:
     """Keep only well-formed citations that map to retrieved chunks."""
     result: list[str] = []
     for line in extract_citation_lines(text):
@@ -125,7 +126,7 @@ def valid_citations(text: str, allowed: set[str]) -> list[str]:
     return result
 
 
-def split_unauthorized_citations(text: str, allowed: set[str]) -> tuple[str, list[str]]:
+def split_unauthorized_citations(text: str, allowed: AbstractSet[str]) -> tuple[str, list[str]]:
     """Body-level citation hygiene, one predicate for strip and count.
 
     Returns (kept_text, rejected). Rejected entries are the normalized
@@ -155,7 +156,7 @@ def split_unauthorized_citations(text: str, allowed: set[str]) -> tuple[str, lis
     return "\n".join(kept), rejected
 
 
-def strip_unauthorized_citations(text: str, allowed: set[str]) -> str:
+def strip_unauthorized_citations(text: str, allowed: AbstractSet[str]) -> str:
     """Remove citation-shaped lines from the answer body that are not in the
     retrieved hit set. The trailing Citations: list is validated separately;
     this closes the same hole for a fabricated cite quoted mid-answer —
