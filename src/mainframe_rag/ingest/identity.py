@@ -172,3 +172,24 @@ def prescan_doc_ids(paths: list[str]) -> dict[str, str | None]:
     from mainframe_rag.ingest.ibm_pdf import resolve_doc_id
 
     return {path_str: resolve_doc_id(Path(path_str)) for path_str in paths}
+
+
+class AmbiguousRevisionError(RuntimeError):
+    """Fail-closed refresh abort (issue #361): sourceless pre-361B residue
+    shares a doc_id with named revisions, so no selector can attribute it
+    to this run's lineage or a coexisting one. Deleting by doc_id could
+    wipe a live revision; leaving it serves mixed generations. The report
+    carries the doc_id, the named revisions present, and the stray content
+    ids only — never manual text or filesystem details."""
+
+    def __init__(self, doc_id: str, revisions: list[str], stray_sha16s: list[str]) -> None:
+        self.doc_id = doc_id
+        self.revisions = revisions
+        super().__init__(
+            f"ambiguous revisions under doc_id {doc_id!r}: unattributable legacy points "
+            f"(content {', '.join(stray_sha16s)}) share the document with named revisions "
+            f"({', '.join(revisions)}). Resolve explicitly: re-run with the original "
+            "--progress file carrying inventory lineage (precise per-revision replace), "
+            "or delete the stale revision's points (doc_id + content-sha filter) after "
+            "a snapshot, then re-ingest. Refusing to guess."
+        )

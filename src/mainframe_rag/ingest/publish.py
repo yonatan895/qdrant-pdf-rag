@@ -116,12 +116,14 @@ def verify_all_complete(
             or rec.rules_version != rules_v
             or rec.status not in ("upserted", "skipped")
             or not rec.doc_id
+            or not rec.source_rev
         ):
             problems.append(path_str)
             continue
         if not is_doc_complete(
             client, staging_settings, rec.doc_id,
             sha256=sha, rules_v=rules_v, source_labels=src_labels,
+            source_rev=rec.source_rev,
         ):
             problems.append(path_str)
     return problems

@@ -47,6 +47,7 @@ from mainframe_rag.ingest.completion import (
     ensure_completion_collection,
     expected_digests,
     is_doc_complete,
+    plan_refresh_deletes,
     release_run_lock,
     source_labels,
     verify_doc_points,
@@ -84,11 +85,11 @@ from mainframe_rag.ingest.publish import (
 )
 from mainframe_rag.ingest.qdrant_io import (
     delete_by_doc,
+    delete_by_revision,
     ensure_collection,
     resolve_live_collection,
     set_bulk_indexing,
     snapshot_collection,
-    stored_doc_state,
     stored_rules_version,
     swap_alias_to,
     upsert_chunks,
@@ -322,9 +323,9 @@ class _DocLocks:
         self._global = threading.Lock()
         self._locks = {}
 
-    def get(self, doc_id: str) -> threading.Lock:
+    def get(self, key: str) -> threading.Lock:
         with self._global:
-            return self._locks.setdefault(doc_id, threading.Lock())
+            return self._locks.setdefault(key, threading.Lock())
 
 
 def _upsert_one(
@@ -337,10 +338,11 @@ def _upsert_one(
     force_reingest: bool = False,
     *,
     src_labels: str,
+    lineage_rev: str | None = None,
 ) -> tuple[str, float]:
     """Stage 2 (upsert stream): verified-completion skip, invalidate-on-change,
     batched upsert, verify-before-mark. Vectors arrive precomputed from the
-    parse worker. The doc_id lock keeps colliding docs from interleaving.
+    parse worker. The revision lock keeps colliding docs from interleaving.
     Returns (status, seconds) with status in upserted | skipped | empty.
     `force_reingest` (--reingest, issue #124) bypasses the completion skip
     and re-extracts every doc. Empty (zero-chunk) docs are an explicit
@@ -348,10 +350,16 @@ def _upsert_one(
     marked complete — the caller records `empty` and fails the run.
     src_labels binds the CLI vendor/product/version triple: overrides change
     payloads and embed headers, so a generation certified under one triple
-    never satisfies a run under another."""
+    never satisfies a run under another. lineage_rev is the inventory
+    lineage for this path (the previous source revision, when the progress
+    file records one): the only key allowed to replace another revision's
+    points. Without lineage, committed coexisting revisions are left alone
+    (replacement would be the overwrite bug) and only residue is swept.
+    """
     started = time.perf_counter()
     client = _get_qdrant(settings)
     rules_v = extraction_rules_version()
+    revision = source_rev_key(parsed.vendor, parsed.product, parsed.version, parsed.sha256)
     if len(chunks) == 0:
         # Explicit policy, not accidental success: no completion, no skip.
         return "empty", round(time.perf_counter() - started, 3)
@@ -360,25 +368,41 @@ def _upsert_one(
             f"chunks/vectors length mismatch for {parsed.doc_id}: "
             f"{len(chunks)} chunks vs {len(vectors)} vectors."
         )
-    with locks.get(parsed.doc_id):
+    with locks.get(revision):
         if not force_reingest and is_doc_complete(
             client, settings, parsed.doc_id,
             sha256=parsed.sha256, rules_v=rules_v, source_labels=src_labels,
+            source_rev=revision,
         ):
             return "skipped", round(time.perf_counter() - started, 3)
-        stored_sha, _ = stored_doc_state(client, settings, parsed.doc_id)
-        # Invalidate any stale generation marker before touching points:
-        # a failed refresh must leave NO valid completion (safe retry),
-        # never a stale marker over partial data. Only a 404 (collection
-        # dropped between the exists-check and the delete) is tolerated —
-        # real Qdrant failures propagate so the doc errors instead of
-        # publishing alongside a stale marker.
+        # Revision delete plan (issue #361): computed BEFORE any delete —
+        # raises on unattributable residue instead of guessing.
+        rev_deletes, legacy_delete = plan_refresh_deletes(
+            client, settings, parsed.doc_id, revision, lineage_rev
+        )
+        # Invalidate this revision's markers (plus the lineage revision's
+        # when it differs — a refresh retires the old generation's markers
+        # with its points) before touching points: a failed refresh must
+        # leave NO valid completion (safe retry), never a stale marker over
+        # partial data. Only a 404 (collection dropped between the
+        # exists-check and the delete) is tolerated — real Qdrant failures
+        # propagate so the doc errors instead of publishing alongside a
+        # stale marker.
+        scopes = {revision}
+        if lineage_rev is not None and lineage_rev != revision:
+            scopes.add(lineage_rev)
         try:
-            delete_completion(client, settings, parsed.doc_id)
+            for scope in sorted(scopes):
+                delete_completion(
+                    client, settings, parsed.doc_id,
+                    source_rev=scope, include_legacy=legacy_delete,
+                )
         except UnexpectedResponse as exc:
             if exc.status_code != 404:
                 raise
-        if stored_sha is not None:
+        for stale_rev in sorted(rev_deletes):
+            delete_by_revision(client, settings, stale_rev)
+        if legacy_delete:
             delete_by_doc(client, settings, parsed.doc_id)
         upserted = upsert_chunks(client, settings, parsed, chunks, vectors, contexts)
         expected, ids_digest, content_digest = expected_digests(chunks)
@@ -393,6 +417,7 @@ def _upsert_one(
             parsed.doc_id,
             sha256=parsed.sha256,
             rules_v=rules_v,
+            source_rev=revision,
             expected_chunks=expected,
             chunk_ids_digest=ids_digest,
             content_digest=content_digest,
@@ -408,6 +433,7 @@ def _upsert_one(
             sha256=parsed.sha256,
             rules_v=rules_v,
             source_labels=src_labels,
+            source_rev=revision,
             expected_chunks=expected,
             chunk_ids_digest=ids_digest,
             content_digest=content_digest,
@@ -594,6 +620,12 @@ def _run_impl(
             # delete, or upsert. Deterministic for identical inputs.
             walk_entries = _gate_planned_entries(src, walk_entries)
             inventory = load_inventory(progress)
+            # Lineage map (issue #361): the previous source revision per
+            # path, for precise refresh replacement in the upsert stage. A
+            # path whose record predates revision stamps carries None —
+            # the refresh plan then treats stored history by the
+            # sole-lineage/residue rules instead of guessing.
+            lineage_by_path = {path: rec.source_rev for path, rec in inventory.items()}
 
             tasks: list[tuple[str, str | None, str | None, str | None, str, str, bool, str | None]] = []
             for path_str, sha in walk_entries:
@@ -613,9 +645,18 @@ def _run_impl(
                     # without a doc_id re-ingest explicitly.
                     assert client is not None
                     bound_doc = record.doc_id
-                    if bound_doc and is_doc_complete(
+                    bound_rev = record.source_rev
+                    # Bound skip (issue #359 req 3, revision-scoped by #361):
+                    # an inventory line alone never proves the target holds
+                    # the generation. Require a valid completion for THIS
+                    # revision plus verified points; otherwise re-queue for
+                    # parse+upsert+verify. Legacy records without a doc_id
+                    # or revision re-ingest explicitly (one lazy-migration
+                    # cycle, never a wrong skip).
+                    if bound_doc and bound_rev and is_doc_complete(
                         client, settings, bound_doc,
                         sha256=sha, rules_v=rules_v, source_labels=src_labels,
+                        source_rev=bound_rev,
                     ):
                         files_ok += 1
                         log.info(json.dumps({"path": path_str, "sha256": record.sha256, "action": "skip"}))
@@ -833,6 +874,7 @@ def _run_impl(
                             upsert_pool.submit(
                                 _upsert_one, parsed, chunks, vectors, settings, locks,
                                 contexts or None, force_reingest, src_labels=src_labels,
+                                lineage_rev=lineage_by_path.get(path_str),
                             )
                         ] = (record, *binding)
                         refill_parse()

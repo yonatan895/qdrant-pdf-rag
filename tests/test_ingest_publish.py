@@ -136,10 +136,15 @@ class PublishFake:
         return self.collections.setdefault(self.aliases.get(name, name), [])
 
     def scroll(self, collection, *, scroll_filter=None, limit=10, with_payload=None, offset=None):
+        from tests.test_run_ingest import _filter_match_value
+
         doc_id = _filter_doc_id(scroll_filter)
+        rev = _filter_match_value(scroll_filter, "source_rev")
         stored = self._resolve(collection)
         if doc_id is not None:
             stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
+        if rev is not None:
+            stored = [p for p in stored if (p.payload or {}).get("source_rev") == rev]
         return stored[:limit], None
 
     def retrieve(self, collection, ids, *, with_payload=True):
@@ -156,11 +161,27 @@ class PublishFake:
         return SimpleNamespace()
 
     def delete(self, collection, *, points_selector, wait=True):
+        from tests.test_run_ingest import _filter_match_value
+
         physical = self.aliases.get(collection, collection)
+        ids = getattr(points_selector, "points", None)
+        if ids is not None:
+            # PointIdsList (precise completion invalidation, issue #361).
+            wanted = {str(i) for i in ids}
+            self.collections[physical] = [
+                p for p in self.collections.get(physical, [])
+                if str(getattr(p, "id", None)) not in wanted
+            ]
+            return SimpleNamespace()
         doc_id = _filter_doc_id(points_selector)
-        kept = [p for p in self.collections.get(physical, [])
-                if (p.payload or {}).get("doc_id") != doc_id]
-        self.collections[physical] = kept
+        rev = _filter_match_value(points_selector, "source_rev")
+        self.collections[physical] = [
+            p for p in self.collections.get(physical, [])
+            if not (
+                (doc_id is None or (p.payload or {}).get("doc_id") == doc_id)
+                and (rev is None or (p.payload or {}).get("source_rev") == rev)
+            )
+        ]
         return SimpleNamespace()
 
     def alias_target_points(self, alias):
@@ -429,6 +450,7 @@ def test_verify_failure_blocks_swap(tmp_path, monkeypatch):
 
 def test_verify_all_complete_matrix(monkeypatch):
     from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.identity import source_rev_key
     from mainframe_rag.ingest.inventory import InventoryRecord
     from mainframe_rag.ingest.rules_version import extraction_rules_version
     from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
@@ -447,21 +469,26 @@ def test_verify_all_complete_matrix(monkeypatch):
 
     inv: dict[str, InventoryRecord] = {
         "ok.pdf": InventoryRecord(path="ok.pdf", sha256="a" * 64, doc_id="D1",
-                                  status="upserted", rules_version=rules_v),
+                                  status="upserted", rules_version=rules_v,
+                                  source_rev=source_rev_key("v", "p", "1", "a" * 64)),
         "missing.pdf": InventoryRecord(path="missing.pdf", sha256="b" * 64, doc_id="D2",
                                        status="upserted", rules_version=rules_v),
         "stale.pdf": InventoryRecord(path="stale.pdf", sha256="c" * 64, doc_id="D1",
                                      status="upserted", rules_version="0" * 16),
         "err.pdf": InventoryRecord(path="err.pdf", sha256="d" * 64, doc_id="D3",
                                    status="error", rules_version=rules_v),
+        # Pre-361B record: matching content and generation, but no revision
+        # stamp — publication cannot prove which revision, so it blocks.
+        "legacy.pdf": InventoryRecord(path="legacy.pdf", sha256="a" * 64, doc_id="D1",
+                                      status="upserted", rules_version=rules_v),
     }
     problems = verify_all_complete(
         fake, staging,
         [("ok.pdf", "a" * 64), ("missing.pdf", "b" * 64), ("stale.pdf", "c" * 64),
-         ("err.pdf", "d" * 64), ("ghost.pdf", "e" * 64)],
+         ("err.pdf", "d" * 64), ("ghost.pdf", "e" * 64), ("legacy.pdf", "a" * 64)],
         inv, rules_v, "||",
     )
-    assert sorted(problems) == ["err.pdf", "ghost.pdf", "missing.pdf", "stale.pdf"]
+    assert sorted(problems) == ["err.pdf", "ghost.pdf", "legacy.pdf", "missing.pdf", "stale.pdf"]
 
 
 def _parsed_doc(doc_id, sha):

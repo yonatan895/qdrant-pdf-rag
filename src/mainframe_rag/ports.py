@@ -117,6 +117,7 @@ class QdrantPoints(Protocol):
         scroll_filter: models.Filter | None = None,
         limit: int = 10,
         with_payload: bool | list[str],
+        offset: int | str | UUID | None = None,
     ) -> tuple[list[models.Record], int | str | UUID | None]: ...
 
     def retrieve(
@@ -131,7 +132,7 @@ class QdrantPoints(Protocol):
         self,
         collection_name: str,
         *,
-        points_selector: models.FilterSelector,
+        points_selector: models.FilterSelector | models.PointIdsList,
         wait: bool = True,
     ) -> models.UpdateResult: ...
 
@@ -226,6 +227,7 @@ class AsyncQdrantPoints(Protocol):
         scroll_filter: models.Filter | None = None,
         limit: int = 10,
         with_payload: bool | list[str],
+        offset: int | str | UUID | None = None,
     ) -> tuple[list[models.Record], int | str | UUID | None]: ...
 
     async def retrieve(
@@ -240,7 +242,7 @@ class AsyncQdrantPoints(Protocol):
         self,
         collection_name: str,
         *,
-        points_selector: models.FilterSelector,
+        points_selector: models.FilterSelector | models.PointIdsList,
         wait: bool = True,
     ) -> models.UpdateResult: ...
 

@@ -47,10 +47,10 @@ from mainframe_rag.ports import QdrantPoints
 
 MANIFEST_SCHEMA_VERSION = 1
 
-# Identity schema carried by the manifest (issue #361): selectors still key
-# on the bare printed doc_id; the 361B migration switches them (and the
-# chunk key) onto the source revision and bumps this to "source_rev".
-IDENTITY_SCHEMA_DOC_ID = "doc_id"
+# Identity schema carried by the manifest (issue #361): the 361B migration
+# switched destructive selectors, locks, completions, and the chunk key
+# onto the source revision. Pre-migration manifests carry "doc_id".
+IDENTITY_SCHEMA_SOURCE_REV = "source_rev"
 
 # Fixed point id per completions collection: exactly one manifest point can
 # exist, and reads need no filter (get-by-id, never a scan).
@@ -66,7 +66,7 @@ class RepresentationManifest(BaseModel):
     schema_version: int = MANIFEST_SCHEMA_VERSION
     # Re-embed-required: stored vectors are stale when any of these change.
     extraction_rules: str
-    identity_schema: str = IDENTITY_SCHEMA_DOC_ID
+    identity_schema: str = IDENTITY_SCHEMA_SOURCE_REV
     embed_mode: str
     embed_model: str | None = None
     embed_model_revision: str = ""

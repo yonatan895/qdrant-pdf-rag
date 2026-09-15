@@ -34,13 +34,20 @@ from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
-from mainframe_rag.ingest.qdrant_io import collection_vector_configs
+from mainframe_rag.ingest.identity import AmbiguousRevisionError
+from mainframe_rag.ingest.qdrant_io import collection_vector_configs, stored_doc_revisions
 from mainframe_rag.ingest.representation import manifest_digest
 from mainframe_rag.ports import QdrantPoints
 
 _COMPLETION_SUFFIX = "__completions"
 
 _COMPLETION_KEYWORD_INDEXES = ("doc_id", "sha256", "rules_v", "generation_id", "target_collection")
+
+# Marker-scan bound (issue #361): markers per doc_id are few (one per
+# committed revision per CLI-triple variant). A scroll cap keeps revision
+# reads bounded; past it the run fails closed via the caller's
+# verification, never by silently missing a marker.
+_MARKER_SCAN_LIMIT = 100
 
 
 class CompletionRecord(BaseModel):
@@ -61,6 +68,10 @@ class CompletionRecord(BaseModel):
     # #362): ties the completion to the manifest. Pre-manifest markers
     # carry None — an explicit legacy outcome in the 362B gate, never a pass.
     manifest_digest: str | None = None
+    # Source revision this marker certifies (issue #361): markers are
+    # per-revision, so coexisting revisions under one doc_id verify
+    # independently. Pre-361B markers carry None (legacy).
+    source_rev: str | None = None
     finished_at: float = Field(default_factory=time.time)
 
 
@@ -138,9 +149,19 @@ def expected_digests(chunks: list[Chunk]) -> tuple[int, str, str]:
     return len(chunks), h_ids.hexdigest(), h_content.hexdigest()
 
 
-def completion_point_id(target_collection: str, doc_id: str, generation_id: str) -> str:
-    """Deterministic, idempotent completion point id (chunk UUID5 untouched)."""
-    key = f"completion|{target_collection}|{doc_id}|{generation_id}"
+def completion_point_id(
+    target_collection: str, doc_id: str, source_rev: str | None, generation_id: str
+) -> str:
+    """Deterministic, idempotent completion point id (chunk UUID5 untouched).
+
+    The id scopes to the source revision (issue #361): two revisions
+    sharing a doc_id must not overwrite each other's markers. Pre-361B
+    markers used the shorter (target, doc_id, generation) key and are
+    unreachable under the new scheme — they read as absent (one re-ingest
+    cycle rewrites them), never as valid.
+    """
+    rev = source_rev if source_rev is not None else ""
+    key = f"completion|{target_collection}|{doc_id}|{rev}|{generation_id}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
@@ -174,26 +195,56 @@ def _doc_id_filter(doc_id: str) -> models.Filter:
     )
 
 
-def read_completion(
+def _doc_markers(
     client: QdrantPoints, settings: Settings, doc_id: str
-) -> CompletionRecord | None:
-    """Latest completion for doc_id, or None when absent/legacy (fail closed)."""
+) -> list[CompletionRecord]:
+    """All parseable markers under a doc_id (bounded scan). Corrupt payloads
+    read as absent — a corrupt marker is a legacy outcome, not a crash."""
     name = completion_collection_name(settings)
     if not client.collection_exists(name):
-        return None
+        return []
     points, _ = client.scroll(
         name,
         scroll_filter=_doc_id_filter(doc_id),
-        limit=1,
+        limit=_MARKER_SCAN_LIMIT,
         with_payload=True,
     )
-    if not points:
-        return None
-    payload = points[0].payload or {}
-    try:
-        return CompletionRecord.model_validate(payload)
-    except (ValidationError, ValueError):
-        return None
+    markers: list[CompletionRecord] = []
+    for p in points:
+        try:
+            markers.append(CompletionRecord.model_validate(p.payload or {}))
+        except (ValidationError, ValueError):
+            continue
+    return markers
+
+
+def read_completion(
+    client: QdrantPoints,
+    settings: Settings,
+    doc_id: str,
+    *,
+    source_rev: str,
+    generation_id: str,
+) -> CompletionRecord | None:
+    """Scoped marker for one revision generation, else None. Exact match on
+    (revision, generation, target) — coexisting revisions never cross-read,
+    and a generation certified under another CLI triple never satisfies."""
+    for m in _doc_markers(client, settings, doc_id):
+        if (
+            m.source_rev == source_rev
+            and m.generation_id == generation_id
+            and m.target_collection == settings.qdrant_collection
+        ):
+            return m
+    return None
+
+
+def legacy_markers(
+    client: QdrantPoints, settings: Settings, doc_id: str
+) -> list[CompletionRecord]:
+    """Pre-361B markers (no source_rev) under a doc_id. Only
+    is_doc_complete's legacy rule interprets them."""
+    return [m for m in _doc_markers(client, settings, doc_id) if m.source_rev is None]
 
 
 def write_completion(
@@ -204,6 +255,7 @@ def write_completion(
     sha256: str,
     rules_v: str,
     source_labels: str,
+    source_rev: str,
     expected_chunks: int,
     chunk_ids_digest: str,
     content_digest: str,
@@ -228,10 +280,11 @@ def write_completion(
         embed_model=settings.embed_model,
         dense_dim=dim,
         manifest_digest=manifest_digest(settings, rules_v),
+        source_rev=source_rev,
     )
     dummy_dim = dim or 1
     point = models.PointStruct(
-        id=completion_point_id(settings.qdrant_collection, doc_id, generation_id),
+        id=completion_point_id(settings.qdrant_collection, doc_id, source_rev, generation_id),
         vector={
             "dense": [0.0] * dummy_dim,
             "bm25": models.SparseVector(indices=[0], values=[1.0]),
@@ -242,8 +295,20 @@ def write_completion(
     return record
 
 
-def delete_completion(client: QdrantPoints, settings: Settings, doc_id: str) -> None:
-    """Invalidate a generation before a refresh deletes/replaces points.
+def delete_completion(
+    client: QdrantPoints,
+    settings: Settings,
+    doc_id: str,
+    *,
+    source_rev: str,
+    include_legacy: bool = False,
+) -> None:
+    """Invalidate a revision's markers before its refresh deletes/replaces
+    points. Markers are selected client-side and deleted by point id —
+    precise, never doc_id-wide (a doc_id-wide delete would wipe coexisting
+    revisions' markers). include_legacy additionally drops sourceless
+    pre-361B markers; callers set it only when the refresh plan proved sole
+    history (plan_refresh_deletes), never beside named others.
 
     A failed refresh must leave NO valid completion (safe retry), never a
     stale marker over partial data.
@@ -251,50 +316,41 @@ def delete_completion(client: QdrantPoints, settings: Settings, doc_id: str) -> 
     name = completion_collection_name(settings)
     if not client.collection_exists(name):
         return
-    client.delete(
+    points, _ = client.scroll(
         name,
-        points_selector=models.FilterSelector(filter=_doc_id_filter(doc_id)),
-        wait=True,
+        scroll_filter=_doc_id_filter(doc_id),
+        limit=_MARKER_SCAN_LIMIT,
+        with_payload=["source_rev"],
+    )
+    ids: list[int | str | uuid.UUID] = []
+    for p in points:
+        rev = (p.payload or {}).get("source_rev")
+        if rev == source_rev or (include_legacy and rev is None):
+            ids.append(p.id)
+    if ids:
+        client.delete(
+            name,
+            points_selector=models.PointIdsList(points=ids),
+            wait=True,
+        )
+
+
+def _rev_filter(doc_id: str, source_rev: str) -> models.Filter:
+    return models.Filter(
+        must=[
+            models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id)),
+            models.FieldCondition(key="source_rev", match=models.MatchValue(value=source_rev)),
+        ]
     )
 
 
-def verify_doc_points(
-    client: QdrantPoints,
-    settings: Settings,
-    doc_id: str,
-    *,
-    sha256: str,
-    rules_v: str,
-    expected_chunks: int,
+def _match_digests(
+    ids: list[str],
+    texts: dict[str, str],
     chunk_ids_digest: str,
     content_digest: str,
 ) -> bool:
-    """True only when the stored points exactly match the expected generation.
-
-    Single scroll bounded by the document itself (limit = expected + 1, so
-    any surplus is observed, not paged past). Checks count, per-point
-    sha256/rules_v, and recomputed ID/content digests.
-    """
-    if expected_chunks < 1:
-        return False
-    points, _ = client.scroll(
-        settings.qdrant_collection,
-        scroll_filter=_doc_id_filter(doc_id),
-        limit=expected_chunks + 1,
-        with_payload=["sha256", "rules_v", "text"],
-    )
-    if len(points) != expected_chunks:
-        return False
-    ids: list[str] = []
-    texts: dict[str, str] = {}
-    for p in points:
-        payload = p.payload or {}
-        if payload.get("sha256") != sha256 or payload.get("rules_v") != rules_v:
-            return False
-        pid = str(p.id)
-        ids.append(pid)
-        texts[pid] = str(payload.get("text") or "")
-    ids.sort()
+    """ID/content digest check shared by both verify paths (one rule)."""
     h_ids = hashlib.sha256()
     for cid in ids:
         h_ids.update(cid.encode("utf-8"))
@@ -310,6 +366,77 @@ def verify_doc_points(
     return h_content.hexdigest() == content_digest
 
 
+def verify_doc_points(
+    client: QdrantPoints,
+    settings: Settings,
+    doc_id: str,
+    *,
+    sha256: str,
+    rules_v: str,
+    source_rev: str,
+    expected_chunks: int,
+    chunk_ids_digest: str,
+    content_digest: str,
+) -> bool:
+    """True only when the stored points exactly match the expected revision
+    generation.
+
+    Scoped path first: a revision-keyed scroll (limit = expected + 1, so
+    any surplus is observed, not paged past) — coexisting sibling revisions
+    under the same doc_id never disturb the count. A stamped point from a
+    DIFFERENT revision fails the verify (mixed generations must never
+    verify). When nothing is stamped (pure legacy history), the doc_id
+    scroll applies the same checks while tolerating absent stamps — the
+    legacy-sole admission rule lives in is_doc_complete, not here.
+    """
+    if expected_chunks < 1:
+        return False
+    scoped, _ = client.scroll(
+        settings.qdrant_collection,
+        scroll_filter=_rev_filter(doc_id, source_rev),
+        limit=expected_chunks + 1,
+        with_payload=["sha256", "rules_v", "source_rev", "text"],
+    )
+    if scoped:
+        if len(scoped) != expected_chunks:
+            return False
+        return _verify_batch(scoped, sha256, rules_v, source_rev, chunk_ids_digest, content_digest)
+    points, _ = client.scroll(
+        settings.qdrant_collection,
+        scroll_filter=_doc_id_filter(doc_id),
+        limit=expected_chunks + 1,
+        with_payload=["sha256", "rules_v", "source_rev", "text"],
+    )
+    if len(points) != expected_chunks:
+        return False
+    return _verify_batch(points, sha256, rules_v, source_rev, chunk_ids_digest, content_digest)
+
+
+def _verify_batch(
+    points: list,
+    sha256: str,
+    rules_v: str,
+    source_rev: str,
+    chunk_ids_digest: str,
+    content_digest: str,
+) -> bool:
+    """Per-point sha/rules/revision checks plus the shared digest match."""
+    ids: list[str] = []
+    texts: dict[str, str] = {}
+    for p in points:
+        payload = p.payload or {}
+        if payload.get("sha256") != sha256 or payload.get("rules_v") != rules_v:
+            return False
+        rev = payload.get("source_rev")
+        if rev is not None and rev != source_rev:
+            return False
+        pid = str(p.id)
+        ids.append(pid)
+        texts[pid] = str(payload.get("text") or "")
+    ids.sort()
+    return _match_digests(ids, texts, chunk_ids_digest, content_digest)
+
+
 def is_doc_complete(
     client: QdrantPoints,
     settings: Settings,
@@ -318,27 +445,146 @@ def is_doc_complete(
     sha256: str,
     rules_v: str,
     source_labels: str,
+    source_rev: str,
 ) -> bool:
-    """Skip gate (req 3): valid completion + verified points, same generation."""
-    completion = read_completion(client, settings, doc_id)
-    if completion is None:
-        return False
-    if completion.target_collection != settings.qdrant_collection:
-        return False
-    if completion.sha256 != sha256 or completion.rules_v != rules_v:
-        return False
-    if completion.generation_id != doc_generation_id(settings, sha256, rules_v, source_labels):
-        return False
-    return verify_doc_points(
-        client,
-        settings,
-        doc_id,
-        sha256=sha256,
-        rules_v=rules_v,
-        expected_chunks=completion.expected_chunks,
-        chunk_ids_digest=completion.chunk_ids_digest,
-        content_digest=completion.content_digest,
+    """Skip gate: valid completion + verified points, same revision generation.
+
+    Scoped path: the revision's own marker for the expected generation.
+    Legacy path (lazy upgrade — unchanged docs skip without mass
+    re-ingest): a sourceless marker certifies only when no named revision
+    other than this one lives under the doc_id; mixed legacy+named fails
+    toward re-ingest, never a wrong skip.
+    """
+    expected_gen = doc_generation_id(settings, sha256, rules_v, source_labels)
+    scoped = read_completion(
+        client, settings, doc_id, source_rev=source_rev, generation_id=expected_gen
     )
+    if scoped is not None:
+        if scoped.sha256 != sha256 or scoped.rules_v != rules_v:
+            return False
+        return verify_doc_points(
+            client,
+            settings,
+            doc_id,
+            sha256=sha256,
+            rules_v=rules_v,
+            source_rev=source_rev,
+            expected_chunks=scoped.expected_chunks,
+            chunk_ids_digest=scoped.chunk_ids_digest,
+            content_digest=scoped.content_digest,
+        )
+    for marker in legacy_markers(client, settings, doc_id):
+        if (
+            marker.target_collection != settings.qdrant_collection
+            or marker.sha256 != sha256
+            or marker.rules_v != rules_v
+            or marker.generation_id != expected_gen
+        ):
+            continue
+        revisions = stored_doc_revisions(client, settings, doc_id)
+        if any(r is not None and r != source_rev for r in revisions):
+            return False
+        return verify_doc_points(
+            client,
+            settings,
+            doc_id,
+            sha256=sha256,
+            rules_v=rules_v,
+            source_rev=source_rev,
+            expected_chunks=marker.expected_chunks,
+            chunk_ids_digest=marker.chunk_ids_digest,
+            content_digest=marker.content_digest,
+        )
+    return False
+
+
+def is_revision_committed(
+    client: QdrantPoints, settings: Settings, doc_id: str, source_rev: str
+) -> bool:
+    """Self-consistent completeness of one revision under its OWN committed
+    generation (no current-run inputs needed): any scoped marker whose
+    points verify. Crash residue never passes — refresh wipes markers
+    before points, so partial data has no marker to validate."""
+    for m in _doc_markers(client, settings, doc_id):
+        if m.source_rev != source_rev or m.target_collection != settings.qdrant_collection:
+            continue
+        if verify_doc_points(
+            client,
+            settings,
+            doc_id,
+            sha256=m.sha256,
+            rules_v=m.rules_v,
+            source_rev=source_rev,
+            expected_chunks=m.expected_chunks,
+            chunk_ids_digest=m.chunk_ids_digest,
+            content_digest=m.content_digest,
+        ):
+            return True
+    return False
+
+
+def plan_refresh_deletes(
+    client: QdrantPoints,
+    settings: Settings,
+    doc_id: str,
+    source_rev: str,
+    lineage_rev: str | None,
+) -> tuple[set[str], bool]:
+    """Delete plan for a refresh (issue #361). Returns (revision deletes,
+    legacy_doc_delete). Raises BEFORE any delete — callers delete only
+    after this returns:
+
+    - a stale current revision is always replaced (a valid one would have
+      skipped already, except under --reingest);
+    - inventory lineage replaces precisely (the lineage revision, if
+      present and different);
+    - committed coexisting revisions are left alone — replacing one needs
+      its lineage (replacement without lineage would be the overwrite bug);
+    - completion-less residue is deleted (crash-safe retry);
+    - unattributable sourceless residue beside named revisions raises
+      AmbiguousRevisionError (fail closed: deleting by doc_id could wipe a
+      live revision, leaving it serves mixed generations).
+    """
+    present = stored_doc_revisions(client, settings, doc_id)
+    dels = {source_rev} if source_rev in present else set()
+    rest = present - {source_rev}
+    named = {r for r in rest if r is not None}
+    legacy = None in rest
+    if lineage_rev is not None and lineage_rev != source_rev and lineage_rev in present:
+        dels.add(lineage_rev)
+        named.discard(lineage_rev)
+    if legacy and not named:
+        return dels, True
+    if legacy:
+        raise AmbiguousRevisionError(doc_id, sorted(named), _stray_sha16s(client, settings, doc_id))
+    if lineage_rev is None:
+        # No lineage: committed others are coexistence (leave); residue goes.
+        for other in sorted(named):
+            if not is_revision_committed(client, settings, doc_id, other):
+                dels.add(other)
+    return dels, False
+
+
+def _stray_sha16s(client: QdrantPoints, settings: Settings, doc_id: str) -> list[str]:
+    """Distinct content ids of sourceless points under a doc_id (raise path
+    only): paginated like the revision scan, deterministic order."""
+    shas: set[str] = set()
+    offset: int | str | uuid.UUID | None = None
+    while True:
+        points, offset = client.scroll(
+            settings.qdrant_collection,
+            scroll_filter=_doc_id_filter(doc_id),
+            limit=_MARKER_SCAN_LIMIT,
+            with_payload=["source_rev", "sha256"],
+            offset=offset,
+        )
+        for p in points:
+            payload = p.payload or {}
+            if payload.get("source_rev") is None and payload.get("sha256"):
+                shas.add(str(payload["sha256"])[:16])
+        if offset is None or not points:
+            break
+    return sorted(shas)
 
 
 def acquire_run_lock(progress_path: Path) -> IO[Any]:

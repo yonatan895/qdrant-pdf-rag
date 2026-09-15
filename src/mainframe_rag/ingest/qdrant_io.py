@@ -8,6 +8,8 @@ Collection mainframe_manuals (architecture.md section 4.3):
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from qdrant_client import models
 
 from mainframe_rag.config import Settings
@@ -26,6 +28,12 @@ BULK_INDEXING_THRESHOLD_KB = 1 << 30
 DEFAULT_INDEXING_THRESHOLD_KB = 20000
 
 _KEYWORD_INDEXES = ("vendor", "product", "version", "doc_id", "chunk_type", "message_ids", "members", "sha256", "source_rev")
+
+# Revision-scan page size (issue #361): stored_doc_revisions pages through
+# every point under a doc_id, so the limit is a throughput knob, never a
+# correctness bound — a truncated scan would miss revisions and mis-target
+# deletes.
+_REVISION_SCAN_PAGE = 1000
 
 
 class DimMismatchError(RuntimeError):
@@ -126,26 +134,31 @@ def ensure_collection(client: QdrantPoints, settings: Settings) -> None:
     ensure_payload_indexes(client, collection)
 
 
-def stored_doc_state(client: QdrantPoints, settings: Settings, doc_id: str) -> tuple[str | None, str | None]:
-    """(sha256, rules_v) for doc_id (first hit), or (None, None) if absent.
-
-    Sampling only — NEVER a completeness proof (issue #359): one surviving
-    point says nothing about the remaining batches. The skip decision must
-    additionally require a valid completion record plus point verification
-    (ingest.completion.is_doc_complete). Kept for the delete-on-mismatch
-    probe and backward-compatible callers."""
-    points, _ = client.scroll(
-        settings.qdrant_collection,
-        scroll_filter=models.Filter(
-            must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
-        ),
-        limit=1,
-        with_payload=["sha256", "rules_v"],
-    )
-    if not points:
-        return None, None
-    payload = points[0].payload or {}
-    return payload.get("sha256"), payload.get("rules_v")
+def stored_doc_revisions(
+    client: QdrantPoints, settings: Settings, doc_id: str
+) -> set[str | None]:
+    """Distinct source revisions stored under a printed doc_id (issue #361):
+    the `source_rev` payload of every point, with None for legacy points
+    that predate the stamp. Paginated (a doc_id can hold hundreds of
+    chunks); the empty set means absent. Callers decide attribution —
+    this function only observes."""
+    revisions: set[str | None] = set()
+    offset: int | str | UUID | None = None
+    while True:
+        points, offset = client.scroll(
+            settings.qdrant_collection,
+            scroll_filter=models.Filter(
+                must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
+            ),
+            limit=_REVISION_SCAN_PAGE,
+            with_payload=["source_rev"],
+            offset=offset,
+        )
+        for p in points:
+            revisions.add((p.payload or {}).get("source_rev"))
+        if offset is None or not points:
+            break
+    return revisions
 
 
 def stored_rules_version(client: QdrantPoints, settings: Settings) -> str | None:
@@ -165,11 +178,35 @@ def stored_rules_version(client: QdrantPoints, settings: Settings) -> str | None
 
 
 def delete_by_doc(client: QdrantPoints, settings: Settings, doc_id: str) -> None:
+    """Delete every point under a printed doc_id. Legacy-sole-migration use
+    only (issue #361): sourceless pre-361B residue that the planner proved
+    is the sole history under the doc_id. Named revisions always delete by
+    their own revision — a doc_id-wide delete over coexisting revisions is
+    the overwrite bug, not a refresh."""
     client.delete(
         settings.qdrant_collection,
         points_selector=models.FilterSelector(
             filter=models.Filter(
                 must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
+            )
+        ),
+        wait=True,
+    )
+
+
+def delete_by_revision(client: QdrantPoints, settings: Settings, source_rev: str) -> None:
+    """Delete exactly one source revision's points (issue #361): the only
+    destructive point selector for named revisions. Coexisting revisions
+    under the same doc_id are untouched."""
+    client.delete(
+        settings.qdrant_collection,
+        points_selector=models.FilterSelector(
+            filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="source_rev", match=models.MatchValue(value=source_rev)
+                    )
+                ]
             )
         ),
         wait=True,

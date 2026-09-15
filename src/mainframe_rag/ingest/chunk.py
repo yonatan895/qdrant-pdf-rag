@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from mainframe_rag.ingest.classify import classify, is_table_block
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+from mainframe_rag.ingest.identity import source_rev_key
 from mainframe_rag.regexes import (
     FRONT_MATTER_RE,
     SKIP_ALWAYS_RE,
@@ -149,8 +150,15 @@ class Chunk:
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
-def make_chunk_id(doc_id: str, heading_path: str, page_start: int, ordinal: int) -> str:
-    key = f"{doc_id}|{heading_path}|{page_start}|{ordinal}"
+def make_chunk_id(source_rev: str, heading_path: str, page_start: int, ordinal: int) -> str:
+    """Point-id contract: UUID5 of the chunk key. The key's first segment is
+    the source revision (issue #361), not the printed doc_id — two revisions
+    sharing a form number must mint distinct point ids, or the second
+    writer's upsert silently collides with the first. The UUID5-of-key
+    scheme itself never changes (only the key content did, once, in the
+    361B migration). Chunk.doc_id (payload, citations, filters) is
+    unaffected."""
+    key = f"{source_rev}|{heading_path}|{page_start}|{ordinal}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
@@ -562,6 +570,9 @@ def make_chunks(
     parsed: ParsedDoc, page_texts: list[str], page_labels: list[str | None] | None = None
 ) -> list[Chunk]:
     doc_id = parsed.doc_id or parsed.path.stem
+    # Chunk identity keys on the source revision (issue #361): the payload
+    # doc_id stays the printed family key for citations and filters.
+    revision = source_rev_key(parsed.vendor, parsed.product, parsed.version, parsed.sha256)
     labels = page_labels or [None] * parsed.page_count
     chunks: list[Chunk] = []
 
@@ -579,8 +590,9 @@ def make_chunks(
 
         for ordinal, (page_start, page_end, text) in enumerate(_split_blocks(paras)):
             # UUID pins the span start: the deterministic chunk key contract
-            # (doc|heading|page|ordinal) is unchanged, only the label spans.
-            chunk_id = make_chunk_id(doc_id, section.heading_path, page_start, ordinal)
+            # (revision|heading|page|ordinal) carries the source revision, so
+            # same-form-number revisions never share point ids.
+            chunk_id = make_chunk_id(revision, section.heading_path, page_start, ordinal)
             span_labels = labels[page_start : page_end + 1] if page_start < len(labels) else []
             label = _page_label_range(span_labels)
             chunks.append(

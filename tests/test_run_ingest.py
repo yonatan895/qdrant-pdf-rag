@@ -105,17 +105,23 @@ def test_summary_counters_failed_run(tmp_path, synthetic_pdf, capsys):
     assert done[0]["files_failed"] == 1
 
 
-def _filter_doc_id(filter_obj) -> str | None:
-    """Extract a doc_id equality value from a Filter/FilterSelector shape."""
+def _filter_match_value(filter_obj, key: str) -> str | None:
+    """Extract one MatchValue from a Filter/FilterSelector shape (one rule
+    for every key — doc_id and source_rev selectors share it)."""
     filt = getattr(filter_obj, "filter", filter_obj)
     must = getattr(filt, "must", None) or []
     for cond in must:
-        if getattr(cond, "key", None) == "doc_id":
+        if getattr(cond, "key", None) == key:
             match = getattr(cond, "match", None)
             value = getattr(match, "value", None)
             if value is not None:
                 return str(value)
     return None
+
+
+def _filter_doc_id(filter_obj) -> str | None:
+    """Extract a doc_id equality value from a Filter/FilterSelector shape."""
+    return _filter_match_value(filter_obj, "doc_id")
 
 
 class _FakeQdrant:
@@ -187,20 +193,16 @@ class _FakeQdrant:
             if self._points.get(collection_name):
                 return [self._points[collection_name][0]], None
             return [SimpleNamespace(payload={"rules_v": self.sample_rules_v})], None
+        # Doc-level reads serve stored points only — the seeded sampling
+        # marker above never leaks into a doc_id-filtered read (issue #361:
+        # revision listing and marker reads must observe, never assume).
         doc_id = _filter_doc_id(scroll_filter)
+        rev = _filter_match_value(scroll_filter, "source_rev")
         stored = self._points.get(collection_name, [])
         if doc_id is not None:
             stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
-        else:
-            # Legacy sampling callers (stored_doc_state pre-#359 shape):
-            # serve a stored point when one exists, else the seeded marker.
-            if stored:
-                return stored[:limit], None
-            if self.stored_sha is None:
-                return [], None
-            return [
-                SimpleNamespace(payload={"sha256": self.stored_sha, "rules_v": self.stored_rules_v})
-            ], None
+        if rev is not None:
+            stored = [p for p in stored if (p.payload or {}).get("source_rev") == rev]
         return stored[:limit], None
 
     def upsert(self, collection_name, *, points, wait=True):
@@ -222,16 +224,31 @@ class _FakeQdrant:
         ]
 
     def delete(self, collection_name, *, points_selector, wait=True):
-        self.deletes += 1
-        doc_id = _filter_doc_id(points_selector)
-        if doc_id is not None:
-            kept = [p for p in self._points.get(collection_name, [])
-                    if (p.payload or {}).get("doc_id") != doc_id]
-            self._points[collection_name] = kept
-        else:
-            self._points[collection_name] = []
         from types import SimpleNamespace
 
+        self.deletes += 1
+        ids = getattr(points_selector, "points", None)
+        if ids is not None:
+            # PointIdsList (precise completion invalidation, issue #361).
+            # Seeded sampling markers carry no id and never match.
+            wanted = {str(i) for i in ids}
+            self._points[collection_name] = [
+                p for p in self._points.get(collection_name, [])
+                if str(getattr(p, "id", None)) not in wanted
+            ]
+            return SimpleNamespace()
+        doc_id = _filter_doc_id(points_selector)
+        rev = _filter_match_value(points_selector, "source_rev")
+        if doc_id is None and rev is None:
+            self._points[collection_name] = []
+        else:
+            self._points[collection_name] = [
+                p for p in self._points.get(collection_name, [])
+                if not (
+                    (doc_id is None or (p.payload or {}).get("doc_id") == doc_id)
+                    and (rev is None or (p.payload or {}).get("source_rev") == rev)
+                )
+            ]
         return SimpleNamespace()
 
 

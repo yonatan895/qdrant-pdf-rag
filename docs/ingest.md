@@ -107,7 +107,12 @@ Contract tests: `tests/test_classify_messages.py`; `testing.md` mandates a
 ## 4. Chunking (`chunk.py`)
 
 Section-outline chunking with per-statement code protection. Point id =
-`UUID5(NAMESPACE_URL, "doc_id|heading_path|page_start|ordinal")`.
+`UUID5(NAMESPACE_URL, "source_rev|heading_path|page_start|ordinal")`
+where `source_rev` is `normalize(vendor)|normalize(product)|normalize(version)|sha256`
+(issue #361): same-form-number revisions mint disjoint point ids, so a
+second writer's upsert can never collide with the first. The UUID5-of-key
+scheme never changes; the payload `doc_id` stays the printed family key
+for citations and filters.
 
 - Budgets: `SECTION_MAX_CHARS = 3500` with a 400-char overlap. 3500 (not
   6000) keeps table/code pages inside 4096-token embedders; the worst-case
@@ -115,8 +120,10 @@ Section-outline chunking with per-statement code protection. Point id =
 - **Id-stability warning:** the ordinal resets per section and `page_start`
   is a 0-based index, not the printed label. Renaming a heading, reordering
   the TOC, or inserting a section re-IDs every later chunk in that section
-  (full re-embed; stale points are removed only via the sha-mismatch delete
-  in §9).
+  (full re-embed; stale points are removed only via the revision delete in
+  §9). Relabeling a file (vendor/product/version) or changing its bytes
+  likewise re-IDs the whole document — that is the 361B migration churn,
+  a one-time event, not ongoing instability.
 - No TOC → windowed fallback sections (`fallback_sections`, issue #216),
   not one whole-document blob: a new section opens at a heading-like page
   lead (numbered headings, Chapter/Appendix/Section leads) or every
@@ -285,35 +292,45 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   never to `m=0` (which drops existing HNSW). Default **off**, load-bearing
   on single-node: a measured 371-doc/246k-point bulk load ran 3× slower
   with unindexed segments. Do not enable for initial loads on small nodes.
-- Point payload (14 fields + optional `context`): `vendor, product, version,
-  doc_id, title, heading_path, page_label, page_start, chunk_type,
+- Point payload (15 fields + optional `context`): `vendor, product, version,
+  doc_id, source_rev, title, heading_path, page_label, page_start, chunk_type,
   message_ids, members, sha256, rules_v, text`; `context` only when present — never
-  indexed, observability only. Point id = `chunk_id` (UUID5); vectors
+  indexed, observability only. Point id = `chunk_id` (UUID5 over the
+  revision-keyed chunk key); vectors
   `{dense, bm25}`; upserts loop `batch_size` (default 128, bounds 16–256)
   with `wait=True`; idempotent by UUID5, no app-level retry — client
   timeouts bound the calls.
 - Pair-length contract (issue #359): `chunks` and `vectors` must align
   exactly — a mismatch raises instead of zip-truncating.
-- Completion records (issue #359, `ingest/completion.py`): one point per
-  published document generation in `<collection>__completions`
+- Completion records (issues #359 + #361, `ingest/completion.py`): one point
+  per published document generation in `<collection>__completions`
   (same dim, dummy vectors, keyword indexes on
-  `doc_id/sha256/rules_v/generation_id/target_collection`). The
+  `doc_id/sha256/rules_v/generation_id/target_collection`). Markers are
+  per-revision: the point id scopes to
+  `(target, doc_id, source_rev, generation_id)` and the payload carries
+  `source_rev`, so coexisting revisions under one `doc_id` verify
+  independently and a refresh retires exactly its lineage's markers (plus
+  sole-history legacy markers). The
   generation binds source hash + representation fingerprint
   (`rules_v|embed_mode|embed_model|dense_dim|context-flag`) + CLI source
   triple (`vendor|product|version` overrides, `source_labels()`) + target
   collection, with expected chunk count and chunk-ID/content digests.
   Written only after every batch is acknowledged and the stored points
-  verify (count + per-point sha/rules + recomputed digests); refreshes
-  invalidate the old marker before deleting points, so a failed refresh
-  leaves no valid completion and retries safely. Zero-chunk docs are an
-  explicit `empty` outcome — never published, never skippable.
+  verify (count + per-point sha/rules/revision + recomputed digests);
+  refreshes invalidate the revision's markers before deleting points, so a
+  failed refresh leaves no valid completion and retries safely. Zero-chunk
+  docs are an explicit `empty` outcome — never published, never skippable.
 - Downstream consumers: `doc_id/product/version/vendor/chunk_type/
   message_ids/members/sha256/rules_v/page_start` → filtered prefetch + keyword
-  indexes (`retrieve/`); `title/heading_path/page_label/text` →
-  citations/prompt (`agent/`); `context` → observability only.
-- `doc_sha256` reads one payload (scroll limit 1, filter `doc_id`) for the
-  upsert skip-check; `delete_by_doc` deletes by `doc_id` selector with
-  `wait=True`.
+  indexes (`retrieve/` — untouched by the identity migration: citations and
+  filters still key on the printed family); `title/heading_path/page_label/text` →
+  citations/prompt (`agent/`); `source_rev` → revision tooling (refresh
+  targeting, coexistence) + keyword index; `context` → observability only.
+- `stored_doc_revisions` lists the distinct source revisions under a
+  `doc_id` (paginated scan, `None` for pre-361B points) for the refresh
+  plan; `delete_by_revision` deletes exactly one revision with `wait=True`;
+  `delete_by_doc` remains for sole-history legacy residue only (never over
+  coexisting revisions).
 
 Contract tests: `tests/test_qdrant_io.py`,
 `tests/test_ingest_robustness.py`.
@@ -370,13 +387,13 @@ thread pool.
   The gateway exposes only mutable aliases, so the dense revision is an
   operator-declared fingerprint, never an inferred weight id; empty means
   unattested.
-- **Source-revision identity gate** (issue #361 step 1, `ingest/identity.py`):
-  three identities — printed `doc_id` (family/citation key, still the
-  destructive selector until the 361B migration), `source_rev`
-  (`normalize(vendor)|normalize(product)|normalize(version)|sha256`,
-  stamped on every point payload + inventory record for the migration's
-  provenance), committed generation. Planning (in-place and alias-publish
-  prewalk alike) gates the walked corpus before any parse worker spawns:
+- **Source-revision identity** (issue #361, `ingest/identity.py` +
+  revision-keyed pipeline): three identities — printed `doc_id`
+  (family/citation key), `source_rev`
+  (`normalize(vendor)|normalize(product)|normalize(version)|sha256`, the
+  destructive key for locks, deletes, completions, and chunk ids),
+  committed generation. Planning (in-place and alias-publish prewalk
+  alike) gates the walked corpus before any parse worker spawns:
   byte-identical copies under several paths ingest exactly once (the
   lexicographically smallest corpus-relpath wins; losers log
   `action: duplicate` and take no inventory record, so reruns re-elect the
@@ -390,10 +407,32 @@ thread pool.
   opening, else first-four-pages text), so prescan keys and worker doc ids
   cannot diverge; cost is one serial open + short text scan per file on top
   of the hashing the parent already does. Mount relocation changes nothing
-  (absolute paths are never identity). Step 2 (361B) switches destructive
-  selectors, locks, completions, and the chunk key onto `source_rev` with a
-  snapshot-gated migration; until then, same-`doc_id`/different-sha inputs
-  fail here instead of silently overwriting each other.
+  (absolute paths are never identity).
+- **Refresh lineage rule:** a refresh replaces precisely the revision named
+  by inventory lineage (the path's previous `source_rev`, threaded from
+  the parent plan into the upsert stage). Committed coexisting revisions
+  are left alone — replacing one needs its lineage, otherwise the write
+  would be the overwrite bug. Completion-less residue is swept (crash-safe
+  retry); sole-history legacy residue migrates via `doc_id` delete; a
+  lineage-less run therefore ADDS revisions — keep the `--progress` file
+  (prod `/work` persists it) so refreshes replace. Unattributable
+  sourceless residue beside named revisions raises `AmbiguousRevisionError`
+  (doc id + revision/content ids, remediation included) before any delete.
+- **361B migration runbook (snapshot-gated, operator-driven, never
+  automatic):** (1) snapshot the collection (`create_snapshot` — the same
+  mechanism publish uses for safety snapshots); (2) re-ingest in place —
+  unchanged docs skip lazily via the legacy rule (no mass re-ingest),
+  changed docs migrate their history precisely, and the representation
+  manifest flips to `identity_schema: source_rev`; (3) verify counts plus
+  `verify_all_complete` semantics (every walked doc revision-verified);
+  (4) roll back by restoring the snapshot. Docs whose history predates
+  revision stamps AND share a `doc_id` with a named revision need one
+  explicit cleanup first (delete the stale revision's points by
+  `doc_id` + content-sha filter, then re-ingest) — the refresh error names
+  exactly that. Pre-361B completion markers are unreachable under the new
+  id scheme and read as absent; the first refresh of each lineage rewrites
+  them scoped. Evaluation needs no re-baseline: citations, filters, and
+  goldens key on `doc_id`/text (see the eval numbers in each 361B PR).
 - **Refresh visibility — alias publication** (`INGEST_ALIAS_PUBLISH=true`,
   default off; enabling by default is a dedicated follow-up PR; issue #359
   req 4/5, `ingest/publish.py` + `qdrant_io` alias/snapshot helpers):
@@ -438,11 +477,10 @@ thread pool.
 - In-flight window `max(2, workers*2)` caps pending parse+upsert work so
   slow upserts never let the parent hold unbounded vectors in RAM;
   first-completed pump; upsert streams default 4 (bounds 1–8).
-- `_DocLocks`: per-`doc_id` threading locks (retained, bounded by unique
-  doc ids) serialize check-delete-upsert sequences — the planning identity
-  gate above aborts cross-revision sharing before any delete/upsert, so a
-  lock collision here is a same-revision rerun (locks re-key onto the
-  source revision in the 361B migration).
+- `_DocLocks`: per-revision threading locks (retained, bounded by unique
+  revisions) serialize same-revision check-delete-upsert sequences across
+  the parallel streams — coexisting revisions under one `doc_id` take
+  different locks and proceed concurrently.
 - `_parse_one` traps everything and returns a plain `InventoryRecord(status="error")`
   (message capped at 500 chars, exception class name in `error_type`, doc id or filename
   stem, zero pages/chunks) plus a dummy parsed doc; the future-exception path uses an
@@ -464,4 +502,5 @@ Contract tests: `tests/test_run_ingest.py` (`main`, `resolve_workers`,
 `tests/test_ingest_completion.py` (failure boundaries),
 `tests/test_ingest_publish.py` (alias publication),
 `tests/test_ingest_identity.py` (dedup/collision planning gate),
+`tests/test_ingest_revisions.py` (revision coexistence/refresh/migration),
 `testing.md` pickle round-trip.
