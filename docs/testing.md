@@ -82,6 +82,7 @@ Parser / citation / fence / grounding changes need the cases that broke last tim
 - Parentheses noise must not become excerpt indexes (`z/OS (3.1)`).
 - Unlabeled vs language-tagged fences; do not use `len > N` as a script signal.
 - Out-of-bounds `[99]`.
+- Retrieved-but-omitted cites are rejected (issue #364): assert the actual outgoing prompt so the fixture cannot accidentally pack every hit; the tail's example cite is not evidence, and `[n]` inside a dropped thinking/extracted script fence is not promoted.
 - e2e `/v1/answer` fails on zero citations or “no supporting excerpts”.
 - Queried identifiers (`IEA500I`, `LFAREA`, …) must exist in the synthetic `build()` fixture, otherwise the gate cannot fail for the right reason.
 

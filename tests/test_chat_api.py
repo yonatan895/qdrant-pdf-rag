@@ -403,9 +403,13 @@ def test_build_chat_messages_pruning_and_cap():
         ChatMessage(role="user", content="How do I resolve it?"),
     ]
     hits = [_hit()]
-    assembled = build_chat_messages(past_messages, hits)
+    prepared = build_chat_messages(past_messages, hits)
+    assembled = prepared.messages
 
     assert len(assembled) == 4  # system, user (prior), assistant (prior), user (active)
+    # Evidence manifest covers the active turn only (issue #364).
+    assert [e.cite for e in prepared.evidence.entries] == [hits[0].cite]
+    assert prepared.evidence.omitted_indices == ()
     assert assembled[0].role == "system"
     assert assembled[1].role == "user"
     assert assembled[1].content == "Explain IEA500I"

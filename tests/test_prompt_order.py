@@ -58,7 +58,7 @@ def test_default_assembly_is_exact():
     in retrieval order, tail last."""
     hit1 = _hit("SA22-0000-00 Ref, Chapter 2 > IEA500I, p. 1-6", "First body.")
     hit2 = _hit("SA22-7777-01 Ref, Chapter 1 > IEB700I, p. 2-3", "Second body.")
-    messages = build_messages("Do the thing?", [hit1, hit2], complexity="simple")
+    messages = build_messages("Do the thing?", [hit1, hit2], complexity="simple").messages
     user = messages[1].content
     tail = (
         "Please answer based strictly on the retrieved manual excerpts above and conclude "
@@ -75,7 +75,7 @@ def test_default_assembly_is_exact():
 
 
 def test_empty_hits_keeps_bare_section_header():
-    messages = build_messages("q?", [], complexity="simple")
+    messages = build_messages("q?", [], complexity="simple").messages
     user = messages[1].content
     assert "Retrieved manual excerpts:\n" in user
     assert "[1]" not in user
@@ -83,10 +83,12 @@ def test_empty_hits_keeps_bare_section_header():
 
 
 def test_context_block_precedes_question():
-    messages = build_messages("q?", [_hit("c, p. 1", "b")], product="z/OS", version="3.2", complexity="simple")
+    messages = build_messages(
+        "q?", [_hit("c, p. 1", "b")], product="z/OS", version="3.2", complexity="simple"
+    ).messages
     user = messages[1].content
     assert user.index("Sysplex context: product: z/OS, version: 3.2") < user.index("Question: q?")
-    no_context = build_messages("q?", [_hit("c, p. 1", "b")], complexity="simple")[1].content
+    no_context = build_messages("q?", [_hit("c, p. 1", "b")], complexity="simple").messages[1].content
     assert no_context.startswith("Question: q?")
 
 
@@ -97,22 +99,25 @@ def test_excerpt_order_follows_input_not_cite_sort():
         _hit("AAA first-sorting cite, p. 1", "body two."),
         _hit("MMM middle cite, p. 5", "body three."),
     ]
-    user = build_messages("q?", hits, complexity="simple")[1].content
+    user = build_messages("q?", hits, complexity="simple").messages[1].content
     assert user.index("body one.") < user.index("body two.") < user.index("body three.")
     assert user.index("[1] ZZZ") < user.index("[2] AAA") < user.index("[3] MMM")
 
 
 def _stable_blocks(hits=None, context_entries=None, question_text="Question: q?", tail_part="TAIL."):
-    from mainframe_rag.agent.answer import _assemble_blocks, order_prompt_blocks
+    from mainframe_rag.agent.answer import (
+        PackedExcerpt,
+        _assemble_blocks,
+        order_prompt_blocks,
+    )
 
     if hits is None:
         hits = [_hit("SA22-0000-00 Ref, p. 1-6", "Body one."), _hit("Other Ref, p. 2-3", "Body two.")]
-    blocks = _assemble_blocks(
-        context_entries or [],
-        question_text,
-        [(f"[{i}] {h.cite}", h.text) for i, h in enumerate(hits, 1)],
-        tail_part,
-    )
+    packed = [
+        PackedExcerpt(index=i, hit=h, body=h.text, truncated=False)
+        for i, h in enumerate(hits, 1)
+    ]
+    blocks = _assemble_blocks(context_entries or [], question_text, packed, tail_part)
     return order_prompt_blocks(blocks, "stable_cache")
 
 
@@ -196,7 +201,7 @@ def test_build_messages_stable_cache_end_to_end():
         product="z/OS",
         complexity="simple",
         order="stable_cache",
-    )
+    ).messages
     user = messages[1].content
     instructions_at = user.index("Instructions: answer the user's question")
     context_at = user.index("Sysplex context:")

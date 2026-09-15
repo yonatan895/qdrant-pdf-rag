@@ -27,9 +27,12 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   SSE `final` event). `citations_inferred` is the provenance flag (issue
   #269): true when every returned cite was mapped from bare bracket markers
   with no explicit citation line — the eval never counts those as grounded.
-  `inferred_indices` (issue #299) lists the 1-based prompt excerpt indices
-  those markers pointed at (empty on every other path), so right-doc /
-  wrong-index is measurable.
+  `inferred_indices` (issue #299) lists the 1-based `[n]` prompt labels those
+  markers pointed at (empty on every other path), so right-doc / wrong-index
+  is measurable. Both the allowlist and the label mapping come exclusively
+  from the final supplied-evidence manifest (issue #364): retrieved hits that
+  packing/trimming omitted, and the prompt's worked example cite, are never
+  accepted as grounding.
 - `GET /healthz` — `HealthzResponse{status, qdrant, embed?}`. Qdrant is
   checked by GET-ting the pooled client's `{base}/readyz` and requiring
   exactly `200` plus the body `all shards are ready` (case/space
@@ -202,7 +205,20 @@ select `complex`. Default is `simple`.
   tokenize RPCs.
 - `splunk_context` truncates at 4000 chars with a suffix before packing, so
   caller context can never starve excerpts.
-- The system prompt's seven rules (ground-only, synthesize-from-templates,
+- Evidence manifest (issue #364): `build_messages` / `build_chat_messages`
+  return a `PreparedPrompt{messages, evidence}`. `evidence` is built from the
+  final packed list after the last trim — never by re-scanning prompt text —
+  and records per supplied excerpt its prompt label, `chunk_id`/`doc_id`,
+  citation, retained-range boundary, truncation flag, and estimator token
+  count, plus the omitted retrieved labels. Duplicate display citations keep
+  distinct identities. The manifest is the only source of the citation
+  allowlist and of `inferred_indices`; the retrieval list rides
+  `AnswerCoreOutput.hits` separately as retrieved candidates. For multi-turn
+  chat, prior turns are conversation context, never evidence for the new
+  answer.
+- The tail's worked example is `hits[0].cite` even when packing dropped that
+  hit: it is prompt furniture, never a manifest entry, so echoing it is
+  rejected. The system prompt's seven rules (ground-only, synthesize-from-templates,
   version-disagree attribution, admit-gap, fenced scripts as examples,
   identify-a-doc-number/message-id/short-name query instead of refusing,
   mandatory `Citations:` with a few-shot example) plus the complex-query
@@ -212,23 +228,28 @@ select `complex`. Default is `simple`.
 
 ## 5. Citation validation
 
-Only retrieved cite strings reach the client, via two passes plus a
-trailing sweep in `cites.py` / `parse_answer`:
+Only cite strings actually supplied in the final prompt reach the client,
+via two passes plus a trailing sweep in `cites.py` / `parse_answer`. The
+allowlist is `PromptEvidence.allowed_citations` (issue #364) — retrieved
+hits omitted by budget packing, and the tail's example cite, are rejected:
 
 1. Explicit block: from a `Citations:` header (any `#` depth, any case),
    consuming cite-shaped or bullet lines (after normalization) until the
    first blank past seen cites — later prose is preserved as body.
 2. Trailing bare cites: a blank-tolerant tail scan for allowed cite lines
    without any header.
-3. Bracket fallback on raw content (only when the passes above found no citation): `[n]` / `[n, m]` only, bounds-checked
-   against retrieved hits, deduped, flagged inferred. **Parentheses are
+3. Bracket fallback on the fence-processed content (only when the passes
+   above found no citation): `[n]` / `[n, m]` only, resolved through the
+   manifest's prompt labels (not retrieval rank), deduped, flagged
+   inferred. Markers that occur only inside dropped `thought`/`thinking`
+   or extracted `SCRIPT_LANGS` fences are never promoted. **Parentheses are
    never inferred** — IBM-manual noise like `z/OS (3.1)` stays body text.
 
 - One shared normalizer peels list markers, `>` quotes, paired
   punctuation, ``[x](url)`` links, `<angle>` wraps, `(parens)` groups, and
   `[1]:`-style numeric prefixes (up to 6 rounds) on both paths — two
   regexes for one concept would diverge.
-- Validation is exact-match + dedupe against the retrieved pool; standalone
+- Validation is exact-match + dedupe against the supplied set; standalone
   lines only — inline mentions (`refer to SA22-… for details`), dimensions
   (`3.5 inches`), and table pipes survive.
 - Fenced code blocks in `SCRIPT_LANGS` (`jcl, rexx, sh, bash, shell,
@@ -322,9 +343,10 @@ timings, citation counts, script presence, finish reason, token usage
 (+ stream/TTFT marks on SSE); `chat` uses actions `chat`, `chat_retrieval`,
 `chat_answer`, `chat_stream`, and the answer log also carries the citation
 WHY telemetry (`inline_bracket_present`, `citations_header_present`,
-`cites_rejected_shape_bad`, `cites_rejected_unmapped`). Errors log
-`str(exc)[:200]` server-side only. **Never query text, PDF/manual text, or
-secrets** — the JSON-log rule is unchanged by tracing.
+`cites_rejected_shape_bad`, `cites_rejected_unmapped`) and the supplied
+`evidence` count (issue #364 — counts only; the gap to `hits` is packing
+omission). Errors log `str(exc)[:200]` server-side only. **Never query text,
+PDF/manual text, or secrets** — the JSON-log rule is unchanged by tracing.
 
 Spans mirror the log contract (one request = one trace: a
 `v1.search`/`v1.answer`/`v1.chat`/`ui.chat` root → (`chat.condense` before

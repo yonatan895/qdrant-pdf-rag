@@ -188,7 +188,7 @@ def render_answer_text(
         "============================================================",
         f"Classification : [{kind.upper()}]",
         f"Timings        : Embed: {timings.get('embed_ms', 0)}ms | Qdrant: {timings.get('qdrant_ms', 0)}ms | Total: {total_ms}ms",
-        f"Excerpts Used  : {len(hits)}",
+        f"Retrieved Hits : {len(hits)}",
         "------------------------------------------------------------",
         "MODEL REASONING ANSWER:",
         "------------------------------------------------------------",
@@ -644,7 +644,7 @@ def execute_answer(
                 "rag.max_context_chars": max_context,
             },
         ):
-            messages = build_messages(
+            prepared = build_messages(
                 query=query,
                 hits=hits,
                 product=product,
@@ -672,7 +672,7 @@ def execute_answer(
             try:
                 reply = as_chat_result(
                     client.chat(
-                        messages,
+                        prepared.messages,
                         reasoning_effort=effort,
                         temperature=settings.llm_temperature,
                     )
@@ -690,11 +690,13 @@ def execute_answer(
             })
 
         reply_content = reply.content
-        allowed_citations = {h.cite for h in hits}
-        parsed = parse_answer(reply_content, allowed_citations, ordered_cites=[h.cite for h in hits])
+        # Issue #364: the allowlist is the prepared prompt's supplied-evidence
+        # manifest, never the retrieval list.
+        parsed = parse_answer(reply_content, prepared.evidence)
         root_span.set_attributes({
             "rag.query_kind": kind,
             "rag.hits": len(hits),
+            "rag.evidence": prepared.evidence.supplied_count,
             "rag.citations": len(parsed.citations),
             "rag.has_script": parsed.script is not None,
             "rag.doc_ids": ",".join(h.doc_id for h in hits[:8]),

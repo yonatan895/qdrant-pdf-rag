@@ -61,10 +61,10 @@ class ParsedAnswer(BaseModel):
     # Citation WHY telemetry (issue #299): parse-time attempt counters the
     # response contract keeps out (the eval joins them from the answer log).
     # shape_bad = citation-block lines that never matched the citation
-    # shape; unmapped = shape-valid lines rejected as not in the hit set.
-    # `citations_header_present` is read from the raw model content — the
-    # returned body has the header stripped, so a body search is always
-    # False (the #303 field bug this replaces).
+    # shape; unmapped = shape-valid lines rejected as not in the supplied
+    # set. Both signals and the bracket scan read the fence-processed model
+    # content (issue #364): the returned body has the header stripped, so a
+    # body search is always False (the #303 field bug this replaces).
     inline_bracket_present: bool = False
     citations_header_present: bool = False
     cites_rejected_shape_bad: int = 0
@@ -234,6 +234,168 @@ def _frame_excerpt(text: str) -> str:
     return f"{EXCERPT_OPEN}\n{text}\n{EXCERPT_CLOSE}"
 
 
+@dataclass(frozen=True)
+class EvidenceEntry:
+    """One retrieved chunk actually supplied to the model in the final prompt
+    (issue #364). Identity is chunk_id (UUID5, revision-keyed) plus doc_id;
+    the retained text is the prefix range [0, included_chars) of the stripped
+    source text, never the text itself. `truncated` marks a packing or
+    verification cut; `est_tokens` is estimator-only (never a tokenize RPC)."""
+
+    prompt_index: int
+    chunk_id: str
+    doc_id: str
+    cite: str
+    truncated: bool
+    included_chars: int
+    source_chars: int
+    est_tokens: int
+
+
+@dataclass(frozen=True)
+class PromptEvidence:
+    """The final supplied-evidence manifest for one prompt: the only source of
+    the citation allowlist and of the [n] -> excerpt index mapping (issue
+    #364). `omitted_indices` records retrieved labels that did not survive
+    packing/trimming, so omission is explicit rather than inferred from list
+    length. Entries stay ordered by prompt label; duplicate display citations
+    keep distinct chunk identities."""
+
+    entries: tuple[EvidenceEntry, ...] = ()
+    omitted_indices: tuple[int, ...] = ()
+
+    @property
+    def allowed_citations(self) -> frozenset[str]:
+        return frozenset(e.cite for e in self.entries)
+
+    def cite_for_index(self, index: int) -> str | None:
+        for entry in self.entries:
+            if entry.prompt_index == index:
+                return entry.cite
+        return None
+
+    @property
+    def supplied_count(self) -> int:
+        return len(self.entries)
+
+
+@dataclass
+class PackedExcerpt:
+    """One hit in the prompt under construction: stable identity, the [i]
+    label it will ship with, and its final body text (truncation suffix
+    included when `truncated`). One list carries identity and text through
+    planning and every verification trim round, so the manifest cannot drift
+    from the rendered prompt (issue #364)."""
+
+    index: int
+    hit: SearchHit
+    body: str
+    truncated: bool = False
+
+    def render(self) -> tuple[str, str]:
+        return f"[{self.index}] {self.hit.cite}", self.body
+
+    def evidence_entry(self) -> EvidenceEntry:
+        source = self.hit.text.strip()
+        included = len(self.body) - (len(_TRUNCATED_SUFFIX) if self.truncated else 0)
+        return EvidenceEntry(
+            prompt_index=self.index,
+            chunk_id=self.hit.chunk_id,
+            doc_id=self.hit.doc_id,
+            cite=self.hit.cite,
+            truncated=self.truncated,
+            included_chars=max(0, included),
+            source_chars=len(source),
+            est_tokens=estimate_tokens(f"[{self.index}] {self.hit.cite}\n{self.body}"),
+        )
+
+
+@dataclass
+class PreparedPrompt:
+    """Final prompt messages plus the immutable evidence manifest of the
+    excerpts actually supplied in them (issue #364). Citation validation
+    consumes `.evidence`; `.messages` is what the model sees."""
+
+    messages: list[ChatMessage]
+    evidence: PromptEvidence
+
+
+def _prompt_evidence(packed: list[PackedExcerpt], total_hits: int) -> PromptEvidence:
+    """Manifest from the final packed list, after every trim: supplied entries
+    in prompt order plus the retrieved labels that were omitted."""
+    supplied = {p.index for p in packed}
+    return PromptEvidence(
+        entries=tuple(p.evidence_entry() for p in packed),
+        omitted_indices=tuple(i for i in range(1, total_hits + 1) if i not in supplied),
+    )
+
+
+def _plan_packed_excerpts(
+    hits: list[SearchHit],
+    budget_tokens: int,
+    max_chunk_chars: int,
+    max_chunk_chars_narrative: int | None,
+    narrative_token_cap: int,
+    complexity: str,
+) -> list[PackedExcerpt]:
+    """Estimator-only planning loop shared by the single-turn and chat
+    tokenizer paths (one excerpt-identity rule, so the two builders cannot
+    diverge on labels, truncation flags, or budget cuts)."""
+    packed: list[PackedExcerpt] = []
+    total_tokens = 0
+    for i, hit in enumerate(hits, 1):
+        text = hit.text.strip()
+        truncated = False
+        if hit.chunk_type not in ("syntax", "message", "table"):
+            if max_chunk_chars_narrative is not None and len(text) > max_chunk_chars_narrative:
+                text = text[:max_chunk_chars_narrative].rstrip() + _TRUNCATED_SUFFIX
+                truncated = True
+            elif complexity == "complex" and estimate_tokens(text) > narrative_token_cap:
+                text = text[: int(narrative_token_cap * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX
+                truncated = True
+        elif len(text) > max_chunk_chars:
+            text = text[:max_chunk_chars].rstrip() + _TRUNCATED_SUFFIX
+            truncated = True
+        header = f"[{i}] {hit.cite}"
+        chunk_tokens = estimate_tokens(f"{header}\n{text}")
+        if total_tokens + chunk_tokens > budget_tokens and packed:
+            rem_tokens = budget_tokens - total_tokens
+            # The char cut must leave room for the header too, or the
+            # packed sum can exceed the budget by the header size.
+            body_rem_tokens = rem_tokens - estimate_tokens(header)
+            if body_rem_tokens > 60:
+                packed.append(
+                    PackedExcerpt(
+                        index=i,
+                        hit=hit,
+                        body=text[: int(body_rem_tokens * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX,
+                        truncated=True,
+                    )
+                )
+            break
+        packed.append(PackedExcerpt(index=i, hit=hit, body=text, truncated=truncated))
+        total_tokens += chunk_tokens
+    return packed
+
+
+def _verify_trim_last(
+    packed: list[PackedExcerpt], used: int, verify_limit: int
+) -> None:
+    """One verification trim round on the last packed excerpt, shared by both
+    tokenizer paths: regenerate its cut from the measured overshoot, drop it
+    when too little would remain, else mark it truncated. The manifest is
+    derived from `packed` afterwards, so trimming cannot bypass it."""
+    overshoot = used - verify_limit
+    cut = int(overshoot * _APPROX_CHARS_PER_TOKEN) + _TRIM_OVERCUT_CHARS
+    last = packed[-1]
+    trimmed = last.body[:-cut] if cut < len(last.body) else ""
+    if len(trimmed.rstrip()) < _MIN_TAIL_CHARS:
+        packed.pop()
+    else:
+        last.body = trimmed.rstrip() + _TRUNCATED_SUFFIX
+        last.truncated = True
+
+
 def order_prompt_blocks(
     blocks: list[PromptBlock], policy: str = "retrieval"
 ) -> list[PromptBlock]:
@@ -275,7 +437,7 @@ def order_prompt_blocks(
 def _assemble_blocks(
     context_entries: list[str],
     question_text: str,
-    packed: list[tuple[str, str]],
+    packed: list[PackedExcerpt],
     tail_part: str,
 ) -> list[PromptBlock]:
     """Core-order blocks from packed excerpts. The section header rides on
@@ -286,10 +448,11 @@ def _assemble_blocks(
     if context_entries:
         blocks.append(("context", "\n\n".join(context_entries)))
     blocks.append(("question", question_text))
-    if packed:
-        header, body = packed[0]
+    rendered = [p.render() for p in packed]
+    if rendered:
+        header, body = rendered[0]
         blocks.append(("excerpt", f"Retrieved manual excerpts:\n{header}\n{body}"))
-        blocks.extend(("excerpt", f"{header}\n{body}") for header, body in packed[1:])
+        blocks.extend(("excerpt", f"{header}\n{body}") for header, body in rendered[1:])
     else:
         blocks.append(("excerpts", "Retrieved manual excerpts:\n"))
     blocks.append(("tail", tail_part))
@@ -310,7 +473,7 @@ def build_messages(
     tokenizer: Tokenizer | None = None,
     settings: Settings | None = None,
     order: Literal["retrieval", "stable_cache"] = "retrieval",
-) -> list[ChatMessage]:
+) -> PreparedPrompt:
     if complexity is None:
         complexity = classify_query_complexity(query)
 
@@ -355,7 +518,7 @@ def build_messages(
         f"Citations:\n{example_cite}"
     )
 
-    packed: list[tuple[str, str]] = []
+    packed: list[PackedExcerpt] = []
     if tokenizer is not None:
         if settings is None:
             raise ValueError("settings is required when a tokenizer is provided")
@@ -379,33 +542,14 @@ def build_messages(
         )
         budget_tokens = max(100, model_len - reserved - thinking_reserve - margin - fixed_tokens)
 
-        total_tokens = 0
-        for i, hit in enumerate(hits, 1):
-            text = hit.text.strip()
-            if hit.chunk_type not in ("syntax", "message", "table"):
-                if max_chunk_chars_narrative is not None and len(text) > max_chunk_chars_narrative:
-                    text = text[:max_chunk_chars_narrative].rstrip() + _TRUNCATED_SUFFIX
-                elif complexity == "complex" and estimate_tokens(text) > narrative_token_cap:
-                    text = text[: int(narrative_token_cap * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX
-            elif len(text) > max_chunk_chars:
-                text = text[:max_chunk_chars].rstrip() + _TRUNCATED_SUFFIX
-            header = f"[{i}] {hit.cite}"
-            chunk_tokens = estimate_tokens(f"{header}\n{text}")
-            if total_tokens + chunk_tokens > budget_tokens and packed:
-                rem_tokens = budget_tokens - total_tokens
-                # The char cut must leave room for the header too, or the
-                # packed sum can exceed the budget by the header size.
-                body_rem_tokens = rem_tokens - estimate_tokens(header)
-                if body_rem_tokens > 60:
-                    packed.append(
-                        (
-                            header,
-                            text[: int(body_rem_tokens * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX,
-                        )
-                    )
-                break
-            packed.append((header, text))
-            total_tokens += chunk_tokens
+        packed = _plan_packed_excerpts(
+            hits,
+            budget_tokens,
+            max_chunk_chars,
+            max_chunk_chars_narrative,
+            narrative_token_cap,
+            complexity,
+        )
 
         # Verification is the only tokenizer work: count the packed prompt
         # once, chat-template aware, and trim the tail if the estimator
@@ -431,14 +575,7 @@ def build_messages(
             )
             if used <= verify_limit:
                 break
-            overshoot = used - verify_limit
-            cut = int(overshoot * _APPROX_CHARS_PER_TOKEN) + _TRIM_OVERCUT_CHARS
-            header, body = packed[-1]
-            trimmed = body[:-cut] if cut < len(body) else ""
-            if len(trimmed.rstrip()) < _MIN_TAIL_CHARS:
-                packed.pop()
-            else:
-                packed[-1] = (header, trimmed.rstrip() + _TRUNCATED_SUFFIX)
+            _verify_trim_last(packed, used, verify_limit)
     else:
         total_chars = 0
         for i, hit in enumerate(hits, 1):
@@ -455,25 +592,37 @@ def build_messages(
                 if hit.chunk_type in ("syntax", "message", "table")
                 else min(max_chunk_chars, narrative_cap)
             )
+            truncated = False
             if len(text) > chunk_cap:
                 text = text[:chunk_cap].rstrip() + _TRUNCATED_SUFFIX
+                truncated = True
             header = f"[{i}] {hit.cite}"
             chunk_len = len(header) + 1 + len(text)
             if total_chars + chunk_len > max_context_chars and packed:
                 remaining = max_context_chars - total_chars
                 if remaining > 200:
-                    packed.append((header, text[:remaining].rstrip() + _TRUNCATED_SUFFIX))
+                    packed.append(
+                        PackedExcerpt(
+                            index=i,
+                            hit=hit,
+                            body=text[:remaining].rstrip() + _TRUNCATED_SUFFIX,
+                            truncated=True,
+                        )
+                    )
                 break
-            packed.append((header, text))
+            packed.append(PackedExcerpt(index=i, hit=hit, body=text, truncated=truncated))
             total_chars += chunk_len
 
     ordered = order_prompt_blocks(
         _assemble_blocks(context_entries, question_text, packed, tail_part), order
     )
-    return [
-        ChatMessage(role="system", content=system_content),
-        ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),
-    ]
+    return PreparedPrompt(
+        messages=[
+            ChatMessage(role="system", content=system_content),
+            ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),
+        ],
+        evidence=_prompt_evidence(packed, len(hits)),
+    )
 
 
 def _user_content(blocks: list[PromptBlock]) -> str:
@@ -862,23 +1011,30 @@ class HttpxLLMClient:
         return _chat_result_from_response(resp.json())
 
 
-def parse_answer(
-    content: str,
-    allowed_citations: set[str],
-    ordered_cites: list[str] | None = None,
-) -> ParsedAnswer:
+def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
     """Split model output into answer, validated citations, optional script.
 
-    The `citations` list and the answer body are filtered to the hit set.
-    `script` (fenced block) is code and deliberately passes through
-    unvalidated — stripping citation-looking lines would corrupt examples.
-    Documented behavior, pinned by test (issue #20 PR C)."""
+    The citation allowlist and the [n] -> cite mapping come exclusively from
+    `evidence` — the final supplied-evidence manifest (issue #364). A
+    retrieved-but-omitted excerpt, or the tail's example cite, is never
+    accepted as grounding. The `citations` list and the answer body are
+    filtered to the supplied set; `script` (fenced block) is code and
+    deliberately passes through unvalidated — stripping citation-looking
+    lines would corrupt examples. Documented behavior, pinned by test
+    (issue #20 PR C).
+
+    The bracket-marker scan and the `inline_bracket_present` telemetry both
+    read the fence-processed text (scripts removed, thinking dropped, prose
+    fences unwrapped), so markers that occur only in discarded thinking/code
+    can never be promoted into provenance (issue #364)."""
     from mainframe_rag.agent.cites import (
         CITATION_LINE_RE,
         CITATIONS_HEADER_RE,
         extract_body_and_citations,
         split_unauthorized_citations,
     )
+
+    allowed_citations = evidence.allowed_citations
 
     # 1. Process code fences: extract scripts, drop thinking blocks, unwrap prose fences
     scripts: list[tuple[str, str]] = []
@@ -943,21 +1099,22 @@ def parse_answer(
             citations = trailing_cites
             body = "\n".join(body_lines)
 
-    inline_bracket_present = bool(_INLINE_INDEX_RE.search(content))
-    citations_header_present = bool(CITATIONS_HEADER_RE.search(content))
+    inline_bracket_present = bool(_INLINE_INDEX_RE.search(text_processed))
+    citations_header_present = bool(CITATIONS_HEADER_RE.search(text_processed))
 
-    if not citations and ordered_cites:
-        # Strictly match bracketed numbers like [1], [2], [1, 2] corresponding to [{i}] prompt excerpts.
-        # Parentheses (e.g. "z/OS (3.1)", "(2)", "APARs (1, 2)") are ignored to avoid false inference.
-        for match in _INLINE_INDEX_RE.finditer(content):
+    if not citations and evidence.entries:
+        # Strictly match bracketed numbers like [1], [2], [1, 2] corresponding
+        # to the [{i}] labels of excerpts actually supplied. Parentheses (e.g.
+        # "z/OS (3.1)", "(2)", "APARs (1, 2)") are ignored to avoid false
+        # inference; an index with no supplied entry resolves to nothing.
+        for match in _INLINE_INDEX_RE.finditer(text_processed):
             for num_str in re.findall(r"\b\d+\b", match.group(1)):
-                idx = int(num_str) - 1
-                if 0 <= idx < len(ordered_cites):
-                    cite = ordered_cites[idx]
-                    if cite in allowed_citations and cite not in citations:
-                        citations.append(cite)
-                        inferred_indices.append(idx + 1)
-                        citations_inferred = True
+                idx = int(num_str)
+                cite = evidence.cite_for_index(idx)
+                if cite is not None and cite not in citations:
+                    citations.append(cite)
+                    inferred_indices.append(idx)
+                    citations_inferred = True
 
     # 3. Clean up unauthorized citations in body
     body, body_rejected = split_unauthorized_citations(body, allowed_citations)
@@ -1073,8 +1230,8 @@ def build_chat_messages(
     tokenizer: Tokenizer | None = None,
     settings: Settings | None = None,
     order: Literal["retrieval", "stable_cache"] = "retrieval",
-) -> list[ChatMessage]:
-    """Build multi-turn chat message list for reasoning chat completions.
+) -> PreparedPrompt:
+    """Build multi-turn chat prompt messages + supplied-evidence manifest.
 
     - System message: authoritative system prompt (with complex extension if applicable).
     - Prior turns: user and assistant messages from history (sliding window).
@@ -1084,9 +1241,11 @@ def build_chat_messages(
       freshly retrieved manual excerpts for the active question, and citation tail instructions.
     - Tokenizer-aware verification: verifies whole prompt [system, *history, active]
       against verify_limit with two-tier trimming (Tier 1: active excerpts; Tier 2: history turns).
+    - Evidence: manifest of the active-turn excerpts that survived packing (issue
+      #364); prior turns are conversation context, never evidence for the new answer.
     """
     if not messages:
-        return []
+        return PreparedPrompt(messages=[], evidence=PromptEvidence())
 
     latest_user_msg = messages[-1]
     active_query = latest_user_msg.content
@@ -1143,7 +1302,7 @@ def build_chat_messages(
         f"Citations:\n{example_cite}"
     )
 
-    packed: list[tuple[str, str]] = []
+    packed: list[PackedExcerpt] = []
     if tokenizer is not None:
         if settings is None:
             raise ValueError("settings is required when a tokenizer is provided")
@@ -1171,31 +1330,14 @@ def build_chat_messages(
 
         budget_tokens = max(100, model_len - reserved - thinking_reserve - margin - fixed_tokens)
 
-        total_tokens = 0
-        for i, hit in enumerate(hits, 1):
-            text = hit.text.strip()
-            if hit.chunk_type not in ("syntax", "message", "table"):
-                if max_chunk_chars_narrative is not None and len(text) > max_chunk_chars_narrative:
-                    text = text[:max_chunk_chars_narrative].rstrip() + _TRUNCATED_SUFFIX
-                elif complexity == "complex" and estimate_tokens(text) > narrative_token_cap:
-                    text = text[: int(narrative_token_cap * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX
-            elif len(text) > max_chunk_chars:
-                text = text[:max_chunk_chars].rstrip() + _TRUNCATED_SUFFIX
-            header = f"[{i}] {hit.cite}"
-            chunk_tokens = estimate_tokens(f"{header}\n{text}")
-            if total_tokens + chunk_tokens > budget_tokens and packed:
-                rem_tokens = budget_tokens - total_tokens
-                body_rem_tokens = rem_tokens - estimate_tokens(header)
-                if body_rem_tokens > 60:
-                    packed.append(
-                        (
-                            header,
-                            text[: int(body_rem_tokens * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX,
-                        )
-                    )
-                break
-            packed.append((header, text))
-            total_tokens += chunk_tokens
+        packed = _plan_packed_excerpts(
+            hits,
+            budget_tokens,
+            max_chunk_chars,
+            max_chunk_chars_narrative,
+            narrative_token_cap,
+            complexity,
+        )
 
         verify_limit = model_len - reserved - thinking_reserve - margin
         max_rounds = _MAX_TRIM_ROUNDS * 2 + len(prior_messages)
@@ -1213,15 +1355,8 @@ def build_chat_messages(
             used = tokenizer.count_messages(candidate)
             if used <= verify_limit:
                 break
-            overshoot = used - verify_limit
             if packed:
-                cut = int(overshoot * _APPROX_CHARS_PER_TOKEN) + _TRIM_OVERCUT_CHARS
-                header, body = packed[-1]
-                trimmed = body[:-cut] if cut < len(body) else ""
-                if len(trimmed.rstrip()) < _MIN_TAIL_CHARS:
-                    packed.pop()
-                else:
-                    packed[-1] = (header, trimmed.rstrip() + _TRUNCATED_SUFFIX)
+                _verify_trim_last(packed, used, verify_limit)
             elif prior_messages:
                 prior_messages.pop(0)
             else:
@@ -1240,23 +1375,35 @@ def build_chat_messages(
                 if hit.chunk_type in ("syntax", "message", "table")
                 else min(max_chunk_chars, narrative_cap)
             )
+            truncated = False
             if len(text) > chunk_cap:
                 text = text[:chunk_cap].rstrip() + _TRUNCATED_SUFFIX
+                truncated = True
             header = f"[{i}] {hit.cite}"
             chunk_len = len(header) + len(text) + 2
             if total_chars + chunk_len > max_context_chars:
                 rem = max_context_chars - total_chars - len(header) - 2
                 if rem > 200:
-                    packed.append((header, text[:rem].rstrip() + _TRUNCATED_SUFFIX))
+                    packed.append(
+                        PackedExcerpt(
+                            index=i,
+                            hit=hit,
+                            body=text[:rem].rstrip() + _TRUNCATED_SUFFIX,
+                            truncated=True,
+                        )
+                    )
                 break
-            packed.append((header, text))
+            packed.append(PackedExcerpt(index=i, hit=hit, body=text, truncated=truncated))
             total_chars += chunk_len
 
     ordered = order_prompt_blocks(
         _assemble_blocks(context_entries, question_text, packed, tail_part), order
     )
-    return [
-        ChatMessage(role="system", content=system_content),
-        *prior_messages,
-        ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),
-    ]
+    return PreparedPrompt(
+        messages=[
+            ChatMessage(role="system", content=system_content),
+            *prior_messages,
+            ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),
+        ],
+        evidence=_prompt_evidence(packed, len(hits)),
+    )
