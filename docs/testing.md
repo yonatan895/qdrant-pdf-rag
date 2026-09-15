@@ -29,8 +29,9 @@ disabled on short docs on purpose.
 
 ## Unit tests are hermetic
 
-Do not call live Qdrant, vLLM, or the internet. Fake the client. Ingest
-tests use `--dry-run`.
+Do not call live Qdrant, vLLM, or the internet. Fake the client. Parse-only ingest
+tests can use `--dry-run`; persistence/publication regressions must exercise the
+real non-dry control path against faithful fakes so the claimed behavior runs.
 
 - Patch `httpx2.get` / `httpx2.post` in every unit test that can reach them. Hostnames like `embed-host:9000` are live network. A test that “works because connect failed” is invalid. For scripts that also stream, patch `httpx2.stream` too — or swap the whole `httpx2` module attribute for a URL-keyed fake (the `FakeGateway` pattern in `tests/test_probe_gateway.py`: first-match-wins routes, a `(method, url, headers)` call log, canned-server failures only).
 - Requesting the `monkeypatch` fixture does nothing by itself. Register every mutated env key with `monkeypatch.setenv` / `monkeypatch.delenv` **before** the code under test runs, or snapshot with `monkeypatch.setattr(os, "environ", dict(os.environ))`. Autouse fixtures must call `monkeypatch`.

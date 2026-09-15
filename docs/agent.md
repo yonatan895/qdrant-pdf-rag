@@ -122,7 +122,7 @@ condense gate cannot be honored on one path only.
 
 ## 2. Error contract
 
-Every JSON client body is `ErrorEnvelope{code, message}` with a fixed
+Every JSON error body is `ErrorEnvelope{code, message}` with a fixed
 message — no exception text, no upstream bodies, no internals, on any
 status (`/ui` failures render HTML banners instead, §1):
 

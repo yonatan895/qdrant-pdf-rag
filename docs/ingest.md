@@ -694,8 +694,9 @@ manifest envelope → `<physical>__completions` → ingest, publication, reader 
 | Record-only drift | Existing policy permits reads; record and evaluate query behavior |
 | Pending | Refuse serving/skipping/publication; resume deliberately, never promote merely on startup |
 | Missing on a populated target | Must refuse certification; serving classifies legacy; final publication guard has the gap above |
-| Corrupt or unsupported | Must not authorize a populated target; decoder currently folds these into absent/legacy instead of distinct typed outcomes |
-| Unreadable store | Must not authorize a populated target; sync manifest read folds errors into absent, async serving reports unknown |
+| Corrupt | Must not authorize a populated target; decoder folds malformed records into absent/legacy |
+| Unsupported schema/state | No dedicated unsupported outcome: a schema-version mismatch compares as re-embed drift; an unfamiliar envelope state is noncommitted/pending |
+| Unreadable store | Must not authorize a populated target; sync manifest retrieval folds fetch errors into absent (existence-check errors can propagate), async serving reports unknown |
 | Representation drift | Refuse until approved re-embedding migration; force never supplies missing model attestation |
 
 The desired distinctions above are not new implemented enum values. Missing,

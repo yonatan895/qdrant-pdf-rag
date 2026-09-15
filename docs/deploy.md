@@ -502,8 +502,8 @@ context workflow; general lint/type/coverage/ruleset changes remain #370.
 Third-party actions use full SHA pins; document runtime downloads outside that
 pin. Runtime artifacts need pinned versions and in-repo SHA256 verification;
 never unpinned curl-to-shell in secret/id-token jobs. Invoke pinned tools by
-absolute path. New/changed jobs require least-privilege permissions, bounded
-timeouts, concurrency with a run-ID fallback, secret/fork guards where relevant,
+absolute path. Policy requires every job to declare least-privilege permissions,
+bounded timeouts, concurrency with a run-ID fallback, secret/fork guards where relevant,
 and third-party sharing off. Existing enforcement gaps are not permission to
 claim compliance. Reviewer install steps remain inline: local composite actions
 can re-resolve a moved checkout during post-processing.

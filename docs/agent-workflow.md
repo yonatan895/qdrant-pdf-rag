@@ -273,7 +273,11 @@ local links. Templates use the same format. External links are not crawled.
 The checker does not establish semantic consistency or agent understanding.
 
 `make agent-doctor` defaults to `unit`; `PROFILE=sim` and `PROFILE=deploy` add
-CLI/pin prerequisites. It is read-only, standard-library-only and performs no
+CLI/pin prerequisites. Run `python3 scripts/agent_doctor.py --profile sim
+--probe-docker` for the optional local-socket probe (one command). Exit 0 means
+verified prerequisites, 2 means missing or unable-to-verify prerequisites with
+distinct labels, and 1 means internal checker failure. It is read-only,
+standard-library-only and performs no
 service probe by default. An explicitly requested bounded Docker probe may
 report unavailable access. Results distinguish `ready`, `missing prerequisite`
 and `unable to verify`; readiness is not test/application/production acceptance.
