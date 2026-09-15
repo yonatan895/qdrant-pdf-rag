@@ -21,7 +21,7 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 | `oc-mirror/` | `ImageSetConfiguration` for disconnected mirroring |
 | `src/mainframe_rag/ingest/` | PDF walk, IBM-style parse, chrome strip, chunk, classify, embed, Qdrant IO |
 | `src/mainframe_rag/retrieve/` | Hybrid search (dense + BM25 prefetch, batched query, weighted RRF), query-class screen, optional cross-encoder rerank (`RERANK_ENDPOINT_ORDER`), diversification, filters |
-| `src/mainframe_rag/agent/` | Async FastAPI `/healthz`, `/v1/search`, `/v1/answer`, multi-turn `/v1/chat` + `/v1/chat/completions` (shared `answer_core`, optional SSE streaming), opt-in `GET /metrics` |
+| `src/mainframe_rag/agent/` | Async FastAPI `/healthz` + `/livez`, `/v1/search`, `/v1/answer`, multi-turn `/v1/chat` + `/v1/chat/completions` (shared `answer_core`, optional SSE streaming), opt-in `GET /metrics` |
 | `src/mainframe_rag/webui/` | Operator console served at `/ui` (ADR-0004): Jinja2 + vendored HTMX/SSE, browser-only state, strict CSP, `UI_ENABLED` fail-closed |
 | `src/mainframe_rag/mcp/` | Read-only Zowe live-state bridge (default off; mock backend for sim) |
 | `src/mainframe_rag/serve/` | Local vLLM VRAM budget profiles (`LOCAL_RT_8GB`, …) + `resolve` CLI |
@@ -231,8 +231,10 @@ See **[docs/install_and_ops.md](docs/install_and_ops.md#47-local-cluster-testing
 The agent listens on port 8080 (ClusterIP `rag-agent:8080` in-cluster; the external console Route is `AGENT_ROUTE=true`). Local ports: Qdrant 6333, reasoning 8000, embed 8001, rerank 8002, LiteLLM gateway 4000 (`make local-stack`), Jaeger 16686.
 
 ```bash
-# Liveness: {"status":"ok","qdrant":true,"embed":true} (degraded/503 shapes documented)
+# Readiness: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible"} (degraded = HTTP 503)
 curl -s http://localhost:8080/healthz
+# Liveness (process only): {"status":"alive"}
+curl -s http://localhost:8080/livez
 
 # Ranked manual chunks with citations, no LLM:
 curl -s -X POST http://localhost:8080/v1/search \

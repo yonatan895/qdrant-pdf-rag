@@ -348,7 +348,9 @@ class ServingManifestQdrant:
 
     envelope=None + points=True reads as legacy; points=False as empty;
     explode=True raises on every call (transport failure → `unknown`).
-    Each call site names the outcome it locks.
+    Each call site names the outcome it locks. Alias resolution reads the
+    configured name as a flat collection (no alias defined by this double),
+    so the served manifest envelope is the physical generation's own.
     """
 
     def __init__(self, envelope=None, points=True, explode=False):
@@ -356,20 +358,108 @@ class ServingManifestQdrant:
         self.points = points
         self.explode = explode
 
-    async def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
+    def _refuse(self):
         if self.explode:
             raise ConnectionError("refused")
+
+    def get_aliases(self):
+        self._refuse()
+        return SimpleNamespace(aliases=[])
+
+    def collection_exists(self, name):
+        self._refuse()
+        return self.envelope is not None or self.points
+
+    async def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
+        self._refuse()
         if self.envelope is None:
             return []
         return [SimpleNamespace(payload=self.envelope, vector=None)]
 
     async def scroll(self, name, *, scroll_filter=None, limit=10, with_payload=None,
                      offset=None):
-        if self.explode:
-            raise ConnectionError("refused")
+        self._refuse()
         if not self.points:
             return [], None
         return [SimpleNamespace(payload={"doc_id": "D"})], None
+
+    def close(self):
+        pass
+
+
+class ServingGateFake:
+    """Serving-generation gate double (issues #391 F3/F4): one fixed
+    generation, or `physical=None` to bind to the configured collection
+    (flat local deployment). Gate/refusal tests use the real gate with a
+    scripted Qdrant double instead."""
+
+    def __init__(self, physical=None, outcome="compatible", details=()):
+        self.physical = physical
+        self.outcome = outcome
+        self.details = tuple(details)
+        self.calls: list[tuple[str, bool]] = []
+        self.invalidations = 0
+
+    async def generation(self, client, settings, rules_v, *, fresh=False):
+        from mainframe_rag.agent.serving import ServingGeneration
+
+        self.calls.append((settings.qdrant_collection, fresh))
+        return ServingGeneration(
+            physical=self.physical or settings.qdrant_collection,
+            outcome=self.outcome,
+            details=self.details,
+        )
+
+    def invalidate(self):
+        self.invalidations += 1
+
+
+class AliasQdrant:
+    """Async Qdrant double for the F4 gate: scripted aliases, physical
+    collections, and per-completions-collection manifest payloads.
+
+    `manifests` maps a completion collection name to its payload (or None),
+    `points` is the set of collections holding points. Sync methods ride the
+    agent's isawaitable shim, mirroring the other doubles.
+    """
+
+    def __init__(self, aliases=None, manifests=None, points=()):
+        self.aliases = dict(aliases or {})
+        self.manifests = dict(manifests or {})
+        self.points = set(points)
+        self.retrieved: list[str] = []
+        self.writes: list[str] = []  # any mutating call records here (read-only proof)
+
+    def get_aliases(self):
+        return SimpleNamespace(
+            aliases=[
+                SimpleNamespace(alias_name=a, collection_name=p)
+                for a, p in sorted(self.aliases.items())
+            ]
+        )
+
+    def collection_exists(self, name):
+        return name in self.manifests or name in self.points
+
+    async def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
+        self.retrieved.append(name)
+        payload = self.manifests.get(name)
+        if payload is None:
+            return []
+        return [SimpleNamespace(payload=payload, vector=None)]
+
+    async def scroll(self, name, *, scroll_filter=None, limit=10, with_payload=None,
+                     offset=None):
+        return ([SimpleNamespace(payload={"doc_id": "D"})] if name in self.points else []), None
+
+    def upsert(self, collection_name, points, **kwargs):
+        self.writes.append(f"upsert:{collection_name}")
+
+    def update_collection_aliases(self, change_aliases_operations):
+        self.writes.append("update_collection_aliases")
+
+    def delete_collection(self, collection_name):
+        self.writes.append(f"delete_collection:{collection_name}")
 
     def close(self):
         pass

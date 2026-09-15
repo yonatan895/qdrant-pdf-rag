@@ -430,8 +430,9 @@ def test_healthz_ready_returns_clean_200(client, monkeypatch):
 
 
 def test_healthz_degraded_paths_leak_no_upstream_text(client, monkeypatch):
-    """Round-7 item 2: degraded-but-200 /healthz must not forward Qdrant
-    response bodies or exception text to the caller."""
+    """Round-7 item 2 + issue #391 F3: a degraded /healthz is an HTTP
+    failure (503) and still must not forward Qdrant response bodies or
+    exception text to the caller."""
 
     class NotReady:
         status_code = 503
@@ -452,7 +453,7 @@ def test_healthz_degraded_paths_leak_no_upstream_text(client, monkeypatch):
     monkeypatch.setattr(app_mod.settings, "embed_base_url", "http://embed.internal/v1")
     monkeypatch.setattr(app_mod.settings, "embed_model", "test-embed")
     resp = client.get("/healthz")
-    assert resp.status_code == 200
+    assert resp.status_code == 503
     body = resp.json()
     assert body["qdrant"] is False and body["embed"] is False
     assert "secret bits" not in resp.text and "token=abc" not in resp.text
@@ -542,12 +543,14 @@ def _ready_pool():
 
 
 def test_healthz_representation_drift_degrades(client, monkeypatch):
-    """Issue #362: a drifted stored generation degrades /healthz with the
-    explicit outcome (smoke.sh fails closed on degraded). The SYNC double
-    also pins the isawaitable shim — production always passes the async
-    client, test doubles ride either shape."""
+    """Issues #362 + #391 F3: a drifted stored generation degrades /healthz
+    with the explicit outcome AND an HTTP failure (smoke fails closed,
+    K8s probes treat it as unready). The real gate runs against a SYNC
+    Qdrant double, pinning the isawaitable shim — production always passes
+    the async client, test doubles ride either shape."""
     from types import SimpleNamespace
 
+    from mainframe_rag.agent.serving import ServingGate
     from mainframe_rag.ingest.completion import completion_collection_name
     from mainframe_rag.ingest.rules_version import extraction_rules_version
     from tests.fakes import manifest_envelope
@@ -559,6 +562,12 @@ def test_healthz_representation_drift_degrades(client, monkeypatch):
     )
 
     class SyncDriftQdrant:
+        def get_aliases(self):
+            return SimpleNamespace(aliases=[])
+
+        def collection_exists(self, name):
+            return True
+
         def retrieve(self, *a, **k):
             return [SimpleNamespace(payload=envelope)]
 
@@ -567,8 +576,9 @@ def test_healthz_representation_drift_degrades(client, monkeypatch):
 
     monkeypatch.setattr(app_mod, "http", _ready_pool())
     monkeypatch.setattr(app_mod, "qdrant", SyncDriftQdrant())
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
     resp = client.get("/healthz")
-    assert resp.status_code == 200
+    assert resp.status_code == 503
     body = resp.json()
     assert body["qdrant"] is True
     assert body["status"] == "degraded"
@@ -579,9 +589,11 @@ def test_healthz_representation_drift_degrades(client, monkeypatch):
 def test_healthz_representation_legacy_and_unknown_degrade(client, monkeypatch):
     """Legacy (points, no contract) and unreadable stores degrade with
     their explicit outcomes; exception text never reaches the body."""
+    from mainframe_rag.agent.serving import ServingGate
     from tests.fakes import ServingManifestQdrant
 
     monkeypatch.setattr(app_mod, "http", _ready_pool())
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
     monkeypatch.setattr(app_mod, "qdrant", ServingManifestQdrant(None, points=True))
     body = client.get("/healthz").json()
     assert (body["status"], body["representation"]) == ("degraded", "legacy")
@@ -596,6 +608,7 @@ def test_healthz_representation_legacy_and_unknown_degrade(client, monkeypatch):
     monkeypatch.setattr(app_mod, "qdrant", Refused())
     resp = client.get("/healthz")
     body = resp.json()
+    assert resp.status_code == 503
     assert (body["status"], body["representation"]) == ("degraded", "unknown")
     assert "secret" not in resp.text
 
@@ -603,6 +616,7 @@ def test_healthz_representation_legacy_and_unknown_degrade(client, monkeypatch):
 def test_healthz_representation_pending_degrades(client, monkeypatch):
     """Issue #391 F2: a pending migration contract is not servable — the
     outcome is explicit and the status degrades (smoke.sh fails closed)."""
+    from mainframe_rag.agent.serving import ServingGate
     from mainframe_rag.ingest.completion import completion_collection_name
     from mainframe_rag.ingest.rules_version import extraction_rules_version
     from tests.fakes import ServingManifestQdrant, manifest_envelope
@@ -613,8 +627,11 @@ def test_healthz_representation_pending_degrades(client, monkeypatch):
         completion_collection_name(settings), state="pending",
     )
     monkeypatch.setattr(app_mod, "http", _ready_pool())
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
     monkeypatch.setattr(app_mod, "qdrant", ServingManifestQdrant(envelope))
-    body = client.get("/healthz").json()
+    resp = client.get("/healthz")
+    body = resp.json()
+    assert resp.status_code == 503
     assert (body["status"], body["representation"]) == ("degraded", "pending")
 
 
@@ -628,15 +645,274 @@ def test_lifespan_refuses_pending_contract(monkeypatch):
     monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
     monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
 
-    async def pending_outcome(*_a, **_k):
-        return "pending", []
+    from mainframe_rag.agent.serving import ServingGeneration
 
-    monkeypatch.setattr(app_mod, "serving_outcome", pending_outcome)
+    class PendingGate:
+        async def generation(self, *_a, **_k):
+            return ServingGeneration(None, "pending", ())
+
+        def invalidate(self):
+            pass
+
+    monkeypatch.setattr(app_mod, "serving_gate", PendingGate())
     with (
         pytest.raises(RuntimeError, match="refuses a pending collection"),
         TestClient(app_mod.app),
     ):
         pass
+
+
+def test_search_refused_when_generation_not_servable(client, monkeypatch):
+    """Issue #391 F3: a legacy (unverified) generation refuses retrieval with
+    the stable 503 before any embed/LLM work; retrieve_search is never
+    called and the outcome text stays out of the client body."""
+    from mainframe_rag.agent.serving import ServingGate
+    from tests.fakes import AliasQdrant
+
+    calls: list[tuple] = []
+
+    def recording_search(*args, **kwargs):
+        calls.append(args)
+        return ([_hit()], "nl", {})
+
+    qd = AliasQdrant(points={app_mod.settings.qdrant_collection})
+    monkeypatch.setattr(app_mod, "qdrant", qd)
+    monkeypatch.setattr(app_mod, "retrieve_search", recording_search)
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
+
+    resp = client.post("/v1/search", json={"query": "IEA500I"})
+    assert resp.status_code == 503
+    assert resp.json() == {
+        "code": "representation_unavailable",
+        "message": "the retrieval generation is not available",
+    }
+    assert calls == [], "retrieval must not run against an unverified generation"
+    assert "legacy" not in resp.text
+
+
+def test_healthz_empty_install_ready_but_requests_refused(client, monkeypatch):
+    """Issue #391 F3 bootstrap: an intentionally empty installation reports
+    ready (`empty`) so the deploy -> ingest sequence does not deadlock, while
+    every retrieval path is refused until data exists."""
+    from mainframe_rag.agent.serving import ServingGate
+    from tests.fakes import AliasQdrant
+
+    monkeypatch.setattr(app_mod, "http", _ready_pool())
+    monkeypatch.setattr(app_mod, "qdrant", AliasQdrant())
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
+
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json()["representation"] == "empty"
+
+    resp = client.post("/v1/search", json={"query": "IEA500I"})
+    assert resp.status_code == 503
+    assert resp.json()["code"] == "representation_unavailable"
+
+
+def test_search_refused_when_metadata_unreadable(client, monkeypatch):
+    """Issue #391 F3: readable points with unreadable metadata is `unknown`,
+    never a pass — the request refuses before retrieval and the transport
+    error stays out of the body."""
+    from mainframe_rag.agent.serving import ServingGate
+    from tests.fakes import AliasQdrant
+
+    class ExplodingAliases(AliasQdrant):
+        def get_aliases(self):
+            raise ConnectionError("refused")
+
+    monkeypatch.setattr(
+        app_mod,
+        "qdrant",
+        ExplodingAliases(points={app_mod.settings.qdrant_collection}),
+    )
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
+
+    resp = client.post("/v1/search", json={"query": "IEA500I"})
+    assert resp.status_code == 503
+    assert resp.json() == {
+        "code": "representation_unavailable",
+        "message": "the retrieval generation is not available",
+    }
+    assert "refused" not in resp.text
+
+
+def test_gate_degrades_after_metadata_drift(client, monkeypatch):
+    """Issue #391 F3 acceptance: start compatible, then introduce an
+    incompatible contract — readiness turns non-success and retrieval stops
+    without an agent restart; `retrieve_search` runs only for the verified
+    state."""
+    from mainframe_rag.agent.serving import ServingGate
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from tests.fakes import AliasQdrant, manifest_envelope
+
+    s = app_mod.settings
+    rules = extraction_rules_version()
+    alias, physical = s.qdrant_collection, f"{s.qdrant_collection}__gengrow"
+    qd = AliasQdrant(
+        aliases={alias: physical},
+        manifests={
+            f"{physical}__completions": manifest_envelope(
+                s, rules, f"{physical}__completions"
+            )
+        },
+        points={physical},
+    )
+    calls: list[tuple] = []
+
+    def recording_search(*args, **kwargs):
+        calls.append(args)
+        return ([_hit()], "nl", {})
+
+    monkeypatch.setattr(app_mod, "http", _ready_pool())
+    monkeypatch.setattr(app_mod, "qdrant", qd)
+    monkeypatch.setattr(app_mod, "retrieve_search", recording_search)
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
+
+    assert client.get("/healthz").status_code == 200
+    assert client.post("/v1/search", json={"query": "IEA500I"}).status_code == 200
+    assert len(calls) == 1
+
+    qd.manifests[f"{physical}__completions"] = manifest_envelope(
+        s, rules, f"{physical}__completions", embed_model_revision="other"
+    )
+    health = client.get("/healthz")
+    assert health.status_code == 503
+    assert health.json()["representation"] == "reembed_required"
+
+    resp = client.post("/v1/search", json={"query": "IEA500I"})
+    assert resp.status_code == 503
+    assert len(calls) == 1, "drifted generation must not reach retrieval"
+
+
+def test_answer_chat_and_stream_refused_before_core(client, monkeypatch):
+    """Issues #391 F3 (+ F2 pending): every conversational path, streaming
+    included, refuses with the same 503 JSON envelope before the core opens —
+    never a 200 SSE stream that dies later."""
+    from tests.fakes import ServingGateFake
+
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGateFake(outcome="pending"))
+    expected = {
+        "code": "representation_unavailable",
+        "message": "the retrieval generation is not available",
+    }
+    messages = [{"role": "user", "content": "IEA500I"}]
+    for path, payload in (
+        ("/v1/answer", {"query": "IEA500I"}),
+        ("/v1/chat", {"messages": messages}),
+        ("/v1/chat/completions", {"messages": messages}),
+        ("/v1/chat", {"messages": messages, "stream": True}),
+        ("/v1/chat/completions", {"messages": messages, "stream": True}),
+    ):
+        resp = client.post(path, json=payload)
+        assert resp.status_code == 503, path
+        assert resp.headers["content-type"].startswith("application/json"), path
+        assert resp.json() == expected, path
+
+    resp = client.post("/v1/answer?stream=true", json={"query": "IEA500I"})
+    assert resp.status_code == 503
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json() == expected
+
+
+def test_livez_is_process_only_while_healthz_degrades(client, monkeypatch):
+    """Issue #391 F3: liveness never reflects data state — /livez stays 200
+    while /healthz is a readiness failure on a non-servable generation, so a
+    data problem cannot restart an otherwise healthy pod."""
+    from mainframe_rag.agent.serving import ServingGate
+    from tests.fakes import AliasQdrant
+
+    monkeypatch.setattr(app_mod, "http", _ready_pool())
+    monkeypatch.setattr(
+        app_mod, "qdrant", AliasQdrant(points={app_mod.settings.qdrant_collection})
+    )
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
+
+    assert client.get("/healthz").status_code == 503
+    resp = client.get("/livez")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "alive"}
+
+
+def test_request_binds_validated_physical_and_alias_switch_revalidates(client, monkeypatch):
+    """Issue #391 F4: retrieval is bound to the validated physical name, so
+    an alias swap cannot redirect an in-flight or cached request; after
+    revalidation the new target is served and the alias name itself is never
+    queried."""
+    from mainframe_rag.agent.serving import ServingGate
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from tests.fakes import AliasQdrant, manifest_envelope
+
+    s = app_mod.settings
+    rules = extraction_rules_version()
+    alias = s.qdrant_collection
+    physical_a, physical_b = f"{alias}__genA", f"{alias}__genB"
+    qd = AliasQdrant(
+        aliases={alias: physical_a},
+        manifests={
+            f"{physical_a}__completions": manifest_envelope(
+                s, rules, f"{physical_a}__completions"
+            )
+        },
+        points={physical_a},
+    )
+    seen: list[str] = []
+
+    def recording_search(client_arg, embedder, collection, *args, **kwargs):
+        seen.append(collection)
+        return ([_hit()], "nl", {})
+
+    monkeypatch.setattr(app_mod, "qdrant", qd)
+    monkeypatch.setattr(app_mod, "retrieve_search", recording_search)
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(60.0))
+
+    assert client.post("/v1/search", json={"query": "IEA500I"}).status_code == 200
+    assert seen == [physical_a]
+
+    qd.aliases[alias] = physical_b
+    qd.manifests[f"{physical_b}__completions"] = manifest_envelope(
+        s, rules, f"{physical_b}__completions"
+    )
+    qd.points.add(physical_b)
+    assert client.post("/v1/search", json={"query": "IEA500I"}).status_code == 200
+    assert seen == [physical_a, physical_a], "cached validation binds the request"
+
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
+    assert client.post("/v1/search", json={"query": "IEA500I"}).status_code == 200
+    assert seen == [physical_a, physical_a, physical_b], "revalidation follows the alias"
+    assert alias not in seen, "the alias name is never queried"
+
+
+def test_gate_recovers_after_metadata_fix(client, monkeypatch):
+    """Issue #391 F3 acceptance: recovery to a verified compatible generation
+    restores service without a restart or manual workaround."""
+    from mainframe_rag.agent.serving import ServingGate
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from tests.fakes import AliasQdrant, manifest_envelope
+
+    s = app_mod.settings
+    rules = extraction_rules_version()
+    physical = f"{s.qdrant_collection}__genrec"
+    qd = AliasQdrant(
+        aliases={s.qdrant_collection: physical},
+        manifests={
+            f"{physical}__completions": manifest_envelope(
+                s, rules, f"{physical}__completions", embed_model_revision="other"
+            )
+        },
+        points={physical},
+    )
+    monkeypatch.setattr(app_mod, "qdrant", qd)
+    monkeypatch.setattr(
+        app_mod, "retrieve_search", lambda *a, **k: ([_hit()], "nl", {})
+    )
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
+
+    assert client.post("/v1/search", json={"query": "IEA500I"}).status_code == 503
+    qd.manifests[f"{physical}__completions"] = manifest_envelope(
+        s, rules, f"{physical}__completions"
+    )
+    assert client.post("/v1/search", json={"query": "IEA500I"}).status_code == 200
 
 
 def test_healthz_embed_probe_forwards_gateway_key(client, monkeypatch):

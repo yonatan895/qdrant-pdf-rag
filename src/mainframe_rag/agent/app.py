@@ -23,6 +23,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 
 import httpx2
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -50,6 +51,7 @@ from mainframe_rag.agent.answer_core import (
     resolve_search_query,
 )
 from mainframe_rag.agent.metrics import endpoint_for_path, record_request, setup_metrics
+from mainframe_rag.agent.serving import ServingGate, ServingGeneration
 from mainframe_rag.agent.sse import (
     empty_final_payload,
     error_payload,
@@ -62,9 +64,8 @@ from mainframe_rag.agent.sse import (
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
 from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
-from mainframe_rag.ingest.completion import completion_collection_name
 from mainframe_rag.ingest.embed import build_embedder
-from mainframe_rag.ingest.representation import require_attested_revision, serving_outcome
+from mainframe_rag.ingest.representation import require_attested_revision
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.logs import configure_logging
 from mainframe_rag.ports import (
@@ -95,6 +96,9 @@ llm: LLMClient
 tokenizer: Tokenizer
 reranker: Reranker | None = None
 zowe_mcp: ZoweMCP | None = None
+# Serving-generation gate (issues #391 F3/F4): created in lifespan from
+# Settings, or injected by tests before startup (never overwritten then).
+serving_gate: ServingGate | None = None
 # Tracer starts as the API proxy (no-op until a real provider is installed).
 # Lifespan reassigns it when tracing is enabled (issue #83); tests swap it
 # directly with a tracer backed by InMemorySpanExporter.
@@ -162,6 +166,47 @@ def core_deps() -> AnswerCoreDeps:
         build_chat_messages_fn=build_chat_messages,
         classify_query_complexity_fn=classify_query_complexity,
     )
+
+
+# One fixed refusal for every non-servable generation state; the outcome and
+# physical name go to the log only (error contract: stable code + message,
+# never internals).
+_REPRESENTATION_UNAVAILABLE = "the retrieval generation is not available"
+
+
+async def serving_settings() -> Settings:
+    """The one serving boundary (issues #391 F3/F4): resolve the configured
+    alias through the TTL-cached gate and return settings bound to the
+    validated physical collection. Raises the stable 503 before any
+    retrieval or stream opens — an unverified or incompatible generation is
+    never queried, and the physical name means an alias swap cannot redirect
+    this request."""
+    assert serving_gate is not None, "lifespan must initialize the serving gate"
+    try:
+        generation = await serving_gate.generation(qdrant, settings, extraction_rules_version())
+    except Exception as exc:
+        log.error(
+            json_log("serving", "representation_unavailable", error_type=type(exc).__name__)
+        )
+        raise AppError(503, "representation_unavailable", _REPRESENTATION_UNAVAILABLE) from exc
+    if not generation.servable:
+        log.warning(
+            json_log(
+                "serving",
+                "representation_unavailable",
+                outcome=generation.outcome,
+                physical=generation.physical or "",
+            )
+        )
+        raise AppError(503, "representation_unavailable", _REPRESENTATION_UNAVAILABLE)
+    assert generation.physical is not None
+    return settings.model_copy(update={"qdrant_collection": generation.physical})
+
+
+async def serving_deps() -> AnswerCoreDeps:
+    """Shared answer-core deps bound to the validated physical generation —
+    the one gate for /v1/answer, /v1/chat*, and the operator console."""
+    return replace(core_deps(), settings=await serving_settings())
 
 
 def _timing_parts(
@@ -284,6 +329,7 @@ def _alert_finish_reason_non_stop(request_id: str, finish_reason: str) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker, zowe_mcp
+    global serving_gate
     settings = load_settings()
     configure_logging(settings.log_level)
     # Startup fail-fast (issue #20 PR D): the agent refuses to listen on a
@@ -362,37 +408,40 @@ async def lifespan(_app: FastAPI):
         timeout=settings.qdrant_timeout_s,
         limits=http_limits,
     )
-    # Representation gate (issue #362 req 4): refuse to serve queries
-    # against an incompatible stored generation. Evidence of drift, legacy,
-    # or a pending migration (issue #391 F2 — the contract was declared but
-    # not verified) refuses to listen; an unreachable store reports unknown
-    # (warn-only — nothing can be served wrong from a store we cannot
-    # read, and /healthz stays the live signal). /healthz re-evaluates
-    # per scrape; query handlers trust this gate plus that signal rather
-    # than paying a Qdrant round-trip per request.
+    # Serving-generation gate (issues #391 F3/F4): one instance per process,
+    # created from Settings unless a test injected its own (never overwritten
+    # then). The cache is invalidated at every startup so a validation from a
+    # previous lifespan can never leak into this one.
+    if serving_gate is None:
+        serving_gate = ServingGate(settings.representation_cache_ttl_s)
+    else:
+        serving_gate.invalidate()
+    # Startup gate: refuse to listen when the RESOLVED physical generation is
+    # known-incompatible (drift, legacy, or a pending migration — issue #391
+    # F2). An unreachable store reports unknown and the process starts; every
+    # request still passes the same gate, so an unverifiable state is refused
+    # (503) rather than served (F3). /healthz re-evaluates per scrape.
     try:
-        outcome, outcome_details = await serving_outcome(
-            qdrant,
-            settings,
-            completion_collection_name(settings),
-            extraction_rules_version(),
+        generation = await serving_gate.generation(
+            qdrant, settings, extraction_rules_version(), fresh=True
         )
     except Exception as exc:  # noqa: BLE001 — exotic transports report unknown
-        outcome, outcome_details = "unknown", [type(exc).__name__]
-    if outcome in ("reembed_required", "legacy", "pending"):
+        generation = ServingGeneration(None, "unknown", (type(exc).__name__,))
+    if generation.outcome in ("reembed_required", "legacy", "pending"):
         raise RuntimeError(
-            f"agent refuses a {outcome} collection "
-            f"{settings.qdrant_collection!r} ({', '.join(outcome_details) or 'no contract'}): "
+            f"agent refuses a {generation.outcome} collection "
+            f"{settings.qdrant_collection!r} "
+            f"({', '.join(generation.details) or 'no contract'}): "
             "re-run ingest with --reingest under these settings to re-embed, then restart "
             "(never serve queries against incompatible vectors)."
         )
-    if outcome in ("record_only_drift", "unknown"):
+    if generation.outcome in ("record_only_drift", "unknown"):
         log.warning(
             json_log(
                 "lifespan",
                 "representation_not_proven",
-                outcome=outcome,
-                details=",".join(outcome_details),
+                outcome=generation.outcome,
+                details=",".join(generation.details),
             )
         )
     # OTel tracing (issue #83): OFF unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
@@ -687,8 +736,14 @@ async def metrics() -> Response:
     return Response(content=body, media_type=CONTENT_TYPE_LATEST)
 
 
-@app.get("/healthz", response_model=HealthzResponse)
-async def healthz() -> HealthzResponse:
+async def evaluate_healthz() -> tuple[HealthzResponse, int]:
+    """Readiness evaluation shared by GET /healthz and the console badge:
+    returns (body, HTTP status). A degraded body is an HTTP failure (issue
+    #391 F3) — Kubernetes HTTP probes treat 200-399 as success, so the
+    previous degraded-but-200 label never made a pod unready. `empty` stays
+    ready on purpose: the deploy -> ingest sequence waits for the agent
+    before any data exists, and requests are still refused by the serving
+    gate while empty (bootstrap must not deadlock)."""
     qdrant_ok = False
     embed_ok: bool | None = None
     try:
@@ -719,22 +774,43 @@ async def healthz() -> HealthzResponse:
             embed_ok = False
             log.warning(json_log("healthz", "health", embed_error=str(exc)[:200]))
 
+    # Readiness is the live, uncached evaluation (F4): probe scrapes must see
+    # an alias rollback or a degraded contract immediately, not a cached
+    # generation. Request paths keep the TTL cache for cost.
+    representation = "unknown"
     try:
-        representation, _ = await serving_outcome(
-            qdrant,
-            settings,
-            completion_collection_name(settings),
-            extraction_rules_version(),
+        assert serving_gate is not None, "lifespan must initialize the serving gate"
+        generation = await serving_gate.generation(
+            qdrant, settings, extraction_rules_version(), fresh=True
         )
+        representation = generation.outcome
     except Exception as exc:  # noqa: BLE001 — exotic doubles report unknown
-        representation = "unknown"
         log.warning(json_log("healthz", "health", representation_error=type(exc).__name__))
 
     representation_ok = representation in ("compatible", "record_only_drift", "empty")
     status = "ok" if qdrant_ok and embed_ok is not False and representation_ok else "degraded"
-    return HealthzResponse(
-        status=status, qdrant=qdrant_ok, embed=embed_ok, representation=representation
+    return (
+        HealthzResponse(
+            status=status, qdrant=qdrant_ok, embed=embed_ok, representation=representation
+        ),
+        200 if status == "ok" else 503,
     )
+
+
+@app.get("/healthz", response_model=HealthzResponse)
+async def healthz(response: Response) -> HealthzResponse:
+    body, code = await evaluate_healthz()
+    response.status_code = code
+    return body
+
+
+@app.get("/livez")
+async def livez() -> dict[str, str]:
+    """Process liveness (issue #391 F3): always 200 while the event loop is
+    serving. Data-serving readiness lives in /healthz — a non-servable
+    generation must never restart an otherwise healthy process, so the
+    livenessProbe points here and the readinessProbe at /healthz."""
+    return {"status": "alive"}
 
 
 @app.post("/v1/search", response_model=SearchResponse)
@@ -742,6 +818,9 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
     request_id = request.state.request_id
     started = time.monotonic()
     _require_query_length(request_id, req.query)
+    # Gate before any retrieval work (issue #391 F3/F4): 503 when the
+    # resolved generation is not validated; otherwise bind to its physical.
+    bound = await serving_settings()
     with tracer.start_as_current_span(
         "v1.search",
         context=parent_context(request.headers),
@@ -751,12 +830,12 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
             res = retrieve_search(
                 qdrant,
                 embedder,
-                settings.qdrant_collection,
+                bound.qdrant_collection,
                 req.query,
                 product=req.product,
                 version=req.version,
                 limit=req.limit,
-                settings=settings,
+                settings=bound,
                 reranker=reranker,
             )
             hits, kind, timings = await _await_retrieval(res)
@@ -810,6 +889,9 @@ async def v1_answer(
         log.warning(json_log(request_id, "answer", error=str(exc)[:200]))
         raise AppError(503, "not_configured", "reasoning model is not configured") from exc
     llm_model = settings.require_reasoning_model()
+    # Serving gate before retrieval and before the root span (issue #391
+    # F3/F4): the request binds to the validated physical generation.
+    bound = await serving_settings()
 
     # One trace per request (issue #83): the root span starts after the
     # cheap fail-fast gates and lives until the response body is produced.
@@ -833,12 +915,12 @@ async def v1_answer(
             res = retrieve_search(
                 qdrant,
                 embedder,
-                settings.qdrant_collection,
+                bound.qdrant_collection,
                 req.query,
                 product=req.product,
                 version=req.version,
                 limit=8,
-                settings=settings,
+                settings=bound,
                 reranker=reranker,
             )
             hits, kind, timings = await _await_retrieval(res)
@@ -861,7 +943,7 @@ async def v1_answer(
         query_kind=kind,
         timings=timings,
     )
-    deps = core_deps()
+    deps = replace(core_deps(), settings=bound)
 
     if not is_stream:
         # The shared core owns prompt planning/verification, LLM inference,
@@ -1156,6 +1238,9 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
     llm_model = settings.require_reasoning_model()
 
     is_stream = req.stream
+    # Serving gate before the root span (issue #391 F3/F4): bind the request
+    # to the validated physical generation or refuse with the stable 503.
+    deps = await serving_deps()
     root_span = tracer.start_span(
         "v1.chat",
         context=parent_context(request.headers),
@@ -1173,7 +1258,6 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         request_id=request_id,
         is_chat=True,
     )
-    deps = core_deps()
 
     try:
         with trace.use_span(root_span, end_on_exit=False):
@@ -1181,12 +1265,12 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
             retrieval_coro = retrieve_search(
                 qdrant,
                 embedder,
-                settings.qdrant_collection,
+                deps.settings.qdrant_collection,
                 search_query,
                 product=req.product,
                 version=req.version,
                 limit=8,
-                settings=settings,
+                settings=deps.settings,
                 reranker=reranker,
             )
             hits, kind, timings = await _await_retrieval(retrieval_coro)

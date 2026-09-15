@@ -543,6 +543,9 @@ async def _run_turn(request: Request, req: UiChatRequest):
         raise app_mod.AppError(422, "invalid_request", "request body failed validation")
 
     request_id = getattr(request.state, "request_id", "ui")
+    # Serving gate before the span (issues #391 F3/F4): the console refuses
+    # with the same stable 503 as the API when the generation is unverified.
+    deps = await app_mod.serving_deps()
     root_span = app_mod.tracer.start_span(
         "ui.chat",
         context=app_mod.parent_context(request.headers),
@@ -559,7 +562,7 @@ async def _run_turn(request: Request, req: UiChatRequest):
         reasoning_effort=req.reasoning_effort,
     )
     try:
-        return await execute_answer_core(core_input, app_mod.core_deps(), parent_span=root_span)
+        return await execute_answer_core(core_input, deps, parent_span=root_span)
     finally:
         root_span.end()
 
@@ -578,7 +581,7 @@ async def ui_healthz() -> Response:
     from mainframe_rag.agent import app as app_mod
 
     try:
-        health = await app_mod.healthz()
+        health, _code = await app_mod.evaluate_healthz()
         online = health.status == "ok"
         css = "badge-ok" if online else "badge-warn"
         label = "Online" if online else "Degraded"
@@ -660,6 +663,10 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
         raise app_mod.AppError(422, "invalid_request", "request body failed validation")
 
     request_id = getattr(request.state, "request_id", "ui")
+    # Serving gate before the stream opens (issues #391 F3/F4): a non-servable
+    # generation is the same stable 503 JSON the API returns, never an SSE
+    # error frame after a 200 was already committed.
+    deps = await app_mod.serving_deps()
     root_span = app_mod.tracer.start_span(
         "ui.chat",
         context=app_mod.parent_context(request.headers),
@@ -680,7 +687,7 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
     async def events():
         try:
             async for item in execute_answer_core_stream(
-                core_input, app_mod.core_deps(), parent_span=root_span
+                core_input, deps, parent_span=root_span
             ):
                 itype = item.get("type")
                 if itype == "token":

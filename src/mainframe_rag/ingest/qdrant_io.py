@@ -231,6 +231,20 @@ def delete_by_revision(client: QdrantPoints, settings: Settings, source_rev: str
     )
 
 
+def live_collection_from(
+    alias: str, alias_target: str | None, target_exists: bool
+) -> tuple[str | None, bool]:
+    """One alias-resolution decision rule (sync ingest + async serving):
+    (physical, legacy). `alias_target` is the alias's collection name (None
+    when no alias is defined); `target_exists` says whether that resolved
+    candidate — the target when defined, else the alias name — exists.
+    A dangling alias resolves as absent so a fresh staging can be published
+    over it."""
+    if alias_target is not None:
+        return (alias_target, False) if target_exists else (None, False)
+    return (alias, True) if target_exists else (None, False)
+
+
 def resolve_live_collection(client: QdrantPoints, settings: Settings) -> tuple[str | None, bool]:
     """Physical collection behind the `<collection>` alias.
 
@@ -242,14 +256,16 @@ def resolve_live_collection(client: QdrantPoints, settings: Settings) -> tuple[s
     can be published over it.
     """
     alias = settings.qdrant_collection
-    for desc in client.get_aliases().aliases:
-        if desc.alias_name == alias:
-            if client.collection_exists(desc.collection_name):
-                return desc.collection_name, False
-            return None, False
-    if client.collection_exists(alias):
-        return alias, True
-    return None, False
+    target = next(
+        (
+            desc.collection_name
+            for desc in client.get_aliases().aliases
+            if desc.alias_name == alias
+        ),
+        None,
+    )
+    candidate = target if target is not None else alias
+    return live_collection_from(alias, target, client.collection_exists(candidate))
 
 
 def snapshot_collection(client: QdrantPoints, collection: str) -> str:

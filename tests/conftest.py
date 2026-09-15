@@ -118,3 +118,23 @@ def _typed_point(pid: str, chunk_type: str, page: str, score: float = 1.0) -> mo
     payload["chunk_type"] = chunk_type
     payload["page_label"] = page
     return base.model_copy(update={"payload": payload})
+
+
+@pytest.fixture(autouse=True)
+def _servable_representation_gate(monkeypatch, request):
+    """Default serving gate for the hermetic suite (issues #391 F3/F4).
+
+    Endpoint tests monkeypatch `retrieve_search`/LLM seams directly, so the
+    gate would otherwise try to resolve the configured alias against an
+    unreachable Qdrant and turn every request into a 503. This fixture
+    installs a servable gate bound to the configured collection; gate and
+    refusal tests override `app_mod.serving_gate` themselves, and the
+    integration tier keeps the real gate (real Qdrant)."""
+    if request.node.get_closest_marker("integration"):
+        yield None
+        return
+    from mainframe_rag.agent import app as app_mod
+    from tests.fakes import ServingGateFake
+
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGateFake())
+    yield

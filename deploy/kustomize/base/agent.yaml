@@ -37,6 +37,16 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+          # Liveness is the process only (issue #391 F3): /healthz is now a
+          # real readiness failure (503) for a non-servable generation, and a
+          # data problem must not restart an otherwise healthy agent.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            failureThreshold: 3
           resources:
             requests: { cpu: "100m", memory: 256Mi }
             limits: { cpu: "500m", memory: 512Mi }

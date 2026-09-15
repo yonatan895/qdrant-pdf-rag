@@ -33,15 +33,39 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   from the final supplied-evidence manifest (issue #364): retrieved hits that
   packing/trimming omitted, and the prompt's worked example cite, are never
   accepted as grounding.
-- `GET /healthz` — `HealthzResponse{status, qdrant, embed?}`. Qdrant is
-  checked by GET-ting the pooled client's `{base}/readyz` and requiring
-  exactly `200` plus the body `all shards are ready` (case/space
-  normalized); the upstream body goes to the log, never the client.
-  `embed` is tri-state: `None` when no embedder is configured, `false` on
-  any exception or non-200 from a `["ping"]` embeddings probe, else the
-  boolean result. `status` is `ok` only when Qdrant is ok and embed is not
-  `False`, else `degraded` (still HTTP 200). Any Qdrant exception becomes
+- `GET /healthz` (readiness) — `HealthzResponse{status, qdrant, embed?,
+  representation}`. Qdrant is checked by GET-ting the pooled client's
+  `{base}/readyz` and requiring exactly `200` plus the body `all shards are
+  ready` (case/space normalized); the upstream body goes to the log, never
+  the client. `embed` is tri-state: `None` when no embedder is configured,
+  `false` on any exception or non-200 from a `["ping"]` embeddings probe,
+  else the boolean result. `representation` is the live, uncached
+  `resolve_serving_generation` outcome (issues #391 F3/F4): the configured
+  alias resolved to its physical generation and that generation's OWN
+  `<physical>__completions` contract compared against the wanted one.
+  `status` is `ok` only when Qdrant is ok, embed is not `False`, and
+  `representation` is `compatible`, `record_only_drift`, or `empty`;
+  anything else is `degraded` **and HTTP 503** (Kubernetes probes judge
+  only the status code, so the JSON label alone never made a pod unready).
+  `empty` stays ready on purpose: the deploy -> ingest sequence waits for
+  the agent before data exists (bootstrap must not deadlock); requests are
+  still refused by the serving gate. Any Qdrant exception becomes
   `503 qdrant_unready`.
+- `GET /livez` (liveness) — always `200 {"status": "alive"}` while the
+  process serves. Data-serving readiness belongs to `/healthz`; the
+  deployment livenessProbe points here so a non-servable generation never
+  restarts a healthy agent.
+- **Serving generation gate** — every retrieval path (`/v1/search`,
+  `/v1/answer`, `/v1/chat`, `/v1/chat/completions`, `/ui/chat*`) asks the
+  gate for the current generation before any embed/LLM/stream work and
+  binds to the validated physical collection name; within
+  `REPRESENTATION_CACHE_TTL_S` (default 5s) requests reuse one validation,
+  after which a fresh resolution makes an alias swap or rollback visible.
+  Not servable (drift, legacy, pending migration, unverified/unknown, or
+  `empty`) is the fixed `503 representation_unavailable` JSON envelope on
+  the API and the stream endpoints (the console's HTML form keeps its
+  fixed error banner). The gate is read-only — it never writes metadata or
+  repairs collections.
 - `POST /v1/chat` (native) and `POST /v1/chat/completions` (OpenAI-compatible
   alias) — `ChatRequest{messages (client-managed history; min 1, roles
   `system`/`user`/`assistant`, `extra="forbid"`), product?, version?,
@@ -109,6 +133,7 @@ status (`/ui` failures render HTML banners instead, §1):
 | `internal` / `internal error` | 500 | Prompt-build failure and any unhandled exception |
 | `not_configured` / `reasoning model…` | 503 | `/v1/answer` or `/v1/chat` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
+| `representation_unavailable` / `the retrieval generation is not available` | 503 | Serving gate: resolved generation is `empty` or not validated compatible (drift/legacy/pending/unknown); `/ui/chat` renders its banner while `/ui/chat/stream` returns this envelope |
 | `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query-length guard, and `/v1/chat` with no `user`-role message (one message, every 422 path) |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
@@ -325,6 +350,7 @@ readers:
 | `llm_stream` | `false` | server-side reasoning SSE |
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
+| `representation_cache_ttl_s` | 5.0 (0 = validate every request) | serving generation gate: alias resolution + contract validation cache |
 | `allow_hash_mode` / `log_level` | `false` / INFO | lifespan hash gate / logging |
 | `otel_exporter_otlp_endpoint` / `otel_sample_ratio` / `otel_export_queue_size` / `otel_export_timeout_ms` | unset = tracing off / 1.0 / 2048 / 5000 | tracing setup |
 | `metrics_enabled` | `false` = /metrics 404s | Prometheus exposition for UWM scrapes |

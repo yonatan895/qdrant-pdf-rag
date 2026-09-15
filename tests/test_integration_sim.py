@@ -285,13 +285,15 @@ def test_alias_publish_rekeys_manifest_across_clone(qdrant_url, corpus, tmp_path
 
 
 def test_alias_publish_revision_migration_keeps_old_generation(
-    qdrant_url, corpus, tmp_path, monkeypatch
+    qdrant_url, mock_url, corpus, tmp_path, monkeypatch
 ):
-    """Issue #391 F2 against the real server: a revision-only change derives
-    a distinct staging generation, re-embeds there, and swaps only after the
-    contract commits; the old physical keeps its points AND its rev-A
-    manifest for rollback (data and metadata roll back together)."""
-    from qdrant_client import QdrantClient
+    """Issue #391 F2/F3/F4 against the real server: a revision-only change
+    derives a distinct staging generation, re-embeds there, and swaps only
+    after the contract commits; the old physical keeps its points AND its
+    rev-A manifest, and the agent (real serving gate) serves the alias
+    target's own contract before, during the migrated state, and after an
+    operator alias rollback."""
+    from qdrant_client import QdrantClient, models
 
     from mainframe_rag.config import Settings
     from mainframe_rag.ingest.qdrant_io import resolve_live_collection, scroll_all_points
@@ -349,6 +351,41 @@ def test_alias_publish_revision_migration_keeps_old_generation(
                 )
             }
             assert docs == expected_docs
+
+        # Issue #391 F3/F4: the real serving gate resolves the alias to the
+        # migrated physical, validates ITS metadata, and serves.
+        with _agent(monkeypatch, qdrant_url, mock_url, PUBLISH_ALIAS) as agent_client:
+            health = agent_client.get("/healthz")
+            assert health.status_code == 200
+            assert health.json()["representation"] == "compatible"
+            body = agent_client.post(
+                "/v1/search", json={"query": "IEA500I operator message"}
+            ).json()
+            assert body["hits"], "the agent must serve the alias target's own generation"
+
+        # Operator rollback: re-point the alias at the old generation. The
+        # agent's next process sees rev-A data AND rev-A metadata together.
+        client.update_collection_aliases(
+            [
+                models.DeleteAliasOperation(
+                    delete_alias=models.DeleteAlias(alias_name=PUBLISH_ALIAS)
+                ),
+                models.CreateAliasOperation(
+                    create_alias=models.CreateAlias(
+                        collection_name=old, alias_name=PUBLISH_ALIAS
+                    )
+                ),
+            ]
+        )
+        monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+        with _agent(monkeypatch, qdrant_url, mock_url, PUBLISH_ALIAS) as agent_client:
+            health = agent_client.get("/healthz")
+            assert health.status_code == 200
+            assert health.json()["representation"] == "compatible"
+            body = agent_client.post(
+                "/v1/search", json={"query": "IEA500I operator message"}
+            ).json()
+            assert body["hits"], "rollback serves the old generation with its own contract"
     finally:
         client.close()
 

@@ -89,6 +89,7 @@ def _hash_env(monkeypatch):
 def test_lifespan_refuses_drifted_store(monkeypatch):
     """Issue #362 req 4: evidence of an incompatible stored generation
     refuses to listen, with the migration path in the message."""
+    from mainframe_rag.agent.serving import ServingGate
     from mainframe_rag.config import Settings
     from mainframe_rag.ingest.completion import completion_collection_name
     from mainframe_rag.ingest.rules_version import extraction_rules_version
@@ -102,16 +103,19 @@ def test_lifespan_refuses_drifted_store(monkeypatch):
         embed_model_revision="other-rev",
     )
     _lifespan_qdrant(monkeypatch, ServingManifestQdrant(envelope))
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
     with pytest.raises(RuntimeError, match="refuses.*reembed_required"), TestClient(app_mod.app):
         pass
 
 
 def test_lifespan_refuses_legacy_store(monkeypatch):
     """A non-empty store with no contract is legacy — refuse, never serve."""
+    from mainframe_rag.agent.serving import ServingGate
     from tests.fakes import ServingManifestQdrant
 
     _hash_env(monkeypatch)
     _lifespan_qdrant(monkeypatch, ServingManifestQdrant(None, points=True))
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
     with pytest.raises(RuntimeError, match="refuses.*legacy"), TestClient(app_mod.app):
         pass
 
@@ -120,9 +124,11 @@ def test_lifespan_unreachable_store_warns_but_listens(monkeypatch):
     """No evidence either way (store unreadable) is `unknown`: warn-only —
     nothing can be served wrong from a store we cannot read, and /healthz
     stays the live signal."""
+    from mainframe_rag.agent.serving import ServingGate
     from tests.fakes import ServingManifestQdrant
 
     _hash_env(monkeypatch)
     _lifespan_qdrant(monkeypatch, ServingManifestQdrant(explode=True))
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0.0))
     with TestClient(app_mod.app):
         pass

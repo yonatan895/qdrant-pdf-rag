@@ -1024,9 +1024,13 @@ keeps the missing combined OpenShift/live-model coverage explicit.
 
 ### 5.1 Health Check API
 
-The agent exposes `/healthz` for OpenShift liveness/readiness probes
-(contract: `agent.md` §1 — `ok`/`degraded`/`503 qdrant_unready`, upstream
-bodies stay server-side):
+The agent exposes `/healthz` for the OpenShift readiness probe and
+`/livez` for liveness (contract: `agent.md` §1 — `ok`/`degraded`/
+`503 qdrant_unready`, upstream bodies stay server-side). `/healthz` is a
+real readiness failure (HTTP 503) whenever the served generation is not
+validated compatible — including `reembed_required`, `legacy`, a `pending`
+migration, or unreadable metadata; `empty` stays ready so the
+deploy -> ingest bootstrap can complete. `/livez` is process-only.
 
 ```bash
 curl -s http://rag-agent.mainframe-rag.svc:8080/healthz
@@ -1105,7 +1109,7 @@ Citation validation runs on the accumulated text exactly as in JSON mode: the ci
 | **PVC Multi-Attach Error** | `job/ingest` fails with `Multi-Attach error for volume` on corpus PVC | Ensure any previous writer pod has released the PVC, or use a ReadOnlyMany volume. |
 | **Qdrant P2P CrashLoop** | Pod `qdrant-0` fails with `No such file or directory` looking for `cert.pem` | Ensure `config.cluster.p2p.enable_tls: false` in `values.yaml` (gossip is plaintext on CNI without `./tls/cert.pem`). |
 | **K8s Manifest Integer/Boolean Error** | `Invalid value: "string", expected integer/boolean` | Ensure numeric/boolean env vars (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`) are explicitly quoted in rendered manifests. |
-| **Degraded `/healthz` Smoke Failure** | `make airgap-smoke` exits 1 with `FAIL: /healthz probe did not report ok` | Pre-flight probe failed closed; check Qdrant and vLLM connectivity inside the cluster. |
+| **Degraded `/healthz` Smoke Failure** | `make airgap-smoke` exits 1 with `FAIL: /healthz probe did not report ok` | Pre-flight probe failed closed (non-`ok` body or non-200). Check Qdrant and vLLM connectivity, then the `representation` field: `reembed_required`/`legacy`/`pending` needs `--reingest`; `unknown` means the metadata store is unreachable. Requests refuse with `503 representation_unavailable` while this holds. |
 | **Qdrant 401 After Reinstall** | `/v1/search` fails with `401 Invalid API key or JWT` after Qdrant was reinstalled or re-`helm upgrade`d | The chart regenerates the `<release>-apikey` secret on reinstall while running agent pods keep the old key in env. Roll the agent: `kubectl -n <ns> rollout restart deploy/rag-agent` and wait for rollout before smoking again. |
 | **Stale dist/ MANIFEST** | `make airgap-validate` / `-deploy` / `-ingest` / `-dryrun` fail with `IMAGE_SHA=<sha> does not match packed MANIFEST sha` | `dist/` is gitignored build output that persists across checkouts — the MANIFEST inside is from an older pack (only `pack` regenerates it; the other steps just read it). Repack at the current HEAD, or clear the stale `dist/` before re-running. |
 | **Stale airgap.env IMAGE_SHA** | `make airgap-pack` / `-load` fail with `IMAGE_SHA=<sha> is not the checked-out commit` right after checking out a new SHA | `airgap.env` is gitignored local state from a previous rehearsal — its `IMAGE_SHA` no longer matches HEAD. Explicit env beats the file (`IMAGE_SHA=$(git rev-parse HEAD) make airgap-pack`), or update the file. |
