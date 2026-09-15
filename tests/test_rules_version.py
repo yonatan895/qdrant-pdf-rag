@@ -133,6 +133,21 @@ def _main_collection():
     from mainframe_rag.config import Settings as _Settings
 
     return _Settings(_env_file=None).qdrant_collection
+
+
+def _seed_current_manifest(fake) -> None:
+    """Commit the current run contract into the fake's completions: the
+    representation preflight passes, so tests below the gate (rules,
+    skips) exercise their claimed path instead of tripping legacy."""
+    from mainframe_rag.config import Settings as _Settings
+    from mainframe_rag.ingest.completion import completion_collection_name
+    from mainframe_rag.ingest.representation import write_manifest
+
+    settings = _Settings(_env_file=None, embed_mode="hash")
+    write_manifest(
+        fake, completion_collection_name(settings), settings,
+        extraction_rules_version(),
+    )
 def test_ingest_fails_closed_on_rules_mismatch(tmp_path, synthetic_pdf, monkeypatch):
     from mainframe_rag.ingest import run_ingest
     from tests.test_run_ingest import _FakeQdrant
@@ -241,9 +256,12 @@ def test_qdrant_skip_gates_on_rules_version(tmp_path, synthetic_pdf, monkeypatch
 
     # Mixed collection (startup sample reads current, the doc itself is
     # legacy-stale — exactly the state a partially-interrupted stamp run
-    # leaves): NOT skipped — delete + re-upsert.
+    # leaves): NOT skipped — delete + re-upsert. The manifest matches the
+    # current contract (crashed-migration state, not pre-manifest legacy),
+    # so the representation preflight passes and the rules gate fires.
     fake = _FakeQdrant(stored_sha=sha, stored_rules_v="",
                        sample_rules_v=extraction_rules_version())
+    _seed_current_manifest(fake)
     _seed_legacy_doc(fake, _main_collection(), "SA22-0000-00", sha, "")
     # A current-rules point from another doc: the startup sample (limit 1,
     # no filter) must observe the mixed collection as current-gated.

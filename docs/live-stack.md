@@ -112,7 +112,9 @@ stops the push, no exceptions. *(Note: Deployment / air-gap / Helm / overlays ch
 ```sh
 # a. health
 curl -s http://127.0.0.1:8087/healthz
-# expect: {"status":"ok","qdrant":true,"embed":true}
+# expect: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible"}
+# (representation is empty pre-ingest, record_only_drift on query-prefix
+# drift; reembed_required/legacy/unknown degrade — smoke fails closed)
 
 # b. trap query — must refuse, zero validated citations
 curl -s http://127.0.0.1:8087/v1/answer -H 'Content-Type: application/json' \

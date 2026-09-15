@@ -314,6 +314,7 @@ def test_embed_failfast_upserts_nothing(tmp_path, synthetic_pdf, monkeypatch):
     monkeypatch.delenv("EMBED_BASE_URL", raising=False)
     monkeypatch.delenv("EMBED_MODEL", raising=False)
     monkeypatch.setenv("EMBED_MODE", "vllm")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "test-rev")
     monkeypatch.setenv("DENSE_DIM", "256")  # collection setup passes; the
     # worker's embed call then fails fast on the missing EMBED_BASE_URL
     progress = tmp_path / "inventory.jsonl"

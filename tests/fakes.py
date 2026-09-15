@@ -291,6 +291,63 @@ class HttpxStreamFake:
 
 
 # ---------------------------------------------------------------------------
+# Representation-gate doubles (issue #362): lifespan/healthz serving checks
+# ---------------------------------------------------------------------------
+
+
+def manifest_envelope(settings, rules_v, completions, **manifest_overrides):
+    """Stored-manifest point payload for a chosen contract. Overrides apply
+    to the manifest model (e.g. embed_model_revision="rev-2" for drift)."""
+    from mainframe_rag.ingest.representation import (
+        _MANIFEST_KEY_PREFIX,
+        build_manifest,
+        digest_of,
+    )
+
+    manifest = build_manifest(settings, rules_v)
+    if manifest_overrides:
+        manifest = manifest.model_copy(update=manifest_overrides)
+    return {
+        "record_type": _MANIFEST_KEY_PREFIX,
+        "target_collection": completions,
+        "manifest_digest": digest_of(manifest),
+        "manifest": manifest.model_dump(mode="json"),
+    }
+
+
+class ServingManifestQdrant:
+    """Async Qdrant double serving one manifest envelope (or none).
+
+    envelope=None + points=True reads as legacy; points=False as empty;
+    explode=True raises on every call (transport failure → `unknown`).
+    Each call site names the outcome it locks.
+    """
+
+    def __init__(self, envelope=None, points=True, explode=False):
+        self.envelope = envelope
+        self.points = points
+        self.explode = explode
+
+    async def retrieve(self, name, ids, *, with_payload=True):
+        if self.explode:
+            raise ConnectionError("refused")
+        if self.envelope is None:
+            return []
+        return [SimpleNamespace(payload=self.envelope)]
+
+    async def scroll(self, name, *, scroll_filter=None, limit=10, with_payload=None,
+                     offset=None):
+        if self.explode:
+            raise ConnectionError("refused")
+        if not self.points:
+            return [], None
+        return [SimpleNamespace(payload={"doc_id": "D"})], None
+
+    def close(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Settings helper
 # ---------------------------------------------------------------------------
 

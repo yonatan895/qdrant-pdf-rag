@@ -196,6 +196,10 @@ export LLM_API_KEY=${GATEWAY_LLM_KEY}
 export EMBED_BASE_URL=${BASE}/v1
 export EMBED_MODEL=${GATEWAY_EMBED_MODEL}
 export EMBED_API_KEY=${GATEWAY_EMBED_KEY}
+# Dev-only attestation (issue #362): the local gateway serves exactly this
+# model id, so it doubles as the revision the agent/ingest gate requires.
+# Prod declares the platform team's immutable revision instead.
+export EMBED_MODEL_REVISION="local:${GATEWAY_EMBED_MODEL}"
 export RERANK_ENABLED=true
 export RERANK_BASE_URL=${BASE}/v1
 export RERANK_MODEL=${GATEWAY_RERANK_MODEL}
@@ -349,7 +353,7 @@ cat <<EOF
     recommendation:
 
 export LLM_BASE_URL=${BASE}/v1 LLM_MODEL_REASONING=${GATEWAY_REASONING_MODEL} LLM_API_KEY=${GATEWAY_LLM_KEY}
-export EMBED_BASE_URL=${BASE}/v1 EMBED_MODEL=${GATEWAY_EMBED_MODEL} EMBED_API_KEY=${GATEWAY_EMBED_KEY} DENSE_DIM=1024
+export EMBED_BASE_URL=${BASE}/v1 EMBED_MODEL=${GATEWAY_EMBED_MODEL} EMBED_API_KEY=${GATEWAY_EMBED_KEY} DENSE_DIM=1024 EMBED_MODEL_REVISION="local:${GATEWAY_EMBED_MODEL}"
 export RERANK_ENABLED=true RERANK_BASE_URL=${BASE}/v1 RERANK_MODEL=${GATEWAY_RERANK_MODEL} RERANK_API_KEY=${GATEWAY_RERANK_KEY}
 
 Ctrl-C stops the gateway AND its postgres (keys stay in the volume).

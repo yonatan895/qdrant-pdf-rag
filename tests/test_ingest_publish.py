@@ -150,14 +150,19 @@ class PublishFake:
     def retrieve(self, collection, ids, *, with_payload=True):
         wanted = {str(i) for i in ids}
         return [
-            SimpleNamespace(id=p.id, payload=p.payload)
+            SimpleNamespace(id=p.id, payload=p.payload, vector=p.vector)
             for p in self._resolve(collection)
             if str(p.id) in wanted
         ]
 
     def upsert(self, collection, *, points, wait=True):
+        # Production upsert overwrites same-id points (manifest recommit,
+        # marker rewrite); the double must too, or reads see stale firsts.
         physical = self.aliases.get(collection, collection)
-        self.collections.setdefault(physical, []).extend(points)
+        stored = self.collections.setdefault(physical, [])
+        ids = {str(p.id) for p in points}
+        stored[:] = [p for p in stored if str(p.id) not in ids]
+        stored.extend(points)
         return SimpleNamespace()
 
     def delete(self, collection, *, points_selector, wait=True):
@@ -557,3 +562,62 @@ def test_flag_off_creates_no_alias_or_generations(tmp_path, monkeypatch):
     assert fake.aliases == {}
     assert all("__gen" not in name for name in fake.collections)
     assert fake.snapshots == {}
+
+
+def _live_manifest_revision(fake, live):
+    from mainframe_rag.ingest.representation import read_manifest
+
+    return read_manifest(fake, f"{live}__completions")
+
+
+def test_steady_live_with_drifted_revision_fails_closed(tmp_path, monkeypatch):
+    """Issue #362: a revision-only change keeps the same staging name
+    (generation fingerprints exclude the operator revision), so the
+    already-live branch would re-verify stale vectors as fine. The
+    read-only representation check must fail closed first — alias and
+    points untouched."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+    assert _live_manifest_revision(fake, live).embed_model_revision == ""
+
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-2")
+    with pytest.raises(RuntimeError, match="representation drift on embed_model_revision"):
+        _run_main(monkeypatch, corpus, progress)
+    assert fake.aliases[ALIAS] == live, "failed steady-state run moves no alias"
+    assert _live_manifest_revision(fake, live).embed_model_revision == "", \
+        "failed run commits no manifest"
+
+
+def test_publish_force_reconverges_live_generation(tmp_path, monkeypatch):
+    """Publish-mode --reingest under a representation change reconverges
+    the live generation in place (same staging name): every doc
+    re-embeds, the manifest commits the new contract, the alias never
+    moves, and no self-swap snapshot churns."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+    snaps_before = dict(fake.snapshots)
+
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-2")
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    assert fake.aliases[ALIAS] == live
+    assert _live_manifest_revision(fake, live).embed_model_revision == "rev-2"
+    assert fake.snapshots == snaps_before, "self-swap must not snapshot"
+    assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}

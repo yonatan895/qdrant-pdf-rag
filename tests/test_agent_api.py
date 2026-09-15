@@ -384,7 +384,7 @@ def test_healthz_degraded_paths_leak_no_upstream_text(client, monkeypatch):
     body = resp.json()
     assert body["qdrant"] is False and body["embed"] is False
     assert "secret bits" not in resp.text and "token=abc" not in resp.text
-    assert set(body) == {"status", "qdrant", "embed"}
+    assert set(body) == {"status", "qdrant", "embed", "representation"}
 
 
 def test_http_exception_handler_shape(client):
@@ -455,6 +455,77 @@ def test_healthz_qdrant_unready_structured(client, monkeypatch):
     body = resp.json()
     assert body == {"code": "qdrant_unready", "message": "qdrant is not ready"}
     assert "refused" not in resp.text  # diagnostics stay in logs
+
+
+def _ready_pool():
+    class Ready:
+        status_code = 200
+        text = "all shards are ready"
+
+    class ReadyPool:
+        async def get(self, *a, **k):
+            return Ready()
+
+    return ReadyPool()
+
+
+def test_healthz_representation_drift_degrades(client, monkeypatch):
+    """Issue #362: a drifted stored generation degrades /healthz with the
+    explicit outcome (smoke.sh fails closed on degraded). The SYNC double
+    also pins the isawaitable shim — production always passes the async
+    client, test doubles ride either shape."""
+    from types import SimpleNamespace
+
+    from mainframe_rag.ingest.completion import completion_collection_name
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from tests.fakes import manifest_envelope
+
+    settings = app_mod.settings
+    envelope = manifest_envelope(
+        settings, extraction_rules_version(),
+        completion_collection_name(settings), embed_model_revision="other-rev",
+    )
+
+    class SyncDriftQdrant:
+        def retrieve(self, *a, **k):
+            return [SimpleNamespace(payload=envelope)]
+
+        def scroll(self, *a, **k):
+            return ([SimpleNamespace(payload={})], None)
+
+    monkeypatch.setattr(app_mod, "http", _ready_pool())
+    monkeypatch.setattr(app_mod, "qdrant", SyncDriftQdrant())
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["qdrant"] is True
+    assert body["status"] == "degraded"
+    assert body["representation"] == "reembed_required"
+    assert "other-rev" not in resp.text
+
+
+def test_healthz_representation_legacy_and_unknown_degrade(client, monkeypatch):
+    """Legacy (points, no contract) and unreadable stores degrade with
+    their explicit outcomes; exception text never reaches the body."""
+    from tests.fakes import ServingManifestQdrant
+
+    monkeypatch.setattr(app_mod, "http", _ready_pool())
+    monkeypatch.setattr(app_mod, "qdrant", ServingManifestQdrant(None, points=True))
+    body = client.get("/healthz").json()
+    assert (body["status"], body["representation"]) == ("degraded", "legacy")
+
+    class Refused:
+        async def retrieve(self, *a, **k):
+            raise ConnectionError("store blew up: secret")
+
+        async def scroll(self, *a, **k):
+            raise ConnectionError("store blew up: secret")
+
+    monkeypatch.setattr(app_mod, "qdrant", Refused())
+    resp = client.get("/healthz")
+    body = resp.json()
+    assert (body["status"], body["representation"]) == ("degraded", "unknown")
+    assert "secret" not in resp.text
 
 
 def test_healthz_embed_probe_forwards_gateway_key(client, monkeypatch):
@@ -2214,6 +2285,7 @@ def test_lifespan_reranker_unreachable_warns_but_still_listens(monkeypatch, caps
     monkeypatch.setenv("EMBED_MODE", "vllm")
     monkeypatch.setenv("EMBED_BASE_URL", "http://embed.internal/v1")
     monkeypatch.setenv("EMBED_MODEL", "test-embed-model")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "test-rev")
     monkeypatch.setenv("DENSE_DIM", "64")
     monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
     monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
