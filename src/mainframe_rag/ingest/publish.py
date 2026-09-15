@@ -126,22 +126,24 @@ def _transfer_staging_metadata(
     re-key the manifest verbatim; verify, never assume.
 
     When live carries a readable manifest, the staging manifest must be
-    readable and identical afterward — otherwise preparation is incomplete
-    and the inner preflight would misread inherited state as legacy (or,
-    worse, a publish would verify against the wrong contract). An existing
-    but unreadable staging completions collection is a partial copy or a
-    pre-re-key clone: it is discarded and re-copied from live, so the
-    transferred metadata is count-verified instead of trusted. Raises with
-    explicit remediation when the transfer still cannot complete; live data
-    and metadata are never modified.
+    readable and identical afterward — model AND envelope state (a pending
+    live must not be laundered into a committed staging via the copy).
+    Otherwise preparation is incomplete and the inner preflight would
+    misread inherited state as legacy (or, worse, a publish would verify
+    against the wrong contract). An existing but unreadable staging
+    completions collection is a partial copy or a pre-re-key clone: it is
+    discarded and re-copied from live, so the transferred metadata is
+    count-verified instead of trusted. Raises with explicit remediation
+    when the transfer still cannot complete; live data and metadata are
+    never modified.
     """
     from mainframe_rag.ingest.qdrant_io import clone_collection
-    from mainframe_rag.ingest.representation import read_manifest, rekey_manifest
+    from mainframe_rag.ingest.representation import read_manifest_record, rekey_manifest
 
     live_completions = completion_collection_for(live)
     staging_completions = completion_collection_name(staging_settings)
-    live_manifest = read_manifest(client, live_completions)
-    if live_manifest is None:
+    live_record = read_manifest_record(client, live_completions)
+    if live_record is None:
         return  # legacy live: absence is explicit downstream, never repaired here
     if client.collection_exists(staging_completions):
         # Staging-only cleanup: live is the source and is never touched, and
@@ -154,7 +156,7 @@ def _transfer_staging_metadata(
             f"manifest but {staging_completions!r} has none after the clone/re-key "
             "— refusing to publish from an incomplete staging generation."
         )
-    if read_manifest(client, staging_completions) != live_manifest:
+    if read_manifest_record(client, staging_completions) != live_record:
         raise RuntimeError(
             f"staging manifest at {staging_completions!r} does not match the live "
             "contract — refusing to publish from an incomplete staging generation."
@@ -169,9 +171,16 @@ def verify_all_complete(
     rules_v: str,
     src_labels: str,
 ) -> list[str]:
-    """Paths that must block publication: missing/stale inventory or an
-    unverified staging generation. Empty means publishable."""
+    """Paths that must block publication: missing/stale inventory, an
+    unverified staging generation, or a contract that is not committed
+    (issue #391 F2: a pending migration must never be swapped into
+    service). Empty means publishable."""
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+
+    record = read_manifest_record(client, completion_collection_name(staging_settings))
     problems: list[str] = []
+    if record is not None and record.state != STATE_COMMITTED:
+        problems.append(f"{staging_settings.qdrant_collection}: contract {record.state!r}")
     for path_str, sha in walked:
         rec = inventory.get(path_str)
         if (

@@ -13,12 +13,16 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.representation import (
+    STATE_COMMITTED,
     build_manifest,
     manifest_digest,
     manifest_point_id,
     read_manifest,
+    read_manifest_record,
     write_manifest,
 )
 from mainframe_rag.ingest.rules_version import extraction_rules_version
@@ -286,14 +290,16 @@ def test_run_writes_manifest_and_logs(tmp_path, synthetic_pdf, capsys, monkeypat
                             "--workers", "1"]) == 0
     settings = Settings(_env_file=None)
     name = f"{settings.qdrant_collection}__completions"
-    stored = read_manifest(fake, name)
-    assert stored is not None
-    assert stored == build_manifest(settings, extraction_rules_version())
+    record = read_manifest_record(fake, name)
+    assert record is not None
+    assert record.manifest == build_manifest(settings, extraction_rules_version())
+    # Fresh target = a migration lifecycle (issue #391 F2): the run declares
+    # the contract pending up front, then commits it after every document.
+    assert record.state == STATE_COMMITTED
     lines = [a for a in _stderr_actions(capsys) if a.get("action") == "representation"]
-    assert len(lines) == 1
-    assert lines[0]["collection"] == settings.qdrant_collection
+    assert [l["result"] for l in lines] == ["pending", "committed"]
+    assert all(l["collection"] == settings.qdrant_collection for l in lines)
     assert lines[0]["manifest_digest"] == manifest_digest(settings, extraction_rules_version())
-    assert lines[0]["result"] == "committed"
     assert lines[0]["model_revision_attested"] is False
     # Steady state: identical rerun re-reads the manifest and stays
     # zero-write (already_current, no new upserts anywhere).
@@ -325,3 +331,59 @@ def test_dry_run_record_stamps_parent_manifest_view(tmp_path, synthetic_pdf):
 def test_default_revision_settings_pinned():
     assert Settings(_env_file=None).embed_model_revision == ""
     assert Settings(_env_file=None).bm25_weights_revision == "22b8d2af71a76161e18dd432d2cee0eefa66e412"
+
+
+# ------------------------------------------- generation fingerprint (391 F2) ---
+def test_fingerprint_revision_only_change_alters_identity():
+    """The operator revision rides the fingerprint (pre-391 it did not):
+    revision-only drift must change completion and staging identity, or an
+    A marker would certify re-embedded-as-B vectors."""
+    from mainframe_rag.ingest.completion import doc_generation_id, representation_fingerprint
+
+    a = _settings(embed_model_revision="rev-a")
+    b = _settings(embed_model_revision="rev-b")
+    assert representation_fingerprint(a, RULES) == representation_fingerprint(
+        _settings(embed_model_revision="rev-a"), RULES
+    )
+    assert representation_fingerprint(a, RULES).startswith("rp2:")
+    assert representation_fingerprint(a, RULES) != representation_fingerprint(b, RULES)
+    assert doc_generation_id(a, "sha", RULES, "||") != doc_generation_id(b, "sha", RULES, "||")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"embed_mode": "vllm"},
+        {"embed_model": "other-model"},
+        {"contextual_embed_enabled": True},
+        {"context_llm_model": "other-llm"},
+        {"context_max_chars": 50},
+        {"bm25_model": "other/bm25"},
+        {"bm25_weights_revision": "0" * 40},
+    ],
+)
+def test_fingerprint_covers_settings_driven_reembed_fields(overrides):
+    from mainframe_rag.ingest.completion import representation_fingerprint
+
+    base = representation_fingerprint(_settings(), RULES)
+    assert representation_fingerprint(_settings(**overrides), RULES) != base
+
+
+def test_fingerprint_dense_dim_is_reembed_identity():
+    """Hash mode pins HASH_EMBED_DIM regardless of the setting, so the dim
+    case needs vllm mode to show the projection difference."""
+    from mainframe_rag.ingest.completion import representation_fingerprint
+
+    a = _settings(embed_mode="vllm", embed_model="m", dense_dim=64)
+    b = _settings(embed_mode="vllm", embed_model="m", dense_dim=128)
+    assert representation_fingerprint(a, RULES) != representation_fingerprint(b, RULES)
+
+
+def test_fingerprint_rules_and_prefix_policy():
+    """Extraction rules are re-embed identity; the dense query prefix is
+    record-only — evaluation attribution, never a generation change."""
+    from mainframe_rag.ingest.completion import representation_fingerprint
+
+    base = representation_fingerprint(_settings(), RULES)
+    assert representation_fingerprint(_settings(), "0" * 16) != base
+    assert representation_fingerprint(_settings(dense_query_prefix="OTHER:"), RULES) == base

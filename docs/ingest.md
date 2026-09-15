@@ -386,21 +386,48 @@ thread pool.
   (query-side drift is an evaluation event, never a re-embed trigger).
   The gateway exposes only mutable aliases, so the dense revision is an
   operator-declared fingerprint, never an inferred weight id; vllm mode
-  with a blank `EMBED_MODEL_REVISION` fails closed (hash mode exempt).
+  with a blank `EMBED_MODEL_REVISION` fails closed (hash mode exempt),
+  including under `--reingest` — the force flag bypasses stored-data
+  rejection, never the requirement to name the representation being
+  written.
+- **Migration lifecycle (issue #391 F2):** the stored contract carries an
+  envelope-level `state`. A run whose wanted contract differs from the
+  stored committed one — or that finds a fresh/legacy target — writes it
+  `pending` before any delete/upsert and flips it `committed` only on the
+  success path: zero document failures AND a paginated residue scan
+  proving no completion marker under another `manifest_digest` remains.
+  A partial source walk (a doc removed from the corpus, a retained
+  sibling revision, a crash partial) therefore blocks the commit and the
+  contract stays pending, so old vectors can never be certified as the
+  new representation; `--limit` is refused for any migration
+  (`refuse_limited_migration`) except a fresh empty-target bootstrap. A
+  pending contract is never skippable (`check_ingest_compatible`),
+  servable (`serving_outcome`/lifespan; `/healthz` degrades), or
+  swappable (`verify_all_complete`); resumption is `--reingest`.
+- **Generation identity (issue #391 F2):** completion ids and staging
+  names derive from the versioned fingerprint `rp2:` — a digest of the
+  manifest's `REEMBED_FIELDS` projection, the same field policy
+  `compare_manifests` uses (one tuple, no second field list). A
+  revision-only change therefore changes completion ids, staging names,
+  and skip eligibility together; record-only fields (dense query prefix)
+  stay out. A future fingerprint-format bump invalidates old markers
+  explicitly — one fail-closed re-ingest cycle — documented in the
+  changelog note below; chunk UUID5s never change.
 - **Representation preflight (issue #362):** before any parse worker
   spawns, the run proves the target accepts its contract
   (`check_ingest_compatible`, one rule with the serving check). Explicit
-  outcomes: empty target proceeds (the run commits its manifest);
+  outcomes: empty target proceeds (the run opens its contract pending);
   compatible or record-only drift proceeds (drift logs
   `action: representation_drift` — re-evaluation owed, never a re-ingest);
-  re-embed drift or legacy unversioned state raises with the `--reingest`
-  remediation. `--reingest` is the one deliberate migration step (same
-  override idiom as the #124 rules gate, which runs first so its error
-  precedence is unchanged). Skip paths share the contract structurally:
-  the preflight proves run-level compatibility before any skip is
-  evaluated, so a stale completion can never cause a skip under a drifted
-  representation; marker `manifest_digest` values are audit, not a second
-  gate.
+  re-embed drift, legacy unversioned state, or a pending contract raises
+  with the `--reingest` remediation. `--reingest` is the one deliberate
+  migration step (same override idiom as the #124 rules gate, which runs
+  first so its error precedence is unchanged). Skip paths share the
+  contract structurally: the preflight proves run-level compatibility
+  before any skip is evaluated, so a stale completion can never cause a
+  skip under a drifted representation; marker `manifest_digest` values
+  are audit at skip time (the generation identity gate is the fingerprint)
+  and the commit-time residue proof.
 - **Source-revision identity** (issue #361, `ingest/identity.py` +
   revision-keyed pipeline): three identities — printed `doc_id`
   (family/citation key), `source_rev`
@@ -435,18 +462,20 @@ thread pool.
 - **361B migration runbook (snapshot-gated, operator-driven, never
   automatic):** (1) snapshot the collection (`create_snapshot` — the same
   mechanism publish uses for safety snapshots); (2) re-ingest in place —
-  unchanged docs skip lazily via the legacy rule (no mass re-ingest),
-  changed docs migrate their history precisely, and the representation
-  manifest flips to `identity_schema: source_rev`; (3) verify counts plus
+  under the #391 F2 fingerprint (`rp2:`) every pre-rp2 marker is
+  unreachable, so this first pass re-ingests the whole walked corpus
+  (one fail-closed cycle, unchanged docs included); changed docs also
+  migrate their history precisely, and the representation manifest flips
+  to `identity_schema: source_rev`; (3) verify counts plus
   `verify_all_complete` semantics (every walked doc revision-verified);
   (4) roll back by restoring the snapshot. Docs whose history predates
   revision stamps AND share a `doc_id` with a named revision need one
   explicit cleanup first (delete the stale revision's points by
   `doc_id` + content-sha filter, then re-ingest) — the refresh error names
-  exactly that. Pre-361B completion markers are unreachable under the new
-  id scheme and read as absent; the first refresh of each lineage rewrites
-  them scoped. Evaluation needs no re-baseline: citations, filters, and
-  goldens key on `doc_id`/text (see the eval numbers in each 361B PR).
+  exactly that. Pre-rp2 completion markers read as absent, and the first
+  refresh of each lineage rewrites them scoped. Evaluation needs no
+  re-baseline: citations, filters, and goldens key on `doc_id`/text (see
+  the eval numbers in each 361B PR).
 - **Refresh visibility — alias publication** (`INGEST_ALIAS_PUBLISH=true`,
   default off; enabling by default is a dedicated follow-up PR; issue #359
   req 4/5, `ingest/publish.py` + `qdrant_io` alias/snapshot helpers):
@@ -458,8 +487,10 @@ thread pool.
   same staging (crash-safe resume), changed inputs address a new one, and a
   derived name equal to the live physical means "already published"
   (read-only re-verify, no clone, no swap — plus the representation
-  read-only check, since a revision-only change keeps the same staging
-  name and would otherwise re-verify stale vectors as fine). Staging starts as a
+  read-only check for record-only drift and for a pending same-contract
+  resume). Because the fingerprint embeds every re-embed-required field
+  (issue #391 F2), a revision-only change derives a **distinct** staging
+  generation instead of reconverging live. Staging starts as a
   server-side snapshot-clone of live (points AND completion markers); a
   marker certifies its own `target_collection`, so the walked corpus
   re-embeds into the new generation rather than skipping across physicals
@@ -467,22 +498,39 @@ thread pool.
   swap, not incremental re-embedding. The manifest is
   re-keyed onto the staging id verbatim (`rekey_manifest` — the fixed
   point id embeds the collection name, so a byte copy is unreadable; the
-  contract is carried, never recomputed, or a drifted run would see its
-  own wanted contract and sail through its preflight; the transfer is
-  verified and repaired on reuse, issue #391 F5); the inner run then
-  enforces the same preflight, so a cloned staging under a changed
-  representation fails closed until `--reingest` reconverges it. The alias swaps in one atomic
-  delete+create call only after `verify_all_complete` passes every walked
-  document. Publish-mode `--reingest` against the live generation
-  reconverges it in place and skips the self-swap (`already_live_reconverged`
-  — explicit force relaxes publish atomicity like in-place mode). Swap failure leaves the previous generation serving (job
+  contract AND its pending/committed state are carried, never recomputed,
+  or a drifted run would see its own wanted contract and sail through its
+  preflight; the transfer is verified and repaired on reuse, issue #391
+  F5); the inner run then enforces the same preflight, so a cloned staging
+  under a changed representation fails closed until `--reingest`. With
+  `--reingest` the contract opens `pending` on the staging, every walked
+  doc re-embeds, the residue proof commits it, and only then does the
+  alias swap — the swap also requires the committed state
+  (`verify_all_complete`). Publish-mode `--reingest` reconverges the live
+  physical in place **only** when its stored contract IS the wanted one
+  (same-generation repair; `require_in_place_reconverge`) and skips the
+  self-swap (`already_live_reconverged`); any representation change
+  publishes a distinct staging and never mutates the serving generation.
+  Swap failure leaves the previous generation serving (job
   fails, staging retained for retry). `--limit` subsets and empty corpora
   are refused fail-closed. Corpus deletions are NOT swept (status quo —
   stale points survive until an operator cleans them, same as in-place
-  runs). First-publish cutover from a legacy physical layout snapshots the
+  runs); during a migration those retained markers block the commit until
+  the operator re-ingests the complete corpus or cleans the stale
+  generation. First-publish cutover from a legacy physical layout snapshots the
   squatter, deletes it (brief documented maintenance window), then creates
   the alias; stale-rules legacy content needs `--reingest` like any other
   rules migration.
+- **Fingerprint-format upgrade (one-time, fail-closed):** the pre-#391
+  fingerprint omitted the operator revision and other re-embed-required
+  fields, so it cannot be trusted for skip eligibility. Existing
+  collections therefore see old markers as unreachable once (`rp2:` ids
+  change) and re-ingest on the first run — unchanged docs included; fail
+  closed, never a silent pass. Alias-publish deployments publish the
+  re-ingest as a new staging generation and swap when it verifies; the old
+  physical keeps its complete old generation **and its own contract
+  metadata** (`<old>__completions`), so an alias rollback selects matching
+  metadata, not the new contract.
 - **Rollback / GC (operator actions, never automatic):** the superseded
   physical and a safety snapshot are kept on every swap. Roll back by
   re-pointing the alias (any Qdrant client):

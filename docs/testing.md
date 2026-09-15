@@ -63,7 +63,10 @@ Double fidelity includes client-side defaults the production call relies
 on: a Qdrant `retrieve` double returns vectors only when `with_vectors=True`
 (issue #391 F5 — a double that always returned them hid a missing vector
 projection against every real server, and only the disposable-Qdrant lane
-caught it).
+caught it). A double for a store that upserts must overwrite same-id points
+(issue #391 F2 — a duplicated manifest point reads back as the stale first,
+so a pending contract looked committed in unit tests but not against a
+server).
 
 ## Tests must lock the claimed path
 

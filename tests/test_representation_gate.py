@@ -20,13 +20,20 @@ from mainframe_rag.ingest.representation import (
     COMPATIBLE,
     RECORD_ONLY_DRIFT,
     REEMBED_REQUIRED,
+    STATE_COMMITTED,
+    STATE_PENDING,
+    begin_manifest,
     build_manifest,
     check_ingest_compatible,
+    commit_manifest,
     compare_manifests,
     manifest_digest,
     manifest_point_id,
+    read_manifest_record,
+    refuse_limited_migration,
     rekey_manifest,
     require_attested_revision,
+    require_in_place_reconverge,
     serving_outcome,
     write_manifest,
 )
@@ -366,3 +373,142 @@ async def test_serving_attestation_raises_before_contact():
                   embed_base_url="http://x/v1", embed_model_revision="")
     with pytest.raises(RuntimeError, match="EMBED_MODEL_REVISION"):
         await serving_outcome(ServingManifestQdrant(explode=True), s, _completions(s), RULES)
+
+
+# --------------------------------------------- lifecycle (issue #391 F2) ---
+def _point(doc_id: str = "D"):
+    return SimpleNamespace(id=f"p-{doc_id}", payload={"doc_id": doc_id}, vector=None)
+
+
+def test_begin_commit_lifecycle():
+    """A contract change opens as pending BEFORE any document work and only
+    the explicit commit flips it; a pending re-declaration stays pending
+    (resume), and a committed same-contract begin is zero-write."""
+    s = _settings()
+    store = SyncStore()
+    comp = _completions(s)
+    digest, mode = begin_manifest(store, comp, s, RULES)
+    assert (digest, mode) == (manifest_digest(s, RULES), "pending")
+    record = read_manifest_record(store, comp)
+    assert record is not None
+    assert (record.state, record.manifest) == (STATE_PENDING, build_manifest(s, RULES))
+    writes = store.upserts
+    assert begin_manifest(store, comp, s, RULES) == (digest, "pending")
+    commit_manifest(store, comp, s, RULES)
+    assert read_manifest_record(store, comp).state == STATE_COMMITTED
+    assert store.upserts == writes + 2  # re-declared pending once, committed once
+    assert begin_manifest(store, comp, s, RULES) == (digest, "already_current")
+    assert store.upserts == writes + 2, "steady state is zero-write"
+
+
+def test_begin_record_only_drift_commits_inline():
+    """Query-prefix drift touches no stored vector, so there is nothing to
+    verify: it commits immediately, never via a pending window."""
+    s = _settings()
+    store = SyncStore()
+    comp = _completions(s)
+    write_manifest(store, comp, s, RULES)
+    s2 = _settings(dense_query_prefix="OTHER:")
+    _, mode = begin_manifest(store, comp, s2, RULES)
+    assert mode == "committed"
+    record = read_manifest_record(store, comp)
+    assert (record.state, record.manifest) == (STATE_COMMITTED, build_manifest(s2, RULES))
+
+
+def test_preflight_pending_contract_rejects_with_resume_path():
+    """An interrupted A->B migration must never look compatible: the stored
+    pending state refuses skips until `--reingest` resumes."""
+    s = _settings()
+    store = SyncStore()
+    comp = _completions(s)
+    write_manifest(store, comp, s, RULES, state=STATE_PENDING)
+    store._points.setdefault(s.qdrant_collection, []).append(_point())
+    with pytest.raises(RuntimeError, match="unfinished representation migration") as exc:
+        check_ingest_compatible(store, s, comp, RULES)
+    assert "--reingest" in str(exc.value)
+
+
+def test_refuse_limited_migration_matrix():
+    """--limit may never carry a migration: drift, pending, and legacy
+    targets are refused before mutation; a fresh empty target and a
+    record-only/compatible refresh stay allowed."""
+    s = _settings()
+    drift = _settings(embed_model_revision="rev-2")
+    prefix = _settings(dense_query_prefix="OTHER:")
+
+    compatible = SyncStore()
+    write_manifest(compatible, _completions(s), s, RULES)
+    compatible._points.setdefault(s.qdrant_collection, []).append(_point())
+    refuse_limited_migration(compatible, s, _completions(s), RULES)  # no raise
+
+    record_only = SyncStore()
+    write_manifest(record_only, _completions(s), s, RULES)
+    record_only._points.setdefault(s.qdrant_collection, []).append(_point())
+    refuse_limited_migration(record_only, prefix, _completions(prefix), RULES)  # no raise
+
+    fresh = SyncStore()
+    refuse_limited_migration(fresh, s, _completions(s), RULES)  # no raise
+
+    pending = SyncStore()
+    write_manifest(pending, _completions(s), s, RULES, state=STATE_PENDING)
+    pending._points.setdefault(s.qdrant_collection, []).append(_point())
+    with pytest.raises(RuntimeError, match="representation migration") as exc:
+        refuse_limited_migration(pending, s, _completions(s), RULES)
+    assert "without --limit" in str(exc.value)
+
+    drifted = SyncStore()
+    write_manifest(drifted, _completions(s), s, RULES)
+    drifted._points.setdefault(s.qdrant_collection, []).append(_point())
+    with pytest.raises(RuntimeError, match="representation migration"):
+        refuse_limited_migration(drifted, drift, _completions(drift), RULES)
+
+    legacy = SyncStore()
+    legacy._points.setdefault(s.qdrant_collection, []).append(_point())
+    with pytest.raises(RuntimeError, match="legacy migration"):
+        refuse_limited_migration(legacy, s, _completions(s), RULES)
+
+
+def test_in_place_reconverge_guard():
+    """Alias-mode --reingest may rebuild the live physical only when its
+    stored contract IS the wanted one; legacy/absent and drifted contracts
+    must publish a distinct staging instead."""
+    s = _settings()
+    drift = _settings(embed_model_revision="rev-2")
+
+    absent = SyncStore()
+    with pytest.raises(RuntimeError, match="no readable contract"):
+        require_in_place_reconverge(absent, s, _completions(s), RULES)
+
+    compatible = SyncStore()
+    write_manifest(compatible, _completions(s), s, RULES)
+    require_in_place_reconverge(compatible, s, _completions(s), RULES)  # no raise
+
+    pending = SyncStore()
+    write_manifest(pending, _completions(s), s, RULES, state=STATE_PENDING)
+    require_in_place_reconverge(pending, s, _completions(s), RULES)  # same-contract resume
+
+    drifted = SyncStore()
+    write_manifest(drifted, _completions(s), s, RULES)
+    with pytest.raises(RuntimeError, match="differs from the wanted representation"):
+        require_in_place_reconverge(drifted, drift, _completions(drift), RULES)
+
+
+def test_rekey_carries_pending_state():
+    """A pending live must not be laundered into a committed staging."""
+    s = _settings()
+    store = SyncStore()
+    live_comp, staging_comp = "live__completions", "staging__completions"
+    write_manifest(store, live_comp, s, RULES, state=STATE_PENDING)
+    assert rekey_manifest(store, live_comp, staging_comp) is True
+    assert read_manifest_record(store, staging_comp).state == STATE_PENDING
+
+
+# --------------------------------------------------- serving pending state ---
+@pytest.mark.anyio
+async def test_serving_pending_is_not_servable():
+    s = _settings()
+    envelope = manifest_envelope(s, RULES, _completions(s), state=STATE_PENDING)
+    outcome, details = await serving_outcome(
+        ServingManifestQdrant(envelope), s, _completions(s), RULES
+    )
+    assert (outcome, details) == ("pending", [])

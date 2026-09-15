@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import json
 import time
 import uuid
 from pathlib import Path
@@ -40,10 +41,21 @@ from mainframe_rag.ingest.qdrant_io import (
     scroll_all_points,
     stored_doc_revisions,
 )
-from mainframe_rag.ingest.representation import manifest_digest
+from mainframe_rag.ingest.representation import (
+    REEMBED_FIELDS,
+    build_manifest,
+    manifest_digest,
+)
 from mainframe_rag.ports import QdrantPoints
 
 _COMPLETION_SUFFIX = "__completions"
+
+# Completion/staging identity scheme version (issue #391 F2): the pre-391
+# fingerprint omitted operator-revision and contextual/sparse fields, so an
+# A→B revision change produced the same generation id and old markers could
+# certify stale vectors. Any future format change bumps this; old markers
+# then read as absent (one fail-closed re-ingest cycle).
+REPRESENTATION_FINGERPRINT_VERSION = 2
 
 _COMPLETION_KEYWORD_INDEXES = ("doc_id", "sha256", "rules_v", "generation_id", "target_collection")
 
@@ -65,6 +77,10 @@ class CompletionRecord(BaseModel):
     # Representation contract this generation was verified under (issue
     # #362): ties the completion to the manifest. Pre-manifest markers
     # carry None — an explicit legacy outcome in the 362B gate, never a pass.
+    # Skip eligibility rides the generation identity (the versioned
+    # REEMBED_FIELDS fingerprint, issue #391 F2), never this digest: a
+    # record-only query-prefix change must keep skipping. The digest is the
+    # commit-time residue proof for a representation migration.
     manifest_digest: str | None = None
     # Source revision this marker certifies (issue #361): markers are
     # per-revision, so coexisting revisions under one doc_id verify
@@ -84,25 +100,25 @@ def completion_collection_for(collection: str) -> str:
 
 
 def representation_fingerprint(settings: Settings, rules_v: str) -> str:
-    """Generation identity for the stored representation (req 1).
+    """Generation identity for the stored representation (issue #391 F2).
 
-    Extensible `|`-joined fingerprint: extraction rules + embed coordinates
-    that change stored vectors. Coordinate format changes with #362 owners;
-    adding segments is backward-compatible because equality is exact-match
-    and mismatches re-ingest (never skip).
+    Versioned digest of the manifest's REEMBED_FIELDS projection — the one
+    policy tuple `compare_manifests` uses — so completion ids, staging
+    names, and the compatibility gate cannot drift from one another. The
+    operator embedding revision rides inside the projection (the pre-391
+    fingerprint omitted it, which is exactly how A vectors could be skipped
+    as B after a revision-only change). Record-only fields (dense query
+    prefix) and the manifest state envelope stay out. The `rp2:` prefix
+    makes the identity scheme itself versioned: a future format change
+    bumps it and invalidates old markers explicitly — one fail-closed
+    re-ingest cycle, never a silent pass.
     """
-    try:
-        dim = settings.require_dense_dim()
-    except RuntimeError:
-        dim = None
-    return "|".join(
-        [
-            rules_v,
-            settings.embed_mode,
-            settings.embed_model or "",
-            str(dim) if dim is not None else "",
-            "ctx1" if settings.contextual_embed_enabled else "ctx0",
-        ]
+    manifest = build_manifest(settings, rules_v)
+    projection = {field: getattr(manifest, field) for field in REEMBED_FIELDS}
+    payload = json.dumps(projection, sort_keys=True, separators=(",", ":"))
+    return (
+        f"rp{REPRESENTATION_FINGERPRINT_VERSION}:"
+        f"{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
     )
 
 
@@ -450,11 +466,15 @@ def is_doc_complete(
 ) -> bool:
     """Skip gate: valid completion + verified points, same revision generation.
 
-    Scoped path: the revision's own marker for the expected generation.
-    Legacy path (lazy upgrade — unchanged docs skip without mass
-    re-ingest): a sourceless marker certifies only when no named revision
-    other than this one lives under the doc_id; mixed legacy+named fails
-    toward re-ingest, never a wrong skip.
+    The generation binding is the versioned REEMBED_FIELDS fingerprint
+    (issue #391 F2): a revision-only change alters `expected_gen`, so an A
+    marker can never satisfy a B run. `m.manifest_digest` deliberately does
+    NOT gate here — it covers record-only fields, and query-prefix drift
+    must keep skipping. Scoped path: the revision's own marker for the
+    expected generation. Legacy path (lazy upgrade — unchanged docs skip
+    without mass re-ingest): a sourceless marker certifies only when no
+    named revision other than this one lives under the doc_id; mixed
+    legacy+named fails toward re-ingest, never a wrong skip.
     """
     expected_gen = doc_generation_id(settings, sha256, rules_v, source_labels)
     scoped = read_completion(
@@ -522,6 +542,47 @@ def is_revision_committed(
         ):
             return True
     return False
+
+
+def stale_completion_markers(
+    client: QdrantPoints,
+    settings: Settings,
+    wanted_digest: str,
+    *,
+    sample: int = 3,
+) -> tuple[int, list[str]]:
+    """Completion markers NOT certified under `wanted_digest` — the
+    commit-time scope proof for a representation migration (issue #391 F2).
+
+    After a migration re-embeds the walked corpus, every remaining marker
+    whose `manifest_digest` differs (including legacy markers with none)
+    certifies vectors under another contract: those docs were not re-embedded
+    by this run (corpus deletions, retained sibling revisions, `--limit`
+    holes) and their vectors may still be searchable. The caller refuses to
+    commit while any remain. Read-only, paginated; the manifest point has no
+    `doc_id` and never counts. Returns (count, sample labels)."""
+    name = completion_collection_name(settings)
+    if not client.collection_exists(name):
+        return 0, []
+    count = 0
+    labels: list[str] = []
+    for p in scroll_all_points(
+        client,
+        name,
+        scroll_filter=None,
+        with_payload=["doc_id", "source_rev", "manifest_digest"],
+        page_size=settings.ingest_scan_page_size,
+    ):
+        payload = p.payload or {}
+        doc_id = payload.get("doc_id")
+        if not doc_id:
+            continue  # the manifest point itself
+        if payload.get("manifest_digest") == wanted_digest:
+            continue
+        count += 1
+        if len(labels) < sample:
+            labels.append(f"{doc_id}@{payload.get('source_rev') or 'legacy'}")
+    return count, labels
 
 
 def plan_refresh_deletes(

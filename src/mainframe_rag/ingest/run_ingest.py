@@ -50,6 +50,7 @@ from mainframe_rag.ingest.completion import (
     plan_refresh_deletes,
     release_run_lock,
     source_labels,
+    stale_completion_markers,
     verify_doc_points,
     write_completion,
 )
@@ -95,9 +96,14 @@ from mainframe_rag.ingest.qdrant_io import (
     upsert_chunks,
 )
 from mainframe_rag.ingest.representation import (
+    STATE_PENDING,
+    begin_manifest,
     check_ingest_compatible,
-    ensure_manifest,
+    commit_manifest,
     manifest_digest,
+    refuse_limited_migration,
+    require_attested_revision,
+    require_in_place_reconverge,
 )
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
@@ -591,6 +597,7 @@ def _run_impl(
     bulk_active = False
     client = None
     run_lock = None
+    manifest_mode: str | None = None
     if not dry_run:
         # Single-writer guard (issue #359 req 6): a second concurrent run
         # sharing the progress directory fails closed before any stage runs.
@@ -622,6 +629,10 @@ def _run_impl(
                 "Re-ingest required: re-run with --reingest to re-extract every doc "
                 "(never serve mixed-rule payloads)."
             )
+        # Identity attestation is unconditional (issue #391 F2): --reingest
+        # bypasses rejection of stored data, never the requirement to name
+        # the representation it writes.
+        require_attested_revision(settings)
         if not force_reingest:
             # Representation preflight (issue #362): the rules gate proves
             # extraction identity; this proves embedding identity — same
@@ -635,6 +646,14 @@ def _run_impl(
                 client, settings, completion_collection_name(settings), rules_v
             )
             _log_record_drift(settings, record_drift)
+        if limit:
+            # A partial walk cannot certify a collection-wide contract
+            # (issue #391 F2); read-only, refused before any mutation.
+            # `--limit 0` truncates nothing (same falsy rule as the walk
+            # above), so it is not a partial walk.
+            refuse_limited_migration(
+                client, settings, completion_collection_name(settings), rules_v
+            )
         if bulk:
             # Qdrant skill: HNSW builds must not compete with a bulk load.
             set_bulk_indexing(client, settings.qdrant_collection, bulk=True)
@@ -724,14 +743,16 @@ def _run_impl(
             root.set_attribute("ingest.todo", len(tasks))
 
         if not dry_run:
-            # Representation manifest (issue #362) AFTER the identity gate:
-            # a colliding corpus aborts in planning with zero Qdrant writes,
-            # and steady-state reruns stay zero-write (the manifest commits
-            # only when the stored contract differs). The preflight above
-            # proved compatibility (or --reingest bypassed it), so this is
-            # the migration commit step.
+            # Representation contract, opened AFTER the identity gate: a
+            # colliding corpus aborts in planning with zero Qdrant writes,
+            # and steady-state reruns stay zero-write. A re-embed-required
+            # change is declared `pending` BEFORE any document is deleted or
+            # re-embedded (issue #391 F2) and is flipped to `committed` only
+            # on the success path below, after the residue proof — an
+            # interrupted migration can never certify old vectors as the new
+            # representation.
             assert client is not None
-            manifest_d, manifest_committed = ensure_manifest(
+            manifest_d, manifest_mode = begin_manifest(
                 client, completion_collection_name(settings), settings, rules_v
             )
             log.info(
@@ -740,7 +761,7 @@ def _run_impl(
                         "action": "representation",
                         "collection": settings.qdrant_collection,
                         "manifest_digest": manifest_d,
-                        "result": "committed" if manifest_committed else "already_current",
+                        "result": manifest_mode,
                         "model_revision_attested": bool(settings.embed_model_revision),
                     }
                 )
@@ -759,7 +780,12 @@ def _run_impl(
             )
         )
         if not tasks:
-            # Nothing to do (all skipped): still emit the run summary.
+            # Nothing to do (all skipped): still emit the run summary. A
+            # pending migration with zero tasks commits only if the residue
+            # proof passes (an empty corpus must not certify stale vectors).
+            if manifest_mode == STATE_PENDING:
+                assert client is not None
+                _commit_migration_representation(client, settings, rules_v)
             root.set_attribute("ingest.files_ok", files_ok)
             root.set_attribute("ingest.files_failed", 0)
             root.set_attribute("ingest.chunks_upserted", chunks_upserted)
@@ -970,6 +996,12 @@ def _run_impl(
                             chunks_upserted += record.chunks
                         append_record(progress, record)
                         refill_parse()
+        # Commit the pending migration contract inside the bulk window (it
+        # is part of the load) and only when no document failed — the scope
+        # proof runs here, before any summary claims success (issue #391 F2).
+        if failures == 0 and manifest_mode == STATE_PENDING:
+            assert client is not None
+            _commit_migration_representation(client, settings, rules_v)
     finally:
         if run_lock is not None:
             release_run_lock(run_lock)
@@ -991,12 +1023,55 @@ def _run_impl(
     root.set_attribute("ingest.pages", pages_seen)
     if failures:
         root.set_status(Status(StatusCode.ERROR, "document failures"))
+        if manifest_mode == STATE_PENDING:
+            # Scope proof needs every walked document re-embedded; failures
+            # leave the contract pending (never certified over partial work).
+            log.warning(
+                json.dumps(
+                    {
+                        "action": "representation",
+                        "collection": settings.qdrant_collection,
+                        "result": STATE_PENDING,
+                        "note": "document failures blocked the commit; resume with --reingest",
+                    }
+                )
+            )
     _log_summary(
         started, files_ok, files_failed, chunks_upserted, failures,
         parse_seconds=parse_seconds, upsert_seconds=upsert_seconds,
         pages=pages_seen, bulk_load=bulk,
     )
     return 1 if failures else 0
+
+
+def _commit_migration_representation(
+    client, settings: Settings, rules_v: str
+) -> None:
+    """Success-path commit of a pending migration contract (issue #391 F2):
+    prove no completion marker under another contract remains, then flip
+    pending -> committed. Raises — leaving the contract pending — when the
+    migration scope is incomplete, so serving/skips stay blocked."""
+    digest = manifest_digest(settings, rules_v)
+    count, labels = stale_completion_markers(client, settings, digest)
+    if count:
+        raise RuntimeError(
+            f"representation migration incomplete: {count} completion marker(s) remain "
+            f"under another contract (e.g. {', '.join(labels)}) — their vectors were not "
+            "re-embedded by this run and may still be searchable. Ingest the complete "
+            "corpus (or remove the stale generation deliberately) before committing the "
+            "new contract; it stays pending."
+        )
+    commit_manifest(client, completion_collection_name(settings), settings, rules_v)
+    log.info(
+        json.dumps(
+            {
+                "action": "representation",
+                "collection": settings.qdrant_collection,
+                "manifest_digest": digest,
+                "result": "committed",
+            }
+        )
+    )
 
 
 def _run_publish(
@@ -1047,10 +1122,10 @@ def _run_publish(
     if live == staging and not force_reingest:
         # Steady state: the derived generation is already live. Re-verify it
         # read-only instead of cloning onto itself. The representation
-        # read-only check rides along: a revision-only change keeps the
-        # same staging name (generation fingerprints exclude the operator
-        # revision), so without it this branch would re-verify stale
-        # vectors as fine and return 0 — the silent-mix hole.
+        # read-only check rides along: it is the one place record-only drift
+        # (a new dense query prefix keeps the same staging name — and is
+        # never a re-embed trigger) is acknowledged, and it raises on a
+        # pending contract (interrupted run of the same representation).
         _, record_drift = check_ingest_compatible(
             client,
             staging_settings,
@@ -1078,6 +1153,15 @@ def _run_publish(
             )
         )
         return 0
+    if force_reingest and live == staging:
+        # Forced rebuild of the live generation in place: allowed only for
+        # the SAME representation (issue #391 F2). A drift derives a
+        # different staging name via the fingerprint; a legacy/absent
+        # contract cannot be proven equal. Either way the serving physical
+        # must not be mutated by a migration.
+        require_in_place_reconverge(
+            client, staging_settings, completion_collection_name(staging_settings), rules_v
+        )
     mode = ensure_staging(client, settings, staging_settings, live)
     log.info(
         json.dumps(
@@ -1107,12 +1191,12 @@ def _run_publish(
             f"(e.g. {problems[0]!r}) — alias untouched, {live!r} still live."
         )
     if staging == live:
-        # Forced reconverge of the live generation (publish-mode --reingest
-        # under a representation change): vectors re-embedded in place and
-        # the alias already points here — swapping onto itself would take
-        # a safety snapshot and churn the alias for nothing. Reached only
-        # via the explicit force flag, which relaxes publish atomicity the
-        # same way in-place mode does (documented in docs/ingest.md).
+        # Forced reconverge of the live generation: same contract only
+        # (require_in_place_reconverge above proved it), vectors re-embedded
+        # in place and the alias already points here — swapping onto itself
+        # would take a safety snapshot and churn the alias for nothing.
+        # Explicit force relaxes publish atomicity for the same-generation
+        # repair just like in-place mode does (documented in docs/ingest.md).
         log.info(
             json.dumps(
                 {

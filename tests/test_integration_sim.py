@@ -146,6 +146,7 @@ def _ingest(
     embed: str = "hash",
     mock_url: str | None = None,
     bm25_cache: str | None = None,
+    extra: tuple[str, ...] = (),
 ) -> list[dict]:
     from mainframe_rag.ingest import run_ingest
 
@@ -169,7 +170,7 @@ def _ingest(
     monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
     monkeypatch.setattr(run_ingest, "_worker_embedder", None)
     rc = run_ingest.main(
-        ["--src", str(corpus), "--progress", str(progress), "--workers", "1"]
+        ["--src", str(corpus), "--progress", str(progress), "--workers", "1", *extra]
     )
     assert rc == 0, f"ingest into {collection} failed"
     return [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
@@ -279,6 +280,75 @@ def test_alias_publish_rekeys_manifest_across_clone(qdrant_url, corpus, tmp_path
             "SA22-8888-02",
             "widget-guide",
         }
+    finally:
+        client.close()
+
+
+def test_alias_publish_revision_migration_keeps_old_generation(
+    qdrant_url, corpus, tmp_path, monkeypatch
+):
+    """Issue #391 F2 against the real server: a revision-only change derives
+    a distinct staging generation, re-embeds there, and swaps only after the
+    contract commits; the old physical keeps its points AND its rev-A
+    manifest for rollback (data and metadata roll back together)."""
+    from qdrant_client import QdrantClient
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.qdrant_io import resolve_live_collection, scroll_all_points
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+
+    _drop_publish_fixture(qdrant_url)
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+    local = tmp_path / "rev-corpus"
+    local.mkdir()
+    for pdf in corpus.iterdir():
+        shutil.copy(pdf, local / pdf.name)
+    progress = tmp_path / "inv.jsonl"
+    first = _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress)
+    assert [r["status"] for r in first] == ["upserted"] * 3
+
+    settings = Settings(
+        _env_file=None,
+        qdrant_url=qdrant_url,
+        qdrant_collection=PUBLISH_ALIAS,
+        embed_mode="hash",
+        allow_hash_mode=True,
+    )
+    client = QdrantClient(url=qdrant_url, timeout=10)
+    try:
+        old, legacy = resolve_live_collection(client, settings)
+        assert legacy is False and old is not None
+        old_record = read_manifest_record(client, f"{old}__completions")
+        assert old_record.state == STATE_COMMITTED
+        assert old_record.manifest.embed_model_revision == ""
+
+        monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-2")
+        second = _ingest(
+            monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress, extra=("--reingest",)
+        )
+        second_records = second[len(first):]
+        assert sorted(r["status"] for r in second_records) == ["upserted"] * 3, \
+            "a revision change re-embeds every walked document"
+
+        new, _ = resolve_live_collection(client, settings)
+        assert new != old, "revision-only change must publish a distinct generation"
+        assert client.collection_exists(old), "old physical retained for rollback"
+        assert read_manifest_record(client, f"{old}__completions") == old_record, \
+            "old generation keeps its contract (rollback selects matching metadata)"
+        new_record = read_manifest_record(client, f"{new}__completions")
+        assert new_record is not None
+        assert new_record.state == STATE_COMMITTED
+        assert new_record.manifest.embed_model_revision == "rev-2"
+        expected_docs = {"SA22-0000-00", "SA22-7777-01", "widget-guide"}
+        for physical in (old, new):
+            docs = {
+                p.payload.get("doc_id")
+                for p in scroll_all_points(
+                    client, physical, scroll_filter=None, with_payload=["doc_id"], page_size=100
+                )
+            }
+            assert docs == expected_docs
     finally:
         client.close()
 
