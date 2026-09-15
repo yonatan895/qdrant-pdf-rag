@@ -327,8 +327,10 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   citations/prompt (`agent/`); `source_rev` → revision tooling (refresh
   targeting, coexistence) + keyword index; `context` → observability only.
 - `stored_doc_revisions` lists the distinct source revisions under a
-  `doc_id` (paginated scan, `None` for pre-361B points) for the refresh
-  plan; `delete_by_revision` deletes exactly one revision with `wait=True`;
+  `doc_id` (paginated to exhaustion via the shared `scroll_all_points`
+  helper, page size `Settings.ingest_scan_page_size`, `None` for pre-361B
+  points) for the refresh plan; `delete_by_revision` deletes exactly one
+  revision with `wait=True`;
   `delete_by_doc` remains for sole-history legacy residue only (never over
   coexisting revisions).
 
@@ -348,8 +350,10 @@ thread pool.
   (zero-parse) **plus** a Qdrant completion check
   (`completion.is_doc_complete`: valid marker for this target generation
   **and** verified points) before skipping; the upsert stream skips only on
-  the same verified completion. A single sampled point proves nothing —
-  `stored_doc_state` is a delete probe only. Partial residue, wiped or
+   the same verified completion. A single sampled point proves nothing —
+   `stored_doc_revisions` is a revision-scoped observer (the distinct
+   `source_rev` values under a `doc_id`, `None` for pre-361B points), not a
+   delete probe. Partial residue, wiped or
   restored collections, and legacy marker-less state all re-ingest, never
   skip. Inventory `upserted`/`skipped` lines carry the generation binding
   (`generation_id`, `chunk_ids_digest`, `content_digest`); pre-#359 lines
@@ -366,9 +370,9 @@ thread pool.
   inventory skip against Qdrant, so an old `inventory.jsonl` against a
   wiped collection re-ingests instead of silently doing nothing.
 - **Single writer:** one ingest run per progress directory (fcntl
-  `LOCK_EX|LOCK_NB` on `<progress>.lock`, fail-closed); disjoint Jobs
-  against one collection must still run serially. `_DocLocks` remains the
-  in-process per-`doc_id` guard only.
+   `LOCK_EX|LOCK_NB` on `<progress>.lock`, fail-closed); disjoint Jobs
+   against one collection must still run serially. `_DocLocks` remains the
+   in-process per-revision guard only.
 - **Representation manifest, record-only** (issue #362 step 1,
   `ingest/representation.py`): every non-dry run ensures one fixed-ID
   manifest point in `<collection>__completions` (get-by-id, no index;
@@ -376,7 +380,7 @@ thread pool.
   stay zero-write) plus an `action: representation` run-log line, and
   every completion + inventory record carries the 16-hex `manifest_digest`. The manifest is
   the stored-representation contract — extraction rules, identity schema
-  (`doc_id` until the 361B migration), dense mode/model/operator-revision/
+  (`source_rev` since the 361B migration), dense mode/model/operator-revision/
   dim, contextual block (enabled, LLM id, prompt version, max chars),
   sparse model/weights revision — plus the record-only query prefix
   (query-side drift is an evaluation event, never a re-embed trigger).

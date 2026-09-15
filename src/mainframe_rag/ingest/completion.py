@@ -35,19 +35,17 @@ from qdrant_client import models
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.identity import AmbiguousRevisionError
-from mainframe_rag.ingest.qdrant_io import collection_vector_configs, stored_doc_revisions
+from mainframe_rag.ingest.qdrant_io import (
+    collection_vector_configs,
+    scroll_all_points,
+    stored_doc_revisions,
+)
 from mainframe_rag.ingest.representation import manifest_digest
 from mainframe_rag.ports import QdrantPoints
 
 _COMPLETION_SUFFIX = "__completions"
 
 _COMPLETION_KEYWORD_INDEXES = ("doc_id", "sha256", "rules_v", "generation_id", "target_collection")
-
-# Marker-scan bound (issue #361): markers per doc_id are few (one per
-# committed revision per CLI-triple variant). A scroll cap keeps revision
-# reads bounded; past it the run fails closed via the caller's
-# verification, never by silently missing a marker.
-_MARKER_SCAN_LIMIT = 100
 
 
 class CompletionRecord(BaseModel):
@@ -198,16 +196,18 @@ def _doc_id_filter(doc_id: str) -> models.Filter:
 def _doc_markers(
     client: QdrantPoints, settings: Settings, doc_id: str
 ) -> list[CompletionRecord]:
-    """All parseable markers under a doc_id (bounded scan). Corrupt payloads
-    read as absent — a corrupt marker is a legacy outcome, not a crash."""
+    """All parseable markers under a doc_id, paginated to exhaustion.
+    Corrupt payloads read as absent — a corrupt marker is a legacy outcome,
+    not a crash."""
     name = completion_collection_name(settings)
     if not client.collection_exists(name):
         return []
-    points, _ = client.scroll(
+    points = scroll_all_points(
+        client,
         name,
         scroll_filter=_doc_id_filter(doc_id),
-        limit=_MARKER_SCAN_LIMIT,
         with_payload=True,
+        page_size=settings.ingest_scan_page_size,
     )
     markers: list[CompletionRecord] = []
     for p in points:
@@ -316,11 +316,12 @@ def delete_completion(
     name = completion_collection_name(settings)
     if not client.collection_exists(name):
         return
-    points, _ = client.scroll(
+    points = scroll_all_points(
+        client,
         name,
         scroll_filter=_doc_id_filter(doc_id),
-        limit=_MARKER_SCAN_LIMIT,
         with_payload=["source_rev"],
+        page_size=settings.ingest_scan_page_size,
     )
     ids: list[int | str | uuid.UUID] = []
     for p in points:
@@ -567,23 +568,20 @@ def plan_refresh_deletes(
 
 def _stray_sha16s(client: QdrantPoints, settings: Settings, doc_id: str) -> list[str]:
     """Distinct content ids of sourceless points under a doc_id (raise path
-    only): paginated like the revision scan, deterministic order."""
+    only): paginated to exhaustion like the revision scan, deterministic
+    order."""
     shas: set[str] = set()
-    offset: int | str | uuid.UUID | None = None
-    while True:
-        points, offset = client.scroll(
-            settings.qdrant_collection,
-            scroll_filter=_doc_id_filter(doc_id),
-            limit=_MARKER_SCAN_LIMIT,
-            with_payload=["source_rev", "sha256"],
-            offset=offset,
-        )
-        for p in points:
-            payload = p.payload or {}
-            if payload.get("source_rev") is None and payload.get("sha256"):
-                shas.add(str(payload["sha256"])[:16])
-        if offset is None or not points:
-            break
+    points = scroll_all_points(
+        client,
+        settings.qdrant_collection,
+        scroll_filter=_doc_id_filter(doc_id),
+        with_payload=["source_rev", "sha256"],
+        page_size=settings.ingest_scan_page_size,
+    )
+    for p in points:
+        payload = p.payload or {}
+        if payload.get("source_rev") is None and payload.get("sha256"):
+            shas.add(str(payload["sha256"])[:16])
     return sorted(shas)
 
 

@@ -29,11 +29,34 @@ DEFAULT_INDEXING_THRESHOLD_KB = 20000
 
 _KEYWORD_INDEXES = ("vendor", "product", "version", "doc_id", "chunk_type", "message_ids", "members", "sha256", "source_rev")
 
-# Revision-scan page size (issue #361): stored_doc_revisions pages through
-# every point under a doc_id, so the limit is a throughput knob, never a
-# correctness bound — a truncated scan would miss revisions and mis-target
-# deletes.
-_REVISION_SCAN_PAGE = 1000
+
+def scroll_all_points(
+    client: QdrantPoints,
+    collection: str,
+    *,
+    scroll_filter: models.Filter | None,
+    with_payload: bool | list[str],
+    page_size: int,
+) -> list[models.Record]:
+    """One rule for every paginated observer scan (issue #361 review): page
+    through scroll to exhaustion with the caller's filter. The page size is
+    a throughput knob (`Settings.ingest_scan_page_size`); listings never cap
+    at a fixed count — a truncated scan would miss revisions or markers and
+    mis-target deletes."""
+    gathered: list[models.Record] = []
+    offset: int | str | UUID | None = None
+    while True:
+        page, offset = client.scroll(
+            collection,
+            scroll_filter=scroll_filter,
+            limit=page_size,
+            with_payload=with_payload,
+            offset=offset,
+        )
+        gathered.extend(page)
+        if offset is None or not page:
+            break
+    return gathered
 
 
 class DimMismatchError(RuntimeError):
@@ -139,25 +162,20 @@ def stored_doc_revisions(
 ) -> set[str | None]:
     """Distinct source revisions stored under a printed doc_id (issue #361):
     the `source_rev` payload of every point, with None for legacy points
-    that predate the stamp. Paginated (a doc_id can hold hundreds of
-    chunks); the empty set means absent. Callers decide attribution —
-    this function only observes."""
+    that predate the stamp. Paginated to exhaustion (a doc_id can hold
+    hundreds of chunks); the empty set means absent. Callers decide
+    attribution — this function only observes."""
     revisions: set[str | None] = set()
-    offset: int | str | UUID | None = None
-    while True:
-        points, offset = client.scroll(
-            settings.qdrant_collection,
-            scroll_filter=models.Filter(
-                must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
-            ),
-            limit=_REVISION_SCAN_PAGE,
-            with_payload=["source_rev"],
-            offset=offset,
-        )
-        for p in points:
-            revisions.add((p.payload or {}).get("source_rev"))
-        if offset is None or not points:
-            break
+    for p in scroll_all_points(
+        client,
+        settings.qdrant_collection,
+        scroll_filter=models.Filter(
+            must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
+        ),
+        with_payload=["source_rev"],
+        page_size=settings.ingest_scan_page_size,
+    ):
+        revisions.add((p.payload or {}).get("source_rev"))
     return revisions
 
 
@@ -337,9 +355,10 @@ def upsert_chunks(
             "product": parsed.product,
             "version": parsed.version,
             "doc_id": chunk.doc_id,
-            # Source-revision key (issue #361): additive payload + index in
-            # this PR; destructive selectors switch to it in the 361B
-            # migration. Computed from the same labels the planner gates on.
+            # Source-revision key (issue #361): the destructive key since
+            # the 361B migration — locks, deletes, completions, and chunk
+            # ids all scope to it. Computed from the same labels the
+            # planner gates on.
             "source_rev": source_rev_key(
                 parsed.vendor, parsed.product, parsed.version, parsed.sha256
             ),

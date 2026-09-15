@@ -102,7 +102,10 @@ class RevisionFake:
             stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
         if rev is not None:
             stored = [p for p in stored if (p.payload or {}).get("source_rev") == rev]
-        return stored[:limit], None
+        start = offset if isinstance(offset, int) else 0
+        page = stored[start:start + limit]
+        nxt = start + limit if start + limit < len(stored) else None
+        return page, nxt
 
     def retrieve(self, name, ids, *, with_payload=True):
         wanted = {str(i) for i in ids}
@@ -521,3 +524,30 @@ def test_triple_variant_refresh_retires_old_marker(monkeypatch):
     markers = [p for p in fake._points.get(name, [])]
     assert len(markers) == 1
     assert markers[0].payload["generation_id"].endswith(source_labels("IBM", None, None))
+
+
+def test_marker_listing_paginates_past_old_cap():
+    """Review fix: marker reads paginate to exhaustion — 150 markers under
+    one doc_id are all visible with a 100-point page, and a revision delete
+    removes exactly its own marker (a fixed 100-cap silently dropped both
+    reads and invalidations)."""
+    from mainframe_rag.ingest.completion import (
+        _doc_markers,
+        delete_completion,
+        write_completion,
+    )
+
+    settings = _settings(ingest_scan_page_size=100)
+    fake = RevisionFake()
+    revs = [_rev("v", "p", "1", f"{i:064x}") for i in range(150)]
+    for i, rev in enumerate(revs):
+        write_completion(
+            fake, settings, doc_id="D", sha256=f"{i:064x}",
+            rules_v="r" * 16, source_labels="cli", source_rev=rev,
+            expected_chunks=1, chunk_ids_digest="c" * 16, content_digest="d" * 16,
+        )
+    assert len(_doc_markers(fake, settings, "D")) == 150
+    delete_completion(fake, settings, "D", source_rev=revs[0])
+    remaining = _doc_markers(fake, settings, "D")
+    assert len(remaining) == 149
+    assert {m.source_rev for m in remaining} == set(revs[1:])

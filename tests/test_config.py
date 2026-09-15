@@ -97,6 +97,7 @@ def test_ingest_tuning_defaults():
     s = Settings(_env_file=None)
     assert s.batch_size == 128
     assert s.ingest_upsert_streams == 4
+    assert s.ingest_scan_page_size == 1000
     assert s.ingest_bulk_load is False
 
 
@@ -338,6 +339,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "metrics_enabled": False,
     "batch_size": 128,
     "ingest_upsert_streams": 4,
+    "ingest_scan_page_size": 1000,
     "ingest_bulk_load": False,
     "ingest_alias_publish": False,
     "bm25_model": "Qdrant/bm25",
