@@ -50,7 +50,7 @@ def test_build_manifest_literal():
     assert m.model_dump(mode="json") == {
         "schema_version": 1,
         "extraction_rules": "testrules12345678",
-        "identity_schema": "doc_id",
+        "identity_schema": "source_rev",
         "embed_mode": "hash",
         "embed_model": None,
         "embed_model_revision": "",
@@ -66,7 +66,7 @@ def test_build_manifest_literal():
 
 
 def test_manifest_digest_literal_and_stable():
-    assert manifest_digest(_settings(), RULES) == "3c9b3ce901ce62b0"
+    assert manifest_digest(_settings(), RULES) == "efb582c923ae147d"
     assert manifest_digest(_settings(), RULES) == manifest_digest(_settings(), RULES)
 
 
@@ -166,7 +166,7 @@ def test_write_read_roundtrip():
     name = completion_collection_name(settings)
     fake = _ManifestFake()
     digest = write_manifest(fake, name, settings, RULES)
-    assert digest == "3c9b3ce901ce62b0"
+    assert digest == "efb582c923ae147d"
     stored = read_manifest(fake, name)
     assert stored is not None
     assert stored == build_manifest(settings, RULES)
@@ -206,12 +206,18 @@ def test_completion_record_carries_manifest_digest():
         sha256="ab" * 32,
         rules_v=RULES,
         source_labels="||",
+        source_rev="rev-D",
         expected_chunks=1,
         chunk_ids_digest="i" * 64,
         content_digest="c" * 64,
     )
-    assert record.manifest_digest == "3c9b3ce901ce62b0"
-    assert read_completion(fake, settings, "D").manifest_digest == "3c9b3ce901ce62b0"
+    assert record.manifest_digest == "efb582c923ae147d"
+    assert record.source_rev == "rev-D"
+    stored = read_completion(
+        fake, settings, "D", source_rev="rev-D", generation_id=record.generation_id
+    )
+    assert stored is not None
+    assert stored.manifest_digest == "efb582c923ae147d"
 
 
 def test_weights_revision_matches_pin_file():

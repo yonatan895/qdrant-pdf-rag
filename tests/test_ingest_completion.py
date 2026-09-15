@@ -1,10 +1,10 @@
-"""Verified-completion regressions (issue #359).
+"""Verified-completion regressions (issue #359, revision-scoped by #361).
 
 Deterministic UUID5s permit replay; they do not prove completeness. Each
-test below fails against the inspected behavior (single-point sampling in
-stored_doc_state, inventory-only planner skip, zip-truncation in
-upsert_chunks) and passes only when the claimed path — completion write
-after verification, verified skip, explicit empty policy — is forced.
+test below fails against the inspected behavior (single-point sampling,
+inventory-only planner skip, zip-truncation in upsert_chunks) and passes
+only when the claimed path — completion write after verification,
+verified skip, explicit empty policy — is forced.
 
 Hermetic: faked Qdrant port, no network, no PDFs (chunks fabricated
 in-memory except where main() needs a real file).
@@ -21,11 +21,14 @@ from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.completion import (
     acquire_run_lock,
     completion_collection_name,
+    doc_generation_id,
     is_doc_complete,
+    legacy_markers,
     read_completion,
     release_run_lock,
 )
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+from mainframe_rag.ingest.identity import source_rev_key
 from mainframe_rag.ingest.inventory import InventoryRecord, append_record, should_skip
 from mainframe_rag.ingest.qdrant_io import upsert_chunks
 from mainframe_rag.ingest.rules_version import extraction_rules_version
@@ -58,6 +61,31 @@ def _chunks(doc_id="DOC1", n=5, tag="body") -> list[Chunk]:
 
 def _vectors(n):
     return [([0.1] * 4, ([1], [1.0])) for _ in range(n)]
+
+
+def _rev(sha="a" * 64) -> str:
+    """Source revision for the _parsed() labels (vendor v / product p /
+    version 1): the revision every helper below certifies unless told."""
+    return source_rev_key("v", "p", "1", sha)
+
+
+def _gen(settings, sha="a" * 64, labels="||") -> str:
+    return doc_generation_id(settings, sha, extraction_rules_version(), labels)
+
+
+def _read(settings, fake, doc_id="DOC1", sha="a" * 64, labels="||"):
+    """Scoped completion read mirroring the skip gate (revision + generation)."""
+    return read_completion(
+        fake, settings, doc_id, source_rev=_rev(sha), generation_id=_gen(settings, sha, labels)
+    )
+
+
+def _complete(settings, fake, doc_id="DOC1", sha="a" * 64, labels="||"):
+    return is_doc_complete(
+        fake, settings, doc_id, sha256=sha,
+        rules_v=extraction_rules_version(), source_labels=labels,
+        source_rev=_rev(sha),
+    )
 
 
 class FailingFakeQdrant:
@@ -100,10 +128,15 @@ class FailingFakeQdrant:
 
     # -- points surface -----------------------------------------------
     def scroll(self, collection_name, *, scroll_filter=None, limit=10, with_payload=None, offset=None):
+        from tests.test_run_ingest import _filter_match_value
+
         doc_id = _filter_doc_id(scroll_filter)
+        rev = _filter_match_value(scroll_filter, "source_rev")
         stored = self._points.get(collection_name, [])
         if doc_id is not None:
             stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
+        if rev is not None:
+            stored = [p for p in stored if (p.payload or {}).get("source_rev") == rev]
         return stored[:limit], None
 
     def retrieve(self, collection_name, ids, *, with_payload=True):
@@ -134,17 +167,32 @@ class FailingFakeQdrant:
     def delete(self, collection_name, *, points_selector, wait=True):
         from types import SimpleNamespace
 
+        from tests.test_run_ingest import _filter_match_value
+
         if self.fail_delete is not None:
             raise self.fail_delete
         self.deletes += 1
-        doc_id = _filter_doc_id(points_selector)
-        if doc_id is not None:
+        ids = getattr(points_selector, "points", None)
+        if ids is not None:
+            # PointIdsList (precise completion invalidation, issue #361).
+            wanted = {str(i) for i in ids}
             self._points[collection_name] = [
                 p for p in self._points.get(collection_name, [])
-                if (p.payload or {}).get("doc_id") != doc_id
+                if str(getattr(p, "id", None)) not in wanted
             ]
-        else:
+            return SimpleNamespace()
+        doc_id = _filter_doc_id(points_selector)
+        rev = _filter_match_value(points_selector, "source_rev")
+        if doc_id is None and rev is None:
             self._points[collection_name] = []
+        else:
+            self._points[collection_name] = [
+                p for p in self._points.get(collection_name, [])
+                if not (
+                    (doc_id is None or (p.payload or {}).get("doc_id") == doc_id)
+                    and (rev is None or (p.payload or {}).get("source_rev") == rev)
+                )
+            ]
         return SimpleNamespace()
 
     def main_points(self, collection, doc_id):
@@ -153,14 +201,14 @@ class FailingFakeQdrant:
 
 
 def _upsert_one(monkeypatch, fake, parsed, chunks, settings=None, force_reingest=False,
-                src_labels="||"):
+                src_labels="||", lineage_rev=None):
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
 
     settings = settings or _settings(batch_size=16)
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
     return _upsert_one(parsed, chunks, _vectors(len(chunks)), settings, _DocLocks(),
-                       None, force_reingest, src_labels=src_labels)
+                       None, force_reingest, src_labels=src_labels, lineage_rev=lineage_rev)
 
 
 def test_pair_length_mismatch_raises_without_writes():
@@ -191,7 +239,7 @@ def test_upsert_one_rejects_mismatched_pairs(monkeypatch):
         _upsert_one(_parsed(), _chunks(n=3), _vectors(1),
                     _settings(), _DocLocks(), None, False, src_labels="||")
     assert fake.main_upserted_points == 0
-    assert read_completion(fake, _settings(), "DOC1") is None
+    assert _read(_settings(), fake) is None
 
 
 def test_partial_first_batch_never_skips(monkeypatch):
@@ -205,7 +253,7 @@ def test_partial_first_batch_never_skips(monkeypatch):
         _upsert_one(monkeypatch, fake, parsed, chunks, settings)
     # First batch survived; no completion was written.
     assert len(fake.main_points(settings.qdrant_collection, "DOC1")) == 16
-    assert read_completion(fake, settings, "DOC1") is None
+    assert _read(settings, fake) is None
 
     fake.fail_main_calls = set()
     status, _ = _upsert_one(monkeypatch, fake, parsed, chunks, settings)
@@ -214,7 +262,7 @@ def test_partial_first_batch_never_skips(monkeypatch):
     assert len(points) == 40
     assert len({str(p.id) for p in points}) == 40, "no duplicates"
     assert {str(p.id) for p in points} == {c.chunk_id for c in chunks}
-    completion = read_completion(fake, settings, "DOC1")
+    completion = _read(settings, fake)
     assert completion is not None and completion.expected_chunks == 40
 
 
@@ -248,7 +296,7 @@ def test_fail_after_last_batch_before_completion_recovers(monkeypatch):
     chunks = _chunks(n=33)
     with pytest.raises(RuntimeError, match="post-upsert verification failed|injected completion"):
         _upsert_one(monkeypatch, fake, parsed, chunks, settings)
-    assert read_completion(fake, settings, "DOC1") is None
+    assert _read(settings, fake) is None
 
     fake.fail_completion = False
     status, _ = _upsert_one(monkeypatch, fake, parsed, chunks, settings)
@@ -256,7 +304,7 @@ def test_fail_after_last_batch_before_completion_recovers(monkeypatch):
     points = fake.main_points(settings.qdrant_collection, "DOC1")
     assert len(points) == 33
     assert len({str(p.id) for p in points}) == 33
-    assert read_completion(fake, settings, "DOC1") is not None
+    assert _read(settings, fake) is not None
 
 
 def test_fail_after_completion_before_inventory_skips_without_reupsert(monkeypatch):
@@ -309,7 +357,7 @@ def test_zero_chunk_is_explicit_empty_never_complete(monkeypatch):
     status, _ = _upsert_one(monkeypatch, fake, _parsed(), [], _settings())
     assert status == "empty"
     assert fake.main_points(_settings().qdrant_collection, "DOC1") == []
-    assert read_completion(fake, _settings(), "DOC1") is None
+    assert _read(_settings(), fake) is None
     # An empty outcome must never satisfy a future skip.
     rec = InventoryRecord(path="d.pdf", sha256="a" * 64, status="empty")
     assert should_skip(rec, "a" * 64, rules_version=extraction_rules_version()) is False
@@ -323,16 +371,19 @@ def test_completion_tied_to_target_generation(tmp_path, monkeypatch):
     assert status == "upserted"
     assert completion_collection_name(settings_a) != completion_collection_name(settings_b)
     assert is_doc_complete(fake, settings_b, "DOC1", sha256="a" * 64,
-                           rules_v=extraction_rules_version(), source_labels="||") is False
+                           rules_v=extraction_rules_version(), source_labels="||",
+                           source_rev=_rev()) is False
     # Same target, wrong source hash: also incomplete.
     assert is_doc_complete(fake, settings_a, "DOC1", sha256="b" * 64,
-                           rules_v=extraction_rules_version(), source_labels="||") is False
+                           rules_v=extraction_rules_version(), source_labels="||",
+                           source_rev=_rev("b" * 64)) is False
 
 
 def test_refresh_failure_leaves_no_stale_completion(monkeypatch):
     """Refresh deletes the old generation first; a mid-refresh crash must
     leave NO valid completion (safe retry), never the old marker over
-    partial data."""
+    partial data. Lineage (the v1 revision from inventory) scopes the
+    replacement — production always passes it."""
     settings = _settings(batch_size=16)
     fake = FailingFakeQdrant()
     v1 = _parsed(sha="1" * 64)
@@ -340,21 +391,25 @@ def test_refresh_failure_leaves_no_stale_completion(monkeypatch):
     assert status == "upserted"
 
     v2 = _parsed(sha="2" * 64)
+    lineage = _rev("1" * 64)
     fake.main_upsert_calls = 0  # injection counter is cumulative; re-arm for the refresh
     fake.fail_main_calls = {1}  # fail after old points were deleted
     with pytest.raises(RuntimeError, match="injected main-batch"):
-        _upsert_one(monkeypatch, fake, v2, _chunks(n=4, tag="v2"), settings)
-    assert read_completion(fake, settings, "DOC1") is None
+        _upsert_one(monkeypatch, fake, v2, _chunks(n=4, tag="v2"), settings,
+                    lineage_rev=lineage)
+    assert _read(settings, fake, sha="2" * 64) is None
+    assert _read(settings, fake, sha="1" * 64) is None, "lineage markers go with the refresh"
     assert fake.main_points(settings.qdrant_collection, "DOC1") == []
 
     fake.fail_main_calls = set()
-    status, _ = _upsert_one(monkeypatch, fake, v2, _chunks(n=4, tag="v2"), settings)
+    status, _ = _upsert_one(monkeypatch, fake, v2, _chunks(n=4, tag="v2"), settings,
+                            lineage_rev=lineage)
     assert status == "upserted"
     points = fake.main_points(settings.qdrant_collection, "DOC1")
     assert len(points) == 4
     texts = {(p.payload or {}).get("text") for p in points}
     assert all(t.startswith("v2") for t in texts)
-    completion = read_completion(fake, settings, "DOC1")
+    completion = _read(settings, fake, sha="2" * 64)
     assert completion is not None and completion.sha256 == "2" * 64
 
 
@@ -375,9 +430,9 @@ def test_malformed_completion_is_incomplete(monkeypatch):
             )
         ],
     )
-    assert read_completion(fake, settings, "DOC1") is None
-    assert is_doc_complete(fake, settings, "DOC1", sha256="a" * 64,
-                           rules_v=extraction_rules_version(), source_labels="||") is False
+    assert _read(settings, fake) is None
+    assert legacy_markers(fake, settings, "DOC1") == [], "unparseable payloads read as absent"
+    assert _complete(settings, fake) is False
     status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings)
     assert status == "upserted"
 
@@ -409,9 +464,11 @@ def test_pre_manifest_completion_reads_none_digest():
             )
         ],
     )
-    c = read_completion(fake, settings, "DOC1")
-    assert c is not None
-    assert c.manifest_digest is None
+    c = legacy_markers(fake, settings, "DOC1")
+    assert len(c) == 1
+    assert c[0].manifest_digest is None
+    assert c[0].source_rev is None
+    assert _read(settings, fake) is None, "sourceless markers never satisfy a scoped read"
 
 
 def test_delete_completion_real_error_propagates(monkeypatch):
@@ -424,23 +481,24 @@ def test_delete_completion_real_error_propagates(monkeypatch):
                             _chunks(n=3, tag="v1"), settings)
     assert status == "upserted"
 
+    lineage = _rev("1" * 64)
     fake.fail_delete = RuntimeError("connection reset")
     with pytest.raises(RuntimeError, match="connection reset"):
         _upsert_one(monkeypatch, fake, _parsed(sha="2" * 64),
-                    _chunks(n=4, tag="v2"), settings)
+                    _chunks(n=4, tag="v2"), settings, lineage_rev=lineage)
     # Refresh never started: v1 points and the v1 marker are untouched, and
     # no v2 completion exists.
     assert len(fake.main_points(settings.qdrant_collection, "DOC1")) == 3
-    v1 = read_completion(fake, settings, "DOC1")
+    v1 = _read(settings, fake, sha="1" * 64)
     assert v1 is not None and v1.sha256 == "1" * 64
 
     fake.fail_delete = None
     status, _ = _upsert_one(monkeypatch, fake, _parsed(sha="2" * 64),
-                            _chunks(n=4, tag="v2"), settings)
+                            _chunks(n=4, tag="v2"), settings, lineage_rev=lineage)
     assert status == "upserted"
     points = fake.main_points(settings.qdrant_collection, "DOC1")
     assert len(points) == 4
-    v2 = read_completion(fake, settings, "DOC1")
+    v2 = _read(settings, fake, sha="2" * 64)
     assert v2 is not None and v2.sha256 == "2" * 64
 
 
@@ -457,7 +515,7 @@ def test_delete_completion_404_race_is_tolerated(monkeypatch):
     status, _ = _upsert_one(monkeypatch, fake, _parsed(), _chunks(n=3), settings)
     assert status == "upserted"
     assert len(fake.main_points(settings.qdrant_collection, "DOC1")) == 3
-    assert read_completion(fake, settings, "DOC1") is not None
+    assert _read(settings, fake) is not None
 
 
 def test_cli_triple_change_forces_reingest(monkeypatch):
@@ -476,7 +534,7 @@ def test_cli_triple_change_forces_reingest(monkeypatch):
                             src_labels=source_labels(None, "Solaris", None))
     assert status == "upserted"
     assert len(fake.main_points(settings.qdrant_collection, "DOC1")) == 3
-    completion = read_completion(fake, settings, "DOC1")
+    completion = _read(settings, fake, labels=source_labels(None, "Solaris", None))
     assert completion is not None
     assert completion.generation_id.endswith(source_labels(None, "Solaris", None))
     # And back under the original triple: the Solaris marker does not match.

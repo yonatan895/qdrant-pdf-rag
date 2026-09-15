@@ -521,27 +521,36 @@ def test_make_chunks_span_label_range():
     assert len(chunks) == 1
     assert chunks[0].page_start == 0
     assert chunks[0].page_label == "1-6–1-7"
-    # UUID pins the span start: the deterministic key contract is unchanged.
+    # UUID pins the span start: the key carries the source revision (issue
+    # #361), so same-form-number revisions never share point ids.
     from mainframe_rag.ingest.chunk import make_chunk_id
+    from mainframe_rag.ingest.identity import source_rev_key
 
-    assert chunks[0].chunk_id == make_chunk_id("SA22-0000-01", "Only chapter", 0, 0)
+    rev = source_rev_key("IBM", "z/OS", "9.9", "1" * 64)
+    assert chunks[0].chunk_id == make_chunk_id(rev, "Only chapter", 0, 0)
 
 
 def test_chunk_id_pins_uuid5_namespace_and_key():
-    """The point-id contract is UUID5(NAMESPACE_URL, "doc|heading|page|ordinal").
+    """The point-id contract is UUID5(NAMESPACE_URL, "rev|heading|page|ordinal").
     A literal expected value catches a namespace or key-format change that the
-    self-referential comparison above cannot (AGENTS.md lethal-mistake rule)."""
+    self-referential comparison above cannot (AGENTS.md lethal-mistake rule).
+    The first segment is the source revision (issue #361), not the printed
+    doc_id — the old doc-keyed id must never be minted again."""
     import uuid
 
     from mainframe_rag.ingest.chunk import make_chunk_id
 
-    key = "SA22-0000-01|Only chapter|0|0"
-    assert make_chunk_id("SA22-0000-01", "Only chapter", 0, 0) == str(
+    rev = "ibm|z/os|9.9|" + "1" * 64
+    key = rev + "|Only chapter|0|0"
+    assert make_chunk_id(rev, "Only chapter", 0, 0) == str(
         uuid.uuid5(uuid.NAMESPACE_URL, key)
     )
-    assert make_chunk_id("SA22-0000-01", "Only chapter", 0, 0) == (
-        "88bf0502-bc81-5dc1-8165-99b55e6a7835"
+    assert make_chunk_id(rev, "Only chapter", 0, 0) == (
+        "a1b5c7d0-d365-53d3-a4c2-34fbb3df953e"
     )
+    assert make_chunk_id(rev, "Only chapter", 0, 0) != (
+        "88bf0502-bc81-5dc1-8165-99b55e6a7835"
+    ), "doc-keyed ids are retired by the 361B migration"
 
 
 def test_fallback_sections_split_no_toc_book():

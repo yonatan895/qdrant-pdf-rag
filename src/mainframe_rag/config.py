@@ -235,6 +235,11 @@ class Settings(BaseSettings):
     # run while 23 parse workers idled). Parse workers now embed; this many
     # parallel streams drive the Qdrant upserts (Qdrant skill: 2-4 streams).
     ingest_upsert_streams: int = Field(default=4, ge=1, le=8)
+    # Paginated observer scans (issue #361): revision / marker / stray-sha
+    # listings page through scroll with this page size. Throughput knob
+    # only — correctness comes from paginating to exhaustion, never from
+    # the size, so no call site may cap a listing at a fixed count.
+    ingest_scan_page_size: int = Field(default=1000, ge=100, le=10000)
     # Bulk-load mode: disable HNSW builds during the initial corpus load and
     # restore after (Qdrant skill guidance) — never for incremental prod runs.
     ingest_bulk_load: bool = False

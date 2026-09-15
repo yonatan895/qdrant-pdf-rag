@@ -454,7 +454,7 @@ QDRANT_COLLECTION=mainframe_manuals \
 #### 2. Incremental Ingestion: Adding New PDFs Without Re-ingesting
 Mainframe RAG supports native **idempotent incremental ingestion** via the inventory tracking file (`--progress inventory.jsonl`):
 
-* **SHA-256 + rules-version detection**: On every run, `run_ingest` computes the SHA-256 digest of each discovered PDF and reads the stored `(sha256, rules_v)` pair via `stored_doc_state`.
+* **SHA-256 + rules-version detection**: On every run, `run_ingest` computes the SHA-256 digest of each discovered PDF and re-verifies the inventory `(sha256, rules_v, manifest_digest)` binding against Qdrant: a skip needs a valid per-revision completion (`completion.is_revision_committed` — marker for this target generation plus verified points), never a sampled point.
 * **Instant skipping**: A PDF already `upserted` with the same SHA-256 **and** the same extraction rules version in `inventory.jsonl` is skipped immediately (zero PDF parsing, zero embedding overhead).
 * **Extraction-rules changes**: a stored point whose `rules_v` differs is deleted and re-ingested; a non-empty collection written by a different rules version fails closed unless `--reingest` is passed (details in `docs/ingest.md` §9).
 * **Deterministic UUID5 Point IDs**: New chunks are assigned deterministic UUID5 keys and inserted directly into the existing Qdrant collection without deleting or modifying previously indexed vectors.

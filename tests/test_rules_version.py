@@ -111,6 +111,28 @@ def _settings():
 
 
 # ---------------------------------------------------------------- ingest gate
+def _seed_legacy_doc(fake, collection, doc_id, sha, rules_v, n=3):
+    """Materialize stale pre-361B points (sourceless payloads): the fake's
+    seeded sampling marker models the startup-gate sample only — doc-level
+    reads observe stored points, so stale-payload tests store real ones."""
+    from qdrant_client import models
+
+    fake._points.setdefault(collection, []).extend([
+        models.PointStruct(
+            id=f"stale-{i}",
+            vector={"dense": [0.1] * 256,
+                    "bm25": models.SparseVector(indices=[1], values=[1.0])},
+            payload={"doc_id": doc_id, "sha256": sha, "rules_v": rules_v,
+                     "text": f"stale payload {i}"},
+        )
+        for i in range(n)
+    ])
+
+
+def _main_collection():
+    from mainframe_rag.config import Settings as _Settings
+
+    return _Settings(_env_file=None).qdrant_collection
 def test_ingest_fails_closed_on_rules_mismatch(tmp_path, synthetic_pdf, monkeypatch):
     from mainframe_rag.ingest import run_ingest
     from tests.test_run_ingest import _FakeQdrant
@@ -154,6 +176,8 @@ def test_reingest_flag_reextracts_matching_sha(tmp_path, synthetic_pdf, monkeypa
     monkeypatch.setenv("EMBED_MODE", "hash")
     monkeypatch.delenv("DENSE_DIM", raising=False)
     fake = _FakeQdrant(stored_sha=sha256_file(synthetic_pdf), stored_rules_v="0123456789abcdef")
+    _seed_legacy_doc(fake, _main_collection(), "SA22-0000-00",
+                     sha256_file(synthetic_pdf), "0123456789abcdef")
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     rc = run_ingest.main([
         "--src", str(synthetic_pdf.parent),
@@ -176,6 +200,8 @@ def test_reingest_flag_passes_the_startup_gate(tmp_path, synthetic_pdf, monkeypa
     monkeypatch.setenv("EMBED_MODE", "hash")
     monkeypatch.delenv("DENSE_DIM", raising=False)
     fake = _FakeQdrant(stored_sha="c" * 64, stored_rules_v="0123456789abcdef")
+    _seed_legacy_doc(fake, _main_collection(), "SA22-0000-00", "c" * 64,
+                     "0123456789abcdef")
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     rc = run_ingest.main([
         "--src", str(synthetic_pdf.parent),
@@ -218,6 +244,13 @@ def test_qdrant_skip_gates_on_rules_version(tmp_path, synthetic_pdf, monkeypatch
     # leaves): NOT skipped — delete + re-upsert.
     fake = _FakeQdrant(stored_sha=sha, stored_rules_v="",
                        sample_rules_v=extraction_rules_version())
+    _seed_legacy_doc(fake, _main_collection(), "SA22-0000-00", sha, "")
+    # A current-rules point from another doc: the startup sample (limit 1,
+    # no filter) must observe the mixed collection as current-gated.
+    _seed_legacy_doc(fake, _main_collection(), "OTHER-DOC", "f" * 64,
+                     extraction_rules_version())
+    # Order matters: the gate samples the first stored point.
+    fake._points[_main_collection()].reverse()
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     assert run_ingest.main([
         "--src", str(synthetic_pdf.parent),
