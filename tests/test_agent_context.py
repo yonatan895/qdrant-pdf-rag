@@ -69,6 +69,13 @@ class ContextCheckTests(TestCase):
         (self.root/".github/pull_request_template.md").write_text('[Guide](../missing.md)')
         self.assertTrue(any("pull_request_template.md: broken" in e for e in check(self.root)[0]))
 
+    def test_deprecated_opencode_fallback_requires_audit(self):
+        (self.root/"legacy").mkdir()
+        (self.root/"legacy/CONTEXT.md").write_text('legacy instructions')
+        errors = check(self.root)[0]
+        self.assertEqual(len(errors), 1)
+        self.assertIn('legacy/CONTEXT.md: instruction file missing from audited chains', errors[0])
+
     def test_unlisted_instruction_and_vendor_exclusion(self):
         (self.root/"src").mkdir()
         (self.root/"src/AGENTS.md").write_text('nested')

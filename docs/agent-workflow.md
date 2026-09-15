@@ -222,7 +222,7 @@ limit is a temporary diagnostic option, not this repository's solution.
 
 Audit inventory on 15 September 2026, baseline `9fece72df92ca5da414bc8f5b05cb2f89fcd18c8`:
 only root `AGENTS.md` is present as a first-party instruction file; no nested
-AGENTS/overrides, CLAUDE/GEMINI, Cursor or Copilot instructions were found.
+AGENTS/overrides, CLAUDE/GEMINI/CONTEXT, Cursor or Copilot instructions were found.
 The GitHub opencode workflow contains an inline review prompt and a comment-agent
 entry point. Vendored skills are on-demand third-party guidance, not a replacement
 workflow. The original root was 45,644 bytes; that creates a loading risk, not
@@ -232,7 +232,39 @@ proof this particular conversation was truncated.
 |---|---|---|---|---|---|---|
 | Current Codex hosted session | repository root | User-supplied AGENTS excerpt and skill catalog visible; automatic loader paths unverified | Unavailable in hosted diagnostics | User-supplied excerpt is not a loader log | Entire baseline AGENTS and contract owners | Session owner must verify hosted loader; no truncation claim |
 | Local Codex CLI 0.154.0 | fresh `codex debug prompt-input` from root and `src/mainframe_rag` | Complete root AGENTS, including its tail, present byte-for-byte in model-visible input | Config limit unset; documented default 32 KiB; complete 7,246-byte entry observed in both diagnostics | No global AGENTS/override or project config found; fallback key unset | Fresh semantic exercises recorded in the implementation PR | Diagnostic exit 0 in both directories; redacted metadata only retained. This proves local CLI loading, not hosted or CI loading |
-| GitHub opencode 1.18.25 (workflow pin) | workflow checkout | Prompt explicitly names root guide; actual loader unverified | Not exposed by workflow | Runner/user defaults unverified | Review prompt routes through this guide | CI maintainer owns fresh root/subdirectory audit; do not claim CLI audit proves this entry point |
+| GitHub OpenCode 1.18.25 (workflow pin) | `github run` in workflow checkout; no working-directory override | Root AGENTS expected from root/subdirectory under the pinned discovery code; actual runner input not captured | No byte cap in pinned instruction read/assembly; effective model/request limit unverified | No tracked OpenCode config; workflow sets no instruction override and caches only the binary; runtime global/remote inputs unverified | Review prompt names this guide; ordinary Markdown links are not automatically followed | Official docs and pinned source reviewed below; CI maintainer owns remaining fresh root/subdirectory runtime audit |
+
+### OpenCode documentation and pinned-source audit
+
+The [OpenCode rules guide](https://opencode.ai/docs/rules/) describes project
+`AGENTS.md`, global `~/.config/opencode/AGENTS.md`, Claude fallbacks and additional
+`instructions` paths/globs/URLs. Ordinary Markdown links do not automatically
+load their targets. Keep this repository's technical docs on demand.
+
+For the workflow's **1.18.25** pin, [instruction.ts](https://github.com/anomalyco/opencode/blob/v1.18.25/packages/opencode/src/session/instruction.ts)
+tries project names `AGENTS.md`, `CLAUDE.md` (unless disabled), then deprecated
+`CONTEXT.md`; it takes upward matches for the first matching name. Its
+[findUp helper](https://github.com/anomalyco/opencode/blob/v1.18.25/packages/core/src/fs-util.ts)
+collects matches from the invocation directory through the worktree root.
+Global rules prefer the OpenCode config directory over the Claude fallback.
+Additional configured instructions are combined; local read failures become
+empty content. The read/assembly code contains no instruction-byte truncation.
+This is not a claim of unlimited model input or proof that a runner loaded a file.
+`AGENTS.override.md` is a Codex convention, not an OpenCode override in this pin.
+The offline checker inventories the union of known first-party names for audit;
+it does not emulate each client's precedence or load global configuration.
+
+[OpenCode's GitHub integration](https://opencode.ai/docs/github/) runs in Actions.
+[GitHub documents fresh hosted runners](https://docs.github.com/en/actions/concepts/runners/github-hosted-runners);
+our [workflow](../.github/workflows/opencode.yml) uses `ubuntu-latest`, restores
+only the pinned binary directory and writes no instruction configuration.
+Together with the current file inventory, this supports the **inference** that
+root AGENTS is the project instruction from both audited directories.
+[OpenCode configuration](https://opencode.ai/docs/config/) can also merge remote,
+global and environment inputs; workflow text alone does not observe those inputs
+or the final model request. Keep the fresh runner audit open. Public documentation
+also cannot reveal this hosted Codex session's effective loader configuration;
+the verified local CLI evidence and documented Codex default remain separate.
 
 For each used entry point, record fresh root and representative-subdirectory
 invocations, tool version, exact tested SHA, loader diagnostics (or the specific

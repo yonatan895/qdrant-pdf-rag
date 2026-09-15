@@ -17,7 +17,7 @@ REQUIRED = (
 )
 LINK = re.compile(r"\[([^\]\n]+)\]\(([^()\s]+)\)")
 ANCHOR = re.compile(r'<a id="([a-z0-9-]+)"></a>')
-INSTRUCTION_NAMES = {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "GEMINI.md"}
+INSTRUCTION_NAMES = {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "GEMINI.md", "CONTEXT.md"}
 # Generated/third-party trees are not first-party workflow policy.
 EXCLUDED = {".git", ".venv", ".agents", "vendor", "dist", "bundles", "node_modules",
             "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", "output"}
