@@ -103,6 +103,25 @@ def test_manifest_digest_dim_fallback_never_raises():
     assert len(manifest_digest(s, RULES)) == 16
 
 
+def test_blank_context_llm_model_is_absent():
+    """Issue #391 F1 follow-up: the prod ingest Job renders
+    CONTEXT_LLM_MODEL as an empty string while the agent leaves it unset.
+    Both mean "no contextual LLM", so the contract must be identical —
+    otherwise every published generation reads reembed_required forever."""
+    from mainframe_rag.ingest.representation import RepresentationManifest
+
+    rendered = _settings(context_llm_model="")
+    unset = _settings(context_llm_model=None)
+    assert build_manifest(rendered, RULES).context_llm_model is None
+    assert build_manifest(_settings(context_llm_model="   "), RULES).context_llm_model is None
+    assert build_manifest(rendered, RULES) == build_manifest(unset, RULES)
+    assert manifest_digest(rendered, RULES) == manifest_digest(unset, RULES)
+    # Stored contracts already written with "" heal on read.
+    payload = build_manifest(unset, RULES).model_dump(mode="json")
+    payload["context_llm_model"] = ""
+    assert RepresentationManifest.model_validate(payload).context_llm_model is None
+
+
 class _ManifestFake:
     """Minimal completions-collection double: upsert capture + get-by-id."""
 

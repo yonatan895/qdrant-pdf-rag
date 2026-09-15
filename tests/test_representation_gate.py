@@ -139,6 +139,16 @@ def test_compare_each_reembed_field_rejects(field, value):
     assert field in fields
 
 
+def test_compare_blank_context_model_is_compatible():
+    """Issue #391 F1 follow-up: the ingest Job's empty-string
+    CONTEXT_LLM_MODEL and the agent's unset value are one contract value;
+    without normalization the published Kind generation read
+    reembed_required on context_llm_model forever."""
+    stored = build_manifest(_settings(context_llm_model=""), RULES)
+    wanted = build_manifest(_settings(context_llm_model=None), RULES)
+    assert compare_manifests(stored, wanted) == (COMPATIBLE, [])
+
+
 def test_compare_prefix_only_is_record_only():
     s = _settings()
     stored = build_manifest(s, RULES).model_copy(update={"dense_query_prefix": "OTHER:"})

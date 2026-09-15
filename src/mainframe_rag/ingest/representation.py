@@ -51,7 +51,7 @@ import inspect
 import json
 import uuid
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from qdrant_client import models
 
 from mainframe_rag.config import Settings
@@ -92,6 +92,19 @@ class RepresentationManifest(BaseModel):
     sparse_weights_revision: str = ""
     # Record-only: audit + evaluation attribution, never a re-embed trigger.
     dense_query_prefix: str = ""
+
+    @field_validator("context_llm_model", mode="before")
+    @classmethod
+    def _blank_context_model_is_absent(cls, value: object) -> object:
+        """Blank and unset are the same contract value (issue #391, F1
+        follow-up): the prod ingest Job renders `CONTEXT_LLM_MODEL` as an
+        empty string while the agent leaves it unset, so without this rule
+        every published generation would compare `reembed_required` on a
+        field both sides mean as "no contextual LLM". Normalizes on build
+        and on read, healing contracts already stored with ""."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 def build_manifest(settings: Settings, rules_v: str) -> RepresentationManifest:
