@@ -434,7 +434,9 @@ counterexamples; [publication](ingest.md#publication-contract) owns writer order
 ## Supplied evidence and answer states
 
 **Status: partially implemented.** **Authority:** #364 (supplied-evidence eligibility),
-#365 (claim support), #368 (stream/console completion). These have separate acceptance
+#365 (answer verification and provisional/incomplete states), #368 (prompt evidence
+preservation and token-budget enforcement), #372 (browser execution, persistence,
+and presentation of those states). These have separate acceptance
 owners; completing one does not close the others. **Decision owners:**
 `answer.build_messages` / `build_chat_messages` / `parse_answer`, `answer_core`,
 `sse`, `webui.routes` and `webui/static/js/console.js`.
@@ -449,7 +451,7 @@ tokens are provisional; terminal events and error states determine completion.
 | Supplied evidence | Manifest records excerpts surviving packing and trim; retrieval membership alone is insufficient |
 | Citation eligibility | Exact allowed cite or mapped bracket index from supplied evidence; not entailment of a claim |
 | Claim support | Requires the claim to follow from retained source content; valid citation shape/allowlist membership does not prove it (#365) |
-| Provisional output | Token deltas may precede validation or failure; never present them as a completed verified answer (#368) |
+| Provisional output | Token deltas may precede validation or failure; never present them as a completed verified answer (#365; browser presentation #372) |
 | Completed answer | Endpoint-specific successful terminal state, not EOF or `[DONE]` alone; chat error frames followed by `[DONE]` still fail |
 
 Scripts extracted from fences pass through unvalidated; a script is not proven
@@ -465,7 +467,7 @@ cover all routes. **Evidence:** `tests/test_prompt_order.py`,
 `tests/test_answer_core.py`, `tests/test_agent_api.py`, `tests/test_chat_api.py`,
 `tests/test_stream_truncation.py`, `tests/test_webui.py`. Inspect their actual
 assertions: eligibility and transport tests do not prove semantic support or all
-browser completion behavior. #365/#368 retain those gaps; no model run is claimed
+browser completion behavior. #365/#372 retain those gaps; no model run is claimed
 by this documentation audit.
 
 <a id="http-model-contract"></a>

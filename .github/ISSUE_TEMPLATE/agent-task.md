@@ -4,7 +4,7 @@ about: A bounded change with explicit authority, boundaries and evidence
 ---
 
 Use short answers; N/A needs a reason. Field guidance and examples:
-[agent workflow](../../docs/agent-workflow.md#task-packet).
+[agent workflow](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/agent-workflow.md#task-packet).
 
 ## Outcome and authority
 User-visible goal; approved issue/ADR; acceptance owner.
@@ -28,7 +28,7 @@ rollback, and configuration cases. Explain exclusions.
 Existing test homes and a minimal failing reproducer.
 Evidence that distinguishes the correct behavior from a plausible wrong one.
 Required commands/tiers; prerequisites; unavailable checks and acceptance impact.
-[Verification minimums](../../docs/live-stack.md#verification-minimums).
+[Verification minimums](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/live-stack.md#verification-minimums).
 
 ## Safety, migration, and rollback
 Protected data/services; isolation; required permissions.

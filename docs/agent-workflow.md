@@ -301,7 +301,14 @@ has one canonical owner link; other cells name boundary/evidence links. Supporte
 links are ordinary `[label]` followed by `(relative/path)`, with an optional `#explicit-id` whose
 target declares `<a id="explicit-id"></a>`. Paths are relative to the containing
 file, with no spaces, URLs, titles or reference-style indirection in checked
-local links. Templates use the same format. External links are not crawled.
+local links. Documentation-to-documentation links stay relative. GitHub-facing
+templates under `.github/` are copied into issue/PR bodies, so they must use
+explicit canonical repository-file URLs
+(`https://github.com/yonatan895/qdrant-pdf-rag/blob/main/...` with an explicit
+`#anchor`); the checker maps that prefix offline to the current checkout and
+applies the same repository-containment and explicit-anchor checks without
+network access. Relative local links inside `.github/` templates are rejected.
+Unrelated external links are not crawled.
 The checker does not establish semantic consistency or agent understanding.
 
 `make agent-doctor` defaults to `unit`; `PROFILE=sim` and `PROFILE=deploy` add

@@ -17,6 +17,7 @@ REQUIRED = (
 )
 LINK = re.compile(r"\[([^\]\n]+)\]\(([^()\s]+)\)")
 ANCHOR = re.compile(r'<a id="([a-z0-9-]+)"></a>')
+CANONICAL_PREFIX = "https://github.com/yonatan895/qdrant-pdf-rag/blob/main/"
 INSTRUCTION_NAMES = {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "GEMINI.md", "CONTEXT.md"}
 # Generated/third-party trees are not first-party workflow policy.
 EXCLUDED = {".git", ".venv", ".agents", "vendor", "dist", "bundles", "node_modules",
@@ -29,6 +30,25 @@ def local_target(root: Path, source: Path, target: str) -> tuple[Path, str]:
     if not result.is_relative_to(root) or Path(path).is_absolute():
         raise ValueError("local link must stay inside the repository")
     return result, anchor
+
+
+def canonical_target(root: Path, target: str) -> tuple[Path, str]:
+    """Map a canonical blob/main URL to a checkout path without network access."""
+    suffix = target[len(CANONICAL_PREFIX):]
+    path, _, anchor = suffix.partition("#")
+    if not path or Path(path).is_absolute():
+        raise ValueError("canonical link must name a repository-relative file")
+    result = (root / path).resolve()
+    if not result.is_relative_to(root):
+        raise ValueError("canonical link must stay inside the repository")
+    return result, anchor
+
+
+def is_template_source(root: Path, source: Path) -> bool:
+    try:
+        return source.relative_to(root).as_posix().startswith(".github/")
+    except ValueError:
+        return False
 
 
 def table(text: str, name: str) -> list[tuple[int, list[str]]]:
@@ -67,8 +87,24 @@ def check(root: Path, client_limit: int | None = None) -> tuple[list[str], list[
 
     def links(source: Path, text: str) -> None:
         for _, target in LINK.findall(text):
+            if target.startswith(CANONICAL_PREFIX):
+                try:
+                    path, anchor = canonical_target(root, target)
+                except ValueError as exc:
+                    errors.append(f"{source.relative_to(root)}: {target}: {exc}")
+                    continue
+                if not path.exists():
+                    errors.append(f"{source.relative_to(root)}: broken canonical reference {target}")
+                elif anchor and (not path.is_file() or anchor not in ANCHOR.findall(read(path))):
+                    errors.append(f"{source.relative_to(root)}: missing explicit anchor {target}")
+                continue
             if re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:", target):
-                continue  # External sources are never crawled.
+                continue  # Unrelated external sources are never crawled.
+            if is_template_source(root, source):
+                errors.append(
+                    f"{source.relative_to(root)}: template links must use canonical repository URL: {target}"
+                )
+                continue
             try:
                 path, anchor = local_target(root, source, target)
             except ValueError as exc:

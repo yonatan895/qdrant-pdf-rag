@@ -67,7 +67,37 @@ class ContextCheckTests(TestCase):
 
     def test_template_links_are_checked(self):
         (self.root/".github/pull_request_template.md").write_text('[Guide](../missing.md)')
-        self.assertTrue(any("pull_request_template.md: broken" in e for e in check(self.root)[0]))
+        self.assertTrue(any("pull_request_template.md: template links must use canonical" in e for e in check(self.root)[0]))
+
+    def test_template_canonical_url_valid(self):
+        canonical = "https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/owner.md#contract"
+        (self.root/".github/pull_request_template.md").write_text(f'[Owner]({canonical})')
+        (self.root/".github/ISSUE_TEMPLATE/agent-task.md").write_text(f'[Owner]({canonical})')
+        self.assertEqual(check(self.root)[0], [])
+
+    def test_template_canonical_missing_file_and_anchor(self):
+        base = "https://github.com/yonatan895/qdrant-pdf-rag/blob/main/"
+        (self.root/".github/pull_request_template.md").write_text(f'[Missing]({base}missing.md)')
+        self.assertTrue(any("broken canonical reference" in e for e in check(self.root)[0]))
+        (self.root/".github/pull_request_template.md").write_text(
+            f'[Missing]({base}docs/owner.md#missing)')
+        self.assertTrue(any("missing explicit anchor" in e for e in check(self.root)[0]))
+
+    def test_template_rejects_old_relative_form_but_docs_allow_relative(self):
+        # Ordinary documentation-relative links remain supported.
+        (self.root/"AGENTS.md").write_text('[Owner](docs/owner.md#contract)\n')
+        self.assertEqual(check(self.root)[0], [])
+        # The same file-relative form is rejected inside GitHub-facing templates.
+        (self.root/".github/pull_request_template.md").write_text('[Owner](../docs/owner.md#contract)')
+        errors = check(self.root)[0]
+        self.assertTrue(any("template links must use canonical" in e for e in errors))
+        # Canonical escape must not read outside the repository.
+        evil = "https://github.com/yonatan895/qdrant-pdf-rag/blob/main/../outside.md"
+        (self.root/".github/pull_request_template.md").write_text(f'[Evil]({evil})')
+        self.assertTrue(any("stay inside" in e for e in check(self.root)[0]))
+        # Unrelated external links in templates remain skipped without network.
+        (self.root/".github/pull_request_template.md").write_text('[Ext](https://example.com/docs/guide)')
+        self.assertEqual(check(self.root)[0], [])
 
     def test_deprecated_opencode_fallback_requires_audit(self):
         (self.root/"legacy").mkdir()
