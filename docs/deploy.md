@@ -25,8 +25,10 @@ no rollback:
   `READY (Awaiting Corpus Ingest)` when it did not.
 
 Standalone `make airgap-deploy` only waits for workload readiness. The agent
-`/healthz` check covers Qdrant and embedding connectivity; it does not prove
-that reasoning works. Run the gateway probe before ingesting when using the
+`/healthz` check covers Qdrant and embedding connectivity **and** the served
+generation's representation contract (HTTP 503 for any non-servable state);
+`/livez` is the process-only liveness probe. It does not prove that reasoning
+works. Run the gateway probe before ingesting when using the
 modular commands. `make airgap-smoke` checks retrieval and tracing; use the
 console/answer checks in the operator runbook to verify the user experience.
 

@@ -281,9 +281,9 @@ def test_ui_chat_body_cap_counts_splunk_context(ui_client, monkeypatch):
 
 def test_ui_healthz_badge_reflects_agent_status(ui_client, monkeypatch):
     async def ok_health():
-        return app_mod.HealthzResponse(status="ok", qdrant=True, embed=True)
+        return app_mod.HealthzResponse(status="ok", qdrant=True, embed=True), 200
 
-    monkeypatch.setattr(app_mod, "healthz", ok_health)
+    monkeypatch.setattr(app_mod, "evaluate_healthz", ok_health)
     resp = ui_client.get("/ui/healthz")
     assert resp.status_code == 200
     assert "Online" in resp.text
@@ -291,10 +291,36 @@ def test_ui_healthz_badge_reflects_agent_status(ui_client, monkeypatch):
     async def down_health():
         raise app_mod.AppError(503, "qdrant_unready", "qdrant is not ready")
 
-    monkeypatch.setattr(app_mod, "healthz", down_health)
+    monkeypatch.setattr(app_mod, "evaluate_healthz", down_health)
     resp = ui_client.get("/ui/healthz")
     assert resp.status_code == 200
     assert "Offline" in resp.text
+
+
+def test_ui_chat_refused_when_generation_not_servable(ui_client, monkeypatch):
+    """Issue #391 F3: the console is gated like the API — a non-servable
+    generation never reaches retrieval or the LLM. The HTML form keeps its
+    fixed error-banner contract; the SSE endpoint refuses with the stable
+    503 JSON before the stream opens."""
+    from tests.fakes import ServingGateFake
+
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGateFake(outcome="pending"))
+    resp = ui_client.post("/ui/chat", data={"message": "hello"})
+    assert resp.status_code == 502
+    assert "could not complete this request" in resp.text
+    assert ui_client.mock_search.calls == []
+    assert app_mod.llm is not None
+
+    resp = ui_client.post(
+        "/ui/chat/stream",
+        json={"messages": [{"role": "user", "content": "hello"}]},
+    )
+    assert resp.status_code == 503
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json() == {
+        "code": "representation_unavailable",
+        "message": "the retrieval generation is not available",
+    }
 
 
 def test_ui_static_serves_pinned_assets_and_blocks_traversal(ui_client):

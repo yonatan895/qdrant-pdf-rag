@@ -559,8 +559,12 @@ async def read_manifest_record_async(
     + `/healthz`): stored contract + state, or None when
     absent/legacy/unparseable. Never raises on stored content; transport
     errors propagate so the caller can report `unknown` instead of guessing.
-    Sync test doubles resolve inline through the shared shim (same
-    discipline as the retrieval legs)."""
+    The existence check runs first (issue #391: a fresh install reads as
+    absent, not as an unreachable store). Sync test doubles resolve inline
+    through the shared shim (same discipline as the retrieval legs)."""
+    exists = await _await_client(async_client.collection_exists(completions_collection))
+    if not exists:
+        return None
     points = await _await_client(
         async_client.retrieve(
             completions_collection,
@@ -610,6 +614,42 @@ async def serving_outcome(
         return compare_manifests(stored.manifest, build_manifest(settings, rules_v))
     except Exception:  # noqa: BLE001 — an unreadable store is unknown, not incompatible
         return "unknown", []
+
+
+async def resolve_serving_generation(
+    async_client: AsyncQdrantPoints | QdrantPoints,
+    settings: Settings,
+    rules_v: str,
+) -> tuple[str | None, str, list[str]]:
+    """Resolve the configured alias to its PHYSICAL generation and validate
+    that generation's contract (issue #391 F4): metadata is never read from
+    the alias-derived name, so a stale `<alias>__completions` cannot certify
+    another physical's vectors. Returns (physical, outcome, details) with
+    `serving_outcome`'s vocabulary; `empty` when no collection exists (fresh
+    install bootstrap). Read-only: resolution and validation never write."""
+    from mainframe_rag.ingest.completion import completion_collection_for
+    from mainframe_rag.ingest.qdrant_io import live_collection_from
+
+    alias = settings.qdrant_collection
+    aliases = await _await_client(async_client.get_aliases())
+    target = next(
+        (
+            desc.collection_name
+            for desc in aliases.aliases
+            if desc.alias_name == alias
+        ),
+        None,
+    )
+    candidate = target if target is not None else alias
+    exists = bool(await _await_client(async_client.collection_exists(candidate)))
+    physical, _legacy = live_collection_from(alias, target, exists)
+    if physical is None:
+        return None, "empty", []
+    bound = settings.model_copy(update={"qdrant_collection": physical})
+    outcome, details = await serving_outcome(
+        async_client, bound, completion_collection_for(physical), rules_v
+    )
+    return physical, outcome, details
 
 
 async def _await_client(res):

@@ -110,11 +110,14 @@ stops the push, no exceptions. *(Note: Deployment / air-gap / Helm / overlays ch
 ### Rung 6 probes (exact)
 
 ```sh
-# a. health
-curl -s http://127.0.0.1:8087/healthz
-# expect: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible"}
-# (representation is empty pre-ingest, record_only_drift on query-prefix
-# drift; reembed_required/legacy/unknown degrade — smoke fails closed)
+# a. readiness + liveness
+curl -s -w ' [%{http_code}]\n' http://127.0.0.1:8087/healthz
+curl -s http://127.0.0.1:8087/livez
+# expect: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible"} [200]
+# and {"status":"alive"} from /livez. representation is empty pre-ingest
+# (still 200 — bootstrap), record_only_drift on query-prefix drift;
+# reembed_required/legacy/pending/unknown degrade AND return HTTP 503
+# (requests refuse 503 representation_unavailable — smoke fails closed)
 
 # b. trap query — must refuse, zero validated citations
 curl -s http://127.0.0.1:8087/v1/answer -H 'Content-Type: application/json' \

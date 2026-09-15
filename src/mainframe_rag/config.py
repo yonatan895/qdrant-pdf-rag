@@ -201,6 +201,14 @@ class Settings(BaseSettings):
     health_qdrant_timeout_s: float = 5.0
     health_embed_timeout_s: float = 10.0
 
+    # Serving-generation gate (issues #391 F3/F4): the agent resolves the
+    # configured alias to its physical generation and validates that
+    # generation's contract at most once per TTL window; every request is
+    # bound to the validated physical name, so an alias swap cannot redirect
+    # an in-flight request. 0 = validate every request (tests/paranoia);
+    # bounded so recovery from a fixed generation is never stale forever.
+    representation_cache_ttl_s: float = Field(default=5.0, ge=0.0, le=300.0)
+
     # Agent startup fail-fast (issue #20 PR D): embed_mode=hash is CI/dev only
     # and must be explicitly allowed (CI overlay sets ALLOW_HASH_MODE=true).
     # Prod (vllm) is validated eagerly at startup: DENSE_DIM / EMBED_* must

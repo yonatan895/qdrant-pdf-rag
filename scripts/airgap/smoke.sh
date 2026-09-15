@@ -40,7 +40,7 @@ except Exception as e:
     sys.exit(1)
 PYEOF
 then
-    die "/healthz probe did not report ok — check Qdrant and embedder connectivity"
+    die "/healthz probe did not report ok — check the printed body: representation reembed_required/legacy/pending needs --reingest, unknown means the store is unreachable, otherwise Qdrant/embedder connectivity"
 fi
 
 # exit 3 from the pod = empty result = nothing ingested yet (skip, not fail).
@@ -71,7 +71,7 @@ if [ "$status" -eq 3 ]; then
     echo "                  AIR-GAP PRODUCTION ACCEPTANCE REPORT"
     echo "================================================================================"
     echo "Namespace:       $NAMESPACE"
-    echo "Agent /healthz:  OK (Qdrant and embedding services operational)"
+    echo "Agent /healthz:  OK (Qdrant, embedding, and representation gate operational)"
     echo "Smoke Search:    SKIPPED (Collection empty — nothing ingested yet)"
     echo "$TRACING_LINE"
     echo "Status:          INFRASTRUCTURE READY (Corpus not yet ingested)"
@@ -130,7 +130,7 @@ echo "==========================================================================
 echo "                  AIR-GAP PRODUCTION ACCEPTANCE REPORT"
 echo "================================================================================"
 echo "Namespace:       $NAMESPACE"
-echo "Agent /healthz:  OK (Qdrant and embedding services operational)"
+echo "Agent /healthz:  OK (Qdrant, embedding, and representation gate operational)"
 echo "Smoke Search:    OK (Query: \"$QUERY\")"
 echo "$TRACING_LINE"
 echo "Status:          ACCEPTANCE CRITERIA PASSED"

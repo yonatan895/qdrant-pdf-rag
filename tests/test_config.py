@@ -41,6 +41,7 @@ def test_outbound_timeout_defaults_bounded():
     assert s.answer_timeout_s > 0
     assert s.health_qdrant_timeout_s > 0
     assert s.health_embed_timeout_s > 0
+    assert 0.0 <= s.representation_cache_ttl_s <= 300.0
     assert 0 <= s.http_connect_retries <= 5
     assert s.http_max_connections == 200
     assert s.http_max_keepalive_connections == 100
@@ -330,6 +331,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "http_max_keepalive_connections": 100,
     "health_qdrant_timeout_s": 5.0,
     "health_embed_timeout_s": 10.0,
+    "representation_cache_ttl_s": 5.0,
     "allow_hash_mode": False,
     "log_level": "INFO",
     "otel_exporter_otlp_endpoint": None,

@@ -66,7 +66,14 @@ projection against every real server, and only the disposable-Qdrant lane
 caught it). A double for a store that upserts must overwrite same-id points
 (issue #391 F2 — a duplicated manifest point reads back as the stale first,
 so a pending contract looked committed in unit tests but not against a
-server).
+server). Alias resolution is part of that fidelity (issue #391 F4):
+`AliasQdrant` scripts `get_aliases` plus per-physical
+`<physical>__completions` payloads so the gate's resolution and its metadata
+read are pinned to the same generation, and `ServingGateFake` is installed
+autouse in `tests/conftest.py` — endpoint tests that monkeypatch the
+retrieval/LLM seams get a servable generation while gate/refusal tests
+install the real `ServingGate` with a scripted Qdrant double, and
+integration-marked tests keep the real gate against the real server.
 
 ## Tests must lock the claimed path
 
@@ -109,7 +116,7 @@ Verification tiers in this repository map directly to the 7-rung verification la
 | **Rung 3** | `make eval-paraphrase` | Paraphrase Retrieval Tier | Scratch collection (`paraphrase-manuals`), non-verbatim semantic retrieval A/B |
 | **Rung 4** | `make sim` | Integration Sim Tier | Real PDFs, docker Qdrant (`images.txt` pin), `scripts/mock_vllm.py`; fail-closed |
 | **Rung 5** | `make eval EMBED_MODE=vllm` | Full Eval Tier | Dev golden set (121 queries) against mode-keyed baseline on live stack |
-| **Rung 6** | Live Agent Probes | Serving / Probe Tier | `/healthz`, injection trap refusal, grounded citation generation, body caps, `/ui` |
+| **Rung 6** | Live Agent Probes | Serving / Probe Tier | `/healthz` + `/livez`, injection trap refusal, grounded citation generation, body caps, `/ui` |
 | **Rung 7** | Feature A/B Numbers | Retrieval A/B Tier | 2×2 matrix and per-query attribution documented in PR body for ranking changes |
 
 ### Air-gap deployment tier (`make airgap-dryrun`, `tests/test_airgap_*.py`, local Kind)
