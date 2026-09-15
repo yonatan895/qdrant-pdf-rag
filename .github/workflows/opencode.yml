@@ -228,7 +228,16 @@ jobs:
           SHARE: "false"
           USE_GITHUB_TOKEN: "false"
           PROMPT: |
-            Review this pull request against AGENTS.md, the linked issue, and THIS DIFF only.
+            Review this pull request against AGENTS.md, the linked acceptance contract
+            and base SHA. Read docs/agent-workflow.md review/handoff guidance. Trace
+            affected unchanged callers, persisted states, launch paths and consumers;
+            do not assume the summary or green tests establish the claimed guarantee.
+            Choose a minimal counterexample and check whether tests distinguish it.
+            Apply missing/corrupt metadata, interruption, cache lifetime, active readers,
+            writer overlap, rollback and configuration cases where relevant.
+            Report preconditions, location, impact, evidence confidence and a focused
+            regression; separate defects, optional improvements and validation gaps.
+            No finding is mandatory. Do not merge, change permissions or weaken gates.
 
             Severity (strict):
             - Block only: correctness bugs, security/secret leaks, layering violations,
@@ -238,12 +247,12 @@ jobs:
 
             Re-review rules (if this PR already has your comments):
             - First verify each prior BLOCKER is fixed or explicitly declined.
-            - Then look only for regressions introduced by the new commits.
+            - Then inspect the changed behavior and affected unchanged boundaries for regressions.
             - Do NOT invent a stricter citation/error/timeout contract than the
               linked issue stated. If a hole remains, classify it Should-fix unless
               it is a real production bug in the claimed behavior.
-            - A stale PR body is a nit. Ask for an update; do not request changes
-              for documentation lag.
+            - A stale or false acceptance claim needs correction before readiness;
+              distinguish that evidence gap from an application defect.
             - If prior blockers are gone and no new blocker exists: APPROVE.
 
             Scope:

@@ -174,10 +174,9 @@ strict stream-end rule above is the upstream reasoning wire and the
   `llm`/`ttft` timings ride the `final` event (JSON responses carry all of
   them as headers).
 - Streams must end with `[DONE]`: ending without it is
-  `TruncatedStreamError`, never `finish_reason: stop`. Before the first
-  content token the client falls back to a single non-streaming POST
-  (discarding the prefix); after tokens arrived the error surfaces and no
-  `final` follows. A `length` finish *with* `[DONE]` is complete, not
+  `TruncatedStreamError`, never a fabricated successful finish. Recovery
+  differs between buffered and client-visible calls: see the HTTP/model
+  fallback contract below. A `length` finish *with* `[DONE]` is complete, not
   truncated.
 - `LLM_STREAM` (default off) routes every server-side reasoning call over
   the streaming wire and measures TTFT on the first content token; the JSON
@@ -228,6 +227,8 @@ select `complex`. Default is `simple`.
   trims in two tiers for up to `4*2 + len(prior turns)` rounds: excerpt
   bodies first, then it pops the oldest history turn. Never per-chunk
   tokenize RPCs.
+- Planning and verification both charge reserved output, complex thinking reserve
+  and safety margin; simple prompts use no thinking reserve.
 - `splunk_context` truncates at 4000 chars with a suffix before packing, so
   caller context can never starve excerpts.
 - Evidence manifest (issue #364): `build_messages` / `build_chat_messages`
@@ -313,9 +314,8 @@ the query timeout.
   clients only; a missing pool is a startup bug.
 - The reasoning client never retries at the transport (sync and async,
   `retries=0`) — answers are non-idempotent; a retry would re-think. The
-  only second ask is the documented `LLM_STREAM` fallback: a stream that
-  truncates before any content is re-issued once as a non-streaming POST
-  (§3). Dispatch picks async
+  permitted second asks are the per-operation streaming fallbacks documented
+  in the HTTP/model contract below; buffered and emitted content differ. Dispatch picks async
   client → running loop → sync, so injected async clients and bare test
   doubles (even plain `str` returns, normalized to chat results) all work.
 - Health timeouts are split from traffic timeouts (5s Qdrant, 10s embed);
@@ -344,7 +344,7 @@ readers:
 | `chat_max_turns` / `chat_max_prior_turn_chars` | 10 / 1000 | chat history packing caps |
 | `prompt_order` | `retrieval` (`stable_cache` alt) | block ordering |
 | `llm_base_url` / `llm_model_reasoning` / `llm_api_key` | unset (answer stays disabled; key unset = keyless) | per-request assertion, LLM client, tokenizer |
-| `answer_timeout_s` | 300.0 | reasoning client, never retried |
+| `answer_timeout_s` | 300.0 | reasoning client; no transport retries, explicit fallback policy below |
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | low / high / 0.2 | answer path |
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 4096 / 1536 / 1000 / 128 / 350 / 5.0 | tokenizer-path budgeting (complex prompt budget prices high-effort thinking, issue #298) |
 | `llm_stream` | `false` | server-side reasoning SSE |
@@ -380,9 +380,126 @@ retrieval on an eligible chat follow-up) → retrieve
 embed/prefetch/RRF/rerank/diversify → prompt build → LLM chat with
 model/effort/TTFT/finish/tokens). The bounded query text is the one
 allowed free-text span attribute; PDF text and secrets never enter spans.
+The OTel API/SDK/exporter dependency pins stay version-locked. Spawn parse workers
+stay untraced; parent stages own their records/spans. Outbound model headers carry
+W3C traceparent via `bearer_auth_headers` when tracing is enabled.
 Tracing ships default-off (endpoint unset → no exporter, no network),
 export is fail-open and bounded (collector outages log and drop, never fail
 a request), and setup must register the tracer provider — otherwise
 import-time proxy tracers silently no-op. Non-`stop` finish reasons raise
 an `answer_alert` log (no counters — multi-worker unsafe) that the L2
 harness joins by `request_id`.
+
+<a id="serving-contract"></a>
+## Serving generation and reader lifetime
+
+**Status: partially implemented.** **Authority:** #391 F3/F4, implemented in
+PR #396; lifetime acceptance remains #391. **Decision owner:**
+`agent.serving.ServingGate` and `representation.resolve_serving_generation`.
+Static inspection: `9fece72df92ca5da414bc8f5b05cb2f89fcd18c8`, 15 September 2026.
+
+**Inputs/producers/state/consumers:** operator settings plus writer-owned alias,
+physical data and `<physical>__completions` → process-local TTL validation →
+search, answer, both chat routes and console. `/healthz` requests fresh validation;
+`/livez` proves only process liveness. The serving credential is read-only.
+
+**Allowed states:** compatible/record-only drift may serve; empty is bootstrap
+readiness only; drift, legacy, pending and unknown refuse with the stable
+`representation_unavailable` envelope before retrieval/model/stream work.
+The gate binds a request to a validated physical name, and aliases become visible
+after revalidation. Negative results are cached too. See
+[metadata outcomes](ingest.md#metadata-contract) for distinctions the reader
+currently collapses and publication checks that remain incomplete.
+
+**Required assumptions and limits:** a physical name is not an immutable snapshot.
+Caching is safe with respect to alias movement only while the validated physical
+data/metadata remain stable for the entire request. In-place writes, a forced
+same-representation repair, an admin mutation or deletion can invalidate that
+assumption during a warm cache and after a request has obtained its target.
+TTL expiry, `invalidate()`, a pending marker and a fresh readiness probe do not
+cancel/drain active readers. There is no reader lease or writer fence here.
+Repair therefore needs operator quiescence/draining; a same-representation repair
+must not be described as atomic. Preserve old physical data plus metadata for
+rollback and keep settings compatible; do not GC targets still in use.
+
+**Evidence:** `tests/test_serving_gate.py::test_resolve_binds_physical_and_reads_its_own_metadata`,
+`test_resolve_refuses_physical_drift_even_when_alias_metadata_is_compatible`,
+`test_gate_caches_within_ttl_and_revalidates`, plus endpoint refusal tests in
+`tests/test_agent_api.py`, `tests/test_chat_api.py`, `tests/test_webui.py`.
+These pin binding/refusal/cache behavior, not immutability or absence of concurrent
+mutation. Active-reader repair and warm-cache mutation remain #391 acceptance
+counterexamples; [publication](ingest.md#publication-contract) owns writer ordering.
+
+<a id="answer-contract"></a>
+## Supplied evidence and answer states
+
+**Status: partially implemented.** **Authority:** #364 (supplied-evidence eligibility),
+#365 (claim support), #368 (stream/console completion). These have separate acceptance
+owners; completing one does not close the others. **Decision owners:**
+`answer.build_messages` / `build_chat_messages` / `parse_answer`, `answer_core`,
+`sse`, `webui.routes` and `webui/static/js/console.js`.
+
+**Inputs and transitions:** retrieved hits → packed excerpts and `PromptEvidence`
+→ reasoning output → citation normalization/eligibility → final response. Earlier
+chat turns and omitted hits are not new supplied evidence. During streaming,
+tokens are provisional; terminal events and error states determine completion.
+
+| Guarantee | What establishes it / what it does not establish |
+|---|---|
+| Supplied evidence | Manifest records excerpts surviving packing and trim; retrieval membership alone is insufficient |
+| Citation eligibility | Exact allowed cite or mapped bracket index from supplied evidence; not entailment of a claim |
+| Claim support | Requires the claim to follow from retained source content; valid citation shape/allowlist membership does not prove it (#365) |
+| Provisional output | Token deltas may precede validation or failure; never present them as a completed verified answer (#368) |
+| Completed answer | Endpoint-specific successful terminal state, not EOF or `[DONE]` alone; chat error frames followed by `[DONE]` still fail |
+
+Scripts extracted from fences pass through unvalidated; a script is not proven
+correct because the answer contains an eligible citation. Inferred bracket-only
+citations retain provenance on API/chat/console and never count as grounding in
+the answer eval/L2. Abstention uses the shared marker-plus-shape predicate;
+parse-time citation WHY telemetry cannot be reconstructed from the stripped body.
+
+**Mutation/lifetime:** the per-answer supplied manifest must follow every trim;
+it is independent of cached generation validation. Console/browser state remains
+browser-only under ADR-0004, with strict CSP and vendored assets; UI gating must
+cover all routes. **Evidence:** `tests/test_prompt_order.py`,
+`tests/test_answer_core.py`, `tests/test_agent_api.py`, `tests/test_chat_api.py`,
+`tests/test_stream_truncation.py`, `tests/test_webui.py`. Inspect their actual
+assertions: eligibility and transport tests do not prove semantic support or all
+browser completion behavior. #365/#368 retain those gaps; no model run is claimed
+by this documentation audit.
+
+<a id="http-model-contract"></a>
+## HTTP/model fallback and lifecycle policy
+
+**Status:** implemented call shapes with tests; semantic answer/completion limits
+are above. **Authority:** ADR-0001/0004, #363 and existing transport contracts;
+#397 corrects the overly broad old “never retry” summary. **Decision owners:**
+`HttpxLLMClient`, `VllmTokenizer`, `HttpReranker`, `http_client` and lifespan.
+
+| Operation | Current permitted recovery / failure boundary |
+|---|---|
+| Reasoning transport | Sync/async reasoning pools use `retries=0`; no connection-level automatic repeat |
+| Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content, caught stream/protocol failures or missing `[DONE]` lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered |
+| Client-visible `chat_stream` | Clean stream exit with no content can make one non-streaming ask; malformed/rejected/empty fallback fails. Missing `[DONE]` after emitted content raises truncation; no replay after those tokens |
+| Tokenizer | Plan locally, verify whole messages per trim round; first RPC failure warns and pins estimator for that instance. No per-chunk RPCs; gateway may lack `/tokenize` |
+| Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
+| Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; [retrieval](retrieval.md) owns dispatch |
+| Condensation | Optional reasoning call; failure returns the raw latest query, not a fabricated condensed result |
+| Tracing export | Separately bounded fail-open export; outages drop/log and must not fail request/shutdown |
+
+This policy describes current operations, not permission to add retries. A new
+fallback/timeout is a behavior change, with bounded Settings and evidence.
+Settings for different call shapes stay separate; add default assertions to
+`tests/test_config.py`. Every client opened by lifespan closes there; closing
+must not cause later calls to rebuild a pool. Sync embed/rerank/tokenizer calls
+run off the event loop. Runtime dispatch must not sniff monkeypatched attributes;
+construct production clients explicitly and use documented awaitable seams.
+Do not read request state that nothing sets or keep handlers nothing can raise.
+Every handler/error shape needs a reachable test; catch narrowly around the
+smallest call, preserve stable 404/405/500 contracts, and never leak internals.
+
+**Evidence:** `tests/test_stream_truncation.py`, `tests/test_agent_api.py`,
+`tests/test_chat_api.py`, `tests/test_probe_gateway.py`, `tests/test_failfast.py`.
+The approved local/CI gateway-only LiteLLM adapter exception is owned by
+[deployment policy](deploy.md#deployment-policy); production gateway protection
+remains the platform team's responsibility.

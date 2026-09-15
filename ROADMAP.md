@@ -1,8 +1,8 @@
 # qdrant-pdf-rag — SOTA Roadmap (Agent-Ready, v2)
 
-> Each section below maps 1:1 to a GitHub issue (#75–#94). An agent picking up a task
-> MUST read: the issue, this document, `AGENTS.md`, `docs/architecture.md`, and
-> `docs/adr/0001-baseline-decisions.md` before writing code.
+> Sections below map to issues #75–#94. Start with [AGENTS.md](AGENTS.md)
+> and the assigned issue; use [context routing](docs/agent-workflow.md#context-map)
+> to select relevant contract, roadmap and ADR entries.
 
 ## Goal and decision basis
 
@@ -36,8 +36,7 @@ rejection or its reopening gate.
 
 ## Global rules for every PR
 
-1. **Run the applicable gates.** [AGENTS.md](AGENTS.md) and
-   [docs/live-stack.md](docs/live-stack.md) define the required rungs by change class
+1. **Run the applicable gates.** [docs/live-stack.md](docs/live-stack.md#verification-minimums) defines the required rungs by change class
    and the A/B evidence owed in the PR. [docs/eval.md](docs/eval.md) owns the
    dev/RC venue rules; the layered harness is RC-only, not a blanket PR requirement.
 2. **Feature flags, not rewrites.** New capabilities land behind a `Settings` flag

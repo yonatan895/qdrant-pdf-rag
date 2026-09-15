@@ -1,6 +1,6 @@
 # Expert Mainframe Agent — Design and Architecture Guide
 
-**Status:** implementation-ready (source of truth)  
+**Status:** architecture and ownership map; implementation status belongs to the linked contracts
 **Audience:** coding agents, platform architects, and operators  
 **Constraint:** public GitHub for *code and cluster recipes*; air-gapped OpenShift for *runtime, corpus, embeddings*  
 **Operations Guide:** see **[docs/install_and_ops.md](install_and_ops.md)** for step-by-step setup and operational runbooks.  
@@ -20,7 +20,7 @@ Build a **citation-first expert mainframe agent** that answers operational quest
 | Reasoning | Internal vLLM / LiteLLM (platform team) | Thinking model for citation + solution / script generation |
 | Embeddings | Internal vLLM stack | Dense vectors only; OpenAI-compatible endpoint |
 
-The agent returns **answers grounded strictly in citations** (doc number, title, heading path, printed page label) and, when asked, JCL/REXX/operator steps verified against those citations. Agent-fetched live state (ADR-0003) cites distinctly as live sources — never as manual citations — and degrades to manuals-only when unreachable.
+The intended acceptance is **answers supported by supplied evidence and citations** (doc number, title, heading path, printed page label) and, when asked, JCL/REXX/operator steps verified against those citations. Claim support is not established by citation eligibility alone (see the answer contract below). Agent-fetched live-state prompt wiring under ADR-0003 remains incomplete; the desired behavior is distinct live citations and honest manuals-only degradation.
 
 ### 1.1 Ownership contract (prod vs local simulation)
 
@@ -100,7 +100,7 @@ Local simulation exists so agent/ingest always exercise the production gateway w
 The 5-stage pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`, orchestratable via `make airgap-pipeline` with pre-flight safety via `make airgap-validate`) is the **canonical deployment standard across the entire project**:
 1. **Production (Air-Gapped OpenShift):** Full 3-replica Qdrant cluster, internal enterprise registry, `restricted-v2` SCC, cluster vLLM endpoints, sneakernet tarball verification.
 2. **Local Cluster Testing (Kind + Local Registry):** Local single-node Kind cluster using a local container registry (`localhost:5000` / `airgap-registry:5000`) and 1-replica overrides (`QDRANT_EXTRA_VALUES`). Runs the exact same packaging scripts, image archives, Helm chart, and Kustomize overlays, with adapted local sizing and SCC.
-3. **Continuous Integration (CI):** Mandatory `make airgap-dryrun` on every PR validating manifest rendering, variable quoting, and fail-closed placeholder rules without a cluster; `airgap-rehearsal` executes the end-to-end pipeline on `main`.
+3. **Continuous Integration (CI):** `make airgap-dryrun` validates applicable deployment changes without a cluster; product workflow path filters exclude markdown-only changes. The context workflow checks relevant docs separately. Published-bundle rehearsal runs on `main`/dispatch; enforced jobs and policy obligations are distinguished in [deploy](deploy.md#ci-policy).
 4. **Release verification (Windows OpenShift Local / CRC):** Published-main bundles must pass [the manual CRC gate](crc-release-verification.md) before production transfer. WSL retains the authenticated model gateway and GPU servers; CRC exercises the production overlays, real SCC admission, OAuth/Route, persistence, and runtime isolation. Transfer the identical tested bundle. Production version, identity, storage, and multi-node acceptance remain separate.
 
 This architectural standard ensures local cluster testing exercises the real production packaging and deployment artifacts, avoiding custom or divergent test manifests.
@@ -109,157 +109,86 @@ This architectural standard ensures local cluster testing exercises the real pro
 
 ## 4. Data Processing & Retrieval Architecture
 
+<a id="boundary-map"></a>
+### Producer, persistence and consumer boundaries
+
+Start with the decision owner, then inspect affected unchanged callers and
+consumers. A filename list cannot establish that a change is isolated.
+
+| Producer / decision owner | State crossing the boundary | Consumers to inspect | Canonical contract |
+|---|---|---|---|
+| Discovery, generic parser, chrome, chunk, classify | Parsed metadata, sanitized text, chunk IDs and fixed vocabulary | Embed-text construction, inventory, Qdrant payload/filter/citation readers | [Ingest](ingest.md) |
+| Source/representation identity | Revision keys, representation manifest and generation fingerprints | Completion/skip/refresh, publication, serving/cache, eval | [Identity](ingest.md#identity-contract) |
+| Ingest orchestration/admin writer | Data points, completion store, pending/committed manifest, inventory, alias | Active readers, readiness, recovery, rollback and GC | [Publication](ingest.md#publication-contract), [metadata](ingest.md#metadata-contract) |
+| Serving generation gate | Validated physical target, process-local TTL cache | Search, answer, both chat aliases, console and unchanged query entry points | [Reader lifetime](agent.md#serving-contract) |
+| Dense/BM25 query, filters, screen, fusion, optional rerank | Ranked candidates and timings | Prompt packing, returned hits, eval/capture/replay | [Retrieval](retrieval.md) |
+| Prompt packing and reasoning | Supplied-evidence manifest, provisional tokens, parsed citations | API JSON/SSE, chat, browser render/export, answer eval/L2 | [Answer states](agent.md#answer-contract) |
+| Operator settings and packaging | Example/override → preflight → rendered agent and ingest env → Settings | Gateway auth/TLS, both model consumers, health/readiness and migration | [Configuration](deploy.md#configuration-contract) |
+| Lifespan, logs and tracing | Pools, structured logs, bounded export queues | Health, request paths, shutdown, collector and run manifests | [HTTP/lifecycle](agent.md#http-model-contract), agent log/trace contract |
+
+At each row ask: **What false implementation could satisfy our current local
+assertion?** A complete inventory does not prove complete searchable coverage;
+a physical name does not prove immutability; a local progress lock does not
+prove publication serialization. These are outstanding #391 proof boundaries.
+
 ### 4.1 Document Ingest & Chunking
 
-1. **PDF Discovery & Parsing:** PyMuPDF extracts metadata, table of contents (bookmarks), printed page labels (`page.get_label()`), and message IDs (`XXXnnnY`).
-2. **Chrome Stripping:** Repeated header/footer lines appearing across $\ge 35\%$ of sampled pages in documents $\ge 8$ pages are stripped (`max(3, int(0.35 * n))` hits minimum — the floor keeps short documents from being wiped).
-3. **Chunk Construction:** Sections partitioned by outline hierarchy. Sections $> 3500$ characters are split on blank lines with a 400-character overlap (`SECTION_MAX_CHARS = 3500`). Code regions (JCL/REXX/console, detected in `chunk.py`) split at statement boundaries only: per-statement atomic items, overlap backs off to whole statements, and one oversize statement emits whole. This ensures dense tables, character code matrices (e.g. AFP fonts), and message documentation never exceed the 4,096-token context limit of dense embedding models.
-4. **Multiprocessing Worker IPC Isolation:** Ingest worker processes trap exceptions locally inside `_parse_one` and serialize plain-data `InventoryRecord(status="error")` payloads, preventing unpicklable exception instances (such as `httpx2.HTTPStatusError` with attached response/request references) from crashing the `ProcessPoolExecutor`.
-5. **Point ID Generation:** UUID5 derived from document and chunk keys (guaranteeing deterministic, idempotency-safe IDs without invalid hex strings). The chunk key's first segment is the source revision (`normalize(vendor)|normalize(product)|normalize(version)|sha256`, issue #361), so same-form-number revisions mint disjoint ids; payload `doc_id` stays the printed family key.
-6. **Payload Slimming:** Points store only essential query, citation, and filter attributes (`vendor`, `product`, `version`, `doc_id`, `source_rev`, `title`, `heading_path`, `page_label`, `page_start`, `chunk_type`, `message_ids`, `members`, `sha256`, `rules_v`, `text`, plus optional `context` when contextual prefixes are enabled). Redundant `embed_text` is omitted from storage.
-7. **Source-revision identity (issue #361):** three identities — printed `doc_id` (citations/family search), `source_rev` (destructive key for locks, deletes, completions, chunk ids), committed generation. Planning dedups byte-identical copies onto the lexicographic winner and aborts fail-closed on cross-revision `doc_id` collisions; refresh replaces by inventory lineage while committed siblings are left alone; crash residue is swept and unattributable legacy residue raises before any delete. Migration is snapshot-gated and lazy (unchanged docs skip). Details: `docs/ingest.md` §4/§8/§9.
-8. **Generation Publication (issue #359, `INGEST_ALIAS_PUBLISH` default-off):** ingest converges a versioned staging generation (snapshot-cloned from live) and swaps the `<collection>` alias to it in one atomic call only after every document verifies against its completion record — readers see a complete old or complete new generation. Superseded physicals plus safety snapshots are kept for operator rollback/GC. Details and runbook: `docs/ingest.md` §8/§9.
+[Ingest](ingest.md) owns generic discovery, parsing/sanitization, chrome removal,
+outline/fallback sections, atomic code/table splits, fixed chunk types, UUID5
+identity, spawn-worker IPC and completion/publication. Vendor signals remain
+payload, never ingestion gates. Do not thread vendor-specific conditions through
+retrieval or HTTP when parse/classify can emit the necessary payload.
 
 ### 4.2 Hybrid Embeddings & Collection Configuration
 
-- **Dense Embeddings:** Ingest and query embed at `POST ${EMBED_BASE_URL}/embeddings` against the internal vLLM stack or the platform LiteLLM gateway (supporting arbitrary embedding dimensions, e.g. 1024-dim `Qwen3-Embedding-0.6B` or 768-dim models; an `*_API_KEY` virtual key rides as a Bearer header when configured, keyless otherwise). Operators configure `VLLM_BASE_URL`; deploy scripts derive `EMBED_BASE_URL` by stripping trailing slashes and an existing `/v1` before appending `/v1` (`scripts/airgap/common.sh`), so both suffixed and bare `VLLM_BASE_URL` forms work; the agent only reads `EMBED_BASE_URL`. `DENSE_DIM` is a fail-fast setting in vLLM mode: the agent and ingest validate it before any collection or embed call, and collection creation verifies the stored dimension matches. Query embeddings prepend the asymmetric query prefix (`Settings.dense_query_prefix`) on the dense query vector only; document chunks and the CI/dev hash embedder stay raw text.
-- **Sparse BM25 Embeddings:** Computed in-process via FastEmbed using pre-baked `Qdrant/bm25` weights.
-- **Collection Configuration (`mainframe_manuals`):**
-  - Dense: `${DENSE_DIM}` dimensions, Cosine distance, on-disk HNSW ($M=16, ef\_construct=128$), int8 scalar quantization in RAM. Collection creation verifies the stored dimension and refuses mismatches (`DimMismatchError`); dimension changes across runs are a caller/harness concern, never silent.
-  - Sparse: `modifier=idf`, on-disk storage.
-  - Payload indexes: `doc_id`, `product`, `version`, `vendor`, `chunk_type`, `message_ids`, `members`, `sha256`, `source_rev` (keyword indexes) plus integer `page_start`.
-- **Representation manifest (issues #362 + #391, enforced):** every non-dry ingest commits the stored-representation contract (extraction rules, identity schema, dense mode/model/operator-revision/dim, contextual recipe, sparse model/weights revision, record-only query prefix) as one fixed-ID point in `<collection>__completions` plus a run-log line; completions and inventory records carry its digest. Enforcement is an ingest-preflight invariant plus a serving gate: re-embed drift or legacy state fails ingest (unless `--reingest`, the deliberate migration) and refuses agent startup; `/healthz` re-evaluates the resolved generation per scrape and returns **HTTP 503** for every non-servable outcome (drift, legacy, pending migration, unreadable metadata — smoke fails closed), while `/livez` stays the process-only liveness probe (a data problem never restarts a healthy pod). Every retrieval path (`/v1/search`, `/v1/answer`, `/v1/chat*`, console) resolves the configured alias to its physical generation, validates that generation's **own** `<physical>__completions` contract (never the alias-derived name), and binds the request to the validated physical for a short TTL (`REPRESENTATION_CACHE_TTL_S`, default 5s); an unverifiable or incompatible generation refuses with the stable `503 representation_unavailable` before any embed or LLM call, and an alias swap or rollback becomes visible after revalidation, never by redirecting an in-flight request. An intentionally empty installation stays ready (`empty` — bootstrap) but serves no requests until data exists. vllm mode requires the operator-declared `EMBED_MODEL_REVISION` (empty = unattested = fail closed); hash mode is exempt. Dense revision is operator-declared — never infer weights from a mutable gateway alias.
-- **Embed window budget:** the worst-case embedded string (chunk header + a `SECTION_MAX_CHARS = 3500` body carrying the `SPLIT_OVERLAP_CHARS = 400` split seed) is pinned by `tests/test_embed_budget.py`; local embed servers keep `--max-model-len 4096` (a 2048 window was rejected by tokenizer sweep — the worst case measures ~2,043 tokens at ~2.0 chars/token on syntax-dense text).
+[Ingest embedding/load](ingest.md) owns named dense/BM25 vectors, dimensions,
+indexes-before-load, batched upserts, model attestation and stored representation.
+[Deployment](deploy.md#configuration-contract) owns endpoint/key propagation.
+Dense vectors are platform HTTP calls; sparse weights are baked/local. Read the
+[identity](ingest.md#identity-contract) and [metadata](ingest.md#metadata-contract)
+contracts before model migration. No copy of the representation hash-field policy
+is maintained here.
 
 ### 4.3 Hybrid Retrieval: Batched Prefetch, RRF Fusion, Rerank & Diversification
 
-Retrieval executes the filtered dense and BM25 prefetches **concurrently in a single batched HTTP call** (`query_batch_points`, falling back to sequential `query_points` for clients without batch support). Async handlers run the same core through `async_search`, with the sync embed (`dense_query`/`sparse`) and cross-encoder (`rerank_candidates`) legs offloaded via `asyncio.to_thread` so a slow embed or rerank call never blocks the event loop:
+[Retrieval](retrieval.md) owns filtered dense/BM25 prefetch, local weighted RRF,
+optional cross-encoder order/fallback, trap/identifier bypass, rewrite/split and
+three-phase diversification. `async_search` is the shared implementation and
+`search` a fail-closed synchronous wrapper. Limits/defaults live in Settings;
+changes require the applicable evaluation and A/B evidence.
 
-```
-User / Splunk Query
-   ├── Query Classifier: Identifier (message ID / doc ID / member code) vs Natural Language
-   │
-   ├── Embed leg (asyncio.to_thread): dense query vector + FastEmbed BM25 indices
-   │
-   ├── Batched prefetch — one HTTP round trip (limit 40 each; 50 when rerank is enabled):
-   │     ├── Dense ANN query (filtered, "dense" vector)
-   │     └── Sparse BM25 query (filtered, "bm25" vector)
-   │
-   ├── Payload Projection: Fetch only RETRIEVE_PAYLOAD_FIELDS
-   │
-   ├── Local Reciprocal Rank Fusion (RRF):
-   │     k = 2
-   │     Weights: [1.0, 3.0] (Dense, BM25) for Identifiers
-   │     Weights: [1.0, 1.0] for Natural Language
-   │
-    ├── Optional cross-encoder rerank (default OFF — `rerank_enabled=False`):
-    │     fused top-`rerank_candidates` (50) scored by `bge-reranker-v2-m3`
-    │     via `HttpReranker`, batched by `rerank_batch_size` (32) under
-    │     `rerank_timeout_s`. Leg order follows `RERANK_ENDPOINT_ORDER`:
-    │     `score_first` tries vLLM `/v1/score` then `/rerank`;
-    │     `rerank_first` reverses them for gateways (LiteLLM serves
-    │     `/rerank`, not `/v1/score`). The other leg stays the fallback
-    │     either way; exhaustion fails closed.
-   │
-   └── Hit diversification → Top-K Ranked Hits with Strict Citation Formatting:
-         max 1 chunk per page, max 3 per doc, 3-phase backfill
-```
+### 4.4 Reasoning, Prompt Assembly & Citation Enforcement
 
-`async_search()` is the single retrieval implementation; the sync `search()`
-is a thin `asyncio.run` wrapper for tooling/eval that fails closed inside a
-running loop — a drift-guard test pins identical outputs on identical fakes.
-
-### 4.4 Reasoning LLM Prompt Construction, Complexity Modulation & Citation Grounding Contract
-
-The agent enforces strict grounding guarantees and adaptive reasoning depth before returning answers to clients:
-
-1. **Query Complexity Classification (`classify_query_complexity`):**
-   Incoming inquiries are classified into two operational tiers:
-   - **Simple Lookups:** Single message code queries or short factual definitions.
-   - **Complex Operational Inquiries:** Multi-step diagnostics, failure/abend troubleshooting (e.g. journal overflow, abend S0C4), configuration procedures (e.g. LFAREA 1M/2G page frames), and comparative memory tuning (e.g. DFSORT HIPRMAX vs MOSIZE).
-   - *Design Rationale:* Factoid questions need fast, accurate answers (~4–7s) without wasting compute. Diagnostic and configuration inquiries demand deep internal thinking (~14–20s, >1,000 reasoning tokens) to analyze interacting subsystems, verify syntax, and structure recovery procedures.
-
-2. **Adaptive Context Length Budgeting (`prompt_max_context_chars_complex`):**
-   - **Context Truncation Vulnerability:** Reasoning models running on a 4,096-token maximum context window (`max_model_len=4096`) are vulnerable to context exhaustion. A default 8,000-character prompt context consumes ~2,400 prompt tokens, leaving only ~1,600 tokens total for *both* reasoning thinking tokens and generated response content. When the model deliberated deeply (>1,000 reasoning tokens), generation hit `Finish: length`, resulting in answers truncated mid-sentence and omitted `Citations:` sections.
-   - **Solution:** For complex queries, prompt manual excerpts are capped at 4,500 characters (`Settings.prompt_max_context_chars_complex = 4500`). This preserves ~1,200 tokens for the prompt, reserving **~2,600 tokens of headroom** exclusively for thinking tokens and comprehensive answer text, greatly reducing truncation faults; the agent emits an alert when a response still finishes with `finish_reason=length` (never a silent mid-sentence cut). The same failure mode applies to multi-turn chat when history grows: `chat_max_turns`/`chat_max_prior_turn_chars` bound the prior turns, and the two-tier trim drops excerpts before evicting history.
-   - **Tokenizer discipline:** budget planning uses the in-process estimator (zero RPCs); the packed prompt is verified against the whole-message `/tokenize` count per trim round (up to 4), at the server *origin* (`/v1` stripped). First `/tokenize` failure logs one warning and pins the in-process estimator for the life of the instance — never a silent per-call fallback, never per-chunk tokenize RPCs.
-
-3. **Reasoning Protocol & Engine Control:**
-   - **System Prompt Extension (`SYSTEM_PROMPT_COMPLEX_EXTENSION`):** Injected dynamically on complex queries. Instructs the reasoning model to conduct multi-phase internal deliberation: problem decomposition, cross-examining manual excerpts for parameters and return codes, constructing verified JCL/operator commands in fenced blocks, and auditing claims against cited manuals.
-   - **Engine Controls:** Dispatches `reasoning_effort="high"` for complex queries and `reasoning_effort="low"` for simple queries. Defaults `temperature=0.2` for grounded, deterministic reasoning; `/v1/chat` may override it per request.
-
-4. **Few-Shot Citation Injection:**
-   The prompt dynamically includes a concrete few-shot example using `hits[0].cite` in the instructions to enforce uniform formatting from both large reasoning models and quantized edge models (e.g. Gemma 4 INT4 QAT).
-
-5. **Citation Resolution (three passes + abstention zero-cite):**
-   - **Allowlist Provenance (issue #364):** The citation allowlist and the `[n]` label mapping come exclusively from `PromptEvidence`, the final supplied-evidence manifest returned by `build_messages`/`build_chat_messages` — the excerpts that survived packing and every verification trim. Retrieved hits omitted from the prompt, and the tail's worked example cite, are never eligible. The retrieval list is retained separately on the core output as retrieved candidates.
-   - **Primary Pass (Explicit Block):** Looks for a terminal `Citations:` section. Each listed citation is normalized and matched against `evidence.allowed_citations`.
-   - **Trailing Bare Cites:** A blank-tolerant tail scan for allowed cite-shaped lines **without** any header.
-   - **Fallback Pass (Bracketed Index Resolution):** Only when the passes above found nothing, the parser scans the fence-processed content for bracketed number references `\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]` (matching prompt tokens like `[1]`, `[2]`, `[1, 2]`) and resolves them through the manifest's prompt labels — not retrieval rank. Resolution sets `citations_inferred` (issue #269) and records the resolved 1-based labels as `inferred_indices` (issue #299): both ride `/v1/answer` JSON and the SSE `final`, and the eval/L2 never count inferred cites as grounding. Markers that occur only in dropped thinking/extracted script fences are never promoted.
-   - **Parenthesis Immunity:** Parentheses `(...)` are deliberately excluded from inference to avoid false positives on standard mainframe technical notation such as `z/OS (3.1)`, `SYS1.PARMLIB(IEASYS00)`, `(2)`, or `APARs (1, 2)`.
-   - **Abstention zero-cite (#135/#305):** `parse_answer` clears citations when `is_abstention` holds (refusal marker + under 200 chars of non-refusal remainder), so a refusal can never look grounded by citing real-but-unsupporting chunks.
-
-6. **Body Stripping & Verification:**
-   Any hallucinated citation lines that match the citation regex but are not in the supplied-evidence allowlist are stripped from the response text before transmission. Mid-sentence narrative text mentioning document IDs is preserved under the standalone-line rule.
-
-7. **Live-State Enrichment (ADR-0003, phase 3 — not yet wired):**
-   The routing/fetch layer shipped in phase 2 (`agent/live_state.py`,
-   default-off; nothing calls `fetch_live` from an endpoint yet). When the
-   prompt wiring lands (ADR-0003 phase 3; ROADMAP PR-17), `live`/`hybrid`
-   queries will fetch bounded
-   read-only context via the Zowe MCP server (max 2 calls, byte-capped,
-   dedicated short timeout) before prompt assembly. Live excerpts will enter
-   as a named `live_context` block under the prompt-order policy, wrapped
-   with the same delimited, instruction-isolated framing as retrieved
-   chunks; trap queries never trigger a fetch, and an unreachable backend
-   degrades to manuals-only with an honest marker. Live sources cite
-   distinctly (never as manual citations) and never count toward manual
-   grounding.
+[Agent](agent.md#answer-contract) owns prompt packing, final supplied evidence,
+citation eligibility, abstention, provisional/completed output and limitations.
+Answer/chat/console share `answer_core`. Search never invokes an LLM. Answering
+uses the configured reasoning model; citation eligibility alone is not semantic
+support or script validation. ADR-0003 live-state routing/fetch helpers exist
+behind a default-off flag, but endpoint prompt wiring is still required under
+ROADMAP #90/#91. Splunk remains caller-supplied context.
 
 ### 4.5 Outbound HTTP, Agent Lifespan & API Contracts
 
-The agent is async end to end: all routes are `async def` on `AsyncQdrantClient` + `httpx2.AsyncClient`, so slow LLM/Qdrant legs never exhaust a threadpool. Lifespan owns every client and closes what it opens:
-- **Async pool:** `httpx2.AsyncClient` with bounded keepalive/connection limits and connect retries — used by `/healthz` probes (pooled client only; no blocking sync fallback on the event loop).
-- **Sync retrieval-leg pool:** a bounded `httpx2.Client` passed to the embedder, tokenizer, and reranker builders; their sync protocol calls execute inside `asyncio.to_thread`. Closed at shutdown.
-- **Reasoning answer calls (`/v1/answer`, `/v1/chat*`, `/ui`):** single-shot with a 300s timeout on the LLM client's own pool; connection-level retries are explicitly disabled (`retries=0`) — answers are not idempotent and a retry would re-ask a model that may already be thinking.
-- **Streaming:** `/v1/answer?stream=true` (or body `stream: true`) returns `text/event-stream`: `event: token` deltas, then exactly one terminal `event: final` carrying the verified answer, citations, `citations_inferred` provenance, `inferred_indices`, script, hits, query kind, `ttft_ms`, and token usage. The final schema is identical on the empty-hits path. A mid-stream failure emits `event: error` and ends **without** `final` — clients must treat stream-end-without-final as failure. `/v1/chat` + `/v1/chat/completions` instead stream OpenAI `chat.completion.chunk` frames terminated by `data: [DONE]`; the terminal chunk carries `finish_reason` plus `citations`/`citations_inferred`/`inferred_indices`/`hits`, and a mid-stream failure emits an error frame **followed by** `[DONE]` (never a fake `finish_reason`; an error frame is failure even though `[DONE]` arrives). Non-streaming JSON remains the default. Server-side reasoning streaming is toggled by `LLM_STREAM` (default off; `make run-agent` and `make local-stack` enable it); TTFT is measured on the first content token and surfaced both in the `final` event and as `Server-Timing: ttft;dur=...` on the JSON path.
-- **Error Contract:** Standard JSON error envelopes (`{"code": "...", "message": "..."}`). Internal exceptions and upstream response bodies are never leaked to clients; registered handlers pin 404/405/422/500 shapes. Retrieval failures read `502 upstream_error / "retrieval failed"`, LLM failures `502 upstream_error / "answer failed"`; prompt-construction failures are local faults and map to 500 `internal` — never mislabeled as upstream.
-- **Multi-turn chat & operator console (ADR-0004):** `POST /v1/chat` (native) and `POST /v1/chat/completions` (OpenAI-compatible alias) share one core with `/v1/answer` — `answer_core` owns prompt planning/verification, LLM inference, and citation parsing; handlers own validation, retrieval, SSE formatting, telemetry, and the error map. Chat clients manage history; follow-up condensation is off by default (`CHAT_CONDENSE_ENABLED`; `make eval-chat` records the evidence for a dedicated default flip). The operator console is served by the same agent at `/ui` (Jinja2 + vendored HTMX 1.9.12 + SSE, strict `script-src 'self'` CSP, all assets local) and is fail-closed behind `UI_ENABLED` (unset → stable 404 envelope). Dialogue state lives only in the browser `localStorage`; the agent stays stateless and the console adds no UI volume or service to the base Deployment. The production patch sets `UI_ENABLED=true` and `AGENT_ROUTE=true` additionally renders the `openshift-ui` overlay (oauth-proxy sidecar + reencrypt Route + `rag-agent-oauth-cookie` Secret) so only the external Route is OAuth-protected.
-- **Distributed tracing (issue #83):** OTel spans, one owner `src/mainframe_rag/tracing.py`; the library default is OFF — a process only exports when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (bare collector origin; OTLP/HTTP, the exporter appends `/v1/traces`; Jaeger v2 all-in-one is the reference backend, Phoenix-compatible since both speak OTLP). The production deploy is ON by default: an unset endpoint resolves to the in-cluster Jaeger via `resolve_otel_endpoint` (`common.sh`), and the `off` sentinel disables tracing and the deployment together. One request renders as one trace: `v1.search`/`v1.answer`/`v1.chat`/`ui.chat` root → (`chat.condense` on an eligible chat follow-up) → `retrieve.search` → `retrieve.embed` → `retrieve.prefetch` → `retrieve.rrf` → `retrieve.rerank` (or `rerank_bypass_reason=trap|identifier` on the parent) → `retrieve.diversify` → `prompt.build` → `llm.chat` (TTFT, token usage, finish_reason). The SSE stream holds the root span open until the terminal `final`/`error` event so the LLM leg stays a child of the same trace. Ingest traces parent-process stages only (`ingest.run` → `ingest.plan`, service `mainframe-rag-ingest`); spawn parse workers stay untraced and report through the inventory/log stream like logs. Outbound model calls carry W3C `traceparent` via `bearer_auth_headers` (no-op when tracing is off) so a tracing-enabled platform gateway can correlate its own spans — the platform tier's monitoring is theirs and is never configured here. Export is bounded (queue + timeout) and fail-open: collector outages log and drop, never fail a request. Span attributes mirror the log contract (ids, counts, scores, timings) with one deliberate exception: the bounded query text is carried on request spans for debugging — PDF/manual text and secrets never enter spans, and the never-log-query-text rule for JSON logs is unchanged.
-
----
+[Agent HTTP/model](agent.md#http-model-contract) owns per-operation retries and
+fallbacks, Settings-bounded pools/timeouts, stable error bodies, endpoint-specific
+SSE completion and shutdown. [ADR-0004](adr/0004-operator-console-htmx.md) owns
+browser-only console state, strict CSP, local assets and external OAuth ingress.
+`tracing.py` owns bounded fail-open OTel export for agent and ingest, with no
+manual text/secrets; bounded query span text is the explicit exception to the
+JSON-log prohibition. A collector outage is not required-metadata permission.
 
 ## 5. Evaluation, Benchmarking & Tooling
 
-### 5.1 Retrieval Accuracy Gates (`evals/`)
-- **Golden Dataset:** `evals/golden.jsonl` (dev set, 121 entries) and the frozen `evals/holdout.jsonl` (72 entries, sha256-pinned at `evals/holdout.jsonl.sha256`). Entries carry `query_class` (message_id / doc_number / syntax / diagnostic / comparative / version / negative / table), `expected_behavior` (answer / abstain), and `must_not_retrieve` trap guards. The holdout is never iterated against: it runs on release candidates only (`make eval-holdout`). Corpus entries are mechanically verified against the live collection (`make verify-golden`).
-- **Regression Gate:** `make eval` evaluates retrieval recall and MRR against the **mode-keyed baseline**: `evals/baseline.json` in hash mode (CI/dev), `evals/baseline-vllm.json` in vllm mode (release candidates, live embedder). Re-baselining is a dedicated PR (`make eval-baseline`).
-- **Recorded vllm baseline:** `evals/baseline-vllm.json` (mode-keyed, dev set; current numbers live in the file's `_meta` — never inline them here, snapshots rot).
-- **Regression Bounds:**
-  - Overall $Recall@1 \ge 0.9\times$ baseline
-  - Overall $Recall@5 \ge 0.95\times$ baseline
-  - Overall $MRR \ge 0.95\times$ baseline
-  - Identifier $Recall@1 = 1.0$ (strict)
-  - Zero query errors
-- **CI Wiring:** `make gate-l1` (ephemeral Qdrant simulator, hash-mode synthetic corpus) is an automated PR check in GitHub CI; the GitLab mirror runs hygiene + pytest + gate-l1 (no e2e, no load tier, no deploys). `make loadtest-mock` (same composition plus a real uvicorn agent: zero errors, SSE integrity, citation parity, fixed error shapes under concurrency) gates PRs touching agent/retrieve/ingest via `.github/workflows/load.yml`.
-- **Tier Map:** retrieval eval (`make eval`) → answer-tier grounding eval (`make eval-answers`, live GPU stack: answer entries must produce ≥1 validated citation, abstain/trap entries must not be answered) → multi-turn condensation A/B (`make eval-chat`, live GPU stack, evidence-only, no baseline gate) → layered harness (`make harness-gate` / `harness-l2` / `harness-l3` / `harness-l4`: snapshot-pinned L1 retrieval gate, citation precision/recall + NLI faithfulness judge, per-stage p50/p95 latency + TTFT + VRAM, repeated answer-relevance/faithfulness gate with a human-review queue). Harness tiers are release-candidate-only, never PR gates.
+[Live-stack](live-stack.md#verification-minimums) is the single required-tier
+map. [Testing](testing.md#evidence-design) owns independent expected results,
+client fidelity and test consolidation. [Eval](eval.md) owns venue, baseline,
+threshold and measured-outcome detail. No baseline changes to make a patch pass.
 
-### 5.2 Performance Benchmarking (`benchmarks/`)
-- **Benchmark Suite:** `make bench` runs concurrent load tests against Qdrant and a deterministic mock LLM, measuring peak RSS, Qdrant container RAM/disk, and p50/p90/p95/p99 search and answer latencies against `benchmarks/baseline.json`.
-
-### 5.3 Developer Tooling & Reporting (`scripts/`)
-- **Interactive Conversational Assistant & REPL (`scripts/query_demo.py` / `make ask`):**
-  - Interactive REPL (`rag-answer> `) and CLI tool supporting pure retrieval inspection, LLM reasoning answers, live mode toggling (`:mode`), and export to JSON/HTML.
-  - Surfaces citation extraction source (`[explicit Citations: section]` vs `[inferred from excerpt [1, 2]]`).
-- **Report Renderer & Comparator (`scripts/render_report.py`):**
-  - Formats eval and benchmark reports into terminal text, Markdown, and 100% self-contained offline HTML dashboards.
-  - Subcommands: `eval`, `bench`, `compare-eval`, `compare-bench`.
-- **Local GPU Dual-Model vLLM Server (`scripts/run_local_vllm.sh` / `make local-vllm` / `make local-vllm-embed`):**
-  - Runs reasoning models (Gemma-4 on port 8000, `GPU_MEM=0.64`) and embedding models (Qwen3-Embedding-0.6B on port 8001, `GPU_MEM=0.33`, `--runner pooling --convert embed --enforce-eager` — vLLM v0.28.0 removed `--task`) concurrently on consumer 8GB VRAM cards. Launch flags resolve from the `mainframe_rag.serve` Budget `LOCAL_RT_8GB` profile (explicit env wins). Both servers keep `--max-model-len 4096`; the embed window budget is pinned by `tests/test_embed_budget.py` (see §4.2).
-- **Agent Dev Server (`make run-agent`):** starts uvicorn with `LLM_STREAM=true` so `/v1/answer?stream=true` streams reasoning tokens (default off in production config); honors `UI_ENABLED` (`UI_ENABLED=true make run-agent` serves the console at `/ui`, unset keeps the fail-closed 404).
-- **Full Local Stack (`make local-stack`):** the canonical local simulation (Qdrant + Jaeger + LiteLLM gateway + agent; `LOCAL_STACK_DRYRUN=1` is hermetic). The agent starts with `UI_ENABLED=true` by default and the stack smoke-checks `GET /ui`; set `UI_ENABLED=false` to exercise the fail-closed route set. `docs/live-stack.md` owns the launch order and model/budget rules.
-- **Automated Local End-to-End Suite (`scripts/test_local_e2e_vllm.py` / `make test-vllm-e2e`):**
-  - Validates full pipeline from PDF build and dense/sparse ingestion to FastAPI HTTP `/v1/search` and `/v1/answer` endpoints against local vLLM, with served-model resolution and strict grounding validation.
+Local launch order, gateway handoff, GPU profiles and mode limits live in
+[live-stack](live-stack.md#operating-modes); installation, component-debugging,
+reports and REPL procedures live in [install and operations](install_and_ops.md).
+A local mocked run cannot certify release behavior or distributed HA. Published
+artifact/topology acceptance stays in [the CRC gate](crc-release-verification.md).
 
 ---
 
@@ -275,7 +204,11 @@ src/mainframe_rag/
     chunk.py          # Outline-based chunking, code-atomic regions & UUID5 generation
     classify.py       # Message, syntax, table, narrative classification
     context.py        # Contextual retrieval prefixes (versioned cache)
-    inventory.py      # Idempotent ingest progress tracking
+    identity.py       # Source-revision identity and collision/dedup planning
+    representation.py # Stored contract, migration state, reader compatibility
+    completion.py     # Per-document verification and progress lock
+    publish.py        # Staging and final publication checks
+    inventory.py      # Ingest progress tracking
     embed.py          # vLLM dense & FastEmbed BM25 embedder; embed-text builder
     qdrant_io.py      # Collection creation & upsert batching
     run_ingest.py     # Ingest CLI worker orchestration
@@ -291,6 +224,7 @@ src/mainframe_rag/
     app.py            # FastAPI service (async routes, SSE) & lifespan client management
     answer.py         # Reasoning LLM client (sync/async/SSE), prompt construction, condensation & citation grounding
     answer_core.py    # Shared engine: retrieval(optional), prompt budget, LLM, citation parse
+    serving.py        # Read-only physical-generation gate and TTL cache
     sse.py            # SSE payloads: /v1/answer events + OpenAI chat chunks/errors/[DONE]
     tokenizer.py      # vLLM /tokenize counting with estimator fallback
     cites.py          # Citation shape validation & extraction
@@ -304,7 +238,7 @@ src/mainframe_rag/
   serve/              # Local vLLM VRAM budget profiles (LOCAL_RT_8GB) + resolve CLI
   config.py           # Pydantic Settings & environment validation
   logs.py             # One-JSON-object-per-line logging
-  manifest.py         # Run manifests (git sha, model ids, settings hash)
+  manifest.py         # Run manifests (unreachable Qdrant version is unknown, never the pin)
   regexes.py          # Shared identifier regexes (MSG_RE, DOCNO_RE)
   tracing.py          # OTel export: agent + ingest; library default off, deploy default on
 ```

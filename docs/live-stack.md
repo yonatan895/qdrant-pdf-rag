@@ -1,25 +1,50 @@
 # Live-stack runbook and verification ladder
 
-How to bring up the full local stack, prove it is healthy, and run the
-mandatory pre-push battery on it. Normative: `AGENTS.md` requires the
-rungs for your change class before every non-docs push; this file is
-the procedure.
+This file owns the single change-impact-to-verification table and exact rung
+procedures. [Testing](testing.md) owns test design; [workflow](agent-workflow.md)
+owns context, conflicts, task/review and handoff formats.
 
-## 0. Which rungs you owe (no more, no less)
+<a id="verification-minimums"></a>
+## 0. Minimum verification by actual impact
 
-| Change class | Required rungs |
+| Change class | Required minimums |
 |---|---|
-| Docs only | Existence-check cited paths; no GPU |
-| Tests / make / CI only | `make check` (rung 1) |
+| Docs only | `make check-context`, cited-path and semantic review; no GPU |
+| Tests / make / CI only | `make check` (rung 1), focused tooling tests; context tools also `make check-context` |
 | Deployment / air-gap / Helm / overlays | `make check` + `make airgap-dryrun` |
-| Agent HTTP / validation | Rungs 1 + 6 (probes) |
+| Agent HTTP / validation | Rungs 1 + 6 (live probes) |
 | Ingest / chunk / classify | Rungs 1 + 2 (gate-l1) + 3 (fresh paraphrase) |
 | Retrieve / embed / RRF / rerank / screen | Full ladder + A/B numbers in the PR body |
-| Defaults, UUID, `chunk_type`, production constants | Split the PR; the split-off pays eval + A/B |
+| Defaults, UUID, `chunk_type`, production constants | Dedicated approved concern; split from features; eval + A/B |
+| Chat / condensation | Applicable HTTP/retrieval minimums plus `make eval-chat` (literal/condensed arms, condense p50) |
 
-Skipping a required rung — or inventing its numbers — fails review
-outright. Running rungs your class does not require is wasted GPU time,
-not diligence.
+Take the union for cross-layer impact and test the interactions. A tooling label
+does not excuse retrieval changes from evaluation. Avoid expensive unrelated
+checks and record relevance decisions. Retrieval changes including chunking,
+filters and query shape owe `make eval` against the mode-keyed baseline:
+identifier recall@1 = 1.0; overall recall@1 ≥ baseline ×0.9, recall@5 ≥ ×0.95,
+MRR ≥ ×0.95; zero query errors. Baseline rewrites use `make eval-baseline` in
+a dedicated PR, never to make a feature pass. Local-launch/tooling work must not
+silently change production constants or ingest-worker semantics.
+
+Four separate phases:
+
+1. **Pre-change diagnosis:** record base SHA, prerequisites and reproducer. A red
+   reproducer for the assigned defect is expected; a missing tool, permission
+   boundary and unrelated product failure are different conditions. Do not stop
+   independent safe work merely because a prerequisite or unrelated rung is red.
+2. **Implementation feedback:** targeted behavior tests and relevant integration
+   contracts; a fresh counterexample may expand the affected boundary map.
+3. **Merge acceptance:** all minimums for the actual diff plus interactions.
+   Missing/skipped checks are not passes. A draft may record blocked validation;
+   it cannot be called ready while required acceptance remains unmet.
+4. **Release acceptance:** verify the exact published bundle and applicable
+   topology/model/corpus using the release runbooks. Historical/mock successes
+   and a local `make check` do not substitute for release evidence.
+
+For #397, docs need context/link/semantic review; Python/Make/CI additions need
+focused tests and `make check`. Application behavior is outside that issue, so
+no GPU, model evaluation or private/live deployment operations are called for.
 
 Conventions below: `$SNAPSHOT_DIR` is persistent disk outside the repo
 (e.g. `export SNAPSHOT_DIR=$HOME/qdrant-snapshots`); `$CORPUS_ROOT` is
@@ -29,12 +54,28 @@ into the repo); `$SCRATCH_DIR` is scratch space outside the repo
 
 ## 1. Bring-up order
 
-Local development and release verification use these environments:
-1. **Standalone Development / GPU Mode** (loopback services for rapid retrieval & prompt iteration): start Qdrant first, then reasoning, then embed — the Budget profiles declare reasoning-first as the allocation order (a 4k-context server fails KV init against leftovers). Each step has a health proof — do not proceed past a failed proof.
-2. **Standard Local Cluster Mode** (Kind + local registry on port 5000): exercises the production air-gap deployment scripts (`make airgap-pack` -> `load` -> `deploy` -> `ingest` -> `smoke`) with local single-replica sizing overrides. See [docs/install_and_ops.md](install_and_ops.md#47-local-cluster-testing-standard-kind--local-registry) for step-by-step setup.
-3. **Published-main release gate** (Windows OpenShift Local / CRC): required before transferring a production bundle. Follow [CRC release verification](crc-release-verification.md) with WSL model serving and the identical signed bundle. This manual gate is separate from the change-class PR ladder above; Kind and dry-run success do not replace it.
+<a id="operating-modes"></a>
+### What each mode proves and may touch
 
-### Standalone Bring-Up (GPU / Dev)
+| Mode | Permitted resources | Evidence and limits |
+|---|---|---|
+| Unit / explicit dev hash | Temporary synthetic files and mocked clients | Contracts/fault paths; no live services or semantic model evidence |
+| Disposable Qdrant simulation | Owned disposable container and generated corpus; deterministic model stand-in | Real client/server projection, storage and API behavior; not real-model quality or distributed HA |
+| Gateway-shaped local development | Explicitly selected local backends behind real pinned gateway, Qdrant/Jaeger/agent and authorized scratch corpus | Model/gateway/application integration and relevant eval; no production topology claim |
+| Published-bundle Kind | Fresh disposable cluster/registry and the downloaded bundle, documented sizing overrides | Same deployment pipeline/artifact; deterministic computation lanes prove plumbing. Single-node runs do not prove distributed HA |
+| Production / CRC acceptance | Operator-authorized site resources and exact candidate; private data under its runbook | Real SCC/TLS/identity/storage/model/corpus checks; CRC fit/fallback and missing combined coverage must be recorded |
+
+The current task's prerequisite check is `make agent-doctor` (default unit).
+It diagnoses tools/runtime, not application acceptance. It does not launch or
+probe a deployment. Never use a documentation check as authority to start, stop,
+reconfigure, ingest into or test a private/live deployment. Keep synthetic
+rehearsal cleanup away from [preserved real-corpus resources](local-real-corpus.md).
+
+Local cluster procedure: [install and operations](install_and_ops.md).
+Release transfer requires [CRC verification](crc-release-verification.md) and
+its exact-bundle record; Kind and dry-run success cannot replace it.
+
+### Component-debug bring-up (GPU / dev only)
 
 ```sh
 # Qdrant (docker, loopback port 6333)
@@ -49,45 +90,62 @@ curl -s -m 10 http://127.0.0.1:8000/v1/models | head -c 200
 make local-vllm-embed
 curl -s -m 10 http://127.0.0.1:8001/v1/models | head -c 200
 
-# Reranker (only for the full-stack topology; port 8002)
+# Reranker only with a compatible three-model pack; never alongside the default 8GB pair
 make local-vllm-rerank
 curl -s -m 10 http://127.0.0.1:8002/v1/models | head -c 200
 ```
 
 ### Full local simulation (`make local-stack`)
 
-`make local-stack` is the canonical full-topology entry (pinned Qdrant +
-Jaeger + the real LiteLLM gateway + the agent; `LOCAL_STACK_DRYRUN=1` prints
-the ordered plan only). Prerequisites: Docker, the three backends above (all
-of `:8000`/`:8001`/`:8002` must answer `/v1/models`), and no gateway already
-running — stop a manual one first with `make local-gateway-stop` (local-stack
-starts and owns its own; an existing `local-litellm-gateway` container makes
-it fail closed). The agent runs with `UI_ENABLED=true` and the smoke step
-checks `GET /ui`.
+`make local-stack` is the canonical full simulation: Qdrant → Jaeger → real
+LiteLLM gateway → probe → optional ingest → agent → smoke → trace check.
+`LOCAL_STACK_DRYRUN=1` prints the plan without Docker/network. Choose a compatible
+GPU pack before starting component servers; the default pair uses
+`RERANK_ENABLED=false make local-stack` and needs reasoning/embedding only.
+A third backend requires the matching pack. Backend curls above are component
+probes, not application consumer configuration.
 
+The supervisor sources the private `GATEWAY_ENV_FILE`, owns the gateway it starts,
+and reuses reachable Jaeger without claiming ownership. Component lifecycle stays
+in `run_local_gateway.sh` (gateway/Postgres), `run_local_jaeger.sh`,
+`run_local_vllm.sh`, and `qdrant_sim.py`/`qdrant_pin.py`; do not fork these owners.
+An existing gateway container makes the supervisor fail closed; resolve ownership
+before stopping it. `/ui` is enabled and smoke-checked unless `UI_ENABLED=false`.
+`make run-agent` honors UI_ENABLED without a default. Detailed installation and
+component-debug procedures remain in [install and operations](install_and_ops.md).
+
+<a id="local-environment"></a>
 ## 2. Environment block
 
-`make eval` and the eval scripts read `Settings` from the environment —
-the Makefile does **not** set embed coordinates, so export them in the
-same shell (never globally, never committed):
+Consumers use gateway URLs and per-leg keys from the launcher-owned private
+handoff; do not reconstruct them from direct backend ports or print the keys.
+After starting an authorized local gateway/stack using the install runbook, use
+the same trusted generated handoff in the consumer shell:
 
 ```sh
+: "${GATEWAY_ENV_FILE:?set the private handoff path from the local launcher}"
+. "$GATEWAY_ENV_FILE"
 export EMBED_MODE=vllm
-export EMBED_BASE_URL=http://127.0.0.1:8001/v1
-export EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B   # fully qualified: the short id 404s
-export DENSE_DIM=1024
-export QDRANT_URL=http://127.0.0.1:6333
-export QDRANT_COLLECTION=mainframe_manuals
-export RERANK_BASE_URL=http://127.0.0.1:8002/v1   # only when a reranker is served
-# Answer-tier / eval-chat also need the reasoning leg (through the gateway
-# when one is running; LLM_API_KEY only when the gateway requires keys):
-export LLM_BASE_URL=http://127.0.0.1:4000/v1
-export LLM_MODEL_REASONING=google/gemma-4-E4B-it-qat-mobile-ct
+export RERANK_ENABLED=false  # selected two-backend topology; source first
+: "${EMBED_BASE_URL:?gateway handoff missing embedding URL}"
+: "${EMBED_MODEL:?gateway handoff missing model ID}"
+: "${EMBED_MODEL_REVISION:?gateway handoff missing revision}"
+: "${LLM_BASE_URL:?gateway handoff missing reasoning URL}"
+: "${LLM_MODEL_REASONING:?gateway handoff missing reasoning ID}"
+: "${DENSE_DIM:?export the dimension for the selected embed model}"
+: "${QDRANT_URL:?set the authorized disposable or local target}"
+: "${QDRANT_COLLECTION:?set the isolated collection for this run}"
+export DENSE_DIM QDRANT_URL QDRANT_COLLECTION
 ```
 
-Model ids must be fully qualified (`Qwen/Qwen3-Embedding-0.6B`, not
-`Qwen3-Embedding-0.6B`): vLLM answers the short id with 404 and the eval
-fails every query.
+The gateway handoff provides `EMBED_MODEL_REVISION` as a **local simulation**
+label (`local:<model-id>`); it is not immutable production weight attestation.
+Production requires the platform-declared revision through the
+[configuration contract](deploy.md#configuration-contract). Use the exact served
+model IDs; a short/basename guess can fail or route incorrectly. Explicit CLI,
+Make and environment selections must apply or fail nonzero; ambiguous discovery
+must not silently retain Settings values. Reranking, when selected, uses the
+handoff's gateway URL/key/order, never a backend consumer URL.
 
 Eval/collection pairing: hash ingest → hash-dim collection → hash eval;
 vLLM ingest → vLLM-dim collection → vLLM eval. Never cross the streams:
@@ -96,8 +154,9 @@ mismatch skip is not a pass (issue #159).
 
 ## 3. Verification ladder (run your class's rungs from §0)
 
-Run top to bottom for your change class. Each rung states its green condition — a red rung
-stops the push, no exceptions. *(Note: Deployment / air-gap / Helm / overlays changes pay `make check` + `make airgap-dryrun` — they do not owe the retrieval ladder rungs 2–7).*
+Run the relevant minimums and interactions selected in §0. Each rung states its
+green condition. Required acceptance failures block readiness; record a draft
+with the failure and next action when validation is blocked.
 
 1. `make check` — ruff, mypy, unit suite. Green: all clean.
 2. `make gate-l1` — L1 retrieval gate on the ephemeral simulator. Green: exit 0, 0 regressions.
@@ -192,7 +251,7 @@ CPU/RAM/disk (see `docs/deploy.md` §5), where prod has ≥10× local.
 |---|---|---|
 | Answer quality, rungs 5–6 (big reasoning + embed) | `LOCAL_RT_8GB` (default) | `:8000` E4B + `:8001` Qwen3-0.6B. No room for a third leg. |
 | Full topology plumbing, rungs 2–4 + 6 (weak answers OK) | `TRIPLE_8GB` | `:8000` 0.5B stand-in + `:8001` embed + `:8002` rerank. `LOCAL_RT_8GB` fails `ROLE=rerank` closed by design. |
-| Retrieval / rerank A/B, rungs 2–3 + 5 (no LLM VRAM) | `RANK_EMBED_8GB` | `:8001` embed + `:8002` rerank only. Consumer side still needs `RERANK_ENABLED=true RERANK_BASE_URL=http://127.0.0.1:8002`. |
+| Retrieval / rerank A/B, rungs 2–3 + 5 (no LLM VRAM) | `RANK_EMBED_8GB` | `:8001` embed + `:8002` rerank only. Consumers use `RERANK_ENABLED=true` and the gateway handoff URL/key (§2). |
 | Prod model pool (never local, never sized here) | `OPENSHIFT_PROD` (illustrative) | Platform-owned reasoning/embed/rerank; not run or sized from this repo. |
 
 Launch order on a cold card: reasoning → embed → rerank (a 4k-context
@@ -234,26 +293,21 @@ The full RC battery and its dated record live there.
 ## 6. Shell safety
 
 - Never switch branches while an ingest runs: parse workers spawn fresh processes that re-import the working tree — a mid-run switch mixes code versions across documents or crashes workers. Finish or kill the ingest first.
+- Quote shell expansions; never put JSON flags into an unquoted `${MODEL_ARGS}`.
+- Scope mode exports to the relevant Make targets with immediate `:=`; global
+  hash-mode exports leak into air-gap recipes. Match both `*embed*` and `*Embed*`.
 - Never `pkill -f` with a pattern matching your own command line (the shell kills itself); use the `[u]` trick (`pkill -f "[u]vicorn.*8087"`) or port-based kill.
 - Agent stdout goes to a file, never a pipe, under load (an unread pipe wedges every request).
 
 ## 7. Real-corpus etiquette
 
-Vendor corpora (point `$CORPUS_ROOT` at them) are read in place — never copied into the repo, never committed, never quoted at length outside the local machine. Ingest progress/inventory files go to `$SCRATCH_DIR` (persistent local disk), never the repo. Resume is the norm: re-running ingest skips completed docs (inventory + Qdrant sha check); transient embed timeouts under batch pile-up are retried, not debugged as parse bugs.
+Vendor corpora (point `$CORPUS_ROOT` at them) are read in place — never copied into the repo, never committed, never quoted at length outside the local machine. Ingest progress/inventory files go to `$SCRATCH_DIR` (persistent local disk), never the repo. Resume requires inventory plus verified completion/points (see ingest.md). Diagnose timeout and partial-work states before an operator rerun; there is no generic application POST retry promise.
 
-## 8. PR-body template
+## 8. Review evidence
 
-```md
-Fixes #<n> (<priority> <roadmap-id>). Single concern: <one line>.
-What changed: <files + behavior, one line per area>.
-Behavior changes called out: <defaults/caps/chunk bytes or NONE>.
-How tested: pytest <N> passed; mypy + ruff clean; gate-l1 <exit>;
-  paraphrase <exit>; sim <passed>/<skipped>; vllm eval <exit + numbers>;
-  eval-chat <literal vs condensed arms + condense p50, or N/A>.
-Live probes: <trap refuses / legit grounded / overlong 422s / /ui smoke, or N/A with reason>.
-Eval: <deltas vs mode-keyed baseline + per-query attribution, or N/A with reason>.
-Air-gap / copyright impact: none | <describe>.
-```
+Use [the shared review format](agent-workflow.md#review-handoff) and
+[PR template](../.github/pull_request_template.md). Record exact SHA, commands,
+exit codes, relevant counts, evidence locations and anything not run.
 
 ## Windows CRC alongside both real models
 

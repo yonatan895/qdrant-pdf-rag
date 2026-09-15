@@ -314,9 +314,11 @@ deploys, GHCR, or PDFs/tokens/hostnames in file). Job meaning stays
 aligned across the two files; only e2e-scale jobs live in
 `.github/workflows/e2e.yml`.
 
-- Markdown-only changes run no GitHub checks (`ci.yml`/`e2e.yml` paths-ignore
-  `**/*.md`); vendored-only bumps (including vendored docs) also run nothing.
-  Mixed changes run CI + E2E.
+- GitHub product `ci.yml`/`e2e.yml` ignore markdown-only changes. The narrow
+  `agent-context.yml` checks relevant instructions/docs/templates and its own tools,
+  including root-only AGENTS changes, without model/image/deployment work.
+  Vendored-only changes do not enter that context lane. Mixed changes retain
+  existing product CI/E2E behavior. GitLab hygiene runs the same offline checker.
 - `ci.yml`: hygiene (refuse committed PDFs), pytest (integration
   deselected), sim (docker Qdrant, fail-closed on skips/zero-pass), gate-l1
   with PR delta comment. Least-privilege permissions, timeouts, and
@@ -401,3 +403,122 @@ its manifest against the bundle first, then verify identical image config/rootfs
 diffIDs across the load, and the running digest against the loaded registry.
 Do not compare an archive digest blindly to a registry digest or accept a tag
 alone. Capture all five images, including every OAuth sidecar.
+
+<a id="deployment-policy"></a>
+## Deployment maintenance policy
+
+Hard boundaries from the root guide remain binding. CPython is 3.14 GIL;
+Qdrant server/client/chart track 1.19.0 and the unprivileged image. The connected
+main factory is the only product image builder. App references use one exact
+`ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<full-git-sha>` across tag,
+push, render, pack and load (retag local `mainframe-rag/*` images before push).
+Never short SHAs, latest product tags, `helm repo add` or builds in the gap.
+Tests explicitly supply pending/recorded OAuth pins; do not assume the production
+pin is pending. Lockfile/pin bumps are dedicated changes; refresh wheelhouse/BM25 on CPython 3.14
+and rebuild connected images. Do not add unused dependencies or unpublished
+extras such as `types-httpx2`; LiteLLM remains outside product dependencies.
+
+The platform owns production models/gateway/Splunk/GPU operators. Local model
+and gateway launchers stay out of product images/Helm/air-gap paths. The sole
+LiteLLM import exception is `scripts/gateway/strict_finish.py` inside the pinned
+local/CI gateway image: observe upstream finish, close the stream, fail closed
+when state is unavailable, retain clean-EOF fault checks on pin bumps. Production
+protection remains the platform's responsibility.
+
+Preserve separate CI/prod overlays and sizing. CI synthetic hash jobs never become
+prod ingest; production has no EMBED_MODE key, RWO block data/work storage,
+read-only caller corpus and two agent replicas. Qdrant chart IDs are explicitly
+null; Jaeger uses project-assigned IDs and `Recreate` for its single Badger writer.
+App source is read-only; required caches/work paths are group-0 writable. Never
+repair admission with `anyuid`. Verify an old trace survives replacement.
+
+Keep placeholders in git, render fails closed on leftover tokens, quote scalar
+environment values, and wire PULL_SECRET to Qdrant **and** agent/ingest. Deploy
+and ingest arguments reject unknown flags before operations. Snapshot administration
+runs in a temporary maintenance Job using the ingest image and write-key Secret;
+serving remains read-only. Jobs are deleted before re-apply because they are
+immutable. TLS bundles retain every required trust root and mount only into the
+application containers; missing ConfigMap/key fails closed. Gateway secrets use
+per-leg Secret references, never plaintext keys in airgap.env.
+
+Install/bootstrap, pipeline, migration and recovery recipes stay in their existing
+owners: [install](install_and_ops.md), [ingest](ingest.md#publication-contract),
+[local recovery](local-real-corpus.md), [CRC gate](crc-release-verification.md).
+Qdrant 1.19 snapshot file URIs must be under the configured snapshot directory;
+require completed recovery, provenance/count/dimension and vector compatibility
+before an alias. Never mix synthetic cleanup with preserved real-corpus resources.
+Transfer the identical tested bundle; missing/failed manual CRC checks block
+promotion. Sizing-only overrides do not establish SCC, residency or distributed HA.
+
+<a id="configuration-contract"></a>
+## Operator configuration propagation contract
+
+**Status:** implemented paths with shell/runtime test evidence; live deployment
+acceptance remains separately required. **Authority:** #245, #246–#248, #362/#391,
+and the current model-ownership agreement. **Decision owners:** `common.sh`
+override/require/normalization helpers, `validate.sh`, deploy/ingest renderers and
+`config.Settings` / `representation.require_attested_revision`.
+
+**Producer → state → consumers:** operator setting → `airgap.env.example` and
+explicit environment → `OPERATOR_ENV_KEYS` snapshot/restore around file loading
+→ `require_env` plus blank/preflight validation → both agent and ingest rendered
+environments → Settings and operation-specific interpretation. Trace every step
+for a newly required input; an example alone or agent-only render is insufficient.
+CI uses explicit synthetic values, never an attestation bypass. No real registry,
+URL, token or private environment file enters git or the transfer artifact.
+
+**Absent/blank semantics:** `common.sh` currently gives non-empty explicit env
+precedence and otherwise permits file/default resolution; required attestation
+rejects whitespace. Runtime bearer auth intentionally omits a header for an
+absent/empty/whitespace key. These are different owners/meanings: do not globally
+normalize blanks without tracing both consumers. `resolve_otel_endpoint` owns the
+separate unset=local-Jaeger and off/none/false/0=disabled policy across stages.
+
+**Preconditions/failures/lifetime:** platform-supplied model/dimension/revision and
+per-leg credentials must match the deployment. Gateway aliases are mutable and
+cannot attest weights. Secrets reach pods via Secret refs; rotations require the
+runbook's restart/verification. Local `GATEWAY_ENV_FILE` is launcher-owned and
+provides gateway URLs/model IDs/keys plus a local simulation revision label.
+Explicit CLI/Make/env model or endpoint overrides must apply or fail; ambiguous
+model discovery fails closed. No new production value is invented here.
+
+**Evidence:** `tests/test_airgap_validate_sh.py`, `test_airgap_deploy_sh.py`,
+`test_airgap_ingest_sh.py`, `test_airgap_pipeline_sh.py`, `test_config.py` and
+`test_representation_gate.py`. Render tests prove wiring under their fixtures;
+real trust/identity/model readiness still needs the application-pod gateway probe
+and release acceptance. `/healthz` plus search does not prove reasoning readiness.
+Known metadata/publication gaps remain #391; broader CI enforcement remains #370.
+
+<a id="ci-policy"></a>
+## CI and reviewer maintenance policy
+
+Keep root `.gitlab-ci.yml` and GitHub `ci.yml`; shared product hygiene/test meaning
+changes together. GitLab uses mirrored CI_PYTHON_IMAGE/CI_RUNNER_TAG and internal
+PIP_INDEX_URL or PIP_FIND_LINKS, failing closed without a package source. No
+public network, GHCR, deploy/pack/image-build or opencode reviewer in GitLab.
+Issue #397 authorizes the offline context check in hygiene and a small GitHub
+context workflow; general lint/type/coverage/ruleset changes remain #370.
+
+Third-party actions use full SHA pins; document runtime downloads outside that
+pin. Runtime artifacts need pinned versions and in-repo SHA256 verification;
+never unpinned curl-to-shell in secret/id-token jobs. Invoke pinned tools by
+absolute path. New/changed jobs require least-privilege permissions, bounded
+timeouts, concurrency with a run-ID fallback, secret/fork guards where relevant,
+and third-party sharing off. Existing enforcement gaps are not permission to
+claim compliance. Reviewer install steps remain inline: local composite actions
+can re-resolve a moved checkout during post-processing.
+
+Rehearsal lanes bootstrap the same downloaded bundle in fresh directories; never
+repack. Bracket every injected fault with healthy control/recovery. Retire the
+old mock pod and verify requested state through its Service from the gateway pod;
+readiness alone cannot prove which fault is served. Project gateway config/modules
+through one volume, without nested read-only subPath mounts. Wait for an
+authenticated certificate-verified Service read before key creation; only transient
+connection startup is retried within the setup deadline, never key/model requests.
+Streams need content, successful finish and DONE; faults/truncation fail.
+
+Connected E2E stays in `e2e.yml`, with ephemeral namespaces and always-run cleanup.
+The opencode inline prompts are repository-controlled review entry points;
+they must follow [the review contract](agent-workflow.md#review-handoff), inspect
+affected unchanged callers and classify evidence gaps honestly. Their actual
+loader/environment acceptance remains an explicit audit item under #397.

@@ -92,6 +92,15 @@ typecheck: | .venv
 .PHONY: check
 check: lint typecheck test
 
+# Offline context/prerequisite tools intentionally have no .venv/install dependency.
+.PHONY: check-context agent-doctor
+check-context:
+	"$(PY)" scripts/check_agent_context.py
+
+PROFILE ?= unit
+agent-doctor:
+	"$(PY)" scripts/agent_doctor.py --profile "$(PROFILE)"
+
 # ---------------------------------------------------------------- images (connected host)
 # The air-gap never builds (issue #15): connected main is the only image
 # factory, and e2e.yml tags these images with the full git SHA.

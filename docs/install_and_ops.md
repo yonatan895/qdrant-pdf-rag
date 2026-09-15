@@ -242,7 +242,7 @@ When running local tooling (`make ask`, `make query-demo`, `test_local_e2e_vllm.
 | **`PROMPT_MAX_CONTEXT_CHARS`** | `8000` | `8000` (for simple queries) |
 | **`PROMPT_MAX_CONTEXT_CHARS_COMPLEX`** | `4500` | `4500` (reserves ~2.6k token headroom for reasoning) |
 | **`RERANK_ENABLED`** | `false` | `false` (cross-encoder rerank ships default-off; see §3.11) |
-| **`RERANK_BASE_URL`** | — | vLLM/TEI scoring endpoint (required when `RERANK_ENABLED=true`) |
+| **`RERANK_BASE_URL`** | Gateway handoff URL | Platform gateway scoring/rerank leg (required when `RERANK_ENABLED=true`) |
 | **`RERANK_MODEL`** | `BAAI/bge-reranker-v2-m3` | Must match the served reranker model |
 | **`LLM_STREAM`** | `true` via `make run-agent` | `false` (production default; enable only where TTFT metrics are wanted) |
 | **`UI_ENABLED`** | `"true"` via `make local-stack`; unset via `make run-agent` (fail-closed 404) | `"true"` from the prod overlay (console served; only the external Route is OAuth-protected) |
@@ -273,6 +273,7 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
   - `--max-num-batched-tokens` (embed server): capped at the Budget window so the memory-profiling peak stays bounded; it does not follow a `MAX_LEN` operator override (erring small is the safe side).
   - `MAX_LEN=4096` for **both** servers: the reasoning prompt budget requires it, and a 2048 embed window was rejected by tokenizer sweep — the worst-case embedded string (chunk header + a `SECTION_MAX_CHARS=3500` body with the 400-char split seed) measures ~2,043 tokens at ~2.0 chars/token on syntax-dense text. The budget is pinned hermetically by `tests/test_embed_budget.py`.
 * **Gemma-4 Support**: Automatically configures `--tool-call-parser gemma4`, `--reasoning-parser gemma4`, and `--chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja`.
+* **Make recipe contract**: `local-vllm*` passes the role and venv `BUDGET_PYTHON` per recipe, with an order-only `.venv` prerequisite. Re-run the tokenizer sweep before changing chunk constants or the embed-text header.
 * **Embedding Model Detection**: Model names matching `*embed*`/`*Embed*` (e.g. `Qwen/Qwen3-Embedding-0.6B`) derive `ROLE=embed` (overridable; `make local-vllm*` passes `ROLE` explicitly) and get the Budget pooling-runner serving shape automatically.
 * **WSL2 Compatibility**: Exports `VLLM_WSL2_ENABLE_PIN_MEMORY=1` for host memory stability.
 * **Safe Secrets**: Passes `HF_TOKEN` via `-e HF_TOKEN` without exposing secret tokens on command-line argument lists.
@@ -357,12 +358,15 @@ via the `LLM_REASONING_EFFORT_*` / `PROMPT_MAX_CONTEXT_CHARS*` Settings
 To verify the entire RAG pipeline from PDF generation and dense/sparse ingestion to HTTP retrieval and grounded LLM reasoning:
 
 ```bash
-# Start the real local gateway and source its private handoff first.
+# Use the trusted local handoff and the checks in live-stack.md first.
 . "$GATEWAY_ENV_FILE"
+: "${EMBED_MODEL_REVISION:?gateway handoff must include the local revision label}"
+: "${DENSE_DIM:?export the selected embedding dimension}"
+export DENSE_DIM
 export RERANK_ENABLED=false
 make test-vllm-e2e \
   MODEL="$LLM_MODEL_REASONING" VLLM_URL="$LLM_BASE_URL" \
-  EMBED_MODEL="$EMBED_MODEL" EMBED_URL="$EMBED_BASE_URL" DENSE_DIM=1024
+  EMBED_MODEL="$EMBED_MODEL" EMBED_URL="$EMBED_BASE_URL" DENSE_DIM="$DENSE_DIM"
 ```
 
 #### Test Execution Flow
@@ -437,7 +441,13 @@ snapshot_download(
 When working with runtime-supplied PDF corpora, start the real gateway, source
 its private `GATEWAY_ENV_FILE`, and export `RERANK_ENABLED=false` for the two-model
 configuration. The examples inherit the gateway URLs, served model IDs and
-per-leg keys from that handoff; keep model computation behind the gateway.
+per-leg keys and `EMBED_MODEL_REVISION` from that handoff; keep model computation
+behind the gateway. Follow [the environment handoff checks](live-stack.md#local-environment)
+first. The generated local revision label is a simulation label, never production
+weight attestation. Before modifying existing data, read the
+[publication/reader limitations](ingest.md#publication-contract); serialize writers
+and drain readers for in-place maintenance. These commands are operator actions,
+not prerequisites for a documentation change.
 
 #### 1. Initial Ingestion with Dense Embeddings
 ```bash
@@ -455,7 +465,7 @@ QDRANT_COLLECTION=mainframe_manuals \
 Mainframe RAG supports native **idempotent incremental ingestion** via the inventory tracking file (`--progress inventory.jsonl`):
 
 * **SHA-256 + rules-version detection**: On every run, `run_ingest` computes the SHA-256 digest of each discovered PDF and re-verifies the inventory `(sha256, rules_v, manifest_digest)` binding against Qdrant: a skip needs a valid per-revision completion (`completion.is_revision_committed` — marker for this target generation plus verified points), never a sampled point.
-* **Instant skipping**: A PDF already `upserted` with the same SHA-256 **and** the same extraction rules version in `inventory.jsonl` is skipped immediately (zero PDF parsing, zero embedding overhead).
+* **Verified skipping**: Inventory matches avoid parsing/embedding only after the target generation's completion and stored points verify; inventory status alone is insufficient.
 * **Extraction-rules changes**: a stored point whose `rules_v` differs is deleted and re-ingested; a non-empty collection written by a different rules version fails closed unless `--reingest` is passed (details in `docs/ingest.md` §9).
 * **Deterministic UUID5 Point IDs**: New chunks are assigned deterministic UUID5 keys and inserted directly into the existing Qdrant collection without deleting or modifying previously indexed vectors.
 * **Corrupted / Partial File Safety**: If ingestion was interrupted midway or a PDF failed earlier with an error, re-running `run_ingest` will pick up right where it left off, only processing un-ingested files.
@@ -648,7 +658,7 @@ the site explicitly enables it:
 |---|---|---|---|
 | Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
 | Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `VLLM_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` + `EMBED_MODEL_REVISION` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. `EMBED_MODEL_REVISION` is the operator-declared immutable model/config revision (a gateway alias is mutable and a dimension is not an identity): blank/whitespace-only values fail pre-flight and refuse agent/ingest startup, and a revision change requires a deliberate `--reingest` migration. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
-| Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `EMBED_BASE_URL`) | `RERANK_MODEL` | Served via a vLLM pooling server (`--runner pooling`, `/v1/score`; TEI `/v1/rerank` fallback). Point it at the reranker server — the embed default only fits single-server deployments. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: `RERANK_ENDPOINT_ORDER=rerank_first` for gateways (run `probe_gateway.py` below to decide). |
+| Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `EMBED_BASE_URL`) | `RERANK_MODEL` | Served via a vLLM pooling server (`--runner pooling`, `/v1/score`; TEI `/v1/rerank` fallback). Use the platform gateway rerank leg and its model ID; do not configure a direct-backend consumer shortcut. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: `RERANK_ENDPOINT_ORDER=rerank_first` for gateways (run `probe_gateway.py` below to decide). |
 
 Set the namespace to the same value chosen in `airgap.env` and create it if the
 site has not already provisioned it. Do not source a local-development handoff in
