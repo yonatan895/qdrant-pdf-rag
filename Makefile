@@ -125,6 +125,7 @@ airgap-dryrun:
 	  STORAGE_CLASS=gp3-csi \
 	  EMBED_MODEL=ibm-granite/granite-embedding-278m-multilingual \
 	  DENSE_DIM=768 \
+	  EMBED_MODEL_REVISION=dryrun-rev-1 \
 	  VLLM_BASE_URL=http://vllm.inference.svc.cluster.local:8000/v1 \
 	  CORPUS_PVC=corpus-pvc \
 	  sh scripts/airgap/pipeline.sh --dry-run

@@ -36,6 +36,9 @@ def test_kind_uses_real_gateway_for_both_legs():
     assert 'GATEWAY_API_KEY_SECRET=test-gateway-keys' in env_step
     assert 'GATEWAY_CA_CONFIGMAP=test-gateway-ca' in env_step
     assert 'DENSE_DIM=1024' in env_step
+    # Issue #391 F1: vllm mode needs an explicit stable revision; the mock
+    # gateway alias is mutable and never a weights identity.
+    assert 'EMBED_MODEL_REVISION=mock-embed@ci' in env_step
     assert 'RERANK_ENABLED=false' in env_step
     gateway_index = next(i for i, s in enumerate(steps) if 'deploy_test_gateway.sh' in s.get('run', ''))
     pipeline_index = next(i for i, s in enumerate(steps) if s.get('name', '').startswith('airgap-pipeline LIVE'))

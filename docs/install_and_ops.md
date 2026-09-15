@@ -619,6 +619,7 @@ EMBED_BASE_URL=https://gateway.example.test/v1
 LLM_BASE_URL=https://gateway.example.test/v1
 EMBED_MODEL=REPLACE_WITH_PLATFORM_EMBED_MODEL
 DENSE_DIM=REPLACE_WITH_PLATFORM_DIMENSION
+EMBED_MODEL_REVISION=REPLACE_WITH_PLATFORM_EMBED_REVISION
 LLM_MODEL_REASONING=REPLACE_WITH_PLATFORM_REASONING_MODEL
 
 # Gateway virtual keys: name of ONE operator-created Secret holding the
@@ -646,7 +647,7 @@ the site explicitly enables it:
 | Role | URL key | Model key | Notes |
 |---|---|---|---|
 | Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
-| Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `VLLM_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
+| Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `VLLM_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` + `EMBED_MODEL_REVISION` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. `EMBED_MODEL_REVISION` is the operator-declared immutable model/config revision (a gateway alias is mutable and a dimension is not an identity): blank/whitespace-only values fail pre-flight and refuse agent/ingest startup, and a revision change requires a deliberate `--reingest` migration. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
 | Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `EMBED_BASE_URL`) | `RERANK_MODEL` | Served via a vLLM pooling server (`--runner pooling`, `/v1/score`; TEI `/v1/rerank` fallback). Point it at the reranker server — the embed default only fits single-server deployments. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: `RERANK_ENDPOINT_ORDER=rerank_first` for gateways (run `probe_gateway.py` below to decide). |
 
 Set the namespace to the same value chosen in `airgap.env` and create it if the
@@ -986,7 +987,8 @@ The current recipe differs from older HTTP/direct-mock examples:
    LiteLLM/PostgreSQL deployment, CA and virtual-key Secrets.
 3. Only model computation uses `scripts/mock_vllm.py`, mounted from the fresh
    bundle's checkout. Set `MOCK_DIM=1024`, `EMBED_MODEL=mock-embed`,
-   `LLM_MODEL_REASONING=mock-reasoning`, `DENSE_DIM=1024` and
+   `LLM_MODEL_REASONING=mock-reasoning`, `DENSE_DIM=1024`,
+   `EMBED_MODEL_REVISION=mock-embed@ci` and
    `RERANK_ENABLED=false`; consumer URLs are `https://test-gateway:4000/v1`.
    Set `GATEWAY_API_KEY_SECRET=test-gateway-keys` and
    `GATEWAY_CA_CONFIGMAP=test-gateway-ca`.

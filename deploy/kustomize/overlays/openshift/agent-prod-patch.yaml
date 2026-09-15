@@ -31,6 +31,10 @@ spec:
               value: __EMBED_MODEL__
             - name: DENSE_DIM
               value: __DENSE_DIM__
+            # Issue #391 F1: vllm embedding mode refuses a blank attestation
+            # at agent startup; the deploy pre-flight requires the same value.
+            - name: EMBED_MODEL_REVISION
+              value: __EMBED_MODEL_REVISION__
             - name: LLM_BASE_URL
               value: __LLM_BASE_URL__
             - name: LLM_MODEL_REASONING

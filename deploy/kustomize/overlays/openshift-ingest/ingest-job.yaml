@@ -40,6 +40,10 @@ spec:
               value: __EMBED_MODEL__
             - name: DENSE_DIM
               value: __DENSE_DIM__
+            # Issue #391 F1: representation preflight refuses a blank
+            # attestation; ingest.sh requires the same value pre-flight.
+            - name: EMBED_MODEL_REVISION
+              value: __EMBED_MODEL_REVISION__
             # OTel (issue #83): endpoint substituted from
             # OTEL_EXPORTER_OTLP_ENDPOINT in airgap.env (unset resolves to the
             # in-cluster Jaeger; the `off` sentinel renders empty).

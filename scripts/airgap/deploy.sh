@@ -11,7 +11,8 @@
 
 enforce_product_rules
 resolve_aliases
-require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM VLLM_BASE_URL
+require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION VLLM_BASE_URL
+require_embed_revision
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
 check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
@@ -107,6 +108,7 @@ kustomize_render "$AGENT_OVERLAY" | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
     -e "s|__QDRANT_RELEASE__|$QDRANT_RELEASE|g" \
     -e "s|__EMBED_BASE_URL__|$EMBED_BASE_URL|g" \
     -e "s|__EMBED_MODEL__|$EMBED_MODEL|g" \
+    -e "s|__EMBED_MODEL_REVISION__|$EMBED_MODEL_REVISION|g" \
     -e "s|__DENSE_DIM__|\"$DENSE_DIM\"|g" \
     -e "s|__LLM_BASE_URL__|${LLM_BASE_URL:-}|g" \
     -e "s|__LLM_MODEL_REASONING__|${LLM_MODEL_REASONING:-}|g" \

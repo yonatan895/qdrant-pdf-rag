@@ -11,7 +11,8 @@
 
 enforce_product_rules
 resolve_aliases
-require_env INTERNAL_REGISTRY NAMESPACE IMAGE_SHA CORPUS_PVC EMBED_MODEL DENSE_DIM VLLM_BASE_URL STORAGE_CLASS
+require_env INTERNAL_REGISTRY NAMESPACE IMAGE_SHA CORPUS_PVC EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION VLLM_BASE_URL STORAGE_CLASS
+require_embed_revision
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
 check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
@@ -59,6 +60,7 @@ kustomize_render deploy/kustomize/overlays/openshift-ingest | sed -E 's|"(__[A-Z
     -e "s|__QDRANT_RELEASE__|$QDRANT_RELEASE|g" \
     -e "s|__EMBED_BASE_URL__|$EMBED_BASE_URL|g" \
     -e "s|__EMBED_MODEL__|$EMBED_MODEL|g" \
+    -e "s|__EMBED_MODEL_REVISION__|$EMBED_MODEL_REVISION|g" \
     -e "s|__DENSE_DIM__|\"$DENSE_DIM\"|g" \
     -e "s|__CORPUS_PVC__|$CORPUS_PVC|g" \
     -e "s|__INGEST_WORKERS__|\"$INGEST_WORKERS\"|g" \

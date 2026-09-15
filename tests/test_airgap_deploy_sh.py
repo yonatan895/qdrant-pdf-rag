@@ -42,6 +42,8 @@ spec:
           env:
             - name: EMBED_MODEL
               value: __EMBED_MODEL__
+            - name: EMBED_MODEL_REVISION
+              value: __EMBED_MODEL_REVISION__
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
             - name: IMAGE_SHA
@@ -172,6 +174,7 @@ def _run(tree, *extra_env):
         "STORAGE_CLASS": "standard",
         "EMBED_MODEL": "embed",
         "DENSE_DIM": "64",
+        "EMBED_MODEL_REVISION": "rev-1",
         "VLLM_BASE_URL": "http://vllm:8000",
     }
     for k, v in extra_env:
@@ -304,7 +307,33 @@ def test_rendered_manifest_substituted_and_written(tree):
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     assert "reg.internal/qdrant-pdf-rag-agent" in rendered
+    # Issue #391 F1: the operator-declared revision reaches the agent
+    # container (the agent refuses a blank attestation at startup).
+    assert re.search(r"(?m)^\s*- name: EMBED_MODEL_REVISION$", rendered)
+    assert re.search(r"(?m)^\s*value: rev-1$", rendered)
     assert_no_placeholders(rendered)
+
+
+def test_missing_embed_revision_fails_before_render(tree):
+    r = _run(tree, ("EMBED_MODEL_REVISION", ""))
+    assert r.returncode != 0
+    assert "required variables unset" in r.stderr and "EMBED_MODEL_REVISION" in r.stderr
+
+
+def test_whitespace_embed_revision_fails_before_render(tree):
+    r = _run(tree, ("EMBED_MODEL_REVISION", "  "))
+    assert r.returncode != 0
+    assert "EMBED_MODEL_REVISION must be a non-blank" in r.stderr
+
+
+def test_agent_overlay_embed_revision_contract():
+    """The stub above mirrors the real prod overlay by hand — pin the real
+    file to the same revision contract so the two cannot silently diverge."""
+    real = (
+        REPO / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml"
+    ).read_text()
+    assert re.search(r"(?m)^\s*- name: EMBED_MODEL_REVISION$", real)
+    assert re.search(r"(?m)^\s*value: __EMBED_MODEL_REVISION__$", real)
 
 
 # ------------------------------------------------------- Jaeger / tracing (#83)
