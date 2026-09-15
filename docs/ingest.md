@@ -357,7 +357,7 @@ thread pool.
   manifest point in `<collection>__completions` (get-by-id, no index;
   written only when the stored contract differs, so steady-state reruns
   stay zero-write) plus an `action: representation` run-log line, and
-  inventory record carries the 16-hex `manifest_digest`. The manifest is
+  every completion + inventory record carries the 16-hex `manifest_digest`. The manifest is
   the stored-representation contract — extraction rules, identity schema
   (`doc_id` until the 361B migration), dense mode/model/operator-revision/
   dim, contextual block (enabled, LLM id, prompt version, max chars),
