@@ -2,6 +2,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import patch
 
 from scripts.check_agent_context import CHAIN_BUDGET, REQUIRED, check
 
@@ -105,6 +106,41 @@ class ContextCheckTests(TestCase):
         errors = check(self.root)[0]
         self.assertEqual(len(errors), 1)
         self.assertIn('legacy/CONTEXT.md: instruction file missing from audited chains', errors[0])
+
+    def test_template_repository_urls_require_expected_host_repo_ref_and_scheme(self):
+        for target in (
+            'https://example.org/yonatan895/qdrant-pdf-rag/blob/main/docs/owner.md#contract',
+            'https://github.com/yonatan895/other/blob/main/docs/owner.md#contract',
+            'https://github.com/yonatan895/qdrant-pdf-rag/blob/other/docs/owner.md#contract',
+            'http://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/owner.md#contract',
+            'https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/owner.md?raw=1#contract',
+        ):
+            with self.subTest(target=target):
+                (self.root/'.github/pull_request_template.md').write_text(f'[Guide]({target})')
+                self.assertTrue(any('expected canonical repository URL' in e for e in check(self.root)[0]))
+        (self.root/'.github/pull_request_template.md').write_text(
+            '[Empty](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/)')
+        self.assertTrue(any('must name a repository-relative file' in e for e in check(self.root)[0]))
+
+    def test_canonical_urls_cannot_read_outside_repository(self):
+        with TemporaryDirectory() as outside:
+            private = Path(outside)/'secret.md'
+            private.write_text('<a id="private"></a>\nPRIVATE-CONTENT')
+            (self.root/'docs/link.md').symlink_to(private)
+            original = Path.read_bytes
+
+            def guarded_read(path):
+                self.assertNotEqual(path.resolve(), private)
+                return original(path)
+
+            with patch.object(Path, 'read_bytes', guarded_read):
+                for target in ('docs/link.md#private', '../outside.md', '%2e%2e/outside.md'):
+                    with self.subTest(target=target):
+                        (self.root/'.github/pull_request_template.md').write_text(
+                            '[Guide](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/'+target+')')
+                        errors = check(self.root)[0]
+                        self.assertTrue(any('stay inside' in e for e in errors))
+                        self.assertFalse(any('PRIVATE-CONTENT' in e for e in errors))
 
     def test_unlisted_instruction_and_vendor_exclusion(self):
         (self.root/"src").mkdir()

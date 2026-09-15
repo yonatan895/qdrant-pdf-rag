@@ -306,9 +306,12 @@ templates under `.github/` are copied into issue/PR bodies, so they must use
 explicit canonical repository-file URLs
 (`https://github.com/yonatan895/qdrant-pdf-rag/blob/main/...` with an explicit
 `#anchor`); the checker maps that prefix offline to the current checkout and
-applies the same repository-containment and explicit-anchor checks without
-network access. Relative local links inside `.github/` templates are rejected.
-Unrelated external links are not crawled.
+validates scheme, host, repository and ref, then applies the shared containment
+and explicit-anchor checks, including decoded paths and symlinks, without network
+access. Relative local links inside `.github/` templates are rejected.
+Unrelated external links are not crawled. Inspect a rendered body preview when
+changing template links; before merge, use a head-pinned equivalent for
+click-through, since a new file/anchor may not exist on `main` yet.
 The checker does not establish semantic consistency or agent understanding.
 
 `make agent-doctor` defaults to `unit`; `PROFILE=sim` and `PROFILE=deploy` add

@@ -7,6 +7,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 ROOT_BUDGET = 8192
 CHAIN_BUDGET = 24576
@@ -34,14 +35,14 @@ def local_target(root: Path, source: Path, target: str) -> tuple[Path, str]:
 
 def canonical_target(root: Path, target: str) -> tuple[Path, str]:
     """Map a canonical blob/main URL to a checkout path without network access."""
-    suffix = target[len(CANONICAL_PREFIX):]
-    path, _, anchor = suffix.partition("#")
-    if not path or Path(path).is_absolute():
+    actual, expected = urlsplit(target), urlsplit(CANONICAL_PREFIX)
+    if ((actual.scheme, actual.netloc) != (expected.scheme, expected.netloc)
+            or not actual.path.startswith(expected.path) or actual.query):
+        raise ValueError(f"expected canonical repository URL under {CANONICAL_PREFIX}")
+    relative = unquote(actual.path[len(expected.path):])
+    if not relative:
         raise ValueError("canonical link must name a repository-relative file")
-    result = (root / path).resolve()
-    if not result.is_relative_to(root):
-        raise ValueError("canonical link must stay inside the repository")
-    return result, anchor
+    return local_target(root, root/"AGENTS.md", relative+"#"+unquote(actual.fragment))
 
 
 def is_template_source(root: Path, source: Path) -> bool:
@@ -86,32 +87,26 @@ def check(root: Path, client_limit: int | None = None) -> tuple[list[str], list[
         return texts[path]
 
     def links(source: Path, text: str) -> None:
+        template = is_template_source(root, source)
         for _, target in LINK.findall(text):
-            if target.startswith(CANONICAL_PREFIX):
-                try:
-                    path, anchor = canonical_target(root, target)
-                except ValueError as exc:
-                    errors.append(f"{source.relative_to(root)}: {target}: {exc}")
-                    continue
-                if not path.exists():
-                    errors.append(f"{source.relative_to(root)}: broken canonical reference {target}")
-                elif anchor and (not path.is_file() or anchor not in ANCHOR.findall(read(path))):
-                    errors.append(f"{source.relative_to(root)}: missing explicit anchor {target}")
-                continue
-            if re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:", target):
-                continue  # Unrelated external sources are never crawled.
-            if is_template_source(root, source):
-                errors.append(
-                    f"{source.relative_to(root)}: template links must use canonical repository URL: {target}"
-                )
-                continue
             try:
-                path, anchor = local_target(root, source, target)
+                url = urlsplit(target)
+                canonical = target.startswith(CANONICAL_PREFIX) or (template and bool(url.scheme) and "/blob/" in url.path)
+                if canonical:
+                    path, anchor = canonical_target(root, target)
+                elif url.scheme:
+                    continue  # Unrelated external sources are never crawled.
+                elif template:
+                    errors.append(f"{source.relative_to(root)}: template links must use canonical repository URL: {target}")
+                    continue
+                else:
+                    path, anchor = local_target(root, source, target)
             except ValueError as exc:
                 errors.append(f"{source.relative_to(root)}: {target}: {exc}")
                 continue
             if not path.exists():
-                errors.append(f"{source.relative_to(root)}: broken local reference {target}")
+                kind = "canonical" if canonical else "local"
+                errors.append(f"{source.relative_to(root)}: broken {kind} reference {target}")
             elif anchor and (not path.is_file() or anchor not in ANCHOR.findall(read(path))):
                 errors.append(f"{source.relative_to(root)}: missing explicit anchor {target}")
 
