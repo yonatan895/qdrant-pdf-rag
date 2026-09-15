@@ -57,7 +57,8 @@ The image bytes and application behavior remain those of the same candidate.
    stand-in. Mark this model computation as mocked in the record. Do not call the
    stand-in directly from agent or ingest.
 4. Source the private gateway handoff, then set `RERANK_ENABLED=false`,
-   `DENSE_DIM=1024`, the HTTPS consumer URLs and complete CA bundle as in the
+   `DENSE_DIM=1024`, `EMBED_MODEL_REVISION=local:Qwen/Qwen3-Embedding-0.6B`,
+   the HTTPS consumer URLs and complete CA bundle as in the
    local guide. Require `probe_gateway.py --require-reasoning --stream` to pass.
 5. With at least 14GiB available in Windows, start CRC at 12288MiB. Keep the
    original Kind nodes stopped. The smaller Qdrant request still matters for
@@ -275,9 +276,9 @@ starting template, changing exactly these coordinates:
 | `AGENT_ROUTE` | `false` |
 | `QDRANT_EXTRA_VALUES` / `INGEST_EXTRA_PATCH` | The Kind files' absolute paths |
 
-Keep the full SHA, original model IDs, dimension 1024, gateway HTTPS URLs,
-Secret/CA names, reranking disabled, 1Gi data/corpus/scratch sizing and Jaeger's
-10Gi claim. Clear host consumer URL/key exports before invoking deployment.
+Keep the full SHA, original model IDs, dimension 1024, the original
+`EMBED_MODEL_REVISION`, gateway HTTPS URLs, Secret/CA names, reranking
+disabled, 1Gi data/corpus/scratch sizing and Jaeger's 10Gi claim. Clear host consumer URL/key exports before invoking deployment.
 Keep `SNEAKERNET_TRUSTED_PUB` set to the independently trusted public PEM.
 
 ```sh

@@ -12,7 +12,8 @@ enforce_product_rules
 resolve_aliases
 
 echo "==> 1. Validating environment variables"
-require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM VLLM_BASE_URL
+require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION VLLM_BASE_URL
+require_embed_revision
 refuse_nfs_storage
 
 case "$DENSE_DIM" in
@@ -56,6 +57,7 @@ echo "    INTERNAL_REGISTRY: $INTERNAL_REGISTRY"
 echo "    NAMESPACE:         $NAMESPACE"
 echo "    STORAGE_CLASS:     $STORAGE_CLASS"
 echo "    EMBED_MODEL:       $EMBED_MODEL"
+echo "    EMBED_MODEL_REVISION: $EMBED_MODEL_REVISION"
 echo "    DENSE_DIM:         $DENSE_DIM"
 echo "    VLLM_BASE_URL:     $VLLM_BASE_URL"
 echo "    IMAGE_SHA:         $IMAGE_SHA"

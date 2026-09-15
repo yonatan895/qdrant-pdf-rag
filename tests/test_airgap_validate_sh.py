@@ -61,6 +61,7 @@ def _run(tree, extra_env=None):
         "STORAGE_CLASS": "standard",
         "EMBED_MODEL": "ibm-granite/granite-embedding-125m-english",
         "DENSE_DIM": "768",
+        "EMBED_MODEL_REVISION": "rev-1",
         "VLLM_BASE_URL": "http://vllm:8000/v1",
     }
     if extra_env:
@@ -190,6 +191,27 @@ def test_validate_dense_dim_zero_refused(tree):
     assert "DENSE_DIM must be greater than 0" in r.stderr
 
 
+def test_validate_missing_embed_revision_fails(tree):
+    """Issue #391 F1: vllm mode refuses a blank attestation at startup, so
+    a missing revision must fail pre-flight, not crash-loop the pods."""
+    r = _run(tree, {"EMBED_MODEL_REVISION": None})
+    assert r.returncode != 0
+    assert "EMBED_MODEL_REVISION" in r.stderr
+    assert "required variables unset" in r.stderr
+
+
+def test_validate_whitespace_embed_revision_fails(tree):
+    r = _run(tree, {"EMBED_MODEL_REVISION": "   "})
+    assert r.returncode != 0
+    assert "EMBED_MODEL_REVISION must be a non-blank" in r.stderr
+
+
+def test_validate_embed_revision_echoed(tree):
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "EMBED_MODEL_REVISION: rev-1" in r.stdout
+
+
 def test_validate_rerank_endpoint_order_bad_value_refused(tree):
     r = _run(tree, {"RERANK_ENDPOINT_ORDER": "bogus"})
     assert r.returncode != 0
@@ -229,6 +251,7 @@ INTERNAL_REGISTRY=wrong.invalid:5000
 NAMESPACE=file-ns
 STORAGE_CLASS=nfs-client
 EMBED_MODEL=file-model
+EMBED_MODEL_REVISION=file-rev-should-lose
 DENSE_DIM=not-a-number
 VLLM_BASE_URL=ftp://file-vllm:8000
 GATEWAY_API_KEY_SECRET=file-secret-should-lose
@@ -239,6 +262,7 @@ INTERNAL_REGISTRY=reg.internal:5000
 NAMESPACE=mainframe-rag
 STORAGE_CLASS=standard
 EMBED_MODEL=ibm-granite/granite-embedding-125m-english
+EMBED_MODEL_REVISION=file-rev-1
 DENSE_DIM=768
 VLLM_BASE_URL=http://vllm:8000/v1
 """
@@ -266,6 +290,7 @@ def test_explicit_env_beats_env_file(tree):
     assert "SUCCESS: Pre-flight validation passed (dry-run mode)." in r.stdout
     assert "GATEWAY_API_KEY_SECRET: explicit-secret" in r.stdout
     assert "file-secret-should-lose" not in r.stdout
+    assert "file-rev-should-lose" not in r.stdout
 
 
 def test_env_file_still_feeds_unset_vars(tree):
@@ -278,6 +303,7 @@ def test_env_file_still_feeds_unset_vars(tree):
             "NAMESPACE": None,
             "STORAGE_CLASS": None,
             "EMBED_MODEL": None,
+            "EMBED_MODEL_REVISION": None,
             "DENSE_DIM": None,
             "VLLM_BASE_URL": None,
         },

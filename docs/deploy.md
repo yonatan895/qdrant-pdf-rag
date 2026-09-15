@@ -51,7 +51,9 @@ restores the snapshot over whatever the file assigned; empty stays unset
   `git rev-parse HEAD`, and `EMBED_BASE_URL` derives from the vLLM URL with
   trailing slashes and a trailing `/v1` stripped.
 - `require_env` collects **all** missing keys before failing, so one run
-  tells the operator everything to fill in.
+  tells the operator everything to fill in. `EMBED_MODEL_REVISION` is a
+  required key on every air-gap launch path (vllm mode refuses a blank
+  attestation); `validate.sh` additionally rejects whitespace-only values.
 - Product rules: `EMBED_MODE=hash` dies (case-sensitive match on that exact
   string); storage classes containing `nfs` (any case) die — but only
   `STORAGE_CLASS` is checked, not snapshot/corpus classes.
@@ -241,7 +243,9 @@ cannot schedule on one node — proven).
   project-assigned UID and volume group from `restricted-v2` for Badger, 10Gi volume with 14-day span TTL, OTLP/HTTP 4318 only (no gRPC —
   `grpcio` is not in the wheelhouse, so 4317 stays closed), UI on
   port-forward only, no archive store (debug data, not records).
-- Validate is read-only pre-flight: required keys, `DENSE_DIM` positive
+- Validate is read-only pre-flight: required keys, non-blank
+  `EMBED_MODEL_REVISION` (the vllm attestation ingest/serving refuse when
+  blank), `DENSE_DIM` positive
   integer, `http(s)` vLLM URL, `http(s)` scheme on any set optional model
   URL (`EMBED/LLM/RERANK/CONTEXT_LLM_BASE_URL`), `RERANK_ENDPOINT_ORDER`
   limited to `score_first`/`rerank_first`, `GATEWAY_API_KEY_SECRET`
@@ -359,7 +363,8 @@ include actual runner CPU, RAM and disk capacity; cleanup runs even after failur
 | Manual Windows CRC | Actual SCC, Service CA, OAuth, Routes, node trust/pulls and runtime egress; record the fit outcome and fallback mode separately |
 
 Only computation behind LiteLLM is deterministic in the Kind lanes. The existing
-`mock_vllm.py` uses explicit model IDs, 1024-dimensional embeddings, synthetic
+`mock_vllm.py` uses explicit model IDs, 1024-dimensional embeddings, an explicit
+`EMBED_MODEL_REVISION` stand-in (`mock-embed@ci`), synthetic
 citation output and controlled faults. Mock citations establish interface
 behavior, not answer quality. The mock, CI deployment helpers and gateway module
 are excluded from application images and production manifests.

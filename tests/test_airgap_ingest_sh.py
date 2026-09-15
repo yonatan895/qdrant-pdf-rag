@@ -61,6 +61,8 @@ spec:
               value: __EMBED_BASE_URL__
             - name: EMBED_MODEL
               value: __EMBED_MODEL__
+            - name: EMBED_MODEL_REVISION
+              value: __EMBED_MODEL_REVISION__
             - name: DENSE_DIM
               value: __DENSE_DIM__
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -127,6 +129,7 @@ def _run_ingest(tree, *extra_env):
         "CORPUS_PVC": "my-manuals-pvc",
         "EMBED_MODEL": "test-embed",
         "DENSE_DIM": "768",
+        "EMBED_MODEL_REVISION": "rev-1",
         "VLLM_BASE_URL": "http://vllm:8000/v1",
         "AIRGAP_DRYRUN": "1",
     }
@@ -144,6 +147,22 @@ def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     assert "claimName: my-manuals-pvc" in rendered
     assert 'value: "4"' in rendered or "value: 4" in rendered
     assert "value: http://vllm:8000/v1" in rendered
+    # Issue #391 F1: the representation preflight refuses a blank revision,
+    # so the operator-declared value must reach the Job environment.
+    assert re.search(r"(?m)^\s*- name: EMBED_MODEL_REVISION$", rendered)
+    assert re.search(r"(?m)^\s*value: rev-1$", rendered)
+
+
+def test_ingest_missing_embed_revision_fails_closed(ingest_tree):
+    r = _run_ingest(ingest_tree, ("EMBED_MODEL_REVISION", ""))
+    assert r.returncode != 0
+    assert "required variables unset" in r.stderr and "EMBED_MODEL_REVISION" in r.stderr
+
+
+def test_ingest_whitespace_embed_revision_fails_closed(ingest_tree):
+    r = _run_ingest(ingest_tree, ("EMBED_MODEL_REVISION", "  "))
+    assert r.returncode != 0
+    assert "EMBED_MODEL_REVISION must be a non-blank" in r.stderr
 
 
 def test_ingest_identity_version_always_rendered(ingest_tree):

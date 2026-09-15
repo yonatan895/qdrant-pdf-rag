@@ -77,6 +77,7 @@ def _run_pipeline(pipe_tree, *args, extra_env=None):
         "STORAGE_CLASS": "standard",
         "EMBED_MODEL": "ibm-granite/granite-embedding-125m-english",
         "DENSE_DIM": "768",
+        "EMBED_MODEL_REVISION": "rev-1",
         "VLLM_BASE_URL": "http://vllm:8000/v1",
     }
     if extra_env:

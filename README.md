@@ -42,7 +42,7 @@ Production wiring — all three legs in `airgap.env` (see [docs/install_and_ops.
 | Role | URL key | Auth |
 |---|---|---|
 | Reasoning (`/v1/answer`, `/v1/chat*`, `/ui`) | `LLM_BASE_URL` + `LLM_MODEL_REASONING` | `llm-api-key` |
-| Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (+ `EMBED_MODEL` + `DENSE_DIM`) | `embed-api-key` |
+| Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (+ `EMBED_MODEL` + `DENSE_DIM` + `EMBED_MODEL_REVISION`) | `embed-api-key` |
 | Rerank (default off) | `RERANK_BASE_URL` + `RERANK_MODEL` + `RERANK_ENDPOINT_ORDER` | `rerank-api-key` |
 
 Keys live only in one operator-created Secret (`GATEWAY_API_KEY_SECRET`, rendered via `secretKeyRef` — never plaintext in `airgap.env`; unset = keyless). Before ingesting, prove every leg from inside the cluster and take the recommended leg order:

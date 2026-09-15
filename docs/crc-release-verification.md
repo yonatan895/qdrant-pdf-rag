@@ -389,7 +389,7 @@ including the OAuth container and completed Jobs.
    Confirm bootstrap verifies both signature and member checksums. Work only
    from this fresh clone; verify its HEAD equals the manifest SHA.
 4. Configure a local `AIRGAP_ENV` file with the registry, namespace, storage,
-   sizing hooks, model IDs/dimension, HTTPS gateway URLs, and Secret names.
+   sizing hooks, model IDs/dimension/operator revision, HTTPS gateway URLs, and Secret names.
    Populate the gateway and OAuth-cookie Secrets from local protected files.
    Do not put key values into the env file. Keep the exact bundle unmodified.
 5. Run `make airgap-validate`, then `make airgap-load`. Verify archive identity

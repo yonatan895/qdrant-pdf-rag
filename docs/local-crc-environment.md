@@ -619,6 +619,7 @@ LLM_BASE_URL=https://host.crc.testing:8444/v1
 EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B
 LLM_MODEL_REASONING=google/gemma-4-E4B-it-qat-mobile-ct
 DENSE_DIM=1024
+EMBED_MODEL_REVISION=local:Qwen/Qwen3-Embedding-0.6B
 RERANK_ENABLED=false
 AGENT_ROUTE=true
 PULL_SECRET=crc-registry-pull
