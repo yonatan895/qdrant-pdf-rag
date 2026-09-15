@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -57,7 +58,34 @@ def _clean_sim_collections(qdrant_url):
     deleted-and-reupserted mid-tier, perturbing score ordering."""
     for name in ("sim-hash", "sim-vllm"):
         httpx2.delete(f"{qdrant_url}/collections/{name}", timeout=10.0)
+    _drop_publish_fixture(qdrant_url)
     yield
+
+
+PUBLISH_ALIAS = "sim-publish"
+
+
+def _drop_publish_fixture(qdrant_url: str) -> None:
+    """Remove the alias-publish fixture state (alias + every generation and
+    its completions) so a warm server cannot certify a stale live generation."""
+    from qdrant_client import QdrantClient, models
+
+    client = QdrantClient(url=qdrant_url, timeout=10)
+    try:
+        aliases = [a for a in client.get_aliases().aliases if a.alias_name == PUBLISH_ALIAS]
+        if aliases:
+            client.update_collection_aliases(
+                [
+                    models.DeleteAliasOperation(
+                        delete_alias=models.DeleteAlias(alias_name=PUBLISH_ALIAS)
+                    )
+                ]
+            )
+        for desc in client.get_collections().collections:
+            if desc.name.startswith(PUBLISH_ALIAS):
+                client.delete_collection(desc.name)
+    finally:
+        client.close()
 
 
 @pytest.fixture(scope="session")
@@ -185,6 +213,74 @@ def test_ingest_real_server_and_resume(qdrant_url, corpus, tmp_path, monkeypatch
     # Resume: fresh inventory, warm Qdrant -> qdrant-level sha skip, no new work.
     resume = _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv2.jsonl")
     assert [r["status"] for r in resume] == ["skipped"] * 3
+
+
+def test_alias_publish_rekeys_manifest_across_clone(qdrant_url, corpus, tmp_path, monkeypatch):
+    """Issue #391 F5 against the real server: a second publish (changed
+    corpus -> new staging generation) clones live's points AND completion
+    markers, then must re-key the manifest with the real retrieve projection
+    (`retrieve` defaults to `with_vectors=False`). Before the fix the re-key
+    silently failed, the inner preflight read the inherited data as legacy,
+    and publication aborted; the permissive in-memory fakes hid it."""
+    from qdrant_client import QdrantClient
+    from scripts.make_synthetic_pdf import build
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.qdrant_io import resolve_live_collection, scroll_all_points
+    from mainframe_rag.ingest.representation import read_manifest
+
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    local = tmp_path / "publish-corpus"
+    local.mkdir()
+    for pdf in corpus.iterdir():
+        shutil.copy(pdf, local / pdf.name)
+    progress = tmp_path / "inv.jsonl"
+    first = _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress)
+    assert [r["status"] for r in first] == ["upserted"] * 3
+
+    # A new document changes the corpus fingerprint -> a distinct staging
+    # generation, so the second publish must clone + re-key live metadata.
+    build(
+        local / "SA22-8888-02.pdf",
+        doc_id="SA22-8888-02",
+        title="Synthetic Data Set Utility Reference",
+        message_id="IEC900I",
+    )
+    second = _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress)
+    # The progress file is append-only: the second run's records are the tail.
+    second_records = second[len(first):]
+    # Completion markers certify their own target_collection, so the cloned
+    # staging re-embeds the walked corpus (never a cross-generation skip):
+    # all four docs upsert. Before the F5 fix this run aborted instead —
+    # the un-rekeyed manifest read as legacy during the inner preflight.
+    assert sorted(r["status"] for r in second_records) == ["upserted"] * 4
+
+    settings = Settings(
+        _env_file=None,
+        qdrant_url=qdrant_url,
+        qdrant_collection=PUBLISH_ALIAS,
+        embed_mode="hash",
+        allow_hash_mode=True,
+    )
+    client = QdrantClient(url=qdrant_url, timeout=10)
+    try:
+        physical, legacy = resolve_live_collection(client, settings)
+        assert legacy is False and physical is not None
+        assert "__gen" in physical, "publish must serve a physical generation behind the alias"
+        manifest = read_manifest(client, f"{physical}__completions")
+        assert manifest is not None, "staging manifest must be readable after the clone + re-key"
+        assert manifest.schema_version == 1
+        points = scroll_all_points(
+            client, physical, scroll_filter=None, with_payload=["doc_id"], page_size=100
+        )
+        assert {p.payload.get("doc_id") for p in points} == {
+            "SA22-0000-00",
+            "SA22-7777-01",
+            "SA22-8888-02",
+            "widget-guide",
+        }
+    finally:
+        client.close()
 
 
 def test_search_end_to_end_deterministic(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):

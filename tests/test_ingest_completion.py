@@ -139,7 +139,7 @@ class FailingFakeQdrant:
             stored = [p for p in stored if (p.payload or {}).get("source_rev") == rev]
         return stored[:limit], None
 
-    def retrieve(self, collection_name, ids, *, with_payload=True):
+    def retrieve(self, collection_name, ids, *, with_payload=True, with_vectors=False):
         from types import SimpleNamespace
 
         wanted = {str(i) for i in ids}

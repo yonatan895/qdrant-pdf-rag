@@ -67,10 +67,17 @@ class SyncStore:
     def scroll(self, name, *, scroll_filter=None, limit=10, with_payload=None, offset=None):
         return self._points.get(name, [])[:limit], None
 
-    def retrieve(self, name, ids, *, with_payload=True):
+    def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
         wanted = {str(i) for i in ids}
         return [
-            SimpleNamespace(id=p.id, payload=p.payload, vector=p.vector)
+            SimpleNamespace(
+                id=p.id,
+                payload=p.payload,
+                # Real client default: no vector unless explicitly requested
+                # (issue #391 F5 — a fake that always returns one hides the
+                # projection bug).
+                vector=p.vector if with_vectors else None,
+            )
             for p in self._points.get(name, [])
             if str(p.id) in wanted
         ]
@@ -287,7 +294,10 @@ def test_rekey_carries_contract_to_staging_id():
         )
     )
     assert rekey_manifest(store, live_comp, staging_comp) is True
-    got = store.retrieve(staging_comp, [manifest_point_id(staging_comp)])
+    # The fake honors the real projection default (no vector unless asked):
+    # rekey passes only because the production call requests vectors.
+    assert store.retrieve(live_comp, [manifest_point_id(live_comp)])[0].vector is None
+    got = store.retrieve(staging_comp, [manifest_point_id(staging_comp)], with_vectors=True)
     assert len(got) == 1
     assert got[0].payload["manifest"] == manifest.model_dump(mode="json")
     assert got[0].payload["target_collection"] == staging_comp

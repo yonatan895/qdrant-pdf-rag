@@ -157,7 +157,7 @@ class _ManifestFake:
         ]
         return pts[:limit], None
 
-    def retrieve(self, name, ids, *, with_payload=True):
+    def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
         store = self.points.get(name, {})
         return [SimpleNamespace(id=i, payload=store[i]) for i in ids if i in store]
 

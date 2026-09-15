@@ -147,10 +147,10 @@ class PublishFake:
             stored = [p for p in stored if (p.payload or {}).get("source_rev") == rev]
         return stored[:limit], None
 
-    def retrieve(self, collection, ids, *, with_payload=True):
+    def retrieve(self, collection, ids, *, with_payload=True, with_vectors=False):
         wanted = {str(i) for i in ids}
         return [
-            SimpleNamespace(id=p.id, payload=p.payload, vector=p.vector)
+            SimpleNamespace(id=p.id, payload=p.payload, vector=p.vector if with_vectors else None)
             for p in self._resolve(collection)
             if str(p.id) in wanted
         ]
@@ -309,6 +309,107 @@ def test_refresh_publishes_new_generation_and_keeps_old(tmp_path, monkeypatch):
     assert gen1 in fake.collections
     assert {p.payload["doc_id"] for p in fake.collections[gen1]} == {"SA22-0000-00"}
     assert f"{gen1}__completions" in fake.collections
+    # The new staging inherited live's contract through the clone + re-key
+    # (issue #391 F5): the fake honors the real retrieve projection default,
+    # so this passes only because rekey_manifest requests vectors explicitly.
+    from mainframe_rag.ingest.representation import read_manifest
+
+    assert read_manifest(fake, f"{gen2}__completions") is not None
+
+
+def _staging_settings(collection: str) -> Settings:
+    return _settings(qdrant_collection=collection)
+
+
+def test_staging_metadata_repair_after_interrupted_metadata_clone(tmp_path, monkeypatch):
+    """Issue #391 F5: a crash after the data clone but before the completions
+    clone leaves staging data with no readable metadata. Reuse must repair
+    (re-transfer live's contract), not publish from incomplete preparation."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import ensure_staging
+    from mainframe_rag.ingest.representation import read_manifest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+    assert _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl") == 0
+    live = fake.aliases[ALIAS]
+    live_points = list(fake.collections[live])
+    live_completions = list(fake.collections[f"{live}__completions"])
+
+    staging = "mainframe_manuals__genDEADBEEF0123456789ab"
+    fake.collections[staging] = list(live_points)  # data clone got through
+
+    assert ensure_staging(fake, _settings(), _staging_settings(staging), live) == "repaired"
+    assert read_manifest(fake, f"{staging}__completions") is not None
+    assert fake.aliases[ALIAS] == live, "repair never moves the alias"
+    assert fake.collections[live] == live_points, "live data untouched"
+    assert fake.collections[f"{live}__completions"] == live_completions, "live metadata untouched"
+
+
+def test_staging_metadata_repair_after_failed_rekey(tmp_path, monkeypatch):
+    """Metadata was cloned but the re-key never ran: the copied manifest
+    point still carries the live id, so staging reads no manifest. Reuse
+    re-keys verbatim from live instead of reading inherited state as legacy."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import ensure_staging
+    from mainframe_rag.ingest.representation import read_manifest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+    assert _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl") == 0
+    live = fake.aliases[ALIAS]
+    contract = read_manifest(fake, f"{live}__completions")
+    assert contract is not None
+
+    staging = "mainframe_manuals__genFEDCBA9876543210abcd"
+    fake.collections[staging] = list(fake.collections[live])
+    fake.collections[f"{staging}__completions"] = list(fake.collections[f"{live}__completions"])
+
+    assert ensure_staging(fake, _settings(), _staging_settings(staging), live) == "repaired"
+    assert read_manifest(fake, f"{staging}__completions") == contract
+    assert fake.aliases[ALIAS] == live
+
+
+def test_incomplete_metadata_transfer_never_publishes(tmp_path, monkeypatch):
+    """A source that cannot yield its manifest vector must fail preparation
+    loudly: no silent 'reused', live untouched, no publish path."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import ensure_staging
+
+    class _NoVectorStore(PublishFake):
+        def retrieve(self, collection, ids, *, with_payload=True, with_vectors=False):
+            wanted = {str(i) for i in ids}
+            return [
+                SimpleNamespace(id=p.id, payload=p.payload, vector=None)
+                for p in self._resolve(collection)
+                if str(p.id) in wanted
+            ]
+
+    _publish_env(monkeypatch)
+    fake = _NoVectorStore()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+    assert _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl") == 0
+    live = fake.aliases[ALIAS]
+    live_points = list(fake.collections[live])
+    live_completions = list(fake.collections[f"{live}__completions"])
+
+    staging = "mainframe_manuals__gen00112233445566778899"
+    with pytest.raises(RuntimeError, match="staging metadata transfer failed"):
+        ensure_staging(fake, _settings(), _staging_settings(staging), live)
+    assert fake.aliases[ALIAS] == live
+    assert fake.collections[live] == live_points
+    assert fake.collections[f"{live}__completions"] == live_completions
 
 
 def test_staging_invisible_until_swap(tmp_path, monkeypatch):

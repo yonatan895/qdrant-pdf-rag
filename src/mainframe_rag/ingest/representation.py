@@ -360,13 +360,20 @@ def rekey_manifest(
     from current settings, or a drifted run would see its own wanted
     contract and sail through its preflight. Returns False when the source
     carries no manifest (legacy live: the inner preflight then reports
-    legacy explicitly)."""
+    legacy explicitly).
+
+    The vector projection is explicit (issue #391 F5): `retrieve` defaults
+    to `with_vectors=False`, so relying on the client default made this
+    return False against every real server while the permissive fakes hid
+    it. A source point without a vector is still refused — never fabricate
+    the destination contract from current settings."""
     if not client.collection_exists(src_completions):
         return False
     points = client.retrieve(
         src_completions,
         ids=[manifest_point_id(src_completions)],
         with_payload=True,
+        with_vectors=True,
     )
     if not points:
         return False

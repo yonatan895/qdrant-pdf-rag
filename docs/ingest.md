@@ -460,12 +460,16 @@ thread pool.
   (read-only re-verify, no clone, no swap — plus the representation
   read-only check, since a revision-only change keeps the same staging
   name and would otherwise re-verify stale vectors as fine). Staging starts as a
-  server-side snapshot-clone of live (points AND completion markers, so
-  unchanged documents skip without re-embedding) and the manifest is
+  server-side snapshot-clone of live (points AND completion markers); a
+  marker certifies its own `target_collection`, so the walked corpus
+  re-embeds into the new generation rather than skipping across physicals
+  — the clone guarantees an untouched, complete old generation until the
+  swap, not incremental re-embedding. The manifest is
   re-keyed onto the staging id verbatim (`rekey_manifest` — the fixed
   point id embeds the collection name, so a byte copy is unreadable; the
   contract is carried, never recomputed, or a drifted run would see its
-  own wanted contract and sail through its preflight); the inner run then
+  own wanted contract and sail through its preflight; the transfer is
+  verified and repaired on reuse, issue #391 F5); the inner run then
   enforces the same preflight, so a cloned staging under a changed
   representation fails closed until `--reingest` reconverges it. The alias swaps in one atomic
   delete+create call only after `verify_all_complete` passes every walked

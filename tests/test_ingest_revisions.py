@@ -107,7 +107,7 @@ class RevisionFake:
         nxt = start + limit if start + limit < len(stored) else None
         return page, nxt
 
-    def retrieve(self, name, ids, *, with_payload=True):
+    def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
         wanted = {str(i) for i in ids}
         return [
             SimpleNamespace(id=p.id, payload=p.payload)
