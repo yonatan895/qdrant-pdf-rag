@@ -351,12 +351,12 @@ class ServingManifestQdrant:
         self.points = points
         self.explode = explode
 
-    async def retrieve(self, name, ids, *, with_payload=True):
+    async def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
         if self.explode:
             raise ConnectionError("refused")
         if self.envelope is None:
             return []
-        return [SimpleNamespace(payload=self.envelope)]
+        return [SimpleNamespace(payload=self.envelope, vector=None)]
 
     async def scroll(self, name, *, scroll_filter=None, limit=10, with_payload=None,
                      offset=None):

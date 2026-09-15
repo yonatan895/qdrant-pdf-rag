@@ -323,7 +323,7 @@ def test_nondry_collision_writes_nothing(tmp_path, monkeypatch):
         def scroll(self, *a, **k):
             return [], None
 
-        def retrieve(self, name, ids, *, with_payload=True):
+        def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
             return []
 
         def upsert(self, name, *, points, wait=True):

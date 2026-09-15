@@ -213,7 +213,7 @@ class _FakeQdrant:
 
         return SimpleNamespace()
 
-    def retrieve(self, collection_name, ids, *, with_payload=True):
+    def retrieve(self, collection_name, ids, *, with_payload=True, with_vectors=False):
         from types import SimpleNamespace
 
         wanted = {str(i) for i in ids}

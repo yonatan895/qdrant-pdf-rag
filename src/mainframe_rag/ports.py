@@ -126,6 +126,7 @@ class QdrantPoints(Protocol):
         ids: list[str],
         *,
         with_payload: bool | list[str],
+        with_vectors: bool = False,
     ) -> list[models.Record]: ...
 
     def delete(
@@ -236,6 +237,7 @@ class AsyncQdrantPoints(Protocol):
         ids: list[str],
         *,
         with_payload: bool | list[str],
+        with_vectors: bool = False,
     ) -> list[models.Record]: ...
 
     async def delete(

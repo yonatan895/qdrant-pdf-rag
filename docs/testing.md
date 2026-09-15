@@ -59,6 +59,12 @@ limit-slicing, dim-16 recording, and per-file cite shapes stay local
 with a comment saying why. A shared-helper change must never silently
 flip a fallback pin into a success pin.
 
+Double fidelity includes client-side defaults the production call relies
+on: a Qdrant `retrieve` double returns vectors only when `with_vectors=True`
+(issue #391 F5 — a double that always returned them hid a missing vector
+projection against every real server, and only the disposable-Qdrant lane
+caught it).
+
 ## Tests must lock the claimed path
 
 If the PR claims “CLI override”, “auto-detect”, “unwrap fence”, “sandbox env”, “IPC isolation”, or “dimension recreate”, the test must still pass when the **success** path is forced with mocks.
