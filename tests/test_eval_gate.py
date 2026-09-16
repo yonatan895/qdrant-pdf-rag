@@ -432,21 +432,40 @@ def test_expected_state_follows_behavior_and_overrides(monkeypatch):
 
 
 def test_repo_golden_rows_opt_into_acceptance_states():
-    """Every committed dev golden row carries the issue #365 acceptance
-    state, consistent with its expected behavior. The frozen holdout opts in
-    only through an adjudicated re-freeze, so it is deliberately not checked
-    here yet."""
-    rows = [
+    """Every committed golden and holdout row carries the issue #365
+    acceptance state, consistent with its expected behavior: the holdout
+    opts in through the adjudicated re-freeze."""
+    for path, expected_n in (("evals/golden.jsonl", 121), ("evals/holdout.jsonl", 72)):
+        rows = [
+            json.loads(line)
+            for line in Path(path).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert len(rows) == expected_n
+        for row in rows:
+            expected = (
+                "insufficient_evidence" if row["expected_behavior"] == "abstain" else "accepted"
+            )
+            assert row["expected_verification_state"] == expected, f"{path}:{row['id']}"
+
+
+def test_doc03_premise_correction_is_adjudicated():
+    """Issue #307/#365 disposition: DOC-03's false premise expects a premise
+    correction naming the real book, not a blind refusal or a confirmation of
+    the asserted identity. The builder override and the committed holdout row
+    must agree, and the state stays answer-tier `accepted`."""
+    from scripts import build_golden_corpus as bgc
+
+    assert bgc.GOLD_OVERRIDES["DOC-03"]["gold_must_contain"] == ["SC23-6858", "Magnetic Tapes"]
+    doc03 = next(
         json.loads(line)
-        for line in Path("evals/golden.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    assert len(rows) == 121
-    for row in rows:
-        expected = (
-            "insufficient_evidence" if row["expected_behavior"] == "abstain" else "accepted"
-        )
-        assert row["expected_verification_state"] == expected, row["id"]
+        for line in Path("evals/holdout.jsonl").read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["id"] == "DOC-03"
+    )
+    assert doc03["expected_behavior"] == "answer"
+    assert doc03["expected_verification_state"] == "accepted"
+    assert doc03["gold_must_contain"] == ["SC23-6858", "Magnetic Tapes"]
+    assert "premise correction" in doc03["note"]
 
 
 # --- absolute identifier gates (AGENTS.md: "identifier recall@1 strict 1.0") ---
