@@ -367,8 +367,17 @@ SEED_SYNTAX_PATTERNS = {
 # original assumption is preserved in the note). Always applied.
 DOC_CORRECTIONS = {
     "DOC-02": "seed note assumed 'MVS System Commands'; the corpus book SA23-1383-01 is z/OS MVS IPCS Customization - expectation bound to the real book",
-    "DOC-03": "seed note assumed 'JES2 Initialization and Tuning Reference'; SC23-6858-01 is z/OS DFSMS Using Magnetic Tapes - expectation bound to the real book",
+    "DOC-03": "seed note assumed 'JES2 Initialization and Tuning Reference'; SC23-6858-01 is z/OS DFSMS Using Magnetic Tapes - expectation bound to the real book; adjudicated 2026-09-16 (#307/#365): the correct outcome is a premise correction naming the real identity, so GOLD_OVERRIDES requires 'Magnetic Tapes' - a blind refusal is a measured failure",
     "DOC-04": "seed asked JES3 init/tuning vs commands; SC23-6862-00 is z/OS DFSMSdfp Checkpoint/Restart - neither; the number resolves to the real book",
+}
+
+# Adjudicated gold overrides (issues #307/#365), applied to the final entry by
+# id after binding/abstain flips: the seed expectation was wrong or incomplete
+# where listed, and the note records the decision. Keep gold phrase-tolerant
+# (case-fold substrings of fixed corpus facts) so the check tests the required
+# content, not one phrasing.
+GOLD_OVERRIDES: dict[str, dict] = {
+    "DOC-03": {"gold_must_contain": ["SC23-6858", "Magnetic Tapes"]},
 }
 
 # Applied only when the entry actually ends up abstain because its domain is
@@ -637,6 +646,12 @@ def main() -> int:
         new_entries.append(entry)
 
     entries = seed_entries + new_entries
+    for entry in entries:
+        # Adjudicated gold overrides land on the final entry (post flip), so
+        # the assertion block below validates the delivered expectation.
+        gold_override = GOLD_OVERRIDES.get(entry["id"])
+        if gold_override:
+            entry.update(gold_override)
     for entry in entries:
         entry.setdefault("must_not_retrieve", [])
         entry.setdefault("must_not_message_ids", [])
