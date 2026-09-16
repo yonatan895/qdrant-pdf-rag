@@ -331,6 +331,40 @@ async def test_answer_stream_disconnect_records_generation_incomplete(
 
 
 @pytest.mark.anyio
+async def test_answer_disconnect_after_error_frame_is_not_a_second_abort(
+    trunc_client, monkeypatch, caplog
+):
+    """Terminal frames count even when the client disappears during delivery
+    (PR #403 review): closing after the error frame must not record a second
+    client_disconnect — the upstream_error outcome already stands."""
+    from fastapi import Request, Response
+
+    from mainframe_rag.agent.app import AnswerRequest
+
+    recorded: list[tuple] = []
+    monkeypatch.setattr(
+        app_mod,
+        "record_request",
+        lambda endpoint, outcome, **kw: recorded.append((endpoint, outcome)),
+    )
+    with caplog.at_level(logging.WARNING, logger="agent"):
+        response = await app_mod.v1_answer(
+            Request(_scope("/v1/answer")),
+            AnswerRequest(query="IEA500I command"),
+            Response(),
+            stream=True,
+        )
+        body = response.body_iterator
+        assert "event: token" in await body.__anext__()
+        assert "event: error" in await body.__anext__()
+        await body.aclose()
+
+    assert ("answer", "upstream_error") in recorded
+    assert not any(outcome == "client_disconnect" for _, outcome in recorded)
+    assert not any('"client_disconnect"' in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.anyio
 async def test_chat_stream_disconnect_records_generation_incomplete(
     hang_client, monkeypatch, caplog
 ):

@@ -163,8 +163,9 @@ same token→final contract with a UI-specific terminal event name.
 terminal chunk with `finish_reason` carrying `citations`,
 `citations_inferred`, `inferred_indices`, and `hits` (chat chunks carry no
 `usage`), then `data: [DONE]`. A mid-stream failure emits one
-`data: {"error": {"code": "upstream_error", "message": "stream failed"}}`
-frame **followed by** `data: [DONE]` — never a fake `finish_reason`; clients
+`data: {"error": {"code": "upstream_error", "message": "stream failed"}, "verification_state": "generation_incomplete"}`
+frame (the strict `error` object plus the additive sibling state, issue #365)
+**followed by** `data: [DONE]` — never a fake `finish_reason`; clients
 must treat an error frame as failure even though `[DONE]` still arrives. The
 strict stream-end rule above is the upstream reasoning wire and the
 `/v1/answer` / `/ui` contract, not the OpenAI-compatible chat contract.
