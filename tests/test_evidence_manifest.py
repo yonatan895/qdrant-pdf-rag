@@ -209,24 +209,27 @@ def test_manifest_maps_nonconsecutive_labels_without_rank_arithmetic():
 
 
 def test_manifest_empty_when_verification_trims_every_excerpt():
-    """Zero supplied evidence is an empty manifest, not an implicit allowlist
-    of the retrieved pool."""
+    """Zero trimmable evidence against an irreducible fixed budget is an
+    explicit budget failure (issue #368), not an empty manifest: the old
+    silent over-budget return is gone. The error carries counts, never
+    prompt text."""
+    from mainframe_rag.agent.answer import PromptBudgetExceeded
+
     settings = _settings(
         llm_max_model_len=2000,
         llm_reserved_output_tokens=200,
         llm_token_safety_margin=50,
     )
-    prepared = build_messages(
-        "IEA500I",
-        [_hit(1), _hit(2)],
-        tokenizer=OvershootTokenizer(),
-        settings=settings,
-        complexity="simple",
-    )
-
-    assert prepared.evidence.entries == ()
-    assert prepared.evidence.omitted_indices == (1, 2)
-    assert prepared.evidence.allowed_citations == frozenset()
+    with pytest.raises(PromptBudgetExceeded) as exc_info:
+        build_messages(
+            "IEA500I",
+            [_hit(1), _hit(2)],
+            tokenizer=OvershootTokenizer(),
+            settings=settings,
+            complexity="simple",
+        )
+    assert exc_info.value.used > exc_info.value.limit
+    assert "IEA500I" not in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -303,21 +306,19 @@ async def test_supplied_bracket_marker_maps_to_prompt_label():
 
 @pytest.mark.anyio
 async def test_example_cite_is_not_evidence_when_all_excerpts_trimmed():
-    """Repeated trimming can leave only the tail's worked example; an
-    instruction example is prompt furniture, never source evidence."""
-    hits = [_hit(1), _hit(2)]
-    example = hits[0].cite
-    llm = CitingLLM(f"Answer text.\n\nCitations:\n{example}\n")
-    out = await execute_answer_core(
-        AnswerCoreInput(query="IEA500I", hits=hits, query_kind="identifier"),
-        _deps(_settings(), llm, tokenizer=OvershootTokenizer()),
-    )
+    """An irreducible budget fails before generation (issue #368): the tail's
+    worked example never becomes evidence, and the model is never called
+    with an over-budget prompt."""
+    from mainframe_rag.agent.answer import PromptBudgetExceeded
 
-    assert out.evidence.entries == ()
-    assert out.citations == []
-    assert out.parsed.cites_rejected_unmapped == 1
-    assert llm.messages is not None
-    assert example in _user_content(llm.messages)  # example stays in the tail
+    hits = [_hit(1), _hit(2)]
+    llm = CitingLLM("Answer text.\n\nCitations:\n")
+    with pytest.raises(PromptBudgetExceeded):
+        await execute_answer_core(
+            AnswerCoreInput(query="IEA500I", hits=hits, query_kind="identifier"),
+            _deps(_settings(), llm, tokenizer=OvershootTokenizer()),
+        )
+    assert llm.messages is None  # no model call happened
 
 
 @pytest.mark.anyio

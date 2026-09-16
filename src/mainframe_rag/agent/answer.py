@@ -24,6 +24,12 @@ log = logging.getLogger(__name__)
 
 from mainframe_rag.agent.tokenizer import estimate_tokens
 from mainframe_rag.config import Settings, bearer_auth_headers
+from mainframe_rag.ingest.chunk import (
+    UNIT_ATOMIC,
+    UNIT_PROSE,
+    UnitSpan,
+    units_for_text,
+)
 from mainframe_rag.ports import ChatMessage, ChatResult, LLMClient, Tokenizer, TokenUsage
 from mainframe_rag.regexes import find_message_ids
 from mainframe_rag.retrieve.query import SearchHit
@@ -94,6 +100,22 @@ class TruncatedStreamError(RuntimeError):
             f"SSE stream ended without [DONE] after {content_chunks} content chunks"
         )
         self.content_chunks = content_chunks
+
+
+class PromptBudgetExceeded(Exception):
+    """Fixed mandatory prompt content exceeds the model token window with
+    nothing left to trim (issue #368): all excerpts and history dropped and
+    the remainder still does not fit. Raised BEFORE any model call, so the
+    routes map it to an explicit client error instead of generating from an
+    over-budget prompt. Carries counts only — never prompt text, which
+    reaches logs through the error paths that catch this."""
+
+    def __init__(self, used: int, limit: int) -> None:
+        super().__init__(
+            f"prompt exceeds the model token budget: {used} > {limit} tokens"
+        )
+        self.used = used
+        self.limit = limit
 
 
 SYSTEM_PROMPT = (
@@ -290,7 +312,10 @@ class EvidenceEntry:
     (issue #364). Identity is chunk_id (UUID5, revision-keyed) plus doc_id;
     the retained text is the prefix range [0, included_chars) of the stripped
     source text, never the text itself. `truncated` marks a packing or
-    verification cut; `est_tokens` is estimator-only (never a tokenize RPC)."""
+    verification cut; `est_tokens` is estimator-only (never a tokenize RPC).
+    `units_total`/`units_retained` (issue #368) count whole atomic/prose
+    units: a retained prefix always covers whole units, so a cut statement
+    or row can never hide inside `included_chars`."""
 
     prompt_index: int
     chunk_id: str
@@ -300,6 +325,8 @@ class EvidenceEntry:
     included_chars: int
     source_chars: int
     est_tokens: int
+    units_total: int = 0
+    units_retained: int = 0
 
 
 @dataclass(frozen=True)
@@ -328,6 +355,13 @@ class PromptEvidence:
     def supplied_count(self) -> int:
         return len(self.entries)
 
+    @property
+    def units_omitted(self) -> int:
+        """Whole units dropped by packing across packed excerpts (issue
+        #368): per-entry total minus retained. Wholly omitted chunks ride
+        `omitted_indices`; this counts partial-excerpt omission."""
+        return sum(e.units_total - e.units_retained for e in self.entries)
+
 
 @dataclass
 class PackedExcerpt:
@@ -348,6 +382,7 @@ class PackedExcerpt:
     def evidence_entry(self) -> EvidenceEntry:
         source = self.hit.text.strip()
         included = len(self.body) - (len(_TRUNCATED_SUFFIX) if self.truncated else 0)
+        spans = _hit_spans(self.hit, source)
         return EvidenceEntry(
             prompt_index=self.index,
             chunk_id=self.hit.chunk_id,
@@ -357,6 +392,8 @@ class PackedExcerpt:
             included_chars=max(0, included),
             source_chars=len(source),
             est_tokens=estimate_tokens(f"[{self.index}] {self.hit.cite}\n{self.body}"),
+            units_total=len(spans),
+            units_retained=sum(1 for s in spans if s.end <= max(0, included)),
         )
 
 
@@ -364,10 +401,14 @@ class PackedExcerpt:
 class PreparedPrompt:
     """Final prompt messages plus the immutable evidence manifest of the
     excerpts actually supplied in them (issue #364). Citation validation
-    consumes `.evidence`; `.messages` is what the model sees."""
+    consumes `.evidence`; `.messages` is what the model sees.
+    `budget_verified` (issue #368) is True only when a remote (non-fallback)
+    tokenizer measured the final messages inside the window: the char-packing
+    and estimator paths report unverified, never confirmed, compliance."""
 
     messages: list[ChatMessage]
     evidence: PromptEvidence
+    budget_verified: bool = False
 
 
 def _prompt_evidence(packed: list[PackedExcerpt], total_hits: int) -> PromptEvidence:
@@ -380,6 +421,70 @@ def _prompt_evidence(packed: list[PackedExcerpt], total_hits: int) -> PromptEvid
     )
 
 
+def _hit_spans(hit: SearchHit, stripped: str) -> tuple[UnitSpan, ...]:
+    """Unit spans for one hit's stripped text (issue #368): persisted payload
+    spans win (validated, else the shared fallback); legacy points without
+    them redetect with the same chunk detectors — never char slicing."""
+    if hit.units is not None:
+        spans: list[UnitSpan] = []
+        cursor = 0
+        valid = True
+        for start, end, kind in hit.units:
+            if (
+                kind not in (UNIT_ATOMIC, UNIT_PROSE)
+                or not (0 <= start <= end <= len(stripped))
+                or start < cursor
+            ):
+                valid = False
+                break
+            spans.append(UnitSpan(start=start, end=end, kind=kind))
+            cursor = end
+        if valid:
+            return tuple(spans)
+    return units_for_text(stripped)
+
+
+def _snap_prefix(
+    source: str, spans: tuple[UnitSpan, ...], max_chars: int
+) -> tuple[str, int] | None:
+    """Largest fittable prefix of `source` within max_chars (issue #368).
+
+    A cut inside an atomic span snaps back to the span start (whole units
+    or omission); a cut inside a prose span keeps the legacy character cut
+    (safe narrative truncation is not banned). Returns (kept, retained span
+    count), or None when nothing fits — the caller omits the excerpt with
+    explicit omission metadata instead of shipping a sliver. Empty spans
+    mean unknown structure: legacy char cut with the historical tail floor.
+    """
+    if max_chars >= len(source):
+        return source, len(spans)
+    if not spans:
+        kept = source[:max_chars].rstrip()
+        if not kept or len(kept) < _MIN_TAIL_CHARS:
+            return None
+        return kept, 0
+    kept_len = max_chars
+    for span in spans:
+        if span.end <= max_chars:
+            continue
+        if span.start < max_chars and span.kind == UNIT_PROSE:
+            # A cut inside a prose span keeps the legacy character cut.
+            break
+        if span.start >= max_chars:
+            # Cut inside an inter-unit gap: the rstrip below pulls back to
+            # the prior unit end.
+            break
+        # Cut inside an atomic span: snap back to the span start so only
+        # whole units ship.
+        kept_len = span.start
+        break
+    kept = source[:kept_len].rstrip()
+    if not kept:
+        return None
+    retained = sum(1 for s in spans if s.end <= len(kept))
+    return kept, retained
+
+
 def _plan_packed_excerpts(
     hits: list[SearchHit],
     budget_tokens: int,
@@ -390,21 +495,39 @@ def _plan_packed_excerpts(
 ) -> list[PackedExcerpt]:
     """Estimator-only planning loop shared by the single-turn and chat
     tokenizer paths (one excerpt-identity rule, so the two builders cannot
-    diverge on labels, truncation flags, or budget cuts)."""
+    diverge on labels, truncation flags, or budget cuts). Per-chunk and
+    remainder cuts snap to whole atomic units (issue #368): a hit whose
+    first unit does not fit is omitted with explicit omission metadata
+    instead of shipping a partial statement."""
     packed: list[PackedExcerpt] = []
     total_tokens = 0
     for i, hit in enumerate(hits, 1):
         text = hit.text.strip()
+        spans = _hit_spans(hit, text)
         truncated = False
         if hit.chunk_type not in ("syntax", "message", "table"):
             if max_chunk_chars_narrative is not None and len(text) > max_chunk_chars_narrative:
-                text = text[:max_chunk_chars_narrative].rstrip() + _TRUNCATED_SUFFIX
+                snapped = _snap_prefix(text, spans, max_chunk_chars_narrative)
+                if snapped is None:
+                    continue
+                text, _ = snapped
+                text += _TRUNCATED_SUFFIX
                 truncated = True
             elif complexity == "complex" and estimate_tokens(text) > narrative_token_cap:
-                text = text[: int(narrative_token_cap * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX
+                snapped = _snap_prefix(
+                    text, spans, int(narrative_token_cap * _APPROX_CHARS_PER_TOKEN)
+                )
+                if snapped is None:
+                    continue
+                text, _ = snapped
+                text += _TRUNCATED_SUFFIX
                 truncated = True
         elif len(text) > max_chunk_chars:
-            text = text[:max_chunk_chars].rstrip() + _TRUNCATED_SUFFIX
+            snapped = _snap_prefix(text, spans, max_chunk_chars)
+            if snapped is None:
+                continue
+            text, _ = snapped
+            text += _TRUNCATED_SUFFIX
             truncated = True
         header = f"[{i}] {hit.cite}"
         chunk_tokens = estimate_tokens(f"{header}\n{text}")
@@ -414,14 +537,19 @@ def _plan_packed_excerpts(
             # packed sum can exceed the budget by the header size.
             body_rem_tokens = rem_tokens - estimate_tokens(header)
             if body_rem_tokens > 60:
-                packed.append(
-                    PackedExcerpt(
-                        index=i,
-                        hit=hit,
-                        body=text[: int(body_rem_tokens * _APPROX_CHARS_PER_TOKEN)].rstrip() + _TRUNCATED_SUFFIX,
-                        truncated=True,
-                    )
+                snapped = _snap_prefix(
+                    text, spans, int(body_rem_tokens * _APPROX_CHARS_PER_TOKEN)
                 )
+                if snapped is not None:
+                    kept, _ = snapped
+                    packed.append(
+                        PackedExcerpt(
+                            index=i,
+                            hit=hit,
+                            body=kept + _TRUNCATED_SUFFIX,
+                            truncated=True,
+                        )
+                    )
             break
         packed.append(PackedExcerpt(index=i, hit=hit, body=text, truncated=truncated))
         total_tokens += chunk_tokens
@@ -432,17 +560,31 @@ def _verify_trim_last(
     packed: list[PackedExcerpt], used: int, verify_limit: int
 ) -> None:
     """One verification trim round on the last packed excerpt, shared by both
-    tokenizer paths: regenerate its cut from the measured overshoot, drop it
-    when too little would remain, else mark it truncated. The manifest is
-    derived from `packed` afterwards, so trimming cannot bypass it."""
+    tokenizer paths: regenerate its cut from the measured overshoot, snapping
+    back to whole atomic units (issue #368), and drop it when no unit fits.
+    A complete short unit always survives in preference to an empty excerpt:
+    the loop recounts afterwards, so keeping evidence can never stall it.
+    The manifest is derived from `packed` afterwards, so trimming cannot
+    bypass it."""
     overshoot = used - verify_limit
     cut = int(overshoot * _APPROX_CHARS_PER_TOKEN) + _TRIM_OVERCUT_CHARS
     last = packed[-1]
-    trimmed = last.body[:-cut] if cut < len(last.body) else ""
-    if len(trimmed.rstrip()) < _MIN_TAIL_CHARS:
+    source = (
+        last.body[: -len(_TRUNCATED_SUFFIX)] if last.truncated else last.body
+    )
+    spans = _hit_spans(last.hit, last.hit.text.strip())
+    if not last.hit.text.strip().startswith(source):
+        # Defensive: the body is not a prefix of its hit (should be
+        # impossible) — drop the excerpt entirely to keep the whole-unit
+        # invariant structural.
+        packed.pop()
+        return
+    snapped = _snap_prefix(source, spans, max(0, len(source) - cut))
+    if snapped is None:
         packed.pop()
     else:
-        last.body = trimmed.rstrip() + _TRUNCATED_SUFFIX
+        kept, _ = snapped
+        last.body = kept + _TRUNCATED_SUFFIX
         last.truncated = True
 
 
@@ -609,27 +751,56 @@ def build_messages(
         # rounds; a prompt that still does not fit surfaces later as
         # finish_reason=length (alerted in app).
         verify_limit = model_len - reserved - thinking_reserve - margin
+        verified_clean = False
         for _ in range(_MAX_TRIM_ROUNDS):
             if not packed:
                 break
-            used = tokenizer.count_messages(
-                [
-                    ChatMessage(role="system", content=system_content),
-                    ChatMessage(
-                        role="user",
-                        content=_user_content(
-                            _assemble_blocks(context_entries, question_text, packed, tail_part)
-                        ),
+            messages = [
+                ChatMessage(role="system", content=system_content),
+                ChatMessage(
+                    role="user",
+                    content=_user_content(
+                        _assemble_blocks(context_entries, question_text, packed, tail_part)
                     ),
-                ]
-            )
+                ),
+            ]
+            used = tokenizer.count_messages(messages)
             if used <= verify_limit:
+                verified_clean = True
                 break
             _verify_trim_last(packed, used, verify_limit)
+        if not verified_clean:
+            # Trims happened after the last fit (or nothing was ever
+            # counted): confirm the final messages against the window
+            # instead of returning an unchecked prompt. One bounded extra
+            # count, not a repair loop.
+            messages = [
+                ChatMessage(role="system", content=system_content),
+                ChatMessage(
+                    role="user",
+                    content=_user_content(
+                        _assemble_blocks(context_entries, question_text, packed, tail_part)
+                    ),
+                ),
+            ]
+            used = tokenizer.count_messages(messages)
+            if used > verify_limit:
+                raise PromptBudgetExceeded(used, verify_limit)
+        budget_verified = verified_clean and bool(
+            getattr(tokenizer, "remote_confirmed", False)
+        )
+        # verified_clean means the last count fit; that count is only
+        # confirmation when the tokenizer measured remotely (issue #368):
+        # estimator-only verification reports estimated, never confirmed.
     else:
+        # No tokenizer: estimator char packing with no token-budget claim
+        # (reports budget_verified=False; production serving always supplies
+        # a tokenizer, so this offline/test path never raises budget errors).
+        budget_verified = False
         total_chars = 0
         for i, hit in enumerate(hits, 1):
             text = hit.text.strip()
+            spans = _hit_spans(hit, text)
             # High-fidelity chunk types (syntax, message, table) preserve their grammar/structure
             # up to max_chunk_chars; narrative prose is bounded by max_chunk_chars_narrative if provided.
             narrative_cap = (
@@ -644,21 +815,28 @@ def build_messages(
             )
             truncated = False
             if len(text) > chunk_cap:
-                text = text[:chunk_cap].rstrip() + _TRUNCATED_SUFFIX
+                snapped = _snap_prefix(text, spans, chunk_cap)
+                if snapped is None:
+                    continue
+                text, _ = snapped
+                text += _TRUNCATED_SUFFIX
                 truncated = True
             header = f"[{i}] {hit.cite}"
             chunk_len = len(header) + 1 + len(text)
             if total_chars + chunk_len > max_context_chars and packed:
                 remaining = max_context_chars - total_chars
                 if remaining > 200:
-                    packed.append(
-                        PackedExcerpt(
-                            index=i,
-                            hit=hit,
-                            body=text[:remaining].rstrip() + _TRUNCATED_SUFFIX,
-                            truncated=True,
+                    snapped = _snap_prefix(text, spans, remaining)
+                    if snapped is not None:
+                        kept, _ = snapped
+                        packed.append(
+                            PackedExcerpt(
+                                index=i,
+                                hit=hit,
+                                body=kept + _TRUNCATED_SUFFIX,
+                                truncated=True,
+                            )
                         )
-                    )
                 break
             packed.append(PackedExcerpt(index=i, hit=hit, body=text, truncated=truncated))
             total_chars += chunk_len
@@ -672,6 +850,7 @@ def build_messages(
             ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),
         ],
         evidence=_prompt_evidence(packed, len(hits)),
+        budget_verified=budget_verified,
     )
 
 
@@ -1393,6 +1572,7 @@ def build_chat_messages(
 
         verify_limit = model_len - reserved - thinking_reserve - margin
         max_rounds = _MAX_TRIM_ROUNDS * 2 + len(prior_messages)
+        verified_clean = False
         for _ in range(max_rounds):
             candidate = [
                 ChatMessage(role="system", content=system_content),
@@ -1406,6 +1586,7 @@ def build_chat_messages(
             ]
             used = tokenizer.count_messages(candidate)
             if used <= verify_limit:
+                verified_clean = True
                 break
             if packed:
                 _verify_trim_last(packed, used, verify_limit)
@@ -1413,10 +1594,37 @@ def build_chat_messages(
                 prior_messages.pop(0)
             else:
                 break
+        if not verified_clean:
+            # Trims happened after the last fit, or nothing was ever
+            # counted: confirm the final messages instead of returning an
+            # unchecked prompt. One bounded extra count, not a repair loop.
+            candidate = [
+                ChatMessage(role="system", content=system_content),
+                *prior_messages,
+                ChatMessage(
+                    role="user",
+                    content=_user_content(
+                        _assemble_blocks(context_entries, question_text, packed, tail_part)
+                    ),
+                ),
+            ]
+            used = tokenizer.count_messages(candidate)
+            if used > verify_limit:
+                raise PromptBudgetExceeded(used, verify_limit)
+        # Only a fitting remote measurement confirms compliance (issue
+        # #368): estimator-only verification reports estimated.
+        budget_verified = verified_clean and bool(
+            getattr(tokenizer, "remote_confirmed", False)
+        )
     else:
+        # No tokenizer: estimator char packing with no token-budget claim
+        # (reports budget_verified=False; production serving always supplies
+        # a tokenizer, so this offline/test path never raises budget errors).
+        budget_verified = False
         total_chars = 0
         for i, hit in enumerate(hits, 1):
             text = hit.text.strip()
+            spans = _hit_spans(hit, text)
             narrative_cap = (
                 max_chunk_chars_narrative
                 if max_chunk_chars_narrative is not None
@@ -1429,21 +1637,28 @@ def build_chat_messages(
             )
             truncated = False
             if len(text) > chunk_cap:
-                text = text[:chunk_cap].rstrip() + _TRUNCATED_SUFFIX
+                snapped = _snap_prefix(text, spans, chunk_cap)
+                if snapped is None:
+                    continue
+                text, _ = snapped
+                text += _TRUNCATED_SUFFIX
                 truncated = True
             header = f"[{i}] {hit.cite}"
             chunk_len = len(header) + len(text) + 2
             if total_chars + chunk_len > max_context_chars:
                 rem = max_context_chars - total_chars - len(header) - 2
                 if rem > 200:
-                    packed.append(
-                        PackedExcerpt(
-                            index=i,
-                            hit=hit,
-                            body=text[:rem].rstrip() + _TRUNCATED_SUFFIX,
-                            truncated=True,
+                    snapped = _snap_prefix(text, spans, rem)
+                    if snapped is not None:
+                        kept, _ = snapped
+                        packed.append(
+                            PackedExcerpt(
+                                index=i,
+                                hit=hit,
+                                body=kept + _TRUNCATED_SUFFIX,
+                                truncated=True,
+                            )
                         )
-                    )
                 break
             packed.append(PackedExcerpt(index=i, hit=hit, body=text, truncated=truncated))
             total_chars += chunk_len
@@ -1458,4 +1673,5 @@ def build_chat_messages(
             ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),
         ],
         evidence=_prompt_evidence(packed, len(hits)),
+        budget_verified=budget_verified,
     )

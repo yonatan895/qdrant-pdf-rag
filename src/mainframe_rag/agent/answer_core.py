@@ -171,6 +171,10 @@ class AnswerCoreOutput:
     # retrieval list (retrieved candidates for diagnostics); `evidence` is
     # what the citation allowlist was actually derived from.
     evidence: PromptEvidence
+    # Token-budget compliance of the final prompt (issue #368): True only
+    # for a fitting remote tokenizer measurement; estimator and
+    # char-packing paths report False (estimated, never confirmed).
+    budget_verified: bool = False
 
 
 async def _await_retrieval(res: Any) -> tuple[list[SearchHit], str, dict[str, int]]:
@@ -304,6 +308,7 @@ def _finalize_answer(
         complexity=complexity,
         parsed=parsed,
         evidence=prepared.evidence,
+        budget_verified=prepared.budget_verified,
     )
 
 

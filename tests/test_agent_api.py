@@ -3045,3 +3045,36 @@ def test_answer_empty_generation_is_incomplete(client, monkeypatch):
     assert body["answer"] == ""
     assert body["citations"] == []
     assert body["verification_state"] == "generation_incomplete"
+
+
+def test_v1_answer_json_success_records_ttft_and_llm_model(client, monkeypatch):
+    """PR #401 regression: successful /v1/answer JSON leg must forward
+    ttft_ms and llm_model to record_request for RED metrics."""
+    from mainframe_rag.ports import ChatResult, TokenUsage
+
+    class MeasuredLLM:
+        def chat(self, messages, *args, **kwargs):
+            return ChatResult(
+                content=(
+                    "Reissue the command.\n\nCitations:\n"
+                    "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+                ),
+                finish_reason="stop",
+                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                ttft_ms=42,
+            )
+
+    calls = []
+
+    def fake_record(endpoint, outcome, **kwargs):
+        calls.append((endpoint, outcome, kwargs))
+
+    monkeypatch.setattr(app_mod, "llm", MeasuredLLM())
+    monkeypatch.setattr(app_mod, "record_request", fake_record)
+    resp = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+    answer_calls = [c for c in calls if c[0] == "answer" and c[1] == "ok"]
+    assert len(answer_calls) == 1
+    _, _, kwargs = answer_calls[0]
+    assert kwargs["ttft_ms"] == 42
+    assert kwargs["llm_model"] == "test-reasoning-model"

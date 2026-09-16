@@ -31,7 +31,7 @@ from opentelemetry import trace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from mainframe_rag.agent.answer import ParsedAnswer
+from mainframe_rag.agent.answer import ParsedAnswer, PromptBudgetExceeded
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
 from mainframe_rag.ingest.embed import build_embedder
@@ -925,6 +925,11 @@ def main(argv: list[str] | None = None) -> int:
             print(output)
 
         return 0
+    except PromptBudgetExceeded as exc:
+        # Irreducible token-budget overflow (issue #368): fixed message,
+        # counts only, distinct exit code for scripting.
+        print(f"Error: prompt exceeds the model token budget ({exc})", file=sys.stderr)
+        return 2
     finally:
         shutdown_tracing()
 

@@ -188,3 +188,13 @@ def test_build_tokenizer_dispatch():
         _env_file=None,
     )
     assert isinstance(build_tokenizer(s_vllm), VllmTokenizer)
+
+
+def test_vllm_tokenizer_remote_confirmed_flips_to_false_on_downgrade():
+    """VllmTokenizer.remote_confirmed starts True and permanently flips
+    to False after the one-shot downgrade on /tokenize failure."""
+    client = TokenizerPostFake(count=0, status_code=404)
+    tok = VllmTokenizer(base_url="http://mock-llm:8000/v1", model="m", client=client)
+    assert tok.remote_confirmed is True
+    tok.count_tokens("trigger downgrade")
+    assert tok.remote_confirmed is False

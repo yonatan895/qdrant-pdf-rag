@@ -137,6 +137,7 @@ status (`/ui` failures render HTML banners instead, §1):
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
 | `representation_unavailable` / `the retrieval generation is not available` | 503 | Serving gate: resolved generation is `empty` or not validated compatible (drift/legacy/pending/unknown); `/ui/chat` renders its banner while `/ui/chat/stream` returns this envelope |
 | `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query-length guard, and `/v1/chat` with no `user`-role message (one message, every 422 path) |
+| `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
 | `method_not_allowed` / `method not allowed` | 405 | Wrong method |
@@ -171,7 +172,10 @@ strict stream-end rule above is the upstream reasoning wire and the
 - The `final` schema is identical on the empty-hits path: zero citations,
   `citations_inferred: false`, empty `inferred_indices`, `ttft_ms: null`, zeroed usage. The empty-hits
   short-circuit happens before prompt build and any LLM call, on both JSON
-  and SSE.
+  and SSE. A pre-generation budget failure (issue #368) likewise precedes
+  any model call: JSON/chat answer it with `422 prompt_budget_exceeded`,
+  while an already-open stream carries `event: error` and ends without
+  a `final`.
 - `Server-Timing` on SSE responses carries the retrieval legs only;
   `llm`/`ttft` timings ride the `final` event (JSON responses carry all of
   them as headers).
@@ -487,12 +491,35 @@ citations retain provenance on API/chat/console and never count as grounding in
 the answer eval/L2. Abstention uses the shared marker-plus-shape predicate;
 parse-time citation WHY telemetry cannot be reconstructed from the stripped body.
 
+Prompt evidence preservation and token-budget enforcement (issue #368,
+implemented): per-chunk caps, total-context remainder cuts, and tokenizer
+verification trims all snap to whole atomic units — code statements, table
+rows, SYSIN records — or omit the excerpt with explicit omission metadata;
+a partial statement is never presented as a complete excerpt. Unit spans
+persist on structured chunk payloads (`units`, additive and unindexed;
+prose payloads are byte-identical to before) and legacy points redetect
+with the same chunk splitters, so no second prompt-side parser exists.
+Ordinary narrative keeps character truncation with the generic suffix; only
+procedural/atomic content is omit-or-whole. The manifest records
+`units_total`/`units_retained` per entry plus `omitted_indices`, and wholly
+omitted chunks stay outside the citation allowlist. After trimming, the
+final messages are confirmed against the real tokenizer/template budget
+(fixed system/history/context/question text plus output/thinking reserves);
+estimator-only and char-packing paths report `budget_verified: false`
+(estimated, never confirmed; the offline/caller-provided `tokenizer=None`
+char-packing path is estimated-only with no token budget claim, while production
+serving paths always supply a tokenizer). On tokenizer-backed paths, fixed
+content alone over the window raises before generation (`422 prompt_budget_exceeded`,
+§2). The answer log carries `budget_verified` and `units_omitted` for eval joins;
+RC-side completeness/support/truncation/latency measurement stays RC-owned (#367).
+
 **Mutation/lifetime:** the per-answer supplied manifest must follow every trim;
 it is independent of cached generation validation. Console/browser state remains
 browser-only under ADR-0004, with strict CSP and vendored assets; UI gating must
 cover all routes. **Evidence:** `tests/test_prompt_order.py`,
 `tests/test_answer_core.py`, `tests/test_agent_api.py`, `tests/test_chat_api.py`,
-`tests/test_stream_truncation.py`, `tests/test_webui.py`. Inspect their actual
+`tests/test_stream_truncation.py`, `tests/test_webui.py`,
+`tests/test_prompt_packing_units.py`, `tests/test_evidence_manifest.py`. Inspect their actual
 assertions: eligibility and transport tests do not prove semantic support or all
 browser completion behavior. #365/#372 retain those gaps; no model run is claimed
 by this documentation audit.

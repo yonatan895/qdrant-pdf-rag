@@ -8,6 +8,7 @@ Collection mainframe_manuals (architecture.md section 4.3):
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from qdrant_client import models
@@ -366,7 +367,7 @@ def upsert_chunks(
         )
     points: list[models.PointStruct] = []
     for chunk, (dense, (sparse_idx, sparse_val)) in zip(chunks, vectors):
-        payload = {
+        payload: dict[str, Any] = {
             "vendor": parsed.vendor,
             "product": parsed.product,
             "version": parsed.version,
@@ -389,6 +390,14 @@ def upsert_chunks(
             "rules_v": rules_v,
             "text": chunk.text,
         }
+        # Atomic-unit spans (issue #368): stored only for structured chunks
+        # (non-empty span list). Prose chunks omit the key, so their
+        # payloads stay byte-identical to before; legacy points without the
+        # key pack via the shared fallback detector. Never indexed.
+        if chunk.units:
+            payload["units"] = [
+                [span.start, span.end, span.kind] for span in chunk.units
+            ]
         if contexts and (context := contexts.get(chunk.chunk_id)):
             payload["context"] = context
         points.append(
