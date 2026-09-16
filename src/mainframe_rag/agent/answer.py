@@ -63,6 +63,13 @@ class ParsedAnswer(BaseModel):
     # (`insufficient_evidence`) from a fluent answer that merely ended up
     # with no eligible citations (`unverified_draft`).
     abstained: bool = False
+    # Verification state + script-review flag (issue #365). parse_answer
+    # cannot know the transport outcome (finish reason), so these stay None/
+    # False here; producers that finalize an answer (answer_core, dev-tool
+    # query_demo) set both from the finalized parse plus finish reason via
+    # verification_state_for. Renderers treat None as unknown, never accepted.
+    verification_state: str | None = None
+    script_review_required: bool = False
     # Citation WHY telemetry (issue #299): parse-time attempt counters the
     # response contract keeps out (the eval joins them from the answer log).
     # shape_bad = citation-block lines that never matched the citation
@@ -174,15 +181,19 @@ def verification_state_for(
     finish_reason: str,
     abstained: bool,
     empty_hits: bool,
+    empty_content: bool = False,
 ) -> VerificationState:
     """One rule mapping a finalized answer to its verification state (issue
     #365). Order is load-bearing: refusal/empty first (nothing was even
     attempted from evidence), then unfinished generation (whatever cites
     exist may be cut off mid-thought), then citation outcome. Inferred-only
     provenance is a draft, not grounding — the eval never counts it, so the
-    client must not read it as accepted either."""
+    client must not read it as accepted either. An empty model generation
+    is incomplete, not a draft: there is no content to review."""
     if empty_hits or abstained:
         return "insufficient_evidence"
+    if empty_content:
+        return "generation_incomplete"
     if finish_reason != "stop":
         return "generation_incomplete"
     if not citations or citations_inferred:

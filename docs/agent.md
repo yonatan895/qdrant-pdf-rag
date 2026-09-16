@@ -76,13 +76,13 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
    #314); the latest user turn is stripped and length-guarded
   by the shared `query_max_chars` rule, and the whole body is capped by
   `chat_max_body_chars` (the same helper as `/ui`). `temperature` overrides
-  `Settings.llm_temperature`; `model` is accepted for OpenAI compatibility but
-  ignored — inference always uses `Settings.llm_model_reasoning`, and the
-   response `model` field reports that reasoning model (issue #313); `max_tokens` is
-   accepted and ignored (token limits are server-side). The response is
-   `ChatCompletionsResponse{id: "chatcmpl-<request_id>", created, model,
-   choices[], usage, citations, citations_inferred, inferred_indices, hits,
-   verification_state, script, script_lang, script_review_required}`;
+   `Settings.llm_temperature`; `model` is accepted for OpenAI compatibility but
+   ignored — inference always uses `Settings.llm_model_reasoning`, and the
+  response `model` field reports that reasoning model (issue #313); `max_tokens` is
+  accepted and ignored (token limits are server-side). The response is
+  `ChatCompletionsResponse{id: "chatcmpl-<request_id>", created, model,
+  choices[], usage, citations, citations_inferred, inferred_indices, hits,
+  verification_state, script, script_lang, script_review_required}`;
   `choices[0].message.content` carries the answer plus a trailing markdown
   `**Citations:**` bullet list when cites exist. Empty hits return
   `finish_reason: "stop"`, zeroed usage, and empty citations/hits. Provenance

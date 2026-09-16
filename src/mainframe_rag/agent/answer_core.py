@@ -291,6 +291,7 @@ def _finalize_answer(
             finish_reason=finish_reason,
             abstained=parsed.abstained,
             empty_hits=False,
+            empty_content=not content.strip(),
         ),
         script_review_required=parsed.script is not None,
         query_kind=kind,

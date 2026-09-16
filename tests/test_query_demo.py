@@ -1,5 +1,6 @@
 """Unit tests for scripts/query_demo.py (pure functions, no network/docker)."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -158,9 +159,57 @@ def test_main_cli_answer_mode(mock_qdrant, mock_chat, mock_embed, mock_search, t
 
 @patch("scripts.query_demo.retrieve_search")
 @patch("scripts.query_demo.build_embedder")
+@patch("mainframe_rag.agent.answer.HttpxLLMClient.chat")
+@patch("qdrant_client.QdrantClient")
+def test_main_cli_answer_json_carries_verification_contract(
+    mock_qdrant, mock_chat, mock_embed, mock_search, tmp_path: Path
+):
+    """Issue #365: dev-tool JSON bundles carry the same contract labels as
+    the API — a fluent-no-cite answer exports as unverified_draft, and a
+    fenced script exports flagged for review."""
+    from scripts.query_demo import answer_export_payload, render_answer_text
+
+    from mainframe_rag.agent.answer import ParsedAnswer
+
+    mock_search.return_value = ([_sample_hit()], "identifier", {"embed_ms": 2, "qdrant_ms": 8})
+    mock_chat.return_value = "Reissue the command after initialization completes."
+    out_file = tmp_path / "draft.json"
+
+    rc = main(["--query", "IEA500I", "--answer", "--format", "json", "--out", str(out_file)])
+    assert rc == 0
+    exported = json.loads(out_file.read_text(encoding="utf-8"))
+    assert exported["verification_state"] == "unverified_draft"
+    assert exported["script_review_required"] is False
+    assert exported["citations"] == []
+
+    # Script-carrying draft: review flag rides text render and export alike.
+    mock_chat.return_value = (
+        "Reissue the command after initialization completes.\n\n"
+        "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```\n"
+    )
+    out_script = tmp_path / "script.json"
+    rc = main(["--query", "IEA500I", "--answer", "--format", "json", "--out", str(out_script)])
+    assert rc == 0
+    exported_script = json.loads(out_script.read_text(encoding="utf-8"))
+    assert exported_script["verification_state"] == "unverified_draft"
+    assert exported_script["script_review_required"] is True
+    assert exported_script["script"] == "//STEP1 EXEC PGM=IEFBR14"
+
+    draft = ParsedAnswer(answer="Fluent prose.", citations=[], script="//X JOB")
+    draft.verification_state = "unverified_draft"
+    draft.script_review_required = True
+    assert answer_export_payload("q", "nl", {}, draft, [])["verification_state"] == "unverified_draft"
+    rendered = render_answer_text("q", "nl", draft, [], {})
+    assert "Verification   : [unverified_draft]" in rendered
+    assert "human review required" in rendered
+
+
+@patch("scripts.query_demo.retrieve_search")
+@patch("scripts.query_demo.build_embedder")
+@patch("mainframe_rag.agent.answer.HttpxLLMClient.chat")
 @patch("qdrant_client.QdrantClient")
 def test_main_cli_answer_mode_zero_hits_renders_gracefully(
-    mock_qdrant, mock_embed, mock_search, tmp_path: Path, capsys
+    mock_qdrant, mock_chat, mock_embed, mock_search, tmp_path: Path, capsys
 ):
     # Issue #181: the empty-hits path returned a dict while renderers expect
     # ParsedAnswer attributes — answer mode crashed instead of rendering.

@@ -2802,6 +2802,18 @@ class FluentNoCiteLLM:
         )
 
 
+class FluentDraftWithScriptLLM:
+    """Fluent prose plus a script fence, zero eligible citations: the
+    orthogonal draft+script combo (issue #365 review) — draft state AND
+    review flag together."""
+
+    def chat(self, messages, *args, **kwargs):
+        return (
+            "Reissue the command after initialization completes.\n\n"
+            "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```\n"
+        )
+
+
 class RefusalLLM:
     def chat(self, messages, *args, **kwargs):
         return "The excerpts do not contain this procedure."
@@ -2873,6 +2885,18 @@ def test_answer_verification_state_unverified_draft_inferred_only(client, monkey
     assert len(body["citations"]) == 1
     # Inferred provenance is eligibility, not grounding: draft, not accepted.
     assert body["verification_state"] == "unverified_draft"
+
+
+def test_answer_draft_with_script_marks_review_required(client, monkeypatch):
+    """Fluent prose + script fence, zero eligible citations: draft state
+    AND review flag together — the uncited script is still a draft."""
+    monkeypatch.setattr(app_mod, "llm", FluentDraftWithScriptLLM())
+    body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
+    assert body["citations"] == []
+    assert body["verification_state"] == "unverified_draft"
+    assert body["script"] == "//STEP1 EXEC PGM=IEFBR14"
+    assert body["script_lang"] == "jcl"
+    assert body["script_review_required"] is True
 
 
 def test_answer_verification_state_insufficient_evidence_abstention(client, monkeypatch):
@@ -3000,3 +3024,24 @@ def test_verification_state_for_matrix():
         citations=[], citations_inferred=False,
         finish_reason="length", abstained=False, empty_hits=False,
     ) == "generation_incomplete"
+    # Empty model content is incomplete, not a draft: nothing to review.
+    assert verification_state_for(
+        citations=[], citations_inferred=False,
+        finish_reason="stop", abstained=False, empty_hits=False,
+        empty_content=True,
+    ) == "generation_incomplete"
+
+
+def test_answer_empty_generation_is_incomplete(client, monkeypatch):
+    """An empty model generation (post-fallback) must not read as a draft
+    or accepted answer: there is no content to review."""
+
+    class EmptyLLM:
+        def chat(self, messages, *args, **kwargs):
+            return ""
+
+    monkeypatch.setattr(app_mod, "llm", EmptyLLM())
+    body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
+    assert body["answer"] == ""
+    assert body["citations"] == []
+    assert body["verification_state"] == "generation_incomplete"
