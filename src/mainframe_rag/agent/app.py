@@ -1088,6 +1088,8 @@ async def v1_answer(
             started,
             query_class=kind,
             hits=len(output.hits),
+            ttft_ms=output.ttft_ms,
+            llm_model=llm_model,
         )
         return AnswerResponse(
             request_id=request_id,

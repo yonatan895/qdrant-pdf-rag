@@ -575,13 +575,9 @@ def _verify_trim_last(
     spans = _hit_spans(last.hit, last.hit.text.strip())
     if not last.hit.text.strip().startswith(source):
         # Defensive: the body is not a prefix of its hit (should be
-        # impossible) — legacy char cut rather than an invented boundary.
-        trimmed = last.body[:-cut] if cut < len(last.body) else ""
-        if len(trimmed.rstrip()) < _MIN_TAIL_CHARS:
-            packed.pop()
-        else:
-            last.body = trimmed.rstrip() + _TRUNCATED_SUFFIX
-            last.truncated = True
+        # impossible) — drop the excerpt entirely to keep the whole-unit
+        # invariant structural.
+        packed.pop()
         return
     snapped = _snap_prefix(source, spans, max(0, len(source) - cut))
     if snapped is None:
@@ -797,8 +793,9 @@ def build_messages(
         # confirmation when the tokenizer measured remotely (issue #368):
         # estimator-only verification reports estimated, never confirmed.
     else:
-        # No tokenizer: estimator char packing with no compliance claim
-        # (issue #368 reports this path as unverified, never confirmed).
+        # No tokenizer: estimator char packing with no token-budget claim
+        # (reports budget_verified=False; production serving always supplies
+        # a tokenizer, so this offline/test path never raises budget errors).
         budget_verified = False
         total_chars = 0
         for i, hit in enumerate(hits, 1):
@@ -1620,7 +1617,9 @@ def build_chat_messages(
             getattr(tokenizer, "remote_confirmed", False)
         )
     else:
-        # No tokenizer: estimator char packing, unverified by construction.
+        # No tokenizer: estimator char packing with no token-budget claim
+        # (reports budget_verified=False; production serving always supplies
+        # a tokenizer, so this offline/test path never raises budget errors).
         budget_verified = False
         total_chars = 0
         for i, hit in enumerate(hits, 1):

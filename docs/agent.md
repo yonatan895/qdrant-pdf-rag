@@ -506,10 +506,12 @@ omitted chunks stay outside the citation allowlist. After trimming, the
 final messages are confirmed against the real tokenizer/template budget
 (fixed system/history/context/question text plus output/thinking reserves);
 estimator-only and char-packing paths report `budget_verified: false`
-(estimated, never confirmed). Fixed content alone over the window raises
-before generation (`422 prompt_budget_exceeded`, §2). The answer log
-carries `budget_verified` and `units_omitted` for eval joins; RC-side
-completeness/support/truncation/latency measurement stays RC-owned (#367).
+(estimated, never confirmed; the offline/caller-provided `tokenizer=None`
+char-packing path is estimated-only with no token budget claim, while production
+serving paths always supply a tokenizer). On tokenizer-backed paths, fixed
+content alone over the window raises before generation (`422 prompt_budget_exceeded`,
+§2). The answer log carries `budget_verified` and `units_omitted` for eval joins;
+RC-side completeness/support/truncation/latency measurement stays RC-owned (#367).
 
 **Mutation/lifetime:** the per-answer supplied manifest must follow every trim;
 it is independent of cached generation validation. Console/browser state remains
