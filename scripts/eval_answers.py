@@ -378,12 +378,22 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         round(unsafe_answers / len(abstain_rows), 4) if abstain_rows else None
     )
     # Verification-state histogram (issue #365): what the served contract
-    # reported per row. Unknown covers error rows and pre-state servers —
-    # a missing signal, never a fabricated state.
+    # reported per row. Error rows stay out of `judged`, so `unknown` means a
+    # judged row whose response carried no state (pre-#365 server) — a
+    # missing signal, never a fabricated state.
     by_state: Counter = Counter()
     for r in judged:
         by_state[str(r.get("verification_state") or "unknown")] += 1
     metrics["by_verification_state"] = dict(sorted(by_state.items()))
+    # Acceptance-state mismatches (issue #365, opt-in): rows whose entry
+    # carries `expected_verification_state` and whose served state differs.
+    # Zero on corpora without the opt-in field — no baseline churn.
+    metrics["state_mismatches"] = sum(
+        1
+        for r in judged
+        if r.get("expected_verification_state") is not None
+        and r.get("verification_state") != r["expected_verification_state"]
+    )
     # Packing attribution (issue #368): whole atomic units dropped by
     # packing, and remote-confirmed token budgets — report-only signals for
     # the completeness/truncation tradeoff, never verdict inputs, never a
@@ -418,6 +428,9 @@ def run_query(
         "query": entry["query"],
         "query_class": entry["query_class"],
         "expected_behavior": entry["expected_behavior"],
+        # Opt-in acceptance state (issue #365): None on pre-state entries, so
+        # the report can count mismatches without guessing from failures.
+        "expected_verification_state": entry.get("expected_verification_state"),
         "trap_type": entry.get("trap_type"),
         "domain": entry.get("domain"),
     }

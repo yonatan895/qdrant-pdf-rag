@@ -87,8 +87,11 @@ def test_classify_max_directions():
 def test_summarize_means_rates_and_sums_faults():
     runs = [
         _run(grounded_rate=0.8, structural_fails=1, errors=1,
+             by_verification_state={"accepted": 10, "unverified_draft": 2},
+             state_mismatches=1,
              faithfulness={"judge_errors": 1, "entailed": 0.6, "neutral": 0.3, "contradiction": 0.1}),
         _run(grounded_rate=1.0, structural_fails=0, errors=0,
+             by_verification_state={"accepted": 12},
              relevance={"judge_errors": 2, "relevant": 0.9, "partial": 0.1, "irrelevant": 0.0}),
     ]
     summary = summarize_l4(runs)
@@ -99,6 +102,10 @@ def test_summarize_means_rates_and_sums_faults():
     assert summary["judge_errors"] == 3  # faithfulness + relevance legs
     assert summary["metrics"]["grounded_rate"] == pytest.approx(0.9)
     assert summary["metrics"]["relevance.relevant"] == pytest.approx(0.85)
+    # Issue #365 acceptance shape: summed across repeats, report-only (never
+    # in GATED_METRICS, so recording a reference cannot adopt it silently).
+    assert summary["by_verification_state"] == {"accepted": 22, "unverified_draft": 2}
+    assert summary["state_mismatches"] == 1
 
 
 def test_mean_metric_none_when_a_repeat_missing():

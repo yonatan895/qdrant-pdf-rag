@@ -384,6 +384,23 @@ ABSENT_CORRECTIONS = {
     "SYN-04": "the OPS/MVS 14.0 book is not in the loaded corpus; the AOF )MSG rule cannot be answered; correct outcome is abstention",
 }
 
+# Acceptance states (issue #365): every entry opts into the verification-state
+# contract so an RC acceptance run measures the state histogram and the
+# false-refusal/unsafe split against an agreed set, not just substring gold.
+# The correct terminal state follows the expected behavior:
+#   answer-tier -> `accepted` (eligible supplied citations + stop)
+#   abstain-tier -> `insufficient_evidence` (marker-shaped refusal / zero-hits)
+# Adjudicated exceptions go in the override map with a note; it is intentionally
+# empty until a row needs one. Never edit the generated JSONL directly.
+EXPECTED_STATE_OVERRIDES: dict[str, str] = {}
+
+
+def expected_state_for(entry: dict) -> str:
+    override = EXPECTED_STATE_OVERRIDES.get(entry["id"])
+    if override is not None:
+        return override
+    return "insufficient_evidence" if entry["expected_behavior"] == "abstain" else "accepted"
+
 
 def map_seed(entry: dict) -> dict:
     cls = SEED_CLASS_MAP[entry["class"]]
@@ -523,7 +540,9 @@ def main() -> int:
     from mainframe_rag.regexes import find_message_ids
 
     settings = load_settings()
-    client = QdrantClient(url=settings.qdrant_url, timeout=30)
+    client = QdrantClient(
+        url=settings.qdrant_url, api_key=settings.qdrant_api_key, timeout=30
+    )
 
     print("[*] building message-id -> docs map ...", file=sys.stderr)
     msg_docs: dict[str, Counter] = defaultdict(Counter)
@@ -718,7 +737,13 @@ def main() -> int:
 
     def write(path: Path, rows: list[dict]) -> None:
         rows = sorted(rows, key=lambda x: (x["query_class"], x["id"]))
-        lines = [json.dumps(r, ensure_ascii=False) for r in rows]
+        lines = [
+            json.dumps(
+                {**r, "expected_verification_state": expected_state_for(r)},
+                ensure_ascii=False,
+            )
+            for r in rows
+        ]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     write(REPO / "evals" / "golden.jsonl", dev)
