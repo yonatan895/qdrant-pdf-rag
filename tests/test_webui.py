@@ -977,3 +977,79 @@ def test_console_send_button_visibility():
     ).read_text(encoding="utf-8")
     assert "#send-btn.hidden" in css
     assert "placeholder-shown + #send-btn:not(.stop)" in css
+
+
+# ---------------------------------------------------------------------------
+# Verification-state presentation (issue #365)
+# ---------------------------------------------------------------------------
+
+
+class FluentNoCiteUiLLM:
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        return ChatResult(
+            content="Reissue the command after initialization completes.",
+            finish_reason="stop",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+
+
+class RefusalUiLLM:
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        return ChatResult(
+            content="The excerpts do not contain this procedure.",
+            finish_reason="stop",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+
+
+def test_ui_fragment_accepted_keeps_verified_title_and_review_badge(ui_client, monkeypatch):
+    """Accepted + script (MarkdownFakeLLM): the verified title is preserved
+    exactly, no draft badge appears, and the script carries its review badge."""
+    monkeypatch.setattr(app_mod, "llm", MarkdownFakeLLM())
+    body = ui_client.post(
+        "/ui/chat",
+        data={"message": "What is IKJEFT01?", "messages": ""},
+        headers={"HX-Request": "true"},
+    ).text
+    assert "Verified manual citations (1)" in body
+    assert "state-unverified_draft" not in body
+    assert "state-insufficient_evidence" not in body
+    assert "state-generation_incomplete" not in body
+    assert "Human review required" in body
+
+
+def test_ui_fragment_draft_badge_without_verified_title(ui_client, monkeypatch):
+    """Fluent prose, zero eligible citations: the draft badge renders and
+    no citations box may read as verified."""
+    monkeypatch.setattr(app_mod, "llm", FluentNoCiteUiLLM())
+    body = ui_client.post(
+        "/ui/chat",
+        data={"message": "What is IEA500I?", "messages": ""},
+        headers={"HX-Request": "true"},
+    ).text
+    assert "Unverified draft" in body
+    assert "Verified manual citations" not in body
+    assert "Inferred citations" not in body
+
+
+def test_ui_fragment_insufficient_evidence_refusal(ui_client, monkeypatch):
+    monkeypatch.setattr(app_mod, "llm", RefusalUiLLM())
+    body = ui_client.post(
+        "/ui/chat",
+        data={"message": "What is IEA500I?", "messages": ""},
+        headers={"HX-Request": "true"},
+    ).text
+    assert "Insufficient evidence" in body
+    assert "Verified manual citations" not in body
+
+
+def test_ui_stream_final_carries_verification_state(ui_client):
+    """The /ui stream terminal final reports the core-computed state and
+    review flag for the console client (UiFakeLLM: accepted, no script)."""
+    resp = ui_client.post(
+        "/ui/chat/stream",
+        json={"messages": [{"role": "user", "content": "What is IEA500I?"}]},
+    )
+    final = next(payload for name, payload in _parse_sse_events(resp.text) if name == "final")
+    assert final["verification_state"] == "accepted"
+    assert final["script_review_required"] is False

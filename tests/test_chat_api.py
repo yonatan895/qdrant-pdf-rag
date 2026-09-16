@@ -456,3 +456,76 @@ def test_abend_regex():
     assert _ABEND_RE.search("abend U4038")
     assert _ABEND_RE.search("System abend S013 occurred")
     assert not _ABEND_RE.search("How do I fix this error?")
+
+
+# ---------------------------------------------------------------------------
+# Answer verification states on chat surfaces (issue #365)
+# ---------------------------------------------------------------------------
+
+
+class ScriptChatLLM:
+    """Answer with an eligible cite plus a JCL fence: chat must surface the
+    script with the review flag (previously dropped on both chat paths)."""
+
+    def chat(self, messages, reasoning_effort=None, temperature=None):
+        return ChatResult(
+            content=(
+                "Run the sample job below.\n\n"
+                "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```\n\n"
+                "Citations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
+        )
+
+
+def test_chat_json_carries_verification_state(chat_client):
+    data = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "What is IEA500I?"}], "stream": False},
+    ).json()
+    assert data["verification_state"] == "accepted"
+    assert data["script_review_required"] is False
+    assert len(data["citations"]) == 1
+
+
+def test_chat_json_surfaces_script_with_review_flag(chat_client, monkeypatch):
+    monkeypatch.setattr(app_mod, "llm", ScriptChatLLM())
+    data = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Show JCL to run IEFBR14"}], "stream": False},
+    ).json()
+    assert data["verification_state"] == "accepted"
+    assert data["script"] == "//STEP1 EXEC PGM=IEFBR14"
+    assert data["script_lang"] == "jcl"
+    assert data["script_review_required"] is True
+
+
+def test_chat_stream_terminal_chunk_carries_state_and_script(chat_client, monkeypatch):
+    """The OpenAI-compat terminal chunk reports state + script in `extra`
+    before [DONE]. Deltas stay provisional raw tokens; the terminal chunk
+    is the authoritative record."""
+    monkeypatch.setattr(app_mod, "llm", ScriptChatLLM())
+    resp = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Show JCL"}], "stream": True},
+    )
+    assert resp.status_code == 200
+    frames = [ln for ln in resp.text.splitlines() if ln.startswith("data:")]
+    assert frames[-1] == "data: [DONE]"
+    terminal = json.loads(frames[-2][len("data: "):])
+    choice = terminal["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["verification_state"] == "accepted"
+    assert choice["script"] == "//STEP1 EXEC PGM=IEFBR14"
+    assert choice["script_lang"] == "jcl"
+    assert choice["script_review_required"] is True
+    assert choice["citations"] == [
+        "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+    ]
+    assert set(choice) >= {
+        "index", "delta", "finish_reason", "citations", "citations_inferred",
+        "inferred_indices", "hits", "verification_state", "script",
+        "script_lang", "script_review_required",
+    }

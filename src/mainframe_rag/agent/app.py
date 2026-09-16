@@ -274,13 +274,16 @@ def _answer_log_fields(
     citations_header_present: bool = False,
     cites_rejected_shape_bad: int = 0,
     cites_rejected_unmapped: int = 0,
+    verification_state: str = "unverified_draft",
 ) -> dict:
     """Answer-leg log fields shared by the JSON and SSE finals: identical
     keys so log consumers see one shape; stream=True only marks the SSE one.
     The citation-attempt counters (issue #299) let the eval split zero-cite
     rows into malformed vs fabricated vs never-attempted without putting
     model output on the wire. `evidence` is the supplied-excerpt count from
-    the final prompt manifest (issue #364) — counts only, never text."""
+    the final prompt manifest (issue #364) — counts only, never text.
+    `verification_state` (issue #365) is the finalized label, so log joins
+    can split accepted vs draft vs incomplete answers without re-deriving."""
     fields: dict = {
         "query_kind": kind,
         "query_complexity": complexity,
@@ -293,6 +296,7 @@ def _answer_log_fields(
         "citations": citations,
         "has_script": has_script,
         "finish_reason": finish_reason,
+        "verification_state": verification_state,
         "prompt_tokens": usage.prompt_tokens,
         "completion_tokens": usage.completion_tokens,
         "reasoning_tokens": usage.reasoning_tokens,
@@ -525,8 +529,17 @@ class AnswerResponse(BaseModel):
     inferred_indices: list[int] = Field(default_factory=list)
     script: str | None
     # Language tag of the extracted script fence (issue #336), None when
-    # no script was extracted. Additive: chat payloads carry no script.
+    # no script was extracted.
     script_lang: str | None = None
+    # Verification state (issue #365): insufficient_evidence |
+    # unverified_draft | generation_incomplete | accepted. Additive with a
+    # closed default (never `accepted`): every route passes the
+    # core-computed label; direct constructions stay non-accepted.
+    verification_state: str = "unverified_draft"
+    # True whenever a script fence was extracted (issue #365): scripts pass
+    # through unvalidated, so a surfaced script is a human-review-required
+    # draft, never certified-executable guidance.
+    script_review_required: bool = False
 
 
 class ChatRequest(BaseModel):
@@ -570,6 +583,13 @@ class ChatCompletionsResponse(BaseModel):
     citations_inferred: bool = False
     inferred_indices: list[int] = Field(default_factory=list)
     hits: list[SearchHit] = Field(default_factory=list)
+    # Verification state (issue #365): same vocabulary as AnswerResponse.
+    verification_state: str = "unverified_draft"
+    # Scripts ride chat too (issue #365): previously dropped on both chat
+    # paths, now surfaced with the review-required flag, like answers.
+    script: str | None = None
+    script_lang: str | None = None
+    script_review_required: bool = False
 
 
 ChatResponse = ChatCompletionsResponse
@@ -991,6 +1011,8 @@ async def v1_answer(
                 inferred_indices=[],
                 script=None,
                 script_lang=None,
+                verification_state=output.verification_state,
+                script_review_required=output.script_review_required,
             )
 
         timing_parts = _timing_parts(timings, llm_ms=output.llm_ms, ttft_ms=output.ttft_ms)
@@ -1018,6 +1040,7 @@ async def v1_answer(
                     citations_header_present=output.parsed.citations_header_present,
                     cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
                     cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
+                    verification_state=output.verification_state,
                 ),
             )
         )
@@ -1049,6 +1072,8 @@ async def v1_answer(
             inferred_indices=output.inferred_indices,
             script=output.script,
             script_lang=output.script_lang,
+            verification_state=output.verification_state,
+            script_review_required=output.script_review_required,
         )
 
     # SSE streaming path
@@ -1096,7 +1121,14 @@ async def v1_answer(
                             )
                         )
                         yield format_sse_event(
-                            "final", empty_final_payload(request_id, output.answer, kind)
+                            "final",
+                            empty_final_payload(
+                                request_id,
+                                output.answer,
+                                kind,
+                                verification_state=output.verification_state,
+                                script_review_required=output.script_review_required,
+                            ),
                         )
                         continue
 
@@ -1124,6 +1156,7 @@ async def v1_answer(
                                 citations_header_present=output.parsed.citations_header_present,
                                 cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
                                 cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
+                                verification_state=output.verification_state,
                             ),
                         )
                     )
@@ -1141,6 +1174,8 @@ async def v1_answer(
                         output.usage,
                         inferred_indices=output.inferred_indices,
                         script_lang=output.script_lang,
+                        verification_state=output.verification_state,
+                        script_review_required=output.script_review_required,
                     )
                     root_span.set_attributes(
                         _answer_span_attrs(
@@ -1319,6 +1354,10 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                 citations_inferred=False,
                 inferred_indices=[],
                 hits=[],
+                verification_state=output.verification_state,
+                script=None,
+                script_lang=None,
+                script_review_required=output.script_review_required,
             )
 
         content = output.answer
@@ -1353,6 +1392,10 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
             citations_inferred=output.citations_inferred,
             inferred_indices=output.inferred_indices,
             hits=output.hits,
+            verification_state=output.verification_state,
+            script=output.script,
+            script_lang=output.script_lang,
+            script_review_required=output.script_review_required,
         )
 
     chat_id = f"chatcmpl-{request_id}"
@@ -1374,6 +1417,10 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                             "citations_inferred": False,
                             "inferred_indices": [],
                             "hits": [],
+                            "verification_state": output.verification_state,
+                            "script": None,
+                            "script_lang": None,
+                            "script_review_required": output.script_review_required,
                         }
                         yield format_openai_chunk(
                             chat_id, llm_model, finish_reason="stop", extra=extra_meta
@@ -1394,6 +1441,10 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                         "citations_inferred": output.citations_inferred,
                         "inferred_indices": output.inferred_indices,
                         "hits": [h.model_dump() for h in output.hits],
+                        "verification_state": output.verification_state,
+                        "script": output.script,
+                        "script_lang": output.script_lang,
+                        "script_review_required": output.script_review_required,
                     }
                     yield format_openai_chunk(
                         chat_id, llm_model, finish_reason=output.finish_reason, extra=extra_meta

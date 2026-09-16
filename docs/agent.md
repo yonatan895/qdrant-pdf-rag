@@ -19,7 +19,8 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   query_kind, hits}`. No LLM involved.
 - `POST /v1/answer` — `AnswerRequest{query, product?, version?,
   splunk_context?, stream (default false)}` → `AnswerResponse{request_id,
-  answer, citations, citations_inferred, inferred_indices, script}`.
+  answer, citations, citations_inferred, inferred_indices, script,
+  script_lang, verification_state, script_review_required}`.
   Retrieval always runs
   with a hardcoded `limit=8` (tuning the search `limit` does not change
   answers); the JSON response deliberately omits `query_kind`, `hits`,
@@ -77,10 +78,11 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   `chat_max_body_chars` (the same helper as `/ui`). `temperature` overrides
   `Settings.llm_temperature`; `model` is accepted for OpenAI compatibility but
   ignored — inference always uses `Settings.llm_model_reasoning`, and the
-  response `model` field reports that reasoning model (issue #313); `max_tokens` is
-  accepted and ignored (token limits are server-side). The response is
-  `ChatCompletionsResponse{id: "chatcmpl-<request_id>", created, model,
-  choices[], usage, citations, citations_inferred, inferred_indices, hits}`;
+   response `model` field reports that reasoning model (issue #313); `max_tokens` is
+   accepted and ignored (token limits are server-side). The response is
+   `ChatCompletionsResponse{id: "chatcmpl-<request_id>", created, model,
+   choices[], usage, citations, citations_inferred, inferred_indices, hits,
+   verification_state, script, script_lang, script_review_required}`;
   `choices[0].message.content` carries the answer plus a trailing markdown
   `**Citations:**` bullet list when cites exist. Empty hits return
   `finish_reason: "stop"`, zeroed usage, and empty citations/hits. Provenance
@@ -149,7 +151,7 @@ mislabeled as retrieval.
 `POST /v1/answer?stream=true` yields zero or more `event: token` deltas,
 then exactly one terminal `event: final` carrying the full answer, validated
 citations, the `citations_inferred` provenance flag, the `inferred_indices`
-list, optional script,
+list, the `verification_state` label, optional script plus its review flag,
 retrieval hits, query kind, `ttft_ms`, and token usage. A mid-stream failure
 emits `event: error` and ends **without** a `final` — clients must treat
 stream-end-without-final as a failed request. `/ui/chat/stream` consumes the
@@ -365,7 +367,8 @@ readers:
 
 Logs are one JSON object per line via `configure_logging`: `search` logs
 query kind, hits, stage timings, elapsed; `answer` adds complexity, LLM
-timings, citation counts, script presence, finish reason, token usage
+timings, citation counts, script presence, finish reason, the finalized
+`verification_state`, token usage
 (+ stream/TTFT marks on SSE); `chat` uses actions `chat`, `chat_retrieval`,
 `chat_answer`, `chat_stream`, and the answer log also carries the citation
 WHY telemetry (`inline_bracket_present`, `citations_header_present`,
@@ -453,6 +456,30 @@ tokens are provisional; terminal events and error states determine completion.
 | Claim support | Requires the claim to follow from retained source content; valid citation shape/allowlist membership does not prove it (#365) |
 | Provisional output | Token deltas may precede validation or failure; never present them as a completed verified answer (#365; browser presentation #372) |
 | Completed answer | Endpoint-specific successful terminal state, not EOF or `[DONE]` alone; chat error frames followed by `[DONE]` still fail |
+
+Verification states (issue #365, computed once in `answer_core`
+from the finalized parse plus the transport outcome — one rule,
+`answer.verification_state_for`, so JSON, SSE, chat, and console agree):
+
+| State | Meaning | Never means |
+|---|---|---|
+| `accepted` | Eligible citations present and generation finished (`stop`) | Semantic proof of any claim |
+| `insufficient_evidence` | Abstention-shaped refusal or empty-hits short-circuit | A failed request (still 200 + explicit text) |
+| `unverified_draft` | Fluent non-abstention answer with zero eligible citations (absent, rejected, or inferred-only) | An error (still 200 — the draft label is the signal) |
+| `generation_incomplete` | `length` finish, empty generation after fallbacks, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
+
+Carriage: `verification_state` rides `AnswerResponse`, the answer SSE
+`final` (both paths), chat JSON top-level and the terminal chunk `extra`,
+and console turns (badge, history persistence, export). `script_review_required`
+is true whenever a script fence was extracted — scripts pass through
+unvalidated on every surface, so a surfaced script is a human-review draft,
+never certified-executable guidance; chat surfaces `script`/`script_lang`
+with the same flag. Defaults stay closed: direct constructions read
+`unverified_draft`, never `accepted`. The answer log carries the finalized
+label for eval joins; the eval splits `false_refusal_rate` (answer-tier
+explicit refusals) from `unsafe_answer_rate` (answered abstain-tier traps)
+on dev synthetic sets, with the verification-state histogram per row.
+Real-corpus acceptance with expert adjudication stays RC-owned.
 
 Scripts extracted from fences pass through unvalidated; a script is not proven
 correct because the answer contains an eligible citation. Inferred bracket-only

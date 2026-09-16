@@ -464,6 +464,9 @@ def _turn(
     citations: list[str] | None = None,
     splunk_context: str | None = None,
     history_content: str | None = None,
+    verification_state: str | None = None,
+    citations_inferred: bool = False,
+    script_review_required: bool = False,
 ) -> dict[str, Any]:
     turn = {
         "role": role,
@@ -474,6 +477,12 @@ def _turn(
         # UTC instant; the template prints HH:MM UTC and console.js upgrades
         # it to the operator's local time on load (P2).
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        # Verification state (issue #365): rendered as a badge and a
+        # state-driven citations title; persisted in browser history so a
+        # reload cannot promote a draft to accepted. None for user turns.
+        "verification_state": verification_state,
+        "citations_inferred": citations_inferred,
+        "script_review_required": script_review_required,
     }
     # Assistant turns render the safe markdown subset; operator turns stay
     # plain <pre> (the operator's own keystrokes, never model output).
@@ -645,6 +654,9 @@ async def ui_chat(
         assistant_content,
         citations=output.citations,
         history_content=_assistant_content(assistant_content, output.citations),
+        verification_state=output.verification_state,
+        citations_inferred=output.citations_inferred,
+        script_review_required=output.script_review_required,
     )
     turns.append(assistant_turn)
     if is_htmx:
@@ -713,6 +725,8 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
                             output.usage,
                             inferred_indices=output.inferred_indices,
                             script_lang=output.script_lang,
+                            verification_state=output.verification_state,
+                            script_review_required=output.script_review_required,
                         ),
                     )
         except Exception as exc:  # noqa: BLE001 — mid-stream: error event, no final

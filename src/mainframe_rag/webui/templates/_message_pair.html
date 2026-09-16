@@ -20,10 +20,26 @@
   {% endif %}
   {% if turn.citations %}
   <div class="citations">
+    {% if turn.citations_inferred %}
+    <div class="citations-title">Inferred citations ({{ turn.citations | length }}) — bracket provenance, not grounding</div>
+    {% elif turn.verification_state == "accepted" %}
     <div class="citations-title">Verified manual citations ({{ turn.citations | length }})</div>
+    {% else %}
+    <div class="citations-title">Citations ({{ turn.citations | length }}) — {{ turn.verification_state | replace("_", " ") if turn.verification_state else "unverified" }}</div>
+    {% endif %}
     <ul>
       {% for cite in turn.citations %}<li><span>{{ cite }}</span><button class="copy-btn copy-cite" type="button">Copy</button></li>{% endfor %}
     </ul>
   </div>
+  {% endif %}
+  {% if turn.verification_state and turn.role == "assistant" and turn.verification_state != "accepted" %}
+  <div class="state-badge state-{{ turn.verification_state }}">
+    {%- if turn.verification_state == "insufficient_evidence" %}Insufficient evidence — not operational guidance
+    {%- elif turn.verification_state == "unverified_draft" %}Unverified draft — no eligible citation
+    {%- elif turn.verification_state == "generation_incomplete" %}Incomplete generation — output was cut off
+    {%- else %}{{ turn.verification_state }}{% endif %}</div>
+  {% endif %}
+  {% if turn.script_review_required %}
+  <div class="state-badge state-review">Human review required — draft script, not certified executable</div>
   {% endif %}
 </article>
