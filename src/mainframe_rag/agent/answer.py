@@ -58,6 +58,18 @@ class ParsedAnswer(BaseModel):
     script_lang: str | None = None
     citations_inferred: bool = False
     inferred_indices: list[int] = Field(default_factory=list)
+    # True when the body met the abstention predicate below and citations
+    # were zeroed for it (issue #365): distinguishes a deliberate refusal
+    # (`insufficient_evidence`) from a fluent answer that merely ended up
+    # with no eligible citations (`unverified_draft`).
+    abstained: bool = False
+    # Verification state + script-review flag (issue #365). parse_answer
+    # cannot know the transport outcome (finish reason), so these stay None/
+    # False here; producers that finalize an answer (answer_core, dev-tool
+    # query_demo) set both from the finalized parse plus finish reason via
+    # verification_state_for. Renderers treat None as unknown, never accepted.
+    verification_state: str | None = None
+    script_review_required: bool = False
     # Citation WHY telemetry (issue #299): parse-time attempt counters the
     # response contract keeps out (the eval joins them from the answer log).
     # shape_bad = citation-block lines that never matched the citation
@@ -149,6 +161,44 @@ def is_abstention(answer_body: str) -> bool:
     sentences = re.split(r"(?<=[.!?])\s+|\n+", answer_body)
     remaining = [s for s in sentences if s.strip() and not is_refusal(s)]
     return sum(len(s) for s in remaining) < _ABSTENTION_REMAINDER_CHARS
+
+
+# Answer verification states (issue #365): machine-readable labels for what
+# was actually established about an answer. Citation allowlist membership is
+# eligibility, never semantic proof — no state claims entailment of a claim.
+VerificationState = Literal[
+    "insufficient_evidence", "unverified_draft", "generation_incomplete", "accepted"
+]
+VERIFICATION_STATES: frozenset[str] = frozenset(
+    {"insufficient_evidence", "unverified_draft", "generation_incomplete", "accepted"}
+)
+
+
+def verification_state_for(
+    *,
+    citations: list[str],
+    citations_inferred: bool,
+    finish_reason: str,
+    abstained: bool,
+    empty_hits: bool,
+    empty_content: bool = False,
+) -> VerificationState:
+    """One rule mapping a finalized answer to its verification state (issue
+    #365). Order is load-bearing: refusal/empty first (nothing was even
+    attempted from evidence), then unfinished generation (whatever cites
+    exist may be cut off mid-thought), then citation outcome. Inferred-only
+    provenance is a draft, not grounding — the eval never counts it, so the
+    client must not read it as accepted either. An empty model generation
+    is incomplete, not a draft: there is no content to review."""
+    if empty_hits or abstained:
+        return "insufficient_evidence"
+    if empty_content:
+        return "generation_incomplete"
+    if finish_reason != "stop":
+        return "generation_incomplete"
+    if not citations or citations_inferred:
+        return "unverified_draft"
+    return "accepted"
 
 
 def classify_query_complexity(query: str) -> str:
@@ -1133,7 +1183,8 @@ def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
     # not prompt hygiene — so every consumer of parse_answer (JSON path,
     # SSE final, query_demo) inherits it. `script` is code and passes
     # through untouched, as documented above.
-    if is_abstention(body):
+    abstained = is_abstention(body)
+    if abstained:
         citations = []
         citations_inferred = False
         inferred_indices = []
@@ -1145,6 +1196,7 @@ def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
         script_lang=script_lang,
         citations_inferred=citations_inferred,
         inferred_indices=inferred_indices,
+        abstained=abstained,
         inline_bracket_present=inline_bracket_present,
         citations_header_present=citations_header_present,
         cites_rejected_shape_bad=cites_rejected_shape_bad,

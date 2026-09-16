@@ -131,6 +131,7 @@ class _AnswerCapture(logging.Handler):
             for key in (
                 "query_complexity",
                 "finish_reason",
+                "verification_state",
                 "prompt_tokens",
                 "completion_tokens",
                 "reasoning_tokens",
@@ -150,7 +151,7 @@ from venue import VenueError, require_rc_for_collection, resolve_golden_paths
 # The trap branch keeps the marker test (any decline phrase = declined, even
 # a long one); the answer branch needs the shape floor so a grounded partial
 # answer's scope caveat is not scored as a refusal (#305).
-from mainframe_rag.agent.answer import is_abstention, is_refusal
+from mainframe_rag.agent.answer import VERIFICATION_STATES, is_abstention, is_refusal
 from mainframe_rag.config import load_settings
 
 
@@ -160,6 +161,7 @@ def judge(
     citations: list[str],
     judge_gold: bool = True,
     citations_inferred: bool = False,
+    verification_state: str | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """Judge one /v1/answer response against a golden entry.
 
@@ -186,7 +188,12 @@ def judge(
     judge_gold=False suppresses the gold-substring and must_cite_identifier
     checks: they judge MODEL phrasing, and the agent's fixed zero-hits
     message contains no model text (citing a canned string can never teach
-    us anything about the model). Structural grounding verdicts always run."""
+    us anything about the model). Structural grounding verdicts always run.
+
+    Verification-state check (issue #365, opt-in): entries carrying
+    `expected_verification_state` fail when the served state differs. Golden
+    files predate the field, so it never fires unless an entry opts in —
+    no baseline churn from the new contract."""
     failures: list[str] = []
     warns: list[str] = []
     body = answer.strip()
@@ -210,6 +217,12 @@ def judge(
             warns.append("hedged abstention: cites excerpts but declines")
         elif not grounded and not refuses:
             warns.append("silent abstention: no citations and no explicit refusal phrase")
+
+    expected_state = entry.get("expected_verification_state")
+    if expected_state is not None and verification_state != expected_state:
+        failures.append(
+            f"verification state {verification_state!r} != expected {expected_state!r}"
+        )
 
     if judge_gold:
         for s in entry.get("gold_must_contain") or []:
@@ -341,6 +354,34 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     completeness_n, completeness_rate = answer_completeness(judged)
     metrics["answer_completeness"] = completeness_rate
     metrics["answer_completeness_n"] = completeness_n
+    # Refusal/unsafe split (issue #365): false refusals are answer-tier rows
+    # failing as explicit refusals; unsafe answers are abstain-tier rows
+    # failing as answered traps. Separate rates so one cannot hide behind
+    # the other's pass rate.
+    false_refusals = sum(
+        1 for r in answer_rows
+        if r["verdict"] == "fail"
+        and "explicit refusal on an answer-tier query" in (r.get("failures") or [])
+    )
+    unsafe_answers = sum(
+        1 for r in abstain_rows
+        if r["verdict"] == "fail"
+    )
+    metrics["false_refusals"] = false_refusals
+    metrics["false_refusal_rate"] = (
+        round(false_refusals / len(answer_rows), 4) if answer_rows else None
+    )
+    metrics["unsafe_answers"] = unsafe_answers
+    metrics["unsafe_answer_rate"] = (
+        round(unsafe_answers / len(abstain_rows), 4) if abstain_rows else None
+    )
+    # Verification-state histogram (issue #365): what the served contract
+    # reported per row. Unknown covers error rows and pre-state servers —
+    # a missing signal, never a fabricated state.
+    by_state: Counter = Counter()
+    for r in judged:
+        by_state[str(r.get("verification_state") or "unknown")] += 1
+    metrics["by_verification_state"] = dict(sorted(by_state.items()))
     return metrics
 
 
@@ -394,6 +435,19 @@ def run_query(
             elapsed_ms=elapsed_ms,
         )
         return row
+    # Verification state (issue #365): unknown values are a contract
+    # violation, not a quality signal — fail closed. Missing (pre-#365
+    # server) reads as None: the row is judged without the state check,
+    # never assumed accepted.
+    verification_state = data.get("verification_state")
+    if verification_state is not None and verification_state not in VERIFICATION_STATES:
+        row.update(
+            verdict="error",
+            failures=[f"unknown verification_state in response: {verification_state!r}"],
+            elapsed_ms=elapsed_ms,
+        )
+        return row
+    script_review_required = bool(data.get("script_review_required", False))
     zero_hits = is_zero_hits_answer(answer)
     # Zero-hits is the agent's canned message (no model text): gold-substring
     # checks would judge the canned string, not the model — suppress them and
@@ -405,6 +459,7 @@ def run_query(
         citations,
         judge_gold=not zero_hits,
         citations_inferred=citations_inferred,
+        verification_state=verification_state,
     )
     if zero_hits:
         warns.append("zero-hits path: gold substrings not judged (canned agent message)")
@@ -426,6 +481,10 @@ def run_query(
         # inferred citations came from, straight off the response contract.
         inferred_indices=inferred_indices,
         script=data.get("script"),
+        # Verification state + script-review flag straight off the response
+        # contract (issue #365): the row carries what the client saw.
+        verification_state=verification_state,
+        script_review_required=script_review_required,
         # joins server-side alert logs (finish_reason != stop) to this row —
         # the response contract deliberately does not expose finish_reason
         request_id=data.get("request_id"),
@@ -554,6 +613,19 @@ def write_summary(path: Path, results: list[dict[str, Any]], metrics: dict[str, 
     lines.append(f"- failures: {metrics['failures']}, warns: {metrics['warns']}, zero-hits paths: {metrics['zero_hits']}")
     lines.append(f"- inferred-citation rows (not grounded): {metrics['inferred_citations']}")
     lines.append(f"- citations per answer (mean): {metrics['citations_per_answer']}")
+    lines.append(
+        f"- false refusals: {metrics.get('false_refusals')} "
+        f"(rate {metrics.get('false_refusal_rate')}, n={metrics.get('answer_n')})"
+    )
+    lines.append(
+        f"- unsafe answers: {metrics.get('unsafe_answers')} "
+        f"(rate {metrics.get('unsafe_answer_rate')}, n={metrics.get('abstain_n')})"
+    )
+    if metrics.get("by_verification_state"):
+        lines.append(
+            "- verification states: "
+            + ", ".join(f"{k}={v}" for k, v in metrics["by_verification_state"].items())
+        )
     lines.append(
         f"- answer completeness: {metrics.get('answer_completeness')} "
         f"(n={metrics.get('answer_completeness_n')}: expected docs retrieved; share whose "

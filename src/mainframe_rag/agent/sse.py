@@ -44,9 +44,17 @@ def _usage_payload(usage: TokenUsage) -> dict[str, int]:
     }
 
 
-def empty_final_payload(request_id: str, answer: str, query_kind: str) -> dict[str, Any]:
+def empty_final_payload(
+    request_id: str,
+    answer: str,
+    query_kind: str,
+    verification_state: str = "insufficient_evidence",
+    script_review_required: bool = False,
+) -> dict[str, Any]:
     """Terminal `final` for the no-hits path: same keys as final_payload
-    (review S6); no tokens streamed, so ttft_ms stays null and usage zeros."""
+    (review S6); no tokens streamed, so ttft_ms stays null and usage zeros.
+    The state is always `insufficient_evidence` — nothing was attempted from
+    evidence — and no script can ride this path, so both default closed."""
     return {
         "type": "final",
         "request_id": request_id,
@@ -54,8 +62,10 @@ def empty_final_payload(request_id: str, answer: str, query_kind: str) -> dict[s
         "citations": [],
         "citations_inferred": False,
         "inferred_indices": [],
+        "verification_state": verification_state,
         "script": None,
         "script_lang": None,
+        "script_review_required": script_review_required,
         "query_kind": query_kind,
         "hits": [],
         "finish_reason": "stop",
@@ -82,6 +92,8 @@ def final_payload(
     usage: TokenUsage,
     inferred_indices: list[int] | None = None,
     script_lang: str | None = None,
+    verification_state: str = "unverified_draft",
+    script_review_required: bool = False,
 ) -> dict[str, Any]:
     """Terminal `final` for the streamed answer: verified citations/script
     identical in shape to the JSON mode and the empty-hits path.
@@ -91,7 +103,9 @@ def final_payload(
     `[n]` prompt labels those markers pointed at, 1-based (issue #364: labels
     come from the final evidence manifest, not retrieval rank); it is
     optional and defaults to empty so callers built against the pre-#299
-    signature keep working, and the payload always carries a list."""
+    signature keep working, and the payload always carries a list.
+    `verification_state` (issue #365) defaults closed (`unverified_draft`,
+    never `accepted`): every route passes the core-computed label."""
     return {
         "type": "final",
         "request_id": request_id,
@@ -99,8 +113,10 @@ def final_payload(
         "citations": citations,
         "citations_inferred": citations_inferred,
         "inferred_indices": list(inferred_indices or []),
+        "verification_state": verification_state,
         "script": script,
         "script_lang": script_lang,
+        "script_review_required": script_review_required,
         "query_kind": query_kind,
         "hits": [h.model_dump() for h in hits],
         "finish_reason": finish_reason,

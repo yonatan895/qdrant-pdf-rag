@@ -2410,6 +2410,16 @@ def test_sse_final_schemas_match_across_paths():
     assert full["citations_inferred"] is False
     assert full["inferred_indices"] == []
     assert empty["inferred_indices"] == []
+    # Verification-state keys ride both finals (issue #365): builder
+    # defaults stay closed — never `accepted` without a computed label.
+    assert full["verification_state"] == "unverified_draft"
+    assert full["script_review_required"] is False
+    assert empty["verification_state"] == "insufficient_evidence"
+    assert empty["script_review_required"] is False
+    assert final_payload(
+        "req-3", "A.", ["c"], False, None, "nl", [hit], "stop", None, usage,
+        verification_state="accepted", script_review_required=True,
+    )["verification_state"] == "accepted"
     # The pre-#299 positional signature still builds a full payload, and an
     # explicit list lands as a list copy.
     assert final_payload(
@@ -2772,3 +2782,266 @@ def test_slow_tokenizer_verify_keeps_loop_responsive(client, monkeypatch):
     assert all(c == 404 for c in probe_codes)
     # The loop stayed responsive while the sync verifies were in flight.
     assert max(probe_latencies) < 0.9
+
+
+# ---------------------------------------------------------------------------
+# Answer verification states (issue #365)
+# ---------------------------------------------------------------------------
+
+_ACCEPTED_CITE = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+
+
+class FluentNoCiteLLM:
+    """Fluent answer with no citation block and no bracket markers: prose
+    only, so nothing is eligible — but the shape is not an abstention."""
+
+    def chat(self, messages, *args, **kwargs):
+        return (
+            "Reissue the command after initialization completes. "
+            "The IOSCMDS LIST output shows the pending requests."
+        )
+
+
+class FluentDraftWithScriptLLM:
+    """Fluent prose plus a script fence, zero eligible citations: the
+    orthogonal draft+script combo (issue #365 review) — draft state AND
+    review flag together."""
+
+    def chat(self, messages, *args, **kwargs):
+        return (
+            "Reissue the command after initialization completes.\n\n"
+            "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```\n"
+        )
+
+
+class RefusalLLM:
+    def chat(self, messages, *args, **kwargs):
+        return "The excerpts do not contain this procedure."
+
+
+class RefusalWithScriptLLM:
+    def chat(self, messages, *args, **kwargs):
+        return (
+            "The excerpts do not contain this procedure.\n\n"
+            "```jcl\n// example only\nIOSCMDS LIST\n```\n"
+        )
+
+
+class LengthFinishLLM:
+    """Cut-off generation: valid citation present, but finish_reason says
+    the model was stopped by the token budget."""
+
+    def chat(self, messages, *args, **kwargs):
+        from mainframe_rag.ports import ChatResult, TokenUsage
+
+        return ChatResult(
+            content=(
+                "Reissue the command after initialization completes.\n\n"
+                "Citations:\n"
+                f"- {_ACCEPTED_CITE}\n"
+            ),
+            finish_reason="length",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=25, total_tokens=35),
+        )
+
+
+class PremiseCorrectingLLM:
+    """Corrects a false premise (JES3 vs JES2) while citing the supplied
+    excerpt: correction prose must keep its citations (issue #365 req 5)."""
+
+    def chat(self, messages, *args, **kwargs):
+        return (
+            "The question assumes JES3, but the excerpts describe JES2 spool "
+            "handling. For JES2, reissue the command after initialization "
+            "completes.\n\n"
+            "Citations:\n"
+            f"- {_ACCEPTED_CITE}\n"
+        )
+
+
+def test_answer_verification_state_accepted(client):
+    body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
+    assert body["verification_state"] == "accepted"
+    assert body["script_review_required"] is True
+    assert body["citations"] == [_ACCEPTED_CITE]
+
+
+def test_answer_verification_state_unverified_draft_no_citations(client, monkeypatch):
+    """Fluent prose, zero eligible citations, not abstention-shaped: a 200
+    draft, never an accepted answer and never an error."""
+    monkeypatch.setattr(app_mod, "llm", FluentNoCiteLLM())
+    resp = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["citations"] == []
+    assert body["verification_state"] == "unverified_draft"
+    assert body["script_review_required"] is False
+
+
+def test_answer_verification_state_unverified_draft_inferred_only(client, monkeypatch):
+    monkeypatch.setattr(app_mod, "llm", InferredOnlyLLM())
+    body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
+    assert body["citations_inferred"] is True
+    assert len(body["citations"]) == 1
+    # Inferred provenance is eligibility, not grounding: draft, not accepted.
+    assert body["verification_state"] == "unverified_draft"
+
+
+def test_answer_draft_with_script_marks_review_required(client, monkeypatch):
+    """Fluent prose + script fence, zero eligible citations: draft state
+    AND review flag together — the uncited script is still a draft."""
+    monkeypatch.setattr(app_mod, "llm", FluentDraftWithScriptLLM())
+    body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
+    assert body["citations"] == []
+    assert body["verification_state"] == "unverified_draft"
+    assert body["script"] == "//STEP1 EXEC PGM=IEFBR14"
+    assert body["script_lang"] == "jcl"
+    assert body["script_review_required"] is True
+
+
+def test_answer_verification_state_insufficient_evidence_abstention(client, monkeypatch):
+    monkeypatch.setattr(app_mod, "llm", RefusalLLM())
+    body = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert body.status_code == 200
+    data = body.json()
+    assert data["citations"] == []
+    assert data["verification_state"] == "insufficient_evidence"
+    assert data["script_review_required"] is False
+
+
+def test_answer_refusal_script_stays_review_required(client, monkeypatch):
+    """A refusal carrying a script fence: citations zeroed, script kept AND
+    flagged — a cited-looking draft must not certify execution."""
+    monkeypatch.setattr(app_mod, "llm", RefusalWithScriptLLM())
+    body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
+    assert body["citations"] == []
+    assert body["verification_state"] == "insufficient_evidence"
+    assert body["script"] == "// example only\nIOSCMDS LIST"
+    assert body["script_lang"] == "jcl"
+    assert body["script_review_required"] is True
+
+
+def test_answer_verification_state_generation_incomplete_length(client, monkeypatch):
+    """finish_reason=length with a valid cite: cites may be cut off
+    mid-thought, so the answer is incomplete, not accepted."""
+    monkeypatch.setattr(app_mod, "llm", LengthFinishLLM())
+    body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
+    assert body["citations"] == [_ACCEPTED_CITE]
+    assert body["verification_state"] == "generation_incomplete"
+    assert body["script_review_required"] is False
+
+
+def test_answer_verification_state_empty_hits_json_and_stream(client, monkeypatch):
+    """No retrieved evidence: insufficient_evidence on both JSON and the
+    SSE terminal final (schema parity)."""
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *a, **k: ([], "nl", {}))
+    body = client.post("/v1/answer", json={"query": "sizing lookaside"}).json()
+    assert body["citations"] == []
+    assert body["verification_state"] == "insufficient_evidence"
+
+    resp = client.post("/v1/answer?stream=true", json={"query": "sizing lookaside"})
+    assert resp.status_code == 200
+    finals = [e for e in _parse_sse_events(resp.text) if e[0] == "final"]
+    assert len(finals) == 1
+    assert finals[0][1]["verification_state"] == "insufficient_evidence"
+    assert finals[0][1]["script_review_required"] is False
+
+
+def test_answer_sse_final_carries_verification_state(client, monkeypatch):
+    """The streamed terminal final reports the same state as the JSON path,
+    plus the review flag for the streamed script."""
+    monkeypatch.setattr(app_mod, "llm", StreamingFakeLLM())
+    resp = client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
+    finals = [e for e in _parse_sse_events(resp.text) if e[0] == "final"]
+    assert len(finals) == 1
+    assert finals[0][1]["verification_state"] == "accepted"
+    assert finals[0][1]["script_review_required"] is True
+    assert finals[0][1]["script_lang"] == "jcl"
+
+
+def test_answer_sse_final_length_is_generation_incomplete(client, monkeypatch):
+    """A length-terminated stream still yields exactly one final (complete
+    wire shape), but the state is incomplete — the cut Citations: tail must
+    not read as accepted."""
+
+    class LengthStreamLLM(StreamingFakeLLM):
+        async def chat_stream(self, messages, *args, **kwargs):
+            async for item in super().chat_stream(messages, *args, **kwargs):
+                if item.get("type") == "done":
+                    item = dict(item, finish_reason="length")
+                yield item
+
+    monkeypatch.setattr(app_mod, "llm", LengthStreamLLM())
+    resp = client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
+    events = _parse_sse_events(resp.text)
+    assert [e for e in events if e[0] == "error"] == []
+    finals = [e for e in events if e[0] == "final"]
+    assert len(finals) == 1
+    assert finals[0][1]["finish_reason"] == "length"
+    assert finals[0][1]["verification_state"] == "generation_incomplete"
+
+
+def test_answer_premise_correction_keeps_citations(client, monkeypatch):
+    """A false-premise correction with eligible cites is a supported answer,
+    not an abstention: citations survive and the state is accepted."""
+    monkeypatch.setattr(app_mod, "llm", PremiseCorrectingLLM())
+    body = client.post("/v1/answer", json={"query": "JES3 spool handling"}).json()
+    assert body["citations"] == [_ACCEPTED_CITE]
+    assert body["verification_state"] == "accepted"
+
+
+def test_verification_state_for_matrix():
+    """Unit pin for the single mapping rule (issue #365): order matters —
+    refusal/empty first, unfinished generation second, citation outcome last."""
+    from mainframe_rag.agent.answer import verification_state_for
+
+    assert verification_state_for(
+        citations=[_ACCEPTED_CITE], citations_inferred=False,
+        finish_reason="stop", abstained=False, empty_hits=False,
+    ) == "accepted"
+    assert verification_state_for(
+        citations=[], citations_inferred=False,
+        finish_reason="stop", abstained=True, empty_hits=False,
+    ) == "insufficient_evidence"
+    assert verification_state_for(
+        citations=[], citations_inferred=False,
+        finish_reason="stop", abstained=False, empty_hits=True,
+    ) == "insufficient_evidence"
+    assert verification_state_for(
+        citations=[_ACCEPTED_CITE], citations_inferred=False,
+        finish_reason="length", abstained=False, empty_hits=False,
+    ) == "generation_incomplete"
+    assert verification_state_for(
+        citations=[], citations_inferred=False,
+        finish_reason="stop", abstained=False, empty_hits=False,
+    ) == "unverified_draft"
+    assert verification_state_for(
+        citations=[_ACCEPTED_CITE], citations_inferred=True,
+        finish_reason="stop", abstained=False, empty_hits=False,
+    ) == "unverified_draft"
+    # Unfinished generation outranks citation outcome: cites present but cut.
+    assert verification_state_for(
+        citations=[], citations_inferred=False,
+        finish_reason="length", abstained=False, empty_hits=False,
+    ) == "generation_incomplete"
+    # Empty model content is incomplete, not a draft: nothing to review.
+    assert verification_state_for(
+        citations=[], citations_inferred=False,
+        finish_reason="stop", abstained=False, empty_hits=False,
+        empty_content=True,
+    ) == "generation_incomplete"
+
+
+def test_answer_empty_generation_is_incomplete(client, monkeypatch):
+    """An empty model generation (post-fallback) must not read as a draft
+    or accepted answer: there is no content to review."""
+
+    class EmptyLLM:
+        def chat(self, messages, *args, **kwargs):
+            return ""
+
+    monkeypatch.setattr(app_mod, "llm", EmptyLLM())
+    body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
+    assert body["answer"] == ""
+    assert body["citations"] == []
+    assert body["verification_state"] == "generation_incomplete"

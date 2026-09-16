@@ -26,6 +26,7 @@ from mainframe_rag.agent.answer import (
     ParsedAnswer,
     PreparedPrompt,
     PromptEvidence,
+    VerificationState,
     as_chat_result,
     assert_reasoning_model,
     build_chat_messages,
@@ -33,6 +34,7 @@ from mainframe_rag.agent.answer import (
     classify_query_complexity,
     condense_query,
     parse_answer,
+    verification_state_for,
 )
 from mainframe_rag.agent.sse import fallback_stream
 from mainframe_rag.config import Settings
@@ -148,6 +150,14 @@ class AnswerCoreOutput:
     inferred_indices: list[int]
     script: str | None
     script_lang: str | None
+    # Verification state (issue #365): what was established about this
+    # answer — eligibility is not semantic proof. Computed once in
+    # _finalize_answer (or the empty-hits short-circuit) so JSON, SSE,
+    # chat, and console cannot disagree.
+    verification_state: VerificationState
+    # True whenever a script fence was extracted: scripts pass through
+    # unvalidated, so any surfaced script is a human-review-required draft.
+    script_review_required: bool
     query_kind: str
     hits: list[SearchHit]
     finish_reason: str
@@ -264,7 +274,9 @@ def _finalize_answer(
 ) -> AnswerCoreOutput:
     """One finalize owner for the JSON and streaming executors: citation
     parsing consumes the prepared evidence manifest, and the output carries
-    the retrieval list separately (issue #364)."""
+    the retrieval list separately (issue #364). The verification state is
+    derived here from the finalized parse plus the transport outcome, so
+    every surface reports the same label for the same answer."""
     parsed = parse_answer(content, prepared.evidence)
     return AnswerCoreOutput(
         answer=parsed.answer,
@@ -273,6 +285,15 @@ def _finalize_answer(
         inferred_indices=parsed.inferred_indices,
         script=parsed.script,
         script_lang=parsed.script_lang,
+        verification_state=verification_state_for(
+            citations=parsed.citations,
+            citations_inferred=parsed.citations_inferred,
+            finish_reason=finish_reason,
+            abstained=parsed.abstained,
+            empty_hits=False,
+            empty_content=not content.strip(),
+        ),
+        script_review_required=parsed.script is not None,
         query_kind=kind,
         hits=hits,
         finish_reason=finish_reason,
@@ -337,6 +358,8 @@ async def execute_answer_core(
             inferred_indices=[],
             script=None,
             script_lang=None,
+            verification_state="insufficient_evidence",
+            script_review_required=False,
             query_kind=kind,
             hits=[],
             finish_reason="stop",
@@ -456,6 +479,8 @@ async def execute_answer_core_stream(
             inferred_indices=[],
             script=None,
             script_lang=None,
+            verification_state="insufficient_evidence",
+            script_review_required=False,
             query_kind=kind,
             hits=[],
             finish_reason="stop",

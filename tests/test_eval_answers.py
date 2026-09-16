@@ -416,6 +416,7 @@ def test_answer_capture_keeps_answer_lines_only() -> None:
     cap.emit(logging.LogRecord("agent", logging.INFO, __file__, 0, "not json", None, None))
     cap.emit(_answer_log_record(request_id="", query_complexity="simple"))
     assert cap.signals == {"r1": {"query_complexity": "complex", "finish_reason": "length",
+                                  "verification_state": None,
                                   "prompt_tokens": 2500, "completion_tokens": 1500,
                                   "reasoning_tokens": 1100, "total_tokens": 4000,
                                   "inline_bracket_present": False,
@@ -660,3 +661,80 @@ def test_summarize_by_why_and_off_gold() -> None:
         "fabricated_unmapped": 1, "malformed_shape_bad": 1,
     }
     assert metrics["inferred_index_off_gold"] == 1
+
+
+# ------------------------------------------------------- verification states #365
+def test_judge_expected_verification_state_opt_in() -> None:
+    from scripts.eval_answers import judge
+
+    grounded = (
+        "LFAREA reserves frames above the bar.\n"
+        "Citations:\nSA23-1380-70 ref, p. 1"
+    )
+    # Entries without the key never check the state (no baseline churn).
+    verdict, failures, _ = judge(
+        _entry(), grounded, ["SA23-1380-70 ref, p. 1"], verification_state="draft anything"
+    )
+    assert verdict == "pass" and failures == []
+    # Opted-in entry: match passes, mismatch fails.
+    verdict, failures, _ = judge(
+        _entry(expected_verification_state="accepted"),
+        grounded, ["SA23-1380-70 ref, p. 1"], verification_state="accepted",
+    )
+    assert verdict == "pass"
+    verdict, failures, _ = judge(
+        _entry(expected_verification_state="accepted"),
+        grounded, ["SA23-1380-70 ref, p. 1"], verification_state="unverified_draft",
+    )
+    assert verdict == "fail"
+    assert any("verification state" in f for f in failures)
+
+
+def test_summarize_splits_false_refusal_and_unsafe_rates() -> None:
+    from scripts.eval_answers import summarize
+
+    results = [
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "message_id",
+         "citations": ["a"], "verification_state": "accepted"},
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "message_id",
+         "citations": [], "warns": [],
+         "failures": ["explicit refusal on an answer-tier query"],
+         "verification_state": "insufficient_evidence"},
+        {"verdict": "fail", "expected_behavior": "answer", "query_class": "message_id",
+         "citations": [], "warns": [], "failures": ["zero validated citations"],
+         "verification_state": "unverified_draft"},
+        {"verdict": "fail", "expected_behavior": "abstain", "query_class": "negative",
+         "citations": ["a"], "failures": ["trap answered: 1 validated citation(s)"],
+         "verification_state": "accepted"},
+        {"verdict": "pass", "expected_behavior": "abstain", "query_class": "negative",
+         "citations": [], "warns": [], "verification_state": "insufficient_evidence"},
+    ]
+    m = summarize(results)
+    assert m["answer_n"] == 3 and m["abstain_n"] == 2
+    assert m["false_refusals"] == 1 and m["false_refusal_rate"] == round(1 / 3, 4)
+    assert m["unsafe_answers"] == 1 and m["unsafe_answer_rate"] == 0.5
+    assert m["by_verification_state"] == {
+        "accepted": 2, "insufficient_evidence": 2, "unverified_draft": 1,
+    }
+
+
+def test_run_query_carries_verification_state_and_review_flag() -> None:
+    row = run_query(
+        _StubClient(_answer_payload(
+            verification_state="accepted", script_review_required=True,
+            script="//STEP1 EXEC PGM=IEFBR14",
+        )),
+        _entry(),
+    )
+    assert row["verdict"] == "pass"
+    assert row["verification_state"] == "accepted"
+    assert row["script_review_required"] is True
+
+
+def test_run_query_unknown_state_is_contract_error() -> None:
+    row = run_query(
+        _StubClient(_answer_payload(verification_state="certified_correct")),
+        _entry(),
+    )
+    assert row["verdict"] == "error"
+    assert any("verification_state" in f for f in row["failures"])

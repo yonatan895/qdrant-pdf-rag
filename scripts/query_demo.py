@@ -189,6 +189,7 @@ def render_answer_text(
         f"Classification : [{kind.upper()}]",
         f"Timings        : Embed: {timings.get('embed_ms', 0)}ms | Qdrant: {timings.get('qdrant_ms', 0)}ms | Total: {total_ms}ms",
         f"Retrieved Hits : {len(hits)}",
+        f"Verification   : [{parsed.verification_state or 'unknown'}]",
         "------------------------------------------------------------",
         "MODEL REASONING ANSWER:",
         "------------------------------------------------------------",
@@ -201,6 +202,8 @@ def render_answer_text(
             "EXTRACTED SCRIPT / CODE:",
             "------------------------------------------------------------",
             parsed.script.strip(),
+            "",
+            "NOTE: human review required — draft script, not certified executable.",
         ])
     cites = parsed.citations
     inferred = parsed.citations_inferred
@@ -245,7 +248,7 @@ def render_answer_html(
         script_html = f"""
         <div class="hit-card">
           <div class="hit-header">
-            <span class="hit-title">Extracted Script / Code</span>
+            <span class="hit-title">Extracted Script / Code (human review required — draft)</span>
           </div>
           <pre class="hit-text">{html.escape(parsed.script)}</pre>
         </div>
@@ -304,6 +307,7 @@ def render_answer_html(
       <h2>"{html.escape(query)}"</h2>
       <span class="meta-tag">Kind: <strong>{html.escape(kind.upper())}</strong></span>
       <span class="meta-tag">Excerpts: {len(hits)}</span>
+      <span class="meta-tag">Verification: {html.escape(parsed.verification_state or "unknown")}</span>
       <span class="meta-tag">Embed: {timings.get('embed_ms', 0)}ms</span>
       <span class="meta-tag">Qdrant: {timings.get('qdrant_ms', 0)}ms</span>
       <span class="meta-tag">Total: {total_ms}ms</span>
@@ -322,6 +326,31 @@ def render_answer_html(
 </body>
 </html>
 """
+
+
+def answer_export_payload(
+    query: str,
+    kind: str,
+    timings: dict[str, int],
+    parsed: ParsedAnswer,
+    hits: list[SearchHit],
+) -> dict[str, Any]:
+    """JSON export shape for --answer --format json (issue #365): the same
+    contract labels the API serves, so dev-tool bundles cannot read as
+    accepted guidance what the API would call a draft."""
+    return {
+        "query": query,
+        "kind": kind,
+        "timings": timings,
+        "answer": parsed.answer,
+        "script": parsed.script,
+        "citations": parsed.citations,
+        "citations_inferred": parsed.citations_inferred,
+        "inferred_indices": parsed.inferred_indices,
+        "verification_state": parsed.verification_state or "unknown",
+        "script_review_required": parsed.script_review_required,
+        "hits": [h.model_dump() for h in hits],
+    }
 
 
 def resolve_runtime_settings(
@@ -598,6 +627,7 @@ def execute_answer(
         build_messages,
         classify_query_complexity,
         parse_answer,
+        verification_state_for,
     )
 
     if settings is None:
@@ -620,6 +650,7 @@ def execute_answer(
                 answer="No relevant manual excerpts found in the collection.",
                 citations=[],
                 script=None,
+                verification_state="insufficient_evidence",
             ), hits, kind, timings
 
         complexity = classify_query_complexity(query)
@@ -693,6 +724,17 @@ def execute_answer(
         # Issue #364: the allowlist is the prepared prompt's supplied-evidence
         # manifest, never the retrieval list.
         parsed = parse_answer(reply_content, prepared.evidence)
+        # Issue #365: the dev tool finalizes like answer_core — the state
+        # needs the transport outcome parse_answer cannot see.
+        parsed.verification_state = verification_state_for(
+            citations=parsed.citations,
+            citations_inferred=parsed.citations_inferred,
+            finish_reason=reply.finish_reason,
+            abstained=parsed.abstained,
+            empty_hits=False,
+            empty_content=not reply_content.strip(),
+        )
+        parsed.script_review_required = parsed.script is not None
         root_span.set_attributes({
             "rag.query_kind": kind,
             "rag.hits": len(hits),
@@ -843,17 +885,12 @@ def main(argv: list[str] | None = None) -> int:
                 settings=settings,
             )
             if args.format == "json":
-                output = json.dumps({
-                    "query": args.query,
-                    "kind": kind,
-                    "timings": timings,
-                    "answer": parsed.answer,
-                    "script": parsed.script,
-                    "citations": parsed.citations,
-                    "citations_inferred": parsed.citations_inferred,
-                    "inferred_indices": parsed.inferred_indices,
-                    "hits": [h.model_dump() for h in hits],
-                }, indent=2)
+                output = json.dumps(
+                    answer_export_payload(
+                        args.query, kind, timings, parsed, hits
+                    ),
+                    indent=2,
+                )
             elif args.format == "html":
                 output = render_answer_html(args.query, kind, parsed, hits, timings)
             else:

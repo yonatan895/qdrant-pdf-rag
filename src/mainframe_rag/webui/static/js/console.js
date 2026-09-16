@@ -123,8 +123,20 @@
         lines.push("");
       }
       lines.push(turn.content, "");
+      if (turn.role === "assistant" && turn.verification_state) {
+        lines.push("**Verification state:** " + turn.verification_state);
+        lines.push("");
+      }
+      if (turn.script_review_required) {
+        lines.push("**Human review required:** draft script below, not certified executable.");
+        lines.push("");
+      }
       if (turn.citations && turn.citations.length) {
-        lines.push("**Verified citations:**");
+        const citeLabel =
+          turn.verification_state === "accepted" && !turn.citations_inferred
+            ? "**Verified citations:**"
+            : "**Citations (" + (turn.verification_state || "unverified") + "):**";
+        lines.push(citeLabel);
         turn.citations.forEach((c) => lines.push("- " + c));
         lines.push("");
       }
@@ -138,6 +150,42 @@
     if (className) node.className = className;
     if (text !== undefined) node.textContent = text;
     return node;
+  }
+
+  /* Verification-state presentation (issue #365): one label table and one
+   * citations-title rule shared by restored turns and streamed turns, so a
+   * reload can never promote a draft to accepted. Titles mirror the server
+   * fragment: only accepted, non-inferred cites read "Verified". */
+  const STATE_LABELS = {
+    insufficient_evidence: "Insufficient evidence — not operational guidance",
+    unverified_draft: "Unverified draft — no eligible citation",
+    generation_incomplete: "Incomplete generation — output was cut off",
+    accepted: "Accepted",
+  };
+
+  function citationsTitle(turn) {
+    const n = turn.citations.length;
+    if (turn.citations_inferred) {
+      return "Inferred citations (" + n + ") — bracket provenance, not grounding";
+    }
+    if (turn.verification_state === "accepted") {
+      return "Verified manual citations (" + n + ")";
+    }
+    const state = turn.verification_state ? turn.verification_state.replace(/_/g, " ") : "unverified";
+    return "Citations (" + n + ") — " + state;
+  }
+
+  function stateBadges(article, turn) {
+    if (turn.role === "assistant" && turn.verification_state && turn.verification_state !== "accepted") {
+      article.appendChild(
+        el("div", "state-badge state-" + turn.verification_state, STATE_LABELS[turn.verification_state] || turn.verification_state)
+      );
+    }
+    if (turn.script_review_required) {
+      article.appendChild(
+        el("div", "state-badge state-review", "Human review required — draft script, not certified executable")
+      );
+    }
   }
 
   /* Safe markdown subset, mirroring routes.render_markdown_subset. Every
@@ -436,7 +484,7 @@
     }
     if (turn.citations && turn.citations.length) {
       const box = el("div", "citations");
-      box.appendChild(el("div", "citations-title", "Verified manual citations (" + turn.citations.length + ")"));
+      box.appendChild(el("div", "citations-title", citationsTitle(turn)));
       const list = el("ul");
       turn.citations.forEach((cite) => {
         const li = el("li");
@@ -449,6 +497,7 @@
       box.appendChild(list);
       article.appendChild(box);
     }
+    stateBadges(article, turn);
     const meta = renderMeta(turn);
     if (meta) article.appendChild(meta);
     return article;
@@ -736,6 +785,10 @@
     if (failed || (!stopped && !finalPayload)) {
       assistantTurn.error = true;
       assistantTurn.content = assistantTurn.content || ERROR_TEXT;
+      // A failed stream never verified anything: retain the non-accepted
+      // state on the turn (issue #365) so history/exports cannot promote
+      // partial content to accepted guidance.
+      assistantTurn.verification_state = "generation_incomplete";
       contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
       article.classList.add("turn-error");
       return;
@@ -751,6 +804,9 @@
         assistantTurn.content += "\n\n```" + tag + "\n" + finalPayload.script + "\n```";
       }
       assistantTurn.citations = finalPayload.citations || [];
+      assistantTurn.citations_inferred = !!finalPayload.citations_inferred;
+      assistantTurn.verification_state = finalPayload.verification_state || "unverified_draft";
+      assistantTurn.script_review_required = !!finalPayload.script_review_required;
       assistantTurn.meta = {
         ttft_ms: typeof finalPayload.ttft_ms === "number" ? finalPayload.ttft_ms : null,
         citations: assistantTurn.citations.length,
@@ -761,13 +817,16 @@
         stopped: false,
       };
     } else {
+      // Operator-stopped with partial content: output was cut off before
+      // finalization, so it stays explicitly incomplete (issue #365).
+      assistantTurn.verification_state = "generation_incomplete";
       assistantTurn.meta = { stopped: true };
     }
     assistantTurn.ts = Date.now();
     contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
     if (assistantTurn.citations.length) {
       const box = el("div", "citations");
-      box.appendChild(el("div", "citations-title", "Verified manual citations (" + assistantTurn.citations.length + ")"));
+      box.appendChild(el("div", "citations-title", citationsTitle(assistantTurn)));
       const list = el("ul");
       assistantTurn.citations.forEach((cite) => {
         const li = el("li");
@@ -780,6 +839,7 @@
       box.appendChild(list);
       article.appendChild(box);
     }
+    stateBadges(article, assistantTurn);
     const meta = renderMeta(assistantTurn);
     if (meta) article.appendChild(meta);
     stickScroll();
