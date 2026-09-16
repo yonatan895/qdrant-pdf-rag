@@ -11,7 +11,9 @@ event: error and ends WITHOUT final.
 Hermetic: fake transports / fake LLMs, no network, no Qdrant.
 """
 
+import asyncio
 import json
+import logging
 
 import pytest
 from fastapi.testclient import TestClient
@@ -154,8 +156,9 @@ def _client(monkeypatch, synthetic_pdf, llm):
         yield c
 
 
-@pytest.fixture
-def trunc_client(monkeypatch, synthetic_pdf):
+def _search_stub():
+    """One synthetic hit through the patched retrieval leg: tests drive the
+    stream machinery, not retrieval."""
     from mainframe_rag.retrieve.query import SearchHit
 
     hit = SearchHit(
@@ -173,10 +176,27 @@ def trunc_client(monkeypatch, synthetic_pdf):
         message_ids=("IEA500I",),
     )
 
-    class TruncSearch:
+    class StubSearch:
         def search(self, *a, **kw):
             return [hit], "identifier", {"embed_ms": 1, "qdrant_ms": 2}
 
+    return StubSearch()
+
+
+class HangingLLM:
+    """Streams one token then never finishes, so a test can close the
+    response generator the way a client disconnect does."""
+
+    async def chat_stream(self, messages, *args, **kwargs):
+        yield {"type": "token", "delta": "Partial ", "token": "Partial ", "ttft_ms": 5}
+        await asyncio.Event().wait()
+
+    def chat(self, *a, **kw):
+        raise AssertionError("non-stream chat must not run on the stream path")
+
+
+@pytest.fixture
+def trunc_client(monkeypatch, synthetic_pdf):
     class TruncLLM:
         async def chat_stream(self, messages, *args, **kwargs):
             yield {"type": "token", "delta": "Partial ", "token": "Partial ", "ttft_ms": 12}
@@ -185,8 +205,14 @@ def trunc_client(monkeypatch, synthetic_pdf):
         def chat(self, *a, **kw):
             raise AssertionError("non-stream chat must not run on the stream path")
 
-    monkeypatch.setattr(app_mod, "retrieve_search", TruncSearch().search)
+    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
     yield from _client(monkeypatch, synthetic_pdf, TruncLLM())
+
+
+@pytest.fixture
+def hang_client(monkeypatch, synthetic_pdf):
+    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
+    yield from _client(monkeypatch, synthetic_pdf, HangingLLM())
 
 
 def test_v1_answer_stream_truncation_emits_error_without_final(trunc_client):
@@ -215,3 +241,124 @@ def test_v1_answer_stream_truncation_emits_error_without_final(trunc_client):
     assert "final" not in kinds
     err = next(e[1] for e in events if e[0] == "error")
     assert err["code"] == "upstream_error"
+    # The error frame carries the machine-readable incomplete state
+    # (issue #365): a truncated stream can never read as accepted guidance.
+    assert err["verification_state"] == "generation_incomplete"
+
+
+def test_v1_chat_stream_truncation_error_frame_carries_incomplete_state(trunc_client):
+    """Chat mirrors the answer path (issue #365): the strict OpenAI `error`
+    object stays intact, a sibling top-level state rides the same frame, and
+    no finish chunk ever claims the truncated content completed."""
+    resp = trunc_client.post(
+        "/v1/chat",
+        json={"messages": [{"role": "user", "content": "IEA500I command"}], "stream": True},
+    )
+    assert resp.status_code == 200
+    assert "data: [DONE]" in resp.text
+    frames = [
+        json.loads(line[len("data: ") :])
+        for line in resp.text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    error = next(f for f in frames if "error" in f)
+    assert error["error"] == {"code": "upstream_error", "message": "stream failed"}
+    assert error["verification_state"] == "generation_incomplete"
+    finished = [
+        f
+        for f in frames
+        if "error" not in f
+        and f.get("choices")
+        and f["choices"][0].get("finish_reason") is not None
+    ]
+    assert finished == []
+
+
+def _scope(path: str) -> dict:
+    """Minimal ASGI scope for a direct route call: middleware normally
+    stamps request_id/started, so the test does."""
+    import time
+
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "state": {"request_id": "disconnect-test", "started": time.monotonic()},
+    }
+
+
+@pytest.mark.anyio
+async def test_answer_stream_disconnect_records_generation_incomplete(
+    hang_client, monkeypatch, caplog
+):
+    """A client disconnect before any terminal frame cannot receive a frame
+    (GeneratorExit at the yield), but is observable server-side (issue #365):
+    alert log with the incomplete state plus a client_disconnect outcome."""
+    from fastapi import Request, Response
+
+    from mainframe_rag.agent.app import AnswerRequest
+
+    recorded: list[tuple] = []
+    monkeypatch.setattr(
+        app_mod,
+        "record_request",
+        lambda endpoint, outcome, **kw: recorded.append((endpoint, outcome)),
+    )
+    with caplog.at_level(logging.WARNING, logger="agent"):
+        response = await app_mod.v1_answer(
+            Request(_scope("/v1/answer")),
+            AnswerRequest(query="IEA500I command"),
+            Response(),
+            stream=True,
+        )
+        body = response.body_iterator
+        first = await body.__anext__()
+        assert "event: token" in first
+        await body.aclose()
+
+    aborts = [r for r in caplog.records if '"client_disconnect"' in r.getMessage()]
+    assert len(aborts) == 1
+    assert '"verification_state": "generation_incomplete"' in aborts[0].getMessage()
+    assert recorded[-1] == ("answer", "client_disconnect")
+
+
+@pytest.mark.anyio
+async def test_chat_stream_disconnect_records_generation_incomplete(
+    hang_client, monkeypatch, caplog
+):
+    """Chat mirror of the answer disconnect (issue #365)."""
+    from fastapi import Request, Response
+
+    from mainframe_rag.agent.app import ChatRequest
+
+    recorded: list[tuple] = []
+    monkeypatch.setattr(
+        app_mod,
+        "record_request",
+        lambda endpoint, outcome, **kw: recorded.append((endpoint, outcome)),
+    )
+    with caplog.at_level(logging.WARNING, logger="agent"):
+        response = await app_mod.chat_completions(
+            ChatRequest(
+                messages=[{"role": "user", "content": "IEA500I command"}], stream=True
+            ),
+            Request(_scope("/v1/chat")),
+            Response(),
+        )
+        body = response.body_iterator
+        first = await body.__anext__()
+        assert '"delta"' in first
+        await body.aclose()
+
+    aborts = [r for r in caplog.records if '"client_disconnect"' in r.getMessage()]
+    assert len(aborts) == 1
+    assert '"verification_state": "generation_incomplete"' in aborts[0].getMessage()
+    assert recorded[-1] == ("chat", "client_disconnect")

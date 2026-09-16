@@ -667,6 +667,11 @@ def test_console_js_streaming_ux_wiring():
         "▲",
         # Follow-up: Stop must survive native validation (required toggle).
         'removeAttribute("required")',
+        # Issue #365: a failed stream with displayed partial content is
+        # persisted as generation_incomplete (never silently dropped from
+        # history/export, never promoted to accepted).
+        "const streamFailed = failed || (!stopped && !finalPayload);",
+        "Stream failed — partial answer kept, not verified",
     ):
         assert token in js, token
 

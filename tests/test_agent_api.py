@@ -2434,7 +2434,14 @@ def test_sse_final_schemas_match_across_paths():
         "prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0, "total_tokens": 0,
     }
     assert empty["ttft_ms"] is None
-    assert error_payload() == {"type": "error", "code": "upstream_error", "message": "stream failed"}
+    assert error_payload() == {
+        "type": "error",
+        "code": "upstream_error",
+        "message": "stream failed",
+        # Mid-stream failure is never accepted guidance (issue #365); the
+        # state is hardcoded, not caller-supplied.
+        "verification_state": "generation_incomplete",
+    }
     frame = format_sse_event("final", full)
     assert frame.startswith("event: final\ndata: ")
     assert frame.endswith("\n\n")
