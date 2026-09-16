@@ -416,6 +416,39 @@ def test_repo_golden_set_is_sha_pinned():
     assert Path("evals/golden.jsonl.sha256").exists()
 
 
+def test_expected_state_follows_behavior_and_overrides(monkeypatch):
+    """Issue #365 acceptance states are authored deterministically by the
+    builder: answer-tier accepted, abstain-tier insufficient_evidence, with
+    an explicit adjudication override path."""
+    from scripts import build_golden_corpus as bgc
+
+    assert bgc.expected_state_for({"id": "X", "expected_behavior": "answer"}) == "accepted"
+    assert (
+        bgc.expected_state_for({"id": "Y", "expected_behavior": "abstain"})
+        == "insufficient_evidence"
+    )
+    monkeypatch.setitem(bgc.EXPECTED_STATE_OVERRIDES, "X", "unverified_draft")
+    assert bgc.expected_state_for({"id": "X", "expected_behavior": "answer"}) == "unverified_draft"
+
+
+def test_repo_golden_rows_opt_into_acceptance_states():
+    """Every committed dev golden row carries the issue #365 acceptance
+    state, consistent with its expected behavior. The frozen holdout opts in
+    only through an adjudicated re-freeze, so it is deliberately not checked
+    here yet."""
+    rows = [
+        json.loads(line)
+        for line in Path("evals/golden.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 121
+    for row in rows:
+        expected = (
+            "insufficient_evidence" if row["expected_behavior"] == "abstain" else "accepted"
+        )
+        assert row["expected_verification_state"] == expected, row["id"]
+
+
 # --- absolute identifier gates (AGENTS.md: "identifier recall@1 strict 1.0") ---
 
 def test_identifier_gate_is_absolute_not_ratio():

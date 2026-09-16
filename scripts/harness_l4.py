@@ -42,6 +42,7 @@ import argparse
 import json
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -159,8 +160,21 @@ def summarize_l4(runs: list[dict[str, Any]]) -> dict[str, Any]:
             for r in runs
         ),
         "metrics": {name: mean_metric(runs, name) for name, _ in GATED_METRICS},
+        # Verification states (issue #365): report-only acceptance shape
+        # across repeats — never a threshold key (GATED_METRICS validation
+        # stays exact), so recording a reference cannot silently adopt it.
+        "by_verification_state": _sum_state_histograms(runs),
+        "state_mismatches": sum(r["metrics"].get("state_mismatches", 0) for r in runs),
         "per_run": [r["metrics"] for r in runs],
     }
+
+
+def _sum_state_histograms(runs: list[dict[str, Any]]) -> dict[str, int]:
+    total: Counter[str] = Counter()
+    for run in runs:
+        for state, n in (run["metrics"].get("by_verification_state") or {}).items():
+            total[str(state)] += int(n)
+    return dict(sorted(total.items()))
 
 
 def classify(value: float, reference: float, tolerance: float, direction: str) -> str:

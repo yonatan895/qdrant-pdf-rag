@@ -312,6 +312,30 @@ def test_summarize_rates_and_structural_counts():
     assert m["syntax_compliance"] == 1.0
 
 
+def test_summarize_carries_state_histogram_and_mismatches():
+    """Issue #365 acceptance shape: served states, opt-in expected-state
+    mismatches, and per-class claim support are report-only slices; rows
+    without the opt-in field never count as mismatches."""
+    rows = [
+        _row("A", query_class="syntax", verification_state="accepted",
+             expected_verification_state="accepted", judge_label="entailed"),
+        _row("B", query_class="version", verification_state="unverified_draft",
+             expected_verification_state="accepted", judge_label="neutral"),
+        _row("C", query_class="negative", expected_behavior="abstain",
+             verification_state="insufficient_evidence"),
+        _row("D", query_class="diagnostic", verification_state="accepted",
+             judge_label="entailed"),
+    ]
+    m = summarize_l2(rows)
+    assert m["by_verification_state"] == {
+        "accepted": 2, "insufficient_evidence": 1, "unverified_draft": 1,
+    }
+    assert m["state_mismatches"] == 1
+    assert m["faithfulness_by_class"]["syntax"]["entailed"] == 1.0
+    assert m["faithfulness_by_class"]["version"]["neutral"] == 1.0
+    assert m["faithfulness_by_class"]["negative"]["judged"] == 0
+
+
 def test_summarize_empty_is_none_not_crash():
     m = summarize_l2([_row("A", path="zero_hits", citations=[])])
     assert m["grounded_rate"] is None

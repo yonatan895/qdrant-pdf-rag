@@ -167,7 +167,13 @@ verdict.
   in the content channel on long answers and the JSON label never appeared,
   failing rows as judge infra errors. Only structural fails gate; rates are
   trend data. The L1-pinned-collection rule is operator discipline
-  (unenforced in code).
+  (unenforced in code). The summary also carries the issue #365 acceptance
+  shape: `by_verification_state` (served state per judged row; `unknown`
+  means a pre-state response, never a fabricated state), `state_mismatches`
+  (rows whose entry opted into `expected_verification_state`), and
+  `faithfulness_by_class` (entailment per query class, so procedure and
+  version-sensitive support read apart from the aggregate) — all
+  report-only.
 - **L3 (perf tier):** per-stage p50/p95 from `Server-Timing` plus TTFT
   (requires `LLM_STREAM=true` on the agent) and `nvidia-smi` VRAM under
   concurrent load, against dedicated mode-keyed baselines — never the CI
@@ -199,7 +205,10 @@ verdict.
   `citation_precision`, `citation_recall`, `truncation_rate`, `syntax_compliance`,
   `faithfulness.entailed`, `faithfulness.contradiction`, `relevance.relevant`,
   and `relevance.irrelevant`. Note that `answer_completeness` is excluded
-  from gating (it is reported only as observational trend data in run summaries).
+  from gating (it is reported only as observational trend data in run summaries),
+  as are the issue #365 state aggregates (`by_verification_state` summed across
+  repeats and `state_mismatches`) — the threshold file's key set stays exact,
+  so recording a reference can never silently adopt them.
   The default tolerance is 0.15 — ~2.3σ of the 3-repeat mean at N=24
   (measured: a 0.05 band flagged run-to-run sampling noise as rate
   regressions); raise N to tighten it, and treat sub-band movement as
@@ -242,11 +251,53 @@ revisited first; default 24 queries, `--all` for full runs), then judge:
   join stay out of the denominator. Reported by the answer eval and both
   harness summaries for observational tracking of the reader-side
   refusal/partial-answer track (excluded from `harness_l4` threshold gating).
+- Acceptance states (issue #365): every dev golden row opts into
+  `expected_verification_state` via `build_golden_corpus.expected_state_for`
+  — answer-tier rows expect `accepted` (eligible supplied citations + `stop`),
+  abstain-tier rows expect `insufficient_evidence`; adjudicated exceptions go
+  in `EXPECTED_STATE_OVERRIDES` with a note. A mismatch is a row failure: the
+  acceptance set states the product requirement, it is not a description of
+  current behavior. The frozen holdout opts in only through the adjudicated
+  re-freeze process (§7). `by_verification_state` reports the served
+  histogram and `state_mismatches` the opt-in failures.
+- Refusal/unsafe split (issue #365): `false_refusal_rate` is the share of
+  judged answer-tier rows failing as explicit refusals (a correct answer was
+  expected); `unsafe_answer_rate` is the share of judged abstain-tier rows
+  failing at all — currently broader than "answered a trap" (it includes
+  gold-substring/identifier misses on abstain rows), deliberately kept
+  separate so neither rate hides behind the other's pass rate.
 - Non-200 responses record the error code only (no bodies); transport
   exceptions record errors. Exit 0 iff zero failures and zero errors.
   Deliberate non-features: no retries, no `finish_reason` checks, and the
   judge never re-parses citations (the agent validator is the single source
   of truth).
+
+### Claim-level support (#365)
+
+Claim support is evaluated offline, never asserted at runtime. A verification
+state describes provenance and completion only; neither `accepted` nor
+citation membership claims that a claim follows from the evidence.
+
+- The offline instrument is the L2 NLI judge: for each judged answer with
+  eligible citations it receives the cited hits' text (capped at
+  `JUDGE_MAX_EVIDENCE_CHARS`; unmapped citations fail the row) and returns
+  one temp-0, low-effort label — `entailed`, `neutral`, or `contradiction`.
+  Citations are validated against the final supplied-evidence manifest
+  (#364), so a cited hit is a retained excerpt; prose excerpts may still be
+  char-trimmed during packing, so the judge can see marginally more text
+  than the prompt carried — a documented approximation, not a silent
+  widening of the claim.
+- `faithfulness_by_class` slices the labels per query class so procedure
+  (`syntax`, `diagnostic`) and version-sensitive (`version`) support reads
+  apart from the aggregate. Judge labels are advisory trend data:
+  unparseable output is a structural fail, and no gate or API state depends
+  on a judge verdict.
+- High-impact and version-sensitive acceptance cases are adjudicated by the
+  domain expert on the RC venue under #367's release-set policy; judge
+  disagreements, parse failures, and unscored rows are reported in the run
+  summary rather than averaged away. Runtime claim verification — a
+  universal truth validator or a mandatory second judge call — stays a #365
+  non-goal requiring a separate measured decision.
 
 ## 6. Paraphrase instrument
 
@@ -328,6 +379,12 @@ split (LEG entries always dev).
 - Re-freeze process: rebuild, `verify-golden` 0 FAIL, new holdout sha,
   re-record baselines — one dedicated commit. Never iterate the holdout to
   tune.
+- Acceptance states (issue #365): the builder stamps
+  `expected_verification_state` on every generated row (answer-tier
+  `accepted`, abstain-tier `insufficient_evidence`; adjudicated exceptions in
+  `EXPECTED_STATE_OVERRIDES`). The dev golden sha pin moves with the field;
+  the frozen holdout receives it only in an adjudicated re-freeze, so dev
+  acceptance and holdout acceptance stay separate rulers.
 
 ## 8. Benchmarks (`benchmark.py`, `loadtest.py`)
 

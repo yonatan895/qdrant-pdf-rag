@@ -85,6 +85,8 @@ import logging
 import re
 import sys
 import time
+from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -373,7 +375,47 @@ def summarize_l2(results: list[dict[str, Any]]) -> dict[str, Any]:
     # issue's fix gate — a refusal or partial answer over retrieved gold is
     # incomplete. None when no judged row carried the pool join.
     metrics["answer_completeness_n"], metrics["answer_completeness"] = answer_completeness(judged)
+    # Verification states (issue #365): the served state per judged row plus
+    # the opt-in acceptance mismatches. The histogram is the acceptance-run
+    # shape (dev golden rows all opt in; the frozen holdout opts in only
+    # after an adjudicated re-freeze).
+    by_state: Counter[str] = Counter(
+        str(r.get("verification_state") or "unknown") for r in judged
+    )
+    metrics["by_verification_state"] = dict(sorted(by_state.items()))
+    metrics["state_mismatches"] = sum(
+        1
+        for r in judged
+        if r.get("expected_verification_state") is not None
+        and r.get("verification_state") != r["expected_verification_state"]
+    )
+    # Claim-support slices (issue #365): entailment per query class so
+    # procedure (syntax/diagnostic) and version-sensitive rows read apart
+    # from the aggregate. Judge-assisted trend data, never an entailment
+    # proof; the aggregate `faithfulness` block stays unchanged.
+    metrics["faithfulness_by_class"] = _faithfulness_by_class(judged, rate)
     return metrics
+
+
+def _faithfulness_by_class(
+    judged: list[dict[str, Any]], rate: Callable[[int, int], float | None]
+) -> dict[str, dict[str, Any]]:
+    """Entailment/neutral/contradiction per query class (issue #365). The
+    judge sees the cited hits' text (evidence_for_citations), so this
+    measures claim support against the cited supplied evidence — advisory,
+    never a runtime proof (docs/eval.md §5)."""
+    out: dict[str, dict[str, Any]] = {}
+    for cls in sorted({str(r.get("query_class") or "unknown") for r in judged}):
+        rows = [r for r in judged if str(r.get("query_class") or "unknown") == cls]
+        labels = [r["judge_label"] for r in rows if r.get("judge_label") in JUDGE_LABELS]
+        out[cls] = {
+            "judged": len(labels),
+            **{
+                lbl: rate(sum(1 for lbl_ in labels if lbl_ == lbl), len(labels))
+                for lbl in JUDGE_LABELS
+            },
+        }
+    return out
 
 
 def _by_why(judged: list[dict[str, Any]]) -> dict[str, int]:

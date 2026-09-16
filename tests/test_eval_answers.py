@@ -719,14 +719,16 @@ def test_summarize_splits_false_refusal_and_unsafe_rates() -> None:
 
     results = [
         {"verdict": "pass", "expected_behavior": "answer", "query_class": "message_id",
-         "citations": ["a"], "verification_state": "accepted"},
+         "citations": ["a"], "verification_state": "accepted",
+         "expected_verification_state": "accepted"},
         {"verdict": "fail", "expected_behavior": "answer", "query_class": "message_id",
          "citations": [], "warns": [],
          "failures": ["explicit refusal on an answer-tier query"],
          "verification_state": "insufficient_evidence"},
         {"verdict": "fail", "expected_behavior": "answer", "query_class": "message_id",
          "citations": [], "warns": [], "failures": ["zero validated citations"],
-         "verification_state": "unverified_draft"},
+         "verification_state": "unverified_draft",
+         "expected_verification_state": "accepted"},
         {"verdict": "fail", "expected_behavior": "abstain", "query_class": "negative",
          "citations": ["a"], "failures": ["trap answered: 1 validated citation(s)"],
          "verification_state": "accepted"},
@@ -740,6 +742,9 @@ def test_summarize_splits_false_refusal_and_unsafe_rates() -> None:
     assert m["by_verification_state"] == {
         "accepted": 2, "insufficient_evidence": 2, "unverified_draft": 1,
     }
+    # Opt-in acceptance states: only rows carrying the field count, and only
+    # when the served state differs (issue #365).
+    assert m["state_mismatches"] == 1
 
 
 def test_run_query_carries_verification_state_and_review_flag() -> None:
