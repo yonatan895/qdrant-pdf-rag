@@ -10,9 +10,9 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from mainframe_rag.ingest.classify import classify, is_table_block
-from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 from mainframe_rag.ingest.identity import source_rev_key
 from mainframe_rag.regexes import (
     FRONT_MATTER_RE,
@@ -20,6 +20,12 @@ from mainframe_rag.regexes import (
     find_members,
     find_message_ids,
 )
+
+if TYPE_CHECKING:
+    # Annotation-only: ibm_pdf pulls in pymupdf, which the serving agent
+    # process must not import transitively (answer.py reuses the unit-span
+    # helpers below for prompt packing).
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 
 SECTION_MAX_CHARS = 3500
 SPLIT_OVERLAP_CHARS = 400
@@ -133,6 +139,30 @@ class Section:
     page_end: int
 
 
+# Unit-span kinds (issue #368): "atomic" spans (code statements, table
+# rows, SYSIN records) snap whole-or-omitted at prompt packing; "prose"
+# spans keep the legacy character cut. Two values only — finer taxonomy is
+# extraction work (#271), not a prompt-packing concern.
+UNIT_ATOMIC = "atomic"
+UNIT_PROSE = "prose"
+_UNIT_KINDS = frozenset({UNIT_ATOMIC, UNIT_PROSE})
+
+# Payload-size bound on persisted spans: a pathological multi-thousand-line
+# block stays servable by falling back to pack-time redetection (the same
+# detectors) instead of shipping megabytes of spans per point.
+_MAX_STORED_SPANS = 512
+
+
+@dataclass(frozen=True, slots=True)
+class UnitSpan:
+    """One atomic-or-prose unit range over stripped chunk text: [start, end)
+    char offsets plus the cut rule. Ordered and non-overlapping per chunk."""
+
+    start: int
+    end: int
+    kind: str
+
+
 @dataclass(frozen=True, slots=True)
 class Chunk:
     chunk_id: str
@@ -145,6 +175,15 @@ class Chunk:
     message_ids: list[str]
     members: list[str]
     ordinal: int
+    # Atomic-unit spans for prompt packing (issue #368): ordered ranges
+    # over the stripped chunk text. Spans always tile whole items, so every
+    # retained prefix is a whole number of units and a table chunk's header
+    # (its first unit) ships with any retained row. None means unknown
+    # (span list capped, see _MAX_STORED_SPANS) — pack with the shared
+    # fallback detector, never char slicing. () means known prose: legacy
+    # character truncation still applies. Identity and the four-type
+    # chunk_type vocabulary are untouched by this field.
+    units: tuple[UnitSpan, ...] | None = None
 
 
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -427,14 +466,74 @@ def _overlap_seed(
     return [(items[-1][0], joined[tail_start:], False)]
 
 
-def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, int, str]]:
-    """Split paragraphs into capped blocks, tracking each block's page span.
+def _item_spans(
+    items: list[tuple[int, str, bool]], offsets: list[int]
+) -> tuple[UnitSpan, ...]:
+    """Unit spans for one joined block (issue #368): each item's range from
+    the join offsets, kinded by the item's atomic flag. Spans tile whole
+    items, so any prefix cut at a span end keeps whole units only."""
+    return tuple(
+        UnitSpan(
+            start=offsets[idx],
+            end=offsets[idx] + len(text),
+            kind=UNIT_ATOMIC if atomic else UNIT_PROSE,
+        )
+        for idx, (_, text, atomic) in enumerate(items)
+    )
 
-    Returns (page_start, page_end, text): the span covers every page the
-    block's items touch, so chunk labels cite the full range (issue #216).
-    The UUID still pins the span start (see make_chunks).
+
+def _locate_parts(
+    stripped: str, parts: list[tuple[str, str]]
+) -> tuple[UnitSpan, ...] | None:
+    """Locate ordered (part, kind) substrings as spans over `stripped`.
+    None when a part is not found in order (defensive: the caller falls
+    back to legacy char treatment rather than inventing boundaries)."""
+    spans: list[UnitSpan] = []
+    cursor = 0
+    for part, kind in parts:
+        pos = stripped.find(part, cursor)
+        if pos < 0:
+            return None
+        spans.append(UnitSpan(start=pos, end=pos + len(part), kind=kind))
+        cursor = pos + len(part)
+    return tuple(spans)
+
+
+def units_for_text(text: str) -> tuple[UnitSpan, ...]:
+    """Pack-time fallback detector for legacy points without persisted spans
+    (issue #368): the SAME splitters the chunker uses, run on the stripped
+    hit text, so no second divergent parser exists. () means prose (legacy
+    char rules) or an unlocatable layout (defensive legacy, never invented
+    boundaries). Persisted spans always win when present."""
+    stripped = text.strip()
+    if not stripped:
+        return ()
+    statements = _code_statements(stripped)
+    if statements:
+        return _locate_parts(stripped, [(s, UNIT_ATOMIC) for s in statements]) or ()
+    if detect_table_region(stripped):
+        rows = _nonblank_lines(stripped)
+        return _locate_parts(stripped, [(r, UNIT_ATOMIC) for r in rows]) or ()
+    items = _mixed_jcl_items(stripped)
+    if len(items) > 1 or items[0][1]:
+        located = _locate_parts(
+            stripped, [(t, UNIT_ATOMIC if a else UNIT_PROSE) for (t, a) in items]
+        )
+        return located or ()
+    return ()
+
+
+def _build_blocks(
+    paras: list[tuple[int, str]],
+) -> list[tuple[int, int, str, tuple[UnitSpan, ...]]]:
+    """Split paragraphs into capped blocks with page spans AND unit spans.
+
+    Returns (page_start, page_end, text, spans): the page span covers every
+    page the block's items touch (issue #216); spans tile the block's items
+    in join order (issue #368). Oversize prose slices carry () — their
+    interior was char-cut at ingest, so no whole-unit claim is possible.
     """
-    blocks: list[tuple[int, int, str]] = []
+    blocks: list[tuple[int, int, str, tuple[UnitSpan, ...]]] = []
     # Expand structured paragraphs into atomic items; prose passes through
     # untouched. Item shape: (page_idx, text, atomic).
     items: list[tuple[int, str, bool]] = []
@@ -472,9 +571,9 @@ def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, int, str]]:
     for page_idx, text, atomic in items:
         if len(text) > SECTION_MAX_CHARS:
             if current:
-                joined, _ = _join_items(current)
+                joined, offsets = _join_items(current)
                 span = _block_span(current)
-                blocks.append((span[0], span[1], joined))
+                blocks.append((span[0], span[1], joined, _item_spans(current, offsets)))
                 current, current_len = [], 0
             if atomic:
                 # A single statement longer than the section cap is emitted
@@ -482,15 +581,15 @@ def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, int, str]]:
                 # fixes, and the 4096-token embed window still covers roughly
                 # twice the cap. The overlap chain restarts after it rather
                 # than seeding from a sliced statement.
-                blocks.append((page_idx, page_idx, text))
+                blocks.append((page_idx, page_idx, text, (UnitSpan(0, len(text), UNIT_ATOMIC),)))
             else:
                 for i in range(0, len(text), SECTION_MAX_CHARS):
-                    blocks.append((page_idx, page_idx, text[i : i + SECTION_MAX_CHARS]))
+                    blocks.append((page_idx, page_idx, text[i : i + SECTION_MAX_CHARS], ()))
             continue
         if current_len + len(text) > SECTION_MAX_CHARS and current:
             joined, offsets = _join_items(current)
             span = _block_span(current)
-            blocks.append((span[0], span[1], joined))
+            blocks.append((span[0], span[1], joined, _item_spans(current, offsets)))
             seed = _overlap_seed(current, joined, offsets)
             if len(seed) == 1 and not seed[0][2]:
                 # Historical blind-tail seed: exact legacy accounting.
@@ -505,10 +604,17 @@ def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, int, str]]:
             current_len += len(text) + 2
 
     if current:
-        joined, _ = _join_items(current)
+        joined, offsets = _join_items(current)
         span = _block_span(current)
-        blocks.append((span[0], span[1], joined))
+        blocks.append((span[0], span[1], joined, _item_spans(current, offsets)))
     return blocks
+
+
+def _split_blocks(paras: list[tuple[int, str]]) -> list[tuple[int, int, str]]:
+    """Split paragraphs into capped (page_start, page_end, text) blocks.
+    Compatibility projection of _build_blocks: unit spans ride the rich
+    internal only, so existing block-shape assertions are untouched."""
+    return [(start, end, text) for (start, end, text, _) in _build_blocks(paras)]
 
 
 # No-TOC fallback sectioning (issue #216): books without bookmarks no
@@ -588,7 +694,7 @@ def make_chunks(
         if not paras:
             continue
 
-        for ordinal, (page_start, page_end, text) in enumerate(_split_blocks(paras)):
+        for ordinal, (page_start, page_end, text, spans) in enumerate(_build_blocks(paras)):
             # UUID pins the span start: the deterministic chunk key contract
             # (revision|heading|page|ordinal) carries the source revision, so
             # same-form-number revisions never share point ids.
@@ -607,7 +713,20 @@ def make_chunks(
                     message_ids=find_message_ids(text),
                     members=find_members(text),
                     ordinal=ordinal,
+                    units=_stored_spans(spans),
                 )
             )
 
     return chunks
+
+
+def _stored_spans(spans: tuple[UnitSpan, ...]) -> tuple[UnitSpan, ...] | None:
+    """Persisted-span projection (issue #368): all-prose blocks store () —
+    known prose, legacy char rules at pack. Blocks with atomic units store
+    their spans, or None past _MAX_STORED_SPANS (pack redetects with the
+    same detectors instead of shipping unbounded payloads)."""
+    if not any(s.kind == UNIT_ATOMIC for s in spans):
+        return ()
+    if len(spans) > _MAX_STORED_SPANS:
+        return None
+    return spans

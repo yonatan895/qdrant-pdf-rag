@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mainframe_rag.agent.answer import (
     HttpxLLMClient,
+    PromptBudgetExceeded,
     TruncatedStreamError,
     assert_reasoning_model,
     build_chat_messages,
@@ -275,6 +276,8 @@ def _answer_log_fields(
     cites_rejected_shape_bad: int = 0,
     cites_rejected_unmapped: int = 0,
     verification_state: str = "unverified_draft",
+    budget_verified: bool = False,
+    units_omitted: int = 0,
 ) -> dict:
     """Answer-leg log fields shared by the JSON and SSE finals: identical
     keys so log consumers see one shape; stream=True only marks the SSE one.
@@ -283,7 +286,10 @@ def _answer_log_fields(
     model output on the wire. `evidence` is the supplied-excerpt count from
     the final prompt manifest (issue #364) — counts only, never text.
     `verification_state` (issue #365) is the finalized label, so log joins
-    can split accepted vs draft vs incomplete answers without re-deriving."""
+    can split accepted vs draft vs incomplete answers without re-deriving.
+    `budget_verified` (issue #368) marks remote-tokenizer-confirmed window
+    compliance; `units_omitted` counts whole atomic units dropped by packing
+    across packed excerpts, so truncation depth is countable from logs."""
     fields: dict = {
         "query_kind": kind,
         "query_complexity": complexity,
@@ -297,6 +303,8 @@ def _answer_log_fields(
         "has_script": has_script,
         "finish_reason": finish_reason,
         "verification_state": verification_state,
+        "budget_verified": budget_verified,
+        "units_omitted": units_omitted,
         "prompt_tokens": usage.prompt_tokens,
         "completion_tokens": usage.completion_tokens,
         "reasoning_tokens": usage.reasoning_tokens,
@@ -968,9 +976,26 @@ async def v1_answer(
     if not is_stream:
         # The shared core owns prompt planning/verification, LLM inference,
         # and parse. A model failure maps to "answer failed" (never a
-        # retrieval code); a prompt-build failure stays an internal 500.
+        # retrieval code); an irreducible prompt-budget overflow maps to the
+        # explicit 422 budget contract (issue #368) — never silent, never a
+        # model call; a prompt-build failure stays an internal 500.
         try:
             output = await execute_answer_core(core_input, deps, parent_span=root_span)
+        except PromptBudgetExceeded as exc:
+            _span_error(root_span, exc)
+            root_span.end()
+            _record_endpoint(
+                request,
+                "answer",
+                "prompt_budget_exceeded",
+                started,
+                query_class=kind,
+                hits=len(hits),
+            )
+            log.warning(json_log(request_id, "answer", error=str(exc)[:200]))
+            raise AppError(
+                422, "prompt_budget_exceeded", "prompt exceeds the model token budget"
+            ) from exc
         except LLMChatError as exc:
             _span_error(root_span, exc.original)
             root_span.end()
@@ -1041,6 +1066,8 @@ async def v1_answer(
                     cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
                     cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
                     verification_state=output.verification_state,
+                    budget_verified=output.budget_verified,
+                    units_omitted=output.evidence.units_omitted,
                 ),
             )
         )
@@ -1061,8 +1088,6 @@ async def v1_answer(
             started,
             query_class=kind,
             hits=len(output.hits),
-            ttft_ms=output.ttft_ms,
-            llm_model=llm_model,
         )
         return AnswerResponse(
             request_id=request_id,
@@ -1157,6 +1182,8 @@ async def v1_answer(
                                 cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
                                 cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
                                 verification_state=output.verification_state,
+                                budget_verified=output.budget_verified,
+                                units_omitted=output.evidence.units_omitted,
                             ),
                         )
                     )
@@ -1197,6 +1224,21 @@ async def v1_answer(
                         llm_model=llm_model,
                     )
                     yield format_sse_event("final", final)
+        except PromptBudgetExceeded as exc:
+            # Raised before the first token (headers already sent): the wire
+            # shape stays the error event, but the fault is labeled budget,
+            # never upstream.
+            _span_error(root_span, exc)
+            _record_endpoint(
+                request,
+                "answer",
+                "prompt_budget_exceeded",
+                started,
+                query_class=kind,
+                hits=len(hits),
+            )
+            log.warning(json_log(request_id, "answer_stream", error=str(exc)[:200]))
+            yield format_sse_event("error", error_payload())
         except TruncatedStreamError as exc:
             # Truncation observability: the partial prefix already went out
             # as token events, so the answer_alert carries counts only —
@@ -1323,6 +1365,16 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
     if not is_stream:
         try:
             output = await execute_answer_core(core_input, deps, parent_span=root_span)
+        except PromptBudgetExceeded as exc:
+            _span_error(root_span, exc)
+            root_span.end()
+            _record_endpoint(
+                request, "chat", "prompt_budget_exceeded", started, query_class=kind, hits=len(hits)
+            )
+            log.warning(json_log(request_id, "chat_answer", error=str(exc)[:200]))
+            raise AppError(
+                422, "prompt_budget_exceeded", "prompt exceeds the model token budget"
+            ) from exc
         except LLMChatError as exc:
             _span_error(root_span, exc.original)
             root_span.end()
@@ -1474,6 +1526,14 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                 request, "chat", "upstream_error", started, query_class=kind, hits=len(hits)
             )
             log.error(json_log(request_id, "chat_stream", error=str(exc)[:200]))
+            yield format_openai_error()
+            yield format_openai_done()
+        except PromptBudgetExceeded as exc:
+            _span_error(root_span, exc)
+            _record_endpoint(
+                request, "chat", "prompt_budget_exceeded", started, query_class=kind, hits=len(hits)
+            )
+            log.warning(json_log(request_id, "chat_stream", error=str(exc)[:200]))
             yield format_openai_error()
             yield format_openai_done()
         except Exception as exc:  # noqa: BLE001 — streaming SSE generator traps upstream error

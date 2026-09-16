@@ -61,6 +61,10 @@ _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
 }
 _ERROR_TEXT = "The reasoning agent could not complete this request. Check the agent logs and retry."
+_BUDGET_ERROR_TEXT = (
+    "The request exceeds the model's token budget. Shorten the question, "
+    "context, or history and retry."
+)
 
 
 def _require_ui() -> None:
@@ -632,15 +636,23 @@ async def ui_chat(
         )
         output = await _run_turn(request, req)
     except Exception as exc:  # noqa: BLE001 — fixed banner to the operator, detail to logs
+        from mainframe_rag.agent.answer import PromptBudgetExceeded
+
         log.error("ui_chat failed: %s", str(exc)[:200])
+        # An irreducible budget overflow is the operator's request to
+        # shrink, not a server fault: distinct fixed banner (issue #368).
+        error_text = (
+            _BUDGET_ERROR_TEXT if isinstance(exc, PromptBudgetExceeded) else _ERROR_TEXT
+        )
+        status_code = 422 if isinstance(exc, PromptBudgetExceeded) else 502
         if is_htmx:
             return _render_pair(
                 request,
                 [user_turn],
                 history_json=_history_json(turns[:-1]),
-                error=_ERROR_TEXT,
+                error=error_text,
             )
-        return _render_page(request, turns, error=_ERROR_TEXT, form=form, status_code=502)
+        return _render_page(request, turns, error=error_text, form=form, status_code=status_code)
 
     assistant_content = output.answer
     if output.script:
@@ -730,7 +742,12 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
                         ),
                     )
         except Exception as exc:  # noqa: BLE001 — mid-stream: error event, no final
-            log.error("ui_chat_stream failed: %s", str(exc)[:200])
+            from mainframe_rag.agent.answer import PromptBudgetExceeded
+
+            if isinstance(exc, PromptBudgetExceeded):
+                log.warning("ui_chat_stream budget exceeded: %s", str(exc)[:200])
+            else:
+                log.error("ui_chat_stream failed: %s", str(exc)[:200])
             yield format_sse_event("error", error_payload())
         finally:
             root_span.end()

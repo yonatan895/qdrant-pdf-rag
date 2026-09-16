@@ -42,6 +42,10 @@ def estimate_tokens(text: str) -> int:
 class FallbackTokenizer:
     """In-process tokenizer for air-gapped / offline testing or fallback."""
 
+    # Estimator-only: verification through this tokenizer is reported as
+    # estimated, never confirmed (issue #368).
+    remote_confirmed = False
+
     def count_tokens(self, text: str) -> int:
         return estimate_tokens(text)
 
@@ -75,6 +79,14 @@ class VllmTokenizer:
         self._api_key = api_key
         self._fallback = FallbackTokenizer()
         self._downgraded = False
+
+    @property
+    def remote_confirmed(self) -> bool:
+        """True while /tokenize answers remotely (issue #368): a prompt-size
+        verdict from this instance confirms compliance only in that state —
+        after the one-shot downgrade it is estimator-based like the
+        fallback."""
+        return not self._downgraded
 
     def count_tokens(self, text: str) -> int:
         if not text:

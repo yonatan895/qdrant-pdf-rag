@@ -396,6 +396,25 @@ def test_summarize_counts_inferred_rows() -> None:
     assert summarize(results)["inferred_citations"] == 1
 
 
+def test_summarize_packing_attribution_is_report_only() -> None:
+    """Issue #368 signals aggregate without touching verdicts: omitted-unit
+    totals and the confirmed-budget share over signaled rows only."""
+    from scripts.eval_answers import summarize
+
+    results = [
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax",
+         "citations": ["c1"], "budget_verified": True, "units_omitted": 2},
+        {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax",
+         "citations": ["c1"], "budget_verified": False, "units_omitted": 0},
+        {"verdict": "error", "expected_behavior": "answer", "query_class": "syntax",
+         "citations": []},
+    ]
+    m = summarize(results)
+    assert m["units_omitted_total"] == 2
+    assert m["budget_verified_n"] == 1
+    assert m["budget_verified_rate"] == 0.5
+
+
 # ------------------------------------------------- issue #298 attribution fields
 def _answer_log_record(**payload) -> logging.LogRecord:
     base = {"request_id": "r1", "action": "answer"}
@@ -417,6 +436,8 @@ def test_answer_capture_keeps_answer_lines_only() -> None:
     cap.emit(_answer_log_record(request_id="", query_complexity="simple"))
     assert cap.signals == {"r1": {"query_complexity": "complex", "finish_reason": "length",
                                   "verification_state": None,
+                                  "budget_verified": None,
+                                  "units_omitted": None,
                                   "prompt_tokens": 2500, "completion_tokens": 1500,
                                   "reasoning_tokens": 1100, "total_tokens": 4000,
                                   "inline_bracket_present": False,
@@ -488,6 +509,9 @@ def test_run_query_without_signals_leaves_nones() -> None:
     assert row["inline_bracket_present"] is None
     assert row["cites_rejected_shape_bad"] is None
     assert row["cites_rejected_unmapped"] is None
+    # Packing attribution (issue #368): likewise unknown without the join.
+    assert row["budget_verified"] is None
+    assert row["units_omitted"] is None
 
 
 def test_run_query_error_row_has_no_signal_fields() -> None:

@@ -132,6 +132,8 @@ class _AnswerCapture(logging.Handler):
                 "query_complexity",
                 "finish_reason",
                 "verification_state",
+                "budget_verified",
+                "units_omitted",
                 "prompt_tokens",
                 "completion_tokens",
                 "reasoning_tokens",
@@ -382,6 +384,21 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     for r in judged:
         by_state[str(r.get("verification_state") or "unknown")] += 1
     metrics["by_verification_state"] = dict(sorted(by_state.items()))
+    # Packing attribution (issue #368): whole atomic units dropped by
+    # packing, and remote-confirmed token budgets — report-only signals for
+    # the completeness/truncation tradeoff, never verdict inputs, never a
+    # default flip. Missing signals (error rows, old servers) stay out of
+    # the denominator.
+    metrics["units_omitted_total"] = sum(
+        int(r.get("units_omitted") or 0) for r in judged
+    )
+    signaled = [r for r in judged if r.get("budget_verified") is not None]
+    metrics["budget_verified_n"] = sum(
+        1 for r in signaled if r.get("budget_verified") is True
+    )
+    metrics["budget_verified_rate"] = (
+        round(metrics["budget_verified_n"] / len(signaled), 4) if signaled else None
+    )
     return metrics
 
 
@@ -525,6 +542,11 @@ def run_query(
         inline_bracket_present=signals.get("inline_bracket_present"),
         cites_rejected_shape_bad=signals.get("cites_rejected_shape_bad"),
         cites_rejected_unmapped=signals.get("cites_rejected_unmapped"),
+        # Packing attribution (issue #368): remote-confirmed budget and
+        # whole units dropped, joined from the answer log; None without the
+        # capture handler. Report-only — judge() never reads these.
+        budget_verified=signals.get("budget_verified"),
+        units_omitted=signals.get("units_omitted"),
     )
     return row
 

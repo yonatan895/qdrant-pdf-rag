@@ -295,7 +295,10 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
 - Point payload (15 fields + optional `context`): `vendor, product, version,
   doc_id, source_rev, title, heading_path, page_label, page_start, chunk_type,
   message_ids, members, sha256, rules_v, text`; `context` only when present — never
-  indexed, observability only. Point id = `chunk_id` (UUID5 over the
+  indexed, observability only. Structured chunks (code/table/SYSIN) add an
+  optional `units` list of `[start, end, kind]` atomic/prose spans over the
+  stripped text for prompt packing (issue #368) — additive and unindexed;
+  prose chunks omit the key, so their payloads are byte-identical to before. Point id = `chunk_id` (UUID5 over the
   revision-keyed chunk key); vectors
   `{dense, bm25}`; upserts loop `batch_size` (default 128, bounds 16–256)
   with `wait=True`; idempotent by UUID5, no app-level retry — client

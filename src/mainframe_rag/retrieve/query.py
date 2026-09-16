@@ -52,6 +52,9 @@ RETRIEVE_PAYLOAD_FIELDS: tuple[str, ...] = (
     "version",
     "message_ids",
     "text",
+    # Atomic-unit spans (issue #368): additive fetch, never filtered or
+    # ranked on — ranking/filter behavior is byte-identical with or without.
+    "units",
 )
 
 
@@ -83,6 +86,37 @@ class SearchHit(BaseModel):
     product: str | None = None
     version: str | None = None
     rerank_score: float | None = None
+    # Persisted unit spans, [start, end, kind] triples over the stripped
+    # chunk text (issue #368). None = legacy point or uncapped block: the
+    # pack stage redetects with the shared chunk detectors. () = known
+    # prose: legacy character truncation applies.
+    units: tuple[tuple[int, int, str], ...] | None = None
+
+
+def _parse_unit_spans(raw: object) -> tuple[tuple[int, int, str], ...] | None:
+    """Fail-closed span parse: any malformation yields None (pack falls back
+    to shared redetection) rather than an invented boundary."""
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        return None
+    spans: list[tuple[int, int, str]] = []
+    for entry in raw:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+            return None
+        start, end, kind = entry
+        if (
+            not isinstance(start, int)
+            or not isinstance(end, int)
+            or isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(kind, str)
+            or kind not in ("atomic", "prose")
+            or not (0 <= start <= end)
+        ):
+            return None
+        spans.append((start, end, kind))
+    return tuple(spans)
 
 
 def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:
@@ -104,6 +138,7 @@ def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:
         product=payload.get("product"),
         version=payload.get("version"),
         message_ids=tuple(payload.get("message_ids") or []),
+        units=_parse_unit_spans(payload.get("units")),
     )
 
 
