@@ -435,6 +435,24 @@ def test_answer_stream_reports_budget_error_event(budget_client):
     assert "final" not in names
 
 
+def test_chat_stream_reports_budget_error_frames(budget_client):
+    """Chat streaming on budget overflow yields the error frame and done,
+    with no content delta frames."""
+    import json
+
+    resp = budget_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "IEA500I"}], "stream": True},
+    )
+    assert resp.status_code == 200
+    lines = [line.strip() for line in resp.text.splitlines() if line.startswith("data: ")]
+    assert len(lines) == 2
+    err_payload = json.loads(lines[0][6:])
+    assert "error" in err_payload
+    assert err_payload["error"]["code"] == "upstream_error"
+    assert lines[1] == "data: [DONE]"
+
+
 def test_console_reports_budget_banner(budget_client):
     """The operator console names the fault as a request to shrink, with a
     422 page status — not the generic server-fault banner."""
