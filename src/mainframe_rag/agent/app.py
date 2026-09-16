@@ -338,6 +338,33 @@ def _alert_finish_reason_non_stop(request_id: str, finish_reason: str) -> None:
         )
 
 
+def _record_stream_abort(
+    request: Request,
+    request_id: str,
+    endpoint: str,
+    started: float,
+    kind: str,
+    hits: int,
+    span: trace.Span,
+) -> None:
+    """Client disconnect or cancellation before a terminal frame (issue #365):
+    partial tokens already left the server as provisional output, so the only
+    honest state is `generation_incomplete`. No frame can follow a disconnect;
+    the countable signals are the alert log and the RED outcome. Counts only —
+    never response text."""
+    span.set_attribute("rag.stream_aborted", True)
+    log.warning(
+        json_log(
+            request_id,
+            "answer_alert",
+            alert="client_disconnect",
+            endpoint=endpoint,
+            verification_state="generation_incomplete",
+        )
+    )
+    _record_endpoint(request, endpoint, "client_disconnect", started, query_class=kind, hits=hits)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker, zowe_mcp
@@ -1112,6 +1139,13 @@ async def v1_answer(
     if timing_parts:
         headers["Server-Timing"] = ", ".join(timing_parts)
 
+    # `terminal` marks a frame that ends the stream's meaning (final or
+    # error). If the generator is closed before one is produced, the client
+    # saw only provisional tokens: the outer generator records the abort as
+    # generation_incomplete (issue #365). A handled error counts as terminal
+    # — its frame already carries the incomplete state.
+    terminal = False
+
     async def sse_event_generator():
         # try/finally, not a per-branch end(): a mid-stream failure (both
         # except branches return) or a client disconnect (GeneratorExit
@@ -1121,9 +1155,14 @@ async def v1_answer(
             async for chunk in _sse_events():
                 yield chunk
         finally:
+            if not terminal:
+                _record_stream_abort(
+                    request, request_id, "answer", started, kind, len(hits), root_span
+                )
             root_span.end()
 
     async def _sse_events() -> AsyncIterator[str]:
+        nonlocal terminal
         try:
             async for item in execute_answer_core_stream(core_input, deps, parent_span=root_span):
                 itype = item.get("type")
@@ -1147,6 +1186,7 @@ async def v1_answer(
                                 rerank_ms=timings.get("rerank_ms"),
                             )
                         )
+                        terminal = True
                         yield format_sse_event(
                             "final",
                             empty_final_payload(
@@ -1225,6 +1265,7 @@ async def v1_answer(
                         ttft_ms=output.ttft_ms,
                         llm_model=llm_model,
                     )
+                    terminal = True
                     yield format_sse_event("final", final)
         except PromptBudgetExceeded as exc:
             # Raised before the first token (headers already sent): the wire
@@ -1240,6 +1281,7 @@ async def v1_answer(
                 hits=len(hits),
             )
             log.warning(json_log(request_id, "answer_stream", error=str(exc)[:200]))
+            terminal = True
             yield format_sse_event("error", error_payload())
         except TruncatedStreamError as exc:
             # Truncation observability: the partial prefix already went out
@@ -1263,6 +1305,7 @@ async def v1_answer(
                 hits=len(hits),
             )
             log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
+            terminal = True
             yield format_sse_event("error", error_payload())
         except Exception as exc:  # noqa: BLE001
             _span_error(root_span, exc)
@@ -1275,6 +1318,7 @@ async def v1_answer(
                 hits=len(hits),
             )
             log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
+            terminal = True
             yield format_sse_event("error", error_payload())
 
     return StreamingResponse(sse_event_generator(), media_type="text/event-stream", headers=headers)
@@ -1454,7 +1498,12 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
 
     chat_id = f"chatcmpl-{request_id}"
 
+    # See the answer path: a closed generator before any terminal frame means
+    # the client saw only provisional tokens (issue #365).
+    terminal = False
+
     async def _chat_sse_events() -> AsyncIterator[str]:
+        nonlocal terminal
         try:
             async for item in execute_answer_core_stream(core_input, deps, parent_span=root_span):
                 itype = item.get("type")
@@ -1476,6 +1525,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                             "script_lang": None,
                             "script_review_required": output.script_review_required,
                         }
+                        terminal = True
                         yield format_openai_chunk(
                             chat_id, llm_model, finish_reason="stop", extra=extra_meta
                         )
@@ -1500,6 +1550,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                         "script_lang": output.script_lang,
                         "script_review_required": output.script_review_required,
                     }
+                    terminal = True
                     yield format_openai_chunk(
                         chat_id, llm_model, finish_reason=output.finish_reason, extra=extra_meta
                     )
@@ -1528,6 +1579,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                 request, "chat", "upstream_error", started, query_class=kind, hits=len(hits)
             )
             log.error(json_log(request_id, "chat_stream", error=str(exc)[:200]))
+            terminal = True
             yield format_openai_error()
             yield format_openai_done()
         except PromptBudgetExceeded as exc:
@@ -1536,6 +1588,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                 request, "chat", "prompt_budget_exceeded", started, query_class=kind, hits=len(hits)
             )
             log.warning(json_log(request_id, "chat_stream", error=str(exc)[:200]))
+            terminal = True
             yield format_openai_error()
             yield format_openai_done()
         except Exception as exc:  # noqa: BLE001 — streaming SSE generator traps upstream error
@@ -1544,6 +1597,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                 request, "chat", "upstream_error", started, query_class=kind, hits=len(hits)
             )
             log.error(json_log(request_id, "chat_stream", error=str(exc)[:200]))
+            terminal = True
             yield format_openai_error()
             yield format_openai_done()
 
@@ -1552,6 +1606,10 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
             async for chunk in _chat_sse_events():
                 yield chunk
         finally:
+            if not terminal:
+                _record_stream_abort(
+                    request, request_id, "chat", started, kind, len(hits), root_span
+                )
             root_span.end()
 
     return StreamingResponse(sse_event_generator(), media_type="text/event-stream")

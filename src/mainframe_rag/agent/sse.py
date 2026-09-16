@@ -32,7 +32,17 @@ def format_sse_event(name: str, payload: dict[str, Any]) -> str:
 
 
 def error_payload() -> dict[str, str]:
-    return {"type": "error", "code": SSE_ERROR_CODE, "message": SSE_ERROR_MESSAGE}
+    """Mid-stream `error` event. The stream never produced a finalized
+    answer, so the state is always `generation_incomplete` (issue #365):
+    partial tokens already sent are provisional and cannot be retracted.
+    The state is hardcoded, never caller-supplied, so no error path can
+    relabel a failed stream as accepted."""
+    return {
+        "type": "error",
+        "code": SSE_ERROR_CODE,
+        "message": SSE_ERROR_MESSAGE,
+        "verification_state": "generation_incomplete",
+    }
 
 
 def _usage_payload(usage: TokenUsage) -> dict[str, int]:
@@ -172,7 +182,14 @@ def format_openai_done() -> str:
 
 def format_openai_error(code: str = SSE_ERROR_CODE, message: str = SSE_ERROR_MESSAGE) -> str:
     """Format an SSE error event for OpenAI-compatible chat streams:
-    data: {"error": {"code": "...", "message": "..."}}\n\n
+    data: {"error": {"code": "...", "message": "..."}, "verification_state": "..."}\n\n
+    The `error` object keeps the strict OpenAI shape; the sibling top-level
+    `verification_state` (issue #365) is additive and hardcoded
+    `generation_incomplete` — a failed stream is never accepted guidance.
+    Standard clients ignore unknown top-level keys.
     """
-    payload = {"error": {"code": code, "message": message}}
+    payload = {
+        "error": {"code": code, "message": message},
+        "verification_state": "generation_incomplete",
+    }
     return f"data: {json.dumps(payload)}\n\n"

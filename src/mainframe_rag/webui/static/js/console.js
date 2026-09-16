@@ -434,6 +434,10 @@
     const meta = turn.meta;
     if (!meta) return null;
     const foot = el("div", "turn-meta");
+    if (meta.error) {
+      foot.textContent = "Stream failed — partial answer kept, not verified";
+      return foot;
+    }
     if (meta.stopped) {
       foot.textContent = "Stopped — partial answer kept";
       return foot;
@@ -782,19 +786,27 @@
       article.remove();
       return;
     }
-    if (failed || (!stopped && !finalPayload)) {
+    const streamFailed = failed || (!stopped && !finalPayload);
+    if (streamFailed && !assistantTurn.content) {
+      // Failed before the first token: only the banner would persist, nothing
+      // was displayed to retain — leave no husk behind.
       assistantTurn.error = true;
-      assistantTurn.content = assistantTurn.content || ERROR_TEXT;
-      // A failed stream never verified anything: retain the non-accepted
-      // state on the turn (issue #365) so history/exports cannot promote
-      // partial content to accepted guidance.
+      assistantTurn.content = ERROR_TEXT;
       assistantTurn.verification_state = "generation_incomplete";
       contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
       article.classList.add("turn-error");
       return;
     }
-
-    if (finalPayload) {
+    if (streamFailed) {
+      // Partial tokens were displayed, so the turn is retained in history and
+      // exports with a non-accepted state (issue #365): never promoted to
+      // accepted guidance, never silently dropped from the record.
+      assistantTurn.error = true;
+      assistantTurn.verification_state = "generation_incomplete";
+      assistantTurn.meta = { stopped: false, error: true };
+      contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
+      article.classList.add("turn-error");
+    } else if (finalPayload) {
       assistantTurn.content = finalPayload.answer || assistantTurn.content;
       if (finalPayload.script) {
         // Tagged script fences leave the answer body during citation parsing;

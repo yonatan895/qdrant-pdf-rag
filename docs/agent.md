@@ -474,7 +474,22 @@ from the finalized parse plus the transport outcome — one rule,
 
 Carriage: `verification_state` rides `AnswerResponse`, the answer SSE
 `final` (both paths), chat JSON top-level and the terminal chunk `extra`,
-and console turns (badge, history persistence, export). `script_review_required`
+and console turns (badge, history persistence, export). Mid-stream failures
+carry it too (issue #365): the answer SSE `error` event gains a hardcoded
+`verification_state: "generation_incomplete"`, and chat error frames keep the
+strict OpenAI `error` object with an additive sibling top-level
+`verification_state` (standard clients ignore unknown keys). A client
+disconnect or cancellation before any terminal frame cannot receive a frame
+at all: the server records `answer_alert client_disconnect` plus a
+`client_disconnect` RED outcome and marks the span `rag.stream_aborted`.
+Non-streaming failures keep their existing error envelopes and carry no
+answer state: no partial answer was ever emitted, so the transport error IS
+the outcome. Streamed tokens cannot be retracted — a rejection after tokens
+were rendered cannot un-display them; only the state badge and the
+history/export labels correct the record, which is why failed partials
+persist as `generation_incomplete` in the console rather than reading as
+accepted.
+`script_review_required`
 is true whenever a script fence was extracted — scripts pass through
 unvalidated on every surface, so a surfaced script is a human-review draft,
 never certified-executable guidance; chat surfaces `script`/`script_lang`
