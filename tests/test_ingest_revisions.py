@@ -556,3 +556,116 @@ def test_marker_listing_paginates_past_old_cap():
     remaining = _doc_markers(fake, settings, "D")
     assert len(remaining) == 149
     assert {m.source_rev for m in remaining} == set(revs[1:])
+
+
+def _keyword_matches(payload: dict, flt) -> bool:
+    """Qdrant keyword-filter semantics over one stored payload (issue #361
+    closure): MatchValue needs equality, MatchAny needs membership (or any
+    overlap for list payloads). The retrieval doubles return canned points
+    without applying filters, so the revision-partition assertion below
+    evaluates the real built filter against the real stored payloads."""
+    for cond in flt.must:
+        assert isinstance(cond, models.FieldCondition), type(cond)
+        value = (payload or {}).get(cond.key)
+        match = cond.match
+        if isinstance(match, models.MatchValue):
+            if value != match.value:
+                return False
+        elif isinstance(match, models.MatchAny):
+            options = set(match.any)
+            if isinstance(value, list):
+                if options.isdisjoint(value):
+                    return False
+            elif value not in options:
+                return False
+        else:  # pragma: no cover
+            raise TypeError(f"unsupported match shape: {type(match)}")
+    return True
+
+
+def test_coexisting_revisions_filter_by_exact_product_version(monkeypatch):
+    """Acceptance (#361 req 1 + proposed version-filter test): two editions
+    sharing one printed form identifier stay independently retrievable with
+    exact product/version filters, while the family filter still sees both
+    — and a stored point's payload formats to a valid family citation."""
+    from mainframe_rag.agent.cites import CITATION_LINE_RE
+    from mainframe_rag.retrieve.filters import build_filter, parse_query
+    from mainframe_rag.retrieve.query import format_citation
+
+    family = "SA22-7592-05"
+    settings = _settings()
+    fake = RevisionFake()
+    coll = settings.qdrant_collection
+    _upsert_one(monkeypatch, fake, _parsed(doc_id=family, sha=SHA_A1, vendor="vendor-a",
+                product="product-x", version="1.0"),
+                _chunks(doc_id=family, rev=REV_A, tag="A"), settings)
+    _upsert_one(monkeypatch, fake, _parsed(doc_id=family, sha=SHA_B1, vendor="vendor-b",
+                product="product-y", version="2.0"),
+                _chunks(doc_id=family, rev=REV_B, tag="B"), settings)
+    points = [p for p in fake._points[coll]
+              if (p.payload or {}).get("doc_id") == family]
+    assert len(points) == 6
+
+    ids = parse_query(family)
+    assert ids.doc_ids == [family]
+    flt_a = build_filter(ids, product="product-x", version="1.0")
+    flt_b = build_filter(ids, product="product-y", version="2.0")
+    flt_family = build_filter(ids)
+    assert {c.key for c in flt_a.must} == {"doc_id", "product", "version"}
+
+    hits_a = {str(p.id) for p in points if _keyword_matches(p.payload, flt_a)}
+    hits_b = {str(p.id) for p in points if _keyword_matches(p.payload, flt_b)}
+    hits_all = {str(p.id) for p in points if _keyword_matches(p.payload, flt_family)}
+    rev_of = {str(p.id): (p.payload or {}).get("source_rev") for p in points}
+    assert {rev_of[i] for i in hits_a} == {REV_A} and len(hits_a) == 3
+    assert {rev_of[i] for i in hits_b} == {REV_B} and len(hits_b) == 3
+    assert hits_a.isdisjoint(hits_b) and hits_all == hits_a | hits_b
+
+    # Human-readable citation still keys on the printed family number.
+    first_a = next(p for p in points if (p.payload or {}).get("source_rev") == REV_A)
+    pl = first_a.payload or {}
+    cite = format_citation(pl["doc_id"], pl["title"], pl["heading_path"], pl["page_label"])
+    assert cite.startswith(family + " ")
+    m = CITATION_LINE_RE.match(cite)
+    assert m is not None and m.group("doc_id") == family
+
+
+def test_revision_locks_serialize_same_revision_only():
+    """#361 closure: same-revision writers share one lock (mutual exclusion,
+    including across threads); coexisting revisions under one doc_id take
+    different locks and never block each other. Event-ordered — no sleeps."""
+    import threading
+
+    from mainframe_rag.ingest.run_ingest import _DocLocks
+
+    locks = _DocLocks()
+    held = threading.Event()
+    release = threading.Event()
+    seen: dict = {}
+
+    def worker():
+        lk = locks.get(REV_A)
+        seen["lk"] = lk
+        lk.acquire()
+        held.set()
+        assert release.wait(timeout=10)
+        lk.release()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    try:
+        assert held.wait(timeout=10)
+        assert seen["lk"] is locks.get(REV_A)
+        # Same revision: exclusive while held.
+        assert locks.get(REV_A).acquire(blocking=False) is False
+        # Coexisting revision: a different, unblocked lock.
+        other = locks.get(REV_B)
+        assert other is not locks.get(REV_A)
+        assert other.acquire(blocking=False) is True
+        other.release()
+    finally:
+        release.set()
+        t.join(timeout=10)
+    assert not t.is_alive()
+    assert locks.get(REV_A).acquire(blocking=False) is True
+    locks.get(REV_A).release()
