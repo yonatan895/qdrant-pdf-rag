@@ -524,3 +524,121 @@ def test_vllm_shaped_embed_variant(qdrant_url, mock_url, corpus, tmp_path, monke
             "embed": True,
             "representation": "compatible",
         }
+
+
+def test_361_inplace_snapshot_restore_keeps_coexisting_revisions(
+    qdrant_url, tmp_path, monkeypatch
+):
+    """Issue #361 closure against the real server: two same-stem editions
+    ingested as separate corpora (the joint walk still aborts — unit-tested)
+    coexist under one printed doc_id; a snapshot restores the generation
+    after the collection is lost, with both revisions, server-side
+    product/version scoping, and completion re-verification intact."""
+    import pymupdf
+    from qdrant_client import QdrantClient, models
+    from scripts.make_synthetic_pdf import build_plain
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.qdrant_io import snapshot_collection, stored_doc_revisions
+
+    collection = "sim-361"
+    client = QdrantClient(url=qdrant_url, timeout=30)
+    try:
+        for name in (collection, f"{collection}__completions"):
+            if client.collection_exists(name):
+                client.delete_collection(name)
+        # One stem, different bytes: the issue's overwrite pair.
+        corp_a = tmp_path / "corp-a"
+        corp_b = tmp_path / "corp-b"
+        corp_a.mkdir()
+        corp_b.mkdir()
+        build_plain(corp_a / "reference.pdf")
+        build_plain(corp_b / "reference.pdf")
+        doc = pymupdf.open(corp_b / "reference.pdf")
+        page = doc.new_page()
+        page.insert_text(
+            (72, 72),
+            "Edition 2 supplement\nRevised torque tables for the Mk II controller.",
+            fontsize=11,
+        )
+        staged = corp_b / "reference.staged.pdf"
+        doc.save(staged, garbage=4)
+        doc.close()
+        staged.replace(corp_b / "reference.pdf")
+
+        rec_a = _ingest(
+            monkeypatch, qdrant_url, collection, corp_a, tmp_path / "inv-a.jsonl",
+            extra=("--vendor", "vendor-a", "--product", "product-x", "--version", "1.0"),
+        )
+        rec_b = _ingest(
+            monkeypatch, qdrant_url, collection, corp_b, tmp_path / "inv-b.jsonl",
+            extra=("--vendor", "vendor-b", "--product", "product-y", "--version", "2.0"),
+        )
+        assert [r["status"] for r in rec_a] == ["upserted"]
+        assert [r["status"] for r in rec_b] == ["upserted"]
+        assert rec_a[0]["doc_id"] == rec_b[0]["doc_id"] == "reference"
+        assert rec_a[0]["source_rev"] != rec_b[0]["source_rev"]
+
+        settings = Settings(
+            _env_file=None,
+            qdrant_url=qdrant_url,
+            qdrant_collection=collection,
+            embed_mode="hash",
+            allow_hash_mode=True,
+        )
+        revs = stored_doc_revisions(client, settings, "reference")
+        assert revs == {rec_a[0]["source_rev"], rec_b[0]["source_rev"]}
+        before = client.get_collection(collection).points_count
+        assert before == rec_a[0]["chunks"] + rec_b[0]["chunks"] > 0
+
+        # Server-side revision scoping (the real keyword filter, not a fake).
+        def _count(**matches):
+            flt = models.Filter(
+                must=[
+                    models.FieldCondition(key=k, match=models.MatchValue(value=v))
+                    for k, v in matches.items()
+                ]
+            )
+            pts, _ = client.scroll(collection, scroll_filter=flt, limit=100)
+            return pts
+
+        got_a = _count(doc_id="reference", product="product-x", version="1.0")
+        got_b = _count(doc_id="reference", product="product-y", version="2.0")
+        assert len(got_a) == rec_a[0]["chunks"] and len(got_b) == rec_b[0]["chunks"]
+        assert {p.payload["source_rev"] for p in got_a} == {rec_a[0]["source_rev"]}
+        assert {p.payload["source_rev"] for p in got_b} == {rec_b[0]["source_rev"]}
+
+        # Snapshot (the 361B runbook step 1), then lose the collection.
+        snap = snapshot_collection(client, collection)
+        assert snap
+        dl = httpx2.get(
+            f"{qdrant_url}/collections/{collection}/snapshots/{snap}", timeout=120.0
+        )
+        assert dl.status_code == 200 and len(dl.content) > 0
+        client.delete_collection(collection)
+        assert client.collection_exists(collection) is False
+
+        # Operator rollback: restore the snapshot, then re-verify.
+        up = httpx2.post(
+            f"{qdrant_url}/collections/{collection}/snapshots/upload?priority=snapshot",
+            files={"snapshot": (snap, dl.content)},
+            timeout=180.0,
+        )
+        assert up.status_code == 200, up.text[:500]
+        assert client.get_collection(collection).points_count == before
+        assert stored_doc_revisions(client, settings, "reference") == revs
+
+        # Completions survived (separate collection, never deleted): a resume
+        # with fresh inventory re-verifies instead of re-ingesting.
+        resume_a = _ingest(
+            monkeypatch, qdrant_url, collection, corp_a, tmp_path / "resume-a.jsonl",
+            extra=("--vendor", "vendor-a", "--product", "product-x", "--version", "1.0"),
+        )
+        resume_b = _ingest(
+            monkeypatch, qdrant_url, collection, corp_b, tmp_path / "resume-b.jsonl",
+            extra=("--vendor", "vendor-b", "--product", "product-y", "--version", "2.0"),
+        )
+        assert [r["status"] for r in resume_a] == ["skipped"]
+        assert [r["status"] for r in resume_b] == ["skipped"]
+    finally:
+        client.close()

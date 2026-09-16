@@ -316,16 +316,17 @@ def _get_qdrant(settings: Settings):
 
 
 class _DocLocks:
-    """Per-doc_id locks for the upsert stage. Two files may resolve to one
-    doc_id (shared form numbers); their check-delete-upsert sequence must
-    not interleave across the parallel streams. The planning gate
-    (_gate_planned_entries, issue #361) aborts such corpora before any
-    delete/upsert, so a lock collision at this stage is a same-revision
-    rerun, not a silent cross-revision overwrite (the 361B migration re-keys
-    these locks onto the source revision).
+    """Per-revision locks for the upsert stage (issue #361). Two files may
+    resolve to one printed doc_id (shared form numbers) while carrying
+    different bytes; the planning gate (_gate_planned_entries) aborts such
+    corpora before any delete/upsert, and coexisting revisions that passed
+    planning take different locks so their check-delete-upsert sequences
+    never serialize against each other by accident. A lock collision at
+    this stage is a same-revision rerun, never a cross-revision overwrite:
+    every holder passes its source_rev_key (vendor|product|version|sha256).
 
-    Locks are retained in memory for the run: bounded by the unique doc_ids
-    in the corpus (~hundreds of entries), so eviction is unnecessary."""
+    Locks are retained in memory for the run: bounded by the unique source
+    revisions in the corpus (~hundreds of entries), so eviction is unnecessary."""
     _global: threading.Lock
     _locks: dict[str, threading.Lock]
 

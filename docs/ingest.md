@@ -468,8 +468,12 @@ thread pool.
   (one fail-closed cycle, unchanged docs included); changed docs also
   migrate their history precisely, and the representation manifest flips
   to `identity_schema: source_rev`; (3) verify counts plus
-  `verify_all_complete` semantics (every walked doc revision-verified);
-  (4) roll back by restoring the snapshot. Docs whose history predates
+   `verify_all_complete` semantics (every walked doc revision-verified);
+   (4) roll back by restoring the snapshot — exercised in sim by
+   `tests/test_integration_sim.py::test_361_inplace_snapshot_restore_keeps_coexisting_revisions`
+   (snapshot → delete → upload-restore → counts/revisions/server-side
+   filters/resume-skip re-verified; alias rollback stays the primary
+   production path). Docs whose history predates
   revision stamps AND share a `doc_id` with a named revision need one
   explicit cleanup first (delete the stale revision's points by
   `doc_id` + content-sha filter, then re-ingest) — the refresh error names
@@ -605,10 +609,16 @@ blank vLLM revision must fail even with force. Deduplication and collision check
 precede destructive work; ambiguous legacy lineage fails rather than deleting a
 sibling. Revision-separated UUIDs prevent cross-revision collisions, but two
 writers of the same revision can still target the same points.
-**Evidence:** `tests/test_ingest_identity.py`, `tests/test_ingest_revisions.py`,
-`tests/test_representation.py::test_fingerprint_revision_only_change_alters_identity`
-and `test_fingerprint_rules_and_prefix_policy` pin identity behavior. They do not
-prove corpus-wide coverage or concurrent publication safety. #361 retains its
+**Evidence:** `tests/test_ingest_identity.py`, `tests/test_ingest_revisions.py`
+(including the closure pins: exact product/version filter partition plus
+family-citation round-trip over coexisting revisions, and an event-ordered
+threaded lock test proving same-revision exclusion with unblocked coexisting
+revisions), `tests/test_representation.py::test_fingerprint_revision_only_change_alters_identity`
+and `test_fingerprint_rules_and_prefix_policy` pin identity behavior, and
+`tests/test_integration_sim.py::test_361_inplace_snapshot_restore_keeps_coexisting_revisions`
+proves coexistence, server-side revision scoping, and snapshot-restore
+rollback against a real server. They do not prove corpus-wide coverage or
+concurrent publication safety. #361 retains its
 acceptance ownership; publication/lifetime gaps belong to #391.
 
 <a id="publication-contract"></a>
