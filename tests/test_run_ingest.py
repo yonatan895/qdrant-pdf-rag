@@ -755,3 +755,65 @@ def test_limit_allows_fresh_subset_but_refuses_revision_migration(
     monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-B")
     with pytest.raises(RuntimeError, match="--limit refuses a representation migration"):
         main([*args, "--reingest"])
+
+
+def test_unmarked_searchable_point_blocks_migration_commit(tmp_path, monkeypatch):
+    """Issue #391 current packet (counterexample 1): the commit-time residue
+    scan reads completion markers only, so an unmarked old-rules point was
+    certified as the wanted representation. The scope proof must verify the
+    actual searchable membership; unknown data blocks the commit and stays."""
+    import pytest
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import STATE_PENDING, read_manifest_record
+
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    collection = Settings(_env_file=None).qdrant_collection
+    from types import SimpleNamespace
+
+    fake._points[collection] = [
+        SimpleNamespace(
+            id="legacy-unmarked",
+            payload={"doc_id": "SA99-0000-00", "rules_v": "pre-rp2", "source_rev": "rev-old"},
+        )
+    ]
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    progress = tmp_path / "inventory.jsonl"
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-B")
+    with pytest.raises(RuntimeError, match="searchable point"):
+        main(_migration_args(corpus, progress, "--reingest"))
+    comp = f"{collection}__completions"
+    record = read_manifest_record(fake, comp)
+    assert record is not None and record.state == STATE_PENDING, (
+        "an incomplete scope proof must leave the contract pending"
+    )
+    assert any(
+        str(getattr(p, "id", "")) == "legacy-unmarked"
+        for p in fake._points[collection]
+    ), "unknown data is preserved: refusal is never a deletion instruction"
+
+
+def test_empty_target_migration_commits_when_nothing_is_searchable(tmp_path, monkeypatch):
+    """Control for counterexample 1: a truly empty target exposes no stale
+    vectors, so the pending bootstrap still commits — the new scope proof is
+    not a blanket refusal."""
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    collection = Settings(_env_file=None).qdrant_collection
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    progress = tmp_path / "inventory.jsonl"
+    assert main(_migration_args(corpus, progress, "--reingest")) == 0
+    record = read_manifest_record(fake, f"{collection}__completions")
+    assert record is not None and record.state == STATE_COMMITTED
