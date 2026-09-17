@@ -334,11 +334,14 @@ database, framework, or public endpoint in this card:
 - `read_evidence(reference, context_budget)`
 - `list_sources(scope)`
 
-**Status:** partially implemented (E1): shared scoped search + exact-read
-(`retrieve/evidence.py`) and one HTTP adapter (`POST /v1/search` returns
-opaque `reference` per hit plus the serving `generation`; `GET
+**Status:** partially implemented (E1+MCP1): shared scoped search +
+exact-read (`retrieve/evidence.py`), one HTTP adapter (`POST /v1/search`
+returns opaque `reference` per hit plus the serving `generation`; `GET
 /v1/evidence/{reference}` returns the exact record or an explicit
-retired/not-found outcome). `list_sources` is deferred to a later slice. **Source of authority:** #405 E0
+retired/not-found outcome), and the thin downstream MCP adapter
+(`mcp/evidence.py` + `evidence_search`/`evidence_read` tools, injected
+backend, parity-tested; the FTP bridge stays FTP-only until a host is
+accepted). `list_sources` is deferred to a later slice. **Source of authority:** #405 E0
 (plan only, 2026); decision gate G2 records compatibility, trusted
 user/source policy, intended published set, reference retention, and
 revoked-access outcomes before E1. Coordinates #361 (revision identity),
@@ -419,8 +422,10 @@ MCP exposes FTP/Zowe tools only (knowledge adapter is MCP1).
 
 **Known gaps and issue owners:** E1 owns the shared implementation plus one
 existing HTTP adapter (no endpoint proliferation, no new auth platform, no
-caching framework); MCP1 owns the thin downstream adapter with parity
-proof; S1 owns the one bounded `job_status` observation contract (G4);
+caching framework); MCP1 is implemented as the thin downstream adapter with
+parity proof — production hosting (which process holds the evidence backend
+and its serving credentials) is deferred to G2 compatibility/auth/retention
+acceptance with the deploy owner, so the FTP sidecar stays FTP-only; S1 owns the one bounded `job_status` observation contract (G4);
 A1 owns the follow-up consumer (pin/refresh/retired/revoked, no silent
 substitution). The `limit` 1–40 vs proposed 1–50 headroom, the exact
 `genfp` alphabet, and the `context_budget` default are E1 decisions —
