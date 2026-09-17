@@ -108,6 +108,8 @@ changes; add a root rule only when it is genuinely repository-wide.
 
 ## Code Review Rules
 
+Reviews follow the canonical [review protocol](docs/agent-workflow.md#review-handoff).
+
 Review the implementation and relevant unchanged callers, not just the PR
 summary. For each claimed guarantee ask: what state establishes it, who can
 change that state, for how long is it valid, and what forbids the counterexample?

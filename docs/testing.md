@@ -108,7 +108,9 @@ Collection-dimension logic: missing, matching, and mismatched (named `dense` dic
 ## Tiers
 
 Required tier selection and commands are maintained only in
-[live-stack](live-stack.md#verification-minimums). The sections below describe
+[live-stack](live-stack.md#verification-minimums) across the 7 risk categories
+(`prose-only`, `test/tool-only`, `publication/retirement lifecycle`, `extraction/ranking`,
+`HTTP/lifecycle`, `packaging/deploy`, `release promotion`). The sections below describe
 how those instruments work and what their results can establish.
 
 ### Air-gap deployment tier (`make airgap-dryrun`, `tests/test_airgap_*.py`, local Kind)
@@ -182,10 +184,24 @@ gate-l1/L1 checks stay the PR gate.
 <a id="evidence-design"></a>
 ## Counterexamples, evidence and consolidation
 
-**Policy authority:** #397 (15 September 2026); broader consolidation is #388,
-and general CI enforcement is #370. Required commands remain in live-stack.
-A documented obligation is not automatically enforced CI: the current `ci.yml`
-unit job invokes pytest, not the entire `make check` command.
+**Policy authority:** #411 (Increment A), #397 (15 September 2026); broader
+consolidation is #388, and general CI enforcement is #370. Required commands and
+merge evidence remain in [live-stack](live-stack.md#verification-minimums)
+structured across the 7 risk categories (`prose-only`, `test/tool-only`,
+`publication/retirement lifecycle`, `extraction/ranking`, `HTTP/lifecycle`,
+`packaging/deploy`, `release promotion`).
+
+**CI claims discipline:** A documented merge obligation is not automatically
+enforced CI: do not claim checks are automated in CI before Increment B implementation.
+The current `ci.yml` unit job invokes pytest on non-docs PRs, not the entire `make check` command;
+`agent-context.yml` runs context checks. Full automated gating across the verification
+ladder is planned under Increment B (#411 / #370).
+
+**Resource boundaries & invariant protection:** Prose/docs and test/tooling PRs
+must respect their resource boundary and avoid starting heavy services (GPU, Qdrant,
+model gateways, Jaeger). Documentation or tooling changes cannot silently waive,
+alter, or bypass core data invariants (UUID5 chunk keys, 4-type vocabulary, residue
+audit, fail-closed contracts).
 
 For a claimed invariant, retain an independent expected outcome. Ask what wrong
 implementation could pass the local assertion, then test that boundary. Metadata

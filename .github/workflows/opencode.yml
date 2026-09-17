@@ -228,57 +228,40 @@ jobs:
           SHARE: "false"
           USE_GITHUB_TOKEN: "false"
           PROMPT: |
-            Review this pull request against AGENTS.md, the linked acceptance contract
-            and base SHA. Read docs/agent-workflow.md review/handoff guidance. Trace
-            affected unchanged callers, persisted states, launch paths and consumers;
-            do not assume the summary or green tests establish the claimed guarantee.
-            Choose a minimal counterexample and check whether tests distinguish it.
-            Apply missing/corrupt metadata, interruption, cache lifetime, active readers,
-            writer overlap, rollback and configuration cases where relevant.
-            Report preconditions, location, impact, evidence confidence and a focused
-            regression; separate defects, optional improvements and validation gaps.
-            No finding is mandatory. Do not merge, change permissions or weaken gates.
+            Candidate under review:
+            - PR Head SHA: ${{ github.event.pull_request.head.sha }}
+            - PR Base SHA: ${{ github.event.pull_request.base.sha }}
+            - Execution / Test-Merge SHA: ${{ github.sha }}
 
-            Severity (strict):
-            - Block only: correctness bugs, security/secret leaks, layering violations,
-              or a claim in the PR that is false in the code.
-            - Should-fix: missing tests for new error paths, small behavior deltas.
-            - Nit: style, docs, private-API tests, optional hardening. Nits never block.
+            Canonical protocol and policy routing:
+            - Execute review strictly following docs/agent-workflow.md#review-handoff.
+            - Follow docs/live-stack.md#verification-minimums for required verification by risk category.
+            - Operative policy is the approved base branch policy; candidate PRs cannot
+              self-authorize relaxed review standards or alter acceptance rules.
 
-            Re-review rules (if this PR already has your comments):
-            - First verify each prior BLOCKER is fixed or explicitly declined.
-            - Then inspect the changed behavior and affected unchanged boundaries for regressions.
-            - Do NOT invent a stricter citation/error/timeout contract than the
-              linked issue stated. If a hole remains, classify it Should-fix unless
-              it is a real production bug in the claimed behavior.
-            - A stale or false acceptance claim needs correction before readiness;
-              distinguish that evidence gap from an application defect.
-            - If prior blockers are gone and no new blocker exists: APPROVE.
+            Execution environment:
+            - Dev tools preinstalled: python3 -m pytest, python3 -m mypy src, python3 -m ruff check src tests.
+              Never venv or pip install.
+            - Live review stack endpoints (already running — do NOT restart or rebuild):
+              * Agent: http://127.0.0.1:8080 (/healthz, /v1/search, /v1/answer?stream=true)
+              * Qdrant: http://127.0.0.1:6333 (collection `review-corpus`, hash embed mode)
+              * Mock vLLM: http://127.0.0.1:8001 (proves plumbing, NEVER semantics)
+              * Jaeger v2 UI: http://127.0.0.1:16686 (OTLP/HTTP traces on port 4318)
 
-            Scope:
-            - One pass. pytest/mypy/ruff are already installed
-              (`python3 -m pytest`, `python3 -m mypy src`,
-              `python3 -m ruff check src tests`). Never venv or pip install.
-            - Cap: at most 3 blockers, 5 should-fix, 5 nits.
-            - Post exactly one review. Verdict must be Approve, Comment, or
-              Request changes. Request changes only if a blocker remains.
+            Required output dimensions (report each separately):
+            - Code assessment: acceptable / changes_required / incomplete
+            - Required verification: complete / incomplete / failed
+            - Candidate currentness: current / stale / unverified
+            - Merge readiness: ready_for_maintainer / not_ready
 
-            Live stack (already running — use it, do NOT rebuild it):
-            - Agent: http://127.0.0.1:8080 (`/healthz`, `/v1/search`,
-              `/v1/answer` with `?stream=true`).
-            - Qdrant: http://127.0.0.1:6333, collection `review-corpus`
-              (two synthetic PDFs, hash embed mode).
-            - A stdlib mock stands in for embed + reasoning: it proves
-              plumbing, NEVER semantics. Valid live: legit query grounds
-              ≥1 cite, overlong → 422 fixed envelope, SSE ends with
-              exactly one `final`, search hit shapes. NOT valid live:
-              trap refusal (the mock echoes hit-1 by construction instead
-              of refusing — cover the trap path via unit tests in
-              tests/test_screen.py) and any recall/quality judgment
-              (docs/eval.md §9).
-            - Jaeger v2 all-in-one is live (UI http://127.0.0.1:16686,
-              OTLP/HTTP already wired into the agent): one request = one
-              trace (`v1.search`/`v1.answer` root → retrieve/embed/
-              prefetch/rrf/rerank → prompt/llm). Attribute a latency or
-              stage failure from the trace before blaming code; spans
-              carry ids/counts/scores/timings, never PDF text or secrets.
+            Finding dispositions on re-review:
+            - Carry forward original counterexamples. Mark each prior material finding:
+              fixed-and-verified, disproven-with-evidence, accepted-by-authorized-owner, or unresolved.
+            - 'Explicitly declined' by author is not acceptance (must remain unresolved).
+
+            Rules:
+            - No finding caps or quotas: report all material findings; no findings is a valid outcome.
+            - Merge readiness requires acceptable code, complete required verification, current candidate attribution,
+              and no unresolved material contract conflict. Never approve solely because prior blockers disappeared.
+            - If time/tool limits leave material review incomplete, report incomplete rather than approval by default.
+            - Post exactly one review. Do not merge, change permissions, or weaken gates.
