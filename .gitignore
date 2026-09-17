@@ -20,6 +20,8 @@ output/
 # throwaway local-cluster working files (§4.7 kind configs, overrides)
 scratch/
 evals/runs/*.jsonl
+# generated review runtime manifest (CI writes it to $RUNNER_TEMP)
+candidate-manifest.json
 
 # --- Python ---
 __pycache__/
