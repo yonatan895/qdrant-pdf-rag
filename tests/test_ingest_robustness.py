@@ -18,7 +18,7 @@ from mainframe_rag.ingest.qdrant_io import ensure_collection, upsert_chunks
 from tests.test_qdrant_io import RecordingClient, _settings
 
 _INDEXED_FIELDS = {
-    "vendor", "source", "product", "version", "doc_id", "chunk_type",
+    "vendor", "product", "version", "doc_id", "chunk_type",
     "message_ids", "members", "sha256", "source_rev", "page_start",
 }
 

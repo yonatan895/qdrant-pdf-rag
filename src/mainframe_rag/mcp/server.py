@@ -33,7 +33,6 @@ from opentelemetry import trace
 
 from mainframe_rag import tracing as tracing_mod
 from mainframe_rag.mcp import bridge
-from mainframe_rag.mcp import evidence as evidence_tools
 from mainframe_rag.mcp.bridge import FTPConfig
 
 ConnectFn = Callable[[FTPConfig], Any]
@@ -70,22 +69,9 @@ def _str_arg(args: dict, name: str, required: bool = False, default: str = "") -
     return value
 
 
-def _run_tool(
-    name: str,
-    args: dict,
-    config: bridge.FTPConfig,
-    connect: ConnectFn,
-    evidence: evidence_tools.EvidenceDeps | None = None,
-) -> dict:
+def _run_tool(name: str, args: dict, config: bridge.FTPConfig, connect: ConnectFn) -> dict:
     """Dispatch one tools/call. Unknown tools and malformed args raise
-    KeyError/ValueError, which handle_request maps to -32602. Evidence
-    tools run only with an injected backend (FTP-only hosts report them
-    unknown); the FTP session opens only for FTP tools, never for evidence."""
-    if evidence is not None and name in evidence_tools.EVIDENCE_TOOL_SCHEMAS:
-        if name == "evidence_search":
-            return evidence_tools.evidence_search(evidence, args)
-        if name == "evidence_read":
-            return evidence_tools.evidence_read(evidence, args)
+    KeyError/ValueError, which handle_request maps to -32602."""
     session = bridge.FTPSession(connect(config), config)
     try:
         if name == "dataset_read":
@@ -179,20 +165,11 @@ def _result_bytes(result: dict) -> int:
     return total
 
 
-def _advertised_schemas(evidence: evidence_tools.EvidenceDeps | None) -> dict[str, dict]:
-    """Capability set: the FTP allowlist always; knowledge tools only with
-    an injected evidence backend (the FTP registration lock stays exact)."""
-    if evidence is None:
-        return TOOL_SCHEMAS
-    return {**TOOL_SCHEMAS, **evidence_tools.EVIDENCE_TOOL_SCHEMAS}
-
-
 def handle_request(
     message: Any,
     config: FTPConfig,
     connect: ConnectFn,
     parent_context: Any | None = None,
-    evidence: evidence_tools.EvidenceDeps | None = None,
 ) -> dict | None:
     """Handle one decoded JSON-RPC message. Returns None for notifications
     (no reply) and for anything that must not produce output."""
@@ -206,11 +183,7 @@ def handle_request(
     if not isinstance(params, dict):
         return _error(msg_id, INVALID_PARAMS, "params must be an object")
 
-    if method == "notifications/initialized" or method.startswith("notifications/"):
-        # MCP notifications carry no id and take no reply — including
-        # notifications/cancelled. Limit: the sequential loop cannot abort an
-        # in-flight tool call; SDK clients enforce their own deadlines while
-        # every leg stays Settings-bounded server-side.
+    if method == "notifications/initialized":
         return None
     if method == "initialize":
         requested = params.get("protocolVersion", PROTOCOL_VERSION)
@@ -226,20 +199,18 @@ def handle_request(
     if method == "ping":
         return _ok(msg_id, {})
     if method == "tools/list":
-        schemas = _advertised_schemas(evidence)
         return _ok(
             msg_id,
             {
                 "tools": [
-                    {"name": name, **schema} for name, schema in schemas.items()
+                    {"name": name, **schema} for name, schema in TOOL_SCHEMAS.items()
                 ]
             },
         )
     if method == "tools/call":
         tool_name = params.get("name")
         arguments = params.get("arguments") or {}
-        schemas = _advertised_schemas(evidence)
-        if not isinstance(tool_name, str) or tool_name not in schemas:
+        if not isinstance(tool_name, str) or tool_name not in TOOL_SCHEMAS:
             return _error(msg_id, INVALID_PARAMS, f"unknown tool: {tool_name!r}")
         if not isinstance(arguments, dict):
             return _error(msg_id, INVALID_PARAMS, "arguments must be an object")
@@ -253,7 +224,7 @@ def handle_request(
             attributes={"mcp.tool": tool_name},
         ) as span:
             try:
-                result = _run_tool(tool_name, arguments, config, connect, evidence)
+                result = _run_tool(tool_name, arguments, config, connect)
             except (KeyError, ValueError) as exc:
                 return _error(msg_id, INVALID_PARAMS, f"invalid tool call: {exc}")
             span.set_attributes(
@@ -267,9 +238,7 @@ def handle_request(
     return _error(msg_id, METHOD_NOT_FOUND, f"unsupported method: {method}")
 
 
-def serve_stdio(
-    config: FTPConfig, connect: ConnectFn, evidence: evidence_tools.EvidenceDeps | None = None
-) -> None:
+def serve_stdio(config: FTPConfig, connect: ConnectFn) -> None:
     """Newline-delimited JSON-RPC loop. stdout carries replies only;
     everything else (including tracebacks) goes to stderr."""
     for raw in sys.stdin:
@@ -283,7 +252,7 @@ def serve_stdio(
             sys.stdout.flush()
             continue
         try:
-            reply = handle_request(message, config, connect, evidence=evidence)
+            reply = handle_request(message, config, connect)
         except Exception as exc:  # noqa: BLE001 — framing must never die
             print(f"mcp bridge error: {type(exc).__name__}", file=sys.stderr)
             reply = _error(message.get("id") if isinstance(message, dict) else None, -32000, "internal error")
@@ -300,9 +269,7 @@ def sample_ratio_from_env() -> float:
         return 1.0
 
 
-def create_app(
-    config: FTPConfig, connect: ConnectFn, evidence: evidence_tools.EvidenceDeps | None = None
-) -> FastAPI:
+def create_app(config: FTPConfig, connect: ConnectFn) -> FastAPI:
     """Streamable-HTTP transport: unary JSON-RPC POSTs at /mcp. Lifespan
     owns the tracer (setup on startup, flush on shutdown); W3C parents
     are extracted per request so tools.call joins the caller's trace."""
@@ -327,9 +294,7 @@ def create_app(
             return JSONResponse(_error(None, PARSE_ERROR, "invalid JSON"), status_code=400)
         try:
             reply = handle_request(
-                message, config, connect,
-                parent_context=tracing_mod.parent_context(request.headers),
-                evidence=evidence,
+                message, config, connect, parent_context=tracing_mod.parent_context(request.headers)
             )
         except Exception:  # noqa: BLE001 — framing must never die
             reply = _error(

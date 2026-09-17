@@ -41,7 +41,6 @@ from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import Chunk, make_chunks
 from mainframe_rag.ingest.completion import (
     acquire_run_lock,
-    completion_collection_for,
     completion_collection_name,
     delete_completion,
     doc_generation_id,
@@ -82,9 +81,7 @@ from mainframe_rag.ingest.publish import (
     corpus_fingerprint,
     ensure_staging,
     generation_fingerprint,
-    resolve_staging_name,
     staging_name_for,
-    sweep_unmarked_residue,
     verify_all_complete,
 )
 from mainframe_rag.ingest.qdrant_io import (
@@ -1117,15 +1114,10 @@ def _run_publish(
     prewalked = _gate_planned_entries(src, prewalked)
     client = _get_qdrant(settings)
     live, legacy = resolve_live_collection(client, settings)
-    gen_fp = generation_fingerprint(settings, rules_v, labels)
-    corp_fp = corpus_fingerprint(prewalked)
-    staging = resolve_staging_name(
-        client,
+    staging = staging_name_for(
         settings.qdrant_collection,
-        gen_fp,
-        corp_fp,
-        live,
-        force_reingest=force_reingest,
+        generation_fingerprint(settings, rules_v, labels),
+        corpus_fingerprint(prewalked),
     )
     staging_settings = settings.model_copy(update={"qdrant_collection": staging})
     if live == staging and not force_reingest:
@@ -1162,10 +1154,14 @@ def _run_publish(
             )
         )
         return 0
-    base = staging_name_for(settings.qdrant_collection, gen_fp, corp_fp)
-    if force_reingest and live is not None and (live == base or live.startswith(f"{base}_")):
+    if force_reingest and live == staging:
+        # Forced rebuild of the live generation in place: allowed only for
+        # the SAME representation (issue #391 F2). A drift derives a
+        # different staging name via the fingerprint; a legacy/absent
+        # contract cannot be proven equal. Either way the serving physical
+        # must not be mutated by a migration.
         require_in_place_reconverge(
-            client, staging_settings, completion_collection_for(live), rules_v
+            client, staging_settings, completion_collection_name(staging_settings), rules_v
         )
     mode = ensure_staging(client, settings, staging_settings, live)
     log.info(
@@ -1187,12 +1183,8 @@ def _run_publish(
     )
     if rc != 0:
         return rc
-    inv = load_inventory(progress)
-    swept = sweep_unmarked_residue(client, staging_settings, prewalked, inv)
-    if swept:
-        log.info(json.dumps({"action": "publish_sweep", "staging": staging, "swept_points": swept}))
     problems = verify_all_complete(
-        client, staging_settings, prewalked, inv, rules_v, labels,
+        client, staging_settings, prewalked, load_inventory(progress), rules_v, labels,
     )
     if problems:
         raise RuntimeError(
@@ -1200,9 +1192,24 @@ def _run_publish(
             f"(e.g. {problems[0]!r}) — alias untouched, {live!r} still live."
         )
     if staging == live:
-        raise RuntimeError(
-            f"Invariant D4 violation: publication attempted on serving collection {live!r} in place."
+        # Forced reconverge of the live generation: same contract only
+        # (require_in_place_reconverge above proved it), vectors re-embedded
+        # in place and the alias already points here — swapping onto itself
+        # would take a safety snapshot and churn the alias for nothing.
+        # Explicit force relaxes publish atomicity for the same-generation
+        # repair just like in-place mode does (documented in docs/ingest.md).
+        log.info(
+            json.dumps(
+                {
+                    "action": "publish",
+                    "alias": settings.qdrant_collection,
+                    "physical": staging,
+                    "result": "already_live_reconverged",
+                    "docs": len(prewalked),
+                }
+            )
         )
+        return 0
     previous = live
     migrated = None
     if legacy and live is not None:

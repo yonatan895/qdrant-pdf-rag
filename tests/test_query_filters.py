@@ -127,19 +127,10 @@ def test_build_filter_none_when_empty():
     assert build_filter(parse_query("nothing here")) is None
 
 
-def test_build_filter_with_source():
-    ids = parse_query("IEA500I")
-    flt = build_filter(ids, product="z/OS", version="3.1", source="ibm")
-    keys = {c.key for c in flt.must}
-    assert keys == {"message_ids", "product", "version", "source"}
-    source_cond = next(c for c in flt.must if c.key == "source")
-    assert source_cond.match.value == "ibm"
-
-
 def test_build_scope_filter():
-    flt = build_scope_filter(product="z/OS", version="3.1", source="ibm")
+    flt = build_scope_filter(product="z/OS", version="3.1")
     assert flt is not None
-    assert {c.key for c in flt.must} == {"product", "version", "source"}
+    assert {c.key for c in flt.must} == {"product", "version"}
 
     flt_empty = build_scope_filter()
     assert flt_empty is None
@@ -662,7 +653,6 @@ def test_search_delegates_to_async_core_exactly_once(monkeypatch):
     assert seen == {
         "client": client, "embedder": embedder, "collection": "coll",
         "query": "sizing lookaside", "product": "z/OS", "version": "3.1",
-        "source": None,
         "limit": 5, "settings": None, "reranker": None,
     }
 
@@ -724,7 +714,7 @@ class ScopedFilterAwareFakeQdrant(FakeQdrant):
 
 def test_search_filter_fallback_retains_explicit_scope_and_excludes_out_of_scope(embedder):
     """Invariant D1: when an identifier matches 0 points, fallback drops identifier
-    clauses but retains explicit caller scope (product, version, source).
+    clauses but retains explicit caller scope (product, version).
     Out-of-scope records must never be returned."""
     in_scope = models.ScoredPoint(
         id="hit-zos",
@@ -733,7 +723,6 @@ def test_search_filter_fallback_retains_explicit_scope_and_excludes_out_of_scope
         payload={
             "product": "z/OS",
             "version": "3.1",
-            "source": "ibm",
             "doc_id": "SA22-7592-05",
             "title": "z/OS Manual",
             "heading_path": "Init",
@@ -749,7 +738,6 @@ def test_search_filter_fallback_retains_explicit_scope_and_excludes_out_of_scope
         payload={
             "product": "Linux",
             "version": "3.1",
-            "source": "ibm",
             "doc_id": "LN-001",
             "title": "Linux Manual",
             "heading_path": "Boot",
@@ -765,7 +753,6 @@ def test_search_filter_fallback_retains_explicit_scope_and_excludes_out_of_scope
         payload={
             "product": "z/OS",
             "version": "2.4",
-            "source": "ibm",
             "doc_id": "SA22-7592-04",
             "title": "z/OS Old Manual",
             "heading_path": "Init",
@@ -774,24 +761,8 @@ def test_search_filter_fallback_retains_explicit_scope_and_excludes_out_of_scope
             "text": "z/OS 2.4 text",
         },
     )
-    out_scope_src = models.ScoredPoint(
-        id="hit-zos-vendor",
-        version=1,
-        score=1.0,
-        payload={
-            "product": "z/OS",
-            "version": "3.1",
-            "source": "third_party",
-            "doc_id": "TP-001",
-            "title": "Third Party Manual",
-            "heading_path": "Tools",
-            "page_label": "1",
-            "chunk_type": "narrative",
-            "text": "Third party text",
-        },
-    )
 
-    fake = ScopedFilterAwareFakeQdrant([in_scope, out_scope_prod, out_scope_ver, out_scope_src])
+    fake = ScopedFilterAwareFakeQdrant([in_scope, out_scope_prod, out_scope_ver])
     hits, kind, _timings = search(
         fake,
         embedder,
@@ -799,21 +770,20 @@ def test_search_filter_fallback_retains_explicit_scope_and_excludes_out_of_scope
         "Identify SC23-6862",  # Identifier not matching SA22-7592-05
         product="z/OS",
         version="3.1",
-        source="ibm",
         limit=5,
     )
 
     assert kind == "identifier"
     assert fake.batch_calls == 2
-    # First batch carried doc_id + product + version + source -> matched 0 points
+    # First batch carried doc_id + product + version -> matched 0 points
     first_keys = {c.key for c in fake.batch_requests[0].filter.must}
-    assert first_keys == {"doc_id", "product", "version", "source"}
+    assert first_keys == {"doc_id", "product", "version"}
 
-    # Second batch (fallback retry) retained product + version + source, dropped doc_id
+    # Second batch (fallback retry) retained product + version, dropped doc_id
     fallback_filter = fake.batch_requests[2].filter
     assert fallback_filter is not None
     fallback_keys = {c.key for c in fallback_filter.must}
-    assert fallback_keys == {"product", "version", "source"}
+    assert fallback_keys == {"product", "version"}
 
     # Recovered hits MUST contain in-scope hit only
     assert len(hits) == 1
@@ -824,7 +794,6 @@ def test_search_filter_fallback_retains_explicit_scope_and_excludes_out_of_scope
     hit_ids = {h.chunk_id for h in hits}
     assert "hit-linux" not in hit_ids
     assert "hit-zos-24" not in hit_ids
-    assert "hit-zos-vendor" not in hit_ids
 
 
 def test_search_filter_fallback_returns_empty_when_no_points_match_scope(embedder):
@@ -838,7 +807,6 @@ def test_search_filter_fallback_returns_empty_when_no_points_match_scope(embedde
         payload={
             "product": "Linux",
             "version": "1.0",
-            "source": "canonical",
             "doc_id": "LN-001",
             "title": "Linux Manual",
             "heading_path": "Boot",

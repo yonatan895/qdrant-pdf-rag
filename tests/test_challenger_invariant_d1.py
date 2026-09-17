@@ -2,7 +2,7 @@
 
 Author: challenger_m1_1
 Focus: Adversarially stress test async_search and fallback filter behavior under diverse conditions:
-  - Mixed scope parameters (only product, only version, only source, all pairs, all three, none, empty strings).
+  - Mixed scope parameters (only product, only version, both, none, empty strings).
   - Scope parameters matching zero points vs matching candidate points.
   - Queries with multiple identifiers (doc_ids, message_ids, members, mixed, partial matches) vs queries without identifiers.
   - Out-of-scope record leakage resistance across dense/sparse score differences, asymmetric legs, reranking, and query splitting.
@@ -20,7 +20,6 @@ from qdrant_client import QdrantClient, models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.retrieve.filters import (
-    _SOURCE_KEY,
     build_scope_filter,
 )
 from mainframe_rag.retrieve.query import (
@@ -158,7 +157,6 @@ def _make_point(
     *,
     product: str | None = "z/OS",
     version: str | None = "3.1",
-    source: str | None = "ibm",
     doc_id: str = "SA22-7592-05",
     message_ids: list[str] | None = None,
     members: list[str] | None = None,
@@ -168,7 +166,6 @@ def _make_point(
     payload = {
         "product": product,
         "version": version,
-        "source": source,
         "doc_id": doc_id,
         "title": f"Doc {doc_id}",
         "heading_path": "Chapter 1 > Section",
@@ -195,21 +192,17 @@ class TestMixedScopeParameters:
     """Stress test build_scope_filter and async_search under all permutations of scope parameters."""
 
     @pytest.mark.parametrize(
-        ("product", "version", "source", "expected_keys"),
+        ("product", "version", "expected_keys"),
         [
-            (None, None, None, set()),
-            ("z/OS", None, None, {"product"}),
-            (None, "3.1", None, {"version"}),
-            (None, None, "ibm", {_SOURCE_KEY}),
-            ("z/OS", "3.1", None, {"product", "version"}),
-            ("z/OS", None, "ibm", {"product", _SOURCE_KEY}),
-            (None, "3.1", "ibm", {"version", _SOURCE_KEY}),
-            ("z/OS", "3.1", "ibm", {"product", "version", _SOURCE_KEY}),
+            (None, None, set()),
+            ("z/OS", None, {"product"}),
+            (None, "3.1", {"version"}),
+            ("z/OS", "3.1", {"product", "version"}),
         ],
     )
-    def test_build_scope_filter_exact_keys(self, product, version, source, expected_keys):
+    def test_build_scope_filter_exact_keys(self, product, version, expected_keys):
         """Invariant D1: build_scope_filter constructs filters with exactly the caller-specified keys."""
-        flt = build_scope_filter(product=product, version=version, source=source)
+        flt = build_scope_filter(product=product, version=version)
         if not expected_keys:
             assert flt is None
         else:
@@ -220,7 +213,7 @@ class TestMixedScopeParameters:
 
     def test_build_scope_filter_with_empty_strings_evaluates_to_none(self):
         """Falsy empty strings ('') do not generate invalid or unmatchable filter conditions."""
-        flt = build_scope_filter(product="", version="", source="")
+        flt = build_scope_filter(product="", version="")
         assert flt is None
 
     def test_build_scope_filter_special_characters_preserved(self):
@@ -228,34 +221,27 @@ class TestMixedScopeParameters:
         flt = build_scope_filter(
             product="z/OS 2.5.0-SP1",
             version="v3.1-beta/rel",
-            source="ibm-corp/storage",
         )
         assert flt is not None
         cond_map = {c.key: c.match.value for c in flt.must}
         assert cond_map["product"] == "z/OS 2.5.0-SP1"
         assert cond_map["version"] == "v3.1-beta/rel"
-        assert cond_map[_SOURCE_KEY] == "ibm-corp/storage"
 
     @pytest.mark.parametrize(
-        ("product", "version", "source"),
+        ("product", "version"),
         [
-            ("z/OS", None, None),
-            (None, "3.1", None),
-            (None, None, "ibm"),
-            ("z/OS", "3.1", None),
-            ("z/OS", None, "ibm"),
-            (None, "3.1", "ibm"),
-            ("z/OS", "3.1", "ibm"),
+            ("z/OS", None),
+            (None, "3.1"),
+            ("z/OS", "3.1"),
         ],
     )
-    def test_search_retains_each_scope_permutation_on_fallback(self, embedder, product, version, source):
+    def test_search_retains_each_scope_permutation_on_fallback(self, embedder, product, version):
         """When an identifier query matches 0 points, fallback preserves whatever scope subset was passed."""
-        in_scope = _make_point("in-scope", product=product or "z/OS", version=version or "3.1", source=source or "ibm")
+        in_scope = _make_point("in-scope", product=product or "z/OS", version=version or "3.1")
         # Construct an out-of-scope point by flipping one of the active dimensions
         out_prod = "Linux" if product else "z/OS"
         out_ver = "1.0" if version else "3.1"
-        out_src = "untrusted" if source else "ibm"
-        out_scope = _make_point("out-scope", product=out_prod, version=out_ver, source=out_src)
+        out_scope = _make_point("out-scope", product=out_prod, version=out_ver)
 
         fake = AdversarialScopeQdrant(all_points=[in_scope, out_scope])
         # Query with non-existent doc_id triggers fallback
@@ -266,7 +252,6 @@ class TestMixedScopeParameters:
             "Identify SC99-9999",
             product=product,
             version=version,
-            source=source,
             limit=5,
         )
 
@@ -276,7 +261,7 @@ class TestMixedScopeParameters:
         fallback_flt = fake.batch_requests[2].filter
         assert fallback_flt is not None
         actual_keys = {c.key for c in fallback_flt.must}
-        expected_keys = {k for k, v in [("product", product), ("version", version), (_SOURCE_KEY, source)] if v}
+        expected_keys = {k for k, v in [("product", product), ("version", version)] if v}
         assert actual_keys == expected_keys
 
         # Returned hits must only include in-scope
@@ -295,8 +280,8 @@ class TestScopeMatchingZeroVsCandidatePoints:
     def test_zero_scope_matches_with_identifier_query_returns_empty_and_never_leaks(self, embedder):
         """Invariant D1: When DB contains points for other products, but 0 points match caller's scope,
         fallback relaxing identifiers MUST NOT relax scope to return out-of-scope points."""
-        linux_p1 = _make_point("lx-1", product="Linux", version="1.0", source="canonical", score=10.0)
-        linux_p2 = _make_point("lx-2", product="Linux", version="2.0", source="canonical", score=20.0)
+        linux_p1 = _make_point("lx-1", product="Linux", version="1.0", score=10.0)
+        linux_p2 = _make_point("lx-2", product="Linux", version="2.0", score=20.0)
         fake = AdversarialScopeQdrant(all_points=[linux_p1, linux_p2])
 
         hits, kind, _ = search(
@@ -306,7 +291,6 @@ class TestScopeMatchingZeroVsCandidatePoints:
             "Identify SC23-6862",
             product="z/OS",
             version="3.1",
-            source="ibm",
             limit=5,
         )
 
@@ -315,14 +299,14 @@ class TestScopeMatchingZeroVsCandidatePoints:
         # Fallback executed with scope filter
         fallback_flt = fake.batch_requests[2].filter
         assert fallback_flt is not None
-        assert {c.key for c in fallback_flt.must} == {"product", "version", _SOURCE_KEY}
+        assert {c.key for c in fallback_flt.must} == {"product", "version"}
         # Zero hits returned — Linux points NEVER leak
         assert hits == []
 
     def test_zero_scope_matches_with_natural_language_query_no_redundant_query(self, embedder):
         """When query has no identifiers and scope matches 0 points, _needs_filter_fallback returns False,
         issuing exactly 1 batch query and returning []."""
-        linux_p = _make_point("lx-1", product="Linux", version="1.0", source="canonical")
+        linux_p = _make_point("lx-1", product="Linux", version="1.0")
         fake = AdversarialScopeQdrant(all_points=[linux_p])
 
         hits, kind, _ = search(
@@ -342,7 +326,7 @@ class TestScopeMatchingZeroVsCandidatePoints:
     def test_partial_scope_mismatch_strictly_excluded(self, embedder):
         """If caller asks for product="z/OS" and version="3.1", but DB only has version="2.4",
         version 2.4 must be strictly excluded even if product matches."""
-        v24_point = _make_point("zos-24", product="z/OS", version="2.4", source="ibm", score=5.0)
+        v24_point = _make_point("zos-24", product="z/OS", version="2.4", score=5.0)
         fake = AdversarialScopeQdrant(all_points=[v24_point])
 
         hits, _, _ = search(
@@ -482,9 +466,8 @@ class TestScoreDifferencesAndOutofScopeLeakage:
         in_scope = _make_point("in-scope", product="z/OS", version="3.1", score=0.0001)
         out_prod = _make_point("out-prod", product="Linux", version="3.1", score=1_000_000.0)
         out_ver = _make_point("out-ver", product="z/OS", version="1.0", score=999_999.0)
-        out_src = _make_point("out-src", product="z/OS", version="3.1", source="untrusted", score=888_888.0)
 
-        fake = AdversarialScopeQdrant(all_points=[in_scope, out_prod, out_ver, out_src])
+        fake = AdversarialScopeQdrant(all_points=[in_scope, out_prod, out_ver])
 
         hits, _, _ = search(
             fake,
@@ -493,7 +476,6 @@ class TestScoreDifferencesAndOutofScopeLeakage:
             "SC99-9999",  # Triggers fallback
             product="z/OS",
             version="3.1",
-            source="ibm",
             limit=5,
         )
 
@@ -625,8 +607,8 @@ class TestTransportAndInterfaceParity:
     def test_legacy_sequential_qdrant_client_retains_scope(self, embedder):
         """A client without query_batch_points takes the sequential _async_prefetch_one path;
         it must retain scope filters on fallback and reject out-of-scope records."""
-        in_scope = _make_point("in-scope", product="z/OS", version="3.1", source="ibm")
-        out_scope = _make_point("out-scope", product="Linux", version="3.1", source="ibm")
+        in_scope = _make_point("in-scope", product="z/OS", version="3.1")
+        out_scope = _make_point("out-scope", product="Linux", version="3.1")
 
         fake = LegacyAdversarialScopeQdrant(all_points=[in_scope, out_scope])
         assert not hasattr(fake, "query_batch_points")
@@ -638,7 +620,6 @@ class TestTransportAndInterfaceParity:
             "Identify SC99-9999",  # Triggers fallback
             product="z/OS",
             version="3.1",
-            source="ibm",
             limit=5,
         )
 
@@ -707,7 +688,6 @@ def _make_real_qdrant_client(points: list[models.ScoredPoint], dim: int = 4) -> 
     )
     for kw in (
         "vendor",
-        "source",
         "product",
         "version",
         "doc_id",
@@ -750,7 +730,6 @@ async def _make_async_real_qdrant_client(points: list[models.ScoredPoint], dim: 
     )
     for kw in (
         "vendor",
-        "source",
         "product",
         "version",
         "doc_id",
@@ -780,23 +759,22 @@ async def _make_async_real_qdrant_client(points: list[models.ScoredPoint], dim: 
     return client, col_name
 
 
-class TestIndexedSourceBehaviorAcrossMockAndRealQdrant:
-    """Stress test source indexing and Invariant D1 scope preservation across
-    both mocked and real vector configurations in Qdrant."""
+class TestScopedRetentionAcrossMockAndRealQdrant:
+    """Invariant D1 scope preservation (product/version) across both mocked
+    and real in-memory vector configurations in Qdrant."""
 
-    def test_stress_source_ibm_matching_and_isolation_real_and_mock(self, embedder):
-        """Stress test query with source='ibm':
-        Both exact match and fallback retention match IBM records while strictly isolating
-        unknown, canonical, and other vendor points."""
-        p_ibm = _make_point("1", source="ibm", product="z/OS", version="3.1", doc_id="SA22-7592-05")
-        p_unk = _make_point("2", source="unknown", product="z/OS", version="3.1", doc_id="SA22-8000-01")
-        p_lx = _make_point("3", source="canonical", product="Linux", version="1.0", doc_id="LN-0001-00")
+    def test_scope_matching_and_isolation_real_and_mock(self, embedder):
+        """Exact identifier match and fallback retention match z/OS 3.1
+        records while strictly isolating other products and versions."""
+        p_zos = _make_point("1", product="z/OS", version="3.1", doc_id="SA22-7592-05")
+        p_old = _make_point("2", product="z/OS", version="2.4", doc_id="SA22-8000-01")
+        p_lx = _make_point("3", product="Linux", version="1.0", doc_id="LN-0001-00")
 
-        points = [p_ibm, p_unk, p_lx]
+        points = [p_zos, p_old, p_lx]
         mock_client = AdversarialScopeQdrant(all_points=points)
         real_client, col = _make_real_qdrant_client(points)
 
-        # 1. Exact identifier match with source="ibm"
+        # 1. Exact identifier match within scope
         for client in (mock_client, real_client):
             hits, kind, _ = search(
                 client,
@@ -805,13 +783,12 @@ class TestIndexedSourceBehaviorAcrossMockAndRealQdrant:
                 "SA22-7592-05",
                 product="z/OS",
                 version="3.1",
-                source="ibm",
             )
             assert kind == "identifier"
             assert len(hits) == 1
             assert hits[0].chunk_id == "1"
 
-        # 2. Fallback retry when identifier SC99-9999 is missing: retains source="ibm"
+        # 2. Fallback retry when identifier SC99-9999 is missing retains scope
         for client in (mock_client, real_client):
             hits, kind, _ = search(
                 client,
@@ -820,39 +797,22 @@ class TestIndexedSourceBehaviorAcrossMockAndRealQdrant:
                 "Identify SC99-9999",
                 product="z/OS",
                 version="3.1",
-                source="ibm",
             )
             assert kind == "identifier"
             assert len(hits) == 1
             assert hits[0].chunk_id == "1"
             assert {h.chunk_id for h in hits} == {"1"}
 
-    def test_stress_source_unknown_matching_and_isolation_real_and_mock(self, embedder):
-        """Stress test query with source='unknown':
-        Exact match and fallback retention match unknown-source points and isolate IBM points."""
-        p_ibm = _make_point("1", source="ibm", product="z/OS", version="3.1", doc_id="SA22-7592-05")
-        p_unk = _make_point("2", source="unknown", product="z/OS", version="3.1", doc_id="SA22-8000-01")
+    def test_scope_zero_match_returns_empty_and_never_leaks(self, embedder):
+        """When 0 points match caller scope, fallback returns [] on both real and mock Qdrant."""
+        p_old = _make_point("1", product="z/OS", version="2.4")
+        p_lx = _make_point("2", product="Linux", version="1.0")
 
-        points = [p_ibm, p_unk]
+        points = [p_old, p_lx]
         mock_client = AdversarialScopeQdrant(all_points=points)
         real_client, col = _make_real_qdrant_client(points)
 
-        # 1. Exact match with source="unknown"
-        for client in (mock_client, real_client):
-            hits, kind, _ = search(
-                client,
-                embedder,
-                col,
-                "SA22-8000-01",
-                product="z/OS",
-                version="3.1",
-                source="unknown",
-            )
-            assert kind == "identifier"
-            assert len(hits) == 1
-            assert hits[0].chunk_id == "2"
-
-        # 2. Fallback query with source="unknown": retains unknown, excludes ibm
+        # Query asks for z/OS 3.1 -> 0 points match
         for client in (mock_client, real_client):
             hits, kind, _ = search(
                 client,
@@ -861,69 +821,17 @@ class TestIndexedSourceBehaviorAcrossMockAndRealQdrant:
                 "SC99-9999",
                 product="z/OS",
                 version="3.1",
-                source="unknown",
-            )
-            assert kind == "identifier"
-            assert len(hits) == 1
-            assert hits[0].chunk_id == "2"
-
-    def test_stress_source_empty_string_and_none_equivalence_real_and_mock(self, embedder):
-        """Stress test queries with source='' and source=None:
-        Both evaluate to no source filter, matching all points within product/version scope."""
-        p_ibm = _make_point("1", source="ibm", product="z/OS", version="3.1", doc_id="SA22-7592-05")
-        p_unk = _make_point("2", source="unknown", product="z/OS", version="3.1", doc_id="SA22-8000-01")
-        p_lx = _make_point("3", source="canonical", product="Linux", version="1.0", doc_id="LN-0001-00")
-
-        points = [p_ibm, p_unk, p_lx]
-        mock_client = AdversarialScopeQdrant(all_points=points)
-        real_client, col = _make_real_qdrant_client(points)
-
-        for src in ("", None):
-            for client in (mock_client, real_client):
-                hits, kind, _ = search(
-                    client,
-                    embedder,
-                    col,
-                    "Identify SC99-9999",
-                    product="z/OS",
-                    version="3.1",
-                    source=src,
-                )
-                assert kind == "identifier"
-                hit_ids = {h.chunk_id for h in hits}
-                # Both z/OS points match, Linux point is strictly excluded
-                assert hit_ids == {"1", "2"}
-
-    def test_stress_source_zero_match_returns_empty_and_never_leaks(self, embedder):
-        """When 0 points match caller's source scope, fallback returns [] on both real and mock Qdrant."""
-        p_unk = _make_point("1", source="unknown", product="z/OS", version="3.1")
-        p_lx = _make_point("2", source="canonical", product="Linux", version="1.0")
-
-        points = [p_unk, p_lx]
-        mock_client = AdversarialScopeQdrant(all_points=points)
-        real_client, col = _make_real_qdrant_client(points)
-
-        # Query asks for source="ibm" -> 0 points match
-        for client in (mock_client, real_client):
-            hits, kind, _ = search(
-                client,
-                embedder,
-                col,
-                "SC99-9999",
-                product="z/OS",
-                version="3.1",
-                source="ibm",
             )
             assert kind == "identifier"
             assert hits == []
 
-    def test_stress_source_mismatch_on_matching_identifier_forces_fallback_isolation(self, embedder):
-        """When a point matches the doc_id but its source is out-of-scope, the initial query
-        fails, fallback relaxes the identifier but retains source, returning in-scope points only."""
-        # Hostile point: matches requested doc_id SA22-7592-05, but source is 'untrusted'
-        p_hostile = _make_point("1", source="untrusted", product="z/OS", version="3.1", doc_id="SA22-7592-05")
-        # In-scope point: different doc_id, but source is 'ibm'
-        p_in_scope = _make_point("2", source="ibm", product="z/OS", version="3.1", doc_id="SA22-0000-00")
+    def test_scope_mismatch_on_matching_identifier_forces_fallback_isolation(self, embedder):
+        """When a point matches the doc_id but its version is out-of-scope, the initial query
+        fails, fallback relaxes the identifier but retains scope, returning in-scope points only."""
+        # Hostile point: matches requested doc_id SA22-7592-05, but version is out of scope
+        p_hostile = _make_point("1", product="z/OS", version="2.4", doc_id="SA22-7592-05")
+        # In-scope point: different doc_id, matching product and version
+        p_in_scope = _make_point("2", product="z/OS", version="3.1", doc_id="SA22-0000-00")
 
         points = [p_hostile, p_in_scope]
         mock_client = AdversarialScopeQdrant(all_points=points)
@@ -937,53 +845,51 @@ class TestIndexedSourceBehaviorAcrossMockAndRealQdrant:
                 "SA22-7592-05",
                 product="z/OS",
                 version="3.1",
-                source="ibm",
             )
             assert kind == "identifier"
             assert len(hits) == 1
             assert hits[0].chunk_id == "2"
             assert "1" not in {h.chunk_id for h in hits}
 
-    @pytest.mark.parametrize("source_val", ["ibm", "unknown", "", None])
-    def test_parity_matrix_across_all_sources(self, embedder, source_val):
+    @pytest.mark.parametrize("scope", [{"product": "z/OS"}, {"version": "3.1"}, {"product": "z/OS", "version": "3.1"}])
+    def test_parity_matrix_across_scope_subsets(self, embedder, scope):
         """Cross-configuration matrix: verify exact result parity between mock and real Qdrant."""
-        p_ibm = _make_point("1", source="ibm", product="z/OS", version="3.1", doc_id="SA22-7592-05")
-        p_unk = _make_point("2", source="unknown", product="z/OS", version="3.1", doc_id="SA22-8000-01")
-        p_lx = _make_point("3", source="canonical", product="Linux", version="1.0", doc_id="LN-0001-00")
+        p_zos = _make_point("1", product="z/OS", version="3.1", doc_id="SA22-7592-05")
+        p_old = _make_point("2", product="z/OS", version="2.4", doc_id="SA22-8000-01")
+        p_lx = _make_point("3", product="Linux", version="1.0", doc_id="LN-0001-00")
 
-        points = [p_ibm, p_unk, p_lx]
+        points = [p_zos, p_old, p_lx]
         mock_client = AdversarialScopeQdrant(all_points=points)
         real_client, col = _make_real_qdrant_client(points)
 
         mock_hits, mock_kind, _ = search(
-            mock_client, embedder, col, "SC99-9999", product="z/OS", version="3.1", source=source_val
+            mock_client, embedder, col, "SC99-9999", **scope
         )
         real_hits, real_kind, _ = search(
-            real_client, embedder, col, "SC99-9999", product="z/OS", version="3.1", source=source_val
+            real_client, embedder, col, "SC99-9999", **scope
         )
 
         assert mock_kind == real_kind == "identifier"
         assert {h.chunk_id for h in mock_hits} == {h.chunk_id for h in real_hits}
 
-    def test_async_real_and_mock_source_parity(self, embedder):
+    def test_async_real_and_mock_scope_parity(self, embedder):
         """Async transport parity: verify async_search with real AsyncQdrantClient matches AsyncAdversarialScopeQdrant."""
         async def _run():
-            p_ibm = _make_point("1", source="ibm", product="z/OS", version="3.1", doc_id="SA22-7592-05")
-            p_unk = _make_point("2", source="unknown", product="z/OS", version="3.1", doc_id="SA22-8000-01")
+            p_zos = _make_point("1", product="z/OS", version="3.1", doc_id="SA22-7592-05")
+            p_old = _make_point("2", product="z/OS", version="2.4", doc_id="SA22-8000-01")
 
-            points = [p_ibm, p_unk]
+            points = [p_zos, p_old]
             mock_async = AsyncAdversarialScopeQdrant(all_points=points)
             real_async, col = await _make_async_real_qdrant_client(points)
 
             mock_hits, mock_kind, _ = await async_search(
-                mock_async, embedder, col, "SC99-9999", product="z/OS", version="3.1", source="ibm"
+                mock_async, embedder, col, "SC99-9999", product="z/OS", version="3.1"
             )
             real_hits, real_kind, _ = await async_search(
-                real_async, embedder, col, "SC99-9999", product="z/OS", version="3.1", source="ibm"
+                real_async, embedder, col, "SC99-9999", product="z/OS", version="3.1"
             )
 
             assert mock_kind == real_kind == "identifier"
             assert {h.chunk_id for h in mock_hits} == {h.chunk_id for h in real_hits} == {"1"}
 
         asyncio.run(_run())
-

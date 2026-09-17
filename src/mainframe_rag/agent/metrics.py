@@ -60,7 +60,6 @@ HITS_BOUNDARIES: tuple[float, ...] = (0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 
 # healthz, unknown paths) must not pollute request series.
 _METRIC_ENDPOINTS: dict[str, tuple[str, ...]] = {
     "search": ("/v1/search",),
-    "evidence": ("/v1/evidence",),
     "answer": ("/v1/answer",),
     "chat": ("/v1/chat", "/v1/chat/completions"),
 }
@@ -135,11 +134,8 @@ def endpoint_for_path(path: str) -> str | None:
     of request series). One mapping, shared by every error handler."""
     clean = path.rstrip("/") or "/"
     for endpoint, routes in _METRIC_ENDPOINTS.items():
-        for route in routes:
-            # Exact routes plus parameterized children (issue #405 E1:
-            # /v1/evidence/{reference} reports under "evidence").
-            if clean == route or clean.startswith(route + "/"):
-                return endpoint
+        if clean in routes:
+            return endpoint
     return None
 
 

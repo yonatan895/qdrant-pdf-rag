@@ -86,12 +86,6 @@ class SearchHit(BaseModel):
     product: str | None = None
     version: str | None = None
     rerank_score: float | None = None
-    # Opaque evidence reference (issue #405 E1): minted by the shared
-    # evidence service as `ev_<genfp16>_<chunk_uuid>`. None only for
-    # pre-E1 constructions and unit fakes — serving paths always set it.
-    # The raw Qdrant point id in `chunk_id` is storage layout, not the
-    # consumer contract; clients must use `reference` for exact reads.
-    reference: str | None = None
     # Persisted unit spans, [start, end, kind] triples over the stripped
     # chunk text (issue #368). None = legacy point or uncapped block: the
     # pack stage redetects with the shared chunk detectors. () = known
@@ -535,7 +529,6 @@ def search(
     query: str,
     product: str | None = None,
     version: str | None = None,
-    source: str | None = None,
     limit: int = 8,
     settings: Settings | None = None,
     reranker: Reranker | None = None,
@@ -566,7 +559,6 @@ def search(
             query,
             product=product,
             version=version,
-            source=source,
             limit=limit,
             settings=settings,
             reranker=reranker,
@@ -601,7 +593,6 @@ async def async_search(
     query: str,
     product: str | None = None,
     version: str | None = None,
-    source: str | None = None,
     limit: int = 8,
     settings: Settings | None = None,
     reranker: Reranker | None = None,
@@ -612,8 +603,8 @@ async def async_search(
     batch call via query_batch_points (falling back to query_points if unsupported).
     When reranking is enabled, fused candidates (top-50) are scored by the cross-encoder."""
     identifiers = parse_query(query)
-    flt = build_filter(identifiers, product=product, version=version, source=source)
-    fallback_flt = build_scope_filter(product=product, version=version, source=source)
+    flt = build_filter(identifiers, product=product, version=version)
+    fallback_flt = build_scope_filter(product=product, version=version)
 
     active_reranker, rerank_active, bypass_reason = _resolve_active_reranker(
         settings, reranker, query, identifiers.has_identifiers

@@ -33,8 +33,6 @@ def test_setup_metrics_idempotent():
     [
         ("/v1/search", "search"),
         ("/v1/search/", "search"),
-        ("/v1/evidence/ev_9f2c4a1b7e031234_abc", "evidence"),
-        ("/v1/evidence/", "evidence"),
         ("/v1/answer", "answer"),
         ("/v1/answer?stream=true", "answer"),
         ("/metrics", None),
