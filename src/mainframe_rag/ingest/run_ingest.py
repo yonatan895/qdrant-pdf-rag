@@ -86,10 +86,12 @@ from mainframe_rag.ingest.publish import (
     ensure_staging,
     generation_fingerprint,
     plan_approved_removals,
+    read_publication_metadata,
     read_publish_state,
     resolve_publish_staging,
     verify_all_complete,
     verify_searchable_coverage,
+    write_publication_metadata,
     write_publish_state,
 )
 from mainframe_rag.ingest.qdrant_io import (
@@ -1304,6 +1306,14 @@ def _run_publish_locked(
                 f"live generation {live!r} fails verification for {len(problems)} "
                 f"path(s) (e.g. {problems[0]!r}) — operator intervention required."
             )
+        if read_publication_metadata(client, completion_collection_name(staging_settings)) is None:
+            write_publication_metadata(
+                client,
+                completion_collection_name(staging_settings),
+                staging_settings,
+                gen_fp=gen_fp,
+                corpus_fp=corp_fp,
+            )
         log.info(
             json.dumps(
                 {
@@ -1401,6 +1411,13 @@ def _run_publish_locked(
         client.delete_collection(live)
         migrated = live
         previous = None
+    write_publication_metadata(
+        client,
+        completion_collection_name(staging_settings),
+        staging_settings,
+        gen_fp=gen_fp,
+        corpus_fp=corp_fp,
+    )
     summary = swap_alias_to(client, settings, staging, previous)
     summary["docs"] = str(len(prewalked))
     summary["staging_mode"] = mode

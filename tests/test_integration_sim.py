@@ -445,6 +445,77 @@ def test_forced_repair_publishes_distinct_generation_on_real_server(
     finally:
         client.close()
         _drop_publish_fixture(qdrant_url)
+
+
+def test_subsequent_run_after_repair_steady_state_on_real_server(
+    qdrant_url, corpus, tmp_path, monkeypatch
+):
+    """Issue #391 Q418-R1 against real Qdrant server: a successful repair cuts
+    over to a suffixed generation; subsequent ordinary ingest without --reingest
+    recognizes live as steady state, performs a read-only verification, and
+    allocates no new collections."""
+    import shutil
+
+    from qdrant_client import QdrantClient
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.qdrant_io import resolve_live_collection
+
+    _drop_publish_fixture(qdrant_url)
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+    local = tmp_path / "repair-steady-corpus"
+    local.mkdir()
+    for pdf in corpus.iterdir():
+        shutil.copy(pdf, local / pdf.name)
+    progress = tmp_path / "inv.jsonl"
+    first = _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress)
+    assert [r["status"] for r in first] == ["upserted"] * 3
+
+    settings = Settings(
+        _env_file=None,
+        qdrant_url=qdrant_url,
+        qdrant_collection=PUBLISH_ALIAS,
+        embed_mode="hash",
+        allow_hash_mode=True,
+    )
+    client = QdrantClient(url=qdrant_url, timeout=10)
+    try:
+        old, _ = resolve_live_collection(client, settings)
+        assert old is not None
+
+        # Forced repair: cuts over to suffixed generation
+        _ingest(
+            monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress, extra=("--reingest",)
+        )
+        repaired, _ = resolve_live_collection(client, settings)
+        assert repaired != old
+        assert repaired.endswith("_1")
+        cols_before = {c.name for c in client.get_collections().collections}
+
+        # Subsequent ordinary run WITHOUT --reingest
+        previous = run_ingest._worker_qdrant
+        if previous is not None:
+            previous.close()
+        monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
+        monkeypatch.setattr(run_ingest, "_worker_embedder", None)
+
+        assert (
+            run_ingest.main(
+                ["--src", str(local), "--progress", str(progress), "--workers", "1"]
+            )
+            == 0
+        )
+        current, _ = resolve_live_collection(client, settings)
+        assert current == repaired
+        cols_after = {c.name for c in client.get_collections().collections}
+        assert cols_after == cols_before, "ordinary steady-state run must not create new collections"
+    finally:
+        client.close()
+        _drop_publish_fixture(qdrant_url)
+
+
 def test_migration_scope_proof_blocks_unmarked_point_on_real_server(
     qdrant_url, corpus, tmp_path, monkeypatch
 ):

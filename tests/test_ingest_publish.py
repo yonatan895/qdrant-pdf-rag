@@ -915,6 +915,193 @@ def test_forced_repair_swap_then_crash_finalizes_read_only(tmp_path, monkeypatch
     assert [(p.id, dict(p.payload or {})) for p in fake.collections[repaired]] == points_after
 
 
+def test_subsequent_ordinary_run_recognizes_repair_steady_state(tmp_path, monkeypatch):
+    """Issue #391 Q418-R1: a successful forced repair cuts over to a suffixed
+    generation; on a subsequent ordinary run without --reingest for the same
+    inputs, publication metadata proves live matches (gen_fp, corpus_fp). The
+    run treats live as steady state directly, re-verifies read-only, and
+    allocates no second staging generation."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+
+    # 1. Initial build: canonical staging generation published
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    initial = fake.aliases[ALIAS]
+
+    # 2. Forced repair: builds and cuts over to suffixed generation (e.g. initial_1)
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    repaired = fake.aliases[ALIAS]
+    assert repaired != initial
+    assert repaired.endswith("_1")
+    gens_after_repair = _gen_collections(fake)
+    points_after_repair = [(p.id, dict(p.payload or {})) for p in fake.collections[repaired]]
+
+    # 3. Subsequent ordinary run WITHOUT --reingest on same corpus
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert fake.aliases[ALIAS] == repaired
+    assert _gen_collections(fake) == gens_after_repair, "steady-state run must not allocate new generation"
+    assert [(p.id, dict(p.payload or {})) for p in fake.collections[repaired]] == points_after_repair
+
+    # Second subsequent ordinary run: must also perform zero allocations, no writes
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert fake.aliases[ALIAS] == repaired
+    assert _gen_collections(fake) == gens_after_repair, "second ordinary run must not allocate new generation"
+    assert [(p.id, dict(p.payload or {})) for p in fake.collections[repaired]] == points_after_repair
+
+    # 4. Missing/malformed receipt control: deleting receipt forces rebuild/staging
+    from mainframe_rag.ingest.publish import completion_collection_for, delete_publication_metadata
+    repaired_completions = completion_collection_for(repaired)
+    delete_publication_metadata(fake, repaired_completions)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    after_missing_receipt = fake.aliases[ALIAS]
+    assert after_missing_receipt != repaired, "missing receipt must allocate staging rather than falsely accepting repair"
+
+    # 5. Counterexample 1: Changed corpus derives new generation
+    _build_doc_with_id(corpus, "doc_b", DOC_B)
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    new_corpus_gen = fake.aliases[ALIAS]
+    assert new_corpus_gen != repaired
+    assert new_corpus_gen in _gen_collections(fake)
+
+
+def test_subsequent_run_changed_revision_after_repair_derives_new_generation(tmp_path, monkeypatch):
+    """Issue #391 Q418-R1 counterexample 2: after a forced repair, changing the
+    model revision changes gen_fp so publication metadata in live no longer
+    matches; an ordinary run allocates a new staging generation instead of
+    re-verifying live as steady state."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    repaired = fake.aliases[ALIAS]
+
+    # Change revision: gen_fp changes, so it must not be recognized as steady state
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-new")
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    after_rev = fake.aliases[ALIAS]
+    assert after_rev != repaired
+
+
+def test_q418_r1_publication_receipt_not_accumulated_across_clones():
+    """Issue #391 S423-N1: publication receipts must not accumulate in completions
+    collections across repeated generation clones. _transfer_staging_metadata removes
+    any inherited receipt from staging while preserving completions and manifest."""
+    from types import SimpleNamespace
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.publish import (
+        _PUBLICATION_METADATA_PREFIX,
+        _transfer_staging_metadata,
+        completion_collection_for,
+        completion_collection_name,
+        publication_metadata_point_id,
+        read_publication_metadata,
+        write_publication_metadata,
+    )
+    from mainframe_rag.ingest.representation import (
+        commit_manifest,
+        read_manifest_record,
+    )
+
+    fake = PublishFake()
+    settings = Settings(qdrant_url="http://localhost:6333", qdrant_collection="col1")
+
+    # 1. Setup live generation with completions, manifest, and publication receipt
+    live = "col1__gen1"
+    live_completions = completion_collection_for(live)
+    staging1 = "col1__gen2"
+    staging1_settings = settings.model_copy(update={"qdrant_collection": staging1})
+    staging1_completions = completion_collection_name(staging1_settings)
+
+    fake.collections[live] = []
+    fake.collections[live_completions] = []
+
+    commit_manifest(fake, live_completions, settings, "rules-1")
+    live_manifest = read_manifest_record(fake, live_completions)
+    assert live_manifest is not None
+
+    # Add a document completion marker
+    doc_marker = SimpleNamespace(
+        id="doc-marker-1",
+        payload={"doc_id": "DOC1", "rules_version": "rules-1", "target_collection": live_completions},
+        vector=[0.0],
+    )
+    fake.collections[live_completions].append(doc_marker)
+
+    # Write publication metadata to live
+    write_publication_metadata(fake, live_completions, settings, gen_fp="gen1", corpus_fp="corp1")
+    assert read_publication_metadata(fake, live_completions) == ("gen1", "corp1")
+
+    # 2. Transfer metadata to staging1 (simulates preparation)
+    _transfer_staging_metadata(fake, settings, staging1_settings, live)
+
+    # Staging1 manifest must be preserved and rekeyed
+    stg1_manifest = read_manifest_record(fake, staging1_completions)
+    assert stg1_manifest is not None
+    assert stg1_manifest == live_manifest
+
+    # Doc marker must be preserved
+    assert any((p.payload or {}).get("doc_id") == "DOC1" for p in fake.collections[staging1_completions])
+
+    # Ancestral publication receipt from live MUST be removed from staging1
+    stg1_receipts = [
+        p for p in fake.collections[staging1_completions]
+        if (p.payload or {}).get("record_type") == _PUBLICATION_METADATA_PREFIX
+    ]
+    assert len(stg1_receipts) == 0, f"staging must have 0 receipts after transfer, got {len(stg1_receipts)}"
+
+    # 3. Simulate publication of staging1: write staging1's receipt
+    write_publication_metadata(fake, staging1_completions, settings, gen_fp="gen2", corpus_fp="corp2")
+    stg1_receipts_after_pub = [
+        p for p in fake.collections[staging1_completions]
+        if (p.payload or {}).get("record_type") == _PUBLICATION_METADATA_PREFIX
+    ]
+    assert len(stg1_receipts_after_pub) == 1
+    assert str(stg1_receipts_after_pub[0].id) == publication_metadata_point_id(staging1_completions)
+
+    # 4. Clone staging1 into staging2: repeated generation cloning
+    staging2 = "col1__gen3"
+    staging2_settings = settings.model_copy(update={"qdrant_collection": staging2})
+    staging2_completions = completion_collection_name(staging2_settings)
+
+    _transfer_staging_metadata(fake, settings, staging2_settings, staging1)
+
+    # Staging2 must NOT accumulate staging1's receipt or live's receipt
+    stg2_receipts = [
+        p for p in fake.collections[staging2_completions]
+        if (p.payload or {}).get("record_type") == _PUBLICATION_METADATA_PREFIX
+    ]
+    assert len(stg2_receipts) == 0, f"staging2 must have 0 receipts after transfer, got {len(stg2_receipts)}"
+
+    # Doc marker and manifest are still preserved
+    assert read_manifest_record(fake, staging2_completions) is not None
+    assert any((p.payload or {}).get("doc_id") == "DOC1" for p in fake.collections[staging2_completions])
+
+    # Publish staging2
+    write_publication_metadata(fake, staging2_completions, settings, gen_fp="gen3", corpus_fp="corp3")
+    stg2_receipts_after_pub = [
+        p for p in fake.collections[staging2_completions]
+        if (p.payload or {}).get("record_type") == _PUBLICATION_METADATA_PREFIX
+    ]
+    assert len(stg2_receipts_after_pub) == 1
+    assert str(stg2_receipts_after_pub[0].id) == publication_metadata_point_id(staging2_completions)
+
+
 def test_publish_force_revision_change_migrates_to_new_generation(tmp_path, monkeypatch):
     """Issue #391 F2: a revision-only change must never reconverge the live
     physical. The versioned fingerprint embeds the operator revision, so

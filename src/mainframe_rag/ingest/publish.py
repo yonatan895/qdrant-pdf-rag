@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -242,6 +243,122 @@ def clear_publish_state(progress: Path, alias: str) -> bool:
     return True
 
 
+_PUBLICATION_METADATA_PREFIX = "publication-metadata"
+
+
+def publication_metadata_point_id(completions_collection: str) -> str:
+    """Deterministic point ID for publication metadata in completions."""
+    return str(
+        uuid.uuid5(uuid.NAMESPACE_URL, f"{_PUBLICATION_METADATA_PREFIX}|{completions_collection}")
+    )
+
+
+def write_publication_metadata(
+    client: QdrantPoints,
+    completions_collection: str,
+    settings: Settings,
+    *,
+    gen_fp: str,
+    corpus_fp: str,
+) -> None:
+    """Record publication fingerprints on cutover (issue #391 Q418-R1).
+    Allows subsequent ordinary runs to recognize successful repair generations
+    as steady state."""
+    from qdrant_client import models
+
+    try:
+        dim = settings.require_dense_dim()
+    except RuntimeError:
+        dim = None
+    dummy_dim = dim or 1
+    client.upsert(
+        completions_collection,
+        points=[
+            models.PointStruct(
+                id=publication_metadata_point_id(completions_collection),
+                vector={
+                    "dense": [0.0] * dummy_dim,
+                    "bm25": models.SparseVector(indices=[0], values=[1.0]),
+                },
+                payload={
+                    "record_type": _PUBLICATION_METADATA_PREFIX,
+                    "target_collection": completions_collection,
+                    "gen_fp": gen_fp,
+                    "corpus_fp": corpus_fp,
+                },
+            )
+        ],
+        wait=True,
+    )
+
+
+def read_publication_metadata(
+    client: QdrantPoints,
+    completions_collection: str,
+) -> tuple[str, str] | None:
+    """Read stored (gen_fp, corpus_fp) for a published generation."""
+    if not client.collection_exists(completions_collection):
+        return None
+    point_id = publication_metadata_point_id(completions_collection)
+    points = client.retrieve(completions_collection, ids=[point_id], with_payload=True)
+    if not points:
+        return None
+    payload = points[0].payload or {}
+    if payload.get("record_type") != _PUBLICATION_METADATA_PREFIX:
+        return None
+    gen_fp = payload.get("gen_fp")
+    corpus_fp = payload.get("corpus_fp")
+    if isinstance(gen_fp, str) and isinstance(corpus_fp, str):
+        return gen_fp, corpus_fp
+    return None
+
+
+def delete_publication_metadata(
+    client: QdrantPoints,
+    completions_collection: str,
+    *,
+    ancestor_completions: str | None = None,
+) -> None:
+    """Remove publication metadata from staging completions during preparation (issue #391 S423-N1).
+
+    Removes both the destination point ID (if already present from an earlier
+    attempt) and any inherited publication receipt(s) cloned from ancestor_completions
+    or found in the collection, while leaving document completions and the
+    representation manifest untouched.
+    """
+    from qdrant_client import models
+
+    if not client.collection_exists(completions_collection):
+        return
+    ids_to_delete: set[str] = {publication_metadata_point_id(completions_collection)}
+    if ancestor_completions:
+        ids_to_delete.add(publication_metadata_point_id(ancestor_completions))
+
+    try:
+        offset = None
+        while True:
+            records, offset = client.scroll(
+                completions_collection,
+                limit=100,
+                with_payload=True,
+                offset=offset,
+            )
+            for rec in records:
+                payload = getattr(rec, "payload", None) or {}
+                if payload.get("record_type") == _PUBLICATION_METADATA_PREFIX:
+                    ids_to_delete.add(str(rec.id))
+            if offset is None:
+                break
+    except Exception:  # noqa: BLE001, S110 — unreadable store skips scroll receipt cleanup
+        pass
+
+    client.delete(
+        completions_collection,
+        points_selector=models.PointIdsList(points=sorted(ids_to_delete)),
+        wait=True,
+    )
+
+
 def _fresh_staging_candidate(
     client: QdrantPoints, base: str, live: str | None, skip: frozenset[str] = frozenset()
 ) -> str:
@@ -337,10 +454,14 @@ def resolve_publish_staging(
         # the derived name would strand it and read as an unrecorded
         # build on the next retry).
         return recorded, False
-    if live == base:
-        if not force_reingest and not has_retirements:
-            return base, False
-        return _fresh_staging_candidate(client, base, live), False
+    if live is not None:
+        live_completions = completion_collection_for(live)
+        pub_meta = read_publication_metadata(client, live_completions)
+        is_live_steady = (pub_meta is not None and pub_meta == (gen_fp, corpus_fp)) or (live == base)
+        if is_live_steady:
+            if not force_reingest and not has_retirements:
+                return live, False
+            return _fresh_staging_candidate(client, base, live), False
     if client.collection_exists(base):
         staging_settings = settings.model_copy(update={"qdrant_collection": base})
         from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
@@ -433,6 +554,11 @@ def _transfer_staging_metadata(
             f"manifest but {staging_completions!r} has none after the clone/re-key "
             "— refusing to publish from an incomplete staging generation."
         )
+    delete_publication_metadata(
+        client,
+        staging_completions,
+        ancestor_completions=live_completions,
+    )
     if read_manifest_record(client, staging_completions) != live_record:
         raise RuntimeError(
             f"staging manifest at {staging_completions!r} does not match the live "

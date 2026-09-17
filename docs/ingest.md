@@ -589,8 +589,15 @@ thread pool.
   rollback-by-republish preserves the retained points and manifest
   byte-identically. A forced rebuild whose derived name IS live takes the
   same suffixed-allocation route (issue #391 current packet), so the
-  serving generation is never workspace either. The resume path
-  deliberately checks no manifest state:
+  serving generation is never workspace either. At cutover, publication
+  fingerprints `(gen_fp, corpus_fp)` are committed to the generation's metadata
+  (`<collection>__completions`), allowing subsequent ordinary runs to recognize
+  successful repair generations as steady state without allocating further staging
+  generations (issue #391 Q418-R1). An existing generation lacking a publication receipt
+  performs a one-time metadata write when verified as `already_live`; once the receipt
+  exists, subsequent ordinary runs perform zero writes (corpus, markers, and metadata remain
+  completely untouched). The resume path deliberately checks no
+  manifest state:
   staging is cloned from live, so an interrupted clone carries a COMMITTED
   manifest indistinguishable from a finished build — resume safety comes
   from the sidecar's fingerprint binding, converge re-verification before
