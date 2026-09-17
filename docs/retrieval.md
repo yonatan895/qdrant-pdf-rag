@@ -322,6 +322,141 @@ otherwise monopolize the prompt slots. Backfill runs in three phases:
 So "max 1 per page" holds until the pool runs dry, then completeness wins.
 Callers must not assume page-diversity in short pools.
 
+<a id="evidence-contract"></a>
+## 9. Evidence-service contract (E0 proposal — not implemented)
+
+**Contract / scope:** the minimal shared knowledge interface behind the
+existing HTTP, console, and MCP consumers (issue #405 E0, PLAN ONLY).
+Three typed capabilities over existing owners — no new service split,
+database, framework, or public endpoint in this card:
+
+- `search_knowledge(query, scope, generation?, limit)`
+- `read_evidence(reference, context_budget)`
+- `list_sources(scope)`
+
+**Status:** partially implemented (E1): shared scoped search + exact-read
+(`retrieve/evidence.py`) and one HTTP adapter (`POST /v1/search` returns
+opaque `reference` per hit plus the serving `generation`; `GET
+/v1/evidence/{reference}` returns the exact record or an explicit
+retired/not-found outcome). `list_sources` is deferred to a later slice. **Source of authority:** #405 E0
+(plan only, 2026); decision gate G2 records compatibility, trusted
+user/source policy, intended published set, reference retention, and
+revoked-access outcomes before E1. Coordinates #361 (revision identity),
+#373 (access boundary), and #90/#91 (live-state direction, observations
+stay source-specific). **Decision owner:** `retrieve/query.py` (search and
+exact fetch) with `agent/serving.py` (generation binding), documented here;
+HTTP/MCP adapters are thin translators. Proposed names are not implemented
+guarantees.
+
+**Inputs and identities:** trusted scope (`product`, `version`, `source`)
+is supplied by the service boundary, never a model-selected argument. The
+serving generation comes from the [reader gate](agent.md#serving-contract)
+(alias resolved to a validated physical, TTL-cached); the response echoes
+that generation. References are opaque versioned locators minted by the
+service (for example `ev_<genfp16>_<chunkuuid>`), treated as opaque by
+clients. Every read revalidates the reference against current generation
+metadata and current authorization — references are locators, never bearer
+permissions, and never accept arbitrary paths, URLs, or collection names.
+Raw Qdrant point ids and collection layout are not the consumer contract
+(today `SearchHit.chunk_id` exposes the raw point id; E1 must stop doing
+that and mint opaque refs instead).
+
+**Producers -> persisted state -> consumers:** ingest/admin writer →
+physical generation + `<physical>__completions` + representation manifest +
+alias ([publication](ingest.md#publication-contract),
+[identity](ingest.md#identity-contract),
+[metadata](ingest.md#metadata-contract)) → serving-gate binding → evidence
+functions → answer/chat/console today
+([answer states](agent.md#answer-contract),
+[HTTP/model](agent.md#http-model-contract)) and one MCP adapter tomorrow.
+Search never calls an LLM; answers use the designated reasoning model.
+
+**Allowed states and transitions:**
+
+- Scoped search returns ranked candidates with opaque refs, the serving
+  generation, and the applied scope echo. Explicit scope survives fallback
+  (D1): identifier-miss recovery retries scope-only, never unfiltered.
+- Exact read returns the referenced authorized evidence (bounded excerpt
+  with truncation/omission flags, whole atomic units per the prompt-packing
+  rule), or an explicit `retired` / `denied` / `unavailable` outcome —
+  never silently substituted current text.
+- A retained reference reread after republish resolves against its pinned
+  generation when still retained, or reports `retired` with an explicit
+  refresh action; moving to the new generation is explicit and visible.
+- `list_sources` returns approved source/revision metadata for the scope,
+  not document text.
+- Operational observations (S1) stay source-specific operations with only
+  shared provenance fields (`source`, `observed_at`, `acquired_at`, scope,
+  completeness); they are not document-search results.
+
+**Preconditions / permitted failures / forbidden outcomes:** compatible (or
+record-only-drift) generation required, else the stable
+`representation_unavailable` refusal before any embed/model work. Missing,
+corrupt, or unreadable final metadata never certifies a populated target.
+Unknown references report `not_found`; revoked access reports `denied` on
+the next read even for previously visible refs; timeouts/truncation report
+honest `partial`/`unavailable`, never `current`. Version ambiguity (two
+releases sharing an identifier) separates candidates or asks for
+clarification — never a silent latest-version choice. Errors carry fixed
+messages and stable codes, never exception or upstream text.
+
+**Concurrency, mutation, caching, and lifetime assumptions:** a physical
+name is not an immutable snapshot; in-place writes, forced repair, or admin
+mutation during a warm cache or after a request binds its target can
+invalidate the assumption (see the reader-lifetime limits). No cross-principal
+result cache and no cross-request live-observation cache until
+authorization-aware caching is justified. Retain current plus previous
+successful generations and their metadata for rollback; GC is an explicit
+operator action.
+
+**Existing evidence:** scoped search exists (`async_search` with
+`product/version/source` filters and scope-only fallback; `SearchRequest`
+carries `product/version/source` with `limit` 1–40 default 8). The shared
+service wraps it without changing ranking: `search_evidence` passes scope
+through and mints `ev_<genfp16>_<chunkuuid>` references; `read_evidence`
+fetches the extended projection by point id in the bound generation only.
+MCP exposes FTP/Zowe tools only (knowledge adapter is MCP1).
+
+**Known gaps and issue owners:** E1 owns the shared implementation plus one
+existing HTTP adapter (no endpoint proliferation, no new auth platform, no
+caching framework); MCP1 owns the thin downstream adapter with parity
+proof; S1 owns the one bounded `job_status` observation contract (G4);
+A1 owns the follow-up consumer (pin/refresh/retired/revoked, no silent
+substitution). The `limit` 1–40 vs proposed 1–50 headroom, the exact
+`genfp` alphabet, and the `context_budget` default are E1 decisions —
+changing a served limit is a dedicated approved concern, not part of E0.
+
+**Synthetic examples (illustrative shape, not a wire guarantee):**
+
+```text
+search_knowledge(query="synthetic operator question about SYNPROD startup",
+                 scope={product: "SYNPROD", version: "1.0", source: "syn-manuals"},
+                 limit=8)
+-> { generation: "gen_2", scope_echo: {...},
+     hits: [{ reference: "ev_9f2c4a1b7e03_SYN-UUID-1",
+               cite: "SYN-1234 Synthetic Manual, Startup > LFAREA, p. 1-3",
+               doc_id: "SYN-1234", source_rev: "syn|SYNPROD|1.0|sha16…",
+               excerpt_truncated: false }] }
+```
+
+```text
+read_evidence(reference="ev_9f2c4a1b7e03_SYN-UUID-1", context_budget=2000)
+-> { generation: "gen_2", doc_id: "SYN-1234",
+     source_rev: "syn|SYNPROD|1.0|sha16…",
+     text: "<bounded excerpt, whole atomic units>",
+     omitted: [], truncated: false }
+read_evidence(reference="ev_DEADBEEF_retired") -> { outcome: "retired",
+  message: "reference retired by republish; refresh explicitly" }
+read_evidence(reference="ev_UNKNOWN") -> { outcome: "not_found",
+  message: "unknown reference" }
+```
+
+Both the existing answer path and a synthetic agent call the same two
+functions; HTTP/MCP translate their inputs/outputs without reinterpreting
+evidence or access. Distinguish document revision (`source_rev`), publication
+build (`gen_N` + manifest digest + alias), and observation time
+(`observed_at` vs `acquired_at`) on every surface.
+
 ## Appendix A — Identifier patterns
 
 One shared pattern set (`regexes.py`) feeds both ingest payloads and query

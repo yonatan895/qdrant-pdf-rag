@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 
 import httpx2
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import FastAPI, HTTPException, Path, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
@@ -79,6 +79,15 @@ from mainframe_rag.ports import (
     Tokenizer,
     TokenUsage,
     ZoweMCP,
+)
+from mainframe_rag.retrieve.evidence import (
+    EVIDENCE_DEFAULT_CONTEXT_BUDGET,
+    EVIDENCE_MAX_CONTEXT_BUDGET,
+    EvidenceNotFound,
+    EvidenceRecord,
+    EvidenceRetired,
+    read_evidence,
+    search_evidence,
 )
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import async_search as retrieve_search
@@ -531,6 +540,7 @@ class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
     product: str | None = None
     version: str | None = None
+    source: str | None = None
     limit: int = Field(default=8, ge=1, le=40)
 
 
@@ -538,6 +548,11 @@ class SearchResponse(BaseModel):
     request_id: str
     query_kind: str
     hits: list[SearchHit]
+    # Serving generation fingerprint (16-hex, issue #405 E1): the generation
+    # the hits were bound to and the prefix of every hit `reference`. Opaque
+    # by design — never the physical collection name. None only for pre-E1
+    # constructions in tests.
+    generation: str | None = None
 
 
 class AnswerRequest(BaseModel):
@@ -876,30 +891,39 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
     # Gate before any retrieval work (issue #391 F3/F4): 503 when the
     # resolved generation is not validated; otherwise bind to its physical.
     bound = await serving_settings()
+    rules_v = extraction_rules_version()
     with tracer.start_as_current_span(
         "v1.search",
         context=parent_context(request.headers),
         attributes={"http.request_id": request_id, "rag.limit": req.limit, "rag.query": req.query},
     ) as span:
         try:
-            res = retrieve_search(
+            # Shared evidence service (issue #405 E1): scoped search plus
+            # opaque reference minting. Ranking/filter behavior is the
+            # service's `retrieve_fn` (this module's alias, so doubles keep
+            # intercepting one symbol); answer/chat keep their direct path
+            # until parity is proven.
+            hits, kind, timings, genfp = await search_evidence(
                 qdrant,
                 embedder,
                 bound.qdrant_collection,
                 req.query,
                 product=req.product,
                 version=req.version,
+                source=req.source,
                 limit=req.limit,
                 settings=bound,
                 reranker=reranker,
+                rules_v=rules_v,
+                retrieve_fn=retrieve_search,
             )
-            hits, kind, timings = await _await_retrieval(res)
         except Exception as exc:
             _span_error(span, exc)
             _record_endpoint(request, "search", "upstream_error", started)
             log.error(json_log(request_id, "search", error=str(exc)[:200]))
             raise AppError(502, "upstream_error", "retrieval failed") from exc
         span.set_attributes(_search_span_attrs(kind, hits))
+        span.set_attributes({"rag.generation": genfp})
     timing_parts = _timing_parts(timings)
     if timing_parts:
         response.headers["Server-Timing"] = ", ".join(timing_parts)
@@ -910,6 +934,7 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
             "search",
             query_kind=kind,
             hits=len(hits),
+            generation=genfp,
             embed_ms=timings.get("embed_ms"),
             qdrant_ms=timings.get("qdrant_ms"),
             rerank_ms=timings.get("rerank_ms"),
@@ -920,7 +945,75 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
         request_id=request_id,
         query_kind=kind,
         hits=hits,
+        generation=genfp,
     )
+
+
+@app.get("/v1/evidence/{reference}", response_model=EvidenceRecord)
+async def v1_evidence(
+    request: Request,
+    response: Response,
+    reference: str = Path(min_length=1),
+    context_budget: int = Query(
+        default=EVIDENCE_DEFAULT_CONTEXT_BUDGET, ge=1, le=EVIDENCE_MAX_CONTEXT_BUDGET
+    ),
+) -> EvidenceRecord:
+    """Exact evidence read (issue #405 E1): one referenced chunk in the bound
+    generation, or an explicit retired/not-found outcome — never silently
+    substituted current text. No LLM involved. The serving gate binds the
+    read to the validated physical before any store contact."""
+    request_id = request.state.request_id
+    started = time.monotonic()
+    bound = await serving_settings()
+    rules_v = extraction_rules_version()
+    with tracer.start_as_current_span(
+        "v1.evidence",
+        context=parent_context(request.headers),
+        attributes={"http.request_id": request_id, "rag.reference": reference},
+    ) as span:
+        try:
+            record = await read_evidence(
+                qdrant,
+                bound.qdrant_collection,
+                reference,
+                bound,
+                rules_v,
+                context_budget=context_budget,
+            )
+        except ValueError as exc:
+            _span_error(span, exc)
+            _record_endpoint(request, "evidence", "invalid_request", started)
+            raise AppError(
+                422, "invalid_request", "request body failed validation"
+            ) from exc
+        except EvidenceRetired as exc:
+            _span_error(span, exc)
+            _record_endpoint(request, "evidence", "not_found", started)
+            log.warning(json_log(request_id, "evidence_retired"))
+            raise AppError(
+                404, "not_found", "evidence retired; refresh explicitly"
+            ) from exc
+        except EvidenceNotFound as exc:
+            _span_error(span, exc)
+            _record_endpoint(request, "evidence", "not_found", started)
+            raise AppError(404, "not_found", "evidence not found") from exc
+        except Exception as exc:
+            _span_error(span, exc)
+            _record_endpoint(request, "evidence", "upstream_error", started)
+            log.error(json_log(request_id, "evidence", error=str(exc)[:200]))
+            raise AppError(502, "upstream_error", "retrieval failed") from exc
+        span.set_attributes({"rag.generation": record.generation})
+    _record_endpoint(request, "evidence", "ok", started, hits=1)
+    log.info(
+        json_log(
+            request_id,
+            "evidence",
+            generation=record.generation,
+            truncated=record.truncated,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+    )
+    return record
 
 
 @app.post("/v1/answer", response_model=None)

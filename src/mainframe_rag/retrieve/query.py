@@ -86,6 +86,12 @@ class SearchHit(BaseModel):
     product: str | None = None
     version: str | None = None
     rerank_score: float | None = None
+    # Opaque evidence reference (issue #405 E1): minted by the shared
+    # evidence service as `ev_<genfp16>_<chunk_uuid>`. None only for
+    # pre-E1 constructions and unit fakes — serving paths always set it.
+    # The raw Qdrant point id in `chunk_id` is storage layout, not the
+    # consumer contract; clients must use `reference` for exact reads.
+    reference: str | None = None
     # Persisted unit spans, [start, end, kind] triples over the stripped
     # chunk text (issue #368). None = legacy point or uncapped block: the
     # pack stage redetects with the shared chunk detectors. () = known
