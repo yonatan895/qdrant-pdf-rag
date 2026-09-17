@@ -17,7 +17,12 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from mainframe_rag.agent.answer import HttpxLLMClient
+from mainframe_rag.agent.answer import (
+    REASON_MALFORMED_FRAME,
+    REASON_MISSING_FINISH,
+    HttpxLLMClient,
+    TruncatedStreamError,
+)
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage
 from tests.fakes import HttpxStreamFake, PostResp, StreamResp, settings_kw
@@ -68,13 +73,15 @@ async def test_stream_request_shape_targets_completions_with_usage_ask():
 @pytest.mark.anyio
 async def test_stream_tolerates_sse_keepalives_and_done_spacing():
     """vLLM emits `: ` comment keepalives; spacing around data:/[DONE]
-    varies. None of that may break termination or content."""
+    varies, and an explicitly finished terminal shape is required (issue
+    #365). None of that may break termination or content."""
     lines = [
         ": ping",
         "",
         'data: {"choices": [{"delta": {"content": "A"}}]}',
         ": ping",
         'data:{"choices": [{"delta": {"content": "B"}}]}',
+        'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
         "data:  [DONE]  ",
     ]
     fake = _stream_lines(lines)
@@ -88,6 +95,26 @@ async def test_stream_tolerates_sse_keepalives_and_done_spacing():
         "usage": items[-1]["usage"],
         "ttft_ms": items[-1]["ttft_ms"],
     }
+
+
+@pytest.mark.anyio
+async def test_stream_tolerates_usage_only_and_finish_only_frames():
+    """Supported protocol variants (issue #365): an OpenAI include_usage
+    frame (`choices: []`) and a finish-only delta frame are not malformed."""
+    lines = [
+        'data: {"choices": [{"delta": {"content": "hi"}}]}',
+        'data: {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}}',
+        'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
+        "data: [DONE]",
+    ]
+    fake = _stream_lines(lines)
+
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    items = [item async for item in llm.chat_stream(_msgs())]
+    assert items[-1]["type"] == "done"
+    assert items[-1]["finish_reason"] == "stop"
+    assert items[-1]["usage"].total_tokens == 4
+    assert fake.post_bodies == []
 
 
 @pytest.mark.anyio
@@ -112,11 +139,13 @@ async def test_stream_without_usage_chunk_yields_zero_usage():
     ) == (0, 0, 0)
 
 
-def test_nonstream_post_shape_and_stop_default():
-    """llm_stream=False posts WITHOUT a stream key; a null finish_reason
-    and absent usage must default, never KeyError."""
+def test_nonstream_post_shape_and_explicit_finish():
+    """llm_stream=False posts WITHOUT a stream key; an explicit finish_reason
+    is preserved and absent usage defaults, never KeyError."""
     seen = {}
-    fake = _post_payload({"choices": [{"message": {"content": "ans"}, "finish_reason": None}]})
+    fake = _post_payload(
+        {"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]}
+    )
     fake.capture = seen
 
     llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
@@ -127,6 +156,31 @@ def test_nonstream_post_shape_and_stop_default():
     assert result.content == "ans"
     assert result.finish_reason == "stop"
     assert result.usage.total_tokens == 0
+
+
+@pytest.mark.parametrize(
+    "payload, reason",
+    [
+        ({"choices": [{"message": {"content": "ans"}}]}, REASON_MISSING_FINISH),
+        (
+            {"choices": [{"message": {"content": "ans"}, "finish_reason": None}]},
+            REASON_MISSING_FINISH,
+        ),
+        (
+            {"choices": [{"message": {"content": "ans"}, "finish_reason": 3}]},
+            REASON_MALFORMED_FRAME,
+        ),
+    ],
+)
+def test_nonstream_payload_without_explicit_finish_fails_closed(payload, reason):
+    """A non-streaming payload without an explicit terminal finish is an
+    incomplete upstream completion, never a synthesized "stop" (issue #365)."""
+    fake = _post_payload(payload)
+
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        llm.chat(_msgs())
+    assert excinfo.value.reason == reason
 
 
 def test_nonstream_nested_reasoning_tokens_mapped():
@@ -245,6 +299,7 @@ async def test_no_auth_header_sent_on_stream_leg_when_key_unset():
     stream_fake = _stream_lines(
         [
             'data: {"choices": [{"delta": {"content": "hi"}}]}',
+            'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
             "data: [DONE]",
         ]
     )

@@ -231,6 +231,43 @@ def test_ui_chat_stream_error_emits_error_event_without_final(monkeypatch, synth
     assert "stream exploded" not in resp.text
 
 
+def test_ui_chat_stream_parser_failure_carries_incomplete_state(monkeypatch, synthetic_pdf):
+    """Issue #365: a real client whose upstream stream fails after content
+    (error frame then [DONE]) ends the console stream with the fixed error
+    event and the incomplete state; the upstream error text never reaches
+    the browser."""
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from tests.fakes import HttpxStreamFake, settings_kw
+
+    llm = HttpxLLMClient(
+        Settings(**settings_kw(llm_base_url="http://llm.internal/v1", llm_stream=True)),
+        client=HttpxStreamFake(
+            lines=[
+                'data: {"choices": [{"delta": {"content": "partial "}}]}',
+                'data: {"error": {"message": "SECRET-UPSTREAM-TEXT"}}',
+                "data: [DONE]",
+            ]
+        ),
+    )
+    client = next(
+        _client(monkeypatch, ui_enabled=True, synthetic_pdf=synthetic_pdf, llm=llm)
+    )
+    resp = client.post(
+        "/ui/chat/stream",
+        json={"messages": [{"role": "user", "content": "What is IEA500I?"}]},
+    )
+    assert resp.status_code == 200
+    events = _parse_sse_events(resp.text)
+    names = [name for name, _ in events]
+    assert "token" in names
+    assert names[-1] == "error"
+    assert "final" not in names
+    error = events[-1][1]
+    assert error["verification_state"] == "generation_incomplete"
+    assert "SECRET-UPSTREAM-TEXT" not in resp.text
+
+
 def test_ui_chat_retrieval_failure_renders_fixed_banner(ui_client, monkeypatch):
     def boom(*_a, **_k):
         raise RuntimeError("qdrant exploded: internal detail")

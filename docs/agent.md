@@ -180,11 +180,22 @@ strict stream-end rule above is the upstream reasoning wire and the
 - `Server-Timing` on SSE responses carries the retrieval legs only;
   `llm`/`ttft` timings ride the `final` event (JSON responses carry all of
   them as headers).
-- Streams must end with `[DONE]`: ending without it is
-  `TruncatedStreamError`, never a fabricated successful finish. Recovery
-  differs between buffered and client-visible calls: see the HTTP/model
-  fallback contract below. A `length` finish *with* `[DONE]` is complete, not
-  truncated.
+- A stream is complete only with `[DONE]` **and** an explicit non-null
+  terminal `finish_reason`: `[DONE]` alone, an upstream `error` frame
+  (even when followed by `[DONE]`), and a malformed frame are all
+  `TruncatedStreamError`, never a fabricated successful finish (issue
+  #365). The non-streaming payload parser requires the same explicit
+  finish; a missing/null `finish_reason` never synthesizes `stop`.
+  Recovery differs between buffered and client-visible calls: see the
+  HTTP/model fallback contract below. An explicitly classified `length`
+  or `content_filter` finish *with* `[DONE]` is complete transport, not
+  truncated — the verification state below owns the incomplete label.
+- Supported protocol variants stay supported: `:` comment keepalives,
+  blank/non-data lines, OpenAI `include_usage` frames (`choices: []` with
+  a usage block), and finish-only or content-null delta frames. Failure
+  reasons are fixed labels (`missing [DONE]`, `upstream error frame`,
+  `malformed frame`, `missing finish reason`) — upstream error bodies are
+  never copied into client responses, logs, or exception text.
 - `LLM_STREAM` (default off) routes every server-side reasoning call over
   the streaming wire and measures TTFT on the first content token; the JSON
   paths still return one answer. `make run-agent` and `make local-stack` set
@@ -460,7 +471,7 @@ tokens are provisional; terminal events and error states determine completion.
 | Citation eligibility | Exact allowed cite or mapped bracket index from supplied evidence; not entailment of a claim |
 | Claim support | Requires the claim to follow from retained source content; valid citation shape/allowlist membership does not prove it (#365) |
 | Provisional output | Token deltas may precede validation or failure; never present them as a completed verified answer (#365; browser presentation #372) |
-| Completed answer | Endpoint-specific successful terminal state, not EOF or `[DONE]` alone; chat error frames followed by `[DONE]` still fail |
+| Completed answer | Endpoint-specific successful terminal state, not EOF or `[DONE]` alone: an explicit non-null terminal finish and no upstream error/malformed frame are required; chat error frames followed by `[DONE]` still fail |
 
 Verification states (issue #365, computed once in `answer_core`
 from the finalized parse plus the transport outcome — one rule,
@@ -471,7 +482,7 @@ from the finalized parse plus the transport outcome — one rule,
 | `accepted` | Eligible citations present and generation finished (`stop`) | Semantic proof of any claim |
 | `insufficient_evidence` | Abstention-shaped refusal or empty-hits short-circuit | A failed request (still 200 + explicit text) |
 | `unverified_draft` | Fluent non-abstention answer with zero eligible citations (absent, rejected, or inferred-only) | An error (still 200 — the draft label is the signal) |
-| `generation_incomplete` | `length` finish, empty generation after fallbacks, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
+| `generation_incomplete` | `length` finish, empty generation after fallbacks, absent/`null` terminal finish, upstream `error` frame, malformed frame, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
 
 Carriage: `verification_state` rides `AnswerResponse`, the answer SSE
 `final` (both paths), chat JSON top-level and the terminal chunk `extra`,
@@ -551,8 +562,8 @@ are above. **Authority:** ADR-0001/0004, #363 and existing transport contracts;
 | Operation | Current permitted recovery / failure boundary |
 |---|---|
 | Reasoning transport | Sync/async reasoning pools use `retries=0`; no connection-level automatic repeat |
-| Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content, caught stream/protocol failures or missing `[DONE]` lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered |
-| Client-visible `chat_stream` | Clean stream exit with no content can make one non-streaming ask; malformed/rejected/empty fallback fails. Missing `[DONE]` after emitted content raises truncation; no replay after those tokens |
+| Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content, caught stream/protocol failures, missing `[DONE]`, upstream error/malformed frame, or missing explicit finish lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered. The POST must itself carry an explicit finish (issue #365) |
+| Client-visible `chat_stream` | No-content stream exit can make one non-streaming ask; malformed/rejected/empty/no-finish fallback fails. Missing `[DONE]`, an upstream error frame, a malformed frame, or `[DONE]` without an explicit finish after emitted content raises truncation; no replay after those tokens |
 | Tokenizer | Plan locally, verify whole messages per trim round; first RPC failure warns and pins estimator for that instance. No per-chunk RPCs; gateway may lack `/tokenize` |
 | Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
 | Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; [retrieval](retrieval.md) owns dispatch |
@@ -570,8 +581,9 @@ Do not read request state that nothing sets or keep handlers nothing can raise.
 Every handler/error shape needs a reachable test; catch narrowly around the
 smallest call, preserve stable 404/405/500 contracts, and never leak internals.
 
-**Evidence:** `tests/test_stream_truncation.py`, `tests/test_agent_api.py`,
-`tests/test_chat_api.py`, `tests/test_probe_gateway.py`, `tests/test_failfast.py`.
+**Evidence:** `tests/test_stream_truncation.py`, `tests/test_vllm_server_contract.py`,
+`tests/test_agent_api.py`, `tests/test_chat_api.py`, `tests/test_mock_vllm.py`,
+`tests/test_probe_gateway.py`, `tests/test_failfast.py`.
 The approved local/CI gateway-only LiteLLM adapter exception is owned by
 [deployment policy](deploy.md#deployment-policy); production gateway protection
 remains the platform team's responsibility.
