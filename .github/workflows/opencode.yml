@@ -338,7 +338,8 @@ jobs:
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: review-result-${{ github.event.pull_request.head.sha }}
+          # `with:` inputs are not shell-expanded; use the expression context.
           path: |
-            $RUNNER_TEMP/candidate-manifest.json
-            $RUNNER_TEMP/normalized-review.json
+            ${{ runner.temp }}/candidate-manifest.json
+            ${{ runner.temp }}/normalized-review.json
           if-no-files-found: error
