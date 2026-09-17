@@ -210,14 +210,16 @@ def commit_retired_inventory(
         whole = bool(plan.get("whole", False))
         legacy = bool(plan.get("legacy", False))
         raw_revs = plan.get("revs")
-        revs: set[str] = (
-            set(raw_revs) if isinstance(raw_revs, (set, frozenset, list)) else set()
-        )
+        revs: set[str] = set(raw_revs) if isinstance(raw_revs, (set, frozenset, list)) else set()
         for rec in inventory.values():
             if rec.doc_id != doc_id or rec.status not in ("upserted", "skipped"):
                 continue
             should_retire = False
-            if whole or (legacy and rec.source_rev is None) or (rec.source_rev is not None and rec.source_rev in revs):
+            if (
+                whole
+                or (legacy and rec.source_rev is None)
+                or (rec.source_rev is not None and rec.source_rev in revs)
+            ):
                 should_retire = True
             if should_retire:
                 append_record(
@@ -367,11 +369,7 @@ def _fresh_staging_candidate(
     but allocation still terminates fail-closed."""
     for attempt in range(1, _MAX_STAGING_SUFFIX_ATTEMPTS + 1):
         candidate = f"{base}_{attempt}"
-        if (
-            candidate != live
-            and candidate not in skip
-            and not client.collection_exists(candidate)
-        ):
+        if candidate != live and candidate not in skip and not client.collection_exists(candidate):
             return candidate
     raise RuntimeError(
         f"derived staging {base!r} is a retained published generation and "
@@ -457,7 +455,9 @@ def resolve_publish_staging(
     if live is not None:
         live_completions = completion_collection_for(live)
         pub_meta = read_publication_metadata(client, live_completions)
-        is_live_steady = (pub_meta is not None and pub_meta == (gen_fp, corpus_fp)) or (live == base)
+        is_live_steady = (pub_meta is not None and pub_meta == (gen_fp, corpus_fp)) or (
+            live == base
+        )
         if is_live_steady:
             if not force_reingest and not has_retirements:
                 return live, False
@@ -607,8 +607,12 @@ def verify_searchable_coverage(
             problems.append(path_str)
             continue
         if not is_doc_complete(
-            client, settings, rec.doc_id,
-            sha256=sha, rules_v=rules_v, source_labels=src_labels,
+            client,
+            settings,
+            rec.doc_id,
+            sha256=sha,
+            rules_v=rules_v,
+            source_labels=src_labels,
             source_rev=rec.source_rev,
         ):
             problems.append(path_str)
@@ -626,7 +630,13 @@ def verify_searchable_coverage(
         problems.extend(legacy_problems)
     problems.extend(
         audit_unmarked_residue(
-            client, settings, walked, inventory, rules_v, retired, retire_plan,
+            client,
+            settings,
+            walked,
+            inventory,
+            rules_v,
+            retired,
+            retire_plan,
             pending_removals=pending_removals,
             allow_approved_legacy=allow_approved_legacy,
             verified_legacy_ids=legacy_ids,
@@ -678,11 +688,38 @@ def verify_all_complete(
             )
     problems.extend(
         verify_searchable_coverage(
-            client, staging_settings, walked, inventory, rules_v, src_labels,
-            retired=retired, retire_plan=retire_plan, allow_approved_legacy=True,
+            client,
+            staging_settings,
+            walked,
+            inventory,
+            rules_v,
+            src_labels,
+            retired=retired,
+            retire_plan=retire_plan,
+            allow_approved_legacy=True,
         )
     )
     return problems
+
+
+def _is_point_retired(
+    doc_id: str | None,
+    source_rev: str | None,
+    retired: frozenset[str],
+    retire_plan: dict[str, dict[str, set[str] | bool]] | None,
+) -> bool:
+    """Check whether a point is covered by an approved retirement plan (issue #391 R-REV)."""
+    if not doc_id or doc_id not in retired:
+        return False
+    if not retire_plan or doc_id not in retire_plan:
+        return True
+    entry = retire_plan[doc_id]
+    if entry.get("whole"):
+        return True
+    revs = entry.get("revs")
+    if source_rev is not None and isinstance(revs, (set, frozenset)) and source_rev in revs:
+        return True
+    return bool(source_rev is None and entry.get("legacy"))
 
 
 def _retired_still_present(
@@ -691,14 +728,15 @@ def _retired_still_present(
     staging: str,
     doc_id: str,
     retire_plan: dict[str, dict[str, set[str] | bool]] | None,
+    valid_pairs: set[tuple[str, str]] | None = None,
 ) -> str:
     """Name the exact gap when an approved removal did not fully land
-    (issue #405 R1): every refusal names the operator path through, never a
-    dead end. Inspects what remains live under the retired doc_id:
+    (issue #405 R1, #391 R-REV): every refusal names the operator path through,
+    never a dead end. Inspects what remains live under the retired doc_id:
 
-    - named revision(s) remain: staging changed after planning (or the plan
-      covered only part of the document) — rerun to re-plan, or retire the
-      whole document;
+    - named revision(s) remain outside the walked corpus: staging changed
+      after planning (or the plan covered only part of the document) — rerun
+      to re-plan, or retire the whole document;
     - only sourceless legacy remains after a whole-document retirement that
       covered it: the apply-time sole-history check saw staging change —
       rerun to re-plan;
@@ -711,7 +749,9 @@ def _retired_still_present(
 
     remaining = stored_doc_revisions(client, staging_settings, doc_id)
     entry = (retire_plan or {}).get(doc_id, {})
-    named = sorted(str(r) for r in remaining if r is not None)
+    is_whole = bool(entry.get("whole", False))
+    valid = valid_pairs or set()
+    named = sorted(str(r) for r in remaining if r is not None and (doc_id, r) not in valid)
     if named:
         return (
             f"{staging}: retired document {doc_id!r} still present as revision(s) "
@@ -724,7 +764,7 @@ def _retired_still_present(
             "removal covered sourceless history — staging changed after the delete: "
             "rerun to re-plan against the current inventory."
         )
-    if entry.get("whole"):
+    if is_whole:
         return (
             f"{staging}: retired document {doc_id!r} persists as sourceless legacy "
             "point(s) with no approved sourceless history — whole-document retirement "
@@ -782,6 +822,7 @@ def verify_approved_legacy_points(
     if not client.collection_exists(staging):
         return set(), []
 
+    walked_doc_ids = {rec.doc_id for p in walked_paths if (rec := inventory.get(p)) and rec.doc_id}
     approved_legacy: dict[tuple[str, str], InventoryRecord] = {}
     for rec in inventory.values():
         if (
@@ -790,7 +831,15 @@ def verify_approved_legacy_points(
             and rec.source_rev is None
             and rec.status in ("upserted", "skipped")
         ):
-            if rec.path in walked_paths or rec.doc_id in retired:
+            if rec.path in walked_paths:
+                continue
+            if retire_plan and rec.doc_id in retire_plan:
+                entry = retire_plan[rec.doc_id]
+                if entry.get("whole") or entry.get("legacy"):
+                    continue
+                if rec.doc_id not in walked_doc_ids:
+                    continue
+            elif rec.doc_id in retired:
                 continue
             approved_legacy[(rec.doc_id, rec.sha256)] = rec
 
@@ -808,9 +857,7 @@ def verify_approved_legacy_points(
 
         if not chunk_ids_digest or not content_digest or expected_chunks < 1:
             markers = [
-                m
-                for m in legacy_markers(client, staging_settings, doc_id)
-                if m.sha256 == sha256
+                m for m in legacy_markers(client, staging_settings, doc_id) if m.sha256 == sha256
             ]
             if markers:
                 m = markers[0]
@@ -930,27 +977,34 @@ def audit_unmarked_residue(
     ):
         payload = p.payload or {}
         doc_id = payload.get("doc_id")
+        source_rev = payload.get("source_rev")
+        if (doc_id, source_rev) in valid_pairs:
+            continue
+        if (
+            source_rev is None
+            and allow_approved_legacy
+            and verified_legacy_ids is not None
+            and str(p.id) in verified_legacy_ids
+        ):
+            continue
         if doc_id is not None and doc_id in retired:
             return [
-                _retired_still_present(client, staging_settings, staging, doc_id, retire_plan)
+                _retired_still_present(
+                    client,
+                    staging_settings,
+                    staging,
+                    str(doc_id),
+                    retire_plan,
+                    valid_pairs=valid_pairs,
+                )
             ]
-        if doc_id is not None and doc_id in pending_removals:
+        if _is_point_retired(doc_id, source_rev, pending_removals, retire_plan):
             # The approved removal applies before verification: the swap gate
             # still refuses any remnant the plan does not actually delete.
             continue
-        source_rev = payload.get("source_rev")
-        if source_rev is not None:
-            covered = (doc_id, source_rev) in valid_pairs
-        else:
-            covered = bool(
-                allow_approved_legacy
-                and verified_legacy_ids is not None
-                and str(p.id) in verified_legacy_ids
-            )
-        if not covered:
-            residue += 1
-            if len(sample) < 3:
-                sample.append(str(p.id))
+        residue += 1
+        if len(sample) < 3:
+            sample.append(str(p.id))
     if residue:
         return [
             (

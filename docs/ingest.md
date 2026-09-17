@@ -551,10 +551,12 @@ thread pool.
    retirement covers approved sourceless (pre-361B) history alongside named
    revisions — the apply-time sole-history check (no named revision left in
    staging) still guards the delete; a named-only retirement never takes
-   legacy points, and residue the approved removal does not cover refuses
-   with the exact way through (re-plan, whole-document retirement, or manual
-   resolution — never a dead end). Retired documents that reappear in the
-   walk, and unknown retirement names, fail closed before any mutation.
+   resolution — never a dead end). Retiring revision A (`--retire-doc DOCID@SOURCEREV`)
+   preserves sibling revision B across planning, walked-document conflict
+   checks, migration commit exclusions, deletion, and residue audits.
+   Retired document revisions that reappear in the walk (or whole documents
+   reappearing when retired wholesale), and unknown retirement names or
+   unapproved revisions, fail closed before any mutation.
    Committed retirements persist into the inventory progress log (`status: retired`)
    upon publication cutover (and recover from the in-flight publish state sidecar
    if interrupted between swap and cleanup), ensuring subsequent ordinary runs

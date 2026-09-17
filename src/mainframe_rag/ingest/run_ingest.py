@@ -193,9 +193,7 @@ def _parse_one(
                 # pool, but a worker must never silently embed header-only
                 # vectors when the flag asked for contexts.
                 if settings.embed_mode == "hash":
-                    raise RuntimeError(
-                        "CONTEXTUAL_EMBED_ENABLED=true requires embed_mode=vllm."
-                    )
+                    raise RuntimeError("CONTEXTUAL_EMBED_ENABLED=true requires embed_mode=vllm.")
                 settings.require_context_llm()
                 if cache_path is None:
                     raise RuntimeError("contextual ingest requires a context cache path.")
@@ -252,16 +250,20 @@ def _parse_one(
             error=str(exc)[:500],
             error_type=type(exc).__name__,
         )
-        dummy_parsed = parsed if parsed is not None else ParsedDoc(
-            path=Path(path_str),
-            sha256=sha,
-            doc_id=Path(path_str).stem,
-            title="",
-            product=product or "",
-            version=version or "",
-            vendor=vendor or "",
-            toc=(),
-            page_count=0,
+        dummy_parsed = (
+            parsed
+            if parsed is not None
+            else ParsedDoc(
+                path=Path(path_str),
+                sha256=sha,
+                doc_id=Path(path_str).stem,
+                title="",
+                product=product or "",
+                version=version or "",
+                vendor=vendor or "",
+                toc=(),
+                page_count=0,
+            )
         )
         return record, dummy_parsed, [], [], {}
 
@@ -336,6 +338,7 @@ class _DocLocks:
 
     Locks are retained in memory for the run: bounded by the unique source
     revisions in the corpus (~hundreds of entries), so eviction is unnecessary."""
+
     _global: threading.Lock
     _locks: dict[str, threading.Lock]
 
@@ -390,8 +393,12 @@ def _upsert_one(
         )
     with locks.get(revision):
         if not force_reingest and is_doc_complete(
-            client, settings, parsed.doc_id,
-            sha256=parsed.sha256, rules_v=rules_v, source_labels=src_labels,
+            client,
+            settings,
+            parsed.doc_id,
+            sha256=parsed.sha256,
+            rules_v=rules_v,
+            source_labels=src_labels,
             source_rev=revision,
         ):
             return "skipped", round(time.perf_counter() - started, 3)
@@ -414,8 +421,11 @@ def _upsert_one(
         try:
             for scope in sorted(scopes):
                 delete_completion(
-                    client, settings, parsed.doc_id,
-                    source_rev=scope, include_legacy=legacy_delete,
+                    client,
+                    settings,
+                    parsed.doc_id,
+                    source_rev=scope,
+                    include_legacy=legacy_delete,
                 )
         except UnexpectedResponse as exc:
             if exc.status_code != 404:
@@ -503,8 +513,18 @@ def run(
     token = otel_context.attach(trace.set_span_in_context(root))
     try:
         return _run_impl(
-            src, progress, workers, limit, dry_run, settings, tracer, root,
-            vendor=vendor, product=product, version=version, force_reingest=force_reingest,
+            src,
+            progress,
+            workers,
+            limit,
+            dry_run,
+            settings,
+            tracer,
+            root,
+            vendor=vendor,
+            product=product,
+            version=version,
+            force_reingest=force_reingest,
             retire_docs=retire_docs,
         )
     except Exception as exc:
@@ -517,9 +537,7 @@ def run(
         shutdown_tracing()
 
 
-def _gate_planned_entries(
-    src: Path, walk_entries: list[tuple[str, str]]
-) -> list[tuple[str, str]]:
+def _gate_planned_entries(src: Path, walk_entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """Identity planning gate (issue #361 req 3/4), shared by the in-place
     plan span and the alias-publish prewalk: byte-identical copies collapse
     onto the deterministic winner (logged, never ingested twice), and
@@ -529,9 +547,7 @@ def _gate_planned_entries(
     kept, duplicates = plan_duplicates(walk_entries, src)
     for dup in duplicates:
         log.info(
-            json.dumps(
-                {"path": dup.loser_rel, "winner": dup.winner_rel, "action": "duplicate"}
-            )
+            json.dumps({"path": dup.loser_rel, "winner": dup.winner_rel, "action": "duplicate"})
         )
     resolved = prescan_doc_ids([path_str for path_str, _ in kept])
     collisions = find_collisions(
@@ -577,6 +593,7 @@ def _run_impl(
     _publish_target: PublishTarget | None = None,
     _pending_removals: frozenset[str] = frozenset(),
     retire_docs: tuple[str, ...] | None = None,
+    _retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
 ) -> int:
     workers = resolve_workers(workers, settings)
     rules_v = extraction_rules_version()
@@ -594,9 +611,18 @@ def _run_impl(
         settings.require_context_llm()
     if settings.ingest_alias_publish and not dry_run and _publish_target is None:
         return _run_publish(
-            src, progress, workers, limit, settings, tracer, root,
-            vendor=vendor, product=product, version=version,
-            force_reingest=force_reingest, retire_docs=retire_docs,
+            src,
+            progress,
+            workers,
+            limit,
+            settings,
+            tracer,
+            root,
+            vendor=vendor,
+            product=product,
+            version=version,
+            force_reingest=force_reingest,
+            retire_docs=retire_docs,
         )
     if retire_docs:
         # Explicit removals are a publication operation (intended-set
@@ -606,7 +632,9 @@ def _run_impl(
             "--retire-doc requires INGEST_ALIAS_PUBLISH=true (and a real run, "
             "not --dry-run): in-place ingest never removes unwalked documents."
         )
-    cache_path = resolve_cache_path(settings, progress) if settings.contextual_embed_enabled else None
+    cache_path = (
+        resolve_cache_path(settings, progress) if settings.contextual_embed_enabled else None
+    )
     # Progress counters (issue #20 PR D): files ok / failed / chunks upserted,
     # logged once per run. Logs carry ids and counts, never PDF text.
     files_ok = 0
@@ -703,16 +731,25 @@ def _run_impl(
             # sole-lineage/residue rules instead of guessing.
             lineage_by_path = {path: rec.source_rev for path, rec in inventory.items()}
 
-            tasks: list[tuple[str, str | None, str | None, str | None, str, str, bool, str | None]] = []
+            tasks: list[
+                tuple[str, str | None, str | None, str | None, str, str, bool, str | None]
+            ] = []
             for path_str, sha in walk_entries:
                 record = inventory.get(path_str)
                 if record and should_skip(
-                    record, sha, allow_dry=dry_run, rules_version=rules_v,
+                    record,
+                    sha,
+                    allow_dry=dry_run,
+                    rules_version=rules_v,
                     force_reingest=force_reingest,
                 ):
                     if dry_run:
                         files_ok += 1  # already ingested — an ok outcome
-                        log.info(json.dumps({"path": path_str, "sha256": record.sha256, "action": "skip"}))
+                        log.info(
+                            json.dumps(
+                                {"path": path_str, "sha256": record.sha256, "action": "skip"}
+                            )
+                        )
                         continue
                     # Bound skip (issue #359 req 3): an inventory line alone
                     # never proves the target holds the generation. Require
@@ -729,13 +766,25 @@ def _run_impl(
                     # parse+upsert+verify. Legacy records without a doc_id
                     # or revision re-ingest explicitly (one lazy-migration
                     # cycle, never a wrong skip).
-                    if bound_doc and bound_rev and is_doc_complete(
-                        client, settings, bound_doc,
-                        sha256=sha, rules_v=rules_v, source_labels=src_labels,
-                        source_rev=bound_rev,
+                    if (
+                        bound_doc
+                        and bound_rev
+                        and is_doc_complete(
+                            client,
+                            settings,
+                            bound_doc,
+                            sha256=sha,
+                            rules_v=rules_v,
+                            source_labels=src_labels,
+                            source_rev=bound_rev,
+                        )
                     ):
                         files_ok += 1
-                        log.info(json.dumps({"path": path_str, "sha256": record.sha256, "action": "skip"}))
+                        log.info(
+                            json.dumps(
+                                {"path": path_str, "sha256": record.sha256, "action": "skip"}
+                            )
+                        )
                         continue
                     log.info(
                         json.dumps(
@@ -754,8 +803,14 @@ def _run_impl(
                 # memory with the parent (None when contextual ingest is off).
                 tasks.append(
                     (
-                        path_str, vendor or detect_vendor(Path(path_str)), product, version, str(src), sha,
-                        not dry_run, str(cache_path) if cache_path is not None else None,
+                        path_str,
+                        vendor or detect_vendor(Path(path_str)),
+                        product,
+                        version,
+                        str(src),
+                        sha,
+                        not dry_run,
+                        str(cache_path) if cache_path is not None else None,
                     )
                 )
             plan_span.set_attribute("ingest.pdfs", len(walk_entries))
@@ -808,19 +863,28 @@ def _run_impl(
             if manifest_mode == STATE_PENDING:
                 assert client is not None
                 _commit_migration_representation(
-                    client, settings, rules_v,
+                    client,
+                    settings,
+                    rules_v,
                     walked=walk_entries,
                     inventory=load_inventory(progress),
                     src_labels=src_labels,
                     pending_removals=_pending_removals,
+                    retire_plan=_retire_plan,
                 )
             root.set_attribute("ingest.files_ok", files_ok)
             root.set_attribute("ingest.files_failed", 0)
             root.set_attribute("ingest.chunks_upserted", chunks_upserted)
             _log_summary(
-                started, files_ok, files_failed, chunks_upserted, failures=0,
-                parse_seconds=parse_seconds, upsert_seconds=upsert_seconds,
-                pages=pages_seen, bulk_load=bulk,
+                started,
+                files_ok,
+                files_failed,
+                chunks_upserted,
+                failures=0,
+                parse_seconds=parse_seconds,
+                upsert_seconds=upsert_seconds,
+                pages=pages_seen,
+                bulk_load=bulk,
             )
             return 0
 
@@ -844,7 +908,9 @@ def _run_impl(
             tuple[InventoryRecord, str | None, str | None, str | None],
         ] = {}
 
-        def submit_parse(task: tuple[str, str | None, str | None, str | None, str, str, bool, str | None]) -> None:
+        def submit_parse(
+            task: tuple[str, str | None, str | None, str | None, str, str, bool, str | None],
+        ) -> None:
             parse_pending[pool.submit(_parse_one, task)] = task[0]
 
         def refill_parse() -> None:
@@ -962,14 +1028,23 @@ def _run_impl(
                             )
                         upsert_pending[
                             upsert_pool.submit(
-                                _upsert_one, parsed, chunks, vectors, settings, locks,
-                                contexts or None, force_reingest, src_labels=src_labels,
+                                _upsert_one,
+                                parsed,
+                                chunks,
+                                vectors,
+                                settings,
+                                locks,
+                                contexts or None,
+                                force_reingest,
+                                src_labels=src_labels,
                                 lineage_rev=lineage_by_path.get(path_str),
                             )
                         ] = (record, *binding)
                         refill_parse()
                     else:  # upsert stream result
-                        record, generation_id, ids_digest, content_digest = upsert_pending.pop(future)
+                        record, generation_id, ids_digest, content_digest = upsert_pending.pop(
+                            future
+                        )
                         try:
                             status, seconds = future.result()
                         except Exception as exc:  # noqa: BLE001 — one bad PDF must not kill the run
@@ -1030,11 +1105,14 @@ def _run_impl(
         if failures == 0 and manifest_mode == STATE_PENDING:
             assert client is not None
             _commit_migration_representation(
-                client, settings, rules_v,
+                client,
+                settings,
+                rules_v,
                 walked=walk_entries,
                 inventory=load_inventory(progress),
                 src_labels=src_labels,
                 pending_removals=_pending_removals,
+                retire_plan=_retire_plan,
             )
     finally:
         if run_lock is not None:
@@ -1046,9 +1124,7 @@ def _run_impl(
                 set_bulk_indexing(client, settings.qdrant_collection, bulk=False)
             except Exception as exc:  # noqa: BLE001
                 log.warning(
-                    json.dumps(
-                        {"action": "restore_bulk_indexing_failed", "error": str(exc)[:200]}
-                    )
+                    json.dumps({"action": "restore_bulk_indexing_failed", "error": str(exc)[:200]})
                 )
 
     root.set_attribute("ingest.files_ok", files_ok)
@@ -1071,9 +1147,15 @@ def _run_impl(
                 )
             )
     _log_summary(
-        started, files_ok, files_failed, chunks_upserted, failures,
-        parse_seconds=parse_seconds, upsert_seconds=upsert_seconds,
-        pages=pages_seen, bulk_load=bulk,
+        started,
+        files_ok,
+        files_failed,
+        chunks_upserted,
+        failures,
+        parse_seconds=parse_seconds,
+        upsert_seconds=upsert_seconds,
+        pages=pages_seen,
+        bulk_load=bulk,
     )
     return 1 if failures else 0
 
@@ -1087,6 +1169,7 @@ def _commit_migration_representation(
     inventory: dict[str, InventoryRecord],
     src_labels: str,
     pending_removals: frozenset[str] = frozenset(),
+    retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
 ) -> None:
     """Success-path commit of a pending migration contract (issue #391 F2):
     prove no marker under another contract remains AND the actual searchable
@@ -1098,7 +1181,11 @@ def _commit_migration_representation(
     approved-removal plan is enforced gone by the post-removal swap audit."""
     digest = manifest_digest(settings, rules_v)
     count, labels = stale_completion_markers(
-        client, settings, digest, exclude_doc_ids=pending_removals
+        client,
+        settings,
+        digest,
+        exclude_doc_ids=pending_removals,
+        retire_plan=retire_plan,
     )
     if count:
         raise RuntimeError(
@@ -1109,8 +1196,15 @@ def _commit_migration_representation(
             "new contract; it stays pending."
         )
     problems = verify_searchable_coverage(
-        client, settings, walked, inventory, rules_v, src_labels,
-        pending_removals=pending_removals, allow_approved_legacy=False,
+        client,
+        settings,
+        walked,
+        inventory,
+        rules_v,
+        src_labels,
+        pending_removals=pending_removals,
+        retire_plan=retire_plan,
+        allow_approved_legacy=False,
     )
     if problems:
         raise RuntimeError(
@@ -1179,10 +1273,18 @@ def _run_publish(
     target_lock = acquire_publish_lock(progress, settings.qdrant_collection)
     try:
         return _run_publish_locked(
-            src, progress, workers, settings, tracer, root,
-            vendor=vendor, product=product, version=version,
+            src,
+            progress,
+            workers,
+            settings,
+            tracer,
+            root,
+            vendor=vendor,
+            product=product,
+            version=version,
             force_reingest=force_reingest,
-            prewalked=prewalked, retire_docs=retire_docs,
+            prewalked=prewalked,
+            retire_docs=retire_docs,
             rules_v=rules_v,
         )
     finally:
@@ -1256,19 +1358,45 @@ def _run_publish_locked(
             else ({}, frozenset())
         )
 
-    walked_known = {
-        rec.doc_id
-        for path_str, _ in prewalked
-        if (rec := prior_inventory.get(path_str)) and rec.doc_id
-    }
-    if retired & walked_known:
+    conflicts: set[str] = set()
+    if retire_plan:
+        for path_str, sha in prewalked:
+            parsed_walked = parse_pdf(
+                Path(path_str),
+                vendor=vendor,
+                product=product,
+                version=version,
+                corpus_root=src,
+                sha256=sha,
+            )
+            doc_id = parsed_walked.doc_id
+            source_rev = source_rev_key(
+                parsed_walked.vendor, parsed_walked.product, parsed_walked.version, sha
+            )
+            if doc_id and doc_id in retire_plan:
+                entry = retire_plan[doc_id]
+                revs = entry.get("revs")
+                if entry.get("whole"):
+                    conflicts.add(doc_id)
+                elif (
+                    source_rev is not None
+                    and isinstance(revs, (set, frozenset))
+                    and source_rev in revs
+                ):
+                    conflicts.add(f"{doc_id}@{source_rev}")
+                elif source_rev is None and entry.get("legacy"):
+                    conflicts.add(doc_id)
+    if conflicts:
         raise RuntimeError(
-            f"retired document(s) {sorted(retired & walked_known)} still present in "
+            f"retired document(s) {sorted(conflicts)} still present in "
             "the walked corpus: remove their files or drop the --retire-doc flag."
         )
     staging, resumed = resolve_publish_staging(
-        client, settings,
-        gen_fp=gen_fp, corpus_fp=corp_fp, live=live,
+        client,
+        settings,
+        gen_fp=gen_fp,
+        corpus_fp=corp_fp,
+        live=live,
         force_reingest=force_reingest,
         has_retirements=bool(retire_docs),
         state=state,
@@ -1298,8 +1426,14 @@ def _run_publish_locked(
         )
         _log_record_drift(staging_settings, record_drift)
         problems = verify_all_complete(
-            client, staging_settings, prewalked, load_inventory(progress),
-            rules_v, labels, retired, retire_plan,
+            client,
+            staging_settings,
+            prewalked,
+            load_inventory(progress),
+            rules_v,
+            labels,
+            retired,
+            retire_plan,
         )
         if problems:
             raise RuntimeError(
@@ -1335,16 +1469,16 @@ def _run_publish_locked(
     # foreign record closed), so this write only creates or re-affirms
     # the record.
     write_publish_state(
-        progress, alias, staging, gen_fp, corp_fp,
+        progress,
+        alias,
+        staging,
+        gen_fp,
+        corp_fp,
         retire_plan=retire_plan,
         retire_docs=tuple(retire_docs or ()),
     )
     if resumed:
-        log.info(
-            json.dumps(
-                {"action": "publish_resume", "alias": alias, "staging": staging}
-            )
-        )
+        log.info(json.dumps({"action": "publish_resume", "alias": alias, "staging": staging}))
     mode = ensure_staging(client, settings, staging_settings, live)
     log.info(
         json.dumps(
@@ -1357,12 +1491,26 @@ def _run_publish_locked(
             }
         )
     )
-    target = PublishTarget(alias=settings.qdrant_collection, staging=staging, live=live, legacy=legacy)
+    target = PublishTarget(
+        alias=settings.qdrant_collection, staging=staging, live=live, legacy=legacy
+    )
     rc = _run_impl(
-        src, progress, workers, None, False, staging_settings, tracer, root,
-        vendor=vendor, product=product, version=version,
-        force_reingest=force_reingest, prewalked=prewalked, _publish_target=target,
+        src,
+        progress,
+        workers,
+        None,
+        False,
+        staging_settings,
+        tracer,
+        root,
+        vendor=vendor,
+        product=product,
+        version=version,
+        force_reingest=force_reingest,
+        prewalked=prewalked,
+        _publish_target=target,
         _pending_removals=retired,
+        _retire_plan=retire_plan,
     )
     if rc != 0:
         return rc
@@ -1382,8 +1530,14 @@ def _run_publish_locked(
             )
         )
     problems = verify_all_complete(
-        client, staging_settings, prewalked, load_inventory(progress),
-        rules_v, labels, retired, retire_plan,
+        client,
+        staging_settings,
+        prewalked,
+        load_inventory(progress),
+        rules_v,
+        labels,
+        retired,
+        retire_plan,
     )
     if problems:
         raise RuntimeError(

@@ -177,7 +177,15 @@ def _ingest(
 
 
 @contextmanager
-def _agent(monkeypatch, qdrant_url: str, mock_url: str, collection: str, *, embed: str = "hash", bm25_cache: str | None = None):
+def _agent(
+    monkeypatch,
+    qdrant_url: str,
+    mock_url: str,
+    collection: str,
+    *,
+    embed: str = "hash",
+    bm25_cache: str | None = None,
+):
     from mainframe_rag.agent import app as app_mod
 
     monkeypatch.setenv("QDRANT_URL", qdrant_url)
@@ -249,7 +257,7 @@ def test_alias_publish_rekeys_manifest_across_clone(qdrant_url, corpus, tmp_path
     )
     second = _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress)
     # The progress file is append-only: the second run's records are the tail.
-    second_records = second[len(first):]
+    second_records = second[len(first) :]
     # Completion markers certify their own target_collection, so the cloned
     # staging re-embeds the walked corpus (never a cross-generation skip):
     # all four docs upsert. Before the F5 fix this run aborted instead —
@@ -329,15 +337,17 @@ def test_alias_publish_revision_migration_keeps_old_generation(
         second = _ingest(
             monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress, extra=("--reingest",)
         )
-        second_records = second[len(first):]
-        assert sorted(r["status"] for r in second_records) == ["upserted"] * 3, \
+        second_records = second[len(first) :]
+        assert sorted(r["status"] for r in second_records) == ["upserted"] * 3, (
             "a revision change re-embeds every walked document"
+        )
 
         new, _ = resolve_live_collection(client, settings)
         assert new != old, "revision-only change must publish a distinct generation"
         assert client.collection_exists(old), "old physical retained for rollback"
-        assert read_manifest_record(client, f"{old}__completions") == old_record, \
+        assert read_manifest_record(client, f"{old}__completions") == old_record, (
             "old generation keeps its contract (rollback selects matching metadata)"
+        )
         new_record = read_manifest_record(client, f"{new}__completions")
         assert new_record is not None
         assert new_record.state == STATE_COMMITTED
@@ -371,9 +381,7 @@ def test_alias_publish_revision_migration_keeps_old_generation(
                     delete_alias=models.DeleteAlias(alias_name=PUBLISH_ALIAS)
                 ),
                 models.CreateAliasOperation(
-                    create_alias=models.CreateAlias(
-                        collection_name=old, alias_name=PUBLISH_ALIAS
-                    )
+                    create_alias=models.CreateAlias(collection_name=old, alias_name=PUBLISH_ALIAS)
                 ),
             ]
         )
@@ -486,9 +494,7 @@ def test_subsequent_run_after_repair_steady_state_on_real_server(
         assert old is not None
 
         # Forced repair: cuts over to suffixed generation
-        _ingest(
-            monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress, extra=("--reingest",)
-        )
+        _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress, extra=("--reingest",))
         repaired, _ = resolve_live_collection(client, settings)
         assert repaired != old
         assert repaired.endswith("_1")
@@ -502,15 +508,15 @@ def test_subsequent_run_after_repair_steady_state_on_real_server(
         monkeypatch.setattr(run_ingest, "_worker_embedder", None)
 
         assert (
-            run_ingest.main(
-                ["--src", str(local), "--progress", str(progress), "--workers", "1"]
-            )
+            run_ingest.main(["--src", str(local), "--progress", str(progress), "--workers", "1"])
             == 0
         )
         current, _ = resolve_live_collection(client, settings)
         assert current == repaired
         cols_after = {c.name for c in client.get_collections().collections}
-        assert cols_after == cols_before, "ordinary steady-state run must not create new collections"
+        assert cols_after == cols_before, (
+            "ordinary steady-state run must not create new collections"
+        )
     finally:
         client.close()
         _drop_publish_fixture(qdrant_url)
@@ -578,7 +584,9 @@ def test_migration_scope_proof_blocks_unmarked_point_on_real_server(
         assert record is not None and record.state == STATE_PENDING, (
             "an incomplete scope proof leaves the contract pending"
         )
-        kept = client.retrieve(collection, ids=["00000000-0000-0000-0000-000000000391"], with_payload=True)
+        kept = client.retrieve(
+            collection, ids=["00000000-0000-0000-0000-000000000391"], with_payload=True
+        )
         assert kept, "unknown data is preserved: refusal is never a deletion instruction"
 
         client.delete(
@@ -591,9 +599,12 @@ def test_migration_scope_proof_blocks_unmarked_point_on_real_server(
             previous.close()
         monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
         monkeypatch.setattr(run_ingest, "_worker_embedder", None)
-        assert run_ingest.main(
-            ["--src", str(corpus), "--progress", str(progress), "--workers", "1", "--reingest"]
-        ) == 0
+        assert (
+            run_ingest.main(
+                ["--src", str(corpus), "--progress", str(progress), "--workers", "1", "--reingest"]
+            )
+            == 0
+        )
         record = read_manifest_record(client, f"{collection}__completions")
         assert record is not None and record.state == STATE_COMMITTED
         assert record.manifest.embed_model_revision == "rev-2"
@@ -700,9 +711,7 @@ def test_legacy_verification_refuses_corrupt_points_on_real_server(
         monkeypatch.setattr(run_ingest, "_worker_embedder", None)
 
         with pytest.raises(RuntimeError, match="fail content/digest verification"):
-            run_ingest.main(
-                ["--src", str(local), "--progress", str(progress), "--workers", "1"]
-            )
+            run_ingest.main(["--src", str(local), "--progress", str(progress), "--workers", "1"])
 
         # 2. Repair the point so its payload text matches the approved content_digest
         client.upsert(
@@ -733,9 +742,7 @@ def test_legacy_verification_refuses_corrupt_points_on_real_server(
 
         # Re-run publish: should succeed now that legacy point is verified
         assert (
-            run_ingest.main(
-                ["--src", str(local), "--progress", str(progress), "--workers", "1"]
-            )
+            run_ingest.main(["--src", str(local), "--progress", str(progress), "--workers", "1"])
             == 0
         )
         live_after, _ = resolve_live_collection(client, settings)
@@ -762,7 +769,9 @@ def test_search_end_to_end_deterministic(qdrant_url, mock_url, corpus, tmp_path,
         again = client.post("/v1/search", json={"query": "IEA500I operator message"}).json()
         # request_id is per-request by design; the result set must be identical.
         assert again["query_kind"] == body["query_kind"]
-        assert again["hits"] == body["hits"], "retrieval must be deterministic for a fixed corpus+query"
+        assert again["hits"] == body["hits"], (
+            "retrieval must be deterministic for a fixed corpus+query"
+        )
 
         health = client.get("/healthz")
         assert health.status_code == 200
@@ -800,7 +809,9 @@ def test_doc_id_filter_scopes_to_second_doc(qdrant_url, mock_url, corpus, tmp_pa
         hits = body["hits"]
         assert hits, "doc_id filter must match the second ingested document"
         assert {h["doc_id"] for h in hits} == {"SA22-7777-01"}
-        assert all("SA22-7777-01 Synthetic Initialization and Tuning Reference" in h["cite"] for h in hits)
+        assert all(
+            "SA22-7777-01 Synthetic Initialization and Tuning Reference" in h["cite"] for h in hits
+        )
 
 
 def test_plain_doc_retrievable_by_stem_doc_id(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):
@@ -834,7 +845,9 @@ def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_pa
 
     golden = [
         GoldenEntry(query="IEA500I operator message", expected_doc_ids=["SA22-0000-00"]),
-        GoldenEntry(query="SA22-7777-01 initialization parameters", expected_doc_ids=["SA22-7777-01"]),
+        GoldenEntry(
+            query="SA22-7777-01 initialization parameters", expected_doc_ids=["SA22-7777-01"]
+        ),
         GoldenEntry(query="widget torque buffer", expected_doc_ids=["widget-guide"]),
     ]
     report = evaluate(golden, load_settings())
@@ -847,6 +860,7 @@ def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_pa
     baseline_path = tmp_path / "eval-baseline.json"
     update_baseline(report, baseline_path)
     import json
+
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     assert check_baseline(report, baseline) == []
 
@@ -859,12 +873,20 @@ def test_vllm_shaped_embed_variant(qdrant_url, mock_url, corpus, tmp_path, monke
         pytest.skip("fastembed BM25 weights not cached; run `make bm25-weights` first")
 
     records = _ingest(
-        monkeypatch, qdrant_url, "sim-vllm", corpus, tmp_path / "inv.jsonl",
-        embed="vllm", mock_url=mock_url, bm25_cache=cache,
+        monkeypatch,
+        qdrant_url,
+        "sim-vllm",
+        corpus,
+        tmp_path / "inv.jsonl",
+        embed="vllm",
+        mock_url=mock_url,
+        bm25_cache=cache,
     )
     assert [r["status"] for r in records] == ["upserted"] * 3
 
-    with _agent(monkeypatch, qdrant_url, mock_url, "sim-vllm", embed="vllm", bm25_cache=cache) as client:
+    with _agent(
+        monkeypatch, qdrant_url, mock_url, "sim-vllm", embed="vllm", bm25_cache=cache
+    ) as client:
         body = client.post("/v1/search", json={"query": "IEA500I operator message"}).json()
         assert body["hits"], "vLLM-shaped embeds must retrieve the ingested message chunk"
         # Doc 2 carries IEB700I, so the message_ids filter scopes to doc 1.
@@ -881,9 +903,7 @@ def test_vllm_shaped_embed_variant(qdrant_url, mock_url, corpus, tmp_path, monke
         }
 
 
-def test_361_inplace_snapshot_restore_keeps_coexisting_revisions(
-    qdrant_url, tmp_path, monkeypatch
-):
+def test_361_inplace_snapshot_restore_keeps_coexisting_revisions(qdrant_url, tmp_path, monkeypatch):
     """Issue #361 closure against the real server: two same-stem editions
     ingested as separate corpora (the joint walk still aborts — unit-tested)
     coexist under one printed doc_id; a snapshot restores the generation
@@ -922,11 +942,19 @@ def test_361_inplace_snapshot_restore_keeps_coexisting_revisions(
         staged.replace(corp_b / "reference.pdf")
 
         rec_a = _ingest(
-            monkeypatch, qdrant_url, collection, corp_a, tmp_path / "inv-a.jsonl",
+            monkeypatch,
+            qdrant_url,
+            collection,
+            corp_a,
+            tmp_path / "inv-a.jsonl",
             extra=("--vendor", "vendor-a", "--product", "product-x", "--version", "1.0"),
         )
         rec_b = _ingest(
-            monkeypatch, qdrant_url, collection, corp_b, tmp_path / "inv-b.jsonl",
+            monkeypatch,
+            qdrant_url,
+            collection,
+            corp_b,
+            tmp_path / "inv-b.jsonl",
             extra=("--vendor", "vendor-b", "--product", "product-y", "--version", "2.0"),
         )
         assert [r["status"] for r in rec_a] == ["upserted"]
@@ -966,9 +994,7 @@ def test_361_inplace_snapshot_restore_keeps_coexisting_revisions(
         # Snapshot (the 361B runbook step 1), then lose the collection.
         snap = snapshot_collection(client, collection)
         assert snap
-        dl = httpx2.get(
-            f"{qdrant_url}/collections/{collection}/snapshots/{snap}", timeout=120.0
-        )
+        dl = httpx2.get(f"{qdrant_url}/collections/{collection}/snapshots/{snap}", timeout=120.0)
         assert dl.status_code == 200 and len(dl.content) > 0
         client.delete_collection(collection)
         assert client.collection_exists(collection) is False
@@ -986,14 +1012,216 @@ def test_361_inplace_snapshot_restore_keeps_coexisting_revisions(
         # Completions survived (separate collection, never deleted): a resume
         # with fresh inventory re-verifies instead of re-ingesting.
         resume_a = _ingest(
-            monkeypatch, qdrant_url, collection, corp_a, tmp_path / "resume-a.jsonl",
+            monkeypatch,
+            qdrant_url,
+            collection,
+            corp_a,
+            tmp_path / "resume-a.jsonl",
             extra=("--vendor", "vendor-a", "--product", "product-x", "--version", "1.0"),
         )
         resume_b = _ingest(
-            monkeypatch, qdrant_url, collection, corp_b, tmp_path / "resume-b.jsonl",
+            monkeypatch,
+            qdrant_url,
+            collection,
+            corp_b,
+            tmp_path / "resume-b.jsonl",
             extra=("--vendor", "vendor-b", "--product", "product-y", "--version", "2.0"),
         )
         assert [r["status"] for r in resume_a] == ["skipped"]
         assert [r["status"] for r in resume_b] == ["skipped"]
+    finally:
+        client.close()
+
+
+def test_revision_scoped_retirement_on_real_server(qdrant_url, tmp_path, monkeypatch):
+    """R-REV (issue #391): explicit retirement of revision A on a real Qdrant
+    server preserves sibling revision B across publication cutover."""
+    from qdrant_client import QdrantClient
+    from qdrant_client.http import models
+    from scripts.make_synthetic_pdf import build as make_pdf
+    from scripts.make_synthetic_pdf import build_plain
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.completion import completion_collection_for
+    from mainframe_rag.ingest.qdrant_io import stored_doc_revisions
+
+    alias = "sim-pub-rev"
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+
+    client = QdrantClient(qdrant_url, timeout=30.0)
+    try:
+        # Clean existing test collections/aliases
+        for a in client.get_aliases().aliases:
+            if a.alias_name == alias:
+                client.update_collection_aliases(
+                    change_aliases_operations=[
+                        models.DeleteAliasOperation(
+                            delete_alias=models.DeleteAlias(alias_name=alias)
+                        )
+                    ]
+                )
+        for c in client.get_collections().collections:
+            if c.name.startswith(alias):
+                client.delete_collection(c.name)
+
+        corp = tmp_path / "corp"
+        corp.mkdir()
+        a_pdf = corp / "doc_a.pdf"
+        make_pdf(a_pdf, doc_id="doc_a", title="Doc A Revision 1")
+        build_plain(corp / "doc_b.pdf")
+
+        progress_1 = tmp_path / "inv1.jsonl"
+        rec_1 = _ingest(
+            monkeypatch,
+            qdrant_url,
+            alias,
+            corp,
+            progress_1,
+            extra=("--vendor", "v", "--product", "p", "--version", "1.0"),
+        )
+        assert [r["status"] for r in rec_1] == ["upserted", "upserted"]
+        rev_1 = next(r["source_rev"] for r in rec_1 if r["doc_id"] == "doc_a")
+        assert rev_1
+
+        active_alias_1 = next(
+            (a.collection_name for a in client.get_aliases().aliases if a.alias_name == alias),
+            None,
+        )
+        assert active_alias_1 is not None
+
+        # S424-F1: Seed an approved, digest-valid legacy sibling point L for doc_a on real server
+        import hashlib
+
+        from mainframe_rag.config import HASH_EMBED_DIM
+        from mainframe_rag.ingest.inventory import InventoryRecord
+        from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+        rules_v = extraction_rules_version()
+        legacy_pt_id = "00000000-0000-0000-0000-000000000777"
+        legacy_text = "legacy real qdrant content for doc_a"
+        client.upsert(
+            active_alias_1,
+            points=[
+                models.PointStruct(
+                    id=legacy_pt_id,
+                    vector={
+                        "dense": [0.0] * HASH_EMBED_DIM,
+                        "bm25": models.SparseVector(indices=[0], values=[1.0]),
+                    },
+                    payload={
+                        "doc_id": "doc_a",
+                        "sha256": "7" * 64,
+                        "rules_v": rules_v,
+                        "text": legacy_text,
+                    },
+                )
+            ],
+            wait=True,
+        )
+        h_ids = hashlib.sha256(legacy_pt_id.encode("utf-8") + b"\0").hexdigest()
+        h_content = hashlib.sha256(
+            legacy_pt_id.encode("utf-8") + b"\0" + legacy_text.encode("utf-8") + b"\0"
+        ).hexdigest()
+        leg_rec = InventoryRecord(
+            path="legacy/doc_a.pdf",
+            sha256="7" * 64,
+            doc_id="doc_a",
+            pages=1,
+            chunks=1,
+            seconds=0.0,
+            rules_version=rules_v,
+            chunk_ids_digest=h_ids,
+            content_digest=h_content,
+            source_rev=None,
+            status="upserted",
+        )
+        with open(progress_1, "a", encoding="utf-8") as f:
+            f.write(leg_rec.model_dump_json() + "\n")
+
+        # Replace doc_a with Revision 2
+        make_pdf(a_pdf, doc_id="doc_a", title="Doc A Revision 2 (New Content)")
+        progress_2 = tmp_path / "inv2.jsonl"
+        # Copy inv1 forward so prior inventory contains rev_1 and approved legacy L
+        progress_2.write_text(progress_1.read_text())
+
+        rec_2 = _ingest(
+            monkeypatch,
+            qdrant_url,
+            alias,
+            corp,
+            progress_2,
+            extra=(
+                "--vendor",
+                "v",
+                "--product",
+                "p",
+                "--version",
+                "2.0",
+                "--retire-doc",
+                f"doc_a@{rev_1}",
+            ),
+        )
+        rev_2 = [r["source_rev"] for r in rec_2 if r["doc_id"] == "doc_a"][-1]
+        assert rev_2 != rev_1
+
+        # Check aliases on real server
+        active_alias = next(
+            (a.collection_name for a in client.get_aliases().aliases if a.alias_name == alias),
+            None,
+        )
+        assert active_alias is not None
+
+        # Verify live collection contains doc_a@rev_2, approved legacy L, and doc_b, but NOT doc_a@rev_1
+        settings = Settings(
+            _env_file=None,
+            qdrant_url=qdrant_url,
+            qdrant_collection=active_alias,
+            embed_mode="hash",
+            allow_hash_mode=True,
+        )
+        revs_live = stored_doc_revisions(client, settings, "doc_a")
+        assert revs_live == {rev_2, None}
+
+        # Assert exact retained legacy point ID and text on real server
+        pts_leg = client.retrieve(active_alias, ids=[legacy_pt_id], with_payload=True)
+        assert len(pts_leg) == 1
+        assert pts_leg[0].payload.get("text") == legacy_text
+
+        # Check completions collection
+        completions_name = completion_collection_for(active_alias)
+        pts, _ = client.scroll(
+            completions_name,
+            scroll_filter=models.Filter(
+                must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value="doc_a"))]
+            ),
+        )
+        stored_comp_revs = {(p.payload or {}).get("source_rev") for p in pts}
+        assert stored_comp_revs == {rev_2}
+
+        # Subsequent ordinary run on real server: steady-state recognizes both L and rev_2 without re-embedding
+        from mainframe_rag.ingest import run_ingest
+
+        assert (
+            run_ingest.main(
+                [
+                    "--src",
+                    str(corp),
+                    "--progress",
+                    str(progress_2),
+                    "--workers",
+                    "1",
+                    "--vendor",
+                    "v",
+                    "--product",
+                    "p",
+                    "--version",
+                    "2.0",
+                ]
+            )
+            == 0
+        )
+        revs_live_steady = stored_doc_revisions(client, settings, "doc_a")
+        assert revs_live_steady == {rev_2, None}
     finally:
         client.close()
