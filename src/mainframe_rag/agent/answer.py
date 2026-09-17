@@ -89,17 +89,29 @@ class ParsedAnswer(BaseModel):
     cites_rejected_unmapped: int = 0
 
 
-class TruncatedStreamError(RuntimeError):
-    """An SSE chat stream ended without the [DONE] terminator: content
-    received so far is a prefix of unknown completeness and must never be
-    labeled finish_reason "stop". Carries counts only — never response text,
-    which reaches logs through the error paths that catch this."""
+# Fixed incomplete-completion reason labels (issue #365). Labels only —
+# upstream error bodies/messages never become labels or log text.
+REASON_MISSING_DONE = "missing [DONE]"
+REASON_UPSTREAM_ERROR = "upstream error frame"
+REASON_MALFORMED_FRAME = "malformed frame"
+REASON_MISSING_FINISH = "missing finish reason"
 
-    def __init__(self, content_chunks: int) -> None:
-        super().__init__(
-            f"SSE stream ended without [DONE] after {content_chunks} content chunks"
-        )
+
+class TruncatedStreamError(RuntimeError):
+    """An upstream chat completion did not reach an explicit successful
+    terminal state: missing [DONE], an upstream `error` frame, a malformed
+    frame, or [DONE] without an explicit finish reason. Content received so
+    far is a prefix of unknown completeness and must never be labeled
+    finish_reason "stop". Named for the original stream-truncation case; the
+    buffered non-streaming legs raise it too (issue #365). Carries a fixed
+    reason label and counts only — never response text, which reaches logs
+    through the error paths that catch this."""
+
+    def __init__(self, content_chunks: int = 0, reason: str = REASON_MISSING_DONE) -> None:
+        detail = f" after {content_chunks} content chunks" if content_chunks else ""
+        super().__init__(f"upstream completion incomplete ({reason}){detail}")
         self.content_chunks = content_chunks
+        self.reason = reason
 
 
 class PromptBudgetExceeded(Exception):
@@ -902,10 +914,27 @@ def _chat_result_from_response(data: dict[str, Any]) -> ChatResult:
     """Single parser for non-streaming chat-completion payloads: content,
     finish_reason, and usage. All fallback legs (achat, chat_stream,
     _chat_sync) funnel through here so response-shape handling cannot
-    diverge copies."""
-    choice = data["choices"][0]
-    content = str(choice["message"].get("content") or "")
-    finish_reason = str(choice.get("finish_reason") or "stop")
+    diverge copies. Completion is explicit (issue #365): a payload without
+    a non-empty string finish_reason is an incomplete upstream completion,
+    never a synthesized "stop" — a failed or partial upstream response must
+    not be finalized as success."""
+    if not isinstance(data, dict):
+        raise TruncatedStreamError(0, REASON_MALFORMED_FRAME)
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise TruncatedStreamError(0, REASON_MALFORMED_FRAME)
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        raise TruncatedStreamError(0, REASON_MALFORMED_FRAME)
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise TruncatedStreamError(0, REASON_MALFORMED_FRAME)
+    finish_reason = choice.get("finish_reason")
+    if finish_reason is None:
+        raise TruncatedStreamError(0, REASON_MISSING_FINISH)
+    if not isinstance(finish_reason, str) or not finish_reason:
+        raise TruncatedStreamError(0, REASON_MALFORMED_FRAME)
+    content = str(message.get("content") or "")
     usage = _token_usage_from_dict(data.get("usage") or {})
     return ChatResult(content=content, finish_reason=finish_reason, usage=usage)
 
@@ -937,23 +966,60 @@ def _chat_body(
 @dataclass
 class _SseStreamState:
     """Accumulated parse state for one SSE chat-completion stream: time to
-    first content token, terminal finish reason, latest usage payload, content
-    deltas in order, and whether the [DONE] terminator arrived."""
+    first content token, explicit terminal finish reason, latest usage
+    payload, content deltas in order, whether the [DONE] terminator arrived,
+    and fixed labels for an upstream error frame or a malformed frame
+    (issue #365). `finish_reason` starts None: a stream that never carried
+    an explicit finish is incomplete even when [DONE] arrived."""
 
     ttft_ms: int | None = None
-    finish_reason: str = "stop"
+    finish_reason: str | None = None
     usage_data: dict[str, Any] = field(default_factory=dict)
     content_parts: list[str] = field(default_factory=list)
     saw_done: bool = False
+    error: str | None = None
+    malformed: str | None = None
+
+    def incomplete_reason(self) -> str | None:
+        """Fixed label of the first reason this stream is not a successful
+        completion; None only when [DONE] and an explicit finish arrived
+        with no error/malformed frame. Order is load-bearing: a later
+        [DONE] or finish frame can never clear a recorded failure."""
+        if self.error is not None:
+            return self.error
+        if self.malformed is not None:
+            return self.malformed
+        if not self.saw_done:
+            return REASON_MISSING_DONE
+        if self.finish_reason is None:
+            return REASON_MISSING_FINISH
+        return None
+
+    def terminal_seen(self) -> bool:
+        """True when consuming more frames cannot change the outcome: the
+        terminator, an error frame, or a malformed frame was seen."""
+        return self.saw_done or self.error is not None or self.malformed is not None
+
+
+def _completed_finish_reason(state: _SseStreamState) -> str:
+    """The explicit terminal finish of a stream already validated by
+    `incomplete_reason()`; the defensive raise keeps the Optional out of
+    ChatResult if a future caller skips validation."""
+    if state.finish_reason is None:
+        raise TruncatedStreamError(len(state.content_parts), REASON_MISSING_FINISH)
+    return state.finish_reason
 
 
 def _feed_sse_line(state: _SseStreamState, line: str, t0: float) -> str | None:
     """Fold one raw SSE line into the stream state; returns the content delta
-    when the line carries one, else None. Blank lines, non-data lines, and
-    unparseable JSON are skipped — never an error. [DONE] sets saw_done.
-    Shared by achat, chat_stream, and _chat_sync so line semantics (prefix,
-    terminator, usage, delta, finish) cannot diverge copies; each caller keeps
-    its own iteration (sync/async), truncation recovery, and yield behavior."""
+    when the line carries one, else None. Blank lines, `:` comments, and
+    non-data lines are skipped. [DONE] sets saw_done. A parsed frame with a
+    non-null top-level `error` records the fixed upstream-error label; an
+    unparseable or misshapen data payload records the fixed malformed label
+    (both are failures, issue #365) — never their text. Shared by achat,
+    chat_stream, and _chat_sync so line semantics (prefix, terminator, usage,
+    delta, finish) cannot diverge copies; each caller keeps its own iteration
+    (sync/async), truncation recovery, and yield behavior."""
     line = line.strip()
     if not line or not line.startswith("data:"):
         return None
@@ -964,19 +1030,48 @@ def _feed_sse_line(state: _SseStreamState, line: str, t0: float) -> str | None:
     try:
         chunk = json.loads(chunk_str)
     except json.JSONDecodeError:
+        state.malformed = REASON_MALFORMED_FRAME
+        return None
+    if not isinstance(chunk, dict):
+        state.malformed = REASON_MALFORMED_FRAME
+        return None
+    if chunk.get("error") is not None:
+        state.error = REASON_UPSTREAM_ERROR
         return None
     if chunk.get("usage"):
         state.usage_data = chunk["usage"]
-    choices = chunk.get("choices") or []
-    if not choices:
+    choices = chunk.get("choices")
+    if choices is None:
+        # No choices key: heartbeat frame, nothing to fold.
         return None
-    delta_content = (choices[0].get("delta") or {}).get("content")
+    if not isinstance(choices, list):
+        state.malformed = REASON_MALFORMED_FRAME
+        return None
+    if not choices:
+        # OpenAI include_usage terminator: choices [] with a usage block.
+        return None
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        state.malformed = REASON_MALFORMED_FRAME
+        return None
+    delta = choice.get("delta")
+    if delta is not None and not isinstance(delta, dict):
+        state.malformed = REASON_MALFORMED_FRAME
+        return None
+    delta_content = (delta or {}).get("content")
+    if delta_content is not None and not isinstance(delta_content, str):
+        state.malformed = REASON_MALFORMED_FRAME
+        return None
     if delta_content:
         if state.ttft_ms is None:
             state.ttft_ms = int((time.monotonic() - t0) * 1000)
         state.content_parts.append(delta_content)
-    if choices[0].get("finish_reason"):
-        state.finish_reason = str(choices[0]["finish_reason"])
+    finish = choice.get("finish_reason")
+    if finish is not None:
+        if not isinstance(finish, str) or not finish:
+            state.malformed = REASON_MALFORMED_FRAME
+            return None
+        state.finish_reason = finish
     return delta_content
 
 
@@ -1078,19 +1173,22 @@ class HttpxLLMClient:
                     stream_resp.raise_for_status()
                     async for line in stream_resp.aiter_lines():
                         _feed_sse_line(state, line, t0)
-                        if state.saw_done:
+                        if state.terminal_seen():
                             break
-                if not state.saw_done:
-                    # Transport truncation, not a complete answer: the except
-                    # below recovers through the non-streaming POST, which
-                    # returns whole content — the partial prefix is discarded.
-                    raise TruncatedStreamError(len(state.content_parts))
+                reason = state.incomplete_reason()
+                if reason is not None:
+                    # Transport truncation, upstream error/malformed frame, or
+                    # [DONE] without an explicit finish (issue #365): not a
+                    # complete answer. The except below recovers through the
+                    # non-streaming POST, which returns whole content — the
+                    # partial prefix is discarded.
+                    raise TruncatedStreamError(len(state.content_parts), reason)
                 content = "".join(state.content_parts)
                 if not content:
                     log.warning("streaming chat returned empty content; falling back to non-streaming POST")
                 else:
                     usage = _token_usage_from_dict(state.usage_data)
-                    return ChatResult(content=content, finish_reason=state.finish_reason, usage=usage, ttft_ms=state.ttft_ms)
+                    return ChatResult(content=content, finish_reason=_completed_finish_reason(state), usage=usage, ttft_ms=state.ttft_ms)
             except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
                 log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
 
@@ -1099,9 +1197,10 @@ class HttpxLLMClient:
         # server-side parsing defect, not a transient fault, and there are no
         # retries on the answer path (issue #20 PR C). The doubling only
         # happens on that defect, never on the happy path.
-        # A truncated stream (TruncatedStreamError above) joins the same
-        # recovery: the non-streaming POST returns whole content, so the
-        # partial prefix is never surfaced.
+        # A truncation, upstream error/malformed frame, or missing finish
+        # (TruncatedStreamError above) joins the same recovery: the
+        # non-streaming POST returns whole content, so the partial prefix is
+        # never surfaced.
         resp = await self._async_http().post(
             f"{base_url.rstrip('/')}/chat/completions",
             json=body,
@@ -1133,7 +1232,7 @@ class HttpxLLMClient:
             stream_resp.raise_for_status()
             async for line in stream_resp.aiter_lines():
                 delta = _feed_sse_line(state, line, t0)
-                if state.saw_done:
+                if state.terminal_seen():
                     break
                 if delta:
                     yield {
@@ -1143,19 +1242,29 @@ class HttpxLLMClient:
                         "ttft_ms": state.ttft_ms,
                     }
 
-        # Empty-content recovery, mirroring achat: a reasoning model whose
-        # whole output lands in the reasoning channel yields zero content
-        # deltas. Recovery is only possible BEFORE any token was yielded —
-        # a mid-stream failure after real deltas cannot be retried without
-        # duplicating content, so it raises (the app's event: error path)
-        # instead of shipping the prefix labeled "stop".
-        if not state.saw_done and state.content_parts:
-            raise TruncatedStreamError(len(state.content_parts))
+        # Failure handling, mirroring achat: a stream is complete only with
+        # [DONE] plus an explicit finish and no error/malformed frame.
+        # Recovery is only possible BEFORE any token was yielded — a failure
+        # after real deltas cannot be retried without duplicating content, so
+        # it raises (the app's event: error path) instead of shipping the
+        # prefix labeled "stop".
+        reason = state.incomplete_reason()
+        if reason is not None and state.content_parts:
+            raise TruncatedStreamError(len(state.content_parts), reason)
         finish_reason = state.finish_reason
         usage_data = state.usage_data
         ttft_ms = state.ttft_ms
         if not state.content_parts:
-            log.warning("streaming chat returned empty content; falling back to non-streaming POST")
+            # Empty-content recovery: a reasoning model whose whole output
+            # lands in the reasoning channel yields zero content deltas.
+            # A pre-output error/truncation/missing-finish also lands here:
+            # the one non-streaming POST is the existing pre-output recovery
+            # bound and never fabricates success from the failed attempt —
+            # its payload must carry an explicit finish itself.
+            log.warning(
+                "streaming chat produced no content (%s); falling back to non-streaming POST",
+                reason or "empty stream",
+            )
             # Issue #363: the fallback must re-ask with stream=False. Reusing
             # the streaming body makes a spec-compliant backend answer SSE,
             # which resp.json() cannot parse.
@@ -1182,6 +1291,10 @@ class HttpxLLMClient:
             }
             ttft_ms = int((time.monotonic() - t0) * 1000)
             yield {"type": "token", "delta": result.content, "token": result.content, "ttft_ms": ttft_ms}
+        elif finish_reason is None:
+            # Defensive: a content stream with no recorded reason was already
+            # rejected above; never emit `done` without an explicit finish.
+            raise TruncatedStreamError(len(state.content_parts), REASON_MISSING_FINISH)
 
         usage = _token_usage_from_dict(usage_data)
         yield {
@@ -1215,19 +1328,22 @@ class HttpxLLMClient:
                     stream_resp.raise_for_status()
                     for line in stream_resp.iter_lines():
                         _feed_sse_line(state, line, t0)
-                        if state.saw_done:
+                        if state.terminal_seen():
                             break
-                if not state.saw_done:
-                    # Transport truncation, not a complete answer: the except
-                    # below recovers through the non-streaming POST, which
-                    # returns whole content — the partial prefix is discarded.
-                    raise TruncatedStreamError(len(state.content_parts))
+                reason = state.incomplete_reason()
+                if reason is not None:
+                    # Transport truncation, upstream error/malformed frame, or
+                    # [DONE] without an explicit finish (issue #365): not a
+                    # complete answer. The except below recovers through the
+                    # non-streaming POST, which returns whole content — the
+                    # partial prefix is discarded.
+                    raise TruncatedStreamError(len(state.content_parts), reason)
                 content = "".join(state.content_parts)
                 if not content:
                     log.warning("streaming chat returned empty content; falling back to non-streaming POST")
                 else:
                     usage = _token_usage_from_dict(state.usage_data)
-                    return ChatResult(content=content, finish_reason=state.finish_reason, usage=usage, ttft_ms=state.ttft_ms)
+                    return ChatResult(content=content, finish_reason=_completed_finish_reason(state), usage=usage, ttft_ms=state.ttft_ms)
             except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
                 log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
 

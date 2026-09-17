@@ -1463,7 +1463,10 @@ def test_httpx_llm_client_passes_reasoning_params(monkeypatch):
         def json(self):
             return {
                 "choices": [
-                    {"message": {"content": "Test answer\n\nCitations:\nSA22-0000-00, p. 1-6"}}
+                    {
+                        "message": {"content": "Test answer\n\nCitations:\nSA22-0000-00, p. 1-6"},
+                        "finish_reason": "stop",
+                    }
                 ]
             }
 
@@ -1983,6 +1986,7 @@ def test_httpx_llm_client_streaming_measures_ttft_on_first_content_token():
         'data: {"choices": [{"delta": {}}]}',
         'data: {"choices": [{"delta": {"content": "Hello "}}]}',
         'data: {"choices": [{"delta": {"content": "World"}}], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}',
+        'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
         "data: [DONE]",
     ]
 
@@ -2023,7 +2027,13 @@ def test_httpx_llm_client_streaming_empty_content_falls_back_to_post():
             return None
 
         def iter_lines(self):
-            return iter(['data: {"choices": [{"delta": {}}]}', "data: [DONE]"])
+            return iter(
+                [
+                    'data: {"choices": [{"delta": {}}]}',
+                    'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
+                    "data: [DONE]",
+                ]
+            )
 
     class FakePostResp:
         def raise_for_status(self):
@@ -2031,7 +2041,12 @@ def test_httpx_llm_client_streaming_empty_content_falls_back_to_post():
 
         def json(self):
             return {
-                "choices": [{"message": {"role": "assistant", "content": "Fallback content"}}],
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "Fallback content"},
+                        "finish_reason": "stop",
+                    }
+                ],
                 "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
             }
 
@@ -2078,7 +2093,12 @@ def test_httpx_llm_client_streaming_error_falls_back_to_post():
 
         def json(self):
             return {
-                "choices": [{"message": {"role": "assistant", "content": "Post after stream error"}}],
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "Post after stream error"},
+                        "finish_reason": "stop",
+                    }
+                ],
                 "usage": {"total_tokens": 5},
             }
 
@@ -3030,6 +3050,12 @@ def test_verification_state_for_matrix():
     assert verification_state_for(
         citations=[], citations_inferred=False,
         finish_reason="length", abstained=False, empty_hits=False,
+    ) == "generation_incomplete"
+    # Every explicitly classified non-stop finish stays incomplete; only a
+    # real "stop" can reach accepted (issue #365).
+    assert verification_state_for(
+        citations=[_ACCEPTED_CITE], citations_inferred=False,
+        finish_reason="content_filter", abstained=False, empty_hits=False,
     ) == "generation_incomplete"
     # Empty model content is incomplete, not a draft: nothing to review.
     assert verification_state_for(

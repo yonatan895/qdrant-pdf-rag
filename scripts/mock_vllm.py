@@ -51,11 +51,15 @@ TOKEN_INTERVAL_MS = float(os.environ.get("MOCK_TOKEN_INTERVAL_MS", "0"))
 JITTER_MS = float(os.environ.get("MOCK_JITTER_MS", "0"))
 SEED = int(os.environ.get("MOCK_SEED", "0"))
 ERROR_RATE = float(os.environ.get("MOCK_ERROR_RATE", "0"))
-# Explicit deterministic faults for the gateway contract lane. Healthy is
-# byte-identical for model responses; health exposes CI control state only.
+# Explicit deterministic faults for the gateway contract lane:
+# upstream (HTTP 503), malformed (misshapen non-stream payload),
+# truncated (SSE abort before [DONE]), error_frame (content, then a 200
+# `error` frame, then [DONE]), no_finish (content, then [DONE] without a
+# terminal finish_reason). Healthy is byte-identical for model responses;
+# health exposes CI control state only.
 CHAT_FAULT = os.environ.get("MOCK_CHAT_FAULT", "healthy")
 EMBED_FAULT = os.environ.get("MOCK_EMBED_FAULT", "healthy")
-if CHAT_FAULT not in ("healthy", "upstream", "malformed", "truncated"):
+if CHAT_FAULT not in ("healthy", "upstream", "malformed", "truncated", "error_frame", "no_finish"):
     raise ValueError("invalid MOCK_CHAT_FAULT")
 if EMBED_FAULT not in ("healthy", "upstream", "malformed", "dimension"):
     raise ValueError("invalid MOCK_EMBED_FAULT")
@@ -263,6 +267,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Mock-Ttft-Ms", f"{ttft_ms:.1f}")
             self.end_headers()
             abort = CHAT_FAULT == "truncated" or _should_fail()
+            # Stream-only completion-shape faults (issue #365): the upstream
+            # attempt fails but still terminates with [DONE], the exact
+            # counterexample the application parser must reject.
+            error_frame = CHAT_FAULT == "error_frame"
+            no_finish = CHAT_FAULT == "no_finish"
             # One SSE chunk per piece with per-chunk flush: real TTFT plus
             # observable inter-token pacing (the old two-chunk split is
             # gone; reassembly is still byte-exact). Pieces keep their
@@ -281,7 +290,12 @@ class Handler(BaseHTTPRequestHandler):
                     "model": model,
                     "choices": [choice],
                 }
-                if i == len(pieces) - 1 and not abort:
+                if (
+                    i == len(pieces) - 1
+                    and not abort
+                    and not error_frame
+                    and not no_finish
+                ):
                     choice["finish_reason"] = finish_reason
                     chunk["usage"] = usage
                 self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
@@ -291,6 +305,11 @@ class Handler(BaseHTTPRequestHandler):
                     # [DONE] and no final — the truncated-SSE shape the
                     # agent's stream recovery path must survive.
                     return
+            if error_frame:
+                # Error frame then [DONE]: a failed generation that still
+                # looks terminated; never a successful completion.
+                self.wfile.write(f"data: {json.dumps(_INJECTED_FAILURE)}\n\n".encode())
+                self.wfile.flush()
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
             return

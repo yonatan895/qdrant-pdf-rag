@@ -287,6 +287,80 @@ def test_chat_completions_stream_error_is_openai_error(chat_client, monkeypatch)
     assert '"finish_reason": "error"' not in res.text
 
 
+def _parser_failure_llm(lines, payload):
+    """Real HttpxLLMClient over a fake transport: chat routes must inherit
+    the shared completion parser's failure classification (issue #365)."""
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from tests.fakes import HttpxStreamFake, settings_kw
+
+    return HttpxLLMClient(
+        Settings(**settings_kw(llm_base_url="http://llm.internal/v1", llm_stream=True)),
+        client=HttpxStreamFake(lines=lines, payload=payload),
+    )
+
+
+_MISSING_FINISH_PAYLOAD = {"choices": [{"message": {"content": "fallback body"}}]}
+
+
+def test_chat_completions_json_incomplete_upstream_is_502(chat_client, monkeypatch):
+    """Issue #365: a stream and fallback that both lack an explicit finish
+    yield the fixed 502 envelope, never a synthesized finish_reason "stop"."""
+    monkeypatch.setattr(
+        app_mod,
+        "llm",
+        _parser_failure_llm(
+            lines=[
+                'data: {"choices": [{"delta": {"content": "partial "}}]}',
+                "data: [DONE]",
+            ],
+            payload=_MISSING_FINISH_PAYLOAD,
+        ),
+    )
+    res = chat_client.post(
+        "/v1/chat",
+        json={"messages": [{"role": "user", "content": "What is IEA500I?"}]},
+    )
+    assert res.status_code == 502
+    assert res.json() == {"code": "upstream_error", "message": "answer failed"}
+
+
+def test_chat_completions_stream_error_frame_then_done_is_failure(chat_client, monkeypatch):
+    """Issue #365: content -> upstream error frame -> [DONE] must terminate
+    the chat stream with the fixed error frame and no success finish chunk,
+    and the upstream error text must not leak."""
+    monkeypatch.setattr(
+        app_mod,
+        "llm",
+        _parser_failure_llm(
+            lines=[
+                'data: {"choices": [{"delta": {"content": "partial "}}]}',
+                'data: {"error": {"message": "SECRET-UPSTREAM-TEXT"}}',
+                "data: [DONE]",
+            ],
+            payload={"choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}]},
+        ),
+    )
+    res = chat_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "What is IEA500I?"}], "stream": True},
+    )
+    assert res.status_code == 200
+    assert res.text.rstrip().endswith("data: [DONE]")
+    frames = [
+        json.loads(line[len("data: ") :])
+        for line in res.text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    error = next(f for f in frames if "error" in f)
+    assert error["error"] == {"code": "upstream_error", "message": "stream failed"}
+    assert error["verification_state"] == "generation_incomplete"
+    assert all(
+        not (f.get("choices") and f["choices"][0].get("finish_reason")) for f in frames
+    )
+    assert "SECRET-UPSTREAM-TEXT" not in res.text
+
+
 def test_chat_completions_traceparent_header_propagation(chat_client):
     headers = {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
     res = chat_client.post(

@@ -291,7 +291,9 @@ def test_explicit_embed_faults(fault_server, fault):
             assert len(response.json()['data'][0]['embedding']) == (1024 if fault == 'healthy' else 1023)
 
 
-@pytest.mark.parametrize('fault', ['healthy', 'upstream', 'malformed', 'truncated'])
+@pytest.mark.parametrize(
+    'fault', ['healthy', 'upstream', 'malformed', 'truncated', 'error_frame', 'no_finish']
+)
 def test_explicit_chat_faults(fault_server, fault):
     with fault_server(chat=fault) as url:
         response = httpx2.post(url + '/chat/completions', json={
@@ -302,8 +304,89 @@ def test_explicit_chat_faults(fault_server, fault):
             assert response.json()['choices'][0]['message'] is None
         elif fault == 'truncated':
             assert 'data:' in response.text and '[DONE]' not in response.text and '"finish_reason": "stop"' not in response.text
+        elif fault == 'error_frame':
+            # A failed generation that still terminates: content, error
+            # frame, [DONE] (issue #365).
+            assert '"finish_reason": "stop"' not in response.text
+            assert '"error"' in response.text
+            assert 'data: [DONE]' in response.text
+        elif fault == 'no_finish':
+            # [DONE] without an explicit terminal finish (issue #365).
+            assert '"finish_reason": "stop"' not in response.text
+            assert 'data: [DONE]' in response.text
         else:
             assert '"finish_reason": "stop"' in response.text and 'data: [DONE]' in response.text
+
+
+@pytest.mark.parametrize(
+    'fault, reason',
+    [
+        ('error_frame', 'upstream error frame'),
+        ('no_finish', 'missing finish reason'),
+    ],
+)
+def test_httpx_llm_client_rejects_incomplete_mock_stream(fault_server, fault, reason):
+    """Controllable gateway-shaped streaming server + actual client (issue
+    #365): the real HttpxLLMClient over a real loopback socket refuses a
+    failed completion instead of labeling it finish_reason "stop"."""
+    import asyncio
+
+    from mainframe_rag.agent.answer import HttpxLLMClient, TruncatedStreamError
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    with fault_server(chat=fault) as url:
+        settings = Settings(
+            llm_base_url=url, llm_model_reasoning='mock-reasoning', _env_file=None
+        )
+        seen: list[dict] = []
+
+        async def drive():
+            client = HttpxLLMClient(settings)
+            try:
+                async for item in client.chat_stream(
+                    [ChatMessage(role='user', content='TEST')]
+                ):
+                    seen.append(item)
+            finally:
+                await client.aclose()
+
+        with pytest.raises(TruncatedStreamError) as excinfo:
+            asyncio.run(drive())
+        assert excinfo.value.reason == reason
+        assert seen and seen[0]['type'] == 'token'
+
+
+def test_httpx_llm_client_accepts_healthy_mock_stream(fault_server):
+    """The same loopback path completes cleanly on the healthy server: the
+    stricter parser rejects failures, not supported success shapes."""
+    import asyncio
+
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    with fault_server(chat='healthy') as url:
+        settings = Settings(
+            llm_base_url=url, llm_model_reasoning='mock-reasoning', _env_file=None
+        )
+
+        async def drive():
+            client = HttpxLLMClient(settings)
+            try:
+                return [
+                    item
+                    async for item in client.chat_stream(
+                        [ChatMessage(role='user', content='TEST')]
+                    )
+                ]
+            finally:
+                await client.aclose()
+
+        items = asyncio.run(drive())
+        assert items[-1]['type'] == 'done'
+        assert items[-1]['finish_reason'] == 'stop'
+        assert ''.join(i.get('delta') or '' for i in items if i['type'] == 'token')
 
 
 @pytest.mark.parametrize('variable', ['MOCK_CHAT_FAULT', 'MOCK_EMBED_FAULT'])

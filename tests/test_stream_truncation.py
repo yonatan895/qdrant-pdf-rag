@@ -1,12 +1,15 @@
-"""Truncated SSE streams must never surface as complete answers (review finding
-on the mock abort shape).
+"""Incomplete upstream chat completions must never surface as complete
+answers (review finding on the mock abort shape; issue #365).
 
 A connection that dies mid-stream (first chunk, clean close, no [DONE])
 currently exits the SSE loop normally: content is non-empty so the
 empty-recovery never fires, and the partial answer ships labeled
 finish_reason "stop" — silent truncation, with no error event and no
 answer_alert. Contract (AGENTS.md SSE section): a mid-stream failure emits
-event: error and ends WITHOUT final.
+event: error and ends WITHOUT final. The same shared parser rejects an
+upstream `error` frame, a malformed frame, and [DONE] without an explicit
+finish reason: a completion is successful only with an explicit terminal
+finish and no failure frame (issue #365).
 
 Hermetic: fake transports / fake LLMs, no network, no Qdrant.
 """
@@ -19,7 +22,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mainframe_rag.agent import app as app_mod
-from mainframe_rag.agent.answer import HttpxLLMClient, TruncatedStreamError
+from mainframe_rag.agent.answer import (
+    REASON_MALFORMED_FRAME,
+    REASON_MISSING_FINISH,
+    REASON_UPSTREAM_ERROR,
+    HttpxLLMClient,
+    TruncatedStreamError,
+    _chat_result_from_response,
+)
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage
@@ -35,6 +45,13 @@ _COMPLETE_PAYLOAD = {
     "choices": [{"message": {"content": "Complete answer"}, "finish_reason": "stop"}],
     "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
 }
+
+_CONTENT_LINE = 'data: {"choices": [{"delta": {"content": "Partial "}}]}'
+_FINISH_LINE = 'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}'
+_DONE_LINE = "data: [DONE]"
+# A fixed sentinel the client must never echo: upstream error text is not a
+# client response, a log field, or an exception message.
+_ERROR_FRAME = 'data: {"error": {"message": "SECRET-UPSTREAM-TEXT", "code": 500}}'
 
 
 def _settings_kwargs(**overrides):
@@ -119,29 +136,204 @@ async def test_chat_stream_truncated_empty_still_recovers_via_post():
     assert items[-1]["type"] == "done" and items[-1]["finish_reason"] == "stop"
 
 
+@pytest.mark.parametrize("finish", ["length", "content_filter"])
 @pytest.mark.anyio
-async def test_chat_stream_length_finish_with_done_is_not_truncation():
-    """A length-limited stream terminates properly ([DONE] + finish_reason):
-    it must NOT raise — length handling downstream is unchanged."""
+async def test_chat_stream_explicit_non_stop_finish_is_classified_not_truncated(finish):
+    """An explicitly finished stream terminates properly ([DONE] + non-null
+    finish_reason): it must NOT raise — stop/length/content_filter stay
+    classified by the downstream verification state, not by this parser."""
     fake = HttpxStreamFake(
         lines=[
             'data: {"choices": [{"delta": {"content": "Cut "}}]}',
-            'data: {"choices": [{"delta": {"content": "off"}, "finish_reason": "length"}]}',
+            f'data: {{"choices": [{{"delta": {{"content": "off"}}, "finish_reason": "{finish}"}}]}}',
             "data: [DONE]",
         ]
     )
     llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
     items = [item async for item in llm.chat_stream([ChatMessage(role="user", content="hi")])]
     assert fake.post_bodies == []  # no recovery POST on a terminated stream
-    assert items[-1]["type"] == "done" and items[-1]["finish_reason"] == "length"
+    assert items[-1]["type"] == "done" and items[-1]["finish_reason"] == finish
+
+
+@pytest.mark.anyio
+async def test_chat_stream_error_frame_then_done_raises_without_replay():
+    """content -> upstream error frame -> [DONE] is a failed generation
+    (issue #365). Tokens already went to the client, so there is no second
+    ask, and the fixed reason never carries the upstream error text."""
+    fake = HttpxStreamFake(
+        lines=[_CONTENT_LINE, _ERROR_FRAME, _DONE_LINE], payload=_COMPLETE_PAYLOAD
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    items = []
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        async for item in llm.chat_stream([ChatMessage(role="user", content="hi")]):
+            items.append(item)
+    assert [i["type"] for i in items] == ["token"]
+    assert excinfo.value.reason == REASON_UPSTREAM_ERROR
+    assert fake.post_bodies == []  # no replay after a visible token
+    assert "SECRET-UPSTREAM-TEXT" not in str(excinfo.value)
+
+
+@pytest.mark.anyio
+async def test_chat_stream_error_frame_text_never_reaches_logs(caplog):
+    """Client errors and logs carry fixed messages only (issue #365): the
+    upstream error body must not leak through the recovery log line."""
+    fake = HttpxStreamFake(lines=[_ERROR_FRAME, _DONE_LINE], payload=_COMPLETE_PAYLOAD)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    with caplog.at_level(logging.WARNING, logger="mainframe_rag.agent.answer"):
+        items = [item async for item in llm.chat_stream([ChatMessage(role="user", content="hi")])]
+    assert items[-1]["type"] == "done"
+    assert not any("SECRET-UPSTREAM-TEXT" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_chat_stream_done_without_finish_raises_before_post():
+    """[DONE] alone is not completion (issue #365): a stream that never
+    carried an explicit finish is incomplete even though it terminated."""
+    fake = HttpxStreamFake(lines=[_CONTENT_LINE, _DONE_LINE], payload=_COMPLETE_PAYLOAD)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        async for _item in llm.chat_stream([ChatMessage(role="user", content="hi")]):
+            pass
+    assert excinfo.value.reason == REASON_MISSING_FINISH
+    assert fake.post_bodies == []
+
+
+@pytest.mark.parametrize(
+    "bad_frame",
+    [
+        "data: {not json",
+        'data: ["not-a-dict"]',
+        'data: {"choices": ["not-a-dict"]}',
+        'data: {"choices": [{"delta": "not-a-dict"}]}',
+        'data: {"choices": [{"delta": {"content": 5}}]}',
+    ],
+)
+@pytest.mark.anyio
+async def test_chat_stream_malformed_frame_after_content_raises(bad_frame):
+    """A malformed data frame is a failure, never silently skipped (issue
+    #365) — and it surfaces as the fixed reason, not a raw AttributeError."""
+    fake = HttpxStreamFake(
+        lines=[_CONTENT_LINE, bad_frame, _DONE_LINE], payload=_COMPLETE_PAYLOAD
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    items = []
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        async for item in llm.chat_stream([ChatMessage(role="user", content="hi")]):
+            items.append(item)
+    assert [i["type"] for i in items] == ["token"]
+    assert excinfo.value.reason == REASON_MALFORMED_FRAME
+    assert fake.post_bodies == []
+
+
+@pytest.mark.anyio
+async def test_chat_stream_pre_output_error_frame_recovers_via_one_post():
+    """The counterexample cannot fabricate success from the failed attempt,
+    but the existing pre-output bound still allows one non-streaming POST
+    (issue #365 acceptance): an independently successful fallback may
+    complete."""
+    fake = HttpxStreamFake(lines=[_ERROR_FRAME, _DONE_LINE], payload=_COMPLETE_PAYLOAD)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    items = [item async for item in llm.chat_stream([ChatMessage(role="user", content="hi")])]
+    assert len(fake.post_bodies) == 1
+    assert items[0]["type"] == "token" and items[0]["delta"] == "Complete answer"
+    assert items[-1]["type"] == "done" and items[-1]["finish_reason"] == "stop"
+
+
+@pytest.mark.anyio
+async def test_chat_stream_pre_output_error_frame_failed_fallback_raises():
+    """A fallback payload without an explicit finish is itself an incomplete
+    completion: no synthesized "stop" may be shipped as done (issue #365)."""
+    fake = HttpxStreamFake(
+        lines=[_ERROR_FRAME, _DONE_LINE],
+        payload={"choices": [{"message": {"content": "fallback body"}}]},
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    items = []
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        async for item in llm.chat_stream([ChatMessage(role="user", content="hi")]):
+            items.append(item)
+    assert len(fake.post_bodies) == 1
+    assert excinfo.value.reason == REASON_MISSING_FINISH
+    assert all(i["type"] != "done" for i in items)
+
+
+@pytest.mark.anyio
+async def test_achat_error_frame_discards_partial_and_recovers_via_post():
+    """Buffered leg (LLM_STREAM): the failed stream's partial prefix is
+    discarded and the single non-streaming POST returns the whole answer."""
+    fake = HttpxStreamFake(
+        lines=[_CONTENT_LINE, _ERROR_FRAME, _DONE_LINE], payload=_COMPLETE_PAYLOAD
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
+    result = await llm.achat([ChatMessage(role="user", content="hi")])
+    assert len(fake.post_bodies) == 1
+    assert result.content == "Complete answer"
+    assert result.finish_reason == "stop"
+
+
+@pytest.mark.anyio
+async def test_achat_missing_finish_on_both_legs_raises_not_synthesized_stop():
+    """A missing-finish stream falls back once; a missing-finish fallback
+    then fails the request instead of inventing finish_reason "stop"."""
+    fake = HttpxStreamFake(
+        lines=[_CONTENT_LINE, _DONE_LINE],
+        payload={"choices": [{"message": {"content": "fallback body"}}]},
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=True)), client=fake)
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        await llm.achat([ChatMessage(role="user", content="hi")])
+    assert len(fake.post_bodies) == 1
+    assert excinfo.value.reason == REASON_MISSING_FINISH
+
+
+@pytest.mark.parametrize(
+    "payload, reason",
+    [
+        ({"choices": [{"message": {"content": "x"}}]}, REASON_MISSING_FINISH),
+        (
+            {"choices": [{"message": {"content": "x"}, "finish_reason": None}]},
+            REASON_MISSING_FINISH,
+        ),
+        (
+            {"choices": [{"message": {"content": "x"}, "finish_reason": 3}]},
+            REASON_MALFORMED_FRAME,
+        ),
+        ({}, REASON_MALFORMED_FRAME),
+        ({"choices": []}, REASON_MALFORMED_FRAME),
+        ({"choices": [None]}, REASON_MALFORMED_FRAME),
+        (
+            {"choices": [{"message": None, "finish_reason": "stop"}]},
+            REASON_MALFORMED_FRAME,
+        ),
+    ],
+)
+def test_buffered_payload_requires_explicit_finish(payload, reason):
+    """The non-streaming parser (all fallback legs) rejects missing and
+    misshapen terminal shapes with fixed labels (issue #365)."""
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        _chat_result_from_response(payload)
+    assert excinfo.value.reason == reason
+
+
+@pytest.mark.parametrize("finish", ["stop", "length", "content_filter"])
+def test_buffered_payload_preserves_explicit_finish(finish):
+    """Explicit terminal finishes stay literally classified: the parser
+    never rewrites a real value."""
+    result = _chat_result_from_response(
+        {"choices": [{"message": {"content": "x"}, "finish_reason": finish}]}
+    )
+    assert result.finish_reason == finish
 
 
 def test_truncation_error_carries_counts_not_content():
     """Log contract: exception text reaches logs, so it must never carry
-    response text — counts only."""
+    response text — counts and a fixed reason only."""
     err = TruncatedStreamError(7)
     assert "7" in str(err)
+    assert "[DONE]" in str(err)
     assert "Partial" not in str(err)
+    assert err.reason
 
 
 def _client(monkeypatch, synthetic_pdf, llm):
@@ -215,14 +407,12 @@ def hang_client(monkeypatch, synthetic_pdf):
     yield from _client(monkeypatch, synthetic_pdf, HangingLLM())
 
 
-def test_v1_answer_stream_truncation_emits_error_without_final(trunc_client):
-    """Contract pin: token deltas, then event: error, and NO event: final."""
-    resp = trunc_client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
-    assert resp.status_code == 200
+def _answer_sse_events(text: str) -> list[tuple[str, dict]]:
+    """(event-name, payload) pairs from a raw `event:`/`data:` answer stream."""
     events = []
     current_event = "message"
     current_data: list[str] = []
-    for line in resp.text.split("\n"):
+    for line in text.split("\n"):
         line = line.strip()
         if not line:
             if current_data:
@@ -235,6 +425,14 @@ def test_v1_answer_stream_truncation_emits_error_without_final(trunc_client):
             current_data.append(line[5:].strip())
     if current_data:
         events.append((current_event, json.loads("\n".join(current_data))))
+    return events
+
+
+def test_v1_answer_stream_truncation_emits_error_without_final(trunc_client):
+    """Contract pin: token deltas, then event: error, and NO event: final."""
+    resp = trunc_client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
+    assert resp.status_code == 200
+    events = _answer_sse_events(resp.text)
     kinds = [e[0] for e in events]
     assert "token" in kinds
     assert "error" in kinds
@@ -272,6 +470,118 @@ def test_v1_chat_stream_truncation_error_frame_carries_incomplete_state(trunc_cl
         and f["choices"][0].get("finish_reason") is not None
     ]
     assert finished == []
+
+
+@pytest.fixture
+def error_frame_client(monkeypatch, synthetic_pdf):
+    """Real HttpxLLMClient over a fake transport whose stream carries a
+    content token, an upstream error frame, then [DONE] — the exact
+    counterexample from issue #365, driven through the app routes."""
+    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
+    llm = HttpxLLMClient(
+        Settings(**_settings_kwargs(llm_stream=True)),
+        client=HttpxStreamFake(
+            lines=[_CONTENT_LINE, _ERROR_FRAME, _DONE_LINE], payload=_COMPLETE_PAYLOAD
+        ),
+    )
+    yield from _client(monkeypatch, synthetic_pdf, llm)
+
+
+@pytest.fixture
+def missing_finish_client(monkeypatch, synthetic_pdf):
+    """Real client whose stream ends with [DONE] but no finish frame, and
+    whose non-streaming fallback payload also lacks a finish reason."""
+    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
+    llm = HttpxLLMClient(
+        Settings(**_settings_kwargs(llm_stream=True)),
+        client=HttpxStreamFake(
+            lines=[_CONTENT_LINE, _DONE_LINE],
+            payload={"choices": [{"message": {"content": "fallback body"}}]},
+        ),
+    )
+    yield from _client(monkeypatch, synthetic_pdf, llm)
+
+
+def test_v1_answer_real_client_error_frame_emits_fixed_error_without_leak(error_frame_client):
+    """Parser-level failure reaches the wire as the fixed error event and no
+    final; the upstream error text never appears in the response."""
+    resp = error_frame_client.post(
+        "/v1/answer?stream=true", json={"query": "IEA500I command"}
+    )
+    assert resp.status_code == 200
+    events = _answer_sse_events(resp.text)
+    kinds = [e[0] for e in events]
+    assert "token" in kinds
+    assert kinds[-1] == "error"
+    assert "final" not in kinds
+    err = events[-1][1]
+    assert err["code"] == "upstream_error" and err["message"] == "stream failed"
+    assert err["verification_state"] == "generation_incomplete"
+    assert "SECRET-UPSTREAM-TEXT" not in resp.text
+
+
+def test_v1_chat_real_client_error_frame_is_incomplete_no_success_chunk(error_frame_client):
+    """Chat mirror: strict OpenAI error object + [DONE], no chunk claims the
+    failed generation completed."""
+    resp = error_frame_client.post(
+        "/v1/chat",
+        json={"messages": [{"role": "user", "content": "IEA500I command"}], "stream": True},
+    )
+    assert resp.status_code == 200
+    assert "data: [DONE]" in resp.text
+    frames = [
+        json.loads(line[len("data: ") :])
+        for line in resp.text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    error = next(f for f in frames if "error" in f)
+    assert error["verification_state"] == "generation_incomplete"
+    finished = [
+        f
+        for f in frames
+        if "error" not in f and f.get("choices") and f["choices"][0].get("finish_reason")
+    ]
+    assert finished == []
+    assert "SECRET-UPSTREAM-TEXT" not in resp.text
+
+
+def test_v1_answer_real_client_missing_finish_both_legs_is_502(missing_finish_client):
+    """The buffered JSON path cannot synthesize success from a stream and
+    fallback that both lack an explicit finish: fixed 502 envelope only."""
+    resp = missing_finish_client.post("/v1/answer", json={"query": "IEA500I command"})
+    assert resp.status_code == 502
+    assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
+
+
+def test_v1_chat_json_real_client_missing_finish_is_502(missing_finish_client):
+    """Chat JSON shares the answer core: same fixed envelope, never a
+    finish_reason "stop" answer body."""
+    resp = missing_finish_client.post(
+        "/v1/chat", json={"messages": [{"role": "user", "content": "IEA500I command"}]}
+    )
+    assert resp.status_code == 502
+    assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
+
+
+def test_v1_chat_stream_real_client_missing_finish_emits_error_and_done(missing_finish_client):
+    """Chat SSE: the fallback payload itself lacks a finish, so the stream
+    ends with the fixed error frame + [DONE] and no success finish chunk."""
+    resp = missing_finish_client.post(
+        "/v1/chat",
+        json={"messages": [{"role": "user", "content": "IEA500I command"}], "stream": True},
+    )
+    assert resp.status_code == 200
+    frames = [
+        json.loads(line[len("data: ") :])
+        for line in resp.text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    error = next(f for f in frames if "error" in f)
+    assert error["error"] == {"code": "upstream_error", "message": "stream failed"}
+    assert error["verification_state"] == "generation_incomplete"
+    assert all(
+        not (f.get("choices") and f["choices"][0].get("finish_reason")) for f in frames
+    )
 
 
 def _scope(path: str) -> dict:
