@@ -735,11 +735,94 @@ def test_steady_live_with_drifted_revision_fails_closed(tmp_path, monkeypatch):
         "failed run commits no manifest"
 
 
-def test_publish_force_same_contract_reconverges_live(tmp_path, monkeypatch):
-    """Publish-mode --reingest with an UNCHANGED contract reconverges the
-    live generation in place (same staging name): every doc re-embeds, the
-    alias never moves, and no self-swap snapshot churns. Issue #391 F2 keeps
-    this path open for same-generation repair only."""
+def test_publish_force_same_contract_repairs_distinct_generation(tmp_path, monkeypatch):
+    """Issue #391 current packet (counterexample 3): a forced same-contract
+    rebuild must never mutate the serving generation. `--reingest` allocates
+    a distinct resumable repair generation, re-embeds there, verifies, and
+    swaps; the old physical keeps its points AND its manifest for rollback,
+    and no self-swap snapshot churns."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.completion import completion_collection_for
+    from mainframe_rag.ingest.representation import read_manifest_record
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+    points_before = [(p.id, dict(p.payload or {})) for p in fake.collections[live]]
+    manifest_before = read_manifest_record(fake, completion_collection_for(live))
+
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    repaired = fake.aliases[ALIAS]
+    assert repaired != live, "a forced repair must publish a distinct generation"
+    assert repaired.endswith("_1"), f"expected a resumable repair build, got {repaired}"
+    assert [(p.id, dict(p.payload or {})) for p in fake.collections[live]] == points_before, (
+        "the serving generation must be byte-identical after a repair"
+    )
+    assert read_manifest_record(fake, completion_collection_for(live)) == manifest_before, (
+        "the old generation keeps its own contract for rollback"
+    )
+    assert fake.snapshots.get(live), "superseded generation keeps a safety snapshot"
+    assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {DOC_A}
+
+
+def test_forced_repair_never_touches_live_during_build(tmp_path, monkeypatch):
+    """Reader isolation: while the repair build runs, the alias still
+    resolves to the original generation, its points are unchanged, and the
+    serving gate validates that physical as compatible; only the post-verify
+    swap moves the alias."""
+    import asyncio
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import resolve_serving_generation
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+    live_points = [p.id for p in fake.collections[live]]
+
+    observed: dict = {}
+    real_inner = run_ingest._run_impl
+
+    def observing_inner(*args, **kwargs):
+        if kwargs.get("_publish_target") is None:
+            return real_inner(*args, **kwargs)
+        observed["alias_target"] = fake.aliases[ALIAS]
+        observed["live_points"] = [p.id for p in fake.collections[live]]
+        observed["reader"] = asyncio.run(
+            resolve_serving_generation(
+                fake, _settings(qdrant_collection=ALIAS), extraction_rules_version()
+            )
+        )
+        return real_inner(*args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "_run_impl", observing_inner)
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    assert observed["alias_target"] == live, "the alias never moves before the verified swap"
+    assert observed["live_points"] == live_points, "the live physical is not mutated mid-build"
+    physical, outcome, _ = observed["reader"]
+    assert (physical, outcome) == (live, "compatible"), (
+        "an active reader keeps a validated compatible generation during the repair"
+    )
+    assert fake.aliases[ALIAS] != live, "the repair swapped only after verification"
+
+
+def test_forced_repair_partial_corpus_refuses_and_preserves_live(tmp_path, monkeypatch):
+    """A repair build must certify the same complete corpus as any publish:
+    a removed file without an approved removal blocks the swap, the old
+    generation keeps serving, and its points are untouched."""
     from mainframe_rag.ingest import run_ingest
 
     _publish_env(monkeypatch)
@@ -747,17 +830,89 @@ def test_publish_force_same_contract_reconverges_live(tmp_path, monkeypatch):
     monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    _build_doc(corpus, "SA22-0000-00_first")
+    _, b_path = _two_doc_corpus(corpus)
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
-    snaps_before = dict(fake.snapshots)
+    points_before = [(p.id, dict(p.payload or {})) for p in fake.collections[live]]
 
-    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    b_path.rename(tmp_path / "doc_b.pdf.held")
+    with pytest.raises(RuntimeError, match="unmarked residue"):
+        _run_main(monkeypatch, corpus, progress, "--reingest")
     assert fake.aliases[ALIAS] == live
-    assert _live_manifest_revision(fake, live).embed_model_revision == ""
-    assert fake.snapshots == snaps_before, "self-swap must not snapshot"
-    assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
+    assert [(p.id, dict(p.payload or {})) for p in fake.collections[live]] == points_before
+
+
+def test_interrupted_same_contract_repair_resumes_recorded_build(tmp_path, monkeypatch):
+    """A crash mid-repair resumes the recorded repair generation (distinct
+    from live) instead of allocating another suffix; live stays unchanged
+    throughout."""
+    import json
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+    points_before = [(p.id, dict(p.payload or {})) for p in fake.collections[live]]
+
+    real_inner = run_ingest._run_impl
+
+    def dying_inner(*args, **kwargs):
+        if kwargs.get("_publish_target") is None:
+            return real_inner(*args, **kwargs)
+        raise RuntimeError("injected mid-repair crash")
+
+    monkeypatch.setattr(run_ingest, "_run_impl", dying_inner)
+    with pytest.raises(RuntimeError, match="injected mid-repair crash"):
+        _run_main(monkeypatch, corpus, progress, "--reingest")
+    assert fake.aliases[ALIAS] == live
+    state_path = publish_state_path(progress, ALIAS)
+    staging = json.loads(state_path.read_text())["staging"]
+    assert staging.endswith("_1") and staging in fake.collections
+    assert [(p.id, dict(p.payload or {})) for p in fake.collections[live]] == points_before
+
+    monkeypatch.setattr(run_ingest, "_run_impl", real_inner)
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    assert fake.aliases[ALIAS] == staging
+    assert not state_path.exists()
+    assert _gen_collections(fake) == sorted([live, staging])
+
+
+def test_forced_repair_swap_then_crash_finalizes_read_only(tmp_path, monkeypatch):
+    """A crash between the repair swap and sidecar cleanup resumes through
+    the read-only steady-state path: no second repair generation, no
+    mutation of the generation already serving."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+
+    real_clear = run_ingest.clear_publish_state
+    monkeypatch.setattr(run_ingest, "clear_publish_state", lambda *a, **k: False)
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    repaired = fake.aliases[ALIAS]
+    gens_before = _gen_collections(fake)
+    points_after = [(p.id, dict(p.payload or {})) for p in fake.collections[repaired]]
+
+    monkeypatch.setattr(run_ingest, "clear_publish_state", real_clear)
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    assert fake.aliases[ALIAS] == repaired
+    assert _gen_collections(fake) == gens_before, "finalize allocates nothing"
+    assert [(p.id, dict(p.payload or {})) for p in fake.collections[repaired]] == points_after
 
 
 def test_publish_force_revision_change_migrates_to_new_generation(tmp_path, monkeypatch):

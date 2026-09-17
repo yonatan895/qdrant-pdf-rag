@@ -33,7 +33,6 @@ from mainframe_rag.ingest.representation import (
     refuse_limited_migration,
     rekey_manifest,
     require_attested_revision,
-    require_in_place_reconverge,
     serving_outcome,
     write_manifest,
 )
@@ -466,31 +465,6 @@ def test_refuse_limited_migration_matrix():
     legacy._points.setdefault(s.qdrant_collection, []).append(_point())
     with pytest.raises(RuntimeError, match="legacy migration"):
         refuse_limited_migration(legacy, s, _completions(s), RULES)
-
-
-def test_in_place_reconverge_guard():
-    """Alias-mode --reingest may rebuild the live physical only when its
-    stored contract IS the wanted one; legacy/absent and drifted contracts
-    must publish a distinct staging instead."""
-    s = _settings()
-    drift = _settings(embed_model_revision="rev-2")
-
-    absent = SyncStore()
-    with pytest.raises(RuntimeError, match="no readable contract"):
-        require_in_place_reconverge(absent, s, _completions(s), RULES)
-
-    compatible = SyncStore()
-    write_manifest(compatible, _completions(s), s, RULES)
-    require_in_place_reconverge(compatible, s, _completions(s), RULES)  # no raise
-
-    pending = SyncStore()
-    write_manifest(pending, _completions(s), s, RULES, state=STATE_PENDING)
-    require_in_place_reconverge(pending, s, _completions(s), RULES)  # same-contract resume
-
-    drifted = SyncStore()
-    write_manifest(drifted, _completions(s), s, RULES)
-    with pytest.raises(RuntimeError, match="differs from the wanted representation"):
-        require_in_place_reconverge(drifted, drift, _completions(drift), RULES)
 
 
 def test_rekey_carries_pending_state():

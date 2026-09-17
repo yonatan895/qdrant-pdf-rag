@@ -552,8 +552,13 @@ class TestAliasCutoverBypassResistance:
         with pytest.raises(RuntimeError, match="unfinished representation migration"):
             _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl")
 
-    def test_force_reingest_fails_if_contract_corrupt(self, tmp_path, monkeypatch):
-        """Forced in-place reconverge refuses when live carries no readable contract."""
+    def test_force_reingest_repairs_unreadable_contract_as_distinct_generation(
+        self, tmp_path, monkeypatch
+    ):
+        """Issue #391 current packet: a forced rebuild of a live generation
+        with no readable contract must not mutate it in place. The repair
+        publishes a distinct generation whose contract is committed only
+        after the full re-embed; the old physical (contract-less) is kept."""
         _publish_env(monkeypatch)
         fake = PublishFake()
         monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
@@ -565,6 +570,7 @@ class TestAliasCutoverBypassResistance:
         # First publish succeeds
         assert _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl") == 0
         live = fake.aliases[ALIAS]
+        live_points = [p.id for p in fake.collections[live]]
 
         # Corrupt manifest
         completions = f"{live}__completions"
@@ -573,6 +579,11 @@ class TestAliasCutoverBypassResistance:
             p for p in fake.collections.get(completions, []) if str(p.id) != mp_id
         ]
 
-        # Rerun with --reingest
-        with pytest.raises(RuntimeError, match="refusing to reconverge.*no readable contract"):
-            _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl", "--reingest")
+        # Rerun with --reingest: distinct repair generation, old retained.
+        assert _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl", "--reingest") == 0
+        repaired = fake.aliases[ALIAS]
+        assert repaired != live
+        assert [p.id for p in fake.collections[live]] == live_points
+        assert read_manifest_record(fake, f"{live}__completions") is None
+        record = read_manifest_record(fake, f"{repaired}__completions")
+        assert record is not None and record.state == STATE_COMMITTED

@@ -350,35 +350,6 @@ def refuse_limited_migration(
         )
 
 
-def require_in_place_reconverge(
-    client: QdrantPoints, settings: Settings, completions_collection: str, rules_v: str
-) -> None:
-    """Guard the alias-mode forced in-place reconverge (issue #391 F2):
-    `--reingest` may rebuild the live physical only when its stored contract
-    IS the wanted contract (committed, or pending from an interrupted run of
-    the same contract). A representation change — or a legacy/absent
-    contract the caller cannot verify — must address a distinct staging
-    generation; force never disables reader isolation. Read-only; raises
-    before the alias target is touched."""
-    stored = read_manifest_record(client, completions_collection)
-    wanted = build_manifest(settings, rules_v)
-    if stored is None:
-        raise RuntimeError(
-            f"refusing to reconverge {settings.qdrant_collection!r} in place: it carries "
-            "no readable contract (legacy or absent), so the wanted representation "
-            "cannot be proven equal — a migration must publish a distinct staging "
-            "generation. Re-run without --reingest for the canonical remediation."
-        )
-    if compare_manifests(stored.manifest, wanted)[0] == REEMBED_REQUIRED:
-        raise RuntimeError(
-            f"refusing to reconverge {settings.qdrant_collection!r} in place: its stored "
-            "contract differs from the wanted representation (revision/embedding drift), "
-            "so rebuilding it would mutate the serving generation. Publish a distinct "
-            "staging generation instead (the derived staging name changes with the "
-            "representation fingerprint; re-run without --reingest to see the drift)."
-        )
-
-
 # Re-embed-required manifest fields (issue #362 req 2): a change means the
 # stored vectors are stale — skips and serving stop until a deliberate
 # migration re-embeds. schema_version rides along: an unknown contract is
