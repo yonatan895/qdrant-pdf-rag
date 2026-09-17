@@ -192,10 +192,11 @@ structured across the 7 risk categories (`prose-only`, `test/tool-only`,
 `packaging/deploy`, `release promotion`).
 
 **CI claims discipline:** A documented merge obligation is not automatically
-enforced CI: do not claim checks are automated in CI before Increment B implementation.
-The current `ci.yml` unit job invokes pytest on non-docs PRs, not the entire `make check` command;
-`agent-context.yml` runs context checks. Full automated gating across the verification
-ladder is planned under Increment B (#411 / #370).
+enforced CI: do not claim checks are automated in CI unless implemented. Under Increment B
+(#411 / #370), PR CI enforces deterministic lint and type checking (`ci.yml` `lint` job running
+`ruff check src tests` and `mypy src`), safe PR concurrency cancellation, profile-selected review
+environments with runtime manifests (`candidate-manifest.json`), Schema v1 review result validation,
+and candidate acceptance summaries (`scripts/review_tooling.py`).
 
 **Resource boundaries & invariant protection:** Prose/docs and test/tooling PRs
 must respect their resource boundary and avoid starting heavy services (GPU, Qdrant,

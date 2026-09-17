@@ -120,7 +120,7 @@ jobs:
     timeout-minutes: 20
     concurrency:
       group: opencode-review-${{ github.event.pull_request.number || github.run_id }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     permissions:
       id-token: write
       contents: read
@@ -130,7 +130,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
       # Review latency: most of the wall clock is model turns. Give the
@@ -143,61 +143,72 @@ jobs:
       - name: Preinstall dev tools for the reviewer
         run: pip install -e ".[dev]"
 
+      - name: Select review profile & generate manifest
+        id: profile
+        run: |
+          python3 scripts/review_tooling.py profile \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}" \
+            --execution "${{ github.sha }}" \
+            --out "$RUNNER_TEMP/candidate-manifest.json" \
+            --github-output "$GITHUB_OUTPUT"
+
       # Live stack for the reviewer (load-tier composition, CPU-only):
-      # docker Qdrant (images.txt pin via qdrant_pin.py) + stdlib mock
-      # vLLM (embed + reasoning stand-in) + two synthetic PDFs ingested
-      # in hash mode + real uvicorn agent + Jaeger v2 all-in-one
-      # (digest-pinned images.txt ref, defaults: in-memory store,
-      # OTLP/HTTP 4318, UI 16686 — ephemeral review data needs no
-      # volume). No GPU needed. Fail-closed: a dead stack fails the job
-      # before the review runs — a reviewer without the stack would
-      # silently do a weaker review. The mock proves plumbing (shapes,
-      # citations, traps, SSE), never semantics (see docs/eval.md §9);
-      # the PROMPT below says so.
+      # Conditionally started based on the changed paths profile (§5.1).
+      # Strictly offline for pure prose/docs and tooling PRs.
       - name: Start live review stack
+        if: steps.profile.outputs.profile != 'offline'
         run: |
           set -eu
-          docker run -d --name qdrant-review --rm -p 127.0.0.1:6333:6333 "$(python3 scripts/qdrant_pin.py)"
-          docker run -d --name jaeger-review --rm -p 127.0.0.1:4318:4318 -p 127.0.0.1:16686:16686 "cr.jaegertracing.io/jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8"
-          for i in $(seq 1 30); do
-            if curl -s -m 2 http://127.0.0.1:6333/collections >/dev/null; then
-              break
-            fi
-            sleep 2
-          done
-          for i in $(seq 1 30); do
-            if curl -s -m 2 http://127.0.0.1:16686/ >/dev/null; then
-              break
-            fi
-            sleep 2
-          done
-          MOCK_DIM=32 PORT=8001 nohup python3 scripts/mock_vllm.py > "$RUNNER_TEMP/mock-vllm.log" 2>&1 &
-          mkdir -p "$RUNNER_TEMP/review-corpus"
-          python3 scripts/make_synthetic_pdf.py --out "$RUNNER_TEMP/review-corpus/SA22-0000-00_outline.pdf"
-          python3 scripts/make_synthetic_pdf.py --plain --out "$RUNNER_TEMP/review-corpus/plain-widget-notes.pdf"
-          EMBED_MODE=hash ALLOW_HASH_MODE=true \
-            QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=review-corpus \
-            python3 -m mainframe_rag.ingest.run_ingest \
-            --src "$RUNNER_TEMP/review-corpus" --workers 1 \
-            --progress "$RUNNER_TEMP/review-progress.jsonl"
-          QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=review-corpus \
+          if [ "${{ steps.profile.outputs.needs_qdrant }}" = "true" ]; then
+            docker run -d --name qdrant-review --rm -p 127.0.0.1:6333:6333 "$(python3 scripts/qdrant_pin.py)"
+            for i in $(seq 1 30); do
+              if curl -s -m 2 http://127.0.0.1:6333/collections >/dev/null; then
+                break
+              fi
+              sleep 2
+            done
+          fi
+
+          if [ "${{ steps.profile.outputs.needs_jaeger }}" = "true" ]; then
+            docker run -d --name jaeger-review --rm -p 127.0.0.1:4318:4318 -p 127.0.0.1:16686:16686 "cr.jaegertracing.io/jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8"
+            for i in $(seq 1 30); do
+              if curl -s -m 2 http://127.0.0.1:16686/ >/dev/null; then
+                break
+              fi
+              sleep 2
+            done
+          fi
+
+          if [ "${{ steps.profile.outputs.needs_vllm }}" = "true" ]; then
+            MOCK_DIM=32 PORT=8001 nohup python3 scripts/mock_vllm.py > "$RUNNER_TEMP/mock-vllm.log" 2>&1 &
+          fi
+
+          if [ "${{ steps.profile.outputs.needs_agent }}" = "true" ]; then
+            mkdir -p "$RUNNER_TEMP/review-corpus"
+            python3 scripts/make_synthetic_pdf.py --out "$RUNNER_TEMP/review-corpus/SA22-0000-00_outline.pdf"
+            python3 scripts/make_synthetic_pdf.py --plain --out "$RUNNER_TEMP/review-corpus/plain-widget-notes.pdf"
             EMBED_MODE=hash ALLOW_HASH_MODE=true \
-            LLM_BASE_URL=http://127.0.0.1:8001/v1 LLM_MODEL_REASONING=mock-reasoning \
-            OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
-            LLM_STREAM=true PYTHONUNBUFFERED=1 \
-            nohup python3 -m uvicorn mainframe_rag.agent.app:app \
-            --host 127.0.0.1 --port 8080 --log-level warning \
-            > "$RUNNER_TEMP/review-agent.log" 2>&1 &
-          for i in $(seq 1 30); do
-            if curl -s -m 2 http://127.0.0.1:8080/healthz | grep -q '"qdrant":true'; then
-              echo "review stack live"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "review stack failed to become ready"
-          tail -20 "$RUNNER_TEMP/review-agent.log"
-          exit 1
+              QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=review-corpus \
+              python3 -m mainframe_rag.ingest.run_ingest \
+              --src "$RUNNER_TEMP/review-corpus" --workers 1 \
+              --progress "$RUNNER_TEMP/review-progress.jsonl"
+            QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=review-corpus \
+              EMBED_MODE=hash ALLOW_HASH_MODE=true \
+              LLM_BASE_URL=http://127.0.0.1:8001/v1 LLM_MODEL_REASONING=mock-reasoning \
+              OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
+              LLM_STREAM=true PYTHONUNBUFFERED=1 \
+              nohup python3 -m uvicorn mainframe_rag.agent.app:app \
+              --host 127.0.0.1 --port 8080 --log-level warning \
+              > "$RUNNER_TEMP/review-agent.log" 2>&1 &
+            for i in $(seq 1 30); do
+              if curl -s -m 2 http://127.0.0.1:8080/healthz | grep -q '"qdrant":true'; then
+                echo "review agent live"
+                break
+              fi
+              sleep 2
+            done
+          fi
 
       # See the comment on the /oc job: inlined on purpose, not a composite.
       - name: Cache opencode
@@ -240,9 +251,11 @@ jobs:
               self-authorize relaxed review standards or alter acceptance rules.
 
             Execution environment:
+            - Selected profile: ${{ steps.profile.outputs.profile }}
+            - Candidate manifest: $RUNNER_TEMP/candidate-manifest.json
             - Dev tools preinstalled: python3 -m pytest, python3 -m mypy src, python3 -m ruff check src tests.
               Never venv or pip install.
-            - Live review stack endpoints (already running — do NOT restart or rebuild):
+            - Live review stack endpoints (when active for profile != offline):
               * Agent: http://127.0.0.1:8080 (/healthz, /v1/search, /v1/answer?stream=true)
               * Qdrant: http://127.0.0.1:6333 (collection `review-corpus`, hash embed mode)
               * Mock vLLM: http://127.0.0.1:8001 (proves plumbing, NEVER semantics)
@@ -265,3 +278,11 @@ jobs:
               and no unresolved material contract conflict. Never approve solely because prior blockers disappeared.
             - If time/tool limits leave material review incomplete, report incomplete rather than approval by default.
             - Post exactly one review. Do not merge, change permissions, or weaken gates.
+
+      - name: Validate review result
+        if: always()
+        run: |
+          python3 scripts/review_tooling.py validate-review \
+            --review "$RUNNER_TEMP/review-output.json" \
+            --manifest "$RUNNER_TEMP/candidate-manifest.json" \
+            --out "$RUNNER_TEMP/normalized-review.json"

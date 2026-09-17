@@ -47,15 +47,17 @@ on:
       - '!vendor/**'
 permissions:
   contents: read
+
+concurrency:
+  group: agent-context-${{ github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check-context:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     timeout-minutes: 5
-    concurrency:
-      group: agent-context-${{ github.ref || github.run_id }}
-      cancel-in-progress: true
     env:
       SHARE: 'false'
     steps:
