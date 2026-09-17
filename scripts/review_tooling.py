@@ -42,18 +42,54 @@ PROSE_PATTERNS = [
 ]
 
 TOOLING_PATTERNS = [
-    "scripts/check_agent_context.py",
-    "scripts/agent_doctor.py",
-    "scripts/review_tooling.py",
-    "scripts/review_*.py",
+    "scripts/**",
+    "benchmarks/**",
+    "vendor/**",
     "tests/test_agent_context.py",
     "tests/test_agent_doctor.py",
     "tests/test_review_tooling.py",
     ".github/workflows/**",
+    ".gitlab-ci.yml",
+    "NOTICE*",
     "Makefile",
     ".gitignore",
     ".gitattributes",
     ".editorconfig",
+]
+
+# Packaging/deployment/defaults/identity surfaces (verification table row
+# `packaging/deploy`). These select the lightweight `deploy` profile: no heavy
+# services, but the packaging lane and unit tests are required. Ambiguity with
+# a code category (storage/http/tracing) takes the union (FULL) instead.
+DEPLOY_PATTERNS = [
+    "deploy/**",
+    "images/**",
+    "overlays/**",
+    "oc-mirror/**",
+    "charts/**",
+    "Dockerfile*",
+    "Containerfile*",
+    "*.dockerfile",
+    ".dockerignore",
+    "docker-compose*.yml",
+    "docker-compose*.yaml",
+    "compose*.yml",
+    "compose*.yaml",
+    "scripts/airgap/**",
+    "scripts/bootstrap.sh",
+    "scripts/bootstrap_ci.py",
+    "pyproject.toml",
+    "requirements*.txt",
+    "requirements*.in",
+    "constraints*.txt",
+    "*.lock",
+    "airgap.env.example",
+    "tests/test_airgap_*.py",
+    "tests/helpers_airgap.py",
+]
+
+TEST_PATTERNS = [
+    "tests/**",
 ]
 
 STORAGE_PATTERNS = [
@@ -62,7 +98,6 @@ STORAGE_PATTERNS = [
     "scripts/fetch_bm25_weights.py",
     "bm25-weights.sha256",
     "images.txt",
-    "charts/**",
     "evals/**",
     "tests/test_ingest*.py",
     "tests/test_qdrant*.py",
@@ -96,6 +131,7 @@ TRACING_PATTERNS = [
 
 class ProfileName(str, enum.Enum):
     OFFLINE = "offline"
+    DEPLOY = "deploy"
     STORAGE = "storage"
     HTTP = "http"
     TRACING = "tracing"
@@ -192,54 +228,73 @@ class ProfileDecision:
         return "agent" in self.services
 
 
+ALL_SERVICES = ["agent", "jaeger", "qdrant", "vllm"]
+
+
 def classify_paths(paths: Iterable[str]) -> ProfileDecision:
     path_list = [p.strip() for p in paths if p.strip()]
     if not path_list:
-        return ProfileDecision(ProfileName.OFFLINE, [], ["none"])
+        # An empty change set cannot be classified safely: an unreadable diff,
+        # a bad SHA or a shallow checkout must not silently downgrade review.
+        return ProfileDecision(ProfileName.FULL, list(ALL_SERVICES), ["unclassified_empty"])
 
     categories: set[str] = set()
     services: set[str] = set()
 
     for path in path_list:
         matched = False
+        is_markdown = path.replace("\\", "/").endswith((".md", ".markdown"))
         if _match_any(path, PROSE_PATTERNS):
             categories.add("prose")
             matched = True
         if _match_any(path, TOOLING_PATTERNS):
             categories.add("tooling")
             matched = True
-        if _match_any(path, STORAGE_PATTERNS):
-            categories.add("storage")
-            services.add("qdrant")
+        if _match_any(path, TEST_PATTERNS):
+            categories.add("tests")
             matched = True
-        if _match_any(path, HTTP_PATTERNS):
-            categories.add("http")
-            services.add("qdrant")
-            services.add("vllm")
-            services.add("agent")
+        if _match_any(path, DEPLOY_PATTERNS):
+            categories.add("deploy")
             matched = True
-        if _match_any(path, TRACING_PATTERNS):
-            categories.add("tracing")
-            services.add("jaeger")
-            matched = True
+        # Markdown never selects a live service by itself: the prose resource
+        # boundary is strictly offline even when the file sits under an
+        # evals/, charts/ or src/ tree. Tooling/tests/deploy still apply.
+        if not is_markdown:
+            if _match_any(path, STORAGE_PATTERNS):
+                categories.add("storage")
+                services.add("qdrant")
+                matched = True
+            if _match_any(path, HTTP_PATTERNS):
+                categories.add("http")
+                services.add("qdrant")
+                services.add("vllm")
+                services.add("agent")
+                matched = True
+            if _match_any(path, TRACING_PATTERNS):
+                categories.add("tracing")
+                services.add("jaeger")
+                matched = True
 
         if not matched:
-            # Any unclassified file in src/ or repository triggers full profile
-            if path.startswith("src/"):
-                categories.add("src_unclassified")
-                services.update(["qdrant", "vllm", "jaeger", "agent"])
-            else:
-                categories.add("general_unclassified")
+            # Fail closed: an unmapped executable/config path selects the
+            # broader applicable checks instead of a silent docs-only pass.
+            categories.add("unclassified")
+            services.update(ALL_SERVICES)
 
-    code_categories = categories - {"prose", "tooling", "general_unclassified"}
+    code_categories = categories - {"prose", "tooling", "tests", "unclassified"}
     sorted_cats = sorted(categories)
 
+    if "unclassified" in categories:
+        return ProfileDecision(ProfileName.FULL, list(ALL_SERVICES), sorted_cats)
+
     if not code_categories:
-        # Strictly offline CPU: prose and/or tooling only
+        # Strictly offline CPU: prose and/or tooling/tests only
         return ProfileDecision(ProfileName.OFFLINE, [], sorted_cats)
 
     # Determine profile name based on active code categories
-    if code_categories == {"storage"}:
+    if code_categories == {"deploy"}:
+        return ProfileDecision(ProfileName.DEPLOY, sorted(services), sorted_cats)
+    elif code_categories == {"storage"}:
         return ProfileDecision(ProfileName.STORAGE, sorted(services), sorted_cats)
     elif code_categories == {"http"}:
         return ProfileDecision(ProfileName.HTTP, sorted(services), sorted_cats)
@@ -594,19 +649,28 @@ def validate_review_payload(
 # -----------------------------------------------------------------------------
 
 LANE_REQUIREMENTS_BY_PROFILE: dict[str, set[str]] = {
-    ProfileName.OFFLINE.value: {"context_check", "lint_and_types", "reviewer"},
+    # Offline base is the minimal applicable set; tooling/tests categories add
+    # lint_and_types and unit_tests in build_acceptance_summary. Prose-only
+    # changes never run the path-filtered ci/pytest lanes by policy.
+    ProfileName.OFFLINE.value: {"context_check", "reviewer"},
+    ProfileName.DEPLOY.value: {"context_check", "lint_and_types", "unit_tests", "packaging", "reviewer"},
     ProfileName.STORAGE.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "gate_l1", "reviewer"},
-    ProfileName.HTTP.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "agent_probes", "reviewer"},
+    ProfileName.HTTP.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "reviewer"},
     ProfileName.TRACING.value: {"context_check", "lint_and_types", "unit_tests", "reviewer"},
-    ProfileName.FULL.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "gate_l1", "agent_probes", "reviewer"},
+    ProfileName.FULL.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "gate_l1", "reviewer"},
 }
 
+# agent_probes and eval_retrieval have no CI producer yet: live agent probes
+# stay a reviewer-side obligation (HTTP/lifecycle row) and semantic retrieval
+# evaluation is mode/venue-gated. They are reported as UNSELECTED unless a
+# producer supplies a status, and never block acceptance by themselves.
 ALL_KNOWN_LANES = [
     "context_check",
     "lint_and_types",
     "unit_tests",
     "simulation",
     "gate_l1",
+    "packaging",
     "agent_probes",
     "eval_retrieval",
     "reviewer",
@@ -718,10 +782,11 @@ def build_acceptance_summary(
         LANE_REQUIREMENTS_BY_PROFILE[ProfileName.FULL.value],
     )
 
-    # In case matched_categories has tooling/tests in offline profile, require unit_tests
+    # Tooling/tests changes always owe the deterministic Python lanes. This is
+    # additive on top of the profile sets (deploy already requires them).
     matched_cats = manifest.get("matched_categories", [])
     if "tooling" in matched_cats or "tests" in matched_cats:
-        required_lanes = set(required_lanes) | {"unit_tests"}
+        required_lanes = set(required_lanes) | {"lint_and_types", "unit_tests"}
 
     head_sha = str(manifest.get("head_sha", ""))
     base_sha = str(manifest.get("base_sha", ""))
@@ -892,6 +957,8 @@ def cmd_validate_review(args: argparse.Namespace) -> int:
                 manifest = json.loads(mp.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError, ValueError, UnicodeDecodeError) as e:
                 parse_error = f"Error reading manifest {manifest_path}: {e}"
+        else:
+            parse_error = f"Manifest file not found: {manifest_path}"
 
     normalized = validate_review_payload(
         raw_payload=raw_payload,
@@ -912,6 +979,11 @@ def cmd_validate_review(args: argparse.Namespace) -> int:
 
     if not args.quiet:
         print(out_json)
+
+    if args.require_payload and (raw_payload is None or normalized.validation_errors):
+        # Missing/malformed/mis-attributed reviewer output is a failed review
+        # execution. A valid `changes_required` verdict is NOT a failure here.
+        return 2
 
     if args.check:
         if normalized.merge_readiness == MergeReadiness.READY_FOR_MAINTAINER.value:
@@ -1033,6 +1105,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_val.add_argument("--expected-execution", help="Expected execution SHA")
     p_val.add_argument("--check-git", action="store_true", help="Validate commits and cleanliness with git")
     p_val.add_argument("--out", help="Path to write normalized review JSON")
+    p_val.add_argument(
+        "--require-payload",
+        action="store_true",
+        help="Exit 2 unless the payload parsed and passed structural/attribution validation",
+    )
     p_val.add_argument("--check", action="store_true", help="Exit 0 if ready_for_maintainer, 1 if not_ready")
     p_val.add_argument("--quiet", action="store_true", help="Do not print normalized JSON to stdout")
     p_val.set_defaults(func=cmd_validate_review)

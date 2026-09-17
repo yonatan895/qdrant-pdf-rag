@@ -194,9 +194,24 @@ structured across the 7 risk categories (`prose-only`, `test/tool-only`,
 **CI claims discipline:** A documented merge obligation is not automatically
 enforced CI: do not claim checks are automated in CI unless implemented. Under Increment B
 (#411 / #370), PR CI enforces deterministic lint and type checking (`ci.yml` `lint` job running
-`ruff check src tests` and `mypy src`), safe PR concurrency cancellation, profile-selected review
-environments with runtime manifests (`candidate-manifest.json`), Schema v1 review result validation,
-and candidate acceptance summaries (`scripts/review_tooling.py`).
+`ruff check src tests` and `mypy src`), safe PR concurrency cancellation, and profile-selected
+review environments with runtime manifests (`candidate-manifest.json`). The reviewer job gates its
+machine-readable result with `scripts/review_tooling.py validate-review --require-payload
+--check-git`: a missing, malformed, or mis-attributed payload fails the job, while a valid
+`changes_required` verdict remains a successful review execution. Candidate acceptance summaries
+(`scripts/review_tooling.py summarize-acceptance`) are implemented and unit-tested but are not yet
+wired as a required check or an always-scheduled PR workflow; that gating is the tracked follow-up
+to this increment and must not be claimed as enforcement until the maintainer configures the check.
+
+**Review profile selection:** `scripts/review_tooling.py profile` is the executable projection of
+[verification minimums](live-stack.md#verification-minimums), not a second policy language. It maps
+changed paths to the categories `prose`, `tooling`, `tests`, `deploy`, `storage`, `http`, and
+`tracing`; cross-layer unions select `full`. `deploy` covers the packaging/deployment/defaults
+surfaces (Containerfiles, `deploy/` kustomize overlays, `pyproject.toml`, lockfiles,
+`scripts/airgap/`, air-gap shell tests) without heavy services. Unmapped paths and unreadable or
+empty diffs fail
+closed to `full`, so an ambiguous executable change is never reviewed as docs-only. The profile
+selects the reviewer environment and the acceptance lanes; it does not waive any required evidence.
 
 **Resource boundaries & invariant protection:** Prose/docs and test/tooling PRs
 must respect their resource boundary and avoid starting heavy services (GPU, Qdrant,

@@ -67,9 +67,86 @@ class TestProfileClassification(unittest.TestCase):
         self.assertFalse(decision.needs_jaeger)
         self.assertFalse(decision.needs_agent)
 
-    def test_classify_empty_paths(self):
+    def test_classify_empty_paths_fails_closed(self):
+        # An empty change set means the diff could not be read (bad SHA,
+        # shallow checkout). It must not silently downgrade to a docs review.
         decision = classify_paths([])
+        self.assertEqual(decision.profile, ProfileName.FULL)
+        self.assertEqual(set(decision.services), {"agent", "jaeger", "qdrant", "vllm"})
+        self.assertIn("unclassified_empty", decision.matched_categories)
+
+    def test_classify_deploy_and_packaging_paths(self):
+        paths = [
+            "Dockerfile",
+            "images/Containerfile.agent",
+            "pyproject.toml",
+            "requirements.lock.txt",
+            "scripts/airgap/deploy.sh",
+            "deploy/kustomize/base/agent.yaml",
+            "airgap.env.example",
+            "tests/test_airgap_deploy_sh.py",
+        ]
+        decision = classify_paths(paths)
+        self.assertEqual(decision.profile, ProfileName.DEPLOY)
+        self.assertEqual(decision.services, [])
+        self.assertFalse(decision.needs_qdrant)
+        self.assertFalse(decision.needs_vllm)
+        self.assertFalse(decision.needs_jaeger)
+        self.assertFalse(decision.needs_agent)
+
+    def test_classify_charts_and_compose_as_deploy(self):
+        decision = classify_paths(["charts/mainframe-rag/values.yaml", "docker-compose.ci.yml"])
+        self.assertEqual(decision.profile, ProfileName.DEPLOY)
+        self.assertEqual(decision.services, [])
+
+    def test_classify_unclassified_path_fails_closed(self):
+        decision = classify_paths(["mystery.bin"])
+        self.assertEqual(decision.profile, ProfileName.FULL)
+        self.assertEqual(set(decision.services), {"agent", "jaeger", "qdrant", "vllm"})
+        self.assertIn("unclassified", decision.matched_categories)
+
+    def test_classify_tests_only_offline_with_tests_category(self):
+        for path in ("tests/test_config.py", "tests/conftest.py", "tests/test_airgap_deploy_sh.py"):
+            decision = classify_paths([path])
+            if path.startswith("tests/test_airgap_"):
+                self.assertEqual(decision.profile, ProfileName.DEPLOY)
+            else:
+                self.assertEqual(decision.profile, ProfileName.OFFLINE)
+                self.assertIn("tests", decision.matched_categories)
+
+    def test_classify_scripts_benchmarks_and_ci_mirror_as_tooling(self):
+        for path in ("scripts/gate_l1.py", "benchmarks/harness.json", ".gitlab-ci.yml",
+                     "vendor/qdrant-skills.sha"):
+            decision = classify_paths([path])
+            self.assertEqual(decision.profile, ProfileName.OFFLINE)
+            self.assertIn("tooling", decision.matched_categories)
+
+    def test_markdown_never_selects_live_services(self):
+        # The prose resource boundary is strictly offline even when the file
+        # lives under a service-owned tree.
+        decision = classify_paths(["evals/README.md"])
         self.assertEqual(decision.profile, ProfileName.OFFLINE)
+        self.assertEqual(decision.services, [])
+        self.assertEqual(decision.matched_categories, ["prose"])
+
+        ingest_doc = classify_paths(["src/mainframe_rag/ingest/README.md"])
+        self.assertEqual(ingest_doc.profile, ProfileName.OFFLINE)
+        self.assertEqual(ingest_doc.services, [])
+
+    def test_markdown_under_tests_keeps_test_lane(self):
+        decision = classify_paths(["tests/fixtures/notes.md"])
+        self.assertEqual(decision.profile, ProfileName.OFFLINE)
+        self.assertEqual(decision.services, [])
+        self.assertIn("tests", decision.matched_categories)
+
+    def test_classify_deploy_plus_code_takes_union_full(self):
+        decision = classify_paths(["pyproject.toml", "src/mainframe_rag/ingest/publish.py"])
+        self.assertEqual(decision.profile, ProfileName.FULL)
+        self.assertEqual(decision.services, ["qdrant"])
+
+    def test_classify_mixed_docs_and_deploy_stays_deploy(self):
+        decision = classify_paths(["docs/testing.md", "Dockerfile"])
+        self.assertEqual(decision.profile, ProfileName.DEPLOY)
         self.assertEqual(decision.services, [])
 
     def test_classify_storage(self):
@@ -480,6 +557,77 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
         self.assertFalse(summary.all_prerequisites_met)
         self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
 
+    def test_deploy_profile_requires_packaging_lane(self):
+        manifest = self._sample_manifest(profile="deploy")
+        lane_statuses = {
+            "context_check": "success",
+            "lint_and_types": "success",
+            "unit_tests": "success",
+            # packaging omitted: the airgap dry-run lane never ran
+            "reviewer": "success",
+        }
+        summary = build_acceptance_summary(manifest, lane_statuses)
+        self.assertFalse(summary.all_prerequisites_met)
+        self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
+        packaging = next(l for l in summary.lanes if l.name == "packaging")
+        self.assertTrue(packaging.required)
+        self.assertEqual(packaging.state, LaneState.SELECTED_MISSING)
+
+    def test_deploy_profile_packaging_skipped_blocks(self):
+        manifest = self._sample_manifest(profile="deploy")
+        lane_statuses = {
+            "context_check": "success",
+            "lint_and_types": "success",
+            "unit_tests": "success",
+            "packaging": "skipped",
+            "reviewer": "success",
+        }
+        summary = build_acceptance_summary(manifest, lane_statuses)
+        self.assertFalse(summary.all_prerequisites_met)
+        packaging = next(l for l in summary.lanes if l.name == "packaging")
+        self.assertEqual(packaging.state, LaneState.SELECTED_SKIPPED)
+
+    def test_offline_tooling_requires_lint_and_unit_lanes(self):
+        manifest = self._sample_manifest(profile="offline")
+        manifest["matched_categories"] = ["tooling"]
+        lane_statuses = {"context_check": "success", "reviewer": "success"}
+        summary = build_acceptance_summary(manifest, lane_statuses)
+        self.assertFalse(summary.all_prerequisites_met)
+        lint = next(l for l in summary.lanes if l.name == "lint_and_types")
+        unit = next(l for l in summary.lanes if l.name == "unit_tests")
+        self.assertEqual(lint.state, LaneState.SELECTED_MISSING)
+        self.assertEqual(unit.state, LaneState.SELECTED_MISSING)
+
+    def test_offline_prose_does_not_require_path_filtered_lanes(self):
+        # ci.yml ignores markdown-only PRs, so lint/unit lanes have no producer
+        # for prose; requiring them would make docs-only acceptance unreachable.
+        manifest = self._sample_manifest(profile="offline")
+        lane_statuses = {"context_check": "success", "reviewer": "success"}
+        summary = build_acceptance_summary(manifest, lane_statuses)
+        self.assertTrue(summary.all_prerequisites_met)
+        lint = next(l for l in summary.lanes if l.name == "lint_and_types")
+        unit = next(l for l in summary.lanes if l.name == "unit_tests")
+        self.assertEqual(lint.state, LaneState.UNSELECTED)
+        self.assertEqual(unit.state, LaneState.UNSELECTED)
+
+    def test_producerless_lanes_are_unselected_and_do_not_block(self):
+        # agent_probes/eval_retrieval have no CI producer; they must never
+        # block purely by being absent.
+        manifest = self._sample_manifest(profile="http")
+        lane_statuses = {
+            "context_check": "success",
+            "lint_and_types": "success",
+            "unit_tests": "success",
+            "simulation": "success",
+            "reviewer": "success",
+        }
+        summary = build_acceptance_summary(manifest, lane_statuses)
+        self.assertTrue(summary.all_prerequisites_met)
+        for name in ("agent_probes", "eval_retrieval"):
+            lane = next(l for l in summary.lanes if l.name == name)
+            self.assertFalse(lane.required)
+            self.assertEqual(lane.state, LaneState.UNSELECTED)
+
     def test_all_selected_lanes_passed_produces_ready(self):
         manifest = self._sample_manifest(profile="http")
         lane_statuses = {
@@ -599,6 +747,102 @@ class TestReviewToolingCLI(unittest.TestCase):
             )
             self.assertEqual(res_inv.returncode, 1)
 
+    def test_cli_validate_review_require_payload_flag(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_payload = {
+                "schema_version": 1,
+                "head_sha": "a" * 40,
+                "base_sha": "b" * 40,
+                "execution_sha": "c" * 40,
+                "code_assessment": "acceptable",
+                "verification": "complete",
+                "candidate_currentness": "current",
+                "merge_readiness": "ready_for_maintainer",
+                "material_findings": [],
+                "evidence": {},
+            }
+
+            # A valid changes_required verdict is a successful review execution
+            # (structural validation passes even though the candidate is not ready).
+            findings_file = pathlib.Path(tmpdir) / "findings_review.json"
+            findings_payload = dict(base_payload)
+            findings_payload["code_assessment"] = "changes_required"
+            findings_payload["verification"] = "incomplete"
+            findings_payload["merge_readiness"] = "not_ready"
+            findings_payload["material_findings"] = [
+                {"id": "F1", "disposition": "unresolved", "description": "Open finding"}
+            ]
+            findings_file.write_text(json.dumps(findings_payload))
+            res_findings = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/review_tooling.py",
+                    "validate-review",
+                    "--review",
+                    str(findings_file),
+                    "--require-payload",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(res_findings.returncode, 0)
+
+            # Missing payload file fails the review execution.
+            missing = pathlib.Path(tmpdir) / "absent.json"
+            res_missing = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/review_tooling.py",
+                    "validate-review",
+                    "--review",
+                    str(missing),
+                    "--require-payload",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(res_missing.returncode, 2)
+
+            # Unparseable payload fails the review execution.
+            malformed_file = pathlib.Path(tmpdir) / "malformed.md"
+            malformed_file.write_text("Review prose with no machine-readable block.")
+            res_malformed = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/review_tooling.py",
+                    "validate-review",
+                    "--review",
+                    str(malformed_file),
+                    "--require-payload",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(res_malformed.returncode, 2)
+
+            # Forged readiness (override applied) fails structural validation.
+            forged_file = pathlib.Path(tmpdir) / "forged.json"
+            forged_payload = dict(base_payload)
+            forged_payload["code_assessment"] = "changes_required"
+            forged_file.write_text(json.dumps(forged_payload))
+            res_forged = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/review_tooling.py",
+                    "validate-review",
+                    "--review",
+                    str(forged_file),
+                    "--require-payload",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(res_forged.returncode, 2)
+
     def test_cli_summarize_acceptance_check_flag(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             manifest_file = pathlib.Path(tmpdir) / "manifest.json"
@@ -635,7 +879,7 @@ class TestReviewToolingCLI(unittest.TestCase):
             )
             self.assertEqual(res.returncode, 0)
 
-            # Missing obligation exits 1
+            # Missing obligation exits 1 (reviewer lane absent)
             res_fail = subprocess.run(
                 [
                     sys.executable,
@@ -645,9 +889,7 @@ class TestReviewToolingCLI(unittest.TestCase):
                     str(manifest_file),
                     "--lane",
                     "context_check:success",
-                    # lint_and_types omitted
-                    "--lane",
-                    "reviewer:success",
+                    # reviewer omitted
                     "--check",
                 ],
                 capture_output=True,

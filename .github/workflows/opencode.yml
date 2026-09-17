@@ -162,26 +162,53 @@ jobs:
           set -eu
           if [ "${{ steps.profile.outputs.needs_qdrant }}" = "true" ]; then
             docker run -d --name qdrant-review --rm -p 127.0.0.1:6333:6333 "$(python3 scripts/qdrant_pin.py)"
+            qdrant_ready=false
             for i in $(seq 1 30); do
               if curl -s -m 2 http://127.0.0.1:6333/collections >/dev/null; then
+                qdrant_ready=true
                 break
               fi
               sleep 2
             done
+            if [ "$qdrant_ready" != "true" ]; then
+              echo "qdrant review service failed to become ready — refusing a degraded review"
+              docker logs qdrant-review 2>&1 | tail -20 || true
+              exit 1
+            fi
           fi
 
           if [ "${{ steps.profile.outputs.needs_jaeger }}" = "true" ]; then
             docker run -d --name jaeger-review --rm -p 127.0.0.1:4318:4318 -p 127.0.0.1:16686:16686 "cr.jaegertracing.io/jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8"
+            jaeger_ready=false
             for i in $(seq 1 30); do
               if curl -s -m 2 http://127.0.0.1:16686/ >/dev/null; then
+                jaeger_ready=true
                 break
               fi
               sleep 2
             done
+            if [ "$jaeger_ready" != "true" ]; then
+              echo "jaeger review service failed to become ready — refusing a degraded review"
+              docker logs jaeger-review 2>&1 | tail -20 || true
+              exit 1
+            fi
           fi
 
           if [ "${{ steps.profile.outputs.needs_vllm }}" = "true" ]; then
             MOCK_DIM=32 PORT=8001 nohup python3 scripts/mock_vllm.py > "$RUNNER_TEMP/mock-vllm.log" 2>&1 &
+            vllm_ready=false
+            for i in $(seq 1 30); do
+              if curl -s -m 2 http://127.0.0.1:8001/healthz >/dev/null; then
+                vllm_ready=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$vllm_ready" != "true" ]; then
+              echo "mock vLLM failed to become ready — refusing a degraded review"
+              tail -20 "$RUNNER_TEMP/mock-vllm.log"
+              exit 1
+            fi
           fi
 
           if [ "${{ steps.profile.outputs.needs_agent }}" = "true" ]; then
@@ -201,13 +228,20 @@ jobs:
               nohup python3 -m uvicorn mainframe_rag.agent.app:app \
               --host 127.0.0.1 --port 8080 --log-level warning \
               > "$RUNNER_TEMP/review-agent.log" 2>&1 &
+            agent_ready=false
             for i in $(seq 1 30); do
               if curl -s -m 2 http://127.0.0.1:8080/healthz | grep -q '"qdrant":true'; then
                 echo "review agent live"
+                agent_ready=true
                 break
               fi
               sleep 2
             done
+            if [ "$agent_ready" != "true" ]; then
+              echo "review agent failed to become ready — refusing a degraded review"
+              tail -20 "$RUNNER_TEMP/review-agent.log"
+              exit 1
+            fi
           fi
 
       # See the comment on the /oc job: inlined on purpose, not a composite.
@@ -255,7 +289,8 @@ jobs:
             - Candidate manifest: $RUNNER_TEMP/candidate-manifest.json
             - Dev tools preinstalled: python3 -m pytest, python3 -m mypy src, python3 -m ruff check src tests.
               Never venv or pip install.
-            - Live review stack endpoints (when active for profile != offline):
+            - Live review stack endpoints (started only when the selected profile needs them;
+              absent endpoints are intentionally unselected, not a failure):
               * Agent: http://127.0.0.1:8080 (/healthz, /v1/search, /v1/answer?stream=true)
               * Qdrant: http://127.0.0.1:6333 (collection `review-corpus`, hash embed mode)
               * Mock vLLM: http://127.0.0.1:8001 (proves plumbing, NEVER semantics)
@@ -272,6 +307,15 @@ jobs:
               fixed-and-verified, disproven-with-evidence, accepted-by-authorized-owner, or unresolved.
             - 'Explicitly declined' by author is not acceptance (must remain unresolved).
 
+            Machine-readable result (required):
+            - Write one Schema v1 JSON object to $RUNNER_TEMP/review-output.json with fields:
+              schema_version (1), head_sha, base_sha, execution_sha, code_assessment,
+              verification, candidate_currentness, merge_readiness, material_findings
+              (each: id, disposition, description, location, impact), evidence.
+            - Include the same JSON object verbatim in the posted review between
+              <!-- review-result:start --> and <!-- review-result:end --> markers.
+            - A missing or malformed object fails the reviewer job; a valid not_ready verdict does not.
+
             Rules:
             - No finding caps or quotas: report all material findings; no findings is a valid outcome.
             - Merge readiness requires acceptable code, complete required verification, current candidate attribution,
@@ -285,4 +329,16 @@ jobs:
           python3 scripts/review_tooling.py validate-review \
             --review "$RUNNER_TEMP/review-output.json" \
             --manifest "$RUNNER_TEMP/candidate-manifest.json" \
+            --check-git \
+            --require-payload \
             --out "$RUNNER_TEMP/normalized-review.json"
+
+      - name: Upload review artifacts
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: review-result-${{ github.event.pull_request.head.sha }}
+          path: |
+            $RUNNER_TEMP/candidate-manifest.json
+            $RUNNER_TEMP/normalized-review.json
+          if-no-files-found: error
