@@ -145,7 +145,10 @@ class PublishFake:
             stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
         if rev is not None:
             stored = [p for p in stored if (p.payload or {}).get("source_rev") == rev]
-        return stored[:limit], None
+        start = 0 if offset is None else int(offset)
+        page = stored[start : start + limit]
+        next_offset = str(start + limit) if start + limit < len(stored) else None
+        return page, next_offset
 
     def retrieve(self, collection, ids, *, with_payload=True, with_vectors=False):
         wanted = {str(i) for i in ids}
@@ -226,6 +229,8 @@ def test_staging_name_shape_and_determinism():
     assert re.fullmatch(r"mainframe_manuals__gen[0-9a-f]{28}", name)
     assert staging_name_for(ALIAS, "a" * 16, "b" * 12) == name
     assert staging_name_for(ALIAS, "c" * 16, "b" * 12) != name
+    assert staging_name_for(ALIAS, "a" * 16, "b" * 12, counter=1) == f"{name}_1"
+    assert staging_name_for(ALIAS, "a" * 16, "b" * 12, counter=2) == f"{name}_2"
 
 
 def test_corpus_fingerprint_order_invariant_and_sensitive():
@@ -562,6 +567,7 @@ def test_verify_all_complete_matrix(monkeypatch):
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.identity import source_rev_key
     from mainframe_rag.ingest.inventory import InventoryRecord
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, write_manifest
     from mainframe_rag.ingest.rules_version import extraction_rules_version
     from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
     from tests.test_ingest_completion import _chunks, _vectors
@@ -572,6 +578,7 @@ def test_verify_all_complete_matrix(monkeypatch):
 
     rules_v = extraction_rules_version()
     staging = _settings(qdrant_collection="stg", batch_size=16)
+    write_manifest(fake, "stg__completions", staging, rules_v, state=STATE_COMMITTED)
     fake.collections["stg"] = []
     chunks = _chunks(doc_id="D1", n=3)
     _upsert_one(_parsed_doc("D1", "a" * 64), chunks, _vectors(3),
@@ -730,11 +737,49 @@ def test_steady_live_with_drifted_revision_fails_closed(tmp_path, monkeypatch):
         "failed run commits no manifest"
 
 
-def test_publish_force_same_contract_reconverges_live(tmp_path, monkeypatch):
-    """Publish-mode --reingest with an UNCHANGED contract reconverges the
-    live generation in place (same staging name): every doc re-embeds, the
-    alias never moves, and no self-swap snapshot churns. Issue #391 F2 keeps
-    this path open for same-generation repair only."""
+def test_publish_force_same_contract_creates_new_generation_and_preserves_live(tmp_path, monkeypatch):
+    """Invariant D4 (Immutable Publication Lifetime Model):
+    Publish-mode --reingest with an UNCHANGED contract must publish a distinct
+    physical staging generation before alias cutover, never mutating the active
+    serving collection in place. Active readers bound to the initial live physical
+    never observe partial states, deleted points, or uncommitted manifests."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+
+    live_before = fake.aliases[ALIAS]
+    points_before = list(fake.collections[live_before])
+    assert points_before, "initial publish must populate live collection"
+
+    # Run same-contract --reingest
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+
+    live_after = fake.aliases[ALIAS]
+    # Invariant D4 assertions:
+    assert live_after != live_before, "same-contract --reingest must publish a distinct generation"
+    assert live_before in fake.collections, "previous live physical must be retained for reader drain / rollback"
+    assert fake.collections[live_before] == points_before, "active serving collection must never be mutated in place"
+
+    # New generation contract and coverage assertions:
+    assert _live_manifest_revision(fake, live_after).embed_model_revision == ""
+    record = read_manifest_record(fake, f"{live_after}__completions")
+    assert record is not None and record.state == STATE_COMMITTED
+    assert fake.snapshots.get(live_before) is not None, "safety snapshot of previous live must be taken during alias swap"
+    assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
+
+
+def test_clean_rerun_after_reingest_is_noop(tmp_path, monkeypatch):
+    """After a same-contract --reingest has published a suffixed generation (e.g. gen_1),
+    a subsequent rerun without --reingest must recognize the live generation as already
+    matching the corpus and contract, verifying it read-only without flipping alias or creating new collections."""
     from mainframe_rag.ingest import run_ingest
 
     _publish_env(monkeypatch)
@@ -745,14 +790,68 @@ def test_publish_force_same_contract_reconverges_live(tmp_path, monkeypatch):
     _build_doc(corpus, "SA22-0000-00_first")
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
-    live = fake.aliases[ALIAS]
-    snaps_before = dict(fake.snapshots)
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    reingest_live = fake.aliases[ALIAS]
+    n_collections = len(fake.collections)
+
+    # Clean rerun without --reingest
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert fake.aliases[ALIAS] == reingest_live, "steady state must retain re-ingested live generation"
+    assert len(fake.collections) == n_collections, "steady state must not create new collections"
+
+
+def test_consecutive_reingests_allocate_distinct_generations(tmp_path, monkeypatch):
+    """Multiple --reingest invocations on an unchanged corpus allocate successive
+    distinct physical generations (e.g. gen_1, gen_2), never colliding or mutating live."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    gen0 = fake.aliases[ALIAS]
 
     assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
-    assert fake.aliases[ALIAS] == live
-    assert _live_manifest_revision(fake, live).embed_model_revision == ""
-    assert fake.snapshots == snaps_before, "self-swap must not snapshot"
-    assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
+    gen1 = fake.aliases[ALIAS]
+    assert gen1 != gen0
+
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    gen2 = fake.aliases[ALIAS]
+    assert gen2 != gen1 and gen2 != gen0
+    assert fake.aliases[ALIAS] == gen2
+    assert {gen0, gen1, gen2}.issubset(set(fake.collections.keys()))
+
+
+def test_active_reader_isolation_during_same_contract_reingest(tmp_path, monkeypatch):
+    """Active readers bound to the serving generation continue reading its points
+    safely while a concurrent or subsequent re-ingest populates a new generation."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+
+    # Reader binds to serving generation
+    live_gen = fake.aliases[ALIAS]
+    reader_target_points_before = list(fake.collections[live_gen])
+
+    # Ingest executes --reingest
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    new_live_gen = fake.aliases[ALIAS]
+    assert new_live_gen != live_gen
+
+    # Reader querying its bound physical collection sees identical points
+    reader_target_points_after = list(fake.collections[live_gen])
+    assert reader_target_points_after == reader_target_points_before
 
 
 def test_publish_force_revision_change_migrates_to_new_generation(tmp_path, monkeypatch):
@@ -792,3 +891,409 @@ def test_publish_force_revision_change_migrates_to_new_generation(tmp_path, monk
     record = read_manifest_record(fake, f"{new}__completions")
     assert record is not None and record.state == STATE_COMMITTED
     assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
+
+
+def test_verify_all_complete_refuses_missing_manifest_on_populated_staging(monkeypatch):
+    """Invariant D2: Populated staging without a manifest blocks publication;
+    empty bootstrap (0 walked docs) remains permitted."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+    staging = _settings(qdrant_collection="stg-nomanifest")
+    rules_v = extraction_rules_version()
+
+    # Case A: Populated target (walked is non-empty) -> missing manifest is a blocking problem
+    problems = verify_all_complete(
+        fake, staging, [("doc.pdf", "a" * 64)], {}, rules_v, "||"
+    )
+    assert "stg-nomanifest: missing or unreadable metadata manifest" in problems
+
+    # Case B: Empty bootstrap (walked is empty) -> missing manifest is permitted
+    assert verify_all_complete(fake, staging, [], {}, rules_v, "||") == []
+
+
+def test_verify_all_complete_refuses_corrupt_manifest_on_populated_staging(monkeypatch):
+    """Invariant D2: Staging with unparseable/corrupt manifest payload blocks publication."""
+    from types import SimpleNamespace
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import manifest_point_id
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+    staging = _settings(qdrant_collection="stg-corrupt")
+    rules_v = extraction_rules_version()
+
+    completions = "stg-corrupt__completions"
+    fake.collections[completions] = [
+        SimpleNamespace(
+            id=manifest_point_id(completions),
+            payload={
+                "record_type": "manifest",
+                "manifest": "not-a-valid-manifest-dict",
+                "state": "committed",
+            },
+        )
+    ]
+
+    problems = verify_all_complete(
+        fake, staging, [("doc.pdf", "a" * 64)], {}, rules_v, "||"
+    )
+    assert "stg-corrupt: missing or unreadable metadata manifest" in problems
+
+
+def test_verify_all_complete_refuses_representation_drift(monkeypatch):
+    """Invariant D2: Committed manifest with drifted representation blocks publication."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, write_manifest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+    staging = _settings(qdrant_collection="stg-drift", embed_model="model-a")
+    rules_v = extraction_rules_version()
+
+    # Write manifest under model-b
+    drift_settings = staging.model_copy(update={"embed_model": "model-b"})
+    write_manifest(fake, "stg-drift__completions", drift_settings, rules_v, state=STATE_COMMITTED)
+
+    problems = verify_all_complete(
+        fake, staging, [("doc.pdf", "a" * 64)], {}, rules_v, "||"
+    )
+    assert any("stg-drift: representation drift on embed_model" in p for p in problems)
+
+
+def test_publish_missing_manifest_prevents_alias_cutover(tmp_path, monkeypatch):
+    """Invariant D2 E2E: Full publication flow aborts and leaves alias untouched
+    when the staging manifest is missing at publication gate."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import manifest_point_id
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+
+    # Hook commit_manifest to suppress writing the committed manifest point,
+    # simulating a missing or dropped manifest at publication gate
+    orig_commit = run_ingest.commit_manifest
+
+    def _suppress_commit(client, completions_collection, settings, rules_v):
+        orig_commit(client, completions_collection, settings, rules_v)
+        # Remove manifest point
+        comp_points = fake.collections.get(completions_collection, [])
+        mp_id = manifest_point_id(completions_collection)
+        fake.collections[completions_collection] = [p for p in comp_points if str(p.id) != mp_id]
+        return ""
+
+    monkeypatch.setattr(run_ingest, "commit_manifest", _suppress_commit)
+
+    with pytest.raises(RuntimeError, match="missing or unreadable metadata manifest"):
+        _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl")
+
+    assert fake.aliases == {}, "Alias cutover must be refused when metadata manifest is missing"
+
+
+# ------------------------------------------------ Invariant D3 (Residue)
+def test_verify_all_complete_rejects_unmarked_residue(monkeypatch):
+    """Invariant D3: Staging with unreferenced/stray document points fails verification."""
+    from qdrant_client import models
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.identity import source_rev_key
+    from mainframe_rag.ingest.inventory import InventoryRecord
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, write_manifest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
+    from tests.test_ingest_completion import _chunks, _vectors
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+
+    rules_v = extraction_rules_version()
+    staging = _settings(qdrant_collection="stg-residue", batch_size=16)
+    write_manifest(fake, "stg-residue__completions", staging, rules_v, state=STATE_COMMITTED)
+    fake.collections["stg-residue"] = []
+
+    # Valid doc D1
+    chunks = _chunks(doc_id="D1", n=2)
+    _upsert_one(_parsed_doc("D1", "a" * 64), chunks, _vectors(2),
+                staging, _DocLocks(), None, False, src_labels="||")
+
+    # Injected stray point D_STRAY
+    fake.collections["stg-residue"].append(
+        models.PointStruct(
+            id="00000000-0000-0000-0000-000000000099",
+            vector={"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])},
+            payload={"doc_id": "D_STRAY", "source_rev": "stray_rev", "sha256": "b" * 64, "rules_v": rules_v, "text": "stray"},
+        )
+    )
+
+    inv = {
+        "ok.pdf": InventoryRecord(
+            path="ok.pdf", sha256="a" * 64, doc_id="D1",
+            status="upserted", rules_version=rules_v,
+            source_rev=source_rev_key("v", "p", "1", "a" * 64),
+        ),
+    }
+    problems = verify_all_complete(
+        fake, staging, [("ok.pdf", "a" * 64)], inv, rules_v, "||"
+    )
+    assert any("unmarked residue detected" in p for p in problems)
+
+
+def test_verify_all_complete_rejects_orphan_point_without_metadata(monkeypatch):
+    """Invariant D3: Staging point with empty/null payload is flagged as unmarked residue."""
+    from qdrant_client import models
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.identity import source_rev_key
+    from mainframe_rag.ingest.inventory import InventoryRecord
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, write_manifest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
+    from tests.test_ingest_completion import _chunks, _vectors
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+
+    rules_v = extraction_rules_version()
+    staging = _settings(qdrant_collection="stg-orphan", batch_size=16)
+    write_manifest(fake, "stg-orphan__completions", staging, rules_v, state=STATE_COMMITTED)
+    fake.collections["stg-orphan"] = []
+
+    chunks = _chunks(doc_id="D1", n=2)
+    _upsert_one(_parsed_doc("D1", "a" * 64), chunks, _vectors(2),
+                staging, _DocLocks(), None, False, src_labels="||")
+
+    # Point with empty payload
+    fake.collections["stg-orphan"].append(
+        models.PointStruct(
+            id="00000000-0000-0000-0000-000000000088",
+            vector={"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])},
+            payload={},
+        )
+    )
+
+    inv = {
+        "ok.pdf": InventoryRecord(
+            path="ok.pdf", sha256="a" * 64, doc_id="D1",
+            status="upserted", rules_version=rules_v,
+            source_rev=source_rev_key("v", "p", "1", "a" * 64),
+        ),
+    }
+    problems = verify_all_complete(
+        fake, staging, [("ok.pdf", "a" * 64)], inv, rules_v, "||"
+    )
+    assert any("unmarked residue detected" in p for p in problems)
+
+
+def test_verify_all_complete_rejects_point_with_mismatched_rules_version(monkeypatch):
+    """Invariant D3: Staging point with mismatched rules_version is flagged as unmarked residue."""
+    from qdrant_client import models
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.identity import source_rev_key
+    from mainframe_rag.ingest.inventory import InventoryRecord
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, write_manifest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
+    from tests.test_ingest_completion import _chunks, _vectors
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+
+    rules_v = extraction_rules_version()
+    staging = _settings(qdrant_collection="stg-wrong-rules", batch_size=16)
+    write_manifest(fake, "stg-wrong-rules__completions", staging, rules_v, state=STATE_COMMITTED)
+    fake.collections["stg-wrong-rules"] = []
+
+    chunks = _chunks(doc_id="D1", n=2)
+    _upsert_one(_parsed_doc("D1", "a" * 64), chunks, _vectors(2),
+                staging, _DocLocks(), None, False, src_labels="||")
+
+    src_rev = source_rev_key("v", "p", "1", "a" * 64)
+    fake.collections["stg-wrong-rules"].append(
+        models.PointStruct(
+            id="00000000-0000-0000-0000-000000000077",
+            vector={"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])},
+            payload={"doc_id": "D1", "source_rev": src_rev, "sha256": "a" * 64, "rules_v": "old_rules_v", "text": "old"},
+        )
+    )
+
+    inv = {
+        "ok.pdf": InventoryRecord(
+            path="ok.pdf", sha256="a" * 64, doc_id="D1",
+            status="upserted", rules_version=rules_v,
+            source_rev=src_rev,
+        ),
+    }
+    problems = verify_all_complete(
+        fake, staging, [("ok.pdf", "a" * 64)], inv, rules_v, "||"
+    )
+    assert any("unmarked residue detected" in p for p in problems)
+
+
+def test_sweep_unmarked_residue_removes_deleted_doc_points_and_markers(monkeypatch):
+    """Invariant D3: sweep_unmarked_residue cleans unreferenced document points
+    and completion markers, allowing verification to pass cleanly."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.identity import source_rev_key
+    from mainframe_rag.ingest.inventory import InventoryRecord
+    from mainframe_rag.ingest.publish import sweep_unmarked_residue
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, write_manifest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+    from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
+    from tests.test_ingest_completion import _chunks, _vectors
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+
+    rules_v = extraction_rules_version()
+    staging = _settings(qdrant_collection="stg-sweep", batch_size=16)
+    write_manifest(fake, "stg-sweep__completions", staging, rules_v, state=STATE_COMMITTED)
+    fake.collections["stg-sweep"] = []
+
+    # Insert Doc 1 and Doc 2 into staging
+    chunks1 = _chunks(doc_id="D1", n=2)
+    _upsert_one(_parsed_doc("D1", "a" * 64), chunks1, _vectors(2),
+                staging, _DocLocks(), None, False, src_labels="||")
+    chunks2 = _chunks(doc_id="D2", n=3)
+    _upsert_one(_parsed_doc("D2", "b" * 64), chunks2, _vectors(3),
+                staging, _DocLocks(), None, False, src_labels="||")
+
+    rev1 = source_rev_key("v", "p", "1", "a" * 64)
+    rev2 = source_rev_key("v", "p", "1", "b" * 64)
+    inv = {
+        "d1.pdf": InventoryRecord(path="d1.pdf", sha256="a" * 64, doc_id="D1",
+                                  status="upserted", rules_version=rules_v, source_rev=rev1),
+        "d2.pdf": InventoryRecord(path="d2.pdf", sha256="b" * 64, doc_id="D2",
+                                  status="upserted", rules_version=rules_v, source_rev=rev2),
+    }
+
+    # Suppose d2 was deleted: walked contains ONLY d1
+    walked = [("d1.pdf", "a" * 64)]
+
+    # Before sweep, verify_all_complete fails because Doc 2 is residue
+    problems_before = verify_all_complete(fake, staging, walked, inv, rules_v, "||")
+    assert any("unmarked residue detected" in p for p in problems_before)
+
+    # Execute sweep
+    swept_count = sweep_unmarked_residue(fake, staging, walked, inv)
+    assert swept_count == len(chunks2)
+
+    # After sweep, Doc 2 points are gone from staging
+    stg_points = fake.collections["stg-sweep"]
+    assert all((p.payload or {}).get("doc_id") == "D1" for p in stg_points)
+
+    # Completions collection has no markers for Doc 2
+    comp_points = fake.collections["stg-sweep__completions"]
+    for p in comp_points:
+        assert (p.payload or {}).get("doc_id") != "D2"
+
+    # Verification passes with 0 problems
+    problems_after = verify_all_complete(fake, staging, walked, inv, rules_v, "||")
+    assert problems_after == []
+
+
+def test_publish_cutover_sweeps_deleted_document_points(tmp_path, monkeypatch):
+    """Invariant D3 End-to-End: When a corpus document is deleted from disk, publication
+    sweeps its points from staging prior to alias cutover; active searchable coverage
+    contains zero unmarked residue from the deleted document."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+    doc_b = _build_doc(corpus, "SA22-0000-01_second")
+    progress = tmp_path / "inv.jsonl"
+
+    # Run 1: Publish initial state with Doc A and Doc B
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    gen1 = fake.aliases[ALIAS]
+    gen1_doc_ids = {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)}
+    assert gen1_doc_ids == {"SA22-0000-00", "SA22-0000-01"}
+
+    # Delete Doc B from disk
+    doc_b.unlink()
+
+    # Run 2: Publish update after deletion
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    gen2 = fake.aliases[ALIAS]
+    assert gen2 != gen1, "Must cut over to new generation"
+
+    # Active coverage contains ZERO points from deleted Doc B
+    active_doc_ids = {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)}
+    assert active_doc_ids == {"SA22-0000-00"}, "Active searchable coverage must contain zero residue from deleted document"
+
+    # Gen 1 is preserved intact for rollback
+    gen1_preserved = {p.payload["doc_id"] for p in fake.collections[gen1]}
+    assert gen1_preserved == {"SA22-0000-00", "SA22-0000-01"}
+
+    # Gen 2 completion markers contain no entry for Doc B
+    gen2_comp = fake.collections[f"{gen2}__completions"]
+    for p in gen2_comp:
+        assert (p.payload or {}).get("doc_id") != "SA22-0000-01"
+
+
+def test_publish_unmarked_residue_blocks_alias_cutover_if_unswept(tmp_path, monkeypatch):
+    """Invariant D3 End-to-End Safety: If unswept residue exists in staging,
+    verify_all_complete flags it, publication aborts fail-closed, and alias is untouched."""
+    from qdrant_client import models
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+    progress = tmp_path / "inv.jsonl"
+
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live_before = fake.aliases[ALIAS]
+
+    # Hook sweep_unmarked_residue to inject a stray point after sweep (simulating unswept residue)
+    orig_sweep = run_ingest.sweep_unmarked_residue
+
+    def _sweep_and_inject(client, staging_settings, walked, inventory):
+        res = orig_sweep(client, staging_settings, walked, inventory)
+        stg = staging_settings.qdrant_collection
+        fake.collections[stg].append(
+            models.PointStruct(
+                id="00000000-0000-0000-0000-000000000099",
+                vector={"dense": [0.0] * 256, "bm25": models.SparseVector(indices=[0], values=[1.0])},
+                payload={"doc_id": "RESIDUE", "source_rev": "stale_rev", "sha256": "x", "rules_v": extraction_rules_version(), "text": "unswept"},
+            )
+        )
+        return res
+
+    monkeypatch.setattr(run_ingest, "sweep_unmarked_residue", _sweep_and_inject)
+
+    # Ingest update with force_reingest
+    with pytest.raises(RuntimeError, match="unmarked residue detected"):
+        _run_main(monkeypatch, corpus, progress, "--reingest")
+
+    # Alias is untouched, previous live remains serving
+    assert fake.aliases[ALIAS] == live_before, "Alias must remain untouched when staging has unmarked residue"
+

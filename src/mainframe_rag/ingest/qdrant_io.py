@@ -28,7 +28,18 @@ HNSW_EF_CONSTRUCT = 128
 BULK_INDEXING_THRESHOLD_KB = 1 << 30
 DEFAULT_INDEXING_THRESHOLD_KB = 20000
 
-_KEYWORD_INDEXES = ("vendor", "product", "version", "doc_id", "chunk_type", "message_ids", "members", "sha256", "source_rev")
+_KEYWORD_INDEXES = (
+    "vendor",
+    "source",
+    "product",
+    "version",
+    "doc_id",
+    "chunk_type",
+    "message_ids",
+    "members",
+    "sha256",
+    "source_rev",
+)
 
 
 def scroll_all_points(
@@ -369,6 +380,7 @@ def upsert_chunks(
     for chunk, (dense, (sparse_idx, sparse_val)) in zip(chunks, vectors):
         payload: dict[str, Any] = {
             "vendor": parsed.vendor,
+            "source": parsed.vendor,
             "product": parsed.product,
             "version": parsed.version,
             "doc_id": chunk.doc_id,

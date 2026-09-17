@@ -5,10 +5,11 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import Embedder
-from mainframe_rag.retrieve.filters import build_filter, parse_query
+from mainframe_rag.retrieve.filters import build_filter, build_scope_filter, parse_query
 from mainframe_rag.retrieve.query import format_citation, rrf_fuse, search
 from tests.conftest import FakeEmbedder, FakeQdrant, LegacyFakeQdrant, _point, _typed_point
 
@@ -124,6 +125,28 @@ def test_build_filter_includes_all_context():
 
 def test_build_filter_none_when_empty():
     assert build_filter(parse_query("nothing here")) is None
+
+
+def test_build_filter_with_source():
+    ids = parse_query("IEA500I")
+    flt = build_filter(ids, product="z/OS", version="3.1", source="ibm")
+    keys = {c.key for c in flt.must}
+    assert keys == {"message_ids", "product", "version", "source"}
+    source_cond = next(c for c in flt.must if c.key == "source")
+    assert source_cond.match.value == "ibm"
+
+
+def test_build_scope_filter():
+    flt = build_scope_filter(product="z/OS", version="3.1", source="ibm")
+    assert flt is not None
+    assert {c.key for c in flt.must} == {"product", "version", "source"}
+
+    flt_empty = build_scope_filter()
+    assert flt_empty is None
+
+    flt_prod_only = build_scope_filter(product="z/OS")
+    assert flt_prod_only is not None
+    assert {c.key for c in flt_prod_only.must} == {"product"}
 
 
 def test_format_citation():
@@ -518,6 +541,10 @@ def test_search_filter_fallback_recovers_unfiltered_hits(embedder):
     assert _needs_filter_fallback([], [], build_filter(parse_query("SC23-6862"))) is True
     assert _needs_filter_fallback([_point("a")], [], build_filter(parse_query("SC23-6862"))) is False
     assert _needs_filter_fallback([], [], None) is False
+    scope_flt = build_scope_filter(product="z/OS", version="3.1")
+    id_flt = build_filter(parse_query("SC23-6862"), product="z/OS", version="3.1")
+    assert _needs_filter_fallback([], [], id_flt, scope_flt) is True
+    assert _needs_filter_fallback([], [], scope_flt, scope_flt) is False
 
     fake = FilterAwareFakeQdrant(dense=[_point("d1")], sparse=[_point("s1")])
     hits, kind, timings = search(fake, embedder, "mainframe_manuals", "Identify SC23-6862", limit=5)
@@ -635,6 +662,7 @@ def test_search_delegates_to_async_core_exactly_once(monkeypatch):
     assert seen == {
         "client": client, "embedder": embedder, "collection": "coll",
         "query": "sizing lookaside", "product": "z/OS", "version": "3.1",
+        "source": None,
         "limit": 5, "settings": None, "reranker": None,
     }
 
@@ -651,3 +679,210 @@ def test_search_fails_closed_inside_running_loop():
             search(object(), object(), "coll", "sizing lookaside")
 
     asyncio.run(main())
+
+
+def _matches_filter(point: models.ScoredPoint, flt: models.Filter | None) -> bool:
+    if flt is None:
+        return True
+    payload = point.payload or {}
+    for cond in flt.must or []:
+        val = payload.get(cond.key)
+        if isinstance(cond.match, models.MatchValue):
+            if val != cond.match.value:
+                return False
+        elif isinstance(cond.match, models.MatchAny):
+            if isinstance(val, (list, tuple)):
+                if not any(v in val for v in cond.match.any):
+                    return False
+            elif val not in cond.match.any:
+                return False
+    return True
+
+
+class ScopedFilterAwareFakeQdrant(FakeQdrant):
+    def __init__(self, all_points: list[models.ScoredPoint]):
+        super().__init__(dense=all_points, sparse=all_points)
+        self.batch_calls = 0
+
+    def query_batch_points(self, collection, requests, **_):
+        self.batch_calls += 1
+        results = []
+        for req in requests:
+            self.queries.append(
+                {"using": req.using, "filter": req.filter, "with_payload": req.with_payload}
+            )
+            self.batch_requests.append(req)
+            matching = [p for p in self._dense if _matches_filter(p, req.filter)]
+            results.append(SimpleNamespace(points=matching))
+        return results
+
+    def query_points(self, collection, query, using, limit, query_filter, with_payload, **_):
+        self.queries.append({"using": using, "filter": query_filter, "with_payload": with_payload})
+        matching = [p for p in self._dense if _matches_filter(p, query_filter)]
+        return SimpleNamespace(points=matching[:limit])
+
+
+def test_search_filter_fallback_retains_explicit_scope_and_excludes_out_of_scope(embedder):
+    """Invariant D1: when an identifier matches 0 points, fallback drops identifier
+    clauses but retains explicit caller scope (product, version, source).
+    Out-of-scope records must never be returned."""
+    in_scope = models.ScoredPoint(
+        id="hit-zos",
+        version=1,
+        score=1.0,
+        payload={
+            "product": "z/OS",
+            "version": "3.1",
+            "source": "ibm",
+            "doc_id": "SA22-7592-05",
+            "title": "z/OS Manual",
+            "heading_path": "Init",
+            "page_label": "1",
+            "chunk_type": "narrative",
+            "text": "z/OS initialization text",
+        },
+    )
+    out_scope_prod = models.ScoredPoint(
+        id="hit-linux",
+        version=1,
+        score=1.0,
+        payload={
+            "product": "Linux",
+            "version": "3.1",
+            "source": "ibm",
+            "doc_id": "LN-001",
+            "title": "Linux Manual",
+            "heading_path": "Boot",
+            "page_label": "1",
+            "chunk_type": "narrative",
+            "text": "Linux boot text",
+        },
+    )
+    out_scope_ver = models.ScoredPoint(
+        id="hit-zos-24",
+        version=1,
+        score=1.0,
+        payload={
+            "product": "z/OS",
+            "version": "2.4",
+            "source": "ibm",
+            "doc_id": "SA22-7592-04",
+            "title": "z/OS Old Manual",
+            "heading_path": "Init",
+            "page_label": "1",
+            "chunk_type": "narrative",
+            "text": "z/OS 2.4 text",
+        },
+    )
+    out_scope_src = models.ScoredPoint(
+        id="hit-zos-vendor",
+        version=1,
+        score=1.0,
+        payload={
+            "product": "z/OS",
+            "version": "3.1",
+            "source": "third_party",
+            "doc_id": "TP-001",
+            "title": "Third Party Manual",
+            "heading_path": "Tools",
+            "page_label": "1",
+            "chunk_type": "narrative",
+            "text": "Third party text",
+        },
+    )
+
+    fake = ScopedFilterAwareFakeQdrant([in_scope, out_scope_prod, out_scope_ver, out_scope_src])
+    hits, kind, _timings = search(
+        fake,
+        embedder,
+        "mainframe_manuals",
+        "Identify SC23-6862",  # Identifier not matching SA22-7592-05
+        product="z/OS",
+        version="3.1",
+        source="ibm",
+        limit=5,
+    )
+
+    assert kind == "identifier"
+    assert fake.batch_calls == 2
+    # First batch carried doc_id + product + version + source -> matched 0 points
+    first_keys = {c.key for c in fake.batch_requests[0].filter.must}
+    assert first_keys == {"doc_id", "product", "version", "source"}
+
+    # Second batch (fallback retry) retained product + version + source, dropped doc_id
+    fallback_filter = fake.batch_requests[2].filter
+    assert fallback_filter is not None
+    fallback_keys = {c.key for c in fallback_filter.must}
+    assert fallback_keys == {"product", "version", "source"}
+
+    # Recovered hits MUST contain in-scope hit only
+    assert len(hits) == 1
+    assert hits[0].chunk_id == "hit-zos"
+    assert hits[0].product == "z/OS"
+    assert hits[0].version == "3.1"
+    # Never return out-of-scope hits
+    hit_ids = {h.chunk_id for h in hits}
+    assert "hit-linux" not in hit_ids
+    assert "hit-zos-24" not in hit_ids
+    assert "hit-zos-vendor" not in hit_ids
+
+
+def test_search_filter_fallback_returns_empty_when_no_points_match_scope(embedder):
+    """Invariant D1: if caller supplies scope filters and fallback relaxes
+    identifiers, but no points in the database match the scope, search must
+    return [] and NEVER drop scope constraints to return out-of-scope points."""
+    linux_point = models.ScoredPoint(
+        id="hit-linux",
+        version=1,
+        score=1.0,
+        payload={
+            "product": "Linux",
+            "version": "1.0",
+            "source": "canonical",
+            "doc_id": "LN-001",
+            "title": "Linux Manual",
+            "heading_path": "Boot",
+            "page_label": "1",
+            "chunk_type": "narrative",
+            "text": "Linux text",
+        },
+    )
+
+    fake = ScopedFilterAwareFakeQdrant([linux_point])
+    hits, kind, _timings = search(
+        fake,
+        embedder,
+        "mainframe_manuals",
+        "Identify SC23-6862",
+        product="z/OS",
+        version="3.1",
+        limit=5,
+    )
+
+    assert kind == "identifier"
+    assert fake.batch_calls == 2
+    # Fallback retry carried scope filter
+    fallback_filter = fake.batch_requests[2].filter
+    assert fallback_filter is not None
+    assert {c.key for c in fallback_filter.must} == {"product", "version"}
+    # Hits must be strictly empty
+    assert hits == []
+
+
+def test_search_pure_scope_filter_zero_matches_no_redundant_fallback(embedder):
+    """When a query has no identifiers, flt == fallback_flt; if 0 points match,
+    _needs_filter_fallback returns False. Exactly 1 batch is issued without redundant retry."""
+    fake = ScopedFilterAwareFakeQdrant([])
+    hits, kind, _timings = search(
+        fake,
+        embedder,
+        "mainframe_manuals",
+        "how should I size the lookaside facility",
+        product="z/OS",
+        version="3.1",
+        limit=5,
+    )
+    assert kind == "nl"
+    assert fake.batch_calls == 1  # No redundant retry
+    assert hits == []
+

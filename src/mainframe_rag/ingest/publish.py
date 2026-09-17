@@ -19,16 +19,19 @@ CLI source triple, corpus content): identical reruns converge the same
 staging (crash-safe resume), changed inputs address a new one, and a
 derived name equal to the live physical means "already published".
 
-Corpus deletions are NOT swept (status quo: same as in-place runs —
-stale-generation points survive until an operator cleans them; see
-docs/ingest.md). Publishing a `--limit` subset or an empty corpus is
-refused fail-closed by the caller.
+Corpus deletions and unmarked residue are swept from staging before cutover
+(issue #405 Invariant D3): all searchable points in a published generation are
+attributable to verified generation coverage. Publishing a `--limit` subset or
+an empty corpus is refused fail-closed by the caller.
 """
 
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from typing import Any
+
+from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.completion import (
@@ -38,6 +41,11 @@ from mainframe_rag.ingest.completion import (
     representation_fingerprint,
 )
 from mainframe_rag.ingest.inventory import InventoryRecord
+from mainframe_rag.ingest.qdrant_io import (
+    delete_by_doc,
+    delete_by_revision,
+    scroll_all_points,
+)
 from mainframe_rag.ports import QdrantPoints
 
 
@@ -74,9 +82,49 @@ def corpus_fingerprint(entries: list[tuple[str, str]]) -> str:
     return digest.hexdigest()[:12]
 
 
-def staging_name_for(collection: str, gen_fp: str, corpus_fp: str) -> str:
+def staging_name_for(
+    collection: str,
+    gen_fp: str,
+    corpus_fp: str,
+    counter: int | None = None,
+) -> str:
     """Deterministic staging address: safe charset, bounded length."""
-    return f"{collection}__gen{gen_fp}{corpus_fp}"
+    base = f"{collection}__gen{gen_fp}{corpus_fp}"
+    if counter is not None:
+        return f"{base}_{counter}"
+    return base
+
+
+def resolve_staging_name(
+    client: QdrantPoints,
+    collection: str,
+    gen_fp: str,
+    corpus_fp: str,
+    live: str | None,
+    force_reingest: bool = False,
+) -> str:
+    """Resolve a distinct physical staging collection name.
+
+    Under Invariant D4 (Immutable Publication Lifetime Model), a physical
+    generation is strictly immutable once published. Publication (including
+    --reingest / force_reingest) must never mutate the active serving collection
+    in place. When the base generation matches the currently live collection,
+    a distinct physical name is allocated so active readers remain completely
+    isolated.
+    """
+    base = staging_name_for(collection, gen_fp, corpus_fp)
+    if not force_reingest:
+        if live is not None and (live == base or live.startswith(f"{base}_")):
+            return live
+        return base
+    if (live is None or (live != base and not live.startswith(f"{base}_"))) and not client.collection_exists(base):
+        return base
+    counter = 1
+    while True:
+        candidate = staging_name_for(collection, gen_fp, corpus_fp, counter=counter)
+        if candidate != live and not client.collection_exists(candidate):
+            return candidate
+        counter += 1
 
 
 def ensure_staging(
@@ -175,12 +223,31 @@ def verify_all_complete(
     unverified staging generation, or a contract that is not committed
     (issue #391 F2: a pending migration must never be swapped into
     service). Empty means publishable."""
-    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+    from mainframe_rag.ingest.representation import (
+        COMPATIBLE,
+        RECORD_ONLY_DRIFT,
+        STATE_COMMITTED,
+        build_manifest,
+        compare_manifests,
+        read_manifest_record,
+    )
 
     record = read_manifest_record(client, completion_collection_name(staging_settings))
     problems: list[str] = []
-    if record is not None and record.state != STATE_COMMITTED:
+    if record is None:
+        if walked:
+            problems.append(
+                f"{staging_settings.qdrant_collection}: missing or unreadable metadata manifest"
+            )
+    elif record.state != STATE_COMMITTED:
         problems.append(f"{staging_settings.qdrant_collection}: contract {record.state!r}")
+    else:
+        wanted = build_manifest(staging_settings, rules_v)
+        outcome, fields = compare_manifests(record.manifest, wanted)
+        if outcome not in (COMPATIBLE, RECORD_ONLY_DRIFT):
+            problems.append(
+                f"{staging_settings.qdrant_collection}: representation drift on {', '.join(fields)}"
+            )
     for path_str, sha in walked:
         rec = inventory.get(path_str)
         if (
@@ -199,4 +266,158 @@ def verify_all_complete(
             source_rev=rec.source_rev,
         ):
             problems.append(path_str)
+    # Issue #405 Invariant D3: unmarked residue exclusion
+    problems.extend(
+        audit_unmarked_residue(client, staging_settings, walked, inventory, rules_v)
+    )
     return problems
+
+
+def sweep_unmarked_residue(
+    client: QdrantPoints,
+    staging_settings: Settings,
+    walked: list[tuple[str, str]],
+    inventory: dict[str, InventoryRecord],
+) -> int:
+    """Sweep points and completion markers from staging that do not belong
+    to the walked corpus (issue #405 Invariant D3)."""
+    staging = staging_settings.qdrant_collection
+    if not client.collection_exists(staging):
+        return 0
+    valid_pairs = {
+        (rec.doc_id, rec.source_rev)
+        for path_str, _ in walked
+        if (rec := inventory.get(path_str))
+        and rec.doc_id
+        and rec.source_rev
+        and rec.status in ("upserted", "skipped")
+    }
+    valid_docs = {doc_id for doc_id, _ in valid_pairs}
+
+    points = scroll_all_points(
+        client,
+        staging,
+        scroll_filter=None,
+        with_payload=["doc_id", "source_rev"],
+        page_size=staging_settings.ingest_scan_page_size,
+    )
+    all_swept_ids: list[Any] = []
+    stale_revs: set[str] = set()
+    stale_docs: set[str] = set()
+
+    for p in points:
+        payload = p.payload or {}
+        doc_id = payload.get("doc_id")
+        source_rev = payload.get("source_rev")
+        if doc_id and source_rev:
+            if (doc_id, source_rev) not in valid_pairs:
+                stale_revs.add(source_rev)
+                all_swept_ids.append(p.id)
+        elif doc_id and not source_rev:
+            if doc_id not in valid_docs:
+                stale_docs.add(doc_id)
+                all_swept_ids.append(p.id)
+        else:
+            all_swept_ids.append(p.id)
+
+    for rev in stale_revs:
+        delete_by_revision(client, staging_settings, rev)
+    for doc in stale_docs:
+        delete_by_doc(client, staging_settings, doc)
+    if all_swept_ids:
+        client.delete(
+            staging,
+            points_selector=models.PointIdsList(points=all_swept_ids),
+            wait=True,
+        )
+
+    _sweep_completion_markers(client, staging_settings, valid_pairs, valid_docs)
+    return len(all_swept_ids)
+
+
+def _sweep_completion_markers(
+    client: QdrantPoints,
+    staging_settings: Settings,
+    valid_pairs: set[tuple[str, str]],
+    valid_docs: set[str],
+) -> None:
+    comp_col = completion_collection_name(staging_settings)
+    if not client.collection_exists(comp_col):
+        return
+    comp_points = scroll_all_points(
+        client,
+        comp_col,
+        scroll_filter=None,
+        with_payload=["doc_id", "source_rev"],
+        page_size=staging_settings.ingest_scan_page_size,
+    )
+    stale_comp_ids: list[Any] = []
+    for p in comp_points:
+        payload = p.payload or {}
+        doc_id = payload.get("doc_id")
+        if not doc_id:
+            continue  # preserve manifest point (no doc_id)
+        source_rev = payload.get("source_rev")
+        if source_rev:
+            if (doc_id, source_rev) not in valid_pairs:
+                stale_comp_ids.append(p.id)
+        elif doc_id not in valid_docs:
+            stale_comp_ids.append(p.id)
+    if stale_comp_ids:
+        client.delete(
+            comp_col,
+            points_selector=models.PointIdsList(points=stale_comp_ids),
+            wait=True,
+        )
+
+
+def audit_unmarked_residue(
+    client: QdrantPoints,
+    staging_settings: Settings,
+    walked: list[tuple[str, str]],
+    inventory: dict[str, InventoryRecord],
+    rules_v: str,
+) -> list[str]:
+    """Audit staging collection to certify absence of unmarked residue (Invariant D3)."""
+    staging = staging_settings.qdrant_collection
+    if not client.collection_exists(staging):
+        return []
+
+    valid_pairs = {
+        (rec.doc_id, rec.source_rev)
+        for path_str, sha in walked
+        if (rec := inventory.get(path_str))
+        and rec.sha256 == sha
+        and rec.doc_id
+        and rec.source_rev
+        and rec.rules_version == rules_v
+        and rec.status in ("upserted", "skipped")
+    }
+
+    points = scroll_all_points(
+        client,
+        staging,
+        scroll_filter=None,
+        with_payload=["doc_id", "source_rev", "rules_v"],
+        page_size=staging_settings.ingest_scan_page_size,
+    )
+    residue_ids: list[str] = []
+    for p in points:
+        payload = p.payload or {}
+        doc_id = payload.get("doc_id")
+        source_rev = payload.get("source_rev")
+        point_rules = payload.get("rules_v")
+        if (
+            doc_id is None
+            or source_rev is None
+            or (doc_id, source_rev) not in valid_pairs
+            or point_rules != rules_v
+        ):
+            residue_ids.append(str(p.id))
+
+    if residue_ids:
+        sample = ", ".join(residue_ids[:3])
+        return [
+            f"{staging}: unmarked residue detected ({len(residue_ids)} point(s), e.g. {sample})"
+        ]
+    return []

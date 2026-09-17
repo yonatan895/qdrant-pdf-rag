@@ -129,16 +129,22 @@ def query_kind(identifiers: QueryIdentifiers) -> str:
     return "identifier" if identifiers.has_identifiers else "nl"
 
 
+_SOURCE_KEY: str = "source"
+
+
 def build_filter(
     identifiers: QueryIdentifiers,
     product: str | None = None,
     version: str | None = None,
+    source: str | None = None,
 ) -> models.Filter | None:
     must: list[models.Condition] = []
     if product:
         must.append(models.FieldCondition(key="product", match=models.MatchValue(value=product)))
     if version:
         must.append(models.FieldCondition(key="version", match=models.MatchValue(value=version)))
+    if source:
+        must.append(models.FieldCondition(key="source", match=models.MatchValue(value=source)))
     if identifiers.doc_ids:
         must.append(
             models.FieldCondition(key="doc_id", match=models.MatchAny(any=identifiers.doc_ids))
@@ -154,3 +160,18 @@ def build_filter(
             models.FieldCondition(key="members", match=models.MatchAny(any=identifiers.members))
         )
     return models.Filter(must=must) if must else None
+
+
+def build_scope_filter(
+    product: str | None = None,
+    version: str | None = None,
+    source: str | None = None,
+) -> models.Filter | None:
+    """Build a scope-only filter without query identifiers (issue #405 D1).
+
+    Preserves explicit caller scope constraints (product, version, source)
+    during fallback when identifier clauses (doc_id, message_ids, members)
+    are relaxed. Returns None when all scope constraints are None.
+    """
+    return build_filter(QueryIdentifiers(), product=product, version=version, source=source)
+
