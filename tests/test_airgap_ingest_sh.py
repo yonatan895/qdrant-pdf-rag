@@ -268,7 +268,9 @@ def test_ingest_default_render_adds_no_maintenance_args(ingest_tree):
     )
     assert '"--reingest"' not in rendered
     assert '"--retire-doc"' not in rendered
-    assert re.search(r"(?m)^\s*value: false$", rendered)
+    # Review F1: boolean env values render as quoted strings (K8s EnvVar.value
+    # is a string field), matching the sibling integer quoting contract.
+    assert re.search(r'(?m)^\s*value: "false"$', rendered)
     assert_no_placeholders(rendered)
 
 
@@ -296,15 +298,58 @@ def test_ingest_retire_docs_rendered_with_alias_publish(ingest_tree):
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     assert '"--retire-doc", "SA22-0000-00"' in rendered
     assert '"--retire-doc", "SA22-7777-01@rev-1"' in rendered
-    assert re.search(r"(?m)^\s*value: true$", rendered)
+    assert re.search(r'(?m)^\s*value: "true"$', rendered)
     assert_no_placeholders(rendered)
 
 
-def test_ingest_malformed_retire_docs_fails_closed(ingest_tree):
+def test_ingest_retire_docs_accepts_source_revision_alphabet(ingest_tree):
+    """Review F2: a real source_rev (`vendor|product|version|sha256`, labels
+    may carry '/', '|' and spaces) reaches the Job args verbatim; the old
+    narrow charset made revision-scoped retirement unreachable and the sed
+    delimiter collided with the revision pipes."""
+    rev = "ibm|z/os|3.1|" + "a" * 64
     r = _run_ingest(
         ingest_tree,
         ("INGEST_ALIAS_PUBLISH", "true"),
-        ("INGEST_RETIRE_DOCS", "SA22-0000-00;touch /tmp/unsafe"),
+        ("INGEST_RETIRE_DOCS", f"SA23-1380-09@{rev}"),
+    )
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert f'"--retire-doc", "SA23-1380-09@{rev}"' in rendered
+    assert_no_placeholders(rendered)
+
+
+def test_ingest_retire_docs_wildcard_fails_closed(ingest_tree):
+    """Review F3: operator input is never pathname-expanded (noglob) and
+    wildcards fail closed instead of rendering local filenames."""
+    r = _run_ingest(
+        ingest_tree,
+        ("INGEST_ALIAS_PUBLISH", "true"),
+        ("INGEST_RETIRE_DOCS", "*"),
+    )
+    assert r.returncode != 0
+    assert "malformed INGEST_RETIRE_DOCS" in r.stderr
+    assert "wildcards" in r.stderr
+
+
+def test_ingest_retire_docs_empty_side_fails_closed(ingest_tree):
+    r = _run_ingest(
+        ingest_tree,
+        ("INGEST_ALIAS_PUBLISH", "true"),
+        ("INGEST_RETIRE_DOCS", "SA22-0000-00@"),
+    )
+    assert r.returncode != 0
+    assert "empty side of '@'" in r.stderr
+
+
+def test_ingest_malformed_retire_docs_fails_closed(ingest_tree):
+    """Quotes/backslashes would break the rendered double-quoted YAML scalar
+    and are refused; other punctuation (/, |, spaces, ';') is data, never a
+    shell evaluation, and reaches the backend verbatim."""
+    r = _run_ingest(
+        ingest_tree,
+        ("INGEST_ALIAS_PUBLISH", "true"),
+        ("INGEST_RETIRE_DOCS", 'SA22-0000-00"bad'),
     )
     assert r.returncode != 0
     assert "malformed INGEST_RETIRE_DOCS" in r.stderr
