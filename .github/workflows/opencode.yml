@@ -164,7 +164,7 @@ jobs:
             docker run -d --name qdrant-review --rm -p 127.0.0.1:6333:6333 "$(python3 scripts/qdrant_pin.py)"
             qdrant_ready=false
             for i in $(seq 1 30); do
-              if curl -s -m 2 http://127.0.0.1:6333/collections >/dev/null; then
+              if curl -fsS -m 2 http://127.0.0.1:6333/collections >/dev/null; then
                 qdrant_ready=true
                 break
               fi
@@ -181,7 +181,7 @@ jobs:
             docker run -d --name jaeger-review --rm -p 127.0.0.1:4318:4318 -p 127.0.0.1:16686:16686 "cr.jaegertracing.io/jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8"
             jaeger_ready=false
             for i in $(seq 1 30); do
-              if curl -s -m 2 http://127.0.0.1:16686/ >/dev/null; then
+              if curl -fsS -m 2 http://127.0.0.1:16686/ >/dev/null; then
                 jaeger_ready=true
                 break
               fi
@@ -198,7 +198,7 @@ jobs:
             MOCK_DIM=32 PORT=8001 nohup python3 scripts/mock_vllm.py > "$RUNNER_TEMP/mock-vllm.log" 2>&1 &
             vllm_ready=false
             for i in $(seq 1 30); do
-              if curl -s -m 2 http://127.0.0.1:8001/healthz >/dev/null; then
+              if curl -fsS -m 2 http://127.0.0.1:8001/healthz >/dev/null; then
                 vllm_ready=true
                 break
               fi
@@ -230,7 +230,7 @@ jobs:
               > "$RUNNER_TEMP/review-agent.log" 2>&1 &
             agent_ready=false
             for i in $(seq 1 30); do
-              if curl -s -m 2 http://127.0.0.1:8080/healthz | grep -q '"qdrant":true'; then
+              if curl -fsS -m 2 http://127.0.0.1:8080/healthz | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'; then
                 echo "review agent live"
                 agent_ready=true
                 break

@@ -29,6 +29,7 @@ from scripts.review_tooling import (
     build_acceptance_summary,
     classify_paths,
     evaluate_lane,
+    evaluate_probe_response,
     extract_review_json,
     generate_candidate_manifest,
     validate_review_payload,
@@ -473,6 +474,46 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
             "matched_categories": ["prose"] if profile == "offline" else [profile],
         }
 
+    def _ready_review(self):
+        payload = {
+            "schema_version": 1,
+            "head_sha": "1" * 40,
+            "base_sha": "2" * 40,
+            "execution_sha": "3" * 40,
+            "code_assessment": "acceptable",
+            "verification": "complete",
+            "candidate_currentness": "current",
+            "merge_readiness": "ready_for_maintainer",
+            "material_findings": [],
+            "evidence": {"notes": "ok"},
+        }
+        return validate_review_payload(
+            payload,
+            expected_head="1" * 40,
+            expected_base="2" * 40,
+            expected_execution="3" * 40,
+        )
+
+    def _not_ready_review(self):
+        payload = {
+            "schema_version": 1,
+            "head_sha": "1" * 40,
+            "base_sha": "2" * 40,
+            "execution_sha": "3" * 40,
+            "code_assessment": "changes_required",
+            "verification": "incomplete",
+            "candidate_currentness": "current",
+            "merge_readiness": "not_ready",
+            "material_findings": [{"id": "F1", "disposition": "unresolved", "description": "open"}],
+            "evidence": {"notes": "not ready"},
+        }
+        return validate_review_payload(
+            payload,
+            expected_head="1" * 40,
+            expected_base="2" * 40,
+            expected_execution="3" * 40,
+        )
+
     def test_lane_evaluation_states(self):
         # 1. Unselected lane
         l_unsel = evaluate_lane("simulation", required=False, reported_status=None)
@@ -509,7 +550,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
             "simulation": "skipped",  # unselected lane was skipped
             "gate_l1": "skipped",     # unselected lane was skipped
         }
-        summary = build_acceptance_summary(manifest, lane_statuses)
+        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertTrue(summary.all_prerequisites_met)
         self.assertEqual(summary.recommended_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
 
@@ -524,7 +565,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
             "gate_l1": "success",
             "reviewer": "success",
         }
-        summary = build_acceptance_summary(manifest, lane_statuses)
+        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertFalse(summary.all_prerequisites_met)
         self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
         sim_lane = next(l for l in summary.lanes if l.name == "simulation")
@@ -540,7 +581,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
             # gate_l1 is omitted entirely
             "reviewer": "success",
         }
-        summary = build_acceptance_summary(manifest, lane_statuses)
+        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertFalse(summary.all_prerequisites_met)
         self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
         gate_lane = next(l for l in summary.lanes if l.name == "gate_l1")
@@ -553,7 +594,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
             "lint_and_types": "success",
             "reviewer": "success",
         }
-        summary = build_acceptance_summary(manifest, lane_statuses)
+        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertFalse(summary.all_prerequisites_met)
         self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
 
@@ -566,7 +607,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
             # packaging omitted: the airgap dry-run lane never ran
             "reviewer": "success",
         }
-        summary = build_acceptance_summary(manifest, lane_statuses)
+        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertFalse(summary.all_prerequisites_met)
         self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
         packaging = next(l for l in summary.lanes if l.name == "packaging")
@@ -582,7 +623,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
             "packaging": "skipped",
             "reviewer": "success",
         }
-        summary = build_acceptance_summary(manifest, lane_statuses)
+        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertFalse(summary.all_prerequisites_met)
         packaging = next(l for l in summary.lanes if l.name == "packaging")
         self.assertEqual(packaging.state, LaneState.SELECTED_SKIPPED)
@@ -591,7 +632,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
         manifest = self._sample_manifest(profile="offline")
         manifest["matched_categories"] = ["tooling"]
         lane_statuses = {"context_check": "success", "reviewer": "success"}
-        summary = build_acceptance_summary(manifest, lane_statuses)
+        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertFalse(summary.all_prerequisites_met)
         lint = next(l for l in summary.lanes if l.name == "lint_and_types")
         unit = next(l for l in summary.lanes if l.name == "unit_tests")
@@ -603,7 +644,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
         # for prose; requiring them would make docs-only acceptance unreachable.
         manifest = self._sample_manifest(profile="offline")
         lane_statuses = {"context_check": "success", "reviewer": "success"}
-        summary = build_acceptance_summary(manifest, lane_statuses)
+        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertTrue(summary.all_prerequisites_met)
         lint = next(l for l in summary.lanes if l.name == "lint_and_types")
         unit = next(l for l in summary.lanes if l.name == "unit_tests")
@@ -621,7 +662,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
             "simulation": "success",
             "reviewer": "success",
         }
-        summary = build_acceptance_summary(manifest, lane_statuses)
+        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertTrue(summary.all_prerequisites_met)
         for name in ("agent_probes", "eval_retrieval"):
             lane = next(l for l in summary.lanes if l.name == name)
@@ -638,7 +679,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
             "agent_probes": "success",
             "reviewer": "success",
         }
-        summary = build_acceptance_summary(manifest, lane_statuses)
+        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertTrue(summary.all_prerequisites_met)
         self.assertEqual(summary.recommended_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
 
@@ -649,7 +690,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
             "lint_and_types": "success",
             "reviewer": "success",
         }
-        summary = build_acceptance_summary(manifest, lane_statuses)
+        summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         md = summary.markdown_report
 
         self.assertIn("### Maintainer Merge Authority", md)
@@ -856,8 +897,22 @@ class TestReviewToolingCLI(unittest.TestCase):
                 "matched_categories": ["prose"],
             }
             manifest_file.write_text(json.dumps(manifest))
+            review_file = pathlib.Path(tmpdir) / "review.json"
+            review_file.write_text(json.dumps({
+                "schema_version": 1,
+                "head_sha": "1" * 40,
+                "base_sha": "2" * 40,
+                "execution_sha": "3" * 40,
+                "code_assessment": "acceptable",
+                "verification": "complete",
+                "candidate_currentness": "current",
+                "merge_readiness": "ready_for_maintainer",
+                "material_findings": [],
+                "evidence": {"notes": "ok"},
+            }))
 
-            # All obligations met exits 0
+            # All obligations met exits 0 (validated review result required;
+            # reviewer lane status alone never suffices).
             res = subprocess.run(
                 [
                     sys.executable,
@@ -865,6 +920,8 @@ class TestReviewToolingCLI(unittest.TestCase):
                     "summarize-acceptance",
                     "--manifest",
                     str(manifest_file),
+                    "--review",
+                    str(review_file),
                     "--lane",
                     "context_check:success",
                     "--lane",
@@ -897,6 +954,307 @@ class TestReviewToolingCLI(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(res_fail.returncode, 1)
+
+
+class TestExecutionAttribution(unittest.TestCase):
+    """F3: a commit existing is not proof it was executed (pinned worktree)."""
+
+    def _make_two_commit_repo(self):
+        tmp = tempfile.TemporaryDirectory()
+        repo = pathlib.Path(tmp.name)
+        def git(*args):
+            res = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=False)
+            self.assertEqual(res.returncode, 0, msg=f"git {' '.join(args)} failed: {res.stderr}")
+            return res
+        git("init", "-q")
+        git("config", "user.email", "test@example.com")
+        git("config", "user.name", "Test")
+        (repo / "file.txt").write_text("base\n")
+        git("add", "file.txt")
+        git("commit", "-qm", "base")
+        base = git("rev-parse", "HEAD").stdout.strip()
+        (repo / "file.txt").write_text("candidate\n")
+        git("add", "file.txt")
+        git("commit", "-qm", "candidate")
+        head = git("rev-parse", "HEAD").stdout.strip()
+        return tmp, repo, base, head
+
+    def _payload(self, head, base, execution):
+        return {
+            "schema_version": 1,
+            "head_sha": head,
+            "base_sha": base,
+            "execution_sha": execution,
+            "code_assessment": "acceptable",
+            "verification": "complete",
+            "candidate_currentness": "current",
+            "merge_readiness": "ready_for_maintainer",
+            "material_findings": [],
+            "evidence": {"notes": "ok"},
+        }
+
+    def test_wrong_clean_checkout_is_unverified(self):
+        tmp, repo, base, head = self._make_two_commit_repo()
+        try:
+            # Claim the newer candidate/execution while checked out at base.
+            subprocess.run(["git", "checkout", "-q", base], cwd=repo, check=True)
+            payload = self._payload(head, base, head)
+            result = validate_review_payload(payload, check_git=True, cwd=repo)
+            self.assertEqual(result.candidate_currentness, CandidateCurrentness.UNVERIFIED.value)
+            self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
+            self.assertTrue(any("does not match" in e and "HEAD" in e for e in result.validation_errors))
+        finally:
+            tmp.cleanup()
+
+    def test_wrong_checkout_cli_marks_not_ready(self):
+        tmp, repo, base, head = self._make_two_commit_repo()
+        try:
+            subprocess.run(["git", "checkout", "-q", base], cwd=repo, check=True)
+            review_file = repo / "review.json"
+            review_file.write_text(json.dumps(self._payload(head, base, head)))
+            script = str(pathlib.Path(__file__).resolve().parents[1] / "scripts" / "review_tooling.py")
+            res = subprocess.run(
+                [sys.executable, script, "validate-review", "--review", str(review_file),
+                 "--check-git", "--require-payload"],
+                capture_output=True, text=True, check=False, cwd=repo,
+            )
+            self.assertEqual(res.returncode, 2)
+            normalized = json.loads(res.stdout) if res.stdout.strip() else {}
+            self.assertEqual(normalized.get("merge_readiness"), MergeReadiness.NOT_READY.value)
+            self.assertEqual(normalized.get("candidate_currentness"), CandidateCurrentness.UNVERIFIED.value)
+        finally:
+            tmp.cleanup()
+
+    def test_correct_checkout_passes_attribution(self):
+        tmp, repo, base, head = self._make_two_commit_repo()
+        try:
+            subprocess.run(["git", "checkout", "-q", head], cwd=repo, check=True)
+            payload = self._payload(head, base, head)
+            result = validate_review_payload(payload, check_git=True, cwd=repo)
+            self.assertEqual(result.merge_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
+            self.assertEqual(len(result.validation_errors), 0)
+        finally:
+            tmp.cleanup()
+
+    def test_head_must_be_ancestor_of_execution(self):
+        tmp, repo, base, head = self._make_two_commit_repo()
+        try:
+            # Execution older than head: head cannot be contained in execution.
+            subprocess.run(["git", "checkout", "-q", base], cwd=repo, check=True)
+            payload = self._payload(head, base, base)
+            result = validate_review_payload(payload, check_git=True, cwd=repo)
+            self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
+            self.assertTrue(any("ancestor" in e for e in result.validation_errors))
+        finally:
+            tmp.cleanup()
+
+    def test_missing_evidence_field_fails(self):
+        payload = self._payload("1" * 40, "2" * 40, "3" * 40)
+        del payload["evidence"]
+        result = validate_review_payload(payload)
+        self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
+        self.assertTrue(any("evidence" in e for e in result.validation_errors))
+
+    def test_non_object_evidence_fails(self):
+        payload = self._payload("1" * 40, "2" * 40, "3" * 40)
+        payload["evidence"] = "all good"
+        result = validate_review_payload(payload)
+        self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
+        self.assertTrue(any("evidence" in e for e in result.validation_errors))
+
+
+class TestReadinessProbes(unittest.TestCase):
+    """F4: an endpoint responding is not proof the service is ready."""
+
+    def _serve(self, status_code, body):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                data = body.encode()
+                self.send_response(status_code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, fmt, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, f"http://127.0.0.1:{server.server_address[1]}/healthz"
+
+    def _fetch(self, url):
+        import urllib.request
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                return resp.status, resp.read().decode()
+        except Exception as exc:  # noqa: BLE001
+            code = getattr(exc, "code", None)
+            try:
+                body = exc.read().decode() if hasattr(exc, "read") else ""
+            except Exception:  # noqa: BLE001
+                body = ""
+            return code, body
+
+    def test_healthy_200_ok_is_ready(self):
+        server, url = self._serve(200, json.dumps({"status": "ok", "qdrant": True}))
+        try:
+            code, body = self._fetch(url)
+            self.assertTrue(evaluate_probe_response(code, body, require_agent_ok=True))
+            self.assertTrue(evaluate_probe_response(code, body))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_503_degraded_is_not_ready(self):
+        server, url = self._serve(503, json.dumps({"status": "degraded", "qdrant": True}))
+        try:
+            code, body = self._fetch(url)
+            self.assertFalse(evaluate_probe_response(code, body, require_agent_ok=True))
+            self.assertFalse(evaluate_probe_response(code, body))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_404_is_not_ready(self):
+        server, url = self._serve(404, json.dumps({"error": "not found"}))
+        try:
+            code, body = self._fetch(url)
+            self.assertFalse(evaluate_probe_response(code, body, require_agent_ok=True))
+            self.assertFalse(evaluate_probe_response(code, body))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_malformed_body_is_not_ready(self):
+        server, url = self._serve(200, "not-json{{{")
+        try:
+            code, body = self._fetch(url)
+            self.assertFalse(evaluate_probe_response(code, body, require_agent_ok=True))
+            # Generic (non-agent) probes accept any 2xx body.
+            self.assertTrue(evaluate_probe_response(code, body))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_degraded_with_qdrant_true_still_not_ready(self):
+        # Counterexample from the review: degraded overall status with a
+        # nested qdrant:true flag must not count as agent readiness.
+        body = json.dumps({"status": "degraded", "qdrant": True, "representation": "reembed_required"})
+        self.assertFalse(evaluate_probe_response(503, body, require_agent_ok=True))
+        self.assertFalse(evaluate_probe_response(200, body, require_agent_ok=True))
+
+    def test_workflow_probes_are_status_and_contract_aware(self):
+        workflow = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "opencode.yml"
+        text = workflow.read_text(encoding="utf-8")
+        # All service probes must be HTTP-status-aware (curl --fail), and the
+        # agent probe must validate the readiness contract, not one nested flag.
+        self.assertIn("curl -fsS -m 2 http://127.0.0.1:6333/collections", text)
+        self.assertIn("curl -fsS -m 2 http://127.0.0.1:16686/", text)
+        self.assertIn("curl -fsS -m 2 http://127.0.0.1:8001/healthz", text)
+        self.assertIn("curl -fsS -m 2 http://127.0.0.1:8080/healthz", text)
+        self.assertIn('"status"', text)
+        self.assertNotIn('| grep -q \'"qdrant":true\'', text)
+
+
+class TestAcceptanceUnionAndReviewerAuthority(unittest.TestCase):
+    """F5/F6: unions of risk never reduce verification; job success is not approval."""
+
+    def _manifest(self, profile, categories):
+        return {
+            "schema_version": 1,
+            "head_sha": "1" * 40,
+            "base_sha": "2" * 40,
+            "execution_sha": "3" * 40,
+            "profile": profile,
+            "dirty": False,
+            "matched_categories": categories,
+        }
+
+    def _ready_review(self):
+        payload = {
+            "schema_version": 1,
+            "head_sha": "1" * 40,
+            "base_sha": "2" * 40,
+            "execution_sha": "3" * 40,
+            "code_assessment": "acceptable",
+            "verification": "complete",
+            "candidate_currentness": "current",
+            "merge_readiness": "ready_for_maintainer",
+            "material_findings": [],
+            "evidence": {"notes": "ok"},
+        }
+        return validate_review_payload(payload, expected_head="1" * 40,
+                                       expected_base="2" * 40, expected_execution="3" * 40)
+
+    def _not_ready_review(self):
+        payload = {
+            "schema_version": 1,
+            "head_sha": "1" * 40,
+            "base_sha": "2" * 40,
+            "execution_sha": "3" * 40,
+            "code_assessment": "changes_required",
+            "verification": "incomplete",
+            "candidate_currentness": "current",
+            "merge_readiness": "not_ready",
+            "material_findings": [{"id": "F1", "disposition": "unresolved", "description": "open"}],
+            "evidence": {"notes": "blocked"},
+        }
+        return validate_review_payload(payload, expected_head="1" * 40,
+                                       expected_base="2" * 40, expected_execution="3" * 40)
+
+    def test_full_profile_keeps_packaging_when_deploy_present(self):
+        decision = classify_paths(["pyproject.toml", "src/mainframe_rag/ingest/publish.py"])
+        self.assertEqual(decision.profile, ProfileName.FULL)
+        manifest = self._manifest("full", decision.matched_categories)
+        self.assertIn("deploy", manifest["matched_categories"])
+        summary = build_acceptance_summary(
+            manifest,
+            {"context_check": "success", "lint_and_types": "success", "unit_tests": "success",
+             "simulation": "success", "gate_l1": "success", "packaging": "success",
+             "reviewer": "success"},
+            review=self._ready_review(),
+        )
+        packaging = next(l for l in summary.lanes if l.name == "packaging")
+        self.assertTrue(packaging.required)
+        # Omitting the packaging lane must block even though profile is full.
+        blocked = build_acceptance_summary(
+            manifest,
+            {"context_check": "success", "lint_and_types": "success", "unit_tests": "success",
+             "simulation": "success", "gate_l1": "success", "reviewer": "success"},
+            review=self._ready_review(),
+        )
+        self.assertFalse(blocked.all_prerequisites_met)
+        missing = next(l for l in blocked.lanes if l.name == "packaging")
+        self.assertEqual(missing.state, LaneState.SELECTED_MISSING)
+
+    def test_reviewer_success_with_not_ready_review_blocks(self):
+        manifest = self._manifest("offline", ["prose"])
+        summary = build_acceptance_summary(
+            manifest,
+            {"context_check": "success", "reviewer": "success"},
+            review=self._not_ready_review(),
+        )
+        self.assertFalse(summary.all_prerequisites_met)
+        self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
+        reviewer = next(l for l in summary.lanes if l.name == "reviewer")
+        self.assertEqual(reviewer.state, LaneState.SELECTED_FAILED)
+
+    def test_missing_review_blocks_despite_job_success(self):
+        manifest = self._manifest("offline", ["prose"])
+        summary = build_acceptance_summary(
+            manifest,
+            {"context_check": "success", "reviewer": "success"},
+            review=None,
+        )
+        self.assertFalse(summary.all_prerequisites_met)
+        self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
+        reviewer = next(l for l in summary.lanes if l.name == "reviewer")
+        self.assertEqual(reviewer.state, LaneState.SELECTED_MISSING)
 
 
 if __name__ == "__main__":

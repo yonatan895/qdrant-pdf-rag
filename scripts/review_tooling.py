@@ -462,6 +462,69 @@ class NormalizedReviewResult:
         }
 
 
+def _run_git(args: list[str], cwd: pathlib.Path | str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=cwd,
+    )
+
+
+def resolve_execution_head(cwd: pathlib.Path | str | None = None) -> str:
+    """Actual execution-worktree identity (pinned checkout).
+
+    Callers must keep services/tests pinned to this immutable worktree and
+    inspect other revisions via git objects or a separate worktree rather
+    than switching the active execution checkout.
+    """
+    try:
+        res = _run_git(["rev-parse", "HEAD"], cwd=cwd)
+    except OSError:
+        return ""
+    if res.returncode != 0:
+        return ""
+    return res.stdout.strip()
+
+
+def is_ancestor(ancestor_sha: str, descendant_sha: str, cwd: pathlib.Path | str | None = None) -> bool:
+    """Allowed head/execution relationship: execution equals head, or the
+    test-merge execution commit contains the PR head as an ancestor."""
+    if not ancestor_sha or not descendant_sha:
+        return False
+    if ancestor_sha.lower() == descendant_sha.lower():
+        return True
+    try:
+        res = _run_git(["merge-base", "--is-ancestor", ancestor_sha, descendant_sha], cwd=cwd)
+    except OSError:
+        return False
+    return res.returncode == 0
+
+
+def evaluate_probe_response(status_code: int | None, body: str | None = None, *, require_agent_ok: bool = False) -> bool:
+    """Shared readiness predicate for review-service probes.
+
+    HTTP success alone (2xx) is not readiness for the agent: the agent
+    readiness contract is `status == "ok"` with HTTP 200. A degraded 503
+    body that still contains `"qdrant":true` (e.g. reembed_required) must
+    not count as ready.
+    """
+    if status_code is None or not (200 <= status_code < 300):
+        return False
+    if not require_agent_ok:
+        return True
+    if not body:
+        return False
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    return parsed.get("status") == "ok"
+
+
 def validate_review_payload(
     raw_payload: dict[str, Any] | None,
     expected_head: str | None = None,
@@ -470,6 +533,7 @@ def validate_review_payload(
     manifest: dict[str, Any] | None = None,
     check_git: bool = False,
     parse_error: str | None = None,
+    cwd: pathlib.Path | str | None = None,
 ) -> NormalizedReviewResult:
     validation_errors: list[str] = []
 
@@ -567,7 +631,14 @@ def validate_review_payload(
         validation_errors.append("material_findings must be a list")
         has_unresolved_findings = True
 
-    evidence = raw_payload.get("evidence", {})
+    if "evidence" not in raw_payload:
+        validation_errors.append("evidence field is missing")
+        evidence: Any = {}
+    else:
+        evidence = raw_payload.get("evidence")
+        if not isinstance(evidence, dict):
+            validation_errors.append("evidence must be an object")
+            evidence = {}
 
     # Git attribution checks
     # Use manifest if provided
@@ -593,19 +664,49 @@ def validate_review_payload(
 
     if check_git:
         try:
-            # Check commit existence in git object database
+            # Check commit existence in git object database. Existence alone
+            # never proves execution: the pinned worktree HEAD binding below
+            # is what ties the claimed SHAs to the code actually checked out.
             for sha, name in [(head_sha, "head_sha"), (base_sha, "base_sha"), (execution_sha, "execution_sha")]:
                 if sha:
-                    chk = subprocess.run(
-                        ["git", "rev-parse", "--verify", f"{sha}^{{commit}}"],
-                        capture_output=True, text=True, check=False,
-                    )
+                    chk = _run_git(["rev-parse", "--verify", f"{sha}^{{commit}}"], cwd=cwd)
                     if chk.returncode != 0:
                         candidate_currentness = CandidateCurrentness.UNVERIFIED.value
                         validation_errors.append(f"Commit {name} ({sha}) not found in git repository")
 
-            # Check working tree cleanliness
-            st = subprocess.run(["git", "status", "--porcelain", "-uno"], capture_output=True, text=True, check=False)
+            # Bind the candidate manifest to the actual execution worktree
+            # revision. A clean checkout of another commit must not pass
+            # simply because all claimed commits exist as git objects.
+            actual_head = resolve_execution_head(cwd=cwd)
+            if not actual_head:
+                candidate_currentness = CandidateCurrentness.UNVERIFIED.value
+                validation_errors.append("Unable to resolve execution worktree HEAD for attribution check")
+            else:
+                if execution_sha and actual_head.lower() != execution_sha.lower():
+                    candidate_currentness = CandidateCurrentness.UNVERIFIED.value
+                    validation_errors.append(
+                        f"Execution worktree HEAD ({actual_head}) does not match "
+                        f"claimed execution_sha ({execution_sha}); keep services/tests pinned "
+                        "to the immutable execution worktree and inspect other revisions "
+                        "via git objects or a separate worktree"
+                    )
+                if exp_e and actual_head.lower() != exp_e.lower():
+                    candidate_currentness = CandidateCurrentness.UNVERIFIED.value
+                    validation_errors.append(
+                        f"Execution worktree HEAD ({actual_head}) does not match "
+                        f"expected execution_sha ({exp_e})"
+                    )
+                # Allowed head/execution relationship: execution equals head,
+                # or execution is a test-merge commit containing head.
+                if head_sha and execution_sha and not is_ancestor(head_sha, execution_sha, cwd=cwd):
+                    candidate_currentness = CandidateCurrentness.UNVERIFIED.value
+                    validation_errors.append(
+                        f"head_sha ({head_sha}) is not an ancestor of execution_sha ({execution_sha}); "
+                        "execution must equal head or be a test-merge containing head"
+                    )
+
+            # Recheck relevant dirty-tree state before accepting reviewer output.
+            st = _run_git(["status", "--porcelain", "-uno"], cwd=cwd)
             if st.stdout.strip():
                 candidate_currentness = CandidateCurrentness.UNVERIFIED.value
                 validation_errors.append("Working tree contains uncommitted changes")
@@ -788,6 +889,12 @@ def build_acceptance_summary(
     if "tooling" in matched_cats or "tests" in matched_cats:
         required_lanes = set(required_lanes) | {"lint_and_types", "unit_tests"}
 
+    # Deploy always contributes the packaging obligation, even when the
+    # cross-layer union selects the `full` profile (whose base set has no
+    # packaging lane). A union of risks must never reduce verification.
+    if "deploy" in matched_cats:
+        required_lanes = set(required_lanes) | {"packaging"}
+
     head_sha = str(manifest.get("head_sha", ""))
     base_sha = str(manifest.get("base_sha", ""))
     execution_sha = str(manifest.get("execution_sha", ""))
@@ -803,15 +910,23 @@ def build_acceptance_summary(
     for name in lanes_to_evaluate:
         req = name in required_lanes
         status = lane_statuses.get(name)
-        # If lane is 'reviewer', integrate review result
-        if name == "reviewer":
-            if review:
-                if review.merge_readiness == MergeReadiness.READY_FOR_MAINTAINER.value:
-                    status = "success"
-                else:
-                    status = "failure"
-            elif status is None:
+        # If lane is 'reviewer', the validated candidate-bound review result
+        # is authoritative. Workflow execution success alone is never code
+        # approval: a successful reviewer job can return changes_required /
+        # not_ready, and a missing normalized review blocks when reviewer
+        # acceptance is required.
+        if name == "reviewer" and req:
+            if review is None:
                 status = None
+            elif review.merge_readiness == MergeReadiness.READY_FOR_MAINTAINER.value:
+                status = "success"
+            else:
+                status = "failure"
+        elif name == "reviewer" and review:
+            if review.merge_readiness == MergeReadiness.READY_FOR_MAINTAINER.value:
+                status = "success"
+            else:
+                status = "failure"
 
         evaluation = evaluate_lane(name, req, status)
         lane_evaluations.append(evaluation)
