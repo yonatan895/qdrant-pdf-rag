@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "manifest_version": 1,
+  "head_sha": "205f331c0cdbcac8ee2be7d6b0a0706acdb3415f",
+  "base_sha": "3452e9e38042367694a135a1f242da376b33d11f",
+  "execution_sha": "75add73339ed3e2e15d05723fb4bac195cc2f5d6",
+  "dirty": false,
+  "dirty_tree": false,
+  "profile": "offline",
+  "services": [],
+  "matched_categories": [
+    "prose",
+    "tests",
+    "tooling"
+  ],
+  "interpreter": {
+    "implementation": "CPython",
+    "version": "3.14.7",
+    "free_threaded": false,
+    "gil_disabled": false,
+    "jit": false,
+    "jit_enabled": false
+  },
+  "dependencies": {
+    "requirements_hash": "4a54cebcc9a3cec2d7978dec843037c997bd1d6aade412053fcd9bb7d0ebc658",
+    "lockfile_sha256": "4a54cebcc9a3cec2d7978dec843037c997bd1d6aade412053fcd9bb7d0ebc658"
+  }
+}
