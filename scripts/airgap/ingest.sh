@@ -50,6 +50,46 @@ spec:
 EOF
 fi
 
+# Maintenance modes (issue #391 current packet): the operator launcher is
+# the one supported path, so repair/removal flags travel through it with
+# validation instead of ad-hoc applies. One Job name and the shared
+# ingest-work PVC keep the host-local target lock meaningful (one
+# authorized publisher, shared progress path); no distributed lock is
+# claimed, and aliases/defaults are never flipped implicitly.
+#
+# Retirement entries accept the real backend alphabet: a source_rev is
+# `vendor|product|version|sha256` (labels may carry '/', '|' and spaces),
+# so validation rejects only what would break the shell or the rendered
+# YAML — control characters, quotes, backslashes and wildcards — and the
+# backend still refuses any revision absent from the approved inventory.
+ALIAS_PUBLISH=$(bool_flag INGEST_ALIAS_PUBLISH false)
+REINGEST=$(bool_flag INGEST_REINGEST false)
+INGEST_ARGS='"--src", "/corpus", "--progress", "/work/inventory.jsonl"'
+if [ "$REINGEST" = "true" ]; then
+    INGEST_ARGS="$INGEST_ARGS, \"--reingest\""
+fi
+if [ -n "${INGEST_RETIRE_DOCS:-}" ]; then
+    [ "$ALIAS_PUBLISH" = "true" ] || die "INGEST_RETIRE_DOCS requires INGEST_ALIAS_PUBLISH=true — explicit removals are a publication operation and the ingest refuses them in-place"
+    _old_ifs=$IFS
+    IFS=', '
+    set -f  # operator input is data, never a pathname pattern (review F3)
+    for _entry in $INGEST_RETIRE_DOCS; do
+        [ -n "$_entry" ] || continue
+        case "$_entry" in
+            @*|*@) die "malformed INGEST_RETIRE_DOCS entry '$_entry': expected DOCID or DOCID@SOURCEREV (empty side of '@')" ;;
+            *'"'*|*\\*|*\**|*\?*) die "malformed INGEST_RETIRE_DOCS entry '$_entry': quotes, backslashes and wildcards are not allowed" ;;
+        esac
+        if printf '%s' "$_entry" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+            die "malformed INGEST_RETIRE_DOCS entry: control characters are not allowed"
+        fi
+        INGEST_ARGS="$INGEST_ARGS, \"--retire-doc\", \"$_entry\""
+    done
+    set +f
+    IFS=$_old_ifs
+    unset _old_ifs _entry
+fi
+INGEST_ARGS="[$INGEST_ARGS]"
+
 echo "==> Kustomize: prod ingest Job (corpus PVC: $CORPUS_PVC)"
 INGEST_WORKERS=${INGEST_WORKERS:-4}
 kustomize_render deploy/kustomize/overlays/openshift-ingest | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
@@ -64,12 +104,23 @@ kustomize_render deploy/kustomize/overlays/openshift-ingest | sed -E 's|"(__[A-Z
     -e "s|__DENSE_DIM__|\"$DENSE_DIM\"|g" \
     -e "s|__CORPUS_PVC__|$CORPUS_PVC|g" \
     -e "s|__INGEST_WORKERS__|\"$INGEST_WORKERS\"|g" \
+    -e "s|__INGEST_ALIAS_PUBLISH__|\"$ALIAS_PUBLISH\"|g" \
     -e "s|__CONTEXTUAL_EMBED_ENABLED__|\"${CONTEXTUAL_EMBED_ENABLED:-false}\"|g" \
     -e "s|__CONTEXT_LLM_BASE_URL__|${CONTEXT_LLM_BASE_URL:-}|g" \
     -e "s|__CONTEXT_LLM_MODEL__|${CONTEXT_LLM_MODEL:-}|g" \
     -e "s|__OTEL_EXPORTER_OTLP_ENDPOINT__|${OTEL_ENDPOINT_RESOLVED}|g" \
     -e "s|__OTEL_DEPLOYMENT_ENVIRONMENT__|${OTEL_DEPLOYMENT_ENVIRONMENT:-}|g" \
     > dist/ingest-rendered.yaml
+# Literal insertion for the operator-visible args (review F2): real source
+# revisions contain '|', '/', spaces and '&', which sed delimiters and
+# replacements would reinterpret. awk index/substr copies bytes verbatim;
+# control characters are rejected above, so the placeholder stays on one line.
+INGEST_ARGS="$INGEST_ARGS" awk '
+    { i = index($0, "__INGEST_ARGS__")
+      if (i) { print substr($0, 1, i - 1) ENVIRON["INGEST_ARGS"] substr($0, i + 15) }
+      else print }' \
+    dist/ingest-rendered.yaml > dist/ingest-rendered.args.tmp
+mv dist/ingest-rendered.args.tmp dist/ingest-rendered.yaml
 # Gateway virtual keys (LiteLLM): same strip-or-substitute contract as the
 # agent render in deploy.sh (Secret holds embed-api-key + context-llm-api-key
 # for this Job).

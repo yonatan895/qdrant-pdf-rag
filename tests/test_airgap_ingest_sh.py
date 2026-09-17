@@ -46,12 +46,14 @@ spec:
       containers:
         - name: ingest
           image: __INTERNAL_REGISTRY__/qdrant-pdf-rag-ingest:__IMAGE_SHA__
-          args: ["--src", "/corpus", "--progress", "/work/inventory.jsonl"]
+          args: __INGEST_ARGS__
           env:
             - name: QDRANT_URL
               value: __QDRANT_URL__
             - name: QDRANT_COLLECTION
               value: mainframe_manuals
+            - name: INGEST_ALIAS_PUBLISH
+              value: "__INGEST_ALIAS_PUBLISH__"
             - name: QDRANT_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -239,6 +241,124 @@ def test_ingest_overlay_qdrant_contract():
     assert re.search(r"(?m)^\s*key: api-key$", real)
     assert "read-only-api-key" not in real
     assert "__QDRANT_RELEASE__-apikey" in real
+
+
+def test_ingest_overlay_maintenance_contract():
+    """Issue #391 current packet: maintenance modes are explicit, validated
+    launcher inputs rendered into the prod Job, and the progress path stays
+    the single shared publisher path (no implicit alias/default flip)."""
+    real = (
+        REPO / "deploy" / "kustomize" / "overlays" / "openshift-ingest" / "ingest-job.yaml"
+    ).read_text()
+    assert re.search(r"(?m)^\s*args: __INGEST_ARGS__$", real)
+    assert re.search(r"(?m)^\s*- name: INGEST_ALIAS_PUBLISH$", real)
+    assert re.search(r'(?m)^\s*value: "__INGEST_ALIAS_PUBLISH__"$', real)
+    assert re.search(r'(?m)^\s*value: "true"$', real) is None
+    # The launcher owns the one shared progress path (writer constraint).
+    launcher = (REPO / "scripts" / "airgap" / "ingest.sh").read_text()
+    assert "--progress\", \"/work/inventory.jsonl" in launcher
+
+
+def test_ingest_default_render_adds_no_maintenance_args(ingest_tree):
+    r = _run_ingest(ingest_tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert (
+        'args: ["--src", "/corpus", "--progress", "/work/inventory.jsonl"]' in rendered
+    )
+    assert '"--reingest"' not in rendered
+    assert '"--retire-doc"' not in rendered
+    # Review F1: boolean env values render as quoted strings (K8s EnvVar.value
+    # is a string field), matching the sibling integer quoting contract.
+    assert re.search(r'(?m)^\s*value: "false"$', rendered)
+    assert_no_placeholders(rendered)
+
+
+def test_ingest_force_repair_args_rendered(ingest_tree):
+    r = _run_ingest(ingest_tree, ("INGEST_REINGEST", "true"))
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert '"--reingest"' in rendered
+    assert_no_placeholders(rendered)
+
+
+def test_ingest_retire_docs_require_alias_publish(ingest_tree):
+    r = _run_ingest(ingest_tree, ("INGEST_RETIRE_DOCS", "SA22-0000-00"))
+    assert r.returncode != 0
+    assert "INGEST_ALIAS_PUBLISH=true" in r.stderr
+
+
+def test_ingest_retire_docs_rendered_with_alias_publish(ingest_tree):
+    r = _run_ingest(
+        ingest_tree,
+        ("INGEST_ALIAS_PUBLISH", "true"),
+        ("INGEST_RETIRE_DOCS", "SA22-0000-00, SA22-7777-01@rev-1"),
+    )
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert '"--retire-doc", "SA22-0000-00"' in rendered
+    assert '"--retire-doc", "SA22-7777-01@rev-1"' in rendered
+    assert re.search(r'(?m)^\s*value: "true"$', rendered)
+    assert_no_placeholders(rendered)
+
+
+def test_ingest_retire_docs_accepts_source_revision_alphabet(ingest_tree):
+    """Review F2: a real source_rev (`vendor|product|version|sha256`, labels
+    may carry '/', '|' and spaces) reaches the Job args verbatim; the old
+    narrow charset made revision-scoped retirement unreachable and the sed
+    delimiter collided with the revision pipes."""
+    rev = "ibm|z/os|3.1|" + "a" * 64
+    r = _run_ingest(
+        ingest_tree,
+        ("INGEST_ALIAS_PUBLISH", "true"),
+        ("INGEST_RETIRE_DOCS", f"SA23-1380-09@{rev}"),
+    )
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert f'"--retire-doc", "SA23-1380-09@{rev}"' in rendered
+    assert_no_placeholders(rendered)
+
+
+def test_ingest_retire_docs_wildcard_fails_closed(ingest_tree):
+    """Review F3: operator input is never pathname-expanded (noglob) and
+    wildcards fail closed instead of rendering local filenames."""
+    r = _run_ingest(
+        ingest_tree,
+        ("INGEST_ALIAS_PUBLISH", "true"),
+        ("INGEST_RETIRE_DOCS", "*"),
+    )
+    assert r.returncode != 0
+    assert "malformed INGEST_RETIRE_DOCS" in r.stderr
+    assert "wildcards" in r.stderr
+
+
+def test_ingest_retire_docs_empty_side_fails_closed(ingest_tree):
+    r = _run_ingest(
+        ingest_tree,
+        ("INGEST_ALIAS_PUBLISH", "true"),
+        ("INGEST_RETIRE_DOCS", "SA22-0000-00@"),
+    )
+    assert r.returncode != 0
+    assert "empty side of '@'" in r.stderr
+
+
+def test_ingest_malformed_retire_docs_fails_closed(ingest_tree):
+    """Quotes/backslashes would break the rendered double-quoted YAML scalar
+    and are refused; other punctuation (/, |, spaces, ';') is data, never a
+    shell evaluation, and reaches the backend verbatim."""
+    r = _run_ingest(
+        ingest_tree,
+        ("INGEST_ALIAS_PUBLISH", "true"),
+        ("INGEST_RETIRE_DOCS", 'SA22-0000-00"bad'),
+    )
+    assert r.returncode != 0
+    assert "malformed INGEST_RETIRE_DOCS" in r.stderr
+
+
+def test_ingest_invalid_maintenance_bool_fails_closed(ingest_tree):
+    r = _run_ingest(ingest_tree, ("INGEST_REINGEST", "maybe"))
+    assert r.returncode != 0
+    assert "must be true/false" in r.stderr
 
 
 def test_ingest_dryrun_custom_workers(ingest_tree):

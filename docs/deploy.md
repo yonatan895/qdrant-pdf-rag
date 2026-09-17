@@ -464,8 +464,15 @@ explicit environment → `OPERATOR_ENV_KEYS` snapshot/restore around file loadin
 → `require_env` plus blank/preflight validation → both agent and ingest rendered
 environments → Settings and operation-specific interpretation. Trace every step
 for a newly required input; an example alone or agent-only render is insufficient.
-CI uses explicit synthetic values, never an attestation bypass. No real registry,
-URL, token or private environment file enters git or the transfer artifact.
+Maintenance modes (issue #391 current packet) follow the same path:
+`INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST` and `INGEST_RETIRE_DOCS` are
+`OPERATOR_ENV_KEYS` validated by `scripts/airgap/ingest.sh` and rendered into
+the ingest Job args/env; the example documents them commented out, no default
+flips, and the shared ingest-work progress path is fixed so one authorized
+publisher at a time is enforceable (host-local target lock, no distributed
+lock claim). CI uses explicit synthetic values, never an attestation bypass. No
+real registry, URL, token or private environment file enters git or the transfer
+artifact.
 
 **Absent/blank semantics:** `common.sh` currently gives non-empty explicit env
 precedence and otherwise permits file/default resolution; required attestation

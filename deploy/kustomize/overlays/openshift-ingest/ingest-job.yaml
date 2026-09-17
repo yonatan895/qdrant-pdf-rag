@@ -23,7 +23,13 @@ spec:
         - name: ingest
           image: __INTERNAL_REGISTRY__/qdrant-pdf-rag-ingest:__IMAGE_SHA__
           imagePullPolicy: IfNotPresent
-          args: ["--src", "/corpus", "--progress", "/work/inventory.jsonl"]
+          # Maintenance args (issue #391 current packet) are rendered by
+          # scripts/airgap/ingest.sh from validated INGEST_REINGEST /
+          # INGEST_RETIRE_DOCS values; the progress path is fixed there too
+          # (one authorized publisher per shared ingest-work PVC). The
+          # placeholder is a whole YAML scalar so an empty rendering stays a
+          # valid sequence.
+          args: __INGEST_ARGS__
           env:
             - name: QDRANT_URL
               value: __QDRANT_URL__
@@ -34,6 +40,13 @@ spec:
                 secretKeyRef:
                   name: __QDRANT_RELEASE__-apikey
                   key: api-key
+            # Issue #391 current packet: alias publication is an explicit
+            # deployment-mode choice, never a default flip. Required for
+            # explicit removals (INGEST_RETIRE_DOCS) and for repair
+            # isolation; in-place mode keeps its documented maintenance
+            # window.
+            - name: INGEST_ALIAS_PUBLISH
+              value: "__INGEST_ALIAS_PUBLISH__"
             - name: EMBED_BASE_URL
               value: __EMBED_BASE_URL__
             - name: EMBED_MODEL
