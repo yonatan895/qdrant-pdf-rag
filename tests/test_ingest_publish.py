@@ -1714,12 +1714,11 @@ def test_retire_plan_validated_under_target_lock(tmp_path, monkeypatch):
     assert _gen_collections(fake) == gens_before, "stale plan builds nothing"
 
 
-def test_walked_doc_legacy_stray_publishes(tmp_path, monkeypatch):
-    """SF2 boundary: a sourceless point under a walked doc_id is covered by
-    the pre-361B compatibility bridge (no revision stamp exists to match
-    exactly) — the steady-state re-verify passes; unattributable residue
-    under unwalked docs still refuses (see
-    test_unmarked_legacy_residue_blocks_cutover_without_deletion)."""
+def test_walked_doc_unapproved_legacy_stray_refuses(tmp_path, monkeypatch):
+    """Issue #391 current packet (counterexample 2): sharing a walked doc_id
+    is not attributed coverage. A sourceless point with no approved legacy
+    membership refuses the steady-state re-verify; the point is preserved and
+    the alias does not move."""
     from mainframe_rag.ingest import run_ingest
 
     _publish_env(monkeypatch)
@@ -1735,5 +1734,99 @@ def test_walked_doc_legacy_stray_publishes(tmp_path, monkeypatch):
     fake.collections[live].append(
         SimpleNamespace(id="stray-a", payload={"doc_id": DOC_A, "text": "pre-361B"})
     )
+    with pytest.raises(RuntimeError, match="unmarked residue"):
+        _run_main(monkeypatch, corpus, progress)
+    assert fake.aliases[ALIAS] == live, "refusal moves no alias"
+    assert any(getattr(p, "id", None) == "stray-a" for p in fake.collections[live]), (
+        "unknown residue is preserved, never deleted"
+    )
+
+
+def test_walked_doc_approved_legacy_stray_publishes(tmp_path, monkeypatch):
+    """The pre-361B bridge survives with content attribution: a sourceless
+    point whose (doc_id, sha256) matches an approved legacy inventory record
+    is verified expected membership, not a printed-identity match."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+
+    fake.collections[live].append(
+        SimpleNamespace(
+            id="legacy-a",
+            payload={"doc_id": DOC_A, "sha256": "0" * 64, "text": "pre-361B"},
+        )
+    )
+    _seed_approved_legacy(progress, DOC_A)
     assert _run_main(monkeypatch, corpus, progress) == 0
     assert fake.aliases[ALIAS] == live
+    assert any(getattr(p, "id", None) == "legacy-a" for p in fake.collections[live])
+
+
+def test_publish_migration_with_explicit_retire_single_run(tmp_path, monkeypatch):
+    """Issue #391 counterexample 1 in publish mode: a representation migration
+    plus an explicitly approved removal still commits and swaps in one run.
+    The approved removal is applied before the verification that gates the
+    swap, and the superseded generation is retained."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a_path, _ = _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+
+    a_path.unlink()
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-B")
+    assert _run_main(
+        monkeypatch, corpus, progress, "--retire-doc", DOC_A, "--reingest"
+    ) == 0
+    new = fake.aliases[ALIAS]
+    assert new != live
+    assert _live_doc_ids(fake) == {DOC_B}
+    assert {p.payload["doc_id"] for p in fake.collections[live]} == {DOC_A, DOC_B}
+    record = read_manifest_record(fake, f"{new}__completions")
+    assert record is not None and record.state == STATE_COMMITTED
+    assert record.manifest.embed_model_revision == "rev-B"
+
+
+def test_publish_migration_retire_unapproved_stray_refuses(tmp_path, monkeypatch):
+    """The commit-time excusal of an approved removal is bounded: a stray
+    revision under the retired doc survives the approved named-revision
+    removal, and the post-removal audit refuses the swap (re-plan path)."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a_path, _ = _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+    fake.collections[live].append(
+        SimpleNamespace(
+            id="stray-a",
+            payload={"doc_id": DOC_A, "sha256": "f" * 64, "source_rev": "rev-old"},
+        )
+    )
+
+    a_path.unlink()
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-B")
+    with pytest.raises(RuntimeError, match="still present"):
+        _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A, "--reingest")
+    assert fake.aliases[ALIAS] == live, "refusal moves no alias"
+    assert any(getattr(p, "id", None) == "stray-a" for p in fake.collections[live])

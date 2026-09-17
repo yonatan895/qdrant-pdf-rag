@@ -369,6 +369,62 @@ def _transfer_staging_metadata(
         )
 
 
+def verify_searchable_coverage(
+    client: QdrantPoints,
+    settings: Settings,
+    walked: list[tuple[str, str]],
+    inventory: dict[str, InventoryRecord],
+    rules_v: str,
+    src_labels: str,
+    *,
+    retired: frozenset[str] = frozenset(),
+    retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
+    pending_removals: frozenset[str] = frozenset(),
+    allow_approved_legacy: bool = False,
+) -> list[str]:
+    """One read-only coverage rule: every walked document verifies and every
+    searchable point is attributable to a verified walked generation
+    (issue #391 current packet). Empty means attributable.
+
+    Two callers, one policy:
+    - the alias-swap gate (`verify_all_complete`) allows approved pre-361B
+      legacy membership, because a compatible committed generation may carry
+      lazily migrated history;
+    - the migration commit (`_commit_migration_representation`) is strict
+      (`allow_approved_legacy=False`): a new contract may only be declared
+      over vectors this run re-embedded. `pending_removals` are points under
+      a lock-validated `--retire-doc` plan that applies before the swap
+      audit, so the commit does not block on data whose removal is already
+      approved and enforced downstream. Never deletes."""
+    problems: list[str] = []
+    for path_str, sha in walked:
+        rec = inventory.get(path_str)
+        if (
+            rec is None
+            or rec.sha256 != sha
+            or rec.rules_version != rules_v
+            or rec.status not in ("upserted", "skipped")
+            or not rec.doc_id
+            or not rec.source_rev
+        ):
+            problems.append(path_str)
+            continue
+        if not is_doc_complete(
+            client, settings, rec.doc_id,
+            sha256=sha, rules_v=rules_v, source_labels=src_labels,
+            source_rev=rec.source_rev,
+        ):
+            problems.append(path_str)
+    problems.extend(
+        audit_unmarked_residue(
+            client, settings, walked, inventory, rules_v, retired, retire_plan,
+            pending_removals=pending_removals,
+            allow_approved_legacy=allow_approved_legacy,
+        )
+    )
+    return problems
+
+
 def verify_all_complete(
     client: QdrantPoints,
     staging_settings: Settings,
@@ -410,27 +466,10 @@ def verify_all_complete(
             problems.append(
                 f"{staging_settings.qdrant_collection}: representation drift on {', '.join(fields)}"
             )
-    for path_str, sha in walked:
-        rec = inventory.get(path_str)
-        if (
-            rec is None
-            or rec.sha256 != sha
-            or rec.rules_version != rules_v
-            or rec.status not in ("upserted", "skipped")
-            or not rec.doc_id
-            or not rec.source_rev
-        ):
-            problems.append(path_str)
-            continue
-        if not is_doc_complete(
-            client, staging_settings, rec.doc_id,
-            sha256=sha, rules_v=rules_v, source_labels=src_labels,
-            source_rev=rec.source_rev,
-        ):
-            problems.append(path_str)
     problems.extend(
-        audit_unmarked_residue(
-            client, staging_settings, walked, inventory, rules_v, retired, retire_plan
+        verify_searchable_coverage(
+            client, staging_settings, walked, inventory, rules_v, src_labels,
+            retired=retired, retire_plan=retire_plan, allow_approved_legacy=True,
         )
     )
     return problems
@@ -490,6 +529,24 @@ def _retired_still_present(
     )
 
 
+def approved_legacy_membership(
+    inventory: dict[str, InventoryRecord],
+) -> set[tuple[str, str]]:
+    """(doc_id, sha256) of approved sourceless pre-361B history: inventory
+    lines with no revision stamp, a content sha, and an approved status.
+    The one rule that lets the compatibility bridge distinguish verified
+    expected legacy membership from a printed-doc_id match (issue #391
+    current packet)."""
+    return {
+        (rec.doc_id, rec.sha256)
+        for rec in inventory.values()
+        if rec.doc_id
+        and rec.sha256
+        and rec.source_rev is None
+        and rec.status in ("upserted", "skipped")
+    }
+
+
 def audit_unmarked_residue(
     client: QdrantPoints,
     staging_settings: Settings,
@@ -498,16 +555,23 @@ def audit_unmarked_residue(
     rules_v: str,
     retired: frozenset[str] = frozenset(),
     retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
+    *,
+    pending_removals: frozenset[str] = frozenset(),
+    allow_approved_legacy: bool = False,
 ) -> list[str]:
     """Read-only coverage audit (issue #405 R1): every searchable point in
     the candidate generation must be attributable to the walked corpus. A
     point counts as covered when its (doc_id, source_rev) has a verified
-    walked inventory record, or — for pre-revision legacy points — when its
-    doc_id was walked (compatibility bridge for pre-361B corpora, whose
-    sourceless points carry no revision stamp to match exactly; see
-    docs/ingest.md). Anything else (including points for explicitly
-    retired documents, which must already be gone) is a problem, never a
-    deletion: absence from a partial walk is not a removal instruction."""
+    walked inventory record, or — when `allow_approved_legacy` — when it is
+    sourceless pre-revision history whose (doc_id, sha256) matches an
+    approved legacy inventory line (content attribution, never merely a
+    shared printed doc_id; issue #391 current packet). `pending_removals`
+    are doc_ids under a lock-validated removal plan applied before the swap
+    audit; their points are excused here and enforced gone by the retired
+    check once the plan is applied. Anything else (including points for
+    explicitly retired documents, which must already be gone) is a problem,
+    never a deletion: absence from a partial walk is not a removal
+    instruction."""
     from mainframe_rag.ingest.qdrant_io import scroll_all_points
 
     staging = staging_settings.qdrant_collection
@@ -523,29 +587,29 @@ def audit_unmarked_residue(
         and rec.rules_version == rules_v
         and rec.status in ("upserted", "skipped")
     }
-    walked_doc_ids = {
-        rec.doc_id
-        for path_str, _ in walked
-        if (rec := inventory.get(path_str)) and rec.doc_id
-    }
+    legacy_pairs = approved_legacy_membership(inventory) if allow_approved_legacy else set()
     residue = 0
     sample: list[str] = []
     for p in scroll_all_points(
         client,
         staging,
         scroll_filter=None,
-        with_payload=["doc_id", "source_rev"],
+        with_payload=["doc_id", "source_rev", "sha256"],
         page_size=staging_settings.ingest_scan_page_size,
     ):
         payload = p.payload or {}
         doc_id = payload.get("doc_id")
-        source_rev = payload.get("source_rev")
         if doc_id is not None and doc_id in retired:
             return [
                 _retired_still_present(client, staging_settings, staging, doc_id, retire_plan)
             ]
+        if doc_id is not None and doc_id in pending_removals:
+            # The approved removal applies before verification: the swap gate
+            # still refuses any remnant the plan does not actually delete.
+            continue
+        source_rev = payload.get("source_rev")
         covered = (doc_id, source_rev) in valid_pairs or (
-            source_rev is None and doc_id in walked_doc_ids
+            source_rev is None and (doc_id, payload.get("sha256")) in legacy_pairs
         )
         if not covered:
             residue += 1
@@ -555,7 +619,9 @@ def audit_unmarked_residue(
         return [
             (
                 f"{staging}: unmarked residue detected ({residue} point(s)"
-                f"{', e.g. ' + ', '.join(sample) if sample else ''}) — refusing "
+                f"{', e.g. ' + ', '.join(sample) if sample else ''}) — a searchable "
+                "point must match a verified walked generation (or, for sourceless "
+                "legacy history, an approved legacy inventory sha256); refusing "
                 "cutover without an explicit approved removal."
             )
         ]

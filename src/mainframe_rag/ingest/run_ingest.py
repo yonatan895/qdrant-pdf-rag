@@ -88,6 +88,7 @@ from mainframe_rag.ingest.publish import (
     read_publish_state,
     resolve_publish_staging,
     verify_all_complete,
+    verify_searchable_coverage,
     write_publish_state,
 )
 from mainframe_rag.ingest.qdrant_io import (
@@ -571,6 +572,7 @@ def _run_impl(
     force_reingest: bool = False,
     prewalked: list[tuple[str, str]] | None = None,
     _publish_target: PublishTarget | None = None,
+    _pending_removals: frozenset[str] = frozenset(),
     retire_docs: tuple[str, ...] | None = None,
 ) -> int:
     workers = resolve_workers(workers, settings)
@@ -802,7 +804,13 @@ def _run_impl(
             # proof passes (an empty corpus must not certify stale vectors).
             if manifest_mode == STATE_PENDING:
                 assert client is not None
-                _commit_migration_representation(client, settings, rules_v)
+                _commit_migration_representation(
+                    client, settings, rules_v,
+                    walked=walk_entries,
+                    inventory=load_inventory(progress),
+                    src_labels=src_labels,
+                    pending_removals=_pending_removals,
+                )
             root.set_attribute("ingest.files_ok", files_ok)
             root.set_attribute("ingest.files_failed", 0)
             root.set_attribute("ingest.chunks_upserted", chunks_upserted)
@@ -1018,7 +1026,13 @@ def _run_impl(
         # proof runs here, before any summary claims success (issue #391 F2).
         if failures == 0 and manifest_mode == STATE_PENDING:
             assert client is not None
-            _commit_migration_representation(client, settings, rules_v)
+            _commit_migration_representation(
+                client, settings, rules_v,
+                walked=walk_entries,
+                inventory=load_inventory(progress),
+                src_labels=src_labels,
+                pending_removals=_pending_removals,
+            )
     finally:
         if run_lock is not None:
             release_run_lock(run_lock)
@@ -1062,14 +1076,27 @@ def _run_impl(
 
 
 def _commit_migration_representation(
-    client, settings: Settings, rules_v: str
+    client,
+    settings: Settings,
+    rules_v: str,
+    *,
+    walked: list[tuple[str, str]],
+    inventory: dict[str, InventoryRecord],
+    src_labels: str,
+    pending_removals: frozenset[str] = frozenset(),
 ) -> None:
     """Success-path commit of a pending migration contract (issue #391 F2):
-    prove no completion marker under another contract remains, then flip
-    pending -> committed. Raises — leaving the contract pending — when the
-    migration scope is incomplete, so serving/skips stay blocked."""
+    prove no marker under another contract remains AND the actual searchable
+    membership is attributable to this run's verified walked documents
+    (issue #391 current packet: an unmarked old-rules point must never be
+    certified by a marker-only scan), then flip pending -> committed. Raises
+    — leaving the contract pending — on any gap, so serving/skips stay
+    blocked. Read-only: unknown points are preserved, never deleted; the
+    approved-removal plan is enforced gone by the post-removal swap audit."""
     digest = manifest_digest(settings, rules_v)
-    count, labels = stale_completion_markers(client, settings, digest)
+    count, labels = stale_completion_markers(
+        client, settings, digest, exclude_doc_ids=pending_removals
+    )
     if count:
         raise RuntimeError(
             f"representation migration incomplete: {count} completion marker(s) remain "
@@ -1077,6 +1104,19 @@ def _commit_migration_representation(
             "re-embedded by this run and may still be searchable. Ingest the complete "
             "corpus (or remove the stale generation deliberately) before committing the "
             "new contract; it stays pending."
+        )
+    problems = verify_searchable_coverage(
+        client, settings, walked, inventory, rules_v, src_labels,
+        pending_removals=pending_removals, allow_approved_legacy=False,
+    )
+    if problems:
+        raise RuntimeError(
+            f"representation migration incomplete: {len(problems)} searchable point(s) or "
+            f"walked document(s) are not attributable to a verified generation under the "
+            f"wanted contract (e.g. {problems[0]!r}) — their vectors were not re-embedded "
+            "by this run. Restore the complete corpus, approve an explicit removal "
+            "(`--retire-doc`, alias-publish mode), or resolve the residue manually before "
+            "committing the new contract; it stays pending."
         )
     commit_manifest(client, completion_collection_name(settings), settings, rules_v)
     log.info(
@@ -1269,6 +1309,7 @@ def _run_publish_locked(
         src, progress, workers, None, False, staging_settings, tracer, root,
         vendor=vendor, product=product, version=version,
         force_reingest=force_reingest, prewalked=prewalked, _publish_target=target,
+        _pending_removals=retired,
     )
     if rc != 0:
         return rc

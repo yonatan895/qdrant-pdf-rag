@@ -445,6 +445,93 @@ def test_forced_repair_publishes_distinct_generation_on_real_server(
     finally:
         client.close()
         _drop_publish_fixture(qdrant_url)
+def test_migration_scope_proof_blocks_unmarked_point_on_real_server(
+    qdrant_url, corpus, tmp_path, monkeypatch
+):
+    """Issue #391 current packet, real storage semantics: the commit-time
+    membership proof reads real scroll projections; an unmarked old-rules
+    point blocks the migration commit, the contract stays pending, and the
+    point survives the refusal. A complete walk afterward commits (rev-B)."""
+    from qdrant_client import QdrantClient, models
+
+    from mainframe_rag.config import HASH_EMBED_DIM
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import (
+        STATE_COMMITTED,
+        STATE_PENDING,
+        read_manifest_record,
+    )
+
+    collection = "sim-scope-proof"
+    client = QdrantClient(url=qdrant_url, timeout=10)
+    try:
+        if client.collection_exists(collection):
+            client.delete_collection(collection)
+        if client.collection_exists(f"{collection}__completions"):
+            client.delete_collection(f"{collection}__completions")
+        monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+        progress = tmp_path / "inv.jsonl"
+        first = _ingest(monkeypatch, qdrant_url, collection, corpus, progress)
+        assert [r["status"] for r in first] == ["upserted"] * 3
+
+        client.upsert(
+            collection,
+            points=[
+                models.PointStruct(
+                    id="00000000-0000-0000-0000-000000000391",
+                    vector={
+                        "dense": [0.0] * HASH_EMBED_DIM,
+                        "bm25": models.SparseVector(indices=[0], values=[1.0]),
+                    },
+                    payload={
+                        "doc_id": "SA99-0000-00",
+                        "rules_v": "pre-rp2",
+                        "source_rev": "rev-old",
+                    },
+                )
+            ],
+            wait=True,
+        )
+
+        monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-2")
+        previous = run_ingest._worker_qdrant
+        if previous is not None:
+            previous.close()
+        monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
+        monkeypatch.setattr(run_ingest, "_worker_embedder", None)
+        with pytest.raises(RuntimeError, match="searchable point"):
+            run_ingest.main(
+                ["--src", str(corpus), "--progress", str(progress), "--workers", "1", "--reingest"]
+            )
+        record = read_manifest_record(client, f"{collection}__completions")
+        assert record is not None and record.state == STATE_PENDING, (
+            "an incomplete scope proof leaves the contract pending"
+        )
+        kept = client.retrieve(collection, ids=["00000000-0000-0000-0000-000000000391"], with_payload=True)
+        assert kept, "unknown data is preserved: refusal is never a deletion instruction"
+
+        client.delete(
+            collection,
+            points_selector=models.PointIdsList(points=["00000000-0000-0000-0000-000000000391"]),
+            wait=True,
+        )
+        previous = run_ingest._worker_qdrant
+        if previous is not None:
+            previous.close()
+        monkeypatch.setattr(run_ingest, "_worker_qdrant", None)
+        monkeypatch.setattr(run_ingest, "_worker_embedder", None)
+        assert run_ingest.main(
+            ["--src", str(corpus), "--progress", str(progress), "--workers", "1", "--reingest"]
+        ) == 0
+        record = read_manifest_record(client, f"{collection}__completions")
+        assert record is not None and record.state == STATE_COMMITTED
+        assert record.manifest.embed_model_revision == "rev-2"
+    finally:
+        if client.collection_exists(f"{collection}__completions"):
+            client.delete_collection(f"{collection}__completions")
+        if client.collection_exists(collection):
+            client.delete_collection(collection)
+        client.close()
 
 
 def test_search_end_to_end_deterministic(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):
