@@ -551,6 +551,7 @@ def stale_completion_markers(
     wanted_digest: str,
     *,
     sample: int = 3,
+    exclude_doc_ids: frozenset[str] = frozenset(),
 ) -> tuple[int, list[str]]:
     """Completion markers NOT certified under `wanted_digest` — the
     commit-time scope proof for a representation migration (issue #391 F2).
@@ -560,8 +561,12 @@ def stale_completion_markers(
     certifies vectors under another contract: those docs were not re-embedded
     by this run (corpus deletions, retained sibling revisions, `--limit`
     holes) and their vectors may still be searchable. The caller refuses to
-    commit while any remain. Read-only, paginated; the manifest point has no
-    `doc_id` and never counts. Returns (count, sample labels)."""
+    commit while any remain. `exclude_doc_ids` names documents under a
+    lock-validated removal plan that applies before the swap audit: their
+    markers are about to be deleted explicitly, and the post-removal audit
+    refuses any remnant the plan did not actually remove. Read-only,
+    paginated; the manifest point has no `doc_id` and never counts. Returns
+    (count, sample labels)."""
     name = completion_collection_name(settings)
     if not client.collection_exists(name):
         return 0, []
@@ -578,6 +583,8 @@ def stale_completion_markers(
         doc_id = payload.get("doc_id")
         if not doc_id:
             continue  # the manifest point itself
+        if doc_id in exclude_doc_ids:
+            continue
         if payload.get("manifest_digest") == wanted_digest:
             continue
         count += 1

@@ -393,19 +393,25 @@ thread pool.
   including under `--reingest` — the force flag bypasses stored-data
   rejection, never the requirement to name the representation being
   written.
-- **Migration lifecycle (issue #391 F2):** the stored contract carries an
-  envelope-level `state`. A run whose wanted contract differs from the
-  stored committed one — or that finds a fresh/legacy target — writes it
-  `pending` before any delete/upsert and flips it `committed` only on the
-  success path: zero document failures AND a paginated residue scan
-  proving no completion marker under another `manifest_digest` remains.
-  Retained stale markers block the commit and leave the contract pending.
-  Unmarked old data is not covered by that scan; see the publication contract
-  below for the remaining #391 gap; `--limit` is refused for any migration
-  (`refuse_limited_migration`) except a fresh empty-target bootstrap. A
-  pending contract is never skippable (`check_ingest_compatible`),
-  servable (`serving_outcome`/lifespan; `/healthz` degrades), or
-  swappable (`verify_all_complete`); resumption is `--reingest`.
+- **Migration lifecycle (issue #391 F2; scope proof from the #391 current
+  packet):** the stored contract carries an envelope-level `state`. A run
+  whose wanted contract differs from the stored committed one — or that
+  finds a fresh/legacy target — writes it `pending` before any
+  delete/upsert and flips it `committed` only on the success path: zero
+  document failures AND a read-only scope proof that (a) no completion
+  marker under another `manifest_digest` remains and (b) every searchable
+  point is attributable to a verified walked document of this run. The
+  commit proof is strict: approved pre-361B legacy membership is not
+  accepted there, because a new contract may only be declared over vectors
+  this run re-embedded. Unmarked old data therefore blocks the commit and
+  leaves the contract pending; points an explicit, lock-validated
+  `--retire-doc` plan removes before the swap audit are excused at commit
+  and enforced gone downstream. Unknown data is preserved, never deleted;
+  `--limit` is refused for any migration (`refuse_limited_migration`)
+  except a fresh empty-target bootstrap. A pending contract is never
+  skippable (`check_ingest_compatible`), servable
+  (`serving_outcome`/lifespan; `/healthz` degrades), or swappable
+  (`verify_all_complete`); resumption is `--reingest`.
 - **Generation identity (issue #391 F2):** completion ids and staging
   names derive from the versioned fingerprint `rp2:` — a digest of the
   manifest's `REEMBED_FIELDS` projection, the same field policy
@@ -429,7 +435,7 @@ thread pool.
   before any skip is evaluated, so a stale completion can never cause a
   skip under a drifted representation; marker `manifest_digest` values
   are audit at skip time (the generation identity gate is the fingerprint)
-  and the commit-time residue proof.
+  and the commit-time scope proof.
 - **Source-revision identity** (issue #361, `ingest/identity.py` +
   revision-keyed pipeline): three identities — printed `doc_id`
   (family/citation key), `source_rev`
@@ -546,10 +552,13 @@ thread pool.
    with the exact way through (re-plan, whole-document retirement, or manual
    resolution — never a dead end). Retired documents that reappear in the
    walk, and unknown retirement names, fail closed before any mutation.
-   The audit's legacy allowance is a compatibility bridge, not attribution:
-   a sourceless point under a walked `doc_id` is covered because pre-361B
-   points carry no revision stamp to match exactly; residue under unwalked
-   or retired docs still refuses. `--retire-doc` is a CLI-only flag (the
+   The audit's legacy allowance is a compatibility bridge with content
+   attribution (issue #391 current packet): a sourceless point is covered
+   only when its `(doc_id, sha256)` matches an approved legacy inventory
+   line (`source_rev` absent, approved status) — sharing a printed
+   `doc_id` with a walked document is not attribution. Unexplained
+   residue under walked, unwalked or retired docs refuses and is
+   preserved. `--retire-doc` is a CLI-only flag (the
    air-gap `scripts/airgap/ingest.sh` wrapper does not plumb it yet).
   During a migration retained markers block the commit until
   the operator re-ingests the complete corpus or cleans the stale
@@ -674,8 +683,11 @@ acceptance ownership; publication/lifetime gaps belong to #391.
 **Status: partially implemented.** **Authority:** #359/#391 and #405 R1/R2;
 #397 documents the remaining gap, not a runtime fix. **Decision owner:**
 `completion` verification, `run_ingest._commit_migration_representation`,
-`publish.verify_all_complete`, `run_ingest._run_publish`. Static inspection below is at
-`d8d9ecb7a9a6f426529c715368b513926f6c5a96` (merge #408); it is not a newly executed reproduction.
+`publish.verify_searchable_coverage`, `publish.verify_all_complete`,
+`run_ingest._run_publish`. Static inspection below was at
+`d8d9ecb7a9a6f426529c715368b513926f6c5a96` (merge #408); the #391 current packet
+re-audited `ff5ccba` and its commit-scope/legacy-attribution findings are
+implemented with the tests named under Existing evidence.
 
 **Required invariant:** all searchable points in a published generation are
 attributable to verified generation coverage. A scan finding no stale completion
@@ -695,14 +707,19 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   vector/chunk length mismatches fail before load; zero chunks are explicit
   `empty`, never a successful document publication.
 - Representation migration writes `pending`, then commits after no document
-  failures and `stale_completion_markers` finds no differently stamped markers.
-  This detects marked residue. It does not inspect all unmarked searchable data.
+  failures, `stale_completion_markers` finds no differently stamped markers,
+  and the read-only scope proof attributes every searchable point to a verified
+  walked document of this run (`verify_searchable_coverage`; strict at commit —
+  no legacy allowance). This detects marked residue AND unmarked data. An
+  explicitly approved removal planned under the target lock is excused at
+  commit and enforced gone before the swap.
 - `verify_all_complete` checks the walked inventory, rejects a present pending
   contract, a missing/unreadable/drifted final manifest on a walked corpus,
-  and any searchable point no walked document accounts for (read-only
-  residue audit; explicit `--retire-doc` removals are the only deletions and
-  are applied before verification). In-place mode still never removes
-  unwalked data.
+  and any searchable point no verified walked generation accounts for —
+  sourceless points only through approved legacy `(doc_id, sha256)` membership
+  (read-only residue audit; explicit `--retire-doc` removals are the only
+  deletions and are applied before verification). In-place mode still never
+  removes unwalked data.
 - Distinct staging plus the alias update isolates ordinary generation cutover
   under the coverage and writer assumptions below. Forced same-representation
   repair of live staging, and first legacy-name conversion do not offer
@@ -741,7 +758,14 @@ reconverge and rollback, plus the R1/R2 lifecycle: partial-walk refusal with
 preservation, explicit retirement with rollback history, fail-closed unknown
 and contradictory retirements, read-only residue audit, same-target writer
 serialization, overtaken-publisher refusal, same-staging resume, retained
-generation immutability, and in-place lock scoping. Warm-cache mutation and
+generation immutability, and in-place lock scoping. The #391 current-packet
+scope proof adds `tests/test_run_ingest.py::test_unmarked_searchable_point_blocks_migration_commit`
+(empty walk over an unmarked old-rules point refuses and preserves it) and
+`test_ingest_publish.py::test_walked_doc_unapproved_legacy_stray_refuses` /
+`test_walked_doc_approved_legacy_stray_publishes` (content attribution, not a
+printed-doc_id match), plus the migration-with-retirement pair
+(`test_publish_migration_with_explicit_retire_single_run`,
+`test_publish_migration_retire_unapproved_stray_refuses`). Warm-cache mutation and
 serving-reader draining remain #391 acceptance counterexamples; retain
 independent expected membership and real client projection semantics.
 
