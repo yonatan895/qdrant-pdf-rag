@@ -488,12 +488,15 @@ thread pool.
   default off; enabling by default is a dedicated follow-up PR; issue #359
   req 4/5, `ingest/publish.py` + `qdrant_io` alias/snapshot helpers):
   readers resolve `<collection>` through a Qdrant alias. The ordinary
-  distinct-staging cutover keeps the old target during preparation; complete
-  coverage and immutable reader lifetime have the limitations below.
-  Each publish run derives a deterministic staging generation
+  distinct-staging cutover keeps the old target during preparation; one
+  target-held lock serializes publishers for the same alias from staging
+  resolution through cutover, and a pre-swap live recheck refuses a
+  candidate overtaken by a lock-bypass writer. Each publish run derives
+  a deterministic staging generation
   `<collection>__gen<genfp><corpusfp>` (representation fingerprint + CLI
-  source triple + walked-corpus content); an identical rerun converges the
-  same staging (crash-safe resume), changed inputs address a new one, and a
+  source triple + walked-corpus content); an identical rerun resumes the
+  same recorded unfinished staging (crash-safe resume via the
+  `publish-<alias>.json` sidecar), changed inputs address a new one, and a
   derived name equal to the live physical means "already published"
   (read-only re-verify, no clone, no swap — plus the representation
   read-only check for record-only drift and for a pending same-contract
@@ -514,22 +517,40 @@ thread pool.
   under a changed representation fails closed until `--reingest`. With
   `--reingest` the contract opens `pending` on the staging, every walked
   doc re-embeds, the residue proof commits it, and only then does the
-  alias swap. `verify_all_complete` rejects a present pending record but
-  currently tolerates an absent final record (known gap below). Publish-mode `--reingest` reconverges the live
+  alias swap. `verify_all_complete` rejects a present pending record and a
+  missing/unreadable/drifted final manifest on a walked corpus, plus any
+  searchable point no walked document accounts for (read-only residue
+  audit — the refusal deletes nothing). Publish-mode `--reingest` reconverges the live
   physical in place **only** when its stored contract IS the wanted one
   (same-generation repair; `require_in_place_reconverge`) and skips the
   self-swap (`already_live_reconverged`); any representation change
   publishes a distinct staging and never mutates the serving generation.
   Swap failure leaves the previous generation serving (job
   fails, staging retained for retry). `--limit` subsets and empty corpora
-  are refused fail-closed. Corpus deletions are NOT swept (status quo —
-  stale points survive until an operator cleans them, same as in-place
-  runs); during a migration those retained markers block the commit until
+  are refused fail-closed. Corpus deletions are NOT swept: a file missing
+  from the walk is not a removal instruction — unmarked residue (including
+  a previously published document that simply was not walked) refuses
+  cutover until the operator either restores the file or names an explicit
+  approved removal (`--retire-doc DOCID`, repeatable, validated against
+  the last approved inventory and applied to staging with revision-scoped
+  deletes before verification). Retired documents that reappear in the
+  walk, and unknown retirement names, fail closed before any mutation.
+  During a migration retained markers block the commit until
   the operator re-ingests the complete corpus or cleans the stale
   generation. First-publish cutover from a legacy physical layout snapshots the
   squatter, deletes it (brief documented maintenance window), then creates
   the alias; stale-rules legacy content needs `--reingest` like any other
   rules migration.
+- **Retained generations are never workspace (issue #405 R2):** a derived
+  staging name that collides with a committed retained (non-live)
+  generation allocates a suffixed candidate instead of reusing it, so
+  rollback-by-republish preserves the retained points and manifest
+  byte-identically. An existing staging with no matching build record
+  fails closed (remove it explicitly or resume the run that recorded it).
+  Same-alias publishers must share the progress directory (already required
+  for refresh lineage) so the target lock serializes them; different
+  directories or hosts are operator error, guarded only by the pre-swap
+  live recheck — there is no distributed lock.
 - **Fingerprint-format upgrade (one-time, fail-closed):** the pre-#391
   fingerprint omitted the operator revision and other re-embed-required
   fields, so it cannot be trusted for skip eligibility. Existing
@@ -627,10 +648,10 @@ acceptance ownership; publication/lifetime gaps belong to #391.
 <a id="publication-contract"></a>
 ## Completeness, publication and writer coordination
 
-**Status: partially implemented.** **Authority:** #359/#391; #397 documents the
-remaining gap, not a runtime fix. **Decision owner:** `completion` verification,
-`run_ingest._commit_migration_representation`, `publish.verify_all_complete`,
-`run_ingest._run_publish`. Static inspection below is at
+**Status: partially implemented.** **Authority:** #359/#391 and #405 R1/R2;
+#397 documents the remaining gap, not a runtime fix. **Decision owner:**
+`completion` verification, `run_ingest._commit_migration_representation`,
+`publish.verify_all_complete`, `run_ingest._run_publish`. Static inspection below is at
 `9fece72df92ca5da414bc8f5b05cb2f89fcd18c8`; it is not a newly executed reproduction.
 
 **Required invariant:** all searchable points in a published generation are
@@ -653,14 +674,16 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
 - Representation migration writes `pending`, then commits after no document
   failures and `stale_completion_markers` finds no differently stamped markers.
   This detects marked residue. It does not inspect all unmarked searchable data.
-- `verify_all_complete` checks the walked inventory and rejects a present pending
-  contract. Its `record is not None` guard does not reject missing/corrupt/unreadable
-  final metadata by itself. Required metadata absence must not certify a populated
-  target; this is an outstanding #391 acceptance gap.
+- `verify_all_complete` checks the walked inventory, rejects a present pending
+  contract, a missing/unreadable/drifted final manifest on a walked corpus,
+  and any searchable point no walked document accounts for (read-only
+  residue audit; explicit `--retire-doc` removals are the only deletions and
+  are applied before verification). In-place mode still never removes
+  unwalked data.
 - Distinct staging plus the alias update isolates ordinary generation cutover
-  only under the coverage and writer assumptions. In-place mode (default),
-  forced same-representation repair of live staging, and first legacy-name
-  conversion do not offer uninterrupted immutable-generation reads.
+  under the coverage and writer assumptions below. Forced same-representation
+  repair of live staging, and first legacy-name conversion do not offer
+  uninterrupted immutable-generation reads.
 - Corpus deletion is not automatic garbage collection. On a disposable synthetic
   regenerated corpus, use an isolated fresh target; the legacy delete-and-rebuild
   recipe is destructive and is not an instruction to delete a live collection.
@@ -668,9 +691,14 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
 
 **Coordination/lifetime assumptions:** serialize the **entire** resolve/prepare/
 ingest/verify/publish interval across every writer/admin actor to the same target.
-The current `acquire_run_lock(progress)` is a local advisory file lock in the
-inner ingest path, released before the outer final verification/swap. Different
-progress paths/hosts and overlapping publishers are not covered; `_DocLocks`
+Publish mode holds one target-identified advisory file lock
+(`publish-<alias>.lock` beside the progress file) from staging resolution
+through cutover; a second live publisher for the same target fails closed
+(fcntl releases on process death, so a held lock means a live holder — locks
+are never stolen). Same-alias runs must share the progress directory; a
+pre-swap live recheck refuses a candidate overtaken by a lock-bypass writer
+(different directory or host), without which the alias could swing back to
+an older generation. The inner build keeps its own progress lock; `_DocLocks`
 only serializes revisions inside one process. Supported operation requires
 operator-serialized jobs, not a claim of distributed lock enforcement. No HA
 claim follows from a single-node run.
@@ -685,11 +713,14 @@ and [release recovery](crc-release-verification.md).
 
 **Existing evidence:** `tests/test_ingest_completion.py` checks per-document failure
 boundaries; `tests/test_ingest_publish.py` includes staging visibility, failed
-swap recovery, pending refusal, forced same-contract reconvergence and rollback.
-Those tests are narrower than full coverage, immutable reader lifetime or complete
-publication serialization. Extend these homes for #391's unmarked-data, missing
-final-metadata, active-reader, warm-cache and overlapping-publisher counterexamples;
-retain independent expected membership and real client projection semantics.
+swap recovery, pending/missing/drifted-manifest refusal, forced same-contract
+reconverge and rollback, plus the R1/R2 lifecycle: partial-walk refusal with
+preservation, explicit retirement with rollback history, fail-closed unknown
+and contradictory retirements, read-only residue audit, same-target writer
+serialization, overtaken-publisher refusal, same-staging resume, retained
+generation immutability, and in-place lock scoping. Warm-cache mutation and
+serving-reader draining remain #391 acceptance counterexamples; retain
+independent expected membership and real client projection semantics.
 
 <a id="metadata-contract"></a>
 ## Representation metadata outcomes

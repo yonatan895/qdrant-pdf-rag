@@ -25,6 +25,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -674,3 +675,112 @@ def release_run_lock(handle: IO[Any]) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     with contextlib.suppress(Exception):
         handle.close()
+
+
+def publish_lock_path(progress_path: Path, alias: str) -> Path:
+    """Target-identified lock file (issue #405 R2): publishers for the same
+    alias serialize on one path regardless of which progress file names the
+    run. Same-alias runs must therefore share the progress directory (already
+    required for refresh lineage); different directories are operator error
+    and remain guarded only by the pre-swap live recheck."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", alias).strip("._")
+    if not safe:
+        raise RuntimeError(f"cannot derive a publish lock for empty alias {alias!r}.")
+    return progress_path.parent / f"publish-{safe}.lock"
+
+
+def acquire_publish_lock(progress_path: Path, alias: str) -> IO[Any]:
+    """Publication writer ownership (issue #405 R2): fcntl LOCK_EX|LOCK_NB
+    held from staging resolution through alias cutover. A second live
+    publisher for the same target fails closed here — locks are never
+    stolen, and fcntl releases on process death so a held lock always
+    means a live holder on this host. Multi-host concurrent publication
+    is unsupported (operator discipline, as with the progress lock)."""
+    lock_path = publish_lock_path(progress_path, alias)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 — handle outlives the call
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        raise RuntimeError(
+            f"another publish for target {alias!r} holds {lock_path} — "
+            "concurrent publishers for the same target are rejected; run serially."
+        ) from exc
+    return handle
+
+
+def plan_retire_deletes(
+    approved_revs: dict[str, set[str | None]],
+    requested: dict[str, set[str | None]],
+) -> dict[str, dict[str, set[str] | bool]]:
+    """Retirement delete plan for explicitly approved removals (issue #405
+    R1). `approved_revs` maps doc_id to the revisions in the last approved
+    inventory; `requested` maps doc_id to the revisions named by
+    --retire-doc (None in the set means the whole document). Returns
+    {doc_id: {"revs": named revisions to delete, "legacy": sole-legacy
+    points go too}}. Raises BEFORE any delete — callers apply only after
+    this returns:
+
+    - retiring an unknown document or a revision with no approved history
+      fails closed (typo guard), never a silent success;
+    - named revisions delete precisely, coexisting retained revisions are
+      never selected;
+    - legacy sourceless points go only with an explicit whole-document
+      retirement whose approved history holds no named revision (the same
+      sole-history rule as refresh planning); mixed-history legacy stays
+      for the fail-closed audit instead of guessing.
+    """
+    plan: dict[str, dict[str, set[str] | bool]] = {}
+    for doc_id in sorted(requested):
+        if doc_id not in approved_revs:
+            raise RuntimeError(
+                f"--retire-doc {doc_id!r} has no approved history: only documents "
+                "in the last approved inventory may be retired explicitly."
+            )
+        approved = approved_revs[doc_id]
+        named_approved = {r for r in approved if r is not None}
+        want = requested[doc_id]
+        if None in want:
+            revs = set(named_approved)
+            legacy = not named_approved and None in approved
+        else:
+            unknown = set(want) - named_approved
+            if unknown:
+                raise RuntimeError(
+                    f"--retire-doc {doc_id!r} names unapproved revision(s) "
+                    f"{sorted(str(r) for r in unknown)}: approved revisions are "
+                    f"{sorted(named_approved)}."
+                )
+            revs = {str(r) for r in want}
+            legacy = False
+        plan[doc_id] = {"revs": revs, "legacy": legacy}
+    return plan
+
+
+def delete_legacy_markers(client: QdrantPoints, settings: Settings, doc_id: str) -> None:
+    """Drop sourceless pre-361B completion markers under one explicitly
+    retired document. Same per-doc scroll + point-id delete pattern as
+    delete_completion (bounded by the document's markers); callers invoke it
+    only for whole-document retirements whose approved history holds no
+    named revision, never beside retained named markers."""
+    name = completion_collection_name(settings)
+    if not client.collection_exists(name):
+        return
+    points = scroll_all_points(
+        client,
+        name,
+        scroll_filter=_doc_id_filter(doc_id),
+        with_payload=["source_rev"],
+        page_size=settings.ingest_scan_page_size,
+    )
+    ids: list[int | str | uuid.UUID] = []
+    for p in points:
+        if (p.payload or {}).get("source_rev") is None:
+            ids.append(p.id)
+    if ids:
+        client.delete(
+            name,
+            points_selector=models.PointIdsList(points=ids),
+            wait=True,
+        )

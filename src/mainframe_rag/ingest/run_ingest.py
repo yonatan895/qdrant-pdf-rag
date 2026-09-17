@@ -40,6 +40,7 @@ from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import Chunk, make_chunks
 from mainframe_rag.ingest.completion import (
+    acquire_publish_lock,
     acquire_run_lock,
     completion_collection_name,
     delete_completion,
@@ -78,11 +79,16 @@ from mainframe_rag.ingest.inventory import (
 )
 from mainframe_rag.ingest.publish import (
     PublishTarget,
+    apply_approved_removals,
+    clear_publish_state,
     corpus_fingerprint,
     ensure_staging,
     generation_fingerprint,
-    staging_name_for,
+    plan_approved_removals,
+    read_publish_state,
+    resolve_publish_staging,
     verify_all_complete,
+    write_publish_state,
 )
 from mainframe_rag.ingest.qdrant_io import (
     delete_by_doc,
@@ -473,6 +479,7 @@ def run(
     product: str | None = None,
     version: str | None = None,
     force_reingest: bool = False,
+    retire_docs: tuple[str, ...] | None = None,
 ) -> int:
     """Public entry: OTel tracing around the ingest body (issue #83).
 
@@ -495,6 +502,7 @@ def run(
         return _run_impl(
             src, progress, workers, limit, dry_run, settings, tracer, root,
             vendor=vendor, product=product, version=version, force_reingest=force_reingest,
+            retire_docs=retire_docs,
         )
     except Exception as exc:
         root.set_attribute("ingest.error_type", type(exc).__name__)
@@ -564,6 +572,7 @@ def _run_impl(
     force_reingest: bool = False,
     prewalked: list[tuple[str, str]] | None = None,
     _publish_target: PublishTarget | None = None,
+    retire_docs: tuple[str, ...] | None = None,
 ) -> int:
     workers = resolve_workers(workers, settings)
     rules_v = extraction_rules_version()
@@ -583,7 +592,15 @@ def _run_impl(
         return _run_publish(
             src, progress, workers, limit, settings, tracer, root,
             vendor=vendor, product=product, version=version,
-            force_reingest=force_reingest,
+            force_reingest=force_reingest, retire_docs=retire_docs,
+        )
+    if retire_docs:
+        # Explicit removals are a publication operation (intended-set
+        # membership); in-place mode never deletes unwalked data and
+        # dry runs mutate nothing.
+        raise RuntimeError(
+            "--retire-doc requires INGEST_ALIAS_PUBLISH=true (and a real run, "
+            "not --dry-run): in-place ingest never removes unwalked documents."
         )
     cache_path = resolve_cache_path(settings, progress) if settings.contextual_embed_enabled else None
     # Progress counters (issue #20 PR D): files ok / failed / chunks upserted,
@@ -1087,6 +1104,7 @@ def _run_publish(
     product: str | None = None,
     version: str | None = None,
     force_reingest: bool = False,
+    retire_docs: tuple[str, ...] | None = None,
 ) -> int:
     """Alias-publication orchestration (issue #359 req 4/5): converge a    versioned staging generation, then atomically swap the alias to it.
 
@@ -1095,7 +1113,6 @@ def _run_publish(
     staging settings; only a fully verified staging swaps, and the
     superseded physical is kept for operator rollback/GC."""
     rules_v = extraction_rules_version()
-    labels = source_labels(vendor, product, version)
     if limit is not None:
         raise RuntimeError(
             "INGEST_ALIAS_PUBLISH refuses --limit: publication certifies the "
@@ -1112,12 +1129,69 @@ def _run_publish(
     # publication certifies the gated corpus — a colliding or duplicated
     # walk must fail here, never after a staging generation was cloned.
     prewalked = _gate_planned_entries(src, prewalked)
+    # Explicit retirement planning (issue #405 R1) validates --retire-doc
+    # flags against the last approved inventory before any coordination or
+    # mutation; a missing file is never itself a removal instruction.
+    prior_inventory = load_inventory(progress)
+    retire_plan, retired = (
+        plan_approved_removals(tuple(retire_docs or ()), prior_inventory)
+        if retire_docs
+        else ({}, frozenset())
+    )
+    walked_known = {
+        rec.doc_id
+        for path_str, _ in prewalked
+        if (rec := prior_inventory.get(path_str)) and rec.doc_id
+    }
+    if retired & walked_known:
+        raise RuntimeError(
+            f"retired document(s) {sorted(retired & walked_known)} still present in "
+            "the walked corpus: remove their files or drop the --retire-doc flag."
+        )
+    # Writer ownership (issue #405 R2): one target-held lock spans staging
+    # resolution through alias cutover. In-place mode keeps its own
+    # progress lock only (explicitly scoped legacy path).
+    target_lock = acquire_publish_lock(progress, settings.qdrant_collection)
+    try:
+        return _run_publish_locked(
+            src, progress, workers, settings, tracer, root,
+            vendor=vendor, product=product, version=version,
+            force_reingest=force_reingest,
+            prewalked=prewalked, retire_plan=retire_plan, retired=retired,
+            rules_v=rules_v,
+        )
+    finally:
+        release_run_lock(target_lock)
+
+
+def _run_publish_locked(
+    src: Path,
+    progress: Path,
+    workers: int | None,
+    settings: Settings,
+    tracer: trace.Tracer,
+    root: trace.Span,
+    vendor: str | None,
+    product: str | None,
+    version: str | None,
+    force_reingest: bool,
+    prewalked: list[tuple[str, str]],
+    retire_plan: dict,
+    retired: frozenset[str],
+    rules_v: str,
+) -> int:
+    """Publication body under the target lock (see _run_publish)."""
+    labels = source_labels(vendor, product, version)
+    alias = settings.qdrant_collection
     client = _get_qdrant(settings)
     live, legacy = resolve_live_collection(client, settings)
-    staging = staging_name_for(
-        settings.qdrant_collection,
-        generation_fingerprint(settings, rules_v, labels),
-        corpus_fingerprint(prewalked),
+    gen_fp = generation_fingerprint(settings, rules_v, labels)
+    corp_fp = corpus_fingerprint(prewalked)
+    state = read_publish_state(progress, alias)
+    staging, resumed = resolve_publish_staging(
+        client, settings,
+        gen_fp=gen_fp, corpus_fp=corp_fp, live=live,
+        force_reingest=force_reingest, state=state,
     )
     staging_settings = settings.model_copy(update={"qdrant_collection": staging})
     if live == staging and not force_reingest:
@@ -1127,6 +1201,10 @@ def _run_publish(
         # (a new dense query prefix keeps the same staging name — and is
         # never a re-embed trigger) is acknowledged, and it raises on a
         # pending contract (interrupted run of the same representation).
+        # A stale sidecar (superseded build record) is forgotten, never
+        # acted on: the live generation is the ground truth here.
+        if clear_publish_state(progress, alias):
+            log.info(json.dumps({"action": "publish_state_superseded", "alias": alias}))
         _, record_drift = check_ingest_compatible(
             client,
             staging_settings,
@@ -1135,7 +1213,8 @@ def _run_publish(
         )
         _log_record_drift(staging_settings, record_drift)
         problems = verify_all_complete(
-            client, staging_settings, prewalked, load_inventory(progress), rules_v, labels,
+            client, staging_settings, prewalked, load_inventory(progress),
+            rules_v, labels, retired,
         )
         if problems:
             raise RuntimeError(
@@ -1159,10 +1238,28 @@ def _run_publish(
         # the SAME representation (issue #391 F2). A drift derives a
         # different staging name via the fingerprint; a legacy/absent
         # contract cannot be proven equal. Either way the serving physical
-        # must not be mutated by a migration.
+        # must not be mutated by a migration. In-place repair keeps no
+        # build record: a stale sidecar names a dead staging, not this one.
+        if clear_publish_state(progress, alias):
+            log.info(json.dumps({"action": "publish_state_superseded", "alias": alias}))
         require_in_place_reconverge(
             client, staging_settings, completion_collection_name(staging_settings), rules_v
         )
+    else:
+        # Distinct staging build: record it before any mutation so an
+        # interrupted run resumes this same build (issue #405 R2) instead
+        # of allocating another suffix.
+        if state is not None and (
+            state.get("gen_fp") != gen_fp or state.get("corpus_fp") != corp_fp
+        ):
+            log.info(json.dumps({"action": "publish_state_superseded", "alias": alias}))
+        write_publish_state(progress, alias, staging, gen_fp, corp_fp)
+        if resumed:
+            log.info(
+                json.dumps(
+                    {"action": "publish_resume", "alias": alias, "staging": staging}
+                )
+            )
     mode = ensure_staging(client, settings, staging_settings, live)
     log.info(
         json.dumps(
@@ -1183,8 +1280,24 @@ def _run_publish(
     )
     if rc != 0:
         return rc
+    if retire_plan:
+        # Explicit removals only (issue #405 R1): a missing file never
+        # deletes. Applied after the build, before verification, so the
+        # read-only audit certifies the exact candidate being published.
+        removed = apply_approved_removals(client, staging_settings, retire_plan)
+        log.info(
+            json.dumps(
+                {
+                    "action": "publish_retire",
+                    "alias": alias,
+                    "staging": staging,
+                    "removed": {doc: count for doc, count in sorted(removed.items())},
+                }
+            )
+        )
     problems = verify_all_complete(
-        client, staging_settings, prewalked, load_inventory(progress), rules_v, labels,
+        client, staging_settings, prewalked, load_inventory(progress),
+        rules_v, labels, retired,
     )
     if problems:
         raise RuntimeError(
@@ -1198,6 +1311,7 @@ def _run_publish(
         # would take a safety snapshot and churn the alias for nothing.
         # Explicit force relaxes publish atomicity for the same-generation
         # repair just like in-place mode does (documented in docs/ingest.md).
+        clear_publish_state(progress, alias)
         log.info(
             json.dumps(
                 {
@@ -1210,6 +1324,17 @@ def _run_publish(
             )
         )
         return 0
+    # Stale-candidate guard (issue #405 R2): the alias must still resolve to
+    # the live generation observed before the build. A publisher that another
+    # writer (different lock path or host) overtook refuses instead of
+    # switching the alias back to its older candidate.
+    live_now, _ = resolve_live_collection(client, settings)
+    if live_now != live:
+        raise RuntimeError(
+            f"live target moved during publication ({live!r} -> {live_now!r}): "
+            "another publisher cut over first — alias untouched, retry against "
+            "the current live generation."
+        )
     previous = live
     migrated = None
     if legacy and live is not None:
@@ -1225,6 +1350,7 @@ def _run_publish(
     summary["staging_mode"] = mode
     if migrated is not None:
         summary["migrated_legacy"] = migrated
+    clear_publish_state(progress, alias)
     log.info(json.dumps({"action": "publish", **{k: str(v) for k, v in summary.items()}}))
     return 0
 
@@ -1280,6 +1406,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run", action="store_true", help="Parse + chunk only; no Qdrant, no embeddings"
     )
+    parser.add_argument(
+        "--retire-doc",
+        action="append",
+        default=None,
+        help="Repeatable: retire DOCID (all revisions) or DOCID@SOURCEREV "
+        "from the published set. Validated against the last approved "
+        "inventory; publish mode only.",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -1294,6 +1428,7 @@ def main(argv: list[str] | None = None) -> int:
         product=args.product,
         version=args.version,
         force_reingest=args.reingest,
+        retire_docs=tuple(args.retire_doc or ()),
     )
 
 
