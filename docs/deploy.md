@@ -467,7 +467,9 @@ for a newly required input; an example alone or agent-only render is insufficien
 Maintenance modes (issue #391 current packet) follow the same path:
 `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST` and `INGEST_RETIRE_DOCS` are
 `OPERATOR_ENV_KEYS` validated by `scripts/airgap/ingest.sh` and rendered into
-the ingest Job args/env; the example documents them commented out, no default
+the ingest Job args/env (`INGEST_RETIRE_DOCS` accepts comma- or newline-separated
+`DOCID[@SOURCEREV]` entries and preserves interior whitespace in product/version labels);
+the example documents them commented out, no default
 flips, and the shared ingest-work progress path is fixed so one authorized
 publisher at a time is enforceable (host-local target lock, no distributed
 lock claim). CI uses explicit synthetic values, never an attestation bypass. No

@@ -572,10 +572,19 @@ thread pool.
    preserved. The prod Job reaches these modes through
    `scripts/airgap/ingest.sh` (issue #391 current packet):
    `INGEST_ALIAS_PUBLISH=true` selects publication, `INGEST_REINGEST=true`
-   renders `--reingest` (forced repair), and `INGEST_RETIRE_DOCS` takes a
-   comma/space-separated `DOCID[@SOURCEREV]` list rendered as repeated
-   `--retire-doc` (requires alias publication; labels may carry '|', '/'
-   and spaces — the launcher validates structure, not an ASCII subset).
+    renders `--reingest` (forced repair), and `INGEST_RETIRE_DOCS` takes a
+    **comma- or newline-separated** `DOCID[@SOURCEREV]` list rendered as
+    repeated `--retire-doc` (requires alias publication; labels may carry
+    `|`, `/` and interior spaces — the launcher validates structure, not an
+    ASCII subset). Leading and trailing whitespace per entry is trimmed, but
+    interior spaces are preserved verbatim, so a value like
+    `DOC_A DOC_B` is **one entry** with an embedded space, not two entries.
+    To separate two documents use a comma (`DOC_A,DOC_B`) or a newline.
+    Shell/env-file example for a multi-word revision:
+    `INGEST_RETIRE_DOCS="z/OS Comm Svr@v|IBM|z/OS communications server|2.5"`.
+    Previous documentation described comma/space separation; operators using
+    bare-space separation between entries must migrate to comma or newline
+    delimiters.
    The launcher keeps one Job name and the shared `/work` progress path,
    and never flips a mode implicitly: one authorized publisher at a time,
    no distributed lock.
