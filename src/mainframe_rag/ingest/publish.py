@@ -33,16 +33,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.completion import (
+    _doc_id_filter,
+    _verify_batch,
     completion_collection_for,
     completion_collection_name,
     delete_completion,
     delete_legacy_markers,
     is_doc_complete,
+    legacy_markers,
     plan_retire_deletes,
     representation_fingerprint,
 )
@@ -107,7 +112,13 @@ def publish_state_path(progress: Path, alias: str) -> Path:
 
 
 def write_publish_state(
-    progress: Path, alias: str, staging: str, gen_fp: str, corpus_fp: str
+    progress: Path,
+    alias: str,
+    staging: str,
+    gen_fp: str,
+    corpus_fp: str,
+    retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
+    retire_docs: tuple[str, ...] | None = None,
 ) -> None:
     """Record the in-flight build atomically (tmp + rename: a crash never
     leaves a torn sidecar). Overwrites any superseded state with a log at
@@ -115,17 +126,26 @@ def write_publish_state(
     path = publish_state_path(progress, alias)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
+    payload: dict = {
+        "version": PUBLISH_STATE_VERSION,
+        "alias": alias,
+        "staging": staging,
+        "gen_fp": gen_fp,
+        "corpus_fp": corpus_fp,
+    }
+    if retire_docs is not None:
+        payload["retire_docs"] = list(retire_docs)
+    if retire_plan is not None:
+        serialized_plan: dict[str, dict[str, Any]] = {}
+        for doc_id, p in sorted(retire_plan.items()):
+            entry: dict[str, Any] = dict(p)
+            revs_val = entry.get("revs")
+            if isinstance(revs_val, (set, frozenset)):
+                entry["revs"] = sorted(revs_val)
+            serialized_plan[doc_id] = entry
+        payload["retire_plan"] = serialized_plan
     tmp.write_text(
-        json.dumps(
-            {
-                "version": PUBLISH_STATE_VERSION,
-                "alias": alias,
-                "staging": staging,
-                "gen_fp": gen_fp,
-                "corpus_fp": corpus_fp,
-            },
-            sort_keys=True,
-        ),
+        json.dumps(payload, sort_keys=True),
         encoding="utf-8",
     )
     tmp.replace(path)
@@ -159,7 +179,57 @@ def read_publish_state(progress: Path, alias: str) -> dict | None:
             f"unrecognized publish state at {path}: refusing to guess the "
             "recorded build — remove it explicitly to abandon it, then rerun."
         )
+    if "retire_plan" in state and isinstance(state["retire_plan"], dict):
+        state["retire_plan"] = {
+            doc_id: {
+                **entry,
+                "revs": set(entry["revs"]) if "revs" in entry else set(),
+            }
+            for doc_id, entry in state["retire_plan"].items()
+            if isinstance(entry, dict)
+        }
     return state
+
+
+def commit_retired_inventory(
+    progress: Path,
+    inventory: dict[str, InventoryRecord],
+    retire_plan: dict[str, dict[str, set[str] | bool]],
+) -> int:
+    """Persist committed retirement disposition to inventory progress log (issue #391 S422-F1).
+
+    For each document in the approved removal plan, appends a retirement record
+    (status='retired') so subsequent runs recognize the deliberate removal rather
+    than demanding missing chunks.
+    """
+    from mainframe_rag.ingest.inventory import append_record
+
+    count = 0
+    for doc_id, plan in sorted(retire_plan.items()):
+        whole = bool(plan.get("whole", False))
+        legacy = bool(plan.get("legacy", False))
+        raw_revs = plan.get("revs")
+        revs: set[str] = (
+            set(raw_revs) if isinstance(raw_revs, (set, frozenset, list)) else set()
+        )
+        for rec in inventory.values():
+            if rec.doc_id != doc_id or rec.status not in ("upserted", "skipped"):
+                continue
+            should_retire = False
+            if whole or (legacy and rec.source_rev is None) or (rec.source_rev is not None and rec.source_rev in revs):
+                should_retire = True
+            if should_retire:
+                append_record(
+                    progress,
+                    rec.model_copy(
+                        update={
+                            "status": "retired",
+                            "finished_at": time.time(),
+                        }
+                    ),
+                )
+                count += 1
+    return count
 
 
 def clear_publish_state(progress: Path, alias: str) -> bool:
@@ -201,6 +271,7 @@ def resolve_publish_staging(
     corpus_fp: str,
     live: str | None,
     force_reingest: bool,
+    has_retirements: bool = False,
     state: dict | None,
 ) -> tuple[str, bool]:
     """Select the staging collection for this build (issue #405 R2).
@@ -267,7 +338,7 @@ def resolve_publish_staging(
         # build on the next retry).
         return recorded, False
     if live == base:
-        if not force_reingest:
+        if not force_reingest and not has_retirements:
             return base, False
         return _fresh_staging_candidate(client, base, live), False
     if client.collection_exists(base):
@@ -415,11 +486,24 @@ def verify_searchable_coverage(
             source_rev=rec.source_rev,
         ):
             problems.append(path_str)
+    legacy_ids: set[str] = set()
+    if allow_approved_legacy:
+        legacy_ids, legacy_problems = verify_approved_legacy_points(
+            client,
+            settings,
+            inventory,
+            rules_v,
+            walked_paths={p for p, _ in walked},
+            retired=retired,
+            retire_plan=retire_plan,
+        )
+        problems.extend(legacy_problems)
     problems.extend(
         audit_unmarked_residue(
             client, settings, walked, inventory, rules_v, retired, retire_plan,
             pending_removals=pending_removals,
             allow_approved_legacy=allow_approved_legacy,
+            verified_legacy_ids=legacy_ids,
         )
     )
     return problems
@@ -534,9 +618,8 @@ def approved_legacy_membership(
 ) -> set[tuple[str, str]]:
     """(doc_id, sha256) of approved sourceless pre-361B history: inventory
     lines with no revision stamp, a content sha, and an approved status.
-    The one rule that lets the compatibility bridge distinguish verified
-    expected legacy membership from a printed-doc_id match (issue #391
-    current packet)."""
+    Kept for backward compatibility; publication verification uses
+    `verify_approved_legacy_points` for digest-level verification."""
     return {
         (rec.doc_id, rec.sha256)
         for rec in inventory.values()
@@ -545,6 +628,117 @@ def approved_legacy_membership(
         and rec.source_rev is None
         and rec.status in ("upserted", "skipped")
     }
+
+
+def verify_approved_legacy_points(
+    client: QdrantPoints,
+    staging_settings: Settings,
+    inventory: dict[str, InventoryRecord],
+    rules_v: str,
+    *,
+    walked_paths: set[str] | frozenset[str] = frozenset(),
+    retired: frozenset[str] = frozenset(),
+    retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
+) -> tuple[set[str], list[str]]:
+    """Verify stored pre-361B legacy points against approved digests (issue #391 Q417-L1).
+
+    Every sourceless point permitted by the publication compatibility bridge must
+    belong to an approved, verifiable legacy document: expected chunk count, chunk
+    IDs, extraction rules, and stored excerpt text must match approved digests.
+    Unverifiable history fails closed with an explicit --reingest remediation;
+    unexpected points carrying an approved source-file hash are refused.
+
+    Returns (verified_point_ids, problems).
+    """
+    from mainframe_rag.ingest.qdrant_io import scroll_all_points
+
+    staging = staging_settings.qdrant_collection
+    if not client.collection_exists(staging):
+        return set(), []
+
+    approved_legacy: dict[tuple[str, str], InventoryRecord] = {}
+    for rec in inventory.values():
+        if (
+            rec.doc_id
+            and rec.sha256
+            and rec.source_rev is None
+            and rec.status in ("upserted", "skipped")
+        ):
+            if rec.path in walked_paths or rec.doc_id in retired:
+                continue
+            approved_legacy[(rec.doc_id, rec.sha256)] = rec
+
+    if not approved_legacy:
+        return set(), []
+
+    verified_ids: set[str] = set()
+    problems: list[str] = []
+
+    for (doc_id, sha256), rec in sorted(approved_legacy.items()):
+        expected_chunks = rec.chunks
+        chunk_ids_digest = rec.chunk_ids_digest
+        content_digest = rec.content_digest
+        expected_rules = rec.rules_version
+
+        if not chunk_ids_digest or not content_digest or expected_chunks < 1:
+            markers = [
+                m
+                for m in legacy_markers(client, staging_settings, doc_id)
+                if m.sha256 == sha256
+            ]
+            if markers:
+                m = markers[0]
+                expected_chunks = m.expected_chunks
+                chunk_ids_digest = m.chunk_ids_digest
+                content_digest = m.content_digest
+                expected_rules = m.rules_v
+
+        if not chunk_ids_digest or not content_digest or expected_chunks < 1:
+            problems.append(
+                f"{staging}: legacy document {doc_id!r} has no verifiable chunk/content "
+                "digest — re-ingest with --reingest to upgrade to the current representation."
+            )
+            continue
+
+        if expected_rules != rules_v:
+            problems.append(
+                f"{staging}: legacy document {doc_id!r} extraction rules {expected_rules!r} "
+                f"mismatch current rules {rules_v!r} — re-ingest with --reingest to upgrade."
+            )
+            continue
+
+        doc_points = scroll_all_points(
+            client,
+            staging,
+            scroll_filter=_doc_id_filter(doc_id),
+            with_payload=["doc_id", "source_rev", "sha256", "rules_v", "text"],
+            page_size=staging_settings.ingest_scan_page_size,
+        )
+        legacy_pts = [
+            p
+            for p in doc_points
+            if (p.payload or {}).get("source_rev") is None
+            and (p.payload or {}).get("sha256") == sha256
+        ]
+
+        if len(legacy_pts) != expected_chunks:
+            problems.append(
+                f"{staging}: legacy document {doc_id!r} chunk count mismatch: expected "
+                f"{expected_chunks}, found {len(legacy_pts)} — refusing cutover without "
+                "complete verified evidence."
+            )
+            continue
+
+        if not _verify_batch(legacy_pts, sha256, rules_v, "", chunk_ids_digest, content_digest):
+            problems.append(
+                f"{staging}: legacy document {doc_id!r} stored points fail content/digest "
+                "verification — refusing cutover without verified evidence."
+            )
+            continue
+
+        verified_ids.update(str(p.id) for p in legacy_pts)
+
+    return verified_ids, problems
 
 
 def audit_unmarked_residue(
@@ -558,20 +752,20 @@ def audit_unmarked_residue(
     *,
     pending_removals: frozenset[str] = frozenset(),
     allow_approved_legacy: bool = False,
+    verified_legacy_ids: set[str] | None = None,
 ) -> list[str]:
-    """Read-only coverage audit (issue #405 R1): every searchable point in
-    the candidate generation must be attributable to the walked corpus. A
-    point counts as covered when its (doc_id, source_rev) has a verified
-    walked inventory record, or — when `allow_approved_legacy` — when it is
-    sourceless pre-revision history whose (doc_id, sha256) matches an
-    approved legacy inventory line (content attribution, never merely a
-    shared printed doc_id; issue #391 current packet). `pending_removals`
-    are doc_ids under a lock-validated removal plan applied before the swap
-    audit; their points are excused here and enforced gone by the retired
-    check once the plan is applied. Anything else (including points for
-    explicitly retired documents, which must already be gone) is a problem,
-    never a deletion: absence from a partial walk is not a removal
-    instruction."""
+    """Read-only coverage audit (issue #405 R1, #391 Q417-L1): every searchable
+    point in the candidate generation must be attributable to the walked corpus.
+    A point counts as covered when its (doc_id, source_rev) has a verified
+    walked inventory record, or — when `allow_approved_legacy` — when it is a
+    sourceless pre-revision point verified against approved legacy digests
+    (content and chunk-identity verification, never merely a shared file hash;
+    issue #391 Q417-L1). `pending_removals` are doc_ids under a lock-validated
+    removal plan applied before the swap audit; their points are excused here
+    and enforced gone by the retired check once the plan is applied. Anything
+    else (including points for explicitly retired documents, which must already
+    be gone) is a problem, never a deletion: absence from a partial walk is not
+    a removal instruction."""
     from mainframe_rag.ingest.qdrant_io import scroll_all_points
 
     staging = staging_settings.qdrant_collection
@@ -587,7 +781,18 @@ def audit_unmarked_residue(
         and rec.rules_version == rules_v
         and rec.status in ("upserted", "skipped")
     }
-    legacy_pairs = approved_legacy_membership(inventory) if allow_approved_legacy else set()
+    if verified_legacy_ids is None and allow_approved_legacy:
+        verified_legacy_ids, legacy_probs = verify_approved_legacy_points(
+            client,
+            staging_settings,
+            inventory,
+            rules_v,
+            walked_paths={p for p, _ in walked},
+            retired=retired,
+            retire_plan=retire_plan,
+        )
+        if legacy_probs:
+            return legacy_probs
     residue = 0
     sample: list[str] = []
     for p in scroll_all_points(
@@ -608,9 +813,14 @@ def audit_unmarked_residue(
             # still refuses any remnant the plan does not actually delete.
             continue
         source_rev = payload.get("source_rev")
-        covered = (doc_id, source_rev) in valid_pairs or (
-            source_rev is None and (doc_id, payload.get("sha256")) in legacy_pairs
-        )
+        if source_rev is not None:
+            covered = (doc_id, source_rev) in valid_pairs
+        else:
+            covered = bool(
+                allow_approved_legacy
+                and verified_legacy_ids is not None
+                and str(p.id) in verified_legacy_ids
+            )
         if not covered:
             residue += 1
             if len(sample) < 3:
@@ -621,7 +831,7 @@ def audit_unmarked_residue(
                 f"{staging}: unmarked residue detected ({residue} point(s)"
                 f"{', e.g. ' + ', '.join(sample) if sample else ''}) — a searchable "
                 "point must match a verified walked generation (or, for sourceless "
-                "legacy history, an approved legacy inventory sha256); refusing "
+                "legacy history, verified legacy document digests); refusing "
                 "cutover without an explicit approved removal."
             )
         ]

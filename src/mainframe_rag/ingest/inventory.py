@@ -18,7 +18,7 @@ class InventoryRecord(BaseModel):
     doc_id: str | None = None
     pages: int = 0
     chunks: int = 0
-    status: str = "pending"  # upserted | skipped | dry | error | empty (set before append)
+    status: str = "pending"  # upserted | skipped | dry | error | empty | retired (set before append)
     seconds: float = 0.0
     error: str | None = None
     error_type: str | None = None  # exception class name, for typed triage

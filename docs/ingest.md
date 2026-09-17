@@ -555,12 +555,18 @@ thread pool.
    with the exact way through (re-plan, whole-document retirement, or manual
    resolution — never a dead end). Retired documents that reappear in the
    walk, and unknown retirement names, fail closed before any mutation.
-   The audit's legacy allowance is a compatibility bridge with content
-   attribution (issue #391 current packet): a sourceless point is covered
-   only when its `(doc_id, sha256)` matches an approved legacy inventory
-   line (`source_rev` absent, approved status) — sharing a printed
-   `doc_id` with a walked document is not attribution. Unexplained
-   residue under walked, unwalked or retired docs refuses and is
+   Committed retirements persist into the inventory progress log (`status: retired`)
+   upon publication cutover (and recover from the in-flight publish state sidecar
+   if interrupted between swap and cleanup), ensuring subsequent ordinary runs
+   recognize deliberate retirements without demanding missing chunks or allocating
+   redundant generations.
+   The audit's legacy allowance is a compatibility bridge with digest-level
+   verification (issue #391 Q417-L1): a sourceless point is covered only when
+   it belongs to an approved legacy inventory record with verified chunk count,
+   chunk IDs, extraction rules, and excerpt text digests (`chunk_ids_digest`,
+   `content_digest`, `rules_version`) — matching `(doc_id, sha256)` alone is
+   not attribution. Unverifiable legacy data fails closed requiring `--reingest`.
+   Unexplained residue under walked, unwalked or retired docs refuses and is
    preserved. The prod Job reaches these modes through
    `scripts/airgap/ingest.sh` (issue #391 current packet):
    `INGEST_ALIAS_PUBLISH=true` selects publication, `INGEST_REINGEST=true`
@@ -730,7 +736,7 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
 - `verify_all_complete` checks the walked inventory, rejects a present pending
   contract, a missing/unreadable/drifted final manifest on a walked corpus,
   and any searchable point no verified walked generation accounts for —
-  sourceless points only through approved legacy `(doc_id, sha256)` membership
+  sourceless points only through verified approved legacy document digests
   (read-only residue audit; explicit `--retire-doc` removals are the only
   deletions and are applied before verification). In-place mode still never
   removes unwalked data.

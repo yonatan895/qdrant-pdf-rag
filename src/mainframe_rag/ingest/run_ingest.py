@@ -81,6 +81,7 @@ from mainframe_rag.ingest.publish import (
     PublishTarget,
     apply_approved_removals,
     clear_publish_state,
+    commit_retired_inventory,
     corpus_fingerprint,
     ensure_staging,
     generation_fingerprint,
@@ -1204,16 +1205,55 @@ def _run_publish_locked(
     """Publication body under the target lock (see _run_publish)."""
     labels = source_labels(vendor, product, version)
     alias = settings.qdrant_collection
-    # Explicit retirement planning (issue #405 R1) runs first under the
-    # lock, against the freshest approved inventory: a missing file is
-    # never itself a removal instruction, and a retirement contradicting
-    # the walked corpus fails before any coordination or mutation.
+    client = _get_qdrant(settings)
+    live, legacy = resolve_live_collection(client, settings)
+    gen_fp = generation_fingerprint(settings, rules_v, labels)
+    corp_fp = corpus_fingerprint(prewalked)
+    state = read_publish_state(progress, alias)
+
     prior_inventory = load_inventory(progress)
-    retire_plan, retired = (
-        plan_approved_removals(tuple(retire_docs or ()), prior_inventory)
-        if retire_docs
-        else ({}, frozenset())
-    )
+    # Check whether an in-flight publish state binds the authorized removal plan (S424-F2):
+    # If the sidecar matches these inputs and records the requested retirements,
+    # reuse the bound removal plan rather than re-evaluating against a mutated inventory
+    # or an already-retired inventory record on post-cutover retry.
+    is_replaying_retire = False
+    if state is not None and state.get("gen_fp") == gen_fp and state.get("corpus_fp") == corp_fp:
+        recorded_retire_docs = state.get("retire_docs")
+        already_swapped = state.get("staging") == live
+        if already_swapped:
+            # The recorded build already cut over before cleanup. Finalizing
+            # uses the recorded retire_plan to finish committing inventory and
+            # clearing the sidecar, whether retried with the same flags or on
+            # an ordinary run.
+            if "retire_plan" in state and state["retire_plan"] is not None:
+                retire_plan = state["retire_plan"]
+                retired = frozenset(retire_plan)
+                is_replaying_retire = True
+        elif recorded_retire_docs is not None:
+            if list(retire_docs or ()) != recorded_retire_docs:
+                raise RuntimeError(
+                    f"publish state records staging {state.get('staging')!r} for different "
+                    f"retirements (recorded {recorded_retire_docs!r}, requested "
+                    f"{list(retire_docs or ())!r}): refusing a build the current "
+                    "inputs cannot explain — remove the state file explicitly to "
+                    "abandon the recorded build, then rerun."
+                )
+            if "retire_plan" in state and state["retire_plan"] is not None:
+                retire_plan = state["retire_plan"]
+                retired = frozenset(retire_plan)
+                is_replaying_retire = True
+        elif "retire_plan" in state and state["retire_plan"] is not None and retire_docs:
+            retire_plan = state["retire_plan"]
+            retired = frozenset(retire_plan)
+            is_replaying_retire = True
+
+    if not is_replaying_retire:
+        retire_plan, retired = (
+            plan_approved_removals(tuple(retire_docs or ()), prior_inventory)
+            if retire_docs
+            else ({}, frozenset())
+        )
+
     walked_known = {
         rec.doc_id
         for path_str, _ in prewalked
@@ -1224,15 +1264,12 @@ def _run_publish_locked(
             f"retired document(s) {sorted(retired & walked_known)} still present in "
             "the walked corpus: remove their files or drop the --retire-doc flag."
         )
-    client = _get_qdrant(settings)
-    live, legacy = resolve_live_collection(client, settings)
-    gen_fp = generation_fingerprint(settings, rules_v, labels)
-    corp_fp = corpus_fingerprint(prewalked)
-    state = read_publish_state(progress, alias)
     staging, resumed = resolve_publish_staging(
         client, settings,
         gen_fp=gen_fp, corpus_fp=corp_fp, live=live,
-        force_reingest=force_reingest, state=state,
+        force_reingest=force_reingest,
+        has_retirements=bool(retire_docs),
+        state=state,
     )
     staging_settings = settings.model_copy(update={"qdrant_collection": staging})
     if live == staging:
@@ -1247,6 +1284,8 @@ def _run_publish_locked(
         # (interrupted run of the same representation). A stale sidecar
         # (superseded build record) is forgotten, never acted on: the live
         # generation is the ground truth here.
+        if state and state.get("retire_plan"):
+            commit_retired_inventory(progress, load_inventory(progress), state["retire_plan"])
         if clear_publish_state(progress, alias):
             log.info(json.dumps({"action": "publish_state_superseded", "alias": alias}))
         _, record_drift = check_ingest_compatible(
@@ -1285,7 +1324,11 @@ def _run_publish_locked(
     # reaching here always matches these inputs (resolve fails a
     # foreign record closed), so this write only creates or re-affirms
     # the record.
-    write_publish_state(progress, alias, staging, gen_fp, corp_fp)
+    write_publish_state(
+        progress, alias, staging, gen_fp, corp_fp,
+        retire_plan=retire_plan,
+        retire_docs=tuple(retire_docs or ()),
+    )
     if resumed:
         log.info(
             json.dumps(
@@ -1363,6 +1406,8 @@ def _run_publish_locked(
     summary["staging_mode"] = mode
     if migrated is not None:
         summary["migrated_legacy"] = migrated
+    if retire_plan:
+        commit_retired_inventory(progress, load_inventory(progress), retire_plan)
     clear_publish_state(progress, alias)
     log.info(json.dumps({"action": "publish", **{k: str(v) for k, v in summary.items()}}))
     return 0
