@@ -17,8 +17,11 @@ verified swap, not free incremental re-embedding.
 Staging names derive deterministically from (representation fingerprint,
 CLI source triple, corpus content): identical reruns resume the same
 recorded build — including a suffixed allocation from the
-rollback-by-republish path — changed inputs address a new one, and a
-derived name equal to the live physical means "already published".
+rollback-by-republish or forced-repair path — changed inputs address a new
+one, and a derived name equal to the live physical means "already
+published". A forced rebuild of that live physical (issue #391 current
+packet) allocates a suffixed repair build instead of mutating it: readers
+keep the complete old generation until the verified atomic swap.
 
 Corpus deletions are NOT swept (status quo: same as in-place runs —
 stale-generation points survive until an operator cleans them; see
@@ -204,9 +207,9 @@ def resolve_publish_staging(
 
     Returns (staging, resumed). Same inputs always address the same build,
     so an interrupted run resumes its unfinished staging — including a
-    suffixed allocation from the rollback-by-republish path — instead of
-    allocating another suffix. A committed retained generation is never
-    taken as workspace without a record binding it to these inputs; a
+    suffixed allocation from the rollback-by-republish or repair path —
+    instead of allocating another suffix. A committed retained generation is
+    never taken as workspace without a record binding it to these inputs; a
     foreign record (no fingerprint match) fails closed — only the operator
     may clear it.
 
@@ -219,6 +222,14 @@ def resolve_publish_staging(
     every document before any swap, and never building into the serving
     generation (a record naming live finalizes through the read-only
     steady-state path).
+
+    A forced rebuild of the serving generation (issue #391 current packet)
+    must not mutate it in place: `--reingest` on a derived name equal to
+    live allocates a distinct, sidecar-recorded repair generation; the
+    caller clones live into it and swaps only after full verification, so
+    readers keep a complete old generation until the atomic cutover. A
+    plain rerun with the same inputs remains the read-only steady-state
+    re-verify.
     """
     base = staging_name_for(settings.qdrant_collection, gen_fp, corpus_fp)
     matched = (
@@ -228,10 +239,6 @@ def resolve_publish_staging(
         and state.get("corpus_fp") == corpus_fp
         else None
     )
-    if live == base and not force_reingest:
-        return base, False
-    if live == base and force_reingest:
-        return base, False
     if state is not None and matched is None:
         raise RuntimeError(
             f"publish state records staging {state.get('staging')!r} for different "
@@ -259,6 +266,10 @@ def resolve_publish_staging(
         # the derived name would strand it and read as an unrecorded
         # build on the next retry).
         return recorded, False
+    if live == base:
+        if not force_reingest:
+            return base, False
+        return _fresh_staging_candidate(client, base, live), False
     if client.collection_exists(base):
         staging_settings = settings.model_copy(update={"qdrant_collection": base})
         from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record

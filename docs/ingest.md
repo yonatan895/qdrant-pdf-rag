@@ -525,12 +525,15 @@ thread pool.
   alias swap. `verify_all_complete` rejects a present pending record and a
   missing/unreadable/drifted final manifest on a walked corpus, plus any
   searchable point no walked document accounts for (read-only residue
-  audit — the refusal deletes nothing). Publish-mode `--reingest` reconverges the live
-  physical in place **only** when its stored contract IS the wanted one
-  (same-generation repair; `require_in_place_reconverge`) and skips the
-  self-swap (`already_live_reconverged`); any representation change
-  publishes a distinct staging and never mutates the serving generation.
-  Swap failure leaves the previous generation serving (job
+  audit — the refusal deletes nothing). Publish-mode `--reingest` never
+  mutates the serving physical: an unchanged contract allocates a distinct
+  repair generation (suffixed, sidecar-recorded, resumable, cloned from
+  live) and a representation change derives a distinct staging via the
+  fingerprint; both re-embed the walked corpus, verify, and swap, and the
+  superseded generation is retained for rollback. A resolved generation
+  that already serves re-verifies read-only (`already_live`) — including a
+  forced rerun after a swap-before-cleanup crash, which finalizes instead
+  of building again. Swap failure leaves the previous generation serving (job
   fails, staging retained for retry). `--limit` subsets and empty corpora
    are refused fail-closed. Corpus deletions are NOT swept: a file missing
    from the walk is not a removal instruction — unmarked residue (including
@@ -561,7 +564,10 @@ thread pool.
   staging name that collides with a committed retained (non-live)
   generation allocates a suffixed candidate instead of reusing it, so
   rollback-by-republish preserves the retained points and manifest
-  byte-identically. The resume path deliberately checks no manifest state:
+  byte-identically. A forced rebuild whose derived name IS live takes the
+  same suffixed-allocation route (issue #391 current packet), so the
+  serving generation is never workspace either. The resume path
+  deliberately checks no manifest state:
   staging is cloned from live, so an interrupted clone carries a COMMITTED
   manifest indistinguishable from a finished build — resume safety comes
   from the sidecar's fingerprint binding, converge re-verification before
@@ -703,10 +709,10 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   residue audit; explicit `--retire-doc` removals are the only deletions and
   are applied before verification). In-place mode still never removes
   unwalked data.
-- Distinct staging plus the alias update isolates ordinary generation cutover
-  under the coverage and writer assumptions below. Forced same-representation
-  repair of live staging, and first legacy-name conversion do not offer
-  uninterrupted immutable-generation reads.
+- Distinct staging plus the alias update isolates ordinary cutover and forced
+  repair under the coverage and writer assumptions below; the serving
+  generation is never mutated in publish mode, and only first legacy-name
+  conversion has a brief documented maintenance window.
 - Corpus deletion is not automatic garbage collection. On a disposable synthetic
   regenerated corpus, use an isolated fresh target; the legacy delete-and-rebuild
   recipe is destructive and is not an instruction to delete a live collection.
@@ -726,18 +732,27 @@ only serializes revisions inside one process. Supported operation requires
 operator-serialized jobs, not a claim of distributed lock enforcement. No HA
 claim follows from a single-node run.
 
-**Maintenance and rollback:** before in-place repair, operators must quiesce
-writers and drain affected readers; setting a manifest pending or waiting a TTL
-alone does not drain in-flight requests. Preserve a restorable backup and the old
-physical **and its own metadata**. Alias rollback still needs compatible settings
-and reader revalidation. Retain old state until readers have drained; GC is an
-explicit operator action, never automatic. See [serving lifetime](agent.md#serving-contract)
+**Maintenance and rollback:** in-place mode (`INGEST_ALIAS_PUBLISH=false`)
+repairs the live collection directly, so operators must quiesce writers and
+drain affected readers first; setting a manifest pending or waiting a TTL
+alone does not drain in-flight requests. Alias-mode repair is a normal
+distinct-generation publish: the old physical keeps serving until the
+verified atomic swap, and is retained afterward. Preserve a restorable backup
+and the old physical **and its own metadata**. Alias rollback still needs
+compatible settings and reader revalidation. Retain old state until readers
+have drained; GC is an explicit operator action, never automatic. See
+[serving lifetime](agent.md#serving-contract)
 and [release recovery](crc-release-verification.md).
 
 **Existing evidence:** `tests/test_ingest_completion.py` checks per-document failure
 boundaries; `tests/test_ingest_publish.py` includes staging visibility, failed
 swap recovery, pending/missing/drifted-manifest refusal, forced same-contract
-reconverge and rollback, plus the R1/R2 lifecycle: partial-walk refusal with
+repair as a distinct generation (no live mutation, resumable, reader-compatible
+mid-build: `test_publish_force_same_contract_repairs_distinct_generation`,
+`test_forced_repair_never_touches_live_during_build`,
+`test_interrupted_same_contract_repair_resumes_recorded_build`,
+`test_forced_repair_partial_corpus_refuses_and_preserves_live`) and rollback,
+plus the R1/R2 lifecycle: partial-walk refusal with
 preservation, explicit retirement with rollback history, fail-closed unknown
 and contradictory retirements, read-only residue audit, same-target writer
 serialization, overtaken-publisher refusal, same-staging resume, retained

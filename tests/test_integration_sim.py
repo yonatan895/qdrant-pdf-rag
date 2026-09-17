@@ -390,6 +390,63 @@ def test_alias_publish_revision_migration_keeps_old_generation(
         client.close()
 
 
+def test_forced_repair_publishes_distinct_generation_on_real_server(
+    qdrant_url, corpus, tmp_path, monkeypatch
+):
+    """Issue #391 current packet, real clone/alias semantics: a forced
+    same-contract rebuild (--reingest) publishes a suffixed repair
+    generation, keeps the old physical and its manifest byte-identical, and
+    swaps the alias only after verification."""
+    from qdrant_client import QdrantClient
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.qdrant_io import resolve_live_collection
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+
+    _drop_publish_fixture(qdrant_url)
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+    local = tmp_path / "repair-corpus"
+    local.mkdir()
+    for pdf in corpus.iterdir():
+        shutil.copy(pdf, local / pdf.name)
+    progress = tmp_path / "inv.jsonl"
+    first = _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress)
+    assert [r["status"] for r in first] == ["upserted"] * 3
+
+    settings = Settings(
+        _env_file=None,
+        qdrant_url=qdrant_url,
+        qdrant_collection=PUBLISH_ALIAS,
+        embed_mode="hash",
+        allow_hash_mode=True,
+    )
+    client = QdrantClient(url=qdrant_url, timeout=10)
+    try:
+        old, legacy = resolve_live_collection(client, settings)
+        assert legacy is False and old is not None
+        old_record = read_manifest_record(client, f"{old}__completions")
+        assert old_record.state == STATE_COMMITTED
+        old_count = client.get_collection(old).points_count
+
+        repaired = _ingest(
+            monkeypatch, qdrant_url, PUBLISH_ALIAS, local, progress, extra=("--reingest",)
+        )
+        assert len(repaired) > len(first), "the repair re-embeds every walked document"
+        new, _ = resolve_live_collection(client, settings)
+        assert new != old
+        assert new.endswith("_1"), f"expected a suffixed repair generation, got {new}"
+        assert read_manifest_record(client, f"{old}__completions") == old_record
+        assert client.get_collection(old).points_count == old_count, (
+            "the serving generation must not be mutated by a repair"
+        )
+        new_record = read_manifest_record(client, f"{new}__completions")
+        assert new_record is not None and new_record.state == STATE_COMMITTED
+    finally:
+        client.close()
+        _drop_publish_fixture(qdrant_url)
+
+
 def test_search_end_to_end_deterministic(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):
     _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv.jsonl")
     with _agent(monkeypatch, qdrant_url, mock_url, "sim-hash") as client:

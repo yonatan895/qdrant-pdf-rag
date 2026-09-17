@@ -109,7 +109,6 @@ from mainframe_rag.ingest.representation import (
     manifest_digest,
     refuse_limited_migration,
     require_attested_revision,
-    require_in_place_reconverge,
 )
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
@@ -1196,15 +1195,18 @@ def _run_publish_locked(
         force_reingest=force_reingest, state=state,
     )
     staging_settings = settings.model_copy(update={"qdrant_collection": staging})
-    if live == staging and not force_reingest:
-        # Steady state: the derived generation is already live. Re-verify it
-        # read-only instead of cloning onto itself. The representation
-        # read-only check rides along: it is the one place record-only drift
-        # (a new dense query prefix keeps the same staging name — and is
-        # never a re-embed trigger) is acknowledged, and it raises on a
-        # pending contract (interrupted run of the same representation).
-        # A stale sidecar (superseded build record) is forgotten, never
-        # acted on: the live generation is the ground truth here.
+    if live == staging:
+        # Steady state: the resolved generation already serves. That is a
+        # plain rerun with the derived name (unforced), or a sidecar-bound
+        # build that swapped before its cleanup (forced repair, issue #391
+        # current packet). Either way: re-verify read-only instead of
+        # cloning/building onto live. The representation read-only check
+        # rides along: it is the one place record-only drift (a new dense
+        # query prefix keeps the same staging name — and is never a re-embed
+        # trigger) is acknowledged, and it raises on a pending contract
+        # (interrupted run of the same representation). A stale sidecar
+        # (superseded build record) is forgotten, never acted on: the live
+        # generation is the ground truth here.
         if clear_publish_state(progress, alias):
             log.info(json.dumps({"action": "publish_state_superseded", "alias": alias}))
         _, record_drift = check_ingest_compatible(
@@ -1235,31 +1237,21 @@ def _run_publish_locked(
             )
         )
         return 0
-    if force_reingest and live == staging:
-        # Forced rebuild of the live generation in place: allowed only for
-        # the SAME representation (issue #391 F2). A drift derives a
-        # different staging name via the fingerprint; a legacy/absent
-        # contract cannot be proven equal. Either way the serving physical
-        # must not be mutated by a migration. In-place repair keeps no
-        # build record: a stale sidecar names a dead staging, not this one.
-        if clear_publish_state(progress, alias):
-            log.info(json.dumps({"action": "publish_state_superseded", "alias": alias}))
-        require_in_place_reconverge(
-            client, staging_settings, completion_collection_name(staging_settings), rules_v
-        )
-    else:
-        # Distinct staging build: record it before any mutation so an
-        # interrupted run resumes this same build (issue #405 R2) instead
-        # of allocating another suffix. The state reaching here always
-        # matches these inputs (resolve fails a foreign record closed),
-        # so this write only creates or re-affirms the record.
-        write_publish_state(progress, alias, staging, gen_fp, corp_fp)
-        if resumed:
-            log.info(
-                json.dumps(
-                    {"action": "publish_resume", "alias": alias, "staging": staging}
-                )
+    # Distinct staging build: record it before any mutation so an
+    # interrupted run resumes this same build (issue #405 R2) instead
+    # of allocating another suffix — including a forced repair build,
+    # whose distinct name keeps the serving generation immutable until
+    # the verified cutover (issue #391 current packet). The state
+    # reaching here always matches these inputs (resolve fails a
+    # foreign record closed), so this write only creates or re-affirms
+    # the record.
+    write_publish_state(progress, alias, staging, gen_fp, corp_fp)
+    if resumed:
+        log.info(
+            json.dumps(
+                {"action": "publish_resume", "alias": alias, "staging": staging}
             )
+        )
     mode = ensure_staging(client, settings, staging_settings, live)
     log.info(
         json.dumps(
@@ -1304,26 +1296,6 @@ def _run_publish_locked(
             f"staging {staging!r} incomplete for {len(problems)} path(s) "
             f"(e.g. {problems[0]!r}) — alias untouched, {live!r} still live."
         )
-    if staging == live:
-        # Forced reconverge of the live generation: same contract only
-        # (require_in_place_reconverge above proved it), vectors re-embedded
-        # in place and the alias already points here — swapping onto itself
-        # would take a safety snapshot and churn the alias for nothing.
-        # Explicit force relaxes publish atomicity for the same-generation
-        # repair just like in-place mode does (documented in docs/ingest.md).
-        clear_publish_state(progress, alias)
-        log.info(
-            json.dumps(
-                {
-                    "action": "publish",
-                    "alias": settings.qdrant_collection,
-                    "physical": staging,
-                    "result": "already_live_reconverged",
-                    "docs": len(prewalked),
-                }
-            )
-        )
-        return 0
     # Stale-candidate guard (issue #405 R2): the alias must still resolve to
     # the live generation observed before the build. A publisher that another
     # writer (different lock path or host) overtook refuses instead of
