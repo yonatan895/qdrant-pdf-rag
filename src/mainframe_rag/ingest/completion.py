@@ -682,7 +682,10 @@ def publish_lock_path(progress_path: Path, alias: str) -> Path:
     alias serialize on one path regardless of which progress file names the
     run. Same-alias runs must therefore share the progress directory (already
     required for refresh lineage); different directories are operator error
-    and remain guarded only by the pre-swap live recheck."""
+    and remain guarded only by the pre-swap live recheck. The sanitisation
+    maps the alias charset onto the lock filename: two aliases differing
+    only in sanitised-away characters would share a lock (harmless —
+    over-serialization, never concurrent publication)."""
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", alias).strip("._")
     if not safe:
         raise RuntimeError(f"cannot derive a publish lock for empty alias {alias!r}.")
@@ -718,18 +721,22 @@ def plan_retire_deletes(
     R1). `approved_revs` maps doc_id to the revisions in the last approved
     inventory; `requested` maps doc_id to the revisions named by
     --retire-doc (None in the set means the whole document). Returns
-    {doc_id: {"revs": named revisions to delete, "legacy": sole-legacy
-    points go too}}. Raises BEFORE any delete — callers apply only after
-    this returns:
+    {doc_id: {"revs": named revisions to delete, "legacy": approved
+    sourceless history goes too, "whole": whole-document retirement}}.
+    Raises BEFORE any delete — callers apply only after this returns:
 
     - retiring an unknown document or a revision with no approved history
       fails closed (typo guard), never a silent success;
     - named revisions delete precisely, coexisting retained revisions are
       never selected;
     - legacy sourceless points go only with an explicit whole-document
-      retirement whose approved history holds no named revision (the same
-      sole-history rule as refresh planning); mixed-history legacy stays
-      for the fail-closed audit instead of guessing.
+      retirement covering approved sourceless history — including
+      mixed-history documents (named revisions plus approved sourceless
+      history retire together). The live sole-history check at apply time
+      (no named revision left in staging) still guards the delete, mirroring
+      refresh planning; a partial (named-only) retirement never takes
+      legacy points, and unapproved sourceless residue stays for the
+      fail-closed audit instead of guessing.
     """
     plan: dict[str, dict[str, set[str] | bool]] = {}
     for doc_id in sorted(requested):
@@ -743,7 +750,8 @@ def plan_retire_deletes(
         want = requested[doc_id]
         if None in want:
             revs = set(named_approved)
-            legacy = not named_approved and None in approved
+            legacy = None in approved
+            whole = True
         else:
             unknown = set(want) - named_approved
             if unknown:
@@ -754,7 +762,8 @@ def plan_retire_deletes(
                 )
             revs = {str(r) for r in want}
             legacy = False
-        plan[doc_id] = {"revs": revs, "legacy": legacy}
+            whole = False
+        plan[doc_id] = {"revs": revs, "legacy": legacy, "whole": whole}
     return plan
 
 
@@ -762,8 +771,8 @@ def delete_legacy_markers(client: QdrantPoints, settings: Settings, doc_id: str)
     """Drop sourceless pre-361B completion markers under one explicitly
     retired document. Same per-doc scroll + point-id delete pattern as
     delete_completion (bounded by the document's markers); callers invoke it
-    only for whole-document retirements whose approved history holds no
-    named revision, never beside retained named markers."""
+    only for whole-document retirements covering approved sourceless
+    history, never beside retained named markers."""
     name = completion_collection_name(settings)
     if not client.collection_exists(name):
         return

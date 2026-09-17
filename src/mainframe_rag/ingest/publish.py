@@ -15,8 +15,9 @@ read-only instead. The clone's value is that live is untouched until the
 verified swap, not free incremental re-embedding.
 
 Staging names derive deterministically from (representation fingerprint,
-CLI source triple, corpus content): identical reruns converge the same
-staging (crash-safe resume), changed inputs address a new one, and a
+CLI source triple, corpus content): identical reruns resume the same
+recorded build — including a suffixed allocation from the
+rollback-by-republish path — changed inputs address a new one, and a
 derived name equal to the live physical means "already published".
 
 Corpus deletions are NOT swept (status quo: same as in-place runs —
@@ -144,6 +145,12 @@ def read_publish_state(progress: Path, alias: str) -> dict | None:
         not isinstance(state, dict)
         or state.get("version") != PUBLISH_STATE_VERSION
         or state.get("alias") != alias
+        or not isinstance(state.get("staging"), str)
+        or not state["staging"]
+        or not isinstance(state.get("gen_fp"), str)
+        or not state["gen_fp"]
+        or not isinstance(state.get("corpus_fp"), str)
+        or not state["corpus_fp"]
     ):
         raise RuntimeError(
             f"unrecognized publish state at {path}: refusing to guess the "
@@ -162,6 +169,27 @@ def clear_publish_state(progress: Path, alias: str) -> bool:
     return True
 
 
+def _fresh_staging_candidate(
+    client: QdrantPoints, base: str, live: str | None, skip: frozenset[str] = frozenset()
+) -> str:
+    """Allocate a suffixed staging name outside the live and skipped
+    generations. Collisions are rare and deliberate (rollback-by-republish),
+    but allocation still terminates fail-closed."""
+    for attempt in range(1, _MAX_STAGING_SUFFIX_ATTEMPTS + 1):
+        candidate = f"{base}_{attempt}"
+        if (
+            candidate != live
+            and candidate not in skip
+            and not client.collection_exists(candidate)
+        ):
+            return candidate
+    raise RuntimeError(
+        f"derived staging {base!r} is a retained published generation and "
+        f"no free suffixed candidate exists after {_MAX_STAGING_SUFFIX_ATTEMPTS} "
+        "attempts — operator cleanup required."
+    )
+
+
 def resolve_publish_staging(
     client: QdrantPoints,
     settings: Settings,
@@ -174,15 +202,24 @@ def resolve_publish_staging(
 ) -> tuple[str, bool]:
     """Select the staging collection for this build (issue #405 R2).
 
-    Returns (staging, resumed). Same inputs always address the same name,
-    so an interrupted run resumes its unfinished build instead of
+    Returns (staging, resumed). Same inputs always address the same build,
+    so an interrupted run resumes its unfinished staging — including a
+    suffixed allocation from the rollback-by-republish path — instead of
     allocating another suffix. A committed retained generation is never
-    returned as writable workspace: rollback-by-republish allocates a
-    suffixed candidate. A foreign unfinished staging (no matching record)
-    fails closed — only the operator may clear it.
-    """
-    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+    taken as workspace without a record binding it to these inputs; a
+    foreign record (no fingerprint match) fails closed — only the operator
+    may clear it.
 
+    Deliberately no manifest-state check on the resume path: staging is
+    cloned from live, so an interrupted clone carries a COMMITTED manifest
+    indistinguishable from a finished build — manifest state cannot tell
+    them apart, and checking it would strand every post-clone crash retry
+    on a fresh suffix. Resume safety comes from fingerprint binding (the
+    record pins the exact intended inputs), converge re-verification of
+    every document before any swap, and never building into the serving
+    generation (a record naming live finalizes through the read-only
+    steady-state path).
+    """
     base = staging_name_for(settings.qdrant_collection, gen_fp, corpus_fp)
     matched = (
         state
@@ -191,33 +228,44 @@ def resolve_publish_staging(
         and state.get("corpus_fp") == corpus_fp
         else None
     )
-    if matched is not None and matched.get("staging") != base:
-        raise RuntimeError(
-            f"publish state records staging {matched.get('staging')!r} for these "
-            f"inputs but the derived name is {base!r}: refusing a build the "
-            "inputs cannot explain — remove the state file explicitly, then rerun."
-        )
     if live == base and not force_reingest:
         return base, False
     if live == base and force_reingest:
         return base, False
-    if matched is not None and client.collection_exists(base):
-        return base, True
+    if state is not None and matched is None:
+        raise RuntimeError(
+            f"publish state records staging {state.get('staging')!r} for different "
+            f"inputs (gen {state.get('gen_fp')!r}, corpus {state.get('corpus_fp')!r}): "
+            "refusing a build the current inputs cannot explain — remove the "
+            "state file explicitly to abandon the recorded build, then rerun."
+        )
     if matched is not None:
-        return base, False
+        recorded = matched.get("staging")
+        if not isinstance(recorded, str) or not recorded:
+            raise RuntimeError(
+                "publish state records these inputs but names no staging: "
+                "refusing to guess the recorded build — remove the state file "
+                "explicitly to abandon it, then rerun."
+            )
+        if recorded == live:
+            # The recorded build already serves: a crash between the swap
+            # and the sidecar cleanup. Returned as-is so the caller takes
+            # the read-only steady-state path — never a build into live.
+            return recorded, True
+        if client.collection_exists(recorded):
+            return recorded, True
+        # The recorded build was cleaned up outside the lock: rebuild at
+        # the recorded name so the sidecar stays accurate (rebuilding at
+        # the derived name would strand it and read as an unrecorded
+        # build on the next retry).
+        return recorded, False
     if client.collection_exists(base):
         staging_settings = settings.model_copy(update={"qdrant_collection": base})
+        from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+
         record = read_manifest_record(client, completion_collection_name(staging_settings))
         if record is not None and record.state == STATE_COMMITTED:
-            for attempt in range(1, _MAX_STAGING_SUFFIX_ATTEMPTS + 1):
-                candidate = f"{base}_{attempt}"
-                if candidate != live and not client.collection_exists(candidate):
-                    return candidate, False
-            raise RuntimeError(
-                f"derived staging {base!r} is a retained published generation and "
-                f"no free suffixed candidate exists after {_MAX_STAGING_SUFFIX_ATTEMPTS} "
-                "attempts — operator cleanup required."
-            )
+            return _fresh_staging_candidate(client, base, live), False
         raise RuntimeError(
             f"staging {base!r} exists from an unrecorded unfinished build: refusing "
             "to reuse or overwrite it — remove it explicitly, or resume the run "
@@ -318,6 +366,7 @@ def verify_all_complete(
     rules_v: str,
     src_labels: str,
     retired: frozenset[str] = frozenset(),
+    retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
 ) -> list[str]:
     """Paths that must block publication: missing/stale inventory, an
     unverified staging generation, a contract that is not committed
@@ -369,9 +418,65 @@ def verify_all_complete(
         ):
             problems.append(path_str)
     problems.extend(
-        audit_unmarked_residue(client, staging_settings, walked, inventory, rules_v, retired)
+        audit_unmarked_residue(
+            client, staging_settings, walked, inventory, rules_v, retired, retire_plan
+        )
     )
     return problems
+
+
+def _retired_still_present(
+    client: QdrantPoints,
+    staging_settings: Settings,
+    staging: str,
+    doc_id: str,
+    retire_plan: dict[str, dict[str, set[str] | bool]] | None,
+) -> str:
+    """Name the exact gap when an approved removal did not fully land
+    (issue #405 R1): every refusal names the operator path through, never a
+    dead end. Inspects what remains live under the retired doc_id:
+
+    - named revision(s) remain: staging changed after planning (or the plan
+      covered only part of the document) — rerun to re-plan, or retire the
+      whole document;
+    - only sourceless legacy remains after a whole-document retirement that
+      covered it: the apply-time sole-history check saw staging change —
+      rerun to re-plan;
+    - only sourceless legacy remains outside the approved removal: a
+      partial retirement never takes legacy points — whole-document
+      --retire-doc covers approved sourceless history, anything else needs
+      manual resolution.
+    """
+    from mainframe_rag.ingest.qdrant_io import stored_doc_revisions
+
+    remaining = stored_doc_revisions(client, staging_settings, doc_id)
+    entry = (retire_plan or {}).get(doc_id, {})
+    named = sorted(str(r) for r in remaining if r is not None)
+    if named:
+        return (
+            f"{staging}: retired document {doc_id!r} still present as revision(s) "
+            f"{named} — the approved removal no longer matches staging: rerun to "
+            "re-plan against the current inventory, or retire the whole document."
+        )
+    if entry.get("legacy"):
+        return (
+            f"{staging}: retired document {doc_id!r} still present after its approved "
+            "removal covered sourceless history — staging changed after the delete: "
+            "rerun to re-plan against the current inventory."
+        )
+    if entry.get("whole"):
+        return (
+            f"{staging}: retired document {doc_id!r} persists as sourceless legacy "
+            "point(s) with no approved sourceless history — whole-document retirement "
+            "already ran and covered nothing sourceless: resolve manually, never by "
+            "re-running the same flag."
+        )
+    return (
+        f"{staging}: retired document {doc_id!r} persists as sourceless legacy "
+        f"point(s) outside the approved (partial) removal — a named-only retirement "
+        f"never takes legacy points: use whole-document --retire-doc {doc_id!r} to "
+        "cover approved sourceless history, or resolve manually."
+    )
 
 
 def audit_unmarked_residue(
@@ -381,12 +486,15 @@ def audit_unmarked_residue(
     inventory: dict[str, InventoryRecord],
     rules_v: str,
     retired: frozenset[str] = frozenset(),
+    retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
 ) -> list[str]:
     """Read-only coverage audit (issue #405 R1): every searchable point in
     the candidate generation must be attributable to the walked corpus. A
     point counts as covered when its (doc_id, source_rev) has a verified
     walked inventory record, or — for pre-revision legacy points — when its
-    doc_id was walked. Anything else (including points for explicitly
+    doc_id was walked (compatibility bridge for pre-361B corpora, whose
+    sourceless points carry no revision stamp to match exactly; see
+    docs/ingest.md). Anything else (including points for explicitly
     retired documents, which must already be gone) is a problem, never a
     deletion: absence from a partial walk is not a removal instruction."""
     from mainframe_rag.ingest.qdrant_io import scroll_all_points
@@ -423,10 +531,7 @@ def audit_unmarked_residue(
         source_rev = payload.get("source_rev")
         if doc_id is not None and doc_id in retired:
             return [
-                (
-                    f"{staging}: retired document {doc_id!r} still present — "
-                    "remove its file or drop the --retire-doc flag."
-                )
+                _retired_still_present(client, staging_settings, staging, doc_id, retire_plan)
             ]
         covered = (doc_id, source_rev) in valid_pairs or (
             source_rev is None and doc_id in walked_doc_ids
@@ -480,9 +585,11 @@ def apply_approved_removals(
     """Delete explicitly approved retirements from staging (issue #405 R1).
     Named revisions go through server-side revision-filtered deletes plus
     their marker invalidation; legacy sourceless points go only with an
-    explicit whole-document retirement whose staging holds no named
-    revision afterwards (checked live, mirroring the refresh sole-history
-    rule). Returns {doc_id: deleted revision count} for the run log."""
+    explicit whole-document retirement covering approved sourceless history
+    (named and mixed-history documents alike), and only when no named
+    revision remains in staging afterwards (checked live, mirroring the
+    refresh sole-history rule). Returns {doc_id: deleted revision count}
+    for the run log."""
     from mainframe_rag.ingest.qdrant_io import (
         delete_by_doc,
         delete_by_revision,

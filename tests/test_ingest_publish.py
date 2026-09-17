@@ -1278,3 +1278,307 @@ def test_inplace_run_uses_progress_lock_only(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="INGEST_ALIAS_PUBLISH"):
         _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A)
+
+
+# ------------------------------------------------- Review round on #409 (issue #405)
+
+
+def _write_committed_manifest(fake, collection):
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, write_manifest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    staging = _settings(qdrant_collection=collection)
+    write_manifest(
+        fake, f"{collection}__completions", staging,
+        extraction_rules_version(), state=STATE_COMMITTED,
+    )
+
+
+def test_suffixed_crash_retry_resumes_recorded_staging(monkeypatch):
+    """B1: a crash after the sidecar records a suffixed allocation resumes
+    that same staging on retry with identical inputs — no new collection,
+    no strand."""
+    from mainframe_rag.ingest.publish import (
+        resolve_publish_staging,
+        staging_name_for,
+    )
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    settings = _settings(qdrant_collection=ALIAS)
+    gen_fp = "g" * 16
+    corp_fp = "c" * 12
+    base = staging_name_for(ALIAS, gen_fp, corp_fp)
+    live = "live-gen"
+    fake.collections[live] = []
+    # Derived base is a retained published generation ...
+    fake.collections[base] = [SimpleNamespace(id="p", payload={"doc_id": "X"})]
+    _write_committed_manifest(fake, base)
+    # ... so the first build allocated base_1, recorded it, then crashed
+    # before cutover (the clone carries a committed manifest verbatim).
+    recorded = f"{base}_1"
+    fake.collections[recorded] = [SimpleNamespace(id="q", payload={"doc_id": "X"})]
+    _write_committed_manifest(fake, recorded)
+    state = {
+        "version": 1, "alias": ALIAS, "staging": recorded,
+        "gen_fp": gen_fp, "corpus_fp": corp_fp,
+    }
+    before = set(fake.collections)
+    staging, resumed = resolve_publish_staging(
+        fake, settings, gen_fp=gen_fp, corpus_fp=corp_fp, live=live,
+        force_reingest=False, state=state,
+    )
+    assert (staging, resumed) == (recorded, True)
+    assert set(fake.collections) == before, "resume allocates nothing"
+
+
+def test_foreign_publish_state_fails_closed(monkeypatch):
+    """A sidecar recording different inputs than the current run is never
+    acted on — only the operator may abandon it."""
+    from mainframe_rag.ingest.publish import resolve_publish_staging
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    settings = _settings(qdrant_collection=ALIAS)
+    with pytest.raises(RuntimeError, match="different inputs"):
+        resolve_publish_staging(
+            fake, settings, gen_fp="g" * 16, corpus_fp="c" * 12,
+            live=None, force_reingest=False,
+            state={"staging": "other", "gen_fp": "h" * 16, "corpus_fp": "c" * 12},
+        )
+
+
+def test_recorded_serving_generation_finalizes_read_only(tmp_path, monkeypatch):
+    """SF3: a crash between swap and sidecar cleanup (suffixed staging now
+    serving) finalizes through the read-only steady-state path on retry —
+    no rebuild, no build into live, no new generation."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    dir_a = tmp_path / "corpus_a"
+    dir_a.mkdir()
+    _build_doc_with_id(dir_a, "doc_a", DOC_A)
+    dir_b = tmp_path / "corpus_b"
+    dir_b.mkdir()
+    _build_doc_with_id(dir_b, "doc_b", DOC_B)
+    progress = tmp_path / "inv.jsonl"
+
+    assert _run_main(monkeypatch, dir_a, progress) == 0
+    assert _run_main(monkeypatch, dir_b, progress, "--retire-doc", DOC_A) == 0
+    # Revisit the older input set: derived base is retained, so the build
+    # allocates a suffix. Suppress the post-swap cleanup to simulate the
+    # crash landing between cutover and sidecar removal.
+    real_clear = run_ingest.clear_publish_state
+    monkeypatch.setattr(run_ingest, "clear_publish_state", lambda *a, **k: False)
+    assert _run_main(monkeypatch, dir_a, progress, "--retire-doc", DOC_B) == 0
+    live = fake.aliases[ALIAS]
+    assert live != ALIAS and live.endswith("_1"), f"expected suffixed staging, got {live}"
+    gens_before = _gen_collections(fake)
+    assert _live_doc_ids(fake) == {DOC_A}
+
+    monkeypatch.setattr(run_ingest, "clear_publish_state", real_clear)
+    assert _run_main(monkeypatch, dir_a, progress, "--retire-doc", DOC_B) == 0
+    assert fake.aliases[ALIAS] == live
+    assert _gen_collections(fake) == gens_before, "finalize allocates nothing"
+    assert _live_doc_ids(fake) == {DOC_A}
+
+
+def test_plan_retire_mixed_history_covers_approved_legacy():
+    """B2: whole-document retirement covers approved sourceless history
+    alongside named revisions (the #409 reproducer, fixed expectation)."""
+    from mainframe_rag.ingest.completion import plan_retire_deletes
+
+    assert plan_retire_deletes({"DOC": {"rev1", None}}, {"DOC": {None}}) == {
+        "DOC": {"revs": {"rev1"}, "legacy": True, "whole": True}
+    }
+
+
+def test_plan_retire_partial_leaves_legacy():
+    """A named-only retirement never takes legacy points, whole or not."""
+    from mainframe_rag.ingest.completion import plan_retire_deletes
+
+    assert plan_retire_deletes({"DOC": {"rev1", None}}, {"DOC": {"rev1"}}) == {
+        "DOC": {"revs": {"rev1"}, "legacy": False, "whole": False}
+    }
+    assert plan_retire_deletes({"DOC": {"rev1"}}, {"DOC": {None}}) == {
+        "DOC": {"revs": {"rev1"}, "legacy": False, "whole": True}
+    }
+
+
+def _seed_approved_legacy(progress, doc_id):
+    """Give a doc approved sourceless history the way a pre-361B inventory
+    record does (source_rev None, upserted)."""
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    inv = load_inventory(progress)
+    paths = [p for p, rec in inv.items() if rec.doc_id == doc_id]
+    assert paths, f"no inventory history for {doc_id}"
+    template = inv[paths[0]]
+    legacy = template.model_copy(
+        update={"path": f"legacy/{doc_id}.pdf", "sha256": "0" * 64, "source_rev": None}
+    )
+    with open(progress, "a", encoding="utf-8") as f:
+        f.write(legacy.model_dump_json() + "\n")
+
+
+def test_whole_doc_retire_covers_mixed_history(tmp_path, monkeypatch):
+    """B2 end to end: a document with a named revision plus approved
+    sourceless history retires completely — named points, legacy points,
+    and legacy markers all go; rollback history is retained."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live_before = fake.aliases[ALIAS]
+
+    fake.collections[live_before].append(
+        SimpleNamespace(id="legacy-a", payload={"doc_id": DOC_A, "text": "pre-361B"})
+    )
+    _seed_approved_legacy(progress, DOC_A)
+    (corpus / "doc_a.pdf").unlink()
+
+    assert _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A) == 0
+    live_after = fake.aliases[ALIAS]
+    assert live_after != live_before
+    assert {p.payload["doc_id"] for p in fake.collections[live_after]} == {DOC_B}
+    assert live_before in fake.collections
+    assert {p.payload["doc_id"] for p in fake.collections[live_before]} == {
+        DOC_A, DOC_B,
+    }
+
+
+def test_partial_retire_leaves_legacy_with_named_path(tmp_path, monkeypatch):
+    """B2: a named-only retirement beside approved legacy refuses, and the
+    message names the whole-document way through instead of dead-ending."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a_path, _ = _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live_before = fake.aliases[ALIAS]
+
+    fake.collections[live_before].append(
+        SimpleNamespace(id="legacy-a", payload={"doc_id": DOC_A, "text": "pre-361B"})
+    )
+    _seed_approved_legacy(progress, DOC_A)
+    rev = load_inventory(progress)[str(a_path)].source_rev
+    assert rev
+    a_path.unlink()
+
+    with pytest.raises(RuntimeError, match="never takes legacy points"):
+        _run_main(monkeypatch, corpus, progress, "--retire-doc", f"{DOC_A}@{rev}")
+    assert fake.aliases[ALIAS] == live_before
+    assert any(
+        getattr(p, "id", None) == "legacy-a" for p in fake.collections[live_before]
+    ), "refusal deletes nothing"
+
+
+def test_audit_names_gap_for_unexpected_remnants(monkeypatch):
+    """B2: the retired-doc audit names the operator path for each remnant
+    shape — unexpected revisions (re-plan) vs sourceless residue with no
+    approved history (manual resolution)."""
+    from mainframe_rag.ingest.inventory import InventoryRecord
+    from mainframe_rag.ingest.publish import audit_unmarked_residue
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    staging = _settings(qdrant_collection="stg")
+    fake.collections["stg"] = [
+        SimpleNamespace(id="r2", payload={"doc_id": "D-NAMED", "source_rev": "rev2"}),
+        SimpleNamespace(id="leg", payload={"doc_id": "D-LEGACY"}),
+    ]
+    inv: dict[str, InventoryRecord] = {}
+    named = audit_unmarked_residue(
+        fake, staging, [], inv, "r" * 16,
+        retired=frozenset({"D-NAMED"}),
+        retire_plan={"D-NAMED": {"revs": {"rev1"}, "legacy": False, "whole": False}},
+    )
+    assert len(named) == 1 and "rev2" in named[0] and "re-plan" in named[0]
+
+    fake.collections["stg"] = [
+        SimpleNamespace(id="leg", payload={"doc_id": "D-LEGACY"}),
+    ]
+    manual = audit_unmarked_residue(
+        fake, staging, [], inv, "r" * 16,
+        retired=frozenset({"D-LEGACY"}),
+        retire_plan={"D-LEGACY": {"revs": {"rev1"}, "legacy": False, "whole": True}},
+    )
+    assert len(manual) == 1 and "no approved sourceless history" in manual[0]
+
+
+def test_retire_plan_validated_under_target_lock(tmp_path, monkeypatch):
+    """SF1: retirement planning reads the freshest inventory under the
+    target lock — an approval revoked before lock acquisition fails closed
+    instead of publishing from a stale plan."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a_path, _ = _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live_before = fake.aliases[ALIAS]
+    gens_before = _gen_collections(fake)
+    a_path.unlink()
+
+    real_acquire = run_ingest.acquire_publish_lock
+
+    def revoking_acquire(progress_path, alias):
+        lines = [
+            line for line in progress.read_text().splitlines()
+            if DOC_A not in line
+        ]
+        progress.write_text("\n".join(lines) + ("\n" if lines else ""))
+        assert DOC_A not in {
+            rec.doc_id for rec in load_inventory(progress).values()
+        }
+        return real_acquire(progress_path, alias)
+
+    monkeypatch.setattr(run_ingest, "acquire_publish_lock", revoking_acquire)
+    with pytest.raises(RuntimeError, match="no approved history"):
+        _run_main(monkeypatch, corpus, progress, "--retire-doc", DOC_A)
+    assert fake.aliases[ALIAS] == live_before
+    assert _gen_collections(fake) == gens_before, "stale plan builds nothing"
+
+
+def test_walked_doc_legacy_stray_publishes(tmp_path, monkeypatch):
+    """SF2 boundary: a sourceless point under a walked doc_id is covered by
+    the pre-361B compatibility bridge (no revision stamp exists to match
+    exactly) — the steady-state re-verify passes; unattributable residue
+    under unwalked docs still refuses (see
+    test_unmarked_legacy_residue_blocks_cutover_without_deletion)."""
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+
+    fake.collections[live].append(
+        SimpleNamespace(id="stray-a", payload={"doc_id": DOC_A, "text": "pre-361B"})
+    )
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert fake.aliases[ALIAS] == live

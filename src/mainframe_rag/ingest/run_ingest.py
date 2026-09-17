@@ -1129,35 +1129,18 @@ def _run_publish(
     # publication certifies the gated corpus — a colliding or duplicated
     # walk must fail here, never after a staging generation was cloned.
     prewalked = _gate_planned_entries(src, prewalked)
-    # Explicit retirement planning (issue #405 R1) validates --retire-doc
-    # flags against the last approved inventory before any coordination or
-    # mutation; a missing file is never itself a removal instruction.
-    prior_inventory = load_inventory(progress)
-    retire_plan, retired = (
-        plan_approved_removals(tuple(retire_docs or ()), prior_inventory)
-        if retire_docs
-        else ({}, frozenset())
-    )
-    walked_known = {
-        rec.doc_id
-        for path_str, _ in prewalked
-        if (rec := prior_inventory.get(path_str)) and rec.doc_id
-    }
-    if retired & walked_known:
-        raise RuntimeError(
-            f"retired document(s) {sorted(retired & walked_known)} still present in "
-            "the walked corpus: remove their files or drop the --retire-doc flag."
-        )
     # Writer ownership (issue #405 R2): one target-held lock spans staging
-    # resolution through alias cutover. In-place mode keeps its own
-    # progress lock only (explicitly scoped legacy path).
+    # resolution through alias cutover — including retirement planning
+    # below, so two serialized publishers sharing the progress directory
+    # can never plan on stale inventory (issue #409 review). In-place mode
+    # keeps its own progress lock only (explicitly scoped legacy path).
     target_lock = acquire_publish_lock(progress, settings.qdrant_collection)
     try:
         return _run_publish_locked(
             src, progress, workers, settings, tracer, root,
             vendor=vendor, product=product, version=version,
             force_reingest=force_reingest,
-            prewalked=prewalked, retire_plan=retire_plan, retired=retired,
+            prewalked=prewalked, retire_docs=retire_docs,
             rules_v=rules_v,
         )
     finally:
@@ -1176,13 +1159,32 @@ def _run_publish_locked(
     version: str | None,
     force_reingest: bool,
     prewalked: list[tuple[str, str]],
-    retire_plan: dict,
-    retired: frozenset[str],
+    retire_docs: tuple[str, ...] | None,
     rules_v: str,
 ) -> int:
     """Publication body under the target lock (see _run_publish)."""
     labels = source_labels(vendor, product, version)
     alias = settings.qdrant_collection
+    # Explicit retirement planning (issue #405 R1) runs first under the
+    # lock, against the freshest approved inventory: a missing file is
+    # never itself a removal instruction, and a retirement contradicting
+    # the walked corpus fails before any coordination or mutation.
+    prior_inventory = load_inventory(progress)
+    retire_plan, retired = (
+        plan_approved_removals(tuple(retire_docs or ()), prior_inventory)
+        if retire_docs
+        else ({}, frozenset())
+    )
+    walked_known = {
+        rec.doc_id
+        for path_str, _ in prewalked
+        if (rec := prior_inventory.get(path_str)) and rec.doc_id
+    }
+    if retired & walked_known:
+        raise RuntimeError(
+            f"retired document(s) {sorted(retired & walked_known)} still present in "
+            "the walked corpus: remove their files or drop the --retire-doc flag."
+        )
     client = _get_qdrant(settings)
     live, legacy = resolve_live_collection(client, settings)
     gen_fp = generation_fingerprint(settings, rules_v, labels)
@@ -1214,7 +1216,7 @@ def _run_publish_locked(
         _log_record_drift(staging_settings, record_drift)
         problems = verify_all_complete(
             client, staging_settings, prewalked, load_inventory(progress),
-            rules_v, labels, retired,
+            rules_v, labels, retired, retire_plan,
         )
         if problems:
             raise RuntimeError(
@@ -1248,11 +1250,9 @@ def _run_publish_locked(
     else:
         # Distinct staging build: record it before any mutation so an
         # interrupted run resumes this same build (issue #405 R2) instead
-        # of allocating another suffix.
-        if state is not None and (
-            state.get("gen_fp") != gen_fp or state.get("corpus_fp") != corp_fp
-        ):
-            log.info(json.dumps({"action": "publish_state_superseded", "alias": alias}))
+        # of allocating another suffix. The state reaching here always
+        # matches these inputs (resolve fails a foreign record closed),
+        # so this write only creates or re-affirms the record.
         write_publish_state(progress, alias, staging, gen_fp, corp_fp)
         if resumed:
             log.info(
@@ -1297,7 +1297,7 @@ def _run_publish_locked(
         )
     problems = verify_all_complete(
         client, staging_settings, prewalked, load_inventory(progress),
-        rules_v, labels, retired,
+        rules_v, labels, retired, retire_plan,
     )
     if problems:
         raise RuntimeError(

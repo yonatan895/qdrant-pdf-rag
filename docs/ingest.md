@@ -494,10 +494,15 @@ thread pool.
   candidate overtaken by a lock-bypass writer. Each publish run derives
   a deterministic staging generation
   `<collection>__gen<genfp><corpusfp>` (representation fingerprint + CLI
-  source triple + walked-corpus content); an identical rerun resumes the
-  same recorded unfinished staging (crash-safe resume via the
-  `publish-<alias>.json` sidecar), changed inputs address a new one, and a
-  derived name equal to the live physical means "already published"
+   source triple + walked-corpus content); an identical rerun resumes the
+   same recorded unfinished build — including a suffixed allocation from a
+   rollback-by-republish collision — via the `publish-<alias>.json` sidecar
+   (crash-safe resume; a record naming the now-serving generation means the
+   crash landed between swap and cleanup, so the rerun finalizes through
+   the read-only steady-state path instead of rebuilding). Changed inputs
+   address a new build, and a record for different inputs fails closed
+   (remove it explicitly to abandon the recorded build). A derived name
+   equal to the live physical means "already published"
   (read-only re-verify, no clone, no swap — plus the representation
   read-only check for record-only drift and for a pending same-contract
   resume). Because the fingerprint embeds every re-embed-required field
@@ -527,14 +532,25 @@ thread pool.
   publishes a distinct staging and never mutates the serving generation.
   Swap failure leaves the previous generation serving (job
   fails, staging retained for retry). `--limit` subsets and empty corpora
-  are refused fail-closed. Corpus deletions are NOT swept: a file missing
-  from the walk is not a removal instruction — unmarked residue (including
-  a previously published document that simply was not walked) refuses
-  cutover until the operator either restores the file or names an explicit
-  approved removal (`--retire-doc DOCID`, repeatable, validated against
-  the last approved inventory and applied to staging with revision-scoped
-  deletes before verification). Retired documents that reappear in the
-  walk, and unknown retirement names, fail closed before any mutation.
+   are refused fail-closed. Corpus deletions are NOT swept: a file missing
+   from the walk is not a removal instruction — unmarked residue (including
+   a previously published document that simply was not walked) refuses
+   cutover until the operator either restores the file or names an explicit
+   approved removal (`--retire-doc DOCID[@SOURCEREV]`, repeatable, planned
+   under the target lock against the freshest approved inventory and applied
+   to staging with revision-scoped deletes before verification). Whole-doc
+   retirement covers approved sourceless (pre-361B) history alongside named
+   revisions — the apply-time sole-history check (no named revision left in
+   staging) still guards the delete; a named-only retirement never takes
+   legacy points, and residue the approved removal does not cover refuses
+   with the exact way through (re-plan, whole-document retirement, or manual
+   resolution — never a dead end). Retired documents that reappear in the
+   walk, and unknown retirement names, fail closed before any mutation.
+   The audit's legacy allowance is a compatibility bridge, not attribution:
+   a sourceless point under a walked `doc_id` is covered because pre-361B
+   points carry no revision stamp to match exactly; residue under unwalked
+   or retired docs still refuses. `--retire-doc` is a CLI-only flag (the
+   air-gap `scripts/airgap/ingest.sh` wrapper does not plumb it yet).
   During a migration retained markers block the commit until
   the operator re-ingests the complete corpus or cleans the stale
   generation. First-publish cutover from a legacy physical layout snapshots the
@@ -545,12 +561,19 @@ thread pool.
   staging name that collides with a committed retained (non-live)
   generation allocates a suffixed candidate instead of reusing it, so
   rollback-by-republish preserves the retained points and manifest
-  byte-identically. An existing staging with no matching build record
-  fails closed (remove it explicitly or resume the run that recorded it).
-  Same-alias publishers must share the progress directory (already required
-  for refresh lineage) so the target lock serializes them; different
-  directories or hosts are operator error, guarded only by the pre-swap
-  live recheck — there is no distributed lock.
+  byte-identically. The resume path deliberately checks no manifest state:
+  staging is cloned from live, so an interrupted clone carries a COMMITTED
+  manifest indistinguishable from a finished build — resume safety comes
+  from the sidecar's fingerprint binding, converge re-verification before
+  any swap, and never building into the serving generation. An existing
+  staging with no matching build record fails closed (remove it explicitly
+  or resume the run that recorded it). Same-alias publishers must share the
+  progress directory (already required for refresh lineage) so the target
+  lock serializes them; different directories or hosts are operator error,
+  guarded only by the pre-swap live recheck — there is no distributed lock.
+  Lock filenames sanitize the alias charset: aliases differing only in
+  sanitised-away characters share a lock (over-serialization, never
+  concurrent publication).
 - **Fingerprint-format upgrade (one-time, fail-closed):** the pre-#391
   fingerprint omitted the operator revision and other re-embed-required
   fields, so it cannot be trusted for skip eligibility. Existing
@@ -652,7 +675,7 @@ acceptance ownership; publication/lifetime gaps belong to #391.
 #397 documents the remaining gap, not a runtime fix. **Decision owner:**
 `completion` verification, `run_ingest._commit_migration_representation`,
 `publish.verify_all_complete`, `run_ingest._run_publish`. Static inspection below is at
-`9fece72df92ca5da414bc8f5b05cb2f89fcd18c8`; it is not a newly executed reproduction.
+`d8d9ecb7a9a6f426529c715368b513926f6c5a96` (merge #408); it is not a newly executed reproduction.
 
 **Required invariant:** all searchable points in a published generation are
 attributable to verified generation coverage. A scan finding no stale completion
