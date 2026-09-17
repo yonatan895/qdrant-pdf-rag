@@ -145,7 +145,10 @@ class PublishFake:
             stored = [p for p in stored if (p.payload or {}).get("doc_id") == doc_id]
         if rev is not None:
             stored = [p for p in stored if (p.payload or {}).get("source_rev") == rev]
-        return stored[:limit], None
+        start = 0 if offset is None else int(offset)
+        page = stored[start : start + limit]
+        next_offset = str(start + limit) if start + limit < len(stored) else None
+        return page, next_offset
 
     def retrieve(self, collection, ids, *, with_payload=True, with_vectors=False):
         wanted = {str(i) for i in ids}
@@ -562,6 +565,7 @@ def test_verify_all_complete_matrix(monkeypatch):
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.identity import source_rev_key
     from mainframe_rag.ingest.inventory import InventoryRecord
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, write_manifest
     from mainframe_rag.ingest.rules_version import extraction_rules_version
     from mainframe_rag.ingest.run_ingest import _DocLocks, _upsert_one
     from tests.test_ingest_completion import _chunks, _vectors
@@ -572,6 +576,7 @@ def test_verify_all_complete_matrix(monkeypatch):
 
     rules_v = extraction_rules_version()
     staging = _settings(qdrant_collection="stg", batch_size=16)
+    write_manifest(fake, "stg__completions", staging, rules_v, state=STATE_COMMITTED)
     fake.collections["stg"] = []
     chunks = _chunks(doc_id="D1", n=3)
     _upsert_one(_parsed_doc("D1", "a" * 64), chunks, _vectors(3),
@@ -792,3 +797,113 @@ def test_publish_force_revision_change_migrates_to_new_generation(tmp_path, monk
     record = read_manifest_record(fake, f"{new}__completions")
     assert record is not None and record.state == STATE_COMMITTED
     assert {p.payload["doc_id"] for p in fake.alias_target_points(ALIAS)} == {"SA22-0000-00"}
+
+
+def test_verify_all_complete_refuses_missing_manifest_on_populated_staging(monkeypatch):
+    """Invariant D2: Populated staging without a manifest blocks publication;
+    empty bootstrap (0 walked docs) remains permitted."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+    staging = _settings(qdrant_collection="stg-nomanifest")
+    rules_v = extraction_rules_version()
+
+    # Case A: Populated target (walked is non-empty) -> missing manifest is a blocking problem
+    problems = verify_all_complete(
+        fake, staging, [("doc.pdf", "a" * 64)], {}, rules_v, "||"
+    )
+    assert "stg-nomanifest: missing or unreadable metadata manifest" in problems
+
+    # Case B: Empty bootstrap (walked is empty) -> missing manifest is permitted
+    assert verify_all_complete(fake, staging, [], {}, rules_v, "||") == []
+
+
+def test_verify_all_complete_refuses_corrupt_manifest_on_populated_staging(monkeypatch):
+    """Invariant D2: Staging with unparseable/corrupt manifest payload blocks publication."""
+    from types import SimpleNamespace
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import manifest_point_id
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+    staging = _settings(qdrant_collection="stg-corrupt")
+    rules_v = extraction_rules_version()
+
+    completions = "stg-corrupt__completions"
+    fake.collections[completions] = [
+        SimpleNamespace(
+            id=manifest_point_id(completions),
+            payload={
+                "record_type": "manifest",
+                "manifest": "not-a-valid-manifest-dict",
+                "state": "committed",
+            },
+        )
+    ]
+
+    problems = verify_all_complete(
+        fake, staging, [("doc.pdf", "a" * 64)], {}, rules_v, "||"
+    )
+    assert "stg-corrupt: missing or unreadable metadata manifest" in problems
+
+
+def test_verify_all_complete_refuses_representation_drift(monkeypatch):
+    """Invariant D2: Committed manifest with drifted representation blocks publication."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import STATE_COMMITTED, write_manifest
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+    staging = _settings(qdrant_collection="stg-drift", embed_model="model-a")
+    rules_v = extraction_rules_version()
+
+    # Write manifest under model-b
+    drift_settings = staging.model_copy(update={"embed_model": "model-b"})
+    write_manifest(fake, "stg-drift__completions", drift_settings, rules_v, state=STATE_COMMITTED)
+
+    problems = verify_all_complete(
+        fake, staging, [("doc.pdf", "a" * 64)], {}, rules_v, "||"
+    )
+    assert any("stg-drift: representation drift on embed_model" in p for p in problems)
+
+
+def test_publish_missing_manifest_prevents_alias_cutover(tmp_path, monkeypatch):
+    """Invariant D2 E2E: Full publication flow aborts and leaves alias untouched
+    when the staging manifest is missing at publication gate."""
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.representation import manifest_point_id
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda s: fake)
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc(corpus, "SA22-0000-00_first")
+
+    # Hook commit_manifest to suppress writing the committed manifest point,
+    # simulating a missing or dropped manifest at publication gate
+    orig_commit = run_ingest.commit_manifest
+
+    def _suppress_commit(client, completions_collection, settings, rules_v):
+        orig_commit(client, completions_collection, settings, rules_v)
+        # Remove manifest point
+        comp_points = fake.collections.get(completions_collection, [])
+        mp_id = manifest_point_id(completions_collection)
+        fake.collections[completions_collection] = [p for p in comp_points if str(p.id) != mp_id]
+        return ""
+
+    monkeypatch.setattr(run_ingest, "commit_manifest", _suppress_commit)
+
+    with pytest.raises(RuntimeError, match="missing or unreadable metadata manifest"):
+        _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl")
+
+    assert fake.aliases == {}, "Alias cutover must be refused when metadata manifest is missing"

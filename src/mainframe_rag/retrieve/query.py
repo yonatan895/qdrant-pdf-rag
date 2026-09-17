@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from mainframe_rag.config import Settings
 
 from mainframe_rag.ports import AsyncQdrantPoints, Embedder, QdrantPoints, Reranker
-from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
+from mainframe_rag.retrieve.filters import build_filter, build_scope_filter, parse_query, query_kind
 from mainframe_rag.retrieve.rewrite import expand_query, should_rewrite
 from mainframe_rag.retrieve.screen import screen_query
 from mainframe_rag.retrieve.split import split_query
@@ -382,11 +382,14 @@ def _needs_filter_fallback(
     dense_points: list[models.ScoredPoint],
     sparse_points: list[models.ScoredPoint],
     flt: models.Filter | None,
+    fallback_flt: models.Filter | None = None,
 ) -> bool:
     """One rule for the empty-filtered retry (both twins share it): only when
-    a filter was applied and both legs came back empty. Non-empty filtered
-    results take the byte-identical legacy path — no second call."""
-    return flt is not None and not dense_points and not sparse_points
+    a filter was applied, both legs came back empty, and the filter can be relaxed.
+    Non-empty filtered results take the byte-identical legacy path — no second call."""
+    if flt is not None and not dense_points and not sparse_points:
+        return not (fallback_flt is not None and flt == fallback_flt)
+    return False
 
 
 def _retrieve_span_attrs(
@@ -601,6 +604,7 @@ async def async_search(
     When reranking is enabled, fused candidates (top-50) are scored by the cross-encoder."""
     identifiers = parse_query(query)
     flt = build_filter(identifiers, product=product, version=version)
+    fallback_flt = build_scope_filter(product=product, version=version)
 
     active_reranker, rerank_active, bypass_reason = _resolve_active_reranker(
         settings, reranker, query, identifiers.has_identifiers
@@ -673,10 +677,10 @@ async def async_search(
                         flt,
                         prefetch_limit,
                     )
-                leg_fallback = _needs_filter_fallback(dense_points, sparse_points, flt)
+                leg_fallback = _needs_filter_fallback(dense_points, sparse_points, flt, fallback_flt)
                 if leg_fallback:
                     dense_req, sparse_req = _build_prefetch_requests(
-                        dense_vec, sparse_idx, sparse_val, None, prefetch_limit
+                        dense_vec, sparse_idx, sparse_val, fallback_flt, prefetch_limit
                     )
                     if hasattr(client, "query_batch_points"):
                         res = client.query_batch_points(collection, requests=[dense_req, sparse_req])
@@ -685,14 +689,14 @@ async def async_search(
                         sparse_points = responses[1].points
                     else:
                         dense_points = await _async_prefetch_one(
-                            client, collection, dense_vec, "dense", None, prefetch_limit
+                            client, collection, dense_vec, "dense", fallback_flt, prefetch_limit
                         )
                         sparse_points = await _async_prefetch_one(
                             client,
                             collection,
                             models.SparseVector(indices=sparse_idx, values=sparse_val),
                             "bm25",
-                            None,
+                            fallback_flt,
                             prefetch_limit,
                         )
                 leg_dense_points.append(dense_points)

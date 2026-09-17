@@ -175,12 +175,31 @@ def verify_all_complete(
     unverified staging generation, or a contract that is not committed
     (issue #391 F2: a pending migration must never be swapped into
     service). Empty means publishable."""
-    from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
+    from mainframe_rag.ingest.representation import (
+        COMPATIBLE,
+        RECORD_ONLY_DRIFT,
+        STATE_COMMITTED,
+        build_manifest,
+        compare_manifests,
+        read_manifest_record,
+    )
 
     record = read_manifest_record(client, completion_collection_name(staging_settings))
     problems: list[str] = []
-    if record is not None and record.state != STATE_COMMITTED:
+    if record is None:
+        if walked:
+            problems.append(
+                f"{staging_settings.qdrant_collection}: missing or unreadable metadata manifest"
+            )
+    elif record.state != STATE_COMMITTED:
         problems.append(f"{staging_settings.qdrant_collection}: contract {record.state!r}")
+    else:
+        wanted = build_manifest(staging_settings, rules_v)
+        outcome, fields = compare_manifests(record.manifest, wanted)
+        if outcome not in (COMPATIBLE, RECORD_ONLY_DRIFT):
+            problems.append(
+                f"{staging_settings.qdrant_collection}: representation drift on {', '.join(fields)}"
+            )
     for path_str, sha in walked:
         rec = inventory.get(path_str)
         if (
