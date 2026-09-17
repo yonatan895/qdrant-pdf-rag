@@ -117,6 +117,13 @@ jobs:
     runs-on: ubuntu-latest
     # Observed reviews: 1.5-7.5 min, with variance up to ~2x. 20 min bounds a
     # stuck run without clipping a normal review.
+    #
+    # Actor constraint: the pinned opencode CLI asserts the repo permission of
+    # the event actor before it runs. A head pushed by a bot (for example
+    # opencode-agent[bot]) makes that actor non-write, so the review fails
+    # closed before the model runs. Recovery is a new push of the candidate
+    # from a write-capable human account (a rerun keeps the original actor);
+    # the red job is a required-check failure, never a silent skip.
     timeout-minutes: 20
     concurrency:
       group: opencode-review-${{ github.event.pull_request.number || github.run_id }}

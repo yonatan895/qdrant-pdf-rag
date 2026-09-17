@@ -1002,7 +1002,7 @@ class TestExecutionAttribution(unittest.TestCase):
             result = validate_review_payload(payload, check_git=True, cwd=repo)
             self.assertEqual(result.candidate_currentness, CandidateCurrentness.UNVERIFIED.value)
             self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
-            self.assertTrue(any("does not match" in e and "HEAD" in e for e in result.validation_errors))
+            self.assertTrue(any("matches neither" in e and "HEAD" in e for e in result.validation_errors))
         finally:
             tmp.cleanup()
 
@@ -1033,6 +1033,29 @@ class TestExecutionAttribution(unittest.TestCase):
             result = validate_review_payload(payload, check_git=True, cwd=repo)
             self.assertEqual(result.merge_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
             self.assertEqual(len(result.validation_errors), 0)
+        finally:
+            tmp.cleanup()
+
+    def test_head_checkout_with_test_merge_execution_passes(self):
+        # The pinned reviewer CLI deliberately checks out the PR head before the
+        # model runs while tests execute on the test-merge commit. Both are
+        # legitimate candidate identities; an unrelated clean checkout is not.
+        tmp, repo, base, head = self._make_two_commit_repo()
+        try:
+            subprocess.run(["git", "checkout", "-q", head], cwd=repo, check=True)
+            (repo / "merge.txt").write_text("test-merge\n")
+            subprocess.run(["git", "add", "merge.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "test-merge"], cwd=repo, check=True)
+            execution = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+            ).stdout.strip()
+            self.assertNotEqual(execution, head)
+            subprocess.run(["git", "checkout", "-q", head], cwd=repo, check=True)
+
+            payload = self._payload(head, base, execution)
+            result = validate_review_payload(payload, check_git=True, cwd=repo)
+            self.assertEqual(result.merge_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
+            self.assertEqual(result.validation_errors, [])
         finally:
             tmp.cleanup()
 

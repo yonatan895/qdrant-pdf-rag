@@ -674,27 +674,24 @@ def validate_review_payload(
                         candidate_currentness = CandidateCurrentness.UNVERIFIED.value
                         validation_errors.append(f"Commit {name} ({sha}) not found in git repository")
 
-            # Bind the candidate manifest to the actual execution worktree
-            # revision. A clean checkout of another commit must not pass
-            # simply because all claimed commits exist as git objects.
+            # Bind the candidate to the actual worktree revision. The pinned
+            # reviewer CLI deliberately checks out the PR head before the model
+            # runs (`Checking out local branch...`), while tests and services run
+            # on the test-merge execution commit: both are legitimate candidate
+            # identities. Any other clean checkout (e.g. the base) must not pass
+            # merely because all claimed commits exist as git objects.
             actual_head = resolve_execution_head(cwd=cwd)
             if not actual_head:
                 candidate_currentness = CandidateCurrentness.UNVERIFIED.value
                 validation_errors.append("Unable to resolve execution worktree HEAD for attribution check")
             else:
-                if execution_sha and actual_head.lower() != execution_sha.lower():
+                allowed_worktrees = {sha.lower() for sha in (head_sha, execution_sha) if sha}
+                if actual_head.lower() not in allowed_worktrees:
                     candidate_currentness = CandidateCurrentness.UNVERIFIED.value
                     validation_errors.append(
-                        f"Execution worktree HEAD ({actual_head}) does not match "
-                        f"claimed execution_sha ({execution_sha}); keep services/tests pinned "
-                        "to the immutable execution worktree and inspect other revisions "
-                        "via git objects or a separate worktree"
-                    )
-                if exp_e and actual_head.lower() != exp_e.lower():
-                    candidate_currentness = CandidateCurrentness.UNVERIFIED.value
-                    validation_errors.append(
-                        f"Execution worktree HEAD ({actual_head}) does not match "
-                        f"expected execution_sha ({exp_e})"
+                        f"Execution worktree HEAD ({actual_head}) matches neither the claimed "
+                        f"head_sha ({head_sha}) nor execution_sha ({execution_sha}); a clean "
+                        "checkout of another revision cannot attest the candidate"
                     )
                 # Allowed head/execution relationship: execution equals head,
                 # or execution is a test-merge commit containing head.
