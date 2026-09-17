@@ -549,8 +549,15 @@ thread pool.
    The audit's legacy allowance is a compatibility bridge, not attribution:
    a sourceless point under a walked `doc_id` is covered because pre-361B
    points carry no revision stamp to match exactly; residue under unwalked
-   or retired docs still refuses. `--retire-doc` is a CLI-only flag (the
-   air-gap `scripts/airgap/ingest.sh` wrapper does not plumb it yet).
+   or retired docs still refuses. The prod Job reaches these modes through
+   `scripts/airgap/ingest.sh` (issue #391 current packet):
+   `INGEST_ALIAS_PUBLISH=true` selects publication, `INGEST_REINGEST=true`
+   renders `--reingest` (forced repair), and `INGEST_RETIRE_DOCS` takes a
+   comma/space-separated `DOCID[@SOURCEREV]` list rendered as repeated
+   `--retire-doc` (requires alias publication). The launcher validates the
+   values, keeps one Job name and the shared `/work` progress path, and
+   never flips a mode implicitly: one authorized publisher at a time, no
+   distributed lock.
   During a migration retained markers block the commit until
   the operator re-ingests the complete corpus or cleans the stale
   generation. First-publish cutover from a legacy physical layout snapshots the

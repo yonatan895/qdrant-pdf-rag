@@ -50,6 +50,34 @@ spec:
 EOF
 fi
 
+# Maintenance modes (issue #391 current packet): the operator launcher is
+# the one supported path, so repair/removal flags travel through it with
+# validation instead of ad-hoc applies. One Job name and the shared
+# ingest-work PVC keep the host-local target lock meaningful (one
+# authorized publisher, shared progress path); no distributed lock is
+# claimed, and aliases/defaults are never flipped implicitly.
+ALIAS_PUBLISH=$(bool_flag INGEST_ALIAS_PUBLISH false)
+REINGEST=$(bool_flag INGEST_REINGEST false)
+INGEST_ARGS='"--src", "/corpus", "--progress", "/work/inventory.jsonl"'
+if [ "$REINGEST" = "true" ]; then
+    INGEST_ARGS="$INGEST_ARGS, \"--reingest\""
+fi
+if [ -n "${INGEST_RETIRE_DOCS:-}" ]; then
+    [ "$ALIAS_PUBLISH" = "true" ] || die "INGEST_RETIRE_DOCS requires INGEST_ALIAS_PUBLISH=true — explicit removals are a publication operation and the ingest refuses them in-place"
+    _old_ifs=$IFS
+    IFS=', '
+    for _doc in $INGEST_RETIRE_DOCS; do
+        [ -n "$_doc" ] || continue
+        case "$_doc" in
+            *[!A-Za-z0-9_.@-]*) die "malformed INGEST_RETIRE_DOCS entry '$_doc': expected DOCID or DOCID@SOURCEREV (letters, digits, '.', '_', '@', '-')" ;;
+        esac
+        INGEST_ARGS="$INGEST_ARGS, \"--retire-doc\", \"$_doc\""
+    done
+    IFS=$_old_ifs
+    unset _old_ifs _doc
+fi
+INGEST_ARGS="[$INGEST_ARGS]"
+
 echo "==> Kustomize: prod ingest Job (corpus PVC: $CORPUS_PVC)"
 INGEST_WORKERS=${INGEST_WORKERS:-4}
 kustomize_render deploy/kustomize/overlays/openshift-ingest | sed -E 's|"(__[A-Z0-9_]+__)"|\1|g' | sed \
@@ -64,6 +92,8 @@ kustomize_render deploy/kustomize/overlays/openshift-ingest | sed -E 's|"(__[A-Z
     -e "s|__DENSE_DIM__|\"$DENSE_DIM\"|g" \
     -e "s|__CORPUS_PVC__|$CORPUS_PVC|g" \
     -e "s|__INGEST_WORKERS__|\"$INGEST_WORKERS\"|g" \
+    -e "s|__INGEST_ALIAS_PUBLISH__|$ALIAS_PUBLISH|g" \
+    -e "s|__INGEST_ARGS__|$INGEST_ARGS|g" \
     -e "s|__CONTEXTUAL_EMBED_ENABLED__|\"${CONTEXTUAL_EMBED_ENABLED:-false}\"|g" \
     -e "s|__CONTEXT_LLM_BASE_URL__|${CONTEXT_LLM_BASE_URL:-}|g" \
     -e "s|__CONTEXT_LLM_MODEL__|${CONTEXT_LLM_MODEL:-}|g" \
