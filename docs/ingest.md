@@ -551,23 +551,40 @@ thread pool.
    retirement covers approved sourceless (pre-361B) history alongside named
    revisions — the apply-time sole-history check (no named revision left in
    staging) still guards the delete; a named-only retirement never takes
-   legacy points, and residue the approved removal does not cover refuses
-   with the exact way through (re-plan, whole-document retirement, or manual
-   resolution — never a dead end). Retired documents that reappear in the
-   walk, and unknown retirement names, fail closed before any mutation.
-   The audit's legacy allowance is a compatibility bridge with content
-   attribution (issue #391 current packet): a sourceless point is covered
-   only when its `(doc_id, sha256)` matches an approved legacy inventory
-   line (`source_rev` absent, approved status) — sharing a printed
-   `doc_id` with a walked document is not attribution. Unexplained
-   residue under walked, unwalked or retired docs refuses and is
+   resolution — never a dead end). Retiring revision A (`--retire-doc DOCID@SOURCEREV`)
+   preserves sibling revision B across planning, walked-document conflict
+   checks, migration commit exclusions, deletion, and residue audits.
+   Retired document revisions that reappear in the walk (or whole documents
+   reappearing when retired wholesale), and unknown retirement names or
+   unapproved revisions, fail closed before any mutation.
+   Committed retirements persist into the inventory progress log (`status: retired`)
+   upon publication cutover (and recover from the in-flight publish state sidecar
+   if interrupted between swap and cleanup), ensuring subsequent ordinary runs
+   recognize deliberate retirements without demanding missing chunks or allocating
+   redundant generations.
+   The audit's legacy allowance is a compatibility bridge with digest-level
+   verification (issue #391 Q417-L1): a sourceless point is covered only when
+   it belongs to an approved legacy inventory record with verified chunk count,
+   chunk IDs, extraction rules, and excerpt text digests (`chunk_ids_digest`,
+   `content_digest`, `rules_version`) — matching `(doc_id, sha256)` alone is
+   not attribution. Unverifiable legacy data fails closed requiring `--reingest`.
+   Unexplained residue under walked, unwalked or retired docs refuses and is
    preserved. The prod Job reaches these modes through
    `scripts/airgap/ingest.sh` (issue #391 current packet):
    `INGEST_ALIAS_PUBLISH=true` selects publication, `INGEST_REINGEST=true`
-   renders `--reingest` (forced repair), and `INGEST_RETIRE_DOCS` takes a
-   comma/space-separated `DOCID[@SOURCEREV]` list rendered as repeated
-   `--retire-doc` (requires alias publication; labels may carry '|', '/'
-   and spaces — the launcher validates structure, not an ASCII subset).
+    renders `--reingest` (forced repair), and `INGEST_RETIRE_DOCS` takes a
+    **comma- or newline-separated** `DOCID[@SOURCEREV]` list rendered as
+    repeated `--retire-doc` (requires alias publication; labels may carry
+    `|`, `/` and interior spaces — the launcher validates structure, not an
+    ASCII subset). Leading and trailing whitespace per entry is trimmed, but
+    interior spaces are preserved verbatim, so a value like
+    `DOC_A DOC_B` is **one entry** with an embedded space, not two entries.
+    To separate two documents use a comma (`DOC_A,DOC_B`) or a newline.
+    Shell/env-file example for a multi-word revision:
+    `INGEST_RETIRE_DOCS="z/OS Comm Svr@v|IBM|z/OS communications server|2.5"`.
+    Previous documentation described comma/space separation; operators using
+    bare-space separation between entries must migrate to comma or newline
+    delimiters.
    The launcher keeps one Job name and the shared `/work` progress path,
    and never flips a mode implicitly: one authorized publisher at a time,
    no distributed lock.
@@ -583,8 +600,15 @@ thread pool.
   rollback-by-republish preserves the retained points and manifest
   byte-identically. A forced rebuild whose derived name IS live takes the
   same suffixed-allocation route (issue #391 current packet), so the
-  serving generation is never workspace either. The resume path
-  deliberately checks no manifest state:
+  serving generation is never workspace either. At cutover, publication
+  fingerprints `(gen_fp, corpus_fp)` are committed to the generation's metadata
+  (`<collection>__completions`), allowing subsequent ordinary runs to recognize
+  successful repair generations as steady state without allocating further staging
+  generations (issue #391 Q418-R1). An existing generation lacking a publication receipt
+  performs a one-time metadata write when verified as `already_live`; once the receipt
+  exists, subsequent ordinary runs perform zero writes (corpus, markers, and metadata remain
+  completely untouched). The resume path deliberately checks no
+  manifest state:
   staging is cloned from live, so an interrupted clone carries a COMMITTED
   manifest indistinguishable from a finished build — resume safety comes
   from the sidecar's fingerprint binding, converge re-verification before
@@ -730,7 +754,7 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
 - `verify_all_complete` checks the walked inventory, rejects a present pending
   contract, a missing/unreadable/drifted final manifest on a walked corpus,
   and any searchable point no verified walked generation accounts for —
-  sourceless points only through approved legacy `(doc_id, sha256)` membership
+  sourceless points only through verified approved legacy document digests
   (read-only residue audit; explicit `--retire-doc` removals are the only
   deletions and are applied before verification). In-place mode still never
   removes unwalked data.

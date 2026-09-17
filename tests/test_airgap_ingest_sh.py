@@ -319,6 +319,94 @@ def test_ingest_retire_docs_accepts_source_revision_alphabet(ingest_tree):
     assert_no_placeholders(rendered)
 
 
+def test_ingest_retire_docs_preserves_interior_spaces_in_product_label(ingest_tree):
+    """Issue #391 Q419-I1: operator inputs with interior spaces (e.g. from
+    normalize_label on product names) must not be fragmented by word splitting.
+    Leading and trailing whitespace per entry is stripped, while interior spaces
+    are preserved lossless into Job args and validate cleanly against backend
+    retirement planning."""
+    import yaml
+
+    from mainframe_rag.ingest.identity import source_rev_key
+    from mainframe_rag.ingest.inventory import InventoryRecord
+    from mainframe_rag.ingest.publish import plan_approved_removals
+
+    rev = source_rev_key("IBM", "z/OS communications server", "3.1", "a" * 64)
+    assert "z/os communications server" in rev
+
+    # Test padded entries separated by comma
+    retire_input = f"  SA23-1380-09@{rev}  ,  SA22-0000-00  "
+    r = _run_ingest(
+        ingest_tree,
+        ("INGEST_ALIAS_PUBLISH", "true"),
+        ("INGEST_RETIRE_DOCS", retire_input),
+    )
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert_no_placeholders(rendered)
+
+    parsed = yaml.safe_load(rendered)
+    container = parsed["spec"]["template"]["spec"]["containers"][0]
+    args = container["args"]
+
+    # Extract all --retire-doc values from container args
+    retire_args = [
+        args[i + 1]
+        for i, arg in enumerate(args)
+        if arg == "--retire-doc" and i + 1 < len(args)
+    ]
+    assert retire_args == [f"SA23-1380-09@{rev}", "SA22-0000-00"]
+
+    # Verify backend retirement planner accepts the exact parsed args against inventory
+    inv = {
+        "/corpus/doc1.pdf": InventoryRecord(
+            path="/corpus/doc1.pdf",
+            sha256="a" * 64,
+            rules_version="r" * 16,
+            status="upserted",
+            chunks=1,
+            doc_id="SA23-1380-09",
+            source_rev=rev,
+        ),
+        "/corpus/doc2.pdf": InventoryRecord(
+            path="/corpus/doc2.pdf",
+            sha256="b" * 64,
+            rules_version="r" * 16,
+            status="upserted",
+            chunks=1,
+            doc_id="SA22-0000-00",
+            source_rev="rev2",
+        ),
+    }
+    plan, retired = plan_approved_removals(tuple(retire_args), inv)
+    assert retired == frozenset({"SA23-1380-09", "SA22-0000-00"})
+    assert plan["SA23-1380-09"]["revs"] == {rev}
+    assert plan["SA22-0000-00"]["whole"] is True
+
+
+def test_ingest_retire_docs_newline_separated(ingest_tree):
+    """Q419-I1: INGEST_RETIRE_DOCS supports newline-separated entries."""
+    import yaml
+
+    retire_input = "SA23-1380-09@rev-1\nSA22-0000-00"
+    r = _run_ingest(
+        ingest_tree,
+        ("INGEST_ALIAS_PUBLISH", "true"),
+        ("INGEST_RETIRE_DOCS", retire_input),
+    )
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    parsed = yaml.safe_load(rendered)
+    container = parsed["spec"]["template"]["spec"]["containers"][0]
+    args = container["args"]
+    retire_args = [
+        args[i + 1]
+        for i, arg in enumerate(args)
+        if arg == "--retire-doc" and i + 1 < len(args)
+    ]
+    assert retire_args == ["SA23-1380-09@rev-1", "SA22-0000-00"]
+
+
 def test_ingest_retire_docs_wildcard_fails_closed(ingest_tree):
     """Review F3: operator input is never pathname-expanded (noglob) and
     wildcards fail closed instead of rendering local filenames."""

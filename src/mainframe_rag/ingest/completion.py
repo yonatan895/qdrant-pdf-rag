@@ -210,9 +210,7 @@ def _doc_id_filter(doc_id: str) -> models.Filter:
     )
 
 
-def _doc_markers(
-    client: QdrantPoints, settings: Settings, doc_id: str
-) -> list[CompletionRecord]:
+def _doc_markers(client: QdrantPoints, settings: Settings, doc_id: str) -> list[CompletionRecord]:
     """All parseable markers under a doc_id, paginated to exhaustion.
     Corrupt payloads read as absent — a corrupt marker is a legacy outcome,
     not a crash."""
@@ -230,7 +228,7 @@ def _doc_markers(
     for p in points:
         try:
             markers.append(CompletionRecord.model_validate(p.payload or {}))
-        except (ValidationError, ValueError):
+        except ValidationError, ValueError:
             continue
     return markers
 
@@ -256,9 +254,7 @@ def read_completion(
     return None
 
 
-def legacy_markers(
-    client: QdrantPoints, settings: Settings, doc_id: str
-) -> list[CompletionRecord]:
+def legacy_markers(client: QdrantPoints, settings: Settings, doc_id: str) -> list[CompletionRecord]:
     """Pre-361B markers (no source_rev) under a doc_id. Only
     is_doc_complete's legacy rule interprets them."""
     return [m for m in _doc_markers(client, settings, doc_id) if m.source_rev is None]
@@ -545,6 +541,26 @@ def is_revision_committed(
     return False
 
 
+def _is_marker_excluded(
+    doc_id: str,
+    source_rev: str | None,
+    exclude_doc_ids: frozenset[str],
+    retire_plan: dict[str, dict[str, set[str] | bool]] | None,
+) -> bool:
+    """Check whether a completion marker is excused under an approved removal plan (issue #391 R-REV)."""
+    if doc_id not in exclude_doc_ids:
+        return False
+    if not retire_plan or doc_id not in retire_plan:
+        return True
+    entry = retire_plan[doc_id]
+    if entry.get("whole"):
+        return True
+    revs = entry.get("revs")
+    if source_rev is not None and isinstance(revs, (set, frozenset)) and source_rev in revs:
+        return True
+    return bool(source_rev is None and entry.get("legacy"))
+
+
 def stale_completion_markers(
     client: QdrantPoints,
     settings: Settings,
@@ -552,6 +568,7 @@ def stale_completion_markers(
     *,
     sample: int = 3,
     exclude_doc_ids: frozenset[str] = frozenset(),
+    retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
 ) -> tuple[int, list[str]]:
     """Completion markers NOT certified under `wanted_digest` — the
     commit-time scope proof for a representation migration (issue #391 F2).
@@ -561,12 +578,12 @@ def stale_completion_markers(
     certifies vectors under another contract: those docs were not re-embedded
     by this run (corpus deletions, retained sibling revisions, `--limit`
     holes) and their vectors may still be searchable. The caller refuses to
-    commit while any remain. `exclude_doc_ids` names documents under a
-    lock-validated removal plan that applies before the swap audit: their
-    markers are about to be deleted explicitly, and the post-removal audit
-    refuses any remnant the plan did not actually remove. Read-only,
-    paginated; the manifest point has no `doc_id` and never counts. Returns
-    (count, sample labels)."""
+    commit while any remain. `exclude_doc_ids` and `retire_plan` name documents
+    and revisions under a lock-validated removal plan that applies before the
+    swap audit: their markers are about to be deleted explicitly, and the
+    post-removal audit refuses any remnant the plan did not actually remove.
+    Read-only, paginated; the manifest point has no `doc_id` and never counts.
+    Returns (count, sample labels)."""
     name = completion_collection_name(settings)
     if not client.collection_exists(name):
         return 0, []
@@ -583,7 +600,7 @@ def stale_completion_markers(
         doc_id = payload.get("doc_id")
         if not doc_id:
             continue  # the manifest point itself
-        if doc_id in exclude_doc_ids:
+        if _is_marker_excluded(doc_id, payload.get("source_rev"), exclude_doc_ids, retire_plan):
             continue
         if payload.get("manifest_digest") == wanted_digest:
             continue
@@ -620,18 +637,18 @@ def plan_refresh_deletes(
     rest = present - {source_rev}
     named = {r for r in rest if r is not None}
     legacy = None in rest
-    if lineage_rev is not None and lineage_rev != source_rev and lineage_rev in present:
-        dels.add(lineage_rev)
-        named.discard(lineage_rev)
+    if lineage_rev is not None:
+        if lineage_rev != source_rev and lineage_rev in present:
+            dels.add(lineage_rev)
+        return dels, False
     if legacy and not named:
         return dels, True
     if legacy:
         raise AmbiguousRevisionError(doc_id, sorted(named), _stray_sha16s(client, settings, doc_id))
-    if lineage_rev is None:
-        # No lineage: committed others are coexistence (leave); residue goes.
-        for other in sorted(named):
-            if not is_revision_committed(client, settings, doc_id, other):
-                dels.add(other)
+    # No lineage: committed others are coexistence (leave); residue goes.
+    for other in sorted(named):
+        if not is_revision_committed(client, settings, doc_id, other):
+            dels.add(other)
     return dels, False
 
 

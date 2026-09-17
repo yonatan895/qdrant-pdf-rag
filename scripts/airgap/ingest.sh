@@ -71,9 +71,12 @@ fi
 if [ -n "${INGEST_RETIRE_DOCS:-}" ]; then
     [ "$ALIAS_PUBLISH" = "true" ] || die "INGEST_RETIRE_DOCS requires INGEST_ALIAS_PUBLISH=true — explicit removals are a publication operation and the ingest refuses them in-place"
     _old_ifs=$IFS
-    IFS=', '
+    _nl='
+'
+    IFS=",$_nl"
     set -f  # operator input is data, never a pathname pattern (review F3)
     for _entry in $INGEST_RETIRE_DOCS; do
+        _entry=$(printf '%s' "$_entry" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
         [ -n "$_entry" ] || continue
         case "$_entry" in
             @*|*@) die "malformed INGEST_RETIRE_DOCS entry '$_entry': expected DOCID or DOCID@SOURCEREV (empty side of '@')" ;;
@@ -86,7 +89,7 @@ if [ -n "${INGEST_RETIRE_DOCS:-}" ]; then
     done
     set +f
     IFS=$_old_ifs
-    unset _old_ifs _entry
+    unset _old_ifs _nl _entry
 fi
 INGEST_ARGS="[$INGEST_ARGS]"
 
