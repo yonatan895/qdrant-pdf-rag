@@ -93,20 +93,24 @@ design and review; application/test/CI implementation needs the task's authority
 New product scope requires an issue decision, not a silent expansion.
 
 <a id="task-packet"></a>
+<a id="author-packet"></a>
 ## Task packet
 
 Use the [issue form](../.github/ISSUE_TEMPLATE/agent-task.md), or these same fields
-in a GitLab issue. A small fix can use short answers; `N/A` needs a reason.
+in a GitLab issue. Before implementation, authors record the compact 5-question
+author input packet. For a small fix, five short answers suffice (`N/A` needs a reason):
 
-| Field | What the assignee needs |
-|---|---|
-| Outcome and authority | User-visible goal, approved issue/ADR, acceptance owner, invariant and one forbidden outcome |
-| Baseline and scope | Repository/base SHA, relevant prior comments, permitted behavior changes, non-goals, approval boundary |
-| Read first / impact map | Canonical owners; producers → state → consumers, including UI and deployment where affected |
-| Assumptions and counterexamples | Modes/topology, mutation ownership; missing data, interruption, retry, writer/reader overlap, cache, rollback and configuration cases; explain exclusions |
-| Verification plan | Existing test homes, minimal reproducer, independent expected result distinguishing a plausible wrong implementation, required tiers/prerequisites and unavailable checks |
-| Safety, migration, rollback | Protected services/data, isolation, permissions and recovery expectations |
-| Completion | Observable conditions, evidence locations, remaining gaps and owners |
+```text
+Outcome and authority: <one observable change + owner issue/contract>
+Forbidden outcome: <the most important counterexample>
+Boundaries and assumptions: <inputs -> state -> consumers; supported modes>
+Planned proof: <existing test home; smallest distinguishing case; required tiers>
+Compatibility and rollback: <what changes, what remains, and how to recover>
+```
+
+Settled decisions link their existing owner; reopen only a specific demonstrated
+conflict. An agent must not independently choose deletion, retention, permission,
+or publication semantics while generating tests.
 
 ### Worked planning example: representation/publication (#391)
 
@@ -154,17 +158,53 @@ Do not write blanket `Fixes`/`Closes` for a partly addressed parent.
 Independent reviewer prompt:
 
 ```text
-Review the actual diff against the approved acceptance contract and base SHA.
-Do not assume the author summary or green tests establish the claimed guarantee.
-Trace the affected unchanged callers, persisted states, launch paths, and consumers.
-Choose the smallest plausible counterexample at each relevant boundary.
-Check whether tests would distinguish that counterexample from the intended outcome.
-Check missing/corrupt metadata, interruption, cache lifetime, active readers,
-writer overlap, rollback, and configuration only where they apply.
-Report concrete preconditions, location, impact, evidence confidence, and a focused
-regression for defects. Separate optional improvements and validation gaps.
-A finding is not mandatory: explicitly state when no blocker was found in scope.
-Do not merge, change permissions, weaken a gate, or broaden product scope.
+Review the actual candidate against the approved outcome and acceptance policy.
+Record head SHA, base SHA, and execution SHA; distinguish head from test-merge code.
+Read the relevant owner contract and prior findings, then trace the affected
+unchanged producers, persisted state, callers, launch paths, and consumers.
+Do not treat the PR summary, new comments, or passing tests as the authority
+for a changed invariant.
+
+Choose a small independent counterexample for each material changed guarantee.
+Exercise missing/corrupt data, interruption, retry, reader/writer overlap,
+rollback, scope/authorization, and configuration only where applicable.
+Prefer the public operation or real boundary that can expose the failure;
+helper tests and generic health checks establish narrower facts.
+Distinguish executed results, static reasoning, and checks not run.
+
+For each material finding, report its ID, preconditions, location, impact,
+confidence, smallest reproducer, and observable acceptance condition.
+A passing test that expects the forbidden outcome does not resolve a finding.
+A documentation-only exception needs an explicit authorized contract decision,
+including consequences and migration/operational limits, before it can alter
+acceptance. Evidence that genuinely disproves a finding is equally valid.
+
+On re-review, carry forward the original counterexample. Mark each material
+finding fixed-and-verified, disproven-with-evidence, accepted-by-authorized-owner,
+or unresolved. 'Explicitly declined' by the implementer is not acceptance.
+Inspect the corrective diff and its affected boundaries for regressions.
+Do not restart a whole-project audit or demand unrelated cleanup.
+
+Report separately:
+- Code assessment: acceptable / changes_required / incomplete.
+- Required verification: complete / incomplete / failed.
+- Candidate currentness: current / stale / unverified.
+- Merge readiness: ready_for_maintainer / not_ready.
+
+Ready requires acceptable code, complete required verification, current candidate
+attribution, and no unresolved material contract conflict. Missing required
+checks are not successes; report them without inventing a product defect.
+No findings is a valid outcome. Summarize high-impact findings first, but never
+hide a verified blocker to meet a quota. Group common-root-cause findings.
+Style preferences and unrelated improvements do not block a useful change.
+If time/tool limits leave material review incomplete, report incomplete rather
+than approval by default.
+
+Use the prepared environment and valid candidate-specific CI evidence. Run
+additional checks only to answer a review question. Do not install arbitrary
+packages, contact private/live systems, widen permissions, change baselines,
+merge, or modify the author's implementation. Keep exploratory tests isolated.
+Return one concise review summary with supporting detail and remaining limits.
 ```
 
 Keep a short continuation note in the PR/draft/task record: base/current SHA,

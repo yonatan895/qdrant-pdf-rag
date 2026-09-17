@@ -7,16 +7,17 @@ owns context, conflicts, task/review and handoff formats.
 <a id="verification-minimums"></a>
 ## 0. Minimum verification by actual impact
 
-| Change class | Required minimums |
-|---|---|
-| Docs only | `make check-context`, cited-path and semantic review; no GPU |
-| Tests / make / CI only | `make check` (rung 1), focused tooling tests; context tools also `make check-context` |
-| Deployment / air-gap / Helm / overlays | `make check` + `make airgap-dryrun` |
-| Agent HTTP / validation | Rungs 1 + 6 (live probes) |
-| Ingest / chunk / classify | Rungs 1 + 2 (gate-l1) + 3 (fresh paraphrase) |
-| Retrieve / embed / RRF / rerank / screen | Full ladder + A/B numbers in the PR body |
-| Defaults, UUID, `chunk_type`, production constants | Dedicated approved concern; split from features; eval + A/B |
-| Chat / condensation | Applicable HTTP/retrieval minimums plus `make eval-chat` (literal/condensed arms, condense p50) |
+| Actual change | Required merge evidence | Resource boundary |
+|---|---|---|
+| **prose-only** (prose/navigation only) | `make check-context`, cited-path and semantic review of claims; generated config or executable examples select their affected row too | Strictly offline/CPU: NO GPU, NO Qdrant, NO model gateway (LiteLLM/vLLM), NO Jaeger, and NO live source |
+| **test/tool-only** (test/tool/workflow only) | Relevant tool checks, lint/types for affected Python, focused test/selector checks (`pytest tests/test_agent_context.py tests/test_agent_doctor.py`), CI workflow YAML validation; changes to a shared fixture select dependent suites | Hermetic local/CI: pure checks by default; forbid heavy services (GPU, Qdrant, LiteLLM/vLLM gateways, Jaeger) unless the specific integration tier is under test |
+| **publication/retirement lifecycle** (publication, retirement, completion, locks, restore ordering) | Common code checks (`make check` with `test_ingest_publish` / `test_ingest_completion`); focused transition/fault tests; real non-dry control path against faithful fakes; read-only residue audit; retirement inventory validation; writer concurrency/locking (`publish-<alias>.lock`) and recheck verification; disposable Qdrant boundary exercise; existing inexpensive L1 plumbing gate (`make gate-l1`) while applicable | Real storage/protocol semantics and deterministic embeddings; CPU / disposable Qdrant simulation or faithful fakes; NO GPU; NO live platform model pool; generic search success is not publication acceptance |
+| **extraction/ranking** (extraction, chunking, identifiers, filters, ranking, embedding representation) | Common checks (`make check`); source-fidelity/retrieval tests; relevant L1 (`make gate-l1`) / fresh-corpus regression (`make eval-paraphrase`); intended-mode semantic evaluation (`make eval EMBED_MODE=vllm`) and before/after per-class attribution where retrieval behavior changes (full ladder rungs 1–7); chat/condensation requires `make eval-chat` | Real model/corpus evidence where semantics are claimed; synthetic/hash runs are not semantic acceptance; disposable simulation / mock vLLM for plumbing, GPU or live gateway for semantic evaluation |
+| **HTTP/lifecycle** (HTTP/MCP/browser lifecycle) | Common checks (`make check`); Rung 6 live agent probes: actual relevant client/transport behavior, `/healthz`/`/livez`, trap refusal (0 citations), legit query grounded (≥1 citation), overlong 422 fixed envelope, SSE chunk token/final integrity, cancellation and finalization; browser execution only for browser behavior | Controllable test server/source; running agent + disposable Qdrant + mock/real gateway + local Jaeger; no live z/OS/Splunk by default |
+| **packaging/deploy** (packaging/deployment/defaults/identity) | Applicable union plus existing artifact/render/bootstrap/migration checks (`make check` including `tests/test_airgap_*.py`, `make airgap-dryrun` with zero leftover placeholders, string quoting checks, storage class checks refusing NFS for block data, gateway key strip/substitute) and explicit compatibility decision; operational changes select relevant topology acceptance | Preserve air-gap and authorized site boundaries; hermetic shell stubs, local Kind cluster, or ephemeral lab namespace |
+| **release promotion** (release promotion) | Exact bundle/image, configuration, corpus/model and supported topology acceptance from release runbooks (`docs/crc-release-verification.md`); `probe_gateway.py --stream` from pod; frozen holdout evaluation under `VENUE=rc` (`make eval-holdout`); layered harness L1–L4 where applicable | Operator-authorized site / CRC acceptance cluster, platform model pool, real corpus; separate from ordinary PR merge; no substitution with a mock or skipped release lane |
+
+**Data invariant protection (cross-cutting):** Defaults, UUID5 chunk keys, 4-type vocabulary (`prose`, `code`, `table`, `heading`), residue audit, fail-closed contracts, and production constants require a dedicated approved concern split from features, evaluated against mode-keyed baselines with full A/B evidence. Documentation, tooling, or refactoring PRs cannot silently alter, suppress, or waive data invariants.
 
 Take the union for cross-layer impact and test the interactions. A tooling label
 does not excuse retrieval changes from evaluation. Avoid expensive unrelated
@@ -42,9 +43,10 @@ Four separate phases:
    topology/model/corpus using the release runbooks. Historical/mock successes
    and a local `make check` do not substitute for release evidence.
 
-For #397, docs need context/link/semantic review; Python/Make/CI additions need
-focused tests and `make check`. Application behavior is outside that issue, so
-no GPU, model evaluation or private/live deployment operations are called for.
+For Increment A of #411 (and #397), docs need context/link/semantic review (`make check-context`);
+tooling/Make/CI additions need focused tests (`pytest tests/test_agent_context.py tests/test_agent_doctor.py`)
+and `make check`. Application behavior is outside this issue, so no GPU, Qdrant,
+model gateway, or Jaeger services are permitted.
 
 Conventions below: `$SNAPSHOT_DIR` is persistent disk outside the repo
 (e.g. `export SNAPSHOT_DIR=$HOME/qdrant-snapshots`); `$CORPUS_ROOT` is
