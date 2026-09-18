@@ -115,7 +115,7 @@ jobs:
       github.event_name == 'pull_request' &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    # Observed reviews: 1.5-7.5 min, with variance up to ~2x. 20 min bounds a
+    # Observed reviews: 1.5-7.5 min, with variance up to ~2x. 30 min bounds a
     # stuck run without clipping a normal review.
     #
     # Actor constraint: the pinned opencode CLI asserts the repo permission of
@@ -124,7 +124,7 @@ jobs:
     # closed before the model runs. Recovery is a new push of the candidate
     # from a write-capable human account (a rerun keeps the original actor);
     # the red job is a required-check failure, never a silent skip.
-    timeout-minutes: 20
+    timeout-minutes: 30
     concurrency:
       group: opencode-review-${{ github.event.pull_request.number || github.run_id }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -295,9 +295,21 @@ jobs:
             - Inspect discriminating boundary cases: real producer-to-consumer round-trips,
               next operation after successful cleanup, and equivalent transport/state parity.
 
+            Verification discipline (anti-timeout and anti-loop rules):
+            - Consume valid current-candidate CI once. DO NOT run the full repository test suite
+              (e.g. `python3 -m pytest` without file args, or `make check`); parallel CI already runs them.
+            - Run only focused tests relevant to candidate diff, reproducer, or active profile:
+              target the recommended test focus (${{ steps.profile.outputs.test_focus }}) or
+              specific tests with `-k <filter>`.
+            - When running pytest, DO NOT use `-q` / `--quiet` so that the standard pytest summary
+              line (`X passed in Ys`) is printed and visible in terminal output.
+            - Do not retry or repeat test commands with minor pipe or formatting variations. One
+              focused test execution is sufficient for evidence.
+
             Execution environment:
             - Selected profile: ${{ steps.profile.outputs.profile }}
             - Candidate manifest: $RUNNER_TEMP/candidate-manifest.json
+            - Recommended test focus: ${{ steps.profile.outputs.test_focus }}
             - Dev tools preinstalled: python3 -m pytest, python3 -m mypy src, python3 -m ruff check src tests.
               Never venv or pip install.
             - Live review stack endpoints (started only when the selected profile needs them;
