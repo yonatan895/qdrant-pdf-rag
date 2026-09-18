@@ -1345,6 +1345,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertParity(["agent-doctor", "PROFILE=sim", "PY=pyfake"],
                           ["dev:doctor", "PROFILE=sim", "PY=pyfake"])
         self.assertParity(["check"], ["qa:check"])
+        self.assertParity(["loadtest-mock"], ["qa:load"])
 
     def test_make_task_parity_eval_modes(self):
         self.make_parity_ws()

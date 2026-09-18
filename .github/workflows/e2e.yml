@@ -65,6 +65,11 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Install pinned Task runner (Makefile shim forwards to Task)
+        run: |
+          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
+
       - name: Build wheelhouse + BM25 weights + images (same Containerfiles as air-gap)
         run: |
           export PATH="/usr/local/bin:$PATH"
@@ -129,6 +134,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+
+      - name: Install pinned Task runner (Makefile shim forwards to Task)
+        run: |
+          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
 
       - name: Install skopeo
         run: |
@@ -261,6 +271,10 @@ jobs:
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
           test "$(awk '/^sha: /{print $2}' qdrant-pdf-rag/dist/MANIFEST.txt)" = "$SHA"
           cd qdrant-pdf-rag
+          # The Makefile is a one-way Task shim: provision the pinned
+          # runner from the extracted bundle copy (pin fidelity at $SHA).
+          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
+          export PATH="$RUNNER_TEMP/task-bin:$PATH"
           # Operator-equivalent airgap.env edits (dry-run stand-ins, never prod).
           sed -i \
             -e 's|^INTERNAL_REGISTRY=.*|INTERNAL_REGISTRY=ghcr.io/acceptance-standin|' \
@@ -395,6 +409,11 @@ jobs:
           test -f qdrant-pdf-rag/dist/sneakernet-signing.pub
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
           test "$(awk '/^sha: /{print $2}' qdrant-pdf-rag/dist/MANIFEST.txt)" = "$SHA"
+
+      - name: Install pinned Task runner (Makefile shim forwards to Task)
+        run: |
+          sh gapbox/qdrant-pdf-rag/scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
 
       - name: Start authenticated TLS registry + Kind
         run: |
@@ -793,6 +812,11 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/oc-unpack/kubectl" /usr/local/bin/kubectl
           /usr/local/bin/oc version --client=true
 
+      - name: Install pinned Task runner (Makefile shim forwards to Task)
+        run: |
+          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
+
       - name: Log in to lab OpenShift
         run: /usr/local/bin/oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_TOKEN" --insecure-skip-tls-verify=true
 
@@ -929,6 +953,11 @@ jobs:
           echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
           /usr/local/bin/kubectl version --client=true
+
+      - name: Install pinned Task runner (Makefile shim forwards to Task)
+        run: |
+          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
 
       - name: airgap-deploy dry-run (prod render, fail-closed placeholders, knobs)
         env:
@@ -1145,6 +1174,11 @@ jobs:
           AIRGAP_WORKSPACE=qdrant-pdf-rag sh bootstrap.sh
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
           echo "BUNDLE_CHECKOUT=$GITHUB_WORKSPACE/gapbox/qdrant-pdf-rag" >> "$GITHUB_ENV"
+
+      - name: Install pinned Task runner (Makefile shim forwards to Task)
+        run: |
+          sh "$BUNDLE_CHECKOUT/scripts/tools/install-task.sh" --bin-dir "$RUNNER_TEMP/task-bin"
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
 
       - name: Install checksum-pinned Helm
         run: |

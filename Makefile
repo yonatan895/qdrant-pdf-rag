@@ -141,6 +141,10 @@ bench-baseline:
 loadtest:
 	task eval:load PY="$(PY)"
 
+.PHONY: loadtest-mock
+loadtest-mock:
+	task qa:load
+
 # ---------------------------------------------------------------- retrieval accuracy
 .PHONY: eval eval-baseline eval-draft eval-holdout verify-golden gate-l1
 eval:

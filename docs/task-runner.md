@@ -107,7 +107,7 @@ recipe succeeds. Consequences, all covered by runner-boundary tests:
 | `lint` / `typecheck` / `test` / `check` | `qa:lint` / `qa:typecheck` / `qa:unit` / `qa:check`, root aliases | ruff / mypy / pytest + `pyproject.toml` | Migrated |
 | `check-context` | `qa:context`, root `check-context` | `scripts/check_agent_context.py` | Migrated |
 | `wheelhouse`, `bm25-weights`, `chart`, `pull-chart`, `helm-template`, `helm-lint`, `build-images` | `artifacts:wheelhouse/bm25/chart-check/chart-fetch/helm-render/helm-lint/images` | pip / fetch script / helm / docker | `.venv` diagnosed (builds), chart presence verified, sequential preparation | `BUNDLE_DIR`, `BM25_MODEL`, `IMAGE_TAG`, image names | bundles output, images, chart fetch | **Migrated (B1)** with completion-stamp freshness ([#freshness](#freshness)) |
-| `sim*`, `loadtest-mock`, `bench*`, `loadtest` | `qa:sim/load`, `eval:bench*` | existing suites | Deferred to B3/B2 |
+| `sim*`, `loadtest-mock`, `bench*`, `loadtest` | `qa:sim`/`qa:load` (B3), `eval:bench*`/`eval:load` (B2) | existing suites | **Migrated (B2/B3)** |
 | `eval*`, `gate-l1`, `harness-*`, `verify-golden`, `capture-pool`, reports | `eval:*` | existing scripts/baselines | **Migrated (B2)** with per-task mode/venue scoping ([#inputs](#inputs)) |
 | `query-demo`, `ask`, `local-*`, `run-agent`, `test-vllm-e2e` | `local:*`, `qa:sim/load/vllm-e2e` | existing launchers/scripts | **Migrated (B3)**; `run_local_stack.sh` calls `scripts/sim_qdrant.sh` directly (no runner) |
 | `airgap-*`, `airgap-dryrun` | `airgap:*` | `scripts/airgap/*` | **Migrated (B4)** thin wrappers; operator keys bridged per task (no defaults); `bootstrap.sh` offline wording stays for C |
@@ -145,7 +145,11 @@ empirically for both override forms, including empty values and quoted
 spaces, across every command family.
 
 Limits: the pinned `task` must be on `PATH` (install script; doctor
-finding); multiple goals run sequentially; no `-j` for installs/builds
+finding) — CI jobs that invoke `make` provision it first via an `Install
+pinned Task runner` step (`e2e.yml` checkout jobs and `load.yml` from the
+repo; black-box bundle jobs from the extracted bundle copy, pin fidelity
+at the bundle SHA; the full consumer switch to `task` stays increment C);
+multiple goals run sequentially; no `-j` for installs/builds
 (concurrent processes must not share one `.venv`/bundle dir); `-C dir`
 resolves against the repo root; unknown targets fail with Make's own
 "No rule" error (no catch-all). `make help` prints a migration pointer and
