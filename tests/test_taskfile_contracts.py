@@ -17,11 +17,14 @@ private config. Only stdlib (runnable with the system interpreter).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -378,6 +381,132 @@ class TaskContractsTests(unittest.TestCase):
     def assertEnvSubset(self, call: dict, expected: dict) -> None:
         for key, value in expected.items():
             self.assertEqual(call["env"].get(key), value, key)
+
+    def prepare_controlled_runner(self):
+        self.copy_repo_script("tools/run-task.sh")
+        installed = self.root / ".tools/bin/task"
+        installed.parent.mkdir(parents=True)
+        # A symlink keeps hermetic tests small; the launcher hashes its target.
+        installed.symlink_to(self.task_bin)
+        digest = hashlib.sha256(Path(self.task_bin).read_bytes()).hexdigest()
+        (self.root / "scripts/tools/task-pin.txt").write_text(
+            f"version: v{PIN_VERSION}\nbinary-sha256: {digest}\n")
+
+    def run_controlled(self, *args, extra_env=None, cwd=None):
+        env = dict(os.environ)
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            ["sh", str(self.root / "scripts/tools/run-task.sh"), *args],
+            cwd=cwd or self.root, env=env, capture_output=True, text=True,
+            timeout=30, check=False)
+
+    def test_controlled_runner_ignores_inherited_controls_and_private_dotenv(self):
+        self.prepare_controlled_runner()
+        self.make_venv_fake()
+        # The upstream binary reads .env experiments even without dotenv: in YAML.
+        # Initialization in scripts/tools must never read this root private file.
+        (self.root / ".env").write_text("TASK_X_ENV_PRECEDENCE=1\nTOKEN=SECRET-SENTINEL\n")
+        values = {**self.recorder_env, "TASK_DRY": "1", "TASK_PY": "false",
+                  "TASK_X_ENV_PRECEDENCE": "1", "TASK_TEMP_DIR": "/forbidden",
+                  "TASK_CONCURRENCY": "invalid", "EMBED_MODE": "hash"}
+        for _ in range(2):
+            proc = self.run_controlled("eval:retrieval", "EMBED_MODE=vllm", extra_env=values)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertNotIn("SECRET-SENTINEL", proc.stdout + proc.stderr)
+        self.assertEqual(len(self.calls()), 2, "requested verification must rerun")
+        for call in self.calls():
+            self.assertEqual(call["env"]["EMBED_MODE"], "vllm")
+            self.assertIn("evals/baseline-vllm.json", call["argv"])
+            self.assertEqual(call["cwd"], str(self.root))
+
+    def test_controlled_discovery_and_literal_focused_selection(self):
+        self.prepare_controlled_runner()
+        (self.root / "sub dir").mkdir()
+        # A read of the private file would block; discovery must not open it.
+        os.mkfifo(self.root / ".env")
+        before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        for args in ((), ("help",), ("--list", "--json"), ("airgap:dryrun", "--summary")):
+            proc = self.run_controlled(*args, cwd=self.root / "sub dir")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        after = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        self.assertEqual(before, after)
+        self.make_venv_fake()
+        literal = "tests/a space;$(touch SENTINEL)אב.py"
+        proc = self.run_controlled("qa:unit", "--", literal, "-q", extra_env=self.recorder_env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.calls()[0]["argv"], ["-m", "pytest", literal, "-q"])
+        self.assertFalse((self.root / "SENTINEL").exists())
+
+    def test_controlled_runner_rejects_corruption_config_and_path_overrides(self):
+        self.prepare_controlled_runner()
+        for args in (("--taskfile=other.yml",), ("-tother.yml",), ("-gl",),
+                     ("--parallel",), ("--force",), ("TASK_PY=false",)):
+            proc = self.run_controlled(*args)
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+        for relative in (".taskrc.yml", "scripts/tools/.env"):
+            config = self.root / relative
+            config.write_text("PRIVATE-SENTINEL [invalid config")
+            proc = self.run_controlled("--list")
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+            self.assertNotIn("PRIVATE-SENTINEL", proc.stdout + proc.stderr)
+            config.unlink()
+        installed = self.root / ".tools/bin/task"
+        installed.unlink()
+        installed.write_text("#!/bin/sh\ntouch SHOULD-NOT-RUN\n")
+        installed.chmod(0o755)
+        proc = self.run_controlled("--list")
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("checksum mismatch", proc.stderr)
+        self.assertFalse((self.root / "SHOULD-NOT-RUN").exists())
+        installed.unlink()
+        proc = self.run_controlled("--list")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("absent", proc.stderr)
+
+    def test_multi_family_selection_does_not_leak_eval_defaults(self):
+        self.make_venv_fake()
+        self.make_airgap_fixtures({"EMBED_MODE": "vllm"})
+        self.make_airgap_stage_double()
+        proc = self.run_task("eval:retrieval", "airgap:deploy", extra_env=self.recorder_env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.calls()[0]["env"]["EMBED_MODE"], "hash")
+        self.assertEqual(self.airgap_calls()[0]["resolved"]["EMBED_MODE"], "vllm")
+
+    def test_controlled_cancellation_reaches_foreground_owner_and_cleanup(self):
+        self.prepare_controlled_runner()
+        self.make_venv_fake()
+        owner = self.root / "scripts/run_local_vllm.sh"
+        owner.write_text(
+            '#!/bin/sh\nset -eu\n'
+            'trap \'rm -f owned-resource; echo stopped > cleaned; exit 23\' INT TERM\n'
+            'touch owned-resource ready\nwhile :; do sleep 0.1; done\n')
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=sig):
+                proc = subprocess.Popen(
+                    ["sh", str(self.root / "scripts/tools/run-task.sh"), "local:llm"],
+                    cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    start_new_session=True)
+                try:
+                    deadline = time.monotonic() + 10
+                    while not (self.root / "ready").exists() and time.monotonic() < deadline:
+                        if proc.poll() is not None:
+                            self.fail(proc.communicate())
+                        time.sleep(0.02)
+                    self.assertTrue((self.root / "ready").exists())
+                    os.killpg(proc.pid, sig)
+                    proc.communicate(timeout=10)
+                    self.assertNotEqual(proc.returncode, 0)
+                    self.assertTrue((self.root / "cleaned").exists())
+                    self.assertFalse((self.root / "owned-resource").exists())
+                finally:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    proc.communicate(timeout=10)
+                (self.root / "ready").unlink()
+                (self.root / "cleaned").unlink()
 
     def test_discovery_needs_no_venv_config_or_services(self):
         before = {p.relative_to(self.root).as_posix() for p in self.root.rglob("*") if p.is_file()}
