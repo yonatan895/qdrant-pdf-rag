@@ -27,7 +27,7 @@ The intended acceptance is **answers supported by supplied evidence and citation
 | Environment | Model tier (reasoning / embed / rerank) | Qdrant + ingest + retrieval + agent |
 |---|---|---|
 | **Production (air-gap OpenShift)** | **Platform team owns it**: vLLM servers behind the LiteLLM gateway. This repo consumes it over HTTP only (`*_BASE_URL` + per-leg virtual keys) — it never installs, deploys, or Helm-charts vLLM / LiteLLM / GPU operators on a product path. | **This repo owns it.** |
-| **Local dev/test** | **Simulated by this repo** (`make local-stack`): local vLLM backends behind the real, digest-pinned LiteLLM gateway (`scripts/run_local_gateway.sh`) — a stand-in for the platform team's tier. | **Same code as prod**, same wire contract, plus Jaeger tracing of our components verified end to end. |
+| **Local dev/test** | **Simulated by this repo** (`sh scripts/tools/run-task.sh local:stack`): local vLLM backends behind the real, digest-pinned LiteLLM gateway (`scripts/run_local_gateway.sh`) — a stand-in for the platform team's tier. | **Same code as prod**, same wire contract, plus Jaeger tracing of our components verified end to end. |
 
 Local simulation exists so agent/ingest always exercise the production gateway wire shape (single origin, model-id routing, per-leg Bearer virtual keys, native `/rerank` + `/v1/score` pass-through) — never a straight-to-vLLM shortcut. The local model/gateway simulation scripts (`scripts/run_local_gateway.sh`, `scripts/run_local_stack.sh`, `scripts/run_local_vllm.sh`) are local-only: never in the air gap or Helm. CI's `airgap-rehearsal` is a deployment-config rehearsal and uses the documented `scripts/mock_vllm.py` stand-in instead.
 
@@ -38,7 +38,7 @@ Local simulation exists so agent/ingest always exercise the production gateway w
 ```
                     ┌─────────────────────────────────────────┐
   Connected LAN     │  Public GitHub  (this repo)             │
-                    │  chart, Makefile, ingest, retrieval     │
+                    │  chart, Taskfile, ingest, retrieval     │
                     └───────────────┬─────────────────────────┘
                                     │ sneaker-net bundle
                                     ▼
@@ -97,10 +97,10 @@ Local simulation exists so agent/ingest always exercise the production gateway w
 
 ### 3.2 Canonical Deployment Standard Across Environments
 
-The 5-stage pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`, orchestratable via `make airgap-pipeline` with pre-flight safety via `make airgap-validate`) is the **canonical deployment standard across the entire project**:
+The 5-stage pipeline (`airgap:pack` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`, orchestratable via `sh scripts/tools/run-task.sh airgap:pipeline` with pre-flight safety via `sh scripts/tools/run-task.sh airgap:validate`) is the **canonical deployment standard across the entire project**:
 1. **Production (Air-Gapped OpenShift):** Full 3-replica Qdrant cluster, internal enterprise registry, `restricted-v2` SCC, cluster vLLM endpoints, sneakernet tarball verification.
 2. **Local Cluster Testing (Kind + Local Registry):** Local single-node Kind cluster using a local container registry (`localhost:5000` / `airgap-registry:5000`) and 1-replica overrides (`QDRANT_EXTRA_VALUES`). Runs the exact same packaging scripts, image archives, Helm chart, and Kustomize overlays, with adapted local sizing and SCC.
-3. **Continuous Integration (CI):** `make airgap-dryrun` validates applicable deployment changes without a cluster; product workflow path filters exclude markdown-only changes. The context workflow checks relevant docs separately. Published-bundle rehearsal runs on `main`/dispatch; enforced jobs and policy obligations are distinguished in [deploy](deploy.md#ci-policy).
+3. **Continuous Integration (CI):** `sh scripts/tools/run-task.sh airgap:dryrun` validates applicable deployment changes without a cluster; product workflow path filters exclude markdown-only changes. The context workflow checks relevant docs separately. Published-bundle rehearsal runs on `main`/dispatch; enforced jobs and policy obligations are distinguished in [deploy](deploy.md#ci-policy).
 4. **Release verification (Windows OpenShift Local / CRC):** Published-main bundles must pass [the manual CRC gate](crc-release-verification.md) before production transfer. WSL retains the authenticated model gateway and GPU servers; CRC exercises the production overlays, real SCC admission, OAuth/Route, persistence, and runtime isolation. Transfer the identical tested bundle. Production version, identity, storage, and multi-node acceptance remain separate.
 
 This architectural standard ensures local cluster testing exercises the real production packaging and deployment artifacts, avoiding custom or divergent test manifests.

@@ -1,4 +1,4 @@
-"""Load tier (marker ``integration``, run via ``make loadtest-mock``).
+"""Load tier (marker ``integration``, run via ``sh scripts/tools/run-task.sh qa:load``).
 
 Same composition locally and in CI: real PDFs -> real ingest (hash mode)
 into docker Qdrant (``images.txt`` pin, or ``QDRANT_SIM_URL``) -> a real
@@ -6,7 +6,7 @@ uvicorn agent plus the deterministic mock LLM over loopback HTTP. No
 retrieval/LLM code is monkeypatched; ``scripts/mock_vllm.py`` is the only
 stand-in.
 
-Unlike ``make sim`` (correctness) this tier asserts ABSOLUTE contracts under
+Unlike ``sh scripts/tools/run-task.sh qa:sim`` (correctness) this tier asserts ABSOLUTE contracts under
 concurrency — never cross-environment comparisons (harness invariant #1):
 
 - zero request errors and zero missing ``Server-Timing`` headers on

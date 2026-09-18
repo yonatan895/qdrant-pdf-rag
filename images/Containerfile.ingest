@@ -1,5 +1,5 @@
 # Ingest image: UBI, non-root, wheelhouse + BM25 weights baked in.
-# Build on the connected host (make build-images); BM25 weights must never be
+# Build on the connected host (sh scripts/tools/run-task.sh artifacts:images); BM25 weights must never be
 # downloaded at runtime (air-gap rule, architecture.md section 3.1).
 # Python 3.14 GIL (issue #5): ubi9/python-314-minimal ships python3.14 + pip;
 # no microdnf python install needed. Exact image pinned in images.txt
@@ -7,8 +7,8 @@
 # was 9.8, digest is the contract).
 FROM registry.access.redhat.com/ubi9/python-314-minimal@sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba
 
-# Wheels: built on the connected host (make wheelhouse), installed offline.
-# Named build contexts (see Makefile build-images): wheelhouse=, bm25=
+# Wheels: built on the connected host (sh scripts/tools/run-task.sh artifacts:wheelhouse), installed offline.
+# Named build contexts (see task artifacts:images): wheelhouse=, bm25=
 COPY requirements.lock.txt /wheelhouse/requirements.lock.txt
 COPY --from=wheelhouse / /wheelhouse/
 RUN pip install --no-index --find-links /wheelhouse -r /wheelhouse/requirements.lock.txt \

@@ -151,8 +151,8 @@ jobs:
       - name: Preinstall dev tools for the reviewer
         run: |
           pip install -e ".[dev]"
-          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
-          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
+          sh scripts/tools/install-task.sh
+          echo "TASK_CONTRACTS_REQUIRE_RUNNER=1" >> "$GITHUB_ENV"
 
       - name: Select review profile & generate manifest
         id: profile
@@ -302,7 +302,7 @@ jobs:
 
             Verification discipline (anti-timeout and anti-loop rules):
             - Consume valid current-candidate CI once. DO NOT run the full repository test suite
-              (e.g. `python3 -m pytest` without file args, or `make check`); parallel CI already runs them.
+              (e.g. `python3 -m pytest` without file args, or `sh scripts/tools/run-task.sh qa:check`); parallel CI already runs them.
             - Run only focused tests relevant to candidate diff, reproducer, or active profile:
               target the recommended test focus (${{ steps.profile.outputs.test_focus }}) or
               specific tests with `-k <filter>`.
@@ -316,6 +316,9 @@ jobs:
             - Candidate manifest: $RUNNER_TEMP/candidate-manifest.json
             - Recommended test focus: ${{ steps.profile.outputs.test_focus }}
             - Dev tools preinstalled: python3 -m pytest, python3 -m mypy src, python3 -m ruff check src tests.
+              Pinned Task: sh scripts/tools/run-task.sh; use it for discovery/context.
+              Focused pytest uses the prepared python3 interpreter directly.
+              TASK_CONTRACTS_REQUIRE_RUNNER=1 is set; missing Task is a failure.
               Never venv or pip install.
             - Live review stack endpoints (started only when the selected profile needs them;
               absent endpoints are intentionally unselected, not a failure):

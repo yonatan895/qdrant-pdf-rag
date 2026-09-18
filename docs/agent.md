@@ -96,7 +96,7 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   turns, 1000 chars each), bypasses the LLM entirely when the turn already
   carries a message/member identifier or abend code, and falls back to the raw
   latest text on any failure. The condensation A/B and its default-flip
-  decision live in `docs/eval.md` (`make eval-chat`).
+  decision live in `docs/eval.md` (`sh scripts/tools/run-task.sh eval:chat`).
 - `GET /ui` — operator console (ADR-0004), a thin adapter over the same core:
   Jinja2 shell + HTMX form/fragment + SSE stream (`/ui/chat`, `/ui/chat/stream`,
   `/ui/healthz`, `/ui/static/*`), browser-only `localStorage` state, strict CSP.
@@ -199,7 +199,7 @@ strict stream-end rule above is the upstream reasoning wire and the
   never copied into client responses, logs, or exception text.
 - `LLM_STREAM` (default off) routes every server-side reasoning call over
   the streaming wire and measures TTFT on the first content token; the JSON
-  paths still return one answer. `make run-agent` and `make local-stack` set
+  paths still return one answer. `sh scripts/tools/run-task.sh local:agent` and `sh scripts/tools/run-task.sh local:stack` set
   it; client-visible SSE is requested per call (`stream=true`). The SSE
   generator ends the root span in a `finally` so disconnects stay in the
   same trace.

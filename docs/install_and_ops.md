@@ -39,12 +39,13 @@ Mainframe RAG is a citation-first retrieval-augmented generation engine designed
 ## 2. Prerequisites
 
 ### Local Development
-- **Operating System:** Linux / macOS / WSL2
+- **Operating System:** Linux / WSL2 (linux-amd64 pinned Task artifact)
 - **Python:** CPython **3.14 GIL** (`python3.14 --version`). Do not use free-threading (`3.14t`).
 - **Container Runtime:** Docker or Podman (for running integration simulation tests).
-- **Tools:** `git`, `make`, `curl`.
+- **Tools:** `git`, `curl`, POSIX shell, `tar`, `sha256sum`; the pinned Task runner is installed explicitly below.
 
 ### Disconnected / Air-Gapped Bastion
+- **Host runner:** signed bundle bootstrap installs verified Task into `.tools/bin/task`; no Make, preinstalled Task, Go, application Python or internet is needed for bootstrap. Keep `git`, POSIX shell, `tar`, `sha256sum` and `openssl` available for its verification steps.
 - **OpenShift Client:** `oc` (v4.12+) or `kubectl`.
 - **Helm:** `helm` v3.12+ (do **not** run `helm repo add` in the air-gap; chart is vendored at `charts/qdrant-1.19.0.tgz`).
 - **Image Tooling:** `skopeo` (for loading archives into the internal registry).
@@ -66,16 +67,19 @@ mode is the [complementary CRC/Kind rehearsal](local-release-fallback.md).
 git clone https://github.com/yonatan895/qdrant-pdf-rag.git
 cd qdrant-pdf-rag
 
-# 2. Bootstrap virtual environment and install locked dependencies
-make venv
+# 2. Install the pinned host runner (connected host only)
+sh scripts/tools/install-task.sh
 
-# 3. Download and cache BM25 model weights locally (first run downloads
+# 3. Bootstrap virtual environment and install locked dependencies
+sh scripts/tools/run-task.sh dev:setup PY=python3.14
+
+# 4. Download and cache BM25 model weights locally (first run downloads
 # Qdrant/bm25 via FastEmbed — needs HuggingFace reachability; afterwards the
 # weights live in bundles/bm25-weights and are baked into images)
-make bm25-weights
+sh scripts/tools/run-task.sh artifacts:bm25
 ```
 
-Fresh-machine heavylift to budget for: the venv install, the BM25 download above, the Qdrant image pull on first `make sim`, and the `vllm-openai` pull on first `make local-vllm*` (the pinned `v0.28.0` image is ≈29 GB). The `HF_TOKEN` path in §3.6 additionally needs gated-repo approval (e.g. Gemma) before the token works — request access first.
+Fresh-machine heavylift to budget for: the venv install, the BM25 download above, the Qdrant image pull on first `sh scripts/tools/run-task.sh qa:sim`, and the `vllm-openai` pull on first `sh scripts/tools/run-task.sh local:llm` (or `local:embed` / `local:rerank`) (the pinned `v0.28.0` image is ≈29 GB). The `HF_TOKEN` path in §3.6 additionally needs gated-repo approval (e.g. Gemma) before the token works — request access first.
 
 ### 3.2 Code Quality & Unit Tests
 
@@ -83,12 +87,12 @@ Run static analysis, type checking, and unit test suites:
 
 ```bash
 # Run linters (ruff), type checking (mypy), and unit tests (pytest)
-make check
+sh scripts/tools/run-task.sh qa:check
 
 # Or run individual verification steps:
-make test        # Fast unit tests (mocked clients, synthetic data)
-make lint        # Ruff linting
-make typecheck   # Mypy static typing
+sh scripts/tools/run-task.sh qa:unit        # Fast unit tests (mocked clients, synthetic data)
+sh scripts/tools/run-task.sh qa:lint        # Ruff linting
+sh scripts/tools/run-task.sh qa:typecheck   # Mypy static typing
 ```
 
 ### 3.3 Integration Simulation Tier
@@ -97,20 +101,20 @@ The simulation tier spins up an ephemeral Docker container running the pinned un
 
 ```bash
 # Run simulation suite
-make sim
+sh scripts/tools/run-task.sh qa:sim
 
 # Optional: Run a persistent local Qdrant container on port 6333
-make sim-qdrant
+sh scripts/tools/run-task.sh local:qdrant:up
 
 # Teardown local Qdrant container
-make sim-clean
+sh scripts/tools/run-task.sh local:qdrant:down
 ```
 
-**Load tier** (`make loadtest-mock`, `tests/test_load_tier.py`) runs the same composition — runtime PDFs, hash-mode ingest into the pinned Qdrant image, a real uvicorn agent (`LLM_STREAM=true`) plus the deterministic mock LLM — and asserts absolute contracts under concurrency instead of correctness: zero request errors and zero missing `Server-Timing` headers on `/v1/search` and `/v1/answer`, per-stream SSE integrity on `/v1/answer?stream=true` (token deltas, exactly one `final` with citations, no `error` event), citation parity across stream/search/JSON shapes, fixed error envelopes with no leaked internals, and determinism after load. The chaos leg runs the same streams against an abort-storm mock (`MOCK_ERROR_RATE`): every stream must classify as complete XOR aborted, aborted streams carry `event: error` with no `final`, and each leaves exactly one `stream_truncated` alert. The TTFT leg runs against a paced mock (`MOCK_TTFT_MS`): agent `ttft_ms` never precedes the model's first byte. Never cross-environment latency comparisons. Knobs (CI-sane defaults): `LOAD_SEARCH_CONCURRENCY` / `LOAD_SEARCH_DURATION_S` / `LOAD_ANSWER_CONCURRENCY` / `LOAD_ANSWER_DURATION_S` / `LOAD_STREAMS` / `LOAD_STREAM_WORKERS`; `QDRANT_SIM_URL` reuses a running server.
+**Load tier** (`sh scripts/tools/run-task.sh qa:load`, `tests/test_load_tier.py`) runs the same composition — runtime PDFs, hash-mode ingest into the pinned Qdrant image, a real uvicorn agent (`LLM_STREAM=true`) plus the deterministic mock LLM — and asserts absolute contracts under concurrency instead of correctness: zero request errors and zero missing `Server-Timing` headers on `/v1/search` and `/v1/answer`, per-stream SSE integrity on `/v1/answer?stream=true` (token deltas, exactly one `final` with citations, no `error` event), citation parity across stream/search/JSON shapes, fixed error envelopes with no leaked internals, and determinism after load. The chaos leg runs the same streams against an abort-storm mock (`MOCK_ERROR_RATE`): every stream must classify as complete XOR aborted, aborted streams carry `event: error` with no `final`, and each leaves exactly one `stream_truncated` alert. The TTFT leg runs against a paced mock (`MOCK_TTFT_MS`): agent `ttft_ms` never precedes the model's first byte. Never cross-environment latency comparisons. Knobs (CI-sane defaults): `LOAD_SEARCH_CONCURRENCY` / `LOAD_SEARCH_DURATION_S` / `LOAD_ANSWER_CONCURRENCY` / `LOAD_ANSWER_DURATION_S` / `LOAD_STREAMS` / `LOAD_STREAM_WORKERS`; `QDRANT_SIM_URL` reuses a running server.
 
 ```bash
 # Run load tier (fail-closed: no skips; docker/startup/zero-request failures raise)
-make loadtest-mock
+sh scripts/tools/run-task.sh qa:load
 ```
 
 ### 3.4 Retrieval Evaluation Gates & Quality Tiers
@@ -119,13 +123,13 @@ Tier map, thresholds, and gate semantics live in `eval.md` (§1–§4); the
 rungs your change class owes live in `live-stack.md` (§0, §3). This
 section keeps only the runnable commands.
 
-#### Automated L1 Retrieval Gate (`make gate-l1`)
+#### Automated L1 Retrieval Gate (`sh scripts/tools/run-task.sh eval:gate-l1`)
 
 The L1 gate runs automatically on every PR in GitHub Actions and GitLab CI:
 
 ```bash
 # Run L1 retrieval evaluation gate locally (starts ephemeral Qdrant simulator if needed)
-make gate-l1
+sh scripts/tools/run-task.sh eval:gate-l1
 
 # Or run the script directly:
 python scripts/gate_l1.py --out bundles/eval-report.json --delta bundles/eval-delta.md
@@ -135,7 +139,7 @@ python scripts/gate_l1.py --out bundles/eval-report.json --delta bundles/eval-de
 - **Fail-Closed Verification:** Fails nonzero on any query failure or metric regression — ratios in `eval.md` §2 (strict `identifier`/`message_id` recall@1, `must_not.violations == 0` absolute).
 - **PR Delta Reporting:** Automatically posts or updates a markdown delta table comment on the PR (GitHub) or merge request note (GitLab).
 
-#### Paraphrase Retrieval Instrument (`make eval-paraphrase`)
+#### Paraphrase Retrieval Instrument (`sh scripts/tools/run-task.sh eval:paraphrase`)
 
 The main golden set echoes query text into target pages, so semantic
 improvements cannot register — `evals/paraphrase.jsonl` (22 entries) is the
@@ -158,7 +162,7 @@ QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=paraphrase-manuals \
   --src /tmp/para-corpus --progress /tmp/para-corpus/inventory.jsonl --workers 2
 
 # 3. Score against the mode-keyed paraphrase baselines:
-QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=paraphrase-manuals make eval-paraphrase
+QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=paraphrase-manuals sh scripts/tools/run-task.sh eval:paraphrase
 ```
 
 Baselines (`evals/baseline-paraphrase.json` hash, `evals/baseline-paraphrase-vllm.json` vllm) gate the same tolerances as the main set (`eval.md` §2). Uses: contextual-prefix A/B, reranker on/off A/B, dense-prefix tuning. Not wired into CI (no cluster, no embed server there).
@@ -168,7 +172,7 @@ Baselines (`evals/baseline-paraphrase.json` hash, `evals/baseline-paraphrase-vll
 Standard CI runners are CPU-only; L2/L3 need the live GPU stack. Three
 options, cheapest first:
 
-1. **RC gate (primary):** run `make harness-l2` / `make harness-l3` on lab
+1. **RC gate (primary):** run `sh scripts/tools/run-task.sh eval:harness:l2` / `sh scripts/tools/run-task.sh eval:harness:l3` on lab
    GPU workstations during the release-candidate window. Standing-red
    product debts are tracked as explicit RC debt.
 2. **Dedicated GPU runner (optional):** enterprise runner with an NVIDIA
@@ -187,37 +191,37 @@ owe live in `live-stack.md` §3:
 ```bash
 # Evaluate retrieval accuracy against the golden set (mode-keyed baselines
 # per eval.md §2; mismatch skip semantics per eval.md §2).
-EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus make eval
+EMBED_MODE=hash QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=local-corpus sh scripts/tools/run-task.sh eval:retrieval
 
 # Re-record committed accuracy baseline (dedicated PR only, per AGENTS.md)
-make eval-baseline
+sh scripts/tools/run-task.sh eval:baseline
 
 # Run performance benchmarking
-make bench
+sh scripts/tools/run-task.sh eval:bench
 
 # Re-record committed benchmark baseline (dedicated PR only)
-make bench-baseline
+sh scripts/tools/run-task.sh eval:bench-baseline
 ```
 
-### 3.5 Developer Reporting & Interactive Query Assistant (`make ask` / `make query-demo`)
+### 3.5 Developer Reporting & Interactive Query Assistant (`sh scripts/tools/run-task.sh local:ask` / `sh scripts/tools/run-task.sh local:query`)
 
 Mainframe RAG provides interactive terminal REPLs and single-command CLI utilities for inspecting retrieval results and testing LLM reasoning. Local developer defaults (`EMBED_MODE=hash`, `ALLOW_HASH_MODE=true`, `QDRANT_URL=http://localhost:6333`, and auto-detection of local vLLM models) are applied automatically:
 
 ```bash
 # 1. Interactive conversational Q&A assistant (Reasoning LLM + Qdrant retrieval)
-make ask
+sh scripts/tools/run-task.sh local:ask
 
 # 2. Ask a single question directly on the command line
-make ask QUERY="What is message ICH408I?"
+sh scripts/tools/run-task.sh local:ask QUERY="What is message ICH408I?"
 
 # 3. Query a specific collection
-make ask QUERY="What is message IEA500I?" COLLECTION=local_vllm_test_corpus
+sh scripts/tools/run-task.sh local:ask QUERY="What is message IEA500I?" COLLECTION=local_vllm_test_corpus
 
 # 4. Launch pure retrieval debugger REPL (inspect rank scores and chunk payloads without calling LLM)
-make query-demo
+sh scripts/tools/run-task.sh local:query
 
 # 5. Inspect a single query in pure search mode
-make query-demo QUERY="IEA500I" COLLECTION=local_vllm_test_corpus
+sh scripts/tools/run-task.sh local:query QUERY="IEA500I" COLLECTION=local_vllm_test_corpus
 
 # 6. Export query results to self-contained HTML or JSON
 PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer --query "IEA500I" --format html --out bundles/answer-IEA500I.html
@@ -226,7 +230,7 @@ PYTHONPATH=. .venv/bin/python scripts/query_demo.py --answer --query "IEA500I" -
 
 #### Local Development Environment Defaults
 
-When running local tooling (`make ask`, `make query-demo`, `test_local_e2e_vllm.py`), the following defaults are automatically applied if unset in the environment:
+When running local tooling (`sh scripts/tools/run-task.sh local:ask`, `sh scripts/tools/run-task.sh local:query`, `test_local_e2e_vllm.py`), the following defaults are automatically applied if unset in the environment:
 
 | Variable | Local Dev Default | Air-Gap / Prod Rule |
 |---|---|---|
@@ -244,9 +248,9 @@ When running local tooling (`make ask`, `make query-demo`, `test_local_e2e_vllm.
 | **`RERANK_ENABLED`** | `false` | `false` (cross-encoder rerank ships default-off; see §3.11) |
 | **`RERANK_BASE_URL`** | Gateway handoff URL | Platform gateway scoring/rerank leg (required when `RERANK_ENABLED=true`) |
 | **`RERANK_MODEL`** | `BAAI/bge-reranker-v2-m3` | Must match the served reranker model |
-| **`LLM_STREAM`** | `true` via `make run-agent` | `false` (production default; enable only where TTFT metrics are wanted) |
-| **`UI_ENABLED`** | `"true"` via `make local-stack`; unset via `make run-agent` (fail-closed 404) | `"true"` from the prod overlay (console served; only the external Route is OAuth-protected) |
-| **`CHAT_CONDENSE_ENABLED`** | `false` (default) | `false` (enabling is a dedicated default-flip PR; `make eval-chat` is the evidence) |
+| **`LLM_STREAM`** | `true` via `sh scripts/tools/run-task.sh local:agent` | `false` (production default; enable only where TTFT metrics are wanted) |
+| **`UI_ENABLED`** | `"true"` via `sh scripts/tools/run-task.sh local:stack`; unset via `sh scripts/tools/run-task.sh local:agent` (fail-closed 404) | `"true"` from the prod overlay (console served; only the external Route is OAuth-protected) |
+| **`CHAT_CONDENSE_ENABLED`** | `false` (default) | `false` (enabling is a dedicated default-flip PR; `sh scripts/tools/run-task.sh eval:chat` is the evidence) |
 
 #### REPL Controls & Options
 * **Interactive Mode Switch (`:mode`)**: Type `:mode` inside the REPL to toggle dynamically between `search` (pure vector/BM25 retrieval preview) and `answer` (retrieval + LLM reasoning generation).
@@ -257,7 +261,7 @@ When running local tooling (`make ask`, `make query-demo`, `test_local_e2e_vllm.
 
 ### 3.6 Local vLLM Inference & GPU Acceleration (RTX 5060 / 8GB VRAM)
 
-The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`](../scripts/run_local_vllm.sh)) and Makefile targets for serving local reasoning and dense embedding models via Docker with NVIDIA GPU pass-through:
+The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`](../scripts/run_local_vllm.sh)) and Task launch commands for serving local reasoning and dense embedding models via Docker with NVIDIA GPU pass-through:
 
 #### Key Launcher Features
 * **Pinned Container Image**: Defaults to `vllm/vllm-openai:v0.28.0` (built with CUDA 12.8+, supporting NVIDIA Blackwell architectures like the RTX 5060 Laptop GPU and Gemma-4). The pinned tag implements every flag the script passes — v0.28.0 removed `--task`, so the embed branch passes `--runner pooling --convert embed`.
@@ -265,7 +269,7 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
   - **Reasoning Model (Port 8000)**: `GPU_MEM=0.64` (~5.2 GB VRAM allocation).
   - **Embedding Model (Port 8001)**: `GPU_MEM=0.33` with `--enforce-eager` (~2.7 GB VRAM budget; measured 1.29 GiB spare KV at startup). Explicit `GPU_MEM=`/`MAX_LEN=`/`SEQS=`/`ROLE=` always win.
   - Verify actual residency and long inputs on the selected GPU. Eager execution removes compilation/CUDA-graph workspace, but allocations alone do not establish fit.
-  - *Solo Runs*: For dedicated reasoning benchmarks, `GPU_MEM=0.85 make local-vllm` restores maximum KV cache capacity.
+  - *Solo Runs*: For dedicated reasoning benchmarks, `GPU_MEM=0.85 sh scripts/tools/run-task.sh local:llm` restores maximum KV cache capacity.
 * **8GB VRAM Optimizations**:
   - `--limit-mm-per-prompt '{"image":0,"audio":0}'` rejects those modalities; it does not establish the memory saving. The opt-in `LOCAL_CRC_32GB` profile additionally uses `--language-model-only` and a zero multimodal processor cache.
   - `--max-num-seqs 1`: Bounds concurrent sequence allocation to prevent out-of-memory spikes.
@@ -273,8 +277,8 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
   - `--max-num-batched-tokens` (embed server): capped at the Budget window so the memory-profiling peak stays bounded; it does not follow a `MAX_LEN` operator override (erring small is the safe side).
   - `MAX_LEN=4096` for **both** servers: the reasoning prompt budget requires it, and a 2048 embed window was rejected by tokenizer sweep — the worst-case embedded string (chunk header + a `SECTION_MAX_CHARS=3500` body with the 400-char split seed) measures ~2,043 tokens at ~2.0 chars/token on syntax-dense text. The budget is pinned hermetically by `tests/test_embed_budget.py`.
 * **Gemma-4 Support**: Automatically configures `--tool-call-parser gemma4`, `--reasoning-parser gemma4`, and `--chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja`.
-* **Make recipe contract**: `local-vllm*` passes the role and venv `BUDGET_PYTHON` per recipe, with an order-only `.venv` prerequisite. Re-run the tokenizer sweep before changing chunk constants or the embed-text header.
-* **Embedding Model Detection**: Model names matching `*embed*`/`*Embed*` (e.g. `Qwen/Qwen3-Embedding-0.6B`) derive `ROLE=embed` (overridable; `make local-vllm*` passes `ROLE` explicitly) and get the Budget pooling-runner serving shape automatically.
+* **Task launch contract**: `local:llm`, `local:embed` and `local:rerank` pass the role and repository venv `BUDGET_PYTHON` per invocation; a missing `.venv` fails with an explicit setup instruction. Re-run the tokenizer sweep before changing chunk constants or the embed-text header.
+* **Embedding Model Detection**: Model names matching `*embed*`/`*Embed*` (e.g. `Qwen/Qwen3-Embedding-0.6B`) derive `ROLE=embed` (overridable; `sh scripts/tools/run-task.sh local:llm` (or `local:embed` / `local:rerank`) passes `ROLE` explicitly) and get the Budget pooling-runner serving shape automatically.
 * **WSL2 Compatibility**: Exports `VLLM_WSL2_ENABLE_PIN_MEMORY=1` for host memory stability.
 * **Safe Secrets**: Passes `HF_TOKEN` via `-e HF_TOKEN` without exposing secret tokens on command-line argument lists.
 
@@ -283,53 +287,53 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
 **1. Start the Reasoning Model Server (Port 8000):**
 ```bash
 # Offline weights directory (recommended):
-MODEL=/path/to/models/gemma-4-E4B-it-qat-mobile-ct make local-vllm
+MODEL=/path/to/models/gemma-4-E4B-it-qat-mobile-ct sh scripts/tools/run-task.sh local:llm
 
 # Or via HuggingFace Hub:
-HF_TOKEN="<your-token>" MODEL=google/gemma-4-E4B-it-qat-mobile-ct make local-vllm
+HF_TOKEN="<your-token>" MODEL=google/gemma-4-E4B-it-qat-mobile-ct sh scripts/tools/run-task.sh local:llm
 ```
 
 **2. Start the Dense Embedding Server (Port 8001):**
 ```bash
 # Offline weights directory (recommended):
-MODEL=/path/to/models/Qwen3-Embedding-0.6B make local-vllm-embed
+MODEL=/path/to/models/Qwen3-Embedding-0.6B sh scripts/tools/run-task.sh local:embed
 
 # Or via HuggingFace Hub:
-MODEL=Qwen/Qwen3-Embedding-0.6B make local-vllm-embed
+MODEL=Qwen/Qwen3-Embedding-0.6B sh scripts/tools/run-task.sh local:embed
 ```
 
 #### Serving configurations (pick one pack per 8GB card)
 
-One server per `make` invocation (each blocks its shell — run each in its own terminal or background it). `BUDGET_PROFILE` selects the pack; the launcher preflights the full pack (`--check-pack`) and fails closed on deficits. Explicit `GPU_MEM=`/`MAX_LEN=`/`SEQS=` always win over resolved values.
+One server per Task invocation (each blocks its shell — run each in its own terminal or background it). `BUDGET_PROFILE` selects the pack; the launcher preflights the full pack (`--check-pack`) and fails closed on deficits. Explicit `GPU_MEM=`/`MAX_LEN=`/`SEQS=` always win over resolved values.
 
 | Goal | Profile (default `LOCAL_RT_8GB`) | Commands | Notes |
 |---|---|---|---|
-| Answer quality (big reasoning + embedding) | `LOCAL_RT_8GB` | `make local-vllm` (:8000, E4B) + `make local-vllm-embed` (:8001) | Default pair. No room for a third leg (measured 7.0 GB resident). |
+| Answer quality (big reasoning + embedding) | `LOCAL_RT_8GB` | `sh scripts/tools/run-task.sh local:llm` (:8000, E4B) + `sh scripts/tools/run-task.sh local:embed` (:8001) | Default pair. No room for a third leg (measured 7.0 GB resident). |
 | Windows CRC plus the current two models | `LOCAL_CRC_32GB` | Both launch targets with `BUDGET_PROFILE=LOCAL_CRC_32GB` | 0.54/0.43, eager, one sequence, 4096 tokens; [host setup and measurements](local-crc-environment.md). |
-| Full topology (reasoning + embedding + ranking) | `TRIPLE_8GB` | Above with `MODEL=Qwen/Qwen2.5-0.5B-Instruct GPU_MEM=0.20 MAX_LEN=4096 SEQS=1` on :8000, plus `make local-vllm-rerank` (:8002) | 0.5B answers are weak — plumbing/rerank coverage only. E4B triple demonstrably does not fit; resolve refuses it. |
-| Retrieval + ranking, no LLM | `RANK_EMBED_8GB` | `make local-vllm-embed` (:8001) + `make local-vllm-rerank` (:8002) | Rerank A/B and `--rerank` evals without spending VRAM on reasoning. |
+| Full topology (reasoning + embedding + ranking) | `TRIPLE_8GB` | Above with `MODEL=Qwen/Qwen2.5-0.5B-Instruct GPU_MEM=0.20 MAX_LEN=4096 SEQS=1` on :8000, plus `sh scripts/tools/run-task.sh local:rerank` (:8002) | 0.5B answers are weak — plumbing/rerank coverage only. E4B triple demonstrably does not fit; resolve refuses it. |
+| Retrieval + ranking, no LLM | `RANK_EMBED_8GB` | `sh scripts/tools/run-task.sh local:embed` (:8001) + `sh scripts/tools/run-task.sh local:rerank` (:8002) | Rerank A/B and `--rerank` evals without spending VRAM on reasoning. |
 | Reasoning + ranking (no vLLM embed) | — | Unsupported | Hash embed mode pins `HashReranker` by design (determinism), so a GPU reranker is unreachable there — see issue #193. |
 
 Reranked search also needs `RERANK_ENABLED=true RERANK_BASE_URL=http://127.0.0.1:4000/v1 RERANK_MODEL=BAAI/bge-reranker-v2-m3` on the consumer side (`query-demo`, eval `--rerank`, agent env). Launch order on a cold card: reasoning → embed → rerank (a 4k-context server fails KV init against leftovers; the profiles declare this allocation order).
 
-#### Local Production Simulation (`make local-stack`)
+#### Local Production Simulation (`sh scripts/tools/run-task.sh local:stack`)
 
-The ownership contract is explicit: in production the platform team owns the model tier (vLLM + LiteLLM) and this repo owns Qdrant + ingest + retrieval + the agent, reaching every model leg only over the gateway HTTP contract. `make local-stack` reproduces that **complete topology on one machine** — pinned Qdrant + Jaeger + the real LiteLLM gateway (digest-pinned) in front of the enabled local vLLM backends + the FastAPI agent — and probes every leg through the gateway **and verifies a trace landed in Jaeger** before declaring the stack up. Agent and ingest never call vLLM directly, so the wire contract under test is the production one.
+The ownership contract is explicit: in production the platform team owns the model tier (vLLM + LiteLLM) and this repo owns Qdrant + ingest + retrieval + the agent, reaching every model leg only over the gateway HTTP contract. `sh scripts/tools/run-task.sh local:stack` reproduces that **complete topology on one machine** — pinned Qdrant + Jaeger + the real LiteLLM gateway (digest-pinned) in front of the enabled local vLLM backends + the FastAPI agent — and probes every leg through the gateway **and verifies a trace landed in Jaeger** before declaring the stack up. Agent and ingest never call vLLM directly, so the wire contract under test is the production one.
 
-Prerequisites: Docker, `.venv`, reasoning on :8000 and embeddings on :8001. Start reranking on :8002 only when enabled. The current two-model rehearsal explicitly uses `RERANK_ENABLED=false`. Qdrant is started via `make sim-qdrant` (the pinned-image owner) when unreachable; `make sim-clean` stops it.
+Prerequisites: Docker, `.venv`, reasoning on :8000 and embeddings on :8001. Start reranking on :8002 only when enabled. The current two-model rehearsal explicitly uses `RERANK_ENABLED=false`. Qdrant is started via `sh scripts/tools/run-task.sh local:qdrant:up` (the pinned-image owner) when unreachable; `sh scripts/tools/run-task.sh local:qdrant:down` stops it.
 
 ```bash
 # Full stack: Qdrant -> Jaeger -> gateway -> probe -> (optional ingest) -> agent -> smoke -> trace check
-RERANK_ENABLED=false make local-stack
-RERANK_ENABLED=false CORPUS_DIR=output/demo-pdfs make local-stack     # also ingest through the gateway
-LOCAL_STACK_DRYRUN=1 make local-stack            # ordered plan only; no docker/network
+RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack
+RERANK_ENABLED=false CORPUS_DIR=output/demo-pdfs sh scripts/tools/run-task.sh local:stack     # also ingest through the gateway
+LOCAL_STACK_DRYRUN=1 sh scripts/tools/run-task.sh local:stack            # ordered plan only; no docker/network
 ```
 
 Tracing is part of the stack, not a flag: the agent and (when `CORPUS_DIR` is set) the ingest run export OTLP to Jaeger, and a `v1.search` span must land before the stack reports up. Jaeger reuses an instance already answering on the UI port (an operator-managed one is left alone) or starts the digest-pinned owner (`scripts/run_local_jaeger.sh`); the real local LiteLLM gateway also exports its spans there so the gateway hop appears in the waterfall. The Jaeger **browser UI** is at `http://127.0.0.1:16686`.
 
-The operator console (ADR-0004) is part of the stack by default: the agent starts with `UI_ENABLED=true`, the up sequence smoke-checks `GET /ui` (HTTP 200), and the banner prints the console URL (`http://127.0.0.1:8080/ui`). Set `UI_ENABLED=false` to exercise the fail-closed 404 route set; `make run-agent` alone honors `UI_ENABLED` without a default.
+The operator console (ADR-0004) is part of the stack by default: the agent starts with `UI_ENABLED=true`, the up sequence smoke-checks `GET /ui` (HTTP 200), and the banner prints the console URL (`http://127.0.0.1:8080/ui`). Set `UI_ENABLED=false` to exercise the fail-closed 404 route set; `sh scripts/tools/run-task.sh local:agent` alone honors `UI_ENABLED` without a default.
 
-On exit (Ctrl-C) the agent, the gateway, and an owned Jaeger stop; Qdrant stays for `make sim-clean`. Ports: agent 8080 (`LOCAL_AGENT_PORT`), gateway 4000 (`GATEWAY_PORT`), Jaeger UI 16686 / OTLP 4318 (`JAEGER_PORT`, `JAEGER_OTLP_PORT`), Qdrant `QDRANT_URL` (default `http://127.0.0.1:6333`). Ephemeral keys are written mode 600 to a temp env file (`GATEWAY_ENV_FILE`, default `/tmp/local-stack-gateway-<port>.env`) — never inside the repo, never committed.
+On exit (Ctrl-C) the agent, the gateway, and an owned Jaeger stop; Qdrant stays for `sh scripts/tools/run-task.sh local:qdrant:down`. Ports: agent 8080 (`LOCAL_AGENT_PORT`), gateway 4000 (`GATEWAY_PORT`), Jaeger UI 16686 / OTLP 4318 (`JAEGER_PORT`, `JAEGER_OTLP_PORT`), Qdrant `QDRANT_URL` (default `http://127.0.0.1:6333`). Ephemeral keys are written mode 600 to a temp env file (`GATEWAY_ENV_FILE`, default `/tmp/local-stack-gateway-<port>.env`) — never inside the repo, never committed.
 
 The gateway contract the stack exercises:
 
@@ -338,7 +342,7 @@ The gateway contract the stack exercises:
 * **Both rerank legs**: native `/v1/rerank` via the `hosted_vllm/` provider, plus a `/v1/score` pass-through to the vLLM backend (LiteLLM has no native score route). `scripts/probe_gateway.py` prints the recommended `RERANK_ENDPOINT_ORDER` after probing both.
 * **Tokenizer**: `/tokenize` stays 404 behind the gateway — the agent pins its in-process estimator after one warning (expected, not a fault).
 
-For single-component debugging, `make local-jaeger` / `make local-jaeger-stop` manage just the trace backend, and `make local-gateway` keeps the gateway in the foreground (`make local-gateway-stop` stops it and its key store); then export the printed keys and run `scripts/probe_gateway.py --require-reasoning --stream` and `make run-agent` yourself. The key store is a throwaway Postgres container + named volume (LiteLLM `/key/generate` needs a database): env-passed keys survive restarts, minted keys rotate per start (`GATEWAY_RESET_KEYS=1` wipes the store). `scripts/run_local_gateway.sh` owns gateway config rendering; the LiteLLM image is pinned by digest there. The model/gateway launcher is local-only. CI supplies its own gateway deployment and deterministic model computation; neither deployment belongs on a product path. The shared strict-finish module has a gateway-only LiteLLM import exception and is excluded from application images.
+For single-component debugging, `sh scripts/tools/run-task.sh local:jaeger:up` / `sh scripts/tools/run-task.sh local:jaeger:down` manage just the trace backend, and `sh scripts/tools/run-task.sh local:gateway:up` keeps the gateway in the foreground (`sh scripts/tools/run-task.sh local:gateway:down` stops it and its key store); then export the printed keys and run `scripts/probe_gateway.py --require-reasoning --stream` and `sh scripts/tools/run-task.sh local:agent` yourself. The key store is a throwaway Postgres container + named volume (LiteLLM `/key/generate` needs a database): env-passed keys survive restarts, minted keys rotate per start (`GATEWAY_RESET_KEYS=1` wipes the store). `scripts/run_local_gateway.sh` owns gateway config rendering; the LiteLLM image is pinned by digest there. The model/gateway launcher is local-only. CI supplies its own gateway deployment and deterministic model computation; neither deployment belongs on a product path. The shared strict-finish module has a gateway-only LiteLLM import exception and is excluded from application images.
 
 ---
 
@@ -353,7 +357,7 @@ via the `LLM_REASONING_EFFORT_*` / `PROMPT_MAX_CONTEXT_CHARS*` Settings
 
 ---
 
-### 3.8 Automated Local End-to-End Suite (`make test-vllm-e2e`)
+### 3.8 Automated Local End-to-End Suite (`sh scripts/tools/run-task.sh qa:vllm-e2e`)
 
 To verify the entire RAG pipeline from PDF generation and dense/sparse ingestion to HTTP retrieval and grounded LLM reasoning:
 
@@ -364,7 +368,7 @@ To verify the entire RAG pipeline from PDF generation and dense/sparse ingestion
 : "${DENSE_DIM:?export the selected embedding dimension}"
 export DENSE_DIM
 export RERANK_ENABLED=false
-make test-vllm-e2e \
+sh scripts/tools/run-task.sh qa:vllm-e2e \
   MODEL="$LLM_MODEL_REASONING" VLLM_URL="$LLM_BASE_URL" \
   EMBED_MODEL="$EMBED_MODEL" EMBED_URL="$EMBED_BASE_URL" DENSE_DIM="$DENSE_DIM"
 ```
@@ -377,19 +381,19 @@ make test-vllm-e2e \
 5. **HTTP `/v1/answer` Verification**: Executes reasoning queries through the real gateway via FastAPI HTTP endpoints.
 6. **Strict Grounding Gate**: Fails closed if the model response returns zero validated citations or indicates ungrounded hallucination.
 
-#### Streaming Reasoning on the Local Stack (`make run-agent`)
+#### Streaming Reasoning on the Local Stack (`sh scripts/tools/run-task.sh local:agent`)
 ```bash
 # Start the agent with LLM_STREAM=true so reasoning SSE reaches the client:
-make run-agent                    # uvicorn on http://localhost:8080
+sh scripts/tools/run-task.sh local:agent                    # uvicorn on http://localhost:8080
 
 # Stream a grounded answer (SSE):
 curl -N -X POST "http://localhost:8080/v1/answer?stream=true" \
   -H "Content-Type: application/json" \
   -d '{"query": "What parameter controls LFAREA in IEASYSxx?"}'
 ```
-The SSE response yields `event: token` deltas as the reasoning model generates, then exactly one terminal `event: final` carrying the full verified answer, citations, optional script, retrieval metadata, `ttft_ms`, and token usage. A mid-stream failure emits `event: error` and ends **without** a `final` event — treat stream-end-without-final as a failed request. `LLM_STREAM` (server-side reasoning SSE) defaults to `false` in production config; `make run-agent` enables it for TTFT measurement (also consumed by the L3 harness).
+The SSE response yields `event: token` deltas as the reasoning model generates, then exactly one terminal `event: final` carrying the full verified answer, citations, optional script, retrieval metadata, `ttft_ms`, and token usage. A mid-stream failure emits `event: error` and ends **without** a `final` event — treat stream-end-without-final as a failed request. `LLM_STREAM` (server-side reasoning SSE) defaults to `false` in production config; `sh scripts/tools/run-task.sh local:agent` enables it for TTFT measurement (also consumed by the L3 harness).
 
-This component runner honors `UI_ENABLED`: `UI_ENABLED=true make run-agent` serves the operator console at `http://localhost:8080/ui` (unset keeps `/ui` at the fail-closed 404). `make local-stack` sets it true by default; the multi-turn chat and console contracts live in `docs/agent.md` §1/§3.
+This component runner honors `UI_ENABLED`: `UI_ENABLED=true sh scripts/tools/run-task.sh local:agent` serves the operator console at `http://localhost:8080/ui` (unset keeps `/ui` at the fail-closed 404). `sh scripts/tools/run-task.sh local:stack` sets it true by default; the multi-turn chat and console contracts live in `docs/agent.md` §1/§3.
 
 ---
 
@@ -509,14 +513,14 @@ identical to the hybrid+RRF baseline until explicitly enabled:
 RERANK_ENABLED=true \
 RERANK_BASE_URL=http://localhost:4000/v1 \
 RERANK_MODEL=BAAI/bge-reranker-v2-m3 \
-make run-agent
+sh scripts/tools/run-task.sh local:agent
 ```
 
 ---
 
 ## 4. Standard Deployment Architecture (Air-Gap Production & Local Cluster Testing)
 
-The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts, Helm chart, and Kustomize overlays, with adapted sizing and SCC for local test clusters).
+The hardened 5-stage deployment pipeline (`airgap:pack` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts, Helm chart, and Kustomize overlays, with adapted sizing and SCC for local test clusters).
 
 ### 4.1 Packaging on the Connected Host (Image Factory)
 
@@ -531,12 +535,13 @@ To build the package manually on a connected Linux workstation:
 git clone https://github.com/yonatan895/qdrant-pdf-rag.git
 cd qdrant-pdf-rag
 git checkout "$IMAGE_SHA"  # Set to the full published-main SHA matching built GHCR images
+sh scripts/tools/install-task.sh  # Explicit connected runner provisioning
 
 # Custodied release key supplied through the approved credential process.
 # CI reads PEM bytes from SNEAKERNET_SIGNING_KEY; the local pack command
 # takes the PATH to a protected PEM file.
 SNEAKERNET_SIGNING_KEY=/secure/release-signing.pem \
-SNEAKERNET_KEY_TRUSTED=true make airgap-pack
+SNEAKERNET_KEY_TRUSTED=true sh scripts/tools/run-task.sh airgap:pack
 ```
 
 A maintainer creates the signing key once in a protected directory, for example
@@ -561,6 +566,7 @@ This generates `dist/qdrant-pdf-rag-<sha>.tar` and its digest `dist/qdrant-pdf-r
 5. Self-contained extraction bootstrap script (`bootstrap.sh`).
 6. Manifest (`MANIFEST.txt`), Packing Record (`PACKING_RECORD.txt`), digest enumeration (`sbom.json`), offline signature (`SHA256SUMS.sig` + `sneakernet-signing.pub`), and member `SHA256SUMS`.
 7. The console oauth-proxy sidecar image (`oauth-proxy-image.tar`) — pinned in `images.txt`; connected packaging needs Red Hat registry authentication (see §4.4.2).
+8. The pinned host runner (`task_linux_amd64.tar.gz`), `task-pin.txt` and `task-LICENSE`, all covered by member checksums. Packaging reuses `.tools/cache` from the installer or `AIRGAP_TASK_ARCHIVE=/absolute/path/task_linux_amd64.tar.gz`; otherwise the connected pack fetches the exact pinned archive.
 
 ### 4.2 Transfer & Automated Bootstrap
 
@@ -591,9 +597,15 @@ cd qdrant-pdf-rag
 
 The `bootstrap.sh` script automatically:
 - Verifies the bundle signature (`SNEAKERNET_TRUSTED_PUB` when provided) and then all member checksums in `SHA256SUMS`.
-- Clones the Git repository from `repo.bundle`.
+- Clones the Git repository from `repo.bundle` and checks its full HEAD against the manifest. An existing workspace must already match that SHA; otherwise use a fresh `AIRGAP_WORKSPACE` or deliberately check out the approved bundle SHA before retrying.
 - Populates `./dist` with image archives and manifests, including `oauth-proxy-image.tar` when the bundle contains it.
-- Initializes `airgap.env` from `airgap.env.example` if not already present.
+- Verifies the bundled Task pin against the checkout, verifies installer integrity, then installs `.tools/bin/task` from the signed bundle archive without network access or preinstalled Make/Task/Go/application Python.
+- Initializes `airgap.env` from `airgap.env.example` only when absent; reruns preserve operator configuration and retained artifacts.
+
+After bootstrap use `sh scripts/tools/run-task.sh --list` for discovery.
+For rollback, use the previous approved bundle and its own bootstrap/command
+contract in a separate workspace; an older bundle may still use Make. Never
+combine its assets with a newer checkout.
 
 ### 4.3 Configure Environment & Pre-Flight Validation
 
@@ -602,9 +614,9 @@ Edit `airgap.env` to configure your cluster environment:
 > [!NOTE]
 > Environment precedence (explicit env beats file, `AIRGAP_ENV` path beats
 > local `./airgap.env`) lives in `deploy.md` §2 — one rule, one owner. Two
-> re-run notes: `VAR=x make airgap-*` overrides a stale key, but a bare
-> `make airgap-*` reuses whatever the file still holds — re-run
-> `make airgap-validate` after editing `airgap.env` before touching the cluster.
+> re-run notes: `VAR=x sh scripts/tools/run-task.sh airgap:validate` overrides a stale key, but a bare
+> `sh scripts/tools/run-task.sh airgap:validate` reuses whatever the file still holds — re-run
+> `sh scripts/tools/run-task.sh airgap:validate` after editing `airgap.env` before touching the cluster.
 
 ```ini
 # Internal image registry accessible to cluster nodes
@@ -669,7 +681,7 @@ export NAMESPACE=mainframe-rag
 oc create namespace "$NAMESPACE" --dry-run=client -o yaml | oc apply -f -
 ```
 
-Create the key Secret **before** `make airgap-deploy` (one Secret, four data keys; the contextual-gist key rides the ingest Job):
+Create the key Secret **before** `sh scripts/tools/run-task.sh airgap:deploy` (one Secret, four data keys; the contextual-gist key rides the ingest Job):
 
 ```bash
 # Files are mode 600, supplied through the platform credential process.
@@ -688,19 +700,19 @@ replaces the client's default bundle. Mounting this ConfigMap makes agent and
 ingest trust the gateway; node registry trust and browser ingress trust remain
 separate. Test correct CA, wrong CA and hostname mismatch from actual pods.
 
-`make airgap-validate` verifies the Secret exists (when the namespace does) and refuses plaintext `*_API_KEY` values in `airgap.env`. Rotate by updating the Secret, then rollout-restart the agent (or re-run the ingest Job).
+`sh scripts/tools/run-task.sh airgap:validate` verifies the Secret exists (when the namespace does) and refuses plaintext `*_API_KEY` values in `airgap.env`. Rotate by updating the Secret, then rollout-restart the agent (or re-run the ingest Job).
 
-#### Pre-Flight Validation (`make airgap-validate`)
+#### Pre-Flight Validation (`sh scripts/tools/run-task.sh airgap:validate`)
 
 Before modifying any cluster state, run the pre-flight validation check to verify tools, required variables, storage class compliance (refusing NFS), and required keys — it prints OpenShift SCC guidance but does not verify SCC permissions:
 
 ```bash
-make airgap-validate
+sh scripts/tools/run-task.sh airgap:validate
 ```
 
 To preview rendered templates and substitution rules without cluster credentials:
 ```bash
-make airgap-dryrun
+sh scripts/tools/run-task.sh airgap:dryrun
 ```
 
 Before loading, the registry administrator must configure authenticated TLS,
@@ -736,10 +748,10 @@ Operators can either run the complete automated pipeline in one command or execu
 
 ```bash
 # Execute validate -> load -> deploy -> (optional ingest) -> smoke in sequence:
-make airgap-pipeline
+sh scripts/tools/run-task.sh airgap:pipeline
 
 # Or with ingest:
-CORPUS_PVC=my-corpus-pvc make airgap-pipeline
+CORPUS_PVC=my-corpus-pvc sh scripts/tools/run-task.sh airgap:pipeline
 ```
 
 The pipeline probes configured legs before ingest, but its built-in probe does
@@ -756,10 +768,10 @@ CRC pass does not replace it.
 
 ```bash
 # 1. Verify internal member checksums and push images to internal registry
-make airgap-load
+sh scripts/tools/run-task.sh airgap:load
 
 # 2. Deploy Qdrant 3-replica cluster and Agent deployment
-make airgap-deploy
+sh scripts/tools/run-task.sh airgap:deploy
 
 # 3. Require both real platform legs and a successful streaming finish
 # from the application's network, trust store and Secret-backed identity.
@@ -767,8 +779,8 @@ oc -n "$NAMESPACE" exec deploy/rag-agent -c agent -- \
   python3 /app/scripts/probe_gateway.py --require-reasoning --stream
 
 # 4. Only after that probe passes:
-make airgap-ingest
-make airgap-smoke
+sh scripts/tools/run-task.sh airgap:ingest
+sh scripts/tools/run-task.sh airgap:smoke
 ```
 
 #### OpenShift Security Context Constraints (SCC) Note
@@ -804,14 +816,14 @@ Acceptance Criteria:
 ### 4.4.1 Tracing (active by default, issue #83)
 
 Tracing is **on by default**: leaving `OTEL_EXPORTER_OTLP_ENDPOINT` unset
-resolves to the in-cluster `http://jaeger:4318`, and `make airgap-deploy`
+resolves to the in-cluster `http://jaeger:4318`, and `sh scripts/tools/run-task.sh airgap:deploy`
 renders and applies `deploy/kustomize/jaeger` (Jaeger v2 all-in-one, badger
 storage on a 10Gi RWO block PVC, 14-day span TTL, ClusterIP only) and wires
 the endpoint into the agent and the ingest Job. To disable tracing — and skip
 the Jaeger deployment entirely — set `OTEL_EXPORTER_OTLP_ENDPOINT=off` (also
 `none`, `false`, or `0`) in `airgap.env`. A custom `http(s)` OTLP/HTTP
 collector origin is accepted in place of the in-cluster Jaeger; anything else
-fails closed before a manifest is rendered. `make airgap-validate` prints the
+fails closed before a manifest is rendered. `sh scripts/tools/run-task.sh airgap:validate` prints the
 resolved mode.
 
 This traces **this repo's components only** (agent, retrieval, ingest); the
@@ -825,7 +837,7 @@ pack-wide contract — every pin with a recorded digest is mirrored on every
 pack; the oauth-proxy pin is skipped while `sha256:PENDING`), so the
 default-on path works in a disconnected install. The endpoint may be given
 with or without the `/v1/traces` path — the agent accepts both.
-`make airgap-smoke` proves a `v1.search` span landed before reporting
+`sh scripts/tools/run-task.sh airgap:smoke` proves a `v1.search` span landed before reporting
 acceptance (empty-collection runs report tracing as skipped); it polls the
 Jaeger query API at `JAEGER_QUERY_URL` (default `http://jaeger:16686`) —
 change that only when a custom collector exposes a Jaeger-compatible query
@@ -898,21 +910,21 @@ OAuth-protected; enable it with `AGENT_ROUTE=true`:
    probes. In-cluster tools keep using the ClusterIP 8080 port (unauthenticated
    by design, no Route).
 
-`make airgap-validate` checks none of these prerequisites — a missing digest or
+`sh scripts/tools/run-task.sh airgap:validate` checks none of these prerequisites — a missing digest or
 Secret fails at deploy time.
 
 > **Connected-host follow-up before an air-gap cut:** a `requirements.lock.txt`
 > bump (e.g. the `jinja2` + `python-multipart` pins the console needs) requires
-> `make wheelhouse bm25-weights` plus a connected image rebuild/push and a
+> `sh scripts/tools/run-task.sh artifacts:wheelhouse artifacts:bm25` plus a connected image rebuild/push and a
 > fresh pack — air-gap images install only from the baked wheelhouse.
 
 ### 4.5 Corpus Ingestion
 
 #### Gateway readiness probe
 
-After `make airgap-deploy` and before ingesting, prove the platform
+After `sh scripts/tools/run-task.sh airgap:deploy` and before ingesting, prove the platform
 gateway answers every configured leg from inside the cluster (same network
-as the agent — the bastion itself may not reach it). `make airgap-pipeline`
+as the agent — the bastion itself may not reach it). `sh scripts/tools/run-task.sh airgap:pipeline`
 runs this probe automatically after deployment; the following command is for
 modular deployment and diagnosis:
 
@@ -928,7 +940,7 @@ The probe exits nonzero when a required leg fails (a 401 names the missing
 the recommended `RERANK_ENDPOINT_ORDER` (`score_first` whenever the score leg
 answers — a gateway exposing both legs still gets `score_first`;
 `rerank_first` only when the score leg is unavailable). Set the
-recommendation in `airgap.env` and re-run `make airgap-deploy` before
+recommendation in `airgap.env` and re-run `sh scripts/tools/run-task.sh airgap:deploy` before
 ingesting. A missing `/tokenize` is informational only — the agent pins
 its in-process estimator (expected behind LiteLLM).
 
@@ -936,7 +948,7 @@ Once the manual PDF corpus PVC is provisioned and populated:
 
 ```bash
 # Launch one-shot ingest Job against corpus PVC
-make airgap-ingest CORPUS_PVC=mainframe-manuals-pvc
+sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=mainframe-manuals-pvc
 ```
 
 Monitor ingest progress:
@@ -948,10 +960,10 @@ oc -n mainframe-rag logs -f job/ingest
 
 ```bash
 # Run in-cluster smoke search
-make airgap-smoke
+sh scripts/tools/run-task.sh airgap:smoke
 
 # Or query specific message IDs:
-QUERY="IEA500I operator message" make airgap-smoke
+QUERY="IEA500I operator message" sh scripts/tools/run-task.sh airgap:smoke
 ```
 
 ### 4.7 Local Cluster Testing Standard (Kind + Local Registry)
@@ -1112,18 +1124,18 @@ Citation validation runs on the accumulated text exactly as in JSON mode: the ci
 |---|---|---|
 | **Dimension Mismatch** | Ingest/Search fails with 400 dimension mismatch | Verify `DENSE_DIM` in `airgap.env` matches `EMBED_MODEL` on vLLM. |
 | **Qdrant Unready** | `/healthz` returns `503 qdrant_unready` | Check Qdrant pod logs (`oc logs qdrant-0`); check block PVC mount. |
-| **NFS Storage Refusal** | `make airgap-deploy` fails validation | Set `STORAGE_CLASS` to an RWO block driver (Ceph RBD / SAN / EBS). |
+| **NFS Storage Refusal** | `sh scripts/tools/run-task.sh airgap:deploy` fails validation | Set `STORAGE_CLASS` to an RWO block driver (Ceph RBD / SAN / EBS). |
 | **Hash Mode in Prod** | Scripts fail closed with `EMBED_MODE=hash forbidden` | Remove `EMBED_MODE` from production environment; provide valid vLLM endpoint. |
 | **Registry Certificate Error** | `skopeo copy` fails with `x509: certificate signed by unknown authority` | Install the registry CA in the loader's trust store and configure node trust separately. Verify the certificate hostname; do not disable TLS verification for CRC release or production acceptance. The Kind HTTP registry is a development-only exception. |
 | **OpenShift SCC Rejection** | Pod `qdrant-0` fails with `unable to validate against any security context constraint` | Block promotion, capture admission evidence, and fix project-range compatibility in the owning production configuration. Verify PVC writes under `restricted-v2`; never grant `anyuid`. See [CRC verification](crc-release-verification.md). |
 | **PVC Multi-Attach Error** | `job/ingest` fails with `Multi-Attach error for volume` on corpus PVC | Ensure any previous writer pod has released the PVC, or use a ReadOnlyMany volume. |
 | **Qdrant P2P CrashLoop** | Pod `qdrant-0` fails with `No such file or directory` looking for `cert.pem` | Ensure `config.cluster.p2p.enable_tls: false` in `values.yaml` (gossip is plaintext on CNI without `./tls/cert.pem`). |
 | **K8s Manifest Integer/Boolean Error** | `Invalid value: "string", expected integer/boolean` | Ensure numeric/boolean env vars (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`) are explicitly quoted in rendered manifests. |
-| **Degraded `/healthz` Smoke Failure** | `make airgap-smoke` exits 1 with `FAIL: /healthz probe did not report ok` | Pre-flight probe failed closed (non-`ok` body or non-200). Check Qdrant and vLLM connectivity, then the `representation` field: `reembed_required`/`legacy`/`pending` needs `--reingest`; `unknown` means the metadata store is unreachable. Requests refuse with `503 representation_unavailable` while this holds. |
+| **Degraded `/healthz` Smoke Failure** | `sh scripts/tools/run-task.sh airgap:smoke` exits 1 with `FAIL: /healthz probe did not report ok` | Pre-flight probe failed closed (non-`ok` body or non-200). Check Qdrant and vLLM connectivity, then the `representation` field: `reembed_required`/`legacy`/`pending` needs `--reingest`; `unknown` means the metadata store is unreachable. Requests refuse with `503 representation_unavailable` while this holds. |
 | **Qdrant 401 After Reinstall** | `/v1/search` fails with `401 Invalid API key or JWT` after Qdrant was reinstalled or re-`helm upgrade`d | The chart regenerates the `<release>-apikey` secret on reinstall while running agent pods keep the old key in env. Roll the agent: `kubectl -n <ns> rollout restart deploy/rag-agent` and wait for rollout before smoking again. |
-| **Stale dist/ MANIFEST** | `make airgap-validate` / `-deploy` / `-ingest` / `-dryrun` fail with `IMAGE_SHA=<sha> does not match packed MANIFEST sha` | `dist/` is gitignored build output that persists across checkouts — the MANIFEST inside is from an older pack (only `pack` regenerates it; the other steps just read it). Repack at the current HEAD, or clear the stale `dist/` before re-running. |
-| **Stale airgap.env IMAGE_SHA** | `make airgap-pack` / `-load` fail with `IMAGE_SHA=<sha> is not the checked-out commit` right after checking out a new SHA | `airgap.env` is gitignored local state from a previous rehearsal — its `IMAGE_SHA` no longer matches HEAD. Explicit env beats the file (`IMAGE_SHA=$(git rev-parse HEAD) make airgap-pack`), or update the file. |
+| **Stale dist/ MANIFEST** | `airgap:validate` / `airgap:deploy` / `airgap:ingest` / `airgap:dryrun` fail with `IMAGE_SHA=<sha> does not match packed MANIFEST sha` | `dist/` is gitignored build output that persists across checkouts — the MANIFEST inside is from an older pack (only `pack` regenerates it; the other steps just read it). Repack at the current HEAD, or clear the stale `dist/` before re-running. |
+| **Stale airgap.env IMAGE_SHA** | `airgap:pack` / `airgap:load` fail with `IMAGE_SHA=<sha> is not the checked-out commit` right after checking out a new SHA | `airgap.env` is gitignored local state from a previous rehearsal — its `IMAGE_SHA` no longer matches HEAD. Explicit env beats the file (`IMAGE_SHA=$(git rev-parse HEAD) sh scripts/tools/run-task.sh airgap:pack`), or update the file. |
 | **Stale dist/ tarballs fill disk** | `pack`/`load` fail with no-space errors after several rehearsals | Every pack leaves a ~1.5 GB `qdrant-pdf-rag-<sha>.tar` in gitignored `dist/`; only the MANIFEST-pinned one is live. Delete superseded tarballs (keep the `.tar.sha256` of the live one) — pack never prunes. |
 | **Kind ErrImagePull on localhost:5000** | mock/corpus-gen pods fail with `dial tcp [::1]:5000: connect: connection refused` | The Kind `containerdConfigPatches` in §4.7 must mirror **both** `localhost:5000` and `airgap-registry:5000` to the registry container — one key per naming family used by the manifests. Recreate the cluster with the documented config (containerd mirrors are set at creation). |
-| **Console Route deploy fail-close** | `make airgap-deploy` dies on the oauth-proxy `sha256:PENDING` pin or a missing `rag-agent-oauth-cookie` Secret | Record the digest in `images.txt` + repack and create the cookie Secret (§4.4.2); or deploy with `AGENT_ROUTE=false` (ClusterIP-only, `/ui` still served in-cluster). |
-| **`/ui` returns 404** | Console request returns the stable `404 not_found` envelope | `UI_ENABLED` is unset/false for the agent process. The prod overlay sets it true; for local runs use `UI_ENABLED=true make run-agent` or `make local-stack`. |
+| **Console Route deploy fail-close** | `sh scripts/tools/run-task.sh airgap:deploy` dies on the oauth-proxy `sha256:PENDING` pin or a missing `rag-agent-oauth-cookie` Secret | Record the digest in `images.txt` + repack and create the cookie Secret (§4.4.2); or deploy with `AGENT_ROUTE=false` (ClusterIP-only, `/ui` still served in-cluster). |
+| **`/ui` returns 404** | Console request returns the stable `404 not_found` envelope | `UI_ENABLED` is unset/false for the agent process. The prod overlay sets it true; for local runs use `UI_ENABLED=true sh scripts/tools/run-task.sh local:agent` or `sh scripts/tools/run-task.sh local:stack`. |

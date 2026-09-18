@@ -1,5 +1,5 @@
 """Qdrant least-privilege authorization battery (issue #366, marker:
-``integration``, run via ``make sim`` neighbors — not part of ``make check``).
+``integration``, run via ``sh scripts/tools/run-task.sh qa:sim`` neighbors — not part of ``sh scripts/tools/run-task.sh qa:check``).
 
 Behavioral proof against the pinned Qdrant image (not Secret-name
 assertions): the read-only key from the chart's ``readOnlyApiKey`` value

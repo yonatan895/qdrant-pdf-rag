@@ -1,7 +1,7 @@
 #!/bin/sh
 # AIR-GAP SIDE (issue #15): one-shot ingest Job against the PROD stack.
 #
-#   make airgap-ingest CORPUS_PVC=<existing-pvc>
+#   sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<existing-pvc>
 #
 # The corpus PVC is caller-supplied (back it with NFS RO, block, whatever the
 # platform team provides) and is mounted READ-ONLY at /corpus. No demo PDFs,
@@ -184,4 +184,4 @@ else
     kill "$LOGS_PID" 2>/dev/null || true
 fi
 
-next_step "make airgap-smoke"
+next_step "sh scripts/tools/run-task.sh airgap:smoke"

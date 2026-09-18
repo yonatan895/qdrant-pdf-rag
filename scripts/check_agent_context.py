@@ -14,11 +14,12 @@ CHAIN_BUDGET = 24576
 REQUIRED = (
     "AGENTS.md", "docs/agent-workflow.md", ".github/ISSUE_TEMPLATE/agent-task.md",
     ".github/pull_request_template.md", "scripts/check_agent_context.py",
-    "scripts/agent_doctor.py", "Makefile",
+    "scripts/agent_doctor.py",
     "Taskfile.yml", "taskfiles/quality.yml", "taskfiles/dev.yml",
     "taskfiles/artifacts.yml", "taskfiles/eval.yml", "taskfiles/local.yml",
     "taskfiles/airgap.yml",
     "scripts/tools/install-task.sh", "scripts/tools/task-pin.txt",
+    "scripts/tools/run-task.sh", "scripts/tools/task-artifact.sh",
     "docs/task-runner.md",
 )
 LINK = re.compile(r"\[([^\]\n]+)\]\(([^()\s]+)\)")

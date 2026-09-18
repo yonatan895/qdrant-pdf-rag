@@ -2,7 +2,7 @@
 # AIR-GAP SIDE (issue #15): pre-flight validation of environment, tools,
 # storage class, registry connectivity, and cluster security context.
 #
-#   make airgap-validate
+#   sh scripts/tools/run-task.sh airgap:validate
 #
 # Safe, read-only pre-flight inspection before modifying any cluster state.
 
@@ -121,7 +121,7 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "==> [dryrun] Cluster and registry live probes skipped"
     echo ""
     echo "SUCCESS: Pre-flight validation passed (dry-run mode)."
-    next_step "make airgap-load"
+    next_step "sh scripts/tools/run-task.sh airgap:load"
     exit 0
 fi
 
@@ -143,7 +143,7 @@ if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
             die "Secret '$GATEWAY_API_KEY_SECRET' not found in namespace '$NAMESPACE' — create it before deploying (see airgap.env.example)"
         echo "    Gateway key Secret '$GATEWAY_API_KEY_SECRET' verified in namespace '$NAMESPACE'"
     else
-        echo "    Notice: namespace '$NAMESPACE' does not exist yet — create Secret '$GATEWAY_API_KEY_SECRET' there before 'make airgap-deploy'"
+        echo "    Notice: namespace '$NAMESPACE' does not exist yet — create Secret '$GATEWAY_API_KEY_SECRET' there before 'sh scripts/tools/run-task.sh airgap:deploy'"
     fi
 fi
 
@@ -166,4 +166,4 @@ fi
 
 echo ""
 echo "SUCCESS: Pre-flight validation passed cleanly."
-next_step "make airgap-load"
+next_step "sh scripts/tools/run-task.sh airgap:load"

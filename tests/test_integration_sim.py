@@ -1,4 +1,4 @@
-"""End-to-end simulation tier (marker: ``integration``, run via ``make sim``).
+"""End-to-end simulation tier (marker: ``integration``, run via ``sh scripts/tools/run-task.sh qa:sim``).
 
 Real PDFs -> real ingest into a real Qdrant server (docker, the images.txt
 pin) -> agent endpoints over the real app. The model is the only stand-in:
@@ -38,7 +38,7 @@ MOCK_SPEC = importlib.util.spec_from_file_location(
 
 @pytest.fixture(scope="session")
 def qdrant_url():
-    """QDRANT_SIM_URL wins (a running server, e.g. `make sim-qdrant`);
+    """QDRANT_SIM_URL wins (a running server, e.g. `sh scripts/tools/run-task.sh local:qdrant:up`);
     otherwise run the pinned image on an ephemeral loopback port. Lifecycle
     lives in scripts/qdrant_sim.py (shared with the benchmark harness)."""
     from scripts.qdrant_sim import QdrantSimError, start_simulator
@@ -128,7 +128,7 @@ def corpus(tmp_path_factory) -> Path:
 
 
 def _bm25_cache_dir() -> str | None:
-    """A fastembed cache containing Qdrant/bm25 (make bm25-weights layout)."""
+    """A fastembed cache containing Qdrant/bm25 (sh scripts/tools/run-task.sh artifacts:bm25 layout)."""
     env = os.environ.get("SIM_BM25_CACHE_DIR")
     candidates = ([Path(env)] if env else []) + [REPO_ROOT / "bundles" / "bm25-weights"]
     for candidate in candidates:
@@ -870,7 +870,7 @@ def test_vllm_shaped_embed_variant(qdrant_url, mock_url, corpus, tmp_path, monke
     sparse via local fastembed BM25 (weights must already be cached)."""
     cache = _bm25_cache_dir()
     if not cache:
-        pytest.skip("fastembed BM25 weights not cached; run `make bm25-weights` first")
+        pytest.skip("fastembed BM25 weights not cached; run `sh scripts/tools/run-task.sh artifacts:bm25` first")
 
     records = _ingest(
         monkeypatch,

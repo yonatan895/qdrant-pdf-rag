@@ -529,7 +529,7 @@ def check_baseline(report: dict, baseline: dict | None) -> list[str]:
 def update_baseline(report: dict, baseline_path: Path) -> None:
     payload: dict = {
         "_meta": {
-            "note": "Re-baseline via `make eval-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/eval_retrieval.py.",
+            "note": "Re-baseline via `sh scripts/tools/run-task.sh eval:baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/eval_retrieval.py.",
             "n": report.get("n", 0),
             "collection": report.get("collection", "local-corpus"),
             "embed_mode": report.get("embed_mode", "hash"),

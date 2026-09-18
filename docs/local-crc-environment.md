@@ -38,13 +38,14 @@ cluster stopped and its registry, volumes, corpus and backups intact.
 | Tools | Repository-pinned Linux tools; Windows CRC `oc` and checksum-verified Windows Helm 3.19.0 |
 
 Install Docker with WSL integration and NVIDIA GPU support. Verify `docker info`
-and `nvidia-smi` before downloading models. Install Git, Make, OpenSSL, a supported
+and `nvidia-smi` before downloading models. Install Git, OpenSSL, a supported
 Python 3.14 interpreter, and the repository's pinned deployment tools. On the
-connected clone, run `make venv` and `make bm25-weights`. Save model access tokens
+connected clone, explicitly install the runner with
+`sh scripts/tools/install-task.sh`, then run `sh scripts/tools/run-task.sh dev:setup PY=python3.14` and `sh scripts/tools/run-task.sh artifacts:bm25`. Save model access tokens
 outside Git; gated model access must already be approved by the model publisher.
 
 For ordinary development without CRC, the complete simulation entrypoint remains
-`RERANK_ENABLED=false make local-stack`, after starting both model backends.
+`RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack`, after starting both model backends.
 Do not run a second host agent/Qdrant/Jaeger stack alongside the CRC product pods.
 [The local stack owner](live-stack.md) describes its lifecycle.
 
@@ -139,13 +140,13 @@ then start embedding. Keep the foreground launcher sessions alive:
 
 ```sh
 # Terminal 1, from the connected development clone:
-make local-vllm \
+sh scripts/tools/run-task.sh local:llm \
   MODEL="$REASONING_VIEW" SERVED_NAME=google/gemma-4-E4B-it-qat-mobile-ct \
   PORT=8000 BUDGET_PROFILE=LOCAL_CRC_32GB \
   VLLM_IMAGE=vllm/vllm-openai@sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14
 
 # Terminal 2, only after reasoning is healthy:
-make local-vllm-embed \
+sh scripts/tools/run-task.sh local:embed \
   MODEL="$EMBED_VIEW" SERVED_NAME=Qwen/Qwen3-Embedding-0.6B \
   PORT=8001 BUDGET_PROFILE=LOCAL_CRC_32GB \
   VLLM_IMAGE=vllm/vllm-openai@sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14
@@ -188,7 +189,7 @@ PY_KEYS
 set -a
 . "$LOCAL_STATE/gateway-restart.env"
 set +a
-make local-gateway > "$LOCAL_STATE/gateway.log" 2>&1
+sh scripts/tools/run-task.sh local:gateway:up > "$LOCAL_STATE/gateway.log" 2>&1
 ```
 
 The default backend URLs route through Docker's `host.docker.internal` to 8000
@@ -646,8 +647,8 @@ Unset consumer-only values after preparing the Secret:
 ```sh
 unset LLM_BASE_URL EMBED_BASE_URL RERANK_BASE_URL CONTEXT_LLM_BASE_URL
 unset LLM_API_KEY EMBED_API_KEY RERANK_API_KEY CONTEXT_LLM_API_KEY
-make airgap-validate
-make airgap-load
+sh scripts/tools/run-task.sh airgap:validate
+sh scripts/tools/run-task.sh airgap:load
 ```
 
 Create the synthetic corpus with the **loaded candidate ingest image**:
@@ -750,7 +751,7 @@ Stop on any failed command. Confirm exit code zero, `restricted-v2` and the
 candidate image identity in the evidence, then run:
 
 ```sh
-make airgap-pipeline
+sh scripts/tools/run-task.sh airgap:pipeline
 oc -n "$CRC_NAMESPACE" exec deploy/rag-agent -c agent -- \
   python3 /app/scripts/probe_gateway.py --require-reasoning --stream
 oc -n "$CRC_NAMESPACE" exec -i deploy/rag-agent -c agent -- python3 - \
@@ -838,7 +839,7 @@ restart counts throughout the workload. Use Windows `Win32_OperatingSystem` and
 workload sample; historical swap usage alone is not evidence of sustained paging.
 
 For each of two cold starts, stop CRC, then the recorded model containers and
-`make local-gateway-stop GATEWAY_NAME=crc-litellm-gateway
+`sh scripts/tools/run-task.sh local:gateway:down GATEWAY_NAME=crc-litellm-gateway
 PG_NAME=crc-litellm-gateway-pg PG_NET=crc-litellm-gateway-net`. Retain the database
 volume, registry and TLS front. Restart reasoning, then embedding, restore the
 same private gateway keys, probe HTTPS, require the Windows startup headroom,
@@ -848,14 +849,14 @@ shutdown must be separated from unexpected restarts during measured workload.
 
 For the 30-minute run keep one interactive client and one ingest worker. Repeat
 the application contract command while generating a new uniquely named original
-synthetic PDF and running `make airgap-ingest` at intervals. Merely re-running an
+synthetic PDF and running `sh scripts/tools/run-task.sh airgap:ingest` at intervals. Merely re-running an
 unchanged inventory is not fresh ingest work. Record each request/job outcome,
 explicit non-inferred citations, long embedding inputs and completion markers.
 Afterward run the existing snapshot/PVC/trace helper and repeat the full pipeline:
 
 ```sh
 sh scripts/ci/check_lifecycle.sh "$CRC_NAMESPACE"
-make airgap-pipeline
+sh scripts/tools/run-task.sh airgap:pipeline
 ```
 
 Compare exact point IDs/counts and hashes of credentials before/after; do not

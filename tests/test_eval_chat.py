@@ -1,7 +1,7 @@
 """Unit tests for the multi-turn condensation A/B helpers (scripts/eval_chat.py).
 
 Hermetic: follow-up templates, per-arm entry construction, and pure
-aggregation only. The live tier runs via `make eval-chat` on the RC stack.
+aggregation only. The live tier runs via `sh scripts/tools/run-task.sh eval:chat` on the RC stack.
 """
 
 from __future__ import annotations

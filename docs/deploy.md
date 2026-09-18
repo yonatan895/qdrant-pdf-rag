@@ -24,12 +24,12 @@ no rollback:
 - The final banner differs: `OPERATIONAL & ACCEPTED` when ingestion ran,
   `READY (Awaiting Corpus Ingest)` when it did not.
 
-Standalone `make airgap-deploy` only waits for workload readiness. The agent
+Standalone `sh scripts/tools/run-task.sh airgap:deploy` only waits for workload readiness. The agent
 `/healthz` check covers Qdrant and embedding connectivity **and** the served
 generation's representation contract (HTTP 503 for any non-servable state);
 `/livez` is the process-only liveness probe. It does not prove that reasoning
 works. Run the gateway probe before ingesting when using the
-modular commands. `make airgap-smoke` checks retrieval and tracing; use the
+modular commands. `sh scripts/tools/run-task.sh airgap:smoke` checks retrieval and tracing; use the
 console/answer checks in the operator runbook to verify the user experience.
 
 Production transfer additionally requires [the manual CRC release gate](crc-release-verification.md)
@@ -62,10 +62,15 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - **Maintenance warning:** a new `.example` key that is not added to
   `OPERATOR_ENV_KEYS` silently regresses to file-wins. The list and the
   example must change together.
-- `make airgap-dryrun` deliberately does **not** include the file at the
-  make level, and its recipe carries fixed test parameters — so it can
-  never render an operator's `airgap.env`. Render custom values by invoking
-  the scripts (or pipeline) directly with explicit environment.
+- Task discovery never loads private env files. Air-gap tasks bridge only
+  caller-set operator values to `common.sh`; CLI assignments win over the
+  caller environment before that script applies its precedence rule.
+  `sh scripts/tools/run-task.sh airgap:dryrun` executes the pipeline with
+  fixed stand-ins for its declared dry-run inputs. Other operator keys still
+  follow `common.sh`; inspect that owner before supplying private config.
+  Task `--dry` only previews commands and is not rendering evidence. Render
+  custom values through `airgap:pipeline AIRGAP_DRYRUN=1` or the scripts with
+  explicit environment.
 
 ## 3. Render pipeline
 
@@ -128,13 +133,13 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
   401 (pinned by `tests/test_qdrant_auth.py` against the vendored image).
   Deploy and ingest preflight fail closed when the rendered manifests
   reference the wrong key (`check_agent_qdrant_key` /
-  `check_ingest_qdrant_key` in `common.sh`); `make airgap-validate`
+  `check_ingest_qdrant_key` in `common.sh`); `sh scripts/tools/run-task.sh airgap:validate`
   pins the same contract on the overlay sources. Key values never appear
   in manifests, logs, or test output — only Secret names and data keys.
 - Qdrant key rotation (chart-native): the chart generates both keys with
   `randAlphaNum 32` and reuses the existing Secret across `helm upgrade`
   while it exists. To rotate: `kubectl -n $NAMESPACE delete secret
-  <release>-apikey`, re-run the Helm release step (`make airgap-deploy`
+  <release>-apikey`, re-run the Helm release step (`sh scripts/tools/run-task.sh airgap:deploy`
   regenerates both keys on upgrade), then `rollout restart` the agent
   Deployment and re-run ingest consumers so every pod picks up the new
   Secret revision. Verify with a real search (smoke) plus a revoked-key
@@ -159,7 +164,7 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
   oauth-proxy digest recorded in `images.txt` (an unrecorded
   `sha256:PENDING` still fails closed) and the operator-created Secret
   `rag-agent-oauth-cookie`; it defaults `false` (ClusterIP only, console
-  reachable in-cluster). `make airgap-validate` checks none of these — they
+  reachable in-cluster). `sh scripts/tools/run-task.sh airgap:validate` checks none of these — they
   fail at deploy time.
 
 ## 4. Signing and provenance
@@ -206,7 +211,7 @@ checksums **after**.
   seeds `airgap.env` from the example only when absent — never overwriting
   operator edits. Artifact discovery searches `dist/` then the parent dir.
   The copy list includes `oauth-proxy-image.tar` when the bundle contains it;
-  no manual sidecar-image copy is needed before `airgap-load`.
+  no manual sidecar-image copy is needed before `airgap:load`.
 
 ## 5. Sizing and security
 
@@ -282,11 +287,11 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
   (non-root), agent serving uvicorn on 8080, ingest entrypointing
   `run_ingest`.
 - `qdrant-client` in the lockfile must track the 1.19 server and chart.
-  `make pull-chart` pulls latest unpinned — a drift risk if re-run without
+  `sh scripts/tools/run-task.sh artifacts:chart-fetch` pulls latest unpinned — a drift risk if re-run without
   a `--version` pin; the committed tgz is the contract.
 - New runtime deps require a connected-host wheelhouse refresh before an
   air-gap cut: a `requirements.lock.txt` bump (e.g. `jinja2` +
-  `python-multipart` for ADR-0004) means `make wheelhouse bm25-weights` plus
+  `python-multipart` for ADR-0004) means `sh scripts/tools/run-task.sh artifacts:wheelhouse artifacts:bm25` plus
   a connected image rebuild/push and a fresh pack. The air-gap images
   install only from the baked wheelhouse (`--no-index`).
 - The oauth-proxy digest is recorded in `images.txt`. Connected packaging
@@ -319,6 +324,18 @@ aligned across the two files; only e2e-scale jobs live in
   including root-only AGENTS changes, without model/image/deployment work.
   Vendored-only changes do not enter that context lane. Mixed changes retain
   existing product CI/E2E behavior. GitLab hygiene runs the same offline checker.
+- GitHub unit/context/review lanes explicitly install the pinned host Task into
+  `.tools/bin` and dispatch through `sh scripts/tools/run-task.sh`. Runner
+  contract lanes set `TASK_CONTRACTS_REQUIRE_RUNNER=1`; absence is a failure,
+  never a skipped pass. Offline GitLab runners mount the approved
+  `task_linux_amd64.tar.gz` at `CI_TASK_ARCHIVE`; the unit job verifies/installs
+  it with `install-task.sh --archive`, with no public download. Prepared Python
+  jobs retain their interpreter and do not run `dev:setup`.
+- Taskfile/modules participate in tooling review/path selection; air-gap and
+  artifact modules plus `scripts/tools/` select deployment checks. Existing
+  direct pipeline calls retain their explicit `--dry-run` / `--skip-load`
+  contract. Neither the runner nor path classification authorizes new network
+  access or cluster operations.
 - `ci.yml`: hygiene (refuse committed PDFs), pytest (integration
   deselected), sim (docker Qdrant, fail-closed on skips/zero-pass), gate-l1
   with PR delta comment. Least-privilege permissions, timeouts, and
@@ -488,7 +505,7 @@ per-leg credentials must match the deployment. Gateway aliases are mutable and
 cannot attest weights. Secrets reach pods via Secret refs; rotations require the
 runbook's restart/verification. Local `GATEWAY_ENV_FILE` is launcher-owned and
 provides gateway URLs/model IDs/keys plus a local simulation revision label.
-Explicit CLI/Make/env model or endpoint overrides must apply or fail; ambiguous
+Explicit CLI/Task/env model or endpoint overrides must apply or fail; ambiguous
 model discovery fails closed. No new production value is invented here.
 
 **Evidence:** `tests/test_airgap_validate_sh.py`, `test_airgap_deploy_sh.py`,

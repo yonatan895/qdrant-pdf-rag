@@ -1,5 +1,5 @@
 # FastEmbed BM25 weights (HF repo Qdrant/bm25): runtime-fetched by the CI sim
-# job and baked into images via `make bm25-weights`. Pinned by content:
+# job and baked into images via `sh scripts/tools/run-task.sh artifacts:bm25`. Pinned by content:
 # scripts/fetch_bm25_weights.py --verify-manifest fails closed when any file's
 # sha256 differs, or upstream adds/removes files. Re-record = dedicated PR.
 # revision 22b8d2af71a76161e18dd432d2cee0eefa66e412

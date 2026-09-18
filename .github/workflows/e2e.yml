@@ -5,7 +5,7 @@
 #
 # Image scheme (single source of truth, issue #8):
 #   ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<full-git-sha>
-# built via `docker tag` from the Makefile's local tags, pushed on
+# built via `docker tag` from the artifact task local tags, pushed on
 # main/dispatch, and applied via the kustomize `ghcr.io/OWNER` sed.
 #
 # Prereqs (README "Connected E2E"): GHCR packages public (anonymous pull from
@@ -65,21 +65,20 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install pinned Task runner (Makefile shim forwards to Task)
+      - name: Install pinned Task runner
         run: |
-          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
-          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
+          sh scripts/tools/install-task.sh
 
       - name: Build wheelhouse + BM25 weights + images (same Containerfiles as air-gap)
         run: |
           export PATH="/usr/local/bin:$PATH"
           PYBIN="$(command -v python3.14 || command -v python)"
           echo "Using python: $PYBIN"
-          # Explicit preparation with the same interpreter Make used for the
-          # order-only prerequisite (verification never installs).
-          task dev:setup PY="$PYBIN"
-          make wheelhouse bm25-weights PY="$PYBIN"
-          make build-images IMAGE_TAG="$GITHUB_SHA"
+          # Explicit preparation using the selected interpreter; verification
+          # never installs dependencies.
+          sh scripts/tools/run-task.sh dev:setup PY="$PYBIN"
+          sh scripts/tools/run-task.sh artifacts:wheelhouse artifacts:bm25 PY="$PYBIN"
+          sh scripts/tools/run-task.sh artifacts:images IMAGE_TAG="$GITHUB_SHA"
 
       - id: refs
         run: |
@@ -138,10 +137,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install pinned Task runner (Makefile shim forwards to Task)
+      - name: Install pinned Task runner
         run: |
-          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
-          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
+          sh scripts/tools/install-task.sh
 
       - name: Install skopeo
         run: |
@@ -190,7 +188,7 @@ jobs:
             export SNEAKERNET_SIGNING_KEY="$RUNNER_TEMP/signing.key"
             export SNEAKERNET_KEY_TRUSTED=true
           fi
-          make airgap-pack
+          sh scripts/tools/run-task.sh airgap:pack
           ls -la dist/
           cat dist/MANIFEST.txt
           cat dist/PACKING_RECORD.txt
@@ -286,9 +284,9 @@ jobs:
             -e 's|^VLLM_BASE_URL=.*|VLLM_BASE_URL=http://vllm:8000|' \
             -e 's|^CORPUS_PVC=.*|CORPUS_PVC=corpus|' \
             airgap.env
-          AIRGAP_DRYRUN=1 make airgap-validate
-          # Render the operator's standin values explicitly: `make
-          # airgap-dryrun` carries its own fixed test parameters by contract,
+          AIRGAP_DRYRUN=1 sh scripts/tools/run-task.sh airgap:validate
+          # Render the operator's standin values explicitly: `airgap:dryrun`
+          # carries its own fixed test parameters by contract,
           # so it cannot render this airgap.env — pass the same standins as
           # environment (explicit env wins over the file since #152).
           AIRGAP_DRYRUN=1 IMAGE_SHA="$SHA" \
@@ -305,7 +303,7 @@ jobs:
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml
           # Second PULL_SECRET branch: a wired secret reaches the manifests.
           sed -i 's|^PULL_SECRET=.*|PULL_SECRET=acceptance-pull|' airgap.env
-          AIRGAP_DRYRUN=1 make airgap-deploy
+          AIRGAP_DRYRUN=1 sh scripts/tools/run-task.sh airgap:deploy
           grep -q "name: acceptance-pull" dist/agent-rendered.yaml
 
   # --------------------------------------- kind full-live handoff rehearsal
@@ -530,7 +528,7 @@ jobs:
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
-          make airgap-load
+          sh scripts/tools/run-task.sh airgap:load
 
       - name: Create registry pull secret before the first node pull
         run: |
@@ -604,7 +602,7 @@ jobs:
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
-          make airgap-validate
+          sh scripts/tools/run-task.sh airgap:validate
 
       - name: Generate corpus PVC + demo PDFs (operator-supplied corpus step)
         run: |
@@ -806,11 +804,6 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/oc-unpack/kubectl" /usr/local/bin/kubectl
           /usr/local/bin/oc version --client=true
 
-      - name: Install pinned Task runner (Makefile shim forwards to Task)
-        run: |
-          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
-          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
-
       - name: Log in to lab OpenShift
         run: /usr/local/bin/oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_TOKEN" --insecure-skip-tls-verify=true
 
@@ -948,10 +941,9 @@ jobs:
           sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
           /usr/local/bin/kubectl version --client=true
 
-      - name: Install pinned Task runner (Makefile shim forwards to Task)
+      - name: Install pinned Task runner
         run: |
-          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
-          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
+          sh scripts/tools/install-task.sh
 
       - name: airgap-deploy dry-run (prod render, fail-closed placeholders, knobs)
         env:
@@ -967,7 +959,7 @@ jobs:
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
           export PATH="/usr/local/bin:$PATH"
-          make airgap-deploy
+          sh scripts/tools/run-task.sh airgap:deploy
           test -f dist/agent-rendered.yaml
           grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-agent:${SHA}" dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml
@@ -994,7 +986,7 @@ jobs:
           export PATH="/usr/local/bin:$PATH"
           printf 'resources:\n  requests: {cpu: "100m", memory: 256Mi}\n' > "$RUNNER_TEMP/vals.yaml"
           export QDRANT_EXTRA_VALUES="$RUNNER_TEMP/vals.yaml"
-          out="$(make airgap-deploy)"
+          out="$(sh scripts/tools/run-task.sh airgap:deploy)"
           echo "$out" | grep -q "persistence.size=1Gi"
           echo "$out" | grep -q "imagePullSecrets\[0\].name=ci-pull"
           grep -q "name: ci-pull" dist/agent-rendered.yaml
@@ -1013,7 +1005,7 @@ jobs:
           QDRANT_EXTRA_VALUES: /nonexistent/vals.yaml
         run: |
           export PATH="/usr/local/bin:$PATH"
-          if make airgap-deploy 2>err.log; then
+          if sh scripts/tools/run-task.sh airgap:deploy 2>err.log; then
             echo "::error::deploy.sh did not fail on a missing QDRANT_EXTRA_VALUES file"
             exit 1
           fi
@@ -1034,7 +1026,7 @@ jobs:
           QDRANT_STORAGE_SIZE: 1Gi
         run: |
           export PATH="/usr/local/bin:$PATH"
-          make airgap-deploy
+          sh scripts/tools/run-task.sh airgap:deploy
           test -f dist/jaeger-rendered.yaml
           grep -q "ghcr.io/dryrun-standin/jaegertracing/jaeger:v2.20.0" dist/jaeger-rendered.yaml
           grep -q "storageClassName: standard" dist/jaeger-rendered.yaml
@@ -1062,7 +1054,7 @@ jobs:
           # this step uses the off sentinel — metrics-on does not depend on
           # tracing and must not drag Jaeger along.
           rm -f dist/jaeger-rendered.yaml
-          make airgap-deploy
+          sh scripts/tools/run-task.sh airgap:deploy
           test -f dist/servicemonitor-rendered.yaml
           grep -q "kind: ServiceMonitor" dist/servicemonitor-rendered.yaml
           grep -q "path: /metrics" dist/servicemonitor-rendered.yaml
@@ -1090,13 +1082,13 @@ jobs:
           {"spec":{"template":{"spec":{"containers":[{"name":"ingest","resources":{"requests":{"cpu":"250m","memory":"512Mi"},"limits":{"cpu":"1","memory":"1Gi"}}}]}}}}
           EOF
           export INGEST_EXTRA_PATCH="$RUNNER_TEMP/ingest-patch.json"
-          make airgap-ingest
+          sh scripts/tools/run-task.sh airgap:ingest
           test -f dist/ingest-rendered.yaml
           grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-ingest:${SHA}" dist/ingest-rendered.yaml
           grep -q "cpu: 250m" dist/ingest-rendered.yaml   # INGEST_EXTRA_PATCH applied
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml
 
-      - name: make airgap-dryrun (full pipeline dry-run incl. validate/load/smoke)
+      - name: Task airgap:dryrun (full pipeline dry-run incl. validate/load/smoke)
         env:
           IMAGE_SHA: ${{ env.SHA }}
           AIRGAP_DRYRUN: "1"
@@ -1110,7 +1102,7 @@ jobs:
           CORPUS_PVC: corpus
         run: |
           export PATH="/usr/local/bin:$PATH"
-          make airgap-dryrun
+          sh scripts/tools/run-task.sh airgap:dryrun
           test -f dist/agent-rendered.yaml
           test -f dist/ingest-rendered.yaml
 
@@ -1311,7 +1303,7 @@ jobs:
           INTERNAL_REGISTRY="ghcr.io/${OWNER_LC}"
           echo "${GITHUB_TOKEN}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
           export INTERNAL_REGISTRY
-          make airgap-load
+          sh scripts/tools/run-task.sh airgap:load
 
       - name: airgap-deploy (PROD overlays, helm-knobbed sizes, fail-closed checks)
         env:
@@ -1329,7 +1321,7 @@ jobs:
           export INTERNAL_REGISTRY="ghcr.io/${OWNER_LC}"
           export NAMESPACE="$NS"
           export STORAGE_CLASS="$SC"
-          make airgap-deploy
+          sh scripts/tools/run-task.sh airgap:deploy
 
       - name: Generate corpus PVC + demo PDFs (operator-supplied corpus step)
         env:
@@ -1388,13 +1380,13 @@ jobs:
           export INTERNAL_REGISTRY="ghcr.io/${OWNER_LC}"
           export NAMESPACE="$NS"
           export STORAGE_CLASS="$SC"
-          make airgap-ingest
+          sh scripts/tools/run-task.sh airgap:ingest
 
       - name: airgap-smoke (operator smoke + expected-substring checks)
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd "$BUNDLE_CHECKOUT"
-          NAMESPACE="$NS" QUERY="IEA500I operator message" make airgap-smoke
+          NAMESPACE="$NS" QUERY="IEA500I operator message" sh scripts/tools/run-task.sh airgap:smoke
           /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
             python /app/scripts/smoke_search.py \
               --url http://localhost:8080 --query "IEA500I operator message" --expect "IEA500I"

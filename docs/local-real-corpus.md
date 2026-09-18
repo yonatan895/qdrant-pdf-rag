@@ -75,9 +75,9 @@ against this deployment. Check Windows disk headroom for extracted data as well
 as host/WSL memory; a PVC capacity is not a reservation of physical disk space.
 
 ```sh
-make airgap-validate
-make airgap-load
-make airgap-deploy
+sh scripts/tools/run-task.sh airgap:validate
+sh scripts/tools/run-task.sh airgap:load
+sh scripts/tools/run-task.sh airgap:deploy
 kubectl -n "$KIND_NAMESPACE" exec qdrant-0 -- \
   test -r /qdrant/snapshots/restore/real_manuals.snapshot
 kubectl -n "$KIND_NAMESPACE" exec deploy/rag-agent -- \
@@ -163,7 +163,7 @@ before changing routing. Never print payload text or raw vectors to shared logs.
 ## 3. Open the console and retain this deployment
 
 ```sh
-make airgap-smoke
+sh scripts/tools/run-task.sh airgap:smoke
 kubectl -n "$KIND_NAMESPACE" port-forward --address 127.0.0.1 svc/rag-agent 8080:8080
 ```
 

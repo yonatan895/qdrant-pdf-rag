@@ -3,7 +3,7 @@ verdict logic (judge), deterministic stratified sampling (select_sample),
 and aggregation (summarize).
 
 Hermetic: no Qdrant, no vLLM, no TestClient — the pure helpers are imported
-directly. The live tier runs via `make eval-answers` (like
+directly. The live tier runs via `sh scripts/tools/run-task.sh eval:answers` (like
 scripts/test_local_e2e_vllm.py, never part of plain pytest)."""
 
 from __future__ import annotations

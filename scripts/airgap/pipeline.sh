@@ -9,7 +9,7 @@
 #   5. Verify Acceptance Smoke Test   (scripts/airgap/smoke.sh)
 #
 # Usage:
-#   make airgap-pipeline
+#   sh scripts/tools/run-task.sh airgap:pipeline
 #   sh scripts/airgap/pipeline.sh [--skip-load] [--skip-ingest] [--dry-run]
 
 . "$(dirname -- "$0")/common.sh"
@@ -69,7 +69,7 @@ elif [ -n "${CORPUS_PVC:-}" ]; then
 else
     echo ""
     echo ">>> STAGE 4/5: CORPUS INGESTION (SKIPPED — CORPUS_PVC not set)"
-    echo "    To ingest later: make airgap-ingest CORPUS_PVC=<pvc>"
+    echo "    To ingest later: sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc>"
 fi
 
 echo ""

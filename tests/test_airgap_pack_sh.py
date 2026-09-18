@@ -26,6 +26,13 @@ from tests.helpers_airgap import (
     skopeo_stub,
     symlink_tools,
 )
+from tests.helpers_task_artifact import (
+    TASK_ASSET,
+    TASK_BINARY_SHA256,
+    TASK_SHA256,
+    copy_task_tools,
+    task_archive,
+)
 
 # Stub skopeo: materialize every docker-archive:DEST as a marker file;
 # answer inspect with a canned digest (pack binds it into MANIFEST, so the
@@ -59,12 +66,17 @@ TOOLS = (
     "ls",
     "openssl",
     "python3",
+    "mktemp",
+    "uname",
+    "gzip",
+    "cmp",
 )
 
 
 @pytest.fixture
 def pack_tree(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "pack.sh", "bootstrap.sh"])
+    copy_task_tools(tmp_path)
     shutil.copy(REPO / "images.txt", tmp_path / "images.txt")
     # Four-image tests exercise the pending state explicitly, even after a
     # production pin is recorded. The recorded-pin test covers all five images.
@@ -78,6 +90,8 @@ def pack_tree(tmp_path):
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     (tmp_path / "README.md").write_text("Hello")
+    (tmp_path / "Taskfile.yml").write_text("version: '3'\ntasks:\n  probe:\n    cmds: ['printf packed-task-ok']\n")
+    (tmp_path / "airgap.env.example").write_text("INTERNAL_REGISTRY=fixture\n")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
     head = subprocess.run(
@@ -103,6 +117,7 @@ def _run_pack(tree, *extra_env):
         "SKOPEO_LOG": str(tmp_path / "skopeo-args.log"),
         "AIRGAP_APP_REGISTRY": "ghcr.io/pack-test",
         "SNEAKERNET_SIGNING_KEY": str(key),
+        "AIRGAP_TASK_ARCHIVE": str(task_archive()),
     }
     for k, v in extra_env:
         env[k] = v
@@ -162,6 +177,7 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     for name in (
         "bootstrap.sh",
         "repo.bundle",
+        TASK_ASSET, "task-pin.txt", "task-LICENSE",
         "qdrant-image.tar",
         "jaeger-image.tar",
         f"app-ingest-{head}.tar",
@@ -177,6 +193,18 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     ):
         assert (dist / name).is_file(), name
 
+    # Exercise the exact archive just produced, not a reconstructed bootstrap fixture.
+    extract = tmp_path / "fresh offline extraction"
+    extract.mkdir()
+    with tarfile.open(dist / f"qdrant-pdf-rag-{head}.tar") as archive:
+        archive.extractall(extract, filter="data")
+    boot = subprocess.run(["sh", "bootstrap.sh"], cwd=extract, env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, check=False)
+    assert boot.returncode == 0, boot.stdout + boot.stderr
+    workspace = extract / "qdrant-pdf-rag"
+    probe = subprocess.run([str(workspace / ".tools/bin/task"), "probe"], cwd=workspace, env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, check=False)
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout == "packed-task-ok"
+
     # MANIFEST pins this SHA, the images that were "pulled", and their digests.
     manifest = (dist / "MANIFEST.txt").read_text()
     assert f"sha: {head}" in manifest
@@ -189,6 +217,8 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     # every inspect identically, while the fixture images.txt pins differ.
     assert f"qdrant_digest: {STUB_DIGEST}" in manifest
     assert "signed: ephemeral" in manifest
+    assert f"task_sha256: {TASK_SHA256}" in manifest
+    assert f"task_binary_sha256: {TASK_BINARY_SHA256}" in manifest
     log = skopeo_log.read_text()
     assert log.splitlines().count("copy") == 4
     assert log.count("inspect") == 4
@@ -202,6 +232,17 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert sbom["image_sha"] == head
     assert {img["name"] for img in sbom["images"]} == {"qdrant", "jaeger", "app-ingest", "app-agent"}
     assert sbom["images"][2]["digest"] == STUB_DIGEST
+    assert sbom["host_tools"][0]["sha256"] == TASK_SHA256
+    assert sbom["host_tools"][0]["license"] == "MIT"
+    assert sbom["host_tools"][0]["license_file"] == "task-LICENSE"
+    assert "Task host tool:" in (dist / "PACKING_RECORD.txt").read_text()
+    with tarfile.open(dist / f"qdrant-pdf-rag-{head}.tar") as archive:
+        assert set(archive.getnames()) == {
+            "bootstrap.sh", "repo.bundle", TASK_ASSET, "task-pin.txt", "task-LICENSE",
+            "qdrant-image.tar", "jaeger-image.tar", f"app-ingest-{head}.tar", f"app-agent-{head}.tar",
+            "MANIFEST.txt", "PACKING_RECORD.txt", "sbom.json", "sneakernet-signing.pub",
+            "SHA256SUMS", "SHA256SUMS.sig",
+        }
 
 
 def test_pack_skips_pending_oauth_proxy_pin(pack_tree):
@@ -299,3 +340,15 @@ fi
         text=True,
     ).stdout.strip()
     assert logged == head
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_pack_rejects_bad_task_before_image_calls(pack_tree, damage):
+    tree, log, _, _ = pack_tree
+    archive = tree / "unapproved.tar.gz"
+    if damage == "corrupt":
+        archive.write_bytes(b"not Task")
+    result, _ = _run_pack(pack_tree, ("AIRGAP_TASK_ARCHIVE", str(archive)))
+    assert result.returncode != 0
+    assert "Task archive" in result.stderr
+    assert not log.exists()

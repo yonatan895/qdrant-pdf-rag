@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -15,7 +17,9 @@ from pathlib import Path
 try:
     from scripts.qdrant_pin import qdrant_image_pin
 except ModuleNotFoundError:  # direct `python scripts/agent_doctor.py` entry
-    from qdrant_pin import qdrant_image_pin
+    from qdrant_pin import qdrant_image_pin as _local_qdrant_image_pin
+
+    qdrant_image_pin = _local_qdrant_image_pin
 
 PROBE_TIMEOUT_S = 5
 # Executes only stdlib/metadata reads, never imports product packages or loads .env.
@@ -39,44 +43,30 @@ class Finding:
     detail: str
 
 
-def task_pin_version(root: Path) -> str | None:
-    """Pinned go-task version (without leading v) or None when unreadable."""
-    try:
-        for line in (root / "scripts/tools/task-pin.txt").read_text(encoding="utf-8").splitlines():
-            if line.startswith("version:"):
-                version = line.split(":", 1)[1].strip().lstrip("v")
-                return version or None
-    except (OSError, UnicodeError):
-        return None
-    return None
-
-
-def task_executable(root: Path) -> Path | None:
-    """Workspace-local install first, then PATH; None when absent."""
+def inspect_task(root: Path) -> Finding:
+    """Verify the exact workspace executable without executing a PATH program."""
     local = root / ".tools/bin/task"
     try:
-        if local.is_file():
-            return local
-    except OSError:
-        pass
-    found = shutil.which("task")
-    return Path(found) if found else None
-
-
-def task_version_string(exe: Path) -> str | None:
-    """Bounded `task --version` read; None when unavailable or unreadable."""
+        pin = dict(line.split(": ", 1) for line in
+                   (root / "scripts/tools/task-pin.txt").read_text(encoding="utf-8").splitlines()
+                   if line and not line.startswith("#") and ": " in line)
+        version, expected = pin["version"], pin["binary-sha256"]
+        if not re.fullmatch(r"[a-f0-9]{64}", expected):
+            raise ValueError("invalid pin")
+    except (OSError, UnicodeError, KeyError, ValueError):
+        return Finding("unable to verify", "Task runner", "Task pin record unreadable or incomplete")
+    if not local.is_file() or not os.access(local, os.X_OK):
+        return Finding("missing prerequisite", "Task runner",
+                       "pinned .tools/bin/task absent; use the connected installer or signed offline bootstrap")
     try:
-        result = subprocess.run(
-            [str(exe), "--version"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=PROBE_TIMEOUT_S, check=False, text=True,
-        )
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None
-    if result.returncode != 0:
-        return None
-    text = (result.stdout or "").strip()
-    return text or None
+        with local.open("rb") as stream:
+            observed = hashlib.file_digest(stream, "sha256").hexdigest()
+    except OSError:
+        return Finding("unable to verify", "Task runner", "Task executable unreadable")
+    if observed != expected:
+        return Finding("missing prerequisite", "Task runner",
+                       "Task binary checksum mismatch; reinstall from the pinned archive")
+    return Finding("ready", "Task runner", f"pinned go-task {version} executable checksum verified")
 
 
 def inspect_runtime(python: Path, packages: list[str]) -> dict | None:
@@ -138,7 +128,7 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False) -> l
         add("unable to verify", "tracked configuration", "missing, unreadable or unsupported pin/config input")
         return results
 
-    tools = ["git", "make"]
+    tools = ["git"]
     if profile == "sim":
         tools += ["docker"]
     if profile == "deploy":
@@ -148,26 +138,7 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False) -> l
     for name in tools:
         add("ready" if shutil.which(name) else "missing prerequisite", name, "CLI presence only")
 
-    # Task runner identity (#402 increment A): the pinned go-task binary must
-    # be the one that runs, never an unrelated `task` or an unverified copy.
-    # Presence-only `make`-style check is insufficient; verify the version
-    # against the pin record with a bounded read. Never installs.
-    task_exe = task_executable(root)
-    pinned = task_pin_version(root)
-    if task_exe is None:
-        add("missing prerequisite", "Task runner",
-            "pinned task binary absent; run: sh scripts/tools/install-task.sh (never auto-installed)")
-    elif pinned is None:
-        add("unable to verify", "Task runner", "task pin record unreadable; inspect scripts/tools/task-pin.txt")
-    else:
-        observed = task_version_string(task_exe)
-        if observed is None:
-            add("unable to verify", "Task runner", "bounded task --version probe unavailable")
-        elif observed == pinned:
-            add("ready", "Task runner", f"pinned go-task v{pinned} identity verified")
-        else:
-            add("missing prerequisite", "Task runner",
-                f"task version mismatch: want v{pinned}; reinstall via scripts/tools/install-task.sh")
+    results.append(inspect_task(root))
 
     interpreters = [("checker runtime", Path(sys.executable))]
     development = root/".venv/bin/python"

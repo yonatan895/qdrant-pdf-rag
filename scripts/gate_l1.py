@@ -209,7 +209,7 @@ def run_gate(
         if not baseline_path.exists():
             msg = (
                 f"FAIL: baseline {baseline_path} missing; the gate cannot be applied — "
-                "re-record it via `make eval-baseline` in a dedicated PR (issue #267)"
+                "re-record it via `sh scripts/tools/run-task.sh eval:baseline` in a dedicated PR (issue #267)"
             )
             print(msg, file=sys.stderr)
             return 2, f"## Retrieval Evaluation Gate (L1)\n\n**ERROR:** {msg}\n"

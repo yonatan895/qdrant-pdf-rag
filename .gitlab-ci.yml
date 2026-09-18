@@ -16,7 +16,11 @@
 #                                   3.14 GIL, no 3.14t), e.g.
 #                                   "${CI_REGISTRY}/ci/python:3.14". The default
 #                                   below is a placeholder for that mirror; the
-#                                   image must contain git, python3, pip.
+#                                   image must contain git, python3, pip, tar,
+#                                   sha256sum and install.
+#   CI_TASK_ARCHIVE (required for test) path to the approved pinned linux-amd64
+#                                   Task release archive on the runner, transferred
+#                                   offline (see scripts/tools/task-pin.txt).
 #   CI_RUNNER_TAG   (optional)      runner tag, default "airgap"
 #   PIP_FIND_LINKS  (recommended)   path to a wheelhouse directory on the runner
 #                                   (e.g. /wheelhouse) built from requirements.lock.txt
@@ -98,7 +102,11 @@ hygiene:
 test:
   extends: .py-base
   stage: test
+  variables:
+    TASK_CONTRACTS_REQUIRE_RUNNER: "1"
   script:
+    - ': "${CI_TASK_ARCHIVE:?mount the approved pinned Task archive on the runner}"'
+    - sh scripts/tools/install-task.sh --archive "$CI_TASK_ARCHIVE"
     - pytest -q
   # Tests generate synthetic PDFs at runtime; no artifacts are cached or
   # uploaded anywhere (deliberately no artifacts: section).

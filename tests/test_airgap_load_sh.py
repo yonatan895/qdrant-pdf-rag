@@ -21,6 +21,7 @@ from tests.helpers_airgap import (
     skopeo_stub,
     write_stub,
 )
+from tests.helpers_task_artifact import copy_task_tools, task_manifest, task_members
 
 IMAGE_SHA = "b" * 40
 
@@ -36,6 +37,7 @@ def _sha256(data: bytes) -> str:
 def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False):
     artdir.mkdir(parents=True, exist_ok=True)
     files = {
+        **task_members(),
         "repo.bundle": b"bundle-content\n",
         "qdrant-image.tar": b"qdrant-tar\n",
         "jaeger-image.tar": b"jaeger-tar\n",
@@ -47,6 +49,7 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False):
             f"jaeger_digest: {STUB_DIGEST}\n"
             f"ingest_digest: {STUB_DIGEST}\n"
             f"agent_digest: {STUB_DIGEST}\n"
+            + task_manifest()
         ).encode(),
         "sbom.json": b'{"images": []}\n',
     }
@@ -71,6 +74,7 @@ def _sign_artifacts(artdir: Path) -> None:
 @pytest.fixture
 def load_tree(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "load.sh"])
+    copy_task_tools(tmp_path)
     skopeo_log = tmp_path / "skopeo-args.log"
     write_stub(tmp_path / "bin" / "skopeo", STUB_SKOPEO)
     return tmp_path, skopeo_log
@@ -129,6 +133,7 @@ def test_load_success_with_parent_dir(load_tree):
     _make_artifacts(tmp_path, sha=IMAGE_SHA)
     subdir = tmp_path / "clone-dir"
     subdir.mkdir()
+    copy_task_tools(subdir)
     (subdir / "scripts" / "airgap").mkdir(parents=True)
     for f in ("common.sh", "load.sh"):
         shutil.copy(REPO / "scripts" / "airgap" / f, subdir / "scripts" / "airgap" / f)
@@ -231,3 +236,30 @@ def test_load_missing_internal_registry_fails_closed(load_tree):
     r = _run_load(load_tree, ("INTERNAL_REGISTRY", ""))
     assert r.returncode == 1
     assert "required variables unset: INTERNAL_REGISTRY" in r.stderr
+
+
+def test_load_signed_missing_task_member_refuses_before_push(load_tree):
+    root, log = load_tree
+    artdir = root / "dist"
+    _make_artifacts(artdir)
+    sums = artdir / "SHA256SUMS"
+    sums.write_text("".join(line for line in sums.read_text().splitlines(keepends=True) if "task_linux_amd64.tar.gz" not in line))
+    (artdir / "task_linux_amd64.tar.gz").unlink()
+    sign_sums(artdir)
+    result = _run_load(load_tree)
+    assert result.returncode != 0
+    assert "Task member missing" in result.stderr
+    assert not log.exists()
+
+
+def test_load_ignores_retained_optional_image_outside_current_signed_inventory(load_tree):
+    root, log = load_tree
+    artdir = root / "dist"
+    _make_artifacts(artdir)
+    retained = artdir / "oauth-proxy-image.tar"
+    retained.write_bytes(b"retained from prior approved bundle")
+    result = _run_load(load_tree)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Loaded 4 images" in result.stdout
+    assert "oauth-proxy" not in log.read_text()
+    assert retained.read_bytes() == b"retained from prior approved bundle"

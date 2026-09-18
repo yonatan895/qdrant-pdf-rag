@@ -1,9 +1,8 @@
-# Repository task entry — issue #402 increment A.
+# Repository command entry — issue #402.
 #
-# Authoritative entry for discovery, doctor, context and quality only.
-# `Makefile` remains authoritative for everything else until later increments
-# port artifacts, evaluation, local simulation and air-gap wrappers (see
-# docs/task-runner.md for the inventory, policy and shim exit milestone).
+# All command families delegate to their existing script/module owners.
+# CI and offline callers use scripts/tools/run-task.sh with the verified local
+# executable; docs/task-runner.md owns provisioning and the Make exit gate.
 #
 # Safety rules enforced here, not just documented:
 # - No global dynamic `sh:` variables, no `dotenv:`, no remote/optional

@@ -20,7 +20,7 @@ class ContextCheckTests(TestCase):
         self.workflow.write_text('''<!-- context-map:start -->
 | Contract | Canonical owner | Boundaries | Evidence |
 |---|---|---|---|
-| example | [Owner](owner.md#contract) | [Source](../Makefile) | [Tests](owner.md) |
+| example | [Owner](owner.md#contract) | [Source](../Taskfile.yml) | [Tests](owner.md) |
 <!-- context-map:end -->
 <!-- instruction-chains:start -->
 | Invocation directory | Chain |

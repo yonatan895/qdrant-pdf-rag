@@ -2,7 +2,7 @@
 # CONNECTED SIDE (issue #15): pack a green public-main SHA into one sneakernet
 # tarball: git bundle + 3 image archives + MANIFEST + member checksums.
 #
-#   make airgap-pack              # or: sh scripts/airgap/pack.sh
+#   sh scripts/tools/run-task.sh airgap:pack              # or: sh scripts/airgap/pack.sh
 #
 # IMAGE_SHA defaults to the full SHA of the checked-out commit and MUST equal
 # the GHCR tag that e2e.yml pushed for that SHA. Fails closed if any image
@@ -19,7 +19,7 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required to write sbom.jso
 [ -n "${SNEAKERNET_SIGNING_KEY:-}" ] || die "SNEAKERNET_SIGNING_KEY is unset (path to the PEM signing key; CI uses the secret, local rehearsal generates a throwaway pair)"
 [ -f "$SNEAKERNET_SIGNING_KEY" ] || die "SNEAKERNET_SIGNING_KEY file not found: $SNEAKERNET_SIGNING_KEY"
 openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -noout >/dev/null 2>&1 || die "SNEAKERNET_SIGNING_KEY is not a valid PEM private key (store real newlines, not backslash-escaped ones)"
-[ -d .git ] || die "run from a git clone of the repository"
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "run from a git clone of the repository"
 [ -n "$IMAGE_SHA" ] || die "IMAGE_SHA could not be resolved from git"
 [ "$IMAGE_SHA" = "$(git rev-parse HEAD)" ] || \
     die "IMAGE_SHA=$IMAGE_SHA is not the checked-out commit ($(git rev-parse HEAD)). Pack at the SHA whose GHCR tags exist; the bundle is always of HEAD. Usual cause: a stale IMAGE_SHA in ./airgap.env — explicit env beats the file, or update the file."
@@ -62,6 +62,24 @@ fi
 DIST="$REPO_ROOT/dist"
 OUT_TARBALL="$DIST/qdrant-pdf-rag-${IMAGE_SHA}.tar"
 mkdir -p "$DIST"
+echo "==> Pinned Task host tool (archive, pin and license)"
+. "$REPO_ROOT/scripts/tools/task-artifact.sh"
+task_read_pin "$REPO_ROOT/scripts/tools/task-pin.txt"
+task_check_platform
+TASK_SOURCE=${AIRGAP_TASK_ARCHIVE:-$REPO_ROOT/.tools/cache/$TASK_ASSET}
+TASK_TMP=$(mktemp -d "$DIST/.task-pack.XXXXXX")
+trap 'rm -rf "$TASK_TMP"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ ! -f "$TASK_SOURCE" ] && [ -z "${AIRGAP_TASK_ARCHIVE:-}" ]; then
+    command -v curl >/dev/null 2>&1 || die "curl or a provisioned AIRGAP_TASK_ARCHIVE is required on the connected pack host"
+    TASK_SOURCE="$TASK_TMP/$TASK_ASSET"
+    curl -fsSL -o "$TASK_SOURCE" "$TASK_ORIGIN"
+fi
+task_extract_verified "$TASK_SOURCE" "$TASK_TMP"
+[ "$TASK_SOURCE" -ef "$DIST/$TASK_ASSET" ] || cp "$TASK_SOURCE" "$DIST/$TASK_ASSET"
+cp "$TASK_PIN" "$DIST/task-pin.txt"
+cp "$TASK_TMP/LICENSE" "$DIST/task-LICENSE"
 rm -f "$DIST"/repo.bundle "$DIST"/qdrant-image.tar "$DIST"/jaeger-image.tar "$DIST"/app-*.tar \
       "$DIST"/MANIFEST.txt "$DIST"/SHA256SUMS "$OUT_TARBALL" "$OUT_TARBALL.sha256"
 # shellcheck disable=SC2086
@@ -117,6 +135,12 @@ CHART_VERSION=$(basename charts/qdrant-*.tgz .tgz)
 CHART_SHA256=$(sha256sum charts/qdrant-*.tgz | awk '{print $1}')
 {
     echo "sha: $IMAGE_SHA"
+    echo "task_version: $TASK_VERSION"
+    echo "task_platform: linux-amd64"
+    echo "task_asset: $TASK_ASSET"
+    echo "task_sha256: $TASK_SHA256"
+    echo "task_binary_sha256: $TASK_BINARY_SHA256"
+    echo "task_license_sha256: $TASK_LICENSE_SHA256"
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "qdrant: $QDRANT_REF"
     echo "qdrant_digest: $QDRANT_DIGEST"
@@ -150,6 +174,7 @@ SBOM_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 export SBOM_DATE IMAGE_SHA QDRANT_REF QDRANT_DIGEST JAEGER_REF JAEGER_DIGEST
 export INGEST_IMAGE INGEST_DIGEST AGENT_IMAGE AGENT_DIGEST UBI_REF UBI_DIGEST
 export OAUTH_PROXY_REF OAUTH_DIGEST CHART_VERSION CHART_SHA256 DIST REPO_ROOT
+export TASK_VERSION TASK_ASSET TASK_SHA256 TASK_BINARY_SHA256 TASK_LICENSE_SHA256 TASK_ORIGIN
 python3 - <<'PYEOF'
 import json
 import os
@@ -170,6 +195,14 @@ sbom = {
         {"name": "app-ingest", "ref": os.environ["INGEST_IMAGE"], "digest": os.environ["INGEST_DIGEST"]},
         {"name": "app-agent", "ref": os.environ["AGENT_IMAGE"], "digest": os.environ["AGENT_DIGEST"]},
     ],
+    "host_tools": [{
+        "name": "go-task/task", "version": os.environ["TASK_VERSION"],
+        "platform": "linux-amd64", "asset": os.environ["TASK_ASSET"],
+        "sha256": os.environ["TASK_SHA256"], "binary_sha256": os.environ["TASK_BINARY_SHA256"],
+        "origin": os.environ["TASK_ORIGIN"], "pin": "task-pin.txt",
+        "license": "MIT", "license_file": "task-LICENSE",
+        "license_sha256": os.environ["TASK_LICENSE_SHA256"],
+    }],
     "base_image": {"ref": os.environ["UBI_REF"], "digest": os.environ["UBI_DIGEST"]},
     "chart": os.environ["CHART_VERSION"],
     "chart_sha256": os.environ["CHART_SHA256"],
@@ -200,6 +233,9 @@ chmod +x "$DIST/bootstrap.sh"
     echo "Source Branch:  $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
     echo ""
     echo "PACKAGED ARTIFACTS:"
+    echo "  - Task host tool:      $TASK_VERSION (linux-amd64), $TASK_ASSET"
+    echo "  - Task archive SHA256: $TASK_SHA256"
+    echo "  - Task pin/license:    task-pin.txt / task-LICENSE (MIT)"
     echo "  - Git Bundle:          repo.bundle (complete git history)"
     echo "  - Qdrant Image:        $QDRANT_REF"
     echo "  - Jaeger Image:        $JAEGER_REF"
@@ -230,7 +266,7 @@ openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -pubout -out "$DIST/sneakernet-signin
 (
     cd "$DIST"
     # shellcheck disable=SC2086
-    sha256sum bootstrap.sh repo.bundle qdrant-image.tar jaeger-image.tar \
+    sha256sum bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar jaeger-image.tar \
               app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR \
               MANIFEST.txt PACKING_RECORD.txt sbom.json sneakernet-signing.pub > SHA256SUMS
 )
@@ -243,7 +279,7 @@ openssl dgst -sha256 -sign "$SNEAKERNET_SIGNING_KEY" \
 
 echo "==> Tarball + tarball digest"
 # shellcheck disable=SC2086
-tar -C "$DIST" -cf "$OUT_TARBALL" bootstrap.sh repo.bundle qdrant-image.tar jaeger-image.tar \
+tar -C "$DIST" -cf "$OUT_TARBALL" bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar jaeger-image.tar \
     app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR MANIFEST.txt PACKING_RECORD.txt sbom.json sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig
 # shellcheck disable=SC2016
 ( cd "$DIST" && sha256sum "$(basename "$OUT_TARBALL")" ) > "$OUT_TARBALL.sha256"
