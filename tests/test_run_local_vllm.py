@@ -24,8 +24,24 @@ def _run_script(tmp_path: Path, extra_env: dict[str, str]) -> tuple[int, str, li
     stub = bindir / "docker"
     stub.write_text(f"#!/bin/sh\nprintf '%s\\0' \"$@\" > \"{out_file}\"\n")
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    base_env = dict(os.environ)
+    for var in (
+        "MODEL",
+        "PORT",
+        "ROLE",
+        "GPU_MEM",
+        "MAX_LEN",
+        "SEQS",
+        "BUDGET_PROFILE",
+        "SERVED_NAME",
+        "VLLM_IMAGE",
+        "TASK",
+        "CHAT_TEMPLATE",
+    ):
+        if var not in extra_env:
+            base_env.pop(var, None)
     env = {
-        **os.environ,
+        **base_env,
         "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
         "HOME": str(tmp_path / "home"),
         "BUDGET_PYTHON": sys.executable,
@@ -181,8 +197,24 @@ def _run_script_with_stub_resolver(tmp_path: Path, extra_env: dict[str, str]) ->
         "\"BUDGET_SEQS='1'\"\n"
     )
     stub_python.chmod(stub_python.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    base_env = dict(os.environ)
+    for var in (
+        "MODEL",
+        "PORT",
+        "ROLE",
+        "GPU_MEM",
+        "MAX_LEN",
+        "SEQS",
+        "BUDGET_PROFILE",
+        "SERVED_NAME",
+        "VLLM_IMAGE",
+        "TASK",
+        "CHAT_TEMPLATE",
+    ):
+        if var not in extra_env:
+            base_env.pop(var, None)
     env = {
-        **os.environ,
+        **base_env,
         "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
         "HOME": str(tmp_path / "home"),
         "BUDGET_PYTHON": str(stub_python),

@@ -259,6 +259,7 @@ class TestCandidateRuntimeManifest(unittest.TestCase):
         self.assertFalse(manifest["dirty_tree"])
         self.assertEqual(manifest["profile"], "offline")
         self.assertEqual(manifest["services"], [])
+        self.assertEqual(manifest["test_focus"], "tests/test_agent_context.py")
 
         # Interpreter attestation
         interp = manifest["interpreter"]
@@ -271,6 +272,28 @@ class TestCandidateRuntimeManifest(unittest.TestCase):
         deps = manifest["dependencies"]
         self.assertIn("requirements_hash", deps)
         self.assertEqual(len(deps["requirements_hash"]), 64)
+
+    def test_test_focus_profile_resolution(self):
+        d_prose = ProfileDecision(ProfileName.OFFLINE, [], ["prose"])
+        self.assertEqual(d_prose.test_focus, "tests/test_agent_context.py")
+
+        d_tooling = ProfileDecision(ProfileName.OFFLINE, [], ["tooling"])
+        self.assertEqual(d_tooling.test_focus, "tests/test_agent_context.py tests/test_review_tooling.py")
+
+        d_deploy = ProfileDecision(ProfileName.DEPLOY, [], ["packaging"])
+        self.assertEqual(d_deploy.test_focus, "tests/test_airgap_*.py tests/test_config.py")
+
+        d_http = ProfileDecision(ProfileName.HTTP, ["agent", "jaeger"], ["agent_code"])
+        self.assertEqual(d_http.test_focus, "tests/test_agent_api.py tests/test_stream_truncation.py")
+
+        d_storage = ProfileDecision(ProfileName.STORAGE, ["qdrant"], ["storage"])
+        self.assertEqual(d_storage.test_focus, "tests/test_ingest_*.py tests/test_publish_*.py")
+
+        d_tracing = ProfileDecision(ProfileName.TRACING, ["jaeger"], ["tracing"])
+        self.assertEqual(d_tracing.test_focus, "tests/test_tracing*.py")
+
+        d_full = ProfileDecision(ProfileName.FULL, ["agent", "jaeger", "qdrant", "vllm"], ["unclassified"])
+        self.assertEqual(d_full.test_focus, "tests/test_agent_api.py tests/test_ingest_publish.py")
 
     def test_manifest_dirty_tree_flag(self):
         decision = ProfileDecision(ProfileName.STORAGE, ["qdrant"], ["storage"])
@@ -729,10 +752,12 @@ class TestReviewToolingCLI(unittest.TestCase):
             manifest = json.loads(out_file.read_text())
             self.assertEqual(manifest["profile"], "offline")
             self.assertEqual(manifest["services"], [])
+            self.assertEqual(manifest["test_focus"], "tests/test_agent_context.py")
 
             gh_text = gh_out_file.read_text()
             self.assertIn("profile=offline", gh_text)
             self.assertIn("needs_qdrant=false", gh_text)
+            self.assertIn("test_focus=tests/test_agent_context.py", gh_text)
 
     def test_cli_validate_review_check_flag(self):
         with tempfile.TemporaryDirectory() as tmpdir:

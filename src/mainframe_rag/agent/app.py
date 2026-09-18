@@ -391,21 +391,23 @@ async def lifespan(_app: FastAPI):
         max_keepalive_connections=settings.http_max_keepalive_connections,
         max_connections=settings.http_max_connections,
     )
-    http = httpx2.AsyncClient(
+    http_client = httpx2.AsyncClient(
         timeout=settings.embed_timeout_s,
         transport=httpx2.AsyncHTTPTransport(retries=settings.http_connect_retries),
         limits=http_limits,
     )
+    http = http_client
     # Sync pool for the retrieval leg (embedder / tokenizer / reranker): the
     # Embedder/Reranker/Tokenizer protocols are sync, so their calls run
     # inside asyncio.to_thread off the event loop. Bounded limits like the
     # async pool; closed on shutdown. One pool on purpose — same shape as the
     # pre-async stack (review S4).
-    http_sync = httpx2.Client(
+    http_sync_client = httpx2.Client(
         timeout=settings.embed_timeout_s,
         transport=httpx2.HTTPTransport(retries=settings.http_connect_retries),
         limits=http_limits,
     )
+    http_sync = http_sync_client
     # One dispatch point for embed_mode; the reasoning-model client owns its
     # own connection pool with its own (long) timeout. LLM env stays
     # request-time fail-fast (assert_reasoning_model in /v1/answer).
@@ -441,12 +443,13 @@ async def lifespan(_app: FastAPI):
     # the isawaitable shims below (review S2).
     import qdrant_client
 
-    qdrant = qdrant_client.AsyncQdrantClient(
+    qdrant_client_inst = qdrant_client.AsyncQdrantClient(
         url=settings.qdrant_url,
         api_key=settings.qdrant_api_key,
         timeout=settings.qdrant_timeout_s,
         limits=http_limits,
     )
+    qdrant = qdrant_client_inst
     # Serving-generation gate (issues #391 F3/F4): one instance per process,
     # created from Settings unless a test injected its own (never overwritten
     # then). The cache is invalidated at every startup so a validation from a
@@ -500,20 +503,20 @@ async def lifespan(_app: FastAPI):
     setup_metrics(settings.metrics_enabled)
     yield
     shutdown_tracing()
-    if hasattr(http, "aclose"):
-        await http.aclose()
-    elif hasattr(http, "close"):
-        http.close()
+    if hasattr(http_client, "aclose"):
+        await http_client.aclose()
+    elif hasattr(http_client, "close"):
+        http_client.close()
 
-    http_sync.close()
+    http_sync_client.close()
 
     if hasattr(llm_client, "aclose"):
         await llm_client.aclose()
     elif hasattr(llm_client, "close"):
         llm_client.close()
 
-    if hasattr(qdrant, "close"):
-        close_res = qdrant.close()
+    if hasattr(qdrant_client_inst, "close"):
+        close_res = qdrant_client_inst.close()
         if inspect.isawaitable(close_res):
             await close_res
 

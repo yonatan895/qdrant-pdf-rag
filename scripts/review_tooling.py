@@ -227,6 +227,23 @@ class ProfileDecision:
     def needs_agent(self) -> bool:
         return "agent" in self.services
 
+    @property
+    def test_focus(self) -> str:
+        if self.profile == ProfileName.OFFLINE:
+            if "tooling" in self.matched_categories or "tests" in self.matched_categories:
+                return "tests/test_agent_context.py tests/test_review_tooling.py"
+            return "tests/test_agent_context.py"
+        elif self.profile == ProfileName.DEPLOY:
+            return "tests/test_airgap_*.py tests/test_config.py"
+        elif self.profile == ProfileName.HTTP:
+            return "tests/test_agent_api.py tests/test_stream_truncation.py"
+        elif self.profile == ProfileName.STORAGE:
+            return "tests/test_ingest_*.py tests/test_publish_*.py"
+        elif self.profile == ProfileName.TRACING:
+            return "tests/test_tracing*.py"
+        else:
+            return "tests/test_agent_api.py tests/test_ingest_publish.py"
+
 
 ALL_SERVICES = ["agent", "jaeger", "qdrant", "vllm"]
 
@@ -380,6 +397,7 @@ def generate_candidate_manifest(
         "dirty": final_dirty,
         "dirty_tree": final_dirty,
         "profile": profile_decision.profile.value,
+        "test_focus": profile_decision.test_focus,
         "services": profile_decision.services,
         "matched_categories": profile_decision.matched_categories,
         "interpreter": probe_interpreter(),
@@ -1032,6 +1050,7 @@ def cmd_profile(args: argparse.Namespace) -> int:
             f.write(f"needs_vllm={str(decision.needs_vllm).lower()}\n")
             f.write(f"needs_jaeger={str(decision.needs_jaeger).lower()}\n")
             f.write(f"needs_agent={str(decision.needs_agent).lower()}\n")
+            f.write(f"test_focus={decision.test_focus}\n")
 
     if not args.quiet:
         print(decision.profile.value)
