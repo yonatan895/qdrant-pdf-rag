@@ -1,0 +1,69 @@
+# Repository task entry — issue #402 increment A.
+#
+# Authoritative entry for discovery, doctor, context and quality only.
+# `Makefile` remains authoritative for everything else until later increments
+# port artifacts, evaluation, local simulation and air-gap wrappers (see
+# docs/task-runner.md for the inventory, policy and shim exit milestone).
+#
+# Safety rules enforced here, not just documented:
+# - No global dynamic `sh:` variables, no `dotenv:`, no remote/optional
+#   includes: `task --list` and summaries work with no venv, Docker, network,
+#   model, credentials or private config and modify nothing.
+# - YAML owns dispatch/order only; scripts keep validation/lifecycle logic.
+# - Verification tasks never install: a missing `.venv` fails closed with a
+#   pointer to `task dev:setup` (deliberate interface change vs Make's
+#   order-only setup; recorded in docs/task-runner.md).
+# - Caller values reach scripts through `env:` bridges and quoted `"$VAR"`
+#   expansion, never re-parsed template interpolation (see taskfiles/).
+version: '3'
+
+includes:
+  qa:
+    taskfile: ./taskfiles/quality.yml
+    dir: .
+  dev:
+    taskfile: ./taskfiles/dev.yml
+    dir: .
+
+tasks:
+  default:
+    desc: Show available tasks (read-only discovery)
+    cmds:
+      - task --list
+    silent: true
+
+  help:
+    desc: Show available tasks (read-only discovery)
+    cmds:
+      - task --list
+    silent: true
+
+  lint:
+    desc: Alias for qa:lint (ruff over src and tests)
+    cmds:
+      - task: qa:lint
+
+  typecheck:
+    desc: Alias for qa:typecheck (mypy over src)
+    cmds:
+      - task: qa:typecheck
+
+  test:
+    desc: Alias for qa:unit (unit suite; integration deselected by pyproject)
+    cmds:
+      - task: qa:unit
+
+  check:
+    desc: Alias for qa:check (lint, then typecheck, then unit, in order)
+    cmds:
+      - task: qa:check
+
+  check-context:
+    desc: Alias for qa:context (offline structure check, no installs)
+    cmds:
+      - task: qa:context
+
+  agent-doctor:
+    desc: Alias for dev:doctor (read-only prerequisite diagnosis)
+    cmds:
+      - task: dev:doctor

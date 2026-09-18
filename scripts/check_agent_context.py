@@ -15,6 +15,9 @@ REQUIRED = (
     "AGENTS.md", "docs/agent-workflow.md", ".github/ISSUE_TEMPLATE/agent-task.md",
     ".github/pull_request_template.md", "scripts/check_agent_context.py",
     "scripts/agent_doctor.py", "Makefile",
+    "Taskfile.yml", "taskfiles/quality.yml", "taskfiles/dev.yml",
+    "scripts/tools/install-task.sh", "scripts/tools/task-pin.txt",
+    "docs/task-runner.md",
 )
 LINK = re.compile(r"\[([^\]\n]+)\]\(([^()\s]+)\)")
 ANCHOR = re.compile(r'<a id="([a-z0-9-]+)"></a>')

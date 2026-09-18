@@ -39,6 +39,46 @@ class Finding:
     detail: str
 
 
+def task_pin_version(root: Path) -> str | None:
+    """Pinned go-task version (without leading v) or None when unreadable."""
+    try:
+        for line in (root / "scripts/tools/task-pin.txt").read_text(encoding="utf-8").splitlines():
+            if line.startswith("version:"):
+                version = line.split(":", 1)[1].strip().lstrip("v")
+                return version or None
+    except (OSError, UnicodeError):
+        return None
+    return None
+
+
+def task_executable(root: Path) -> Path | None:
+    """Workspace-local install first, then PATH; None when absent."""
+    local = root / ".tools/bin/task"
+    try:
+        if local.is_file():
+            return local
+    except OSError:
+        pass
+    found = shutil.which("task")
+    return Path(found) if found else None
+
+
+def task_version_string(exe: Path) -> str | None:
+    """Bounded `task --version` read; None when unavailable or unreadable."""
+    try:
+        result = subprocess.run(
+            [str(exe), "--version"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=PROBE_TIMEOUT_S, check=False, text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if result.returncode != 0:
+        return None
+    text = (result.stdout or "").strip()
+    return text or None
+
+
 def inspect_runtime(python: Path, packages: list[str]) -> dict | None:
     try:
         result = subprocess.run(
@@ -107,6 +147,27 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False) -> l
         add("ready" if cli else "missing prerequisite", "oc or kubectl", "CLI presence only; no cluster contact")
     for name in tools:
         add("ready" if shutil.which(name) else "missing prerequisite", name, "CLI presence only")
+
+    # Task runner identity (#402 increment A): the pinned go-task binary must
+    # be the one that runs, never an unrelated `task` or an unverified copy.
+    # Presence-only `make`-style check is insufficient; verify the version
+    # against the pin record with a bounded read. Never installs.
+    task_exe = task_executable(root)
+    pinned = task_pin_version(root)
+    if task_exe is None:
+        add("missing prerequisite", "Task runner",
+            "pinned task binary absent; run: sh scripts/tools/install-task.sh (never auto-installed)")
+    elif pinned is None:
+        add("unable to verify", "Task runner", "task pin record unreadable; inspect scripts/tools/task-pin.txt")
+    else:
+        observed = task_version_string(task_exe)
+        if observed is None:
+            add("unable to verify", "Task runner", "bounded task --version probe unavailable")
+        elif observed == pinned:
+            add("ready", "Task runner", f"pinned go-task v{pinned} identity verified")
+        else:
+            add("missing prerequisite", "Task runner",
+                f"task version mismatch: want v{pinned}; reinstall via scripts/tools/install-task.sh")
 
     interpreters = [("checker runtime", Path(sys.executable))]
     development = root/".venv/bin/python"

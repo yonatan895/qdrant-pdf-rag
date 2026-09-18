@@ -23,6 +23,10 @@ evals/runs/*.jsonl
 # generated review runtime manifest (CI writes it to $RUNNER_TEMP)
 candidate-manifest.json
 
+# --- Task runner (pinned host tool, issue #402; never track binaries/caches) ---
+.task/
+.tools/
+
 # --- Python ---
 __pycache__/
 *.py[cod]

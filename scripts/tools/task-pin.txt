@@ -1,0 +1,26 @@
+# Task runner pin — issue #402 increment A
+#
+# Single source for the repository-pinned Task (go-task/task) artifact.
+# linux-amd64 only: matches the repository Linux/WSL2 baseline and every
+# current CI asset (ubuntu-latest runners, linux-amd64 helm/kubectl/kind).
+# Do not claim Windows/PowerShell or arm64 support here; audit + package
+# those only if CI/bastion actually needs them in a later increment.
+#
+# Verification performed 2026-09-18 on the connected host:
+#   curl -fsSL -o task_checksums.txt \
+#     https://github.com/go-task/task/releases/download/v3.53.1/task_checksums.txt
+#   curl -fsSL -o task_linux_amd64.tar.gz \
+#     https://github.com/go-task/task/releases/download/v3.53.1/task_linux_amd64.tar.gz
+#   sha256sum task_linux_amd64.tar.gz matches the manifest line below.
+#   tar xzf task_linux_amd64.tar.gz && ./task --version -> 3.53.1
+#
+# Update in a dedicated pin-bump PR (never drive-by); offline packaging
+# (increment C) consumes this record, it does not re-resolve `latest`.
+
+version: v3.53.1
+asset: task_linux_amd64.tar.gz
+sha256: a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7
+origin: https://github.com/go-task/task/releases/download/v3.53.1/task_linux_amd64.tar.gz
+checksum-manifest: https://github.com/go-task/task/releases/download/v3.53.1/task_checksums.txt
+license: MIT — https://github.com/go-task/task/blob/v3.53.1/LICENSE
+platforms: linux-amd64 only
