@@ -1,12 +1,13 @@
 # Artifact tasks — issue #402 increment B1.
 #
 # Dispatch only: pip/helm/docker keep their own semantics. Freshness uses a
-# completion stamp (`.task-complete`, written only after success) combined
-# with `sources` on the inputs that affect outputs. An existing output
-# directory is therefore never proof of a finished build — this deliberately
-# improves on Make's directory-mtime shortcut, which can skip a rebuild after
-# a failed `pip wheel`/fetch left a partial directory behind. Verification
-# tasks (`chart:check`, `helm:lint`) never cache: they re-verify on request.
+# completion stamp (`.task-complete`, written only after builder success and
+# output verification) combined with input identity and output member checks
+# in `status`. An existing output directory is therefore never proof of a
+# finished build — this deliberately improves on Make's directory-mtime
+# shortcut, which can skip a rebuild after a failed `pip wheel`/fetch left a
+# partial directory behind. Verification tasks (`chart:check`, `helm:lint`)
+# never cache: they re-verify on request.
 # Included with `dir: .` from the root Taskfile: always runs at repo root.
 version: '3'
 
@@ -19,10 +20,11 @@ tasks:
       mirroring `make wheelhouse`. Inputs: BUNDLE_DIR (default bundles;
       wheelhouse lands in BUNDLE_DIR/wheelhouse). Freshness is proven by a
       completion stamp recording the lockfile content, interpreter version
-      and platform, re-verified on every run: content changes rebuild,
-      mtime-only touches do not, and a missing stamp rebuilds even when the
-      output directory survives (a directory alone is never proof of a
-      finished build). Fails closed without `.venv` (run `task dev:setup`).
+      and platform, combined with an output-member receipt (.wheels.sha256)
+      re-verified on every run: content changes rebuild, mtime-only touches
+      do not, and a missing stamp or missing/modified wheel rebuilds even
+      when the output directory survives (a directory alone is never proof
+      of a finished build). Fails closed without `.venv` (run `task dev:setup`).
       Fingerprint state is never used, so discovery (`--list`, JSON
       listing, summaries) never writes state. Connected host only.
     vars:
@@ -33,10 +35,13 @@ tasks:
     status:
       - test -f "$TASK_WHEELHOUSE/.task-complete"
       - test "$(cat "$TASK_WHEELHOUSE/.task-complete")" = "$(sha256sum requirements.lock.txt) $(.venv/bin/python -V 2>&1) $(uname -s -m)"
+      - test -f "$TASK_WHEELHOUSE/.wheels.sha256"
+      - (cd "$TASK_WHEELHOUSE" && sha256sum -c --status .wheels.sha256)
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - rm -rf "$TASK_WHEELHOUSE" && mkdir -p "$TASK_WHEELHOUSE"
       - .venv/bin/python -m pip wheel -r requirements.lock.txt -w "$TASK_WHEELHOUSE"
+      - (cd "$TASK_WHEELHOUSE" && ls *.whl >/dev/null 2>&1 && sha256sum *.whl > .wheels.sha256 && sha256sum -c --status .wheels.sha256)
       - echo "$(sha256sum requirements.lock.txt) $(.venv/bin/python -V 2>&1) $(uname -s -m)" > "$TASK_WHEELHOUSE/.task-complete"
 
   bm25:
@@ -47,11 +52,12 @@ tasks:
       `make bm25-weights` (upstream drift fails closed in the script).
       Inputs: BM25_MODEL (default Qdrant/bm25), BUNDLE_DIR (default bundles).
       Freshness is proven by a completion stamp recording the manifest and
-      fetcher content plus the model selection, re-verified on every run:
+      fetcher content plus the model selection, combined with an offline
+      member check against the sha256 manifest, re-verified on every run:
       content or model changes rebuild, mtime-only touches do not, and a
-      missing stamp rebuilds even when the output directory survives.
-      Fingerprint state is never used, so discovery never writes state.
-      Connected host only.
+      missing stamp or missing/modified weight file rebuilds even when the
+      output directory survives. Fingerprint state is never used, so
+      discovery never writes state. Connected host only.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       BM25_MODEL: '{{if hasKey . "BM25_MODEL"}}{{.BM25_MODEL}}{{else}}Qdrant/bm25{{end}}'
@@ -62,10 +68,12 @@ tasks:
     status:
       - test -f "$TASK_BM25_WEIGHTS/.task-complete"
       - test "$(cat "$TASK_BM25_WEIGHTS/.task-complete")" = "$(cat bm25-weights.sha256 scripts/fetch_bm25_weights.py | sha256sum) $TASK_BM25_MODEL"
+      - python3 scripts/fetch_bm25_weights.py --verify-only --out "$TASK_BM25_WEIGHTS" --verify-manifest bm25-weights.sha256
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - rm -rf "$TASK_BM25_WEIGHTS" && mkdir -p "$TASK_BM25_WEIGHTS"
       - .venv/bin/python scripts/fetch_bm25_weights.py --model "$TASK_BM25_MODEL" --out "$TASK_BM25_WEIGHTS" --verify-manifest bm25-weights.sha256
+      - python3 scripts/fetch_bm25_weights.py --verify-only --out "$TASK_BM25_WEIGHTS" --verify-manifest bm25-weights.sha256
       - echo "$(cat bm25-weights.sha256 scripts/fetch_bm25_weights.py | sha256sum) $TASK_BM25_MODEL" > "$TASK_BM25_WEIGHTS/.task-complete"
 
   chart-check:

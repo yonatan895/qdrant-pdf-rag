@@ -47,13 +47,30 @@ exit "${RECORDER_EXIT:-0}"
 VENV_FAKE = """#!/bin/sh
 # Fake .venv interpreter: answers `-V` from $FAKE_PY_VERSION without logging
 # (status probes stay observable through rebuild/skip behavior), records all
-# real build invocations as JSON. Never installs, downloads, or runs pip.
+# real build invocations as JSON. Produces deterministic stand-in members on success.
 if [ "$1" = "-V" ]; then echo "${FAKE_PY_VERSION:-Python 3.14.5}"; exit 0; fi
 python3 - "$RECORDER_LOG" "venv-python" "$@" <<'PYEOF'
 import json, os, sys
 log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
 with open(log, "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd()}) + "\\n")
+ret = int(os.environ.get("RECORDER_EXIT", "0"))
+if ret != 0:
+    sys.exit(ret)
+if "-m" in argv and "pip" in argv and "wheel" in argv and "-w" in argv:
+    idx = argv.index("-w") + 1
+    if idx < len(argv):
+        os.makedirs(argv[idx], exist_ok=True)
+        with open(os.path.join(argv[idx], "fake_pkg-1.0.0-py3-none-any.whl"), "w") as whl:
+            whl.write("fake-wheel-content\\n")
+if any("fetch_bm25_weights.py" in a for a in argv):
+    if "--out" in argv:
+        idx = argv.index("--out") + 1
+        if idx < len(argv):
+            snap = os.path.join(argv[idx], "models--fake", "snapshots", "snap1")
+            os.makedirs(snap, exist_ok=True)
+            with open(os.path.join(snap, "weights.bin"), "wb") as wf:
+                wf.write(b"synthetic-weights-content\\n")
 PYEOF
 exit "${RECORDER_EXIT:-0}"
 """
@@ -164,11 +181,14 @@ class TaskContractsTests(unittest.TestCase):
 
     def make_artifact_fixtures(self) -> None:
         """Minimal inputs the artifact tasks fingerprint (content inert)."""
+        import hashlib
         (self.root / "requirements.lock.txt").write_text("qdrant-client==1.19.0\n", encoding="utf-8")
-        (self.root / "bm25-weights.sha256").write_text("0" * 64 + "  weights.bin\n", encoding="utf-8")
+        data = b"synthetic-weights-content\n"
+        digest = hashlib.sha256(data).hexdigest()
+        (self.root / "bm25-weights.sha256").write_text(f"{digest}  weights.bin\n", encoding="utf-8")
         fetch = self.root / "scripts/fetch_bm25_weights.py"
         fetch.parent.mkdir(parents=True, exist_ok=True)
-        fetch.write_text("# fixture fetcher (never executed; venv python is faked)\n", encoding="utf-8")
+        shutil.copy(REPO / "scripts/fetch_bm25_weights.py", fetch)
 
     def pip_calls(self) -> list[dict]:
         return [c for c in self.calls() if c["tag"] == "venv-python"]
@@ -306,6 +326,28 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(len(self.pip_calls()), before + 1)
         self.assertFalse((self.root / "bundles/wheelhouse/partial.txt").exists())
         self.assertTrue(stamp.is_file())
+        # TR432-F1: delete one expected member while retaining the stamp: rebuilds
+        wheel = self.root / "bundles/wheelhouse/fake_pkg-1.0.0-py3-none-any.whl"
+        self.assertTrue(wheel.is_file())
+        wheel.unlink()
+        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(len(self.pip_calls()), before + 2, "deleted wheel member must rebuild")
+        self.assertTrue(wheel.is_file())
+        # TR432-F1: modify a member while preserving name and stamp: rebuilds
+        wheel.write_text("corrupted-content\n")
+        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(len(self.pip_calls()), before + 3, "corrupted wheel member must rebuild")
+
+    def test_wheelhouse_builder_failure_leaves_no_stamp(self):
+        self.make_venv_fake()
+        self.make_artifact_fixtures()
+        env = self.tool_env()
+        env["RECORDER_EXIT"] = "1"
+        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertFalse((self.root / "bundles/wheelhouse/.task-complete").exists())
 
     def test_wheelhouse_interpreter_change_rebuilds(self):
         self.make_venv_fake(version="Python 3.14.5")
@@ -359,6 +401,19 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(len(self.pip_calls()), 2, "model change must refetch, not reuse cached weights")
         self.assertIn("--model", self.pip_calls()[-1]["argv"])
         self.assertEqual(self.pip_calls()[-1]["argv"][2], "Other/model")
+        # TR432-F1: delete one expected weight member while retaining stamp: refetches
+        weight = self.root / "bundles/bm25-weights/models--fake/snapshots/snap1/weights.bin"
+        self.assertTrue(weight.is_file())
+        weight.unlink()
+        proc = self.run_task("artifacts:bm25", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(len(self.pip_calls()), 3, "deleted weight member must refetch")
+        self.assertTrue(weight.is_file())
+        # TR432-F1: corrupt weight content: refetches
+        weight.write_bytes(b"corrupted-weight-data\n")
+        proc = self.run_task("artifacts:bm25", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(len(self.pip_calls()), 4, "corrupted weight member must refetch")
 
     def test_chart_check_fails_closed_then_passes(self):
         proc = self.run_task("artifacts:chart-check")
