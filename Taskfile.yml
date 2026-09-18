@@ -15,6 +15,9 @@
 #   order-only setup; recorded in docs/task-runner.md).
 # - Caller values reach scripts through `env:` bridges and quoted `"$VAR"`
 #   expansion, never re-parsed template interpolation (see taskfiles/).
+# - Artifact rebuilds additionally require a completion stamp written only
+#   after success (see taskfiles/artifacts.yml); an existing output
+#   directory alone never counts as a finished build.
 version: '3'
 
 includes:
@@ -23,6 +26,9 @@ includes:
     dir: .
   dev:
     taskfile: ./taskfiles/dev.yml
+    dir: .
+  artifacts:
+    taskfile: ./taskfiles/artifacts.yml
     dir: .
 
 tasks:

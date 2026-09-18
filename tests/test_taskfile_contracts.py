@@ -1,4 +1,5 @@
-"""Task runner-boundary contracts for issue #402 increment A.
+"""Task runner-boundary contracts for issue #402 (increments A: quality/context,
+B: artifacts; eval/local/air-gap follow in later slices).
 
 Exercises the ACTUAL pinned Task binary against the migrated Taskfiles with
 inert process-boundary recorders in temporary workspaces. Expectations below
@@ -35,6 +36,20 @@ RECORDER = """#!/bin/sh
 # Inert boundary recorder: appends one JSON line per invocation, then exits
 # with $RECORDER_EXIT (default 0). Never touches the network or services.
 python3 - "$RECORDER_LOG" "$RECORDER_TAG" "$@" <<'PYEOF'
+import json, os, sys
+log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
+with open(log, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd()}) + "\\n")
+PYEOF
+exit "${RECORDER_EXIT:-0}"
+"""
+
+VENV_FAKE = """#!/bin/sh
+# Fake .venv interpreter: answers `-V` from $FAKE_PY_VERSION without logging
+# (status probes stay observable through rebuild/skip behavior), records all
+# real build invocations as JSON. Never installs, downloads, or runs pip.
+if [ "$1" = "-V" ]; then echo "${FAKE_PY_VERSION:-Python 3.14.5}"; exit 0; fi
+python3 - "$RECORDER_LOG" "venv-python" "$@" <<'PYEOF'
 import json, os, sys
 log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
 with open(log, "a", encoding="utf-8") as fh:
@@ -115,6 +130,51 @@ class TaskContractsTests(unittest.TestCase):
             "RECORDER_TAG": tag,
             "RECORDER_EXIT": str(exit_code),
         }
+
+    def make_venv_fake(self, version: str = "Python 3.14.5") -> None:
+        """Fake .venv interpreter with a controllable `-V` identity string."""
+        path = self.root / ".venv/bin/python"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(VENV_FAKE, encoding="utf-8")
+        path.chmod(0o755)
+        self.recorder_env = {
+            "RECORDER_LOG": str(self.log),
+            "RECORDER_TAG": "venv-python",
+            "RECORDER_EXIT": "0",
+            "FAKE_PY_VERSION": version,
+        }
+
+    def make_tool_recorder(self, name: str) -> None:
+        """Fake `helm`/`docker` on a workspace-local bin dir (argv recorded)."""
+        bindir = self.root / "bin"
+        bindir.mkdir(parents=True, exist_ok=True)
+        path = bindir / name
+        path.write_text(RECORDER.replace('"$RECORDER_TAG"', f'"tool-{name}"'), encoding="utf-8")
+        path.chmod(0o755)
+
+    def tool_env(self) -> dict:
+        """Recorder env plus workspace bin dir leading PATH (task dir kept)."""
+        env = dict(self.recorder_env)
+        env["PATH"] = os.pathsep.join([
+            str(self.root / "bin"),
+            os.path.dirname(self.task_bin),
+            os.environ.get("PATH", ""),
+        ])
+        return env
+
+    def make_artifact_fixtures(self) -> None:
+        """Minimal inputs the artifact tasks fingerprint (content inert)."""
+        (self.root / "requirements.lock.txt").write_text("qdrant-client==1.19.0\n", encoding="utf-8")
+        (self.root / "bm25-weights.sha256").write_text("0" * 64 + "  weights.bin\n", encoding="utf-8")
+        fetch = self.root / "scripts/fetch_bm25_weights.py"
+        fetch.parent.mkdir(parents=True, exist_ok=True)
+        fetch.write_text("# fixture fetcher (never executed; venv python is faked)\n", encoding="utf-8")
+
+    def pip_calls(self) -> list[dict]:
+        return [c for c in self.calls() if c["tag"] == "venv-python"]
+
+    def tool_calls(self, name: str) -> list[dict]:
+        return [c for c in self.calls() if c["tag"] == f"tool-{name}"]
 
     def test_discovery_needs_no_venv_config_or_services(self):
         before = {p.relative_to(self.root).as_posix() for p in self.root.rglob("*") if p.is_file()}
@@ -204,14 +264,173 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("--exit-code", "qa:lint", extra_env=self.recorder_env)
         self.assertEqual(proc.returncode, 3, proc.stdout)
 
+    def test_artifacts_registered_in_discovery(self):
+        proc = self.run_task("--list")
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        for name in ("artifacts:wheelhouse", "artifacts:bm25", "artifacts:chart-check",
+                     "artifacts:chart-fetch", "artifacts:helm-render", "artifacts:helm-lint",
+                     "artifacts:images"):
+            self.assertIn(name, proc.stdout)
+
+    def test_wheelhouse_freshness_cycle(self):
+        self.make_venv_fake()
+        self.make_artifact_fixtures()
+        env = self.tool_env()
+        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual([c["argv"] for c in self.pip_calls()],
+                         [["-m", "pip", "wheel", "-r", "requirements.lock.txt", "-w", "bundles/wheelhouse"]])
+        stamp = self.root / "bundles/wheelhouse/.task-complete"
+        self.assertTrue(stamp.is_file(), "completion stamp published only after success")
+        # Fresh: skip without invoking pip again.
+        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("up to date", proc.stdout)
+        self.assertEqual(len(self.pip_calls()), 1)
+        # Content change rebuilds; mtime-only touch does not (checksum method).
+        (self.root / "requirements.lock.txt").write_text("qdrant-client==1.19.0\n# comment\n", encoding="utf-8")
+        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(len(self.pip_calls()), 2)
+        before = len(self.pip_calls())
+        (self.root / "requirements.lock.txt").touch()
+        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(len(self.pip_calls()), before)
+        # Missing stamp rebuilds even though the directory survives: an
+        # existing directory is never proof of a finished build.
+        stamp.unlink()
+        (self.root / "bundles/wheelhouse/partial.txt").write_text("stale", encoding="utf-8")
+        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(len(self.pip_calls()), before + 1)
+        self.assertFalse((self.root / "bundles/wheelhouse/partial.txt").exists())
+        self.assertTrue(stamp.is_file())
+
+    def test_wheelhouse_interpreter_change_rebuilds(self):
+        self.make_venv_fake(version="Python 3.14.5")
+        self.make_artifact_fixtures()
+        env = self.tool_env()
+        self.assertEqual(self.run_task("artifacts:wheelhouse", extra_env=env).returncode, 0)
+        self.assertEqual(len(self.pip_calls()), 1)
+        self.assertEqual(self.run_task("artifacts:wheelhouse", extra_env=env).returncode, 0)
+        self.assertEqual(len(self.pip_calls()), 1)
+        env = dict(env, FAKE_PY_VERSION="Python 3.14.6")
+        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(len(self.pip_calls()), 2, "interpreter change must not reuse cached wheels")
+
+    def test_wheelhouse_bundle_dir_override(self):
+        self.make_venv_fake()
+        self.make_artifact_fixtures()
+        env = self.tool_env()
+        proc = self.run_task("artifacts:wheelhouse", "BUNDLE_DIR=alt", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual([c["argv"] for c in self.pip_calls()],
+                         [["-m", "pip", "wheel", "-r", "requirements.lock.txt", "-w", "alt/wheelhouse"]])
+        self.assertTrue((self.root / "alt/wheelhouse/.task-complete").is_file())
+        self.assertFalse((self.root / "bundles").exists())
+
+    def test_wheelhouse_missing_venv_fails_closed(self):
+        self.make_artifact_fixtures()
+        self.recorder_env = {}
+        proc = self.run_task("artifacts:wheelhouse", extra_env={})
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("missing development environment", proc.stdout)
+        self.assertFalse((self.root / "bundles").exists(), "failed prep must leave no outputs")
+
+    def test_bm25_model_selection_reaches_fetcher(self):
+        self.make_venv_fake()
+        self.make_artifact_fixtures()
+        env = self.tool_env()
+        proc = self.run_task("artifacts:bm25", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(
+            [c["argv"] for c in self.pip_calls()],
+            [["scripts/fetch_bm25_weights.py", "--model", "Qdrant/bm25",
+              "--out", "bundles/bm25-weights", "--verify-manifest", "bm25-weights.sha256"]])
+        stamp = (self.root / "bundles/bm25-weights/.task-complete").read_text(encoding="utf-8").strip()
+        self.assertTrue(stamp.endswith(" Qdrant/bm25"), stamp)
+        proc = self.run_task("artifacts:bm25", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(len(self.pip_calls()), 1, "fresh stamp must skip the fetch")
+        proc = self.run_task("artifacts:bm25", "BM25_MODEL=Other/model", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(len(self.pip_calls()), 2, "model change must refetch, not reuse cached weights")
+        self.assertIn("--model", self.pip_calls()[-1]["argv"])
+        self.assertEqual(self.pip_calls()[-1]["argv"][2], "Other/model")
+
+    def test_chart_check_fails_closed_then_passes(self):
+        proc = self.run_task("artifacts:chart-check")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("charts/qdrant-*.tgz missing", proc.stdout)
+        self.assertIn("task artifacts:chart-fetch", proc.stdout)
+        charts = self.root / "charts"
+        charts.mkdir()
+        (charts / "qdrant-1.19.0.tgz").write_text("fixture", encoding="utf-8")
+        proc = self.run_task("artifacts:chart-check")
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+
+    def test_helm_render_verifies_chart_first_with_fixed_sets(self):
+        self.make_tool_recorder("helm")
+        self.make_venv_fake()
+        env = self.tool_env()
+        charts = self.root / "charts"
+        charts.mkdir()
+        (charts / "qdrant-1.19.0.tgz").write_text("fixture", encoding="utf-8")
+        proc = self.run_task("artifacts:helm-render", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.tool_calls("helm")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["argv"], [
+            "template", "qdrant", "charts/qdrant-1.19.0.tgz", "-f", "overlays/openshift/values.yaml",
+            "--set", "image.repository=PLACEHOLDER_REGISTRY/qdrant/qdrant",
+            "--set", "imagePullSecrets[0].name=PLACEHOLDER_PULL_SECRET",
+            "--set", "persistence.storageClassName=PLACEHOLDER_STORAGE_CLASS",
+            "--set", "snapshotPersistence.storageClassName=PLACEHOLDER_STORAGE_CLASS",
+        ])
+        self.assertEqual(calls[0]["cwd"], str(self.root))
+
+    def test_helm_render_refuses_without_chart(self):
+        self.make_tool_recorder("helm")
+        self.make_venv_fake()
+        proc = self.run_task("artifacts:helm-render", extra_env=self.tool_env())
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self.tool_calls("helm"), [], "helm must not run before chart verification")
+
+    def test_images_builds_preparations_then_images_in_order(self):
+        self.make_venv_fake()
+        self.make_artifact_fixtures()
+        self.make_tool_recorder("docker")
+        env = self.tool_env()
+        proc = self.run_task("artifacts:images", "IMAGE_TAG=abc123", "BUNDLE_DIR=alt", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(
+            [c["argv"] for c in self.pip_calls()],
+            [["-m", "pip", "wheel", "-r", "requirements.lock.txt", "-w", "alt/wheelhouse"],
+             ["scripts/fetch_bm25_weights.py", "--model", "Qdrant/bm25",
+              "--out", "alt/bm25-weights", "--verify-manifest", "bm25-weights.sha256"]])
+        docker = [c["argv"] for c in self.tool_calls("docker")]
+        self.assertEqual(len(docker), 2)
+        self.assertEqual(docker[0][:7], ["build", "--build-context", "wheelhouse=alt/wheelhouse",
+                                         "--build-context", "bm25=alt/bm25-weights",
+                                         "-f", "images/Containerfile.ingest"])
+        self.assertIn("mainframe-rag/ingest:abc123", docker[0])
+        self.assertIn("images/Containerfile.agent", docker[1])
+        self.assertIn("mainframe-rag/agent:abc123", docker[1])
+        for call in self.tool_calls("docker"):
+            self.assertEqual(call["cwd"], str(self.root))
+
     def test_taskfile_wiring_stays_dispatch_only(self):
         root_text = (REPO / "Taskfile.yml").read_text(encoding="utf-8")
         quality_text = (REPO / "taskfiles/quality.yml").read_text(encoding="utf-8")
         dev_text = (REPO / "taskfiles/dev.yml").read_text(encoding="utf-8")
-        combined = root_text + quality_text + dev_text
+        artifacts_text = (REPO / "taskfiles/artifacts.yml").read_text(encoding="utf-8")
+        combined = root_text + quality_text + dev_text + artifacts_text
         # Local required namespaced includes; one implementation per alias.
         self.assertIn("taskfile: ./taskfiles/quality.yml", root_text)
         self.assertIn("taskfile: ./taskfiles/dev.yml", root_text)
+        self.assertIn("taskfile: ./taskfiles/artifacts.yml", root_text)
         for alias, canonical in (("task: qa:lint", "lint"), ("task: qa:check", "check"),
                                  ("task: qa:context", "context"), ("task: dev:doctor", "doctor")):
             self.assertIn(alias, root_text, canonical)
@@ -226,9 +445,24 @@ class TaskContractsTests(unittest.TestCase):
         self.assertNotIn("https://", code)
         self.assertNotIn("deps:", code)
         self.assertNotIn("sources:", code)
+        self.assertNotIn("method:", code)
         self.assertNotIn("ignore_error", code)
         self.assertNotIn("export EMBED_MODE", code)
         self.assertNotIn("airgap.env", code)
+        # Verification never caches (`sources:` fingerprints even write
+        # state on `--list --json`); only artifact builds (plus the explicit
+        # dev:setup presence check) may carry freshness state, proven by
+        # content-bearing completion stamps re-verified on every run.
+        verify_code = "\n".join(
+            line for line in (root_text + quality_text).splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        self.assertNotIn("status:", verify_code)
+        build_code = "\n".join(
+            line for line in artifacts_text.splitlines() if not line.lstrip().startswith("#")
+        )
+        self.assertIn(".task-complete", build_code)
+        self.assertIn("sha256sum", build_code)
 
 
 if __name__ == "__main__":

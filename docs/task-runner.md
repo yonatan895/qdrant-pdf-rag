@@ -5,12 +5,13 @@ verification policy stays in [live-stack](live-stack.md#verification-minimums);
 test design stays in [testing](testing.md#evidence-design).
 
 <a id="scope"></a>
-## Scope: increment A
+## Scope: increments A and B1
 
-`Taskfile.yml` (+ `taskfiles/quality.yml`, `taskfiles/dev.yml`) is the entry
-point for **discovery, doctor, context and quality only**. `Makefile` remains
-authoritative for artifacts, evaluation, local simulation and air-gap
-workflows until increments B/C port them. No product behavior changes here.
+`Taskfile.yml` (+ `taskfiles/quality.yml`, `taskfiles/dev.yml`,
+`taskfiles/artifacts.yml`) is the entry point for **discovery, doctor,
+context, quality (A) and artifacts (B1)**. `Makefile` remains authoritative
+for evaluation, local simulation and air-gap workflows until later slices
+port them. No product behavior changes here.
 
 All documented invocations assume the pinned `task` on `PATH` (session-local;
 the installer prints the exact export). `task` with no task name prints the
@@ -62,10 +63,26 @@ task list and builds/installs/launches nothing.
 
 Verification diagnoses a missing `.venv` and points at `task dev:setup`; it
 never creates one (deliberate change vs Make's order-only setup). `dev:setup`
-is the only A task that installs, only on explicit request, connected host
-only; CI uses its prepared interpreter. No secrets in CLI/examples/logs;
+is the only setup task that installs, only on explicit request, connected
+host only; CI uses its prepared interpreter. No secrets in CLI/examples/logs;
 `silent: true` only on discovery aliases. `clean`, services, evaluation and
 air-gap behavior are unchanged (still Make-owned).
+
+<a id="freshness"></a>
+## Artifact freshness (B1)
+
+`artifacts:wheelhouse` and `artifacts:bm25` prove freshness with a completion
+stamp (`.task-complete`) recording every input that affects outputs —
+lockfile/manifest/fetcher content, model selection, interpreter version,
+platform — re-verified by `status:` on every run and written only after the
+recipe succeeds. Consequences, all covered by runner-boundary tests:
+
+- Changed inputs rebuild; mtime-only touches do not; a missing stamp rebuilds
+  even when the output directory survives (deliberate improvement over Make's
+  directory-mtime shortcut, which can skip after a failed partial build).
+- No `sources:`/`method:` fingerprints anywhere: Task computes those even for
+  `--list --json`, which would break side-effect-free discovery. Verification
+  tasks carry no freshness state at all.
 
 <a id="inventory"></a>
 ## Inventory (increment A dispositions)
@@ -79,12 +96,12 @@ air-gap behavior are unchanged (still Make-owned).
 | `agent-doctor` (`PROFILE`) | `dev:doctor`, root `agent-doctor` | `scripts/agent_doctor.py` (+ new Task-identity finding) | Migrated |
 | `lint` / `typecheck` / `test` / `check` | `qa:lint` / `qa:typecheck` / `qa:unit` / `qa:check`, root aliases | ruff / mypy / pytest + `pyproject.toml` | Migrated |
 | `check-context` | `qa:context`, root `check-context` | `scripts/check_agent_context.py` | Migrated |
-| `wheelhouse`, `bm25-weights`, `chart*`, `helm-*`, `build-images` | `artifacts:*` | existing scripts/pins | Deferred to B (needs artifact freshness semantics) |
-| `sim*`, `loadtest-mock`, `bench*`, `loadtest` | `qa:sim/load`, `eval:bench*` | existing suites | Deferred to B |
-| `eval*`, `gate-l1`, `harness-*`, `verify-golden`, `capture-pool`, reports | `eval:*` | existing scripts/baselines | Deferred to B (mode/venue scoping) |
-| `query-demo`, `ask`, `local-*`, `run-agent`, `test-vllm-e2e` | `local:*`, `qa:vllm-e2e` | existing launchers | Deferred to B (argv/process-lifetime rules) |
-| `airgap-*`, `airgap-dryrun` | `airgap:*` | `scripts/airgap/*` | Deferred to B wrappers + C offline handoff |
-| `e2e-demo-pdfs`, `clean` | `dev:demo-pdfs`, `dev:clean` | existing scripts | Deferred to B (retention contract) |
+| `wheelhouse`, `bm25-weights`, `chart`, `pull-chart`, `helm-template`, `helm-lint`, `build-images` | `artifacts:wheelhouse/bm25/chart-check/chart-fetch/helm-render/helm-lint/images` | pip / fetch script / helm / docker | `.venv` diagnosed (builds), chart presence verified, sequential preparation | `BUNDLE_DIR`, `BM25_MODEL`, `IMAGE_TAG`, image names | bundles output, images, chart fetch | **Migrated (B1)** with completion-stamp freshness ([#freshness](#freshness)) |
+| `sim*`, `loadtest-mock`, `bench*`, `loadtest` | `qa:sim/load`, `eval:bench*` | existing suites | Deferred to B3/B2 |
+| `eval*`, `gate-l1`, `harness-*`, `verify-golden`, `capture-pool`, reports | `eval:*` | existing scripts/baselines | Deferred to B2 (mode/venue scoping) |
+| `query-demo`, `ask`, `local-*`, `run-agent`, `test-vllm-e2e` | `local:*`, `qa:vllm-e2e` | existing launchers | Deferred to B3 (argv/process-lifetime rules) |
+| `airgap-*`, `airgap-dryrun` | `airgap:*` | `scripts/airgap/*` | Deferred to B4 wrappers + C offline handoff |
+| `e2e-demo-pdfs`, `clean` | `dev:demo-pdfs`, `dev:clean` | existing scripts | Deferred to B5 (retention contract) |
 
 Executable consumer inventory (all found by searching first-party `make`
 invocations): `scripts/run_local_stack.sh:157` (`make -C … sim-qdrant`);

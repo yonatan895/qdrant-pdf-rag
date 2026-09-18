@@ -16,6 +16,7 @@ REQUIRED = (
     ".github/pull_request_template.md", "scripts/check_agent_context.py",
     "scripts/agent_doctor.py", "Makefile",
     "Taskfile.yml", "taskfiles/quality.yml", "taskfiles/dev.yml",
+    "taskfiles/artifacts.yml",
     "scripts/tools/install-task.sh", "scripts/tools/task-pin.txt",
     "docs/task-runner.md",
 )
