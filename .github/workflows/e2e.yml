@@ -75,6 +75,9 @@ jobs:
           export PATH="/usr/local/bin:$PATH"
           PYBIN="$(command -v python3.14 || command -v python)"
           echo "Using python: $PYBIN"
+          # Explicit preparation with the same interpreter Make used for the
+          # order-only prerequisite (verification never installs).
+          task dev:setup PY="$PYBIN"
           make wheelhouse bm25-weights PY="$PYBIN"
           make build-images IMAGE_TAG="$GITHUB_SHA"
 

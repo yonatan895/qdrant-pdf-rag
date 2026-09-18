@@ -62,7 +62,10 @@ jobs:
           echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
       - name: docker must be present (the tier raises without it — no docker must fail here)
         run: docker version
-      - run: pip install -e ".[dev]"
+      # Explicit preparation (verification never installs): the tier runs
+      # on .venv/bin/python, which `make loadtest-mock` previously provided
+      # via its order-only prerequisite.
+      - run: task dev:setup
       - name: run the load tier (fail closed — no skips, at least one pass)
         run: |
           set -o pipefail
