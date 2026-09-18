@@ -12,7 +12,7 @@ httpx2==2.12.0
 fastapi==0.141.1
 # ADR-0004 operator console: server-side templates (transitive MarkupSafe floats
 # per this file's convention) and FastAPI form parsing for POST /ui/chat.
-# Requires a connected-host `make wheelhouse` + image rebuild before the
+# Requires a connected-host `sh scripts/tools/run-task.sh artifacts:wheelhouse` + image rebuild before the
 # air-gap install sees either.
 jinja2==3.1.6
 python-multipart==0.0.32

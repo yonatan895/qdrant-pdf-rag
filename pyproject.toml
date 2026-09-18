@@ -35,7 +35,7 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "-q -m 'not integration'"
 markers = [
-    "integration: end-to-end simulation against a docker Qdrant server + loopback mocks (run via `make sim`)",
+    "integration: end-to-end simulation against a docker Qdrant server + loopback mocks (run via `sh scripts/tools/run-task.sh qa:sim`)",
 ]
 
 [tool.ruff]

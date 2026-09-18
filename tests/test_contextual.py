@@ -2,7 +2,7 @@
 
 All LLM contact is faked; the success path is forced with mocks (a test that
 only passes because the network call failed is invalid). Live-network
-validation rides `make eval EMBED_MODE=vllm`, never this file.
+validation rides `sh scripts/tools/run-task.sh eval:retrieval EMBED_MODE=vllm`, never this file.
 """
 
 from pathlib import Path

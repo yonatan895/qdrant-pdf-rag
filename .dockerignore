@@ -1,5 +1,5 @@
 # Keep build contexts small; wheels and BM25 weights come in via named
-# build contexts (see Makefile build-images), never from the repo tree.
+# build contexts (see task artifacts:images), never from the repo tree.
 .git
 .venv
 venv
