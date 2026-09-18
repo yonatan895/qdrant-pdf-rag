@@ -16,9 +16,10 @@
 #
 # Prereqs: docker; the three backends already serving (make local-vllm,
 # local-vllm-embed, local-vllm-rerank); .venv. Qdrant is started via
-# `make sim-qdrant` (the pinned-image Qdrant owner) when unreachable.
+# scripts/sim_qdrant.sh (the pinned-image Qdrant owner, shared with
+# `task local:qdrant:up`) when unreachable.
 # Ctrl-C stops the agent, gateway, and an owned Jaeger; Qdrant is left for
-# `make sim-clean`.
+# `task local:qdrant:down`.
 # LOCAL_STACK_DRYRUN=1 prints the ordered plan and validates inputs only.
 # Never a product path; never in CI or the air gap.
 
@@ -153,8 +154,9 @@ else
         *127.0.0.1:6333*|*localhost:6333*) ;;
         *) die "Qdrant unreachable at $QDRANT_URL (custom URL — start it yourself)" ;;
     esac
-    step "Qdrant unreachable — starting pinned sim (make sim-qdrant)"
-    make -C "$REPO_ROOT" sim-qdrant
+    step "Qdrant unreachable — starting pinned sim (task local:qdrant:up)"
+    SIM_CONTAINER="${SIM_CONTAINER-qdrant-sim}" SIM_PORT="${SIM_PORT-6333}" \
+      sh "$REPO_ROOT/scripts/sim_qdrant.sh" up
     _OK=0
     i=0
     while [ "$i" -lt 60 ]; do

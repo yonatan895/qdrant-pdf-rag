@@ -5,12 +5,14 @@ verification policy stays in [live-stack](live-stack.md#verification-minimums);
 test design stays in [testing](testing.md#evidence-design).
 
 <a id="scope"></a>
-## Scope: increment A
+## Scope: increments A, B1, B2, B3, B4 and B5
 
-`Taskfile.yml` (+ `taskfiles/quality.yml`, `taskfiles/dev.yml`) is the entry
-point for **discovery, doctor, context and quality only**. `Makefile` remains
-authoritative for artifacts, evaluation, local simulation and air-gap
-workflows until increments B/C port them. No product behavior changes here.
+`Taskfile.yml` (+ all `taskfiles/` modules) now covers every command family:
+**discovery, doctor, context, quality (A), artifacts (B1), evaluation (B2),
+local simulation (B3), air-gap stages (B4), dev outputs and cleanup (B5)**.
+The `Makefile` is a one-way compatibility shim forwarding to Task (next
+section), pending removal at the D-gate. Remaining: offline Task handoff and
+CI/docs cutover (C). No product behavior changes here.
 
 All documented invocations assume the pinned `task` on `PATH` (session-local;
 the installer prints the exact export). `task` with no task name prints the
@@ -41,6 +43,15 @@ task list and builds/installs/launches nothing.
 | `PROFILE` | `task dev:doctor PROFILE=sim` | `unit` (default) / `sim` / `deploy`, owned by `agent_doctor.py`. Same empty/false/zero rules as `PY`. |
 | Focused tests | `task qa:unit -- tests/test_agent_context.py -q` | Replaces the default `pytest tests -v` argv once (shell word-splitting applies; trusted developer input only, never untrusted free text). Empty selection keeps the default. |
 | `TASK_BIN` | env for `tests/test_taskfile_contracts.py` | Override for the Task binary under test; `.tools/bin/task`, then `PATH`. |
+| `EMBED_MODE` | `task eval:retrieval EMBED_MODE=vllm` or `EMBED_MODE=vllm task eval:retrieval` | Eval-family default `hash`; both forms converge, CLI wins. Script-read, so bridged under its exact name per task (never global). Explicit empty is preserved (script fails); baselines still derive from the effective mode via `coalesce`. |
+| `VENUE` | `task eval:retrieval VENUE=rc` | Eval-family default `dev`; same form rules as `EMBED_MODE`. `eval:holdout` forces `rc` (caller input ignored, same as Make). |
+| `$(or)`-style knobs (`N`, `RESTORE`, `REPEATS`, `GOLDEN`, `OUT`, `REPORT`, `BASELINE`, `BASE`, `CURRENT`, `BENCH_REPEATS`) | `task eval:answers N=5` | Empty falls back to the Make `$(or)` default via shell `:-`; non-empty passes through exactly. |
+| `AGENT_URL`, `CONCURRENCY`, `DURATION`, `REQUEST_TIMEOUT`, `HARNESS_L3_BASELINE` | `task eval:harness:l3 AGENT_URL=…` | `?=`-style with defaults (`:8080`, `8`/`30`/`30`, mode-keyed L3 baseline); explicit empty preserved. |
+| `$(if)`-style optional flags (`QUERY`, `LIMIT`, …) | `task local:query QUERY="text" LIMIT=5` | Unset/empty inputs are omitted entirely; set values accumulate through positional parameters so free text arrives as single argv entries and executes nothing. (Quotes nested inside `${VAR:+...}` do not survive outer field splitting on any POSIX shell — that idiom is forbidden and pinned by test.) |
+| `$(if)`-style optional environment (`CORPUS_DIR`, `UI_ENABLED`, …) | `task local:stack CORPUS_DIR=/data` | Forwarded via conditional `export` in the same command only when set and non-empty; otherwise the script default applies. |
+| Secrets (`GATEWAY_MASTER_KEY`, per-leg keys) | caller environment only, e.g. `GATEWAY_MASTER_KEY=… task local:gateway:up` | Never Task vars or CLI values: Task never echoes bridged values into `--dry`/logs, and process-table entries carry no secrets. Scripts mint per-start keys when absent. |
+| `BUDGET_PYTHON` | (fixed by the task) | Always `$PWD/.venv/bin/python` at the repo root for Budget resolution (same as Make `$(CURDIR)`); never exported globally, never caller-overridable. |
+| Operator keys (`INTERNAL_REGISTRY`, `NAMESPACE`, … — full `OPERATOR_ENV_KEYS`) | `task airgap:deploy INTERNAL_REGISTRY=x` or `INTERNAL_REGISTRY=x task airgap:deploy` | Bridged per air-gap task with no Task-side defaults, so `common.sh` precedence holds exactly: explicit values beat the env file, empty stays unset, unset applies file then script defaults. `airgap:dryrun` instead pins stand-ins that beat everything (same as the Make recipe environment). |
 
 - Values reach scripts through `env:` bridges and quoted `"$VAR"` expansion,
   never re-parsed template interpolation (a `$(…)` value stays a literal
@@ -54,18 +65,35 @@ task list and builds/installs/launches nothing.
   preserves `agent_doctor.py`'s 0/1/2.
 - `check` runs lint→typecheck→unit sequentially via direct task calls, never
   parallel `deps`. No `sources:`/`status:` caching on verification; only
-  `dev:setup` skips when `.venv/bin/python` exists (a failed preparation
-  leaves no executable, so it never caches green).
+  `dev:setup` skips when `.venv/bin/python` and `.venv/.setup-complete` exist
+  (written only after dependency installation succeeds, so partial setups
+  never cache green).
 
 <a id="safety"></a>
 ## Safety boundaries
 
 Verification diagnoses a missing `.venv` and points at `task dev:setup`; it
 never creates one (deliberate change vs Make's order-only setup). `dev:setup`
-is the only A task that installs, only on explicit request, connected host
-only; CI uses its prepared interpreter. No secrets in CLI/examples/logs;
+is the only setup task that installs, only on explicit request, connected
+host only; CI uses its prepared interpreter. No secrets in CLI/examples/logs;
 `silent: true` only on discovery aliases. `clean`, services, evaluation and
 air-gap behavior are unchanged (still Make-owned).
+
+<a id="freshness"></a>
+## Artifact freshness (B1)
+
+`artifacts:wheelhouse` and `artifacts:bm25` prove freshness with a completion
+stamp (`.task-complete`) recording every input that affects outputs —
+lockfile/manifest/fetcher content, model selection, interpreter version,
+platform — re-verified by `status:` on every run and written only after the
+recipe succeeds. Consequences, all covered by runner-boundary tests:
+
+- Changed inputs rebuild; mtime-only touches do not; a missing stamp rebuilds
+  even when the output directory survives (deliberate improvement over Make's
+  directory-mtime shortcut, which can skip after a failed partial build).
+- No `sources:`/`method:` fingerprints anywhere: Task computes those even for
+  `--list --json`, which would break side-effect-free discovery. Verification
+  tasks carry no freshness state at all.
 
 <a id="inventory"></a>
 ## Inventory (increment A dispositions)
@@ -79,12 +107,13 @@ air-gap behavior are unchanged (still Make-owned).
 | `agent-doctor` (`PROFILE`) | `dev:doctor`, root `agent-doctor` | `scripts/agent_doctor.py` (+ new Task-identity finding) | Migrated |
 | `lint` / `typecheck` / `test` / `check` | `qa:lint` / `qa:typecheck` / `qa:unit` / `qa:check`, root aliases | ruff / mypy / pytest + `pyproject.toml` | Migrated |
 | `check-context` | `qa:context`, root `check-context` | `scripts/check_agent_context.py` | Migrated |
-| `wheelhouse`, `bm25-weights`, `chart*`, `helm-*`, `build-images` | `artifacts:*` | existing scripts/pins | Deferred to B (needs artifact freshness semantics) |
-| `sim*`, `loadtest-mock`, `bench*`, `loadtest` | `qa:sim/load`, `eval:bench*` | existing suites | Deferred to B |
-| `eval*`, `gate-l1`, `harness-*`, `verify-golden`, `capture-pool`, reports | `eval:*` | existing scripts/baselines | Deferred to B (mode/venue scoping) |
-| `query-demo`, `ask`, `local-*`, `run-agent`, `test-vllm-e2e` | `local:*`, `qa:vllm-e2e` | existing launchers | Deferred to B (argv/process-lifetime rules) |
-| `airgap-*`, `airgap-dryrun` | `airgap:*` | `scripts/airgap/*` | Deferred to B wrappers + C offline handoff |
-| `e2e-demo-pdfs`, `clean` | `dev:demo-pdfs`, `dev:clean` | existing scripts | Deferred to B (retention contract) |
+| `wheelhouse`, `bm25-weights`, `chart`, `pull-chart`, `helm-template`, `helm-lint`, `build-images` | `artifacts:wheelhouse/bm25/chart-check/chart-fetch/helm-render/helm-lint/images` | pip / fetch script / helm / docker | `.venv` diagnosed (builds), chart presence verified, sequential preparation | `BUNDLE_DIR`, `BM25_MODEL`, `IMAGE_TAG`, image names | bundles output, images, chart fetch | **Migrated (B1)** with completion-stamp freshness ([#freshness](#freshness)) |
+| `sim*`, `loadtest-mock`, `bench*`, `loadtest` | `qa:sim`/`qa:load` (B3), `eval:bench*`/`eval:load` (B2) | existing suites | **Migrated (B2/B3)** |
+| `eval*`, `gate-l1`, `harness-*`, `verify-golden`, `capture-pool`, reports | `eval:*` | existing scripts/baselines | **Migrated (B2)** with per-task mode/venue scoping ([#inputs](#inputs)) |
+| `query-demo`, `ask`, `local-*`, `run-agent`, `test-vllm-e2e` | `local:*`, `qa:sim/load/vllm-e2e` | existing launchers/scripts | **Migrated (B3)**; `run_local_stack.sh` calls `scripts/sim_qdrant.sh` directly (no runner) |
+| `airgap-*`, `airgap-dryrun` | `airgap:*` | `scripts/airgap/*` | **Migrated (B4)** thin wrappers; operator keys bridged per task (no defaults); `bootstrap.sh` offline wording stays for C |
+| `e2e-demo-pdfs`, `clean` | `dev:demo-pdfs`, `dev:clean` | existing scripts | **Migrated (B5)**; `clean` keeps the bounded retention contract (keeps `*.tar*`, never touches `.tools/`, external paths) |
+| *(shim)* all of the above via `make …` | one-line forwarding recipes | this table | **Migrated (B5)** one-way shim ([#shim](#shim)); `make help` prints a migration pointer + task list |
 
 Executable consumer inventory (all found by searching first-party `make`
 invocations): `scripts/run_local_stack.sh:157` (`make -C … sim-qdrant`);
@@ -100,12 +129,52 @@ consumer is updated once in increment C (no parallel acceptance system).
 here. Runtime consumers migrate in B/C; historical `make` commands in dated
 records stay as history.
 
+<a id="shim"></a>
+## Make compatibility shim (B5, removed at the D-gate)
+
+Every `Makefile` target forwards once to its Task equivalent and does
+nothing else — Task is the single implementation; Task never calls Make.
+Proven by make/task consistency tests that run both spellings against the
+same inert recorders and require identical tool-boundary traces.
+
+Forwarding rule: recipes forward `PY` explicitly (Make resolves it as
+`python3.14 || python3`; Task defaults to `python3`). Every other caller
+override rides the recipe environment into Task's env form automatically,
+so `VAR=x make target` and `make target VAR=x` both keep working with no
+per-target repetition — Task-side defaults match Make's. Verified
+empirically for both override forms, including empty values and quoted
+spaces, across every command family.
+
+Limits: the pinned `task` must be on `PATH` for connected-host targets
+(install script; doctor finding) — CI jobs that invoke `make` provision it
+first via an `Install pinned Task runner` step (`e2e.yml` checkout jobs,
+`opencode.yml` review, and `load.yml` from the repo; black-box bundle jobs
+need no Task since `airgap-*` targets call stage scripts directly under
+TR437-F1 Option 2; the full consumer switch to `task` stays increment C);
+air-gap entry points (`airgap-*`) retain direct script calls until increment
+C delivers the offline Task handoff (TR437-F1 Option 2), so offline bastions
+without Task remain functional; multiple goals run sequentially; no `-j` for installs/builds (concurrent processes must not share
+one `.venv`/bundle dir); `-C dir` resolves against the repo root; unknown
+targets fail with Make's own "No rule" error (no catch-all). `make help`
+prints a migration pointer and the task list instead of the old catalog.
+
+Approved differences from the old recipes (all covered by tests):
+completion stamps instead of directory mtimes (a partial directory never
+counts as built); verification diagnoses a missing `.venv` instead of
+creating it; explicit-empty `SIM_CONTAINER`/`SIM_PORT` fail closed with a
+clear message instead of a docker error; explicit-empty env-default inputs
+(e.g. `DENSE_DIM=`) fall back cleanly instead of leaking ambient empties
+into script defaults (which could crash); `qdrant_pin.py` runs under
+`python3` instead of Make's `$(PY)` (stdlib-only, identical output);
+`make help` output changed. Old signed bundles keep their Make interface
+as history; the old→new name map is the inventory table above.
+
 <a id="shim-exit"></a>
 ## Compatibility-shim exit milestone (strict D-gate)
 
-No shim is added in increment A (Makefile untouched, Task additive). Broad
-porting (B) may add a one-way Make→Task forwarding shim for migrated targets
-only. The Makefile/shim is removed **after**: every in-repository executable
+The shim landed in increment B5 (above): every in-repository target forwards
+to Task, including the runtime `run_local_stack.sh` path via
+`scripts/sim_qdrant.sh`. The Makefile/shim is removed **after**: every in-repository executable
 consumer has moved, the signed offline bootstrap works without Make, agent
 fresh-context acceptance is recorded, and required candidate checks pass.
 Retired Make-specific assertions map to retained behavioral coverage in

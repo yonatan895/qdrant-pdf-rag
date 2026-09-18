@@ -65,11 +65,19 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Install pinned Task runner (Makefile shim forwards to Task)
+        run: |
+          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
+
       - name: Build wheelhouse + BM25 weights + images (same Containerfiles as air-gap)
         run: |
           export PATH="/usr/local/bin:$PATH"
           PYBIN="$(command -v python3.14 || command -v python)"
           echo "Using python: $PYBIN"
+          # Explicit preparation with the same interpreter Make used for the
+          # order-only prerequisite (verification never installs).
+          task dev:setup PY="$PYBIN"
           make wheelhouse bm25-weights PY="$PYBIN"
           make build-images IMAGE_TAG="$GITHUB_SHA"
 
@@ -129,6 +137,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+
+      - name: Install pinned Task runner (Makefile shim forwards to Task)
+        run: |
+          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
 
       - name: Install skopeo
         run: |
@@ -793,6 +806,11 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/oc-unpack/kubectl" /usr/local/bin/kubectl
           /usr/local/bin/oc version --client=true
 
+      - name: Install pinned Task runner (Makefile shim forwards to Task)
+        run: |
+          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
+
       - name: Log in to lab OpenShift
         run: /usr/local/bin/oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_TOKEN" --insecure-skip-tls-verify=true
 
@@ -929,6 +947,11 @@ jobs:
           echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -
           sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
           /usr/local/bin/kubectl version --client=true
+
+      - name: Install pinned Task runner (Makefile shim forwards to Task)
+        run: |
+          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
 
       - name: airgap-deploy dry-run (prod render, fail-closed placeholders, knobs)
         env:

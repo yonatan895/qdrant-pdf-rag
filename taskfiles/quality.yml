@@ -70,3 +70,53 @@ tasks:
       TASK_PY: '{{.PY}}'
     cmds:
       - '"$TASK_PY" scripts/check_agent_context.py'
+
+  sim:
+    desc: Run the integration tier against disposable Qdrant (0 skips)
+    summary: |
+      `.venv/bin/python -m pytest -m integration -v -rs`, mirroring
+      `make sim`. A skip fails the run (a skip on missing local weights
+      means symlink or rebuild them, never ignore it). Needs docker (or
+      QDRANT_SIM_URL) and the BM25 weights; no GPU or live gateway.
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - .venv/bin/python -m pytest -m integration -v -rs
+
+  load:
+    desc: Run the load tier (same composition CI runs, absolute contracts)
+    summary: |
+      `.venv/bin/python -m pytest -m integration tests/test_load_tier.py
+      -v`, mirroring `make loadtest-mock`. Fail-closed: no skips;
+      docker/startup/zero-request failures raise. Knobs live in the
+      caller environment (LOAD_SEARCH_CONCURRENCY and friends, read by the
+      test itself).
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - .venv/bin/python -m pytest -m integration tests/test_load_tier.py -v
+
+  vllm-e2e:
+    desc: Gateway-shaped vLLM end-to-end suite (explicitly selected)
+    summary: |
+      `PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py` with
+      only the caller-set model/URL/dim/mode flags, mirroring
+      `make test-vllm-e2e`. Needs the local backends serving; explicitly
+      selected, never part of ordinary verification.
+    env:
+      PYTHONPATH: '.'
+      TASK_MODEL: '{{.MODEL}}'
+      TASK_VLLM_URL: '{{.VLLM_URL}}'
+      TASK_EMBED_MODEL: '{{.EMBED_MODEL}}'
+      TASK_EMBED_URL: '{{.EMBED_URL}}'
+      TASK_DENSE_DIM: '{{.DENSE_DIM}}'
+      TASK_EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - >-
+        set --;
+        if [ -n "${TASK_MODEL:-}" ]; then set -- "$@" --model "$TASK_MODEL"; fi;
+        if [ -n "${TASK_VLLM_URL:-}" ]; then set -- "$@" --vllm-url "$TASK_VLLM_URL"; fi;
+        if [ -n "${TASK_EMBED_MODEL:-}" ]; then set -- "$@" --embed-model "$TASK_EMBED_MODEL"; fi;
+        if [ -n "${TASK_EMBED_URL:-}" ]; then set -- "$@" --embed-url "$TASK_EMBED_URL"; fi;
+        if [ -n "${TASK_DENSE_DIM:-}" ]; then set -- "$@" --dense-dim "$TASK_DENSE_DIM"; fi;
+        if [ -n "${TASK_EMBED_MODE:-}" ]; then set -- "$@" --embed-mode "$TASK_EMBED_MODE"; fi;
+        exec .venv/bin/python scripts/test_local_e2e_vllm.py "$@"

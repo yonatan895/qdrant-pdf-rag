@@ -1,0 +1,141 @@
+# Artifact tasks — issue #402 increment B1.
+#
+# Dispatch only: pip/helm/docker keep their own semantics. Freshness uses a
+# completion stamp (`.task-complete`, written only after builder success and
+# output verification) combined with input identity and output member checks
+# in `status`. An existing output directory is therefore never proof of a
+# finished build — this deliberately improves on Make's directory-mtime
+# shortcut, which can skip a rebuild after a failed `pip wheel`/fetch left a
+# partial directory behind. Verification tasks (`chart:check`, `helm:lint`)
+# never cache: they re-verify on request.
+# Included with `dir: .` from the root Taskfile: always runs at repo root.
+version: '3'
+
+tasks:
+  wheelhouse:
+    desc: Build the offline pip wheelhouse from the lockfile (connected)
+    summary: |
+      Runs `.venv/bin/python -m pip wheel -r requirements.lock.txt -w <dir>`
+      with the venv interpreter so wheel tags match the runtime (cp314),
+      mirroring `make wheelhouse`. Inputs: BUNDLE_DIR (default bundles;
+      wheelhouse lands in BUNDLE_DIR/wheelhouse). Freshness is proven by a
+      completion stamp recording the lockfile content, interpreter version
+      and platform, combined with an output-member receipt (.wheels.sha256)
+      re-verified on every run: content changes rebuild, mtime-only touches
+      do not, and a missing stamp or missing/modified wheel rebuilds even
+      when the output directory survives (a directory alone is never proof
+      of a finished build). Fails closed without `.venv` (run `task dev:setup`).
+      Fingerprint state is never used, so discovery (`--list`, JSON
+      listing, summaries) never writes state. Connected host only.
+    vars:
+      BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
+      WHEELHOUSE: '{{.BUNDLE_DIR}}/wheelhouse'
+    env:
+      TASK_WHEELHOUSE: '{{.WHEELHOUSE}}'
+    status:
+      - test -f "$TASK_WHEELHOUSE/.task-complete"
+      - test "$(cat "$TASK_WHEELHOUSE/.task-complete")" = "$(sha256sum requirements.lock.txt) $(.venv/bin/python -V 2>&1) $(uname -s -m)"
+      - test -f "$TASK_WHEELHOUSE/.wheels.sha256"
+      - (cd "$TASK_WHEELHOUSE" && sha256sum -c --status .wheels.sha256)
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - rm -rf "$TASK_WHEELHOUSE" && mkdir -p "$TASK_WHEELHOUSE"
+      - .venv/bin/python -m pip wheel -r requirements.lock.txt -w "$TASK_WHEELHOUSE"
+      - (cd "$TASK_WHEELHOUSE" && ls *.whl >/dev/null 2>&1 && sha256sum *.whl > .wheels.sha256 && sha256sum -c --status .wheels.sha256)
+      - echo "$(sha256sum requirements.lock.txt) $(.venv/bin/python -V 2>&1) $(uname -s -m)" > "$TASK_WHEELHOUSE/.task-complete"
+
+  bm25:
+    desc: Fetch BM25 sparse weights verified against the sha256 manifest
+    summary: |
+      Runs the venv Python over `scripts/fetch_bm25_weights.py --model
+      <model> --out <dir> --verify-manifest bm25-weights.sha256`, mirroring
+      `make bm25-weights` (upstream drift fails closed in the script).
+      Inputs: BM25_MODEL (default Qdrant/bm25), BUNDLE_DIR (default bundles).
+      Freshness is proven by a completion stamp recording the manifest and
+      fetcher content plus the model selection, combined with an offline
+      member check against the sha256 manifest, re-verified on every run:
+      content or model changes rebuild, mtime-only touches do not, and a
+      missing stamp or missing/modified weight file rebuilds even when the
+      output directory survives. Fingerprint state is never used, so
+      discovery never writes state. Connected host only.
+    vars:
+      BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
+      BM25_MODEL: '{{if hasKey . "BM25_MODEL"}}{{.BM25_MODEL}}{{else}}Qdrant/bm25{{end}}'
+      BM25_WEIGHTS: '{{.BUNDLE_DIR}}/bm25-weights'
+    env:
+      TASK_BM25_WEIGHTS: '{{.BM25_WEIGHTS}}'
+      TASK_BM25_MODEL: '{{.BM25_MODEL}}'
+    status:
+      - test -f "$TASK_BM25_WEIGHTS/.task-complete"
+      - test "$(cat "$TASK_BM25_WEIGHTS/.task-complete")" = "$(cat bm25-weights.sha256 scripts/fetch_bm25_weights.py | sha256sum) $TASK_BM25_MODEL"
+      - python3 scripts/fetch_bm25_weights.py --verify-only --out "$TASK_BM25_WEIGHTS" --verify-manifest bm25-weights.sha256
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - rm -rf "$TASK_BM25_WEIGHTS" && mkdir -p "$TASK_BM25_WEIGHTS"
+      - .venv/bin/python scripts/fetch_bm25_weights.py --model "$TASK_BM25_MODEL" --out "$TASK_BM25_WEIGHTS" --verify-manifest bm25-weights.sha256
+      - python3 scripts/fetch_bm25_weights.py --verify-only --out "$TASK_BM25_WEIGHTS" --verify-manifest bm25-weights.sha256
+      - echo "$(cat bm25-weights.sha256 scripts/fetch_bm25_weights.py | sha256sum) $TASK_BM25_MODEL" > "$TASK_BM25_WEIGHTS/.task-complete"
+
+  chart-check:
+    desc: Verify the vendored Qdrant chart archive is present
+    summary: |
+      Passes only when `charts/qdrant-*.tgz` exists (normal runs use the
+      vendored chart), mirroring `make chart`. Always re-verifies on request;
+      never cached. Fetching is `task artifacts:chart-fetch` (connected
+      maintenance only, never an implicit prerequisite).
+    cmds:
+      - 'ls charts/qdrant-*.tgz >/dev/null 2>&1 || { echo "charts/qdrant-*.tgz missing; run: task artifacts:chart-fetch (connected host)" >&2; exit 1; }'
+
+  chart-fetch:
+    desc: Fetch the Qdrant Helm chart (connected maintenance only)
+    summary: |
+      Runs `helm pull qdrant/qdrant --destination charts`, mirroring
+      `make pull-chart`. Connected host only; never an implicit deploy
+      prerequisite. Always runs on request (upstream may have moved).
+    cmds:
+      - mkdir -p charts
+      - helm pull qdrant/qdrant --destination charts
+
+  helm-render:
+    desc: Render the Qdrant chart with placeholder overrides
+    summary: |
+      Runs `helm template` against the vendored chart with the fixed
+      placeholder `--set` values and `overlays/openshift/values.yaml`,
+      mirroring `make helm-template`. Verifies chart presence first.
+    cmds:
+      - task: chart-check
+      - helm template qdrant charts/qdrant-*.tgz -f overlays/openshift/values.yaml --set image.repository=PLACEHOLDER_REGISTRY/qdrant/qdrant --set imagePullSecrets[0].name=PLACEHOLDER_PULL_SECRET --set persistence.storageClassName=PLACEHOLDER_STORAGE_CLASS --set snapshotPersistence.storageClassName=PLACEHOLDER_STORAGE_CLASS
+
+  helm-lint:
+    desc: Lint the Qdrant chart against the OpenShift values
+    summary: |
+      Runs `helm lint` against the vendored chart, mirroring
+      `make helm-lint`. Verifies chart presence first; always re-verifies.
+    cmds:
+      - task: chart-check
+      - helm lint charts/qdrant-*.tgz -f overlays/openshift/values.yaml
+
+  images:
+    desc: Build ingest and agent images with wheelhouse/bm25 contexts (connected)
+    summary: |
+      Builds both Containerfiles with the named `wheelhouse`/`bm25`
+      build contexts and `-t <name>:<tag>`, mirroring `make build-images`.
+      Preparation runs first and sequentially (wheelhouse, then bm25),
+      never as parallel deps sharing state. Inputs: IMAGE_TAG (default
+      latest), INGEST_IMAGE_NAME, AGENT_IMAGE_NAME, BUNDLE_DIR, BM25_MODEL.
+      Connected host only; the air gap never builds.
+    vars:
+      IMAGE_TAG: '{{if hasKey . "IMAGE_TAG"}}{{.IMAGE_TAG}}{{else}}latest{{end}}'
+      INGEST_IMAGE_NAME: '{{if hasKey . "INGEST_IMAGE_NAME"}}{{.INGEST_IMAGE_NAME}}{{else}}mainframe-rag/ingest{{end}}'
+      AGENT_IMAGE_NAME: '{{if hasKey . "AGENT_IMAGE_NAME"}}{{.AGENT_IMAGE_NAME}}{{else}}mainframe-rag/agent{{end}}'
+      BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
+    env:
+      TASK_IMAGE_TAG: '{{.IMAGE_TAG}}'
+      TASK_INGEST_IMAGE_NAME: '{{.INGEST_IMAGE_NAME}}'
+      TASK_AGENT_IMAGE_NAME: '{{.AGENT_IMAGE_NAME}}'
+      TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
+    cmds:
+      - task: wheelhouse
+      - task: bm25
+      - docker build --build-context wheelhouse="$TASK_BUNDLE_DIR/wheelhouse" --build-context bm25="$TASK_BUNDLE_DIR/bm25-weights" -f images/Containerfile.ingest -t "$TASK_INGEST_IMAGE_NAME:$TASK_IMAGE_TAG" .
+      - docker build --build-context wheelhouse="$TASK_BUNDLE_DIR/wheelhouse" --build-context bm25="$TASK_BUNDLE_DIR/bm25-weights" -f images/Containerfile.agent -t "$TASK_AGENT_IMAGE_NAME:$TASK_IMAGE_TAG" .

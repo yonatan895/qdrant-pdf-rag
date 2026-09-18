@@ -14,20 +14,22 @@ tasks:
       selection, same `requirements.lock.txt` plus editable `.[dev]` install
       into `.venv` with the venv's own pip). Inputs: PY (default python3;
       explicit empty is preserved and fails rather than silently defaulting).
-      Skips when `.venv/bin/python` already exists (a failed preparation
-      leaves no executable behind, so it is never cached as complete).
+      Skips when `.venv/bin/python` and completion stamp `.venv/.setup-complete`
+      both exist (written only after successful dependency installation).
       Connected host only; CI uses its prepared interpreter and must not call
       this. Never invoked implicitly by verification tasks.
     status:
-      - 'test -x .venv/bin/python'
+      - 'test -x .venv/bin/python && test -f .venv/.setup-complete'
     vars:
       PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}python3{{end}}'
     env:
       TASK_PY: '{{.PY}}'
     cmds:
+      - 'rm -f .venv/.setup-complete'
       - '"$TASK_PY" -m venv .venv'
       - '.venv/bin/python -m pip install --upgrade pip'
       - '.venv/bin/python -m pip install -r requirements.lock.txt -e ".[dev]"'
+      - 'touch .venv/.setup-complete'
 
   doctor:
     desc: Diagnose tool prerequisites (read-only)
@@ -48,3 +50,32 @@ tasks:
       TASK_PROFILE: '{{.PROFILE}}'
     cmds:
       - '"$TASK_PY" scripts/agent_doctor.py --profile "$TASK_PROFILE"'
+
+  demo-pdfs:
+    desc: Generate the original synthetic demo PDFs (dev only)
+    summary: |
+      Two `scripts/make_synthetic_pdf.py` runs into output/demo-pdfs (one
+      outline, one `--plain`), mirroring `make e2e-demo-pdfs`. Original
+      synthetic documents only; never vendor material.
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - mkdir -p output/demo-pdfs
+      - .venv/bin/python scripts/make_synthetic_pdf.py --out output/demo-pdfs/SA22-0000-00_outline.pdf
+      - .venv/bin/python scripts/make_synthetic_pdf.py --plain --out output/demo-pdfs/plain-widget-notes.pdf
+
+  clean:
+    desc: Remove generated environments and outputs (bounded, never external)
+    summary: |
+      Removes `.venv`, test caches, the bundle dir, `output/`, and
+      non-archive leftovers inside `dist/`, mirroring `make clean`. Bounded
+      retention contract: `*.tar*` release archives in `dist/` are kept; the
+      workspace-local Task install (`.tools/`), external corpora, signing
+      keys and snapshots live outside these paths and are never touched.
+      Input: BUNDLE_DIR (default bundles).
+    vars:
+      BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
+    env:
+      TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
+    cmds:
+      - rm -rf .venv .pytest_cache .mypy_cache .ruff_cache "$TASK_BUNDLE_DIR" output
+      - 'if [ -d dist ]; then find dist -mindepth 1 ! -name "*.tar*" -delete 2>/dev/null || true; rmdir dist 2>/dev/null || true; fi'

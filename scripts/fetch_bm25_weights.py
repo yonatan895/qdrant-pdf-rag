@@ -67,7 +67,17 @@ def main() -> None:
         "--verify-manifest", type=Path, default=None,
         help="sha256 manifest (bm25-weights.sha256) to verify the download against",
     )
+    parser.add_argument(
+        "--verify-only", action="store_true",
+        help="verify existing downloaded files against manifest without importing or downloading",
+    )
     args = parser.parse_args()
+
+    if args.verify_only:
+        if not args.verify_manifest:
+            raise SystemExit("error: --verify-only requires --verify-manifest")
+        verify_manifest(args.out, args.verify_manifest)
+        return
 
     args.out.mkdir(parents=True, exist_ok=True)
     # Instantiating the model materializes its files under the cache dir.
