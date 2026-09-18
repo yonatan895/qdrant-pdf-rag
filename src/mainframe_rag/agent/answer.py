@@ -914,12 +914,15 @@ def _chat_result_from_response(data: dict[str, Any]) -> ChatResult:
     """Single parser for non-streaming chat-completion payloads: content,
     finish_reason, and usage. All fallback legs (achat, chat_stream,
     _chat_sync) funnel through here so response-shape handling cannot
-    diverge copies. Completion is explicit (issue #365): a payload without
-    a non-empty string finish_reason is an incomplete upstream completion,
-    never a synthesized "stop" — a failed or partial upstream response must
+    diverge copies. Completion is explicit (issue #365): a payload with a
+    top-level error, without a non-empty string finish_reason, or with
+    non-string content is an incomplete upstream completion, never a synthesized
+    "stop" or coerced string — a failed or partial upstream response must
     not be finalized as success."""
     if not isinstance(data, dict):
         raise TruncatedStreamError(0, REASON_MALFORMED_FRAME)
+    if data.get("error") is not None:
+        raise TruncatedStreamError(0, REASON_UPSTREAM_ERROR)
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices:
         raise TruncatedStreamError(0, REASON_MALFORMED_FRAME)
@@ -934,7 +937,10 @@ def _chat_result_from_response(data: dict[str, Any]) -> ChatResult:
         raise TruncatedStreamError(0, REASON_MISSING_FINISH)
     if not isinstance(finish_reason, str) or not finish_reason:
         raise TruncatedStreamError(0, REASON_MALFORMED_FRAME)
-    content = str(message.get("content") or "")
+    raw_content = message.get("content")
+    if raw_content is not None and not isinstance(raw_content, str):
+        raise TruncatedStreamError(0, REASON_MALFORMED_FRAME)
+    content = raw_content or ""
     usage = _token_usage_from_dict(data.get("usage") or {})
     return ChatResult(content=content, finish_reason=finish_reason, usage=usage)
 
@@ -1062,16 +1068,16 @@ def _feed_sse_line(state: _SseStreamState, line: str, t0: float) -> str | None:
     if delta_content is not None and not isinstance(delta_content, str):
         state.malformed = REASON_MALFORMED_FRAME
         return None
-    if delta_content:
-        if state.ttft_ms is None:
-            state.ttft_ms = int((time.monotonic() - t0) * 1000)
-        state.content_parts.append(delta_content)
     finish = choice.get("finish_reason")
     if finish is not None:
         if not isinstance(finish, str) or not finish:
             state.malformed = REASON_MALFORMED_FRAME
             return None
         state.finish_reason = finish
+    if delta_content:
+        if state.ttft_ms is None:
+            state.ttft_ms = int((time.monotonic() - t0) * 1000)
+        state.content_parts.append(delta_content)
     return delta_content
 
 
@@ -1222,6 +1228,7 @@ class HttpxLLMClient:
 
         t0 = time.monotonic()
         state = _SseStreamState()
+        yielded_tokens = 0
 
         async with self._async_http().stream(
             "POST",
@@ -1235,6 +1242,7 @@ class HttpxLLMClient:
                 if state.terminal_seen():
                     break
                 if delta:
+                    yielded_tokens += 1
                     yield {
                         "type": "token",
                         "delta": delta,
@@ -1249,12 +1257,12 @@ class HttpxLLMClient:
         # it raises (the app's event: error path) instead of shipping the
         # prefix labeled "stop".
         reason = state.incomplete_reason()
-        if reason is not None and state.content_parts:
+        if reason is not None and yielded_tokens > 0:
             raise TruncatedStreamError(len(state.content_parts), reason)
         finish_reason = state.finish_reason
         usage_data = state.usage_data
         ttft_ms = state.ttft_ms
-        if not state.content_parts:
+        if yielded_tokens == 0:
             # Empty-content recovery: a reasoning model whose whole output
             # lands in the reasoning channel yields zero content deltas.
             # A pre-output error/truncation/missing-finish also lands here:

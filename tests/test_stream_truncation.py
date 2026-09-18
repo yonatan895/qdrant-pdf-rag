@@ -306,14 +306,102 @@ async def test_achat_missing_finish_on_both_legs_raises_not_synthesized_stop():
             {"choices": [{"message": None, "finish_reason": "stop"}]},
             REASON_MALFORMED_FRAME,
         ),
+        (
+            {
+                "error": {"message": "SECRET"},
+                "choices": [{"message": {"content": "x"}, "finish_reason": "stop"}],
+            },
+            REASON_UPSTREAM_ERROR,
+        ),
+        (
+            {"choices": [{"message": {"content": {"bad": 1}}, "finish_reason": "stop"}]},
+            REASON_MALFORMED_FRAME,
+        ),
+        (
+            {"choices": [{"message": {"content": [1, 2]}, "finish_reason": "stop"}]},
+            REASON_MALFORMED_FRAME,
+        ),
+        (
+            {"choices": [{"message": {"content": 99}, "finish_reason": "stop"}]},
+            REASON_MALFORMED_FRAME,
+        ),
     ],
 )
 def test_buffered_payload_requires_explicit_finish(payload, reason):
     """The non-streaming parser (all fallback legs) rejects missing and
-    misshapen terminal shapes with fixed labels (issue #365)."""
+    misshapen terminal shapes, top-level errors, and non-string content with
+    fixed labels (issues #365 / Q420-P1)."""
     with pytest.raises(TruncatedStreamError) as excinfo:
         _chat_result_from_response(payload)
     assert excinfo.value.reason == reason
+
+
+@pytest.mark.anyio
+async def test_chat_stream_malformed_first_frame_recovers_via_post():
+    """Q420-P2: a malformed first content+finish frame emits NO invalid text
+    and uses the single allowed non-streaming fallback to complete normally."""
+    malformed_first_line = (
+        'data: {"choices": [{"delta": {"content": "not emitted"}, "finish_reason": 42}]}'
+    )
+    fake = HttpxStreamFake(
+        lines=[malformed_first_line, _DONE_LINE], payload=_COMPLETE_PAYLOAD
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    items = [
+        item async for item in llm.chat_stream([ChatMessage(role="user", content="hi")])
+    ]
+    # "not emitted" was never yielded
+    assert not any("not emitted" in item.get("delta", "") for item in items)
+    assert len(fake.post_bodies) == 1
+    assert items[0]["type"] == "token" and items[0]["delta"] == "Complete answer"
+    assert items[-1]["type"] == "done" and items[-1]["finish_reason"] == "stop"
+
+
+@pytest.mark.anyio
+async def test_chat_stream_malformed_frame_after_yielded_token_raises_without_replay():
+    """Q420-P2: a malformed content+finish frame after an actually emitted token
+    raises the fixed incomplete error and makes zero fallback requests."""
+    malformed_second_line = (
+        'data: {"choices": [{"delta": {"content": "bad token"}, "finish_reason": 42}]}'
+    )
+    fake = HttpxStreamFake(
+        lines=[_CONTENT_LINE, malformed_second_line, _DONE_LINE],
+        payload=_COMPLETE_PAYLOAD,
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    items = []
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        async for item in llm.chat_stream([ChatMessage(role="user", content="hi")]):
+            items.append(item)
+    assert len(items) == 1
+    assert items[0]["type"] == "token" and items[0]["delta"] == "Partial "
+    assert excinfo.value.reason == REASON_MALFORMED_FRAME
+    assert fake.post_bodies == []  # no replay allowed after a visible token
+
+
+@pytest.mark.anyio
+async def test_chat_stream_malformed_first_frame_failed_fallback_fails_closed():
+    """Q420-P2: a pre-output malformed frame whose fallback also fails
+    fails closed without recursion or retry."""
+    malformed_first_line = (
+        'data: {"choices": [{"delta": {"content": "not emitted"}, "finish_reason": 42}]}'
+    )
+    fake = HttpxStreamFake(
+        lines=[malformed_first_line, _DONE_LINE],
+        payload={
+            "error": {"message": "SECRET-UPSTREAM-TEXT"},
+            "choices": [{"message": {"content": "fallback"}, "finish_reason": "stop"}],
+        },
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    items = []
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        async for item in llm.chat_stream([ChatMessage(role="user", content="hi")]):
+            items.append(item)
+    assert len(fake.post_bodies) == 1  # exactly one fallback attempt, no retry loop
+    assert excinfo.value.reason == REASON_UPSTREAM_ERROR
+    assert "SECRET-UPSTREAM-TEXT" not in str(excinfo.value)
+    assert all(i.get("type") != "done" for i in items)
 
 
 @pytest.mark.parametrize("finish", ["stop", "length", "content_filter"])
@@ -582,6 +670,69 @@ def test_v1_chat_stream_real_client_missing_finish_emits_error_and_done(missing_
     assert all(
         not (f.get("choices") and f["choices"][0].get("finish_reason")) for f in frames
     )
+
+
+@pytest.fixture
+def buffered_error_client(monkeypatch, synthetic_pdf):
+    """Client configured with a non-streaming mock returning a top-level error (Q420-P1)."""
+    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
+    llm = HttpxLLMClient(
+        Settings(**_settings_kwargs(llm_stream=False)),
+        client=HttpxStreamFake(
+            lines=[],
+            payload={
+                "error": {"message": "PRIVATE-SENTINEL-KEY"},
+                "choices": [
+                    {"message": {"content": "should not appear"}, "finish_reason": "stop"}
+                ],
+            },
+        ),
+    )
+    yield from _client(monkeypatch, synthetic_pdf, llm)
+
+
+def test_v1_chat_json_real_client_buffered_error_is_502(buffered_error_client):
+    """Q420-P1: buffered chat completions with top-level error fail closed as 502
+    upstream_error without leaking private error text."""
+    resp = buffered_error_client.post(
+        "/v1/chat",
+        json={"messages": [{"role": "user", "content": "IEA500I command"}]},
+    )
+    assert resp.status_code == 502
+    assert resp.json() == {"code": "upstream_error", "message": "answer failed"}
+    assert "PRIVATE-SENTINEL-KEY" not in resp.text
+
+
+@pytest.fixture
+def malformed_first_recovering_client(monkeypatch, synthetic_pdf):
+    """Client whose first stream frame is malformed finish_reason, recovering via POST (Q420-P2)."""
+    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
+    malformed_first_line = (
+        'data: {"choices": [{"delta": {"content": "not emitted"}, "finish_reason": 42}]}'
+    )
+    llm = HttpxLLMClient(
+        Settings(**_settings_kwargs(llm_stream=True)),
+        client=HttpxStreamFake(
+            lines=[malformed_first_line, _DONE_LINE],
+            payload=_COMPLETE_PAYLOAD,
+        ),
+    )
+    yield from _client(monkeypatch, synthetic_pdf, llm)
+
+
+def test_v1_chat_stream_real_client_malformed_first_frame_recovers(
+    malformed_first_recovering_client,
+):
+    """Q420-P2: streaming chat with malformed first frame recovers via single POST fallback,
+    emitting no invalid text and completing successfully."""
+    resp = malformed_first_recovering_client.post(
+        "/v1/chat",
+        json={"messages": [{"role": "user", "content": "IEA500I command"}], "stream": True},
+    )
+    assert resp.status_code == 200
+    assert "data: [DONE]" in resp.text
+    assert "not emitted" not in resp.text
+    assert "Complete answer" in resp.text
 
 
 def _scope(path: str) -> dict:

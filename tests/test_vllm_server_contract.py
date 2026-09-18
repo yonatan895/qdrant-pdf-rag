@@ -20,6 +20,7 @@ import pytest
 from mainframe_rag.agent.answer import (
     REASON_MALFORMED_FRAME,
     REASON_MISSING_FINISH,
+    REASON_UPSTREAM_ERROR,
     HttpxLLMClient,
     TruncatedStreamError,
 )
@@ -170,17 +171,161 @@ def test_nonstream_post_shape_and_explicit_finish():
             {"choices": [{"message": {"content": "ans"}, "finish_reason": 3}]},
             REASON_MALFORMED_FRAME,
         ),
+        (
+            {
+                "error": {"message": "PRIVATE_SENTINEL"},
+                "choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}],
+            },
+            REASON_UPSTREAM_ERROR,
+        ),
+        (
+            {
+                "error": "upstream exploded",
+                "choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}],
+            },
+            REASON_UPSTREAM_ERROR,
+        ),
+        (
+            {"choices": [{"message": {"content": {"unexpected": "shape"}}, "finish_reason": "stop"}]},
+            REASON_MALFORMED_FRAME,
+        ),
+        (
+            {"choices": [{"message": {"content": ["unexpected", "list"]}, "finish_reason": "stop"}]},
+            REASON_MALFORMED_FRAME,
+        ),
+        (
+            {"choices": [{"message": {"content": 42}, "finish_reason": "stop"}]},
+            REASON_MALFORMED_FRAME,
+        ),
     ],
 )
 def test_nonstream_payload_without_explicit_finish_fails_closed(payload, reason):
-    """A non-streaming payload without an explicit terminal finish is an
-    incomplete upstream completion, never a synthesized "stop" (issue #365)."""
+    """A non-streaming payload without an explicit terminal finish, with a
+    top-level error, or with non-string content fails closed (issues #365 / Q420-P1)."""
     fake = _post_payload(payload)
 
     llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
     with pytest.raises(TruncatedStreamError) as excinfo:
         llm.chat(_msgs())
     assert excinfo.value.reason == reason
+
+
+@pytest.mark.parametrize(
+    "payload, expected_content, expected_finish",
+    [
+        (
+            {"choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}]},
+            "ans",
+            "stop",
+        ),
+        (
+            {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]},
+            "",
+            "stop",
+        ),
+        (
+            {"choices": [{"message": {"content": None}, "finish_reason": "stop"}]},
+            "",
+            "stop",
+        ),
+        (
+            {
+                "error": None,
+                "choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}],
+            },
+            "ans",
+            "stop",
+        ),
+        (
+            {"choices": [{"message": {"content": "ans"}, "finish_reason": "length"}]},
+            "ans",
+            "length",
+        ),
+        (
+            {
+                "choices": [
+                    {"message": {"content": "ans"}, "finish_reason": "content_filter"}
+                ]
+            },
+            "ans",
+            "content_filter",
+        ),
+    ],
+)
+def test_nonstream_payload_healthy_variants(payload, expected_content, expected_finish):
+    """Healthy non-streaming payloads, including null/empty content, error: None,
+    and explicit terminal classifications, are preserved (issues #365 / Q420-P1)."""
+    fake = _post_payload(payload)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+    result = llm.chat(_msgs())
+    assert result.content == expected_content
+    assert result.finish_reason == expected_finish
+
+
+def test_nonstream_client_sync_rejects_error_payload():
+    """Sync chat() rejects top-level error payloads without leaking
+    error-body text into the exception (issues #365 / Q420-P1)."""
+    payload = {
+        "error": {"message": "PRIVATE_SENTINEL"},
+        "choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}],
+    }
+    fake = _post_payload(payload)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        llm.chat(_msgs())
+    assert excinfo.value.reason == REASON_UPSTREAM_ERROR
+    assert "PRIVATE_SENTINEL" not in str(excinfo.value)
+
+
+@pytest.mark.anyio
+async def test_nonstream_client_async_rejects_error_payload():
+    """Async achat() rejects top-level error payloads without leaking
+    error-body text into the exception (issues #365 / Q420-P1)."""
+    payload = {
+        "error": {"message": "PRIVATE_SENTINEL"},
+        "choices": [{"message": {"content": "ans"}, "finish_reason": "stop"}],
+    }
+    fake = _post_payload(payload)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        await llm.achat(_msgs())
+    assert excinfo.value.reason == REASON_UPSTREAM_ERROR
+    assert "PRIVATE_SENTINEL" not in str(excinfo.value)
+
+
+def test_nonstream_client_sync_rejects_object_content():
+    """Sync chat() rejects object content instead of stringifying
+    it into answer prose (issues #365 / Q420-P1)."""
+    payload = {
+        "choices": [
+            {"message": {"content": {"unexpected": "shape"}}, "finish_reason": "stop"}
+        ],
+    }
+    fake = _post_payload(payload)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        llm.chat(_msgs())
+    assert excinfo.value.reason == REASON_MALFORMED_FRAME
+
+
+@pytest.mark.anyio
+async def test_nonstream_client_async_rejects_object_content():
+    """Async achat() rejects object content instead of stringifying
+    it into answer prose (issues #365 / Q420-P1)."""
+    payload = {
+        "choices": [
+            {"message": {"content": {"unexpected": "shape"}}, "finish_reason": "stop"}
+        ],
+    }
+    fake = _post_payload(payload)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs()), client=fake)
+
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        await llm.achat(_msgs())
+    assert excinfo.value.reason == REASON_MALFORMED_FRAME
 
 
 def test_nonstream_nested_reasoning_tokens_mapped():
