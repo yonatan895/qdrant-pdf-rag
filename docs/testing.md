@@ -226,6 +226,51 @@ actually cover. Apply missing/corrupt data, interruption, retry, concurrent
 readers/writers, warm caches, rollback and configuration cases where relevant;
 record why exclusions do not affect the contract.
 
+### A. Producer-to-consumer round trips
+
+For a transported identifier or configuration value, use the actual producer and inspect the actual consumer artifact:
+
+```text
+source_rev_key(... multi-word product ...)
+  -> documented operator input
+  -> actual launcher/render path
+  -> parsed YAML args
+  -> backend selector against synthetic approved inventory
+```
+
+Assert exact value and argument count, not substring presence or YAML parseability alone. Keep an independent expected result; do not call the changed serializer on both sides of the assertion. Include a domain boundary that differs from the comfortable happy-path fixture, such as internal whitespace or an actual delimiter. No real private source is needed.
+
+A reviewer cannot narrow the supported domain to the current sample corpus merely because the producer's broader inputs expose a defect. Either preserve the contract or obtain an explicit authorized compatibility decision with truthful documentation.
+
+### B. One action after successful cleanup
+
+For a lifecycle change, add or identify a retained sequence test such as:
+
+```text
+publish -> force repair -> successful swap -> sidecar cleanup
+        -> ordinary identical run -> another identical run
+```
+
+Assert stable logical identity, exact retained membership, and the absence of unnecessary mutations/embedding/allocation. Do not turn this into a timing benchmark when counters/read-only assertions answer the question. A crash-before-cleanup test is separate evidence, not a substitute. Preserve meaningful existing crash/retry/rollback tests without multiplying them across unrelated transports/models.
+
+### C. Equivalent validation; explicit emission/commit boundaries
+
+Use a compact table for buffered/streaming or sync/async paths that implement the same validation rule. Include an error that coexists with a success-shaped field, wrong field types, and a healthy control. Expected verdicts must be independently specified.
+
+Track distinctions that drive recovery or publication:
+
+```text
+received != validated != emitted
+built != verified != published
+source identity != stored-content verification
+```
+
+For streaming recovery, assert yielded events and fallback-call counts through the actual iterator. For storage, inspect actual records and protected operations. A flag saying `complete` or a test named `parity` is not itself proof of the corresponding behavior.
+
+### D. Curate exploratory tests before committing
+
+Challengers may explore freely in an isolated workspace, but retain only clear cases protecting distinct behavior. Add them to the owning suite; use parameterization when the rule is genuinely shared. Do not preserve separate large files named after each agent or review round. Map replacements to their retained coverage; removing a forbidden-behavior pin requires explicit contract authority, not merely the desire for a green run.
+
 Existing homes: completion/publication/representation/serving suites cover
 those boundaries; API/chat/webui/stream suites cover adapters and completion;
 air-gap shell suites cover configuration precedence and both render paths.

@@ -290,6 +290,10 @@ jobs:
             - Follow docs/live-stack.md#verification-minimums for required verification by risk category.
             - Operative policy is the approved base branch policy; candidate PRs cannot
               self-authorize relaxed review standards or alter acceptance rules.
+            - Derive the expected outcome and supported input domain from the approved
+              contract and actual producer before adopting author helpers or sample fixtures.
+            - Inspect discriminating boundary cases: real producer-to-consumer round-trips,
+              next operation after successful cleanup, and equivalent transport/state parity.
 
             Execution environment:
             - Selected profile: ${{ steps.profile.outputs.profile }}
@@ -310,9 +314,13 @@ jobs:
             - Merge readiness: ready_for_maintainer / not_ready
 
             Finding dispositions on re-review:
-            - Carry forward original counterexamples. Mark each prior material finding:
-              fixed-and-verified, disproven-with-evidence, accepted-by-authorized-owner, or unresolved.
-            - 'Explicitly declined' by author is not acceptance (must remain unresolved).
+            - Preserve original counterexamples and preconditions: a narrower passing test does not close a broader finding.
+            - Mark each prior material finding:
+              * fixed-and-verified: original counterexample prevented and relevant proof ran.
+              * disproven-with-evidence: counterexample genuinely cannot occur under supported contract (requires contract/producer proof).
+              * accepted-by-authorized-owner: authorized scoped owner decision with documented limits; code is not marked fixed.
+              * unresolved: otherwise ('explicitly declined' by author is not acceptance).
+            - For each material finding record: ID | original counterexample | expected boundary result | exact evidence | disposition.
 
             Machine-readable result (required):
             - Write one Schema v1 JSON object to $RUNNER_TEMP/review-output.json with fields:

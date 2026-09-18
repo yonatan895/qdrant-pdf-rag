@@ -16,6 +16,7 @@ Group related evidence; no artifact is required for every trivial assertion.
 
 ## Limits and follow-ups
 Remaining gaps, blocked validation, adjacent discoveries, and their issue owners.
+Recurring environment discrepancies: record command, interpreter/config identity, candidate result, and controlled base comparison; link bounded follow-up.
 No blanket Fixes/Closes reference for a parent whose acceptance is only partially met.
 
 ## Self-review
@@ -35,15 +36,14 @@ until reconciled. The final record must name the actual candidate.
 - **Candidate head SHA**: `<commit-sha>`
 - **Base SHA**: `<base-commit-sha>`
 - **Author claim**: [Invariant or behavior claimed complete]
+- **Applied boundary proof**: [round-trip | next-operation | state/transport parity | content-digest | N/A: reason]
 - **Execution SHA / test-merge**: `<sha or not run>`
 - **Known limitations**: [not implemented vs not verified; owning issue]
 
 ### Independent reviewer assessment
+- **Canonical review link**: [Link to latest candidate-bound review comment or artifact]
 - **Reviewed candidate SHA**: `<evaluated-commit-sha>`
-- **Code assessment**: `acceptable` | `changes_required` | `incomplete`
-- **Required verification**: `complete` | `incomplete` | `failed`
-- **Candidate currentness**: `current` | `stale` | `unverified`
-- **Merge readiness**: `ready_for_maintainer` | `not_ready`
+- **Summary readiness**: `ready_for_maintainer` | `not_ready`
 - **Material findings**: [IDs -> dispositions (fixed-and-verified / disproven-with-evidence / accepted-by-authorized-owner / unresolved), or none]
 - [Canonical review protocol](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/agent-workflow.md#review-handoff)
 

@@ -6,33 +6,33 @@ about: A bounded change with explicit authority, boundaries and evidence
 Use short answers; N/A needs a reason. Field guidance and examples:
 [agent workflow](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/agent-workflow.md#task-packet).
 
-## Outcome and authority
+## Outcome and supported domain
 User-visible goal; approved issue/ADR; acceptance owner.
-Required invariant and one forbidden outcome.
+One observable change; identify the actual producer/contract of its inputs.
+Required invariant and one forbidden counterexample.
 
 ## Baseline and scope
 Repository and inspected base SHA; relevant prior PRs/comments.
 Allowed behavior changes; non-goals; scope requiring further approval.
 
-## Read first / impact map
+## Boundary proof and impact map
 Canonical contracts and decision owners.
+Smallest case a plausible wrong implementation could pass locally but fail end-to-end.
 Producers → storage/state → consumers, including deployment and UI where affected.
-Listed paths are a starting map, not a prohibition on examining affected callers.
+Reuse existing test homes; listed paths are a starting map, not a file allowlist.
 
-## Assumptions and counterexamples
-Supported modes/topology and who may mutate shared state.
-Applicable missing-data, crash, retry, concurrent-reader/writer, cache,
-rollback, and configuration cases. Explain exclusions.
+## Next operation and state distinctions
+For persisted/lifecycle changes: success -> cleanup -> next ordinary action, not only failure -> retry.
+Where multiple paths implement the same rule, compare equivalent allowed and forbidden inputs.
+Applicable missing-data, crash, retry, concurrent-reader/writer, cache, and rollback cases.
 
 ## Verification plan
 Existing test homes and a minimal failing reproducer.
-Evidence that distinguishes the correct behavior from a plausible wrong one.
+Evidence that distinguishes correct behavior from plausible wrong implementations.
 Required commands/tiers; prerequisites; unavailable checks and acceptance impact.
 [Verification minimums](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/live-stack.md#verification-minimums).
 
-## Safety, migration, and rollback
+## Safety, migration, and limits
 Protected data/services; isolation; required permissions.
-Migration and rollback expectations, or N/A.
-
-## Completion
+Compatibility decision, migration and rollback expectations, or N/A.
 Observable acceptance conditions, evidence locations, and remaining gaps.
