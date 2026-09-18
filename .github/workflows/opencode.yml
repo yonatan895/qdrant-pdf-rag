@@ -339,6 +339,11 @@ jobs:
               schema_version (1), head_sha, base_sha, execution_sha, code_assessment,
               verification, candidate_currentness, merge_readiness, material_findings
               (each: id, disposition, description, location, impact), evidence.
+            - `evidence` MUST be a JSON object, never a list or string: map each
+              material claim/counterexample to its proof, mirroring the PR
+              template evidence table (test/command, tested SHA, result,
+              evidence location). Emit `{}` only when no material claim needed
+              proof. List-shaped evidence fails validation and fails the job.
             - Include the same JSON object verbatim in the posted review between
               <!-- review-result:start --> and <!-- review-result:end --> markers.
             - A missing or malformed object fails the reviewer job; a valid not_ready verdict does not.

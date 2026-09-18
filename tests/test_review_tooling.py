@@ -1104,11 +1104,13 @@ class TestExecutionAttribution(unittest.TestCase):
         self.assertTrue(any("evidence" in e for e in result.validation_errors))
 
     def test_non_object_evidence_fails(self):
-        payload = self._payload("1" * 40, "2" * 40, "3" * 40)
-        payload["evidence"] = "all good"
-        result = validate_review_payload(payload)
-        self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
-        self.assertTrue(any("evidence" in e for e in result.validation_errors))
+        for bad in ("all good", ["claim one proven", "claim two proven"]):
+            with self.subTest(evidence=bad):
+                payload = self._payload("1" * 40, "2" * 40, "3" * 40)
+                payload["evidence"] = bad
+                result = validate_review_payload(payload)
+                self.assertEqual(result.merge_readiness, MergeReadiness.NOT_READY.value)
+                self.assertTrue(any("evidence" in e for e in result.validation_errors))
 
 
 class TestReadinessProbes(unittest.TestCase):
