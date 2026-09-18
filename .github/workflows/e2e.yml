@@ -274,10 +274,6 @@ jobs:
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
           test "$(awk '/^sha: /{print $2}' qdrant-pdf-rag/dist/MANIFEST.txt)" = "$SHA"
           cd qdrant-pdf-rag
-          # The Makefile is a one-way Task shim: provision the pinned
-          # runner from the extracted bundle copy (pin fidelity at $SHA).
-          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
-          export PATH="$RUNNER_TEMP/task-bin:$PATH"
           # Operator-equivalent airgap.env edits (dry-run stand-ins, never prod).
           sed -i \
             -e 's|^INTERNAL_REGISTRY=.*|INTERNAL_REGISTRY=ghcr.io/acceptance-standin|' \
@@ -412,11 +408,6 @@ jobs:
           test -f qdrant-pdf-rag/dist/sneakernet-signing.pub
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
           test "$(awk '/^sha: /{print $2}' qdrant-pdf-rag/dist/MANIFEST.txt)" = "$SHA"
-
-      - name: Install pinned Task runner (Makefile shim forwards to Task)
-        run: |
-          sh gapbox/qdrant-pdf-rag/scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
-          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
 
       - name: Start authenticated TLS registry + Kind
         run: |
@@ -1177,11 +1168,6 @@ jobs:
           AIRGAP_WORKSPACE=qdrant-pdf-rag sh bootstrap.sh
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
           echo "BUNDLE_CHECKOUT=$GITHUB_WORKSPACE/gapbox/qdrant-pdf-rag" >> "$GITHUB_ENV"
-
-      - name: Install pinned Task runner (Makefile shim forwards to Task)
-        run: |
-          sh "$BUNDLE_CHECKOUT/scripts/tools/install-task.sh" --bin-dir "$RUNNER_TEMP/task-bin"
-          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
 
       - name: Install checksum-pinned Helm
         run: |

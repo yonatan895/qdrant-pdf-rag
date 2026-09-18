@@ -133,6 +133,7 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
+      actions: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -148,7 +149,10 @@ jobs:
           python-version: "3.14"
           cache: pip
       - name: Preinstall dev tools for the reviewer
-        run: pip install -e ".[dev]"
+        run: |
+          pip install -e ".[dev]"
+          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
 
       - name: Select review profile & generate manifest
         id: profile
@@ -279,6 +283,7 @@ jobs:
           OPENCODE_PERMISSION: '{"*":"allow","doom_loop":"allow","external_directory":"allow","question":"allow"}'
           SHARE: "false"
           USE_GITHUB_TOKEN: "false"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PROMPT: |
             Candidate under review:
             - PR Head SHA: ${{ github.event.pull_request.head.sha }}
