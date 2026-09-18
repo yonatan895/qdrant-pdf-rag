@@ -17,8 +17,14 @@ on:
       - 'scripts/check_agent_context.py'
       - 'scripts/agent_doctor.py'
       - 'scripts/qdrant_pin.py'
+      - 'scripts/tools/install-task.sh'
+      - 'scripts/tools/task-pin.txt'
+      - 'Taskfile.yml'
+      - 'taskfiles/**'
+      - 'docs/task-runner.md'
       - 'tests/test_agent_context.py'
       - 'tests/test_agent_doctor.py'
+      - 'tests/test_taskfile_contracts.py'
       - 'Makefile'
       - '!.agents/**'
       - '!vendor/**'
@@ -40,8 +46,14 @@ on:
       - 'scripts/check_agent_context.py'
       - 'scripts/agent_doctor.py'
       - 'scripts/qdrant_pin.py'
+      - 'scripts/tools/install-task.sh'
+      - 'scripts/tools/task-pin.txt'
+      - 'Taskfile.yml'
+      - 'taskfiles/**'
+      - 'docs/task-runner.md'
       - 'tests/test_agent_context.py'
       - 'tests/test_agent_doctor.py'
+      - 'tests/test_taskfile_contracts.py'
       - 'Makefile'
       - '!.agents/**'
       - '!vendor/**'
@@ -67,5 +79,11 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.14'
+      - name: Install pinned Task (issue #402 increment A)
+        run: |
+          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
       - run: make check-context PY=python
+      - run: task qa:context PY=python
       - run: python -m unittest tests.test_agent_context tests.test_agent_doctor
+      - run: TASK_CONTRACTS_REQUIRE_RUNNER=1 python -m unittest tests.test_taskfile_contracts

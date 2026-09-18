@@ -1,0 +1,50 @@
+# Development environment tasks — issue #402 increment A.
+#
+# `dev:setup` is the only task here that installs anything, and only when the
+# caller explicitly requests it. `dev:doctor` is read-only diagnostics.
+# Included with `dir: .` from the root Taskfile so commands always run at the
+# repository root.
+version: '3'
+
+tasks:
+  setup:
+    desc: Create .venv and install locked development dependencies (connected)
+    summary: |
+      Explicit preparation mirroring `make venv` (same base interpreter
+      selection, same `requirements.lock.txt` plus editable `.[dev]` install
+      into `.venv` with the venv's own pip). Inputs: PY (default python3;
+      explicit empty is preserved and fails rather than silently defaulting).
+      Skips when `.venv/bin/python` already exists (a failed preparation
+      leaves no executable behind, so it is never cached as complete).
+      Connected host only; CI uses its prepared interpreter and must not call
+      this. Never invoked implicitly by verification tasks.
+    status:
+      - 'test -x .venv/bin/python'
+    vars:
+      PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}python3{{end}}'
+    env:
+      TASK_PY: '{{.PY}}'
+    cmds:
+      - '"$TASK_PY" -m venv .venv'
+      - '.venv/bin/python -m pip install --upgrade pip'
+      - '.venv/bin/python -m pip install -r requirements.lock.txt -e ".[dev]"'
+
+  doctor:
+    desc: Diagnose tool prerequisites (read-only)
+    summary: |
+      Runs `scripts/agent_doctor.py` (default unit profile; `PROFILE=sim`
+      adds Docker, `PROFILE=deploy` adds helm/skopeo/tar/openssl/sha256sum
+      plus oc-or-kubectl presence). Inputs: PY (default python3), PROFILE
+      (default unit). An explicit empty value is preserved and fails in the
+      script rather than silently falling back; explicit false/zero-like
+      strings pass through unchanged. Reads only: creates no environment,
+      contacts no service (the script's --probe-docker socket read is only
+      available via the script flag, not through this task).
+    vars:
+      PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}python3{{end}}'
+      PROFILE: '{{if hasKey . "PROFILE"}}{{.PROFILE}}{{else}}unit{{end}}'
+    env:
+      TASK_PY: '{{.PY}}'
+      TASK_PROFILE: '{{.PROFILE}}'
+    cmds:
+      - '"$TASK_PY" scripts/agent_doctor.py --profile "$TASK_PROFILE"'

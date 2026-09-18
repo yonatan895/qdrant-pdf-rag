@@ -1,0 +1,72 @@
+# Quality tasks — issue #402 increment A.
+#
+# Dispatch only: ruff/mypy/pytest and the offline context checker keep their
+# own validation, selection and exit semantics. No install policy lives here;
+# verification diagnoses a missing `.venv`, `task dev:setup` prepares it.
+# Included with `dir: .` from the root Taskfile so commands always run at the
+# repository root, including invocation from documented subdirectories.
+version: '3'
+
+tasks:
+  lint:
+    desc: Run ruff lint over src and tests
+    summary: |
+      Runs `.venv/bin/python -m ruff check src tests` (same tool and scope as
+      `make lint`). Fails closed when `.venv/bin/python` is absent — run
+      `task dev:setup` explicitly. Never creates or mutates the environment.
+      No network, Docker, model or credentials required.
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - '.venv/bin/python -m ruff check src tests'
+
+  typecheck:
+    desc: Run mypy typecheck over src
+    summary: |
+      Runs `.venv/bin/python -m mypy src` (same tool and scope as
+      `make typecheck`). Fails closed when `.venv/bin/python` is absent — run
+      `task dev:setup` explicitly. Never creates or mutates the environment.
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - '.venv/bin/python -m mypy src'
+
+  unit:
+    desc: Run the unit test suite (integration deselected by pyproject)
+    summary: |
+      Default `task qa:unit` runs `.venv/bin/python -m pytest tests -v`,
+      matching `make test` (pyproject addopts deselect integration).
+      Focused selection replaces the default argv once:
+      `task qa:unit -- tests/test_agent_context.py -q` runs exactly that
+      selection (shell word-splitting applies to CLI_ARGS; trusted developer
+      input only — never untrusted free text). An empty selection keeps the
+      default. Fails closed when `.venv/bin/python` is absent.
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - '.venv/bin/python -m pytest {{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}tests -v{{end}}'
+
+  check:
+    desc: Run lint, then typecheck, then unit tests, in that order
+    summary: |
+      Sequential equivalent of `make check` (same three tools, same scope).
+      Steps run one after another through direct task calls — never parallel
+      `deps`, so one shared `.venv` is never installed into concurrently and
+      a failed step stops the sequence with its own exit status.
+    cmds:
+      - task: lint
+      - task: typecheck
+      - task: unit
+
+  context:
+    desc: Run offline agent-context structure check (no installs)
+    summary: |
+      Runs `scripts/check_agent_context.py` with the selected Python (PY,
+      default python3; use PY=python to match CI, or a full path). An explicit
+      empty PY is preserved and fails in the script rather than silently
+      falling back; explicit false/zero-like strings are passed through
+      unchanged. Requires no venv, Docker, network, model, credentials or
+      private config and modifies nothing.
+    vars:
+      PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}python3{{end}}'
+    env:
+      TASK_PY: '{{.PY}}'
+    cmds:
+      - '"$TASK_PY" scripts/check_agent_context.py'

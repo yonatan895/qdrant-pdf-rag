@@ -23,6 +23,7 @@ class DoctorTests(TestCase):
             'bm25-weights.sha256': 'example', 'charts/qdrant-1.19.0.tgz': 'example',
             '.venv/bin/python': 'fixture', 'airgap.env.example': '# public example',
             'scripts/airgap/common.sh': '# fixture',
+            'scripts/tools/task-pin.txt': 'version: v3.53.1\n',
             'deploy/kustomize/overlays/openshift/kustomization.yaml': 'fixture',
             'deploy/kustomize/overlays/openshift-ingest/kustomization.yaml': 'fixture',
         }
@@ -41,9 +42,42 @@ class DoctorTests(TestCase):
         self.addCleanup(self.runtime_patch.stop)
 
     def test_ready_profiles_no_daemon_calls(self):
-        with patch.object(doctor.subprocess, 'run', side_effect=AssertionError('no default service calls')):
+        def only_task_version(argv, **kwargs):
+            if argv[0].endswith('/task') and argv[1:] == ['--version']:
+                return subprocess.CompletedProcess(argv, 0, '3.53.1', '')
+            raise AssertionError('no default service calls')
+        with patch.object(doctor.subprocess, 'run', side_effect=only_task_version):
             for profile in ('unit', 'sim', 'deploy'):
-                self.assertTrue(all(f.status == 'ready' for f in doctor.diagnose(self.root, profile)))
+                self.assertTrue(all(f.status == 'ready' for f in doctor.diagnose(self.root, profile)),
+                                [f for f in doctor.diagnose(self.root, profile) if f.status != 'ready'])
+
+    def test_task_runner_identity_prefers_workspace_local(self):
+        self.which.side_effect = lambda name: None
+        findings = doctor.diagnose(self.root, 'unit')
+        self.assertIn('Task runner',
+                      {f.subject for f in findings if f.status == 'missing prerequisite'})
+        local = self.root/'.tools/bin/task'
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_text('fixture')
+        with patch.object(doctor.subprocess, 'run') as run:
+            run.return_value = subprocess.CompletedProcess([], 0, '3.53.1', '')
+            findings = doctor.diagnose(self.root, 'unit')
+            self.assertTrue(any(f.subject == 'Task runner' and f.status == 'ready' for f in findings))
+            argv = run.call_args.args[0]
+            self.assertEqual(argv, [str(local), '--version'])
+            self.assertEqual(run.call_args.kwargs['timeout'], 5)
+            run.return_value = subprocess.CompletedProcess([], 0, '9.9.9', '')
+            findings = doctor.diagnose(self.root, 'unit')
+            self.assertTrue(any(f.subject == 'Task runner' and f.status == 'missing prerequisite'
+                                for f in findings))
+            run.side_effect = subprocess.TimeoutExpired('task', 5)
+            findings = doctor.diagnose(self.root, 'unit')
+            self.assertTrue(any(f.subject == 'Task runner' and f.status == 'unable to verify'
+                                for f in findings))
+        (self.root/'scripts/tools/task-pin.txt').unlink()
+        findings = doctor.diagnose(self.root, 'unit')
+        self.assertTrue(any(f.subject == 'Task runner' and f.status == 'unable to verify'
+                            for f in findings))
 
     def test_missing_tools_and_environment(self):
         self.which.side_effect = lambda name: None if name in ('docker', 'make') else '/tools/'+name
@@ -84,7 +118,12 @@ class DoctorTests(TestCase):
         (self.root/'airgap.env').write_text('TOKEN='+secret+'\n$(touch should-not-exist)')
         (self.root/'.env').write_text('TOKEN='+secret)
         output = io.StringIO()
-        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        def only_task_version(argv, **kwargs):
+            if argv[0].endswith('/task') and argv[1:] == ['--version']:
+                return subprocess.CompletedProcess(argv, 0, '3.53.1', '')
+            raise AssertionError('no default service calls')
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output), \
+                patch.object(doctor.subprocess, 'run', side_effect=only_task_version):
             self.assertEqual(doctor.main(['--root', str(self.root)]), 0)
             self.probe.side_effect = None
             self.probe.return_value = None
