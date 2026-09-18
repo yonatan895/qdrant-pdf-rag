@@ -38,7 +38,8 @@ REQUIRE_RUNNER = os.environ.get("TASK_CONTRACTS_REQUIRE_RUNNER") == "1"
 LOGGED_ENV_KEYS = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
                    "ROLE", "MODEL", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
                    "GATEWAY_PORT", "CORPUS_DIR", "LOCAL_AGENT_PORT", "JAEGER_PORT",
-                   "SIM_CONTAINER", "SIM_PORT")
+                   "SIM_CONTAINER", "SIM_PORT",
+                   "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN")
 
 RECORDER = """#!/bin/sh
 # Inert boundary recorder: appends one JSON line per invocation, then exits
@@ -49,7 +50,8 @@ log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
 keys = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
         "ROLE", "MODEL", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
         "GATEWAY_PORT", "CORPUS_DIR", "LOCAL_AGENT_PORT", "JAEGER_PORT",
-        "SIM_CONTAINER", "SIM_PORT")
+        "SIM_CONTAINER", "SIM_PORT",
+        "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN")
 with open(log, "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd(),
                          "env": {k: os.environ.get(k) for k in keys}}) + "\\n")
@@ -68,7 +70,8 @@ log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
 keys = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
         "ROLE", "MODEL", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
         "GATEWAY_PORT", "CORPUS_DIR", "LOCAL_AGENT_PORT", "JAEGER_PORT",
-        "SIM_CONTAINER", "SIM_PORT")
+        "SIM_CONTAINER", "SIM_PORT",
+        "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN")
 with open(log, "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd(),
                          "env": {k: os.environ.get(k) for k in keys}}) + "\\n")
@@ -594,7 +597,7 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("eval:retrieval", "EMBED_MODE=vllm", extra_env=dict(env, EMBED_MODE="hash"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
-        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "vllm", "VENUE": "dev"})
+        self.assertEnvSubset(calls[0], {"EMBED_MODE": "vllm", "VENUE": "dev"})
         self.assertIn("evals/baseline-vllm.json", calls[0]["argv"])
         if (self.log).exists():
             self.log.unlink()
@@ -602,7 +605,7 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("eval:retrieval", "EMBED_MODE=hash", extra_env=dict(env, EMBED_MODE="vllm"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
-        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "dev"})
+        self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "dev"})
         self.assertIn("evals/baseline.json", calls[0]["argv"])
         if (self.log).exists():
             self.log.unlink()
@@ -610,7 +613,7 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("eval:retrieval", "VENUE=dev", extra_env=dict(env, VENUE="rc"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
-        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "dev"})
+        self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "dev"})
 
     def test_eval_explicit_empty_mode_preserved_with_hash_baseline(self):
         # Mirrors Make `$(filter vllm,"")` (hash branch) plus an empty export:
@@ -628,7 +631,7 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("eval:retrieval", "EMBED_MODE=", extra_env=dict(self.tool_env(), EMBED_MODE="vllm"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
-        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "", "VENUE": "dev"})
+        self.assertEnvSubset(calls[0], {"EMBED_MODE": "", "VENUE": "dev"})
         self.assertIn("evals/baseline.json", calls[0]["argv"])
 
     def test_harness_golden_flag_iff_hash_mode(self):
@@ -665,14 +668,14 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("eval:holdout", extra_env=dict(env, VENUE="dev"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
-        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "rc"})
+        self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "rc"})
         if (self.log).exists():
             self.log.unlink()
         # Ambient VENUE=dev AND CLI VENUE=dev together cannot override holdout's VENUE=rc (TR433-F1)
         proc = self.run_task("eval:holdout", "VENUE=dev", extra_env=dict(env, VENUE="dev"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
-        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "rc"})
+        self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "rc"})
         if (self.log).exists():
             self.log.unlink()
         # Tampered holdout fails before any python invocation.
@@ -828,6 +831,46 @@ class TaskContractsTests(unittest.TestCase):
         self.assertTrue(budget.startswith("/") and budget.endswith("/.venv/bin/python"), budget)
         if (self.log).exists():
             self.log.unlink()
+        # Direct CLI form for local:llm forwards MODEL, PORT, GPU_MEM, MAX_LEN, SEQS, BUDGET_PROFILE (TR434-F2)
+        proc = self.run_task("local:llm", "MODEL=approved-local-model", "PORT=8100",
+                             "GPU_MEM=0.7", "MAX_LEN=4096", "SEQS=4", "BUDGET_PROFILE=custom-profile",
+                             extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.script_calls("run_local_vllm.sh")
+        self.assertEnvSubset(calls[0], {
+            "ROLE": "reasoning",
+            "MODEL": "approved-local-model",
+            "PORT": "8100",
+            "GPU_MEM": "0.7",
+            "MAX_LEN": "4096",
+            "SEQS": "4",
+            "BUDGET_PROFILE": "custom-profile",
+        })
+        if (self.log).exists():
+            self.log.unlink()
+        # Conflicting ambient vs CLI: CLI wins (TR434-F2)
+        proc = self.run_task("local:llm", "MODEL=cli-model", "PORT=8100",
+                             extra_env=dict(env, MODEL="ambient-model", PORT="9999"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.script_calls("run_local_vllm.sh")
+        self.assertEnvSubset(calls[0], {
+            "ROLE": "reasoning",
+            "MODEL": "cli-model",
+            "PORT": "8100",
+        })
+        if (self.log).exists():
+            self.log.unlink()
+        # Ambient-only invocation is preserved (TR434-F2)
+        proc = self.run_task("local:llm", extra_env=dict(env, MODEL="ambient-only-model", PORT="8200"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.script_calls("run_local_vllm.sh")
+        self.assertEnvSubset(calls[0], {
+            "ROLE": "reasoning",
+            "MODEL": "ambient-only-model",
+            "PORT": "8200",
+        })
+        if (self.log).exists():
+            self.log.unlink()
         proc = self.run_task("local:embed", "ROLE=x", "MODEL=m", "PORT=1234", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.script_calls("run_local_vllm.sh")
@@ -952,6 +995,27 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("local:qdrant:down", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual([c["argv"] for c in self.tool_calls("docker")], [["stop", "qdrant-sim"]])
+        if (self.log).exists():
+            self.log.unlink()
+        # Conflicting ambient vs CLI: CLI wins over ambient SIM_CONTAINER (TR434-F1)
+        proc = self.run_task("local:qdrant:down", "SIM_CONTAINER=requested-sim",
+                             extra_env=dict(env, SIM_CONTAINER="ambient-sim"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual([c["argv"] for c in self.tool_calls("docker")], [["stop", "requested-sim"]])
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("local:qdrant:up", "SIM_CONTAINER=requested-sim", "SIM_PORT=6334",
+                             extra_env=dict(env, SIM_CONTAINER="ambient-sim", SIM_PORT="6333"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        docker = [c["argv"] for c in self.tool_calls("docker")]
+        self.assertEqual(docker[0], ["inspect", "requested-sim"])
+        self.assertIn("requested-sim", docker[1])
+        self.assertIn("127.0.0.1:6334:6333", docker[1])
+        if (self.log).exists():
+            self.log.unlink()
+        # Explicit empty fails closed (TR434-F1)
+        proc = self.run_task("local:qdrant:up", "SIM_CONTAINER=", extra_env=env)
+        self.assertNotEqual(proc.returncode, 0)
 
     def test_stack_forwards_only_set_vars(self):
         self.make_venv_fake()
@@ -962,7 +1026,29 @@ class TaskContractsTests(unittest.TestCase):
         calls = self.script_calls("run_local_stack.sh")
         self.assertEqual(len(calls), 1)
         self.assertEnvSubset(calls[0], {"CORPUS_DIR": "/data", "GATEWAY_PORT": "4001",
-                                        "LOCAL_AGENT_PORT": None, "JAEGER_PORT": None})
+                                        "LOCAL_AGENT_PORT": None, "JAEGER_PORT": None,
+                                        "LOCAL_STACK_DRYRUN": None})
+        if (self.log).exists():
+            self.log.unlink()
+        # Direct CLI LOCAL_STACK_DRYRUN=1 reaches script (TR434-F2)
+        proc = self.run_task("local:stack", "LOCAL_STACK_DRYRUN=1", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.script_calls("run_local_stack.sh")
+        self.assertEnvSubset(calls[0], {"LOCAL_STACK_DRYRUN": "1"})
+        if (self.log).exists():
+            self.log.unlink()
+        # Ambient LOCAL_STACK_DRYRUN=1 reaches script (TR434-F2)
+        proc = self.run_task("local:stack", extra_env=dict(env, LOCAL_STACK_DRYRUN="1"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.script_calls("run_local_stack.sh")
+        self.assertEnvSubset(calls[0], {"LOCAL_STACK_DRYRUN": "1"})
+        if (self.log).exists():
+            self.log.unlink()
+        # Conflicting ambient and CLI: CLI wins (TR434-F2)
+        proc = self.run_task("local:stack", "LOCAL_STACK_DRYRUN=0", extra_env=dict(env, LOCAL_STACK_DRYRUN="1"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.script_calls("run_local_stack.sh")
+        self.assertEnvSubset(calls[0], {"LOCAL_STACK_DRYRUN": "0"})
 
     def test_agent_stream_port_and_ui(self):
         self.make_venv_fake()
@@ -1016,12 +1102,14 @@ class TaskContractsTests(unittest.TestCase):
         dev_text = (REPO / "taskfiles/dev.yml").read_text(encoding="utf-8")
         artifacts_text = (REPO / "taskfiles/artifacts.yml").read_text(encoding="utf-8")
         eval_text = (REPO / "taskfiles/eval.yml").read_text(encoding="utf-8")
-        combined = root_text + quality_text + dev_text + artifacts_text + eval_text
+        local_text = (REPO / "taskfiles/local.yml").read_text(encoding="utf-8")
+        combined = root_text + quality_text + dev_text + artifacts_text + eval_text + local_text
         # Local required namespaced includes; one implementation per alias.
         self.assertIn("taskfile: ./taskfiles/quality.yml", root_text)
         self.assertIn("taskfile: ./taskfiles/dev.yml", root_text)
         self.assertIn("taskfile: ./taskfiles/artifacts.yml", root_text)
         self.assertIn("taskfile: ./taskfiles/eval.yml", root_text)
+        self.assertIn("taskfile: ./taskfiles/local.yml", root_text)
         for alias, canonical in (("task: qa:lint", "lint"), ("task: qa:check", "check"),
                                  ("task: qa:context", "context"), ("task: dev:doctor", "doctor")):
             self.assertIn(alias, root_text, canonical)

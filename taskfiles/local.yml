@@ -4,7 +4,8 @@
 # cleanup; YAML only forwards inputs. Three Make input forms map to three
 # shell patterns (documented in docs/task-runner.md#inputs):
 # - `?=` (unset selects default, explicit empty preserved): hasKey template
-#   defaults plus exact-name `env:` bridges.
+#   defaults plus bridged TASK_ variables bound at the command boundary so
+#   CLI variables override ambient environment variables.
 # - `$(or)` (empty falls back): raw bridges plus shell `:-` at use site.
 # - `$(if)` (unset/empty omits): raw bridges plus `${VAR:+...}` (flags) or a
 #   conditional `export` in the same command (environment).
@@ -26,10 +27,10 @@ tasks:
       SIM_CONTAINER: '{{if hasKey . "SIM_CONTAINER"}}{{.SIM_CONTAINER}}{{else}}qdrant-sim{{end}}'
       SIM_PORT: '{{if hasKey . "SIM_PORT"}}{{.SIM_PORT}}{{else}}6333{{end}}'
     env:
-      SIM_CONTAINER: '{{.SIM_CONTAINER}}'
-      SIM_PORT: '{{.SIM_PORT}}'
+      TASK_SIM_CONTAINER: '{{.SIM_CONTAINER}}'
+      TASK_SIM_PORT: '{{.SIM_PORT}}'
     cmds:
-      - sh scripts/sim_qdrant.sh up
+      - SIM_CONTAINER="$TASK_SIM_CONTAINER" SIM_PORT="$TASK_SIM_PORT" sh scripts/sim_qdrant.sh up
 
   qdrant:down:
     desc: Stop the sim Qdrant container (ignores an already-stopped one)
@@ -41,10 +42,10 @@ tasks:
       SIM_CONTAINER: '{{if hasKey . "SIM_CONTAINER"}}{{.SIM_CONTAINER}}{{else}}qdrant-sim{{end}}'
       SIM_PORT: '{{if hasKey . "SIM_PORT"}}{{.SIM_PORT}}{{else}}6333{{end}}'
     env:
-      SIM_CONTAINER: '{{.SIM_CONTAINER}}'
-      SIM_PORT: '{{.SIM_PORT}}'
+      TASK_SIM_CONTAINER: '{{.SIM_CONTAINER}}'
+      TASK_SIM_PORT: '{{.SIM_PORT}}'
     cmds:
-      - sh scripts/sim_qdrant.sh down
+      - SIM_CONTAINER="$TASK_SIM_CONTAINER" SIM_PORT="$TASK_SIM_PORT" sh scripts/sim_qdrant.sh down
 
   query:
     desc: Interactive query inspection against Qdrant/gateway (read-only)
@@ -130,28 +131,62 @@ tasks:
       `BUDGET_PYTHON=<repo>/.venv/bin/python ROLE=<role>
       sh scripts/run_local_vllm.sh`, mirroring `make local-vllm`. The venv
       interpreter is always used for Budget resolution (never exported
-      globally). Input: ROLE (default reasoning). Foreground: Ctrl-C stops
+      globally). Inputs: ROLE (default reasoning), MODEL, PORT, BUDGET_PROFILE,
+      GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE. Foreground: Ctrl-C stops
       the server. Needs the 8GB GPU budget; see docs/live-stack.md.
     env:
       TASK_ROLE: '{{.ROLE}}'
+      TASK_MODEL: '{{.MODEL}}'
+      TASK_PORT: '{{.PORT}}'
+      TASK_BUDGET_PROFILE: '{{.BUDGET_PROFILE}}'
+      TASK_GPU_MEM: '{{.GPU_MEM}}'
+      TASK_MAX_LEN: '{{.MAX_LEN}}'
+      TASK_SEQS: '{{.SEQS}}'
+      TASK_VLLM_IMAGE: '{{.VLLM_IMAGE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - BUDGET_PYTHON="$PWD/.venv/bin/python" ROLE="${TASK_ROLE:-reasoning}" sh scripts/run_local_vllm.sh
+      - >-
+        export BUDGET_PYTHON="$PWD/.venv/bin/python";
+        if [ -n "${TASK_ROLE:-}" ]; then export ROLE="$TASK_ROLE"; else export ROLE="${ROLE:-reasoning}"; fi;
+        if [ -n "${TASK_MODEL:-}" ]; then export MODEL="$TASK_MODEL"; fi;
+        if [ -n "${TASK_PORT:-}" ]; then export PORT="$TASK_PORT"; fi;
+        if [ -n "${TASK_BUDGET_PROFILE:-}" ]; then export BUDGET_PROFILE="$TASK_BUDGET_PROFILE"; fi;
+        if [ -n "${TASK_GPU_MEM:-}" ]; then export GPU_MEM="$TASK_GPU_MEM"; fi;
+        if [ -n "${TASK_MAX_LEN:-}" ]; then export MAX_LEN="$TASK_MAX_LEN"; fi;
+        if [ -n "${TASK_SEQS:-}" ]; then export SEQS="$TASK_SEQS"; fi;
+        if [ -n "${TASK_VLLM_IMAGE:-}" ]; then export VLLM_IMAGE="$TASK_VLLM_IMAGE"; fi;
+        sh scripts/run_local_vllm.sh
 
   embed:
     desc: Serve the embedding model locally (GPU, foreground)
     summary: |
       Like `local:llm` for the embed role, mirroring `make local-vllm-embed`.
       Inputs: ROLE (default embed), MODEL (default
-      Qwen/Qwen3-Embedding-0.6B), PORT (default 8001). Never export MODEL
+      Qwen/Qwen3-Embedding-0.6B), PORT (default 8001), BUDGET_PROFILE,
+      GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE. Never export MODEL
       globally: it would hijack the sibling launchers' defaults.
     env:
       TASK_ROLE: '{{.ROLE}}'
       TASK_MODEL: '{{.MODEL}}'
       TASK_PORT: '{{.PORT}}'
+      TASK_BUDGET_PROFILE: '{{.BUDGET_PROFILE}}'
+      TASK_GPU_MEM: '{{.GPU_MEM}}'
+      TASK_MAX_LEN: '{{.MAX_LEN}}'
+      TASK_SEQS: '{{.SEQS}}'
+      TASK_VLLM_IMAGE: '{{.VLLM_IMAGE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - BUDGET_PYTHON="$PWD/.venv/bin/python" ROLE="${TASK_ROLE:-embed}" MODEL="${TASK_MODEL:-Qwen/Qwen3-Embedding-0.6B}" PORT="${TASK_PORT:-8001}" sh scripts/run_local_vllm.sh
+      - >-
+        export BUDGET_PYTHON="$PWD/.venv/bin/python";
+        if [ -n "${TASK_ROLE:-}" ]; then export ROLE="$TASK_ROLE"; else export ROLE="${ROLE:-embed}"; fi;
+        if [ -n "${TASK_MODEL:-}" ]; then export MODEL="$TASK_MODEL"; else export MODEL="${MODEL:-Qwen/Qwen3-Embedding-0.6B}"; fi;
+        if [ -n "${TASK_PORT:-}" ]; then export PORT="$TASK_PORT"; else export PORT="${PORT:-8001}"; fi;
+        if [ -n "${TASK_BUDGET_PROFILE:-}" ]; then export BUDGET_PROFILE="$TASK_BUDGET_PROFILE"; fi;
+        if [ -n "${TASK_GPU_MEM:-}" ]; then export GPU_MEM="$TASK_GPU_MEM"; fi;
+        if [ -n "${TASK_MAX_LEN:-}" ]; then export MAX_LEN="$TASK_MAX_LEN"; fi;
+        if [ -n "${TASK_SEQS:-}" ]; then export SEQS="$TASK_SEQS"; fi;
+        if [ -n "${TASK_VLLM_IMAGE:-}" ]; then export VLLM_IMAGE="$TASK_VLLM_IMAGE"; fi;
+        sh scripts/run_local_vllm.sh
 
   rerank:
     desc: Serve the reranker locally (GPU, foreground, triple pack only)
@@ -159,15 +194,30 @@ tasks:
       Like `local:llm` for the rerank role, mirroring
       `make local-vllm-rerank`. Inputs: BUDGET_PROFILE (default TRIPLE_8GB),
       ROLE (default rerank), MODEL (default BAAI/bge-reranker-v2-m3), PORT
-      (default 8002). Never alongside the default 8GB pair.
+      (default 8002), GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE. Never alongside
+      the default 8GB pair.
     env:
       TASK_BUDGET_PROFILE: '{{.BUDGET_PROFILE}}'
       TASK_ROLE: '{{.ROLE}}'
       TASK_MODEL: '{{.MODEL}}'
       TASK_PORT: '{{.PORT}}'
+      TASK_GPU_MEM: '{{.GPU_MEM}}'
+      TASK_MAX_LEN: '{{.MAX_LEN}}'
+      TASK_SEQS: '{{.SEQS}}'
+      TASK_VLLM_IMAGE: '{{.VLLM_IMAGE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - BUDGET_PROFILE="${TASK_BUDGET_PROFILE:-TRIPLE_8GB}" BUDGET_PYTHON="$PWD/.venv/bin/python" ROLE="${TASK_ROLE:-rerank}" MODEL="${TASK_MODEL:-BAAI/bge-reranker-v2-m3}" PORT="${TASK_PORT:-8002}" sh scripts/run_local_vllm.sh
+      - >-
+        export BUDGET_PYTHON="$PWD/.venv/bin/python";
+        if [ -n "${TASK_BUDGET_PROFILE:-}" ]; then export BUDGET_PROFILE="$TASK_BUDGET_PROFILE"; else export BUDGET_PROFILE="${BUDGET_PROFILE:-TRIPLE_8GB}"; fi;
+        if [ -n "${TASK_ROLE:-}" ]; then export ROLE="$TASK_ROLE"; else export ROLE="${ROLE:-rerank}"; fi;
+        if [ -n "${TASK_MODEL:-}" ]; then export MODEL="$TASK_MODEL"; else export MODEL="${MODEL:-BAAI/bge-reranker-v2-m3}"; fi;
+        if [ -n "${TASK_PORT:-}" ]; then export PORT="$TASK_PORT"; else export PORT="${PORT:-8002}"; fi;
+        if [ -n "${TASK_GPU_MEM:-}" ]; then export GPU_MEM="$TASK_GPU_MEM"; fi;
+        if [ -n "${TASK_MAX_LEN:-}" ]; then export MAX_LEN="$TASK_MAX_LEN"; fi;
+        if [ -n "${TASK_SEQS:-}" ]; then export SEQS="$TASK_SEQS"; fi;
+        if [ -n "${TASK_VLLM_IMAGE:-}" ]; then export VLLM_IMAGE="$TASK_VLLM_IMAGE"; fi;
+        sh scripts/run_local_vllm.sh
 
   gateway:up:
     desc: Start the local LiteLLM gateway in front of the backends
@@ -181,7 +231,9 @@ tasks:
     env:
       TASK_GATEWAY_PORT: '{{.GATEWAY_PORT}}'
     cmds:
-      - GATEWAY_PORT="${TASK_GATEWAY_PORT:-4000}" sh scripts/run_local_gateway.sh
+      - >-
+        if [ -n "${TASK_GATEWAY_PORT:-}" ]; then export GATEWAY_PORT="$TASK_GATEWAY_PORT"; else export GATEWAY_PORT="${GATEWAY_PORT:-4000}"; fi;
+        sh scripts/run_local_gateway.sh
 
   gateway:down:
     desc: Stop the local gateway and its key-store (ignores absent ones)
@@ -195,8 +247,12 @@ tasks:
       TASK_PG_NAME: '{{.PG_NAME}}'
       TASK_PG_NET: '{{.PG_NET}}'
     cmds:
-      - docker stop "${TASK_GATEWAY_NAME:-local-litellm-gateway}" "${TASK_PG_NAME:-local-litellm-gateway-pg}" 2>/dev/null || true
-      - docker network rm "${TASK_PG_NET:-local-litellm-gateway-net}" 2>/dev/null || true
+      - >-
+        GATEWAY_NAME="${TASK_GATEWAY_NAME:-${GATEWAY_NAME:-local-litellm-gateway}}";
+        PG_NAME="${TASK_PG_NAME:-${PG_NAME:-local-litellm-gateway-pg}}";
+        PG_NET="${TASK_PG_NET:-${PG_NET:-local-litellm-gateway-net}}";
+        docker stop "$GATEWAY_NAME" "$PG_NAME" 2>/dev/null || true;
+        docker network rm "$PG_NET" 2>/dev/null || true
 
   jaeger:up:
     desc: Start the local Jaeger v2 backend (or reuse a running one)
@@ -215,29 +271,31 @@ tasks:
     env:
       TASK_JAEGER_NAME: '{{.JAEGER_NAME}}'
     cmds:
-      - docker stop "${TASK_JAEGER_NAME:-local-jaeger}" 2>/dev/null || true
+      - docker stop "${TASK_JAEGER_NAME:-${JAEGER_NAME:-local-jaeger}}" 2>/dev/null || true
 
   stack:
     desc: Run the full local production simulation (supervisor)
     summary: |
-      `sh scripts/run_local_stack.sh` with only caller-set CORPUS_DIR,
-      GATEWAY_PORT, LOCAL_AGENT_PORT and JAEGER_PORT forwarded, mirroring
-      `make local-stack`. The supervisor owns gateway/Jaeger/agent lifetime
-      (traps, readiness probes, trace check); Qdrant falls back to
-      scripts/sim_qdrant.sh. LOCAL_STACK_DRYRUN=1 prints the plan without
-      Docker/network. Needs docker, the three backends and .venv (checked
-      by the script, not here — same as Make).
+      `sh scripts/run_local_stack.sh` with caller-set CORPUS_DIR,
+      GATEWAY_PORT, LOCAL_AGENT_PORT, JAEGER_PORT and LOCAL_STACK_DRYRUN
+      forwarded, mirroring `make local-stack`. The supervisor owns
+      gateway/Jaeger/agent lifetime (traps, readiness probes, trace check);
+      Qdrant falls back to scripts/sim_qdrant.sh. LOCAL_STACK_DRYRUN=1
+      prints the plan without Docker/network. Needs docker, the three
+      backends and .venv (checked by the script, not here — same as Make).
     env:
       TASK_CORPUS_DIR: '{{.CORPUS_DIR}}'
       TASK_GATEWAY_PORT: '{{.GATEWAY_PORT}}'
       TASK_LOCAL_AGENT_PORT: '{{.LOCAL_AGENT_PORT}}'
       TASK_JAEGER_PORT: '{{.JAEGER_PORT}}'
+      TASK_LOCAL_STACK_DRYRUN: '{{.LOCAL_STACK_DRYRUN}}'
     cmds:
       - >-
         if [ -n "${TASK_CORPUS_DIR:-}" ]; then export CORPUS_DIR="$TASK_CORPUS_DIR"; fi;
         if [ -n "${TASK_GATEWAY_PORT:-}" ]; then export GATEWAY_PORT="$TASK_GATEWAY_PORT"; fi;
         if [ -n "${TASK_LOCAL_AGENT_PORT:-}" ]; then export LOCAL_AGENT_PORT="$TASK_LOCAL_AGENT_PORT"; fi;
         if [ -n "${TASK_JAEGER_PORT:-}" ]; then export JAEGER_PORT="$TASK_JAEGER_PORT"; fi;
+        if [ -n "${TASK_LOCAL_STACK_DRYRUN:-}" ]; then export LOCAL_STACK_DRYRUN="$TASK_LOCAL_STACK_DRYRUN"; fi;
         sh scripts/run_local_stack.sh
 
   agent:
@@ -255,4 +313,5 @@ tasks:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - >-
         if [ -n "${TASK_UI_ENABLED:-}" ]; then export UI_ENABLED="$TASK_UI_ENABLED"; fi;
-        LLM_STREAM=true .venv/bin/python -m uvicorn mainframe_rag.agent.app:app --host 0.0.0.0 --port "${TASK_PORT:-8080}"
+        PORT="${TASK_PORT:-${PORT:-8080}}";
+        LLM_STREAM=true .venv/bin/python -m uvicorn mainframe_rag.agent.app:app --host 0.0.0.0 --port "$PORT"
