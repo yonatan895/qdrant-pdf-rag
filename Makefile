@@ -19,8 +19,10 @@
 # dotenv, per-task bridges only.
 #
 # Shim requirements and limits:
-# - The pinned `task` must be on PATH (sh scripts/tools/install-task.sh;
-#   doctor reports it). Without it every target fails with command-not-found.
+# - Connected host targets require the pinned `task` on PATH (sh scripts/tools/install-task.sh;
+#   doctor reports it). Without it, forwarding targets fail with command-not-found.
+# - Air-gap entry points (`airgap-*`) call stage scripts directly so offline
+#   bastions without Task remain functional until increment C offline handoff (TR437-F1 Option 2).
 # - Multiple goals run sequentially through separate task processes.
 # - Do not use -j: concurrent task processes must never share one .venv or
 #   bundle dir for installs/builds (Task `deps` are concurrent by design and
@@ -97,23 +99,33 @@ build-images:
 	task artifacts:images
 
 # ---------------------------------------------------------------- air-gap happy path (issue #15)
+# Direct script wrappers retained until offline Task handoff lands (TR437-F1 Option 2).
 .PHONY: airgap-pack airgap-load airgap-deploy airgap-ingest airgap-smoke airgap-validate airgap-pipeline airgap-dryrun
 airgap-pack:
-	task airgap:pack
+	sh scripts/airgap/pack.sh
 airgap-load:
-	task airgap:load
+	sh scripts/airgap/load.sh
 airgap-deploy:
-	task airgap:deploy
+	sh scripts/airgap/deploy.sh
 airgap-ingest:
-	task airgap:ingest
+	sh scripts/airgap/ingest.sh
 airgap-smoke:
-	task airgap:smoke
+	sh scripts/airgap/smoke.sh
 airgap-validate:
-	task airgap:validate
+	sh scripts/airgap/validate.sh
 airgap-pipeline:
-	task airgap:pipeline
+	sh scripts/airgap/pipeline.sh
 airgap-dryrun:
-	task airgap:dryrun
+	AIRGAP_DRYRUN=1 IMAGE_SHA=$$(git rev-parse HEAD 2>/dev/null || echo "0000000000000000000000000000000000000000") \
+	  INTERNAL_REGISTRY=registry.example.internal/mainframe-rag \
+	  NAMESPACE=mainframe-rag \
+	  STORAGE_CLASS=gp3-csi \
+	  EMBED_MODEL=ibm-granite/granite-embedding-278m-multilingual \
+	  DENSE_DIM=768 \
+	  EMBED_MODEL_REVISION=dryrun-rev-1 \
+	  VLLM_BASE_URL=http://vllm.inference.svc.cluster.local:8000/v1 \
+	  CORPUS_PVC=corpus-pvc \
+	  sh scripts/airgap/pipeline.sh --dry-run
 
 # ---------------------------------------------------------------- simulation (docker Qdrant, tests/test_integration_sim.py)
 .PHONY: sim

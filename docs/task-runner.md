@@ -65,8 +65,9 @@ task list and builds/installs/launches nothing.
   preserves `agent_doctor.py`'s 0/1/2.
 - `check` runs lint→typecheck→unit sequentially via direct task calls, never
   parallel `deps`. No `sources:`/`status:` caching on verification; only
-  `dev:setup` skips when `.venv/bin/python` exists (a failed preparation
-  leaves no executable, so it never caches green).
+  `dev:setup` skips when `.venv/bin/python` and `.venv/.setup-complete` exist
+  (written only after dependency installation succeeds, so partial setups
+  never cache green).
 
 <a id="safety"></a>
 ## Safety boundaries
@@ -144,16 +145,18 @@ per-target repetition — Task-side defaults match Make's. Verified
 empirically for both override forms, including empty values and quoted
 spaces, across every command family.
 
-Limits: the pinned `task` must be on `PATH` (install script; doctor
-finding) — CI jobs that invoke `make` provision it first via an `Install
-pinned Task runner` step (`e2e.yml` checkout jobs and `load.yml` from the
-repo; black-box bundle jobs from the extracted bundle copy, pin fidelity
-at the bundle SHA; the full consumer switch to `task` stays increment C);
-multiple goals run sequentially; no `-j` for installs/builds
-(concurrent processes must not share one `.venv`/bundle dir); `-C dir`
-resolves against the repo root; unknown targets fail with Make's own
-"No rule" error (no catch-all). `make help` prints a migration pointer and
-the task list instead of the old catalog.
+Limits: the pinned `task` must be on `PATH` for connected-host targets
+(install script; doctor finding) — CI jobs that invoke `make` provision it
+first via an `Install pinned Task runner` step (`e2e.yml` checkout jobs and
+`load.yml` from the repo; black-box bundle jobs from the extracted bundle
+copy, pin fidelity at the bundle SHA; the full consumer switch to `task`
+stays increment C); air-gap entry points (`airgap-*`) retain direct script
+calls until increment C delivers the offline Task handoff (TR437-F1 Option 2),
+so offline bastions without Task remain functional; multiple goals run
+sequentially; no `-j` for installs/builds (concurrent processes must not share
+one `.venv`/bundle dir); `-C dir` resolves against the repo root; unknown
+targets fail with Make's own "No rule" error (no catch-all). `make help`
+prints a migration pointer and the task list instead of the old catalog.
 
 Approved differences from the old recipes (all covered by tests):
 completion stamps instead of directory mtimes (a partial directory never

@@ -14,20 +14,22 @@ tasks:
       selection, same `requirements.lock.txt` plus editable `.[dev]` install
       into `.venv` with the venv's own pip). Inputs: PY (default python3;
       explicit empty is preserved and fails rather than silently defaulting).
-      Skips when `.venv/bin/python` already exists (a failed preparation
-      leaves no executable behind, so it is never cached as complete).
+      Skips when `.venv/bin/python` and completion stamp `.venv/.setup-complete`
+      both exist (written only after successful dependency installation).
       Connected host only; CI uses its prepared interpreter and must not call
       this. Never invoked implicitly by verification tasks.
     status:
-      - 'test -x .venv/bin/python'
+      - 'test -x .venv/bin/python && test -f .venv/.setup-complete'
     vars:
       PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}python3{{end}}'
     env:
       TASK_PY: '{{.PY}}'
     cmds:
+      - 'rm -f .venv/.setup-complete'
       - '"$TASK_PY" -m venv .venv'
       - '.venv/bin/python -m pip install --upgrade pip'
       - '.venv/bin/python -m pip install -r requirements.lock.txt -e ".[dev]"'
+      - 'touch .venv/.setup-complete'
 
   doctor:
     desc: Diagnose tool prerequisites (read-only)

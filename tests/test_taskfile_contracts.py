@@ -254,7 +254,7 @@ class TaskContractsTests(unittest.TestCase):
         self.make_airgap_fixtures({})
         self.make_airgap_stage_double("deploy.sh")
 
-    def run_make(self, *args: str, extra_env: dict | None = None) -> subprocess.CompletedProcess:
+    def run_make(self, *args: str, makefile: str | None = None, extra_env: dict | None = None) -> subprocess.CompletedProcess:
         if shutil.which("make") is None:
             self.skipTest("make unavailable")
         env = dict(os.environ)
@@ -266,14 +266,19 @@ class TaskContractsTests(unittest.TestCase):
         ])
         if extra_env:
             env.update(extra_env)
+        cmd = ["make", "-C", str(self.root)]
+        if makefile:
+            cmd.extend(["-f", makefile])
+        cmd.extend(args)
         return subprocess.run(
-            ["make", "-C", str(self.root), *args],
+            cmd,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             timeout=120, check=False, text=True, env=env, cwd=str(self.root))
 
     def assertParity(self, make_args: list, task_args: list, extra_env: dict | None = None,
-                     check_env: tuple = (), expect_calls: bool = True) -> list[dict]:
-        """Run the old spelling through the shim and the new spelling
+                     check_env: tuple = (), expect_calls: bool = True,
+                     makefile: str | None = None) -> list[dict]:
+        """Run the old spelling through Make (or shim) and the new spelling
         directly. Tool argv, cwd and order must match exactly; child
         environment is compared only for the listed keys, because Make
         exposes caller CLI assignments in recipe environments while Task
@@ -284,11 +289,11 @@ class TaskContractsTests(unittest.TestCase):
             base_env.update(extra_env)
         if (self.log).exists():
             self.log.unlink()
-        make_proc = self.run_make(*make_args, extra_env=base_env)
+        make_proc = self.run_make(*make_args, makefile=makefile, extra_env=base_env)
         self.assertEqual(make_proc.returncode, 0, make_proc.stdout)
         make_calls = self.calls()
         if expect_calls:
-            self.assertTrue(make_calls, "make run produced no observed calls")
+            self.assertTrue(make_calls, f"make run produced no observed calls: {make_proc.stdout}")
         if (self.log).exists():
             self.log.unlink()
         task_proc = self.run_task(*task_args, extra_env=base_env)
@@ -1396,6 +1401,159 @@ class TaskContractsTests(unittest.TestCase):
         self.assertIn("task --list", proc.stdout)
         self.assertIn("qa:context", proc.stdout)
 
+    def make_historical_parity_ws(self) -> None:
+        """Workspace containing the pre-migration Makefile (commit 2c850dd4)
+        alongside Taskfile.yml, backed by identical inert doubles."""
+        fixture_path = REPO / "tests/fixtures/Makefile.pre-402"
+        self.assertTrue(fixture_path.is_file(), "pre-migration Makefile fixture missing")
+        shutil.copy(fixture_path, self.root / "Makefile.historical")
+        self.copy_repo_script("sim_qdrant.sh")
+        self.copy_repo_script("qdrant_pin.py")
+        self.make_script_recorder("run_local_vllm.sh")
+        (self.root / "images.txt").write_text(
+            "example.com/qdrant/qdrant:v9.9.9-unprivileged sha256:fixture\n", encoding="utf-8")
+        charts = self.root / "charts"
+        charts.mkdir(parents=True, exist_ok=True)
+        (charts / "qdrant-1.19.0.tgz").write_text("fixture", encoding="utf-8")
+        self.make_venv_fake()
+        self.make_eval_fixtures()
+        self.make_tool_recorder("helm")
+        self.make_tool_recorder("docker")
+        self.make_tool_recorder("pyfake")
+        self.make_airgap_fixtures({})
+        self.make_airgap_stage_double("deploy.sh")
+        self.make_airgap_stage_double("pipeline.sh")
+
+    def test_historical_make_parity_quality_and_context(self):
+        self.make_historical_parity_ws()
+        self.assertParity(["lint"], ["qa:lint"], makefile="Makefile.historical")
+        self.assertParity(["check-context", "PY=pyfake"], ["qa:context", "PY=pyfake"],
+                          makefile="Makefile.historical")
+        self.assertParity(["agent-doctor", "PROFILE=sim", "PY=pyfake"],
+                          ["dev:doctor", "PROFILE=sim", "PY=pyfake"],
+                          makefile="Makefile.historical")
+        self.assertParity(["check"], ["qa:check"], makefile="Makefile.historical")
+        self.assertParity(["loadtest-mock"], ["qa:load"], makefile="Makefile.historical")
+
+    def test_historical_make_parity_eval_modes_and_precedence(self):
+        self.make_historical_parity_ws()
+        # Default eval mode / venue
+        self.assertParity(["eval"], ["eval:retrieval"], makefile="Makefile.historical",
+                          check_env=("EMBED_MODE", "VENUE"))
+        # Mode override CLI
+        self.assertParity(["eval", "EMBED_MODE=vllm"], ["eval:retrieval", "EMBED_MODE=vllm"],
+                          makefile="Makefile.historical",
+                          check_env=("EMBED_MODE", "VENUE"))
+        # Mode override ambient
+        self.assertParity(["eval"], ["eval:retrieval"], makefile="Makefile.historical",
+                          extra_env=dict(self.tool_env(), EMBED_MODE="vllm"),
+                          check_env=("EMBED_MODE", "VENUE"))
+        # Conflicting ambient and CLI (CLI beats ambient)
+        self.assertParity(["eval", "EMBED_MODE=hash"], ["eval:retrieval", "EMBED_MODE=hash"],
+                          makefile="Makefile.historical",
+                          extra_env=dict(self.tool_env(), EMBED_MODE="vllm"),
+                          check_env=("EMBED_MODE", "VENUE"))
+        # Holdout with ambient dev and default CLI forces rc in both
+        self.assertParity(["eval-holdout"], ["eval:holdout"],
+                          makefile="Makefile.historical",
+                          extra_env=dict(self.tool_env(), VENUE="dev"),
+                          check_env=("EMBED_MODE", "VENUE"))
+        # Answers count knob
+        self.assertParity(["eval-answers", "N=5"], ["eval:answers", "N=5"],
+                          makefile="Makefile.historical",
+                          check_env=("EMBED_MODE", "VENUE"))
+
+    def test_historical_make_parity_local_inputs_and_controls(self):
+        self.make_historical_parity_ws()
+        self.assertParity(["query-demo", "QUERY=hi", "LIMIT=2"],
+                          ["local:query", "QUERY=hi", "LIMIT=2"],
+                          makefile="Makefile.historical")
+        self.assertParity(["sim-qdrant", "SIM_CONTAINER=mycont", "SIM_PORT=6334"],
+                          ["local:qdrant:up", "SIM_CONTAINER=mycont", "SIM_PORT=6334"],
+                          makefile="Makefile.historical")
+        self.assertParity(["sim-clean", "SIM_CONTAINER=mycont"],
+                          ["local:qdrant:down", "SIM_CONTAINER=mycont"],
+                          makefile="Makefile.historical")
+        self.assertParity(["local-vllm", "PORT=8001", "MODEL=test-model"],
+                          ["local:llm", "PORT=8001", "MODEL=test-model"],
+                          makefile="Makefile.historical",
+                          check_env=("PORT", "MODEL"))
+
+    def test_historical_make_parity_airgap_and_artifacts(self):
+        self.make_historical_parity_ws()
+        self.assertParity(["chart"], ["artifacts:chart-check"],
+                          makefile="Makefile.historical", expect_calls=False)
+        self.assertParity(["helm-template"], ["artifacts:helm-render"],
+                          makefile="Makefile.historical")
+        # Direct deploy call with CLI override
+        self.assertParity(["airgap-deploy", "INTERNAL_REGISTRY=cli-reg"],
+                          ["airgap:deploy", "INTERNAL_REGISTRY=cli-reg"],
+                          makefile="Makefile.historical")
+        # airgap-dryrun runs pipeline double with fixed stand-ins
+        self.assertParity(["airgap-dryrun"], ["airgap:dryrun"],
+                          makefile="Makefile.historical")
+
+    def test_historical_make_parity_multi_goal_and_failure_propagation(self):
+        self.make_historical_parity_ws()
+        # Multi-goal execution runs sequentially without leaking target vars
+        self.assertParity(["lint", "check-context", "PY=pyfake"],
+                          ["qa:lint", "qa:context", "PY=pyfake"],
+                          makefile="Makefile.historical")
+        # Failure propagation: error exit in child halts execution and returns non-zero in both
+        self.make_venv_fake()
+        self.recorder_env["RECORDER_EXIT"] = "42"
+        proc_make = self.run_make("lint", makefile="Makefile.historical", extra_env=self.tool_env())
+        proc_task = self.run_task("qa:lint", extra_env=self.tool_env())
+        self.assertNotEqual(proc_make.returncode, 0)
+        self.assertNotEqual(proc_task.returncode, 0)
+
+    def test_historical_make_approved_intentional_differences(self):
+        # 1. Clean-environment prerequisite: Make auto-installs .venv via order-only prereq;
+        #    Task verification diagnoses missing .venv and fails closed without auto-creating it.
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        shutil.rmtree(self.root / ".venv", ignore_errors=True)
+        proc_task = self.run_task("qa:lint", extra_env=self.tool_env())
+        self.assertNotEqual(proc_task.returncode, 0)
+        self.assertIn("missing development environment: .venv/bin/python absent", proc_task.stdout)
+        self.assertIn("task dev:setup", proc_task.stdout)
+        self.assertFalse((self.root / ".venv").exists(), "Task must not auto-create .venv")
+
+    def test_dev_setup_completion_stamp(self):
+        # dev:setup requires both .venv/bin/python AND .venv/.setup-complete.
+        # If .venv/bin/python exists but .setup-complete is missing (simulated failed pip install),
+        # dev:setup must NOT skip; it must re-run cmds.
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        self.make_tool_recorder("fake-pip")
+        py_path = self.root / "bin/fakepy"
+        py_path.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
+            '    mkdir -p .venv/bin\n'
+            '    touch .venv/bin/python\n'
+            '    chmod +x .venv/bin/python\n'
+            '    exit 0\n'
+            'fi\n'
+            'exit 0\n',
+            encoding="utf-8")
+        py_path.chmod(0o755)
+
+        # 1. First run: status fails, cmds run, stamp is created
+        proc = self.run_task("dev:setup", "PY=fakepy", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertTrue((self.root / ".venv/.setup-complete").is_file(), "stamp must be written on success")
+
+        # 2. Status passes when stamp exists (up-to-date)
+        proc = self.run_task("dev:setup", "PY=fakepy", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn('Task "dev:setup" is up to date', proc.stdout)
+
+        # 3. If stamp is removed while interpreter exists (partial setup), status fails and it re-runs
+        (self.root / ".venv/.setup-complete").unlink()
+        proc = self.run_task("dev:setup", "PY=fakepy", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertNotIn('Task "dev:setup" is up to date', proc.stdout)
+        self.assertTrue((self.root / ".venv/.setup-complete").is_file(), "stamp re-created on retry")
+
     def test_dev_demo_pdfs_and_clean(self):
         self.make_venv_fake()
         env = self.tool_env()
@@ -1484,6 +1642,10 @@ class TaskContractsTests(unittest.TestCase):
         )
         self.assertIn(".task-complete", build_code)
         self.assertIn("sha256sum", build_code)
+        dev_code = "\n".join(
+            line for line in dev_text.splitlines() if not line.lstrip().startswith("#")
+        )
+        self.assertIn(".setup-complete", dev_code)
         # Mode/venue bridged under TASK_ prefixes and bound at the command boundary
         # so ambient environment variables cannot defeat CLI inputs.
         eval_code = "\n".join(
