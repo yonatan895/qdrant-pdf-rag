@@ -39,7 +39,8 @@ python3 - "$RECORDER_LOG" "$RECORDER_TAG" "$@" <<'PYEOF'
 import json, os, sys
 log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
 with open(log, "a", encoding="utf-8") as fh:
-    fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd()}) + "\\n")
+    fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd(),
+                         "env": {k: os.environ.get(k) for k in ("EMBED_MODE", "VENUE")}}) + "\\n")
 PYEOF
 exit "${RECORDER_EXIT:-0}"
 """
@@ -52,8 +53,8 @@ if [ "$1" = "-V" ]; then echo "${FAKE_PY_VERSION:-Python 3.14.5}"; exit 0; fi
 python3 - "$RECORDER_LOG" "venv-python" "$@" <<'PYEOF'
 import json, os, sys
 log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
-with open(log, "a", encoding="utf-8") as fh:
-    fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd()}) + "\\n")
+    fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd(),
+                         "env": {k: os.environ.get(k) for k in ("EMBED_MODE", "VENUE")}}) + "\\n")
 ret = int(os.environ.get("RECORDER_EXIT", "0"))
 if ret != 0:
     sys.exit(ret)
@@ -189,6 +190,16 @@ class TaskContractsTests(unittest.TestCase):
         fetch = self.root / "scripts/fetch_bm25_weights.py"
         fetch.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / "scripts/fetch_bm25_weights.py", fetch)
+
+    def make_eval_fixtures(self) -> None:
+        """Holdout file plus a matching sha256 manifest (tamperable)."""
+        import hashlib
+        data = b"frozen-holdout-fixture\n"
+        evals = self.root / "evals"
+        evals.mkdir(parents=True, exist_ok=True)
+        (evals / "holdout.jsonl").write_bytes(data)
+        (evals / "holdout.jsonl.sha256").write_text(
+            f"{hashlib.sha256(data).hexdigest()}  evals/holdout.jsonl\n", encoding="utf-8")
 
     def pip_calls(self) -> list[dict]:
         return [c for c in self.calls() if c["tag"] == "venv-python"]
@@ -476,16 +487,203 @@ class TaskContractsTests(unittest.TestCase):
         for call in self.tool_calls("docker"):
             self.assertEqual(call["cwd"], str(self.root))
 
+    def test_eval_registered_in_discovery(self):
+        proc = self.run_task("--list")
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        for name in ("eval:retrieval", "eval:gate-l1", "eval:paraphrase", "eval:holdout",
+                     "eval:verify-golden", "eval:baseline", "eval:draft", "eval:capture-pool",
+                     "eval:answers", "eval:chat", "eval:harness:gate", "eval:harness:baseline",
+                     "eval:harness:l2", "eval:harness:l3", "eval:harness:l3-baseline",
+                     "eval:harness:l4", "eval:harness:l4-record", "eval:report", "eval:html",
+                     "eval:compare", "eval:bench-report", "eval:bench-html", "eval:bench-compare",
+                     "eval:bench", "eval:bench-baseline", "eval:load"):
+            self.assertIn(name, proc.stdout)
+
+    def test_eval_mode_venue_defaults(self):
+        self.make_venv_fake()
+        proc = self.run_task("eval:retrieval", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "dev"})
+        self.assertEqual(
+            calls[0]["argv"],
+            ["scripts/eval_retrieval.py", "--golden", "evals/golden.jsonl",
+             "--check", "evals/baseline.json", "--out", "bundles/eval-report.json",
+             "--summary", "bundles/eval-summary.md"])
+
+    def test_eval_mode_override_cli_and_env_forms(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        proc = self.run_task("eval:retrieval", "EMBED_MODE=vllm", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "vllm", "VENUE": "dev"})
+        self.assertIn("evals/baseline-vllm.json", calls[0]["argv"])
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("eval:retrieval", extra_env=dict(env, EMBED_MODE="vllm", VENUE="rc"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "vllm", "VENUE": "rc"})
+        self.assertIn("evals/baseline-vllm.json", calls[0]["argv"])
+
+    def test_eval_explicit_empty_mode_preserved_with_hash_baseline(self):
+        # Mirrors Make `$(filter vllm,"")` (hash branch) plus an empty export:
+        # the baseline cannot disagree with the effective mode, and the empty
+        # value reaches the script instead of silently becoming the default.
+        self.make_venv_fake()
+        proc = self.run_task("eval:retrieval", "EMBED_MODE=", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "", "VENUE": "dev"})
+        self.assertIn("evals/baseline.json", calls[0]["argv"])
+
+    def test_harness_golden_flag_iff_hash_mode(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        proc = self.run_task("eval:harness:gate", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertIn("--golden", argv)
+        self.assertEqual(argv[argv.index("--golden") + 1], "evals/golden.jsonl")
+        self.assertIn("benchmarks/harness.json", argv)
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("eval:harness:gate", "EMBED_MODE=vllm", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertNotIn("--golden", argv)
+        self.assertIn("benchmarks/harness-vllm.json", argv)
+
+    def test_holdout_forces_rc_venue_and_verifies_first(self):
+        self.make_venv_fake()
+        self.make_eval_fixtures()
+        env = self.tool_env()
+        proc = self.run_task("eval:holdout", "VENUE=dev", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(len(calls), 1, "sha256sum pre-check must precede the single python run")
+        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "rc"})
+        self.assertIn("evals/holdout.jsonl", calls[0]["argv"])
+        # Tampered holdout fails before any python invocation.
+        with (self.root / "evals/holdout.jsonl").open("ab") as fh:
+            fh.write(b"tampered\n")
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("eval:holdout", extra_env=env)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self.pip_calls(), [])
+
+    def test_eval_count_inputs_default_and_override(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        proc = self.run_task("eval:answers", "N=5", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[argv.index("--max-queries") + 1], "5")
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("eval:answers", "N=", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[argv.index("--max-queries") + 1], "24")
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("eval:chat", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[argv.index("--limit") + 1], "12")
+
+    def test_bench_verify_and_load_carry_no_mode_exports(self):
+        self.make_venv_fake()
+        self.make_tool_recorder("python3base")
+        env = self.tool_env()
+        for task_name in ("eval:bench", "eval:verify-golden"):
+            with self.subTest(task=task_name):
+                if (self.log).exists():
+                    self.log.unlink()
+                proc = self.run_task(task_name, extra_env=env)
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                self.assertEqual(self.pip_calls()[0]["env"], {"EMBED_MODE": None, "VENUE": None})
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("eval:load", "PY=python3base", "AGENT_URL=http://x:9999", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        base_calls = self.tool_calls("python3base")
+        self.assertEqual(len(base_calls), 1)
+        self.assertEqual(base_calls[0]["argv"], [
+            "scripts/loadtest.py", "--url", "http://x:9999", "--endpoint", "search",
+            "--concurrency", "8", "--duration", "30"])
+        self.assertEqual(base_calls[0]["env"], {"EMBED_MODE": None, "VENUE": None})
+
+    def test_capture_pool_out_defaults_to_dated_bundle(self):
+        import re
+        self.make_venv_fake()
+        env = self.tool_env()
+        proc = self.run_task("eval:capture-pool", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        out = argv[argv.index("--out") + 1]
+        self.assertTrue(re.fullmatch(r"bundles/pools-\d{8}\.jsonl", out), out)
+        self.assertEqual(argv[argv.index("--golden") + 1], "evals/golden.jsonl")
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("eval:capture-pool", "OUT=/tmp/x.jsonl", "GOLDEN=g.jsonl", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[argv.index("--out") + 1], "/tmp/x.jsonl")
+        self.assertEqual(argv[argv.index("--golden") + 1], "g.jsonl")
+
+    def test_report_inputs_default_and_override(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        proc = self.run_task("eval:report", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[argv.index("--report") + 1], "bundles/eval-report.json")
+        self.assertEqual(argv[argv.index("--baseline") + 1], "evals/baseline.json")
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("eval:report", "REPORT=/r.json", "BASELINE=/b.json", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[argv.index("--report") + 1], "/r.json")
+        self.assertEqual(argv[argv.index("--baseline") + 1], "/b.json")
+
+    def test_harness_l3_baseline_nesting(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        proc = self.run_task("eval:harness:l3", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[argv.index("--baseline") + 1], "benchmarks/harness-l3.json")
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("eval:harness:l3", "EMBED_MODE=vllm", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[argv.index("--baseline") + 1], "benchmarks/harness-l3-vllm.json")
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("eval:harness:l3", "EMBED_MODE=vllm", "HARNESS_L3_BASELINE=c.json",
+                             extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        argv = self.pip_calls()[0]["argv"]
+        self.assertEqual(argv[argv.index("--baseline") + 1], "c.json")
+
     def test_taskfile_wiring_stays_dispatch_only(self):
         root_text = (REPO / "Taskfile.yml").read_text(encoding="utf-8")
         quality_text = (REPO / "taskfiles/quality.yml").read_text(encoding="utf-8")
         dev_text = (REPO / "taskfiles/dev.yml").read_text(encoding="utf-8")
         artifacts_text = (REPO / "taskfiles/artifacts.yml").read_text(encoding="utf-8")
-        combined = root_text + quality_text + dev_text + artifacts_text
+        eval_text = (REPO / "taskfiles/eval.yml").read_text(encoding="utf-8")
+        combined = root_text + quality_text + dev_text + artifacts_text + eval_text
         # Local required namespaced includes; one implementation per alias.
         self.assertIn("taskfile: ./taskfiles/quality.yml", root_text)
         self.assertIn("taskfile: ./taskfiles/dev.yml", root_text)
         self.assertIn("taskfile: ./taskfiles/artifacts.yml", root_text)
+        self.assertIn("taskfile: ./taskfiles/eval.yml", root_text)
         for alias, canonical in (("task: qa:lint", "lint"), ("task: qa:check", "check"),
                                  ("task: qa:context", "context"), ("task: dev:doctor", "doctor")):
             self.assertIn(alias, root_text, canonical)
@@ -496,20 +694,25 @@ class TaskContractsTests(unittest.TestCase):
             line for line in combined.splitlines() if not line.lstrip().startswith("#")
         )
         self.assertNotIn("dotenv", code)
-        self.assertNotIn("http://", code)
-        self.assertNotIn("https://", code)
+        # No remote includes: every taskfile reference resolves locally.
+        # (Plain http(s) defaults such as AGENT_URL are legitimate and
+        # covered by exact-argv tests, not by this structural check.)
+        for line in code.splitlines():
+            if "taskfile:" in line:
+                self.assertIn("./", line)
+                self.assertNotIn("http", line)
         self.assertNotIn("deps:", code)
         self.assertNotIn("sources:", code)
         self.assertNotIn("method:", code)
         self.assertNotIn("ignore_error", code)
         self.assertNotIn("export EMBED_MODE", code)
         self.assertNotIn("airgap.env", code)
-        # Verification never caches (`sources:` fingerprints even write
-        # state on `--list --json`); only artifact builds (plus the explicit
-        # dev:setup presence check) may carry freshness state, proven by
-        # content-bearing completion stamps re-verified on every run.
+        # Verification and evaluation never cache (`sources:` fingerprints
+        # even write state on `--list --json`); only artifact builds (plus
+        # the explicit dev:setup presence check) may carry freshness state,
+        # proven by content-bearing completion stamps re-verified on every run.
         verify_code = "\n".join(
-            line for line in (root_text + quality_text).splitlines()
+            line for line in (root_text + quality_text + eval_text).splitlines()
             if not line.lstrip().startswith("#")
         )
         self.assertNotIn("status:", verify_code)
@@ -518,6 +721,13 @@ class TaskContractsTests(unittest.TestCase):
         )
         self.assertIn(".task-complete", build_code)
         self.assertIn("sha256sum", build_code)
+        # Script-read mode/venue keep their exact environment names; nothing
+        # may reintroduce a global export line.
+        eval_code = "\n".join(
+            line for line in eval_text.splitlines() if not line.lstrip().startswith("#")
+        )
+        self.assertIn("EMBED_MODE: '{{.EMBED_MODE}}'", eval_code)
+        self.assertIn("VENUE: '{{.VENUE}}'", eval_code)
 
 
 if __name__ == "__main__":

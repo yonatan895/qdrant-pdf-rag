@@ -30,6 +30,9 @@ includes:
   artifacts:
     taskfile: ./taskfiles/artifacts.yml
     dir: .
+  eval:
+    taskfile: ./taskfiles/eval.yml
+    dir: .
 
 tasks:
   default:

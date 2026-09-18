@@ -5,13 +5,13 @@ verification policy stays in [live-stack](live-stack.md#verification-minimums);
 test design stays in [testing](testing.md#evidence-design).
 
 <a id="scope"></a>
-## Scope: increments A and B1
+## Scope: increments A, B1 and B2
 
 `Taskfile.yml` (+ `taskfiles/quality.yml`, `taskfiles/dev.yml`,
-`taskfiles/artifacts.yml`) is the entry point for **discovery, doctor,
-context, quality (A) and artifacts (B1)**. `Makefile` remains authoritative
-for evaluation, local simulation and air-gap workflows until later slices
-port them. No product behavior changes here.
+`taskfiles/artifacts.yml`, `taskfiles/eval.yml`) is the entry point for
+**discovery, doctor, context, quality (A), artifacts (B1) and evaluation
+(B2)**. `Makefile` remains authoritative for local simulation and air-gap
+workflows until later slices port them. No product behavior changes here.
 
 All documented invocations assume the pinned `task` on `PATH` (session-local;
 the installer prints the exact export). `task` with no task name prints the
@@ -42,6 +42,10 @@ task list and builds/installs/launches nothing.
 | `PROFILE` | `task dev:doctor PROFILE=sim` | `unit` (default) / `sim` / `deploy`, owned by `agent_doctor.py`. Same empty/false/zero rules as `PY`. |
 | Focused tests | `task qa:unit -- tests/test_agent_context.py -q` | Replaces the default `pytest tests -v` argv once (shell word-splitting applies; trusted developer input only, never untrusted free text). Empty selection keeps the default. |
 | `TASK_BIN` | env for `tests/test_taskfile_contracts.py` | Override for the Task binary under test; `.tools/bin/task`, then `PATH`. |
+| `EMBED_MODE` | `task eval:retrieval EMBED_MODE=vllm` or `EMBED_MODE=vllm task eval:retrieval` | Eval-family default `hash`; both forms converge, CLI wins. Script-read, so bridged under its exact name per task (never global). Explicit empty is preserved (script fails); baselines still derive from the effective mode via `coalesce`. |
+| `VENUE` | `task eval:retrieval VENUE=rc` | Eval-family default `dev`; same form rules as `EMBED_MODE`. `eval:holdout` forces `rc` (caller input ignored, same as Make). |
+| `$(or)`-style knobs (`N`, `RESTORE`, `REPEATS`, `GOLDEN`, `OUT`, `REPORT`, `BASELINE`, `BASE`, `CURRENT`, `BENCH_REPEATS`) | `task eval:answers N=5` | Empty falls back to the Make `$(or)` default via shell `:-`; non-empty passes through exactly. |
+| `AGENT_URL`, `CONCURRENCY`, `DURATION`, `REQUEST_TIMEOUT`, `HARNESS_L3_BASELINE` | `task eval:harness:l3 AGENT_URL=…` | `?=`-style with defaults (`:8080`, `8`/`30`/`30`, mode-keyed L3 baseline); explicit empty preserved. |
 
 - Values reach scripts through `env:` bridges and quoted `"$VAR"` expansion,
   never re-parsed template interpolation (a `$(…)` value stays a literal
@@ -98,7 +102,7 @@ recipe succeeds. Consequences, all covered by runner-boundary tests:
 | `check-context` | `qa:context`, root `check-context` | `scripts/check_agent_context.py` | Migrated |
 | `wheelhouse`, `bm25-weights`, `chart`, `pull-chart`, `helm-template`, `helm-lint`, `build-images` | `artifacts:wheelhouse/bm25/chart-check/chart-fetch/helm-render/helm-lint/images` | pip / fetch script / helm / docker | `.venv` diagnosed (builds), chart presence verified, sequential preparation | `BUNDLE_DIR`, `BM25_MODEL`, `IMAGE_TAG`, image names | bundles output, images, chart fetch | **Migrated (B1)** with completion-stamp freshness ([#freshness](#freshness)) |
 | `sim*`, `loadtest-mock`, `bench*`, `loadtest` | `qa:sim/load`, `eval:bench*` | existing suites | Deferred to B3/B2 |
-| `eval*`, `gate-l1`, `harness-*`, `verify-golden`, `capture-pool`, reports | `eval:*` | existing scripts/baselines | Deferred to B2 (mode/venue scoping) |
+| `eval*`, `gate-l1`, `harness-*`, `verify-golden`, `capture-pool`, reports | `eval:*` | existing scripts/baselines | **Migrated (B2)** with per-task mode/venue scoping ([#inputs](#inputs)) |
 | `query-demo`, `ask`, `local-*`, `run-agent`, `test-vllm-e2e` | `local:*`, `qa:vllm-e2e` | existing launchers | Deferred to B3 (argv/process-lifetime rules) |
 | `airgap-*`, `airgap-dryrun` | `airgap:*` | `scripts/airgap/*` | Deferred to B4 wrappers + C offline handoff |
 | `e2e-demo-pdfs`, `clean` | `dev:demo-pdfs`, `dev:clean` | existing scripts | Deferred to B5 (retention contract) |
