@@ -247,7 +247,7 @@ class TaskContractsTests(unittest.TestCase):
             'python3 - "$@" <<\'PYEOF\'\n'
             'import json, os, sys\n'
             'keys = ("INTERNAL_REGISTRY", "NAMESPACE", "EMBED_MODE", "CORPUS_PVC",\n'
-            '        "AIRGAP_DRYRUN", "IMAGE_SHA", "STORAGE_CLASS", "QUERY")\n'
+            '        "AIRGAP_DRYRUN", "IMAGE_SHA", "STORAGE_CLASS", "QUERY", "AIRGAP_ENV")\n'
             'with open(os.environ["RECORDER_LOG"], "a") as fh:\n'
             '    fh.write(json.dumps({"tag": "airgap-stage", "argv": sys.argv[1:],\n'
             '                         "resolved": {k: os.environ.get(k) for k in keys}}) + "\\n")\n'
@@ -1177,13 +1177,77 @@ class TaskContractsTests(unittest.TestCase):
         common = (REPO / "scripts/airgap/common.sh").read_text(encoding="utf-8")
         expected = set(re.search(r'OPERATOR_ENV_KEYS="([^"]+)"', common).group(1).split())
         self.assertGreater(len(expected), 50, "operator key list unexpectedly small")
+        self.assertIn("AIRGAP_ENV", expected, "AIRGAP_ENV must be an operator key")
         yml = (REPO / "taskfiles/airgap.yml").read_text(encoding="utf-8")
-        blocks = re.findall(r"    env:\n((?:      [A-Z_]+: .*\n)+)", yml)
+        blocks = re.findall(r"    env:\n((?:      TASK_[A-Z_]+: .*\n)+)", yml)
         # Seven bridged stages; dryrun carries fixed params instead of bridges.
         self.assertEqual(len(blocks), 7)
         for block in blocks:
-            bridged = set(re.findall(r"^      ([A-Z_]+): ", block, re.MULTILINE))
+            bridged = set(re.findall(r"^      TASK_([A-Z_]+): ", block, re.MULTILINE)) - {"OP_KEYS"}
             self.assertEqual(bridged, expected)
+
+    def test_operator_precedence_three_way_conflict(self):
+        # Three conflicting values: ambient env, CLI, and env file (TR435-F1)
+        # CLI wins over ambient and file; ambient wins over file.
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        self.make_airgap_fixtures({"INTERNAL_REGISTRY": "file-reg", "NAMESPACE": "file-ns", "CORPUS_PVC": "file-pvc"})
+        self.make_airgap_stage_double("deploy.sh")
+        proc = self.run_task("airgap:deploy", "NAMESPACE=cli-ns",
+                             extra_env=dict(self.tool_env(), NAMESPACE="ambient-ns", INTERNAL_REGISTRY="ambient-reg"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        resolved = self.airgap_calls()[0]["resolved"]
+        self.assertEqual(resolved["NAMESPACE"], "cli-ns", "CLI must override ambient and file")
+        self.assertEqual(resolved["INTERNAL_REGISTRY"], "ambient-reg", "ambient must override file when CLI unset")
+        self.assertEqual(resolved["CORPUS_PVC"], "file-pvc", "file applies when CLI and ambient unset")
+
+    def test_airgap_dryrun_cli_and_ambient_precedence(self):
+        # TR435-F1: AIRGAP_DRYRUN selection must not be defeated by ambient env
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        self.make_airgap_fixtures({"AIRGAP_DRYRUN": "0"})
+        self.make_airgap_stage_double("deploy.sh")
+        # 1. Ambient 0 + CLI 1 -> child receives 1
+        proc = self.run_task("airgap:deploy", "AIRGAP_DRYRUN=1",
+                             extra_env=dict(self.tool_env(), AIRGAP_DRYRUN="0"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        resolved = self.airgap_calls()[0]["resolved"]
+        self.assertEqual(resolved["AIRGAP_DRYRUN"], "1")
+        if (self.log).exists():
+            self.log.unlink()
+        # 2. Ambient 1 + CLI 0 -> child receives 0
+        proc = self.run_task("airgap:deploy", "AIRGAP_DRYRUN=0",
+                             extra_env=dict(self.tool_env(), AIRGAP_DRYRUN="1"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        resolved = self.airgap_calls()[0]["resolved"]
+        self.assertEqual(resolved["AIRGAP_DRYRUN"], "0")
+
+    def test_airgap_env_selector_cli_and_ambient_precedence(self):
+        # TR435-F2: AIRGAP_ENV selector directs common.sh to source the chosen file
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        # Default airgap.env
+        self.make_airgap_fixtures({"INTERNAL_REGISTRY": "default-file-reg", "NAMESPACE": "default-file-ns"})
+        # Custom file
+        custom_env = self.root / "custom.env"
+        custom_env.write_text("INTERNAL_REGISTRY=custom-file-reg\nNAMESPACE=custom-file-ns\n", encoding="utf-8")
+        # Ambient env file
+        ambient_env = self.root / "ambient.env"
+        ambient_env.write_text("INTERNAL_REGISTRY=ambient-file-reg\nNAMESPACE=ambient-file-ns\n", encoding="utf-8")
+        self.make_airgap_stage_double("deploy.sh")
+        # CLI selector overrides ambient selector and default airgap.env
+        proc = self.run_task("airgap:deploy", f"AIRGAP_ENV={custom_env}",
+                             extra_env=dict(self.tool_env(), AIRGAP_ENV=str(ambient_env)))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        resolved = self.airgap_calls()[0]["resolved"]
+        self.assertEqual(resolved["INTERNAL_REGISTRY"], "custom-file-reg")
+        self.assertEqual(resolved["NAMESPACE"], "custom-file-ns")
+        if (self.log).exists():
+            self.log.unlink()
+        # Ambient selector applies when CLI selector unset
+        proc = self.run_task("airgap:deploy",
+                             extra_env=dict(self.tool_env(), AIRGAP_ENV=str(ambient_env)))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        resolved = self.airgap_calls()[0]["resolved"]
+        self.assertEqual(resolved["INTERNAL_REGISTRY"], "ambient-file-reg")
+        self.assertEqual(resolved["NAMESPACE"], "ambient-file-ns")
 
     def test_dryrun_fixed_params_win(self):
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
