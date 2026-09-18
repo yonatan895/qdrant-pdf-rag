@@ -5,13 +5,14 @@ verification policy stays in [live-stack](live-stack.md#verification-minimums);
 test design stays in [testing](testing.md#evidence-design).
 
 <a id="scope"></a>
-## Scope: increments A, B1 and B2
+## Scope: increments A, B1, B2 and B3
 
 `Taskfile.yml` (+ `taskfiles/quality.yml`, `taskfiles/dev.yml`,
-`taskfiles/artifacts.yml`, `taskfiles/eval.yml`) is the entry point for
-**discovery, doctor, context, quality (A), artifacts (B1) and evaluation
-(B2)**. `Makefile` remains authoritative for local simulation and air-gap
-workflows until later slices port them. No product behavior changes here.
+`taskfiles/artifacts.yml`, `taskfiles/eval.yml`, `taskfiles/local.yml`) is
+the entry point for **discovery, doctor, context, quality (A), artifacts
+(B1), evaluation (B2) and local simulation (B3)**. `Makefile` remains
+authoritative for air-gap workflows until B4 ports them. No product behavior
+changes here.
 
 All documented invocations assume the pinned `task` on `PATH` (session-local;
 the installer prints the exact export). `task` with no task name prints the
@@ -46,6 +47,10 @@ task list and builds/installs/launches nothing.
 | `VENUE` | `task eval:retrieval VENUE=rc` | Eval-family default `dev`; same form rules as `EMBED_MODE`. `eval:holdout` forces `rc` (caller input ignored, same as Make). |
 | `$(or)`-style knobs (`N`, `RESTORE`, `REPEATS`, `GOLDEN`, `OUT`, `REPORT`, `BASELINE`, `BASE`, `CURRENT`, `BENCH_REPEATS`) | `task eval:answers N=5` | Empty falls back to the Make `$(or)` default via shell `:-`; non-empty passes through exactly. |
 | `AGENT_URL`, `CONCURRENCY`, `DURATION`, `REQUEST_TIMEOUT`, `HARNESS_L3_BASELINE` | `task eval:harness:l3 AGENT_URL=…` | `?=`-style with defaults (`:8080`, `8`/`30`/`30`, mode-keyed L3 baseline); explicit empty preserved. |
+| `$(if)`-style optional flags (`QUERY`, `LIMIT`, …) | `task local:query QUERY="text" LIMIT=5` | Unset/empty inputs are omitted entirely; set values accumulate through positional parameters so free text arrives as single argv entries and executes nothing. (Quotes nested inside `${VAR:+...}` do not survive outer field splitting on any POSIX shell — that idiom is forbidden and pinned by test.) |
+| `$(if)`-style optional environment (`CORPUS_DIR`, `UI_ENABLED`, …) | `task local:stack CORPUS_DIR=/data` | Forwarded via conditional `export` in the same command only when set and non-empty; otherwise the script default applies. |
+| Secrets (`GATEWAY_MASTER_KEY`, per-leg keys) | caller environment only, e.g. `GATEWAY_MASTER_KEY=… task local:gateway:up` | Never Task vars or CLI values: Task never echoes bridged values into `--dry`/logs, and process-table entries carry no secrets. Scripts mint per-start keys when absent. |
+| `BUDGET_PYTHON` | (fixed by the task) | Always `$PWD/.venv/bin/python` at the repo root for Budget resolution (same as Make `$(CURDIR)`); never exported globally, never caller-overridable. |
 
 - Values reach scripts through `env:` bridges and quoted `"$VAR"` expansion,
   never re-parsed template interpolation (a `$(…)` value stays a literal
@@ -103,7 +108,7 @@ recipe succeeds. Consequences, all covered by runner-boundary tests:
 | `wheelhouse`, `bm25-weights`, `chart`, `pull-chart`, `helm-template`, `helm-lint`, `build-images` | `artifacts:wheelhouse/bm25/chart-check/chart-fetch/helm-render/helm-lint/images` | pip / fetch script / helm / docker | `.venv` diagnosed (builds), chart presence verified, sequential preparation | `BUNDLE_DIR`, `BM25_MODEL`, `IMAGE_TAG`, image names | bundles output, images, chart fetch | **Migrated (B1)** with completion-stamp freshness ([#freshness](#freshness)) |
 | `sim*`, `loadtest-mock`, `bench*`, `loadtest` | `qa:sim/load`, `eval:bench*` | existing suites | Deferred to B3/B2 |
 | `eval*`, `gate-l1`, `harness-*`, `verify-golden`, `capture-pool`, reports | `eval:*` | existing scripts/baselines | **Migrated (B2)** with per-task mode/venue scoping ([#inputs](#inputs)) |
-| `query-demo`, `ask`, `local-*`, `run-agent`, `test-vllm-e2e` | `local:*`, `qa:vllm-e2e` | existing launchers | Deferred to B3 (argv/process-lifetime rules) |
+| `query-demo`, `ask`, `local-*`, `run-agent`, `test-vllm-e2e` | `local:*`, `qa:sim/load/vllm-e2e` | existing launchers/scripts | **Migrated (B3)**; `run_local_stack.sh` calls `scripts/sim_qdrant.sh` directly (no runner) |
 | `airgap-*`, `airgap-dryrun` | `airgap:*` | `scripts/airgap/*` | Deferred to B4 wrappers + C offline handoff |
 | `e2e-demo-pdfs`, `clean` | `dev:demo-pdfs`, `dev:clean` | existing scripts | Deferred to B5 (retention contract) |
 

@@ -32,15 +32,27 @@ for _line in (REPO / "scripts/tools/task-pin.txt").read_text(encoding="utf-8").s
         PIN_VERSION = _line.split(":", 1)[1].strip().lstrip("v")
 REQUIRE_RUNNER = os.environ.get("TASK_CONTRACTS_REQUIRE_RUNNER") == "1"
 
+# Environment keys the recorders capture per invocation. Deliberately an
+# allowlist (never the whole environment): failure output must not leak
+# unrelated caller configuration, let alone secret-bearing variables.
+LOGGED_ENV_KEYS = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
+                   "ROLE", "MODEL", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
+                   "GATEWAY_PORT", "CORPUS_DIR", "LOCAL_AGENT_PORT", "JAEGER_PORT",
+                   "SIM_CONTAINER", "SIM_PORT")
+
 RECORDER = """#!/bin/sh
 # Inert boundary recorder: appends one JSON line per invocation, then exits
 # with $RECORDER_EXIT (default 0). Never touches the network or services.
 python3 - "$RECORDER_LOG" "$RECORDER_TAG" "$@" <<'PYEOF'
 import json, os, sys
 log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
+keys = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
+        "ROLE", "MODEL", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
+        "GATEWAY_PORT", "CORPUS_DIR", "LOCAL_AGENT_PORT", "JAEGER_PORT",
+        "SIM_CONTAINER", "SIM_PORT")
 with open(log, "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd(),
-                         "env": {k: os.environ.get(k) for k in ("EMBED_MODE", "VENUE")}}) + "\\n")
+                         "env": {k: os.environ.get(k) for k in keys}}) + "\\n")
 PYEOF
 exit "${RECORDER_EXIT:-0}"
 """
@@ -53,9 +65,13 @@ if [ "$1" = "-V" ]; then echo "${FAKE_PY_VERSION:-Python 3.14.5}"; exit 0; fi
 python3 - "$RECORDER_LOG" "venv-python" "$@" <<'PYEOF'
 import json, os, sys
 log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
+keys = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
+        "ROLE", "MODEL", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
+        "GATEWAY_PORT", "CORPUS_DIR", "LOCAL_AGENT_PORT", "JAEGER_PORT",
+        "SIM_CONTAINER", "SIM_PORT")
 with open(log, "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd(),
-                         "env": {k: os.environ.get(k) for k in ("EMBED_MODE", "VENUE")}}) + "\\n")
+                         "env": {k: os.environ.get(k) for k in keys}}) + "\\n")
 ret = int(os.environ.get("RECORDER_EXIT", "0"))
 if ret != 0:
     sys.exit(ret)
@@ -171,6 +187,42 @@ class TaskContractsTests(unittest.TestCase):
         path.write_text(RECORDER.replace('"$RECORDER_TAG"', f'"tool-{name}"'), encoding="utf-8")
         path.chmod(0o755)
 
+    def make_script_recorder(self, name: str) -> None:
+        """Stand-in owner script (e.g. run_local_stack.sh) logging argv+env."""
+        path = self.root / "scripts" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(RECORDER.replace('"$RECORDER_TAG"', f'"script-{name}"'), encoding="utf-8")
+        path.chmod(0o755)
+
+    def copy_repo_script(self, name: str) -> None:
+        """Use the shipped script (tests the real artifact, not a copy)."""
+        dest = self.root / "scripts" / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO / "scripts" / name, dest)
+        dest.chmod(0o755)
+
+    def make_docker_fake(self) -> None:
+        """Fake docker: `inspect` exits $DOCKER_INSPECT_EXIT (default 1)."""
+        bindir = self.root / "bin"
+        bindir.mkdir(parents=True, exist_ok=True)
+        path = bindir / "docker"
+        path.write_text(
+            '#!/bin/sh\n'
+            'python3 - "$RECORDER_LOG" "tool-docker" "$@" <<\'PYEOF\'\n'
+            'import json, os, sys\n'
+            'log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]\n'
+            'with open(log, "a", encoding="utf-8") as fh:\n'
+            '    fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd()}) + "\\n")\n'
+            'PYEOF\n'
+            'if [ "$1" = "inspect" ]; then exit "${DOCKER_INSPECT_EXIT:-1}"; fi\n'
+            'exit 0\n',
+            encoding="utf-8")
+        path.chmod(0o755)
+
+    def make_sim_images_fixture(self) -> None:
+        (self.root / "images.txt").write_text(
+            "example.com/qdrant/qdrant:v9.9.9-unprivileged sha256:fixture\n", encoding="utf-8")
+
     def tool_env(self) -> dict:
         """Recorder env plus workspace bin dir leading PATH (task dir kept)."""
         env = dict(self.recorder_env)
@@ -207,6 +259,13 @@ class TaskContractsTests(unittest.TestCase):
 
     def tool_calls(self, name: str) -> list[dict]:
         return [c for c in self.calls() if c["tag"] == f"tool-{name}"]
+
+    def script_calls(self, name: str) -> list[dict]:
+        return [c for c in self.calls() if c["tag"] == f"script-{name}"]
+
+    def assertEnvSubset(self, call: dict, expected: dict) -> None:
+        for key, value in expected.items():
+            self.assertEqual(call["env"].get(key), value, key)
 
     def test_discovery_needs_no_venv_config_or_services(self):
         before = {p.relative_to(self.root).as_posix() for p in self.root.rglob("*") if p.is_file()}
@@ -506,7 +565,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "dev"})
+        self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "dev"})
         self.assertEqual(
             calls[0]["argv"],
             ["scripts/eval_retrieval.py", "--golden", "evals/golden.jsonl",
@@ -519,14 +578,14 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("eval:retrieval", "EMBED_MODE=vllm", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
-        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "vllm", "VENUE": "dev"})
+        self.assertEnvSubset(calls[0], {"EMBED_MODE": "vllm", "VENUE": "dev"})
         self.assertIn("evals/baseline-vllm.json", calls[0]["argv"])
         if (self.log).exists():
             self.log.unlink()
         proc = self.run_task("eval:retrieval", extra_env=dict(env, EMBED_MODE="vllm", VENUE="rc"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
-        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "vllm", "VENUE": "rc"})
+        self.assertEnvSubset(calls[0], {"EMBED_MODE": "vllm", "VENUE": "rc"})
         self.assertIn("evals/baseline-vllm.json", calls[0]["argv"])
         if (self.log).exists():
             self.log.unlink()
@@ -561,7 +620,7 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("eval:retrieval", "EMBED_MODE=", extra_env=self.tool_env())
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
-        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "", "VENUE": "dev"})
+        self.assertEnvSubset(calls[0], {"EMBED_MODE": "", "VENUE": "dev"})
         self.assertIn("evals/baseline.json", calls[0]["argv"])
         if (self.log).exists():
             self.log.unlink()
@@ -598,7 +657,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
         self.assertEqual(len(calls), 1, "sha256sum pre-check must precede the single python run")
-        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "rc"})
+        self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "rc"})
         self.assertIn("evals/holdout.jsonl", calls[0]["argv"])
         if (self.log).exists():
             self.log.unlink()
@@ -653,7 +712,7 @@ class TaskContractsTests(unittest.TestCase):
                     self.log.unlink()
                 proc = self.run_task(task_name, extra_env=env)
                 self.assertEqual(proc.returncode, 0, proc.stdout)
-                self.assertEqual(self.pip_calls()[0]["env"], {"EMBED_MODE": None, "VENUE": None})
+                self.assertEnvSubset(self.pip_calls()[0], {"EMBED_MODE": None, "VENUE": None})
         if (self.log).exists():
             self.log.unlink()
         proc = self.run_task("eval:load", "PY=python3base", "AGENT_URL=http://x:9999", extra_env=env)
@@ -663,7 +722,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(base_calls[0]["argv"], [
             "scripts/loadtest.py", "--url", "http://x:9999", "--endpoint", "search",
             "--concurrency", "8", "--duration", "30"])
-        self.assertEqual(base_calls[0]["env"], {"EMBED_MODE": None, "VENUE": None})
+        self.assertEnvSubset(base_calls[0], {"EMBED_MODE": None, "VENUE": None})
 
     def test_capture_pool_out_defaults_to_dated_bundle(self):
         import re
@@ -720,6 +779,237 @@ class TaskContractsTests(unittest.TestCase):
         argv = self.pip_calls()[0]["argv"]
         self.assertEqual(argv[argv.index("--baseline") + 1], "c.json")
 
+    def test_local_registered_in_discovery(self):
+        proc = self.run_task("--list")
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        for name in ("local:qdrant:up", "local:qdrant:down", "local:query", "local:ask",
+                     "local:llm", "local:embed", "local:rerank", "local:gateway:up",
+                     "local:gateway:down", "local:jaeger:up", "local:jaeger:down",
+                     "local:stack", "local:agent", "qa:sim", "qa:load", "qa:vllm-e2e"):
+            self.assertIn(name, proc.stdout)
+
+    def test_query_optional_flags_and_literal_values(self):
+        self.make_recorder(self.root / ".venv/bin/python")
+        env = self.tool_env()
+        proc = self.run_task("local:query", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.calls()
+        self.assertEqual(calls[0]["argv"], ["scripts/query_demo.py", "--embed-mode", "hash"])
+        self.assertEnvSubset(calls[0], {"PYTHONPATH": "."})
+        if (self.log).exists():
+            self.log.unlink()
+        sentinel = "a b$c;`echo PWNED`"
+        proc = self.run_task("local:query", f"QUERY={sentinel}", "LIMIT=5", "LIMIT2=",
+                             extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.calls()
+        self.assertEqual(calls[0]["argv"], ["scripts/query_demo.py", "--query", sentinel,
+                                            "--limit", "5", "--embed-mode", "hash"])
+        self.assertFalse((self.root / "PWNED").exists())
+
+    def test_ask_answer_flag_first(self):
+        self.make_recorder(self.root / ".venv/bin/python")
+        proc = self.run_task("local:ask", "QUERY=hi", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.calls()[0]["argv"],
+                         ["scripts/query_demo.py", "--answer", "--query", "hi",
+                          "--embed-mode", "hash"])
+
+    def test_vllm_launcher_env_exact(self):
+        self.make_venv_fake()
+        self.make_script_recorder("run_local_vllm.sh")
+        env = self.tool_env()
+        proc = self.run_task("local:llm", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.script_calls("run_local_vllm.sh")
+        self.assertEqual(len(calls), 1)
+        self.assertEnvSubset(calls[0], {"ROLE": "reasoning"})
+        budget = calls[0]["env"].get("BUDGET_PYTHON")
+        self.assertTrue(budget.startswith("/") and budget.endswith("/.venv/bin/python"), budget)
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("local:embed", "ROLE=x", "MODEL=m", "PORT=1234", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.script_calls("run_local_vllm.sh")
+        self.assertEnvSubset(calls[0], {"ROLE": "x", "MODEL": "m", "PORT": "1234"})
+
+    def test_gateway_down_ignores_absent_resources(self):
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "1"}
+        self.make_tool_recorder("docker")
+        proc = self.run_task("local:gateway:down", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        docker = [c["argv"] for c in self.tool_calls("docker")]
+        self.assertEqual(docker, [
+            ["stop", "local-litellm-gateway", "local-litellm-gateway-pg"],
+            ["network", "rm", "local-litellm-gateway-net"]])
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("local:gateway:down", "GATEWAY_NAME=g", "PG_NAME=p", "PG_NET=n",
+                             extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        docker = [c["argv"] for c in self.tool_calls("docker")]
+        self.assertEqual(docker, [["stop", "g", "p"], ["network", "rm", "n"]])
+
+    def test_gateway_up_forwards_port_to_script(self):
+        self.make_venv_fake()
+        self.make_script_recorder("run_local_gateway.sh")
+        env = self.tool_env()
+        proc = self.run_task("local:gateway:up", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.script_calls("run_local_gateway.sh")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["argv"], [])
+        self.assertEnvSubset(calls[0], {"GATEWAY_PORT": "4000"})
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("local:gateway:up", "GATEWAY_PORT=4321", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEnvSubset(self.script_calls("run_local_gateway.sh")[0], {"GATEWAY_PORT": "4321"})
+
+    def test_jaeger_tasks(self):
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        self.make_script_recorder("run_local_jaeger.sh")
+        self.make_tool_recorder("docker")
+        env = self.tool_env()
+        proc = self.run_task("local:jaeger:up", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(len(self.script_calls("run_local_jaeger.sh")), 1)
+        if (self.log).exists():
+            self.log.unlink()
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "1"}
+        proc = self.run_task("local:jaeger:down", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual([c["argv"] for c in self.tool_calls("docker")],
+                         [["stop", "local-jaeger"]])
+
+    def test_sim_helper_up_reuses_running_container(self):
+        self.copy_repo_script("sim_qdrant.sh")
+        self.copy_repo_script("qdrant_pin.py")
+        self.make_sim_images_fixture()
+        self.make_docker_fake()
+        env = dict(os.environ, PATH=str(self.root / "bin") + os.pathsep + os.environ.get("PATH", ""),
+                   RECORDER_LOG=str(self.log), RECORDER_EXIT="0", DOCKER_INSPECT_EXIT="0")
+        proc = subprocess.run(["sh", str(self.root / "scripts/sim_qdrant.sh"), "up"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=60, check=False, text=True, env=env, cwd=str(self.root))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("already running", proc.stdout)
+        docker = [c["argv"] for c in self.calls()]
+        self.assertEqual(docker, [["inspect", "qdrant-sim"]])
+
+    def test_sim_helper_up_starts_pinned_image(self):
+        self.copy_repo_script("sim_qdrant.sh")
+        self.copy_repo_script("qdrant_pin.py")
+        self.make_sim_images_fixture()
+        self.make_docker_fake()
+        env = dict(os.environ, PATH=str(self.root / "bin") + os.pathsep + os.environ.get("PATH", ""),
+                   RECORDER_LOG=str(self.log), RECORDER_EXIT="0", DOCKER_INSPECT_EXIT="1")
+        proc = subprocess.run(["sh", str(self.root / "scripts/sim_qdrant.sh"), "up"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=60, check=False, text=True, env=env, cwd=str(self.root))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        docker = [c["argv"] for c in self.calls()]
+        self.assertEqual(len(docker), 2)
+        self.assertEqual(docker[0], ["inspect", "qdrant-sim"])
+        self.assertIn("127.0.0.1:6333:6333", docker[1])
+        self.assertIn("example.com/qdrant/qdrant:v9.9.9-unprivileged", docker[1])
+        self.assertIn("QDRANT_SIM_URL=http://127.0.0.1:6333", proc.stdout)
+
+    def test_sim_helper_rejects_empty_names(self):
+        self.copy_repo_script("sim_qdrant.sh")
+        self.copy_repo_script("qdrant_pin.py")
+        self.make_sim_images_fixture()
+        self.make_docker_fake()
+        env = dict(os.environ, PATH=str(self.root / "bin") + os.pathsep + os.environ.get("PATH", ""),
+                   RECORDER_LOG=str(self.log), RECORDER_EXIT="0",
+                   SIM_CONTAINER="", DOCKER_INSPECT_EXIT="1")
+        proc = subprocess.run(["sh", str(self.root / "scripts/sim_qdrant.sh"), "up"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=60, check=False, text=True, env=env, cwd=str(self.root))
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("must not be empty", proc.stdout)
+        self.assertEqual(self.calls(), [], "docker must not run on invalid input")
+        proc = subprocess.run(["sh", str(self.root / "scripts/sim_qdrant.sh"), "bogus"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=60, check=False, text=True, env=env, cwd=str(self.root))
+        self.assertEqual(proc.returncode, 2)
+
+    def test_qdrant_tasks_delegate_to_helper(self):
+        self.copy_repo_script("sim_qdrant.sh")
+        self.copy_repo_script("qdrant_pin.py")
+        self.make_sim_images_fixture()
+        self.make_docker_fake()
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        env = dict(self.tool_env(), DOCKER_INSPECT_EXIT="1")
+        proc = self.run_task("local:qdrant:up", "SIM_CONTAINER=custom", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        docker = [c["argv"] for c in self.tool_calls("docker")]
+        self.assertEqual(docker[0], ["inspect", "custom"])
+        self.assertIn("--name", docker[1])
+        self.assertIn("custom", docker[1])
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("local:qdrant:down", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual([c["argv"] for c in self.tool_calls("docker")], [["stop", "qdrant-sim"]])
+
+    def test_stack_forwards_only_set_vars(self):
+        self.make_venv_fake()
+        self.make_script_recorder("run_local_stack.sh")
+        env = self.tool_env()
+        proc = self.run_task("local:stack", "CORPUS_DIR=/data", "GATEWAY_PORT=4001", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.script_calls("run_local_stack.sh")
+        self.assertEqual(len(calls), 1)
+        self.assertEnvSubset(calls[0], {"CORPUS_DIR": "/data", "GATEWAY_PORT": "4001",
+                                        "LOCAL_AGENT_PORT": None, "JAEGER_PORT": None})
+
+    def test_agent_stream_port_and_ui(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        proc = self.run_task("local:agent", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEnvSubset(calls[0], {"LLM_STREAM": "true", "UI_ENABLED": None})
+        self.assertIn("--port", calls[0]["argv"])
+        self.assertEqual(calls[0]["argv"][calls[0]["argv"].index("--port") + 1], "8080")
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("local:agent", "UI_ENABLED=true", "PORT=9090", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEnvSubset(calls[0], {"LLM_STREAM": "true", "UI_ENABLED": "true"})
+        self.assertEqual(calls[0]["argv"][calls[0]["argv"].index("--port") + 1], "9090")
+
+    def test_sim_and_load_use_fixed_tiers(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        proc = self.run_task("qa:sim", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.pip_calls()[0]["argv"], ["-m", "pytest", "-m", "integration", "-v", "-rs"])
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("qa:load", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.pip_calls()[0]["argv"],
+                         ["-m", "pytest", "-m", "integration", "tests/test_load_tier.py", "-v"])
+
+    def test_vllm_e2e_optional_flags(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        proc = self.run_task("qa:vllm-e2e", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.pip_calls()[0]["argv"],
+                         ["scripts/test_local_e2e_vllm.py", "--embed-mode", "hash"])
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("qa:vllm-e2e", "MODEL=m", "DENSE_DIM=768", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.pip_calls()[0]["argv"],
+                         ["scripts/test_local_e2e_vllm.py", "--model", "m",
+                          "--dense-dim", "768", "--embed-mode", "hash"])
+
     def test_taskfile_wiring_stays_dispatch_only(self):
         root_text = (REPO / "Taskfile.yml").read_text(encoding="utf-8")
         quality_text = (REPO / "taskfiles/quality.yml").read_text(encoding="utf-8")
@@ -750,6 +1040,10 @@ class TaskContractsTests(unittest.TestCase):
                 self.assertIn("./", line)
                 self.assertNotIn("http", line)
         self.assertNotIn("deps:", code)
+        # Optional `--flag value` pairs accumulate through positional
+        # parameters: quotes nested inside `${VAR:+...}` do NOT survive outer
+        # field splitting on any POSIX shell, so that idiom is forbidden.
+        self.assertNotIn(":+--", code)
         self.assertNotIn("sources:", code)
         self.assertNotIn("method:", code)
         self.assertNotIn("ignore_error", code)

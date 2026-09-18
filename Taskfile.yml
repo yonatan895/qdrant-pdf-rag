@@ -33,6 +33,9 @@ includes:
   eval:
     taskfile: ./taskfiles/eval.yml
     dir: .
+  local:
+    taskfile: ./taskfiles/local.yml
+    dir: .
 
 tasks:
   default:

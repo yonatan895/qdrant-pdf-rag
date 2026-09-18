@@ -1,0 +1,258 @@
+# Local simulation tasks — issue #402 increment B3.
+#
+# Dispatch only: launchers own process lifetime, readiness probes, traps and
+# cleanup; YAML only forwards inputs. Three Make input forms map to three
+# shell patterns (documented in docs/task-runner.md#inputs):
+# - `?=` (unset selects default, explicit empty preserved): hasKey template
+#   defaults plus exact-name `env:` bridges.
+# - `$(or)` (empty falls back): raw bridges plus shell `:-` at use site.
+# - `$(if)` (unset/empty omits): raw bridges plus `${VAR:+...}` (flags) or a
+#   conditional `export` in the same command (environment).
+# Secrets (gateway keys) are NEVER Task vars: they ride the caller process
+# environment, which children inherit; Task never echoes them into previews.
+# Included with `dir: .` from the root Taskfile: always runs at repo root.
+version: '3'
+
+tasks:
+  qdrant:up:
+    desc: Start the pinned sim Qdrant on the fixed loopback port
+    summary: |
+      `sh scripts/sim_qdrant.sh up` (shared owner with
+      scripts/run_local_stack.sh): reuses the named container when it
+      already runs, else starts the images.txt-pinned image on
+      127.0.0.1:SIM_PORT. Inputs: SIM_CONTAINER (default qdrant-sim),
+      SIM_PORT (default 6333); explicit empty fails closed in the helper.
+    vars:
+      SIM_CONTAINER: '{{if hasKey . "SIM_CONTAINER"}}{{.SIM_CONTAINER}}{{else}}qdrant-sim{{end}}'
+      SIM_PORT: '{{if hasKey . "SIM_PORT"}}{{.SIM_PORT}}{{else}}6333{{end}}'
+    env:
+      SIM_CONTAINER: '{{.SIM_CONTAINER}}'
+      SIM_PORT: '{{.SIM_PORT}}'
+    cmds:
+      - sh scripts/sim_qdrant.sh up
+
+  qdrant:down:
+    desc: Stop the sim Qdrant container (ignores an already-stopped one)
+    summary: |
+      `sh scripts/sim_qdrant.sh down`, mirroring `make sim-clean`. Never
+      fails when the container is already gone. Same inputs as
+      `local:qdrant:up`.
+    vars:
+      SIM_CONTAINER: '{{if hasKey . "SIM_CONTAINER"}}{{.SIM_CONTAINER}}{{else}}qdrant-sim{{end}}'
+      SIM_PORT: '{{if hasKey . "SIM_PORT"}}{{.SIM_PORT}}{{else}}6333{{end}}'
+    env:
+      SIM_CONTAINER: '{{.SIM_CONTAINER}}'
+      SIM_PORT: '{{.SIM_PORT}}'
+    cmds:
+      - sh scripts/sim_qdrant.sh down
+
+  query:
+    desc: Interactive query inspection against Qdrant/gateway (read-only)
+    summary: |
+      `PYTHONPATH=. .venv/bin/python scripts/query_demo.py` with only the
+      caller-set `--flag value` pairs, mirroring `make query-demo` (12
+      optional flags; unset/empty inputs are omitted, never sent empty).
+      Pairs accumulate through positional parameters, so free-text values
+      arrive as single argv entries and execute nothing. Read-only
+      inspection, not a substitute for eval.
+    env:
+      PYTHONPATH: '.'
+      TASK_QUERY: '{{.QUERY}}'
+      TASK_COLLECTION: '{{.COLLECTION}}'
+      TASK_LIMIT: '{{.LIMIT}}'
+      TASK_PRODUCT: '{{.PRODUCT}}'
+      TASK_VERSION: '{{.VERSION}}'
+      TASK_EMBED_MODEL: '{{.EMBED_MODEL}}'
+      TASK_EMBED_URL: '{{.EMBED_URL}}'
+      TASK_EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
+      TASK_DENSE_DIM: '{{.DENSE_DIM}}'
+      TASK_MODEL: '{{.MODEL}}'
+      TASK_VLLM_URL: '{{.VLLM_URL}}'
+      TASK_OTEL_ENDPOINT: '{{.OTEL_ENDPOINT}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - >-
+        set --;
+        if [ -n "${TASK_QUERY:-}" ]; then set -- "$@" --query "$TASK_QUERY"; fi;
+        if [ -n "${TASK_COLLECTION:-}" ]; then set -- "$@" --collection "$TASK_COLLECTION"; fi;
+        if [ -n "${TASK_LIMIT:-}" ]; then set -- "$@" --limit "$TASK_LIMIT"; fi;
+        if [ -n "${TASK_PRODUCT:-}" ]; then set -- "$@" --product "$TASK_PRODUCT"; fi;
+        if [ -n "${TASK_VERSION:-}" ]; then set -- "$@" --version "$TASK_VERSION"; fi;
+        if [ -n "${TASK_EMBED_MODEL:-}" ]; then set -- "$@" --embed-model "$TASK_EMBED_MODEL"; fi;
+        if [ -n "${TASK_EMBED_URL:-}" ]; then set -- "$@" --embed-url "$TASK_EMBED_URL"; fi;
+        if [ -n "${TASK_EMBED_MODE:-}" ]; then set -- "$@" --embed-mode "$TASK_EMBED_MODE"; fi;
+        if [ -n "${TASK_DENSE_DIM:-}" ]; then set -- "$@" --dense-dim "$TASK_DENSE_DIM"; fi;
+        if [ -n "${TASK_MODEL:-}" ]; then set -- "$@" --model "$TASK_MODEL"; fi;
+        if [ -n "${TASK_VLLM_URL:-}" ]; then set -- "$@" --vllm-url "$TASK_VLLM_URL"; fi;
+        if [ -n "${TASK_OTEL_ENDPOINT:-}" ]; then set -- "$@" --otel-endpoint "$TASK_OTEL_ENDPOINT"; fi;
+        exec .venv/bin/python scripts/query_demo.py "$@"
+
+  ask:
+    desc: Interactive conversational Q&A against Qdrant/reasoning model
+    summary: |
+      Same forwarding as `local:query` with `--answer` first, mirroring
+      `make ask`. Interactive; output goes to the terminal.
+    env:
+      PYTHONPATH: '.'
+      TASK_QUERY: '{{.QUERY}}'
+      TASK_COLLECTION: '{{.COLLECTION}}'
+      TASK_LIMIT: '{{.LIMIT}}'
+      TASK_PRODUCT: '{{.PRODUCT}}'
+      TASK_VERSION: '{{.VERSION}}'
+      TASK_EMBED_MODEL: '{{.EMBED_MODEL}}'
+      TASK_EMBED_URL: '{{.EMBED_URL}}'
+      TASK_EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
+      TASK_DENSE_DIM: '{{.DENSE_DIM}}'
+      TASK_MODEL: '{{.MODEL}}'
+      TASK_VLLM_URL: '{{.VLLM_URL}}'
+      TASK_OTEL_ENDPOINT: '{{.OTEL_ENDPOINT}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - >-
+        set -- --answer;
+        if [ -n "${TASK_QUERY:-}" ]; then set -- "$@" --query "$TASK_QUERY"; fi;
+        if [ -n "${TASK_COLLECTION:-}" ]; then set -- "$@" --collection "$TASK_COLLECTION"; fi;
+        if [ -n "${TASK_LIMIT:-}" ]; then set -- "$@" --limit "$TASK_LIMIT"; fi;
+        if [ -n "${TASK_PRODUCT:-}" ]; then set -- "$@" --product "$TASK_PRODUCT"; fi;
+        if [ -n "${TASK_VERSION:-}" ]; then set -- "$@" --version "$TASK_VERSION"; fi;
+        if [ -n "${TASK_EMBED_MODEL:-}" ]; then set -- "$@" --embed-model "$TASK_EMBED_MODEL"; fi;
+        if [ -n "${TASK_EMBED_URL:-}" ]; then set -- "$@" --embed-url "$TASK_EMBED_URL"; fi;
+        if [ -n "${TASK_EMBED_MODE:-}" ]; then set -- "$@" --embed-mode "$TASK_EMBED_MODE"; fi;
+        if [ -n "${TASK_DENSE_DIM:-}" ]; then set -- "$@" --dense-dim "$TASK_DENSE_DIM"; fi;
+        if [ -n "${TASK_MODEL:-}" ]; then set -- "$@" --model "$TASK_MODEL"; fi;
+        if [ -n "${TASK_VLLM_URL:-}" ]; then set -- "$@" --vllm-url "$TASK_VLLM_URL"; fi;
+        if [ -n "${TASK_OTEL_ENDPOINT:-}" ]; then set -- "$@" --otel-endpoint "$TASK_OTEL_ENDPOINT"; fi;
+        exec .venv/bin/python scripts/query_demo.py "$@"
+
+  llm:
+    desc: Serve the reasoning model locally (GPU, foreground)
+    summary: |
+      `BUDGET_PYTHON=<repo>/.venv/bin/python ROLE=<role>
+      sh scripts/run_local_vllm.sh`, mirroring `make local-vllm`. The venv
+      interpreter is always used for Budget resolution (never exported
+      globally). Input: ROLE (default reasoning). Foreground: Ctrl-C stops
+      the server. Needs the 8GB GPU budget; see docs/live-stack.md.
+    env:
+      TASK_ROLE: '{{.ROLE}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - BUDGET_PYTHON="$PWD/.venv/bin/python" ROLE="${TASK_ROLE:-reasoning}" sh scripts/run_local_vllm.sh
+
+  embed:
+    desc: Serve the embedding model locally (GPU, foreground)
+    summary: |
+      Like `local:llm` for the embed role, mirroring `make local-vllm-embed`.
+      Inputs: ROLE (default embed), MODEL (default
+      Qwen/Qwen3-Embedding-0.6B), PORT (default 8001). Never export MODEL
+      globally: it would hijack the sibling launchers' defaults.
+    env:
+      TASK_ROLE: '{{.ROLE}}'
+      TASK_MODEL: '{{.MODEL}}'
+      TASK_PORT: '{{.PORT}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - BUDGET_PYTHON="$PWD/.venv/bin/python" ROLE="${TASK_ROLE:-embed}" MODEL="${TASK_MODEL:-Qwen/Qwen3-Embedding-0.6B}" PORT="${TASK_PORT:-8001}" sh scripts/run_local_vllm.sh
+
+  rerank:
+    desc: Serve the reranker locally (GPU, foreground, triple pack only)
+    summary: |
+      Like `local:llm` for the rerank role, mirroring
+      `make local-vllm-rerank`. Inputs: BUDGET_PROFILE (default TRIPLE_8GB),
+      ROLE (default rerank), MODEL (default BAAI/bge-reranker-v2-m3), PORT
+      (default 8002). Never alongside the default 8GB pair.
+    env:
+      TASK_BUDGET_PROFILE: '{{.BUDGET_PROFILE}}'
+      TASK_ROLE: '{{.ROLE}}'
+      TASK_MODEL: '{{.MODEL}}'
+      TASK_PORT: '{{.PORT}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - BUDGET_PROFILE="${TASK_BUDGET_PROFILE:-TRIPLE_8GB}" BUDGET_PYTHON="$PWD/.venv/bin/python" ROLE="${TASK_ROLE:-rerank}" MODEL="${TASK_MODEL:-BAAI/bge-reranker-v2-m3}" PORT="${TASK_PORT:-8002}" sh scripts/run_local_vllm.sh
+
+  gateway:up:
+    desc: Start the local LiteLLM gateway in front of the backends
+    summary: |
+      `GATEWAY_PORT=<port> sh scripts/run_local_gateway.sh`, mirroring
+      `make local-gateway`. Input: GATEWAY_PORT (default 4000). Keys ride
+      the caller environment only (GATEWAY_MASTER_KEY etc.; the script mints
+      per-start keys when absent and prints them once) — never Task vars,
+      never CLI values. Foreground: Ctrl-C stops the gateway containers.
+      Needs the three backends up first.
+    env:
+      TASK_GATEWAY_PORT: '{{.GATEWAY_PORT}}'
+    cmds:
+      - GATEWAY_PORT="${TASK_GATEWAY_PORT:-4000}" sh scripts/run_local_gateway.sh
+
+  gateway:down:
+    desc: Stop the local gateway and its key-store (ignores absent ones)
+    summary: |
+      `docker stop`/`docker network rm` over the gateway names, mirroring
+      `make local-gateway-stop`. Each cleanup tolerates an already-removed
+      resource locally without masking other failures. Inputs: GATEWAY_NAME,
+      PG_NAME, PG_NET (defaults local-litellm-gateway[-pg[-net]]).
+    env:
+      TASK_GATEWAY_NAME: '{{.GATEWAY_NAME}}'
+      TASK_PG_NAME: '{{.PG_NAME}}'
+      TASK_PG_NET: '{{.PG_NET}}'
+    cmds:
+      - docker stop "${TASK_GATEWAY_NAME:-local-litellm-gateway}" "${TASK_PG_NAME:-local-litellm-gateway-pg}" 2>/dev/null || true
+      - docker network rm "${TASK_PG_NET:-local-litellm-gateway-net}" 2>/dev/null || true
+
+  jaeger:up:
+    desc: Start the local Jaeger v2 backend (or reuse a running one)
+    summary: |
+      `sh scripts/run_local_jaeger.sh`, mirroring `make local-jaeger`.
+      Starts only when nothing answers on :16686; an already-running Jaeger
+      is reused, never stopped by us.
+    cmds:
+      - sh scripts/run_local_jaeger.sh
+
+  jaeger:down:
+    desc: Stop the local Jaeger container (ignores an absent one)
+    summary: |
+      `docker stop` over the Jaeger name, mirroring `make local-jaeger-stop`.
+      Input: JAEGER_NAME (default local-jaeger).
+    env:
+      TASK_JAEGER_NAME: '{{.JAEGER_NAME}}'
+    cmds:
+      - docker stop "${TASK_JAEGER_NAME:-local-jaeger}" 2>/dev/null || true
+
+  stack:
+    desc: Run the full local production simulation (supervisor)
+    summary: |
+      `sh scripts/run_local_stack.sh` with only caller-set CORPUS_DIR,
+      GATEWAY_PORT, LOCAL_AGENT_PORT and JAEGER_PORT forwarded, mirroring
+      `make local-stack`. The supervisor owns gateway/Jaeger/agent lifetime
+      (traps, readiness probes, trace check); Qdrant falls back to
+      scripts/sim_qdrant.sh. LOCAL_STACK_DRYRUN=1 prints the plan without
+      Docker/network. Needs docker, the three backends and .venv (checked
+      by the script, not here — same as Make).
+    env:
+      TASK_CORPUS_DIR: '{{.CORPUS_DIR}}'
+      TASK_GATEWAY_PORT: '{{.GATEWAY_PORT}}'
+      TASK_LOCAL_AGENT_PORT: '{{.LOCAL_AGENT_PORT}}'
+      TASK_JAEGER_PORT: '{{.JAEGER_PORT}}'
+    cmds:
+      - >-
+        if [ -n "${TASK_CORPUS_DIR:-}" ]; then export CORPUS_DIR="$TASK_CORPUS_DIR"; fi;
+        if [ -n "${TASK_GATEWAY_PORT:-}" ]; then export GATEWAY_PORT="$TASK_GATEWAY_PORT"; fi;
+        if [ -n "${TASK_LOCAL_AGENT_PORT:-}" ]; then export LOCAL_AGENT_PORT="$TASK_LOCAL_AGENT_PORT"; fi;
+        if [ -n "${TASK_JAEGER_PORT:-}" ]; then export JAEGER_PORT="$TASK_JAEGER_PORT"; fi;
+        sh scripts/run_local_stack.sh
+
+  agent:
+    desc: Run the agent API locally under uvicorn (component runner)
+    summary: |
+      `LLM_STREAM=true .venv/bin/python -m uvicorn ... --port <port>` with
+      UI_ENABLED forwarded only when set, mirroring `make run-agent`.
+      Inputs: PORT (default 8080), UI_ENABLED (unset keeps the app
+      fail-closed; `true` opens /ui). Honors the supervisor-owned gateway
+      handoff in the caller environment.
+    env:
+      TASK_PORT: '{{.PORT}}'
+      TASK_UI_ENABLED: '{{.UI_ENABLED}}'
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - >-
+        if [ -n "${TASK_UI_ENABLED:-}" ]; then export UI_ENABLED="$TASK_UI_ENABLED"; fi;
+        LLM_STREAM=true .venv/bin/python -m uvicorn mainframe_rag.agent.app:app --host 0.0.0.0 --port "${TASK_PORT:-8080}"
