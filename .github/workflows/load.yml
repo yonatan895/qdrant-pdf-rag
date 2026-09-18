@@ -11,7 +11,9 @@ on:
       - "scripts/qdrant_pin.py"
       - "scripts/make_synthetic_pdf.py"
       - "tests/test_load_tier.py"
-      - "Makefile"
+      - "Taskfile.yml"
+      - "taskfiles/**"
+      - "scripts/tools/**"
       - "images.txt"
       - ".github/workflows/load.yml"
   push:
@@ -26,7 +28,9 @@ on:
       - "scripts/qdrant_pin.py"
       - "scripts/make_synthetic_pdf.py"
       - "tests/test_load_tier.py"
-      - "Makefile"
+      - "Taskfile.yml"
+      - "taskfiles/**"
+      - "scripts/tools/**"
       - "images.txt"
       - ".github/workflows/load.yml"
 
@@ -38,7 +42,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Load tier (tests/test_load_tier.py, `make loadtest-mock`): the same
+  # Load tier (tests/test_load_tier.py, `sh scripts/tools/run-task.sh qa:load`): the same
   # composition developers run locally — real PDFs -> real hash-mode ingest
   # into docker Qdrant (images.txt pin) -> real uvicorn agent plus the
   # deterministic mock LLM over loopback. Asserts absolute contracts under
@@ -56,20 +60,18 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0 (the pin does not cover pip installs below — they resolve from PyPI at run time)
         with:
           python-version: "3.14"
-      - name: Install pinned Task runner (Makefile shim forwards to Task)
+      - name: Install pinned Task runner
         run: |
-          sh scripts/tools/install-task.sh --bin-dir "$RUNNER_TEMP/task-bin"
-          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
+          sh scripts/tools/install-task.sh
       - name: docker must be present (the tier raises without it — no docker must fail here)
         run: docker version
       # Explicit preparation (verification never installs): the tier runs
-      # on .venv/bin/python, which `make loadtest-mock` previously provided
-      # via its order-only prerequisite.
-      - run: task dev:setup
+      # on the explicitly prepared .venv/bin/python.
+      - run: sh scripts/tools/run-task.sh dev:setup
       - name: run the load tier (fail closed — no skips, at least one pass)
         run: |
           set -o pipefail
-          make loadtest-mock 2>&1 | tee load-output.txt
+          sh scripts/tools/run-task.sh qa:load 2>&1 | tee load-output.txt
           if grep -qE '[1-9][0-9]* skipped' load-output.txt; then
             echo "load tests were skipped — coverage must not silently vanish" >&2
             exit 1

@@ -11,11 +11,16 @@ Tests:
 """
 from __future__ import annotations
 
+import fnmatch
 import json
+import os
 import pathlib
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 
 from scripts.review_tooling import (
@@ -58,7 +63,8 @@ class TestProfileClassification(unittest.TestCase):
             "tests/test_review_tooling.py",
             ".github/workflows/ci.yml",
             ".github/workflows/opencode.yml",
-            "Makefile",
+            "Taskfile.yml",
+            "taskfiles/quality.yml",
         ]
         decision = classify_paths(paths)
         self.assertEqual(decision.profile, ProfileName.OFFLINE)
@@ -67,6 +73,22 @@ class TestProfileClassification(unittest.TestCase):
         self.assertFalse(decision.needs_vllm)
         self.assertFalse(decision.needs_jaeger)
         self.assertFalse(decision.needs_agent)
+
+    def test_task_entry_and_modules_select_owned_verification(self):
+        for path in ("Taskfile.yml", "taskfiles/quality.yml", "taskfiles/dev.yml",
+                     "taskfiles/eval.yml", "taskfiles/local.yml"):
+            with self.subTest(path=path):
+                decision = classify_paths([path])
+                self.assertEqual(decision.profile, ProfileName.OFFLINE)
+                self.assertIn("tooling", decision.matched_categories)
+        for path in ("taskfiles/airgap.yml", "taskfiles/artifacts.yml",
+                     "scripts/tools/install-task.sh", "scripts/tools/run-task.sh",
+                     "scripts/tools/task-pin.txt"):
+            with self.subTest(path=path):
+                decision = classify_paths([path])
+                self.assertEqual(decision.profile, ProfileName.DEPLOY)
+                self.assertEqual(decision.services, [])
+                self.assertIn("deploy", decision.matched_categories)
 
     def test_classify_empty_paths_fails_closed(self):
         # An empty change set means the diff could not be read (bad SHA,
@@ -1305,6 +1327,94 @@ class TestAcceptanceUnionAndReviewerAuthority(unittest.TestCase):
         self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
         reviewer = next(l for l in summary.lanes if l.name == "reviewer")
         self.assertEqual(reviewer.state, LaneState.SELECTED_MISSING)
+
+
+class TestTaskCiConsumers(unittest.TestCase):
+    """CI selection and shell guards; runner semantics live in Task contract tests."""
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+
+    def test_task_edits_trigger_context_and_load_on_push_and_pull_request(self):
+        changes = ("Taskfile.yml", "taskfiles/quality.yml", "taskfiles/airgap.yml",
+                   "scripts/tools/run-task.sh", "scripts/tools/task-pin.txt")
+        for workflow in ("agent-context.yml", "load.yml"):
+            text = (self.root / ".github/workflows" / workflow).read_text()
+            blocks = re.findall(r"    paths:\n((?:      - .*\n)+)", text)
+            self.assertEqual(len(blocks), 2, workflow)
+            for block in blocks:
+                patterns = [line.strip()[3:-1] for line in block.splitlines()]
+                for path in changes:
+                    with self.subTest(workflow=workflow, path=path):
+                        self.assertTrue(any(fnmatch.fnmatch(path, p) for p in patterns))
+
+    def test_github_unit_and_context_contract_lanes_require_the_runner(self):
+        product = (self.root / ".github/workflows/ci.yml").read_text()
+        unit = product.split("  test:\n", 1)[1].split("  sim:\n", 1)[0]
+        self.assertIn('TASK_CONTRACTS_REQUIRE_RUNNER: "1"', unit)
+        self.assertLess(unit.index("sh scripts/tools/install-task.sh"), unit.index("pytest -q"))
+        context = (self.root / ".github/workflows/agent-context.yml").read_text()
+        self.assertLess(context.index("sh scripts/tools/install-task.sh"),
+                        context.index("sh scripts/tools/run-task.sh qa:context"))
+        self.assertIn("TASK_CONTRACTS_REQUIRE_RUNNER=1 python -m unittest tests.test_taskfile_contracts", context)
+
+    def test_load_step_preserves_failure_skip_and_no_tests_guards(self):
+        text = (self.root / ".github/workflows/load.yml").read_text()
+        step = text.split("      - name: run the load tier ", 1)[1]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        for output, status, success in (("2 passed", 0, True), ("2 passed", 7, False),
+                                        ("2 passed, 1 skipped", 0, False),
+                                        ("no tests ran", 0, False)):
+            with self.subTest(output=output, status=status), tempfile.TemporaryDirectory() as td:
+                root = pathlib.Path(td)
+                tool = root / "scripts/tools/run-task.sh"
+                tool.parent.mkdir(parents=True)
+                tool.write_text('printf "%s\\n" "$*" > calls\nprintf "%s\\n" "$OUTPUT"\nexit "$STATUS"\n')
+                proc = subprocess.run(
+                    ["bash", "-eu", "-c", script], cwd=root,
+                    env={**os.environ, "OUTPUT": output, "STATUS": str(status)},
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(proc.returncode == 0, success, proc.stdout + proc.stderr)
+                self.assertEqual((root / "calls").read_text(), "qa:load\n")
+
+    def test_offline_unit_job_requires_local_archive_before_running_tests(self):
+        text = (self.root / ".gitlab-ci.yml").read_text()
+        job = text.split("\ntest:\n", 1)[1].split("\ngate-l1:", 1)[0]
+        self.assertIn('TASK_CONTRACTS_REQUIRE_RUNNER: "1"', job)
+        commands = []
+        for line in job.split("  script:\n", 1)[1].splitlines():
+            if line.startswith("    - "):
+                command = line[6:]
+                commands.append(command[1:-1] if command.startswith("'") else command)
+        script = "\n".join(commands)
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            tool = root / "scripts/tools/install-task.sh"
+            tool.parent.mkdir(parents=True)
+            tool.write_text('printf "%s\\n" "$@" > archive-args\nexit "${INSTALL_STATUS:-0}"\n')
+            test = root / "pytest"
+            test.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > tests-ran\n')
+            test.chmod(0o755)
+            env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}"}
+            env.pop("CI_TASK_ARCHIVE", None)
+            missing = subprocess.run(["sh", "-eu", "-c", script], cwd=root, env=env,
+                                     capture_output=True, text=True, check=False)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertFalse((root / "archive-args").exists())
+            self.assertFalse((root / "tests-ran").exists())
+            archive = str(root / "offline archive with spaces.tar.gz")
+            for status in (9, 0):
+                proc = subprocess.run(
+                    ["sh", "-eu", "-c", script], cwd=root,
+                    env={**env, "CI_TASK_ARCHIVE": archive, "INSTALL_STATUS": str(status)},
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(proc.returncode, status, proc.stdout + proc.stderr)
+                self.assertEqual((root / "archive-args").read_text(), f"--archive\n{archive}\n")
+                self.assertEqual((root / "tests-ran").exists(), status == 0)
+            self.assertEqual((root / "tests-ran").read_text(), "-q\n")
+            self.assertEqual(shlex.split(commands[1]),
+                             ["sh", "scripts/tools/install-task.sh", "--archive", "$CI_TASK_ARCHIVE"])
 
 
 if __name__ == "__main__":

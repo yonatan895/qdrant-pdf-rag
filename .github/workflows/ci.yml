@@ -38,6 +38,8 @@ jobs:
   # Unit gate: hygiene (no PDFs in git) + hermetic pytest. The simulation
   # tier is deselected via pyproject addopts, so this job never needs docker.
   test:
+    env:
+      TASK_CONTRACTS_REQUIRE_RUNNER: "1"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -52,6 +54,8 @@ jobs:
             exit 1
           fi
       - run: pip install -e ".[dev]"
+      - name: Install pinned Task runner for required contract tests
+        run: sh scripts/tools/install-task.sh
       - run: pytest -q
 
   # Simulation tier (tests/test_integration_sim.py, marker 'integration'):
