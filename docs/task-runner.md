@@ -5,13 +5,14 @@ verification policy stays in [live-stack](live-stack.md#verification-minimums);
 test design stays in [testing](testing.md#evidence-design).
 
 <a id="scope"></a>
-## Scope: increments A, B1, B2 and B3
+## Scope: increments A, B1, B2, B3 and B4
 
 `Taskfile.yml` (+ `taskfiles/quality.yml`, `taskfiles/dev.yml`,
-`taskfiles/artifacts.yml`, `taskfiles/eval.yml`, `taskfiles/local.yml`) is
-the entry point for **discovery, doctor, context, quality (A), artifacts
-(B1), evaluation (B2) and local simulation (B3)**. `Makefile` remains
-authoritative for air-gap workflows until B4 ports them. No product behavior
+`taskfiles/artifacts.yml`, `taskfiles/eval.yml`, `taskfiles/local.yml`,
+`taskfiles/airgap.yml`) is the entry point for **discovery, doctor, context,
+quality (A), artifacts (B1), evaluation (B2), local simulation (B3) and
+air-gap stages (B4)**. Remaining: dev completion, the Make→Task shim,
+offline Task handoff, and CI/docs cutover (B5/C/D). No product behavior
 changes here.
 
 All documented invocations assume the pinned `task` on `PATH` (session-local;
@@ -51,6 +52,7 @@ task list and builds/installs/launches nothing.
 | `$(if)`-style optional environment (`CORPUS_DIR`, `UI_ENABLED`, …) | `task local:stack CORPUS_DIR=/data` | Forwarded via conditional `export` in the same command only when set and non-empty; otherwise the script default applies. |
 | Secrets (`GATEWAY_MASTER_KEY`, per-leg keys) | caller environment only, e.g. `GATEWAY_MASTER_KEY=… task local:gateway:up` | Never Task vars or CLI values: Task never echoes bridged values into `--dry`/logs, and process-table entries carry no secrets. Scripts mint per-start keys when absent. |
 | `BUDGET_PYTHON` | (fixed by the task) | Always `$PWD/.venv/bin/python` at the repo root for Budget resolution (same as Make `$(CURDIR)`); never exported globally, never caller-overridable. |
+| Operator keys (`INTERNAL_REGISTRY`, `NAMESPACE`, … — full `OPERATOR_ENV_KEYS`) | `task airgap:deploy INTERNAL_REGISTRY=x` or `INTERNAL_REGISTRY=x task airgap:deploy` | Bridged per air-gap task with no Task-side defaults, so `common.sh` precedence holds exactly: explicit values beat the env file, empty stays unset, unset applies file then script defaults. `airgap:dryrun` instead pins stand-ins that beat everything (same as the Make recipe environment). |
 
 - Values reach scripts through `env:` bridges and quoted `"$VAR"` expansion,
   never re-parsed template interpolation (a `$(…)` value stays a literal
@@ -109,7 +111,7 @@ recipe succeeds. Consequences, all covered by runner-boundary tests:
 | `sim*`, `loadtest-mock`, `bench*`, `loadtest` | `qa:sim/load`, `eval:bench*` | existing suites | Deferred to B3/B2 |
 | `eval*`, `gate-l1`, `harness-*`, `verify-golden`, `capture-pool`, reports | `eval:*` | existing scripts/baselines | **Migrated (B2)** with per-task mode/venue scoping ([#inputs](#inputs)) |
 | `query-demo`, `ask`, `local-*`, `run-agent`, `test-vllm-e2e` | `local:*`, `qa:sim/load/vllm-e2e` | existing launchers/scripts | **Migrated (B3)**; `run_local_stack.sh` calls `scripts/sim_qdrant.sh` directly (no runner) |
-| `airgap-*`, `airgap-dryrun` | `airgap:*` | `scripts/airgap/*` | Deferred to B4 wrappers + C offline handoff |
+| `airgap-*`, `airgap-dryrun` | `airgap:*` | `scripts/airgap/*` | **Migrated (B4)** thin wrappers; operator keys bridged per task (no defaults); `bootstrap.sh` offline wording stays for C |
 | `e2e-demo-pdfs`, `clean` | `dev:demo-pdfs`, `dev:clean` | existing scripts | Deferred to B5 (retention contract) |
 
 Executable consumer inventory (all found by searching first-party `make`

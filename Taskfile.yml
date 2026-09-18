@@ -36,6 +36,9 @@ includes:
   local:
     taskfile: ./taskfiles/local.yml
     dir: .
+  airgap:
+    taskfile: ./taskfiles/airgap.yml
+    dir: .
 
 tasks:
   default:

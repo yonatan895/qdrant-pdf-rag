@@ -226,6 +226,38 @@ class TaskContractsTests(unittest.TestCase):
         (self.root / "images.txt").write_text(
             "example.com/qdrant/qdrant:v9.9.9-unprivileged sha256:fixture\n", encoding="utf-8")
 
+    def make_airgap_fixtures(self, file_env: dict | None = None) -> None:
+        """Real common.sh (precedence under test) + fixture airgap.env."""
+        airgap = self.root / "scripts/airgap"
+        airgap.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO / "scripts/airgap/common.sh", airgap / "common.sh")
+        lines = [f"{k}={v}" for k, v in (file_env or {}).items()]
+        (self.root / "airgap.env").write_text("\n".join(lines) + "\n" if lines else "",
+                                              encoding="utf-8")
+
+    def make_airgap_stage_double(self, name: str = "deploy.sh") -> None:
+        """Deploy/pipeline double: real precedence, inert stage, logs resolved keys."""
+        airgap = self.root / "scripts/airgap"
+        airgap.mkdir(parents=True, exist_ok=True)
+        (airgap / name).write_text(
+            '#!/bin/sh\n'
+            '# Test double for scripts/airgap/<stage>.sh: sources the shipped\n'
+            '# common.sh (precedence under test), then records resolved values.\n'
+            '. "$(dirname "$0")/common.sh"\n'
+            'python3 - "$@" <<\'PYEOF\'\n'
+            'import json, os, sys\n'
+            'keys = ("INTERNAL_REGISTRY", "NAMESPACE", "EMBED_MODE", "CORPUS_PVC",\n'
+            '        "AIRGAP_DRYRUN", "IMAGE_SHA", "STORAGE_CLASS", "QUERY")\n'
+            'with open(os.environ["RECORDER_LOG"], "a") as fh:\n'
+            '    fh.write(json.dumps({"tag": "airgap-stage", "argv": sys.argv[1:],\n'
+            '                         "resolved": {k: os.environ.get(k) for k in keys}}) + "\\n")\n'
+            'PYEOF\n',
+            encoding="utf-8")
+        (airgap / name).chmod(0o755)
+
+    def airgap_calls(self) -> list[dict]:
+        return [c for c in self.calls() if c.get("tag") == "airgap-stage"]
+
     def tool_env(self) -> dict:
         """Recorder env plus workspace bin dir leading PATH (task dir kept)."""
         env = dict(self.recorder_env)
@@ -1096,6 +1128,80 @@ class TaskContractsTests(unittest.TestCase):
                          ["scripts/test_local_e2e_vllm.py", "--model", "m",
                           "--dense-dim", "768", "--embed-mode", "hash"])
 
+    def test_airgap_registered_in_discovery(self):
+        proc = self.run_task("--list")
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        for name in ("airgap:pack", "airgap:load", "airgap:deploy", "airgap:ingest",
+                     "airgap:smoke", "airgap:validate", "airgap:pipeline", "airgap:dryrun"):
+            self.assertIn(name, proc.stdout)
+
+    def test_operator_cli_beats_file(self):
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        self.make_airgap_fixtures({"INTERNAL_REGISTRY": "file-reg", "NAMESPACE": "file-ns"})
+        self.make_airgap_stage_double("deploy.sh")
+        proc = self.run_task("airgap:deploy", "INTERNAL_REGISTRY=cli-reg",
+                             extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        resolved = self.airgap_calls()[0]["resolved"]
+        self.assertEqual(resolved["INTERNAL_REGISTRY"], "cli-reg")
+        self.assertEqual(resolved["NAMESPACE"], "file-ns")
+
+    def test_operator_file_applies_when_unset(self):
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        self.make_airgap_fixtures({"INTERNAL_REGISTRY": "file-reg"})
+        self.make_airgap_stage_double("deploy.sh")
+        proc = self.run_task("airgap:deploy", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.airgap_calls()[0]["resolved"]["INTERNAL_REGISTRY"], "file-reg")
+
+    def test_operator_empty_stays_unset(self):
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        self.make_airgap_fixtures({"INTERNAL_REGISTRY": "file-reg"})
+        self.make_airgap_stage_double("deploy.sh")
+        proc = self.run_task("airgap:deploy", "INTERNAL_REGISTRY=", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.airgap_calls()[0]["resolved"]["INTERNAL_REGISTRY"], "file-reg")
+
+    def test_operator_unset_stays_empty_no_task_defaults(self):
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        self.make_airgap_fixtures({})
+        self.make_airgap_stage_double("deploy.sh")
+        proc = self.run_task("airgap:deploy", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        resolved = self.airgap_calls()[0]["resolved"]
+        self.assertEqual(resolved["QUERY"], "")
+        self.assertEqual(resolved["EMBED_MODE"], "")
+
+    def test_bridge_set_matches_operator_keys(self):
+        import re
+        common = (REPO / "scripts/airgap/common.sh").read_text(encoding="utf-8")
+        expected = set(re.search(r'OPERATOR_ENV_KEYS="([^"]+)"', common).group(1).split())
+        self.assertGreater(len(expected), 50, "operator key list unexpectedly small")
+        yml = (REPO / "taskfiles/airgap.yml").read_text(encoding="utf-8")
+        blocks = re.findall(r"    env:\n((?:      [A-Z_]+: .*\n)+)", yml)
+        # Seven bridged stages; dryrun carries fixed params instead of bridges.
+        self.assertEqual(len(blocks), 7)
+        for block in blocks:
+            bridged = set(re.findall(r"^      ([A-Z_]+): ", block, re.MULTILINE))
+            self.assertEqual(bridged, expected)
+
+    def test_dryrun_fixed_params_win(self):
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        self.make_airgap_fixtures({"INTERNAL_REGISTRY": "file-reg"})
+        self.make_airgap_stage_double("pipeline.sh")
+        proc = self.run_task("airgap:dryrun", "INTERNAL_REGISTRY=evil-reg",
+                             extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.airgap_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["argv"], ["--dry-run"])
+        resolved = calls[0]["resolved"]
+        self.assertEqual(resolved["AIRGAP_DRYRUN"], "1")
+        self.assertEqual(resolved["INTERNAL_REGISTRY"], "registry.example.internal/mainframe-rag")
+        self.assertEqual(resolved["NAMESPACE"], "mainframe-rag")
+        self.assertEqual(resolved["STORAGE_CLASS"], "gp3-csi")
+        self.assertIsNone(resolved["QUERY"], "unrelated keys stay absent, never defaulted")
+
     def test_taskfile_wiring_stays_dispatch_only(self):
         root_text = (REPO / "Taskfile.yml").read_text(encoding="utf-8")
         quality_text = (REPO / "taskfiles/quality.yml").read_text(encoding="utf-8")
@@ -1103,13 +1209,15 @@ class TaskContractsTests(unittest.TestCase):
         artifacts_text = (REPO / "taskfiles/artifacts.yml").read_text(encoding="utf-8")
         eval_text = (REPO / "taskfiles/eval.yml").read_text(encoding="utf-8")
         local_text = (REPO / "taskfiles/local.yml").read_text(encoding="utf-8")
-        combined = root_text + quality_text + dev_text + artifacts_text + eval_text + local_text
+        airgap_text = (REPO / "taskfiles/airgap.yml").read_text(encoding="utf-8")
+        combined = root_text + quality_text + dev_text + artifacts_text + eval_text + local_text + airgap_text
         # Local required namespaced includes; one implementation per alias.
         self.assertIn("taskfile: ./taskfiles/quality.yml", root_text)
         self.assertIn("taskfile: ./taskfiles/dev.yml", root_text)
         self.assertIn("taskfile: ./taskfiles/artifacts.yml", root_text)
         self.assertIn("taskfile: ./taskfiles/eval.yml", root_text)
         self.assertIn("taskfile: ./taskfiles/local.yml", root_text)
+        self.assertIn("taskfile: ./taskfiles/airgap.yml", root_text)
         for alias, canonical in (("task: qa:lint", "lint"), ("task: qa:check", "check"),
                                  ("task: qa:context", "context"), ("task: dev:doctor", "doctor")):
             self.assertIn(alias, root_text, canonical)
