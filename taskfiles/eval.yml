@@ -2,11 +2,12 @@
 #
 # Dispatch only: every script keeps its own validation, dataset, baseline and
 # exit semantics. Mode/venue scoping mirrors Make's target-scoped exports and
-# is NEVER global: EMBED_MODE (default hash) and VENUE (default dev) are set
-# per task through `env:` bridges, so air-gap and unrelated tasks cannot
-# inherit a hash default. Names the scripts actually read from their
-# environment keep their exact names (EMBED_MODE, VENUE); argv-only wiring
-# uses the TASK_ prefix. `make VAR=x task` (env form) and `task VAR=x`
+# is NEVER global: EMBED_MODE (default hash) and VENUE (default dev) are
+# bridged per task via TASK_EMBED_MODE/TASK_VENUE and bound at the command
+# boundary (`EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE"`) so ambient
+# caller environment variables cannot silently override CLI inputs (and
+# `holdout` unconditionally binds `VENUE=rc`). Air-gap and unrelated tasks
+# cannot inherit a hash default. `make VAR=x task` (env form) and `task VAR=x`
 # (CLI form) converge; CLI wins on conflict; an explicit empty value is
 # preserved for `?=`-style inputs and fails in the script, while `$(or)`-style
 # inputs fall back to their default via shell `:-` exactly like Make.
@@ -31,13 +32,13 @@ tasks:
       EVAL_BASELINE: '{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}evals/baseline-vllm.json{{else}}evals/baseline.json{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_EVAL_BASELINE: '{{.EVAL_BASELINE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --check "$TASK_EVAL_BASELINE" --out "$TASK_BUNDLE_DIR/eval-report.json" --summary "$TASK_BUNDLE_DIR/eval-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --check "$TASK_EVAL_BASELINE" --out "$TASK_BUNDLE_DIR/eval-report.json" --summary "$TASK_BUNDLE_DIR/eval-summary.md"
 
   paraphrase:
     desc: Score the paraphrase set against its mode-keyed baseline
@@ -52,13 +53,13 @@ tasks:
       PARAPHRASE_BASELINE: '{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}evals/baseline-paraphrase-vllm.json{{else}}evals/baseline-paraphrase.json{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_PARAPHRASE_BASELINE: '{{.PARAPHRASE_BASELINE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/eval_retrieval.py --golden evals/paraphrase.jsonl --check "$TASK_PARAPHRASE_BASELINE" --out "$TASK_BUNDLE_DIR/eval-paraphrase-report.json" --summary "$TASK_BUNDLE_DIR/eval-paraphrase-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_retrieval.py --golden evals/paraphrase.jsonl --check "$TASK_PARAPHRASE_BASELINE" --out "$TASK_BUNDLE_DIR/eval-paraphrase-report.json" --summary "$TASK_BUNDLE_DIR/eval-paraphrase-summary.md"
 
   gate-l1:
     desc: Run the L1 retrieval gate (PR check instrument)
@@ -71,12 +72,12 @@ tasks:
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/gate_l1.py --out "$TASK_BUNDLE_DIR/eval-report.json" --summary "$TASK_BUNDLE_DIR/eval-summary.md" --delta "$TASK_BUNDLE_DIR/eval-delta.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/gate_l1.py --out "$TASK_BUNDLE_DIR/eval-report.json" --summary "$TASK_BUNDLE_DIR/eval-summary.md" --delta "$TASK_BUNDLE_DIR/eval-delta.md"
 
   verify-golden:
     desc: Verify golden expectations against the live collection
@@ -101,13 +102,12 @@ tasks:
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: 'rc'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
       - sha256sum -c evals/holdout.jsonl.sha256
-      - .venv/bin/python scripts/eval_retrieval.py --golden evals/holdout.jsonl --check evals/holdout-baseline.json --out "$TASK_BUNDLE_DIR/eval-holdout-report.json" --summary "$TASK_BUNDLE_DIR/eval-holdout-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE=rc .venv/bin/python scripts/eval_retrieval.py --golden evals/holdout.jsonl --check evals/holdout-baseline.json --out "$TASK_BUNDLE_DIR/eval-holdout-report.json" --summary "$TASK_BUNDLE_DIR/eval-holdout-summary.md"
 
   baseline:
     desc: Re-record the committed accuracy baseline (dedicated PR only)
@@ -122,13 +122,13 @@ tasks:
       EVAL_BASELINE: '{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}evals/baseline-vllm.json{{else}}evals/baseline.json{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_EVAL_BASELINE: '{{.EVAL_BASELINE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --update-baseline "$TASK_EVAL_BASELINE" --out "$TASK_BUNDLE_DIR/eval-report.json" --summary "$TASK_BUNDLE_DIR/eval-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --update-baseline "$TASK_EVAL_BASELINE" --out "$TASK_BUNDLE_DIR/eval-report.json" --summary "$TASK_BUNDLE_DIR/eval-summary.md"
 
   capture-pool:
     desc: Record live prefetch pools for offline replay (RC/gap only)
@@ -144,14 +144,14 @@ tasks:
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_GOLDEN: '{{.GOLDEN}}'
       TASK_OUT: '{{.OUT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/capture_pool.py --golden "${TASK_GOLDEN:-evals/golden.jsonl}" --out "${TASK_OUT:-"$TASK_BUNDLE_DIR/pools-$(date +%Y%m%d).jsonl"}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/capture_pool.py --golden "${TASK_GOLDEN:-evals/golden.jsonl}" --out "${TASK_OUT:-"$TASK_BUNDLE_DIR/pools-$(date +%Y%m%d).jsonl"}"
 
   answers:
     desc: Answer-tier golden eval on the live GPU stack
@@ -165,13 +165,13 @@ tasks:
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_N: '{{.N}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/eval_answers.py --max-queries "${TASK_N:-24}" --out "$TASK_BUNDLE_DIR/eval-answers-report.json" --summary "$TASK_BUNDLE_DIR/eval-answers-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_answers.py --max-queries "${TASK_N:-24}" --out "$TASK_BUNDLE_DIR/eval-answers-report.json" --summary "$TASK_BUNDLE_DIR/eval-answers-summary.md"
 
   chat:
     desc: Multi-turn condensation A/B on the dev golden set (evidence only)
@@ -185,13 +185,13 @@ tasks:
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_N: '{{.N}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/eval_chat.py --limit "${TASK_N:-12}" --out "$TASK_BUNDLE_DIR/eval-chat-report.json" --summary "$TASK_BUNDLE_DIR/eval-chat-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_chat.py --limit "${TASK_N:-12}" --out "$TASK_BUNDLE_DIR/eval-chat-report.json" --summary "$TASK_BUNDLE_DIR/eval-chat-summary.md"
 
   harness:gate:
     desc: Layered harness L1 retrieval + promotion gate
@@ -208,14 +208,14 @@ tasks:
       HARNESS_BASELINE: '{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}benchmarks/harness-vllm.json{{else}}benchmarks/harness.json{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_HARNESS_BASELINE: '{{.HARNESS_BASELINE}}'
       TASK_RESTORE: '{{.RESTORE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/harness.py --gate --baseline "$TASK_HARNESS_BASELINE" --restore "${TASK_RESTORE:-drift}" {{if eq (coalesce .EMBED_MODE "hash") "vllm"}}{{else}}--golden evals/golden.jsonl{{end}} --out "$TASK_BUNDLE_DIR/harness-report.json"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness.py --gate --baseline "$TASK_HARNESS_BASELINE" --restore "${TASK_RESTORE:-drift}" {{if eq (coalesce .EMBED_MODE "hash") "vllm"}}{{else}}--golden evals/golden.jsonl{{end}} --out "$TASK_BUNDLE_DIR/harness-report.json"
 
   harness:baseline:
     desc: Re-record the harness baseline (dedicated PR only)
@@ -230,14 +230,14 @@ tasks:
       HARNESS_BASELINE: '{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}benchmarks/harness-vllm.json{{else}}benchmarks/harness.json{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_HARNESS_BASELINE: '{{.HARNESS_BASELINE}}'
       TASK_RESTORE: '{{.RESTORE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/harness.py --update-baseline --baseline "$TASK_HARNESS_BASELINE" --restore "${TASK_RESTORE:-drift}" {{if eq (coalesce .EMBED_MODE "hash") "vllm"}}{{else}}--golden evals/golden.jsonl{{end}} --out "$TASK_BUNDLE_DIR/harness-report.json"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness.py --update-baseline --baseline "$TASK_HARNESS_BASELINE" --restore "${TASK_RESTORE:-drift}" {{if eq (coalesce .EMBED_MODE "hash") "vllm"}}{{else}}--golden evals/golden.jsonl{{end}} --out "$TASK_BUNDLE_DIR/harness-report.json"
 
   harness:l2:
     desc: Harness L2 answer tier (live GPU stack, never a PR gate)
@@ -250,13 +250,13 @@ tasks:
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_N: '{{.N}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/harness_l2.py --max-queries "${TASK_N:-24}" --out "$TASK_BUNDLE_DIR/harness-l2-report.json" --summary "$TASK_BUNDLE_DIR/harness-l2-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l2.py --max-queries "${TASK_N:-24}" --out "$TASK_BUNDLE_DIR/harness-l2-report.json" --summary "$TASK_BUNDLE_DIR/harness-l2-summary.md"
 
   harness:l3:
     desc: Harness L3 performance tier against a running agent (RC only)
@@ -277,8 +277,8 @@ tasks:
       HARNESS_L3_BASELINE: '{{if hasKey . "HARNESS_L3_BASELINE"}}{{.HARNESS_L3_BASELINE}}{{else}}{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}benchmarks/harness-l3-vllm.json{{else}}benchmarks/harness-l3.json{{end}}{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_AGENT_URL: '{{.AGENT_URL}}'
       TASK_CONCURRENCY: '{{.CONCURRENCY}}'
       TASK_DURATION: '{{.DURATION}}'
@@ -287,7 +287,7 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/harness_l3.py --url "$TASK_AGENT_URL" --baseline "$TASK_HARNESS_L3_BASELINE" --concurrency "$TASK_CONCURRENCY" --duration "$TASK_DURATION" --request-timeout "$TASK_REQUEST_TIMEOUT" --gate --out "$TASK_BUNDLE_DIR/harness-l3-report.json" --summary "$TASK_BUNDLE_DIR/harness-l3-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l3.py --url "$TASK_AGENT_URL" --baseline "$TASK_HARNESS_L3_BASELINE" --concurrency "$TASK_CONCURRENCY" --duration "$TASK_DURATION" --request-timeout "$TASK_REQUEST_TIMEOUT" --gate --out "$TASK_BUNDLE_DIR/harness-l3-report.json" --summary "$TASK_BUNDLE_DIR/harness-l3-summary.md"
 
   harness:l3-baseline:
     desc: Re-record the L3 baseline (dedicated PR only)
@@ -305,8 +305,8 @@ tasks:
       HARNESS_L3_BASELINE: '{{if hasKey . "HARNESS_L3_BASELINE"}}{{.HARNESS_L3_BASELINE}}{{else}}{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}benchmarks/harness-l3-vllm.json{{else}}benchmarks/harness-l3.json{{end}}{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_AGENT_URL: '{{.AGENT_URL}}'
       TASK_CONCURRENCY: '{{.CONCURRENCY}}'
       TASK_DURATION: '{{.DURATION}}'
@@ -315,7 +315,7 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/harness_l3.py --url "$TASK_AGENT_URL" --baseline "$TASK_HARNESS_L3_BASELINE" --concurrency "$TASK_CONCURRENCY" --duration "$TASK_DURATION" --request-timeout "$TASK_REQUEST_TIMEOUT" --update-baseline --out "$TASK_BUNDLE_DIR/harness-l3-report.json" --summary "$TASK_BUNDLE_DIR/harness-l3-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l3.py --url "$TASK_AGENT_URL" --baseline "$TASK_HARNESS_L3_BASELINE" --concurrency "$TASK_CONCURRENCY" --duration "$TASK_DURATION" --request-timeout "$TASK_REQUEST_TIMEOUT" --update-baseline --out "$TASK_BUNDLE_DIR/harness-l3-report.json" --summary "$TASK_BUNDLE_DIR/harness-l3-summary.md"
 
   harness:l4:
     desc: Harness L4 answer-quality gate (live GPU stack, RC only)
@@ -329,14 +329,14 @@ tasks:
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_N: '{{.N}}'
       TASK_REPEATS: '{{.REPEATS}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/harness_l4.py --max-queries "${TASK_N:-24}" --repeats "${TASK_REPEATS:-3}" --out "$TASK_BUNDLE_DIR/harness-l4-report.json" --summary "$TASK_BUNDLE_DIR/harness-l4-summary.md" --queue "$TASK_BUNDLE_DIR/harness-l4-review-queue.json"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l4.py --max-queries "${TASK_N:-24}" --repeats "${TASK_REPEATS:-3}" --out "$TASK_BUNDLE_DIR/harness-l4-report.json" --summary "$TASK_BUNDLE_DIR/harness-l4-summary.md" --queue "$TASK_BUNDLE_DIR/harness-l4-review-queue.json"
 
   harness:l4-record:
     desc: Re-record L4 thresholds (dedicated PR only)
@@ -349,14 +349,14 @@ tasks:
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_N: '{{.N}}'
       TASK_REPEATS: '{{.REPEATS}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/harness_l4.py --max-queries "${TASK_N:-24}" --repeats "${TASK_REPEATS:-3}" --update-thresholds --out "$TASK_BUNDLE_DIR/harness-l4-report.json" --summary "$TASK_BUNDLE_DIR/harness-l4-summary.md" --queue "$TASK_BUNDLE_DIR/harness-l4-review-queue.json"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l4.py --max-queries "${TASK_N:-24}" --repeats "${TASK_REPEATS:-3}" --update-thresholds --out "$TASK_BUNDLE_DIR/harness-l4-report.json" --summary "$TASK_BUNDLE_DIR/harness-l4-summary.md" --queue "$TASK_BUNDLE_DIR/harness-l4-review-queue.json"
 
   draft:
     desc: Draft golden-set candidates from collection payloads
@@ -367,11 +367,11 @@ tasks:
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - .venv/bin/python scripts/eval_retrieval.py --label-draft --docs 40
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_retrieval.py --label-draft --docs 40
 
   report:
     desc: Render the eval report (text/markdown)
@@ -386,13 +386,13 @@ tasks:
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_REPORT: '{{.REPORT}}'
       TASK_BASELINE: '{{.BASELINE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - .venv/bin/python scripts/render_report.py eval --report "${TASK_REPORT:-"$TASK_BUNDLE_DIR/eval-report.json"}" --baseline "${TASK_BASELINE:-evals/baseline.json}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py eval --report "${TASK_REPORT:-"$TASK_BUNDLE_DIR/eval-report.json"}" --baseline "${TASK_BASELINE:-evals/baseline.json}"
 
   html:
     desc: Render the eval report as a self-contained HTML dashboard
@@ -406,15 +406,15 @@ tasks:
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_REPORT: '{{.REPORT}}'
       TASK_BASELINE: '{{.BASELINE}}'
       TASK_OUT: '{{.OUT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/render_report.py eval --report "${TASK_REPORT:-"$TASK_BUNDLE_DIR/eval-report.json"}" --baseline "${TASK_BASELINE:-evals/baseline.json}" --format html --out "${TASK_OUT:-"$TASK_BUNDLE_DIR/eval-report.html"}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py eval --report "${TASK_REPORT:-"$TASK_BUNDLE_DIR/eval-report.json"}" --baseline "${TASK_BASELINE:-evals/baseline.json}" --format html --out "${TASK_OUT:-"$TASK_BUNDLE_DIR/eval-report.html"}"
       - echo "Rendered ${TASK_OUT:-"$TASK_BUNDLE_DIR/eval-report.html"}"
 
   compare:
@@ -427,14 +427,14 @@ tasks:
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       TASK_BASE: '{{.BASE}}'
       TASK_CURRENT: '{{.CURRENT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - .venv/bin/python scripts/render_report.py compare-eval --base "${TASK_BASE:-evals/baseline.json}" --current "${TASK_CURRENT:-"$TASK_BUNDLE_DIR/eval-report.json"}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py compare-eval --base "${TASK_BASE:-evals/baseline.json}" --current "${TASK_CURRENT:-"$TASK_BUNDLE_DIR/eval-report.json"}"
 
   bench-report:
     desc: Render the benchmark report (text/markdown)
@@ -448,13 +448,13 @@ tasks:
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_REPORT: '{{.REPORT}}'
       TASK_BASELINE: '{{.BASELINE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - .venv/bin/python scripts/render_report.py bench --report "${TASK_REPORT:-"$TASK_BUNDLE_DIR/bench-report.json"}" --baseline "${TASK_BASELINE:-benchmarks/baseline.json}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py bench --report "${TASK_REPORT:-"$TASK_BUNDLE_DIR/bench-report.json"}" --baseline "${TASK_BASELINE:-benchmarks/baseline.json}"
 
   bench-html:
     desc: Render the benchmark report as HTML
@@ -468,15 +468,15 @@ tasks:
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_REPORT: '{{.REPORT}}'
       TASK_BASELINE: '{{.BASELINE}}'
       TASK_OUT: '{{.OUT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - .venv/bin/python scripts/render_report.py bench --report "${TASK_REPORT:-"$TASK_BUNDLE_DIR/bench-report.json"}" --baseline "${TASK_BASELINE:-benchmarks/baseline.json}" --format html --out "${TASK_OUT:-"$TASK_BUNDLE_DIR/bench-report.html"}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py bench --report "${TASK_REPORT:-"$TASK_BUNDLE_DIR/bench-report.json"}" --baseline "${TASK_BASELINE:-benchmarks/baseline.json}" --format html --out "${TASK_OUT:-"$TASK_BUNDLE_DIR/bench-report.html"}"
       - echo "Rendered ${TASK_OUT:-"$TASK_BUNDLE_DIR/bench-report.html"}"
 
   bench-compare:
@@ -489,21 +489,21 @@ tasks:
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
     env:
-      EMBED_MODE: '{{.EMBED_MODE}}'
-      VENUE: '{{.VENUE}}'
+      TASK_EMBED_MODE: '{{.EMBED_MODE}}'
+      TASK_VENUE: '{{.VENUE}}'
       TASK_BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       TASK_BASE: '{{.BASE}}'
       TASK_CURRENT: '{{.CURRENT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - .venv/bin/python scripts/render_report.py compare-bench --base "${TASK_BASE:-benchmarks/baseline.json}" --current "${TASK_CURRENT:-"$TASK_BUNDLE_DIR/bench-report.json"}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py compare-bench --base "${TASK_BASE:-benchmarks/baseline.json}" --current "${TASK_CURRENT:-"$TASK_BUNDLE_DIR/bench-report.json"}"
 
   bench:
     desc: Run the benchmark workload against the committed baseline
     summary: |
-      `scripts/benchmark.py --check benchmarks/baseline.json`, mirroring
-      `make bench`. Fails on regressions. Carries no mode exports (same as
-      Make): the workload/baseline pairing is fixed.
+      `scripts/benchmark.py --collection bench --check benchmarks/baseline.json`,
+      mirroring `make bench`. Fails on regressions. Carries no mode exports
+      (same as Make): the workload/baseline pairing is fixed.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
     env:

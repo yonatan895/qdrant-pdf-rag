@@ -53,6 +53,7 @@ if [ "$1" = "-V" ]; then echo "${FAKE_PY_VERSION:-Python 3.14.5}"; exit 0; fi
 python3 - "$RECORDER_LOG" "venv-python" "$@" <<'PYEOF'
 import json, os, sys
 log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
+with open(log, "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd(),
                          "env": {k: os.environ.get(k) for k in ("EMBED_MODE", "VENUE")}}) + "\\n")
 ret = int(os.environ.get("RECORDER_EXIT", "0"))
@@ -527,6 +528,30 @@ class TaskContractsTests(unittest.TestCase):
         calls = self.pip_calls()
         self.assertEqual(calls[0]["env"], {"EMBED_MODE": "vllm", "VENUE": "rc"})
         self.assertIn("evals/baseline-vllm.json", calls[0]["argv"])
+        if (self.log).exists():
+            self.log.unlink()
+        # Conflicting forms: CLI wins over ambient environment (TR433-F1)
+        # 1. Ambient hash + CLI vllm -> child and baseline select vllm
+        proc = self.run_task("eval:retrieval", "EMBED_MODE=vllm", extra_env=dict(env, EMBED_MODE="hash"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "vllm", "VENUE": "dev"})
+        self.assertIn("evals/baseline-vllm.json", calls[0]["argv"])
+        if (self.log).exists():
+            self.log.unlink()
+        # 2. Ambient vllm + CLI hash -> child and baseline select hash
+        proc = self.run_task("eval:retrieval", "EMBED_MODE=hash", extra_env=dict(env, EMBED_MODE="vllm"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "dev"})
+        self.assertIn("evals/baseline.json", calls[0]["argv"])
+        if (self.log).exists():
+            self.log.unlink()
+        # 3. Ambient rc + CLI dev for VENUE -> child selects dev
+        proc = self.run_task("eval:retrieval", "VENUE=dev", extra_env=dict(env, VENUE="rc"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "dev"})
 
     def test_eval_explicit_empty_mode_preserved_with_hash_baseline(self):
         # Mirrors Make `$(filter vllm,"")` (hash branch) plus an empty export:
@@ -534,6 +559,14 @@ class TaskContractsTests(unittest.TestCase):
         # value reaches the script instead of silently becoming the default.
         self.make_venv_fake()
         proc = self.run_task("eval:retrieval", "EMBED_MODE=", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "", "VENUE": "dev"})
+        self.assertIn("evals/baseline.json", calls[0]["argv"])
+        if (self.log).exists():
+            self.log.unlink()
+        # Explicit empty CLI overrides nonempty ambient value (TR433-F1)
+        proc = self.run_task("eval:retrieval", "EMBED_MODE=", extra_env=dict(self.tool_env(), EMBED_MODE="vllm"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
         self.assertEqual(calls[0]["env"], {"EMBED_MODE": "", "VENUE": "dev"})
@@ -560,17 +593,32 @@ class TaskContractsTests(unittest.TestCase):
         self.make_venv_fake()
         self.make_eval_fixtures()
         env = self.tool_env()
+        # CLI VENUE=dev cannot override holdout's VENUE=rc
         proc = self.run_task("eval:holdout", "VENUE=dev", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
         self.assertEqual(len(calls), 1, "sha256sum pre-check must precede the single python run")
         self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "rc"})
         self.assertIn("evals/holdout.jsonl", calls[0]["argv"])
+        if (self.log).exists():
+            self.log.unlink()
+        # Ambient VENUE=dev cannot override holdout's VENUE=rc (TR433-F1)
+        proc = self.run_task("eval:holdout", extra_env=dict(env, VENUE="dev"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "rc"})
+        if (self.log).exists():
+            self.log.unlink()
+        # Ambient VENUE=dev AND CLI VENUE=dev together cannot override holdout's VENUE=rc (TR433-F1)
+        proc = self.run_task("eval:holdout", "VENUE=dev", extra_env=dict(env, VENUE="dev"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        calls = self.pip_calls()
+        self.assertEqual(calls[0]["env"], {"EMBED_MODE": "hash", "VENUE": "rc"})
+        if (self.log).exists():
+            self.log.unlink()
         # Tampered holdout fails before any python invocation.
         with (self.root / "evals/holdout.jsonl").open("ab") as fh:
             fh.write(b"tampered\n")
-        if (self.log).exists():
-            self.log.unlink()
         proc = self.run_task("eval:holdout", extra_env=env)
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(self.pip_calls(), [])
@@ -721,13 +769,15 @@ class TaskContractsTests(unittest.TestCase):
         )
         self.assertIn(".task-complete", build_code)
         self.assertIn("sha256sum", build_code)
-        # Script-read mode/venue keep their exact environment names; nothing
-        # may reintroduce a global export line.
+        # Mode/venue bridged under TASK_ prefixes and bound at the command boundary
+        # so ambient environment variables cannot defeat CLI inputs.
         eval_code = "\n".join(
             line for line in eval_text.splitlines() if not line.lstrip().startswith("#")
         )
-        self.assertIn("EMBED_MODE: '{{.EMBED_MODE}}'", eval_code)
-        self.assertIn("VENUE: '{{.VENUE}}'", eval_code)
+        self.assertIn("TASK_EMBED_MODE: '{{.EMBED_MODE}}'", eval_code)
+        self.assertIn("TASK_VENUE: '{{.VENUE}}'", eval_code)
+        self.assertIn('EMBED_MODE="$TASK_EMBED_MODE"', eval_code)
+        self.assertIn('VENUE="$TASK_VENUE"', eval_code)
 
 
 if __name__ == "__main__":
