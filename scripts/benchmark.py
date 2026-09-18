@@ -429,7 +429,7 @@ def check_baseline(result: dict, baseline: dict | None) -> list[str]:
 def update_baseline(result: dict, baseline_path: Path) -> None:
     payload: dict = {
         "_meta": {
-            "note": "Re-baseline via `make bench-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/benchmark.py GATED_METRICS.",
+            "note": "Re-baseline via `sh scripts/tools/run-task.sh eval:bench-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/benchmark.py GATED_METRICS.",
             "env": result["env"],
             "capture": {
                 "repeats": result.get("repeats", 1),

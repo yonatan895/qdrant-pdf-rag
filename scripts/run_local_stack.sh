@@ -6,16 +6,16 @@
 # ingest, and the agent: locally we stand up both sides, but every consumer
 # leg still goes through the gateway (never straight to vLLM).
 #
-#   make local-stack                      # Qdrant + Jaeger + gateway + agent
-#   CORPUS_DIR=/path make local-stack     # also ingest through the gateway
+#   sh scripts/tools/run-task.sh local:stack                      # Qdrant + Jaeger + gateway + agent
+#   CORPUS_DIR=/path sh scripts/tools/run-task.sh local:stack     # also ingest through the gateway
 #
 # Tracing is part of the stack, not a flag: agent and ingest export OTLP to
 # the local Jaeger (started here via scripts/run_local_jaeger.sh, or reused
 # when one already answers on the UI port), and the stack refuses to report
 # up until a v1.search span has landed.
 #
-# Prereqs: docker; the three backends already serving (make local-vllm,
-# local-vllm-embed, local-vllm-rerank); .venv. Qdrant is started via
+# Prereqs: docker; the three backends already serving (sh scripts/tools/run-task.sh local:llm,
+# local:embed, local:rerank); .venv. Qdrant is started via
 # scripts/sim_qdrant.sh (the pinned-image Qdrant owner, shared with
 # `task local:qdrant:up`) when unreachable.
 # Ctrl-C stops the agent, gateway, and an owned Jaeger; Qdrant is left for
@@ -103,8 +103,8 @@ if [ "$LOCAL_RERANK_ENABLED" = "true" ]; then
     set -- "$@" "rerank:$RERANK_CHECK_URL"
 fi
 if [ "$DRYRUN" = "1" ]; then
-    echo "[plan] 1. backends: check $* (start with 'make local-vllm*')"
-    echo "[plan] 2. qdrant:  reuse $QDRANT_URL (start with 'make sim-qdrant' if unreachable)"
+    echo "[plan] 1. backends: check $* (start with 'sh scripts/tools/run-task.sh local:llm' (or local:embed / local:rerank))"
+    echo "[plan] 2. qdrant:  reuse $QDRANT_URL (start with 'sh scripts/tools/run-task.sh local:qdrant:up' if unreachable)"
     echo "[plan] 3. jaeger:  reuse $JAEGER_UI_URL or start scripts/run_local_jaeger.sh (OTLP $OTEL_ENDPOINT)"
     echo "[plan] 4. gateway: GATEWAY_ENV_FILE=$GATEWAY_ENV_FILE sh scripts/run_local_gateway.sh"
     echo "[plan] 5. probe:   $PY scripts/probe_gateway.py --stream"
@@ -124,7 +124,7 @@ if [ "$DRYRUN" = "1" ]; then
 fi
 
 command -v docker >/dev/null 2>&1 || die "docker is required for the local stack"
-[ -x "$PY" ] || die "venv python not found at $PY — run 'make venv' first"
+[ -x "$PY" ] || die "venv python not found at $PY — run 'sh scripts/tools/run-task.sh dev:setup PY=python3.14' first"
 
 # The three vLLM backends are the platform-team stand-ins: they must already
 # serve, because starting GPU servers is a per-terminal operator action.
@@ -140,9 +140,9 @@ unset _pair _label _url _code
 if [ -n "$_missing" ]; then
     die "vLLM backends not serving:$_missing
 Start them first (one per terminal; GPU servers block):
-  make local-vllm         # reasoning :8000
-  make local-vllm-embed   # embed     :8001
-  make local-vllm-rerank  # rerank    :8002"
+  sh scripts/tools/run-task.sh local:llm         # reasoning :8000
+  sh scripts/tools/run-task.sh local:embed   # embed     :8001
+  sh scripts/tools/run-task.sh local:rerank  # rerank    :8002"
 fi
 unset _missing
 
@@ -220,7 +220,7 @@ cleanup() {
     if [ -n "$GW_PID" ]; then
         kill -TERM "$GW_PID" 2>/dev/null || true
         # Wait for the gateway's own trap to stop its containers (it owns
-        # their names and cleanup); a hard crash leaves 'make local-gateway-stop'.
+        # their names and cleanup); a hard crash leaves 'sh scripts/tools/run-task.sh local:gateway:down'.
         wait "$GW_PID" 2>/dev/null || true
     fi
     rm -f "$GATEWAY_ENV_FILE"
@@ -326,7 +326,7 @@ $CONSOLE_LINE
  Tracing             : ON — v1.search span verified in Jaeger
 
  Ctrl-C stops the agent, the gateway, and an owned Jaeger. Qdrant stays for
- 'make sim-clean'.
+ 'sh scripts/tools/run-task.sh local:qdrant:down'.
  Try:  curl -s -X POST http://127.0.0.1:$LOCAL_AGENT_PORT/v1/search \\
         -H 'Content-Type: application/json' -d '{"query":"LFAREA","top_k":3}'
 EOF

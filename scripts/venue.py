@@ -5,7 +5,7 @@ The frozen holdout (``evals/holdout.jsonl``) and the real-manual corpora
 are release-candidate instruments. Reading them during dev iteration
 silently turns the holdout into a tuning set, so the default venue is
 ``dev`` and RC work must declare itself with ``VENUE=rc`` (set by the
-``make eval-holdout`` recipe and by operators running the harness tiers).
+``sh scripts/tools/run-task.sh eval:holdout`` recipe and by operators running the harness tiers).
 
 One rule, one helper: every eval/harness entry point calls
 ``resolve_golden_paths`` / ``require_rc_for_collection`` instead of

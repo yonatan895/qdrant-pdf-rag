@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Print the pinned Qdrant image from images.txt (single parser for the
-simulation tier: pytest fixture and `make sim-qdrant` both read this)."""
+simulation tier: pytest fixture and `sh scripts/tools/run-task.sh local:qdrant:up` both read this)."""
 
 from __future__ import annotations
 

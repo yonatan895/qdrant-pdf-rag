@@ -28,7 +28,7 @@ IMS, JES3, and z/OS 2.2-era manuals):
      (VER-02/03/04, SYN-06, DIA-04, ...) need manual SEED_OVERRIDES bindings.
   3. Author new entries for the loaded domains (mine real DFH*/CSQ*/DFS*/
      HASP* message IDs) to restore class balance.
-  4. make verify-golden must be 0 FAIL, then re-freeze: the holdout sha
+  4. sh scripts/tools/run-task.sh eval:verify-golden must be 0 FAIL, then re-freeze: the holdout sha
      changes, so re-record evals/holdout-baseline.json and commit the new
      pin + baselines as one dedicated re-freeze commit. Never iterate
      against the holdout to tune.

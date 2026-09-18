@@ -71,7 +71,7 @@ The image bytes and application behavior remain those of the same candidate.
 7. Apply the reviewed namespace egress policy after recording its public TCP
    positive control. Retain the approved CRC node-registry exceptions separately;
    application NetworkPolicy does not enforce node image pulls.
-8. Run the full `make airgap-pipeline`, actual pod gateway/application contracts,
+8. Run the full `sh scripts/tools/run-task.sh airgap:pipeline`, actual pod gateway/application contracts,
    TLS/auth negative controls, browser OAuth and stream completion, SCC/image
    identity checks, snapshot/PVC/trace lifecycle, and a second complete pipeline.
    Compare point IDs and credential fingerprints before/after.
@@ -282,8 +282,8 @@ disabled, 1Gi data/corpus/scratch sizing and Jaeger's 10Gi claim. Clear host con
 Keep `SNEAKERNET_TRUSTED_PUB` set to the independently trusted public PEM.
 
 ```sh
-make airgap-validate
-make airgap-load
+sh scripts/tools/run-task.sh airgap:validate
+sh scripts/tools/run-task.sh airgap:load
 ```
 
 Use the local guide's temporary application-image gateway probe, substituting
@@ -294,7 +294,7 @@ storage and the loaded Kind-authority ingest image. Retain the same original
 synthetic generator and security settings. Run:
 
 ```sh
-make airgap-pipeline
+sh scripts/tools/run-task.sh airgap:pipeline
 kubectl -n "$KIND_NAMESPACE" exec deploy/rag-agent -- \
   python3 /app/scripts/probe_gateway.py --require-reasoning --stream
 kubectl -n "$KIND_NAMESPACE" exec -i deploy/rag-agent -- python3 - \
@@ -318,7 +318,7 @@ For persistence and redeployment:
 
 ```sh
 sh scripts/ci/check_lifecycle.sh "$KIND_NAMESPACE"
-make airgap-pipeline
+sh scripts/tools/run-task.sh airgap:pipeline
 ```
 
 Compare point IDs/counts, credential fingerprints, PVC identities and old trace

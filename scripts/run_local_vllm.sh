@@ -3,7 +3,7 @@
 # Launch flags (GPU memory, context window, runner/eager shape) resolve from
 # `mainframe_rag.serve` Budget profiles (default LOCAL_RT_8GB, tuned for
 # consumer 8GB cards); explicit GPU_MEM / MAX_LEN / SEQS / ROLE in the
-# environment always win. Run via `make local-vllm*` so BUDGET_PYTHON points
+# environment always win. Run via `sh scripts/tools/run-task.sh local:llm`, `local:embed` or `local:rerank` so BUDGET_PYTHON points
 # at the project venv.
 
 set -eu
@@ -58,7 +58,7 @@ fi
 # Serving-budget sizing (serving-budget track PR-B): Budget
 # (src/mainframe_rag/serve) is the single source of truth for launch flags —
 # the same resolve path for every environment. ROLE selects the profile
-# server: `make local-vllm*` passes it explicitly; direct invocations derive
+# server: `sh scripts/tools/run-task.sh local:llm`, `local:embed` or `local:rerank` passes it explicitly; direct invocations derive
 # it from the model name with the match the old embed branch used (issue #99).
 # --check-pack preflights the whole co-resident pack, so a pack that does not
 # fit refuses here instead of failing at the second server's startup.
@@ -74,7 +74,7 @@ BUDGET_PROFILE="${BUDGET_PROFILE:-LOCAL_RT_8GB}"
 if ! BUDGET_OUT="$("${BUDGET_PYTHON}" -m mainframe_rag.serve resolve \
         --profile "${BUDGET_PROFILE}" --role "${ROLE}" --check-pack)"; then
     echo "ERROR: serving-budget resolve failed for profile '${BUDGET_PROFILE}' role '${ROLE}'." >&2
-    echo "Run via 'make local-vllm*' (provides the .venv python) or set BUDGET_PYTHON to a python with mainframe_rag installed." >&2
+    echo "Run via 'sh scripts/tools/run-task.sh local:llm' (or local:embed / local:rerank) (provides the .venv python) or set BUDGET_PYTHON to a python with mainframe_rag installed." >&2
     exit 1
 fi
 if [ -z "${BUDGET_OUT}" ]; then

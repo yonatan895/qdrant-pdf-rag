@@ -2,7 +2,7 @@
 # AIR-GAP SIDE (issue #15): deploy Qdrant (vendored chart, PROD sizing) and the
 # agent (prod kustomize overlay) into $NAMESPACE, then wait for Ready.
 #
-#   make airgap-deploy
+#   sh scripts/tools/run-task.sh airgap:deploy
 #
 # Prod Qdrant: 3 replicas / 500Gi RWO block / unprivileged / ClusterIP, no
 # Route (overlays/openshift/values.yaml is never shrunk). No NFS. No Cloud.
@@ -253,4 +253,4 @@ else
     fi
 fi
 
-next_step "corpus ready? make airgap-ingest CORPUS_PVC=<pvc>   |   smoke: make airgap-smoke$JAEGER_UI_HINT"
+next_step "corpus ready? sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc>   |   smoke: sh scripts/tools/run-task.sh airgap:smoke$JAEGER_UI_HINT"

@@ -24,7 +24,7 @@ Why this exists
 Execution shape
     Live stack only (Qdrant + embedding model + reasoning model), golden dev
     set only (the frozen holdout is never iterated against). Exit 0 unless a
-    query fails; no baseline gate yet. Run via `make eval-chat`.
+    query fails; no baseline gate yet. Run via `sh scripts/tools/run-task.sh eval:chat`.
 
     LLM_BASE_URL + LLM_MODEL_REASONING select the reasoning model (direct
     vLLM locally, or the platform gateway on RC); QDRANT_* / EMBED_* come

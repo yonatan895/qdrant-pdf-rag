@@ -1,7 +1,7 @@
 #!/bin/sh
 # AIR-GAP SIDE (issue #15): optional smoke against the in-cluster agent.
 # Skips cleanly when nothing has been ingested yet (empty collection).
-# Override the query with QUERY="..." make airgap-smoke.
+# Override the query with QUERY="..." sh scripts/tools/run-task.sh airgap:smoke.
 
 . "$(dirname -- "$0")/common.sh"
 
@@ -60,7 +60,7 @@ else status=$?
 fi
 
 if [ "$status" -eq 3 ]; then
-    echo "SKIP: nothing ingested yet — run make airgap-ingest CORPUS_PVC=<pvc> first"
+    echo "SKIP: nothing ingested yet — run sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc> first"
     if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
         TRACING_LINE="Tracing:       SKIPPED (nothing ingested — no request traced yet)"
     else

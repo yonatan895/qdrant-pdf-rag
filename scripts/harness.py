@@ -139,7 +139,7 @@ def load_baseline(path: Path) -> dict[str, Any] | None:
 def save_baseline(path: Path, summary: dict[str, Any], *, embed_mode: str, snapshot: dict[str, Any]) -> None:
     doc = {
         "_meta": {
-            "note": "Harness promotion baseline; re-record via `make harness-baseline` (dedicated PR, AGENTS.md).",
+            "note": "Harness promotion baseline; re-record via `sh scripts/tools/run-task.sh eval:harness:baseline` (dedicated PR, AGENTS.md).",
             "embed_mode": embed_mode,
             "snapshot": snapshot,
             "class_regression_floor": DEFAULT_CLASS_FLOOR,
@@ -230,14 +230,14 @@ def resolve_snapshot_action(
             "fail",
             (
                 f"recorded pin {recorded_name!r} no longer exists on the server; "
-                "a gate run never pins live state — re-record with make harness-baseline"
+                "a gate run never pins live state — re-record with sh scripts/tools/run-task.sh eval:harness:baseline"
             ),
         )
     return (
         "fail",
         (
             "no recorded pin in the baseline; a gate run never pins live state — "
-            "record one with make harness-baseline"
+            "record one with sh scripts/tools/run-task.sh eval:harness:baseline"
         ),
     )
 
@@ -297,7 +297,7 @@ def restore_snapshot(
     closed) on any mismatch."""
     fp = snapshot_fingerprint(client, collection, prefer_name=snapshot_name)
     if fp is None or snapshot_name not in fp["snapshot_names"]:
-        raise RuntimeError(f"pin snapshot {snapshot_name!r} missing; run `make harness-baseline` to re-pin")
+        raise RuntimeError(f"pin snapshot {snapshot_name!r} missing; run `sh scripts/tools/run-task.sh eval:harness:baseline` to re-pin")
     client.recover_snapshot(
         collection,
         location=f"file://{snapshots_dir.rstrip('/')}/{collection}/{snapshot_name}",
@@ -353,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     # whatever is live — recording happens only via --update-baseline.
     if baseline is None and not args.update_baseline:
         print(f"FAIL: no baseline at {baseline_path}; a gate run never creates one. "
-              "Record it first: make harness-baseline", file=sys.stderr)
+              "Record it first: sh scripts/tools/run-task.sh eval:harness:baseline", file=sys.stderr)
         return 1
     print(f"[*] harness L1: {len(entries)} entries, collection {collection!r}, "
           f"embed_mode={settings.embed_mode}, baseline={baseline_path.name}", file=sys.stderr)

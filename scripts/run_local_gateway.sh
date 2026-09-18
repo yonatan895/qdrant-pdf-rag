@@ -6,20 +6,20 @@
 # keys, native /rerank, and a /v1/score pass-through to the vLLM backend
 # (LiteLLM serves no native /v1/score).
 #
-#   GATEWAY_MASTER_KEY=$(openssl rand -hex 16) make local-gateway
+#   GATEWAY_MASTER_KEY=$(openssl rand -hex 16) sh scripts/tools/run-task.sh local:gateway:up
 #
 # Keys: pass GATEWAY_MASTER_KEY / GATEWAY_LLM_KEY / GATEWAY_EMBED_KEY /
 # GATEWAY_RERANK_KEY to reuse stable values, or leave them unset and the
 # script mints random sk-local-... keys and prints them once. Set
 # GATEWAY_ENV_FILE to also write the leg env (mode 600) for an orchestrator
-# (make local-stack); never point it inside the repo. Keys are never
+# (sh scripts/tools/run-task.sh local:stack); never point it inside the repo. Keys are never
 # committed. Minted keys live in the throwaway Postgres volume: env-passed
 # values survive restarts; unset values rotate at each start and replace the
 # prior key. GATEWAY_RESET_KEYS=1 wipes the store. Key charset is sk- +
 # alphanumerics/dash: anything else dies fail-closed (values render into
 # YAML unquoted).
 # URLs must be http(s); model ids travel verbatim into the routing table.
-# Needs docker + the three `make local-vllm*` backends already up.
+# Needs docker + the three `sh scripts/tools/run-task.sh local:llm`, `local:embed` or `local:rerank` backends already up.
 # Never a product path; never in CI or the air gap.
 
 set -eu
@@ -53,7 +53,7 @@ GATEWAY_EMBED_KEY="${GATEWAY_EMBED_KEY:-}"
 GATEWAY_RERANK_KEY="${GATEWAY_RERANK_KEY:-}"
 GATEWAY_DRYRUN="${GATEWAY_DRYRUN:-0}"
 GATEWAY_DEBUG="${GATEWAY_DEBUG:-0}"
-# Optional machine handoff for orchestrators (make local-stack): when set,
+# Optional machine handoff for orchestrators (sh scripts/tools/run-task.sh local:stack): when set,
 # the leg env (URLs, model ids, per-leg keys) is written there mode 600.
 # Contains ephemeral keys — never a repo path, never committed.
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-}"

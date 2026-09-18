@@ -9,22 +9,22 @@ owns context, conflicts, task/review and handoff formats.
 
 | Actual change | Required merge evidence | Resource boundary |
 |---|---|---|
-| **prose-only** (prose/navigation only) | `make check-context`, cited-path and semantic review of claims; generated config or executable examples select their affected row too | Strictly offline/CPU: NO GPU, NO Qdrant, NO model gateway (LiteLLM/vLLM), NO Jaeger, and NO live source |
+| **prose-only** (prose/navigation only) | `sh scripts/tools/run-task.sh qa:context`, cited-path and semantic review of claims; generated config or executable examples select their affected row too | Strictly offline/CPU: NO GPU, NO Qdrant, NO model gateway (LiteLLM/vLLM), NO Jaeger, and NO live source |
 | **test/tool-only** (test/tool/workflow only) | Relevant tool checks, lint/types for affected Python, focused test/selector checks (`pytest tests/test_agent_context.py tests/test_agent_doctor.py`), CI workflow YAML validation; changes to a shared fixture select dependent suites | Hermetic local/CI: pure checks by default; forbid heavy services (GPU, Qdrant, LiteLLM/vLLM gateways, Jaeger) unless the specific integration tier is under test |
-| **publication/retirement lifecycle** (publication, retirement, completion, locks, restore ordering) | Common code checks (`make check` with `test_ingest_publish` / `test_ingest_completion`); focused transition/fault tests; real non-dry control path against faithful fakes; read-only residue audit; retirement inventory validation; writer concurrency/locking (`publish-<alias>.lock`) and recheck verification; disposable Qdrant boundary exercise; existing inexpensive L1 plumbing gate (`make gate-l1`) while applicable | Real storage/protocol semantics and deterministic embeddings; CPU / disposable Qdrant simulation or faithful fakes; NO GPU; NO live platform model pool; generic search success is not publication acceptance |
-| **extraction/ranking** (extraction, chunking, identifiers, filters, ranking, embedding representation) | Common checks (`make check`); source-fidelity/retrieval tests; relevant L1 (`make gate-l1`) / fresh-corpus regression (`make eval-paraphrase`); intended-mode semantic evaluation (`make eval EMBED_MODE=vllm`) and before/after per-class attribution where retrieval behavior changes (full ladder rungs 1–7); chat/condensation requires `make eval-chat` | Real model/corpus evidence where semantics are claimed; synthetic/hash runs are not semantic acceptance; disposable simulation / mock vLLM for plumbing, GPU or live gateway for semantic evaluation |
-| **HTTP/lifecycle** (HTTP/MCP/browser lifecycle) | Common checks (`make check`); Rung 6 live agent probes: actual relevant client/transport behavior, `/healthz`/`/livez`, trap refusal (0 citations), legit query grounded (≥1 citation), overlong 422 fixed envelope, SSE chunk token/final integrity, cancellation and finalization; browser execution only for browser behavior | Controllable test server/source; running agent + disposable Qdrant + mock/real gateway + local Jaeger; no live z/OS/Splunk by default |
-| **packaging/deploy** (packaging/deployment/defaults/identity) | Applicable union plus existing artifact/render/bootstrap/migration checks (`make check` including `tests/test_airgap_*.py`, `make airgap-dryrun` with zero leftover placeholders, string quoting checks, storage class checks refusing NFS for block data, gateway key strip/substitute) and explicit compatibility decision; operational changes select relevant topology acceptance | Preserve air-gap and authorized site boundaries; hermetic shell stubs, local Kind cluster, or ephemeral lab namespace |
-| **release promotion** (release promotion) | Exact bundle/image, configuration, corpus/model and supported topology acceptance from release runbooks (`docs/crc-release-verification.md`); `probe_gateway.py --stream` from pod; frozen holdout evaluation under `VENUE=rc` (`make eval-holdout`); layered harness L1–L4 where applicable | Operator-authorized site / CRC acceptance cluster, platform model pool, real corpus; separate from ordinary PR merge; no substitution with a mock or skipped release lane |
+| **publication/retirement lifecycle** (publication, retirement, completion, locks, restore ordering) | Common code checks (`sh scripts/tools/run-task.sh qa:check` with `test_ingest_publish` / `test_ingest_completion`); focused transition/fault tests; real non-dry control path against faithful fakes; read-only residue audit; retirement inventory validation; writer concurrency/locking (`publish-<alias>.lock`) and recheck verification; disposable Qdrant boundary exercise; existing inexpensive L1 plumbing gate (`sh scripts/tools/run-task.sh eval:gate-l1`) while applicable | Real storage/protocol semantics and deterministic embeddings; CPU / disposable Qdrant simulation or faithful fakes; NO GPU; NO live platform model pool; generic search success is not publication acceptance |
+| **extraction/ranking** (extraction, chunking, identifiers, filters, ranking, embedding representation) | Common checks (`sh scripts/tools/run-task.sh qa:check`); source-fidelity/retrieval tests; relevant L1 (`sh scripts/tools/run-task.sh eval:gate-l1`) / fresh-corpus regression (`sh scripts/tools/run-task.sh eval:paraphrase`); intended-mode semantic evaluation (`sh scripts/tools/run-task.sh eval:retrieval EMBED_MODE=vllm`) and before/after per-class attribution where retrieval behavior changes (full ladder rungs 1–7); chat/condensation requires `sh scripts/tools/run-task.sh eval:chat` | Real model/corpus evidence where semantics are claimed; synthetic/hash runs are not semantic acceptance; disposable simulation / mock vLLM for plumbing, GPU or live gateway for semantic evaluation |
+| **HTTP/lifecycle** (HTTP/MCP/browser lifecycle) | Common checks (`sh scripts/tools/run-task.sh qa:check`); Rung 6 live agent probes: actual relevant client/transport behavior, `/healthz`/`/livez`, trap refusal (0 citations), legit query grounded (≥1 citation), overlong 422 fixed envelope, SSE chunk token/final integrity, cancellation and finalization; browser execution only for browser behavior | Controllable test server/source; running agent + disposable Qdrant + mock/real gateway + local Jaeger; no live z/OS/Splunk by default |
+| **packaging/deploy** (packaging/deployment/defaults/identity) | Applicable union plus existing artifact/render/bootstrap/migration checks (`sh scripts/tools/run-task.sh qa:check` including `tests/test_airgap_*.py`, `sh scripts/tools/run-task.sh airgap:dryrun` with zero leftover placeholders, string quoting checks, storage class checks refusing NFS for block data, gateway key strip/substitute) and explicit compatibility decision; operational changes select relevant topology acceptance | Preserve air-gap and authorized site boundaries; hermetic shell stubs, local Kind cluster, or ephemeral lab namespace |
+| **release promotion** (release promotion) | Exact bundle/image, configuration, corpus/model and supported topology acceptance from release runbooks (`docs/crc-release-verification.md`); `probe_gateway.py --stream` from pod; frozen holdout evaluation under `VENUE=rc` (`sh scripts/tools/run-task.sh eval:holdout`); layered harness L1–L4 where applicable | Operator-authorized site / CRC acceptance cluster, platform model pool, real corpus; separate from ordinary PR merge; no substitution with a mock or skipped release lane |
 
 **Data invariant protection (cross-cutting):** Defaults, UUID5 chunk keys, 4-type vocabulary (`prose`, `code`, `table`, `heading`), residue audit, fail-closed contracts, and production constants require a dedicated approved concern split from features, evaluated against mode-keyed baselines with full A/B evidence. Documentation, tooling, or refactoring PRs cannot silently alter, suppress, or waive data invariants.
 
 Take the union for cross-layer impact and test the interactions. A tooling label
 does not excuse retrieval changes from evaluation. Avoid expensive unrelated
 checks and record relevance decisions. Retrieval changes including chunking,
-filters and query shape owe `make eval` against the mode-keyed baseline:
+filters and query shape owe `sh scripts/tools/run-task.sh eval:retrieval` against the mode-keyed baseline:
 identifier recall@1 = 1.0; overall recall@1 ≥ baseline ×0.9, recall@5 ≥ ×0.95,
-MRR ≥ ×0.95; zero query errors. Baseline rewrites use `make eval-baseline` in
+MRR ≥ ×0.95; zero query errors. Baseline rewrites use `sh scripts/tools/run-task.sh eval:baseline` in
 a dedicated PR, never to make a feature pass. Local-launch/tooling work must not
 silently change production constants or ingest-worker semantics.
 
@@ -41,11 +41,11 @@ Four separate phases:
    it cannot be called ready while required acceptance remains unmet.
 4. **Release acceptance:** verify the exact published bundle and applicable
    topology/model/corpus using the release runbooks. Historical/mock successes
-   and a local `make check` do not substitute for release evidence.
+   and a local `sh scripts/tools/run-task.sh qa:check` do not substitute for release evidence.
 
-For Increment A of #411 (and #397), docs need context/link/semantic review (`make check-context`);
-tooling/Make/CI additions need focused tests (`pytest tests/test_agent_context.py tests/test_agent_doctor.py`)
-and `make check`. Application behavior is outside this issue, so no GPU, Qdrant,
+For Increment A of #411 (and #397), docs need context/link/semantic review (`sh scripts/tools/run-task.sh qa:context`);
+tooling/Task/CI additions need focused tests (`pytest tests/test_agent_context.py tests/test_agent_doctor.py`)
+and `sh scripts/tools/run-task.sh qa:check`. Application behavior is outside this issue, so no GPU, Qdrant,
 model gateway, or Jaeger services are permitted.
 
 Conventions below: `$SNAPSHOT_DIR` is persistent disk outside the repo
@@ -67,7 +67,7 @@ into the repo); `$SCRATCH_DIR` is scratch space outside the repo
 | Published-bundle Kind | Fresh disposable cluster/registry and the downloaded bundle, documented sizing overrides | Same deployment pipeline/artifact; deterministic computation lanes prove plumbing. Single-node runs do not prove distributed HA |
 | Production / CRC acceptance | Operator-authorized site resources and exact candidate; private data under its runbook | Real SCC/TLS/identity/storage/model/corpus checks; CRC fit/fallback and missing combined coverage must be recorded |
 
-The current task's prerequisite check is `make agent-doctor` (default unit).
+The current task's prerequisite check is `sh scripts/tools/run-task.sh dev:doctor` (default unit).
 It diagnoses tools/runtime, not application acceptance. It does not launch or
 probe a deployment. Never use a documentation check as authority to start, stop,
 reconfigure, ingest into or test a private/live deployment. Keep synthetic
@@ -81,29 +81,30 @@ its exact-bundle record; Kind and dry-run success cannot replace it.
 
 ```sh
 # Qdrant (docker, loopback port 6333)
-make sim-qdrant
+sh scripts/tools/run-task.sh local:qdrant:up
 curl -s -m 5 http://127.0.0.1:6333/collections | head -c 200
 
 # Reasoning server first (docker via Budget launcher, port 8000)
-make local-vllm
+sh scripts/tools/run-task.sh local:llm
 curl -s -m 10 http://127.0.0.1:8000/v1/models | head -c 200
 
 # Embed server (docker via Budget launcher, port 8001)
-make local-vllm-embed
+sh scripts/tools/run-task.sh local:embed
 curl -s -m 10 http://127.0.0.1:8001/v1/models | head -c 200
 
 # Reranker only with a compatible three-model pack; never alongside the default 8GB pair
-make local-vllm-rerank
+sh scripts/tools/run-task.sh local:rerank
 curl -s -m 10 http://127.0.0.1:8002/v1/models | head -c 200
 ```
 
-### Full local simulation (`make local-stack`)
+<a id="full-local-simulation"></a>
+### Full local simulation (`sh scripts/tools/run-task.sh local:stack`)
 
-`make local-stack` is the canonical full simulation: Qdrant → Jaeger → real
+`sh scripts/tools/run-task.sh local:stack` is the canonical full simulation: Qdrant → Jaeger → real
 LiteLLM gateway → probe → optional ingest → agent → smoke → trace check.
 `LOCAL_STACK_DRYRUN=1` prints the plan without Docker/network. Choose a compatible
 GPU pack before starting component servers; the default pair uses
-`RERANK_ENABLED=false make local-stack` and needs reasoning/embedding only.
+`RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack` and needs reasoning/embedding only.
 A third backend requires the matching pack. Backend curls above are component
 probes, not application consumer configuration.
 
@@ -113,7 +114,7 @@ in `run_local_gateway.sh` (gateway/Postgres), `run_local_jaeger.sh`,
 `run_local_vllm.sh`, and `qdrant_sim.py`/`qdrant_pin.py`; do not fork these owners.
 An existing gateway container makes the supervisor fail closed; resolve ownership
 before stopping it. `/ui` is enabled and smoke-checked unless `UI_ENABLED=false`.
-`make run-agent` honors UI_ENABLED without a default. Detailed installation and
+`sh scripts/tools/run-task.sh local:agent` honors UI_ENABLED without a default. Detailed installation and
 component-debug procedures remain in [install and operations](install_and_ops.md).
 
 <a id="local-environment"></a>
@@ -145,7 +146,7 @@ label (`local:<model-id>`); it is not immutable production weight attestation.
 Production requires the platform-declared revision through the
 [configuration contract](deploy.md#configuration-contract). Use the exact served
 model IDs; a short/basename guess can fail or route incorrectly. Explicit CLI,
-Make and environment selections must apply or fail nonzero; ambiguous discovery
+Task and environment selections must apply or fail nonzero; ambiguous discovery
 must not silently retain Settings values. Reranking, when selected, uses the
 handoff's gateway URL/key/order, never a backend consumer URL.
 
@@ -160,12 +161,12 @@ Run the relevant minimums and interactions selected in §0. Each rung states its
 green condition. Required acceptance failures block readiness; record a draft
 with the failure and next action when validation is blocked.
 
-1. `make check` — ruff, mypy, unit suite. Green: all clean.
-2. `make gate-l1` — L1 retrieval gate on the ephemeral simulator. Green: exit 0, 0 regressions.
-3. Fresh-ingest `make eval-paraphrase` — re-ingest the paraphrase corpus into a scratch collection, then evaluate. Green: exit 0 with no regressions vs the mode-keyed paraphrase baseline tolerances (same ratios as the main set — not byte-exact).
-4. `make sim` — integration tier. Green: all pass, **0 skipped** (a skip fails the job; a skip on missing local weights means symlink or rebuild them, never ignore it).
-5. `make eval EMBED_MODE=vllm` (with the §2 block exported) — Green: 0 query failures; numbers at or above the mode-keyed baseline.
-6. Live agent probes — `make run-agent` (or equivalent uvicorn) against the real stack, then the copy-paste probes below (agent on `:8087` in these examples; `Q` is the query). Green: trap refuses with zero validated citations, legit answers grounded with ≥1 citation, overlong 422s with the fixed envelope. `make local-stack` enables the operator console by default (`UI_ENABLED=true`, console at `/ui`, smoke-checked in the up sequence; the banner prints the URL, and `UI_ENABLED=false make local-stack` exercises the fail-closed route set); `make run-agent` honors `UI_ENABLED` (`UI_ENABLED=true make run-agent`; unset keeps the app fail-closed).
+1. `sh scripts/tools/run-task.sh qa:check` — ruff, mypy, unit suite. Green: all clean.
+2. `sh scripts/tools/run-task.sh eval:gate-l1` — L1 retrieval gate on the ephemeral simulator. Green: exit 0, 0 regressions.
+3. Fresh-ingest `sh scripts/tools/run-task.sh eval:paraphrase` — re-ingest the paraphrase corpus into a scratch collection, then evaluate. Green: exit 0 with no regressions vs the mode-keyed paraphrase baseline tolerances (same ratios as the main set — not byte-exact).
+4. `sh scripts/tools/run-task.sh qa:sim` — integration tier. Green: all pass, **0 skipped** (a skip fails the job; a skip on missing local weights means symlink or rebuild them, never ignore it).
+5. `sh scripts/tools/run-task.sh eval:retrieval EMBED_MODE=vllm` (with the §2 block exported) — Green: 0 query failures; numbers at or above the mode-keyed baseline.
+6. Live agent probes — `sh scripts/tools/run-task.sh local:agent` (or equivalent uvicorn) against the real stack, then the copy-paste probes below (agent on `:8087` in these examples; `Q` is the query). Green: trap refuses with zero validated citations, legit answers grounded with ≥1 citation, overlong 422s with the fixed envelope. `sh scripts/tools/run-task.sh local:stack` enables the operator console by default (`UI_ENABLED=true`, console at `/ui`, smoke-checked in the up sequence; the banner prints the URL, and `UI_ENABLED=false sh scripts/tools/run-task.sh local:stack` exercises the fail-closed route set); `sh scripts/tools/run-task.sh local:agent` honors `UI_ENABLED` (`UI_ENABLED=true sh scripts/tools/run-task.sh local:agent`; unset keeps the app fail-closed).
 7. Feature A/B numbers in the PR body — any retrieval/ranking change ships measured deltas (2×2 where applicable: off/on × base/context), per-query attribution for every moved query, must_not hard-zero.
 
 ### Rung 6 probes (exact)
@@ -232,7 +233,7 @@ An untested backup is not a backup. Re-snapshot after any ingest that must survi
 
 ## 5. GPU rules (8 GB box)
 
-- Co-residency budget is tight by design (reasoning 0.64 + embed 0.33). Never launch a third server alongside the `LOCAL_RT_8GB` pair: stop `:8000` before serving anything else (e.g. the reranker on `:8002`) — or run the `TRIPLE_8GB` pack (0.5B reasoning stand-in + embed + rerank) when the third leg is required. Restore afterwards with `make local-vllm`, verify `/v1/models`.
+- Co-residency budget is tight by design (reasoning 0.64 + embed 0.33). Never launch a third server alongside the `LOCAL_RT_8GB` pair: stop `:8000` before serving anything else (e.g. the reranker on `:8002`) — or run the `TRIPLE_8GB` pack (0.5B reasoning stand-in + embed + rerank) when the third leg is required. Restore afterwards with `sh scripts/tools/run-task.sh local:llm`, verify `/v1/models`.
 - Reranker recipe (vLLM pooling, offline weights): mirror the embed container flags with `--runner pooling` and **no** `--convert` (v0.28 auto-detects sequence-classification); serve `/v1/score`; smoke-test discrimination (relevant vs irrelevant score gap, correct direction) before any A/B.
 - Crashed vLLM inits can leak VRAM across container restarts; repeated launch failures with shrinking headroom mean stop retrying — a host reboot is the reset. Do §4 first.
 - `nvidia-smi` is the source of truth for free VRAM, not arithmetic.
@@ -262,13 +263,13 @@ server fails KV init against leftovers; profiles declare this order).
 `MODEL` is **not** budget-resolved: the launcher defaults the reasoning role
 to Gemma-4, so `BUDGET_PROFILE=TRIPLE_8GB` alone runs Gemma at the 0.5B
 pack's 0.20 share and vLLM init fails. Pass it per recipe —
-`BUDGET_PROFILE=TRIPLE_8GB MODEL=Qwen/Qwen2.5-0.5B-Instruct make local-vllm`
-— and never export `MODEL` globally (`local-vllm-embed`/`local-vllm-rerank`
+`BUDGET_PROFILE=TRIPLE_8GB MODEL=Qwen/Qwen2.5-0.5B-Instruct sh scripts/tools/run-task.sh local:llm`
+— and never export `MODEL` globally (`local:embed`/`local:rerank`
 default their own models and an exported value would hijack both).
 
-`make local-stack`'s gateway routes by model id and defaults the reasoning
+`sh scripts/tools/run-task.sh local:stack`'s gateway routes by model id and defaults the reasoning
 name to Gemma-4; when `:8000` serves anything else, pass
-`GATEWAY_REASONING_MODEL=Qwen/Qwen2.5-0.5B-Instruct make local-stack` (the
+`GATEWAY_REASONING_MODEL=Qwen/Qwen2.5-0.5B-Instruct sh scripts/tools/run-task.sh local:stack` (the
 env is inherited by `run_local_gateway.sh`) or the probe 404s on the
 reasoning leg.
 
@@ -282,10 +283,10 @@ re-capture in the gate's own env instead of widening tolerances.
 |---|---|---|
 | `evals/baseline.json` (hash) / `baseline-vllm.json` (vllm) | Hash: any CPU. vLLM: lab/gap GPU stack (§2 block) | Hash ingest → hash-dim collection → hash eval; vLLM likewise. Mismatch exits 2, never 0. |
 | `evals/baseline-paraphrase[-vllm].json` | Same split, dedicated `paraphrase-manuals` collection | Fresh-ingest rung 3 before scoring; not in CI. |
-| `evals/holdout.jsonl` + `holdout-baseline.json` | RC-only vs `real_manuals` (`make eval-holdout` declares `VENUE=rc`) | Never tune locally; sha-verified on RC. |
+| `evals/holdout.jsonl` + `holdout-baseline.json` | RC-only vs `real_manuals` (`sh scripts/tools/run-task.sh eval:holdout` declares `VENUE=rc`) | Never tune locally; sha-verified on RC. |
 | `benchmarks/baseline.json` | CI runner (`cpu_count`, `qdrant_image`) | Never gate a dev-machine capture; repeats ≥3. |
 | `benchmarks/harness[-vllm].json` + L3 perf | GPU RC host (5-key env check, `concurrency` included) | Never merge GPU numbers into the CI bench JSON. |
-| Chat condensation A/B (evidence only — no baseline gate) | Live GPU stack; `real_manuals` under `VENUE=rc` | `make eval-chat`; record the row in `docs/eval.md` before any `CHAT_CONDENSE_ENABLED` default flip. |
+| Chat condensation A/B (evidence only — no baseline gate) | Live GPU stack; `real_manuals` under `VENUE=rc` | `sh scripts/tools/run-task.sh eval:chat`; record the row in `docs/eval.md` before any `CHAT_CONDENSE_ENABLED` default flip. |
 
 `VENUE=rc` is the operator declaration for every real-corpus row above:
 the frozen holdout and `real_manuals` fail closed without it, and dev
@@ -296,8 +297,8 @@ The full RC battery and its dated record live there.
 
 - Never switch branches while an ingest runs: parse workers spawn fresh processes that re-import the working tree — a mid-run switch mixes code versions across documents or crashes workers. Finish or kill the ingest first.
 - Quote shell expansions; never put JSON flags into an unquoted `${MODEL_ARGS}`.
-- Scope mode exports to the relevant Make targets with immediate `:=`; global
-  hash-mode exports leak into air-gap recipes. Match both `*embed*` and `*Embed*`.
+- Scope mode environment bridges to each Task operation; root/global
+  hash-mode exports leak into air-gap commands. Match both `*embed*` and `*Embed*`.
 - Never `pkill -f` with a pattern matching your own command line (the shell kills itself); use the `[u]` trick (`pkill -f "[u]vicorn.*8087"`) or port-based kill.
 - Agent stdout goes to a file, never a pipe, under load (an unread pipe wedges every request).
 

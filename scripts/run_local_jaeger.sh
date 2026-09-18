@@ -1,11 +1,11 @@
 #!/bin/sh
-# Local Jaeger v2 trace backend for `make local-stack` (local-dev only).
+# Local Jaeger v2 trace backend for `sh scripts/tools/run-task.sh local:stack` (local-dev only).
 # OTLP/HTTP on :4318 + UI/API on :16686, in-memory storage (ephemeral by
 # design — local traces are debug data). Same image/digest the air-gap pack
 # mirrors (images.txt), started with the image's default config.
 #
-#   make local-jaeger        # foreground; Ctrl-C stops the container
-#   make local-jaeger-stop   # stop a leftover container
+#   sh scripts/tools/run-task.sh local:jaeger:up        # foreground; Ctrl-C stops the container
+#   sh scripts/tools/run-task.sh local:jaeger:down   # stop a leftover container
 #
 # If a Jaeger already answers on the UI port (the local-stack reuse path),
 # this script reports it and exits 0 without taking ownership; a non-Jaeger
@@ -45,7 +45,7 @@ if curl -s -m 3 -o /dev/null "$BASE/api/services" 2>/dev/null; then
 fi
 command -v docker >/dev/null 2>&1 || die "docker is required for local Jaeger"
 if docker ps -a --format '{{.Names}}' | grep -qx "$JAEGER_NAME"; then
-    die "container '$JAEGER_NAME' already exists — 'make local-jaeger-stop' first (never auto-killed)"
+    die "container '$JAEGER_NAME' already exists — 'sh scripts/tools/run-task.sh local:jaeger:down' first (never auto-killed)"
 fi
 if curl -s -m 2 -o /dev/null "http://127.0.0.1:${JAEGER_OTLP_PORT}/" 2>/dev/null; then
     die "port $JAEGER_OTLP_PORT is serving something that is not Jaeger — free it or set JAEGER_OTLP_PORT"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fetch FastEmbed BM25 sparse weights into a directory for image baking.
 
-Run on the CONNECTED host only (make bm25-weights). The output directory is
+Run on the CONNECTED host only (sh scripts/tools/run-task.sh artifacts:bm25). The output directory is
 copied into the ingest and agent images so the air-gap never downloads.
 
 Runtime-fetched artifacts are pinned by content (AGENTS.md section 6):

@@ -26,9 +26,9 @@ allowlist. Read relevant [roadmap decisions](../ROADMAP.md) and
 | answers | [Evidence and answer states](agent.md#answer-contract) | [Prompt and parser](../src/mainframe_rag/agent/answer.py), [shared core](../src/mainframe_rag/agent/answer_core.py), [SSE](../src/mainframe_rag/agent/sse.py), [browser](../src/mainframe_rag/webui/static/js/console.js), [answer eval](../scripts/eval_answers.py) | [Answer tests](../tests/test_agent_api.py), [console tests](../tests/test_webui.py) |
 | http-model | [Transport and lifecycle](agent.md#http-model-contract) | [Model client](../src/mainframe_rag/agent/answer.py), [tokenizer](../src/mainframe_rag/agent/tokenizer.py), [gateway probe](../scripts/probe_gateway.py), [rerank](../src/mainframe_rag/retrieve/rerank.py) | [Transport tests](../tests/test_agent_api.py), [gateway tests](../tests/test_probe_gateway.py) |
 | retrieval | [Retrieval contracts](retrieval.md) | [Query](../src/mainframe_rag/retrieve/query.py), [screen](../src/mainframe_rag/retrieve/screen.py), [embed](../src/mainframe_rag/ingest/embed.py), [answer core](../src/mainframe_rag/agent/answer_core.py) | [Evaluation](eval.md), [query tests](../tests/test_query_filters.py) |
-| configuration | [Configuration propagation](deploy.md#configuration-contract) | [Example](../airgap.env.example), [overrides and validation](../scripts/airgap/common.sh), [preflight](../scripts/airgap/validate.sh), [agent render](../scripts/airgap/deploy.sh), [ingest render](../scripts/airgap/ingest.sh), [runtime settings](../src/mainframe_rag/config.py), [gateway handoff](../scripts/run_local_gateway.sh) | [Air-gap tests](../tests/test_airgap_validate_sh.py), [settings tests](../tests/test_config.py) |
+| configuration | [Configuration propagation](deploy.md#configuration-contract) | [Example](../airgap.env.example), [overrides and validation](../scripts/airgap/common.sh), [preflight](../scripts/airgap/validate.sh), [agent render](../scripts/airgap/deploy.sh), [ingest render](../scripts/airgap/ingest.sh), [Task wrapper](../taskfiles/airgap.yml), [CI](../.github/workflows/e2e.yml), [bundle/bootstrap](install_and_ops.md), [runtime settings](../src/mainframe_rag/config.py), [gateway handoff](../scripts/run_local_gateway.sh) | [Air-gap tests](../tests/test_airgap_validate_sh.py), [settings tests](../tests/test_config.py) |
 | deployment | [Deployment policy](deploy.md#deployment-policy) | [Install/bootstrap](install_and_ops.md), [real-corpus recovery](local-real-corpus.md), [CRC release](crc-release-verification.md), [pins](../images.txt) | [Release record](crc-release-record.md), [CI inventory](deploy.md#ci-policy) |
-| verification | [Required minimums](live-stack.md#verification-minimums) | [Operating modes](live-stack.md#operating-modes), [Make targets](../Makefile), [Task entry](../Taskfile.yml), [task policy](task-runner.md#scope), [test design](testing.md#evidence-design) | [Evidence rules](testing.md#evidence-design) |
+| verification | [Required minimums](live-stack.md#verification-minimums) | [Operating modes](live-stack.md#operating-modes), [Task entry](../Taskfile.yml), [quality tasks](../taskfiles/quality.yml), [task policy](task-runner.md#scope), [test design](testing.md#evidence-design) | [Evidence rules](testing.md#evidence-design) |
 <!-- context-map:end -->
 
 <a id="conflicts"></a>
@@ -386,7 +386,7 @@ No fixed ten-PR study or invented percentage improvement blocks this issue.
 <a id="context-check-format"></a>
 ## Offline check format and prerequisite diagnosis
 
-`make check-context` checks deterministic structure only. The marked context-map
+`sh scripts/tools/run-task.sh qa:context` checks deterministic structure only. The marked context-map
 and instruction-chains tables above are the curated input. Each contract row
 has one canonical owner link; other cells name boundary/evidence links. Supported
 links are ordinary `[label]` followed by `(relative/path)`, with an optional `#explicit-id` whose
@@ -405,7 +405,7 @@ changing template links; before merge, use a head-pinned equivalent for
 click-through, since a new file/anchor may not exist on `main` yet.
 The checker does not establish semantic consistency or agent understanding.
 
-`make agent-doctor` defaults to `unit`; `PROFILE=sim` and `PROFILE=deploy` add
+`sh scripts/tools/run-task.sh dev:doctor` defaults to `unit`; `PROFILE=sim` and `PROFILE=deploy` add
 CLI/pin prerequisites. Run `python3 scripts/agent_doctor.py --profile sim
 --probe-docker` for the optional local-socket probe (one command). Exit 0 means
 verified prerequisites, 2 means missing or unable-to-verify prerequisites with

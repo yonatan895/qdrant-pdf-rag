@@ -4,7 +4,7 @@
 
 Citation-first expert mainframe agent: hybrid retrieval over ~100 GB of IBM-style manuals (IBM, Broadcom/CA, BMC, Precisely) on **air-gapped OpenShift**, answering operational questions with exact citations — document number, title, heading path, printed page label — plus optional JCL/REXX/operator steps from a reasoning model.
 
-Models (reasoning, dense embed, reranker) are served by the **platform team's internal vLLM / LiteLLM gateway** on a separate cluster — in production this repo only consumes that tier over HTTP; locally `make local-stack` simulates the full topology (vLLM behind the real LiteLLM gateway + Qdrant + Jaeger + agent, with tracing verified end to end). See [Model Gateway & Ownership Contract](#model-gateway--ownership-contract) below.
+Models (reasoning, dense embed, reranker) are served by the **platform team's internal vLLM / LiteLLM gateway** on a separate cluster — in production this repo only consumes that tier over HTTP; locally `sh scripts/tools/run-task.sh local:stack` simulates the full topology (vLLM behind the real LiteLLM gateway + Qdrant + Jaeger + agent, with tracing verified end to end). See [Model Gateway & Ownership Contract](#model-gateway--ownership-contract) below.
 
 - **Design & Architecture:** [docs/architecture.md](docs/architecture.md) (source of truth)
 - **Installation & Operations Guide:** [docs/install_and_ops.md](docs/install_and_ops.md) (step-by-step local & air-gap runbook)
@@ -35,7 +35,7 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 
 **Production (air-gap):** the platform team owns the model tier — reasoning, dense embed, and rerank served by vLLM behind a LiteLLM gateway on a separate cluster. This repo owns Qdrant + ingest + retrieval + the FastAPI agent and consumes the model tier **over HTTP only**; it never installs, deploys, or Helm-charts vLLM / LiteLLM / GPU operators on a product path. All model legs go through the gateway — there is no direct-to-vLLM product path. Tracing is **on by default**: the deploy ships Jaeger for this repo's components (agent + ingest) and `airgap.env` can set `OTEL_EXPORTER_OTLP_ENDPOINT` to a custom collector or to `off` to disable; the model tier's monitoring stays the platform team's.
 
-**Local dev/test:** `make local-stack` simulates the *complete* production topology on one machine — this repo's Qdrant + agent + Jaeger, plus a **platform stand-in**: local vLLM backends behind the **real** (digest-pinned) LiteLLM gateway. Agent and ingest still reach models through the gateway, so the production wire contract (single origin, model-id routing, per-leg virtual keys) is what gets tested, and a `v1.search` span must land in the local Jaeger before the stack reports up. The console is on by default (`UI_ENABLED=true`, `GET /ui` smoke-checked; set `UI_ENABLED=false` for the fail-closed route set). The local model/gateway simulation scripts are local-only — never in the air gap or Helm (CI's separate `airgap-rehearsal` uses the documented `scripts/mock_vllm.py` stand-in). See [docs/install_and_ops.md](docs/install_and_ops.md) §3.6.
+**Local dev/test:** `sh scripts/tools/run-task.sh local:stack` simulates the *complete* production topology on one machine — this repo's Qdrant + agent + Jaeger, plus a **platform stand-in**: local vLLM backends behind the **real** (digest-pinned) LiteLLM gateway. Agent and ingest still reach models through the gateway, so the production wire contract (single origin, model-id routing, per-leg virtual keys) is what gets tested, and a `v1.search` span must land in the local Jaeger before the stack reports up. The console is on by default (`UI_ENABLED=true`, `GET /ui` smoke-checked; set `UI_ENABLED=false` for the fail-closed route set). The local model/gateway simulation scripts are local-only — never in the air gap or Helm (CI's separate `airgap-rehearsal` uses the documented `scripts/mock_vllm.py` stand-in). See [docs/install_and_ops.md](docs/install_and_ops.md) §3.6.
 
 Production wiring — all three legs in `airgap.env` (see [docs/install_and_ops.md](docs/install_and_ops.md) §4.3):
 
@@ -55,8 +55,10 @@ kubectl -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gat
 Local full-stack simulation (Qdrant + gateway + agent + probe; optional ingest):
 
 ```bash
-make local-vllm local-vllm-embed local-vllm-rerank   # one per terminal (GPU)
-make local-stack                                      # or CORPUS_DIR=<dir> make local-stack
+sh scripts/tools/run-task.sh local:llm
+sh scripts/tools/run-task.sh local:embed
+sh scripts/tools/run-task.sh local:rerank   # one per terminal (GPU)
+sh scripts/tools/run-task.sh local:stack                                      # or CORPUS_DIR=<dir> sh scripts/tools/run-task.sh local:stack
 ```
 
 ## Live State (Optional, Default Off)
@@ -75,82 +77,90 @@ make local-stack                                      # or CORPUS_DIR=<dir> make
 
 ---
 
-## Makefile Targets Reference
+## Task command reference
+
+Use the repository-pinned entry from the checkout root. On a connected host,
+install once with `sh scripts/tools/install-task.sh`; offline bootstrap supplies
+the same tool without network access. Start with
+`sh scripts/tools/run-task.sh --list` and
+`sh scripts/tools/run-task.sh <name> --summary`. See the
+[runner contract](docs/task-runner.md) for inputs and older command names.
 
 | Target Category | Command | Description |
 |---|---|---|
-| **Setup & Quality** | `make venv` | Create `.venv` and install locked Python 3.14 dependencies |
-| | `make bm25-weights` | Download and cache FastEmbed BM25 model weights |
-| | `make check` | Run `ruff check`, `mypy src`, and unit test suite |
-| | `make test` | Run unit test suite (`pytest tests -v`) |
-| | `make lint` | Run Ruff linter |
-| | `make typecheck` | Run Mypy static type checker |
-| **Simulation** | `make sim` | Run full integration simulation tier (ephemeral Docker Qdrant + mock LLM) |
-| | `make sim-qdrant` | Start a local Docker Qdrant container on port 6333 |
-| | `make sim-clean` | Stop and remove the local Docker Qdrant container |
-| | `make loadtest-mock` | Load tier: same composition under concurrency, absolute contracts (fail-closed, no skips) |
-| **Accuracy & Eval** | `make eval` | Score golden set queries (`evals/golden.jsonl`) against the mode-keyed baseline (`evals/baseline.json` in hash mode, `evals/baseline-vllm.json` in vllm mode) |
-| | `make gate-l1` | L1 retrieval gate on an ephemeral Qdrant simulator (automated CI check) |
-| | `make eval-answers` | Answer-tier grounding eval (`/v1/answer` must cite, abstain entries must not answer) — live GPU stack |
-| | `make eval-paraphrase` | Paraphrase retrieval instrument (semantic queries without near-verbatim echo) — dedicated collection |
-| | `make eval-holdout` | Score the frozen holdout (`evals/holdout.jsonl`, sha-pinned) — release candidates only |
-| | `make eval-chat` | Multi-turn condensation A/B (`scripts/eval_chat.py`) — live GPU stack, evidence-only, RC venue for real corpora |
-| | `make eval-baseline` | Re-record committed retrieval accuracy baseline (dedicated PR) |
-| | `make eval-draft` | Helper to draft golden-set candidate queries from collection payload |
-| | `make verify-golden` | Mechanically verify golden expectations against the live collection (gates the corpus) |
-| | `make eval-report` | Print terminal retrieval evaluation report |
-| | `make eval-html` | Generate self-contained offline HTML evaluation dashboard (`bundles/eval-report.html`) |
-| | `make eval-compare` | Compare evaluation runs with classification shifts and regression checks |
-| | `make harness-gate` / `make harness-l2` / `make harness-l3` / `make harness-l4` | Layered harness tiers L1/L2/L3/L4 — RC-only, live GPU stack |
-| | `make harness-baseline` / `make harness-l3-baseline` | Re-record harness baselines (dedicated PR) |
-| **Benchmarks** | `make bench` | Benchmark ingest rate, peak RSS, Qdrant RAM/disk, and latency vs baseline |
-| | `make bench-baseline` | Re-record committed performance baseline (dedicated PR) |
-| | `make bench-report` | Print terminal benchmark performance report |
-| | `make bench-html` | Generate self-contained offline HTML benchmark dashboard (`bundles/bench-report.html`) |
-| | `make bench-compare` | Compare benchmark performance against baseline |
-| | `make loadtest` | Run concurrent load test against agent search endpoint |
-| **Interactive Demo** | `make query-demo` | Launch interactive terminal REPL (`rag-search> `) for inspecting queries |
-| | `QUERY="..." make query-demo` | Inspect a single query with classification, latency, rank, citations & text |
-| | `make ask` | Launch interactive reasoning Q&A assistant (`rag-answer> `) with LLM & citations |
-| | `QUERY="..." make ask` | Ask a single question and get grounded reasoning answer with citations |
-| **Local vLLM & GPU** | `make local-vllm` | Run local vLLM reasoning server on GPU (port 8000, Gemma-4, Budget `GPU_MEM=0.64`) |
-| | `make local-vllm-embed` | Run local vLLM dense embedding server on GPU (port 8001, Qwen3-Embedding-0.6B, `GPU_MEM=0.33`, `--runner pooling --convert embed --enforce-eager`) |
-| | `make local-vllm-rerank` | Run local vLLM reranker server on GPU (port 8002, `BAAI/bge-reranker-v2-m3`) |
-| | `make local-stack` | Canonical full local simulation (Qdrant + Jaeger + LiteLLM gateway + agent + console; `UI_ENABLED=true` by default) |
-| | `make local-gateway` / `make local-gateway-stop` | Foreground LiteLLM gateway (port 4000) / stop it and its key store |
-| | `make local-jaeger` / `make local-jaeger-stop` | Jaeger v2 trace backend (UI :16686) / stop it |
-| | `make run-agent` | Start the agent with `LLM_STREAM=true` (reasoning SSE streaming for TTFT) on port 8080; serves `/ui` when `UI_ENABLED=true` |
-| | `make test-vllm-e2e` | Run automated end-to-end suite against local vLLM & Qdrant with grounding validation |
-| **Cluster recipe** | `make pull-chart` / `make helm-template` / `make helm-lint` | Fetch / render / lint the vendored Qdrant chart against OpenShift values |
-| | `make wheelhouse` / `make bm25-weights` / `make build-images` | Build offline wheelhouse, cache BM25 weights, build UBI images (connected host) |
-| | `make e2e-demo-pdfs` | Generate synthetic demo PDFs into `output/demo-pdfs` |
-| | `make clean` | Remove `.venv`, caches, `bundles/`, and `output/` |
-| **Packaging & Standard Deployment** | `make airgap-pack` | Build sneakernet package (`dist/qdrant-pdf-rag-<sha>.tar`) on connected host |
-| | `make airgap-validate` | Pre-flight validation of tools, env, storage class, and OpenShift SCC |
-| | `make airgap-load` | Load image archives and push to `${INTERNAL_REGISTRY}` (in air-gap or local test registry) |
-| | `make airgap-deploy` | Deploy Qdrant cluster, Jaeger v2 tracing, and Agent via standard Helm + Kustomize |
-| | `make airgap-ingest` | Launch one-shot ingest Job against `CORPUS_PVC=<pvc>` |
-| | `make airgap-smoke` | Smoke test in-cluster search endpoint with fail-closed `/healthz` probe |
-| | `make airgap-pipeline` | Single master orchestrator running validate -> load -> deploy -> ingest -> smoke |
-| | `make airgap-dryrun` | Pre-flight dry-run proving manifest rendering and fail-closed rules without cluster |
+| **Setup & Quality** | `sh scripts/tools/run-task.sh dev:setup PY=python3.14` | Create `.venv` and install locked Python 3.14 dependencies |
+| | `sh scripts/tools/run-task.sh artifacts:bm25` | Download and cache FastEmbed BM25 model weights |
+| | `sh scripts/tools/run-task.sh qa:check` | Run `ruff check`, `mypy src`, and unit test suite |
+| | `sh scripts/tools/run-task.sh qa:unit` | Run unit test suite (`pytest tests -v`) |
+| | `sh scripts/tools/run-task.sh qa:lint` | Run Ruff linter |
+| | `sh scripts/tools/run-task.sh qa:typecheck` | Run Mypy static type checker |
+| **Simulation** | `sh scripts/tools/run-task.sh qa:sim` | Run full integration simulation tier (ephemeral Docker Qdrant + mock LLM) |
+| | `sh scripts/tools/run-task.sh local:qdrant:up` | Start a local Docker Qdrant container on port 6333 |
+| | `sh scripts/tools/run-task.sh local:qdrant:down` | Stop and remove the local Docker Qdrant container |
+| | `sh scripts/tools/run-task.sh qa:load` | Load tier: same composition under concurrency, absolute contracts (fail-closed, no skips) |
+| **Accuracy & Eval** | `sh scripts/tools/run-task.sh eval:retrieval` | Score golden set queries (`evals/golden.jsonl`) against the mode-keyed baseline (`evals/baseline.json` in hash mode, `evals/baseline-vllm.json` in vllm mode) |
+| | `sh scripts/tools/run-task.sh eval:gate-l1` | L1 retrieval gate on an ephemeral Qdrant simulator (automated CI check) |
+| | `sh scripts/tools/run-task.sh eval:answers` | Answer-tier grounding eval (`/v1/answer` must cite, abstain entries must not answer) — live GPU stack |
+| | `sh scripts/tools/run-task.sh eval:paraphrase` | Paraphrase retrieval instrument (semantic queries without near-verbatim echo) — dedicated collection |
+| | `sh scripts/tools/run-task.sh eval:holdout` | Score the frozen holdout (`evals/holdout.jsonl`, sha-pinned) — release candidates only |
+| | `sh scripts/tools/run-task.sh eval:chat` | Multi-turn condensation A/B (`scripts/eval_chat.py`) — live GPU stack, evidence-only, RC venue for real corpora |
+| | `sh scripts/tools/run-task.sh eval:baseline` | Re-record committed retrieval accuracy baseline (dedicated PR) |
+| | `sh scripts/tools/run-task.sh eval:draft` | Helper to draft golden-set candidate queries from collection payload |
+| | `sh scripts/tools/run-task.sh eval:verify-golden` | Mechanically verify golden expectations against the live collection (gates the corpus) |
+| | `sh scripts/tools/run-task.sh eval:report` | Print terminal retrieval evaluation report |
+| | `sh scripts/tools/run-task.sh eval:html` | Generate self-contained offline HTML evaluation dashboard (`bundles/eval-report.html`) |
+| | `sh scripts/tools/run-task.sh eval:compare` | Compare evaluation runs with classification shifts and regression checks |
+| | `sh scripts/tools/run-task.sh eval:harness:gate` / `sh scripts/tools/run-task.sh eval:harness:l2` / `sh scripts/tools/run-task.sh eval:harness:l3` / `sh scripts/tools/run-task.sh eval:harness:l4` | Layered harness tiers L1/L2/L3/L4 — RC-only, live GPU stack |
+| | `sh scripts/tools/run-task.sh eval:harness:baseline` / `sh scripts/tools/run-task.sh eval:harness:l3-baseline` | Re-record harness baselines (dedicated PR) |
+| **Benchmarks** | `sh scripts/tools/run-task.sh eval:bench` | Benchmark ingest rate, peak RSS, Qdrant RAM/disk, and latency vs baseline |
+| | `sh scripts/tools/run-task.sh eval:bench-baseline` | Re-record committed performance baseline (dedicated PR) |
+| | `sh scripts/tools/run-task.sh eval:bench-report` | Print terminal benchmark performance report |
+| | `sh scripts/tools/run-task.sh eval:bench-html` | Generate self-contained offline HTML benchmark dashboard (`bundles/bench-report.html`) |
+| | `sh scripts/tools/run-task.sh eval:bench-compare` | Compare benchmark performance against baseline |
+| | `sh scripts/tools/run-task.sh eval:load` | Run concurrent load test against agent search endpoint |
+| **Interactive Demo** | `sh scripts/tools/run-task.sh local:query` | Launch interactive terminal REPL (`rag-search> `) for inspecting queries |
+| | `QUERY="..." sh scripts/tools/run-task.sh local:query` | Inspect a single query with classification, latency, rank, citations & text |
+| | `sh scripts/tools/run-task.sh local:ask` | Launch interactive reasoning Q&A assistant (`rag-answer> `) with LLM & citations |
+| | `QUERY="..." sh scripts/tools/run-task.sh local:ask` | Ask a single question and get grounded reasoning answer with citations |
+| **Local vLLM & GPU** | `sh scripts/tools/run-task.sh local:llm` | Run local vLLM reasoning server on GPU (port 8000, Gemma-4, Budget `GPU_MEM=0.64`) |
+| | `sh scripts/tools/run-task.sh local:embed` | Run local vLLM dense embedding server on GPU (port 8001, Qwen3-Embedding-0.6B, `GPU_MEM=0.33`, `--runner pooling --convert embed --enforce-eager`) |
+| | `sh scripts/tools/run-task.sh local:rerank` | Run local vLLM reranker server on GPU (port 8002, `BAAI/bge-reranker-v2-m3`) |
+| | `sh scripts/tools/run-task.sh local:stack` | Canonical full local simulation (Qdrant + Jaeger + LiteLLM gateway + agent + console; `UI_ENABLED=true` by default) |
+| | `sh scripts/tools/run-task.sh local:gateway:up` / `sh scripts/tools/run-task.sh local:gateway:down` | Foreground LiteLLM gateway (port 4000) / stop it and its key store |
+| | `sh scripts/tools/run-task.sh local:jaeger:up` / `sh scripts/tools/run-task.sh local:jaeger:down` | Jaeger v2 trace backend (UI :16686) / stop it |
+| | `sh scripts/tools/run-task.sh local:agent` | Start the agent with `LLM_STREAM=true` (reasoning SSE streaming for TTFT) on port 8080; serves `/ui` when `UI_ENABLED=true` |
+| | `sh scripts/tools/run-task.sh qa:vllm-e2e` | Run automated end-to-end suite against local vLLM & Qdrant with grounding validation |
+| **Cluster recipe** | `sh scripts/tools/run-task.sh artifacts:chart-fetch` / `sh scripts/tools/run-task.sh artifacts:helm-render` / `sh scripts/tools/run-task.sh artifacts:helm-lint` | Fetch / render / lint the vendored Qdrant chart against OpenShift values |
+| | `sh scripts/tools/run-task.sh artifacts:wheelhouse` / `sh scripts/tools/run-task.sh artifacts:bm25` / `sh scripts/tools/run-task.sh artifacts:images` | Build offline wheelhouse, cache BM25 weights, build UBI images (connected host) |
+| | `sh scripts/tools/run-task.sh dev:demo-pdfs` | Generate synthetic demo PDFs into `output/demo-pdfs` |
+| | `sh scripts/tools/run-task.sh dev:clean` | Remove `.venv`, caches, `bundles/`, and `output/` |
+| **Packaging & Standard Deployment** | `sh scripts/tools/run-task.sh airgap:pack` | Build sneakernet package (`dist/qdrant-pdf-rag-<sha>.tar`) on connected host |
+| | `sh scripts/tools/run-task.sh airgap:validate` | Pre-flight validation of tools, env, storage class, and OpenShift SCC |
+| | `sh scripts/tools/run-task.sh airgap:load` | Load image archives and push to `${INTERNAL_REGISTRY}` (in air-gap or local test registry) |
+| | `sh scripts/tools/run-task.sh airgap:deploy` | Deploy Qdrant cluster, Jaeger v2 tracing, and Agent via standard Helm + Kustomize |
+| | `sh scripts/tools/run-task.sh airgap:ingest` | Launch one-shot ingest Job against `CORPUS_PVC=<pvc>` |
+| | `sh scripts/tools/run-task.sh airgap:smoke` | Smoke test in-cluster search endpoint with fail-closed `/healthz` probe |
+| | `sh scripts/tools/run-task.sh airgap:pipeline` | Single master orchestrator running validate -> load -> deploy -> ingest -> smoke |
+| | `sh scripts/tools/run-task.sh airgap:dryrun` | Pre-flight dry-run proving manifest rendering and fail-closed rules without cluster |
 
 ---
 
 ## Quickstart (Connected Host)
 
 ```bash
-# 1. Bootstrap environment
-make venv
-make bm25-weights
+# 1. Install the pinned host runner, then prepare the environment
+sh scripts/tools/install-task.sh
+sh scripts/tools/run-task.sh dev:setup PY=python3.14
+sh scripts/tools/run-task.sh artifacts:bm25
 
 # 2. Run quality checks
-make check
+sh scripts/tools/run-task.sh qa:check
 
 # 3. Run integration simulation
-make sim
+sh scripts/tools/run-task.sh qa:sim
 
 # 4. Ingest a sample corpus in development mode (hash embedder, scratch collection)
-make sim-qdrant   # local Qdrant on 127.0.0.1:6333 (or reuse QDRANT_SIM_URL)
+sh scripts/tools/run-task.sh local:qdrant:up   # local Qdrant on 127.0.0.1:6333 (or reuse QDRANT_SIM_URL)
 QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=dev-corpus \
   EMBED_MODE=hash ALLOW_HASH_MODE=true \
   .venv/bin/python -m mainframe_rag.ingest.run_ingest \
@@ -161,7 +171,7 @@ QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=dev-corpus \
 
 ## Standard Deployment Architecture (Air-Gap & Local Cluster)
 
-The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `airgap-deploy` -> `airgap-ingest` -> `airgap-smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts, Helm chart, and Kustomize overlays, with adapted sizing and SCC for local test clusters).
+The hardened 5-stage deployment pipeline (`airgap:pack` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts, Helm chart, and Kustomize overlays, with adapted sizing and SCC for local test clusters).
 
 **The air-gap never builds images.** Connected `main` is the only image factory.
 
@@ -170,33 +180,33 @@ The hardened 5-stage deployment pipeline (`airgap-pack` -> `airgap-load` -> `air
 1. **Connected Host (or CI Release Download):**
    ```bash
    git checkout <main-sha>  # Full 40-character Git SHA (or download sneakernet-bundle from GitHub Actions)
-   make airgap-pack         # -> dist/qdrant-pdf-rag-<sha>.tar + .sha256 + PACKING_RECORD.txt
+   sh scripts/tools/run-task.sh airgap:pack         # -> dist/qdrant-pdf-rag-<sha>.tar + .sha256 + PACKING_RECORD.txt
    ```
 
 2. **Sneakernet Transfer & Automated Bootstrap:**
    ```bash
    sha256sum -c qdrant-pdf-rag-<sha>.tar.sha256
    tar -xf qdrant-pdf-rag-<sha>.tar
-   sh bootstrap.sh          # Verifies checksums, clones repo, populates dist/, sets up airgap.env
+   sh bootstrap.sh          # Verifies signature/members; installs offline Task and workspace
    cd qdrant-pdf-rag
    ```
 
 3. **Air-Gapped Bastion:**
    ```bash
    # Configure environment & pre-flight validation:
-   cp airgap.env.example airgap.env   # registry, namespace, storage class, model endpoints + gateway keys
-   make airgap-validate               # tools, storage class (refusing NFS), OpenShift SCC, key Secret
+   # Edit the airgap.env created by bootstrap; preserve existing operator settings.
+   sh scripts/tools/run-task.sh airgap:validate               # tools, storage class (refusing NFS), OpenShift SCC, key Secret
 
    # Option A: Run complete automated pipeline:
-   CORPUS_PVC=<pvc> make airgap-pipeline
+   CORPUS_PVC=<pvc> sh scripts/tools/run-task.sh airgap:pipeline
 
    # Option B: Or execute step-by-step:
-   make airgap-load                   # Push the 4 base image archives (+ oauth-proxy once bundled) to the internal registry
-   make airgap-deploy                 # Deploy Qdrant StatefulSet + Agent + Jaeger (tracing on by default)
+   sh scripts/tools/run-task.sh airgap:load                   # Push the 4 base image archives (+ oauth-proxy once bundled) to the internal registry
+   sh scripts/tools/run-task.sh airgap:deploy                 # Deploy Qdrant StatefulSet + Agent + Jaeger (tracing on by default)
    # Prove the gateway from inside the cluster, apply its leg-order recommendation:
    kubectl -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py
-   make airgap-ingest CORPUS_PVC=<pvc># Ingest corpus from storage PVC
-   make airgap-smoke                  # Verify search endpoint (/healthz pre-flight check)
+   sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc> # Ingest corpus from storage PVC
+   sh scripts/tools/run-task.sh airgap:smoke                  # Verify search endpoint (/healthz pre-flight check)
    ```
 
 ### 2. Local Cluster Testing Standard (Kind + Local Registry)
@@ -215,11 +225,11 @@ To test the deployment scripts and Kubernetes manifests locally with adapted siz
 
 3. **Execute 5-Stage Pipeline:**
    ```bash
-   make airgap-pack
-   INTERNAL_REGISTRY=localhost:5000 INSECURE_REGISTRY=true make airgap-load
-   make airgap-deploy
-   make airgap-ingest CORPUS_PVC=<pvc>
-   make airgap-smoke
+   sh scripts/tools/run-task.sh airgap:pack
+   INTERNAL_REGISTRY=localhost:5000 INSECURE_REGISTRY=true sh scripts/tools/run-task.sh airgap:load
+   sh scripts/tools/run-task.sh airgap:deploy
+   sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc>
+   sh scripts/tools/run-task.sh airgap:smoke
    ```
 
 See **[docs/install_and_ops.md](docs/install_and_ops.md#47-local-cluster-testing-standard-kind--local-registry)** for the complete Kind setup, registry configuration, and mock vLLM setup.
@@ -228,7 +238,7 @@ See **[docs/install_and_ops.md](docs/install_and_ops.md#47-local-cluster-testing
 
 ## Endpoints
 
-The agent listens on port 8080 (ClusterIP `rag-agent:8080` in-cluster; the external console Route is `AGENT_ROUTE=true`). Local ports: Qdrant 6333, reasoning 8000, embed 8001, rerank 8002, LiteLLM gateway 4000 (`make local-stack`), Jaeger 16686.
+The agent listens on port 8080 (ClusterIP `rag-agent:8080` in-cluster; the external console Route is `AGENT_ROUTE=true`). Local ports: Qdrant 6333, reasoning 8000, embed 8001, rerank 8002, LiteLLM gateway 4000 (`sh scripts/tools/run-task.sh local:stack`), Jaeger 16686.
 
 ```bash
 # Readiness: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible"} (degraded = HTTP 503)
@@ -256,7 +266,7 @@ curl -s -X POST http://localhost:8080/v1/chat \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"How do I resolve IEA500I command rejected?"}]}'
 
-# Operator console (ADR-0004) — served when UI_ENABLED=true (make local-stack does):
+# Operator console (ADR-0004) — served when UI_ENABLED=true (sh scripts/tools/run-task.sh local:stack does):
 #   http://localhost:8080/ui
 
 # Prometheus exposition (opt-in via METRICS_ENABLED, else 404):

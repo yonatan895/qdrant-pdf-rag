@@ -90,7 +90,7 @@ while `diagnostic_dualpath_enabled` remains default-off.
   **embed-mode** mismatch only warns and still gates. A requested gate
   that cannot be applied — missing `--check` file or collection mismatch
   — exits **2**, never 0 (issue #159): a skip is distinguishable from
-  green, so `make eval` / `make eval-paraphrase` fail the job. Exit 0
+  green, so `sh scripts/tools/run-task.sh eval:retrieval` / `sh scripts/tools/run-task.sh eval:paraphrase` fail the job. Exit 0
   remains only for a genuinely green gated run or a run with no gate
   requested (`--no-check`, or no mode-keyed baseline recorded yet).
 - **`--check` vs `--update-baseline` are mutually exclusive.** Baselines
@@ -136,14 +136,14 @@ verdict.
   `real_manuals` — 435057 pts, `VENUE=rc` + `QDRANT_COLLECTION=real_manuals`,
   re-recorded 2026-09-12 on the re-frozen set) and `benchmarks/harness.json`
   (hash venue: **dev golden set only**, `evals/golden.jsonl`, over the
-  snapshot-pinned synthetic hash corpus — the Makefile harness targets pin
+  snapshot-pinned synthetic hash corpus — the Task harness commands pin
   `--golden` per mode, issue #158). Venue architecture: harness ↔ real
   (`real_manuals` promotion signal with discriminating power) alongside
-  holdout ↔ real (`real_manuals` via `make eval-holdout` — the honest
+  holdout ↔ real (`real_manuals` via `sh scripts/tools/run-task.sh eval:holdout` — the honest
   real-corpus semantic gate); the synthetic dev venue (`mainframe_manuals`,
   214 pts) currently has no vLLM harness pin, so a synthetic `harness-gate`
   fails closed until one is re-recorded. The holdout runs only under vllm
-  mode — inside the vllm harness (real venue) and as `make eval-holdout`
+  mode — inside the vllm harness (real venue) and as `sh scripts/tools/run-task.sh eval:holdout`
   against `real_manuals` (the semantic gate). The hash harness stays dev-only per
   #158: the synthetic hash venue's sibling pages carry near-identical
   query text by corpus design ("deliberate lexical competitors"). Both venues: collection + hash-vs-vllm pairing is
@@ -180,7 +180,7 @@ verdict.
   bench file. Gates fail closed on env mismatch (5 keys: `cpu_count`,
   `embed_mode`, `qdrant_image`, `gpu_name`, `concurrency`), demand zero
   errors and zero missing timings, and cap stage p95 at 3× baseline.
-  `CONCURRENCY`/`DURATION`/`REQUEST_TIMEOUT` Make variables shape the load
+  `CONCURRENCY`/`DURATION`/`REQUEST_TIMEOUT` Task inputs shape the load
   (recorded in `_meta.env`); a slow reasoning model under concurrency needs
   `REQUEST_TIMEOUT` above the 30s default or every request is a client-side
   error, not a latency sample.   `benchmarks/harness-l3-vllm.json` is
@@ -215,7 +215,7 @@ verdict.
   trend data, not a verdict.
   An uncomputed metric fails rather than vanishing. The reference records
   the venue/embed mode/reasoning model and the gate refuses (exit 2) when
-  the live tier differs; record it with `make harness-l4-record`
+  the live tier differs; record it with `sh scripts/tools/run-task.sh eval:harness:l4-record`
   (dedicated PR). RC-only, never a PR gate.
 - Harness clients use a hardcoded 60s Qdrant timeout (distinct from the
   eval's settings timeout). Bootstrap CIs use linear-interpolated
@@ -314,8 +314,7 @@ competitors (sibling docs sharing vocabulary, intra-doc section pairs).
   `-vllm.json` vllm, dedicated collection): the hash numbers are a plumbing
   anchor, the vllm numbers the semantic instrument — headroom below 1.0 is
   intentional. Same ratio tolerances as the main set. Runbook: generate the
-  corpus, ingest into the dedicated collection, then evaluate — `make
-   eval-paraphrase` runs only the check, not the ingest. Not wired into CI
+  corpus, ingest into the dedicated collection, then evaluate — `sh scripts/tools/run-task.sh eval:paraphrase` runs only the check, not the ingest. Not wired into CI
    (no cluster, no embed server there); never tune against the frozen
     holdout.
 - Measured verdict (issue #300, paraphrase vLLM A/B 2026-09-12, header-only
@@ -336,7 +335,7 @@ anywhere (`tests/test_replay.py`, `scripts/capture_pool.py`):
 
 ```bash
 # 1. Capture (RC/gap, live Qdrant + platform embed/rerank endpoints):
-VENUE=rc make capture-pool          # records into bundles/pools-YYYYMMDD.jsonl
+VENUE=rc sh scripts/tools/run-task.sh eval:capture-pool          # records into bundles/pools-YYYYMMDD.jsonl
 #    overrides: GOLDEN=evals/golden.jsonl OUT=/path/pools.jsonl
 #    (the raw script also takes --no-ce / --max-queries; see its --help)
 # 2. Carry pools.jsonl back (ids/ranks/scores only, never chunk text —
@@ -363,7 +362,7 @@ committed (the real-corpus venue guard refuses `real_manuals` without
 ## 7. Golden corpus discipline
 
 `golden.jsonl` (121 dev) and `holdout.jsonl` (72, sha256-pinned, verified
-with `sha256sum -c` on RC-only `make eval-holdout`) are built from
+with `sha256sum -c` on RC-only `sh scripts/tools/run-task.sh eval:holdout`) are built from
 `expert_golden_seed.jsonl` plus payload mining by `build_golden_corpus.py`:
 manual bindings for out-of-pattern families, authored corrections,
 forced-abstain ids, absent-trap ids, then a deterministic ~60/40 per-class
@@ -374,7 +373,7 @@ split (LEG entries always dev).
   queries, `must_not`-inside-expected without the query id, and duplicate
   queries (case-folded); rarity, stratification, and hygiene WARN unless
   `--strict` (which also demands size and class coverage — and the default
-  `make verify-golden` does not pass `--strict`, so weak traps ship on 0
+  `sh scripts/tools/run-task.sh eval:verify-golden` does not pass `--strict`, so weak traps ship on 0
   FAIL alone).
 - Re-freeze process: rebuild, `verify-golden` 0 FAIL, new holdout sha,
   re-record baselines — one dedicated commit. Never iterate the holdout to
@@ -388,7 +387,7 @@ split (LEG entries always dev).
 
 ## 8. Benchmarks (`benchmark.py`, `loadtest.py`)
 
-`make bench` ingests a generated corpus (distinct bodies with unique
+`sh scripts/tools/run-task.sh eval:bench` ingests a generated corpus (distinct bodies with unique
 message ids, plus one plain doc; leftovers wiped; stale inventory deleted)
 into the pinned Qdrant image, then loads a real uvicorn agent backed by the
 mock LLM, measuring peak RSS, Qdrant container RAM/disk, and search/answer
@@ -444,9 +443,9 @@ schedule, never as a PR gate (`live-stack.md` §0/§5.2).
 **Venue declaration.** Every eval/harness entry point defaults to the dev
 venue: `evals/golden.jsonl` only, synthetic collections only. The frozen
 holdout (`evals/holdout.jsonl`) and the real-corpus collection
-(`real_manuals`) require `VENUE=rc` — set by the `make eval-holdout`
+(`real_manuals`) require `VENUE=rc` — set by the `sh scripts/tools/run-task.sh eval:holdout`
 recipe itself, and by operators for the harness tiers
-(`VENUE=rc make harness-l2`). Without the declaration the scripts exit 2
+(`VENUE=rc sh scripts/tools/run-task.sh eval:harness:l2`). Without the declaration the scripts exit 2
 ("frozen holdout … requires VENUE=rc"), so a truncated venue is never
 scored. `scripts/venue.py` owns the rule.
 
@@ -461,18 +460,21 @@ scored. `scripts/venue.py` owns the rule.
 
 | Step | Command | Artifact / verdict |
 |---|---|---|
-| 1. holdout semantics | `make eval-holdout` | `$(BUNDLE_DIR)/eval-holdout-{report.json,summary.md}` + manifest |
-| 2. L1 promotion | `VENUE=rc make harness-gate` | report + manifest; `merge`/`hold` |
-| 3. answer tier | `VENUE=rc make harness-l2` | report + summary + manifest; structural fails gate |
-| 4. judge gate | `VENUE=rc make harness-l4` | report + summary + review queue; `pass`/`hold`/`fail` |
-| 5. perf tier | `VENUE=rc make harness-l3` | report + manifest vs the L3 baseline |
-| 6. pool capture | `VENUE=rc make capture-pool` | dated `pools-YYYYMMDD.jsonl` (never committed) |
+| 1. holdout semantics | `sh scripts/tools/run-task.sh eval:holdout` | `<BUNDLE_DIR>/eval-holdout-{report.json,summary.md}` + manifest |
+| 2. L1 promotion | `VENUE=rc sh scripts/tools/run-task.sh eval:harness:gate` | report + manifest; `merge`/`hold` |
+| 3. answer tier | `VENUE=rc sh scripts/tools/run-task.sh eval:harness:l2` | report + summary + manifest; structural fails gate |
+| 4. judge gate | `VENUE=rc sh scripts/tools/run-task.sh eval:harness:l4` | report + summary + review queue; `pass`/`hold`/`fail` |
+| 5. perf tier | `VENUE=rc sh scripts/tools/run-task.sh eval:harness:l3` | report + manifest vs the L3 baseline |
+| 6. pool capture | `VENUE=rc sh scripts/tools/run-task.sh eval:capture-pool` | dated `pools-YYYYMMDD.jsonl` (never committed) |
 | 7. hermetic replay | `pytest tests/test_replay.py` + a replay sweep | A/B deltas in the PR body |
 
 L4's reference (`evals/harness-l4-thresholds.json`) is recorded with
-`VENUE=rc make harness-l4-record` on the RC tier and ships in a dedicated
+`VENUE=rc sh scripts/tools/run-task.sh eval:harness:l4-record` on the RC tier and ships in a dedicated
 PR. L2/L4 standing red on known product debt is an RC debt signal, not a
 broken target.
+
+Historical command spellings below are preserved as executed; use the
+[current Task migration map](task-runner.md#inventory) for new runs.
 
 **Dated record.** Each battery run appends a row here in the same PR or
 RC checklist that runs it (`$BUNDLE_DIR` reports are local). Run

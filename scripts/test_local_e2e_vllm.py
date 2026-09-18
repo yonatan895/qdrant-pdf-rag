@@ -80,7 +80,7 @@ def check_vllm_connection(base_url: str, model_name: str) -> tuple[bool, str]:
         print(
             f"[-] Could not connect to reasoning vLLM at {base_url}: {exc}\n"
             "    Please start the local vLLM server first:\n"
-            "      make local-vllm\n"
+            "      sh scripts/tools/run-task.sh local:llm\n"
             f"      or: MODEL={model_name} PORT=8000 sh scripts/run_local_vllm.sh",
             file=sys.stderr,
         )
@@ -126,7 +126,7 @@ def check_embedding_connection(
         print(
             f"[-] Could not connect to embedding endpoint at {base_url}: {exc}\n"
             "    Please start the local vLLM embedding server first:\n"
-            "      make local-vllm-embed\n"
+            "      sh scripts/tools/run-task.sh local:embed\n"
             f"      or: MODEL={model_name} PORT=8001 sh scripts/run_local_vllm.sh",
             file=sys.stderr,
         )

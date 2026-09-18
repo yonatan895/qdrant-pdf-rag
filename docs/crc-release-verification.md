@@ -252,7 +252,7 @@ For the concrete host, TLS registry, Windows-client, Secret and generator comman
 follow [local-crc-environment.md](local-crc-environment.md).
 
 Keep model serving in WSL behind the existing authenticated LiteLLM gateway
-([local-stack ownership](live-stack.md#full-local-simulation-make-local-stack)).
+([local-stack ownership](live-stack.md#full-local-simulation)).
 CRC host access exposes Windows services through `host.crc.testing`; it does
 not establish access to an arbitrary WSL listener. First prove a Windows
 client can reach the gateway, then prove the same connection from a CRC pod.
@@ -368,7 +368,7 @@ Production Qdrant values remove the chart's fixed UID, GID and fsGroup;
 [Jaeger](../deploy/kustomize/jaeger/deployment.yaml) also leaves identities to
 admission. Verify the resulting project-assigned ranges. A denied pod or
 unwritable volume blocks the run. Fix demonstrated incompatibilities in the
-owning production configuration with `make check` and `make airgap-dryrun`,
+owning production configuration with `sh scripts/tools/run-task.sh qa:check` and `sh scripts/tools/run-task.sh airgap:dryrun`,
 then obtain and retest a new main bundle. Never grant `anyuid`, disable SCC,
 or hide a security fix in a CRC-only values file. Validate every workload,
 including the OAuth container and completed Jobs.
@@ -376,8 +376,8 @@ including the OAuth container and completed Jobs.
 ## 6. Fresh bundle rehearsal
 
 1. Select a green, published-main SHA with all required image archives. Record
-   its CI evidence. For deployment changes, require `make check` and
-   `make airgap-dryrun` to pass; documentation edits require cited-path checks
+   its CI evidence. For deployment changes, require `sh scripts/tools/run-task.sh qa:check` and
+   `sh scripts/tools/run-task.sh airgap:dryrun` to pass; documentation edits require cited-path checks
    under [the change-class ladder](live-stack.md#0-which-rungs-you-owe-no-more-no-less).
 2. Obtain the signed bundle, its checksum, and the release signing public key
    from the approved out-of-band source. Require a custodied release key;
@@ -392,7 +392,7 @@ including the OAuth container and completed Jobs.
    sizing hooks, model IDs/dimension/operator revision, HTTPS gateway URLs, and Secret names.
    Populate the gateway and OAuth-cookie Secrets from local protected files.
    Do not put key values into the env file. Keep the exact bundle unmodified.
-5. Run `make airgap-validate`, then `make airgap-load`. Verify archive identity
+5. Run `sh scripts/tools/run-task.sh airgap:validate`, then `sh scripts/tools/run-task.sh airgap:load`. Verify archive identity
    against the signed manifest, then reconcile registry compression/config and
    runtime digests using [the image-identity procedure](deploy.md#image-identity-across-archive-and-registry-formats).
 6. Before product deployment, run a temporary pod using the loaded agent
@@ -405,7 +405,7 @@ including the OAuth container and completed Jobs.
    Adapt only registry, storage class, namespace, pull Secret, and SCC-safe
    security context. Keep the original generated content and the loaded
    release ingest image. Require generator completion; set `CORPUS_PVC`.
-8. Run `make airgap-pipeline` without skip flags. This repeats load, deploys
+8. Run `sh scripts/tools/run-task.sh airgap:pipeline` without skip flags. This repeats load, deploys
    the production overlays including the real OAuth sidecar, probes the
    configured gateway from the agent pod, ingests, and checks smoke/tracing.
    Save stage exit statuses. Empty search or skipped ingest/tracing is a
@@ -422,7 +422,7 @@ IDs remain attributable. Use explicit pod/container names for `oc exec`.
 | Images | Requested image refs and each running container's `imageID`, including OAuth, match loaded release artifacts. Account for manifest-list/platform and archive/registry compression differences; verify image configs/rootfs identity and actual registry digests. |
 | Storage writes | Bound PVCs, actual provisioner/access modes, successful ingest scratch/data writes, Qdrant snapshot creation, and Jaeger span persistence. |
 | Pod replacement | Replace one Qdrant pod and one agent pod, recording old/new UIDs. PVC identity, exact point count, representative hit IDs/citations, and health survive. Restart Jaeger and verify an earlier trace remains queryable. |
-| Repeat deployment | Repeat `make airgap-pipeline` on the same bundle/env; require rollout, new ingest Job completion, unchanged synthetic point count/IDs, healthy search, and tracing. Detect API-key rotation or immutable-resource failures. |
+| Repeat deployment | Repeat `sh scripts/tools/run-task.sh airgap:pipeline` on the same bundle/env; require rollout, new ingest Job completion, unchanged synthetic point count/IDs, healthy search, and tracing. Detect API-key rotation or immutable-resource failures. |
 | Snapshot recovery | Snapshot only the CRC synthetic collection, export and checksum it outside Git, then restore into an isolated empty collection/instance using the same Qdrant version and vector config. Verify exact count, sampled payload/point IDs, and equivalent queries; retain the original collection. Record snapshot and restore evidence, never commit snapshot bytes. |
 | OAuth Route | A fresh unauthenticated `GET /ui` may show the provider chooser (403); `/oauth/start` redirects to OpenShift OAuth. Browser login returns to `/ui`; a fresh session still requires authentication. No accidental direct public API/Jaeger/Qdrant Route. |
 | Certificates | Browser/CLI verifies Route hostname and ingress chain without bypass. Route is `reencrypt`, targets OAuth 8443, and trusts the Service CA; serving Secret is populated and matches its service identity. Existing Routes need inspection because deploy does not replace them. |

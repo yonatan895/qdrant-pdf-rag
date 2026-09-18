@@ -26,10 +26,10 @@ forbidden outcome, relevant owners/boundaries, assumptions, counterexample,
 and verification plan. An issue's file list is a starting map, not proof
 that other affected paths do not exist.
 
-Makefile is authoritative during the #402 transition; the pinned Task entry
-(Taskfile.yml, docs/task-runner.md) covers discovery/doctor/context/quality.
-Start with task --list and task <name> --summary. docs/live-stack.md owns
-verification.
+Use the pinned entry: sh scripts/tools/run-task.sh --list, then
+sh scripts/tools/run-task.sh <name> --summary. Taskfile.yml and taskfiles/
+own dispatch; docs/task-runner.md owns setup/inputs; docs/live-stack.md
+owns required verification.
 
 ## Hard boundaries
 

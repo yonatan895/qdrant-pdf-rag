@@ -98,7 +98,7 @@ def load_thresholds(path: Path) -> dict[str, Any]:
     a gate that cannot name its reference must not score."""
     if not path.exists():
         raise ThresholdError(
-            f"no L4 reference at {path}; record one on the RC host with `make harness-l4-record`"
+            f"no L4 reference at {path}; record one on the RC host with `sh scripts/tools/run-task.sh eval:harness:l4-record`"
         )
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
@@ -353,7 +353,7 @@ def save_thresholds(path: Path, summary: dict[str, Any], settings: Any, repeats:
     doc = {
         "_meta": {
             "note": (
-                "L4 answer-quality reference rates; record with `make harness-l4-record` "
+                "L4 answer-quality reference rates; record with `sh scripts/tools/run-task.sh eval:harness:l4-record` "
                 "(dedicated PR, AGENTS.md). Gate compares repeat means against these with "
                 "_meta.tolerance (default 0.15 = ~2.3 sigma of the 3-repeat mean at N=24; "
                 "raise N to tighten). An uncomputed metric fails. Structural fails gate "
@@ -436,7 +436,7 @@ def main(argv: list[str] | None = None) -> int:
             print("FAIL: L4 reference recorded in a different tier:", file=sys.stderr)
             for m in mismatches:
                 print(f"  - {m}", file=sys.stderr)
-            print("Re-record on this tier: make harness-l4-record", file=sys.stderr)
+            print("Re-record on this tier: sh scripts/tools/run-task.sh eval:harness:l4-record", file=sys.stderr)
             return 2
 
     t0 = time.monotonic()
