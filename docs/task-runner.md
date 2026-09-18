@@ -147,13 +147,13 @@ spaces, across every command family.
 
 Limits: the pinned `task` must be on `PATH` for connected-host targets
 (install script; doctor finding) — CI jobs that invoke `make` provision it
-first via an `Install pinned Task runner` step (`e2e.yml` checkout jobs and
-`load.yml` from the repo; black-box bundle jobs from the extracted bundle
-copy, pin fidelity at the bundle SHA; the full consumer switch to `task`
-stays increment C); air-gap entry points (`airgap-*`) retain direct script
-calls until increment C delivers the offline Task handoff (TR437-F1 Option 2),
-so offline bastions without Task remain functional; multiple goals run
-sequentially; no `-j` for installs/builds (concurrent processes must not share
+first via an `Install pinned Task runner` step (`e2e.yml` checkout jobs,
+`opencode.yml` review, and `load.yml` from the repo; black-box bundle jobs
+need no Task since `airgap-*` targets call stage scripts directly under
+TR437-F1 Option 2; the full consumer switch to `task` stays increment C);
+air-gap entry points (`airgap-*`) retain direct script calls until increment
+C delivers the offline Task handoff (TR437-F1 Option 2), so offline bastions
+without Task remain functional; multiple goals run sequentially; no `-j` for installs/builds (concurrent processes must not share
 one `.venv`/bundle dir); `-C dir` resolves against the repo root; unknown
 targets fail with Make's own "No rule" error (no catch-all). `make help`
 prints a migration pointer and the task list instead of the old catalog.
