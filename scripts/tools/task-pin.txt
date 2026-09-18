@@ -15,11 +15,14 @@
 #   tar xzf task_linux_amd64.tar.gz && ./task --version -> 3.53.1
 #
 # Update in a dedicated pin-bump PR (never drive-by); offline packaging
-# (increment C) consumes this record, it does not re-resolve `latest`.
+# consumes this record; it does not re-resolve `latest`.
 
 version: v3.53.1
 asset: task_linux_amd64.tar.gz
 sha256: a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7
+# Member digests measured after verifying the archive above; no version/pin change.
+binary-sha256: 48fc3727244d39e0fe04f99c512d0a6eaabf12be376828d96ad1545054523aeb
+license-sha256: ae22882adc54d4c2cec2bb1ce5e0b252c7f3344efd55c72144738e8fcc89509b
 origin: https://github.com/go-task/task/releases/download/v3.53.1/task_linux_amd64.tar.gz
 checksum-manifest: https://github.com/go-task/task/releases/download/v3.53.1/task_checksums.txt
 license: MIT — https://github.com/go-task/task/blob/v3.53.1/LICENSE

@@ -2,7 +2,7 @@
 # AIR-GAP SIDE (issue #15): verify member checksums, load the packed images,
 # push to the internal registry under the SAME names and SHA tags.
 #
-#   make airgap-load
+#   sh scripts/tools/run-task.sh airgap:load
 #
 # Run from inside the clone of repo.bundle (see README). The packed artifacts
 # may sit in ./dist or the unpack directory (parent). No cloning happens here:
@@ -39,7 +39,15 @@ esac
 # Operator console (ADR-0004): the oauth-proxy member exists only when the
 # connected pack host had a recorded digest; older bundles simply lack it.
 OAUTH_TAR=""
-[ -f "$ARTDIR/oauth-proxy-image.tar" ] && OAUTH_TAR="oauth-proxy-image.tar"
+if [ -f "$ARTDIR/SHA256SUMS" ]; then
+    # Workspace upgrades retain old archives. Only the current signed inventory
+    # selects optional images; every selected member is verified below.
+    if awk '$2 == "oauth-proxy-image.tar" { found=1 } END { exit !found }' "$ARTDIR/SHA256SUMS"; then
+        OAUTH_TAR="oauth-proxy-image.tar"
+    fi
+elif [ "${AIRGAP_DRYRUN:-0}" = "1" ] && [ -f "$ARTDIR/oauth-proxy-image.tar" ]; then
+    OAUTH_TAR="oauth-proxy-image.tar"
+fi
 LOADED_COUNT=4
 [ -n "$OAUTH_TAR" ] && LOADED_COUNT=5
 
@@ -54,7 +62,7 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     fi
     echo ""
     echo "Loaded $LOADED_COUNT images into $INTERNAL_REGISTRY (dry-run)."
-    next_step "make airgap-deploy"
+    next_step "sh scripts/tools/run-task.sh airgap:deploy"
     exit 0
 fi
 
@@ -72,6 +80,18 @@ check_trusted_pub "$ARTDIR"
 packed_sha=$(awk '/^sha: /{print $2}' "$ARTDIR/MANIFEST.txt")
 [ "$IMAGE_SHA" = "$packed_sha" ] || \
     die "IMAGE_SHA=$IMAGE_SHA does not match the packed MANIFEST sha ($packed_sha) — wrong SHA for this sneakernet bundle"
+
+# Task is a signed host artifact, never an image to push. Require its members
+# even if a malformed, signed checksum list omitted them.
+for member in task_linux_amd64.tar.gz task-pin.txt task-LICENSE; do
+    awk -v member="$member" '$2 == member { n++ } END { exit n != 1 }' "$ARTDIR/SHA256SUMS" || die "Task member missing from SHA256SUMS: $member"
+done
+cmp -s "$ARTDIR/task-pin.txt" "$REPO_ROOT/scripts/tools/task-pin.txt" || die "bundled Task pin differs from approved workspace"
+. "$REPO_ROOT/scripts/tools/task-artifact.sh"
+task_read_pin "$ARTDIR/task-pin.txt"
+task_verify_archive "$ARTDIR/$TASK_ASSET"
+task_check_manifest "$ARTDIR/MANIFEST.txt"
+printf '%s  %s\n' "$TASK_LICENSE_SHA256" "$ARTDIR/task-LICENSE" | sha256sum -c - >/dev/null || die "Task license checksum mismatch"
 
 # Digest binding: every image must equal the MANIFEST-recorded digest.
 check_image_digest() {
@@ -115,4 +135,4 @@ fi
 
 echo ""
 echo "Loaded $LOADED_COUNT images into $INTERNAL_REGISTRY (SHA tag: $IMAGE_SHA)."
-next_step "make airgap-deploy"
+next_step "sh scripts/tools/run-task.sh airgap:deploy"

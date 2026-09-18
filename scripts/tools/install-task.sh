@@ -1,84 +1,50 @@
 #!/bin/sh
-# Install the repository-pinned Task binary (connected host only).
-#
-# Explicit opt-in installer: default discovery (`task --list`), doctor and
-# verification never auto-install. Invoke only when the caller chooses
-# installation:
-#   sh scripts/tools/install-task.sh [--bin-dir DIR]
-#
-# Reads scripts/tools/task-pin.txt (single source: version, asset, sha256,
-# origin). Verifies OS/arch (linux-amd64 only, fail closed), checks the
-# downloaded asset against the pinned SHA-256 before execution, extracts to a
-# workspace-local directory (default .tools/bin, no sudo, no global PATH or
-# profile mutation), and verifies `task --version` matches the pin while
-# distinguishing go-task from any other program named `task`.
-#
-# Offline/air-gap delivery is a later increment and must NOT call this script
-# (no network in the gap); it consumes the signed bundled artifact instead.
+# Explicit pinned installation. --archive is fully offline; omitted, download
+# from the pinned official origin. No sudo, Make, Task, Go or Python needed.
 set -eu
-
 BIN_DIR=".tools/bin"
+ARCHIVE=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --bin-dir)
-      BIN_DIR="${2:?--bin-dir requires a directory argument}"; shift 2;;
-    --bin-dir=*)
-      BIN_DIR="${1#--bin-dir=}"; shift;;
-    -h|--help)
-      echo "usage: sh scripts/tools/install-task.sh [--bin-dir DIR]"; exit 0;;
-    *)
-      echo "install-task: unsupported argument: $1 (see --help)" >&2; exit 2;;
+    --bin-dir) BIN_DIR="${2:?--bin-dir requires a directory argument}"; shift 2;;
+    --bin-dir=*) BIN_DIR="${1#--bin-dir=}"; shift;;
+    --archive) ARCHIVE="${2:?--archive requires a file argument}"; shift 2;;
+    --archive=*) ARCHIVE="${1#--archive=}"; [ -n "$ARCHIVE" ] || exit 2; shift;;
+    -h|--help) echo "usage: sh scripts/tools/install-task.sh [--archive FILE] [--bin-dir DIR]"; exit 0;;
+    *) echo "install-task: unsupported argument: $1 (see --help)" >&2; exit 2;;
   esac
 done
-
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-PIN="$ROOT/scripts/tools/task-pin.txt"
-VERSION="$(sed -n 's/^version: *//p' "$PIN" | head -n 1)"
-ASSET="$(sed -n 's/^asset: *//p' "$PIN" | head -n 1)"
-SHA256="$(sed -n 's/^sha256: *//p' "$PIN" | head -n 1)"
-ORIGIN="$(sed -n 's/^origin: *//p' "$PIN" | head -n 1)"
-if [ -z "$VERSION" ] || [ -z "$ASSET" ] || [ -z "$SHA256" ] || [ -z "$ORIGIN" ]; then
-  echo "install-task: incomplete pin record in scripts/tools/task-pin.txt" >&2
-  exit 2
-fi
-EXPECTED="${VERSION#v}"
-
-OS="$(uname -s)"
-ARCH="$(uname -m)"
-if [ "$OS" != "Linux" ] || [ "$ARCH" != "x86_64" ]; then
-  echo "install-task: unsupported platform ${OS}/${ARCH}; pin covers linux-amd64 only" >&2
-  exit 2
-fi
-command -v curl >/dev/null 2>&1 || { echo "install-task: curl is required (connected host)" >&2; exit 2; }
-command -v sha256sum >/dev/null 2>&1 || { echo "install-task: sha256sum is required" >&2; exit 2; }
-command -v tar >/dev/null 2>&1 || { echo "install-task: tar is required" >&2; exit 2; }
-
-case "$BIN_DIR" in
-  /*) DEST="$BIN_DIR";;
-  *) DEST="$ROOT/$BIN_DIR";;
-esac
-mkdir -p "$DEST"
+. "$ROOT/scripts/tools/task-artifact.sh"
+task_read_pin "$ROOT/scripts/tools/task-pin.txt"
+task_check_platform
+case "$BIN_DIR" in /*) DEST="$BIN_DIR";; *) DEST="$ROOT/$BIN_DIR";; esac
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT INT TERM
-
-echo "install-task: downloading $ORIGIN"
-curl -fsSL -o "$TMP/$ASSET" "$ORIGIN"
-printf '%s  %s\n' "$SHA256" "$TMP/$ASSET" | (cd / && sha256sum -c -)
-tar xzf "$TMP/$ASSET" -C "$TMP"
-if [ ! -x "$TMP/task" ]; then
-  echo "install-task: extracted archive has no executable task binary" >&2
-  exit 1
+INSTALL_TMP=""
+trap 'rm -rf "$TMP"; [ -z "$INSTALL_TMP" ] || rm -f "$INSTALL_TMP"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ -z "$ARCHIVE" ]; then
+    command -v curl >/dev/null 2>&1 || task_fail "curl is required for connected installation; use --archive for offline installation"
+    ARCHIVE="$TMP/$TASK_ASSET"
+    echo "install-task: downloading $TASK_ORIGIN"
+    curl -fsSL -o "$ARCHIVE" "$TASK_ORIGIN"
 fi
-GOT="$("$TMP/task" --version 2>/dev/null | tr -d '[:space:]')"
-if [ "$GOT" != "$EXPECTED" ]; then
-  echo "install-task: version mismatch: got '${GOT:-unreadable}', want '$EXPECTED' (not go-task?)" >&2
-  exit 1
+task_extract_verified "$ARCHIVE" "$TMP"
+GOT="$("$TMP/task" --version)"
+[ "$GOT" = "${TASK_VERSION#v}" ] || task_fail "version mismatch (not the pinned go-task executable)"
+mkdir -p "$DEST"
+# Replace atomically so another launcher never sees a partially copied binary.
+INSTALL_TMP=$(mktemp "$DEST/.task.XXXXXX")
+cp "$TMP/task" "$INSTALL_TMP"
+chmod 0755 "$INSTALL_TMP"
+printf '%s  %s\n' "$TASK_BINARY_SHA256" "$INSTALL_TMP" | sha256sum -c - >/dev/null || task_fail "installed binary checksum mismatch"
+mv -f "$INSTALL_TMP" "$DEST/task"
+INSTALL_TMP=""
+# Retain the verified archive for explicit connected pack/offline tests.
+mkdir -p "$ROOT/.tools/cache"
+if [ ! "$ARCHIVE" -ef "$ROOT/.tools/cache/$TASK_ASSET" ]; then
+    cp "$ARCHIVE" "$ROOT/.tools/cache/$TASK_ASSET"
 fi
-install -m 0755 "$TMP/task" "$DEST/task"
-FINAL="$("$DEST/task" --version 2>/dev/null | tr -d '[:space:]')"
-if [ "$FINAL" != "$EXPECTED" ]; then
-  echo "install-task: installed binary failed verification ($FINAL)" >&2
-  exit 1
-fi
-echo "install-task: installed Task $VERSION (linux-amd64) to $DEST/task"
-echo "next: export PATH=\"$DEST:\$PATH\" (session-local only; no global mutation)"
+echo "install-task: installed Task $TASK_VERSION (linux-amd64) to $DEST/task"
+echo "next: sh scripts/tools/run-task.sh --list"
