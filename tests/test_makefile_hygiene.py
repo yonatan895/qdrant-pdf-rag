@@ -1,38 +1,73 @@
-"""Makefile hygiene: the EMBED_MODE export must stay target-scoped.
+"""Command-interface env scoping (issue #402 B5).
 
-A global `export EMBED_MODE` reaches EVERY make recipe — including the
-airgap scripts, whose fail-closed refusal of EMBED_MODE=hash then fires and
-breaks the CI airgap-dryrun job (the CI dry-run must prove the refusal
-fires, not cause it). This pins the scoping fix at the file level."""
+Migration map for the retired Make-syntax coupling in this file's history:
+- Old `test_makefile_has_no_global_embed_mode_export` -> retained below as
+  `test_shim_makefile_exports_nothing`: any `export` in the shim Makefile
+  would leak into EVERY forwarded task environment, so the shim must not
+  export at all.
+- Old `test_makefile_scopes_embed_mode_export_to_eval_family` (which asserted
+  the literal `export EMBED_MODE :=` source lines in the Makefile) -> retired
+  as obsolete syntax coupling. The protected behavior — hash default scoped
+  to eval consumers, explicit overrides preserved, empty preserved, never
+  global — is proven at the real runner boundary in
+  tests/test_taskfile_contracts.py (mode/venue defaults, CLI/env forms,
+  empty handling, golden-flag derivation, no-mode leak checks on bench,
+  verify and load). What remains here pins the new locus: per-task
+  EMBED_MODE bridges in taskfiles/eval.yml, with the documented exceptions.
+"""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
+# Eval tasks that intentionally carry no mode exports (same as Make).
+MODELESS_EVAL_TASKS = {"verify-golden", "bench", "bench-baseline", "load"}
 
-def test_makefile_has_no_global_embed_mode_export() -> None:
-    lines = (REPO / "Makefile").read_text(encoding="utf-8").splitlines()
-    # A global export is a BARE directive: `export EMBED_MODE` with no value
-    # and no targets. The target-scoped form (`targets: export EMBED_MODE :=
-    # $(EMBED_MODE)`, possibly on a backslash continuation) is the fix, not
-    # a violation.
-    bare = [ln for ln in lines if ln.strip() == "export EMBED_MODE"]
-    assert bare == [], (
-        "bare `export EMBED_MODE` leaks the hash default into every recipe, "
-        "including the airgap scripts that refuse it fail-closed; scope the "
-        "export to the eval-family targets instead"
+
+def _non_comment_lines(path: Path) -> list[str]:
+    return [ln for ln in path.read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def test_shim_makefile_exports_nothing() -> None:
+    lines = _non_comment_lines(REPO / "Makefile")
+    exported = [ln for ln in lines if re.match(r"export\s+\w", ln.strip())]
+    assert exported == [], (
+        "the Make->Task shim must not export anything: an exported variable "
+        f"would leak into every forwarded task environment: {exported}"
     )
 
 
-def test_makefile_scopes_embed_mode_export_to_eval_family() -> None:
-    text = (REPO / "Makefile").read_text(encoding="utf-8")
-    # Join backslash continuations so a directive split across lines is one
-    # logical line, then require the scoped export to name eval-family targets.
-    joined = text.replace("\\\n", " ")
-    scoped = [ln for ln in joined.splitlines() if "export EMBED_MODE :=" in ln]
-    assert scoped, "eval-family targets must export EMBED_MODE (target-scoped)"
-    assert any("eval" in ln for ln in scoped), (
-        "the target-scoped export must cover the eval family"
-    )
+def _eval_task_blocks() -> dict[str, str]:
+    text = (REPO / "taskfiles/eval.yml").read_text(encoding="utf-8")
+    blocks: dict[str, str] = {}
+    current: str | None = None
+    body: list[str] = []
+    for line in text.splitlines():
+        header = re.match(r"  ([A-Za-z0-9_:.-]+):\s*$", line)
+        if header:
+            if current is not None:
+                blocks[current] = "\n".join(body)
+            current, body = header.group(1), []
+        elif current is not None and not line.lstrip().startswith("#"):
+            body.append(line)
+    if current is not None:
+        blocks[current] = "\n".join(body)
+    return blocks
+
+
+def test_eval_tasks_scope_embed_mode_per_task() -> None:
+    blocks = _eval_task_blocks()
+    assert len(blocks) >= 20, f"eval module unexpectedly small: {sorted(blocks)}"
+    for name, body in blocks.items():
+        if name in MODELESS_EVAL_TASKS:
+            assert "EMBED_MODE" not in body, (
+                f"eval:{name} must carry no mode exports (same as Make)"
+            )
+        else:
+            assert "EMBED_MODE: '{{.EMBED_MODE}}'" in body, (
+                f"eval:{name} must bridge EMBED_MODE under its exact script-read name"
+            )

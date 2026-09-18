@@ -235,6 +235,77 @@ class TaskContractsTests(unittest.TestCase):
         (self.root / "airgap.env").write_text("\n".join(lines) + "\n" if lines else "",
                                               encoding="utf-8")
 
+    def make_parity_ws(self) -> None:
+        """Workspace where the SHIMMED Makefile and the Taskfiles coexist,
+        backed by the same inert recorders: `make <old>` and `task <new>`
+        must produce identical tool-boundary traces."""
+        shutil.copy(REPO / "Makefile", self.root / "Makefile")
+        self.copy_repo_script("sim_qdrant.sh")
+        self.copy_repo_script("qdrant_pin.py")
+        (self.root / "images.txt").write_text(
+            "example.com/qdrant/qdrant:v9.9.9-unprivileged sha256:fixture\n", encoding="utf-8")
+        charts = self.root / "charts"
+        charts.mkdir(parents=True, exist_ok=True)
+        (charts / "qdrant-1.19.0.tgz").write_text("fixture", encoding="utf-8")
+        self.make_venv_fake()
+        self.make_tool_recorder("helm")
+        self.make_tool_recorder("docker")
+        self.make_tool_recorder("pyfake")
+        self.make_airgap_fixtures({})
+        self.make_airgap_stage_double("deploy.sh")
+
+    def run_make(self, *args: str, extra_env: dict | None = None) -> subprocess.CompletedProcess:
+        if shutil.which("make") is None:
+            self.skipTest("make unavailable")
+        env = dict(os.environ)
+        env.pop("TASK_BIN", None)
+        env["PATH"] = os.pathsep.join([
+            str(self.root / "bin"),
+            os.path.dirname(self.task_bin),
+            env.get("PATH", ""),
+        ])
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            ["make", "-C", str(self.root), *args],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=120, check=False, text=True, env=env, cwd=str(self.root))
+
+    def assertParity(self, make_args: list, task_args: list, extra_env: dict | None = None,
+                     check_env: tuple = (), expect_calls: bool = True) -> list[dict]:
+        """Run the old spelling through the shim and the new spelling
+        directly. Tool argv, cwd and order must match exactly; child
+        environment is compared only for the listed keys, because Make
+        exposes caller CLI assignments in recipe environments while Task
+        deliberately does not — scripts consume argv and documented
+        environment names (audited), never ambient CLI variables."""
+        base_env = dict(self.tool_env())
+        if extra_env:
+            base_env.update(extra_env)
+        if (self.log).exists():
+            self.log.unlink()
+        make_proc = self.run_make(*make_args, extra_env=base_env)
+        self.assertEqual(make_proc.returncode, 0, make_proc.stdout)
+        make_calls = self.calls()
+        if expect_calls:
+            self.assertTrue(make_calls, "make run produced no observed calls")
+        if (self.log).exists():
+            self.log.unlink()
+        task_proc = self.run_task(*task_args, extra_env=base_env)
+        self.assertEqual(task_proc.returncode, 0, task_proc.stdout)
+        task_calls = self.calls()
+        if not expect_calls:
+            self.assertEqual(task_calls, [])
+            return task_calls
+        self.assertEqual(len(task_calls), len(make_calls))
+        for task_call, make_call in zip(task_calls, make_calls):
+            self.assertEqual(task_call["tag"], make_call["tag"])
+            self.assertEqual(task_call["argv"], make_call["argv"])
+            self.assertEqual(task_call["cwd"], make_call["cwd"])
+            for key in check_env:
+                self.assertEqual(task_call["env"].get(key), make_call["env"].get(key), key)
+        return task_calls
+
     def make_airgap_stage_double(self, name: str = "deploy.sh") -> None:
         """Deploy/pipeline double: real precedence, inert stage, logs resolved keys."""
         airgap = self.root / "scripts/airgap"
@@ -250,6 +321,7 @@ class TaskContractsTests(unittest.TestCase):
             '        "AIRGAP_DRYRUN", "IMAGE_SHA", "STORAGE_CLASS", "QUERY", "AIRGAP_ENV")\n'
             'with open(os.environ["RECORDER_LOG"], "a") as fh:\n'
             '    fh.write(json.dumps({"tag": "airgap-stage", "argv": sys.argv[1:],\n'
+            '                         "cwd": os.getcwd(),\n'
             '                         "resolved": {k: os.environ.get(k) for k in keys}}) + "\\n")\n'
             'PYEOF\n',
             encoding="utf-8")
@@ -830,7 +902,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.calls()
         self.assertEqual(calls[0]["argv"], ["scripts/query_demo.py", "--embed-mode", "hash"])
-        self.assertEnvSubset(calls[0], {"PYTHONPATH": "."})
+        self.assertEnvSubset(calls[0], {"PYTHONPATH": ".", "EMBED_MODE": "hash"})
         if (self.log).exists():
             self.log.unlink()
         sentinel = "a b$c;`echo PWNED`"
@@ -1265,6 +1337,94 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(resolved["NAMESPACE"], "mainframe-rag")
         self.assertEqual(resolved["STORAGE_CLASS"], "gp3-csi")
         self.assertIsNone(resolved["QUERY"], "unrelated keys stay absent, never defaulted")
+
+    def test_make_task_parity_quality_and_context(self):
+        self.make_parity_ws()
+        self.assertParity(["lint"], ["qa:lint"])
+        self.assertParity(["check-context", "PY=pyfake"], ["qa:context", "PY=pyfake"])
+        self.assertParity(["agent-doctor", "PROFILE=sim", "PY=pyfake"],
+                          ["dev:doctor", "PROFILE=sim", "PY=pyfake"])
+        self.assertParity(["check"], ["qa:check"])
+
+    def test_make_task_parity_eval_modes(self):
+        self.make_parity_ws()
+        self.assertParity(["eval", "EMBED_MODE=vllm"], ["eval:retrieval", "EMBED_MODE=vllm"],
+                          check_env=("EMBED_MODE", "VENUE"))
+        self.assertParity(["harness-gate"], ["eval:harness:gate"],
+                          check_env=("EMBED_MODE", "VENUE"))
+        self.assertParity(["eval-answers", "N=5"], ["eval:answers", "N=5"],
+                          check_env=("EMBED_MODE", "VENUE"))
+
+    def test_make_task_parity_local_inputs(self):
+        self.make_parity_ws()
+        # PYTHONPATH only: Make exposes caller CLI assignments ambiently in
+        # recipe environments while Task does not. The scripts consume argv
+        # and documented environment names (audited in the B3 work), so the
+        # ambient difference is behavior-neutral; EMBED_MODE presence
+        # (absent under Make, hash-default under Task) resolves identically
+        # through flag-first logic in every input class.
+        self.assertParity(["query-demo", "QUERY=hi", "LIMIT=2"], ["local:query", "QUERY=hi", "LIMIT=2"],
+                          check_env=("PYTHONPATH",))
+        self.assertParity(["run-agent", "UI_ENABLED=true", "PORT=9090"],
+                          ["local:agent", "UI_ENABLED=true", "PORT=9090"],
+                          check_env=("LLM_STREAM", "UI_ENABLED"))
+        self.assertParity(["sim-qdrant", "SIM_CONTAINER=c"], ["local:qdrant:up", "SIM_CONTAINER=c"])
+
+    def test_make_task_parity_artifacts_and_airgap(self):
+        self.make_parity_ws()
+        self.assertParity(["chart"], ["artifacts:chart-check"], expect_calls=False)
+        self.assertParity(["helm-template"], ["artifacts:helm-render"])
+        self.assertParity(["airgap-deploy", "INTERNAL_REGISTRY=x"],
+                          ["airgap:deploy", "INTERNAL_REGISTRY=x"])
+
+    def test_make_task_parity_env_form_overrides(self):
+        self.make_parity_ws()
+        base_env = dict(self.tool_env(), EMBED_MODE="vllm")
+        self.assertParity(["eval"], ["eval:retrieval"], extra_env=base_env)
+
+    def test_make_unknown_target_fails_clearly(self):
+        self.make_parity_ws()
+        proc = self.run_make("does-not-exist", extra_env=self.tool_env())
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("No rule to make target", proc.stdout)
+
+    def test_make_help_points_at_task_discovery(self):
+        self.make_parity_ws()
+        proc = self.run_make("help", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("task --list", proc.stdout)
+        self.assertIn("qa:context", proc.stdout)
+
+    def test_dev_demo_pdfs_and_clean(self):
+        self.make_venv_fake()
+        env = self.tool_env()
+        proc = self.run_task("dev:demo-pdfs", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(
+            [c["argv"] for c in self.pip_calls()],
+            [["scripts/make_synthetic_pdf.py", "--out", "output/demo-pdfs/SA22-0000-00_outline.pdf"],
+             ["scripts/make_synthetic_pdf.py", "--plain", "--out", "output/demo-pdfs/plain-widget-notes.pdf"]])
+        self.assertTrue((self.root / "output/demo-pdfs").is_dir())
+
+    def test_dev_clean_bounded_retention(self):
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        keepers = [".tools/bin/task", "dist/keep.tar", "airgap.env"]
+        removable = [".venv/bin/python", ".pytest_cache/x", ".mypy_cache/x", ".ruff_cache/x",
+                     "bundles/wheelhouse/f.whl", "output/demo-pdfs/a.pdf",
+                     "dist/drop.txt", "dist/scratch/y"]
+        for name in keepers + removable:
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("fixture", encoding="utf-8")
+        (self.root / ".tools/bin/task").chmod(0o755)
+        proc = self.run_task("dev:clean", extra_env=self.tool_env())
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        for name in removable:
+            self.assertFalse((self.root / name).exists(), name)
+        for name in keepers:
+            self.assertTrue((self.root / name).is_file(), name)
+        self.assertTrue((self.root / "Taskfile.yml").is_file(), "tracked sources survive clean")
+        self.assertTrue((self.root / "dist").is_dir(), "dist survives for its kept archives")
 
     def test_taskfile_wiring_stays_dispatch_only(self):
         root_text = (REPO / "Taskfile.yml").read_text(encoding="utf-8")

@@ -5,15 +5,14 @@ verification policy stays in [live-stack](live-stack.md#verification-minimums);
 test design stays in [testing](testing.md#evidence-design).
 
 <a id="scope"></a>
-## Scope: increments A, B1, B2, B3 and B4
+## Scope: increments A, B1, B2, B3, B4 and B5
 
-`Taskfile.yml` (+ `taskfiles/quality.yml`, `taskfiles/dev.yml`,
-`taskfiles/artifacts.yml`, `taskfiles/eval.yml`, `taskfiles/local.yml`,
-`taskfiles/airgap.yml`) is the entry point for **discovery, doctor, context,
-quality (A), artifacts (B1), evaluation (B2), local simulation (B3) and
-air-gap stages (B4)**. Remaining: dev completion, the Make→Task shim,
-offline Task handoff, and CI/docs cutover (B5/C/D). No product behavior
-changes here.
+`Taskfile.yml` (+ all `taskfiles/` modules) now covers every command family:
+**discovery, doctor, context, quality (A), artifacts (B1), evaluation (B2),
+local simulation (B3), air-gap stages (B4), dev outputs and cleanup (B5)**.
+The `Makefile` is a one-way compatibility shim forwarding to Task (next
+section), pending removal at the D-gate. Remaining: offline Task handoff and
+CI/docs cutover (C). No product behavior changes here.
 
 All documented invocations assume the pinned `task` on `PATH` (session-local;
 the installer prints the exact export). `task` with no task name prints the
@@ -112,7 +111,8 @@ recipe succeeds. Consequences, all covered by runner-boundary tests:
 | `eval*`, `gate-l1`, `harness-*`, `verify-golden`, `capture-pool`, reports | `eval:*` | existing scripts/baselines | **Migrated (B2)** with per-task mode/venue scoping ([#inputs](#inputs)) |
 | `query-demo`, `ask`, `local-*`, `run-agent`, `test-vllm-e2e` | `local:*`, `qa:sim/load/vllm-e2e` | existing launchers/scripts | **Migrated (B3)**; `run_local_stack.sh` calls `scripts/sim_qdrant.sh` directly (no runner) |
 | `airgap-*`, `airgap-dryrun` | `airgap:*` | `scripts/airgap/*` | **Migrated (B4)** thin wrappers; operator keys bridged per task (no defaults); `bootstrap.sh` offline wording stays for C |
-| `e2e-demo-pdfs`, `clean` | `dev:demo-pdfs`, `dev:clean` | existing scripts | Deferred to B5 (retention contract) |
+| `e2e-demo-pdfs`, `clean` | `dev:demo-pdfs`, `dev:clean` | existing scripts | **Migrated (B5)**; `clean` keeps the bounded retention contract (keeps `*.tar*`, never touches `.tools/`, external paths) |
+| *(shim)* all of the above via `make …` | one-line forwarding recipes | this table | **Migrated (B5)** one-way shim ([#shim](#shim)); `make help` prints a migration pointer + task list |
 
 Executable consumer inventory (all found by searching first-party `make`
 invocations): `scripts/run_local_stack.sh:157` (`make -C … sim-qdrant`);
@@ -128,12 +128,46 @@ consumer is updated once in increment C (no parallel acceptance system).
 here. Runtime consumers migrate in B/C; historical `make` commands in dated
 records stay as history.
 
+<a id="shim"></a>
+## Make compatibility shim (B5, removed at the D-gate)
+
+Every `Makefile` target forwards once to its Task equivalent and does
+nothing else — Task is the single implementation; Task never calls Make.
+Proven by make/task consistency tests that run both spellings against the
+same inert recorders and require identical tool-boundary traces.
+
+Forwarding rule: recipes forward `PY` explicitly (Make resolves it as
+`python3.14 || python3`; Task defaults to `python3`). Every other caller
+override rides the recipe environment into Task's env form automatically,
+so `VAR=x make target` and `make target VAR=x` both keep working with no
+per-target repetition — Task-side defaults match Make's. Verified
+empirically for both override forms, including empty values and quoted
+spaces, across every command family.
+
+Limits: the pinned `task` must be on `PATH` (install script; doctor
+finding); multiple goals run sequentially; no `-j` for installs/builds
+(concurrent processes must not share one `.venv`/bundle dir); `-C dir`
+resolves against the repo root; unknown targets fail with Make's own
+"No rule" error (no catch-all). `make help` prints a migration pointer and
+the task list instead of the old catalog.
+
+Approved differences from the old recipes (all covered by tests):
+completion stamps instead of directory mtimes (a partial directory never
+counts as built); verification diagnoses a missing `.venv` instead of
+creating it; explicit-empty `SIM_CONTAINER`/`SIM_PORT` fail closed with a
+clear message instead of a docker error; explicit-empty env-default inputs
+(e.g. `DENSE_DIM=`) fall back cleanly instead of leaking ambient empties
+into script defaults (which could crash); `qdrant_pin.py` runs under
+`python3` instead of Make's `$(PY)` (stdlib-only, identical output);
+`make help` output changed. Old signed bundles keep their Make interface
+as history; the old→new name map is the inventory table above.
+
 <a id="shim-exit"></a>
 ## Compatibility-shim exit milestone (strict D-gate)
 
-No shim is added in increment A (Makefile untouched, Task additive). Broad
-porting (B) may add a one-way Make→Task forwarding shim for migrated targets
-only. The Makefile/shim is removed **after**: every in-repository executable
+The shim landed in increment B5 (above): every in-repository target forwards
+to Task, including the runtime `run_local_stack.sh` path via
+`scripts/sim_qdrant.sh`. The Makefile/shim is removed **after**: every in-repository executable
 consumer has moved, the signed offline bootstrap works without Make, agent
 fresh-context acceptance is recorded, and required candidate checks pass.
 Retired Make-specific assertions map to retained behavioral coverage in
