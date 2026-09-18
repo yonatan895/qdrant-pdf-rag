@@ -3111,3 +3111,176 @@ def test_v1_answer_json_success_records_ttft_and_llm_model(client, monkeypatch):
     _, _, kwargs = answer_calls[0]
     assert kwargs["ttft_ms"] == 42
     assert kwargs["llm_model"] == "test-reasoning-model"
+
+
+def test_metrics_scrape_failure_serves_stable_503(monkeypatch):
+    """Issue #187, #370: when metrics exposition fails, GET /metrics
+    serves fixed 503 metrics_unavailable without leaking exception details."""
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    monkeypatch.setenv("METRICS_ENABLED", "true")
+
+    def _exploding_generate_latest():
+        raise RuntimeError("collector exploded with secret connection info")
+
+    monkeypatch.setattr("prometheus_client.generate_latest", _exploding_generate_latest)
+    with TestClient(app_mod.app) as c:
+        resp = c.get("/metrics")
+    assert resp.status_code == 503
+    assert resp.json() == {
+        "code": "metrics_unavailable",
+        "message": "metrics are not available",
+    }
+    assert "collector exploded" not in resp.text
+
+
+def test_awaited_retrieval_async_error_maps_to_upstream_error(client, monkeypatch):
+    """Issue #370: when retrieval coroutine raises an exception, search,
+    answer, and chat endpoints map it to 502 upstream_error with fixed message."""
+
+    async def _failing_retrieval(*args, **kwargs):
+        raise RuntimeError("qdrant connection refused")
+
+    recorded_metrics = []
+
+    def fake_record(endpoint, outcome, **kwargs):
+        recorded_metrics.append((endpoint, outcome))
+
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *a, **k: _failing_retrieval())
+    monkeypatch.setattr(app_mod, "record_request", fake_record)
+
+    # 1. /v1/search
+    res_search = client.post("/v1/search", json={"query": "IEA500I"})
+    assert res_search.status_code == 502
+    assert res_search.json() == {
+        "code": "upstream_error",
+        "message": "retrieval failed",
+    }
+    assert "connection refused" not in res_search.text
+
+    # 2. /v1/answer
+    res_answer = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert res_answer.status_code == 502
+    assert res_answer.json() == {
+        "code": "upstream_error",
+        "message": "retrieval failed",
+    }
+    assert "connection refused" not in res_answer.text
+
+    # 3. /v1/chat/completions
+    res_chat = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "IEA500I"}]},
+    )
+    assert res_chat.status_code == 502
+    assert res_chat.json() == {
+        "code": "upstream_error",
+        "message": "retrieval failed",
+    }
+    assert "connection refused" not in res_chat.text
+
+    # Verify RED metrics were reported for all three endpoints
+    assert recorded_metrics == [
+        ("search", "upstream_error"),
+        ("answer", "upstream_error"),
+        ("chat", "upstream_error"),
+    ]
+
+
+def test_awaited_retrieval_cancellation_propagates():
+    """Issue #370: _await_retrieval re-raises asyncio.CancelledError directly
+    without converting it into AppError or suppressing cancellation."""
+    import asyncio
+
+    from mainframe_rag.agent.app import _await_retrieval
+
+    async def _cancelled():
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(_await_retrieval(_cancelled()))
+
+    async def _test_task_cancel():
+        async def _long_sleep():
+            await asyncio.sleep(10)
+            return ()
+
+        task = asyncio.create_task(_await_retrieval(_long_sleep()))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_test_task_cancel())
+
+
+def test_lifespan_cleanup_closes_created_clients_when_globals_replaced(monkeypatch):
+    """Issue #370: lifespan retains local references to startup clients, so
+    shutdown closes the actual created instances even if app_mod globals
+    (http, http_sync, qdrant, llm) were replaced by test doubles."""
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+
+    async_closed = []
+    sync_closed = []
+    qdrant_closed = []
+
+    real_async_cls = app_mod.httpx2.AsyncClient
+    real_sync_cls = app_mod.httpx2.Client
+
+    class SpyAsyncClient(real_async_cls):
+        async def aclose(self):
+            async_closed.append(True)
+            await super().aclose()
+
+    class SpySyncClient(real_sync_cls):
+        def close(self):
+            sync_closed.append(True)
+            super().close()
+
+    class SpyQdrantClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            qdrant_closed.append(True)
+
+    monkeypatch.setattr(app_mod.httpx2, "AsyncClient", SpyAsyncClient)
+    monkeypatch.setattr(app_mod.httpx2, "Client", SpySyncClient)
+    monkeypatch.setattr("qdrant_client.AsyncQdrantClient", SpyQdrantClient)
+
+    class DummyDouble:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+        async def aclose(self):
+            self.closed = True
+
+    dummy_async = DummyDouble()
+    dummy_sync = DummyDouble()
+    dummy_qdrant = DummyDouble()
+    dummy_llm = DummyDouble()
+
+    with TestClient(app_mod.app):
+        monkeypatch.setattr(app_mod, "http", dummy_async)
+        monkeypatch.setattr(app_mod, "http_sync", dummy_sync)
+        monkeypatch.setattr(app_mod, "qdrant", dummy_qdrant)
+        monkeypatch.setattr(app_mod, "llm", dummy_llm)
+
+    assert async_closed == [True]
+    assert sync_closed == [True]
+    assert qdrant_closed == [True]
+    assert dummy_async.closed is False
+    assert dummy_sync.closed is False
+    assert dummy_qdrant.closed is False
+    assert dummy_llm.closed is False
+

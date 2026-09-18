@@ -139,7 +139,12 @@ gate-l1:
       - eval-summary.md
       - eval-delta.md
 
-# lint is intentionally omitted (issue #3): ruff is a dev extra but is not in
-# requirements.lock.txt, so a lint job would pull an unpinned package outside
-# the lockfile. If ruff is ever pinned into the lock, add a `lint` job using
-# the same .py-base install path.
+# Deterministic lint and typechecking gate (issues #370, #413): runs in hygiene stage
+# ensuring code hygiene, formatting, and typing parity with GitHub CI.
+lint:
+  extends: .py-base
+  stage: hygiene
+  script:
+    - ruff check src tests
+    - mypy src
+
