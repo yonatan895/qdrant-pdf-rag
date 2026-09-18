@@ -184,8 +184,9 @@ strict stream-end rule above is the upstream reasoning wire and the
   terminal `finish_reason`: `[DONE]` alone, an upstream `error` frame
   (even when followed by `[DONE]`), and a malformed frame are all
   `TruncatedStreamError`, never a fabricated successful finish (issue
-  #365). The non-streaming payload parser requires the same explicit
-  finish; a missing/null `finish_reason` never synthesizes `stop`.
+  #365). The non-streaming payload parser requires identical validation
+  parity: a top-level `error`, non-string content, or a missing/null
+  `finish_reason` is rejected and never synthesizes `stop` or coerces objects.
   Recovery differs between buffered and client-visible calls: see the
   HTTP/model fallback contract below. An explicitly classified `length`
   or `content_filter` finish *with* `[DONE]` is complete transport, not
@@ -562,8 +563,8 @@ are above. **Authority:** ADR-0001/0004, #363 and existing transport contracts;
 | Operation | Current permitted recovery / failure boundary |
 |---|---|
 | Reasoning transport | Sync/async reasoning pools use `retries=0`; no connection-level automatic repeat |
-| Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content, caught stream/protocol failures, missing `[DONE]`, upstream error/malformed frame, or missing explicit finish lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered. The POST must itself carry an explicit finish (issue #365) |
-| Client-visible `chat_stream` | No-content stream exit can make one non-streaming ask; malformed/rejected/empty/no-finish fallback fails. Missing `[DONE]`, an upstream error frame, a malformed frame, or `[DONE]` without an explicit finish after emitted content raises truncation; no replay after those tokens |
+| Buffered `achat` / `_chat_sync` with `LLM_STREAM` | Empty content, caught stream/protocol failures, missing `[DONE]`, upstream error/malformed frame, or missing explicit finish lead to one non-streaming POST; accumulated content is discarded, even if a prefix was buffered. The POST must itself carry an explicit finish, have no top-level error, and have valid string content (issue #365) |
+| Client-visible `chat_stream` | No-content or pre-output stream failure (malformed first frame, pre-output error, missing finish/done before any emitted token) can make one non-streaming ask; malformed/rejected/empty/no-finish fallback fails. Missing `[DONE]`, an upstream error frame, a malformed frame, or `[DONE]` without an explicit finish after actually emitted content raises truncation; no replay after those tokens |
 | Tokenizer | Plan locally, verify whole messages per trim round; first RPC failure warns and pins estimator for that instance. No per-chunk RPCs; gateway may lack `/tokenize` |
 | Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
 | Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; [retrieval](retrieval.md) owns dispatch |
