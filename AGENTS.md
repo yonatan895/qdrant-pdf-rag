@@ -94,11 +94,15 @@ An unavailable or skipped required check is not a pass. A draft/handoff may
 record blocked validation; required acceptance failures still block declaring
 the change ready or promoting its release.
 
-Prove outcomes, not only metadata about outcomes. A new regression normally
-belongs in an existing behavior-focused suite. Preserve independent expected
-results and real client semantics. Do not weaken tests or rewrite evaluation
-baselines to make a patch green. Consolidation must map old coverage to its
-retained owner, or explain why an implementation-only pin is retired.
+Prove outcomes, not only metadata about outcomes: inspect actual stored content
+rather than attribution metadata alone. For lifecycle changes, prove the next
+ordinary operation after successful cleanup, not only failure and retry. For
+transported identifiers, assert exact producer-to-consumer round-trips across
+delimiters and whitespace. A new regression normally belongs in an existing
+behavior-focused suite. Preserve independent expected results and real client
+semantics. Do not weaken tests or rewrite evaluation baselines to make a patch
+green. Consolidation must map old coverage to its retained owner, or explain why
+an implementation-only pin is retired.
 
 Before review, inspect the diff and all changed interfaces. Update the PR
 body with exact tested SHA, commands, exit codes, relevant counts, evidence
@@ -111,8 +115,10 @@ changes; add a root rule only when it is genuinely repository-wide.
 Reviews follow the canonical [review protocol](docs/agent-workflow.md#review-handoff).
 
 Review the implementation and relevant unchanged callers, not just the PR
-summary. For each claimed guarantee ask: what state establishes it, who can
-change that state, for how long is it valid, and what forbids the counterexample?
+summary. Derive the supported domain and expected outcome from the contract
+and actual producer, not from comfortable sample fixtures. For each claimed
+guarantee ask: what state establishes it, who can change that state, for how
+long is it valid, and what forbids the counterexample?
 
 Examine applicable missing/corrupt data, interruption, retry, rollback,
 concurrent writer, active reader, cached validation, and configuration paths.
@@ -121,5 +127,7 @@ design decision, not merely a reassuring comment.
 
 Report concrete preconditions, impact, location, and a minimal test for each
 finding. Distinguish defects from non-blocking improvements and evidence gaps.
-Do not invent findings or certify untested production behavior. Agents do not
-merge their own PRs or change repository access controls.
+On re-review, carry forward the original counterexample: a narrower passing case
+does not close a broader finding. Do not invent findings or certify untested
+production behavior. Agents do not merge their own PRs or change repository
+access controls.

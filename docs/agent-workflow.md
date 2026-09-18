@@ -98,19 +98,30 @@ New product scope requires an issue decision, not a silent expansion.
 
 Use the [issue form](../.github/ISSUE_TEMPLATE/agent-task.md), or these same fields
 in a GitLab issue. Before implementation, authors record the compact 5-question
-author input packet. For a small fix, five short answers suffice (`N/A` needs a reason):
+author input packet. For a small fix, short answers and evidence links suffice (`N/A` needs a one-sentence reason):
 
 ```text
-Outcome and authority: <one observable change + owner issue/contract>
-Forbidden outcome: <the most important counterexample>
-Boundaries and assumptions: <inputs -> state -> consumers; supported modes>
-Planned proof: <existing test home; smallest distinguishing case; required tiers>
-Compatibility and rollback: <what changes, what remains, and how to recover>
+Outcome and supported domain:
+One observable change; identify the actual producer/contract of its inputs.
+
+Boundary proof:
+For each material changed guarantee, select the smallest case that a plausible
+wrong implementation could pass locally but fail end-to-end. Reuse existing tests.
+
+Next operation:
+For persisted/lifecycle changes, show success -> cleanup -> next ordinary action,
+not only failure -> retry. Include only relevant reset/restart/rollback interactions.
+
+State/transport distinction:
+Where multiple paths implement the same rule, compare equivalent allowed and
+forbidden inputs. Keep deliberately different retry/emission policies explicit.
+
+Evidence and limits:
+Name the test and exact candidate; distinguish executed proof, static reasoning,
+and required evidence not available. Record any compatibility decision separately.
 ```
 
-Settled decisions link their existing owner; reopen only a specific demonstrated
-conflict. An agent must not independently choose deletion, retention, permission,
-or publication semantics while generating tests.
+No mandatory checklist of every failure mode for a trivial change. One end-to-end invariant may need several files; a PR is not too broad merely because it updates the necessary consumer and documentation. Settled decisions link their existing owner; reopen only a specific demonstrated conflict. An agent must not independently choose deletion, retention, permission, or publication semantics while generating tests.
 
 ### Worked planning example: representation/publication (#391)
 
@@ -165,25 +176,37 @@ unchanged producers, persisted state, callers, launch paths, and consumers.
 Do not treat the PR summary, new comments, or passing tests as the authority
 for a changed invariant.
 
-Choose a small independent counterexample for each material changed guarantee.
+Before adopting the author's helper names or test cases, derive the expected
+outcome and supported input domain from the approved contract and actual producer.
+For each material changed boundary, inspect one discriminating case the submitted
+examples might miss. Check a real round-trip, the next operation after success,
+or equivalent transport/state paths when those distinctions apply.
 Exercise missing/corrupt data, interruption, retry, reader/writer overlap,
 rollback, scope/authorization, and configuration only where applicable.
 Prefer the public operation or real boundary that can expose the failure;
 helper tests and generic health checks establish narrower facts.
 Distinguish executed results, static reasoning, and checks not run.
 
-For each material finding, report its ID, preconditions, location, impact,
-confidence, smallest reproducer, and observable acceptance condition.
-A passing test that expects the forbidden outcome does not resolve a finding.
-A documentation-only exception needs an explicit authorized contract decision,
-including consequences and migration/operational limits, before it can alter
-acceptance. Evidence that genuinely disproves a finding is equally valid.
+For each material finding, record:
+ID | original counterexample | expected boundary result | exact evidence
+   | disposition | authorized decision link if scope/behavior is accepted instead.
 
-On re-review, carry forward the original counterexample. Mark each material
-finding fixed-and-verified, disproven-with-evidence, accepted-by-authorized-owner,
-or unresolved. 'Explicitly declined' by the implementer is not acceptance.
-Inspect the corrective diff and its affected boundaries for regressions.
-Do not restart a whole-project audit or demand unrelated cleanup.
+On re-review, preserve the original input/preconditions and expected outcome.
+A narrower passing case does not close the original finding. Neither a comment
+nor a test that expects the forbidden behavior proves the invariant.
+Mark each prior material finding:
+- fixed-and-verified: only when the original counterexample is prevented and the
+  relevant proof ran.
+- disproven-with-evidence: when the counterexample genuinely cannot occur under
+  the supported contract (requires contract/producer evidence, not a claim that
+  the current examples do not contain it).
+- accepted-by-authorized-owner: only for an actual scoped decision by that owner;
+  retain the limitation and do not call the code fixed.
+- unresolved: otherwise ('explicitly declined' by author is not acceptance).
+
+Distinguish a new regression, an incomplete prior fix, a pre-existing limitation,
+and unavailable verification. Do not inflate defect counts or severity by mixing
+them. Likewise, safe refusal can still violate a promised usable input/recovery path.
 
 Report separately:
 - Code assessment: acceptable / changes_required / incomplete.
@@ -200,12 +223,40 @@ Style preferences and unrelated improvements do not block a useful change.
 If time/tool limits leave material review incomplete, report incomplete rather
 than approval by default.
 
-Use the prepared environment and valid candidate-specific CI evidence. Run
-additional checks only to answer a review question. Do not install arbitrary
-packages, contact private/live systems, widen permissions, change baselines,
-merge, or modify the author's implementation. Keep exploratory tests isolated.
+Consume valid current-candidate CI once. Run focused experiments to answer a
+specific uncertainty, not to duplicate the full suite for the appearance of
+independence. Keep exploratory changes out of the candidate and its evidence.
+Do not install arbitrary packages, contact private/live systems, widen
+permissions, change baselines, merge, or modify the author's implementation.
 Return one concise review summary with supporting detail and remaining limits.
 ```
+
+### One authoritative final assessment
+
+Keep the author's scope/compatibility/evidence section. For the reviewer outcome,
+link the latest valid candidate-bound structured review/artifact and name its reviewed SHA,
+rather than hand-copying all disposition and verdict fields into a second editable report.
+Historical reviews remain visible; newer prose cannot overwrite their meaning.
+
+During #411's consumer rollout, the trusted current-candidate acceptance summary can be
+the final aggregate. Until then, use the actual review link and explicit maintainer decision;
+do not claim an unenforced gate exists. A bot job's successful execution still does not mean approval.
+Don't infer approval from placeholders or require a second manually synchronized status table.
+
+### Triage a recurring baseline/environment failure once
+
+The repeated `test_reasoning_server_flags_come_from_budget` discrepancy in reviews is a reason
+to assign one focused diagnosis, not silently suppress it each time.
+
+Record the exact command, interpreter/dependency/config identity, candidate result, and controlled
+base comparison. Reuse that record only when the relevant environment and code still match; rerun
+when they change. Link a bounded follow-up to the appropriate fixture/tooling/dependency owner.
+Do not log credentials, private paths or corpus content.
+
+A pre-existing failure is not automatically a new PR defect, but it is also not a passing required test.
+Use the approved #411 verification policy for any equivalent evidence/exception and obtain an authorized
+decision where required. No blanket skip, xfail, widened ignore, arbitrary dependency install, or
+fabricated all-green assessment.
 
 Keep a short continuation note in the PR/draft/task record: base/current SHA,
 goal/invariant, decisions with links, touched boundaries, completed evidence,
