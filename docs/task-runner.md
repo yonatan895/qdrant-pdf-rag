@@ -147,7 +147,7 @@ executed. Prefix current tasks with `sh scripts/tools/run-task.sh`. Task
 | `lint`, `typecheck`, `test`, `check` | `qa:lint`, `qa:typecheck`, `qa:unit`, `qa:check` | Ruff, mypy, pytest; root aliases retained |
 | `wheelhouse`, `bm25-weights` | `artifacts:wheelhouse`, `artifacts:bm25` | artifact preparation and BM25 fetcher |
 | `chart`, `pull-chart`, `helm-template`, `helm-lint`, `build-images` | `artifacts:chart-check`, `artifacts:chart-fetch`, `artifacts:helm-render`, `artifacts:helm-lint`, `artifacts:images` | Helm, Docker and artifact owners |
-| `sim`, `loadtest-mock`, `test-vllm-e2e` | `qa:sim`, `qa:load`, `qa:vllm-e2e` | existing suites/scripts |
+| `sim`, `loadtest-mock`, `test-vllm-e2e` | `qa:sim`, `qa:load`, `qa:vllm-e2e`, `qa:ha` (new multi-peer lane) | existing suites/scripts; `qa:ha` is the issue #360 three-peer fixture |
 | `sim-qdrant`, `sim-clean` | `local:qdrant:up`, `local:qdrant:down` | `sim_qdrant.sh`, shared Qdrant helpers |
 | `eval`, `eval-baseline`, `eval-draft`, `eval-holdout`, `eval-paraphrase` | `eval:retrieval`, `eval:baseline`, `eval:draft`, `eval:holdout`, `eval:paraphrase` | retrieval scripts, mode-keyed baselines |
 | `verify-golden`, `gate-l1`, `capture-pool`, `eval-answers`, `eval-chat` | `eval:verify-golden`, `eval:gate-l1`, `eval:capture-pool`, `eval:answers`, `eval:chat` | existing evaluation scripts |

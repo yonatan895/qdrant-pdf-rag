@@ -744,14 +744,23 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
 - `is_doc_complete` checks marker binding plus stored point counts/digests;
   vector/chunk length mismatches fail before load; zero chunks are explicit
   `empty`, never a successful document publication.
-- Collection distribution (issue #360 Slice A): the corpus and completion
-  constructors carry the explicitly selected policy (`QDRANT_SHARD_NUMBER` /
-  `QDRANT_REPLICATION_FACTOR` / `QDRANT_WRITE_CONSISTENCY_FACTOR`, all unset
-  by default) to creation verbatim; an existing collection whose configured
-  values differ from a selected policy refuses before load — examined
-  read-only, never recreated or mutated. Unreadable live values are unknown,
-  not mismatches. Verifying actual active replica placement and
-  snapshot-gated migration are later slices.
+- Collection distribution (issue #360): the corpus and completion
+  constructors carry the explicitly selected policy
+  (`QDRANT_SHARD_NUMBER` / `QDRANT_REPLICATION_FACTOR` /
+  `QDRANT_WRITE_CONSISTENCY_FACTOR`) to creation verbatim. The air-gap
+  production default is the checked-in 6/3/2 tuple, and the loader validates
+  the complete effective tuple after explicit caller > operator file >
+  `overlays/openshift/collection-policy.env` precedence; a partial override
+  inherits the remaining preset values and local/one-node lanes select 1/1/1
+  explicitly. An existing collection
+  whose configured values differ from the selected policy refuses before
+  load — examined read-only, never recreated or mutated. Unreadable live
+  values are unknown, not mismatches, at this compatibility check; the
+  strict production verifier (`scripts/verify_placement.py`,
+  [deploy policy](deploy.md#collection-policy)) refuses unknown placement
+  and checks actual per-shard active copies for the corpus plus control
+  collection. Snapshot-gated migration of existing collections and
+  publication-eligibility integration remain later slices.
 - Representation migration writes `pending`, then commits after no document
   failures, `stale_completion_markers` finds no differently stamped markers,
   and the read-only scope proof attributes every searchable point to a verified

@@ -64,13 +64,21 @@ podDisruptionBudget:
   enabled: true
   maxUnavailable: 1
 
-topologySpreadConstraints:
-  - maxSkew: 1
-    topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: ScheduleAnyway
-    labelSelector:
-      matchLabels:
-        app.kubernetes.io/name: qdrant
+# Issue #360: hard separation of the three peers across workers. Required
+# pod anti-affinity (not ScheduleAnyway spreading) so a capacity squeeze
+# leaves a peer Pending with a useful diagnosis instead of silently
+# colocating and faking redundancy. The selector uses the chart's stable
+# `app.kubernetes.io/name` label: one Qdrant release per namespace is the
+# architecture, it follows release renames, and it also repels old-generation
+# pods during a rolling upgrade. A PDB limits voluntary disruption only; it
+# is not a copy count.
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: qdrant
+        topologyKey: kubernetes.io/hostname
 
 resources:
   requests:

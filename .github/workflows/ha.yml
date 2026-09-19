@@ -1,0 +1,83 @@
+name: ha
+on:
+  pull_request:
+    paths:
+      - "src/mainframe_rag/config.py"
+      - "src/mainframe_rag/ingest/**"
+      - "scripts/verify_placement.py"
+      - "scripts/qdrant_cluster.py"
+      - "scripts/qdrant_pin.py"
+      - "overlays/openshift/collection-policy.env"
+      - "overlays/openshift/values.yaml"
+      - "tests/test_ha_cluster.py"
+      - "tests/test_placement.py"
+      - "images.txt"
+      - "Taskfile.yml"
+      - "taskfiles/**"
+      - "scripts/tools/**"
+      - ".github/workflows/ha.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/mainframe_rag/config.py"
+      - "src/mainframe_rag/ingest/**"
+      - "scripts/verify_placement.py"
+      - "scripts/qdrant_cluster.py"
+      - "scripts/qdrant_pin.py"
+      - "overlays/openshift/collection-policy.env"
+      - "overlays/openshift/values.yaml"
+      - "tests/test_ha_cluster.py"
+      - "tests/test_placement.py"
+      - "images.txt"
+      - "Taskfile.yml"
+      - "taskfiles/**"
+      - "scripts/tools/**"
+      - ".github/workflows/ha.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ha-${{ github.ref || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  # Multi-peer placement/fault lane (tests/test_ha_cluster.py, `sh scripts/tools/run-task.sh qa:ha`):
+  # starts the pinned Qdrant image (images.txt) as a real three-peer cluster
+  # with separate storage and the checked-in production tuple (6 shards /
+  # RF 3 / W 2), then asserts actual per-shard placement, refusal of a
+  # false-HA RF1 corpus+control pair, degraded reads and healthy rejoin
+  # after stopping one peer, and exact point identity through survivors.
+  # Fail-closed like sim/load: missing docker, a skip, or zero passes must
+  # fail, not go green. Three containers on one runner prove distributed
+  # software behavior only — never independent-worker or site tolerance.
+  # Path-filtered (unrelated changes must not pay for the lane) and
+  # GitHub-only: air-gap GitLab runners cannot pull Docker Hub.
+  ha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0 (the pin does not cover pip installs below — they resolve from PyPI at run time)
+        with:
+          python-version: "3.14"
+      - name: Install pinned Task runner
+        run: |
+          sh scripts/tools/install-task.sh
+      - name: docker must be present (the lane raises without it — no docker must fail here)
+        run: docker version
+      # Explicit preparation (verification never installs): the lane runs on
+      # the explicitly prepared .venv/bin/python.
+      - run: sh scripts/tools/run-task.sh dev:setup
+      - name: run the three-peer HA lane (fail closed — no skips, at least one pass)
+        run: |
+          set -o pipefail
+          sh scripts/tools/run-task.sh qa:ha 2>&1 | tee ha-output.txt
+          if grep -qE '[1-9][0-9]* skipped' ha-output.txt; then
+            echo "HA tests were skipped — coverage must not silently vanish" >&2
+            exit 1
+          fi
+          grep -qE '[1-9][0-9]* passed' ha-output.txt || {
+            echo "no HA tests passed — the lane did not run" >&2
+            exit 1
+          }

@@ -41,6 +41,16 @@ spec:
               value: hash
             - name: INGEST_WORKERS
               value: "1"
+            # Issue #360: this connected-CI lane is a single Qdrant replica.
+            # Select the 1/1/1 non-HA profile explicitly — never infer a
+            # downgrade from the available node count. Strict production
+            # acceptance (6/3/2) must never accept this lane.
+            - name: QDRANT_SHARD_NUMBER
+              value: "1"
+            - name: QDRANT_REPLICATION_FACTOR
+              value: "1"
+            - name: QDRANT_WRITE_CONSISTENCY_FACTOR
+              value: "1"
           resources:
             requests: { cpu: "250m", memory: 512Mi }
             limits: { cpu: "1", memory: 1Gi }

@@ -31,25 +31,13 @@ check_gateway_ca
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 INGEST_TIMEOUT=${INGEST_TIMEOUT:-3600}
 INGEST_WORK_SIZE=${INGEST_WORK_SIZE:-100Gi}   # CI-rehearsal knob; default = prod size
-# Collection distribution policy (issue #360): optional positive integers
-# selecting shard count / replication / write-consistency for collections
-# created by this Job. Unset keeps the Qdrant server default and the entries
-# are stripped below, so no blank value can override the in-code default.
-# Production numbers are an explicit owner decision; validation fails closed
-# here, before rendering. Migration of existing collections is out of scope
+# Collection distribution policy (issue #360): the production path requires
+# one complete validated tuple (checked-in preset 6/3/2 with caller > file >
+# preset precedence; one-node lanes select 1/1/1 explicitly). Partial,
+# unknown or impossible policies fail closed here, before rendering or any
+# cluster mutation. Migration of existing collections is out of scope
 # (later slice), never automatic recreation.
-for _policy_key in QDRANT_SHARD_NUMBER QDRANT_REPLICATION_FACTOR QDRANT_WRITE_CONSISTENCY_FACTOR; do
-    eval "_policy_val=\${$_policy_key:-}"
-    case "$_policy_val" in
-        "") ;;
-        *[!0-9]*) die "$_policy_key must be a positive integer (got '$_policy_val')" ;;
-        *)
-            [ "$_policy_val" -gt 0 ] 2>/dev/null \
-                || die "$_policy_key must be a positive integer (got '$_policy_val')"
-            ;;
-    esac
-done
-unset _policy_key _policy_val
+validate_collection_policy required
 mkdir -p dist
 
 if [ "${AIRGAP_DRYRUN:-0}" != "1" ] && ! $KC -n "$NAMESPACE" get pvc ingest-work >/dev/null 2>&1; then
@@ -156,14 +144,9 @@ else
     strip_gateway_key_entries dist/ingest-rendered.yaml EMBED_API_KEY CONTEXT_LLM_API_KEY
     echo "==> Gateway keys off (GATEWAY_API_KEY_SECRET unset): keyless model endpoints"
 fi
-# Collection distribution policy (issue #360): unset entries leave no
-# trace so the Qdrant server default stands; set values were validated
-# positive integers above and render as bare YAML ints.
-for _policy_key in QDRANT_SHARD_NUMBER QDRANT_REPLICATION_FACTOR QDRANT_WRITE_CONSISTENCY_FACTOR; do
-    eval "_policy_set=\${$_policy_key:+set}"
-    [ -n "$_policy_set" ] || strip_env_entry dist/ingest-rendered.yaml "$_policy_key"
-done
-unset _policy_key _policy_set
+# Collection distribution policy (issue #360): the complete validated tuple
+# renders as bare YAML ints; validate_collection_policy ran before rendering,
+# so no entry can be blank or missing here.
 wire_pull_secret dist/ingest-rendered.yaml
 wire_gateway_ca dist/ingest-rendered.yaml Job ingest ingest
 fail_on_placeholders dist/ingest-rendered.yaml ingest

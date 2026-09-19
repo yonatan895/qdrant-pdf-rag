@@ -65,10 +65,13 @@ class Settings(BaseSettings):
     qdrant_ingest_timeout_s: int = 120
     # Collection distribution policy (issue #360): shard count,
     # replication factor, and write-consistency factor for the corpus and
-    # completion collections created by ingest. All unset by default — None
-    # means the Qdrant server default (today one shard, one copy),
-    # preserving current creation behavior exactly. Production numbers are
-    # an explicit owner decision; this repo never invents them.
+    # completion collections created by ingest. These generic Settings stay
+    # optional for local/dev compatibility; the air-gap production path
+    # always supplies a complete tuple (checked-in preset 6/3/2 with
+    # explicit caller > operator file > preset precedence) and the one-node
+    # profile selects 1/1/1 explicitly. None means "no explicit knob" — it
+    # never qualifies the production path, and shard defaults can depend on
+    # the cluster at creation, so never reconstruct them from pod count.
     # Self-hosted Qdrant cannot reshard, so the shard count is fixed at
     # creation; replicating an existing collection is a snapshot-gated
     # migration (later slice), never automatic recreation.

@@ -63,6 +63,11 @@ def _run(tree, extra_env=None):
         "DENSE_DIM": "768",
         "EMBED_MODEL_REVISION": "rev-1",
         "VLLM_BASE_URL": "http://vllm:8000/v1",
+        # Issue #360: fixtures select the explicit single-node 1/1/1 profile;
+        # the production preset is exercised by its own test below.
+        "QDRANT_SHARD_NUMBER": "1",
+        "QDRANT_REPLICATION_FACTOR": "1",
+        "QDRANT_WRITE_CONSISTENCY_FACTOR": "1",
     }
     if extra_env:
         for k, v in extra_env.items():
@@ -77,6 +82,49 @@ def test_validate_clean_exits_zero(tree):
     r = _run(tree)
     assert r.returncode == 0, r.stderr
     assert "SUCCESS: Pre-flight validation passed (dry-run mode)." in r.stdout
+
+
+def test_validate_reports_selected_policy(tree):
+    r = _run(tree)
+    assert "Collection policy: S=1 RF=1 W=1" in r.stdout
+
+
+def test_validate_production_preset_supplies_tuple(tree):
+    """Issue #360: with no explicit selection the checked-in production
+    preset supplies 6/3/2 to preflight (and therefore to the ingest render)."""
+    target = tree / "overlays" / "openshift"
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO / "overlays" / "openshift" / "collection-policy.env", target)
+    r = _run(
+        tree,
+        {
+            "QDRANT_SHARD_NUMBER": None,
+            "QDRANT_REPLICATION_FACTOR": None,
+            "QDRANT_WRITE_CONSISTENCY_FACTOR": None,
+        },
+    )
+    assert r.returncode == 0, r.stderr
+    assert "Collection policy: S=6 RF=3 W=2" in r.stdout
+
+
+def test_validate_partial_policy_fails_closed(tree):
+    r = _run(tree, {"QDRANT_REPLICATION_FACTOR": None})
+    assert r.returncode == 1
+    assert "collection distribution policy is incomplete" in r.stderr
+    assert "QDRANT_REPLICATION_FACTOR" in r.stderr
+
+
+def test_validate_write_above_replication_fails_closed(tree):
+    r = _run(
+        tree,
+        {
+            "QDRANT_SHARD_NUMBER": "6",
+            "QDRANT_REPLICATION_FACTOR": "2",
+            "QDRANT_WRITE_CONSISTENCY_FACTOR": "3",
+        },
+    )
+    assert r.returncode == 1
+    assert "exceeds" in r.stderr
 
 
 def test_validate_agent_write_key_fails_closed(tree):
