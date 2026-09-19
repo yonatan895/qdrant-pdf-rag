@@ -72,22 +72,27 @@ tasks:
       - '"$TASK_PY" scripts/check_agent_context.py'
 
   sim:
-    desc: Run the integration tier against disposable Qdrant (0 skips)
+    desc: Run the sim integration tier against disposable Qdrant (load tier excluded, 0 skips)
     summary: |
-      `.venv/bin/python -m pytest -m integration -v -rs`, mirroring
-      the retired `make sim`. A skip fails the run (a skip on missing local weights
+      `.venv/bin/python -m pytest -m integration --ignore=tests/test_load_tier.py -v -rs`, mirroring
+      the retired `make sim`. The sim lane covers correctness; the load tier
+      (`tests/test_load_tier.py`, run via `task qa:load`) is excluded here so
+      its absolute concurrency contracts are asserted exactly once, in their
+      own lane. A skip fails the run (a skip on missing local weights
       means symlink or rebuild them, never ignore it). Needs docker (or
       QDRANT_SIM_URL) and the BM25 weights; no GPU or live gateway.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - .venv/bin/python -m pytest -m integration -v -rs
+      - .venv/bin/python -m pytest -m integration --ignore=tests/test_load_tier.py -v -rs
 
   load:
     desc: Run the load tier (same composition CI runs, absolute contracts)
     summary: |
       `.venv/bin/python -m pytest -m integration tests/test_load_tier.py
-      -v`, replacing the retired `make loadtest-mock`. Fail-closed: no skips;
-      docker/startup/zero-request failures raise. Knobs live in the
+      -v`, replacing the retired `make loadtest-mock`. This is the only lane
+      that runs the load tier: `task qa:sim` excludes this file, so the two
+      lanes cover every `integration`-marked node with no overlap.
+      Fail-closed: no skips; docker/startup/zero-request failures raise. Knobs live in the
       caller environment (LOAD_SEARCH_CONCURRENCY and friends, read by the
       test itself).
     cmds:
