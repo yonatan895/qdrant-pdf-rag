@@ -748,9 +748,11 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   constructors carry the explicitly selected policy
   (`QDRANT_SHARD_NUMBER` / `QDRANT_REPLICATION_FACTOR` /
   `QDRANT_WRITE_CONSISTENCY_FACTOR`) to creation verbatim. The air-gap
-  production path always supplies the complete checked-in decision 6/3/2
-  (explicit caller > operator file > `overlays/openshift/collection-policy.env`
-  preset); one-node lanes select 1/1/1 explicitly. An existing collection
+  production default is the checked-in 6/3/2 tuple, and the loader validates
+  the complete effective tuple after explicit caller > operator file >
+  `overlays/openshift/collection-policy.env` precedence; a partial override
+  inherits the remaining preset values and local/one-node lanes select 1/1/1
+  explicitly. An existing collection
   whose configured values differ from the selected policy refuses before
   load — examined read-only, never recreated or mutated. Unreadable live
   values are unknown, not mismatches, at this compatibility check; the

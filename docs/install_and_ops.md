@@ -976,7 +976,9 @@ QUERY="IEA500I operator message" sh scripts/tools/run-task.sh airgap:smoke
 
 **Collection placement (issue #360):** before accepting a generation, run
 the read-only verifier from a pod or the bastion against every expected Qdrant
-peer (see [the collection policy contract](deploy.md#collection-policy)):
+peer (see [the collection policy contract](deploy.md#collection-policy)).
+`QDRANT_URL` is the entry/Service endpoint used for inventory and the alias
+binding; the `--peer-url` endpoints are the authoritative direct peers:
 
 ```bash
 QDRANT_URL=http://qdrant:6333 QDRANT_SHARD_NUMBER=6 \
@@ -987,10 +989,18 @@ python3 scripts/verify_placement.py --production \
     --peer-url http://qdrant-2.qdrant-headless:6333
 ```
 
-`VERDICT: healthy` with exit 0 is the production qualification outcome;
-`degraded` is readable but not qualified. A one-node rehearsal labels
-itself `VERDICT: non-ha` with `--expect-single-node` and never counts as
-distributed acceptance.
+In the ingest image the script is at `/app/scripts/verify_placement.py` and
+the entrypoint runs ingestion; run it as an explicit read-only command
+override (never as an ingest Job): point the container command at
+`python3 /app/scripts/verify_placement.py --production --peer-url ...` with
+the same `QDRANT_*` environment.
+
+`VERDICT: healthy` with exit 0 is the production qualification outcome and
+is placement evidence only (no read/write probe). `degraded` (exit 0 only
+with `--allow-degraded`, never with `--production`) means one known member
+is lost and is operational continuation, not qualification. A one-node
+rehearsal labels itself `VERDICT: non-ha` with `--expect-single-node` and
+never counts as distributed acceptance.
 
 ### 4.7 Local Cluster Testing Standard (Kind + Local Registry)
 

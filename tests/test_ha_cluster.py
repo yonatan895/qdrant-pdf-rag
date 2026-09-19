@@ -1,9 +1,12 @@
 """Disposable three-peer Qdrant acceptance fixture (issue #360 Slice B).
 
-Starts the pinned image as a real three-peer cluster, creates the corpus and
-control collections with the checked-in production tuple (6 shards / RF 3 /
-W 2), and exercises the placement verifier over actual placement: healthy,
-false-HA configuration, peer loss (degraded, reads survive), and rejoin.
+Starts the pinned image as a real three-peer cluster and exercises the
+placement verifier over actual placement: healthy, false-HA configuration,
+peer loss (degraded, reads survive), and rejoin. Each scenario creates and
+seeds its own physical corpus/control pair, so any test can run alone or in
+any order; expected point ids/payloads are declared here, independent of the
+verifier, and re-asserted through survivors after loss and on every peer
+after rejoin.
 
 Local disposable fixture only: three containers on one host prove
 distributed software behavior, not independent-worker or site tolerance.
@@ -17,6 +20,7 @@ import argparse
 import shutil
 import subprocess
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -27,6 +31,7 @@ from scripts.qdrant_cluster import (
     free_port,
     start_cluster,
     wait_cluster_ready,
+    wait_collection_placement,
 )
 from scripts.verify_placement import perform_verification
 
@@ -37,10 +42,22 @@ from mainframe_rag.ingest.qdrant_io import collection_vector_configs
 pytestmark = pytest.mark.integration
 
 REPO = Path(__file__).resolve().parents[1]
-CORPUS = "ha_corpus"
-FALSE_HA = "ha_false"
 DIM = 64
-POINTS = tuple(range(1, 61))
+SHARDS = 6
+RF = 3
+CORPUS_POINTS = tuple(range(1, 61))
+CONTROL_POINTS = tuple(range(1001, 1007))
+
+
+@dataclass(frozen=True)
+class SeededPair:
+    corpus: str
+    control: str
+
+    def expected(self, collection: str) -> dict[int, str]:
+        points = CORPUS_POINTS if collection == self.corpus else CONTROL_POINTS
+        prefix = "corpus" if collection == self.corpus else "control"
+        return {point_id: f"{prefix}-{point_id}" for point_id in points}
 
 
 @pytest.fixture(scope="module")
@@ -58,13 +75,35 @@ def cluster() -> QdrantCluster:
         started.stop()
 
 
+@pytest.fixture
+def seeded_pair(cluster: QdrantCluster) -> SeededPair:
+    """A fresh 6/3/2 corpus+control pair, seeded and fully placed."""
+    suffix = uuid.uuid4().hex[:8]
+    pair = SeededPair(
+        corpus=f"ha_corpus_{suffix}",
+        control=f"ha_corpus_{suffix}__completions",
+    )
+    primary = QdrantClient(url=cluster.urls[0], timeout=60)
+    try:
+        _create_pair(primary, pair.corpus, replication_factor=RF)
+        _seed(primary, pair.corpus, CORPUS_POINTS)
+        _seed(primary, pair.control, CONTROL_POINTS)
+    finally:
+        primary.close()
+    for collection in (pair.corpus, pair.control):
+        wait_collection_placement(
+            cluster.urls, collection, shard_number=SHARDS, replication_factor=RF
+        )
+    return pair
+
+
 def _settings(url: str, collection: str, **overrides) -> Settings:
     base = {
         "qdrant_url": url,
         "qdrant_collection": collection,
         "dense_dim": DIM,
-        "qdrant_shard_number": 6,
-        "qdrant_replication_factor": 3,
+        "qdrant_shard_number": SHARDS,
+        "qdrant_replication_factor": RF,
         "qdrant_write_consistency_factor": 2,
         "_env_file": None,
     }
@@ -80,20 +119,21 @@ def _create_pair(client: QdrantClient, name: str, replication_factor: int) -> No
             vectors_config=vectors,
             sparse_vectors_config=sparse,
             on_disk_payload=True,
-            shard_number=6,
+            shard_number=SHARDS,
             replication_factor=replication_factor,
             write_consistency_factor=min(2, replication_factor),
         )
 
 
-def _seed(client: QdrantClient, name: str) -> None:
+def _seed(client: QdrantClient, name: str, point_ids: tuple[int, ...]) -> None:
+    prefix = "corpus" if point_ids is CORPUS_POINTS else "control"
     points = [
         models.PointStruct(
             id=point_id,
             vector={"dense": [float(point_id)] * DIM},
-            payload={"point": point_id, "tag": f"synthetic-{point_id}"},
+            payload={"point": point_id, "tag": f"{prefix}-{point_id}"},
         )
-        for point_id in POINTS
+        for point_id in point_ids
     ]
     client.upsert(name, points=points, wait=True)
 
@@ -110,41 +150,50 @@ def _verify(settings: Settings, urls: tuple[str, ...]):
     return perform_verification(settings, args)
 
 
-def test_real_three_peer_healthy_fixture(cluster: QdrantCluster, capsys):
-    primary = QdrantClient(url=cluster.urls[0], timeout=60)
-    _create_pair(primary, CORPUS, replication_factor=3)
-    _seed(primary, CORPUS)
+def _assert_exact_payloads(url: str, pair: SeededPair) -> None:
+    reader = QdrantClient(url=url, timeout=30)
+    try:
+        for collection in (pair.corpus, pair.control):
+            expected = pair.expected(collection)
+            records = reader.retrieve(collection, ids=list(expected), with_payload=True)
+            actual = {record.id: record.payload["tag"] for record in records}
+            assert actual == expected, f"{url} {collection}"
+    finally:
+        reader.close()
 
-    settings = _settings(cluster.urls[0], CORPUS)
+
+def test_real_three_peer_healthy_fixture(
+    cluster: QdrantCluster, seeded_pair: SeededPair, capsys
+):
+    settings = _settings(cluster.urls[0], seeded_pair.corpus)
     report, code = _verify(settings, cluster.urls)
     output = capsys.readouterr().out
     assert code == 0, output
     assert report is not None and report.state == "healthy"
+    assert report.alias is not None
+    assert report.alias.inventory == (seeded_pair.corpus, seeded_pair.control)
     assert {verdict.collection for verdict in report.collections} == {
-        CORPUS,
-        completion_collection_for(CORPUS),
+        seeded_pair.corpus,
+        seeded_pair.control,
     }
     for verdict in report.collections:
-        assert len(verdict.shards) == 6
-        assert all(len(shard.active_peers) == 3 for shard in verdict.shards)
+        assert len(verdict.shards) == SHARDS
+        assert all(len(shard.active_peers) == RF for shard in verdict.shards)
 
-    # Exact producer-to-consumer round-trip through a surviving peer entry.
     for url in cluster.urls:
-        reader = QdrantClient(url=url, timeout=30)
-        count = reader.count(CORPUS, exact=True).count
-        assert count == len(POINTS), url
-        records = reader.retrieve(CORPUS, ids=list(POINTS), with_payload=True)
-        assert {
-            record.id: record.payload["tag"] for record in records
-        } == {point_id: f"synthetic-{point_id}" for point_id in POINTS}
+        _assert_exact_payloads(url, seeded_pair)
 
 
 def test_false_ha_configuration_refused(cluster: QdrantCluster, capsys):
     """Three Ready peers with an RF1 corpus and control collection must be
     rejected against the production tuple (the packet's false-HA case)."""
+    name = f"ha_false_{uuid.uuid4().hex[:8]}"
     primary = QdrantClient(url=cluster.urls[0], timeout=60)
-    _create_pair(primary, FALSE_HA, replication_factor=1)
-    settings = _settings(cluster.urls[0], FALSE_HA)
+    try:
+        _create_pair(primary, name, replication_factor=1)
+    finally:
+        primary.close()
+    settings = _settings(cluster.urls[0], name)
     report, code = _verify(settings, cluster.urls)
     output = capsys.readouterr().out
     assert code == 1, output
@@ -153,29 +202,42 @@ def test_false_ha_configuration_refused(cluster: QdrantCluster, capsys):
     assert any("replication_factor=1" in problem for problem in report.configured_problems)
 
 
-def test_peer_loss_is_degraded_and_rejoins_healthy(cluster: QdrantCluster, capsys):
-    settings = _settings(cluster.urls[0], CORPUS)
+def test_peer_loss_is_degraded_and_rejoins_healthy(
+    cluster: QdrantCluster, seeded_pair: SeededPair, capsys
+):
+    settings = _settings(cluster.urls[0], seeded_pair.corpus)
     dropped = f"{cluster.prefix}-2"
-    containers = ["docker", "stop", dropped]
+    survivors = (cluster.urls[0], cluster.urls[2])
 
     try:
-        subprocess.run(containers, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["docker", "stop", dropped], check=True, capture_output=True, text=True
+        )
         report, code = _verify(settings, cluster.urls)
         output = capsys.readouterr().out
         assert code == 1, output
         assert report is not None and report.state == "degraded"
         assert any("unreachable" in problem for problem in report.cluster.problems)
 
-        # The published generation stays readable through a survivor.
-        reader = QdrantClient(url=cluster.urls[0], timeout=30)
-        assert reader.count(CORPUS, exact=True).count == len(POINTS)
+        # The published generation stays readable, with exact identity,
+        # through the survivors.
+        for url in survivors:
+            _assert_exact_payloads(url, seeded_pair)
     finally:
         subprocess.run(
             ["docker", "start", dropped], check=True, capture_output=True, text=True
         )
         wait_cluster_ready(cluster.urls)
 
+    # Membership alone is not catch-up: every shard must be ACTIVE on RF
+    # distinct peers again before re-qualification.
+    for collection in (seeded_pair.corpus, seeded_pair.control):
+        wait_collection_placement(
+            cluster.urls, collection, shard_number=SHARDS, replication_factor=RF
+        )
     report, code = _verify(settings, cluster.urls)
     output = capsys.readouterr().out
     assert code == 0, output
     assert report is not None and report.state == "healthy"
+    for url in cluster.urls:
+        _assert_exact_payloads(url, seeded_pair)

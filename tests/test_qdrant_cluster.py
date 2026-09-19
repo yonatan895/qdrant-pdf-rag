@@ -114,6 +114,55 @@ def test_wait_cluster_ready_requires_all_peers(monkeypatch):
         cluster.wait_cluster_ready(("u1", "u2"), timeout_s=0.1)
 
 
+def test_active_copies_by_shard_counts_only_active_local_reports(monkeypatch):
+    payloads = {
+        "u1": {
+            "peer_id": 101,
+            "local_shards": [
+                {"shard_id": 0, "state": "Active"},
+                {"shard_id": 1, "state": "Recovery"},
+            ],
+        },
+        "u2": {"peer_id": 202, "local_shards": [{"shard_id": 0, "state": "Active"}]},
+    }
+
+    def fake_get(url, timeout):
+        endpoint = url.split("/", 1)[0]
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"result": payloads[endpoint]},
+        )
+
+    monkeypatch.setattr(cluster.httpx2, "get", fake_get)
+    copies = cluster.active_copies_by_shard(("u1", "u2"), "c")
+    assert copies[0] == {101, 202}
+    assert 1 not in copies
+
+
+def test_wait_collection_placement_waits_for_rf_copies(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_copies(_urls, _collection, *, timeout=5.0):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {0: {101, 202}}
+        return {0: {101, 202, 303}}
+
+    monkeypatch.setattr(cluster, "active_copies_by_shard", fake_copies)
+    cluster.wait_collection_placement(
+        ("u1",), "c", shard_number=1, replication_factor=3, timeout_s=10
+    )
+    assert calls["n"] >= 2
+
+
+def test_wait_collection_placement_times_out(monkeypatch):
+    monkeypatch.setattr(cluster, "active_copies_by_shard", lambda *_a, **_k: {0: {101}})
+    with pytest.raises(cluster.QdrantClusterError, match="placement not ready"):
+        cluster.wait_collection_placement(
+            ("u1",), "c", shard_number=1, replication_factor=3, timeout_s=0.1
+        )
+
+
 def test_main_up_reports_failure(monkeypatch, capsys):
     def boom(*_args, **_kwargs):
         raise cluster.QdrantClusterError("docker is required")

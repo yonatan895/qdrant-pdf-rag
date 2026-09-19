@@ -134,6 +134,61 @@ def wait_cluster_ready(urls: tuple[str, ...], *, timeout_s: float = READY_TIMEOU
     )
 
 
+def active_copies_by_shard(
+    urls: tuple[str, ...], collection: str, *, timeout: float = 5.0
+) -> dict[int, set[int]]:
+    """Distinct ACTIVE peers per logical shard from each peer's own report."""
+    copies: dict[int, set[int]] = {}
+    for url in urls:
+        response = httpx2.get(
+            f"{url.rstrip('/')}/collections/{collection}/cluster", timeout=timeout
+        )
+        response.raise_for_status()
+        payload = response.json()["result"]
+        peer = int(payload["peer_id"])
+        for shard in payload.get("local_shards") or []:
+            if str(shard.get("state", "")).lower() != "active":
+                continue
+            copies.setdefault(int(shard["shard_id"]), set()).add(peer)
+    return copies
+
+
+def wait_collection_placement(
+    urls: tuple[str, ...],
+    collection: str,
+    *,
+    shard_number: int,
+    replication_factor: int,
+    timeout_s: float = READY_TIMEOUT_S,
+) -> None:
+    """Wait until every logical shard has `replication_factor` ACTIVE copies
+    on distinct peers. Membership count alone is not replica catch-up."""
+    deadline = time.monotonic() + timeout_s
+    last = "no attempt"
+    while time.monotonic() < deadline:
+        try:
+            copies = active_copies_by_shard(urls, collection)
+        except Exception as exc:  # noqa: BLE001 - retried until the deadline
+            last = f"{type(exc).__name__}: {exc}"
+        else:
+            missing = [
+                shard
+                for shard in range(shard_number)
+                if len(copies.get(shard, ())) < replication_factor
+            ]
+            if not missing:
+                return
+            counts = {shard: len(copies.get(shard, ())) for shard in range(shard_number)}
+            last = (
+                f"{collection}: shard(s) {missing} below {replication_factor} ACTIVE "
+                f"copies (counts {counts})"
+            )
+        time.sleep(1.0)
+    raise QdrantClusterError(
+        f"collection placement not ready within {timeout_s:.0f}s (last: {last})"
+    )
+
+
 def start_cluster(
     repo_root: Path,
     *,

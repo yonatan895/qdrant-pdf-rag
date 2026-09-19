@@ -3,9 +3,18 @@
 Read-only judgement over actual cluster observations: configured
 shard/replication/write-consistency policy, per-shard authoritative active
 copies on reachable peers, transfers/recovery states, and cluster
-membership. Pure evaluation (no I/O) except `resolve_verification_inventory`,
-which maps the configured alias to the physical generation plus its paired
-control collection through the existing naming owner.
+membership. Pure evaluation (no I/O) except `resolve_alias_binding`, which
+captures the configured alias -> physical generation binding together with
+the physical corpus collection and its paired control collection through the
+existing naming owner.
+
+Authoritative placement observations come only from direct peer endpoints
+(`--peer-url`), each of which is bound to the member set the cluster reports
+about itself. The entry endpoint (`QDRANT_URL`, possibly a load-balanced
+Service) is used for inventory/alias/binding checks, never as a peer
+identity: a Service that alternates backends must not become an extra
+replica or combine changing identities. Replicas named outside the accepted
+membership are refused, never counted.
 
 The owner decision (issue #360 comment, 19 September 2026) is 3 Qdrant
 peers, 6 logical shards, replication factor 3, write consistency 2, applied
@@ -255,16 +264,40 @@ class ClusterVerdict:
     reachable_peer_urls: int
     consensus: str
     problems: tuple[str, ...]
+    member_ids: tuple[int, ...] = ()
+    observed_peer_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
-class PeerReachability:
-    """`peer_urls` probed in addition to the primary endpoint."""
+class PeerClusterView:
+    """One authoritative direct peer endpoint's own control-plane view.
+
+    `reachable` means the endpoint answered a read. A reachable endpoint whose
+    own membership/consensus is missing or empty is unverifiable, never a
+    supported lost member: only an endpoint that failed every read can
+    positively establish a single-peer loss. Membership is what the endpoint
+    reports about the whole cluster, not about itself alone.
+    """
 
     endpoint: str
     reachable: bool
     peer_id: int | None = None
+    member_peer_ids: tuple[int, ...] = ()
+    consensus: str = ""
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class AliasBinding:
+    """The configured alias and the physical generation it resolved to when
+    the inventory was captured. `target is None` means no alias exists and
+    the configured name is the physical collection itself (in-place layout);
+    such a verification covers that physical pair, not a current-alias
+    certification."""
+
+    alias: str
+    target: str | None
+    inventory: tuple[str, ...]
 
 
 def _state_from_rank(rank: int) -> str:
@@ -278,17 +311,36 @@ def evaluate_collection_placement(
     collection: str,
     observations: Iterable[CollectionObservation],
     expected: PlacementPolicy,
+    *,
+    accepted_peers: tuple[int, ...],
 ) -> CollectionVerdict:
     """Judge actual placement from authoritative local-shard reports.
 
     Every shard needs `expected.replication_factor` ACTIVE copies on distinct
     peers. Deduplication is by `(collection, shard_id, peer_id)` — a replica
     reported by several peers is still one copy, and a remote report is not an
-    observation of that copy's state. A pending, stale, or under-replicated
-    state is never healthy; an unknown shard count is unverifiable.
+    observation of that copy's state. Only peer ids inside the cluster's own
+    reported member set count: an endpoint or remote reference outside
+    `accepted_peers` is a foreign topology and makes the verdict
+    unverifiable. Local shards outside the declared shard set are refused
+    rather than silently ignored. A pending, stale, or under-replicated state
+    is never healthy; an unknown shard count is unverifiable.
     """
     if expected.shard_number < 1:
         raise ValueError(f"shard_number must be >= 1, got {expected.shard_number}")
+    if not accepted_peers:
+        return CollectionVerdict(
+            collection,
+            "unverifiable",
+            (
+                (
+                    f"{collection}: accepted cluster membership is not established; "
+                    "placement cannot be judged"
+                ),
+            ),
+            (),
+        )
+    accepted = frozenset(accepted_peers)
     views = [view for view in observations if view.collection == collection]
     reachable = [view for view in views if view.reachable]
     unreachable = [view for view in views if not view.reachable]
@@ -339,6 +391,22 @@ def evaluate_collection_placement(
             ),
             (),
         )
+    foreign = [view for view in present if view.peer_id not in accepted]
+    if foreign:
+        return CollectionVerdict(
+            collection,
+            "unverifiable",
+            (
+                (
+                    f"{collection}: endpoint(s) "
+                    f"{', '.join(view.endpoint for view in foreign)} report peer id(s) "
+                    f"{sorted(peer for peer in (view.peer_id for view in foreign) if peer is not None)} "
+                    f"outside the accepted cluster membership {sorted(accepted)} — "
+                    "refusing a foreign topology"
+                ),
+            ),
+            (),
+        )
 
     # (shard_id, peer_id) -> state, from each peer's own local report.
     local: dict[int, dict[int, str]] = {}
@@ -361,6 +429,13 @@ def evaluate_collection_placement(
     reached = {view.peer_id for view in present if view.peer_id is not None}
     for view in present:
         for shard_id, peer_id, state in view.remote_shards:
+            if peer_id not in accepted:
+                problems.append(
+                    f"shard {shard_id}: {view.endpoint} names peer {peer_id} outside "
+                    f"the accepted cluster membership {sorted(accepted)} — refusing a "
+                    "foreign topology"
+                )
+                continue
             if peer_id not in reached:
                 continue
             local_state = local.get(shard_id, {}).get(peer_id)
@@ -401,6 +476,34 @@ def evaluate_collection_placement(
                 (
                     f"{collection}: observed shard_count={shard_count} != expected "
                     f"{expected.shard_number}"
+                ),
+            ),
+            (),
+        )
+    declared = range(shard_count)
+    unexpected = sorted(
+        {
+            shard_id
+            for view in present
+            for shard_id, _state in view.local_shards
+            if shard_id not in declared
+        }
+        | {
+            shard_id
+            for view in present
+            for shard_id, _peer_id, _state in view.remote_shards
+            if shard_id not in declared
+        }
+    )
+    if unexpected:
+        return CollectionVerdict(
+            collection,
+            "unverifiable",
+            (
+                (
+                    f"{collection}: observed shard id(s) {unexpected} outside the "
+                    f"declared shard set 0..{shard_count - 1} — refusing an "
+                    "unsupported layout"
                 ),
             ),
             (),
@@ -491,77 +594,200 @@ def evaluate_collection_placement(
     return CollectionVerdict(collection, state, tuple(shard_problems), tuple(shards))
 
 
+def _cluster_refusal(
+    expected_peers: int,
+    views: tuple[PeerClusterView, ...],
+    problem: str,
+    *,
+    members: frozenset[int] = frozenset(),
+) -> ClusterVerdict:
+    observed = tuple(sorted({v.peer_id for v in views if v.reachable and v.peer_id is not None}))
+    consensus = {v.consensus for v in views if v.reachable}
+    return ClusterVerdict(
+        state="unverifiable",
+        expected_peers=expected_peers,
+        member_peers=len(members),
+        reachable_peer_urls=sum(1 for v in views if v.reachable),
+        consensus=consensus.pop() if len(consensus) == 1 else "unknown",
+        problems=(problem,),
+        member_ids=tuple(sorted(members)),
+        observed_peer_ids=observed,
+    )
+
+
 def evaluate_cluster(
     *,
     expected_peers: int,
-    member_peer_ids: tuple[int, ...],
-    peer_reachability: tuple[PeerReachability, ...],
-    consensus: str,
-    primary_endpoint: str,
+    views: Iterable[PeerClusterView],
 ) -> ClusterVerdict:
-    """Cluster membership, expected peers, and endpoint reachability.
+    """Cluster membership bound to the observed endpoint identities.
 
-    A missing expected peer, an unreachable endpoint, or a stopped consensus
-    thread means the topology cannot be certified. HTTP 200 from one endpoint
-    is never membership evidence.
+    Every expected peer must be provided as its own direct endpoint; each one
+    must report its own peer id, the same cluster membership, and a working
+    consensus thread. Observed identities must be exactly the reported member
+    set. Only a single known member missing with every other check coherent is
+    positively established degraded (the supported one-peer-loss state);
+    missing/contradictory control-plane evidence is unverifiable, never
+    degraded.
     """
-    problems: list[str] = []
     if expected_peers < 1:
         raise ValueError(f"expected_peers must be >= 1, got {expected_peers}")
-    members = len(set(member_peer_ids))
-    # The explicit non-HA profile is a standalone server: no cluster metadata
-    # exists to report, and that is the declared topology.
-    standalone = consensus == "disabled" and expected_peers == 1
-    if standalone:
-        members = max(members, 1)
-    if members < expected_peers:
-        problems.append(
-            f"cluster reports {members} member peer(s), expected {expected_peers} "
-            "(expected reachable peers)"
+    provided = tuple(views)
+    if len(provided) != expected_peers:
+        return _cluster_refusal(
+            expected_peers,
+            provided,
+            f"{len(provided)} authoritative peer endpoint(s) provided, expected "
+            f"{expected_peers} — pass --peer-url for every expected peer (the entry "
+            "endpoint is not a peer)",
         )
-    if not consensus:
-        problems.append("cluster consensus status unreadable")
-    elif consensus == "disabled" and not standalone:
-        problems.append(
-            "server is not in distributed mode (consensus disabled); "
-            f"expected {expected_peers} peers"
+    reachable = tuple(view for view in provided if view.reachable)
+    unreachable = tuple(view for view in provided if not view.reachable)
+    if not reachable:
+        return _cluster_refusal(
+            expected_peers, provided, "no authoritative peer endpoint reachable"
         )
-    elif consensus not in ("disabled", "working"):
-        problems.append(f"cluster consensus thread is {consensus}")
-    provided = tuple(peer_reachability)
-    reachable = sum(1 for peer in provided if peer.reachable)
-    for peer in provided:
-        if not peer.reachable:
-            problems.append(
-                f"peer endpoint {peer.endpoint} unreachable"
-                f" ({peer.error or 'no response'}); its replica states are unknown"
+    if any(view.peer_id is None for view in reachable):
+        endpoints = ", ".join(view.endpoint for view in reachable if view.peer_id is None)
+        return _cluster_refusal(
+            expected_peers, provided, f"reachable peer endpoint(s) {endpoints} did not report a peer id"
+        )
+    observed = [view.peer_id for view in reachable if view.peer_id is not None]
+    if len(set(observed)) != len(observed):
+        return _cluster_refusal(
+            expected_peers,
+            provided,
+            f"only {len(set(observed))} distinct peer id(s) among {len(reachable)} "
+            "reachable endpoint(s) — endpoints must address different peers",
+        )
+    if expected_peers == 1:
+        view = reachable[0]
+        assert view.peer_id is not None
+        members = frozenset(view.member_peer_ids)
+        if members and members != frozenset({view.peer_id}):
+            return _cluster_refusal(
+                expected_peers,
+                provided,
+                f"single peer reports cluster membership {sorted(members)}, which is "
+                f"not itself (peer {view.peer_id})",
             )
-    reachable_ids = {
-        peer.peer_id for peer in provided if peer.reachable and peer.peer_id is not None
-    }
-    if any(peer.reachable and peer.peer_id is None for peer in provided):
-        problems.append("a reachable peer endpoint did not report its peer id")
-    if len(reachable_ids) != reachable:
-        problems.append(
-            f"only {len(reachable_ids)} distinct peer id(s) among {reachable} reachable "
-            "endpoint(s) — endpoints must address different peers"
+        if view.consensus not in ("disabled", "working"):
+            return _cluster_refusal(
+                expected_peers,
+                provided,
+                f"peer {view.peer_id} consensus thread is "
+                f"{view.consensus or 'unknown/unreadable'}",
+                members=frozenset({view.peer_id}),
+            )
+        if not members and view.consensus != "disabled":
+            return _cluster_refusal(
+                expected_peers,
+                provided,
+                f"peer {view.peer_id} reports no membership but consensus is "
+                f"{view.consensus!r}, not a standalone server",
+            )
+        return ClusterVerdict(
+            state="healthy",
+            expected_peers=1,
+            member_peers=1,
+            reachable_peer_urls=1,
+            consensus=view.consensus,
+            problems=(),
+            member_ids=(view.peer_id,),
+            observed_peer_ids=(view.peer_id,),
         )
-    if len(provided) < expected_peers:
-        problems.append(
-            f"only {len(provided)} peer endpoint(s) provided/primary probed, expected "
-            f"{expected_peers} — pass --peer-url for every peer "
-            f"(primary {primary_endpoint} counts only with direct per-peer access)"
+
+    member_sets = {frozenset(view.member_peer_ids) for view in reachable}
+    if len(member_sets) != 1:
+        described = "; ".join(
+            f"{view.endpoint} reports {sorted(view.member_peer_ids)}" for view in reachable
         )
-    state = "healthy"
-    if problems:
-        state = "degraded"
-    return ClusterVerdict(
-        state=state,
-        expected_peers=expected_peers,
-        member_peers=members,
-        reachable_peer_urls=reachable,
-        consensus=consensus or "unknown",
-        problems=tuple(problems),
+        return _cluster_refusal(
+            expected_peers,
+            provided,
+            f"peer endpoints disagree on cluster membership: {described}",
+        )
+    members = member_sets.pop()
+    if not members:
+        return _cluster_refusal(
+            expected_peers,
+            provided,
+            f"reachable peer endpoints report no cluster membership; expected "
+            f"{expected_peers} members",
+        )
+    if len(members) != expected_peers:
+        return _cluster_refusal(
+            expected_peers,
+            provided,
+            f"cluster reports {len(members)} member peer(s) {sorted(members)}, "
+            f"expected {expected_peers}",
+            members=members,
+        )
+    foreign = sorted(set(observed) - members)
+    if foreign:
+        return _cluster_refusal(
+            expected_peers,
+            provided,
+            f"observed peer id(s) {foreign} are not in the cluster's own membership "
+            f"{sorted(members)}",
+            members=members,
+        )
+    consensus_values = {view.consensus for view in reachable}
+    if len(consensus_values) != 1:
+        return _cluster_refusal(
+            expected_peers,
+            provided,
+            "peer endpoints disagree on consensus status: "
+            + ", ".join(
+                f"{view.endpoint}={view.consensus or 'unknown'}" for view in reachable
+            ),
+            members=members,
+        )
+    consensus = consensus_values.pop()
+    if consensus != "working":
+        return _cluster_refusal(
+            expected_peers,
+            provided,
+            f"cluster consensus thread is {consensus or 'unknown/unreadable'}; "
+            f"expected a working {expected_peers}-member cluster",
+            members=members,
+        )
+    missing = sorted(members - set(observed))
+    if not missing:
+        return ClusterVerdict(
+            state="healthy",
+            expected_peers=expected_peers,
+            member_peers=len(members),
+            reachable_peer_urls=len(reachable),
+            consensus=consensus,
+            problems=(),
+            member_ids=tuple(sorted(members)),
+            observed_peer_ids=tuple(sorted(observed)),
+        )
+    if len(missing) == 1 and len(unreachable) == 1:
+        return ClusterVerdict(
+            state="degraded",
+            expected_peers=expected_peers,
+            member_peers=len(members),
+            reachable_peer_urls=len(reachable),
+            consensus=consensus,
+            problems=(
+                (
+                    f"member peer {missing[0]} unreachable via "
+                    f"{unreachable[0].endpoint} "
+                    f"({unreachable[0].error or 'no response'}); its replica and "
+                    "configured policy states are unknown in this run"
+                ),
+            ),
+            member_ids=tuple(sorted(members)),
+            observed_peer_ids=tuple(sorted(observed)),
+        )
+    return _cluster_refusal(
+        expected_peers,
+        provided,
+        f"member peer(s) {missing} not observed (reachable peer ids {sorted(observed)}) "
+        "— insufficient surviving topology to establish a supported degraded state",
+        members=members,
     )
 
 
@@ -574,6 +800,7 @@ class VerificationReport:
     collections: tuple[CollectionVerdict, ...]
     configured_problems: tuple[str, ...] = ()
     alias_conflicts: tuple[str, ...] = ()
+    alias: AliasBinding | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -603,12 +830,26 @@ def evidence_lines(
     lines: list[str] = []
     if report.configured_problems:
         lines.extend(f"configured: {problem}" for problem in report.configured_problems)
+    if report.alias is not None:
+        if report.alias.target is None:
+            lines.append(
+                f"alias: {report.alias.alias!r} has no alias mapping; verified the "
+                f"configured physical pair {report.alias.inventory[0]!r} — this is not "
+                "a current-alias certification"
+            )
+        else:
+            lines.append(
+                f"alias: {report.alias.alias!r} -> {report.alias.target!r} (binding "
+                "captured with the inventory and unchanged across observation; it may "
+                "change after this command returns)"
+            )
     for conflict in report.alias_conflicts:
         lines.append(f"alias: {conflict}")
     cluster = report.cluster
     lines.append(
         f"cluster: {cluster.state} — members={cluster.member_peers}/"
         f"{cluster.expected_peers} reachable_peer_urls={cluster.reachable_peer_urls} "
+        f"observed_peer_ids={list(cluster.observed_peer_ids)} "
         f"consensus={cluster.consensus}"
     )
     for problem in cluster.problems:
@@ -630,45 +871,44 @@ def evidence_lines(
         )
     elif report.state == "healthy":
         lines.append(
-            f"VERDICT: healthy ({report.policy.replication_factor} distinct ACTIVE copies "
-            "per shard on every required collection)"
+            f"VERDICT: healthy (observed {report.policy.replication_factor} distinct "
+            "ACTIVE copies per shard on every required collection — placement evidence "
+            "only; reads/writes were not exercised)"
         )
     elif report.state == "degraded" and allow_degraded:
         lines.append(
-            "VERDICT: degraded (readable with reduced redundancy; not production "
-            "qualification)"
+            "VERDICT: degraded (observed placement with one known member missing — "
+            "operational continuation only, never production qualification; "
+            "reads/writes were not exercised)"
         )
     else:
         lines.append(f"VERDICT: {report.state} (refused)")
     return lines
 
 
-def resolve_verification_inventory(
-    client: QdrantPoints, settings: Settings
-) -> list[str]:
-    """Durable collections needed to serve/recover the active generation: the
-    alias-resolved physical corpus collection plus its paired control
-    collection (the same pair the serving path reads). Read-only; existence
-    is judged by the caller so a missing collection reads as absent, never as
-    verified."""
+def resolve_alias_binding(client: QdrantPoints, configured: str) -> AliasBinding:
+    """Capture the alias -> physical generation binding together with the
+    durable pair the active generation needs: the resolved physical corpus
+    collection plus its paired control collection (the same pair the serving
+    path reads).
+
+    Read-only. The caller re-reads this binding after observing placement and
+    refuses (or retries) when it moved: resolving the alias and inspecting the
+    collections must be one consistent observation, never a stale generation
+    certified while publication already cut over. `target is None` means the
+    configured name is the physical collection itself.
+    """
     target: str | None = None
     for desc in client.get_aliases().aliases:
-        if desc.alias_name == settings.qdrant_collection:
+        if desc.alias_name == configured:
             target = desc.collection_name
             break
-    candidate = target if target is not None else settings.qdrant_collection
-    return [candidate, completion_collection_for(candidate)]
-
-
-def resolve_alias_mapping(
-    client: QdrantPoints, configured: str
-) -> str | None:
-    """Physical collection for the configured alias, or None when no alias
-    exists (in-place layout names the collection directly)."""
-    for desc in client.get_aliases().aliases:
-        if desc.alias_name == configured:
-            return desc.collection_name
-    return None
+    candidate = target if target is not None else configured
+    return AliasBinding(
+        alias=configured,
+        target=target,
+        inventory=(candidate, completion_collection_for(candidate)),
+    )
 
 
 def observe_collection(
