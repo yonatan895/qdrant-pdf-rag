@@ -6,13 +6,18 @@ import pytest
 from qdrant_client import models
 
 from mainframe_rag.config import Settings
-from mainframe_rag.ingest.qdrant_io import DimMismatchError, ensure_collection
+from mainframe_rag.ingest.qdrant_io import (
+    CollectionPolicyMismatchError,
+    DimMismatchError,
+    ensure_collection,
+)
 
 
 class RecordingClient:
-    def __init__(self, exists=False, vector_size=None):
+    def __init__(self, exists=False, vector_size=None, live_params=None):
         self.exists_flag = exists
         self.vector_size = vector_size
+        self.live_params = live_params
         self.created = None
         self.indexes = []
 
@@ -22,7 +27,11 @@ class RecordingClient:
     def get_collection(self, _name):
         dense = SimpleNamespace(size=self.vector_size)
         return SimpleNamespace(
-            config=SimpleNamespace(params=SimpleNamespace(vectors={"dense": dense}))
+            config=SimpleNamespace(
+                params=SimpleNamespace(
+                    vectors={"dense": dense}, **(self.live_params or {})
+                )
+            )
         )
 
     def create_collection(self, name, **kwargs):
@@ -32,12 +41,21 @@ class RecordingClient:
         self.indexes.append((field_name, field_schema))
 
 
-def _settings(dim=768):
-    return Settings(
-        qdrant_url="http://localhost:6333",
-        qdrant_collection="mainframe_manuals",
-        dense_dim=dim,
-    )
+def _settings(dim=768, **overrides):
+    kw = {
+        "qdrant_url": "http://localhost:6333",
+        "qdrant_collection": "mainframe_manuals",
+        "dense_dim": dim,
+    }
+    kw.update(overrides)
+    return Settings(**kw)
+
+
+_POLICY = {
+    "qdrant_shard_number": 6,
+    "qdrant_replication_factor": 2,
+    "qdrant_write_consistency_factor": 1,
+}
 
 
 def test_ensure_collection_creates_named_vectors_and_sparse():
@@ -83,6 +101,56 @@ def test_ensure_collection_requires_dense_dim():
     client = RecordingClient(exists=False)
     with pytest.raises(RuntimeError, match="DENSE_DIM"):
         ensure_collection(client, _settings(dim=None))
+
+
+def test_ensure_collection_unset_policy_creates_without_distribution_keys():
+    """Unset policy reproduces today's server-default creation exactly
+    (issue #360): no shard/replication/consistency keys travel."""
+    client = RecordingClient(exists=False)
+    ensure_collection(client, _settings(768))
+    for key in ("shard_number", "replication_factor", "write_consistency_factor"):
+        assert key not in client.created
+
+
+def test_ensure_collection_forwards_selected_policy_verbatim():
+    client = RecordingClient(exists=False)
+    ensure_collection(client, _settings(768, **_POLICY))
+    assert client.created["shard_number"] == 6
+    assert client.created["replication_factor"] == 2
+    assert client.created["write_consistency_factor"] == 1
+
+
+def test_ensure_collection_existing_matching_policy_passes_without_recreation():
+    live = {"shard_number": 6, "replication_factor": 2, "write_consistency_factor": 1}
+    client = RecordingClient(exists=True, vector_size=768, live_params=live)
+    ensure_collection(client, _settings(768, **_POLICY))
+    assert client.created is None  # examined, never recreated
+
+
+def test_ensure_collection_existing_partial_policy_checks_only_selected_keys():
+    """Unset keys are not examined: an operator selecting only replication
+    does not fail on the shard count the server chose."""
+    live = {"shard_number": 99, "replication_factor": 2, "write_consistency_factor": 1}
+    client = RecordingClient(exists=True, vector_size=768, live_params=live)
+    ensure_collection(client, _settings(768, qdrant_replication_factor=2))
+    assert client.created is None
+
+
+def test_ensure_collection_existing_mismatch_fails_closed_without_mutation():
+    live = {"shard_number": 1, "replication_factor": 1, "write_consistency_factor": 1}
+    client = RecordingClient(exists=True, vector_size=768, live_params=live)
+    with pytest.raises(CollectionPolicyMismatchError, match="snapshot-gated"):
+        ensure_collection(client, _settings(768, **_POLICY))
+    assert client.created is None  # never recreated
+    assert client.indexes == []  # refused before index reconciliation
+
+
+def test_ensure_collection_existing_unreadable_policy_values_are_not_mismatches():
+    """A live info without readable values is unknown, not a mismatch —
+    absence of evidence must not fail a healthy collection."""
+    client = RecordingClient(exists=True, vector_size=768, live_params=None)
+    ensure_collection(client, _settings(768, **_POLICY))
+    assert client.created is None
 
 
 def test_upsert_chunks_payload_is_slimmed_without_embed_text():

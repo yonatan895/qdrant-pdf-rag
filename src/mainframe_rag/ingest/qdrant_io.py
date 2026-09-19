@@ -64,6 +64,47 @@ class DimMismatchError(RuntimeError):
     """Existing collection vector size does not match DENSE_DIM."""
 
 
+class CollectionPolicyMismatchError(RuntimeError):
+    """Existing collection distribution does not match the selected policy."""
+
+
+# Selected-policy key -> live CollectionParams attribute, in the order the
+# remediation message reports them.
+_POLICY_ATTRS = (
+    ("shard_number", "shard_number"),
+    ("replication_factor", "replication_factor"),
+    ("write_consistency_factor", "write_consistency_factor"),
+)
+
+
+def check_collection_distribution(
+    client: QdrantPoints, collection: str, settings: Settings
+) -> None:
+    """Read-only policy examination (issue #360): when the operator selected
+    an explicit distribution policy, an existing collection whose configured
+    values differ fails closed — running a mismatched generation silently
+    is how three Ready pods end up serving one copy. Never recreates or
+    mutates: the remediation is a snapshot-gated migration (later slice),
+    never automatic recreation. Unset policy and unreadable (None) live
+    values are not mismatches — absence of evidence is not evidence."""
+    policy = settings.collection_distribution_kwargs()
+    if not policy:
+        return
+    params = client.get_collection(collection).config.params
+    for kwarg, attr in _POLICY_ATTRS:
+        if kwarg not in policy:
+            continue
+        live = getattr(params, attr, None)
+        if live is None or live == policy[kwarg]:
+            continue
+        raise CollectionPolicyMismatchError(
+            f"Collection '{collection}' {attr} is {live}, selected policy wants "
+            f"{policy[kwarg]}. Refusing to run against a mismatched generation: "
+            "migrate with a snapshot-gated replica operation (issue #360) or "
+            "align the policy — never auto-recreate a populated collection."
+        )
+
+
 def set_bulk_indexing(client: QdrantPoints, collection: str, *, bulk: bool) -> None:
     """bulk=True: effectively disable HNSW builds for the load; bulk=False:
     restore the server-default threshold so the optimizer catches up.
@@ -143,6 +184,9 @@ def ensure_collection(client: QdrantPoints, settings: Settings) -> None:
                 f"Collection '{collection}' dense dim is {actual_size}, DENSE_DIM={dim}. "
                 "Recreate the collection or fix DENSE_DIM."
             )
+        # Selected distribution policy holds for pre-existing collections
+        # too: read-only examination, never recreation (issue #360).
+        check_collection_distribution(client, collection, settings)
         # Indexes-before-load holds for pre-existing collections too: retrieve
         # filters on these payload fields; unindexed filters become scans.
         ensure_payload_indexes(client, collection)
@@ -154,6 +198,7 @@ def ensure_collection(client: QdrantPoints, settings: Settings) -> None:
         vectors_config=vectors_config,
         sparse_vectors_config=sparse_vectors_config,
         on_disk_payload=True,
+        **settings.collection_distribution_kwargs(),
     )
     ensure_payload_indexes(client, collection)
 

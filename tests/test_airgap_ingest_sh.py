@@ -67,6 +67,12 @@ spec:
               value: __EMBED_MODEL_REVISION__
             - name: DENSE_DIM
               value: __DENSE_DIM__
+            - name: QDRANT_SHARD_NUMBER
+              value: __QDRANT_SHARD_NUMBER__
+            - name: QDRANT_REPLICATION_FACTOR
+              value: __QDRANT_REPLICATION_FACTOR__
+            - name: QDRANT_WRITE_CONSISTENCY_FACTOR
+              value: __QDRANT_WRITE_CONSISTENCY_FACTOR__
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: __OTEL_EXPORTER_OTLP_ENDPOINT__
             - name: IMAGE_SHA
@@ -468,6 +474,62 @@ def test_ingest_dryrun_contextual_embed_propagation(ingest_tree):
     assert 'value: "true"' in rendered or "value: true" in rendered
     assert 'value: "http://context-llm:8000/v1"' in rendered or "value: http://context-llm:8000/v1" in rendered
     assert 'value: "meta-llama/Llama-3-8B"' in rendered or "value: meta-llama/Llama-3-8B" in rendered
+
+
+def test_ingest_overlay_collection_policy_contract():
+    """Issue #360: the real ingest overlay carries the three optional
+    distribution-policy entries as bare placeholders for the launcher."""
+    real = (
+        REPO / "deploy" / "kustomize" / "overlays" / "openshift-ingest" / "ingest-job.yaml"
+    ).read_text()
+    for key in ("QDRANT_SHARD_NUMBER", "QDRANT_REPLICATION_FACTOR",
+                "QDRANT_WRITE_CONSISTENCY_FACTOR"):
+        assert re.search(rf"(?m)^\s*- name: {key}$", real), key
+        assert f"value: __{key}__" in real, key
+
+
+def test_ingest_collection_policy_unset_stripped(ingest_tree):
+    """Unset policy leaves no trace: no blank value may override the
+    in-code server default (issue #360)."""
+    r = _run_ingest(ingest_tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    for key in ("QDRANT_SHARD_NUMBER", "QDRANT_REPLICATION_FACTOR",
+                "QDRANT_WRITE_CONSISTENCY_FACTOR"):
+        assert key not in rendered, key
+    assert_no_placeholders(rendered)
+
+
+def test_ingest_collection_policy_explicit_empty_stays_unset(ingest_tree):
+    r = _run_ingest(ingest_tree, ("QDRANT_SHARD_NUMBER", ""))
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert "QDRANT_SHARD_NUMBER" not in rendered
+    assert_no_placeholders(rendered)
+
+
+def test_ingest_collection_policy_set_renders_bare_ints(ingest_tree):
+    r = _run_ingest(
+        ingest_tree,
+        ("QDRANT_SHARD_NUMBER", "6"),
+        ("QDRANT_REPLICATION_FACTOR", "2"),
+        ("QDRANT_WRITE_CONSISTENCY_FACTOR", "1"),
+    )
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert re.search(r"(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: 6$", rendered)
+    assert re.search(r"(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: 2$", rendered)
+    assert re.search(
+        r"(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: 1$", rendered
+    )
+    assert_no_placeholders(rendered)
+
+
+def test_ingest_collection_policy_invalid_fails_closed(ingest_tree):
+    for bad in ("two", "0", "-1", "1.5", "2x"):
+        r = _run_ingest(ingest_tree, ("QDRANT_REPLICATION_FACTOR", bad))
+        assert r.returncode != 0, bad
+        assert "QDRANT_REPLICATION_FACTOR" in r.stderr, bad
 
 
 def test_ingest_otel_on_by_default(ingest_tree):

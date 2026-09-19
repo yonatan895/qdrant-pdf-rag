@@ -493,6 +493,20 @@ lock claim). CI uses explicit synthetic values, never an attestation bypass. No
 real registry, URL, token or private environment file enters git or the transfer
 artifact.
 
+**Collection distribution policy (issue #360 Slice A):** `QDRANT_SHARD_NUMBER`,
+`QDRANT_REPLICATION_FACTOR` and `QDRANT_WRITE_CONSISTENCY_FACTOR` are optional
+operator inputs following the same path — commented-out example entries,
+`OPERATOR_ENV_KEYS` snapshot/restore, Task `TASK_*` bridges (pinned equal by
+`test_bridge_set_matches_operator_keys`), positive-integer validation plus
+unset-entry stripping in `scripts/airgap/ingest.sh`, rendered only into the
+ingest Job (the agent never creates collections, so the agent render
+deliberately excludes them). Unset keeps the Qdrant server default and leaves
+no trace in the manifest; set values reach `Settings` and both collection
+constructors verbatim. Production numbers are an explicit owner decision —
+no default is encoded anywhere in this chain. Active replica placement
+verification and snapshot-gated migration are later slices; this chain only
+selects and carries policy.
+
 **Absent/blank semantics:** `common.sh` currently gives non-empty explicit env
 precedence and otherwise permits file/default resolution; required attestation
 rejects whitespace. Runtime bearer auth intentionally omits a header for an

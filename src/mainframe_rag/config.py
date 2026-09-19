@@ -63,6 +63,18 @@ class Settings(BaseSettings):
     # qdrant-client's stub types timeout as int.
     qdrant_timeout_s: int = 30
     qdrant_ingest_timeout_s: int = 120
+    # Collection distribution policy (issue #360): shard count,
+    # replication factor, and write-consistency factor for the corpus and
+    # completion collections created by ingest. All unset by default — None
+    # means the Qdrant server default (today one shard, one copy),
+    # preserving current creation behavior exactly. Production numbers are
+    # an explicit owner decision; this repo never invents them.
+    # Self-hosted Qdrant cannot reshard, so the shard count is fixed at
+    # creation; replicating an existing collection is a snapshot-gated
+    # migration (later slice), never automatic recreation.
+    qdrant_shard_number: int | None = Field(default=None, ge=1)
+    qdrant_replication_factor: int | None = Field(default=None, ge=1)
+    qdrant_write_consistency_factor: int | None = Field(default=None, ge=1)
 
     # Embeddings. mode "vllm" = internal vLLM (prod, OpenAI-compatible);
     # mode "hash" = local deterministic hashing (CI/dev only, issue #8).
@@ -333,6 +345,20 @@ class Settings(BaseSettings):
                 "Set it in the environment before talking to Qdrant."
             )
         return self.dense_dim
+
+    def collection_distribution_kwargs(self) -> dict[str, int]:
+        """Explicitly selected create_collection distribution knobs
+        (issue #360): only set policy travels to the corpus and completion
+        constructors, so unset reproduces today's server-default creation
+        exactly. One helper so the two collections cannot drift apart."""
+        kwargs: dict[str, int] = {}
+        if self.qdrant_shard_number is not None:
+            kwargs["shard_number"] = self.qdrant_shard_number
+        if self.qdrant_replication_factor is not None:
+            kwargs["replication_factor"] = self.qdrant_replication_factor
+        if self.qdrant_write_consistency_factor is not None:
+            kwargs["write_consistency_factor"] = self.qdrant_write_consistency_factor
+        return kwargs
 
     def require_embed(self) -> tuple[str, str]:
         if self.embed_mode == "hash":
