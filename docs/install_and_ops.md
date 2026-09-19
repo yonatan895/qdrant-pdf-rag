@@ -633,6 +633,14 @@ CORPUS_PVC=manuals-corpus
 RERANK_ENABLED=false
 INSECURE_REGISTRY=false
 
+# Collection distribution policy (issue #360): the checked-in production
+# preset overlays/openshift/collection-policy.env supplies 6 shards / RF 3 /
+# W 2 when these are unset. A one-node rehearsal must select 1/1/1
+# explicitly (never infer a downgrade). Values here win over the preset.
+# QDRANT_SHARD_NUMBER=6
+# QDRANT_REPLICATION_FACTOR=3
+# QDRANT_WRITE_CONSISTENCY_FACTOR=2
+
 # Authenticated TLS gateway endpoints supplied by the platform team.
 # VLLM_BASE_URL takes the bare server origin (a trailing /v1 is tolerated:
 # the deploy scripts strip it before deriving EMBED_BASE_URL).
@@ -965,6 +973,24 @@ sh scripts/tools/run-task.sh airgap:smoke
 # Or query specific message IDs:
 QUERY="IEA500I operator message" sh scripts/tools/run-task.sh airgap:smoke
 ```
+
+**Collection placement (issue #360):** before accepting a generation, run
+the read-only verifier from a pod or the bastion against every expected Qdrant
+peer (see [the collection policy contract](deploy.md#collection-policy)):
+
+```bash
+QDRANT_URL=http://qdrant:6333 QDRANT_SHARD_NUMBER=6 \
+QDRANT_REPLICATION_FACTOR=3 QDRANT_WRITE_CONSISTENCY_FACTOR=2 \
+python3 scripts/verify_placement.py --production \
+    --peer-url http://qdrant-0.qdrant-headless:6333 \
+    --peer-url http://qdrant-1.qdrant-headless:6333 \
+    --peer-url http://qdrant-2.qdrant-headless:6333
+```
+
+`VERDICT: healthy` with exit 0 is the production qualification outcome;
+`degraded` is readable but not qualified. A one-node rehearsal labels
+itself `VERDICT: non-ha` with `--expect-single-node` and never counts as
+distributed acceptance.
 
 ### 4.7 Local Cluster Testing Standard (Kind + Local Registry)
 

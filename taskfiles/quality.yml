@@ -72,18 +72,38 @@ tasks:
       - '"$TASK_PY" scripts/check_agent_context.py'
 
   sim:
-    desc: Run the sim integration tier against disposable Qdrant (load tier excluded, 0 skips)
+    desc: Run the sim integration tier against disposable Qdrant (load and HA tiers excluded, 0 skips)
     summary: |
-      `.venv/bin/python -m pytest -m integration --ignore=tests/test_load_tier.py -v -rs`, mirroring
-      the retired `make sim`. The sim lane covers correctness; the load tier
-      (`tests/test_load_tier.py`, run via `task qa:load`) is excluded here so
-      its absolute concurrency contracts are asserted exactly once, in their
-      own lane. A skip fails the run (a skip on missing local weights
-      means symlink or rebuild them, never ignore it). Needs docker (or
-      QDRANT_SIM_URL) and the BM25 weights; no GPU or live gateway.
+      `.venv/bin/python -m pytest -m integration --ignore=tests/test_load_tier.py
+      --ignore=tests/test_ha_cluster.py -v -rs`, mirroring the retired `make sim`.
+      The sim lane covers correctness; the load tier (`tests/test_load_tier.py`,
+      run via `task qa:load`) is excluded so its absolute concurrency contracts
+      are asserted exactly once, and the multi-peer HA fixture
+      (`tests/test_ha_cluster.py`, run via `task qa:ha`) is excluded so the
+      three-container placement/fault lane is not paid on every sim run. A skip
+      fails the run (a skip on missing local weights means symlink or rebuild
+      them, never ignore it). Needs docker (or QDRANT_SIM_URL) and the BM25
+      weights; no GPU or live gateway.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - .venv/bin/python -m pytest -m integration --ignore=tests/test_load_tier.py -v -rs
+      - .venv/bin/python -m pytest -m integration --ignore=tests/test_load_tier.py --ignore=tests/test_ha_cluster.py -v -rs
+
+  ha:
+    desc: Run the disposable three-peer HA fixture (placement, false HA, peer loss)
+    summary: |
+      `.venv/bin/python -m pytest -m integration tests/test_ha_cluster.py -v`,
+      replacing no retired target: the multi-peer lane is an explicitly
+      selected addition (issue #360). It starts the pinned Qdrant image as a
+      real three-peer cluster with separate storage and asserts actual
+      placement (6/3/2), refusal of a false-HA (RF1) configuration, degraded
+      reads and healthy rejoin after one peer is stopped, and exact point
+      identity across survivors. Needs docker and the pinned image (pulled on
+      a connected host); a missing prerequisite fails — this lane must never
+      skip. Three containers on one host prove distributed software behavior
+      only, never independent-worker or site tolerance.
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - .venv/bin/python -m pytest -m integration tests/test_ha_cluster.py -v
 
   load:
     desc: Run the load tier (same composition CI runs, absolute contracts)

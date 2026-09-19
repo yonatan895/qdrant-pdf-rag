@@ -43,6 +43,8 @@ coverage.xml
 .env
 *.env
 !airgap.env.example
+# Issue #360 production collection policy preset (non-secret, checked in)
+!overlays/openshift/collection-policy.env
 *-secret.yaml
 secrets/
 

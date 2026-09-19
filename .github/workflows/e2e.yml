@@ -500,6 +500,9 @@ jobs:
             -e 's|^DENSE_DIM=.*|DENSE_DIM=1024|' \
             -e 's|^VLLM_BASE_URL=.*|VLLM_BASE_URL=https://test-gateway:4000|' \
             -e 's|^CORPUS_PVC=.*|CORPUS_PVC=corpus|' \
+            -e 's|^QDRANT_SHARD_NUMBER=.*|QDRANT_SHARD_NUMBER=1|' \
+            -e 's|^QDRANT_REPLICATION_FACTOR=.*|QDRANT_REPLICATION_FACTOR=1|' \
+            -e 's|^QDRANT_WRITE_CONSISTENCY_FACTOR=.*|QDRANT_WRITE_CONSISTENCY_FACTOR=1|' \
             airgap.env
           cat >> airgap.env <<'EOF'
           EMBED_BASE_URL=https://test-gateway:4000/v1

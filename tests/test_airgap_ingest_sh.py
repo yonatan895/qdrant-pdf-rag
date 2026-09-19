@@ -6,6 +6,7 @@ PULL_SECRET wiring, and strategic merge patches without a cluster.
 """
 
 import re
+import shutil
 
 import pytest
 
@@ -125,7 +126,12 @@ def ingest_tree(tmp_path):
     return tmp_path, kc_log
 
 
-def _run_ingest(tree, *extra_env):
+def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1", "1")):
+    """Run ingest.sh hermetically.
+
+    `policy` defaults to the explicit single-node 1/1/1 selection; pass None
+    to leave the three keys to the tree's checked-in production preset.
+    """
     tmp_path, kc_log = tree
     env = {
         "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
@@ -141,9 +147,23 @@ def _run_ingest(tree, *extra_env):
         "VLLM_BASE_URL": "http://vllm:8000/v1",
         "AIRGAP_DRYRUN": "1",
     }
+    if policy is not None:
+        (
+            env["QDRANT_SHARD_NUMBER"],
+            env["QDRANT_REPLICATION_FACTOR"],
+            env["QDRANT_WRITE_CONSISTENCY_FACTOR"],
+        ) = policy
     for k, v in extra_env:
         env[k] = v
     return run_sh(tmp_path / "scripts" / "airgap" / "ingest.sh", env, tmp_path)
+
+
+def _copy_collection_preset(tree):
+    """Place the checked-in production preset in the copied tree."""
+    tmp_path, _ = tree
+    target = tmp_path / "overlays" / "openshift"
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO / "overlays" / "openshift" / "collection-policy.env", target)
 
 
 def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
@@ -488,32 +508,83 @@ def test_ingest_overlay_collection_policy_contract():
         assert f"value: __{key}__" in real, key
 
 
-def test_ingest_collection_policy_unset_stripped(ingest_tree):
-    """Unset policy leaves no trace: no blank value may override the
-    in-code server default (issue #360)."""
-    r = _run_ingest(ingest_tree)
+def test_ingest_collection_policy_absent_fails_closed(ingest_tree):
+    """Issue #360: the production path requires a complete policy tuple.
+    A tree without the checked-in preset and without explicit selection
+    must refuse before rendering — no silent 1/1/1 downgrade."""
+    r = _run_ingest(ingest_tree, policy=None)
+    assert r.returncode == 1
+    assert "collection distribution policy is incomplete" in r.stderr
+    assert "1/1/1" in r.stderr
+
+
+def test_ingest_collection_policy_partial_fails_closed(ingest_tree):
+    r = _run_ingest(ingest_tree, ("QDRANT_REPLICATION_FACTOR", ""))
+    assert r.returncode == 1
+    assert "QDRANT_REPLICATION_FACTOR" in r.stderr
+
+
+def test_ingest_collection_policy_preset_supplies_production_tuple(ingest_tree):
+    """The checked-in preset is the lowest-precedence default: an unset
+    operator selection renders the production 6/3/2 tuple."""
+    _copy_collection_preset(ingest_tree)
+    r = _run_ingest(ingest_tree, policy=None)
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    for key in ("QDRANT_SHARD_NUMBER", "QDRANT_REPLICATION_FACTOR",
-                "QDRANT_WRITE_CONSISTENCY_FACTOR"):
-        assert key not in rendered, key
+    assert re.search(r"(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: 6$", rendered)
+    assert re.search(r"(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: 3$", rendered)
+    assert re.search(
+        r"(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: 2$", rendered
+    )
     assert_no_placeholders(rendered)
 
 
-def test_ingest_collection_policy_explicit_empty_stays_unset(ingest_tree):
-    r = _run_ingest(ingest_tree, ("QDRANT_SHARD_NUMBER", ""))
+def test_ingest_collection_policy_file_beats_preset(ingest_tree):
+    _copy_collection_preset(ingest_tree)
+    env_file = ingest_tree[0] / "policy.env"
+    env_file.write_text(
+        "QDRANT_SHARD_NUMBER=2\n"
+        "QDRANT_REPLICATION_FACTOR=2\n"
+        "QDRANT_WRITE_CONSISTENCY_FACTOR=1\n"
+    )
+    r = _run_ingest(
+        ingest_tree, ("AIRGAP_ENV", str(env_file)), policy=None
+    )
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert "QDRANT_SHARD_NUMBER" not in rendered
-    assert_no_placeholders(rendered)
+    assert re.search(r"(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: 2$", rendered)
+    assert re.search(r"(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: 2$", rendered)
+    assert re.search(
+        r"(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: 1$", rendered
+    )
+
+
+def test_ingest_collection_policy_caller_beats_file_and_preset(ingest_tree):
+    _copy_collection_preset(ingest_tree)
+    env_file = ingest_tree[0] / "policy.env"
+    env_file.write_text(
+        "QDRANT_SHARD_NUMBER=2\n"
+        "QDRANT_REPLICATION_FACTOR=2\n"
+        "QDRANT_WRITE_CONSISTENCY_FACTOR=1\n"
+    )
+    r = _run_ingest(
+        ingest_tree,
+        ("AIRGAP_ENV", str(env_file)),
+        policy=("6", "3", "2"),
+    )
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert re.search(r"(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: 6$", rendered)
+    assert re.search(r"(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: 3$", rendered)
+    assert re.search(
+        r"(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: 2$", rendered
+    )
 
 
 def test_ingest_collection_policy_set_renders_bare_ints(ingest_tree):
     r = _run_ingest(
         ingest_tree,
-        ("QDRANT_SHARD_NUMBER", "6"),
-        ("QDRANT_REPLICATION_FACTOR", "2"),
-        ("QDRANT_WRITE_CONSISTENCY_FACTOR", "1"),
+        policy=("6", "2", "1"),
     )
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
@@ -530,6 +601,26 @@ def test_ingest_collection_policy_invalid_fails_closed(ingest_tree):
         r = _run_ingest(ingest_tree, ("QDRANT_REPLICATION_FACTOR", bad))
         assert r.returncode != 0, bad
         assert "QDRANT_REPLICATION_FACTOR" in r.stderr, bad
+
+
+def test_ingest_collection_policy_write_above_replication_fails_closed(ingest_tree):
+    r = _run_ingest(ingest_tree, policy=("6", "2", "3"))
+    assert r.returncode == 1
+    assert "exceeds" in r.stderr and "QDRANT_WRITE_CONSISTENCY_FACTOR" in r.stderr
+
+
+def test_production_preset_is_the_owner_decision():
+    """The checked-in preset is the owner decision (6 shards / RF 3 / W 2),
+    not an inferred default. Local lanes override it explicitly."""
+    from tests.helpers_airgap import REPO as repo
+
+    text = (repo / "overlays" / "openshift" / "collection-policy.env").read_text()
+    for line in (
+        "QDRANT_SHARD_NUMBER=6",
+        "QDRANT_REPLICATION_FACTOR=3",
+        "QDRANT_WRITE_CONSISTENCY_FACTOR=2",
+    ):
+        assert line in text.splitlines()
 
 
 def test_ingest_otel_on_by_default(ingest_tree):

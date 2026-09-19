@@ -15,6 +15,10 @@ echo "==> 1. Validating environment variables"
 require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION VLLM_BASE_URL
 require_embed_revision
 refuse_nfs_storage
+# Issue #360: a partial, impossible or absent collection policy must fail
+# pre-flight, before any ingest/publication mutation. The checked-in
+# production preset supplies 6/3/2; one-node lanes select 1/1/1 explicitly.
+validate_collection_policy required
 
 case "$DENSE_DIM" in
     ''|*[!0-9]*) die "DENSE_DIM must be a positive integer, got '$DENSE_DIM'" ;;
@@ -60,6 +64,7 @@ echo "    EMBED_MODEL:       $EMBED_MODEL"
 echo "    EMBED_MODEL_REVISION: $EMBED_MODEL_REVISION"
 echo "    DENSE_DIM:         $DENSE_DIM"
 echo "    VLLM_BASE_URL:     $VLLM_BASE_URL"
+echo "    Collection policy: S=$QDRANT_SHARD_NUMBER RF=$QDRANT_REPLICATION_FACTOR W=$QDRANT_WRITE_CONSISTENCY_FACTOR"
 echo "    IMAGE_SHA:         $IMAGE_SHA"
 if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
     echo "    Tracing:           ON ($OTEL_ENDPOINT_RESOLVED)"

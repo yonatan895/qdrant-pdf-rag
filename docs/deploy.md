@@ -275,6 +275,87 @@ cannot schedule on one node — proven).
   span lands in `JAEGER_QUERY_URL` within `TRACE_TIMEOUT`; the `off`
   sentinel skips that assertion.
 
+<a id="collection-policy"></a>
+### Collection distribution and placement (issue #360)
+
+**Production decision (checked in, non-secret):** 6 logical shards,
+replication factor 3, write consistency 2, across the three Qdrant peers,
+applied to both the corpus collection and its paired completion/control
+collection. `overlays/openshift/collection-policy.env` carries the tuple;
+`scripts/airgap/common.sh` loads it with explicit caller > operator file >
+preset precedence, `airgap.env.example` documents concrete values, and
+`validate`/`ingest` refuse an incomplete or impossible tuple (all three
+keys required, positive integers, W <= RF) before rendering. Local, CI and
+one-node lanes select 1/1/1 explicitly (`deploy/kustomize/overlays/ci`,
+`.github/workflows/e2e.yml`) — a deliberate non-HA profile, never inferred
+from the available node count. Generic `QDRANT_*` Settings stay optional
+for local compatibility, but unset values cannot qualify the production
+path.
+
+**Failure contract:** one unavailable peer at a time (planned or
+unplanned). RF=3/W=2 keeps acknowledged writes available with one peer
+gone; two surviving copies are *degraded*, not healthy, and a new
+generation must not cut over until every shard has three ACTIVE copies
+again. Do not change RF/W automatically during failure. RF=3 is not
+tolerance of simultaneous failures, shared-storage loss, or loss of the
+platform model/gateway tier. Capacity follows: RF=3 stores three physical
+copies of the logical generation plus snapshots and staging, so a peer is
+never sized as one third of the corpus.
+
+**Placement is a hard requirement:** `overlays/openshift/values.yaml` sets
+required pod anti-affinity across `kubernetes.io/hostname`. A capacity
+squeeze leaves a peer Pending with a diagnostic instead of silently
+colocating. The PDB (`maxUnavailable: 1`) limits voluntary disruption only
+and is not a copy count; maintenance waits for full shard recovery before
+the next eviction/restart. Hostname separation is not yet proof of
+independent hypervisor/rack/storage.
+
+**Verified state:** `scripts/verify_placement.py` is read-only and checks
+actual placement for every durable collection of the active generation —
+the alias-resolved physical corpus collection plus its paired control
+collection — not pod count or configured values:
+
+```sh
+# Production qualification: owner decision, every expected peer direct.
+QDRANT_URL=http://qdrant:6333 QDRANT_SHARD_NUMBER=6 \
+QDRANT_REPLICATION_FACTOR=3 QDRANT_WRITE_CONSISTENCY_FACTOR=2 \
+python3 scripts/verify_placement.py --production \
+    --peer-url http://qdrant-0.qdrant-headless:6333 \
+    --peer-url http://qdrant-1.qdrant-headless:6333 \
+    --peer-url http://qdrant-2.qdrant-headless:6333
+
+# Explicit single-node profile (1/1/1, labeled non-HA).
+QDRANT_URL=http://127.0.0.1:6333 \
+python3 scripts/verify_placement.py --expect-single-node
+```
+
+Run it from the cluster network (an agent/ingest pod or the bastion with
+access to each peer); the command is documented as its direct script owner
+because the repository Task runner is not assumed inside deployment
+workloads. It examines cluster membership/consensus, the actual configured
+S/RF/W per required collection, every logical shard's distinct ACTIVE copies on
+reachable peers, transfers/recovery states, and refuses to count a replica
+merely because another peer reports it. Observations deduplicate by
+`(collection, shard_id, peer_id)`. Unknown/unreadable metadata is
+unverifiable, never green. Outcomes: healthy, degraded (readable with
+reduced redundancy), recovering, unverifiable, unservable, and the explicit
+non-HA profile. Exit 0 verifies healthy or the declared non-HA profile;
+exit 1 refuses everything else (`--allow-degraded` downgrades a *readable*
+degraded topology to exit 0 for operational checks, never for
+qualification); exit 2 is a usage or contradictory/incomplete claim. The
+final `VERDICT:` line is the machine-readable outcome. Moving replicas and
+integrating the verifier with publication eligibility are the later
+migration slice; this command never mutates.
+
+**Disposable local proof:** `scripts/qdrant_cluster.py` starts the pinned
+image as three loopback peers and `tests/test_ha_cluster.py`
+(`sh scripts/tools/run-task.sh qa:ha`) asserts real 6/3/2 placement, a
+false-HA (RF1) corpus+control refusal, degraded reads and healthy rejoin
+after stopping one peer, and exact point identity through survivors. Three
+containers on one host prove distributed software behavior, not
+independent-worker or site tolerance. Existing one-node CRC/Kind lanes and
+the three-worker lifecycle lane are not distributed acceptance.
+
 ## 6. Images and pins
 
 `images.txt` is the digest contract: the cluster must run exactly these
@@ -313,11 +394,12 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
 
 ## 7. CI inventory
 
-GitHub runs unit, sim, gates, bench, load, connected E2E, and the dry-run
-gate; air-gap GitLab runs hygiene + pytest + gate-l1 only (no e2e, load,
-deploys, GHCR, or PDFs/tokens/hostnames in file). Job meaning stays
-aligned across the two files; only e2e-scale jobs live in
-`.github/workflows/e2e.yml`.
+GitHub runs unit, sim, gates, bench, load, the path-filtered multi-peer HA
+lane (issue #360: three-peer placement/peer-loss fixture), connected E2E,
+and the dry-run gate; air-gap GitLab runs hygiene + pytest + gate-l1 only
+(no e2e, load, deploy, multi-peer docker, GHCR, or PDFs/tokens/hostnames in
+file). Job meaning stays aligned across the two files; only e2e-scale jobs
+live in `.github/workflows/e2e.yml`.
 
 - GitHub product `ci.yml`/`e2e.yml` ignore markdown-only changes. The narrow
   `agent-context.yml` checks relevant instructions/docs/templates and its own tools,
@@ -341,7 +423,10 @@ aligned across the two files; only e2e-scale jobs live in
   with PR delta comment. Least-privilege permissions, timeouts, and
   concurrency groups on every job; third-party actions SHA-pinned.
 - `load.yml`: path-allowlisted to agent/retrieve/ingest/mock/sim/loadtest
-  surface — other paths run nothing.
+  surface — other paths run nothing. `ha.yml` is path-allowlisted to the
+  collection-policy/placement surface and runs the three-peer fixture
+  (`qa:ha`) fail-closed (no skips, at least one pass); unrelated changes
+  do not pay for three containers.
 - `bench.yml`: push-to-main + nightly + dispatch (baseline update with
   repeats); never a PR gate.
 - `e2e.yml build`: local images retagged to full-SHA GHCR refs; push only
@@ -493,19 +578,22 @@ lock claim). CI uses explicit synthetic values, never an attestation bypass. No
 real registry, URL, token or private environment file enters git or the transfer
 artifact.
 
-**Collection distribution policy (issue #360 Slice A):** `QDRANT_SHARD_NUMBER`,
-`QDRANT_REPLICATION_FACTOR` and `QDRANT_WRITE_CONSISTENCY_FACTOR` are optional
-operator inputs following the same path — commented-out example entries,
-`OPERATOR_ENV_KEYS` snapshot/restore, Task `TASK_*` bridges (pinned equal by
-`test_bridge_set_matches_operator_keys`), positive-integer validation plus
-unset-entry stripping in `scripts/airgap/ingest.sh`, rendered only into the
-ingest Job (the agent never creates collections, so the agent render
-deliberately excludes them). Unset keeps the Qdrant server default and leaves
-no trace in the manifest; set values reach `Settings` and both collection
-constructors verbatim. Production numbers are an explicit owner decision —
-no default is encoded anywhere in this chain. Active replica placement
-verification and snapshot-gated migration are later slices; this chain only
-selects and carries policy.
+**Collection distribution policy (issue #360):** `QDRANT_SHARD_NUMBER`,
+`QDRANT_REPLICATION_FACTOR` and `QDRANT_WRITE_CONSISTENCY_FACTOR` follow the
+same operator path — concrete example values, `OPERATOR_ENV_KEYS`
+snapshot/restore, Task `TASK_*` bridges (pinned equal by
+`test_bridge_set_matches_operator_keys`), complete-tuple validation in
+`validate.sh`/`ingest.sh`, rendered only into the ingest Job (the agent
+never creates collections, so the agent render deliberately excludes them).
+Precedence is explicit caller > operator file > checked-in production preset
+(`overlays/openshift/collection-policy.env`, owner decision 6/3/2); the
+one-node profile selects 1/1/1 explicitly, never by inference. Values reach
+`Settings` and both collection constructors verbatim; shard defaults are not
+reconstructed from pod count or an assumed server default. Live placement
+verification exists (`scripts/verify_placement.py`,
+[collection policy](#collection-policy)); snapshot-gated migration of
+existing collections, publication eligibility integration and the recorded
+node-loss/site qualification remain later slices.
 
 **Absent/blank semantics:** `common.sh` currently gives non-empty explicit env
 precedence and otherwise permits file/default resolution; required attestation

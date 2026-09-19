@@ -1239,13 +1239,20 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual(self.pip_calls()[0]["argv"],
                          ["-m", "pytest", "-m", "integration",
-                          "--ignore=tests/test_load_tier.py", "-v", "-rs"])
+                          "--ignore=tests/test_load_tier.py",
+                          "--ignore=tests/test_ha_cluster.py", "-v", "-rs"])
         if (self.log).exists():
             self.log.unlink()
         proc = self.run_task("qa:load", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual(self.pip_calls()[0]["argv"],
                          ["-m", "pytest", "-m", "integration", "tests/test_load_tier.py", "-v"])
+        if (self.log).exists():
+            self.log.unlink()
+        proc = self.run_task("qa:ha", extra_env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.pip_calls()[0]["argv"],
+                         ["-m", "pytest", "-m", "integration", "tests/test_ha_cluster.py", "-v"])
 
     def test_vllm_e2e_optional_flags(self):
         self.make_venv_fake()

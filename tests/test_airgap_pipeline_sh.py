@@ -79,6 +79,12 @@ def _run_pipeline(pipe_tree, *args, extra_env=None):
         "DENSE_DIM": "768",
         "EMBED_MODEL_REVISION": "rev-1",
         "VLLM_BASE_URL": "http://vllm:8000/v1",
+        # Issue #360: the hermetic single-node pipeline fixtures select the
+        # 1/1/1 non-HA profile explicitly (the production preset is tested
+        # by test_airgap_ingest_sh/test_airgap_validate_sh).
+        "QDRANT_SHARD_NUMBER": "1",
+        "QDRANT_REPLICATION_FACTOR": "1",
+        "QDRANT_WRITE_CONSISTENCY_FACTOR": "1",
     }
     if extra_env:
         for k, v in extra_env.items():

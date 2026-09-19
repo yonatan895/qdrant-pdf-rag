@@ -24,6 +24,17 @@ for _k in $OPERATOR_ENV_KEYS; do
 done
 unset _k _is_set
 
+# Production collection distribution preset (issue #360): the checked-in
+# target topology (6 shards / RF 3 / W 2; overlays/openshift/collection-policy.env).
+# Lowest precedence by construction — it loads before the operator env file,
+# while explicit caller values were snapshotted above and are restored after.
+# A tree without the fragment (hermetic fixtures, one-node lanes) must select
+# its own complete policy explicitly.
+if [ -f overlays/openshift/collection-policy.env ]; then
+    # shellcheck disable=SC1091
+    . overlays/openshift/collection-policy.env
+fi
+
 if [ -n "${AIRGAP_ENV:-}" ]; then
     if [ -f "$AIRGAP_ENV" ]; then
         # shellcheck disable=SC1091
@@ -64,6 +75,40 @@ require_embed_revision() {
         *[![:space:]]*) ;;
         *) die "EMBED_MODEL_REVISION must be a non-blank immutable model/config revision for ${EMBED_MODEL:-?} (a gateway alias is mutable and a dimension is not an identity)" ;;
     esac
+}
+
+# Collection distribution policy (issue #360): one complete tuple or a
+# fail-closed refusal. Positive integers only; a write-consistency factor
+# above the replication factor can never be satisfied. $1 = "required"
+# (the air-gap mutation path demands a complete policy) or "optional"
+# (read-only callers may run without a selected policy).
+validate_collection_policy() {
+    _mode=${1:-required}
+    _missing=""
+    for _key in QDRANT_SHARD_NUMBER QDRANT_REPLICATION_FACTOR QDRANT_WRITE_CONSISTENCY_FACTOR; do
+        eval "_val=\${$_key:-}"
+        if [ -z "$_val" ]; then
+            _missing="${_missing:+$_missing }$_key"
+            continue
+        fi
+        case "$_val" in
+            *[!0-9]*) die "$_key must be a positive integer (got '$_val')" ;;
+        esac
+        if [ "$_val" -lt 1 ] 2>/dev/null; then
+            die "$_key must be a positive integer (got '$_val')"
+        fi
+    done
+    if [ -n "$_missing" ]; then
+        if [ "$_mode" = "optional" ]; then
+            unset _key _val _missing
+            return 0
+        fi
+        die "collection distribution policy is incomplete (missing: $_missing) — select all three of QDRANT_SHARD_NUMBER/QDRANT_REPLICATION_FACTOR/QDRANT_WRITE_CONSISTENCY_FACTOR (production preset: 6/3/2 in overlays/openshift/collection-policy.env; one-node rehearsal: 1/1/1 explicitly); see airgap.env.example"
+    fi
+    if [ "${QDRANT_WRITE_CONSISTENCY_FACTOR}" -gt "${QDRANT_REPLICATION_FACTOR}" ]; then
+        die "QDRANT_WRITE_CONSISTENCY_FACTOR=${QDRANT_WRITE_CONSISTENCY_FACTOR} exceeds QDRANT_REPLICATION_FACTOR=${QDRANT_REPLICATION_FACTOR}: writes could never acknowledge"
+    fi
+    unset _key _val _missing
 }
 
 # Strict boolean parser for operator flags (issue #391 maintenance modes):
