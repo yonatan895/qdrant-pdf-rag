@@ -476,7 +476,7 @@ class HangingLLM:
 
 
 @pytest.fixture
-def trunc_client(monkeypatch, synthetic_pdf):
+def trunc_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     class TruncLLM:
         async def chat_stream(self, messages, *args, **kwargs):
             yield {"type": "token", "delta": "Partial ", "token": "Partial ", "ttft_ms": 12}
@@ -490,7 +490,7 @@ def trunc_client(monkeypatch, synthetic_pdf):
 
 
 @pytest.fixture
-def hang_client(monkeypatch, synthetic_pdf):
+def hang_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
     yield from _client(monkeypatch, synthetic_pdf, HangingLLM())
 
@@ -561,7 +561,7 @@ def test_v1_chat_stream_truncation_error_frame_carries_incomplete_state(trunc_cl
 
 
 @pytest.fixture
-def error_frame_client(monkeypatch, synthetic_pdf):
+def error_frame_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     """Real HttpxLLMClient over a fake transport whose stream carries a
     content token, an upstream error frame, then [DONE] — the exact
     counterexample from issue #365, driven through the app routes."""
@@ -576,7 +576,7 @@ def error_frame_client(monkeypatch, synthetic_pdf):
 
 
 @pytest.fixture
-def missing_finish_client(monkeypatch, synthetic_pdf):
+def missing_finish_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     """Real client whose stream ends with [DONE] but no finish frame, and
     whose non-streaming fallback payload also lacks a finish reason."""
     monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
@@ -673,7 +673,7 @@ def test_v1_chat_stream_real_client_missing_finish_emits_error_and_done(missing_
 
 
 @pytest.fixture
-def buffered_error_client(monkeypatch, synthetic_pdf):
+def buffered_error_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     """Client configured with a non-streaming mock returning a top-level error (Q420-P1)."""
     monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
     llm = HttpxLLMClient(
@@ -704,7 +704,7 @@ def test_v1_chat_json_real_client_buffered_error_is_502(buffered_error_client):
 
 
 @pytest.fixture
-def malformed_first_recovering_client(monkeypatch, synthetic_pdf):
+def malformed_first_recovering_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     """Client whose first stream frame is malformed finish_reason, recovering via POST (Q420-P2)."""
     monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
     malformed_first_line = (

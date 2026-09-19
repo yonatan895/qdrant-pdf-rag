@@ -111,12 +111,12 @@ def _client(monkeypatch, *, ui_enabled: bool, synthetic_pdf, llm=None):
 
 
 @pytest.fixture
-def ui_client(monkeypatch, synthetic_pdf):
+def ui_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     yield from _client(monkeypatch, ui_enabled=True, synthetic_pdf=synthetic_pdf)
 
 
 @pytest.fixture
-def ui_disabled_client(monkeypatch, synthetic_pdf):
+def ui_disabled_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     yield from _client(monkeypatch, ui_enabled=False, synthetic_pdf=synthetic_pdf)
 
 
@@ -219,7 +219,9 @@ def test_ui_chat_stream_sse_token_final_contract(ui_client):
     assert final["hits"][0]["doc_id"] == "SA22-0000-00"
 
 
-def test_ui_chat_stream_error_emits_error_event_without_final(monkeypatch, synthetic_pdf):
+def test_ui_chat_stream_error_emits_error_event_without_final(
+    monkeypatch, synthetic_pdf, servable_representation_gate
+):
     client = next(_client(monkeypatch, ui_enabled=True, synthetic_pdf=synthetic_pdf, llm=ExplodingStreamLLM()))
     resp = client.post(
         "/ui/chat/stream",
@@ -231,7 +233,9 @@ def test_ui_chat_stream_error_emits_error_event_without_final(monkeypatch, synth
     assert "stream exploded" not in resp.text
 
 
-def test_ui_chat_stream_parser_failure_carries_incomplete_state(monkeypatch, synthetic_pdf):
+def test_ui_chat_stream_parser_failure_carries_incomplete_state(
+    monkeypatch, synthetic_pdf, servable_representation_gate
+):
     """Issue #365: a real client whose upstream stream fails after content
     (error frame then [DONE]) ends the console stream with the fixed error
     event and the incomplete state; the upstream error text never reaches

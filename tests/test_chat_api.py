@@ -122,7 +122,7 @@ class ChatFakeLLM:
 
 
 @pytest.fixture
-def chat_client(monkeypatch, synthetic_pdf):
+def chat_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
     monkeypatch.setenv("EMBED_MODE", "hash")
     monkeypatch.setenv("ALLOW_HASH_MODE", "true")

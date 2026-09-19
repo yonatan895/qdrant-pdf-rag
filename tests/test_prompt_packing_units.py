@@ -384,7 +384,7 @@ def _route_search(qdrant, embedder, collection, query, product=None, version=Non
 
 
 @pytest.fixture
-def budget_client(monkeypatch, synthetic_pdf):
+def budget_client(monkeypatch, synthetic_pdf, servable_representation_gate):
     from fastapi.testclient import TestClient
 
     from mainframe_rag.agent import app as app_mod

@@ -40,7 +40,7 @@ def _hit(cite_suffix: str = "p. 1-6", text: str = "IEA500I BEFORE IOS IOSCMDS CO
 
 
 @pytest.fixture
-def client(monkeypatch, synthetic_pdf):
+def client(monkeypatch, synthetic_pdf, servable_representation_gate):
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
     # CI/dev embed profile: hash mode, explicitly allowed (PR D fail-fast)
     monkeypatch.setenv("EMBED_MODE", "hash")
@@ -172,7 +172,7 @@ def test_answer_surfaces_inferred_citation_provenance(client, monkeypatch):
     assert body["inferred_indices"] == [1]
 
 
-def test_answer_refuses_without_reasoning_model(monkeypatch):
+def test_answer_refuses_without_reasoning_model(monkeypatch, servable_representation_gate):
     monkeypatch.delenv("LLM_MODEL_REASONING", raising=False)
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
     # CI/dev embed profile: hash mode, explicitly allowed (PR D fail-fast)
@@ -493,7 +493,7 @@ def test_404_405_use_structured_shape(client):
     assert resp.json() == {"code": "method_not_allowed", "message": "method not allowed"}
 
 
-def test_unhandled_error_returns_internal_shape(monkeypatch):
+def test_unhandled_error_returns_internal_shape(monkeypatch, servable_representation_gate):
     """An exception escaping the handler logs server-side; client sees only
     {"code": "internal"}. Response construction runs after the handler's try, so breaking it
     yields a genuinely unhandled exception."""
@@ -992,7 +992,7 @@ def test_answer_llm_failure_reads_answer_failed(client, monkeypatch):
     assert "explode" not in resp.text
 
 
-def test_prompt_build_failure_maps_to_internal(monkeypatch):
+def test_prompt_build_failure_maps_to_internal(monkeypatch, servable_representation_gate):
     """Review S5: prompt construction is local work, deliberately outside the
     upstream try — a build failure is an internal fault (500 "internal"),
     never mislabeled as 502 "answer failed" / "retrieval failed". Like the
@@ -2477,7 +2477,9 @@ def test_sse_final_schemas_match_across_paths():
 
 
 @pytest.mark.anyio
-async def test_v1_answer_20_concurrent_requests_no_threadpool_starvation(monkeypatch):
+async def test_v1_answer_20_concurrent_requests_no_threadpool_starvation(
+    monkeypatch, servable_representation_gate
+):
     import asyncio
 
     import httpx2
