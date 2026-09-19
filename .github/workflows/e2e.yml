@@ -269,6 +269,11 @@ jobs:
           test -f qdrant-pdf-rag/dist/sbom.json
           test -f qdrant-pdf-rag/dist/SHA256SUMS.sig
           test -f qdrant-pdf-rag/dist/sneakernet-signing.pub
+          test -f qdrant-pdf-rag/dist/task_linux_amd64.tar.gz
+          test -f qdrant-pdf-rag/dist/task-pin.txt
+          test -f qdrant-pdf-rag/dist/task-LICENSE
+          grep -q "^task_version: " qdrant-pdf-rag/dist/MANIFEST.txt
+          grep -q "go-task/task" qdrant-pdf-rag/dist/sbom.json
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
           test "$(awk '/^sha: /{print $2}' qdrant-pdf-rag/dist/MANIFEST.txt)" = "$SHA"
           cd qdrant-pdf-rag
@@ -404,6 +409,11 @@ jobs:
           test -f qdrant-pdf-rag/dist/sbom.json
           test -f qdrant-pdf-rag/dist/SHA256SUMS.sig
           test -f qdrant-pdf-rag/dist/sneakernet-signing.pub
+          test -f qdrant-pdf-rag/dist/task_linux_amd64.tar.gz
+          test -f qdrant-pdf-rag/dist/task-pin.txt
+          test -f qdrant-pdf-rag/dist/task-LICENSE
+          grep -q "^task_version: " qdrant-pdf-rag/dist/MANIFEST.txt
+          grep -q "go-task/task" qdrant-pdf-rag/dist/sbom.json
           test "$(git -C qdrant-pdf-rag rev-parse HEAD)" = "$SHA"
           test "$(awk '/^sha: /{print $2}' qdrant-pdf-rag/dist/MANIFEST.txt)" = "$SHA"
 
