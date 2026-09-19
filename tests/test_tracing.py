@@ -288,7 +288,7 @@ def _hit():
 
 
 @pytest.fixture
-def client(monkeypatch):
+def client(monkeypatch, servable_representation_gate):
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
     monkeypatch.setenv("EMBED_MODE", "hash")
     monkeypatch.setenv("ALLOW_HASH_MODE", "true")

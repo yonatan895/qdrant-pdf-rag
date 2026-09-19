@@ -69,11 +69,13 @@ so a pending contract looked committed in unit tests but not against a
 server). Alias resolution is part of that fidelity (issue #391 F4):
 `AliasQdrant` scripts `get_aliases` plus per-physical
 `<physical>__completions` payloads so the gate's resolution and its metadata
-read are pinned to the same generation, and `ServingGateFake` is installed
-autouse in `tests/conftest.py` — endpoint tests that monkeypatch the
+read are pinned to the same generation, and `servable_representation_gate`
+in `tests/conftest.py` is an explicit fixture requested by the endpoint
+client fixtures — endpoint tests that monkeypatch the
 retrieval/LLM seams get a servable generation while gate/refusal tests
 install the real `ServingGate` with a scripted Qdrant double, and
 integration-marked tests keep the real gate against the real server.
+Pure/tool tests request nothing and never import the serving application.
 
 ## Tests must lock the claimed path
 

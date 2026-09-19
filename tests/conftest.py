@@ -120,19 +120,22 @@ def _typed_point(pid: str, chunk_type: str, page: str, score: float = 1.0) -> mo
     return base.model_copy(update={"payload": payload})
 
 
-@pytest.fixture(autouse=True)
-def _servable_representation_gate(monkeypatch, request):
-    """Default serving gate for the hermetic suite (issues #391 F3/F4).
+@pytest.fixture
+def servable_representation_gate(monkeypatch):
+    """Explicit servable gate for endpoint tests (issue #388 Slice 2).
 
-    Endpoint tests monkeypatch `retrieve_search`/LLM seams directly, so the
-    gate would otherwise try to resolve the configured alias against an
-    unreachable Qdrant and turn every request into a 503. This fixture
-    installs a servable gate bound to the configured collection; gate and
-    refusal tests override `app_mod.serving_gate` themselves, and the
-    integration tier keeps the real gate (real Qdrant)."""
-    if request.node.get_closest_marker("integration"):
-        yield None
-        return
+    Request this fixture from the test or client fixture that drives the
+    agent app over TestClient. Requesting it is the mechanism: setup runs
+    before the requesting body, so lifespan keeps the fake instead of
+    building a real gate that would 503 every request against the
+    hermetic double. Gate/refusal tests override `app_mod.serving_gate`
+    themselves and integration-marked tests keep the real gate, so neither
+    requests this fixture. Pure/tool tests request nothing and never
+    import the serving application as a result.
+
+    The `_hermetic_qdrant_client` guard above stays autouse on purpose: it
+    patches only `qdrant_client.AsyncQdrantClient` (no serving import, one
+    setattr) and must never depend on an ambient sim (issue #362)."""
     from mainframe_rag.agent import app as app_mod
     from tests.fakes import ServingGateFake
 
