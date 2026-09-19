@@ -7,7 +7,7 @@
 # boundary (`EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE"`) so ambient
 # caller environment variables cannot silently override CLI inputs (and
 # `holdout` unconditionally binds `VENUE=rc`). Air-gap and unrelated tasks
-# cannot inherit a hash default. `make VAR=x task` (env form) and `task VAR=x`
+# cannot inherit a hash default. the retired `make VAR=x task` (env form) and `task VAR=x`
 # (CLI form) converge; CLI wins on conflict; an explicit empty value is
 # preserved for `?=`-style inputs and fails in the script, while `$(or)`-style
 # inputs fall back to their default via shell `:-` exactly like Make.
@@ -22,7 +22,7 @@ tasks:
     desc: Score the dev golden set against the mode-keyed baseline
     summary: |
       `.venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl
-      --check <mode baseline>`, mirroring `make eval`. Needs a running
+      --check <mode baseline>`, replacing the retired `make eval`. Needs a running
       Qdrant. Inputs: EMBED_MODE (default hash), VENUE (default dev),
       BUNDLE_DIR (default bundles).
     vars:
@@ -44,7 +44,7 @@ tasks:
     desc: Score the paraphrase set against its mode-keyed baseline
     summary: |
       Same instrument as retrieval over `evals/paraphrase.jsonl` with
-      paraphrase baselines, mirroring `make eval-paraphrase`. Run with
+      paraphrase baselines, replacing the retired `make eval-paraphrase`. Run with
       QDRANT_COLLECTION=paraphrase-manuals after ingesting that corpus.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
@@ -65,7 +65,7 @@ tasks:
     desc: Run the L1 retrieval gate (PR check instrument)
     summary: |
       `.venv/bin/python scripts/gate_l1.py` with report/delta outputs,
-      mirroring `make gate-l1`. Fails nonzero on regressions.
+      replacing the retired `make gate-l1`. Fails nonzero on regressions.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
@@ -83,7 +83,7 @@ tasks:
     desc: Verify golden expectations against the live collection
     summary: |
       `.venv/bin/python scripts/verify_golden.py`, mirroring
-      `make verify-golden`. Gates the corpus; nonzero on any FAIL. Carries
+      the retired `make verify-golden`. Gates the corpus; nonzero on any FAIL. Carries
       no mode exports (same as Make).
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
@@ -93,7 +93,7 @@ tasks:
     desc: Verify the holdout pin, then score the frozen holdout (RC only)
     summary: |
       `sha256sum -c evals/holdout.jsonl.sha256` first, then the holdout eval
-      against its own baseline, mirroring `make eval-holdout`. Release
+      against its own baseline, replacing the retired `make eval-holdout`. Release
       candidates only: never iterate against the holdout. VENUE is forced to
       rc (caller VENUE is ignored, same as Make); EMBED_MODE stays
       caller-selected (default hash).
@@ -113,7 +113,7 @@ tasks:
     desc: Re-record the committed accuracy baseline (dedicated PR only)
     summary: |
       `--update-baseline` against the mode-keyed baseline, mirroring
-      `make eval-baseline`. Baseline rewrites require a dedicated PR, never
+      the retired `make eval-baseline`. Baseline rewrites require a dedicated PR, never
       run this to make a feature pass.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
@@ -134,7 +134,7 @@ tasks:
     desc: Record live prefetch pools for offline replay (RC/gap only)
     summary: |
       `scripts/capture_pool.py` where the real models live, mirroring
-      `make capture-pool`. Inputs: GOLDEN (default evals/golden.jsonl), OUT
+      the retired `make capture-pool`. Inputs: GOLDEN (default evals/golden.jsonl), OUT
       (default bundles/pools-YYYYMMDD.jsonl); empty values fall back like
       Make `$(or)`. Output carries ids/ranks/scores only, never chunk text;
       keep it in bundles/ or scratch, never commit.
@@ -157,7 +157,7 @@ tasks:
     desc: Answer-tier golden eval on the live GPU stack
     summary: |
       `scripts/eval_answers.py` (one reasoning call per query), mirroring
-      `make eval-answers`. Needs the live stack and the eval environment.
+      the retired `make eval-answers`. Needs the live stack and the eval environment.
       Input: N bounds the sample (default 24; empty falls back).
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
@@ -176,7 +176,7 @@ tasks:
   chat:
     desc: Multi-turn condensation A/B on the dev golden set (evidence only)
     summary: |
-      `scripts/eval_chat.py`, mirroring `make eval-chat`. Live stack only;
+      `scripts/eval_chat.py`, replacing the retired `make eval-chat`. Live stack only;
       evidence for a future default decision, never a gate. Input: N
       (default 12; empty falls back).
     vars:
@@ -197,7 +197,7 @@ tasks:
     desc: Layered harness L1 retrieval + promotion gate
     summary: |
       `scripts/harness.py --gate` against the mode-keyed baseline,
-      mirroring `make harness-gate`. RC-only gate. Input: RESTORE (default
+      replacing the retired `make harness-gate`. RC-only gate. Input: RESTORE (default
       drift; `always` forces full snapshot recover; empty falls back).
       The vllm harness runs golden + holdout over the real corpus; otherwise
       `--golden evals/golden.jsonl` is passed.
@@ -221,7 +221,7 @@ tasks:
     desc: Re-record the harness baseline (dedicated PR only)
     summary: |
       `scripts/harness.py --update-baseline`, mirroring
-      `make harness-baseline`. Same mode/baseline/golden rules as
+      the retired `make harness-baseline`. Same mode/baseline/golden rules as
       `eval:harness:gate`.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
@@ -242,7 +242,7 @@ tasks:
   harness:l2:
     desc: Harness L2 answer tier (live GPU stack, never a PR gate)
     summary: |
-      `scripts/harness_l2.py`, mirroring `make harness-l2`. Input: N
+      `scripts/harness_l2.py`, replacing the retired `make harness-l2`. Input: N
       (default 24; empty falls back).
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
@@ -261,7 +261,7 @@ tasks:
   harness:l3:
     desc: Harness L3 performance tier against a running agent (RC only)
     summary: |
-      `scripts/harness_l3.py --gate`, mirroring `make harness-l3`. The agent
+      `scripts/harness_l3.py --gate`, replacing the retired `make harness-l3`. The agent
       under test must run with LLM_STREAM=true for TTFT streaming. Inputs:
       AGENT_URL (default http://127.0.0.1:8080), CONCURRENCY/DURATION/
       REQUEST_TIMEOUT (defaults 8/30/30), HARNESS_L3_BASELINE (mode-keyed
@@ -293,7 +293,7 @@ tasks:
     desc: Re-record the L3 baseline (dedicated PR only)
     summary: |
       `scripts/harness_l3.py --update-baseline`, mirroring
-      `make harness-l3-baseline`. Same inputs as `eval:harness:l3`.
+      the retired `make harness-l3-baseline`. Same inputs as `eval:harness:l3`.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
@@ -321,7 +321,7 @@ tasks:
     desc: Harness L4 answer-quality gate (live GPU stack, RC only)
     summary: |
       `scripts/harness_l4.py` gated against the committed thresholds,
-      mirroring `make harness-l4`. Inputs: N (default 24), REPEATS
+      replacing the retired `make harness-l4`. Inputs: N (default 24), REPEATS
       (default 3); empty values fall back.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
@@ -342,7 +342,7 @@ tasks:
     desc: Re-record L4 thresholds (dedicated PR only)
     summary: |
       `scripts/harness_l4.py --update-thresholds`, mirroring
-      `make harness-l4-record`. Same inputs as `eval:harness:l4`.
+      the retired `make harness-l4-record`. Same inputs as `eval:harness:l4`.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
@@ -362,7 +362,7 @@ tasks:
     desc: Draft golden-set candidates from collection payloads
     summary: |
       `scripts/eval_retrieval.py --label-draft --docs 40`, mirroring
-      `make eval-draft`. Prints candidates for manual query editing.
+      the retired `make eval-draft`. Prints candidates for manual query editing.
     vars:
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
@@ -376,7 +376,7 @@ tasks:
   report:
     desc: Render the eval report (text/markdown)
     summary: |
-      `scripts/render_report.py eval`, mirroring `make eval-report`.
+      `scripts/render_report.py eval`, replacing the retired `make eval-report`.
       Inputs: REPORT (default bundles/eval-report.json), BASELINE (default
       evals/baseline.json); empty values fall back. Note: this BASELINE is
       the report input selector, not the mode-keyed eval baseline.
@@ -398,7 +398,7 @@ tasks:
     desc: Render the eval report as a self-contained HTML dashboard
     summary: |
       `scripts/render_report.py eval --format html`, mirroring
-      `make eval-html`. Same inputs as `eval:report` plus OUT (default
+      the retired `make eval-html`. Same inputs as `eval:report` plus OUT (default
       bundles/eval-report.html); prints the rendered path.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
@@ -420,7 +420,7 @@ tasks:
   compare:
     desc: Compare two eval baselines
     summary: |
-      `scripts/render_report.py compare-eval`, mirroring `make eval-compare`.
+      `scripts/render_report.py compare-eval`, replacing the retired `make eval-compare`.
       Inputs: BASE (default evals/baseline.json), CURRENT (default
       bundles/eval-report.json); empty values fall back.
     vars:
@@ -439,7 +439,7 @@ tasks:
   bench-report:
     desc: Render the benchmark report (text/markdown)
     summary: |
-      `scripts/render_report.py bench`, mirroring `make bench-report`.
+      `scripts/render_report.py bench`, replacing the retired `make bench-report`.
       Inputs: REPORT (default bundles/bench-report.json), BASELINE (default
       benchmarks/baseline.json); empty values fall back.
     vars:
@@ -460,7 +460,7 @@ tasks:
     desc: Render the benchmark report as HTML
     summary: |
       `scripts/render_report.py bench --format html`, mirroring
-      `make bench-html`. Same inputs as `eval:bench-report` plus OUT
+      the retired `make bench-html`. Same inputs as `eval:bench-report` plus OUT
       (default bundles/bench-report.html); prints the rendered path.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
@@ -483,7 +483,7 @@ tasks:
     desc: Compare two benchmark baselines
     summary: |
       `scripts/render_report.py compare-bench`, mirroring
-      `make bench-compare`. Inputs: BASE (default benchmarks/baseline.json),
+      the retired `make bench-compare`. Inputs: BASE (default benchmarks/baseline.json),
       CURRENT (default bundles/bench-report.json); empty values fall back.
     vars:
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
@@ -502,7 +502,7 @@ tasks:
     desc: Run the benchmark workload against the committed baseline
     summary: |
       `scripts/benchmark.py --collection bench --check benchmarks/baseline.json`,
-      mirroring `make bench`. Fails on regressions. Carries no mode exports
+      replacing the retired `make bench`. Fails on regressions. Carries no mode exports
       (same as Make): the workload/baseline pairing is fixed.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
@@ -517,7 +517,7 @@ tasks:
     desc: Re-record the benchmark baseline (dedicated PR only)
     summary: |
       `scripts/benchmark.py --update-baseline`, mirroring
-      `make bench-baseline`. Input: BENCH_REPEATS (default 3; empty falls
+      the retired `make bench-baseline`. Input: BENCH_REPEATS (default 3; empty falls
       back). Record in the gate's own environment, never a dev machine.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
@@ -533,7 +533,7 @@ tasks:
     desc: Standalone load run against an already-running agent
     summary: |
       `scripts/loadtest.py --url <agent> --endpoint search --concurrency 8
-      --duration 30` with the selected base Python, mirroring `make loadtest`
+      --duration 30` with the selected base Python, replacing the retired `make loadtest`
       (which also uses the base interpreter, not the venv). Input: PY
       (default python3), AGENT_URL (default http://127.0.0.1:8080). Carries
       no mode exports (same as Make).

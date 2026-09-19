@@ -17,7 +17,7 @@ tasks:
     summary: |
       Runs `.venv/bin/python -m pip wheel -r requirements.lock.txt -w <dir>`
       with the venv interpreter so wheel tags match the runtime (cp314),
-      mirroring `make wheelhouse`. Inputs: BUNDLE_DIR (default bundles;
+      replacing the retired `make wheelhouse`. Inputs: BUNDLE_DIR (default bundles;
       wheelhouse lands in BUNDLE_DIR/wheelhouse). Freshness is proven by a
       completion stamp recording the lockfile content, interpreter version
       and platform, combined with an output-member receipt (.wheels.sha256)
@@ -49,7 +49,7 @@ tasks:
     summary: |
       Runs the venv Python over `scripts/fetch_bm25_weights.py --model
       <model> --out <dir> --verify-manifest bm25-weights.sha256`, mirroring
-      `make bm25-weights` (upstream drift fails closed in the script).
+      the retired `make bm25-weights` (upstream drift fails closed in the script).
       Inputs: BM25_MODEL (default Qdrant/bm25), BUNDLE_DIR (default bundles).
       Freshness is proven by a completion stamp recording the manifest and
       fetcher content plus the model selection, combined with an offline
@@ -80,7 +80,7 @@ tasks:
     desc: Verify the vendored Qdrant chart archive is present
     summary: |
       Passes only when `charts/qdrant-*.tgz` exists (normal runs use the
-      vendored chart), mirroring `make chart`. Always re-verifies on request;
+      vendored chart), replacing the retired `make chart`. Always re-verifies on request;
       never cached. Fetching is `task artifacts:chart-fetch` (connected
       maintenance only, never an implicit prerequisite).
     cmds:
@@ -90,7 +90,7 @@ tasks:
     desc: Fetch the Qdrant Helm chart (connected maintenance only)
     summary: |
       Runs `helm pull qdrant/qdrant --destination charts`, mirroring
-      `make pull-chart`. Connected host only; never an implicit deploy
+      the retired `make pull-chart`. Connected host only; never an implicit deploy
       prerequisite. Always runs on request (upstream may have moved).
     cmds:
       - mkdir -p charts
@@ -101,7 +101,7 @@ tasks:
     summary: |
       Runs `helm template` against the vendored chart with the fixed
       placeholder `--set` values and `overlays/openshift/values.yaml`,
-      mirroring `make helm-template`. Verifies chart presence first.
+      replacing the retired `make helm-template`. Verifies chart presence first.
     cmds:
       - task: chart-check
       - helm template qdrant charts/qdrant-*.tgz -f overlays/openshift/values.yaml --set image.repository=PLACEHOLDER_REGISTRY/qdrant/qdrant --set imagePullSecrets[0].name=PLACEHOLDER_PULL_SECRET --set persistence.storageClassName=PLACEHOLDER_STORAGE_CLASS --set snapshotPersistence.storageClassName=PLACEHOLDER_STORAGE_CLASS
@@ -110,7 +110,7 @@ tasks:
     desc: Lint the Qdrant chart against the OpenShift values
     summary: |
       Runs `helm lint` against the vendored chart, mirroring
-      `make helm-lint`. Verifies chart presence first; always re-verifies.
+      the retired `make helm-lint`. Verifies chart presence first; always re-verifies.
     cmds:
       - task: chart-check
       - helm lint charts/qdrant-*.tgz -f overlays/openshift/values.yaml
@@ -119,7 +119,7 @@ tasks:
     desc: Build ingest and agent images with wheelhouse/bm25 contexts (connected)
     summary: |
       Builds both Containerfiles with the named `wheelhouse`/`bm25`
-      build contexts and `-t <name>:<tag>`, mirroring `make build-images`.
+      build contexts and `-t <name>:<tag>`, replacing the retired `make build-images`.
       Preparation runs first and sequentially (wheelhouse, then bm25),
       never as parallel deps sharing state. Inputs: IMAGE_TAG (default
       latest), INGEST_IMAGE_NAME, AGENT_IMAGE_NAME, BUNDLE_DIR, BM25_MODEL.

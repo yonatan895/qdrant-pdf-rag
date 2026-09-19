@@ -10,7 +10,7 @@ tasks:
   setup:
     desc: Create .venv and install locked development dependencies (connected)
     summary: |
-      Explicit preparation mirroring `make venv` (same base interpreter
+      Explicit preparation replacing the retired `make venv` (same base interpreter
       selection, same `requirements.lock.txt` plus editable `.[dev]` install
       into `.venv` with the venv's own pip). Inputs: PY (default python3;
       explicit empty is preserved and fails rather than silently defaulting).
@@ -55,7 +55,7 @@ tasks:
     desc: Generate the original synthetic demo PDFs (dev only)
     summary: |
       Two `scripts/make_synthetic_pdf.py` runs into output/demo-pdfs (one
-      outline, one `--plain`), mirroring `make e2e-demo-pdfs`. Original
+      outline, one `--plain`), replacing the retired `make e2e-demo-pdfs`. Original
       synthetic documents only; never vendor material.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
@@ -67,7 +67,7 @@ tasks:
     desc: Remove generated environments and outputs (bounded, never external)
     summary: |
       Removes `.venv`, test caches, the bundle dir, `output/`, and
-      non-archive leftovers inside `dist/`, mirroring `make clean`. Bounded
+      non-archive leftovers inside `dist/`, replacing the retired `make clean`. Bounded
       retention contract: `*.tar*` release archives in `dist/` are kept; the
       workspace-local Task install (`.tools/`), external corpora, signing
       keys and snapshots live outside these paths and are never touched.

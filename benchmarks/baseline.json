@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "note": "Re-baseline via `make bench-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/benchmark.py GATED_METRICS.",
+    "note": "Re-baseline via `sh scripts/tools/run-task.sh eval:bench-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/benchmark.py GATED_METRICS.",
     "env": {
       "cpu_count": 4,
       "mem_total_mb": 15989.7,

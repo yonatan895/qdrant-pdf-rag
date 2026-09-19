@@ -2,7 +2,7 @@
 #
 # All command families delegate to their existing script/module owners.
 # CI and offline callers use scripts/tools/run-task.sh with the verified local
-# executable; docs/task-runner.md owns provisioning and the Make exit gate.
+# executable; docs/task-runner.md owns provisioning and the Task exit gate.
 #
 # Safety rules enforced here, not just documented:
 # - No global dynamic `sh:` variables, no `dotenv:`, no remote/optional
@@ -10,8 +10,8 @@
 #   model, credentials or private config and modify nothing.
 # - YAML owns dispatch/order only; scripts keep validation/lifecycle logic.
 # - Verification tasks never install: a missing `.venv` fails closed with a
-#   pointer to `task dev:setup` (deliberate interface change vs Make's
-#   order-only setup; recorded in docs/task-runner.md).
+#   pointer to `task dev:setup` (explicit setup separate from verification;
+#   recorded in docs/task-runner.md).
 # - Caller values reach scripts through `env:` bridges and quoted `"$VAR"`
 #   expansion, never re-parsed template interpolation (see taskfiles/).
 # - Artifact rebuilds additionally require a completion stamp written only
