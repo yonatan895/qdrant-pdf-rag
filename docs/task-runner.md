@@ -170,19 +170,20 @@ own the full Python lock; #376 owns broader distribution inventory.
 <a id="shim-exit"></a>
 ## Compatibility window and removal milestone
 
-#402 increment C makes Task the canonical documented interface and supplies the
-offline handoff. The Make adapter is transitional, never a second implementation.
-While retained, use only its inventoried targets/assignments: multiple goals
-run sequentially, `-C` resolves within the repository, unknown targets fail,
-and `-j` is unsupported for shared installs/builds. No arbitrary Make-language
-or Makeflags translation is promised.
+#402 increment C made Task the canonical documented interface and supplied the
+offline handoff. Increment D (this change) removes the Make adapter: the root
+`Makefile` shim is deleted and no runtime Make dependency or Task → Make
+delegation remains in supported workflows. The inventory table above stays as
+the concise old → new command reference for readers of older records; dated
+evidence and old signed bundles retain their original command spelling and
+their own bundled interface, independent of new releases.
 
-Increment D removes it only after every executable consumer has moved, signed
-offline bootstrap works without Make, fixed-checkout fresh-context acceptance
-is recorded, and all required candidate checks pass. Schema/list/preview output
-alone does not satisfy those gates. Required published-artifact/topology evidence
-remains open until executed on the exact candidate; documentation cannot certify
-it. Old signed bundles keep their own interface, independent of new releases.
+D-gate record: every in-repository executable consumer had moved to
+`sh scripts/tools/run-task.sh` or its documented direct script owner, the
+signed offline bootstrap works without Make, and the e2e airgap-acceptance and
+kind-live lanes assert the Task bundle members explicitly. Required
+published-artifact/topology evidence is recorded per release, not certified by
+documentation alone.
 
 Approved interface differences from old recipes: explicit setup separate from
 verification; content-aware completion stamps; literal free-text forwarding;

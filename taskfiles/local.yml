@@ -35,7 +35,7 @@ tasks:
   qdrant:down:
     desc: Stop the sim Qdrant container (ignores an already-stopped one)
     summary: |
-      `sh scripts/sim_qdrant.sh down`, mirroring `make sim-clean`. Never
+      `sh scripts/sim_qdrant.sh down`, replacing the retired `make sim-clean`. Never
       fails when the container is already gone. Same inputs as
       `local:qdrant:up`.
     vars:
@@ -51,7 +51,7 @@ tasks:
     desc: Interactive query inspection against Qdrant/gateway (read-only)
     summary: |
       `PYTHONPATH=. .venv/bin/python scripts/query_demo.py` with only the
-      caller-set `--flag value` pairs, mirroring `make query-demo` (12
+      caller-set `--flag value` pairs, replacing the retired `make query-demo` (12
       optional flags; unset/empty inputs are omitted, never sent empty).
       Pairs accumulate through positional parameters, so free-text values
       arrive as single argv entries and execute nothing. Read-only
@@ -93,7 +93,7 @@ tasks:
     desc: Interactive conversational Q&A against Qdrant/reasoning model
     summary: |
       Same forwarding as `local:query` with `--answer` first, mirroring
-      `make ask`. Interactive; output goes to the terminal.
+      the retired `make ask`. Interactive; output goes to the terminal.
     env:
       PYTHONPATH: '.'
       TASK_QUERY: '{{.QUERY}}'
@@ -131,7 +131,7 @@ tasks:
     desc: Serve the reasoning model locally (GPU, foreground)
     summary: |
       `BUDGET_PYTHON=<repo>/.venv/bin/python ROLE=<role>
-      sh scripts/run_local_vllm.sh`, mirroring `make local-vllm`. The venv
+      sh scripts/run_local_vllm.sh`, replacing the retired `make local-vllm`. The venv
       interpreter is always used for Budget resolution (never exported
       globally). Inputs: ROLE (default reasoning), MODEL, PORT, BUDGET_PROFILE,
       GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE. Foreground: Ctrl-C stops
@@ -162,7 +162,7 @@ tasks:
   embed:
     desc: Serve the embedding model locally (GPU, foreground)
     summary: |
-      Like `local:llm` for the embed role, mirroring `make local-vllm-embed`.
+      Like `local:llm` for the embed role, replacing the retired `make local-vllm-embed`.
       Inputs: ROLE (default embed), MODEL (default
       Qwen/Qwen3-Embedding-0.6B), PORT (default 8001), BUDGET_PROFILE,
       GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE. Never export MODEL
@@ -194,7 +194,7 @@ tasks:
     desc: Serve the reranker locally (GPU, foreground, triple pack only)
     summary: |
       Like `local:llm` for the rerank role, mirroring
-      `make local-vllm-rerank`. Inputs: BUDGET_PROFILE (default TRIPLE_8GB),
+      the retired `make local-vllm-rerank`. Inputs: BUDGET_PROFILE (default TRIPLE_8GB),
       ROLE (default rerank), MODEL (default BAAI/bge-reranker-v2-m3), PORT
       (default 8002), GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE. Never alongside
       the default 8GB pair.
@@ -225,7 +225,7 @@ tasks:
     desc: Start the local LiteLLM gateway in front of the backends
     summary: |
       `GATEWAY_PORT=<port> sh scripts/run_local_gateway.sh`, mirroring
-      `make local-gateway`. Input: GATEWAY_PORT (default 4000). Keys ride
+      the retired `make local-gateway`. Input: GATEWAY_PORT (default 4000). Keys ride
       the caller environment only (GATEWAY_MASTER_KEY etc.; the script mints
       per-start keys when absent and prints them once) — never Task vars,
       never CLI values. Foreground: Ctrl-C stops the gateway containers.
@@ -241,7 +241,7 @@ tasks:
     desc: Stop the local gateway and its key-store (ignores absent ones)
     summary: |
       `docker stop`/`docker network rm` over the gateway names, mirroring
-      `make local-gateway-stop`. Each cleanup tolerates an already-removed
+      the retired `make local-gateway-stop`. Each cleanup tolerates an already-removed
       resource locally without masking other failures. Inputs: GATEWAY_NAME,
       PG_NAME, PG_NET (defaults local-litellm-gateway[-pg[-net]]).
     env:
@@ -259,7 +259,7 @@ tasks:
   jaeger:up:
     desc: Start the local Jaeger v2 backend (or reuse a running one)
     summary: |
-      `sh scripts/run_local_jaeger.sh`, mirroring `make local-jaeger`.
+      `sh scripts/run_local_jaeger.sh`, replacing the retired `make local-jaeger`.
       Starts only when nothing answers on :16686; an already-running Jaeger
       is reused, never stopped by us.
     cmds:
@@ -268,7 +268,7 @@ tasks:
   jaeger:down:
     desc: Stop the local Jaeger container (ignores an absent one)
     summary: |
-      `docker stop` over the Jaeger name, mirroring `make local-jaeger-stop`.
+      `docker stop` over the Jaeger name, replacing the retired `make local-jaeger-stop`.
       Input: JAEGER_NAME (default local-jaeger).
     env:
       TASK_JAEGER_NAME: '{{.JAEGER_NAME}}'
@@ -280,7 +280,7 @@ tasks:
     summary: |
       `sh scripts/run_local_stack.sh` with caller-set CORPUS_DIR,
       GATEWAY_PORT, LOCAL_AGENT_PORT, JAEGER_PORT and LOCAL_STACK_DRYRUN
-      forwarded, mirroring `make local-stack`. The supervisor owns
+      forwarded, replacing the retired `make local-stack`. The supervisor owns
       gateway/Jaeger/agent lifetime (traps, readiness probes, trace check);
       Qdrant falls back to scripts/sim_qdrant.sh. LOCAL_STACK_DRYRUN=1
       prints the plan without Docker/network. Needs docker, the three
@@ -304,7 +304,7 @@ tasks:
     desc: Run the agent API locally under uvicorn (component runner)
     summary: |
       `LLM_STREAM=true .venv/bin/python -m uvicorn ... --port <port>` with
-      UI_ENABLED forwarded only when set, mirroring `make run-agent`.
+      UI_ENABLED forwarded only when set, replacing the retired `make run-agent`.
       Inputs: PORT (default 8080), UI_ENABLED (unset keeps the app
       fail-closed; `true` opens /ui). Honors the supervisor-owned gateway
       handoff in the caller environment.

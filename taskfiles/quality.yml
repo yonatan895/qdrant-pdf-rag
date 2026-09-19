@@ -12,7 +12,7 @@ tasks:
     desc: Run ruff lint over src and tests
     summary: |
       Runs `.venv/bin/python -m ruff check src tests` (same tool and scope as
-      `make lint`). Fails closed when `.venv/bin/python` is absent — run
+      the retired `make lint`). Fails closed when `.venv/bin/python` is absent — run
       `task dev:setup` explicitly. Never creates or mutates the environment.
       No network, Docker, model or credentials required.
     cmds:
@@ -23,7 +23,7 @@ tasks:
     desc: Run mypy typecheck over src
     summary: |
       Runs `.venv/bin/python -m mypy src` (same tool and scope as
-      `make typecheck`). Fails closed when `.venv/bin/python` is absent — run
+      the retired `make typecheck`). Fails closed when `.venv/bin/python` is absent — run
       `task dev:setup` explicitly. Never creates or mutates the environment.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
@@ -33,7 +33,7 @@ tasks:
     desc: Run the unit test suite (integration deselected by pyproject)
     summary: |
       Default `task qa:unit` runs `.venv/bin/python -m pytest tests -v`,
-      matching `make test` (pyproject addopts deselect integration).
+      matching the retired `make test` (pyproject addopts deselect integration).
       Focused selection replaces the default argv once:
       `task qa:unit -- tests/test_agent_context.py -q` runs exactly that
       selection (shell word-splitting applies to CLI_ARGS; trusted developer
@@ -46,7 +46,7 @@ tasks:
   check:
     desc: Run lint, then typecheck, then unit tests, in that order
     summary: |
-      Sequential equivalent of `make check` (same three tools, same scope).
+      Sequential replacing the retired `make check` (same three tools, same scope).
       Steps run one after another through direct task calls — never parallel
       `deps`, so one shared `.venv` is never installed into concurrently and
       a failed step stops the sequence with its own exit status.
@@ -75,7 +75,7 @@ tasks:
     desc: Run the integration tier against disposable Qdrant (0 skips)
     summary: |
       `.venv/bin/python -m pytest -m integration -v -rs`, mirroring
-      `make sim`. A skip fails the run (a skip on missing local weights
+      the retired `make sim`. A skip fails the run (a skip on missing local weights
       means symlink or rebuild them, never ignore it). Needs docker (or
       QDRANT_SIM_URL) and the BM25 weights; no GPU or live gateway.
     cmds:
@@ -86,7 +86,7 @@ tasks:
     desc: Run the load tier (same composition CI runs, absolute contracts)
     summary: |
       `.venv/bin/python -m pytest -m integration tests/test_load_tier.py
-      -v`, mirroring `make loadtest-mock`. Fail-closed: no skips;
+      -v`, replacing the retired `make loadtest-mock`. Fail-closed: no skips;
       docker/startup/zero-request failures raise. Knobs live in the
       caller environment (LOAD_SEARCH_CONCURRENCY and friends, read by the
       test itself).
@@ -99,7 +99,7 @@ tasks:
     summary: |
       `PYTHONPATH=. .venv/bin/python scripts/test_local_e2e_vllm.py` with
       only the caller-set model/URL/dim/mode flags, mirroring
-      `make test-vllm-e2e`. Needs the local backends serving; explicitly
+      the retired `make test-vllm-e2e`. Needs the local backends serving; explicitly
       selected, never part of ordinary verification.
     env:
       PYTHONPATH: '.'

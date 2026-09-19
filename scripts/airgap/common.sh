@@ -95,7 +95,7 @@ enforce_product_rules() {
 # the new Settings knobs (PR1) would happily send a leaked value as a
 # Bearer header. Scans the same file the sourcing above selected; commented
 # lines and empty assignments are not keys. Plaintext keys stay usable for
-# local `make ask` via process env — they just can never enter manifests.
+# local `sh scripts/tools/run-task.sh local:ask` via process env — they just can never enter manifests.
 refuse_plaintext_gateway_keys() {
     _env_file=""
     if [ -n "${AIRGAP_ENV:-}" ]; then

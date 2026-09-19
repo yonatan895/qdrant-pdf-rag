@@ -1,6 +1,6 @@
 {
  "_meta": {
-  "note": "Harness promotion baseline; re-record via `make harness-baseline` (dedicated PR, AGENTS.md).",
+  "note": "Harness promotion baseline; re-record via `sh scripts/tools/run-task.sh eval:harness:baseline` (dedicated PR, AGENTS.md).",
   "embed_mode": "hash",
   "snapshot": {
    "points_count": 208,

@@ -21,7 +21,7 @@ tasks:
   pack:
     desc: Build the signed sneakernet bundle (connected host only)
     summary: |
-      `sh scripts/airgap/pack.sh`, mirroring `make airgap-pack`. Needs
+      `sh scripts/airgap/pack.sh`, replacing the retired `make airgap-pack`. Needs
       IMAGE_SHA (must equal git HEAD) and the signing key in the caller
       environment. Connected image factory only; the gap never builds.
     env:
@@ -94,7 +94,7 @@ tasks:
   load:
     desc: Load bundle images into the cluster registry
     summary: |
-      `sh scripts/airgap/load.sh`, mirroring `make airgap-load`. Follows
+      `sh scripts/airgap/load.sh`, replacing the retired `make airgap-load`. Follows
       ARTDIR discovery for the unpacked bundle.
     env:
       TASK_OP_KEYS: "AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_ENV AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL EMBED_MODEL_REVISION GATEWAY_API_KEY_SECRET GATEWAY_CA_CONFIGMAP GHCR_OWNER IMAGE_SHA INGEST_ALIAS_PUBLISH INGEST_EXTRA_PATCH INGEST_REINGEST INGEST_RETIRE_DOCS INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY JAEGER_QUERY_URL KC LLM_BASE_URL LLM_MODEL_REASONING METRICS_ENABLED NAMESPACE OPENSHIFT_NAMESPACE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT OTEL_SERVICE_NAME PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_STORAGE_SIZE QDRANT_TAG QUERY REGISTRY_INTERNAL RERANK_BASE_URL RERANK_ENABLED RERANK_ENDPOINT_ORDER RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB AIRGAP_TASK_ARCHIVE STORAGE_CLASS VLLM_BASE_URL"
@@ -166,7 +166,7 @@ tasks:
   deploy:
     desc: Deploy the application over the loaded images
     summary: |
-      `sh scripts/airgap/deploy.sh`, mirroring `make airgap-deploy`.
+      `sh scripts/airgap/deploy.sh`, replacing the retired `make airgap-deploy`.
       Renders with explicit caller values winning over the env file; see the
       module header for the precedence rule.
     env:
@@ -239,7 +239,7 @@ tasks:
   ingest:
     desc: Ingest the corpus through the deployed pipeline
     summary: |
-      `sh scripts/airgap/ingest.sh`, mirroring `make airgap-ingest`.
+      `sh scripts/airgap/ingest.sh`, replacing the retired `make airgap-ingest`.
       Needs CORPUS_PVC pointing at the prepared claim.
     env:
       TASK_OP_KEYS: "AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_ENV AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL EMBED_MODEL_REVISION GATEWAY_API_KEY_SECRET GATEWAY_CA_CONFIGMAP GHCR_OWNER IMAGE_SHA INGEST_ALIAS_PUBLISH INGEST_EXTRA_PATCH INGEST_REINGEST INGEST_RETIRE_DOCS INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY JAEGER_QUERY_URL KC LLM_BASE_URL LLM_MODEL_REASONING METRICS_ENABLED NAMESPACE OPENSHIFT_NAMESPACE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT OTEL_SERVICE_NAME PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_STORAGE_SIZE QDRANT_TAG QUERY REGISTRY_INTERNAL RERANK_BASE_URL RERANK_ENABLED RERANK_ENDPOINT_ORDER RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB AIRGAP_TASK_ARCHIVE STORAGE_CLASS VLLM_BASE_URL"
@@ -311,7 +311,7 @@ tasks:
   smoke:
     desc: Smoke the deployed search path with a literal query
     summary: |
-      `sh scripts/airgap/smoke.sh`, mirroring `make airgap-smoke`.
+      `sh scripts/airgap/smoke.sh`, replacing the retired `make airgap-smoke`.
       QUERY arrives as the script's quoted value; run ingest first.
     env:
       TASK_OP_KEYS: "AGENT_ROUTE AIRGAP_APP_REGISTRY AIRGAP_BUNDLE_DIR AIRGAP_DRYRUN AIRGAP_ENV AIRGAP_WORKSPACE CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CORPUS_PVC DENSE_DIM EMBED_BASE_URL EMBED_MODE EMBED_MODEL EMBED_MODEL_REVISION GATEWAY_API_KEY_SECRET GATEWAY_CA_CONFIGMAP GHCR_OWNER IMAGE_SHA INGEST_ALIAS_PUBLISH INGEST_EXTRA_PATCH INGEST_REINGEST INGEST_RETIRE_DOCS INGEST_TIMEOUT INGEST_WORKERS INGEST_WORK_SIZE INSECURE_REGISTRY INTERNAL_REGISTRY JAEGER_QUERY_URL KC LLM_BASE_URL LLM_MODEL_REASONING METRICS_ENABLED NAMESPACE OPENSHIFT_NAMESPACE OTEL_DEPLOYMENT_ENVIRONMENT OTEL_EXPORTER_OTLP_ENDPOINT OTEL_SERVICE_NAME PULL_SECRET QDRANT_EXTRA_VALUES QDRANT_IMAGE QDRANT_RELEASE QDRANT_STORAGE_SIZE QDRANT_TAG QUERY REGISTRY_INTERNAL RERANK_BASE_URL RERANK_ENABLED RERANK_ENDPOINT_ORDER RERANK_MODEL SKOPEO_ARGS SNAPSHOT_STORAGE_CLASS SNEAKERNET_KEY_TRUSTED SNEAKERNET_SIGNING_KEY SNEAKERNET_TRUSTED_PUB AIRGAP_TASK_ARCHIVE STORAGE_CLASS VLLM_BASE_URL"
@@ -383,7 +383,7 @@ tasks:
   validate:
     desc: Validate bundle, workspace and configuration without mutating
     summary: |
-      `sh scripts/airgap/validate.sh`, mirroring `make airgap-validate`.
+      `sh scripts/airgap/validate.sh`, replacing the retired `make airgap-validate`.
       With AIRGAP_DRYRUN=1 it renders against stand-ins; without it, it
       checks the real workspace. Prints the next step on success.
     env:
@@ -456,7 +456,7 @@ tasks:
   pipeline:
     desc: 'Run the full air-gap pipeline in stage order (owner: pipeline.sh)'
     summary: |
-      `sh scripts/airgap/pipeline.sh`, mirroring `make airgap-pipeline`.
+      `sh scripts/airgap/pipeline.sh`, replacing the retired `make airgap-pipeline`.
       The script owns stage order and skipping; this task only forwards the
       operator environment. Not reconstructed as a Task dependency graph.
     env:
@@ -530,7 +530,7 @@ tasks:
     desc: Execute the real hermetic pipeline validation (not a preview)
     summary: |
       The fixed dry-run stand-ins plus `sh scripts/airgap/pipeline.sh
-      --dry-run`, mirroring `make airgap-dryrun`. This EXECUTES the
+      --dry-run`, replacing the retired `make airgap-dryrun`. This EXECUTES the
       validation/rendering path; `task --dry` (command preview) is not
       acceptance evidence. Stand-ins win over caller and file values, same
       as the Make recipe environment.

@@ -1,10 +1,12 @@
-"""Task runner-boundary contracts for issue #402 (increments A: quality/context,
-B: artifacts; eval/local/air-gap follow in later slices).
+"""Task runner-boundary contracts for issue #402 (D-gate: final Task-only interface).
 
 Exercises the ACTUAL pinned Task binary against the migrated Taskfiles with
 inert process-boundary recorders in temporary workspaces. Expectations below
 are hardcoded (independent of the YAML under test); the YAML is the
 implementation, the recorder log is the evidence.
+
+Make/Task parity and historical-pre-402 suites were retired with the Makefile
+shim at the D-gate; the old→new map lives in docs/task-runner.md#inventory.
 
 Needs a provisioned Task binary (scripts/tools/install-task.sh): TASK_BIN,
 then .tools/bin/task, then PATH `task`, with `task --version` matching
@@ -237,82 +239,6 @@ class TaskContractsTests(unittest.TestCase):
         lines = [f"{k}={v}" for k, v in (file_env or {}).items()]
         (self.root / "airgap.env").write_text("\n".join(lines) + "\n" if lines else "",
                                               encoding="utf-8")
-
-    def make_parity_ws(self) -> None:
-        """Workspace where the SHIMMED Makefile and the Taskfiles coexist,
-        backed by the same inert recorders: `make <old>` and `task <new>`
-        must produce identical tool-boundary traces."""
-        shutil.copy(REPO / "Makefile", self.root / "Makefile")
-        self.copy_repo_script("sim_qdrant.sh")
-        self.copy_repo_script("qdrant_pin.py")
-        (self.root / "images.txt").write_text(
-            "example.com/qdrant/qdrant:v9.9.9-unprivileged sha256:fixture\n", encoding="utf-8")
-        charts = self.root / "charts"
-        charts.mkdir(parents=True, exist_ok=True)
-        (charts / "qdrant-1.19.0.tgz").write_text("fixture", encoding="utf-8")
-        self.make_venv_fake()
-        self.make_tool_recorder("helm")
-        self.make_tool_recorder("docker")
-        self.make_tool_recorder("pyfake")
-        self.make_airgap_fixtures({})
-        self.make_airgap_stage_double("deploy.sh")
-
-    def run_make(self, *args: str, makefile: str | None = None, extra_env: dict | None = None) -> subprocess.CompletedProcess:
-        if shutil.which("make") is None:
-            self.skipTest("make unavailable")
-        env = dict(os.environ)
-        env.pop("TASK_BIN", None)
-        env["PATH"] = os.pathsep.join([
-            str(self.root / "bin"),
-            os.path.dirname(self.task_bin),
-            env.get("PATH", ""),
-        ])
-        if extra_env:
-            env.update(extra_env)
-        cmd = ["make", "-C", str(self.root)]
-        if makefile:
-            cmd.extend(["-f", makefile])
-        cmd.extend(args)
-        return subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=120, check=False, text=True, env=env, cwd=str(self.root))
-
-    def assertParity(self, make_args: list, task_args: list, extra_env: dict | None = None,
-                     check_env: tuple = (), expect_calls: bool = True,
-                     makefile: str | None = None) -> list[dict]:
-        """Run the old spelling through Make (or shim) and the new spelling
-        directly. Tool argv, cwd and order must match exactly; child
-        environment is compared only for the listed keys, because Make
-        exposes caller CLI assignments in recipe environments while Task
-        deliberately does not — scripts consume argv and documented
-        environment names (audited), never ambient CLI variables."""
-        base_env = dict(self.tool_env())
-        if extra_env:
-            base_env.update(extra_env)
-        if (self.log).exists():
-            self.log.unlink()
-        make_proc = self.run_make(*make_args, makefile=makefile, extra_env=base_env)
-        self.assertEqual(make_proc.returncode, 0, make_proc.stdout)
-        make_calls = self.calls()
-        if expect_calls:
-            self.assertTrue(make_calls, f"make run produced no observed calls: {make_proc.stdout}")
-        if (self.log).exists():
-            self.log.unlink()
-        task_proc = self.run_task(*task_args, extra_env=base_env)
-        self.assertEqual(task_proc.returncode, 0, task_proc.stdout)
-        task_calls = self.calls()
-        if not expect_calls:
-            self.assertEqual(task_calls, [])
-            return task_calls
-        self.assertEqual(len(task_calls), len(make_calls))
-        for task_call, make_call in zip(task_calls, make_calls):
-            self.assertEqual(task_call["tag"], make_call["tag"])
-            self.assertEqual(task_call["argv"], make_call["argv"])
-            self.assertEqual(task_call["cwd"], make_call["cwd"])
-            for key in check_env:
-                self.assertEqual(task_call["env"].get(key), make_call["env"].get(key), key)
-        return task_calls
 
     def make_airgap_stage_double(self, name: str = "deploy.sh") -> None:
         """Deploy/pipeline double: real precedence, inert stage, logs resolved keys."""
@@ -1472,173 +1398,9 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(resolved["STORAGE_CLASS"], "gp3-csi")
         self.assertIsNone(resolved["QUERY"], "unrelated keys stay absent, never defaulted")
 
-    def test_make_task_parity_quality_and_context(self):
-        self.make_parity_ws()
-        self.assertParity(["lint"], ["qa:lint"])
-        self.assertParity(["check-context", "PY=pyfake"], ["qa:context", "PY=pyfake"])
-        self.assertParity(["agent-doctor", "PROFILE=sim", "PY=pyfake"],
-                          ["dev:doctor", "PROFILE=sim", "PY=pyfake"])
-        self.assertParity(["check"], ["qa:check"])
-        self.assertParity(["loadtest-mock"], ["qa:load"])
-
-    def test_make_task_parity_eval_modes(self):
-        self.make_parity_ws()
-        self.assertParity(["eval", "EMBED_MODE=vllm"], ["eval:retrieval", "EMBED_MODE=vllm"],
-                          check_env=("EMBED_MODE", "VENUE"))
-        self.assertParity(["harness-gate"], ["eval:harness:gate"],
-                          check_env=("EMBED_MODE", "VENUE"))
-        self.assertParity(["eval-answers", "N=5"], ["eval:answers", "N=5"],
-                          check_env=("EMBED_MODE", "VENUE"))
-
-    def test_make_task_parity_local_inputs(self):
-        self.make_parity_ws()
-        # PYTHONPATH only: Make exposes caller CLI assignments ambiently in
-        # recipe environments while Task does not. The scripts consume argv
-        # and documented environment names (audited in the B3 work), so the
-        # ambient difference is behavior-neutral; EMBED_MODE presence
-        # (absent under Make, hash-default under Task) resolves identically
-        # through flag-first logic in every input class.
-        self.assertParity(["query-demo", "QUERY=hi", "LIMIT=2"], ["local:query", "QUERY=hi", "LIMIT=2"],
-                          check_env=("PYTHONPATH",))
-        self.assertParity(["run-agent", "UI_ENABLED=true", "PORT=9090"],
-                          ["local:agent", "UI_ENABLED=true", "PORT=9090"],
-                          check_env=("LLM_STREAM", "UI_ENABLED"))
-        self.assertParity(["sim-qdrant", "SIM_CONTAINER=c"], ["local:qdrant:up", "SIM_CONTAINER=c"])
-
-    def test_make_task_parity_artifacts_and_airgap(self):
-        self.make_parity_ws()
-        self.assertParity(["chart"], ["artifacts:chart-check"], expect_calls=False)
-        self.assertParity(["helm-template"], ["artifacts:helm-render"])
-        self.assertParity(["airgap-deploy", "INTERNAL_REGISTRY=x"],
-                          ["airgap:deploy", "INTERNAL_REGISTRY=x"])
-
-    def test_make_task_parity_env_form_overrides(self):
-        self.make_parity_ws()
-        base_env = dict(self.tool_env(), EMBED_MODE="vllm")
-        self.assertParity(["eval"], ["eval:retrieval"], extra_env=base_env)
-
-    def test_make_unknown_target_fails_clearly(self):
-        self.make_parity_ws()
-        proc = self.run_make("does-not-exist", extra_env=self.tool_env())
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("No rule to make target", proc.stdout)
-
-    def test_make_help_points_at_task_discovery(self):
-        self.make_parity_ws()
-        proc = self.run_make("help", extra_env=self.tool_env())
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertIn("task --list", proc.stdout)
-        self.assertIn("qa:context", proc.stdout)
-
-    def make_historical_parity_ws(self) -> None:
-        """Workspace containing the pre-migration Makefile (commit 2c850dd4)
-        alongside Taskfile.yml, backed by identical inert doubles."""
-        fixture_path = REPO / "tests/fixtures/Makefile.pre-402"
-        self.assertTrue(fixture_path.is_file(), "pre-migration Makefile fixture missing")
-        shutil.copy(fixture_path, self.root / "Makefile.historical")
-        self.copy_repo_script("sim_qdrant.sh")
-        self.copy_repo_script("qdrant_pin.py")
-        self.make_script_recorder("run_local_vllm.sh")
-        (self.root / "images.txt").write_text(
-            "example.com/qdrant/qdrant:v9.9.9-unprivileged sha256:fixture\n", encoding="utf-8")
-        charts = self.root / "charts"
-        charts.mkdir(parents=True, exist_ok=True)
-        (charts / "qdrant-1.19.0.tgz").write_text("fixture", encoding="utf-8")
-        self.make_venv_fake()
-        self.make_eval_fixtures()
-        self.make_tool_recorder("helm")
-        self.make_tool_recorder("docker")
-        self.make_tool_recorder("pyfake")
-        self.make_airgap_fixtures({})
-        self.make_airgap_stage_double("deploy.sh")
-        self.make_airgap_stage_double("pipeline.sh")
-
-    def test_historical_make_parity_quality_and_context(self):
-        self.make_historical_parity_ws()
-        self.assertParity(["lint"], ["qa:lint"], makefile="Makefile.historical")
-        self.assertParity(["check-context", "PY=pyfake"], ["qa:context", "PY=pyfake"],
-                          makefile="Makefile.historical")
-        self.assertParity(["agent-doctor", "PROFILE=sim", "PY=pyfake"],
-                          ["dev:doctor", "PROFILE=sim", "PY=pyfake"],
-                          makefile="Makefile.historical")
-        self.assertParity(["check"], ["qa:check"], makefile="Makefile.historical")
-        self.assertParity(["loadtest-mock"], ["qa:load"], makefile="Makefile.historical")
-
-    def test_historical_make_parity_eval_modes_and_precedence(self):
-        self.make_historical_parity_ws()
-        # Default eval mode / venue
-        self.assertParity(["eval"], ["eval:retrieval"], makefile="Makefile.historical",
-                          check_env=("EMBED_MODE", "VENUE"))
-        # Mode override CLI
-        self.assertParity(["eval", "EMBED_MODE=vllm"], ["eval:retrieval", "EMBED_MODE=vllm"],
-                          makefile="Makefile.historical",
-                          check_env=("EMBED_MODE", "VENUE"))
-        # Mode override ambient
-        self.assertParity(["eval"], ["eval:retrieval"], makefile="Makefile.historical",
-                          extra_env=dict(self.tool_env(), EMBED_MODE="vllm"),
-                          check_env=("EMBED_MODE", "VENUE"))
-        # Conflicting ambient and CLI (CLI beats ambient)
-        self.assertParity(["eval", "EMBED_MODE=hash"], ["eval:retrieval", "EMBED_MODE=hash"],
-                          makefile="Makefile.historical",
-                          extra_env=dict(self.tool_env(), EMBED_MODE="vllm"),
-                          check_env=("EMBED_MODE", "VENUE"))
-        # Holdout with ambient dev and default CLI forces rc in both
-        self.assertParity(["eval-holdout"], ["eval:holdout"],
-                          makefile="Makefile.historical",
-                          extra_env=dict(self.tool_env(), VENUE="dev"),
-                          check_env=("EMBED_MODE", "VENUE"))
-        # Answers count knob
-        self.assertParity(["eval-answers", "N=5"], ["eval:answers", "N=5"],
-                          makefile="Makefile.historical",
-                          check_env=("EMBED_MODE", "VENUE"))
-
-    def test_historical_make_parity_local_inputs_and_controls(self):
-        self.make_historical_parity_ws()
-        self.assertParity(["query-demo", "QUERY=hi", "LIMIT=2"],
-                          ["local:query", "QUERY=hi", "LIMIT=2"],
-                          makefile="Makefile.historical")
-        self.assertParity(["sim-qdrant", "SIM_CONTAINER=mycont", "SIM_PORT=6334"],
-                          ["local:qdrant:up", "SIM_CONTAINER=mycont", "SIM_PORT=6334"],
-                          makefile="Makefile.historical")
-        self.assertParity(["sim-clean", "SIM_CONTAINER=mycont"],
-                          ["local:qdrant:down", "SIM_CONTAINER=mycont"],
-                          makefile="Makefile.historical")
-        self.assertParity(["local-vllm", "PORT=8001", "MODEL=test-model"],
-                          ["local:llm", "PORT=8001", "MODEL=test-model"],
-                          makefile="Makefile.historical",
-                          check_env=("PORT", "MODEL"))
-
-    def test_historical_make_parity_airgap_and_artifacts(self):
-        self.make_historical_parity_ws()
-        self.assertParity(["chart"], ["artifacts:chart-check"],
-                          makefile="Makefile.historical", expect_calls=False)
-        self.assertParity(["helm-template"], ["artifacts:helm-render"],
-                          makefile="Makefile.historical")
-        # Direct deploy call with CLI override
-        self.assertParity(["airgap-deploy", "INTERNAL_REGISTRY=cli-reg"],
-                          ["airgap:deploy", "INTERNAL_REGISTRY=cli-reg"],
-                          makefile="Makefile.historical")
-        # airgap-dryrun runs pipeline double with fixed stand-ins
-        self.assertParity(["airgap-dryrun"], ["airgap:dryrun"],
-                          makefile="Makefile.historical")
-
-    def test_historical_make_parity_multi_goal_and_failure_propagation(self):
-        self.make_historical_parity_ws()
-        # Multi-goal execution runs sequentially without leaking target vars
-        self.assertParity(["lint", "check-context", "PY=pyfake"],
-                          ["qa:lint", "qa:context", "PY=pyfake"],
-                          makefile="Makefile.historical")
-        # Failure propagation: error exit in child halts execution and returns non-zero in both
-        self.make_venv_fake()
-        self.recorder_env["RECORDER_EXIT"] = "42"
-        proc_make = self.run_make("lint", makefile="Makefile.historical", extra_env=self.tool_env())
-        proc_task = self.run_task("qa:lint", extra_env=self.tool_env())
-        self.assertNotEqual(proc_make.returncode, 0)
-        self.assertNotEqual(proc_task.returncode, 0)
-
-    def test_historical_make_approved_intentional_differences(self):
-        # 1. Clean-environment prerequisite: Make auto-installs .venv via order-only prereq;
-        #    Task verification diagnoses missing .venv and fails closed without auto-creating it.
+    def test_task_verification_fails_closed_without_autosetup(self):
+        # Explicit setup stays separate from verification: Task diagnosis
+        # fails closed on a missing .venv without auto-creating it.
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
         shutil.rmtree(self.root / ".venv", ignore_errors=True)
         proc_task = self.run_task("qa:lint", extra_env=self.tool_env())

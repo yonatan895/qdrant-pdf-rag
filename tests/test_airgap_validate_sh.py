@@ -320,13 +320,22 @@ def test_empty_env_value_leaves_file_value(tree):
     assert r.returncode == 0, r.stderr
 
 
-def test_makefile_does_not_include_airgap_env():
-    # Locks the other half of the precedence fix: a make-level `-include`
-    # would silently override `VAR=x make ...` with stale file values in
-    # recipe environments and $(...) interpolation alike. Scripts source the
-    # file themselves (see common.sh OPERATOR_ENV_KEYS).
-    text = (REPO / "Makefile").read_text()
-    assert "include airgap.env" not in text
+def test_taskfiles_do_not_load_airgap_env():
+    # Locks the precedence fix at its new locus (issue #402 D): no Taskfile
+    # may declare a `dotenv:` that loads the executable airgap.env file —
+    # a task-level load would silently override explicit caller values with
+    # stale file values. Scripts source the file themselves (see common.sh
+    # OPERATOR_ENV_KEYS); Task passes per-task bridges only.
+    taskfiles = [REPO / "Taskfile.yml", *sorted((REPO / "taskfiles").glob("*.yml"))]
+    assert len(taskfiles) >= 7, [p.name for p in taskfiles]
+    offenders = [p for p in taskfiles
+                 if any("dotenv" in ln
+                        for ln in p.read_text(encoding="utf-8").splitlines()
+                        if not ln.lstrip().startswith("#"))]
+    assert offenders == [], (
+        "no Taskfile may load operator configuration via dotenv: "
+        f"{[p.name for p in offenders]}"
+    )
 
 
 # ------------------------------------------------------- gateway keys (LiteLLM)
