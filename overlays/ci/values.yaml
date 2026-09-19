@@ -2,6 +2,9 @@
 # 1 replica, tiny PVC, no snapshots, no P2P cluster, no Route. Synthetic demo
 # data only. Prod sizing (3 replicas / 500Gi) lives in overlays/openshift/.
 # Runs on a CONNECTED cluster only: pulling docker.io here is acceptable.
+# Explicitly non-HA (issue #360): one pod holds every shard, so no pod/node
+# loss is survivable and no collection policy is asserted here. Never treat
+# this lane as distributed acceptance.
 
 replicaCount: 1
 

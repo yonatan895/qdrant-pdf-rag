@@ -69,6 +69,9 @@ class QdrantPoints(Protocol):
         vectors_config: dict[str, models.VectorParams],
         sparse_vectors_config: dict[str, models.SparseVectorParams],
         on_disk_payload: bool,
+        shard_number: int | None = None,
+        replication_factor: int | None = None,
+        write_consistency_factor: int | None = None,
     ) -> bool: ...
 
     def delete_collection(self, collection_name: str) -> bool: ...
@@ -180,6 +183,9 @@ class AsyncQdrantPoints(Protocol):
         vectors_config: dict[str, models.VectorParams],
         sparse_vectors_config: dict[str, models.SparseVectorParams],
         on_disk_payload: bool,
+        shard_number: int | None = None,
+        replication_factor: int | None = None,
+        write_consistency_factor: int | None = None,
     ) -> bool: ...
 
     async def delete_collection(self, collection_name: str) -> bool: ...

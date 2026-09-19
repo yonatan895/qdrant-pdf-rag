@@ -32,6 +32,36 @@ def test_env_loads(monkeypatch):
     assert s.qdrant_snapshots_dir == "/qdrant/snapshots"
 
 
+def test_collection_policy_env_override(monkeypatch):
+    """Issue #360: explicitly selected distribution policy loads from the
+    operator environment; unset keeps the server-default (None) behavior."""
+    s = Settings(_env_file=None)
+    assert s.collection_distribution_kwargs() == {}
+    monkeypatch.setenv("QDRANT_SHARD_NUMBER", "6")
+    monkeypatch.setenv("QDRANT_REPLICATION_FACTOR", "2")
+    monkeypatch.setenv("QDRANT_WRITE_CONSISTENCY_FACTOR", "1")
+    s = Settings(_env_file=None)
+    assert s.qdrant_shard_number == 6
+    assert s.qdrant_replication_factor == 2
+    assert s.qdrant_write_consistency_factor == 1
+    assert s.collection_distribution_kwargs() == {
+        "shard_number": 6,
+        "replication_factor": 2,
+        "write_consistency_factor": 1,
+    }
+
+
+def test_collection_policy_rejects_non_positive(monkeypatch):
+    """Production numbers are explicit owner decisions, but zero/negative
+    values are never a policy: fail closed at settings load."""
+    monkeypatch.setenv("QDRANT_REPLICATION_FACTOR", "0")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+    monkeypatch.delenv("QDRANT_REPLICATION_FACTOR")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, qdrant_shard_number=0)
+
+
 def test_outbound_timeout_defaults_bounded():
     """Every outbound call has a bounded timeout (issue #20 PR C)."""
     s = Settings(_env_file=None)
@@ -278,6 +308,9 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "qdrant_snapshots_dir": "/qdrant/snapshots",
     "qdrant_timeout_s": 30,
     "qdrant_ingest_timeout_s": 120,
+    "qdrant_shard_number": None,
+    "qdrant_replication_factor": None,
+    "qdrant_write_consistency_factor": None,
     "embed_mode": "vllm",
     "embed_base_url": None,
     "embed_model": None,

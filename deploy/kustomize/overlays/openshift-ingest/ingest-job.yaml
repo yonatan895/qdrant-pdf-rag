@@ -40,6 +40,16 @@ spec:
                 secretKeyRef:
                   name: __QDRANT_RELEASE__-apikey
                   key: api-key
+            # Collection distribution policy (issue #360): optional positive
+            # integers rendered by scripts/airgap/ingest.sh; unset entries
+            # are stripped so the Qdrant server default stands (never a
+            # blank value overriding the in-code default).
+            - name: QDRANT_SHARD_NUMBER
+              value: __QDRANT_SHARD_NUMBER__
+            - name: QDRANT_REPLICATION_FACTOR
+              value: __QDRANT_REPLICATION_FACTOR__
+            - name: QDRANT_WRITE_CONSISTENCY_FACTOR
+              value: __QDRANT_WRITE_CONSISTENCY_FACTOR__
             # Issue #391 current packet: alias publication is an explicit
             # deployment-mode choice, never a default flip. Required for
             # explicit removals (INGEST_RETIRE_DOCS) and for repair

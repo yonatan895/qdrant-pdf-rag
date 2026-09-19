@@ -38,6 +38,7 @@ from mainframe_rag.config import Settings
 from mainframe_rag.ingest.chunk import Chunk
 from mainframe_rag.ingest.identity import AmbiguousRevisionError
 from mainframe_rag.ingest.qdrant_io import (
+    check_collection_distribution,
     collection_vector_configs,
     scroll_all_points,
     stored_doc_revisions,
@@ -181,9 +182,15 @@ def completion_point_id(
 
 
 def ensure_completion_collection(client: QdrantPoints, settings: Settings) -> str:
-    """Create the completions collection + indexes if missing (idempotent)."""
+    """Create the completions collection + indexes if missing (idempotent).
+
+    Shares the corpus distribution policy (issue #360): control state must
+    survive the same node loss as the data it gates, so the selected policy
+    applies here verbatim and the existing-collection examination is the
+    same read-only check — never recreation."""
     name = completion_collection_name(settings)
     if client.collection_exists(name):
+        check_collection_distribution(client, name, settings)
         for field in _COMPLETION_KEYWORD_INDEXES:
             client.create_payload_index(
                 name, field_name=field, field_schema=models.PayloadSchemaType.KEYWORD
@@ -196,6 +203,7 @@ def ensure_completion_collection(client: QdrantPoints, settings: Settings) -> st
         vectors_config=vectors_config,
         sparse_vectors_config=sparse_vectors_config,
         on_disk_payload=True,
+        **settings.collection_distribution_kwargs(),
     )
     for field in _COMPLETION_KEYWORD_INDEXES:
         client.create_payload_index(

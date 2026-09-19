@@ -22,6 +22,7 @@ from mainframe_rag.ingest.completion import (
     acquire_run_lock,
     completion_collection_name,
     doc_generation_id,
+    ensure_completion_collection,
     is_doc_complete,
     legacy_markers,
     read_completion,
@@ -30,7 +31,7 @@ from mainframe_rag.ingest.completion import (
 from mainframe_rag.ingest.ibm_pdf import ParsedDoc
 from mainframe_rag.ingest.identity import source_rev_key
 from mainframe_rag.ingest.inventory import InventoryRecord, append_record, should_skip
-from mainframe_rag.ingest.qdrant_io import upsert_chunks
+from mainframe_rag.ingest.qdrant_io import CollectionPolicyMismatchError, upsert_chunks
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 from tests.test_run_ingest import _filter_doc_id
 
@@ -377,6 +378,70 @@ def test_completion_tied_to_target_generation(tmp_path, monkeypatch):
     assert is_doc_complete(fake, settings_a, "DOC1", sha256="b" * 64,
                            rules_v=extraction_rules_version(), source_labels="||",
                            source_rev=_rev("b" * 64)) is False
+
+
+class _RecordingCollectionClient:
+    """Minimal create/exists recorder for the completion constructor."""
+
+    def __init__(self, exists=False, live_params=None):
+        self.exists_flag = exists
+        self.live_params = live_params
+        self.created = None
+
+    def collection_exists(self, _name):
+        return self.exists_flag
+
+    def get_collection(self, _name):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            config=SimpleNamespace(
+                params=SimpleNamespace(**(self.live_params or {}))
+            )
+        )
+
+    def create_collection(self, name, **kwargs):
+        self.created = (name, kwargs)
+
+    def create_payload_index(self, *a, **k):
+        return None
+
+
+def test_completion_collection_shares_corpus_policy_verbatim():
+    """Control state must survive the same node loss as the data it gates
+    (issue #360): the selected policy applies here exactly as in the
+    corpus constructor."""
+    client = _RecordingCollectionClient(exists=False)
+    settings = _settings(
+        qdrant_shard_number=6,
+        qdrant_replication_factor=2,
+        qdrant_write_consistency_factor=1,
+    )
+    name = ensure_completion_collection(client, settings)
+    assert name == completion_collection_name(settings)
+    assert client.created[1]["shard_number"] == 6
+    assert client.created[1]["replication_factor"] == 2
+    assert client.created[1]["write_consistency_factor"] == 1
+
+
+def test_completion_collection_unset_policy_creates_without_distribution_keys():
+    client = _RecordingCollectionClient(exists=False)
+    ensure_completion_collection(client, _settings())
+    for key in ("shard_number", "replication_factor", "write_consistency_factor"):
+        assert key not in client.created[1]
+
+
+def test_completion_collection_existing_mismatch_fails_closed_without_mutation():
+    live = {"shard_number": 1, "replication_factor": 1, "write_consistency_factor": 1}
+    client = _RecordingCollectionClient(exists=True, live_params=live)
+    settings = _settings(
+        qdrant_shard_number=6,
+        qdrant_replication_factor=2,
+        qdrant_write_consistency_factor=1,
+    )
+    with pytest.raises(CollectionPolicyMismatchError, match="snapshot-gated"):
+        ensure_completion_collection(client, settings)
+    assert client.created is None
 
 
 def test_refresh_failure_leaves_no_stale_completion(monkeypatch):

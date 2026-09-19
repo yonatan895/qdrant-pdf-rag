@@ -744,6 +744,14 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
 - `is_doc_complete` checks marker binding plus stored point counts/digests;
   vector/chunk length mismatches fail before load; zero chunks are explicit
   `empty`, never a successful document publication.
+- Collection distribution (issue #360 Slice A): the corpus and completion
+  constructors carry the explicitly selected policy (`QDRANT_SHARD_NUMBER` /
+  `QDRANT_REPLICATION_FACTOR` / `QDRANT_WRITE_CONSISTENCY_FACTOR`, all unset
+  by default) to creation verbatim; an existing collection whose configured
+  values differ from a selected policy refuses before load — examined
+  read-only, never recreated or mutated. Unreadable live values are unknown,
+  not mismatches. Verifying actual active replica placement and
+  snapshot-gated migration are later slices.
 - Representation migration writes `pending`, then commits after no document
   failures, `stale_completion_markers` finds no differently stamped markers,
   and the read-only scope proof attributes every searchable point to a verified
@@ -794,7 +802,9 @@ have drained; GC is an explicit operator action, never automatic. See
 and [release recovery](crc-release-verification.md).
 
 **Existing evidence:** `tests/test_ingest_completion.py` checks per-document failure
-boundaries; `tests/test_ingest_publish.py` includes staging visibility, failed
+boundaries; `tests/test_qdrant_io.py` checks corpus-constructor forwarding and
+read-only distribution examination; completion-constructor policy checks live
+beside the generation-scoping tests in `tests/test_ingest_completion.py`; `tests/test_ingest_publish.py` includes staging visibility, failed
 swap recovery, pending/missing/drifted-manifest refusal, forced same-contract
 repair as a distinct generation (no live mutation, resumable, reader-compatible
 mid-build: `test_publish_force_same_contract_repairs_distinct_generation`,
