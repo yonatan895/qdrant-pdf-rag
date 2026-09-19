@@ -1237,7 +1237,9 @@ class TaskContractsTests(unittest.TestCase):
         env = self.tool_env()
         proc = self.run_task("qa:sim", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.pip_calls()[0]["argv"], ["-m", "pytest", "-m", "integration", "-v", "-rs"])
+        self.assertEqual(self.pip_calls()[0]["argv"],
+                         ["-m", "pytest", "-m", "integration",
+                          "--ignore=tests/test_load_tier.py", "-v", "-rs"])
         if (self.log).exists():
             self.log.unlink()
         proc = self.run_task("qa:load", extra_env=env)

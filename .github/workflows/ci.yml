@@ -58,13 +58,16 @@ jobs:
         run: sh scripts/tools/install-task.sh
       - run: pytest -q
 
-  # Simulation tier (tests/test_integration_sim.py, marker 'integration'):
+  # Simulation tier (marker 'integration', excluding the load tier):
   # real PDFs -> real ingest -> a real Qdrant server (the images.txt pin,
   # auto-started docker container) -> agent endpoints over the real app.
   # The model is the deterministic mock. BM25 weights are fetched and
   # verified against the in-repo sha256 manifest so the vLLM-shaped
   # prod-embed variant runs instead of skipping. The job is fail-closed:
   # missing docker, a skip, or zero passes must fail, not go green.
+  # The load tier (tests/test_load_tier.py) runs only in its own lane
+  # (`sh scripts/tools/run-task.sh qa:load`, .github/workflows/load.yml),
+  # so its absolute concurrency contracts are asserted exactly once.
   # GitHub-only: air-gap GitLab runners cannot pull Docker Hub (AGENTS.md).
   sim:
     runs-on: ubuntu-latest
@@ -85,7 +88,7 @@ jobs:
       - name: run the simulation tier (fail closed — no skips, at least one pass)
         run: |
           set -o pipefail
-          pytest -m integration -v -rs 2>&1 | tee sim-output.txt
+          pytest -m integration --ignore=tests/test_load_tier.py -v -rs 2>&1 | tee sim-output.txt
           if grep -qE '[1-9][0-9]* skipped' sim-output.txt; then
             echo "simulation tests were skipped — coverage must not silently vanish" >&2
             exit 1
