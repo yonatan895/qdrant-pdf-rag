@@ -71,6 +71,24 @@ workload, final publication, next ordinary ingest and full application checks
 remain pending. Model/gateway sessions and the ingest Job must not be restarted
 just because a polling window expires.
 
+At 18:48 UTC, Qdrant was OOM-killed at the local 2 GiB limit and restarted.
+Ingest recorded a connection refusal; that document failure prevents this
+attempt from committing its pending representation or publishing the alias.
+The Job was stopped after preserving its logs and resource state. The supported
+recovery requires a full `--reingest`; ordinary ingest cannot certify a pending
+representation, and this retry must not be described as skipping completed work.
+
+With approximately 1.5 GiB host memory available after CPU checks finished, the
+local Qdrant limit was raised to 3 GiB. An initial in-place resize was verified
+against the kernel's `memory.max` without another restart. While ingest was
+stopped, Helm 4.3.0 then reconciled that limit using the same bundled chart and
+retained release values; the replacement Qdrant pod became ready at 3 GiB.
+The private operator values also retain the correction. Requests, production
+defaults, collections, aliases, PVCs and model configuration were not changed.
+The full real-corpus retry has started; sustained fit and successful publication
+remain unproven. Earlier steady-state memory readings did not establish peak
+migration headroom.
+
 ## Remaining environment acceptance
 
 | Environment | Missing proof | Closure requirement |
