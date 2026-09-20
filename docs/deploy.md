@@ -634,7 +634,10 @@ the ingest Job args/env (`INGEST_RETIRE_DOCS` accepts comma- or newline-separate
 the example documents them commented out, no default
 flips, and the shared ingest-work progress path is fixed so one authorized
 publisher at a time is enforceable (host-local target lock, no distributed
-lock claim). CI uses explicit synthetic values, never an attestation bypass. No
+lock claim). Replacing the immutable Job waits for foreground deletion of its
+prior pods before applying the replacement; a deletion failure aborts the
+launcher. The scratch PVC and its durable progress remain intact. CI uses
+explicit synthetic values, never an attestation bypass. No
 real registry, URL, token or private environment file enters git or the transfer
 artifact.
 

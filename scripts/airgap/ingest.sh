@@ -107,11 +107,12 @@ if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
         $KC apply -f dist/ingest-work-rendered.yaml
     fi
 fi
-# Jobs are immutable: remove a previous run so re-ingest works.
+# Jobs are immutable. Wait for the old pods as well as their Job to disappear:
+# a terminating pod may still hold the shared progress/publisher lock.
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
-    echo "[dryrun] $KC -n $NAMESPACE delete job ingest --ignore-not-found"
+    echo "[dryrun] $KC -n $NAMESPACE delete job ingest --ignore-not-found --cascade=foreground --wait=true"
 else
-    $KC -n "$NAMESPACE" delete job ingest --ignore-not-found
+    $KC -n "$NAMESPACE" delete job ingest --ignore-not-found --cascade=foreground --wait=true
 fi
 run $KC apply -f dist/ingest-rendered.yaml
 

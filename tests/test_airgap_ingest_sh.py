@@ -99,6 +99,43 @@ def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     assert rendered_env(rendered, "ingest")["EMBED_MODEL_REVISION"] == "rev-1"
 
 
+@pytest.mark.parametrize("delete_fails", [False, True])
+def test_ingest_replacement_waits_for_prior_writer(ingest_tree, delete_fails):
+    """A deleted Job can still have a terminating pod holding the writer lock."""
+    tree, _ = ingest_tree
+    (tree / "old-writer").touch()
+    write_stub(tree / "bin/kubectl", """#!/bin/sh
+case "$*" in
+  *"get pvc ingest-work"*) echo persistentvolumeclaim/ingest-work ;;
+  *"delete job ingest"*)
+    [ "$DELETE_FAILS" != true ] || exit 23
+    case "$*" in
+      *--cascade=foreground*--wait=true*) rm old-writer ;;
+    esac
+    ;;
+  *"apply -f dist/ingest-rendered.yaml"*)
+    if [ -e old-writer ]; then echo 'prior writer still holds lock' >&2; exit 24; fi
+    touch replacement-applied
+    ;;
+  *"get pods"*) echo Succeeded ;;
+  *"wait --for=condition=complete"*) test -e replacement-applied ;;
+esac
+""")
+    result = _run_ingest(
+        ingest_tree,
+        ("AIRGAP_DRYRUN", "0"),
+        ("DELETE_FAILS", str(delete_fails).lower()),
+    )
+    if delete_fails:
+        assert result.returncode == 23, result.stderr
+        assert (tree / "old-writer").exists()
+        assert not (tree / "replacement-applied").exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert not (tree / "old-writer").exists()
+        assert (tree / "replacement-applied").exists()
+
+
 def test_ingest_missing_embed_revision_fails_closed(ingest_tree):
     r = _run_ingest(ingest_tree, ("EMBED_MODEL_REVISION", ""))
     assert r.returncode != 0

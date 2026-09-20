@@ -35,6 +35,8 @@ volumes must survive. Production settings and serving safety gates stay intact.
 | README starts a third model beside the default 8 GiB pair | Quickstart launched reranker without selecting a compatible pack | Default quickstart now uses reasoning/embedding with reranking explicitly off |
 | Bastion prerequisites still recommend Helm 3.12+ | The current deployment launcher requires Helm 4 and the verified local run uses 4.3.0 | Corrected the prerequisite to the pinned 4.3.0 client and documented host standard-library Python for deployment rendering |
 | UI works in WSL but times out in the Windows browser | Windows `AgentService` occupies 8080; Windows HTTP probe timed out while WSL returned 200 | Forwarded 8087 to the unchanged service port 8080; Windows verified the UI, stylesheet and both scripts return 200. Jaeger remains available on 16686 |
+| Forced migration retry ignores completed checkpoints | The published `cbcc74b` forced retry reprocessed completed documents after the Qdrant OOM | Recovery candidate [PR #461](https://github.com/yonatan895/qdrant-pdf-rag/pull/461) verifies and retains same-build document checkpoints; actual four- and six-worker resumes skipped 72 and 78 completed documents respectively |
+| Replacement Job overlaps a terminating writer | Background deletion returned while the prior pod still held its publisher lock; the first replacement pod refused safely | Launcher now waits for foreground deletion before applying the replacement; six-worker transition explicitly waited for old-pod removal |
 | CRC and internal site qualification | Insufficient CRC startup headroom; no authorized internal GitLab/Quay/namespace supplied | Record NOT RUN and exact environment/acceptance requirements; Kind cannot close OpenShift or site controls |
 
 Private logs, snapshots, configuration and model checksum manifests stay outside
@@ -59,7 +61,7 @@ and streaming `[DONE]` passed from the new candidate's application pod.
 The first `airgap:deploy` exited 201 through Task after the unchanged 300-second
 agent rollout wait: readiness is correctly `503 representation=legacy`. This is
 not a successful full deployment. An explicit `INGEST_ALIAS_PUBLISH=true` /
-`INGEST_REINGEST=true` migration is running with all 452 hash-matched originals,
+`INGEST_REINGEST=true` migration started with all 452 hash-matched originals,
 one worker and real Qwen embeddings under the recorded immutable revision. The
 old physical collection remains the alias target until verified publication.
 The selected operator wait is 86400 seconds, matching the existing Job deadline;
@@ -75,8 +77,9 @@ At 18:48 UTC, Qdrant was OOM-killed at the local 2 GiB limit and restarted.
 Ingest recorded a connection refusal; that document failure prevents this
 attempt from committing its pending representation or publishing the alias.
 The Job was stopped after preserving its logs and resource state. The supported
-recovery requires a full `--reingest`; ordinary ingest cannot certify a pending
-representation, and this retry must not be described as skipping completed work.
+published code required a full `--reingest`; ordinary ingest cannot certify a
+pending representation. That first retry did not skip completed work. The later
+checkpoint-recovery candidate below corrects this observed limitation.
 
 With approximately 1.5 GiB host memory available after CPU checks finished, the
 local Qdrant limit was raised to 3 GiB. An initial in-place resize was verified
@@ -85,7 +88,7 @@ stopped, Helm 4.3.0 then reconciled that limit using the same bundled chart and
 retained release values; the replacement Qdrant pod became ready at 3 GiB.
 The private operator values also retain the correction. Requests, production
 defaults, collections, aliases, PVCs and model configuration were not changed.
-The full real-corpus retry has started; sustained fit and successful publication
+The full real-corpus retry started; sustained fit and successful publication
 remain unproven. Earlier steady-state memory readings did not establish peak
 migration headroom.
 
@@ -100,6 +103,54 @@ Kind node image and SHA256-compared with the binary inside that container.
 The private durable runtime now selects this client; its version check reports
 matching client/server v1.37.0. The global client remains untouched, and earlier
 commands retain their original client attribution.
+
+## Verified checkpoints and concurrency trial
+
+The user requested four concurrent workers and recovery without repeating an
+entire interrupted build. Candidate `d03512c0f1af02493f470df413e7d118e2cb3434`
+([PR #461](https://github.com/yonatan895/qdrant-pdf-rag/pull/461)) retains only
+completed documents verified against the same persisted build, exact requested
+representation, staging target and actual point count/identity/content digests.
+Incomplete documents may replay. New deliberate forced builds still rebuild
+everything; pending serving/publication refusal and final full-corpus proof stay
+intact. The synthetic fault matrix passed 14 cases; the actual disposable-Qdrant
+test preserved stored payloads/vectors, completed the failed document, published,
+and then performed an ordinary run without embedding. Common checks passed
+2,439 tests, and the existing L1 plumbing gate passed.
+
+The connected host built the candidate with pinned image/wheel/BM25 inputs.
+Source hashes inside the disconnected image matched the committed code, and the
+extraction-rules identity stayed `c1862af03b39cfca`. The local registry and actual
+ingest pod report image digest
+`sha256:e0d957af91a2a5d5d7530dc6cdaf9e902d851d3d0d8a53dac5e16181b9dce38a`.
+This is an unmerged local candidate, not the earlier signed published bundle.
+The serving agent remains on `cbcc74b`; do not attribute its behavior to this
+ingest image.
+
+At 19:34 UTC, the four-worker retry verified and skipped 72 completed documents
+covering 73,597 points. Actual payload/vector sample digests across three saved
+documents were unchanged. The staging collection and old serving alias target
+were preserved. The first replacement pod had refused the still-held publisher
+lock; its retry succeeded after old-pod termination. No lock was bypassed. The
+host log stream was explicitly reattached to the active retry pod.
+
+The user then requested a six-worker trial with close queue monitoring. After
+foreground removal of the old writer, the 19:42 UTC retry started six workers,
+verified and skipped 78 completed documents, and queued 374 remaining documents.
+Local ingest requests are 1 CPU/2 GiB; limits remain 4 CPU/3 GiB. Production
+defaults, model settings and Qdrant's 3 GiB local limit are unchanged. In the
+first two minutes, five-second model-metric samples recorded about 2,670 completed
+embedding inputs, a peak waiting queue of 520, repeated queue drainage, mean
+per-input latency around 5.3 seconds, and zero model errors or aborts. These are
+early observations, not sustained full-corpus acceptance or a throughput
+benchmark against identical document sizes. Ingest/Qdrant cgroups and host
+memory pressure remain monitored. Whole-batch client timeout and ingestion
+errors must also remain absent; per-input model latency alone does not prove that.
+
+The durable recovery checkout and scoped ingest wrapper are under
+`~/.config/mainframe-rag/helm-live-audit/recovery-d03512c`. Evidence remains private
+under `/tmp/resume-391`. Final publication, full-run memory fit and post-publication
+application verification are still pending.
 
 ## Remaining environment acceptance
 
@@ -141,7 +192,8 @@ Host-tool candidate `67ad7ebde01731b83c5afaf2bc68f21c93746a2f` passed
 two warnings; Ruff and mypy (54 source files) passed. The focused launcher suites
 passed 80 tests. Later documentation-only corrections distinguish the proposed
 Zowe sidecar from the deployed chart and describe the verified direct proxy route.
-The application remains the published `cbcc74b` release throughout.
+These checks predate the later recovery candidate; the serving agent remains on
+published `cbcc74b`, while ingestion uses the candidate identified above.
 
 Private evidence directory: `/tmp/helm-live-audit`; bootstrap/load/validate,
 original and resumed migration logs, source-hash/mount proof, gateway probes,
@@ -154,4 +206,5 @@ The verified release and private operator inputs have also been retained under
 `run-airgap.sh` wrapper. Its `airgap:validate` passed (exit 0). The active ingest
 continues from its original workspace; this copy does not authorize overlapping
 writers. After ingestion completes, the persistent wrapper is available for the
-ordinary repeat and subsequent deployment operations.
+subsequent deployment operations. The newer recovery checkout above owns the
+next ingestion operation; do not overwrite its candidate or start a second writer.
