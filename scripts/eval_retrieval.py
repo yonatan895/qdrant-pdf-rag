@@ -44,7 +44,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired, TypedDict, TypeGuard
 
 import httpx2
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -475,7 +475,7 @@ def _absolute_floors_apply(baseline: dict) -> bool:
     return collection not in RC_ONLY_COLLECTIONS
 
 
-def _finite_number(value: object) -> bool:
+def _finite_number(value: object) -> TypeGuard[int | float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
@@ -640,7 +640,14 @@ def summary_markdown(report: dict, baseline: dict | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def label_draft(collection: str, settings, docs: int) -> list[dict]:
+class _LabelDraft(TypedDict):
+    query: str
+    expected_doc_ids: list[str]
+    note: str
+    expected_heading: NotRequired[str]
+
+
+def label_draft(collection: str, settings, docs: int) -> list[_LabelDraft]:
     """Mechanically true draft entries from collection payload: identifier
     queries per doc (doc number, message ids) plus one heading-derived topic
     query per doc. Humans edit queries; expectations are payload facts."""
@@ -655,7 +662,7 @@ def label_draft(collection: str, settings, docs: int) -> list[dict]:
         limit=docs,
         with_payload=["doc_id", "title", "heading_path", "message_ids"],
     )
-    drafts = []
+    drafts: list[_LabelDraft] = []
     for point in points:
         payload = point.payload or {}
         doc_id = str(payload.get("doc_id") or "")
