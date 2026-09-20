@@ -115,6 +115,25 @@ tasks:
       - task: chart-check
       - helm lint charts/qdrant-*.tgz -f overlays/openshift/values.yaml
 
+  app-helm-lint:
+    desc: Lint the first-party application chart (issue #448)
+    summary: |
+      Runs `helm lint` against charts/mainframe-rag, validating templates
+      and values.schema.json against the checked-in defaults. Always
+      re-verifies; no cluster, registry, or private config required.
+    cmds:
+      - helm lint charts/mainframe-rag
+
+  app-helm-render:
+    desc: Render the first-party application chart with defaults (issue #448)
+    summary: |
+      Runs `helm template` against charts/mainframe-rag with the checked-in
+      defaults (steady-state: no Route, no Job). Rendering proof only;
+      operator releases render from mapped release values via
+      scripts/airgap/map_values.py (see airgap:dryrun). No cluster required.
+    cmds:
+      - helm template app charts/mainframe-rag --namespace mainframe-rag
+
   images:
     desc: Build ingest and agent images with wheelhouse/bm25 contexts (connected)
     summary: |

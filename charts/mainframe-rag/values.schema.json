@@ -182,7 +182,10 @@
           "required": ["enabled", "model", "endpointOrder"],
           "properties": {
             "enabled": { "type": "boolean" },
-            "baseUrl": { "type": "string" },
+            "baseUrl": {
+              "type": "string",
+              "description": "Empty falls back to the embedding URL (HttpReranker)."
+            },
             "model": {
               "type": "string",
               "minLength": 1,
@@ -192,21 +195,7 @@
               "type": "string",
               "enum": ["score_first", "rerank_first"]
             }
-          },
-          "allOf": [
-            {
-              "if": {
-                "properties": { "enabled": { "const": true } },
-                "required": ["enabled"]
-              },
-              "then": {
-                "properties": {
-                  "baseUrl": { "pattern": "^https?://\\S+$" }
-                },
-                "required": ["baseUrl"]
-              }
-            }
-          ]
+          }
         }
       }
     },

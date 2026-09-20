@@ -982,6 +982,32 @@ jobs:
           grep -q 'value: http://jaeger:4318' dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml
 
+      - name: first-party chart render asserts (issue #448 H2a)
+        env:
+          IMAGE_SHA: ${{ env.SHA }}
+          AIRGAP_DRYRUN: "1"
+          INTERNAL_REGISTRY: ghcr.io/dryrun-standin
+          NAMESPACE: airgap-dryrun
+          STORAGE_CLASS: standard
+          EMBED_MODEL: embed-from-airgap-env
+          DENSE_DIM: "768"
+          EMBED_MODEL_REVISION: dryrun-rev-1
+          VLLM_BASE_URL: http://vllm:8000
+          QDRANT_STORAGE_SIZE: 1Gi
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          sh scripts/tools/run-task.sh artifacts:app-helm-lint
+          sh scripts/tools/run-task.sh airgap:deploy
+          test -f dist/mainframe-rag-release-values.yaml
+          test -f dist/agent-chart-rendered.yaml
+          grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-agent:${SHA}" dist/agent-chart-rendered.yaml
+          grep -q "kind: Deployment" dist/agent-chart-rendered.yaml
+          grep -q "kind: Service" dist/agent-chart-rendered.yaml
+          # Steady-state release owns no one-shot Job (D3).
+          ! grep -q "kind: Job" dist/agent-chart-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/mainframe-rag-release-values.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-chart-rendered.yaml
+
       - name: airgap-deploy dry-run with PULL_SECRET + extra values
         env:
           IMAGE_SHA: ${{ env.SHA }}
@@ -1100,6 +1126,11 @@ jobs:
           grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-ingest:${SHA}" dist/ingest-rendered.yaml
           grep -q "cpu: 250m" dist/ingest-rendered.yaml   # INGEST_EXTRA_PATCH applied
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml
+          # Explicit chart Job render (D3: show-only, never auto-installed).
+          test -f dist/ingest-chart-rendered.yaml
+          grep -q "kind: Job" dist/ingest-chart-rendered.yaml
+          grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-ingest:${SHA}" dist/ingest-chart-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-chart-rendered.yaml
 
       - name: Task airgap:dryrun (full pipeline dry-run incl. validate/load/smoke)
         env:
@@ -1118,6 +1149,9 @@ jobs:
           sh scripts/tools/run-task.sh airgap:dryrun
           test -f dist/agent-rendered.yaml
           test -f dist/ingest-rendered.yaml
+          test -f dist/mainframe-rag-release-values.yaml
+          test -f dist/agent-chart-rendered.yaml
+          test -f dist/ingest-chart-rendered.yaml
 
   # ---------------------------------------------- air-gap runbook rehearsal
   # Rehearses the OPERATOR RUNBOOK (issue #15) against the lab OpenShift, so

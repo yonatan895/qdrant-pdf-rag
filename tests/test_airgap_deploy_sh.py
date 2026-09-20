@@ -136,7 +136,7 @@ exit 0
 
 @pytest.fixture
 def tree(tmp_path):
-    make_bin_tree(tmp_path, ["common.sh", "deploy.sh"])
+    make_bin_tree(tmp_path, ["common.sh", "deploy.sh", "map_values.py"])
     (tmp_path / "overlays" / "openshift").mkdir(parents=True, exist_ok=True)
     (tmp_path / "deploy" / "kustomize").mkdir(parents=True, exist_ok=True)
     copy_chart(tmp_path)
@@ -594,7 +594,16 @@ def test_agent_route_renders_oauth_sidecar_and_reencrypt_route(tree):
     the console port; the dry-run keeps rendering cluster-free."""
     tmp_path, _ = tree
     set_oauth_proxy_pin(tmp_path, "sha256:" + "b" * 64)
-    r = _run(tree, ("AGENT_ROUTE", "true"), ("AIRGAP_DRYRUN", "1"))
+    # Issue #448 H2a: route-on dry-run rehearses the chart Route too, which
+    # needs the namespace service CA as a generated value (D8).
+    ca_file = tmp_path / "route-ca.crt"
+    ca_file.write_text("-----BEGIN CERTIFICATE-----\nDRYRUN\n-----END CERTIFICATE-----\n")
+    r = _run(
+        tree,
+        ("AGENT_ROUTE", "true"),
+        ("AIRGAP_DRYRUN", "1"),
+        ("ROUTE_DESTINATION_CA_FILE", str(ca_file)),
+    )
     assert r.returncode == 0, r.stderr
     rendered = (tmp_path / "dist" / "agent-rendered.yaml").read_text()
     assert "reg.internal/openshift4/ose-oauth-proxy:v4.14" in rendered
