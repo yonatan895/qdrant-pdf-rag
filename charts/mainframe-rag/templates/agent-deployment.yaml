@@ -39,33 +39,33 @@ spec:
               name: http
           env:
             - name: QDRANT_URL
-              value: {{ include "mainframe-rag.qdrantUrl" . }}
+              value: {{ include "mainframe-rag.qdrantUrl" . | quote }}
             - name: QDRANT_API_KEY
               valueFrom:
                 secretKeyRef:
                   key: read-only-api-key
                   name: {{ include "mainframe-rag.qdrantSecretName" . }}
             - name: EMBED_BASE_URL
-              value: {{ .Values.models.embedding.baseUrl }}
+              value: {{ .Values.models.embedding.baseUrl | quote }}
             - name: EMBED_MODEL
-              value: {{ .Values.models.embedding.model }}
+              value: {{ .Values.models.embedding.model | quote }}
             - name: DENSE_DIM
               value: {{ .Values.models.embedding.dimension | quote }}
             - name: EMBED_MODEL_REVISION
-              value: {{ .Values.models.embedding.revision }}
+              value: {{ .Values.models.embedding.revision | quote }}
             - name: LLM_BASE_URL
-              value: {{ .Values.models.reasoning.baseUrl }}
+              value: {{ .Values.models.reasoning.baseUrl | quote }}
             - name: LLM_MODEL_REASONING
-              value: {{ .Values.models.reasoning.model }}
+              value: {{ .Values.models.reasoning.model | quote }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ include "mainframe-rag.otelEndpoint" . }}
+              value: {{ include "mainframe-rag.otelEndpoint" . | quote }}
             - name: IMAGE_SHA
               value: {{ .Values.images.agent.tag | quote }}
             - name: OTEL_DEPLOYMENT_ENVIRONMENT
-              value: {{ .Values.tracing.deploymentEnvironment }}
+              value: {{ .Values.tracing.deploymentEnvironment | quote }}
             {{- if .Values.tracing.serviceName }}
             - name: OTEL_SERVICE_NAME
-              value: {{ .Values.tracing.serviceName }}
+              value: {{ .Values.tracing.serviceName | quote }}
             {{- end }}
             - name: METRICS_ENABLED
               value: {{ .Values.metrics.enabled | toString | quote }}
@@ -74,11 +74,11 @@ spec:
             - name: RERANK_ENABLED
               value: {{ .Values.models.rerank.enabled | toString | quote }}
             - name: RERANK_BASE_URL
-              value: {{ .Values.models.rerank.baseUrl }}
+              value: {{ .Values.models.rerank.baseUrl | quote }}
             - name: RERANK_MODEL
-              value: {{ .Values.models.rerank.model }}
+              value: {{ .Values.models.rerank.model | quote }}
             - name: RERANK_ENDPOINT_ORDER
-              value: {{ .Values.models.rerank.endpointOrder }}
+              value: {{ .Values.models.rerank.endpointOrder | quote }}
             {{- if .Values.gateway.apiKeySecretName }}
             - name: LLM_API_KEY
               valueFrom:

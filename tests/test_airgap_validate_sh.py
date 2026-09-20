@@ -131,7 +131,7 @@ def test_validate_agent_write_key_fails_closed(tree):
     """Issue #366: a prod agent overlay wiring the full-access Qdrant key
     must fail preflight before anything reaches the cluster."""
     overlay = (
-        tree / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml"
+        tree / "charts/mainframe-rag/templates/agent-deployment.yaml"
     )
     overlay.write_text(overlay.read_text().replace("key: read-only-api-key", "key: api-key"))
     r = _run(tree)
@@ -143,12 +143,7 @@ def test_validate_ingest_readonly_key_fails_closed(tree):
     """Issue #366 mirror: downgrading the ingest overlay to read-only must
     also fail preflight — ingest owns corpus mutation."""
     overlay = (
-        tree
-        / "deploy"
-        / "kustomize"
-        / "overlays"
-        / "openshift-ingest"
-        / "ingest-job.yaml"
+        tree / "charts/mainframe-rag/templates/ingest-job.yaml"
     )
     lines = [
         "key: read-only-api-key" if line.strip() == "key: api-key" else line
@@ -164,12 +159,7 @@ def test_validate_ingest_copresent_readonly_key_fails_closed(tree):
     """Anti-revert parity with the agent gate: a co-present read-only key
     in the ingest overlay fails preflight even with api-key present."""
     overlay = (
-        tree
-        / "deploy"
-        / "kustomize"
-        / "overlays"
-        / "openshift-ingest"
-        / "ingest-job.yaml"
+        tree / "charts/mainframe-rag/templates/ingest-job.yaml"
     )
     text = overlay.read_text()
     anchor = "key: api-key\n"

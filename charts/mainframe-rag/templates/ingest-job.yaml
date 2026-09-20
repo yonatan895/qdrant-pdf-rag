@@ -53,7 +53,7 @@ spec:
             {{- end }}
           env:
             - name: QDRANT_URL
-              value: {{ include "mainframe-rag.qdrantUrl" . }}
+              value: {{ include "mainframe-rag.qdrantUrl" . | quote }}
             - name: QDRANT_COLLECTION
               value: mainframe_manuals
             - name: QDRANT_API_KEY
@@ -70,29 +70,29 @@ spec:
             - name: INGEST_ALIAS_PUBLISH
               value: {{ .Values.ingest.aliasPublish | toString | quote }}
             - name: EMBED_BASE_URL
-              value: {{ .Values.models.embedding.baseUrl }}
+              value: {{ .Values.models.embedding.baseUrl | quote }}
             - name: EMBED_MODEL
-              value: {{ .Values.models.embedding.model }}
+              value: {{ .Values.models.embedding.model | quote }}
             - name: DENSE_DIM
               value: {{ .Values.models.embedding.dimension | quote }}
             - name: EMBED_MODEL_REVISION
-              value: {{ .Values.models.embedding.revision }}
+              value: {{ .Values.models.embedding.revision | quote }}
             - name: IMAGE_SHA
               value: {{ .Values.images.ingest.tag | quote }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ include "mainframe-rag.otelEndpoint" . }}
+              value: {{ include "mainframe-rag.otelEndpoint" . | quote }}
             - name: OTEL_SERVICE_NAME
               value: mainframe-rag-ingest
             - name: OTEL_DEPLOYMENT_ENVIRONMENT
-              value: {{ .Values.tracing.deploymentEnvironment }}
+              value: {{ .Values.tracing.deploymentEnvironment | quote }}
             - name: INGEST_WORKERS
               value: {{ .Values.ingest.workers | quote }}
             - name: CONTEXTUAL_EMBED_ENABLED
               value: {{ .Values.ingest.contextualEnabled | toString | quote }}
             - name: CONTEXT_LLM_BASE_URL
-              value: {{ .Values.ingest.contextLlmBaseUrl }}
+              value: {{ .Values.ingest.contextLlmBaseUrl | quote }}
             - name: CONTEXT_LLM_MODEL
-              value: {{ .Values.ingest.contextLlmModel }}
+              value: {{ .Values.ingest.contextLlmModel | quote }}
             {{- if .Values.gateway.apiKeySecretName }}
             - name: EMBED_API_KEY
               valueFrom:

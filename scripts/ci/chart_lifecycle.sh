@@ -2,8 +2,8 @@
 # CI-only first-party chart lifecycle rehearsal (issue #448 H2b).
 #
 # Exercises the migration-required release sequence against the SAME chart
-# source + mapper-generated values intended for the air gap, while the
-# Kustomize renderer stays the deployment authority (H3 owns cutover):
+# source + mapper-generated values and client-side apply mode used by the
+# air-gap application deployment:
 #
 #   fresh A -> unchanged A -> B -> injected failed B -> retain/recover A
 #   -> successful B -> explicit compatible redeploy A
@@ -151,6 +151,9 @@ expect_mark_b() {
 helm_values() {
     _values="$1"
     shift
+    case "$1" in
+        install|upgrade) set -- "$@" --server-side=false ;;
+    esac
     set -- "$@" -f "$_values"
     if [ -n "$SCALE_VALUES" ]; then
         set -- "$@" -f "$SCALE_VALUES"
@@ -240,7 +243,7 @@ smoke retained
 echo "serving B retained through failed revision (smoke green)"
 
 echo "==> chart-lifecycle: retain/recover A (rollback to revision $REV1)"
-helm rollback "$RELEASE" "$REV1" -n "$NS" --wait --timeout="$TIMEOUT"
+helm rollback "$RELEASE" "$REV1" -n "$NS" --server-side=false --wait --timeout="$TIMEOUT"
 echo "recovered A at revision $(revision)"
 guards "$CHART_PVC"
 smoke

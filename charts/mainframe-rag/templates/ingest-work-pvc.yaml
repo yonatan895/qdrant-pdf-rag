@@ -1,0 +1,14 @@
+{{- if .Values.ingest.enabled }}
+# Rendered explicitly by ingest.sh; never installed in the steady-state release.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ingest-work
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.ingest.workSize | quote }}
+  storageClassName: {{ .Values.storage.className | quote }}
+{{- end }}

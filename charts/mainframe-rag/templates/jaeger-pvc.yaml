@@ -6,6 +6,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: jaeger-badger
   namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     app: jaeger
 spec:

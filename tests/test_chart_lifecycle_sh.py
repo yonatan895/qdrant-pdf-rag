@@ -237,6 +237,9 @@ def test_full_sequence_green(harness):
     mutating = [o for o in ops if o in ('install', 'upgrade', 'rollback')]
     assert mutating == ['install', 'upgrade', 'upgrade', 'upgrade',
                         'rollback', 'upgrade', 'upgrade']
+    for args in helm_calls(calls):
+        if args[0] in ('install', 'upgrade', 'rollback'):
+            assert '--server-side=false' in args
     assert 'status' in ops  # revision probes between mutations
     # Helm --timeout needs a duration unit (live rehearsal caught bare "300").
     import re as _re

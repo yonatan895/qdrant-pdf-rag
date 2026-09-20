@@ -56,6 +56,14 @@ jobs:
       - run: pip install -e ".[dev]"
       - name: Install pinned Task runner for required contract tests
         run: sh scripts/tools/install-task.sh
+      - name: Install checksum-pinned Helm for deployment render tests
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/helm-unpack"
+          tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
+          sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
+          /usr/local/bin/helm version --short
       - run: pytest -q
 
   # Simulation tier (marker 'integration', excluding the load tier):

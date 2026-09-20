@@ -11,7 +11,7 @@ import shutil
 
 import pytest
 
-from tests.helpers_airgap import REPO, copy_chart, make_bin_tree, write_stub
+from tests.helpers_airgap import REPO, copy_chart, install_rendering_helm, make_bin_tree, write_stub
 
 IMAGE_SHA = "e" * 40
 
@@ -61,6 +61,7 @@ def pipe_tree(tmp_path):
 
     for name in ("skopeo", "helm", "kubectl", "oc", "kustomize"):
         write_stub(tmp_path / "bin" / name, STUB_PIPE_TOOL)
+    install_rendering_helm(tmp_path)
     return tmp_path
 
 

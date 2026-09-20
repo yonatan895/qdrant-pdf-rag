@@ -45,6 +45,10 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
     """Create bin/ + scripts/airgap/ and copy the named scripts from the repo."""
     (tmp_path / "bin").mkdir(exist_ok=True)
     (tmp_path / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
+    if any(name in scripts for name in ("deploy.sh", "ingest.sh", "validate.sh")):
+        shutil.copytree(REPO / "charts/mainframe-rag", tmp_path / "charts/mainframe-rag", dirs_exist_ok=True)
+    if "deploy.sh" in scripts:
+        scripts = [*scripts, "check_app_ownership.py"]
     for f in scripts:
         shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
     return tmp_path
@@ -168,3 +172,37 @@ def assert_pull_secret_wired(rendered: str, name: str) -> None:
     assert re.search(
         rf"^([ ]*)imagePullSecrets:\n\1  - name: {re.escape(name)}$", rendered, re.MULTILINE
     )
+
+
+def install_rendering_helm(tree: Path) -> None:
+    """Use real Helm for rendering, record rather than execute live mutations."""
+    import shlex
+
+    helm = shutil.which('helm')
+    if not helm:
+        raise RuntimeError('pinned Helm is required for deployment render tests')
+    shutil.copytree(REPO / 'charts/mainframe-rag', tree / 'charts/mainframe-rag', dirs_exist_ok=True)
+    write_stub(tree / 'bin/helm', '''#!/bin/sh
+if [ -n "${HELM_LOG:-}" ]; then printf '%s\\n' "$@" >> "$HELM_LOG"; fi
+case "$1" in
+    template|lint|version) exec ''' + shlex.quote(helm) + ''' "$@" ;;
+    upgrade) exit 0 ;;
+    *) exit 2 ;;
+esac
+''')
+
+
+def rendered_container(rendered: str, name: str) -> dict:
+    import yaml
+
+    for doc in yaml.safe_load_all(rendered):
+        if doc and doc.get('kind') in ('Deployment', 'Job'):
+            for container in doc['spec']['template']['spec']['containers']:
+                if container['name'] == name:
+                    return container
+    raise AssertionError(f'container {name} missing from rendered resources')
+
+
+def rendered_env(rendered: str, name: str) -> dict:
+    return {entry['name']: entry.get('value', entry.get('valueFrom'))
+            for entry in rendered_container(rendered, name)['env']}

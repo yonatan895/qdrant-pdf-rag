@@ -16,7 +16,9 @@ from tests.helpers_airgap import (
     assert_no_placeholders,
     assert_pull_secret_wired,
     copy_chart,
+    install_rendering_helm,
     make_bin_tree,
+    rendered_env,
     run_sh,
     set_oauth_proxy_pin,
 )
@@ -130,6 +132,18 @@ if [ "$1" = "kustomize" ] || [ "$1" = "build" ]; then
   exit 0
 fi
 printf '%s\\n' "$@" >> "$HELM_LOG"
+case "$*" in
+  *'get -f '*'-o json'*)
+    if [ -n "${{OWNERSHIP_FILE:-}}" ]; then cat "$OWNERSHIP_FILE";
+    else echo '{{"apiVersion":"v1","kind":"List","items":[]}}'; fi ;;
+
+  *'get secret '*'go-template='*)
+    if [ -n "${{MISSING_KEY:-}}" ]; then
+      case "$*" in *"$MISSING_KEY"*) exit 0 ;; esac
+    fi
+    echo present ;;
+
+esac
 exit 0
 """
 
@@ -160,6 +174,7 @@ def tree(tmp_path):
         p = tmp_path / "bin" / name
         p.write_text(STUB_BIN.format(stub_yaml=stub_yaml, jaeger_stub=jaeger_stub, servicemonitor_stub=servicemonitor_stub, oauth_stub=oauth_stub))
         p.chmod(0o755)
+    install_rendering_helm(tmp_path)
     return tmp_path, helm_log
 
 
@@ -223,9 +238,9 @@ def test_pull_secret_bad_name_fails_closed(tree, bad_name):
 def _stub_with_qdrant_key(tree, key_line):
     """Rewrite the stub kustomize output's QDRANT_API_KEY data key."""
     tmp_path, _ = tree
-    stub = (tmp_path / "stub-kustomize.yaml").read_text()
+    stub = (tmp_path / "charts/mainframe-rag/templates/agent-deployment.yaml").read_text()
     assert "key: read-only-api-key" in stub
-    (tmp_path / "stub-kustomize.yaml").write_text(
+    (tmp_path / "charts/mainframe-rag/templates/agent-deployment.yaml").write_text(
         stub.replace("key: read-only-api-key", key_line)
     )
 
@@ -257,11 +272,11 @@ def test_agent_qdrant_write_key_fails_closed(tree):
 def test_agent_qdrant_key_missing_fails_closed(tree):
     """No QDRANT_API_KEY block at all must also stop the deploy."""
     tmp_path, _ = tree
-    stub = (tmp_path / "stub-kustomize.yaml").read_text()
+    stub = (tmp_path / "charts/mainframe-rag/templates/agent-deployment.yaml").read_text()
     lines = stub.splitlines()
     start = next(i for i, l in enumerate(lines) if "- name: QDRANT_API_KEY" in l)
     del lines[start : start + 5]
-    (tmp_path / "stub-kustomize.yaml").write_text("\n".join(lines) + "\n")
+    (tmp_path / "charts/mainframe-rag/templates/agent-deployment.yaml").write_text("\n".join(lines) + "\n")
     r = _run(tree)
     assert r.returncode != 0
     assert "read-only-api-key" in r.stderr
@@ -310,7 +325,7 @@ def test_rendered_manifest_substituted_and_written(tree):
     # Issue #391 F1: the operator-declared revision reaches the agent
     # container (the agent refuses a blank attestation at startup).
     assert re.search(r"(?m)^\s*- name: EMBED_MODEL_REVISION$", rendered)
-    assert re.search(r"(?m)^\s*value: rev-1$", rendered)
+    assert rendered_env(rendered, "agent")["EMBED_MODEL_REVISION"] == "rev-1"
     assert_no_placeholders(rendered)
 
 
@@ -346,7 +361,7 @@ def test_tracing_on_by_default_deploys_jaeger(tree):
     assert r.returncode == 0, r.stderr
     assert (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert "value: http://jaeger:4318" in rendered
+    assert 'value: "http://jaeger:4318"' in rendered
     assert_no_placeholders(rendered)
     assert "Tracing off" not in r.stdout
 
@@ -358,7 +373,7 @@ def test_tracing_off_sentinel_skips_jaeger(tree, token):
     assert not (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     # Endpoint env var always rendered; empty value = tracing off.
-    assert re.search(r"OTEL_EXPORTER_OTLP_ENDPOINT\n\s+value:\s*$", rendered, re.MULTILINE)
+    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
     assert "Tracing off" in r.stdout
 
 
@@ -377,7 +392,7 @@ def test_tracing_enabled_deploys_jaeger_and_wires_endpoint(tree):
     assert "storageClassName: standard" in jaeger
     assert "namespace: ns" in jaeger
     assert_no_placeholders(jaeger)
-    assert 'value: http://jaeger:4318' in agent
+    assert rendered_env(agent, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://jaeger:4318"
     assert_no_placeholders(agent)
 
 
@@ -410,7 +425,7 @@ def test_deploy_identity_version_always_rendered(tree):
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     # service.version is the packed SHA: always set, deploy.sh fail-closes
     # on empty/HEAD before rendering.
-    assert re.search(r"IMAGE_SHA\n\s+value: " + IMAGE_SHA, rendered, re.MULTILINE)
+    assert rendered_env(rendered, "agent")["IMAGE_SHA"] == IMAGE_SHA
 
 
 def test_deploy_identity_environment_empty_by_default(tree):
@@ -419,14 +434,14 @@ def test_deploy_identity_environment_empty_by_default(tree):
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
     # Optional: bare `value:` renders and the agent omits the attribute —
     # same empty-renders-bare convention as the OTEL endpoint above.
-    assert re.search(r"OTEL_DEPLOYMENT_ENVIRONMENT\n\s+value:\s*$", rendered, re.MULTILINE)
+    assert rendered_env(rendered, "agent")["OTEL_DEPLOYMENT_ENVIRONMENT"] == ""
 
 
 def test_deploy_identity_environment_wired_when_set(tree):
     r = _run(tree, ("OTEL_DEPLOYMENT_ENVIRONMENT", "lab"))
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert re.search(r"OTEL_DEPLOYMENT_ENVIRONMENT\n\s+value: lab$", rendered, re.MULTILINE)
+    assert rendered_env(rendered, "agent")["OTEL_DEPLOYMENT_ENVIRONMENT"] == "lab"
 
 
 def test_service_name_stripped_when_unset(tree):
@@ -443,7 +458,7 @@ def test_service_name_wired_when_set(tree):
     r = _run(tree, ("OTEL_SERVICE_NAME", "my-rag-prod"))
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert re.search(r"OTEL_SERVICE_NAME\n\s+value: my-rag-prod$", rendered, re.MULTILINE)
+    assert rendered_env(rendered, "agent")["OTEL_SERVICE_NAME"] == "my-rag-prod"
 
 
 # ------------------------------------------------------- ServiceMonitor (#187)
@@ -507,7 +522,7 @@ def test_reranker_endpoint_order_defaults_score_first(tree):
     r = _run(tree)
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert re.search(r"RERANK_ENDPOINT_ORDER\n\s+value: score_first", rendered, re.MULTILINE)
+    assert rendered_env(rendered, "agent")["RERANK_ENDPOINT_ORDER"] == "score_first"
     assert "__RERANK_ENDPOINT_ORDER__" not in rendered
 
 
@@ -515,7 +530,7 @@ def test_reranker_endpoint_order_rerank_first_renders(tree):
     r = _run(tree, ("RERANK_ENDPOINT_ORDER", "rerank_first"))
     assert r.returncode == 0, r.stderr
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert re.search(r"RERANK_ENDPOINT_ORDER\n\s+value: rerank_first", rendered, re.MULTILINE)
+    assert rendered_env(rendered, "agent")["RERANK_ENDPOINT_ORDER"] == "rerank_first"
 
 
 # ------------------------------------------------------- gateway keys (LiteLLM)
@@ -549,10 +564,9 @@ def test_gateway_keys_wired_when_secret_set(tree):
         ("RERANK_API_KEY", "rerank-api-key"),
     ):
         # Sorted-key order (key before name), as kustomize renders mappings.
-        assert re.search(
-            rf"- name: {env_name}\n\s+valueFrom:\n\s+secretKeyRef:\n\s+key: {data_key}\n\s+name: gateway-api-keys",
-            rendered,
-        ), env_name
+        assert rendered_env(rendered, "agent")[env_name] == {
+            "secretKeyRef": {"key": data_key, "name": "gateway-api-keys"}
+        }
     assert "__GATEWAY_API_KEY_SECRET__" not in rendered
     assert_no_placeholders(rendered)
     assert "Gateway keys wired" in r.stdout
@@ -619,3 +633,80 @@ def test_agent_route_fails_closed_on_pending_oauth_pin(tree):
     assert r.returncode != 0
     assert "oauth-proxy digest recorded" in r.stderr
     assert "sha256:PENDING" in r.stderr
+
+
+@pytest.mark.parametrize("ownership", ["legacy", "ours", "other-release", "other-namespace", "controller", "other-manager"])
+def test_app_adoption_checks_ownership_before_any_release_mutation(tree, ownership):
+    import json
+
+    meta = {"name": "rag-agent", "namespace": "ns"}
+    if ownership in ("ours", "other-release", "other-namespace"):
+        meta["annotations"] = {
+            "meta.helm.sh/release-name": "other" if ownership == "other-release" else "mainframe-rag",
+            "meta.helm.sh/release-namespace": "other" if ownership == "other-namespace" else "ns",
+        }
+    if ownership == "controller":
+        meta["ownerReferences"] = [{"name": "operator"}]
+    if ownership == "other-manager":
+        meta["labels"] = {"app.kubernetes.io/managed-by": "other"}
+    inventory = tree[0] / "existing.json"
+    inventory.write_text(json.dumps({"apiVersion": "v1", "kind": "List", "items": [
+        {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta},
+    ]}))
+    result = _run(tree, ("OWNERSHIP_FILE", str(inventory)))
+    allowed = ownership in ("legacy", "ours")
+    assert (result.returncode == 0) == allowed, result.stderr
+    log = _helm_log(tree)
+    assert ("upgrade" in log) == allowed
+    if allowed:
+        assert "--take-ownership" in log
+        assert "--server-side=false" in log
+    else:
+        assert "ownership preflight refused" in result.stderr
+
+
+@pytest.mark.parametrize("key", ["llm-api-key", "embed-api-key", "rerank-api-key", ".dockerconfigjson"])
+def test_missing_referenced_secret_key_blocks_before_mutation(tree, key):
+    result = _run(tree, ("GATEWAY_API_KEY_SECRET", "gateway-keys"),
+                  ("PULL_SECRET", "registry-pull"), ("MISSING_KEY", key))
+    assert result.returncode != 0
+    assert "required Secret key is missing or empty" in result.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_invalid_schema_fails_before_namespace_or_release_mutation(tree):
+    result = _run(tree, ("RERANK_ENDPOINT_ORDER", "invalid"))
+    assert result.returncode != 0
+    log = _helm_log(tree)
+    assert "upgrade" not in log
+    assert "new-project" not in log
+    assert "create" not in log
+
+
+def test_model_revision_yaml_characters_round_trip(tree):
+    revision = 'release: #tag | a & b "quoted"\nsecond line'
+    result = _run(tree, ("EMBED_MODEL_REVISION", revision), ("EMBED_MODEL", "true"))
+    assert result.returncode == 0, result.stderr
+    rendered = (tree[0] / "dist/agent-rendered.yaml").read_text()
+    assert rendered_env(rendered, "agent")["EMBED_MODEL_REVISION"] == revision
+    assert rendered_env(rendered, "agent")["EMBED_MODEL"] == "true"
+
+
+@pytest.mark.parametrize("payload", ['{"kind":"List"}', '{"kind":"List","items":null}', 'not-json'])
+def test_corrupt_ownership_inventory_blocks_mutation(tree, payload):
+    inventory = tree[0] / "existing.json"
+    inventory.write_text(payload)
+    result = _run(tree, ("OWNERSHIP_FILE", str(inventory)))
+    assert result.returncode != 0
+    assert "ownership preflight refused" in result.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_old_helm_fails_before_any_release_mutation(tree):
+    helm = tree[0] / "bin/helm"
+    helm.write_text(helm.read_text().replace('case "$1" in',
+        'if [ "$1" = version ]; then echo v3.19.0; exit 0; fi\ncase "$1" in'))
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "Helm 4 is required" in result.stderr
+    assert "upgrade" not in _helm_log(tree)

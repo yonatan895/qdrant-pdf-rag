@@ -58,7 +58,8 @@ def make_old_tree(tmp_path: Path) -> Path:
     """Build a minimal tmp repo root that deploy.sh/ingest.sh run in dry-run."""
     (tmp_path / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
     for name in ("common.sh", "deploy.sh", "ingest.sh", "map_values.py"):
-        shutil.copy(REPO / "scripts" / "airgap" / name, tmp_path / "scripts" / "airgap" / name)
+        source = REPO / "tests/fixtures/helm_migration" if name in ("deploy.sh", "ingest.sh") else REPO / "scripts/airgap"
+        shutil.copy(source / name, tmp_path / "scripts" / "airgap" / name)
     shutil.copytree(REPO / "deploy" / "kustomize", tmp_path / "deploy" / "kustomize")
     (tmp_path / "overlays" / "openshift").mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO / "overlays" / "openshift" / "values.yaml", tmp_path / "overlays" / "openshift" / "values.yaml")
@@ -340,6 +341,9 @@ def test_base_parity_with_independent_controls(tmp_path):
         if "valueFrom" in o:
             assert o["valueFrom"] == n["valueFrom"], name
         else:
+            # Kubernetes treats an omitted/null EnvVar value as the empty string.
+            if o.get("value") is None:
+                o = {**o, "value": ""}
             assert o.get("value") == n.get("value"), f"{name}: {o.get('value')!r} != {n.get('value')!r}"
             assert type(o.get("value")) is type(n.get("value")), name
 
@@ -629,6 +633,9 @@ def test_ingest_job_parity_normal(tmp_path):
         if "valueFrom" in o:
             assert o["valueFrom"] == n["valueFrom"], name
         else:
+            # Kubernetes treats an omitted/null EnvVar value as the empty string.
+            if o.get("value") is None:
+                o = {**o, "value": ""}
             assert o.get("value") == n.get("value"), f"{name}: {o.get('value')!r} != {n.get('value')!r}"
             assert type(o.get("value")) is type(n.get("value")), name
 
@@ -774,6 +781,7 @@ def test_chart_shape_no_qdrant_no_hook_no_secret_values():
         "agent-deployment.yaml",
         "agent-service.yaml",
         "ingest-job.yaml",
+        "ingest-work-pvc.yaml",
         "jaeger-config.yaml",
         "jaeger-deployment.yaml",
         "jaeger-pvc.yaml",
@@ -801,3 +809,23 @@ def test_numeric_looking_release_sha_remains_an_exact_env_string():
     job = run_new_job_only({'images': images, 'ingest': {'corpusPVC': 'corpus'}})[('Job', 'ingest')]
     assert env_map(agent)['IMAGE_SHA']['value'] == sha
     assert env_map(job, 'ingest')['IMAGE_SHA']['value'] == sha
+
+
+def test_jaeger_claim_is_retained_across_release_removal():
+    docs = run_new_template({})
+    claim = docs[("PersistentVolumeClaim", "jaeger-badger")]
+    assert claim["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+    disabled = run_new_template({"tracing": {"enabled": False}})
+    assert not any(name.startswith("jaeger") for _, name in disabled)
+
+
+def test_chart_preserves_positive_operator_dimension_and_worker_range():
+    # The old production launcher/runtime has no 4096-dimension or 32-worker
+    # ceiling. Shadow-chart bounds must not become new limits at cutover.
+    rendered = run_new_template({
+        "models": {"embedding": {"dimension": 8192}},
+        "ingest": {"enabled": True, "corpusPVC": "corpus", "workers": 64},
+    })
+    agent_env = env_map(rendered[("Deployment", "rag-agent")])
+    assert agent_env["DENSE_DIM"]["value"] == "8192"
+    assert ingest_env_map(rendered[("Job", "ingest")])["INGEST_WORKERS"]["value"] == "64"

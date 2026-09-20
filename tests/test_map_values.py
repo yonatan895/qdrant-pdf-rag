@@ -36,7 +36,7 @@ MAPPER_KEYS = [
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
     "OTEL_DEPLOYMENT_ENVIRONMENT", "OTEL_SERVICE_NAME",
     "METRICS_ENABLED", "AGENT_ROUTE", "ROUTE_DESTINATION_CA_FILE",
-    "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS",
+    "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
     "CONTEXTUAL_EMBED_ENABLED", "CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL",
     "QDRANT_SHARD_NUMBER", "QDRANT_REPLICATION_FACTOR", "QDRANT_WRITE_CONSISTENCY_FACTOR",
@@ -353,3 +353,12 @@ def test_reasoning_fails_closed_when_model_set_without_base_url(monkeypatch, map
     assert r.returncode != 0
     assert "LLM_BASE_URL is required when LLM_MODEL_REASONING is set" in r.stderr
 
+
+
+@pytest.mark.parametrize("namespace", ["bad\nfield: value", "bad.name", "Upper", "-bad", "bad-", "a" * 64])
+def test_namespace_rejects_invalid_label_before_values_write(mapper_env, monkeypatch, namespace):
+    monkeypatch.setenv("NAMESPACE", namespace)
+    result, out = mapper_env("--without-ingest-job")
+    assert result.returncode != 0
+    assert "NAMESPACE must be a DNS label" in result.stderr
+    assert not out.exists()

@@ -119,6 +119,7 @@ ingest:
   # Caller-supplied corpus PVC (read-only mount). Required when enabled.
   corpusPVC: ""
   workers: 4
+  workSize: 100Gi
   aliasPublish: false
   reingest: false
   # Explicit approved removals (requires aliasPublish=true). Entries accept

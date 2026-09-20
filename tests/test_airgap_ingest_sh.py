@@ -15,7 +15,10 @@ from tests.helpers_airgap import (
     STUB_TOOL,
     assert_no_placeholders,
     assert_pull_secret_wired,
+    install_rendering_helm,
     make_bin_tree,
+    rendered_container,
+    rendered_env,
     run_sh,
     write_stub,
 )
@@ -129,6 +132,7 @@ def ingest_tree(tmp_path):
     # real helm rendering is proven by test_helm_chart_shadow,
     # test_map_values and the e2e dry-run gate.
     write_stub(tmp_path / "bin" / "helm", STUB_TOOL)
+    install_rendering_helm(tmp_path)
     return tmp_path, kc_log
 
 
@@ -180,11 +184,11 @@ def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     assert "reg.internal:5000/qdrant-pdf-rag-ingest:" in rendered
     assert "claimName: my-manuals-pvc" in rendered
     assert 'value: "4"' in rendered or "value: 4" in rendered
-    assert "value: http://vllm:8000/v1" in rendered
+    assert 'value: "http://vllm:8000/v1"' in rendered
     # Issue #391 F1: the representation preflight refuses a blank revision,
     # so the operator-declared value must reach the Job environment.
     assert re.search(r"(?m)^\s*- name: EMBED_MODEL_REVISION$", rendered)
-    assert re.search(r"(?m)^\s*value: rev-1$", rendered)
+    assert rendered_env(rendered, "ingest")["EMBED_MODEL_REVISION"] == "rev-1"
 
 
 def test_ingest_missing_embed_revision_fails_closed(ingest_tree):
@@ -205,7 +209,7 @@ def test_ingest_identity_version_always_rendered(ingest_tree):
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
     # service.version is the packed SHA: always set, ingest.sh fail-closes
     # on empty/HEAD before rendering (issue #315).
-    assert re.search(r"IMAGE_SHA\n\s+value: " + IMAGE_SHA, rendered, re.MULTILINE)
+    assert rendered_env(rendered, "ingest")["IMAGE_SHA"] == IMAGE_SHA
 
 
 # ------------------------------------------------------- Qdrant least privilege (#366)
@@ -230,12 +234,12 @@ def test_ingest_qdrant_key_keeps_write_access(ingest_tree):
 def test_ingest_qdrant_readonly_key_fails_closed(ingest_tree):
     """A render downgrading ingest to the read-only key must stop the run."""
     tmp_path, _ = ingest_tree
-    stub = (tmp_path / "stub-ingest.yaml").read_text()
+    stub = (tmp_path / "charts/mainframe-rag/templates/ingest-job.yaml").read_text()
     lines = [
-        "key: read-only-api-key" if l.strip() == "key: api-key" else l
+        l.replace("key: api-key", "key: read-only-api-key") if l.strip() == "key: api-key" else l
         for l in stub.splitlines()
     ]
-    (tmp_path / "stub-ingest.yaml").write_text("\n".join(lines) + "\n")
+    (tmp_path / "charts/mainframe-rag/templates/ingest-job.yaml").write_text("\n".join(lines) + "\n")
     r = _run_ingest(ingest_tree)
     assert r.returncode != 0
     assert "key api-key" in r.stderr
@@ -245,7 +249,7 @@ def test_ingest_qdrant_copresent_readonly_key_fails_closed(ingest_tree):
     """Anti-revert parity with the agent check: a read-only key smuggled
     into the ingest render must stop the run even with api-key present."""
     tmp_path, _ = ingest_tree
-    stub = (tmp_path / "stub-ingest.yaml").read_text()
+    stub = (tmp_path / "charts/mainframe-rag/templates/ingest-job.yaml").read_text()
     anchor = "                  key: api-key\n"
     assert anchor in stub
     stub = stub.replace(
@@ -255,9 +259,9 @@ def test_ingest_qdrant_copresent_readonly_key_fails_closed(ingest_tree):
         + "              valueFrom:\n"
         + "                secretKeyRef:\n"
         + "                  key: read-only-api-key\n"
-        + "                  name: __QDRANT_RELEASE__-apikey\n",
+        + "                  name: qdrant-apikey\n",
     )
-    (tmp_path / "stub-ingest.yaml").write_text(stub)
+    (tmp_path / "charts/mainframe-rag/templates/ingest-job.yaml").write_text(stub)
     r = _run_ingest(ingest_tree)
     assert r.returncode != 0
     assert "read-only" in r.stderr
@@ -275,29 +279,22 @@ def test_ingest_overlay_qdrant_contract():
     assert "__QDRANT_RELEASE__-apikey" in real
 
 
-def test_ingest_overlay_maintenance_contract():
-    """Issue #391 current packet: maintenance modes are explicit, validated
-    launcher inputs rendered into the prod Job, and the progress path stays
-    the single shared publisher path (no implicit alias/default flip)."""
-    real = (
-        REPO / "deploy" / "kustomize" / "overlays" / "openshift-ingest" / "ingest-job.yaml"
-    ).read_text()
-    assert re.search(r"(?m)^\s*args: __INGEST_ARGS__$", real)
-    assert re.search(r"(?m)^\s*- name: INGEST_ALIAS_PUBLISH$", real)
-    assert re.search(r'(?m)^\s*value: "__INGEST_ALIAS_PUBLISH__"$', real)
-    assert re.search(r'(?m)^\s*value: "true"$', real) is None
-    # The launcher owns the one shared progress path (writer constraint).
-    launcher = (REPO / "scripts" / "airgap" / "ingest.sh").read_text()
-    assert "--progress\", \"/work/inventory.jsonl" in launcher
+def test_ingest_overlay_maintenance_contract(ingest_tree):
+    """The explicit Job preserves the shared progress path and safe defaults."""
+    result = _run_ingest(ingest_tree)
+    assert result.returncode == 0, result.stderr
+    rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
+    assert rendered_container(rendered, "ingest")["args"] == [
+        "--src", "/corpus", "--progress", "/work/inventory.jsonl",
+    ]
+    assert rendered_env(rendered, "ingest")["INGEST_ALIAS_PUBLISH"] == "false"
 
 
 def test_ingest_default_render_adds_no_maintenance_args(ingest_tree):
     r = _run_ingest(ingest_tree)
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert (
-        'args: ["--src", "/corpus", "--progress", "/work/inventory.jsonl"]' in rendered
-    )
+    assert rendered_container(rendered, "ingest")["args"] == ["--src", "/corpus", "--progress", "/work/inventory.jsonl"]
     assert '"--reingest"' not in rendered
     assert '"--retire-doc"' not in rendered
     # Review F1: boolean env values render as quoted strings (K8s EnvVar.value
@@ -310,7 +307,7 @@ def test_ingest_force_repair_args_rendered(ingest_tree):
     r = _run_ingest(ingest_tree, ("INGEST_REINGEST", "true"))
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert '"--reingest"' in rendered
+    assert "--reingest" in rendered_container(rendered, "ingest")["args"]
     assert_no_placeholders(rendered)
 
 
@@ -328,8 +325,8 @@ def test_ingest_retire_docs_rendered_with_alias_publish(ingest_tree):
     )
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert '"--retire-doc", "SA22-0000-00"' in rendered
-    assert '"--retire-doc", "SA22-7777-01@rev-1"' in rendered
+    assert rendered_container(rendered, "ingest")["args"][-4:-2] == ["--retire-doc", "SA22-0000-00"]
+    assert rendered_container(rendered, "ingest")["args"][-2:] == ["--retire-doc", "SA22-7777-01@rev-1"]
     assert re.search(r'(?m)^\s*value: "true"$', rendered)
     assert_no_placeholders(rendered)
 
@@ -347,7 +344,7 @@ def test_ingest_retire_docs_accepts_source_revision_alphabet(ingest_tree):
     )
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert f'"--retire-doc", "SA23-1380-09@{rev}"' in rendered
+    assert rendered_container(rendered, "ingest")["args"][-2:] == ["--retire-doc", f"SA23-1380-09@{rev}"]
     assert_no_placeholders(rendered)
 
 
@@ -635,7 +632,7 @@ def test_ingest_otel_on_by_default(ingest_tree):
     r = _run_ingest(ingest_tree)
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert "value: http://jaeger:4318" in rendered
+    assert 'value: "http://jaeger:4318"' in rendered
     assert "value: mainframe-rag-ingest" in rendered
 
 
@@ -643,7 +640,7 @@ def test_ingest_otel_off_sentinel(ingest_tree):
     r = _run_ingest(ingest_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"))
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert re.search(r"OTEL_EXPORTER_OTLP_ENDPOINT\n\s+value:\s*$", rendered, re.MULTILINE)
+    assert rendered_env(rendered, "ingest")["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
 
 
 def test_ingest_otel_endpoint_and_environment_wired(ingest_tree):
@@ -654,8 +651,8 @@ def test_ingest_otel_endpoint_and_environment_wired(ingest_tree):
     )
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert "value: http://jaeger:4318" in rendered
-    assert "value: prod" in rendered
+    assert 'value: "http://jaeger:4318"' in rendered
+    assert 'value: "prod"' in rendered
     assert_no_placeholders(rendered)
 
 
@@ -734,10 +731,9 @@ def test_ingest_gateway_keys_wired_when_secret_set(ingest_tree):
         ("EMBED_API_KEY", "embed-api-key"),
         ("CONTEXT_LLM_API_KEY", "context-llm-api-key"),
     ):
-        assert re.search(
-            rf"- name: {env_name}\n\s+valueFrom:\n\s+secretKeyRef:\n\s+key: {data_key}\n\s+name: gateway-api-keys",
-            rendered,
-        ), env_name
+        assert rendered_env(rendered, "ingest")[env_name] == {
+            "secretKeyRef": {"key": data_key, "name": "gateway-api-keys"}
+        }
     # The ingest Job never touches the reasoning/rerank legs (anchored:
     # CONTEXT_LLM_API_KEY contains LLM_API_KEY as a substring).
     assert not re.search(r"^- name: LLM_API_KEY$", rendered, re.MULTILINE)
