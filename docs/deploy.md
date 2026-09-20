@@ -176,8 +176,8 @@ fault injection, serving smoke and PVC identities. Migration-only old/new
 comparisons currently use frozen pre-cutover scripts under
 `tests/fixtures/helm_migration`; they are not an operator deployment path.
 Helm rendering and Kind do not prove OpenShift or actual internal-site
-qualification. Those unexecuted checks must remain recorded as such; CRC was
-explicitly skipped by the operator for insufficient memory.
+qualification. Record unexecuted checks as not run in the candidate review;
+they do not authorize production promotion or Kustomize retirement.
 
 ## 4. Signing and provenance
 
