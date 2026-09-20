@@ -1225,3 +1225,74 @@ def test_revision_scoped_retirement_on_real_server(qdrant_url, tmp_path, monkeyp
         assert revs_live_steady == {rev_2, None}
     finally:
         client.close()
+
+
+def test_forced_migration_retry_retains_verified_document_on_real_qdrant(qdrant_url, tmp_path, monkeypatch):
+    """An interrupted migration keeps actual completed payloads/vectors on retry."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from qdrant_client import QdrantClient, models
+    from scripts.make_synthetic_pdf import build
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    alias = "sim-resume-forced"
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    monkeypatch.setenv("INGEST_UPSERT_STREAMS", "1")
+    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", lambda max_workers, mp_context: ThreadPoolExecutor(max_workers=max_workers))
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    build(corpus / "a.pdf", doc_id="SA22-7000-00")
+    build(corpus / "b.pdf", doc_id="SA22-7000-01")
+    progress = tmp_path / "inventory.jsonl"
+    _ingest(monkeypatch, qdrant_url, alias, corpus, progress)
+    client = QdrantClient(url=qdrant_url, timeout=30)
+    try:
+        live = next(a.collection_name for a in client.get_aliases().aliases if a.alias_name == alias)
+        monkeypatch.setenv("EMBED_MODEL_REVISION", "resume-synthetic-revision")
+        real_upsert = run_ingest._upsert_one
+
+        def fail_second(doc, *args, **kwargs):
+            if doc.doc_id == "SA22-7000-01":
+                raise RuntimeError("synthetic interrupted document")
+            return real_upsert(doc, *args, **kwargs)
+
+        monkeypatch.setattr(run_ingest, "_upsert_one", fail_second)
+        argv = ["--src", str(corpus), "--progress", str(progress), "--workers", "1", "--reingest"]
+        assert run_ingest.main(argv) == 1
+        staging = json.loads(publish_state_path(progress, alias).read_text())["staging"]
+        assert next(a.collection_name for a in client.get_aliases().aliases if a.alias_name == alias) == live
+        filter_a = models.Filter(must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value="SA22-7000-00"))])
+
+        def stored_a():
+            points, offset = client.scroll(staging, scroll_filter=filter_a, limit=100, with_payload=True, with_vectors=True)
+            assert points and offset is None
+            return [p.model_dump() for p in points]
+
+        before = stored_a()
+        real_parse = run_ingest._parse_one
+        parsed = []
+
+        def observed_parse(args):
+            parsed.append(Path(args[0]).name)
+            return real_parse(args)
+
+        monkeypatch.setattr(run_ingest, "_parse_one", observed_parse)
+        monkeypatch.setattr(run_ingest, "_upsert_one", real_upsert)
+        assert run_ingest.main(argv) == 0
+        assert parsed == ["b.pdf"]
+        assert stored_a() == before
+        assert next(a.collection_name for a in client.get_aliases().aliases if a.alias_name == alias) == staging
+        parsed.clear()
+        assert run_ingest.main(argv[:-1]) == 0
+        assert parsed == []
+    finally:
+        aliases = [a for a in client.get_aliases().aliases if a.alias_name == alias]
+        if aliases:
+            client.update_collection_aliases([models.DeleteAliasOperation(delete_alias=models.DeleteAlias(alias_name=alias))])
+        for collection in client.get_collections().collections:
+            if collection.name.startswith(alias + "__gen"):
+                client.delete_collection(collection.name)
+        client.close()

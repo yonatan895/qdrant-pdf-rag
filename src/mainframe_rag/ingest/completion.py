@@ -468,6 +468,7 @@ def is_doc_complete(
     rules_v: str,
     source_labels: str,
     source_rev: str,
+    required_manifest_digest: str | None = None,
 ) -> bool:
     """Skip gate: valid completion + verified points, same revision generation.
 
@@ -480,12 +481,18 @@ def is_doc_complete(
     without mass re-ingest): a sourceless marker certifies only when no
     named revision other than this one lives under the doc_id; mixed
     legacy+named fails toward re-ingest, never a wrong skip.
+
+    A forced-build resume supplies required_manifest_digest: only a scoped
+    checkpoint written under that exact contract can save migration work.
+    Ordinary compatible/record-only drift retains the existing policy.
     """
     expected_gen = doc_generation_id(settings, sha256, rules_v, source_labels)
     scoped = read_completion(
         client, settings, doc_id, source_rev=source_rev, generation_id=expected_gen
     )
     if scoped is not None:
+        if required_manifest_digest is not None and scoped.manifest_digest != required_manifest_digest:
+            return False
         if scoped.sha256 != sha256 or scoped.rules_v != rules_v:
             return False
         return verify_doc_points(
@@ -499,6 +506,8 @@ def is_doc_complete(
             chunk_ids_digest=scoped.chunk_ids_digest,
             content_digest=scoped.content_digest,
         )
+    if required_manifest_digest is not None:
+        return False
     for marker in legacy_markers(client, settings, doc_id):
         if (
             marker.target_collection != settings.qdrant_collection
