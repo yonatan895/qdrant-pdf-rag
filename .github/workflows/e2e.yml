@@ -6,7 +6,7 @@
 # Image scheme (single source of truth, issue #8):
 #   ghcr.io/<owner-lowercase>/qdrant-pdf-rag-{ingest,agent}:<full-git-sha>
 # built via `docker tag` from the artifact task local tags, pushed on
-# main/dispatch, and applied via the kustomize `ghcr.io/OWNER` sed.
+# main/dispatch, and consumed by the chart through generated operator values.
 #
 # Prereqs (README "Connected E2E"): GHCR packages public (anonymous pull from
 # the lab cluster), OPENSHIFT_SERVER/OPENSHIFT_TOKEN secrets. curlimages/curl
@@ -86,7 +86,7 @@ jobs:
           SHA="$GITHUB_SHA"
           # Issue #8 scheme: ghcr.io/<owner-lowercase>/qdrant-pdf-rag-<name>:<sha>.
           # This exact string is used for docker tag, docker push, and the
-          # kustomize sed — keep them identical.
+          # Helm values — keep them identical.
           OWNER_LC="$(echo "${{ github.repository_owner }}" | tr 'A-Z' 'a-z')"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "ingest=ghcr.io/${OWNER_LC}/qdrant-pdf-rag-ingest:$SHA" >> "$GITHUB_OUTPUT"
@@ -230,14 +230,14 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
-          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
           sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
           /usr/local/bin/helm version --short
 
-      - name: Install pinned kubectl (kustomize render + patch --local)
+      - name: Install pinned kubectl (CI patch --local)
         run: |
           export PATH="/usr/local/bin:$PATH"
           KUBECTL_VERSION=v1.37.0
@@ -353,14 +353,14 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
-          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
           sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
           /usr/local/bin/helm version --short
 
-      - name: Install pinned kubectl (kustomize render + patch --local)
+      - name: Install pinned kubectl (CI patch --local)
         run: |
           export PATH="/usr/local/bin:$PATH"
           KUBECTL_VERSION=v1.37.0
@@ -701,6 +701,13 @@ jobs:
           cd gapbox/qdrant-pdf-rag
           sh scripts/ci/gateway_faults.sh "$NS"
 
+      - name: First-party Helm chart lifecycle from the published bundle
+        if: matrix.lane == 'lifecycle'
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd gapbox/qdrant-pdf-rag
+          sh scripts/ci/rehearse_chart.sh
+
       - name: Three-worker lifecycle and repeated pipeline
         if: matrix.lane == 'lifecycle'
         env:
@@ -775,150 +782,7 @@ jobs:
             echo "OPENSHIFT_SERVER / OPENSHIFT_TOKEN not set; e2e will be skipped."
           fi
 
-  # ---------------------------------------------------------- lab OpenShift
-  openshift-e2e:
-    concurrency:
-      group: openshift-e2e-${{ github.ref || github.run_id }}
-      cancel-in-progress: false
-    permissions:
-      contents: read
-    needs: [build, e2e-secrets-check]
-    if: >-
-      needs.e2e-secrets-check.outputs.ok == 'true' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      SHARE: "false"
-      OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
-      OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
-      SHA: ${{ needs.build.outputs.sha }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (pin does not cover runtime-fetched oc/skopeo below)
-
-      - name: Install checksum-pinned Helm
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
-          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
-          mkdir -p "$RUNNER_TEMP/helm-unpack"
-          tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
-          sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
-          /usr/local/bin/helm version --short
-      - name: Install checksum-pinned OpenShift client
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/oc.tgz" https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.22.7/openshift-client-linux.tar.gz
-          echo "3d02d45ae5037a723afbbdda1063c08d4788a9b9ace6c6f44aa329764ee648a1  $RUNNER_TEMP/oc.tgz" | sha256sum -c -
-          mkdir -p "$RUNNER_TEMP/oc-unpack"
-          tar xzf "$RUNNER_TEMP/oc.tgz" -C "$RUNNER_TEMP/oc-unpack" oc kubectl
-          sudo install -m 0755 "$RUNNER_TEMP/oc-unpack/oc" /usr/local/bin/oc
-          sudo install -m 0755 "$RUNNER_TEMP/oc-unpack/kubectl" /usr/local/bin/kubectl
-          /usr/local/bin/oc version --client=true
-
-      - name: Log in to lab OpenShift
-        run: /usr/local/bin/oc login "$OPENSHIFT_SERVER" --token="$OPENSHIFT_TOKEN" --insecure-skip-tls-verify=true
-
-      - name: Create ephemeral namespace
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          NS="rag-ci-${SHA}"
-          echo "NS=$NS" >> "$GITHUB_ENV"
-          /usr/local/bin/oc new-project "$NS"
-          /usr/local/bin/oc label namespace "$NS" app.kubernetes.io/managed-by=e2e-workflow ephemeral=true
-
-      - name: Deploy Qdrant (CI overlay — 1 replica, 1Gi, unprivileged, ClusterIP)
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          /usr/local/bin/helm upgrade -i qdrant charts/qdrant-*.tgz -n "$NS" -f overlays/ci/values.yaml
-          /usr/local/bin/kubectl -n "$NS" rollout status statefulset/qdrant --timeout=300s
-
-      - name: Wait for Qdrant readyz
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          for i in $(seq 1 30); do
-            if /usr/local/bin/kubectl -n "$NS" run readycheck-"$i" --image=curlimages/curl --restart=Never \
-                 --command -- curl -sf http://qdrant:6333/readyz; then
-              break
-            fi
-            /usr/local/bin/kubectl -n "$NS" delete pod readycheck-"$i" --ignore-not-found
-            [ "$i" = 30 ] && exit 1
-            sleep 10
-          done
-
-      # GHCR packages must be PUBLIC (repo Settings -> Packages) so the lab
-      # cluster can pull anonymously; alternatively create an imagePullSecret
-      # from a fine-grained PAT with oc create secret (token never in git).
-      - name: Apply agent + ingest Job (kustomize overlay, sha-tagged GHCR images)
-        env:
-          KUSTOMIZE_OWNER_PLACEHOLDER: ghcr.io/OWNER
-          KUSTOMIZE_TAG_PLACEHOLDER: ":ci"
-          KUSTOMIZE_NS_PLACEHOLDER: "namespace: rag-ci"
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          OWNER_LC="$(echo "${{ github.repository_owner }}" | tr 'A-Z' 'a-z')"
-          /usr/local/bin/kubectl kustomize deploy/kustomize/overlays/ci \
-            | sed -e "s|$KUSTOMIZE_OWNER_PLACEHOLDER|ghcr.io/${OWNER_LC}|g" \
-                  -e "s|$KUSTOMIZE_TAG_PLACEHOLDER|:${SHA}|g" \
-                  -e "s|$KUSTOMIZE_NS_PLACEHOLDER|namespace: rag-ci-${SHA}|g" \
-            | /usr/local/bin/kubectl apply -f -
-
-      - name: Wait for ingest Job (generates demo PDFs, ingests with EMBED_MODE=hash)
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          if ! /usr/local/bin/kubectl -n "$NS" wait --for=condition=complete job/ingest --timeout=600s; then
-            echo "::error::ingest Job failed"
-            /usr/local/bin/kubectl -n "$NS" logs job/ingest --tail=200 || true
-            /usr/local/bin/kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -30 || true
-            exit 1
-          fi
-
-      - name: Wait for agent readiness
-        run: /usr/local/bin/kubectl -n "$NS" rollout status deploy/rag-agent --timeout=300s
-
-      # Smoke 1: outline PDF — message id found (hybrid search, hash embeddings).
-      - name: Smoke — IEA500I from outline demo PDF
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
-            python /app/scripts/smoke_search.py \
-              --url http://rag-agent:8080 --query "IEA500I operator message" --expect "IEA500I"
-
-      # Smoke 2: plain generic PDF — lexical hit for widget/torque prose.
-      - name: Smoke — torque/widget text from plain demo PDF
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          /usr/local/bin/kubectl -n "$NS" exec deploy/rag-agent -- \
-            python /app/scripts/smoke_search.py \
-              --url http://rag-agent:8080 --query "torque the widget screws" --expect "torque"
-
-      - name: Failure diagnostics (pods, events, logs)
-        if: failure()
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          /usr/local/bin/kubectl -n "$NS" get pods,pvc,svc,jobs -o wide || true
-          /usr/local/bin/kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -40 || true
-          /usr/local/bin/kubectl -n "$NS" describe statefulset/qdrant deploy/rag-agent 2>/dev/null | tail -60 || true
-          /usr/local/bin/kubectl -n "$NS" logs statefulset/qdrant --all-containers --tail=50 || true
-          /usr/local/bin/kubectl -n "$NS" logs deploy/rag-agent --all-containers --tail=100 || true
-          /usr/local/bin/kubectl -n "$NS" logs job/ingest --tail=100 || true
-
-      - name: Delete ephemeral namespace
-        if: always()
-        run: |
-          export PATH="/usr/local/bin:$PATH"
-          /usr/local/bin/oc delete project "$NS" --wait=false --ignore-not-found || \
-            /usr/local/bin/kubectl delete namespace "$NS" --ignore-not-found --wait=false || true
-
-  # --------------------------------- air-gap config dry-run (no cluster, no secrets)
-  # Runs the REAL airgap scripts with AIRGAP_DRYRUN=1 on every PR: renders the
-  # PROD agent + ingest manifests, enforces the placeholder fail-close, the
-  # SHA rules, both PULL_SECRET branches, and the size-knob flow. Proves the
-  # deployment CONFIG with zero secrets and zero cluster; the live rehearsal
-  # (below, secrets-gated) proves the deployment comes up. A true in-runner
-  # OpenShift is not feasible (CRC needs KVM; microshift-aio abandoned 2022),
-  # so this is the PR-level gate for the air-gap path.
+  # Offline rendering of the production Helm launchers.
   airgap-dryrun:
     concurrency:
       group: airgap-dryrun-${{ github.ref || github.run_id }}
@@ -936,14 +800,14 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
-          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
           sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
           /usr/local/bin/helm version --short
 
-      - name: Install pinned kubectl (kustomize render + patch --local)
+      - name: Install pinned kubectl (CI patch --local)
         run: |
           export PATH="/usr/local/bin:$PATH"
           KUBECTL_VERSION=v1.37.0
@@ -979,10 +843,10 @@ jobs:
           # Tracing defaults ON: an unset endpoint resolves to the in-cluster
           # Jaeger (issue #83), so the default deploy renders it too.
           test -f dist/jaeger-rendered.yaml
-          grep -q 'value: http://jaeger:4318' dist/agent-rendered.yaml
+          grep -Eq 'value: "?http://jaeger:4318"?$' dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml
 
-      - name: first-party chart render asserts (issue #448 H2a)
+      - name: First-party release inventory assertions
         env:
           IMAGE_SHA: ${{ env.SHA }}
           AIRGAP_DRYRUN: "1"
@@ -999,14 +863,14 @@ jobs:
           sh scripts/tools/run-task.sh artifacts:app-helm-lint
           sh scripts/tools/run-task.sh airgap:deploy
           test -f dist/mainframe-rag-release-values.yaml
-          test -f dist/agent-chart-rendered.yaml
-          grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-agent:${SHA}" dist/agent-chart-rendered.yaml
-          grep -q "kind: Deployment" dist/agent-chart-rendered.yaml
-          grep -q "kind: Service" dist/agent-chart-rendered.yaml
+          test -f dist/agent-rendered.yaml
+          grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-agent:${SHA}" dist/agent-rendered.yaml
+          grep -q "kind: Deployment" dist/agent-rendered.yaml
+          grep -q "kind: Service" dist/agent-rendered.yaml
           # Steady-state release owns no one-shot Job (D3).
-          ! grep -q "kind: Job" dist/agent-chart-rendered.yaml
+          ! grep -q "kind: Job" dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/mainframe-rag-release-values.yaml
-          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-chart-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml
 
       - name: airgap-deploy dry-run with PULL_SECRET + extra values
         env:
@@ -1069,7 +933,7 @@ jobs:
           test -f dist/jaeger-rendered.yaml
           grep -q "ghcr.io/dryrun-standin/jaegertracing/jaeger:v2.20.0" dist/jaeger-rendered.yaml
           grep -q "storageClassName: standard" dist/jaeger-rendered.yaml
-          grep -q 'value: http://jaeger:4318' dist/agent-rendered.yaml
+          grep -Eq 'value: "?http://jaeger:4318"?$' dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml
 
       - name: airgap-deploy dry-run with metrics enabled (ServiceMonitor render, issue #187)
@@ -1127,10 +991,10 @@ jobs:
           grep -q "cpu: 250m" dist/ingest-rendered.yaml   # INGEST_EXTRA_PATCH applied
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml
           # Explicit chart Job render (D3: show-only, never auto-installed).
-          test -f dist/ingest-chart-rendered.yaml
-          grep -q "kind: Job" dist/ingest-chart-rendered.yaml
-          grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-ingest:${SHA}" dist/ingest-chart-rendered.yaml
-          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-chart-rendered.yaml
+          test -f dist/ingest-rendered.yaml
+          grep -q "kind: Job" dist/ingest-rendered.yaml
+          grep -q "ghcr.io/dryrun-standin/qdrant-pdf-rag-ingest:${SHA}" dist/ingest-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml
 
       - name: Task airgap:dryrun (full pipeline dry-run incl. validate/load/smoke)
         env:
@@ -1150,14 +1014,14 @@ jobs:
           test -f dist/agent-rendered.yaml
           test -f dist/ingest-rendered.yaml
           test -f dist/mainframe-rag-release-values.yaml
-          test -f dist/agent-chart-rendered.yaml
-          test -f dist/ingest-chart-rendered.yaml
+          test -f dist/agent-rendered.yaml
+          test -f dist/ingest-rendered.yaml
 
   # ---------------------------------------------- air-gap runbook rehearsal
   # Rehearses the OPERATOR RUNBOOK (issue #15) against the lab OpenShift, so
   # CI-green proves the air-gap deployment path works at the packed SHA:
   #   airgap-pack -> airgap-load (INTERNAL_REGISTRY stand-in: GHCR)
-  #   -> airgap-deploy (PROD kustomize overlay + prod Helm values)
+  #   -> airgap-deploy (first-party chart + separate Qdrant Helm release)
   #   -> airgap-ingest (corpus PVC) -> airgap-smoke.
   # CI-only stand-ins, never in git prod values (see the size knobs in
   # scripts/airgap/deploy.sh + ingest.sh):
@@ -1211,8 +1075,8 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
-          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
           sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm

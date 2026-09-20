@@ -105,7 +105,7 @@ class TestProfileClassification(unittest.TestCase):
             "pyproject.toml",
             "requirements.lock.txt",
             "scripts/airgap/deploy.sh",
-            "deploy/kustomize/base/agent.yaml",
+            "charts/mainframe-rag/templates/agent-deployment.yaml",
             "airgap.env.example",
             "tests/test_airgap_deploy_sh.py",
         ]

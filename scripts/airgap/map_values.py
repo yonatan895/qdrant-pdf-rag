@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Map resolved operator environment to first-party Helm release values.
 
-Issue #448 H2a (dry-run rehearsal precursor to the H3 generator).
+Issue #448: generated deployment and explicit ingest values.
 
 Reads the ALREADY-RESOLVED environment (common.sh owns alias, precedence,
 and file loading; this script never parses airgap.env and never reorders
 precedence) and writes dist/mainframe-rag-release-values.yaml. Callers must
 export the input set first: sourced files (collection-policy preset,
 airgap.env) leave plain assignments shell-local, invisible to child
-processes (deploy.sh/ingest.sh dry-run branches do this export). The YAML is
+processes (map_app_values performs this export). The YAML is
 emitted by a small deterministic stdlib-only serializer (no pyyaml
 dependency, bastion-friendly): strings via JSON double-quoting (valid YAML,
 byte-exact round-trip including spaces, pipes, ampersands and newlines),
@@ -17,8 +17,7 @@ integers/booleans native, fixed key order.
 Fail-closed: exit 1 with "FAIL: ..." on any missing/invalid selected input,
 mirroring the shell preflight rules. Never prints secret values.
 
-H2a scope: invoked from the AIRGAP_DRYRUN=1 branches of deploy.sh/ingest.sh
-(and CI/Task rehearsal). Production paths are untouched.
+Invoked by deploy.sh/ingest.sh and the identical dry-run/CI rendering paths.
 """
 
 from __future__ import annotations
@@ -144,6 +143,8 @@ def build_values(deploy_only: bool = False) -> dict:
     if not internal_registry:
         die("INTERNAL_REGISTRY is not set (copy airgap.env.example to airgap.env)")
     namespace = env("NAMESPACE") or env("OPENSHIFT_NAMESPACE") or "mainframe-rag"
+    if len(namespace) > 63 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", namespace):
+        die("NAMESPACE must be a DNS label of at most 63 characters")
     qdrant_release = env("QDRANT_RELEASE") or "qdrant"
     image_sha = env("IMAGE_SHA")
     if image_sha in ("", "HEAD"):
@@ -172,7 +173,7 @@ def build_values(deploy_only: bool = False) -> dict:
         if not ca_file:
             die(
                 "AGENT_ROUTE=true needs ROUTE_DESTINATION_CA_FILE pointing at the "
-                "namespace service-CA bundle (route-on chart rehearsal; "
+                "namespace service-CA bundle (Route rendering; "
                 "route-off dry-run needs no CA)"
             )
         try:
@@ -195,6 +196,7 @@ def build_values(deploy_only: bool = False) -> dict:
         "enabled": False,
         "corpusPVC": "",
         "workers": 4,
+        "workSize": env("INGEST_WORK_SIZE") or "100Gi",
         "aliasPublish": False,
         "reingest": False,
         "retireDocs": [],
@@ -224,6 +226,7 @@ def build_values(deploy_only: bool = False) -> dict:
     if ingest_enabled:
         ingest_block = {
             "enabled": True,
+            "workSize": env("INGEST_WORK_SIZE") or "100Gi",
             "corpusPVC": corpus_pvc,
             "workers": positive_int("INGEST_WORKERS", env("INGEST_WORKERS") or "4"),
             "aliasPublish": strict_bool("INGEST_ALIAS_PUBLISH", env("INGEST_ALIAS_PUBLISH"), False),
@@ -339,7 +342,7 @@ def main(argv: list[str]) -> int:
     values = build_values(deploy_only=deploy_only)
     namespace = values.pop("_meta")["namespace"]
     header = (
-        "# Generated release values (issue #448 H2a). Deployment input/evidence, "
+        "# Generated release values (issue #448). Deployment input/evidence, "
         "not a source of truth.\n"
         "# Produced from validated operator input; airgap.env remains the owner.\n"
         f"# Namespace: {namespace}\n"

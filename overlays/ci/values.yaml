@@ -4,7 +4,7 @@
 # Runs on a CONNECTED cluster only: pulling docker.io here is acceptable.
 # Explicitly non-HA (issue #360): one pod holds every shard, so no pod/node
 # loss is survivable. The connected-CI ingest overlay selects the 1/1/1
-# profile explicitly (deploy/kustomize/overlays/ci/ingest-job.yaml); never
+# profile explicitly (the CI operator environment); never
 # treat this lane as distributed acceptance.
 
 replicaCount: 1

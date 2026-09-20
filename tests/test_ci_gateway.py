@@ -110,6 +110,9 @@ def test_rehearsal_lanes_share_published_bundle_and_bound_jobs():
     assert 'airgap-package' in lab['needs']
     assert any('download-artifact@' in s.get('uses', '') for s in lab['steps'])
     assert not any('make airgap-pack' in s.get('run', '') for s in lab['steps'])
+    smokes = '\n'.join(s.get('run', '') for s in lab['steps'])
+    assert '--query "IEA500I operator message" --expect "IEA500I"' in smokes
+    assert '--query "torque the widget screws" --expect "torque"' in smokes
     for job in jobs.values():
         assert job['permissions'] and job['timeout-minutes'] > 0
         assert 'github.run_id' in job['concurrency']['group']
@@ -166,7 +169,8 @@ def test_installer_artifact_corruption_stops_before_installation(tmp_path):
     workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
     installers = [step['run'] for job in workflow['jobs'].values() for step in job['steps']
                   if step.get('name', '').startswith(('Install checksum-pinned', 'Install pinned kubectl', 'Install pinned kind'))]
-    assert len(installers) >= 10
+    # The retired direct-manifest OpenShift lane duplicated one installer.
+    assert len(installers) == 9
     # Exercise the actual shell gates with corrupt downloaded bytes. The curl
     # function avoids the network; sudo records any unsafe attempt to install.
     harness = r"""curl() {

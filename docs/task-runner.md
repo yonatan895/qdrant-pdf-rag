@@ -69,6 +69,10 @@ not an arbitrary system binary.
   artifacts. Old approved bundles use their own bundled bootstrap and Make
   contract in a separate workspace; do not mix old assets with a new checkout.
 
+Deployment render tests and air-gap deployment require Helm 4; use the
+checksum-pinned 4.3.0 client in [CI](../.github/workflows/ci.yml). Rendering
+uses the local chart and needs no cluster or remote chart repository.
+
 Discovery, doctor and verification never provision tools. Missing or foreign
 workspace binaries fail with remediation; installation is an explicit action.
 

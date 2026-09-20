@@ -124,12 +124,12 @@ load() {
 }
 
 load qdrant-image.tar "$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged"
-# Upstream source tag is 2.20.0 in images.txt; retagged to v2.20.0 to match deploy/kustomize/jaeger
+# Upstream source tag is 2.20.0 in images.txt; retagged to v2.20.0 to match the first-party Jaeger template
 load jaeger-image.tar "$INTERNAL_REGISTRY/jaegertracing/jaeger:v2.20.0"
 load "app-ingest-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA"
 load "app-agent-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-agent:$IMAGE_SHA"
 if [ -n "$OAUTH_TAR" ]; then
-    # ADR-0004 console Route: same tag the prod overlay renders for the sidecar.
+    # ADR-0004 console Route: same tag the production chart renders for the sidecar.
     load "$OAUTH_TAR" "$INTERNAL_REGISTRY/openshift4/ose-oauth-proxy:v4.14"
 fi
 

@@ -17,7 +17,7 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 |---|---|
 | `charts/qdrant-*.tgz` | Vendored Qdrant Helm chart (Apache-2.0); never `helm repo add` in the air-gap |
 | `overlays/openshift/values.yaml` | Qdrant OpenShift values: 3-replica StatefulSet, unprivileged, RWO block, ClusterIP only |
-| `deploy/` | 2-replica agent Deployment, one-shot ingest Job, Jaeger (tracing on by default); `AGENT_ROUTE=true` renders the oauth-proxy console overlay (`deploy/kustomize/overlays/openshift-ui`) and a reencrypt Route — fails closed while the oauth-proxy pin is `sha256:PENDING` |
+| `charts/mainframe-rag/` | 2-replica agent Deployment, one-shot ingest Job, Jaeger (tracing on by default); `AGENT_ROUTE=true` renders the OAuth sidecar and a reencrypt Route — fails closed while the oauth-proxy pin is `sha256:PENDING` |
 | `oc-mirror/` | `ImageSetConfiguration` for disconnected mirroring |
 | `src/mainframe_rag/ingest/` | PDF walk, IBM-style parse, chrome strip, chunk, classify, embed, Qdrant IO |
 | `src/mainframe_rag/retrieve/` | Hybrid search (dense + BM25 prefetch, batched query, weighted RRF), query-class screen, optional cross-encoder rerank (`RERANK_ENDPOINT_ORDER`), diversification, filters |
@@ -137,7 +137,7 @@ the same tool without network access. Start with
 | **Packaging & Standard Deployment** | `sh scripts/tools/run-task.sh airgap:pack` | Build sneakernet package (`dist/qdrant-pdf-rag-<sha>.tar`) on connected host |
 | | `sh scripts/tools/run-task.sh airgap:validate` | Pre-flight validation of tools, env, storage class, and OpenShift SCC |
 | | `sh scripts/tools/run-task.sh airgap:load` | Load image archives and push to `${INTERNAL_REGISTRY}` (in air-gap or local test registry) |
-| | `sh scripts/tools/run-task.sh airgap:deploy` | Deploy Qdrant cluster, Jaeger v2 tracing, and Agent via standard Helm + Kustomize |
+| | `sh scripts/tools/run-task.sh airgap:deploy` | Deploy Qdrant cluster, Jaeger v2 tracing, and Agent via separate Helm releases |
 | | `sh scripts/tools/run-task.sh airgap:ingest` | Launch one-shot ingest Job against `CORPUS_PVC=<pvc>` |
 | | `sh scripts/tools/run-task.sh airgap:smoke` | Smoke test in-cluster search endpoint with fail-closed `/healthz` probe |
 | | `sh scripts/tools/run-task.sh airgap:pipeline` | Single master orchestrator running validate -> load -> deploy -> ingest -> smoke |
@@ -171,7 +171,7 @@ QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=dev-corpus \
 
 ## Standard Deployment Architecture (Air-Gap & Local Cluster)
 
-The hardened 5-stage deployment pipeline (`airgap:pack` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts, Helm chart, and Kustomize overlays, with adapted sizing and SCC for local test clusters).
+The hardened 5-stage deployment pipeline (`airgap:pack` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts and Helm charts, with adapted sizing and SCC for local test clusters).
 
 **The air-gap never builds images.** Connected `main` is the only image factory.
 

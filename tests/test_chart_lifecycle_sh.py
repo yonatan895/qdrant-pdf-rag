@@ -39,6 +39,7 @@ elif op == 'upgrade':
             state['rev'] += 1
             state['status'] = 'deployed'
             sys.exit(0)
+        state['fault_image'] = not bool(os.environ.get('ADMISSION_FAIL'))
         state['status'] = 'failed'
         with open(state_file, 'w') as f:
             json.dump(state, f)
@@ -52,6 +53,8 @@ elif op == 'rollback':
 elif op == 'status':
     print(json.dumps({'version': state['rev'], 'info': {'status': state['status']}}))
 elif op == 'get':
+    if os.environ.get('READ_FAIL') == 'manifest':
+        sys.exit(1)
     print(open(os.environ['MANIFEST_FILE']).read())
 else:
     sys.exit(2)
@@ -97,6 +100,8 @@ if command == 'get' and rest[0] in ('secret', 'configmap'):
           f'  uid: some-uid\\n  resourceVersion: "99"\\ndata:\\n  k: dmFs\\n')
     sys.exit(0)
 if command == 'get' and rest[0] == 'pvc':
+    if os.environ.get('READ_FAIL') == 'pvc':
+        sys.exit(1)
     if ns == os.environ['NS']:
         state['chart_pvc_calls'] = state.get('chart_pvc_calls', 0) + 1
         with open(state_file, 'w') as f:
@@ -111,10 +116,16 @@ if command == 'get' and rest[0] == 'pvc':
         print('tripped-data-uid' if state['data_pvc_calls'] > trip_after else 'data-pvc-uid')
     sys.exit(0)
 if command == 'get' and rest[0] == 'sts':
+    if os.environ.get('READ_FAIL') == 'sts':
+        sys.exit(1)
     if os.environ.get('STS_TRIP') == '1':
         print('qdrant   1/1   1m')
     sys.exit(0)
 if command == 'get' and rest[0].startswith('deploy/'):
+    if args[-1].endswith('.image}'):
+        print('test/agent:' + ('0000000000000000000000000000000000000000'
+              if state.get('fault_image') else 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'))
+        sys.exit(0)
     if 'OTEL_DEPLOYMENT_ENVIRONMENT' in ' '.join(args):
         if os.environ.get('MARK_MODE') == 'stuck-a':
             print('')
@@ -226,6 +237,9 @@ def test_full_sequence_green(harness):
     mutating = [o for o in ops if o in ('install', 'upgrade', 'rollback')]
     assert mutating == ['install', 'upgrade', 'upgrade', 'upgrade',
                         'rollback', 'upgrade', 'upgrade']
+    for args in helm_calls(calls):
+        if args[0] in ('install', 'upgrade', 'rollback'):
+            assert '--server-side=false' in args
     assert 'status' in ops  # revision probes between mutations
     # Helm --timeout needs a duration unit (live rehearsal caught bare "300").
     import re as _re
@@ -346,3 +360,80 @@ def test_missing_data_ns_fails_closed(harness):
     assert result.returncode != 0
     assert 'DATA_NS is required' in result.stderr
     assert log.read_text() == ''
+
+
+@pytest.mark.parametrize('resource', ['pvc', 'sts', 'manifest'])
+def test_failed_cluster_reads_block_acceptance(harness, resource):
+    result, _ = run_harness(harness, ('READ_FAIL', resource))
+    assert result.returncode != 0
+    assert 'chart lifecycle complete' not in result.stdout
+
+
+def test_values_paths_reach_helm_without_word_splitting(harness):
+    scale = harness[0] / 'scale values [kind].yaml'
+    scale.write_text('replicaCount: 1\n')
+    result, calls = run_harness(harness, ('SCALE_VALUES', str(scale)))
+    assert result.returncode == 0, result.stderr
+    rendered = [a for a in helm_calls(calls) if a[0] in ('lint', 'install', 'upgrade')]
+    assert len(rendered) == 7
+    for args in rendered:
+        assert args[-2:] == ['-f', str(scale)]
+
+
+def test_published_bundle_entry_uses_resolved_operator_values(tmp_path):
+    import shutil
+
+    import yaml
+
+    root = tmp_path / 'verified source'
+    for relative in ('scripts/ci', 'scripts/airgap'):
+        (root / relative).mkdir(parents=True)
+    for relative in ('scripts/ci/rehearse_chart.sh', 'scripts/airgap/common.sh',
+                     'scripts/airgap/map_values.py'):
+        shutil.copyfile(ROOT / relative, root / relative)
+    (root / 'airgap.env').write_text(
+        'INTERNAL_REGISTRY=registry.test/team\nNAMESPACE=file-namespace\n'
+        'IMAGE_SHA=' + 'a' * 40 + '\n'
+        'STORAGE_CLASS=local-path\nEMBED_MODEL=mock-embed\n'
+        'EMBED_MODEL_REVISION="revision with spaces | and pipes"\n'
+        'DENSE_DIM=1024\nVLLM_BASE_URL=https://test-gateway:4000\n'
+        'CORPUS_PVC=corpus\nPULL_SECRET=rehearsal-pull\n'
+    )
+    (root / 'scripts/ci/chart_lifecycle.sh').write_text(
+        '#!/bin/sh\nset -eu\n'
+        'test "$DATA_NS" = cli-namespace\n'
+        'test "$PULL_SECRET_SRC" = rehearsal-pull\n'
+        'test "$B_MARKER" = chart-lifecycle-B\n'
+        'test "$1" = cli-namespace-chart\n'
+        'test "$2" = charts/mainframe-rag\n'
+        'test "$3" = dist/chart-lifecycle-a.yaml\n'
+        'test "$4" = dist/chart-lifecycle-b.yaml\n'
+        'touch lifecycle-invoked\n'
+    )
+    result = subprocess.run(
+        ['sh', str(root / 'scripts/ci/rehearse_chart.sh')],
+        env={'PATH': os.environ['PATH'], 'NAMESPACE': 'cli-namespace'},
+        text=True, capture_output=True, check=False, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (root / 'lifecycle-invoked').exists()
+    a, b = [yaml.safe_load((root / f'dist/chart-lifecycle-{suffix}.yaml').read_text())
+            for suffix in ('a', 'b')]
+    assert a['ingest']['enabled'] is False
+    assert a['models']['embedding']['revision'] == 'revision with spaces | and pipes'
+    assert a['pullSecret']['name'] == 'rehearsal-pull'
+    assert a['tracing']['deploymentEnvironment'] == 'chart-lifecycle-A'
+    assert b['tracing']['deploymentEnvironment'] == 'chart-lifecycle-B'
+    a['tracing']['deploymentEnvironment'] = b['tracing']['deploymentEnvironment']
+    assert a == b
+    workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
+    steps = workflow['jobs']['kind-live-rehearsal']['steps']
+    step = next(step for step in steps if 'sh scripts/ci/rehearse_chart.sh' in step.get('run', ''))
+    assert step['if'] == "matrix.lane == 'lifecycle'"
+    assert 'cd gapbox/qdrant-pdf-rag' in step['run']
+
+
+def test_admission_rejection_is_not_failed_rollout_evidence(harness):
+    result, _ = run_harness(harness, ('ADMISSION_FAIL', '1'))
+    assert result.returncode != 0
+    assert 'fault image was not admitted' in result.stderr

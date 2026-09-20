@@ -101,8 +101,8 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False) -> l
     required = ["pyproject.toml", "requirements.lock.txt", "images.txt", "bm25-weights.sha256"]
     if profile == "deploy":
         required += ["airgap.env.example", "scripts/airgap/common.sh",
-                     "deploy/kustomize/overlays/openshift/kustomization.yaml",
-                     "deploy/kustomize/overlays/openshift-ingest/kustomization.yaml"]
+                     "charts/mainframe-rag/Chart.yaml",
+                     "charts/mainframe-rag/values.schema.json"]
     for name in required:
         add("ready" if (root/name).is_file() else "missing prerequisite", name, "tracked input presence")
     try:
@@ -128,11 +128,11 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False) -> l
         add("unable to verify", "tracked configuration", "missing, unreadable or unsupported pin/config input")
         return results
 
-    tools = ["git"]
+    tools = ["git", "helm"]  # Unit/deploy contracts execute the real chart renderer.
     if profile == "sim":
         tools += ["docker"]
     if profile == "deploy":
-        tools += ["helm", "skopeo", "tar", "openssl", "sha256sum"]
+        tools += ["skopeo", "tar", "openssl", "sha256sum"]
         cli = shutil.which("oc") or shutil.which("kubectl")
         add("ready" if cli else "missing prerequisite", "oc or kubectl", "CLI presence only; no cluster contact")
     for name in tools:

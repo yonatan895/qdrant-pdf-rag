@@ -249,7 +249,7 @@ When running local tooling (`sh scripts/tools/run-task.sh local:ask`, `sh script
 | **`RERANK_BASE_URL`** | Gateway handoff URL | Platform gateway scoring/rerank leg (required when `RERANK_ENABLED=true`) |
 | **`RERANK_MODEL`** | `BAAI/bge-reranker-v2-m3` | Must match the served reranker model |
 | **`LLM_STREAM`** | `true` via `sh scripts/tools/run-task.sh local:agent` | `false` (production default; enable only where TTFT metrics are wanted) |
-| **`UI_ENABLED`** | `"true"` via `sh scripts/tools/run-task.sh local:stack`; unset via `sh scripts/tools/run-task.sh local:agent` (fail-closed 404) | `"true"` from the prod overlay (console served; only the external Route is OAuth-protected) |
+| **`UI_ENABLED`** | `"true"` via `sh scripts/tools/run-task.sh local:stack`; unset via `sh scripts/tools/run-task.sh local:agent` (fail-closed 404) | `"true"` from the production chart (console served; only the external Route is OAuth-protected) |
 | **`CHAT_CONDENSE_ENABLED`** | `false` (default) | `false` (enabling is a dedicated default-flip PR; `sh scripts/tools/run-task.sh eval:chat` is the evidence) |
 
 #### REPL Controls & Options
@@ -520,7 +520,7 @@ sh scripts/tools/run-task.sh local:agent
 
 ## 4. Standard Deployment Architecture (Air-Gap Production & Local Cluster Testing)
 
-The hardened 5-stage deployment pipeline (`airgap:pack` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts, Helm chart, and Kustomize overlays, with adapted sizing and SCC for local test clusters).
+The hardened 5-stage deployment pipeline (`airgap:pack` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts and Helm charts, with adapted sizing and SCC for local test clusters).
 
 ### 4.1 Packaging on the Connected Host (Image Factory)
 
@@ -825,7 +825,7 @@ Acceptance Criteria:
 
 Tracing is **on by default**: leaving `OTEL_EXPORTER_OTLP_ENDPOINT` unset
 resolves to the in-cluster `http://jaeger:4318`, and `sh scripts/tools/run-task.sh airgap:deploy`
-renders and applies `deploy/kustomize/jaeger` (Jaeger v2 all-in-one, badger
+renders and installs the Jaeger templates in `charts/mainframe-rag` (Jaeger v2 all-in-one, badger
 storage on a 10Gi RWO block PVC, 14-day span TTL, ClusterIP only) and wires
 the endpoint into the agent and the ingest Job. To disable tracing — and skip
 the Jaeger deployment entirely — set `OTEL_EXPORTER_OTLP_ENDPOINT=off` (also
@@ -875,7 +875,7 @@ exemplar deferral) is recorded in `docs/adr/0002-otel-backend-posture.md`.
 
 ### 4.4.2 Operator Console Route (optional, ADR-0004)
 
-The agent serves the operator console at `/ui`, and the production overlay sets
+The agent serves the operator console at `/ui`, and the production chart sets
 `UI_ENABLED=true` — so the console is reachable in-cluster at
 `http://rag-agent:8080/ui` even without a Route. Only the **external** Route is
 OAuth-protected; enable it with `AGENT_ROUTE=true`:
@@ -907,9 +907,9 @@ OAuth-protected; enable it with `AGENT_ROUTE=true`:
    oc -n "$NAMESPACE" create secret generic rag-agent-oauth-cookie \
      --from-file=cookie-secret=/secure/oauth-cookie-secret
    ```
-3. Set `AGENT_ROUTE=true` in `airgap.env` and deploy. `deploy.sh` layers
-   `deploy/kustomize/overlays/openshift-ui` and creates a `reencrypt` Route
-   when one does not already exist (an existing Route is left as-is), inlining
+3. Set `AGENT_ROUTE=true` in `airgap.env` and deploy. `deploy.sh` renders
+   the chart OAuth resources and reconciles the `reencrypt` Route, including
+   an existing Route's CA and timeout, using
    the namespace `openshift-service-ca.crt` bundle as the
    `destinationCACertificate`.
 4. Reach it: `oc -n mainframe-rag get route rag-agent` → unauthenticated
@@ -1012,7 +1012,7 @@ real OpenShift SCC, OAuth, Route, TLS, and isolation checks. Preserve Kind
 volumes and tested backups; stop its nodes while CRC runs.
 
 > [!NOTE]
-> Local cluster testing exercises the identical packaging scripts, container archives, Helm chart, and Kustomize overlays as production, but with adapted sizing and security contexts (1-replica Kind + mock/local vLLM rather than 3-replica OpenShift `restricted-v2`).
+> Local cluster testing exercises the identical packaging scripts, container archives, Helm charts as production, but with adapted sizing and security contexts (1-replica Kind + mock/local vLLM rather than 3-replica OpenShift `restricted-v2`).
 
 The executable recipe for the current test environment is the
 [`kind-live-rehearsal` matrix](../.github/workflows/e2e.yml), with lane details in
@@ -1063,7 +1063,7 @@ The exact setup YAML, image/tool pins, resource patches, authenticated registry
 configuration, corpus generator and cleanup are kept together in the workflow.
 The CRC variant uses [the local runbook's generator](local-crc-environment.md#72-configure-and-deploy-the-same-candidate)
 with `restricted-v2` and project-assigned IDs. No mock or test gateway belongs
-in production overlays or application images.
+in production manifests or application images.
 
 Access Kind privately with `kubectl -n "$NAMESPACE" port-forward svc/rag-agent
 8080:8080` and open `http://localhost:8080/ui`. Kind supplies no OpenShift OAuth,
@@ -1143,7 +1143,7 @@ curl -X POST http://rag-agent:8080/v1/chat \
 #### Operator console (`GET /ui`)
 Server-rendered console (ADR-0004: Jinja2 + HTMX + SSE, browser-only session
 state). `UI_ENABLED` unset/false returns the stable 404 envelope; the
-production overlay sets it true, and external access is the OAuth-proxied
+production chart sets it true, and external access is the OAuth-proxied
 Route from §4.4.2.
 
 #### Streaming (`?stream=true`)
@@ -1174,4 +1174,4 @@ Citation validation runs on the accumulated text exactly as in JSON mode: the ci
 | **Stale dist/ tarballs fill disk** | `pack`/`load` fail with no-space errors after several rehearsals | Every pack leaves a ~1.5 GB `qdrant-pdf-rag-<sha>.tar` in gitignored `dist/`; only the MANIFEST-pinned one is live. Delete superseded tarballs (keep the `.tar.sha256` of the live one) — pack never prunes. |
 | **Kind ErrImagePull on localhost:5000** | mock/corpus-gen pods fail with `dial tcp [::1]:5000: connect: connection refused` | The Kind `containerdConfigPatches` in §4.7 must mirror **both** `localhost:5000` and `airgap-registry:5000` to the registry container — one key per naming family used by the manifests. Recreate the cluster with the documented config (containerd mirrors are set at creation). |
 | **Console Route deploy fail-close** | `sh scripts/tools/run-task.sh airgap:deploy` dies on the oauth-proxy `sha256:PENDING` pin or a missing `rag-agent-oauth-cookie` Secret | Record the digest in `images.txt` + repack and create the cookie Secret (§4.4.2); or deploy with `AGENT_ROUTE=false` (ClusterIP-only, `/ui` still served in-cluster). |
-| **`/ui` returns 404** | Console request returns the stable `404 not_found` envelope | `UI_ENABLED` is unset/false for the agent process. The prod overlay sets it true; for local runs use `UI_ENABLED=true sh scripts/tools/run-task.sh local:agent` or `sh scripts/tools/run-task.sh local:stack`. |
+| **`/ui` returns 404** | Console request returns the stable `404 not_found` envelope | `UI_ENABLED` is unset/false for the agent process. The production chart sets it true; for local runs use `UI_ENABLED=true sh scripts/tools/run-task.sh local:agent` or `sh scripts/tools/run-task.sh local:stack`. |

@@ -26,8 +26,8 @@ class DoctorTests(TestCase):
             'scripts/airgap/common.sh': '# fixture',
             'scripts/tools/task-pin.txt': 'version: v3.53.1\nbinary-sha256: ' + hashlib.sha256(b'fixture').hexdigest() + '\n',
             '.tools/bin/task': 'fixture',
-            'deploy/kustomize/overlays/openshift/kustomization.yaml': 'fixture',
-            'deploy/kustomize/overlays/openshift-ingest/kustomization.yaml': 'fixture',
+            'charts/mainframe-rag/Chart.yaml': 'fixture',
+            'charts/mainframe-rag/values.schema.json': 'fixture',
         }
         for name, value in files.items():
             path = self.root/name

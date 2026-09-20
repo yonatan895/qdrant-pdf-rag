@@ -74,51 +74,80 @@ restores the snapshot over whatever the file assigned; empty stays unset
 
 ## 3. Render pipeline
 
-Qdrant deploys from the vendored chart (`charts/qdrant-1.19.0.tgz` — never
-`helm repo add` in the gap); the agent, ingest Job, and Jaeger deploy from
-kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
-(`fail_on_placeholders`) when any `__[A-Z][A-Z0-9_]*__` survives rendering.
+Qdrant deploys as its separate release from `charts/qdrant-1.19.0.tgz`;
+`mainframe-rag` deploys the first-party chart from the exact verified source
+checkout. Use the checksum-pinned Helm 4.3.0 client from
+[the workflow](../.github/workflows/e2e.yml). Neither chart needs a remote
+chart repository in the air gap.
+`airgap.env` remains the only operator configuration owner. After `common.sh`
+resolves precedence and validates inputs, `map_app_values` exports the declared
+non-secret inputs to the deterministic serializer in `map_values.py`.
 
-- Deploy defaults the Qdrant image tag by stripping the registry path and
-  the `-unprivileged` suffix from `QDRANT_IMAGE`, because the chart
-  re-appends that suffix when `useUnprivilegedImage` is set — passing the
-  suffix through would double-append. The tag is always set explicitly so
-  deploy matches what load pushed.
-- The agent render unquotes `"__TOKEN__"` first, then substitutes each key;
-  integer/boolean env vars render explicitly quoted (`value: "768"`,
-  `value: "false"` — the quoting `testing.md` pins, so manifests never hit
-  Kubernetes integer/boolean type errors). `RERANK_ENABLED` defaults to
-  `false` and the rerank model default is baked in; the OTEL endpoint
-  resolves to the in-cluster Jaeger when unset (`off` disables), and
-  LLM/rerank-base values default to empty.
-- `wire_pull_secret` reuses the matched line's indent when replacing
-  `imagePullSecrets: []` — every overlay nests it inside the pod spec, and
-  a fixed-indent insert breaks out of the mapping (kubectl rejects the
-  manifest). `PULL_SECRET` passes the same DNS-subdomain charset gate as the
-  gateway secret name (`check_secret_name` in `common.sh`, enforced
-  fail-closed by deploy/validate/ingest — sed-active characters die before
-  any render, so keep it to lowercase alphanumerics, `-`, `.`);
-  unset renders `imagePullSecrets: []` (kustomize) and
-  `imagePullSecrets=null` (Helm, so the chart's placeholder name never
-  reaches the cluster).
-- Gateway virtual keys (LiteLLM) render by strip-or-substitute: the agent
-  and ingest overlays carry an optional `secretKeyRef` block
-  (agent: `LLM/EMBED/RERANK_API_KEY`; ingest: `EMBED/CONTEXT_LLM_API_KEY`
-  from data keys `llm/embed/rerank/context-llm-api-key`). A set
-  `GATEWAY_API_KEY_SECRET` substitutes the Secret name into the block;
-  unset deletes the entries via `strip_gateway_key_entries` in `common.sh`
-  so keyless deployments reference no secret (a dangling secretKeyRef
-  would wedge every pod start). The strip matches the five-line entries by
-  env name, never by comments: kustomize drops YAML comments and sorts
-  mapping keys, so the `# gateway-api-keys-begin/end` markers in the
-  overlays are documentation only (unit-test stubs mirror the comment-free
-  sorted kustomize output for this reason). The gateway name passes a
-  DNS-subdomain charset gate (`check_secret_name` in `common.sh`);
-  plaintext `*_API_KEY` values in the env file die in
-  `refuse_plaintext_gateway_keys`, enforced by the pack/load/deploy/ingest/
-  validate scripts via `enforce_product_rules` (smoke only resolves
-  aliases, pipeline inherits the checks from its stages, and bootstrap
-  cannot source `common.sh` before the clone exists).
+`airgap:deploy` writes `dist/mainframe-rag-release-values.yaml`, runs Helm
+schema/lint/template checks, checks the rendered read-only serving credential,
+and verifies selected Secret keys and resource ownership before either release
+is mutated. It then upgrades Qdrant and the application separately. The app
+release never owns an ingest Job, corpus PVC or Qdrant resource. Generated
+values/manifests are ignored evidence, not a manually editable configuration
+surface. All Kubernetes env scalar values are strings, including all-digit
+SHAs and revisions containing YAML-significant characters. The schema preserves
+positive operator dimensions and worker counts without introducing the shadow
+chart's former 4096-dimension or 32-worker ceilings.
+
+`airgap:ingest` writes `dist/mainframe-rag-ingest-values.yaml` and explicitly
+renders the Job and external ingest-work PVC using `--show-only`. The scratch
+claim is created only if absent; failed reads stop the operation. The existing
+Job is deliberately deleted/replaced, waited for, and diagnosed by shell.
+Ingest has no Helm hook and no automatic upgrade execution. Existing worker,
+publication, retirement validation and `/work/inventory.jsonl` lock semantics
+remain unchanged. Route configuration is not needed to render an ingest Job.
+
+Compatibility and lifecycle decisions under #448:
+
+- `check_app_ownership.py` accepts only the fixed first-party resource inventory
+  in the selected namespace. Existing unmanaged Kustomize resources can be
+  adopted with Helm's `--take-ownership`; another release, namespace, deployment
+  manager or controller owner fails preflight. Operators must serialize
+  deployment operations in that namespace; this read-before-write check is
+  not a distributed lock. Adoption changes management metadata, not authorization.
+  Application installs/upgrades explicitly use `--server-side=false` to preserve
+  client-side apply during migration. Helm 4's default server-side apply can
+  adopt unchanged legacy objects but then conflict with `kubectl-client-side-apply`
+  on the next image update. Use the same flag for application rollbacks; do not
+  force conflicts or replace resources to bypass ownership checks.
+- The first adoption also inventories disabled legacy optional objects using
+  cluster API discovery. Discovery/read/ownership failures stop before either
+  release changes. Once selected workloads are ready, deployment deletes only
+  the checked disabled Jaeger workloads/config, console Route/ServiceAccount
+  and ServiceMonitor. This covers objects absent from the first Helm release's
+  history. The cleanup inventory never permits a PVC.
+- Disabled optional workloads, Routes and monitors are removed on upgrades of
+  the Helm release. The Jaeger PVC has `helm.sh/resource-policy: keep`: disabling
+  tracing or removing the app release retains its data. Re-enabling tracing
+  reuses that claim; neither application rollback nor uninstall rolls back data.
+- `PULL_SECRET` and `GATEWAY_API_KEY_SECRET` remain DNS-subdomain names and
+  Secret references. An absent pull Secret renders `imagePullSecrets: []` for
+  first-party pods and `imagePullSecrets=null` for Qdrant. An absent gateway
+  Secret omits key env entries. Selected refs require nonempty keys before
+  mutation: agent `llm/embed/rerank-api-key`, ingest
+  `embed/context-llm-api-key`, pull `.dockerconfigjson`, OAuth `cookie-secret`.
+  No key values enter generated files or logs. Plaintext gateway key settings
+  remain rejected by `enforce_product_rules`.
+- `GATEWAY_CA_CONFIGMAP` remains a reference to `ca-bundle.crt`, mounted only
+  in application containers. `AGENT_ROUTE=true` requires the recorded OAuth
+  image digest and cookie Secret. Deploy reads the public namespace Service CA
+  into generated values and Helm reconciles the reencrypt Route, OAuth port,
+  sidecar and ServiceAccount, including an existing Route's CA/timeout.
+  Route-on deployment therefore requires its namespace and operator Secrets
+  to exist first. Dry-run uses an explicit `ROUTE_DESTINATION_CA_FILE`.
+- Qdrant's tag still strips `-unprivileged` before the upstream chart appends it.
+  Snapshot class falls back to `STORAGE_CLASS`. Rehearsal-only sizing inputs
+  (`QDRANT_STORAGE_SIZE`, `QDRANT_EXTRA_VALUES`, `QDRANT_TAG`, `INGEST_WORK_SIZE`,
+  `INGEST_EXTRA_PATCH`) retain their existing precedence and never change the
+  production defaults. The last remains a client-side CI-only Job patch.
+- Rollout waits remain Qdrant 600s, agent 300s and Jaeger 120s, with bounded
+  diagnostics on failure. Explicit ingest keeps its existing wait/diagnostics.
+
 - The Qdrant service URL is derived as plaintext
   `http://<QDRANT_RELEASE>:6333` (in-cluster DNS). The `<release>-apikey`
   secret name follows `QDRANT_RELEASE` — renaming the release without a
@@ -134,7 +163,7 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
   Deploy and ingest preflight fail closed when the rendered manifests
   reference the wrong key (`check_agent_qdrant_key` /
   `check_ingest_qdrant_key` in `common.sh`); `sh scripts/tools/run-task.sh airgap:validate`
-  pins the same contract on the overlay sources. Key values never appear
+  pins the same contract on the chart template sources. Key values never appear
   in manifests, logs, or test output — only Secret names and data keys.
 - Qdrant key rotation (chart-native): the chart generates both keys with
   `randAlphaNum 32` and reuses the existing Secret across `helm upgrade`
@@ -147,25 +176,15 @@ kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
   untouched. Do not render with `helm template --dry-run` and apply the
   result: without cluster access the chart's Secret lookup misses and
   every render mints fresh random keys.
-- Snapshot storage class falls back to `STORAGE_CLASS`.
-  `QDRANT_STORAGE_SIZE`, `QDRANT_EXTRA_VALUES`, `QDRANT_TAG`,
-  `INGEST_WORK_SIZE`, and `INGEST_EXTRA_PATCH` are rehearsal-only knobs;
-  empty means git prod values untouched (missing override file dies), and
-  they must never reach prod.
-- Rollout waits: Qdrant StatefulSet 600s, agent Deployment 300s, Jaeger
-  120s — on failure the script prints pods, warning events, and container
-  logs before dying. `AGENT_ROUTE=true` layers
-  `deploy/kustomize/overlays/openshift-ui` (oauth-proxy sidecar on Service
-  port 8443, Service CA serving cert, ServiceAccount redirect reference,
-  `/healthz` `skip-auth-regex` bypass) and creates a `reencrypt` Route only
-  when one does not already exist, inlining the namespace
-  `openshift-service-ca.crt` bundle as `destinationCACertificate`
-  (`haproxy.router.openshift.io/timeout: 300s`). It requires the
-  oauth-proxy digest recorded in `images.txt` (an unrecorded
-  `sha256:PENDING` still fails closed) and the operator-created Secret
-  `rag-agent-oauth-cookie`; it defaults `false` (ClusterIP only, console
-  reachable in-cluster). `sh scripts/tools/run-task.sh airgap:validate` checks none of these — they
-  fail at deploy time.
+The published-bundle Kind lifecycle lane uses the same chart and values
+mapper for A/A/B/failed rollout/recovery A/B/redeploy A. It checks admitted
+fault injection, serving smoke and PVC identities. Independent rendered behavior
+is checked by `tests/test_helm_chart_contracts.py`; producer round trips and
+preflight/lifecycle behavior remain in the mapper and air-gap suites. The
+retired parity oracle's coverage mapping is in [testing](testing.md#helm-coverage).
+Helm rendering and Kind do not prove OpenShift or actual internal-site
+qualification. Record unexecuted checks as not run in the candidate review;
+they do not authorize production promotion.
 
 ## 4. Signing and provenance
 
@@ -289,7 +308,7 @@ is the **production default**, distinct from the verifier's stricter
 after merging: all three keys present, positive integers, W <= RF. It does
 not force every caller to exactly 6/3/2 — a partial override inherits the
 remaining preset values, and local, CI and one-node lanes select 1/1/1
-explicitly (`deploy/kustomize/overlays/ci`, `.github/workflows/e2e.yml`) as
+explicitly (the explicit operator environment in `.github/workflows/e2e.yml`) as
 a deliberate non-HA profile, never inferred from the available node count.
 Generic `QDRANT_*` Settings stay optional for local compatibility, but
 unset values cannot qualify the production path.
@@ -425,7 +444,7 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
   makes `AGENT_ROUTE=true` fail closed. A tag bump for `ose-oauth-proxy`
   must change all three sites: `images.txt`, `deploy.sh`, `load.sh`.
 - `METRICS_ENABLED=true` additionally renders/applies
-  `deploy/kustomize/servicemonitor` so the OpenShift UWM stack scrapes
+  the first-party chart ServiceMonitor so the OpenShift UWM stack scrapes
   `/metrics` (prerequisite and sizing in `docs/install_and_ops.md`).
 - The `oc-mirror` config still uses tag form and is otherwise unreferenced
   (optional path) — reconcile to digests before relying on it.
@@ -474,9 +493,12 @@ live in `.github/workflows/e2e.yml`.
   dir — digest verify, unpack, bootstrap, manifest/SHA assertions, dry-run
   pipeline with standin env passed explicitly, both pull-secret branches.
   `kind-live-rehearsal` (main/dispatch) is a three-lane matrix described below.
-  Lab OpenShift jobs remain secret-gated, and PRs never touch the lab cluster.
+  The lab OpenShift rehearsal remains secret-gated, and PRs never touch the lab cluster.
   `airgap-rehearsal` downloads and bootstraps the published bundle; it does not
-  independently repack. A skipped lab job supplies no OpenShift verification.
+  independently repack. It retains both outline-message and generic widget
+  search checks, Qdrant/agent readiness and explicit ingestion formerly covered
+  by the redundant direct-manifest hash-only lab lane. A skipped lab job supplies
+  no OpenShift verification.
 - Pinned third-party versions live in-repo (kubectl + sha256, helm, kind,
   node image); the local-path provisioner manifest is pinned to a source commit and
   sha256-verified before applying it. The opencode
@@ -565,7 +587,7 @@ local/CI gateway image: observe upstream finish, close the stream, fail closed
 when state is unavailable, retain clean-EOF fault checks on pin bumps. Production
 protection remains the platform's responsibility.
 
-Preserve separate CI/prod overlays and sizing. CI synthetic hash jobs never become
+Preserve separate CI/prod Qdrant values and sizing. CI synthetic hash jobs never become
 prod ingest; production has no EMBED_MODE key, RWO block data/work storage,
 read-only caller corpus and two agent replicas. Qdrant chart IDs are explicitly
 null; Jaeger uses project-assigned IDs and `Recreate` for its single Badger writer.
@@ -601,8 +623,8 @@ override/require/normalization helpers, `validate.sh`, deploy/ingest renderers a
 
 **Producer → state → consumers:** operator setting → `airgap.env.example` and
 explicit environment → `OPERATOR_ENV_KEYS` snapshot/restore around file loading
-→ `require_env` plus blank/preflight validation → both agent and ingest rendered
-environments → Settings and operation-specific interpretation. Trace every step
+→ `require_env` plus blank/preflight validation → generated Helm values → schema validation and chart rendering
+→ both agent and ingest environments → Settings and operation-specific interpretation. Trace every step
 for a newly required input; an example alone or agent-only render is insufficient.
 Maintenance modes (issue #391 current packet) follow the same path:
 `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST` and `INGEST_RETIRE_DOCS` are
