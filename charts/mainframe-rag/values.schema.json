@@ -1,9 +1,9 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "mainframe-rag values (issue #448 H1a)",
+  "title": "mainframe-rag values (issue #448 H1b)",
   "type": "object",
   "additionalProperties": false,
-  "required": ["replicaCount", "images", "qdrantRelease", "models", "gateway", "tracing", "metrics", "pullSecret", "resources"],
+  "required": ["replicaCount", "images", "qdrantRelease", "models", "gateway", "tracing", "metrics", "route", "storage", "ingest", "pullSecret", "resources"],
   "properties": {
     "replicaCount": {
       "type": "integer",
@@ -13,7 +13,7 @@
     "images": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["agent"],
+      "required": ["agent", "ingest", "jaeger", "oauthProxy"],
       "properties": {
         "agent": {
           "type": "object",
@@ -29,6 +29,69 @@
               "type": "string",
               "pattern": "^[0-9a-f]{40}$",
               "description": "Full git SHA; deploy.sh fail-closes on empty/HEAD."
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        },
+        "ingest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "tag"],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "__[A-Z0-9_]+__" }
+            },
+            "tag": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$",
+              "description": "Packed SHA; the generator sets agent and ingest tags from IMAGE_SHA."
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        },
+        "jaeger": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "tag"],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "__[A-Z0-9_]+__" }
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "__[A-Z0-9_]+__" }
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        },
+        "oauthProxy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "tag"],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "__[A-Z0-9_]+__" }
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "__[A-Z0-9_]+__" }
             },
             "pullPolicy": {
               "type": "string",
@@ -199,6 +262,128 @@
       "properties": {
         "enabled": { "type": "boolean" }
       }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "timeoutSeconds"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "destinationCA": {
+          "type": "string",
+          "description": "Namespace service-CA bundle (non-secret generated value, D8)."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "properties": {
+              "destinationCA": { "minLength": 1, "pattern": ".*\\S.*" }
+            },
+            "required": ["destinationCA"]
+          }
+        }
+      ]
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["className"],
+      "properties": {
+        "className": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "pattern": "__[A-Z0-9_]+__" },
+          "description": "RWO block storage class; NFS refusal stays owned by shell preflight."
+        }
+      },
+      "not": {
+        "properties": {
+          "className": { "pattern": "[Nn][Ff][Ss]" }
+        }
+      }
+    },
+    "ingest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "workers", "aliasPublish", "reingest", "collectionPolicy"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "True renders the explicit Job; steady-state releases use false (D3)."
+        },
+        "corpusPVC": {
+          "type": "string",
+          "description": "Caller-supplied corpus PVC; required when enabled."
+        },
+        "workers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "aliasPublish": { "type": "boolean" },
+        "reingest": { "type": "boolean" },
+        "retireDocs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\"\\\\*?]+$",
+            "not": { "pattern": "__[A-Z0-9_]+__" }
+          },
+          "description": "Malformed @-sides, control characters and backend inventory checks stay shell-owned (D6)."
+        },
+        "contextualEnabled": { "type": "boolean" },
+        "contextLlmBaseUrl": { "type": "string" },
+        "contextLlmModel": { "type": "string" },
+        "collectionPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["shardNumber", "replicationFactor", "writeConsistencyFactor"],
+          "properties": {
+            "shardNumber": { "type": "integer", "minimum": 1 },
+            "replicationFactor": { "type": "integer", "minimum": 1 },
+            "writeConsistencyFactor": { "type": "integer", "minimum": 1 }
+          },
+          "description": "W<=RF validation stays owned by validate_collection_policy in shell (D6)."
+        },
+        "resources": {
+          "type": "object",
+          "description": "Kubernetes resource requests/limits for the ingest container."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "properties": {
+              "corpusPVC": { "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" }
+            },
+            "required": ["corpusPVC"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "retireDocs": { "minItems": 1 } },
+            "required": ["retireDocs"]
+          },
+          "then": {
+            "properties": { "aliasPublish": { "const": true } }
+          }
+        }
+      ]
     },
     "pullSecret": {
       "type": "object",

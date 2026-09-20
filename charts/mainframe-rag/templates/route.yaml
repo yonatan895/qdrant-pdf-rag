@@ -1,0 +1,26 @@
+# Reencrypt Route to the oauth-proxy port (ADR-0004, issue #373).
+# Rendered only when route.enabled is true. The destination CA is the
+# namespace service-CA bundle supplied as a non-secret generated value (D8);
+# no post-render sed mutation, no Helm lookup (offline rehearsal must match
+# install). The cookie secret (rag-agent-oauth-cookie) is operator-created
+# and checked by deploy.sh preflight, never a chart value (D7).
+{{- if .Values.route.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: rag-agent
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    haproxy.router.openshift.io/timeout: {{ printf "%ds" (int .Values.route.timeoutSeconds) | quote }}
+spec:
+  to:
+    kind: Service
+    name: rag-agent
+  port:
+    targetPort: oauth
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+    destinationCACertificate: |
+{{ .Values.route.destinationCA | indent 6 }}
+{{- end }}

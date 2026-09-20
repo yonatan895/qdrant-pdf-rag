@@ -1,4 +1,4 @@
-# Default values for mainframe-rag (issue #448 H1a shadow).
+# Default values for mainframe-rag (issue #448 H1b shadow).
 # Operator contract: airgap.env remains the supported operator input for the
 # migration (D4). A small generator (H3) will produce the exact release
 # values artifact from validated operator input; this file carries only
@@ -20,6 +20,26 @@ images:
   agent:
     repository: qdrant-pdf-rag-agent
     tag: "0000000000000000000000000000000000000000"
+    pullPolicy: IfNotPresent
+  # One-shot ingest image. The tag is the same packed SHA as the agent in a
+  # real release; kept as a separate field so each image reference has one
+  # owner (D5). The generator sets both tags from IMAGE_SHA (H3).
+  ingest:
+    repository: qdrant-pdf-rag-ingest
+    tag: "0000000000000000000000000000000000000000"
+    pullPolicy: IfNotPresent
+  # Jaeger all-in-one (upstream tag 2.20.0; digest pinned in images.txt and
+  # enforced at pack/load, not in the manifest).
+  jaeger:
+    repository: jaegertracing/jaeger
+    tag: v2.20.0
+    pullPolicy: IfNotPresent
+  # OAuth proxy sidecar for the optional console Route (ADR-0004). Ref is the
+  # internal retag (load.sh pushes the packed image under
+  # <registry>/openshift4/ose-oauth-proxy:v4.14); digest pinned in images.txt.
+  oauthProxy:
+    repository: openshift4/ose-oauth-proxy
+    tag: v4.14
     pullPolicy: IfNotPresent
 
 # Single Qdrant release owner (D2). The chart derives the in-cluster URL
@@ -56,8 +76,8 @@ gateway:
 
 tracing:
   # Unset-equivalent default: enabled with the in-cluster Jaeger endpoint.
-  # Disabled renders an empty OTEL_EXPORTER_OTLP_ENDPOINT and (H1b) skips
-  # the Jaeger deployment. Custom collectors set a full http(s) URL.
+  # Disabled renders an empty OTEL_EXPORTER_OTLP_ENDPOINT and skips the
+  # Jaeger resources. Custom collectors set a full http(s) URL.
   enabled: true
   endpoint: http://jaeger:4318
   # Optional deploy identity; empty renders bare `value:` (agent omits the
@@ -68,7 +88,60 @@ tracing:
   serviceName: ""
 
 metrics:
+  # False renders METRICS_ENABLED="false" (/metrics 404s) and skips the
+  # ServiceMonitor. True serves exposition and renders the monitor for UWM.
   enabled: false
+
+# Optional console Route via the oauth-proxy sidecar (ADR-0004, issue #373).
+# False keeps ClusterIP-only installs. True wires the sidecar, ServiceAccount,
+# Service oauth port/serving-cert annotation and a reencrypt Route. The CA is
+# the namespace service-CA bundle (non-secret generated value, D8); the
+# cookie secret (rag-agent-oauth-cookie) is operator-created and checked by
+# deploy.sh preflight, never a chart value (D7).
+route:
+  enabled: false
+  timeoutSeconds: 300
+  destinationCA: ""
+
+# RWO block storage class for Jaeger Badger (and, in H3, ingest-work scratch).
+# NFS refusal stays owned by shell preflight; schema additionally rejects
+# nfs-looking names fail-closed.
+storage:
+  className: standard
+
+# Explicit ingest operation (D3). Disabled by default so the steady-state
+# release never owns a completed one-shot Job whose immutable fields would
+# block later ingestion. Render explicitly, e.g.:
+# helm template <release> charts/mainframe-rag --namespace <ns> -f release-values.yaml --set ingest.enabled=true --show-only templates/ingest-job.yaml
+# then apply/replace the Job deliberately. Never a Helm hook.
+ingest:
+  enabled: false
+  # Caller-supplied corpus PVC (read-only mount). Required when enabled.
+  corpusPVC: ""
+  workers: 4
+  aliasPublish: false
+  reingest: false
+  # Explicit approved removals (requires aliasPublish=true). Entries accept
+  # the backend alphabet (labels may carry '/', '|' and spaces); shell
+  # preflight remains the owner for malformed combinations (D6).
+  retireDocs: []
+  contextualEnabled: false
+  contextLlmBaseUrl: ""
+  contextLlmModel: ""
+  # Collection distribution policy (issue #360). Rendered as bare ints into
+  # the Job; the complete-tuple W<=RF validation stays owned by
+  # validate_collection_policy in shell (D6).
+  collectionPolicy:
+    shardNumber: 6
+    replicationFactor: 3
+    writeConsistencyFactor: 2
+  resources:
+    requests:
+      cpu: "4"
+      memory: 8Gi
+    limits:
+      cpu: "16"
+      memory: 32Gi
 
 # Optional pull secret name; empty renders `imagePullSecrets: []`.
 pullSecret:

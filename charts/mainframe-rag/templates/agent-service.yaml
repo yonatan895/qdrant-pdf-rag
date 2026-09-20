@@ -1,6 +1,7 @@
-# Agent Service (H1a shadow of deploy/kustomize/base/agent.yaml Service).
-# ClusterIP only; no Route, ever. Selector and port names must track the
-# Deployment below and the ServiceMonitor (H1b).
+# Agent Service (shadow of deploy/kustomize base Service plus the
+# openshift-ui oauth port when route.enabled).
+# ClusterIP only; no Route for Qdrant, ever. Selector and port names must
+# track the Deployment and the ServiceMonitor.
 apiVersion: v1
 kind: Service
 metadata:
@@ -8,11 +9,20 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "mainframe-rag.labels" . | nindent 4 }}
+  {{- if .Values.route.enabled }}
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: rag-agent-tls
+  {{- end }}
 spec:
   type: ClusterIP
   selector:
     {{- include "mainframe-rag.selectorLabels" . | nindent 4 }}
   ports:
+    {{- if .Values.route.enabled }}
+    - name: oauth
+      port: 8443
+      targetPort: oauth
+    {{- end }}
     - name: http
       port: 8080
       targetPort: http

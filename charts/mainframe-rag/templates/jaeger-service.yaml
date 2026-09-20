@@ -1,0 +1,22 @@
+# Jaeger Service (issue #83). ClusterIP only. 4318 is OTLP/HTTP (the agent's
+# only exporter transport); 16686 is the UI for port-forward. No Route, ever.
+{{- if .Values.tracing.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: jaeger
+spec:
+  type: ClusterIP
+  selector:
+    app: jaeger
+  ports:
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+    - name: ui
+      port: 16686
+      targetPort: ui
+{{- end }}

@@ -1,8 +1,9 @@
-# Agent Deployment (H1a shadow of deploy/kustomize base + overlays/openshift).
-# Parity target: `kubectl kustomize deploy/kustomize/overlays/openshift`
+# Agent Deployment (shadow of deploy/kustomize base + overlays/openshift,
+# plus openshift-ui when route.enabled).
+# Parity target: `kubectl kustomize deploy/kustomize/overlays/openshift[-ui]`
 # after deploy.sh placeholder substitution and strip/wire post-processing.
 # Protected defaults (selectors, ports, probes, read-only Qdrant key,
-# UI_ENABLED=true, resource defaults) stay in this template (D5).
+# UI_ENABLED=true, oauth args/ports/volumes, resource defaults) stay here (D5).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,6 +21,9 @@ spec:
       labels:
         {{- include "mainframe-rag.selectorLabels" . | nindent 8 }}
     spec:
+      {{- if .Values.route.enabled }}
+      serviceAccountName: rag-agent
+      {{- end }}
       {{- if .Values.pullSecret.name }}
       imagePullSecrets:
         - name: {{ .Values.pullSecret.name }}
@@ -117,12 +121,54 @@ spec:
               mountPath: /etc/gateway-ca
               readOnly: true
           {{- end }}
-      {{- if .Values.gateway.caConfigMapName }}
+        {{- if .Values.route.enabled }}
+        - name: oauth-proxy
+          image: {{ include "mainframe-rag.oauthProxyImage" . }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --provider=openshift
+            - --https-address=:8443
+            - --upstream=http://127.0.0.1:8080
+            - --tls-cert=/etc/tls/private/tls.crt
+            - --tls-key=/etc/tls/private/tls.key
+            - --cookie-secret-file=/etc/oauth/cookie-secret
+            - --email-domain=*
+            - --openshift-service-account=rag-agent
+            - --skip-auth-regex=^/healthz.*$
+          ports:
+            - name: oauth
+              containerPort: 8443
+          volumeMounts:
+            - name: oauth-tls
+              mountPath: /etc/tls/private
+              readOnly: true
+            - name: oauth-cookie
+              mountPath: /etc/oauth
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+        {{- end }}
+      {{- if or .Values.gateway.caConfigMapName .Values.route.enabled }}
       volumes:
+        {{- if .Values.gateway.caConfigMapName }}
         - name: gateway-ca
           configMap:
             name: {{ .Values.gateway.caConfigMapName }}
             items:
               - key: ca-bundle.crt
                 path: ca-bundle.crt
+        {{- end }}
+        {{- if .Values.route.enabled }}
+        - name: oauth-tls
+          secret:
+            secretName: rag-agent-tls
+        - name: oauth-cookie
+          secret:
+            secretName: rag-agent-oauth-cookie
+        {{- end }}
       {{- end }}

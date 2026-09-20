@@ -1,0 +1,18 @@
+# Jaeger Badger PVC (issue #83). Single-node RWO block volume; NFS refused
+# by shell preflight and schema. 10Gi, 14-day span TTL in the config.
+{{- if .Values.tracing.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jaeger-badger
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: jaeger
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.storage.className }}
+  resources:
+    requests:
+      storage: 10Gi
+{{- end }}

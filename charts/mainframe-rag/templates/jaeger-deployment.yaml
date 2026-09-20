@@ -1,0 +1,77 @@
+# Jaeger all-in-one Deployment (issue #83).
+# Rendered only when tracing.enabled is true. Badger on RWO block,
+# ClusterIP only, UI via port-forward — no Route. Project UID/volume group
+# from restricted-v2 (no fixed IDs). Recreate strategy for the single Badger
+# writer. OTLP/HTTP 4318 only; 4317 stays closed (no grpcio in wheelhouse).
+{{- if .Values.tracing.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: jaeger
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if .Values.pullSecret.name }}
+      imagePullSecrets:
+        - name: {{ .Values.pullSecret.name }}
+      {{- else }}
+      imagePullSecrets: []
+      {{- end }}
+      containers:
+        - name: jaeger
+          image: {{ include "mainframe-rag.jaegerImage" . }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          args: ["--config", "/etc/jaeger/config-badger.yaml"]
+          ports:
+            - containerPort: 4318
+              name: otlp-http
+            - containerPort: 16686
+              name: ui
+          readinessProbe:
+            httpGet:
+              path: /
+              port: ui
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/jaeger
+              readOnly: true
+            - name: badger
+              mountPath: /badger
+      volumes:
+        - name: config
+          configMap:
+            name: jaeger-config
+        - name: badger
+          persistentVolumeClaim:
+            claimName: jaeger-badger
+{{- end }}
