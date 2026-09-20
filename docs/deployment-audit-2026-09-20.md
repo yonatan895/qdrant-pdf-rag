@@ -89,6 +89,18 @@ The full real-corpus retry has started; sustained fit and successful publication
 remain unproven. Earlier steady-state memory readings did not establish peak
 migration headroom.
 
+Read-only cgroup monitoring now records current/peak memory, OOM counters,
+pod identity and the active Job identity every 30 seconds. By 19:00 UTC the
+replacement pod had reached a 2.29 GiB peak, with zero OOM events or restarts;
+this exceeds the former limit but does not yet establish full-run acceptance.
+
+The ambient kubectl v1.35 client also reported unsupported skew against the
+Kind v1.37 server. A task-local v1.37.0 client was copied from the already pinned
+Kind node image and SHA256-compared with the binary inside that container.
+The private durable runtime now selects this client; its version check reports
+matching client/server v1.37.0. The global client remains untouched, and earlier
+commands retain their original client attribution.
+
 ## Remaining environment acceptance
 
 | Environment | Missing proof | Closure requirement |
