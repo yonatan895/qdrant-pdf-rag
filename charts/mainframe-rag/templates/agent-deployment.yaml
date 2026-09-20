@@ -1,0 +1,128 @@
+# Agent Deployment (H1a shadow of deploy/kustomize base + overlays/openshift).
+# Parity target: `kubectl kustomize deploy/kustomize/overlays/openshift`
+# after deploy.sh placeholder substitution and strip/wire post-processing.
+# Protected defaults (selectors, ports, probes, read-only Qdrant key,
+# UI_ENABLED=true, resource defaults) stay in this template (D5).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mainframe-rag.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mainframe-rag.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mainframe-rag.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- if .Values.pullSecret.name }}
+      imagePullSecrets:
+        - name: {{ .Values.pullSecret.name }}
+      {{- else }}
+      imagePullSecrets: []
+      {{- end }}
+      containers:
+        - name: agent
+          image: {{ include "mainframe-rag.agentImage" . }}
+          imagePullPolicy: {{ .Values.images.agent.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: QDRANT_URL
+              value: {{ include "mainframe-rag.qdrantUrl" . }}
+            - name: QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: read-only-api-key
+                  name: {{ include "mainframe-rag.qdrantSecretName" . }}
+            - name: EMBED_BASE_URL
+              value: {{ .Values.models.embedding.baseUrl }}
+            - name: EMBED_MODEL
+              value: {{ .Values.models.embedding.model }}
+            - name: DENSE_DIM
+              value: {{ .Values.models.embedding.dimension | quote }}
+            - name: EMBED_MODEL_REVISION
+              value: {{ .Values.models.embedding.revision }}
+            - name: LLM_BASE_URL
+              value: {{ .Values.models.reasoning.baseUrl }}
+            - name: LLM_MODEL_REASONING
+              value: {{ .Values.models.reasoning.model }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ include "mainframe-rag.otelEndpoint" . }}
+            - name: IMAGE_SHA
+              value: {{ .Values.images.agent.tag }}
+            - name: OTEL_DEPLOYMENT_ENVIRONMENT
+              value: {{ .Values.tracing.deploymentEnvironment }}
+            {{- if .Values.tracing.serviceName }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.tracing.serviceName }}
+            {{- end }}
+            - name: METRICS_ENABLED
+              value: {{ .Values.metrics.enabled | toString | quote }}
+            - name: UI_ENABLED
+              value: "true"
+            - name: RERANK_ENABLED
+              value: {{ .Values.models.rerank.enabled | toString | quote }}
+            - name: RERANK_BASE_URL
+              value: {{ .Values.models.rerank.baseUrl }}
+            - name: RERANK_MODEL
+              value: {{ .Values.models.rerank.model }}
+            - name: RERANK_ENDPOINT_ORDER
+              value: {{ .Values.models.rerank.endpointOrder }}
+            {{- if .Values.gateway.apiKeySecretName }}
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: llm-api-key
+                  name: {{ .Values.gateway.apiKeySecretName }}
+            - name: EMBED_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: embed-api-key
+                  name: {{ .Values.gateway.apiKeySecretName }}
+            - name: RERANK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: rerank-api-key
+                  name: {{ .Values.gateway.apiKeySecretName }}
+            {{- end }}
+            {{- if .Values.gateway.caConfigMapName }}
+            - name: SSL_CERT_FILE
+              value: /etc/gateway-ca/ca-bundle.crt
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources.agent | nindent 12 }}
+          {{- if .Values.gateway.caConfigMapName }}
+          volumeMounts:
+            - name: gateway-ca
+              mountPath: /etc/gateway-ca
+              readOnly: true
+          {{- end }}
+      {{- if .Values.gateway.caConfigMapName }}
+      volumes:
+        - name: gateway-ca
+          configMap:
+            name: {{ .Values.gateway.caConfigMapName }}
+            items:
+              - key: ca-bundle.crt
+                path: ca-bundle.crt
+      {{- end }}

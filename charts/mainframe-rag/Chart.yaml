@@ -1,0 +1,18 @@
+apiVersion: v2
+name: mainframe-rag
+description: First-party OpenShift application chart - issue 448 H1a shadow agent and Service only.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - mainframe
+  - rag
+  - openshift
+home: https://github.com/yonatan895/qdrant-pdf-rag
+maintainers:
+  - name: mainframe-rag
+sources:
+  - https://github.com/yonatan895/qdrant-pdf-rag
+# No dependencies: Qdrant is a separate Helm release by design (D2).
+# No Helm hooks: the ingest Job template (H1b) is rendered explicitly,
+# never installed automatically on upgrade (D3).
