@@ -33,7 +33,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from mainframe_rag.agent.answer_core import (
     AnswerCoreInput,
     ReasoningEffort,
-    chat_body_chars,
     execute_answer_core,
     execute_answer_core_stream,
 )
@@ -548,14 +547,8 @@ async def _run_turn(request: Request, req: UiChatRequest):
     client-facing error mapping (fixed text, detail to logs only)."""
     from mainframe_rag.agent import app as app_mod
 
-    settings = app_mod.settings
-    latest = [m for m in req.messages if m.role == "user"][-1].content.strip()
-    if len(latest) > settings.query_max_chars:
-        raise app_mod.AppError(422, "invalid_request", "request body failed validation")
-    if chat_body_chars(req.messages, req.splunk_context) > settings.chat_max_body_chars:
-        raise app_mod.AppError(422, "invalid_request", "request body failed validation")
-
     request_id = getattr(request.state, "request_id", "ui")
+    turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
     # Serving gate before the span (issues #391 F3/F4): the console refuses
     # with the same stable 503 as the API when the generation is unverified.
     deps = await app_mod.serving_deps()
@@ -565,8 +558,8 @@ async def _run_turn(request: Request, req: UiChatRequest):
         attributes={"http.request_id": request_id, "rag.stream": False},
     )
     core_input = AnswerCoreInput(
-        query=latest,
-        messages=req.messages,
+        query=turn.query,
+        messages=turn.messages,
         product=req.product,
         version=req.version,
         splunk_context=req.splunk_context,
@@ -680,13 +673,8 @@ async def ui_chat(
 async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
     from mainframe_rag.agent import app as app_mod
 
-    latest = [m for m in req.messages if m.role == "user"][-1].content.strip()
-    if len(latest) > app_mod.settings.query_max_chars:
-        raise app_mod.AppError(422, "invalid_request", "request body failed validation")
-    if chat_body_chars(req.messages, req.splunk_context) > app_mod.settings.chat_max_body_chars:
-        raise app_mod.AppError(422, "invalid_request", "request body failed validation")
-
     request_id = getattr(request.state, "request_id", "ui")
+    turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
     # Serving gate before the stream opens (issues #391 F3/F4): a non-servable
     # generation is the same stable 503 JSON the API returns, never an SSE
     # error frame after a 200 was already committed.
@@ -697,8 +685,8 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
         attributes={"http.request_id": request_id, "rag.stream": True},
     )
     core_input = AnswerCoreInput(
-        query=latest,
-        messages=req.messages,
+        query=turn.query,
+        messages=turn.messages,
         product=req.product,
         version=req.version,
         splunk_context=req.splunk_context,

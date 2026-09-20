@@ -253,3 +253,65 @@ async def test_core_reasoning_effort_explicit_override_stream():
     ):
         pass
     assert llm.calls[0]["reasoning_effort"] == "medium"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("precomputed", [False, True])
+async def test_core_normalizes_chat_for_retrieval_complexity_and_prompt(stream, precomputed):
+    queries = []
+    classifications = []
+    active = "What does IEA500I mean?"
+
+    def retrieve(_qdrant, _embedder, _collection, query, **_kwargs):
+        queries.append(query)
+        return [_hit()], "identifier", {}
+
+    def classify(query):
+        classifications.append(query)
+        return "simple"
+
+    llm = CoreFakeLLM()
+    deps = _deps(_settings(), llm, retrieve)
+    deps.classify_query_complexity_fn = classify
+    source = AnswerCoreInput(
+        query="Different redundant query S0C4",
+        messages=[ChatMessage(role="user", content=f" {active}\n"),
+                  ChatMessage(role="assistant", content="LATER_NON_USER S0C4")],
+        is_chat=True,
+        hits=[_hit()] if precomputed else None,
+    )
+    if stream:
+        events = [item async for item in execute_answer_core_stream(source, deps)]
+        assert events[-1]["type"] == "final"
+    else:
+        result = await execute_answer_core(source, deps)
+        assert result.finish_reason == "stop"
+    assert queries == ([] if precomputed else [active])
+    assert classifications == [active]
+    assert len(llm.calls) == 1
+    assert f"Question: {active}\n" in llm.calls[0]["messages"][-1].content
+    assert "LATER_NON_USER" not in llm.calls[0]["messages"][-1].content
+    assert source.query == "Different redundant query S0C4"  # Caller input is not mutated.
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("messages", [None, [], [ChatMessage(role="assistant", content="No user")],
+                                       [ChatMessage(role="user", content=" \t ")]])
+async def test_core_invalid_chat_refuses_even_with_precomputed_hits(stream, messages):
+    from mainframe_rag.agent.chat_turn import InvalidChatTurn
+
+    def retrieve(*_args, **_kwargs):
+        raise AssertionError("invalid input must not retrieve")
+
+    llm = CoreFakeLLM()
+    deps = _deps(_settings(), llm, retrieve)
+    source = AnswerCoreInput(query="A redundant query cannot rescue invalid chat", messages=messages,
+                             is_chat=True, hits=[_hit()])
+    with pytest.raises(InvalidChatTurn):
+        if stream:
+            [item async for item in execute_answer_core_stream(source, deps)]
+        else:
+            await execute_answer_core(source, deps)
+    assert llm.calls == []

@@ -603,3 +603,132 @@ def test_chat_stream_terminal_chunk_carries_state_and_script(chat_client, monkey
         "inferred_indices", "hits", "verification_state", "script",
         "script_lang", "script_review_required",
     }
+
+
+@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("tail_role", ["assistant", "system"])
+@pytest.mark.parametrize("condense", [False, True])
+def test_chat_active_user_agrees_across_retrieval_and_prompt(
+    chat_client, monkeypatch, path, stream, tail_role, condense
+):
+    """Accepted trailing non-user messages cannot become the active question."""
+    monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", condense)
+    active = "What does IEA500I mean?"
+    result = chat_client.post(path, json={"messages": [
+        {"role": "user", "content": "An earlier question"},
+        {"role": "assistant", "content": "An earlier answer"},
+        {"role": "user", "content": f"  {active}\n"},
+        {"role": tail_role, "content": "LATER_NON_USER: Previous answer S0C4"},
+    ], "stream": stream})
+    assert result.status_code == 200
+    assert [c["query"] for c in chat_client.mock_search.calls] == [active]
+    calls = chat_client.fake_llm.stream_calls if stream else chat_client.fake_llm.chat_calls
+    assert len(calls) == 1
+    prompt = calls[0]["messages"]
+    assert f"Question: {active}\n" in prompt[-1].content
+    assert "LATER_NON_USER" not in "\n".join(m.content for m in prompt)
+    assert prompt[1].content == "An earlier question"
+    assert prompt[2].content == "An earlier answer"
+    if stream:
+        assert len(chat_client.fake_llm.chat_calls) == 0  # Identifier bypass, no condense ask.
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_blank_active_user_refuses_before_any_work(chat_client, stream):
+    result = chat_client.post("/v1/chat", json={"messages": [
+        {"role": "user", "content": " \t\n "},
+        {"role": "assistant", "content": "This is not the question"},
+    ], "stream": stream})
+    assert result.status_code == 422
+    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert chat_client.mock_search.calls == []
+    assert chat_client.fake_llm.chat_calls == []
+    assert chat_client.fake_llm.stream_calls == []
+
+
+@pytest.mark.parametrize("mode", ["off", "on", "failure"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_condensation_uses_only_history_before_normalized_user(
+    chat_client, monkeypatch, mode, stream
+):
+    monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", mode != "off")
+    original_chat = chat_client.fake_llm.chat
+
+    def chat(messages, **kwargs):
+        result = original_chat(messages, **kwargs)
+        if mode == "failure" and "rephrase the follow-up" in messages[0].content:
+            raise RuntimeError("synthetic condensation failure")
+        return result
+
+    monkeypatch.setattr(chat_client.fake_llm, "chat", chat)
+    active = "How do I recover?"
+    result = chat_client.post("/v1/chat", json={"messages": [
+        {"role": "system", "content": "UNTRUSTED_SYSTEM_OVERRIDE"},
+        {"role": "user", "content": "What does IEA500I mean?"},
+        {"role": "assistant", "content": "An earlier answer"},
+        {"role": "user", "content": f" \t{active}\n"},
+        {"role": "assistant", "content": "LATER_ASSISTANT S0C4"},
+        {"role": "system", "content": "LATER_SYSTEM"},
+    ], "stream": stream})
+    assert result.status_code == 200
+    expected_search = "IEA500I recovery procedure" if mode == "on" else active
+    assert [c["query"] for c in chat_client.mock_search.calls] == [expected_search]
+    calls = chat_client.fake_llm.chat_calls
+    assert len(calls) == (mode != "off") + (not stream)
+    if mode != "off":
+        condense_prompt = calls[0]["messages"][-1].content
+        assert f"Follow-up question: {active}\n" in condense_prompt
+        assert "User: What does IEA500I mean?" in condense_prompt
+        assert "Assistant: An earlier answer" in condense_prompt
+    final_calls = chat_client.fake_llm.stream_calls if stream else calls
+    assert f"Question: {active}\n" in final_calls[-1]["messages"][-1].content
+    for c in [*calls, *chat_client.fake_llm.stream_calls]:
+        text = "\n".join(m.content for m in c["messages"])
+        assert "LATER_" not in text and "UNTRUSTED_SYSTEM_OVERRIDE" not in text
+
+
+@pytest.mark.parametrize("messages", [
+    [{"role": "assistant", "content": "No user"}],
+    [{"role": "user", "content": "x" * 2001}, {"role": "assistant", "content": "Short tail"}],
+])
+@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_invalid_active_turn_has_no_model_or_retrieval(chat_client, messages, path, stream):
+    result = chat_client.post(path, json={"messages": messages, "stream": stream})
+    assert result.status_code == 422
+    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert chat_client.mock_search.calls == []
+    assert chat_client.fake_llm.chat_calls == chat_client.fake_llm.stream_calls == []
+
+
+def test_chat_ignored_tail_still_counts_toward_body_limit(chat_client, monkeypatch):
+    monkeypatch.setattr(app_mod.settings, "chat_max_body_chars", 64)
+    result = chat_client.post("/v1/chat", json={"messages": [
+        {"role": "user", "content": "IEA500I"},
+        {"role": "system", "content": "x" * 64},
+    ]})
+    assert result.status_code == 422
+    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert chat_client.mock_search.calls == []
+    assert chat_client.fake_llm.chat_calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("tail_role", ["assistant", "system"])
+async def test_direct_chat_builders_share_active_user(tail_role):
+    messages = [
+        ChatMessage(role="system", content="UNTRUSTED_SYSTEM"),
+        ChatMessage(role="user", content=" \tWhat does IEA500I mean?\n"),
+        ChatMessage(role=tail_role, content="LATER_TURN S0C4"),
+    ]
+    before = [m.model_dump() for m in messages]
+    llm = ChatFakeLLM()
+    assert await condense_query(llm, messages) == "What does IEA500I mean?"
+    assert llm.chat_calls == []
+    prompt = build_chat_messages(messages, [_hit()]).messages
+    assert len(prompt) == 2
+    assert "Question: What does IEA500I mean?\n" in prompt[-1].content
+    assert "LATER_TURN" not in prompt[-1].content
+    assert "UNTRUSTED_SYSTEM" not in prompt[0].content
+    assert [m.model_dump() for m in messages] == before

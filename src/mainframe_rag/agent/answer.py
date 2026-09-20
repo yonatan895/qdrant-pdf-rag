@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 log = logging.getLogger(__name__)
 
+from mainframe_rag.agent.chat_turn import prepare_chat_turn
 from mainframe_rag.agent.tokenizer import estimate_tokens
 from mainframe_rag.config import Settings, bearer_auth_headers
 from mainframe_rag.ingest.chunk import (
@@ -1524,9 +1525,8 @@ async def condense_query(
     """Condense a multi-turn follow-up into a standalone search query.
     Bypasses LLM rewrite if the latest turn already contains explicit message,
     abend, or member identifiers."""
-    if not messages:
-        return ""
-    latest_text = messages[-1].content
+    turn = prepare_chat_turn(messages, settings)
+    latest_text = turn.query
     from mainframe_rag.retrieve.filters import parse_query
 
     # Heuristic bypass: If message contains explicit codes (e.g. IEE400I, S0C4, DFS058I), search directly
@@ -1534,7 +1534,7 @@ async def condense_query(
         return latest_text
 
     history_turns = []
-    for m in [msg for msg in messages[:-1] if msg.role != "system"][-4:]:
+    for m in turn.history[-4:]:
         history_turns.append(f"{m.role.capitalize()}: {m.content[:_MAX_PRIOR_TURN_CHARS]}")
 
     if not history_turns:
@@ -1599,11 +1599,8 @@ def build_chat_messages(
     - Evidence: manifest of the active-turn excerpts that survived packing (issue
       #364); prior turns are conversation context, never evidence for the new answer.
     """
-    if not messages:
-        return PreparedPrompt(messages=[], evidence=PromptEvidence())
-
-    latest_user_msg = messages[-1]
-    active_query = latest_user_msg.content
+    turn = prepare_chat_turn(messages, settings, splunk_context)
+    active_query = turn.query
 
     if complexity is None:
         complexity = classify_query_complexity(active_query)
@@ -1620,7 +1617,7 @@ def build_chat_messages(
     )
 
     prior_messages: list[ChatMessage] = []
-    raw_history = [m for m in messages[:-1] if m.role != "system"][-max_turns:]
+    raw_history = turn.history[-max_turns:]
     for m in raw_history:
         text = m.content.strip()
         if m.role == "assistant" and "Retrieved manual excerpts:" in text:
