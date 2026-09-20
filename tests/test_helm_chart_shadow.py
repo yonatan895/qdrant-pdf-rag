@@ -57,7 +57,7 @@ def run(cmd, cwd, env=None):
 def make_old_tree(tmp_path: Path) -> Path:
     """Build a minimal tmp repo root that deploy.sh/ingest.sh run in dry-run."""
     (tmp_path / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
-    for name in ("common.sh", "deploy.sh", "ingest.sh"):
+    for name in ("common.sh", "deploy.sh", "ingest.sh", "map_values.py"):
         shutil.copy(REPO / "scripts" / "airgap" / name, tmp_path / "scripts" / "airgap" / name)
     shutil.copytree(REPO / "deploy" / "kustomize", tmp_path / "deploy" / "kustomize")
     (tmp_path / "overlays" / "openshift").mkdir(parents=True, exist_ok=True)
@@ -69,6 +69,7 @@ def make_old_tree(tmp_path: Path) -> Path:
     (tmp_path / "charts").mkdir(exist_ok=True)
     chart_tgz = next(REPO.glob("charts/qdrant-*.tgz"))
     shutil.copy(chart_tgz, tmp_path / "charts" / chart_tgz.name)
+    shutil.copytree(REPO / "charts" / "mainframe-rag", tmp_path / "charts" / "mainframe-rag")
     shutil.copy(REPO / "images.txt", tmp_path / "images.txt")
     (tmp_path / "dist").mkdir(exist_ok=True)
     return tmp_path
@@ -449,7 +450,11 @@ def test_gateway_ca_parity(tmp_path):
 def test_route_oauth_parity(tmp_path):
     """UI overlay parity: sidecar, ServiceAccount, Service port/annotation."""
     tree = make_old_tree(tmp_path)
-    old = run_old_deploy(tree, {"AGENT_ROUTE": "true"})
+    ca_file = tmp_path / "route-ca.crt"
+    ca_file.write_text(FAKE_CA + "\n")
+    old = run_old_deploy(tree, {
+        "AGENT_ROUTE": "true", "ROUTE_DESTINATION_CA_FILE": str(ca_file),
+    })
     new = run_new_template({
         "route": {"enabled": True, "timeoutSeconds": 300, "destinationCA": FAKE_CA},
         "images": {"oauthProxy": {
@@ -698,6 +703,22 @@ def test_ingest_not_owned_by_default():
     assert "kind: Job" not in raw.stdout
 
 
+def test_rerank_enabled_without_base_url_falls_back(tmp_path):
+    """Empty RERANK_BASE_URL with rerank on is valid: HttpReranker falls back
+    to the embedding URL (retrieve/rerank.py). The chart must preserve the
+    bare render, not reject it."""
+    old = run_old_deploy(make_old_tree(tmp_path), {
+        "RERANK_ENABLED": "true", "RERANK_MODEL": "my-reranker",
+    })
+    new = run_new_template({"models": {"rerank": {
+        "enabled": True, "baseUrl": "", "model": "my-reranker",
+    }}})
+    for docs in (old, new):
+        env = env_map(docs[("Deployment", "rag-agent")])
+        assert env["RERANK_ENABLED"]["value"] == "true"
+        assert env["RERANK_BASE_URL"].get("value") in (None, "")
+
+
 # ------------------------------------------------------- negative schema cases
 
 
@@ -720,7 +741,6 @@ def test_schema_rejects_invalid_selected_configuration():
         ({"gateway": {"apiKeySecretName": "Bad_Name!"}}, "apiKeySecretName"),
         ({"models": {"rerank": {"endpointOrder": "nope"}}}, "endpointOrder"),
         ({"metrics": {"enabled": "false"}}, "metrics"),
-        ({"models": {"rerank": {"enabled": True, "baseUrl": ""}}}, "baseUrl"),
         ({"models": {"reasoning": {"model": "foo", "baseUrl": ""}}}, "reasoning"),
         ({"route": {"enabled": True, "destinationCA": ""}}, "destinationCA"),
         ({"route": {"enabled": True, "timeoutSeconds": 0}}, "timeoutSeconds"),

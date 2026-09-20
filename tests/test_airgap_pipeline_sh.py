@@ -41,7 +41,7 @@ exit 0
 def pipe_tree(tmp_path):
     make_bin_tree(
         tmp_path,
-        ["common.sh", "validate.sh", "load.sh", "deploy.sh", "ingest.sh", "smoke.sh", "pipeline.sh"],
+        ["common.sh", "validate.sh", "load.sh", "deploy.sh", "ingest.sh", "smoke.sh", "pipeline.sh", "map_values.py"],
     )
     copy_chart(tmp_path)
     # validate.sh pins the Qdrant key contract on the overlay sources

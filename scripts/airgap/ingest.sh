@@ -172,6 +172,17 @@ run $KC apply -f dist/ingest-rendered.yaml
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE wait --for=condition=complete job/ingest --timeout=${INGEST_TIMEOUT}s"
     echo "[dryrun] rendered manifest kept at dist/ingest-rendered.yaml"
+    # First-party chart rehearsal (issue #448 H2a, dry-run only): render the
+    # explicit Job from the same chart + mapped values (D3: --show-only, never
+    # installed automatically). Production paths above are untouched. The
+    # export passes file-sourced values that plain sourcing leaves
+    # shell-local to the mapper child process.
+    command -v python3 >/dev/null 2>&1 || die "python3 is required for the chart rehearsal render (issue #448 H2a)"
+    export INTERNAL_REGISTRY NAMESPACE QDRANT_RELEASE IMAGE_SHA EMBED_BASE_URL VLLM_BASE_URL EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION LLM_BASE_URL LLM_MODEL_REASONING RERANK_ENABLED RERANK_BASE_URL RERANK_MODEL RERANK_ENDPOINT_ORDER GATEWAY_API_KEY_SECRET GATEWAY_CA_CONFIGMAP PULL_SECRET OTEL_EXPORTER_OTLP_ENDPOINT OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED OTEL_DEPLOYMENT_ENVIRONMENT OTEL_SERVICE_NAME METRICS_ENABLED AGENT_ROUTE ROUTE_DESTINATION_CA_FILE STORAGE_CLASS CORPUS_PVC INGEST_WORKERS INGEST_ALIAS_PUBLISH INGEST_REINGEST INGEST_RETIRE_DOCS CONTEXTUAL_EMBED_ENABLED CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL QDRANT_SHARD_NUMBER QDRANT_REPLICATION_FACTOR QDRANT_WRITE_CONSISTENCY_FACTOR
+    python3 scripts/airgap/map_values.py --out dist/mainframe-rag-release-values.yaml
+    helm template app charts/mainframe-rag -f dist/mainframe-rag-release-values.yaml --namespace "$NAMESPACE" --show-only templates/ingest-job.yaml > dist/ingest-chart-rendered.yaml
+    fail_on_placeholders dist/ingest-chart-rendered.yaml "ingest chart"
+    echo "[dryrun] chart Job kept at dist/ingest-chart-rendered.yaml"
 else
     echo "==> Waiting for ingest Job (timeout: ${INGEST_TIMEOUT}s)..."
     # Stream logs as an overlay in the background once pod starts
