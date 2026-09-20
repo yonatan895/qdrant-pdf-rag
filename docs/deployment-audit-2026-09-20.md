@@ -159,6 +159,28 @@ completed 40 additional documents (7,656 points); incomplete documents may repla
 Six workers are not accepted under this host allocation. Request timeouts and
 model settings were not loosened to hide the overload.
 
+The subsequent four-worker attempt also recorded 13 `ReadTimeout` errors:
+four at 20:31 UTC and nine during 20:41–20:43 UTC. The host log stream had
+missed these records; a direct pod-log read corrected earlier zero-error
+reports. A local type check started with little spare RAM and full swap before
+the later pressure spike. The user observed saturated disk activity; memory
+stalls rose sharply at the same time. Exact disk attribution was not established,
+and the four earlier timeouts predate that check. The check did not complete and
+is not a verification pass. Further tests, type checks and builds run remotely
+while this host ingests; no paging-free or four-worker capacity claim is made.
+
+At 20:50 UTC, the durable launcher from host source `2f6f65c` replaced only the
+failed ingestion Job and its pods, waiting for foreground termination. It
+preserved the corpus/progress PVCs and the distinct unfinished staging generation.
+The same `d03512c` application image verified and skipped 189 completed documents,
+leaving 263 to process with four workers. This is an actual execution of the
+updated launcher, not only its shell regression. The first new document completed
+without client errors; final publication remains pending. Evidence is retained
+in `four-pressure-attempt-private.log`, `four-pressure-job-private.json`,
+`four-pressure-recovery-private.log` and `current-observations.jsonl` under
+`/tmp/helm-live-audit`. The latter binds observations to the Job UID and streams
+pod logs incrementally rather than trusting a stale host log.
+
 The durable recovery checkout and scoped ingest wrapper are under
 `~/.config/mainframe-rag/helm-live-audit/recovery-d03512c`. Evidence remains private
 under `/tmp/resume-391`. Final publication, full-run memory fit and post-publication
