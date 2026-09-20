@@ -35,7 +35,7 @@ cluster stopped and its registry, volumes, corpus and backups intact.
 | Local serving | `LOCAL_CRC_32GB`; eager execution, one sequence per model, GPU shares 0.54 / 0.43 |
 | Reranking | Explicitly disabled for this rehearsal |
 | Registry / HTTPS gateway | Separate loopback listeners on 5443 / 8444; backend gateway on 4000 |
-| Tools | Repository-pinned Linux tools; Windows CRC `oc` and checksum-verified Windows Helm 3.19.0 |
+| Tools | Repository-pinned Linux tools; Windows CRC `oc` and checksum-verified Windows Helm 4.3.0 |
 
 Install Docker with WSL integration and NVIDIA GPU support. Verify `docker info`
 and `nvidia-smi` before downloading models. Install Git, OpenSSL, a supported
@@ -385,12 +385,13 @@ When CRC's Kubernetes API is available only on Windows loopback, use Windows
 context untouched. Verify the kubeconfig server and certificate; do not expose
 a new Kubernetes API bridge merely to make a Linux client connect.
 
-The tested Windows Helm archive was
-`https://get.helm.sh/helm-v3.19.0-windows-amd64.zip`, SHA256
-`6488630c2e5d5945ed990fa02fd9e99f9c6792cdbcd79eb264b6cfb90179d2d1`.
-Its executable SHA256 was
-`a18c49a4cd16f8b162031159eff6b4d657e04ec2df0c2be5544ad11ddf8fae79`.
-Invoke the verified executable by absolute path.
+Use the Windows Helm 4.3.0 archive from
+`https://get.helm.sh/helm-v4.3.0-windows-amd64.zip`, SHA256
+`304ea163cce4d9ad14e189c01846c6a34de9cfdfe48536ae54b2e8ba7884e67c`.
+Its executable SHA256 is
+`2f65add9f1d5c96fc70ad70f06f1c47b3ef21bee4a9f086d861bb138429e9c13`.
+Invoke the verified executable by absolute path. These hashes verify the tool
+bytes; CRC acceptance must still be recorded for the candidate being tested.
 
 Create a private CRC kubeconfig in the restricted Windows folder. In PowerShell,
 use the local CRC administrator for the namespace/trust setup; `oc login` prompts

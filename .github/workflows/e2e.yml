@@ -230,8 +230,8 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
-          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
           sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
@@ -353,8 +353,8 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
-          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
           sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
@@ -807,8 +807,8 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
-          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
           sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
@@ -943,8 +943,8 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
-          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
           sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
@@ -1218,8 +1218,8 @@ jobs:
       - name: Install checksum-pinned Helm
         run: |
           export PATH="/usr/local/bin:$PATH"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
-          echo "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-unpack"
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
           sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
