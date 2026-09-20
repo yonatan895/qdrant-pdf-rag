@@ -87,8 +87,8 @@ Local simulation exists so agent/ingest always exercise the production gateway w
 |---|---|---|---|
 | `qdrant` | StatefulSet (vendored chart) | 3 | Cluster mode, P2P 6335 (TLS off), HTTP 6333, gRPC 6334, `restricted-v2` SCC |
 | `rag-agent` | Deployment | 2 | FastAPI, unprivileged, no GPU |
-| `rag-ingest` | One-Shot Job | 1 | High CPU, worker pool, RWO scratch |
-| `zowe-mcp` | Sidecar in agent pod (ADR-0003, default-off) | 1 per agent | Same agent image, `--mcp-serve` entrypoint, localhost only, `restricted-v2` SCC, read-only tools registered, credentials via mounted secret |
+| `ingest` | One-Shot Job | 1 | High CPU, worker pool, RWO scratch |
+| `zowe-mcp` | Proposed sidecar (ADR-0003); absent from the current Helm chart | Not deployed | Bridge/client code exists; answer-context integration and deployment wiring remain incomplete. Default-off; requires separate site credentials and acceptance |
 | `jaeger` | Deployment (default on; `off` sentinel disables) | 1 | Jaeger v2 all-in-one, Badger RWO block PVC, tracing backend |
 | `bm25-weights` | Baked in images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 
@@ -99,11 +99,11 @@ Local simulation exists so agent/ingest always exercise the production gateway w
 
 The 5-stage pipeline (`airgap:pack` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`, orchestratable via `sh scripts/tools/run-task.sh airgap:pipeline` with pre-flight safety via `sh scripts/tools/run-task.sh airgap:validate`) is the **canonical deployment standard across the entire project**:
 1. **Production (Air-Gapped OpenShift):** Full 3-replica Qdrant cluster, internal enterprise registry, `restricted-v2` SCC, cluster vLLM endpoints, sneakernet tarball verification.
-2. **Local Cluster Testing (Kind + Local Registry):** Local single-node Kind cluster using a local container registry (`localhost:5000` / `airgap-registry:5000`) and 1-replica overrides (`QDRANT_EXTRA_VALUES`). Runs the exact same packaging scripts, image archives, Helm charts, with adapted local sizing and SCC.
+2. **Local Cluster Testing (Kind + Local Registry):** Local single-node Kind cluster using a local container registry (`localhost:5000` / `airgap-registry:5000`) and 1-replica overrides (`QDRANT_EXTRA_VALUES`). Runs the exact same packaging scripts, image archives, Helm charts, with explicit local sizing and identity overrides. Kind does not implement OpenShift SCC admission.
 3. **Continuous Integration (CI):** `sh scripts/tools/run-task.sh airgap:dryrun` validates applicable deployment changes without a cluster; product workflow path filters exclude markdown-only changes. The context workflow checks relevant docs separately. Published-bundle rehearsal runs on `main`/dispatch; enforced jobs and policy obligations are distinguished in [deploy](deploy.md#ci-policy).
 4. **Release verification (Windows OpenShift Local / CRC):** Published-main bundles must pass [the manual CRC gate](crc-release-verification.md) before production transfer. WSL retains the authenticated model gateway and GPU servers; CRC exercises the production Helm charts, real SCC admission, OAuth/Route, persistence, and runtime isolation. Transfer the identical tested bundle. Production version, identity, storage, and multi-node acceptance remain separate.
 
-This architectural standard ensures local cluster testing exercises the real production packaging and deployment artifacts, avoiding custom or divergent test manifests.
+Application and Qdrant resources use the same release charts. Local/CI platform stand-ins, synthetic corpus generators and sizing overrides remain separate test fixtures; their success does not establish production platform acceptance.
 
 ---
 

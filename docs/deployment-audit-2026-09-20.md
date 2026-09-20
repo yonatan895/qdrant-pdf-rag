@@ -79,3 +79,35 @@ just because a polling window expires.
 
 These rows are **NOT RUN**, not waived production passes. No production transfer
 or promotion is performed by this audit.
+
+## Transport correction and verification checkpoint
+
+The first migration attempt encountered an embedding HTTP 502. Nginx recorded
+`upstream prematurely closed connection` on its IPv6 `host.docker.internal:4000`
+hop; model, gateway and proxy containers had zero restarts and no OOM flag. The
+failed attempt was stopped deliberately, preserving its private log and staging
+state. Its obsolete host wait was terminated only after the Job was deleted.
+
+The TLS front now joins the gateway's existing Docker network and routes to the
+gateway container by name. Certificates, authentication, gateway keys, model
+revisions and deadlines are unchanged. Nginx configuration validation and reload
+passed. Ten real embedding batches (128 vectors each, dimension 1024) then passed
+from the candidate agent. Full migration resumed through the same operator
+command and shared progress storage; this is not yet a publication pass.
+
+An independent check inside the actual ingest container verified all 452 source
+hashes and a kernel read-only corpus mount. Serving snapshot writes returned HTTP
+403, and original Qdrant/Jaeger PVC identities were retained.
+
+Host-tool candidate `67ad7ebde01731b83c5afaf2bc68f21c93746a2f` passed
+`sh scripts/tools/run-task.sh qa:check`: exit 0, 2,426 tests passed, 42 deselected,
+two warnings; Ruff and mypy (54 source files) passed. The focused launcher suites
+passed 80 tests. Later documentation-only corrections distinguish the proposed
+Zowe sidecar from the deployed chart and describe the verified direct proxy route.
+The application remains the published `cbcc74b` release throughout.
+
+Private evidence directory: `/tmp/helm-live-audit`; bootstrap/load/validate,
+original and resumed migration logs, source-hash/mount proof, gateway probes,
+resource samples and rollback inventories are separate files. They are not
+committed or attached publicly. Live completion and ordinary-operation evidence
+will supersede this in-progress checkpoint.

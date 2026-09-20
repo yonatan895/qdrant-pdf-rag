@@ -72,7 +72,7 @@ three-model pack; do not add it beside the default reasoning/embedding pair.
 ## Live State (Optional, Default Off)
 
 - **Splunk (system of record):** caller-supplied context — pass `splunk_context` with `/v1/answer`, `/v1/chat`, or a console request; the agent never crawls Splunk itself.
-- **Zowe MCP (agent-fetched):** read-only datasets / JES spool / USS / job status via a sidecar bridge (`zowe_mcp_enabled=false` default; mock backend in sim). See [docs/architecture.md](docs/architecture.md).
+- **Zowe MCP (agent-fetched):** bridge/client code for read-only datasets / JES spool / USS / job status (`zowe_mcp_enabled=false` default; mock backend in sim). Answer-context and Helm sidecar integration remain incomplete. See [docs/architecture.md](docs/architecture.md).
 
 ---
 

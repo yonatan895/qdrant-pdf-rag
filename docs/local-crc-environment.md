@@ -310,7 +310,7 @@ http {
     ssl_certificate_key /pki/server.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     location / {
-      proxy_pass http://host.docker.internal:4000;
+      proxy_pass http://crc-litellm-gateway:4000;
       proxy_http_version 1.1;
       proxy_set_header Connection "";
       proxy_set_header Host $host;
@@ -326,12 +326,24 @@ docker run -d --name crc-fit-gateway-tls --entrypoint nginx \
   --user 1000:1000 --read-only --cap-drop ALL \
   --security-opt no-new-privileges --memory 128m \
   --tmpfs /tmp:uid=1000,gid=1000 --tmpfs /var/cache/nginx:uid=1000,gid=1000 \
-  --add-host host.docker.internal:host-gateway -p 127.0.0.1:8444:8444 \
+  --network crc-litellm-gateway-net -p 127.0.0.1:8444:8444 \
   -v "$LOCAL_STATE/nginx.conf:/etc/nginx/nginx.conf:ro" \
   -v "$LOCAL_STATE/pki/server.crt:/pki/server.crt:ro" \
   -v "$LOCAL_STATE/pki/server.key:/pki/server.key:ro" \
   nginx:1.30.4-alpine@sha256:dc5069ad14f19660b141b21236140b91656bf89bbc3e2417c70ae650cd66104c \
   -g 'daemon off;'
+```
+
+The TLS front joins the existing gateway Docker network and resolves its container
+name directly. This avoids the unnecessary Docker Desktop host/IPv6 forwarding
+hop that caused an observed embedding 502 during the Helm audit. The names above
+match section 4's `GATEWAY_NAME=crc-litellm-gateway`; change the network and upstream
+together if using another name. After recreating the gateway, validate and reload
+Nginx so its upstream address is current:
+
+```sh
+docker exec crc-fit-gateway-tls nginx -t
+docker exec crc-fit-gateway-tls nginx -s reload
 ```
 
 Here 1000 is the WSL owner's ID, not an OpenShift pod identity. Adjust ownership
