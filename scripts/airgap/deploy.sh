@@ -83,6 +83,33 @@ require_secret_keys "${PULL_SECRET:-}" .dockerconfigjson
 if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     $KC -n "$NAMESPACE" get -f dist/agent-rendered.yaml --ignore-not-found -o json > dist/app-existing.json
     python3 scripts/airgap/check_app_ownership.py "$NAMESPACE" < dist/app-existing.json
+
+    # Objects omitted from the first Helm release never enter its history.
+    # Discover supported optional APIs, then inspect only the fixed legacy
+    # inventory selected for removal. Failed discovery/reads stop deployment.
+    _app_apis=$($KC api-resources -o name) || die "cannot discover optional application APIs"
+    set --
+    if [ "$OTEL_TRACING_ENABLED" != "1" ]; then
+        set -- "$@" deployment.apps/jaeger service/jaeger configmap/jaeger-config
+    fi
+    if [ "$AGENT_ROUTE" != "true" ]; then
+        set -- "$@" serviceaccount/rag-agent
+        if printf '%s\n' "$_app_apis" | grep -qx 'routes.route.openshift.io'; then
+            set -- "$@" route.route.openshift.io/rag-agent
+        fi
+    fi
+    if [ "${METRICS_ENABLED:-false}" != "true" ]; then
+        if printf '%s\n' "$_app_apis" | grep -qx 'servicemonitors.monitoring.coreos.com'; then
+            set -- "$@" servicemonitor.monitoring.coreos.com/rag-agent
+        fi
+    fi
+    if [ "$#" -gt 0 ]; then
+        $KC -n "$NAMESPACE" get "$@" --ignore-not-found -o json > dist/app-disabled-existing.json
+    else
+        printf '%s\n' '{"apiVersion":"v1","kind":"List","items":[]}' > dist/app-disabled-existing.json
+    fi
+    python3 scripts/airgap/check_app_ownership.py "$NAMESPACE" --disabled \
+        < dist/app-disabled-existing.json > dist/app-disabled-cleanup.json
 fi
 
 CHART=$(ls charts/qdrant-*.tgz | head -1)
@@ -165,6 +192,11 @@ else
     wait_rollout "deploy/rag-agent" 300
     if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
         wait_rollout "deploy/jaeger" 120
+    fi
+    # Reconcile disabled legacy resources only after the selected workloads
+    # are ready. PVCs are never members of this validated cleanup inventory.
+    if [ -s dist/app-disabled-cleanup.json ]; then
+        $KC -n "$NAMESPACE" delete -f dist/app-disabled-cleanup.json --ignore-not-found
     fi
 fi
 if [ "$AGENT_ROUTE" = "true" ]; then

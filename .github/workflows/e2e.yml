@@ -986,7 +986,7 @@ jobs:
           # Tracing defaults ON: an unset endpoint resolves to the in-cluster
           # Jaeger (issue #83), so the default deploy renders it too.
           test -f dist/jaeger-rendered.yaml
-          grep -q 'value: http://jaeger:4318' dist/agent-rendered.yaml
+          grep -Eq 'value: "?http://jaeger:4318"?$' dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml
 
       - name: first-party chart render asserts (issue #448 H2a)
@@ -1076,7 +1076,7 @@ jobs:
           test -f dist/jaeger-rendered.yaml
           grep -q "ghcr.io/dryrun-standin/jaegertracing/jaeger:v2.20.0" dist/jaeger-rendered.yaml
           grep -q "storageClassName: standard" dist/jaeger-rendered.yaml
-          grep -q 'value: http://jaeger:4318' dist/agent-rendered.yaml
+          grep -Eq 'value: "?http://jaeger:4318"?$' dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/jaeger-rendered.yaml
 
       - name: airgap-deploy dry-run with metrics enabled (ServiceMonitor render, issue #187)

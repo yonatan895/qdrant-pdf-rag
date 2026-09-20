@@ -133,9 +133,19 @@ if [ "$1" = "kustomize" ] || [ "$1" = "build" ]; then
 fi
 printf '%s\\n' "$@" >> "$HELM_LOG"
 case "$*" in
+  *'rollout status '*)
+    [ "${{ROLLOUT_FAIL:-}}" != 1 ] || exit 1 ;;
+  'api-resources -o name')
+    [ "${{DISCOVERY_FAIL:-}}" != 1 ] || exit 1
+    printf '%s\\n' routes.route.openshift.io servicemonitors.monitoring.coreos.com ;;
+  *'get deployment.apps/jaeger '*|*'get serviceaccount/rag-agent '*|*'get servicemonitor.monitoring.coreos.com/rag-agent '*)
+    [ "${{DISABLED_READ_FAIL:-}}" != 1 ] || exit 1
+    if [ -n "${{DISABLED_FILE:-}}" ]; then cat "$DISABLED_FILE";
+    else :; fi ;;
   *'get -f '*'-o json'*)
+    [ "${{ACTIVE_READ_FAIL:-}}" != 1 ] || exit 1
     if [ -n "${{OWNERSHIP_FILE:-}}" ]; then cat "$OWNERSHIP_FILE";
-    else echo '{{"apiVersion":"v1","kind":"List","items":[]}}'; fi ;;
+    else :; fi ;;
 
   *'get secret '*'go-template='*)
     if [ -n "${{MISSING_KEY:-}}" ]; then
@@ -710,3 +720,69 @@ def test_old_helm_fails_before_any_release_mutation(tree):
     assert result.returncode != 0
     assert "Helm 4 is required" in result.stderr
     assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("owner", ["legacy", "ours", "other", "controller"])
+def test_disabled_legacy_resources_are_checked_then_cleaned_after_rollout(tree, owner):
+    import json
+
+    meta = {"name": "jaeger", "namespace": "ns"}
+    if owner in ("ours", "other"):
+        meta["annotations"] = {"meta.helm.sh/release-name": "mainframe-rag" if owner == "ours" else "another"}
+    if owner == "controller":
+        meta["ownerReferences"] = [{"name": "operator"}]
+    path = tree[0] / "disabled.json"
+    path.write_text(json.dumps({"kind": "List", "items": [
+        {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta,
+         "spec": {"unrelated": "must not enter deletion file"}},
+    ]}))
+    result = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"), ("DISABLED_FILE", str(path)))
+    log = _helm_log(tree)
+    if owner in ("other", "controller"):
+        assert result.returncode != 0
+        assert "upgrade" not in log
+        assert "delete" not in log
+    else:
+        assert result.returncode == 0, result.stderr
+        cleanup = json.loads((tree[0] / "dist/app-disabled-cleanup.json").read_text())
+        assert cleanup["items"] == [{"apiVersion": "apps/v1", "kind": "Deployment",
+                                      "metadata": {"name": "jaeger", "namespace": "ns"}}]
+        assert log.index("delete") > log.index("rollout") > log.index("upgrade")
+
+
+@pytest.mark.parametrize("failure", ["DISCOVERY_FAIL", "DISABLED_READ_FAIL", "ACTIVE_READ_FAIL"])
+def test_disabled_resource_read_failures_block_mutations(tree, failure):
+    result = _run(tree, (failure, "1"))
+    assert result.returncode != 0
+    assert "upgrade" not in _helm_log(tree)
+    assert "delete" not in _helm_log(tree)
+
+
+def test_disabled_cleanup_never_accepts_a_pvc(tree):
+    import json
+
+    path = tree[0] / "disabled.json"
+    path.write_text(json.dumps({"kind": "List", "items": [
+        {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+         "metadata": {"name": "jaeger-badger", "namespace": "ns"}},
+    ]}))
+    result = _run(tree, ("DISABLED_FILE", str(path)))
+    assert result.returncode != 0
+    assert "upgrade" not in _helm_log(tree)
+    assert "delete" not in _helm_log(tree)
+
+
+def test_legacy_cleanup_waits_for_successful_rollouts(tree):
+    import json
+
+    path = tree[0] / "disabled.json"
+    path.write_text(json.dumps({"kind": "List", "items": [
+        {"apiVersion": "apps/v1", "kind": "Deployment",
+         "metadata": {"name": "jaeger", "namespace": "ns"}},
+    ]}))
+    result = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"),
+                  ("DISABLED_FILE", str(path)), ("ROLLOUT_FAIL", "1"))
+    assert result.returncode != 0
+    log = _helm_log(tree)
+    assert "upgrade" in log
+    assert "delete" not in log

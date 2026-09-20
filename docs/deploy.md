@@ -115,6 +115,12 @@ Compatibility and lifecycle decisions under #448:
   adopt unchanged legacy objects but then conflict with `kubectl-client-side-apply`
   on the next image update. Use the same flag for application rollbacks; do not
   force conflicts or replace resources to bypass ownership checks.
+- The first adoption also inventories disabled legacy optional objects using
+  cluster API discovery. Discovery/read/ownership failures stop before either
+  release changes. Once selected workloads are ready, deployment deletes only
+  the checked disabled Jaeger workloads/config, console Route/ServiceAccount
+  and ServiceMonitor. This covers objects absent from the first Helm release's
+  history. The cleanup inventory never permits a PVC.
 - Disabled optional workloads, Routes and monitors are removed on upgrades of
   the Helm release. The Jaeger PVC has `helm.sh/resource-policy: keep`: disabling
   tracing or removing the app release retains its data. Re-enabling tracing
