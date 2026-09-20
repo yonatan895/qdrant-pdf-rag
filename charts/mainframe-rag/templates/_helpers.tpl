@@ -1,5 +1,5 @@
 {{/*
-Shared helpers for mainframe-rag (issue #448 H1b).
+Shared helpers for mainframe-rag.
 Keep this file small: no general-purpose PodSpec framework (stop condition).
 Protected implementation defaults (selectors, ports, probes, keys) stay in
 the resource templates, not in values.

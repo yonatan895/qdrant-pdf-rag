@@ -1,4 +1,4 @@
-# Agent Service (shadow of deploy/kustomize base Service plus the
+# Agent Service (HTTP Service plus the
 # openshift-ui oauth port when route.enabled).
 # ClusterIP only; no Route for Qdrant, ever. Selector and port names must
 # track the Deployment and the ServiceMonitor.

@@ -30,21 +30,6 @@ IMAGE_SHA = "b" * 40
 def tree(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "validate.sh"])
     copy_chart(tmp_path)
-    # validate.sh pins the Qdrant key contract on the overlay sources
-    # (issue #366): the copied tree needs the real files it inspects.
-    agent_overlay = tmp_path / "deploy" / "kustomize" / "overlays" / "openshift"
-    agent_overlay.mkdir(parents=True, exist_ok=True)
-    ingest_overlay = tmp_path / "deploy" / "kustomize" / "overlays" / "openshift-ingest"
-    ingest_overlay.mkdir(parents=True, exist_ok=True)
-    shutil.copy(
-        REPO / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml",
-        agent_overlay,
-    )
-    shutil.copy(
-        REPO / "deploy" / "kustomize" / "overlays" / "openshift-ingest" / "ingest-job.yaml",
-        ingest_overlay,
-    )
-
     for name in ("skopeo", "helm", "kubectl", "oc"):
         write_stub(tmp_path / "bin" / name, STUB_TOOL)
     return tmp_path

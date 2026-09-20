@@ -1,4 +1,4 @@
-"""map_values.py unit + producer round-trip (issue #448 H2a).
+"""map_values.py unit + producer round-trip.
 
 The mapper reads the already-resolved operator environment (single owner:
 common.sh) and writes the Helm release values with a stdlib-only

@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "mainframe-rag values (issue #448 H1b)",
+  "title": "mainframe-rag values",
   "type": "object",
   "additionalProperties": false,
   "required": ["replicaCount", "images", "qdrantRelease", "models", "gateway", "tracing", "metrics", "route", "storage", "ingest", "pullSecret", "resources"],

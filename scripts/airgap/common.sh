@@ -195,42 +195,6 @@ resolve_otel_endpoint() {
     export OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED
 }
 
-# Delete gateway key entries from a rendered manifest (used when
-# GATEWAY_API_KEY_SECRET is unset). Each entry is exactly five lines
-# (`- name:` + valueFrom/secretKeyRef/key/name in either mapping order),
-# so awk skips a fixed count anchored on the entry name — never on
-# comments (kustomize drops them) and never on inner line order (kustomize
-# sorts mapping keys). Entry shape is pinned by the render tests.
-# $1 = file, $2... = env entry names.
-strip_gateway_key_entries() {
-    _strip_file=$1; shift
-    for _entry in "$@"; do
-        awk -v entry="$_entry" '
-            $0 ~ "- name: " entry "$" { skip=5 }
-            skip > 0 { skip--; next }
-            { print }
-        ' "$_strip_file" > "$_strip_file.tmp" && mv "$_strip_file.tmp" "$_strip_file"
-    done
-    unset _strip_file _entry
-}
-
-# Delete a plain two-line env entry (`- name: X` + `value: ...`) from a
-# rendered manifest (used for optional entries whose unset state must leave
-# no trace — a blank value would override an in-code default, as with
-# OTEL_SERVICE_NAME vs the agent's DEFAULT_SERVICE_NAME in tracing.py).
-# $1 = file, $2... = env entry names.
-strip_env_entry() {
-    _strip_file=$1; shift
-    for _entry in "$@"; do
-        awk -v entry="$_entry" '
-            $0 ~ "- name: " entry "$" { skip=2 }
-            skip > 0 { skip--; next }
-            { print }
-        ' "$_strip_file" > "$_strip_file.tmp" && mv "$_strip_file.tmp" "$_strip_file"
-    done
-    unset _strip_file _entry
-}
-
 resolve_aliases() {
     INTERNAL_REGISTRY=${INTERNAL_REGISTRY:-${REGISTRY_INTERNAL:-}}
     NAMESPACE=${NAMESPACE:-${OPENSHIFT_NAMESPACE:-mainframe-rag}}
@@ -282,27 +246,6 @@ check_manifest_sha() {
 # load enforce their own tool rules).
 require_kc() {
     [ "${AIRGAP_DRYRUN:-0}" = "1" ] || command -v oc >/dev/null 2>&1 || command -v kubectl >/dev/null 2>&1 || die "oc or kubectl is required on the air-gap bastion (or set AIRGAP_DRYRUN=1 to preview)"
-}
-
-# Render a kustomize overlay: standalone kustomize when present, else the
-# kubectl/oc built-in. Callers pipe through sed placeholder substitution.
-kustomize_render() {
-    if command -v kustomize >/dev/null 2>&1; then
-        kustomize build "$1"
-    else
-        ${KC:-$(kc)} kustomize "$1"
-    fi
-}
-
-# Wire PULL_SECRET into a rendered manifest (no-op when unset).
-# The inserted item reuses the matched line's indent: every overlay nests
-# `imagePullSecrets: []` inside the pod spec, and a fixed 2-space item breaks
-# out of the mapping (kubectl: "did not find expected key" on apply).
-# PULL_SECRET is a DNS-subdomain secret name by contract — no sed-active chars.
-wire_pull_secret() {
-    if [ -n "${PULL_SECRET:-}" ]; then
-        sed -E -i "s|^([[:space:]]*)imagePullSecrets: \[\]|\1imagePullSecrets:\n\1  - name: $PULL_SECRET|" "$1"
-    fi
 }
 
 # Fail closed on leftover __PLACEHOLDER__s. $1 = file, $2 = label for the message.
@@ -422,56 +365,6 @@ next_step() {
     echo ""
     echo "Next: $*"
 }
-
-# Optional complete gateway trust bundle. A targeted kustomize patch preserves
-# Services/ServiceAccounts/OAuth sidecars in multi-document agent renders.
-wire_gateway_ca() (
-    [ -n "${GATEWAY_CA_CONFIGMAP:-}" ] || exit 0
-    check_secret_name "$GATEWAY_CA_CONFIGMAP" GATEWAY_CA_CONFIGMAP
-    _ca_file="$1"; _ca_kind="$2"; _ca_name="$3"; _ca_container="$4"
-    _ca_tmp="$(mktemp -d)"
-    trap 'rm -rf "$_ca_tmp"' EXIT HUP INT TERM
-    cp "$_ca_file" "$_ca_tmp/resources.yaml"
-    cat > "$_ca_tmp/kustomization.yaml" <<EOF_CA
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources: [resources.yaml]
-patches:
-  - target:
-      kind: $_ca_kind
-      name: $_ca_name
-    patch: |-
-      apiVersion: apps/v1
-      kind: $_ca_kind
-      metadata:
-        name: $_ca_name
-      spec:
-        template:
-          spec:
-            containers:
-              - name: $_ca_container
-                env:
-                  - name: SSL_CERT_FILE
-                    value: /etc/gateway-ca/ca-bundle.crt
-                volumeMounts:
-                  - name: gateway-ca
-                    mountPath: /etc/gateway-ca
-                    readOnly: true
-            volumes:
-              - name: gateway-ca
-                configMap:
-                  name: $GATEWAY_CA_CONFIGMAP
-                  items:
-                    - key: ca-bundle.crt
-                      path: ca-bundle.crt
-EOF_CA
-    if [ "$_ca_kind" = "Job" ]; then
-        sed -i 's|apiVersion: apps/v1|apiVersion: batch/v1|' "$_ca_tmp/kustomization.yaml"
-    fi
-    kustomize_render "$_ca_tmp" > "$_ca_tmp/rendered.yaml"
-    [ -s "$_ca_tmp/rendered.yaml" ] || die "gateway CA render produced empty output"
-    cp "$_ca_tmp/rendered.yaml" "$_ca_file"
-)
 
 check_gateway_ca() {
     [ -n "${GATEWAY_CA_CONFIGMAP:-}" ] || return 0

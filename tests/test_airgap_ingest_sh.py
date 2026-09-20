@@ -26,114 +26,22 @@ from tests.helpers_airgap import (
 IMAGE_SHA = "d" * 40
 
 STUB_BIN = """#!/bin/sh
-if [ "$1" = "kustomize" ] || [ "$1" = "build" ]; then
-  cat {stub_yaml}
-  exit 0
-fi
-if [ "$1" = "patch" ]; then
-  # Local strategic merge patch stub
-  cat {stub_patched_yaml}
-  exit 0
-fi
 printf '%s\\n' "$@" >> "$KC_LOG"
 exit 0
 """
 
-STUB_INGEST_KUSTOMIZE = """apiVersion: batch/v1
-kind: Job
-metadata:
-  name: ingest
-  namespace: mainframe-rag
-spec:
-  template:
-    spec:
-      imagePullSecrets: []
-      containers:
-        - name: ingest
-          image: __INTERNAL_REGISTRY__/qdrant-pdf-rag-ingest:__IMAGE_SHA__
-          args: __INGEST_ARGS__
-          env:
-            - name: QDRANT_URL
-              value: __QDRANT_URL__
-            - name: QDRANT_COLLECTION
-              value: mainframe_manuals
-            - name: INGEST_ALIAS_PUBLISH
-              value: "__INGEST_ALIAS_PUBLISH__"
-            - name: QDRANT_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: __QDRANT_RELEASE__-apikey
-                  key: api-key
-            - name: EMBED_BASE_URL
-              value: __EMBED_BASE_URL__
-            - name: EMBED_MODEL
-              value: __EMBED_MODEL__
-            - name: EMBED_MODEL_REVISION
-              value: __EMBED_MODEL_REVISION__
-            - name: DENSE_DIM
-              value: __DENSE_DIM__
-            - name: QDRANT_SHARD_NUMBER
-              value: __QDRANT_SHARD_NUMBER__
-            - name: QDRANT_REPLICATION_FACTOR
-              value: __QDRANT_REPLICATION_FACTOR__
-            - name: QDRANT_WRITE_CONSISTENCY_FACTOR
-              value: __QDRANT_WRITE_CONSISTENCY_FACTOR__
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: __OTEL_EXPORTER_OTLP_ENDPOINT__
-            - name: IMAGE_SHA
-              value: __IMAGE_SHA__
-            - name: OTEL_SERVICE_NAME
-              value: mainframe-rag-ingest
-            - name: OTEL_DEPLOYMENT_ENVIRONMENT
-              value: __OTEL_DEPLOYMENT_ENVIRONMENT__
-            - name: INGEST_WORKERS
-              value: "__INGEST_WORKERS__"
-            - name: CONTEXTUAL_EMBED_ENABLED
-              value: "__CONTEXTUAL_EMBED_ENABLED__"
-            - name: CONTEXT_LLM_BASE_URL
-              value: "__CONTEXT_LLM_BASE_URL__"
-            - name: CONTEXT_LLM_MODEL
-              value: "__CONTEXT_LLM_MODEL__"
-            - name: EMBED_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  key: embed-api-key
-                  name: __GATEWAY_API_KEY_SECRET__
-            - name: CONTEXT_LLM_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  key: context-llm-api-key
-                  name: __GATEWAY_API_KEY_SECRET__
-      volumes:
-        - name: corpus
-          persistentVolumeClaim:
-            claimName: __CORPUS_PVC__
-"""
-
-
 @pytest.fixture
 def ingest_tree(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "ingest.sh", "map_values.py"])
-    (tmp_path / "deploy" / "kustomize" / "overlays" / "openshift-ingest").mkdir(
-        parents=True, exist_ok=True
-    )
-    stub_yaml = tmp_path / "stub-ingest.yaml"
-    stub_yaml.write_text(STUB_INGEST_KUSTOMIZE)
-    stub_patched_yaml = tmp_path / "stub-patched-ingest.yaml"
-    stub_patched_yaml.write_text(STUB_INGEST_KUSTOMIZE.replace("cpu: 4", "cpu: 1"))
-    kc_log = tmp_path / "kc.log"
-    for name in ("kubectl", "oc", "kustomize"):
+    for name in ("kubectl", "oc"):
         write_stub(
             tmp_path / "bin" / name,
-            STUB_BIN.format(stub_yaml=stub_yaml, stub_patched_yaml=stub_patched_yaml),
+            STUB_BIN,
         )
-    # Issue #448 H2a: ingest.sh dry-run also maps release values and renders
-    # the chart Job (real mapper + real python3); helm stays stubbed here —
-    # real helm rendering is proven by test_helm_chart_shadow,
-    # test_map_values and the e2e dry-run gate.
+    # Real Helm renders the chart; cluster mutations remain stubbed.
     write_stub(tmp_path / "bin" / "helm", STUB_TOOL)
     install_rendering_helm(tmp_path)
-    return tmp_path, kc_log
+    return tmp_path, tmp_path / "kc-args.log"
 
 
 def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1", "1")):
@@ -267,16 +175,6 @@ def test_ingest_qdrant_copresent_readonly_key_fails_closed(ingest_tree):
     assert "read-only" in r.stderr
 
 
-def test_ingest_overlay_qdrant_contract():
-    """Pin the real ingest overlay to the write-key contract so it cannot
-    silently follow the agent to read-only."""
-    real = (
-        REPO / "deploy" / "kustomize" / "overlays" / "openshift-ingest" / "ingest-job.yaml"
-    ).read_text()
-    assert "- name: QDRANT_API_KEY" in real
-    assert re.search(r"(?m)^\s*key: api-key$", real)
-    assert "read-only-api-key" not in real
-    assert "__QDRANT_RELEASE__-apikey" in real
 
 
 def test_ingest_overlay_maintenance_contract(ingest_tree):
@@ -499,16 +397,6 @@ def test_ingest_dryrun_contextual_embed_propagation(ingest_tree):
     assert 'value: "meta-llama/Llama-3-8B"' in rendered or "value: meta-llama/Llama-3-8B" in rendered
 
 
-def test_ingest_overlay_collection_policy_contract():
-    """Issue #360: the real ingest overlay carries the three optional
-    distribution-policy entries as bare placeholders for the launcher."""
-    real = (
-        REPO / "deploy" / "kustomize" / "overlays" / "openshift-ingest" / "ingest-job.yaml"
-    ).read_text()
-    for key in ("QDRANT_SHARD_NUMBER", "QDRANT_REPLICATION_FACTOR",
-                "QDRANT_WRITE_CONSISTENCY_FACTOR"):
-        assert re.search(rf"(?m)^\s*- name: {key}$", real), key
-        assert f"value: __{key}__" in real, key
 
 
 def test_ingest_collection_policy_absent_fails_closed(ingest_tree):
@@ -747,31 +635,3 @@ def test_ingest_gateway_secret_bad_name_fails_closed(ingest_tree):
     r = _run_ingest(ingest_tree, ("GATEWAY_API_KEY_SECRET", "Bad_Name!"))
     assert r.returncode == 1
     assert "GATEWAY_API_KEY_SECRET must be a DNS-subdomain name" in r.stderr
-
-
-def test_ingest_gateway_overlay_block_matches_stub_contract():
-    """The stub kustomize above mirrors the real ingest overlay by hand —
-    pin the real file to the same contract so the two cannot diverge."""
-    from tests.helpers_airgap import REPO
-
-    real = (
-        REPO
-        / "deploy"
-        / "kustomize"
-        / "overlays"
-        / "openshift-ingest"
-        / "ingest-job.yaml"
-    ).read_text()
-    assert "# gateway-api-keys-begin" in real
-    assert "# gateway-api-keys-end" in real
-    assert real.index("# gateway-api-keys-begin") < real.index("# gateway-api-keys-end")
-    # Deploy identity (issue #315): ingest spans carry service.version.
-    assert "- name: IMAGE_SHA" in real
-    assert "value: __IMAGE_SHA__" in real
-    for env_name, data_key in (
-        ("EMBED_API_KEY", "embed-api-key"),
-        ("CONTEXT_LLM_API_KEY", "context-llm-api-key"),
-    ):
-        assert f"- name: {env_name}" in real
-        assert f"key: {data_key}" in real
-    assert "__GATEWAY_API_KEY_SECRET__" in real

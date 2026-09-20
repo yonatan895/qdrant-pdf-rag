@@ -420,19 +420,19 @@ import os, subprocess, sys
 from pathlib import Path
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
-if name in ('oc', 'kubectl') and ('kustomize' in args or '--local' in args):
+if name in ('oc', 'kubectl') and '--local' in args:
     exe = os.environ['CRC_LINUX_KUBECTL']
     os.execv(exe, [exe, *args])
 exe = os.environ['CRC_HELM_EXE' if name == 'helm' else 'CRC_OC_EXE']
 file_flags = {'-f', '--filename', '--values', '--from-file', '--from-env-file',
-              '--cert', '--key'}
+              '--cert', '--key', '--output-dir'}
 def windows_path(value, flag=''):
     prefix, path = '', value
     if flag == '--from-file' and '=' in value:
         key, candidate = value.split('=', 1)
         if '/' not in key:
             prefix, path = key + '=', candidate
-    if '/' in path and Path(path).exists():
+    if '/' in path and (Path(path).exists() or flag == '--output-dir'):
         path = subprocess.check_output(
             ['wslpath', '-w', str(Path(path).resolve())], text=True).strip()
     return prefix + path
@@ -461,10 +461,10 @@ export PATH="$OPERATOR_BIN:$PATH"
 oc whoami --show-server
 oc get nodes
 helm list --all-namespaces
-kubectl kustomize deploy/kustomize/overlays/openshift > "$LOCAL_STATE/render-check.yaml"
+helm template mainframe-rag charts/mainframe-rag -f dist/mainframe-rag-release-values.yaml > "$LOCAL_STATE/render-check.yaml"
 ```
 
-Only existing path arguments containing `/` are translated, and translation
+Existing path arguments and Helm output-directory paths containing `/` are translated, and translation
 stops at `--`: `deploy` is a Kubernetes resource word even when a local directory
 has that name. Commands after `exec ... --` run inside pods, not on Windows.
 The adapter also translates `--from-file=KEY=PATH` and explicit certificate,

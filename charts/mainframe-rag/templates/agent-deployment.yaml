@@ -1,7 +1,4 @@
-# Agent Deployment (shadow of deploy/kustomize base + overlays/openshift,
-# plus openshift-ui when route.enabled).
-# Parity target: `kubectl kustomize deploy/kustomize/overlays/openshift[-ui]`
-# after deploy.sh placeholder substitution and strip/wire post-processing.
+# Agent Deployment with optional OAuth sidecar when route.enabled.
 # Protected defaults (selectors, ports, probes, read-only Qdrant key,
 # UI_ENABLED=true, oauth args/ports/volumes, resource defaults) stay here (D5).
 apiVersion: apps/v1

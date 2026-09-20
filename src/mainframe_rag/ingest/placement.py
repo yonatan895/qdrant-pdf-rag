@@ -43,7 +43,7 @@ POLICY_KEYS = (
 
 # Owner decision for the air-gapped production topology and the explicit
 # single-node profile (both checked in: overlays/openshift/collection-policy.env
-# and deploy/kustomize/overlays/ci/ingest-job.yaml).
+# and the explicit rehearsal profiles in .github/workflows/e2e.yml).
 PRODUCTION_POLICY = (6, 3, 2)
 SINGLE_NODE_POLICY = (1, 1, 1)
 PRODUCTION_PEERS = 3

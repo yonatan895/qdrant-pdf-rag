@@ -101,23 +101,23 @@ CHART=$(ls charts/qdrant-*.tgz 2>/dev/null | head -1 || true)
 echo "    Vendored chart: $CHART"
 
 # Issue #366: serving is read-only, ingest owns mutation. The prod agent
-# overlay must reference the chart's `read-only-api-key` data key while the
-# ingest overlay keeps the full-access `api-key`. Source-level gate (no
+# template must reference the chart's `read-only-api-key` data key while the
+# ingest template keeps the full-access `api-key`. Source-level gate (no
 # cluster): deploy.sh/ingest.sh re-check the rendered manifests.
-AGENT_OVERLAY=charts/mainframe-rag/templates/agent-deployment.yaml
-_agent_block=$(grep -A8 -- "- name: QDRANT_API_KEY" "$AGENT_OVERLAY" || true)
+AGENT_TEMPLATE=charts/mainframe-rag/templates/agent-deployment.yaml
+_agent_block=$(grep -A8 -- "- name: QDRANT_API_KEY" "$AGENT_TEMPLATE" || true)
 printf '%s\n' "$_agent_block" | grep -Eq '^[[:space:]]*key: read-only-api-key$' || \
-    die "prod agent overlay must wire QDRANT_API_KEY to read-only-api-key (issue #366)"
+    die "prod agent template must wire QDRANT_API_KEY to read-only-api-key (issue #366)"
 if printf '%s\n' "$_agent_block" | grep -Eq '^[[:space:]]*key: api-key$'; then
-    die "prod agent overlay wires QDRANT_API_KEY to the full-access key (issue #366)"
+    die "prod agent template wires QDRANT_API_KEY to the full-access key (issue #366)"
 fi
 unset _agent_block
-INGEST_OVERLAY=charts/mainframe-rag/templates/ingest-job.yaml
-_ingest_block=$(grep -A8 -- "- name: QDRANT_API_KEY" "$INGEST_OVERLAY" || true)
+INGEST_TEMPLATE=charts/mainframe-rag/templates/ingest-job.yaml
+_ingest_block=$(grep -A8 -- "- name: QDRANT_API_KEY" "$INGEST_TEMPLATE" || true)
 printf '%s\n' "$_ingest_block" | grep -Eq '^[[:space:]]*key: api-key$' || \
-    die "ingest overlay must wire QDRANT_API_KEY to api-key (ingest owns corpus mutation)"
+    die "ingest template must wire QDRANT_API_KEY to api-key (ingest owns corpus mutation)"
 if printf '%s\n' "$_ingest_block" | grep -Eq '^[[:space:]]*key: read-only-api-key$'; then
-    die "ingest overlay wires a read-only Qdrant key into the ingest path (issue #366)"
+    die "ingest template wires a read-only Qdrant key into the ingest path (issue #366)"
 fi
 unset _ingest_block
 echo "    Qdrant key separation verified (agent read-only, ingest write)"

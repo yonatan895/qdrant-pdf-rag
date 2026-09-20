@@ -119,8 +119,8 @@ how those instruments work and what their results can establish.
 ### Air-gap deployment tier (`sh scripts/tools/run-task.sh airgap:dryrun`, `tests/test_airgap_*.py`, local Kind)
 
 The canonical 5-stage deployment pipeline (`airgap:pack` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`) is verified across three complementary tiers:
-1. **Hermetic Test Suite (`pytest tests/test_airgap_*.py`):** Fast unit tests running without a cluster or Docker daemon. Exercises `scripts/airgap/*.sh` via stubs for `helm`, `kubectl`, `oc`, `kustomize`, and `skopeo`. Verifies pre-flight environment validation (`validate.sh`), sneakernet extraction and bootstrap (`bootstrap.sh`), pipeline orchestration (`pipeline.sh`), manifest rendering, string quoting of integers and booleans (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`), storage class checks (refusing NFS), Jaeger v2 wiring, gateway key strip-or-substitute rendering plus plaintext-key refusal and Secret verification, and fail-closed behavior on `/healthz` probe failures.
-2. **CI Pre-Flight Dry-Run (`sh scripts/tools/run-task.sh airgap:dryrun`):** Automated PR gate in GitHub Actions. Renders production Helm templates and Kustomize overlays using test parameters, verifying that all placeholders are substituted and zero leftover `__[A-Z0-9_]+__` patterns remain.
+1. **Hermetic Test Suite (`pytest tests/test_airgap_*.py`):** Fast unit tests running without a cluster or Docker daemon. Exercises `scripts/airgap/*.sh` using real Helm for rendering and stubs for cluster mutations, `kubectl`, `oc`, and `skopeo`. Verifies pre-flight environment validation (`validate.sh`), sneakernet extraction and bootstrap (`bootstrap.sh`), pipeline orchestration (`pipeline.sh`), manifest rendering, string quoting of integers and booleans (`DENSE_DIM`, `INGEST_WORKERS`, `RERANK_ENABLED`), storage class checks (refusing NFS), Jaeger v2 wiring, conditional gateway Secret-reference rendering plus plaintext-key refusal and Secret verification, and fail-closed behavior on `/healthz` probe failures.
+2. **CI Pre-Flight Dry-Run (`sh scripts/tools/run-task.sh airgap:dryrun`):** Automated PR gate in GitHub Actions. Renders production Helm templates using test parameters, verifying that all placeholders are substituted and zero leftover `__[A-Z0-9_]+__` patterns remain.
 3. **Local Cluster & E2E Rehearsal:** In local development, operators test the complete pipeline against a single-node Kind cluster and local registry container on port 5000 (`localhost:5000`). In CI, `airgap-rehearsal` runs on `main` against an ephemeral namespace in the lab OpenShift cluster, validating the real sneakernet tarball unpack, image push, StatefulSet rollout, and smoke queries.
 
 ### Golden corpus (dev/holdout)
@@ -216,7 +216,7 @@ to this increment and must not be claimed as enforcement until the maintainer co
 [verification minimums](live-stack.md#verification-minimums), not a second policy language. It maps
 changed paths to the categories `prose`, `tooling`, `tests`, `deploy`, `storage`, `http`, and
 `tracing`; cross-layer unions select `full`. `deploy` covers the packaging/deployment/defaults
-surfaces (Containerfiles, `deploy/` kustomize overlays, `pyproject.toml`, lockfiles,
+surfaces (Containerfiles, first-party Helm templates, `pyproject.toml`, lockfiles,
 `scripts/airgap/`, air-gap shell tests) without heavy services. Unmapped paths and unreadable or
 empty diffs fail
 closed to `full`, so an ambiguous executable change is never reviewed as docs-only. The profile
@@ -304,3 +304,34 @@ required check is not a pass. Historical green runs are not current release
 evidence. The PR table can group related tests; do not fabricate a run or require
 a permanent artifact for every small assertion. New context-tool tests use
 temporary trees/mocked subprocesses, not live Docker, GPU or a private corpus.
+
+
+<a id="helm-coverage"></a>
+## Helm deployment coverage
+
+`tests/test_helm_chart_contracts.py` uses real Helm and independent expected
+values. `tests/helpers_helm.py` supplies only synthetic inputs and rendering
+helpers; it does not derive expectations from chart source. The retired
+migration oracle is not a supported deployment path. Historical signed
+releases continue to use their own bundled scripts.
+
+| Retired comparison or implementation pin | Retained behavior owner |
+|---|---|
+| Agent inventory and base parity | `test_agent_inventory_matches`, `test_base_contract_with_independent_controls`: inventory, complete typed environment, credentials, image, probes, ports, resources and defaults |
+| Gateway keys, pull Secret, service name, nondefault namespace/registry/rerank | Corresponding chart contract cases plus `test_map_values.py` and deploy/ingest producer round trips |
+| Gateway CA patch structure and old/new parity | `test_gateway_ca.py`: rendered app-only mounts, excluded OAuth/Jaeger containers, bad/absent names, API/key preflight and operator precedence |
+| OAuth overlay and Route parity | `test_route_oauth_contract`: redirect reference, sidecar args, Secret volumes, ports, certificate annotation, reencrypt policy, timeout and off state |
+| Jaeger parity | `test_jaeger_contract`: image, args, probes, ports, resource limits, volume mounts, Badger directories/retention, pipelines and storage/exporter linkage; identity checks in `test_openshift_identities.py` |
+| ServiceMonitor parity | `test_servicemonitor_contract`: selector, HTTP port/path, interval, timeout and disabled state |
+| Ingest and maintenance parity | `test_ingest_job_contract_normal`, `test_ingest_job_contract_maintenance_with_tricky_revision`: complete typed environment, writer key, resources, read-only corpus, scratch, exact argument arrays and per-leg Secret references |
+| Schema, no hooks/Qdrant ownership, numeric SHA, retained PVC, positive operator ranges | Retained chart contract tests; source/template inventory assertions accompany successful real renders |
+| Four deploy overlay-source pins (Qdrant key, revision token, gateway comment block, endpoint-order token) | Rendered chart contracts and launcher's mutation/refusal/round-trip tests; token spellings and comment layout have no runtime contract |
+| Three ingest overlay-source pins (Qdrant key, policy placeholders, gateway comment block) | Explicit Job contracts and `test_airgap_ingest_sh.py` policy, key-refusal and model/key rendering cases |
+| Direct hash-only `openshift-e2e` workflow | Existing published-bundle `airgap-rehearsal`: same two original synthetic PDFs, outline-message and generic widget expected-substring searches, Qdrant/agent readiness and explicit ingestion; HTTP mock computation replaces the redundant hash-only lane |
+
+The byte-for-byte parsed Jaeger config comparison is narrowed to its storage,
+receiver, exporter and pipeline contracts. Log verbosity and mapping layout
+are implementation details; their current values are unchanged. Lifecycle
+scripts separately exercise live adoption, upgrade/failure/rollback, readiness
+and retained storage. Render tests cannot establish OpenShift admission or
+internal GitLab/Quay/site qualification; missing runs stay explicit in PR evidence.

@@ -17,7 +17,7 @@
      duplicated Kubernetes health monitoring and lifecycle management.
   2. **Multi-replica concurrency and distributed storage failure modes:** In production,
      `rag-agent` runs 2 replicas behind a Service and Route
-     (`deploy/kustomize/overlays/openshift/agent-prod-patch.yaml:9`). An on-disk
+     (`charts/mainframe-rag/templates/agent-deployment.yaml`). An on-disk
      SQLite database induces catastrophic failure modes:
      - *Local ephemeral storage:* Operator requests alternating between Pod 1 and
        Pod 2 suffer split-brain dialogue state and lost sessions.
@@ -116,9 +116,9 @@
     are deprecated and decommissioned. `streamlit` is removed from `pyproject.toml`.
 
   ### 3. OpenShift `oauth-proxy` Sidecar Route Termination
-  - **Sidecar topology:** When `AGENT_ROUTE=true`, `scripts/airgap/deploy.sh` layers
-    `deploy/kustomize/overlays/openshift-ui/` on top of the prod overlay; the overlay's
-    sidecar patch adds an official `oauth-proxy` container to the `rag-agent` pod,
+  - **Sidecar topology:** When `AGENT_ROUTE=true`, `scripts/airgap/deploy.sh` renders
+    the first-party chart OAuth templates; the chart's
+    Deployment includes an official `oauth-proxy` container to the `rag-agent` pod,
     listening on port 8443 (HTTPS) and forwarding authenticated requests to FastAPI on
     `http://127.0.0.1:8080`. Deploy fails closed while the oauth-proxy pin in
     `images.txt` is `sha256:PENDING` or the `rag-agent-oauth-cookie` Secret is absent.

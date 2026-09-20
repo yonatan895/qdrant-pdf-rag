@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.helpers_helm import run_new_template
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -38,7 +40,7 @@ def test_production_qdrant_requires_hard_worker_separation():
 
 
 def test_jaeger_accepts_assigned_identity_with_restricted_security():
-    pod = yaml.safe_load((ROOT / 'deploy/kustomize/jaeger/deployment.yaml').read_text())['spec']['template']['spec']
+    pod = run_new_template({})[('Deployment', 'jaeger')]['spec']['template']['spec']
     assert 'fsGroup' not in pod['securityContext']
     assert pod['securityContext']['seccompProfile']['type'] == 'RuntimeDefault'
     for container in pod['containers']:

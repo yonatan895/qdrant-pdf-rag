@@ -1,6 +1,6 @@
-# Default values for mainframe-rag (issue #448 H1b shadow).
+# Default values for mainframe-rag.
 # Operator contract: airgap.env remains the supported operator input for the
-# migration (D4). A small generator (H3) will produce the exact release
+# deployment (D4). map_values.py produces the exact release
 # values artifact from validated operator input; this file carries only
 # checked-in defaults. No real registry hostname, credential, endpoint,
 # corpus path or private namespace belongs here.
@@ -23,7 +23,7 @@ images:
     pullPolicy: IfNotPresent
   # One-shot ingest image. The tag is the same packed SHA as the agent in a
   # real release; kept as a separate field so each image reference has one
-  # owner (D5). The generator sets both tags from IMAGE_SHA (H3).
+  # owner (D5). The generator sets both tags from IMAGE_SHA.
   ingest:
     repository: qdrant-pdf-rag-ingest
     tag: "0000000000000000000000000000000000000000"
@@ -80,8 +80,7 @@ tracing:
   # Jaeger resources. Custom collectors set a full http(s) URL.
   enabled: true
   endpoint: http://jaeger:4318
-  # Optional deploy identity; empty renders bare `value:` (agent omits the
-  # attribute), matching the current Kustomize+sed contract.
+  # Optional deploy identity; empty renders an empty string (no attribute).
   deploymentEnvironment: ""
   # Optional service name; empty strips the entry entirely so the agent
   # default stands (a blank value would override it with "").
@@ -103,7 +102,7 @@ route:
   timeoutSeconds: 300
   destinationCA: ""
 
-# RWO block storage class for Jaeger Badger (and, in H3, ingest-work scratch).
+# RWO block storage class for Jaeger Badger and ingest-work scratch.
 # NFS refusal stays owned by shell preflight; schema additionally rejects
 # nfs-looking names fail-closed.
 storage:

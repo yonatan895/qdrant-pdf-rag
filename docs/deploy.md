@@ -178,12 +178,13 @@ Compatibility and lifecycle decisions under #448:
   every render mints fresh random keys.
 The published-bundle Kind lifecycle lane uses the same chart and values
 mapper for A/A/B/failed rollout/recovery A/B/redeploy A. It checks admitted
-fault injection, serving smoke and PVC identities. Migration-only old/new
-comparisons currently use frozen pre-cutover scripts under
-`tests/fixtures/helm_migration`; they are not an operator deployment path.
+fault injection, serving smoke and PVC identities. Independent rendered behavior
+is checked by `tests/test_helm_chart_contracts.py`; producer round trips and
+preflight/lifecycle behavior remain in the mapper and air-gap suites. The
+retired parity oracle's coverage mapping is in [testing](testing.md#helm-coverage).
 Helm rendering and Kind do not prove OpenShift or actual internal-site
 qualification. Record unexecuted checks as not run in the candidate review;
-they do not authorize production promotion or Kustomize retirement.
+they do not authorize production promotion.
 
 ## 4. Signing and provenance
 
@@ -307,7 +308,7 @@ is the **production default**, distinct from the verifier's stricter
 after merging: all three keys present, positive integers, W <= RF. It does
 not force every caller to exactly 6/3/2 — a partial override inherits the
 remaining preset values, and local, CI and one-node lanes select 1/1/1
-explicitly (`deploy/kustomize/overlays/ci`, `.github/workflows/e2e.yml`) as
+explicitly (the explicit operator environment in `.github/workflows/e2e.yml`) as
 a deliberate non-HA profile, never inferred from the available node count.
 Generic `QDRANT_*` Settings stay optional for local compatibility, but
 unset values cannot qualify the production path.
@@ -443,7 +444,7 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
   makes `AGENT_ROUTE=true` fail closed. A tag bump for `ose-oauth-proxy`
   must change all three sites: `images.txt`, `deploy.sh`, `load.sh`.
 - `METRICS_ENABLED=true` additionally renders/applies
-  `deploy/kustomize/servicemonitor` so the OpenShift UWM stack scrapes
+  the first-party chart ServiceMonitor so the OpenShift UWM stack scrapes
   `/metrics` (prerequisite and sizing in `docs/install_and_ops.md`).
 - The `oc-mirror` config still uses tag form and is otherwise unreferenced
   (optional path) — reconcile to digests before relying on it.
@@ -492,9 +493,12 @@ live in `.github/workflows/e2e.yml`.
   dir — digest verify, unpack, bootstrap, manifest/SHA assertions, dry-run
   pipeline with standin env passed explicitly, both pull-secret branches.
   `kind-live-rehearsal` (main/dispatch) is a three-lane matrix described below.
-  Lab OpenShift jobs remain secret-gated, and PRs never touch the lab cluster.
+  The lab OpenShift rehearsal remains secret-gated, and PRs never touch the lab cluster.
   `airgap-rehearsal` downloads and bootstraps the published bundle; it does not
-  independently repack. A skipped lab job supplies no OpenShift verification.
+  independently repack. It retains both outline-message and generic widget
+  search checks, Qdrant/agent readiness and explicit ingestion formerly covered
+  by the redundant direct-manifest hash-only lab lane. A skipped lab job supplies
+  no OpenShift verification.
 - Pinned third-party versions live in-repo (kubectl + sha256, helm, kind,
   node image); the local-path provisioner manifest is pinned to a source commit and
   sha256-verified before applying it. The opencode
@@ -583,7 +587,7 @@ local/CI gateway image: observe upstream finish, close the stream, fail closed
 when state is unavailable, retain clean-EOF fault checks on pin bumps. Production
 protection remains the platform's responsibility.
 
-Preserve separate CI/prod overlays and sizing. CI synthetic hash jobs never become
+Preserve separate CI/prod Qdrant values and sizing. CI synthetic hash jobs never become
 prod ingest; production has no EMBED_MODE key, RWO block data/work storage,
 read-only caller corpus and two agent replicas. Qdrant chart IDs are explicitly
 null; Jaeger uses project-assigned IDs and `Recreate` for its single Badger writer.

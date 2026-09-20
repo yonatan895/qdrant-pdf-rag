@@ -173,7 +173,7 @@ def build_values(deploy_only: bool = False) -> dict:
         if not ca_file:
             die(
                 "AGENT_ROUTE=true needs ROUTE_DESTINATION_CA_FILE pointing at the "
-                "namespace service-CA bundle (route-on chart rehearsal; "
+                "namespace service-CA bundle (Route rendering; "
                 "route-off dry-run needs no CA)"
             )
         try:

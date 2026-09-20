@@ -63,7 +63,6 @@ helm template mainframe-rag charts/mainframe-rag -f dist/mainframe-rag-release-v
 cat dist/app-helm-render/mainframe-rag/templates/*.yaml > dist/agent-rendered.yaml
 fail_on_placeholders dist/agent-rendered.yaml agent
 check_agent_qdrant_key dist/agent-rendered.yaml agent
-cp dist/agent-rendered.yaml dist/agent-chart-rendered.yaml
 rm -f dist/jaeger-rendered.yaml dist/servicemonitor-rendered.yaml dist/agent-route.yaml
 if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
     cat dist/app-helm-render/mainframe-rag/templates/jaeger-*.yaml > dist/jaeger-rendered.yaml

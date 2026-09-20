@@ -365,7 +365,7 @@ claim that deterministic mock citations measure answer quality.
 
 **SCC prerequisite:** inspect admission with the unmodified security policy.
 Production Qdrant values remove the chart's fixed UID, GID and fsGroup;
-[Jaeger](../deploy/kustomize/jaeger/deployment.yaml) also leaves identities to
+[Jaeger](../charts/mainframe-rag/templates/jaeger-deployment.yaml) also leaves identities to
 admission. Verify the resulting project-assigned ranges. A denied pod or
 unwritable volume blocks the run. Fix demonstrated incompatibilities in the
 owning production configuration with `sh scripts/tools/run-task.sh qa:check` and `sh scripts/tools/run-task.sh airgap:dryrun`,

@@ -8,8 +8,7 @@
 # Steady-state releases use ingest.enabled=false so no completed one-shot Job
 # with immutable fields blocks later ingestion.
 #
-# Parity target: deploy/kustomize/overlays/openshift-ingest after ingest.sh
-# substitution. The Job shares image/config/Secret/volume templates with the
+# The Job shares image/config/Secret/volume templates with the
 # rest of the deployment. Writer lock, publication modes and maintenance
 # authorization stay outside Helm (#391).
 {{- if .Values.ingest.enabled }}

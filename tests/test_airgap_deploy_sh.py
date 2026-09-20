@@ -25,112 +25,7 @@ from tests.helpers_airgap import (
 
 IMAGE_SHA = "a" * 40  # full-sha shaped; deploy.sh only rejects "" / "HEAD"
 
-# Minimal manifest the stub kustomize prints (sed substitutes these). Shaped
-# like real `kubectl kustomize` output: no comments, mapping keys sorted
-# (secretKeyRef key before name) — the strip logic must work on this shape,
-# not on the overlay source shape.
-STUB_KUSTOMIZE = """apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: rag-agent
-  namespace: mainframe-rag
-spec:
-  template:
-    spec:
-      imagePullSecrets: []
-      containers:
-        - name: agent
-          image: __INTERNAL_REGISTRY__/qdrant-pdf-rag-agent:__IMAGE_SHA__
-          env:
-            - name: EMBED_MODEL
-              value: __EMBED_MODEL__
-            - name: EMBED_MODEL_REVISION
-              value: __EMBED_MODEL_REVISION__
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: __OTEL_EXPORTER_OTLP_ENDPOINT__
-            - name: IMAGE_SHA
-              value: __IMAGE_SHA__
-            - name: QDRANT_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  key: read-only-api-key
-                  name: qdrant-apikey
-            - name: OTEL_DEPLOYMENT_ENVIRONMENT
-              value: __OTEL_DEPLOYMENT_ENVIRONMENT__
-            - name: OTEL_SERVICE_NAME
-              value: __OTEL_SERVICE_NAME__
-            - name: METRICS_ENABLED
-              value: "__METRICS_ENABLED__"
-            - name: RERANK_ENABLED
-              value: "__RERANK_ENABLED__"
-            - name: RERANK_BASE_URL
-              value: "__RERANK_BASE_URL__"
-            - name: RERANK_MODEL
-              value: "__RERANK_MODEL__"
-            - name: RERANK_ENDPOINT_ORDER
-              value: __RERANK_ENDPOINT_ORDER__
-            - name: LLM_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  key: llm-api-key
-                  name: __GATEWAY_API_KEY_SECRET__
-            - name: EMBED_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  key: embed-api-key
-                  name: __GATEWAY_API_KEY_SECRET__
-            - name: RERANK_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  key: rerank-api-key
-                  name: __GATEWAY_API_KEY_SECRET__
-"""
-
-# Jaeger stub: mirrors the real render's placeholder surface (issue #83).
-STUB_JAEGER = """apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: jaeger
-  namespace: mainframe-rag
-spec:
-  template:
-    spec:
-      imagePullSecrets: []
-      containers:
-        - name: jaeger
-          image: __INTERNAL_REGISTRY__/jaegertracing/jaeger:v2.20.0
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: jaeger-badger
-spec:
-  storageClassName: __STORAGE_CLASS__
-"""
-
-# ServiceMonitor stub: mirrors the real render's placeholder surface (issue
-# #187) — namespace rewritten by deploy.sh, no images or storage.
-STUB_SERVICEMONITOR = """apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: rag-agent
-  namespace: mainframe-rag
-spec:
-  endpoints:
-    - port: http
-      path: /metrics
-"""
-
 STUB_BIN = """#!/bin/sh
-if [ "$1" = "kustomize" ] || [ "$1" = "build" ]; then
-  case "$2" in
-    *jaeger*) cat {jaeger_stub} ;;
-    *servicemonitor*) cat {servicemonitor_stub} ;;
-    *openshift-ui*) cat {oauth_stub} ;;
-    *) cat {stub_yaml} ;;
-  esac
-  exit 0
-fi
 printf '%s\\n' "$@" >> "$HELM_LOG"
 case "$*" in
   *'rollout status '*)
@@ -162,27 +57,13 @@ exit 0
 def tree(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "deploy.sh", "map_values.py"])
     (tmp_path / "overlays" / "openshift").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "deploy" / "kustomize").mkdir(parents=True, exist_ok=True)
     copy_chart(tmp_path)
     shutil.copy(REPO / "overlays" / "openshift" / "values.yaml", tmp_path / "overlays" / "openshift")
-    shutil.copytree(REPO / "deploy" / "kustomize" / "jaeger", tmp_path / "deploy" / "kustomize" / "jaeger")
-    shutil.copytree(REPO / "deploy" / "kustomize" / "servicemonitor", tmp_path / "deploy" / "kustomize" / "servicemonitor")
     shutil.copy(REPO / "images.txt", tmp_path / "images.txt")
-    stub_yaml = tmp_path / "stub-kustomize.yaml"
-    stub_yaml.write_text(STUB_KUSTOMIZE)
-    jaeger_stub = tmp_path / "stub-jaeger.yaml"
-    jaeger_stub.write_text(STUB_JAEGER)
-    servicemonitor_stub = tmp_path / "stub-servicemonitor.yaml"
-    servicemonitor_stub.write_text(STUB_SERVICEMONITOR)
-    oauth_stub = tmp_path / "stub-kustomize-ui.yaml"
-    oauth_stub.write_text(
-        STUB_KUSTOMIZE
-        + "        - name: oauth-proxy\n          image: __OAUTH_PROXY_IMAGE__\n"
-    )
     helm_log = tmp_path / "helm-args.log"
-    for name in ("helm", "kubectl", "oc", "kustomize"):
+    for name in ("helm", "kubectl", "oc"):
         p = tmp_path / "bin" / name
-        p.write_text(STUB_BIN.format(stub_yaml=stub_yaml, jaeger_stub=jaeger_stub, servicemonitor_stub=servicemonitor_stub, oauth_stub=oauth_stub))
+        p.write_text(STUB_BIN.format())
         p.chmod(0o755)
     install_rendering_helm(tmp_path)
     return tmp_path, helm_log
@@ -246,7 +127,7 @@ def test_pull_secret_bad_name_fails_closed(tree, bad_name):
 # ------------------------------------------------------- Qdrant least privilege (#366)
 
 def _stub_with_qdrant_key(tree, key_line):
-    """Rewrite the stub kustomize output's QDRANT_API_KEY data key."""
+    """Mutate the real chart's QDRANT_API_KEY data key."""
     tmp_path, _ = tree
     stub = (tmp_path / "charts/mainframe-rag/templates/agent-deployment.yaml").read_text()
     assert "key: read-only-api-key" in stub
@@ -292,16 +173,6 @@ def test_agent_qdrant_key_missing_fails_closed(tree):
     assert "read-only-api-key" in r.stderr
 
 
-def test_agent_overlay_qdrant_contract():
-    """The stub above mirrors the real prod overlay by hand — pin the real
-    file to the same Qdrant contract so the two cannot silently diverge."""
-    real = (
-        REPO / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml"
-    ).read_text()
-    assert "- name: QDRANT_API_KEY" in real
-    assert re.search(r"(?m)^\s*key: read-only-api-key$", real)
-    assert not re.search(r"(?m)^\s*key: api-key$", real)
-    assert "__QDRANT_RELEASE__-apikey" in real
 
 
 def test_storage_size_knob_covers_persistence_and_snapshot(tree):
@@ -351,14 +222,6 @@ def test_whitespace_embed_revision_fails_before_render(tree):
     assert "EMBED_MODEL_REVISION must be a non-blank" in r.stderr
 
 
-def test_agent_overlay_embed_revision_contract():
-    """The stub above mirrors the real prod overlay by hand — pin the real
-    file to the same revision contract so the two cannot silently diverge."""
-    real = (
-        REPO / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml"
-    ).read_text()
-    assert re.search(r"(?m)^\s*- name: EMBED_MODEL_REVISION$", real)
-    assert re.search(r"(?m)^\s*value: __EMBED_MODEL_REVISION__$", real)
 
 
 # ------------------------------------------------------- Jaeger / tracing (#83)
@@ -573,7 +436,7 @@ def test_gateway_keys_wired_when_secret_set(tree):
         ("EMBED_API_KEY", "embed-api-key"),
         ("RERANK_API_KEY", "rerank-api-key"),
     ):
-        # Sorted-key order (key before name), as kustomize renders mappings.
+        # Exercise key-before-name ordering in the Secret reference.
         assert rendered_env(rendered, "agent")[env_name] == {
             "secretKeyRef": {"key": data_key, "name": "gateway-api-keys"}
         }
@@ -588,28 +451,8 @@ def test_gateway_secret_bad_name_fails_closed(tree):
     assert "GATEWAY_API_KEY_SECRET must be a DNS-subdomain name" in r.stderr
 
 
-def test_gateway_overlay_block_matches_stub_contract():
-    """The stub kustomize above mirrors the real prod overlay by hand — pin
-    the real file to the same contract (markers, env names, secret token,
-    data keys) so the two cannot silently diverge."""
-    real = (REPO / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml").read_text()
-    assert "# gateway-api-keys-begin" in real
-    assert "# gateway-api-keys-end" in real
-    assert real.index("# gateway-api-keys-begin") < real.index("# gateway-api-keys-end")
-    for env_name, data_key in (
-        ("LLM_API_KEY", "llm-api-key"),
-        ("EMBED_API_KEY", "embed-api-key"),
-        ("RERANK_API_KEY", "rerank-api-key"),
-    ):
-        assert f"- name: {env_name}" in real
-        assert f"key: {data_key}" in real
-    assert "__GATEWAY_API_KEY_SECRET__" in real
 
 
-def test_gateway_overlay_renders_endpoint_order_token():
-    """The real prod overlay carries the order token deploy.sh substitutes."""
-    real = (REPO / "deploy" / "kustomize" / "overlays" / "openshift" / "agent-prod-patch.yaml").read_text()
-    assert re.search(r"- name: RERANK_ENDPOINT_ORDER\n\s+value: __RERANK_ENDPOINT_ORDER__", real)
 
 
 def test_agent_route_renders_oauth_sidecar_and_reencrypt_route(tree):
@@ -618,7 +461,7 @@ def test_agent_route_renders_oauth_sidecar_and_reencrypt_route(tree):
     the console port; the dry-run keeps rendering cluster-free."""
     tmp_path, _ = tree
     set_oauth_proxy_pin(tmp_path, "sha256:" + "b" * 64)
-    # Issue #448 H2a: route-on dry-run rehearses the chart Route too, which
+    # Route-on dry-run renders the chart Route, which
     # needs the namespace service CA as a generated value (D8).
     ca_file = tmp_path / "route-ca.crt"
     ca_file.write_text("-----BEGIN CERTIFICATE-----\nDRYRUN\n-----END CERTIFICATE-----\n")
