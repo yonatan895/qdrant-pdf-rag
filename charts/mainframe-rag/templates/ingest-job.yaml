@@ -62,11 +62,11 @@ spec:
                   name: {{ include "mainframe-rag.qdrantSecretName" . }}
                   key: api-key
             - name: QDRANT_SHARD_NUMBER
-              value: {{ .Values.ingest.collectionPolicy.shardNumber }}
+              value: {{ .Values.ingest.collectionPolicy.shardNumber | quote }}
             - name: QDRANT_REPLICATION_FACTOR
-              value: {{ .Values.ingest.collectionPolicy.replicationFactor }}
+              value: {{ .Values.ingest.collectionPolicy.replicationFactor | quote }}
             - name: QDRANT_WRITE_CONSISTENCY_FACTOR
-              value: {{ .Values.ingest.collectionPolicy.writeConsistencyFactor }}
+              value: {{ .Values.ingest.collectionPolicy.writeConsistencyFactor | quote }}
             - name: INGEST_ALIAS_PUBLISH
               value: {{ .Values.ingest.aliasPublish | toString | quote }}
             - name: EMBED_BASE_URL
