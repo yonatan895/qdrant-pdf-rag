@@ -1,0 +1,84 @@
+# Default values for mainframe-rag (issue #448 H1a shadow).
+# Operator contract: airgap.env remains the supported operator input for the
+# migration (D4). A small generator (H3) will produce the exact release
+# values artifact from validated operator input; this file carries only
+# checked-in defaults. No real registry hostname, credential, endpoint,
+# corpus path or private namespace belongs here.
+#
+# Values expose operator/product decisions, not an arbitrary PodSpec (D5).
+# SecurityContext, probe semantics, selector labels, stable ports and other
+# protected implementation defaults stay in chart templates.
+
+replicaCount: 2
+
+# Packed image identity. The tag is the full git SHA (deploy.sh fail-closes
+# on empty/HEAD; the same rule is enforced by values.schema.json). The
+# repository is the full registry path set by the generator, e.g.
+# registry.example.internal/mainframe-rag/qdrant-pdf-rag-agent. The default
+# below carries no real registry.
+images:
+  agent:
+    repository: qdrant-pdf-rag-agent
+    tag: "0000000000000000000000000000000000000000"
+    pullPolicy: IfNotPresent
+
+# Single Qdrant release owner (D2). The chart derives the in-cluster URL
+# (http://<release>:6333) and the chart-managed Secret name
+# (<release>-apikey) from this one value so a rename cannot orphan one
+# reference. The serving data key (read-only-api-key, issue #366) is a
+# protected template default, not a value.
+qdrantRelease: qdrant
+
+models:
+  embedding:
+    baseUrl: http://vllm.inference.svc.cluster.local:8000/v1
+    model: ibm-granite/granite-embedding-278m-multilingual
+    revision: dryrun-rev-1
+    dimension: 768
+  reasoning:
+    # Empty model disables /v1/answer; when set, baseUrl is required.
+    baseUrl: ""
+    model: ""
+  rerank:
+    enabled: false
+    baseUrl: ""
+    model: BAAI/bge-reranker-v2-m3
+    endpointOrder: score_first
+
+# Single operator-created Secret read via secretKeyRef (D7), or empty for
+# keyless deployments. Data keys are fixed per consumer (agent:
+# llm/embed/rerank-api-key); values never carry key material.
+gateway:
+  apiKeySecretName: ""
+  # Optional complete trust bundle ConfigMap (key ca-bundle.crt) in the
+  # release namespace; empty disables the mount. Matches wire_gateway_ca.
+  caConfigMapName: ""
+
+tracing:
+  # Unset-equivalent default: enabled with the in-cluster Jaeger endpoint.
+  # Disabled renders an empty OTEL_EXPORTER_OTLP_ENDPOINT and (H1b) skips
+  # the Jaeger deployment. Custom collectors set a full http(s) URL.
+  enabled: true
+  endpoint: http://jaeger:4318
+  # Optional deploy identity; empty renders bare `value:` (agent omits the
+  # attribute), matching the current Kustomize+sed contract.
+  deploymentEnvironment: ""
+  # Optional service name; empty strips the entry entirely so the agent
+  # default stands (a blank value would override it with "").
+  serviceName: ""
+
+metrics:
+  enabled: false
+
+# Optional pull secret name; empty renders `imagePullSecrets: []`.
+pullSecret:
+  name: ""
+
+resources:
+  agent:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

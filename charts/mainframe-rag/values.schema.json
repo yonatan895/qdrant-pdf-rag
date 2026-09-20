@@ -1,0 +1,226 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "mainframe-rag values (issue #448 H1a)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replicaCount", "images", "qdrantRelease", "models", "gateway", "tracing", "metrics", "pullSecret", "resources"],
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent"],
+      "properties": {
+        "agent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "tag"],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "__[A-Z0-9_]+__" }
+            },
+            "tag": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$",
+              "description": "Full git SHA; deploy.sh fail-closes on empty/HEAD."
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        }
+      }
+    },
+    "qdrantRelease": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+      "description": "Single owner for the in-cluster URL and chart-managed Secret name."
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["embedding", "reasoning", "rerank"],
+      "properties": {
+        "embedding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["baseUrl", "model", "revision", "dimension"],
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "pattern": "^https?://\\S+$"
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "__[A-Z0-9_]+__" }
+            },
+            "revision": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "not": { "pattern": "__[A-Z0-9_]+__" }
+            },
+            "dimension": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            }
+          }
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "baseUrl": { "type": "string" },
+            "model": { "type": "string" }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "model": { "minLength": 1, "pattern": ".*\\S.*" }
+                },
+                "required": ["model"]
+              },
+              "then": {
+                "properties": {
+                  "baseUrl": { "pattern": "^https?://\\S+$" }
+                },
+                "required": ["baseUrl"]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "baseUrl": { "minLength": 1, "pattern": ".*\\S.*" }
+                },
+                "required": ["baseUrl"]
+              },
+              "then": {
+                "properties": {
+                  "model": { "minLength": 1, "pattern": ".*\\S.*" }
+                },
+                "required": ["model"]
+              }
+            }
+          ]
+        },
+        "rerank": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "model", "endpointOrder"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "baseUrl": { "type": "string" },
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "__[A-Z0-9_]+__" }
+            },
+            "endpointOrder": {
+              "type": "string",
+              "enum": ["score_first", "rerank_first"]
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              },
+              "then": {
+                "properties": {
+                  "baseUrl": { "pattern": "^https?://\\S+$" }
+                },
+                "required": ["baseUrl"]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiKeySecretName"],
+      "properties": {
+        "apiKeySecretName": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$",
+          "description": "Secret name only; values never carry key material (D7)."
+        },
+        "caConfigMapName": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$",
+          "description": "Optional trust bundle ConfigMap; empty disables the mount."
+        }
+      }
+    },
+    "tracing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "endpoint": { "type": "string" },
+        "deploymentEnvironment": { "type": "string" },
+        "serviceName": {
+          "type": "string",
+          "pattern": "^$|^[A-Za-z0-9._-]+$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "properties": {
+              "endpoint": { "pattern": "^https?://\\S+$" }
+            },
+            "required": ["endpoint"]
+          }
+        }
+      ]
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "pullSecret": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent"],
+      "properties": {
+        "agent": {
+          "type": "object",
+          "description": "Kubernetes resource requests/limits for the agent container."
+        }
+      }
+    }
+  }
+}

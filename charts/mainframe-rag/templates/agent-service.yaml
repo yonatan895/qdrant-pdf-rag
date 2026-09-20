@@ -1,0 +1,18 @@
+# Agent Service (H1a shadow of deploy/kustomize/base/agent.yaml Service).
+# ClusterIP only; no Route, ever. Selector and port names must track the
+# Deployment below and the ServiceMonitor (H1b).
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mainframe-rag.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mainframe-rag.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
