@@ -243,6 +243,13 @@ def build_values(deploy_only: bool = False) -> dict:
         if ingest_block["retireDocs"] and not ingest_block["aliasPublish"]:
             die("INGEST_RETIRE_DOCS requires INGEST_ALIAS_PUBLISH=true")
 
+    reasoning_model = env("LLM_MODEL_REASONING")
+    if reasoning_model:
+        reasoning_base = nonempty("LLM_BASE_URL", "is required when LLM_MODEL_REASONING is set")
+    else:
+        reasoning_base = ""
+        reasoning_model = ""
+
     return {
         "replicaCount": 2,
         "images": {
@@ -275,7 +282,7 @@ def build_values(deploy_only: bool = False) -> dict:
                 "revision": env("EMBED_MODEL_REVISION"),
                 "dimension": dimension,
             },
-            "reasoning": {"baseUrl": env("LLM_BASE_URL"), "model": env("LLM_MODEL_REASONING")},
+            "reasoning": {"baseUrl": reasoning_base, "model": reasoning_model},
             "rerank": {
                 "enabled": rerank_enabled,
                 "baseUrl": env("RERANK_BASE_URL"),

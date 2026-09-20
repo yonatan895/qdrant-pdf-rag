@@ -632,12 +632,12 @@ def test_ingest_job_parity_normal(tmp_path):
             assert o.get("value") == n.get("value"), f"{name}: {o.get('value')!r} != {n.get('value')!r}"
             assert type(o.get("value")) is type(n.get("value")), name
 
-    # Spot checks: full-access key, bare-int policy, quoted workers/flags.
+    # Spot checks: full-access key, quoted collection policy, quoted workers/flags.
     assert new_env["QDRANT_API_KEY"]["valueFrom"]["secretKeyRef"] == {
         "name": "qdrant-apikey", "key": "api-key",
     }
     assert new_env["QDRANT_COLLECTION"]["value"] == "mainframe_manuals"
-    assert new_env["QDRANT_SHARD_NUMBER"]["value"] == 6
+    assert new_env["QDRANT_SHARD_NUMBER"]["value"] == "6"
     assert new_env["INGEST_ALIAS_PUBLISH"]["value"] == "false"
     assert new_env["INGEST_WORKERS"]["value"] == "4"
     assert new_env["OTEL_SERVICE_NAME"]["value"] == "mainframe-rag-ingest"

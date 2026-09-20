@@ -108,9 +108,9 @@ kustomize_render deploy/kustomize/overlays/openshift-ingest | sed -E 's|"(__[A-Z
     -e "s|namespace: mainframe-rag|namespace: $NAMESPACE|g" \
     -e "s|__QDRANT_URL__|$QDRANT_URL|g" \
     -e "s|__QDRANT_RELEASE__|$QDRANT_RELEASE|g" \
-    -e "s|__QDRANT_SHARD_NUMBER__|${QDRANT_SHARD_NUMBER:-}|g" \
-    -e "s|__QDRANT_REPLICATION_FACTOR__|${QDRANT_REPLICATION_FACTOR:-}|g" \
-    -e "s|__QDRANT_WRITE_CONSISTENCY_FACTOR__|${QDRANT_WRITE_CONSISTENCY_FACTOR:-}|g" \
+    -e "s|__QDRANT_SHARD_NUMBER__|\"${QDRANT_SHARD_NUMBER:-}\"|g" \
+    -e "s|__QDRANT_REPLICATION_FACTOR__|\"${QDRANT_REPLICATION_FACTOR:-}\"|g" \
+    -e "s|__QDRANT_WRITE_CONSISTENCY_FACTOR__|\"${QDRANT_WRITE_CONSISTENCY_FACTOR:-}\"|g" \
     -e "s|__EMBED_BASE_URL__|$EMBED_BASE_URL|g" \
     -e "s|__EMBED_MODEL__|$EMBED_MODEL|g" \
     -e "s|__EMBED_MODEL_REVISION__|$EMBED_MODEL_REVISION|g" \
@@ -145,7 +145,7 @@ else
     echo "==> Gateway keys off (GATEWAY_API_KEY_SECRET unset): keyless model endpoints"
 fi
 # Collection distribution policy (issue #360): the complete validated tuple
-# renders as bare YAML ints; validate_collection_policy ran before rendering,
+# renders as quoted strings; validate_collection_policy ran before rendering,
 # so no entry can be blank or missing here.
 wire_pull_secret dist/ingest-rendered.yaml
 wire_gateway_ca dist/ingest-rendered.yaml Job ingest ingest

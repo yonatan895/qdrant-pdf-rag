@@ -320,9 +320,36 @@ def test_mapper_to_helm_round_trip(mapper_env, tmp_path):
         ]
         env = {e["name"]: e for e in ingest["env"]}
         assert "RERANK_ENABLED" not in env  # agent-only key
-        assert env["QDRANT_SHARD_NUMBER"]["value"] == 6
+        assert env["QDRANT_SHARD_NUMBER"]["value"] == "6"
         assert env["INGEST_ALIAS_PUBLISH"]["value"] == "true"
     finally:
         for k in ("CORPUS_PVC", "INGEST_ALIAS_PUBLISH", "INGEST_RETIRE_DOCS",
                   "RERANK_ENABLED", "RERANK_BASE_URL"):
             os.environ.pop(k, None)
+
+
+def test_reasoning_disabled_when_model_unset(monkeypatch, mapper_env):
+    monkeypatch.delenv("LLM_MODEL_REASONING", raising=False)
+    monkeypatch.setenv("LLM_BASE_URL", "http://litellm:4000/v1")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    reasoning = load_values(out)["models"]["reasoning"]
+    assert reasoning == {"baseUrl": "", "model": ""}
+
+
+def test_reasoning_mapped_when_both_set(monkeypatch, mapper_env):
+    monkeypatch.setenv("LLM_MODEL_REASONING", "mock-reasoning")
+    monkeypatch.setenv("LLM_BASE_URL", "http://litellm:4000/v1")
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    reasoning = load_values(out)["models"]["reasoning"]
+    assert reasoning == {"baseUrl": "http://litellm:4000/v1", "model": "mock-reasoning"}
+
+
+def test_reasoning_fails_closed_when_model_set_without_base_url(monkeypatch, mapper_env):
+    monkeypatch.setenv("LLM_MODEL_REASONING", "mock-reasoning")
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    r, _ = mapper_env()
+    assert r.returncode != 0
+    assert "LLM_BASE_URL is required when LLM_MODEL_REASONING is set" in r.stderr
+

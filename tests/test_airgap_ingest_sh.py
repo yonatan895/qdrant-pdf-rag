@@ -537,10 +537,10 @@ def test_ingest_collection_policy_preset_supplies_production_tuple(ingest_tree):
     r = _run_ingest(ingest_tree, policy=None)
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert re.search(r"(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: 6$", rendered)
-    assert re.search(r"(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: 3$", rendered)
+    assert re.search(r'(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: "6"$', rendered)
+    assert re.search(r'(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: "3"$', rendered)
     assert re.search(
-        r"(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: 2$", rendered
+        r'(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: "2"$', rendered
     )
     assert_no_placeholders(rendered)
 
@@ -558,10 +558,10 @@ def test_ingest_collection_policy_file_beats_preset(ingest_tree):
     )
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert re.search(r"(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: 2$", rendered)
-    assert re.search(r"(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: 2$", rendered)
+    assert re.search(r'(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: "2"$', rendered)
+    assert re.search(r'(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: "2"$', rendered)
     assert re.search(
-        r"(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: 1$", rendered
+        r'(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: "1"$', rendered
     )
 
 
@@ -580,24 +580,24 @@ def test_ingest_collection_policy_caller_beats_file_and_preset(ingest_tree):
     )
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert re.search(r"(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: 6$", rendered)
-    assert re.search(r"(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: 3$", rendered)
+    assert re.search(r'(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: "6"$', rendered)
+    assert re.search(r'(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: "3"$', rendered)
     assert re.search(
-        r"(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: 2$", rendered
+        r'(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: "2"$', rendered
     )
 
 
-def test_ingest_collection_policy_set_renders_bare_ints(ingest_tree):
+def test_ingest_collection_policy_set_renders_quoted_strings(ingest_tree):
     r = _run_ingest(
         ingest_tree,
         policy=("6", "2", "1"),
     )
     assert r.returncode == 0, r.stderr
     rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
-    assert re.search(r"(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: 6$", rendered)
-    assert re.search(r"(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: 2$", rendered)
+    assert re.search(r'(?m)^\s*- name: QDRANT_SHARD_NUMBER\n\s*value: "6"$', rendered)
+    assert re.search(r'(?m)^\s*- name: QDRANT_REPLICATION_FACTOR\n\s*value: "2"$', rendered)
     assert re.search(
-        r"(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: 1$", rendered
+        r'(?m)^\s*- name: QDRANT_WRITE_CONSISTENCY_FACTOR\n\s*value: "1"$', rendered
     )
     assert_no_placeholders(rendered)
 
