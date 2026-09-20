@@ -102,7 +102,8 @@ while `diagnostic_dualpath_enabled` remains default-off.
   mode-keyed baseline recorded yet). Baselines lacking a metric do not invent
   a threshold for it. The existing baseline identity covers collection/mode;
   it does not attest exact platform weights or semantic model acceptance.
-- **`--check` vs `--update-baseline` are mutually exclusive.** Baselines
+- **`--check` cannot be combined with `--update-baseline`, `--no-check`,
+  or `--label-draft`.** Conflicting modes fail before accessing the venue. Baselines
   record `_meta` (size, collection, mode, timestamp) plus the gated metrics;
   `must_not`/failures/per-query are intentionally omitted (the zero-gate is
   absolute).

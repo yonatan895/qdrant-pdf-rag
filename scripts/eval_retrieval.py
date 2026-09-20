@@ -709,6 +709,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.check and args.update_baseline:
         parser.error("--check and --update-baseline are mutually exclusive")
+    if args.check and (args.no_check or args.label_draft):
+        parser.error("--check cannot be combined with --no-check or --label-draft")
 
     settings = load_settings()
     try:

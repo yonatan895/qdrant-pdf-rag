@@ -653,3 +653,18 @@ def test_cli_rejects_missing_and_nonfinite_required_metrics(tmp_path, monkeypatc
         baseline.write_text(json.dumps({"recall@1": value}))
         monkeypatch.setattr(ev, "evaluate", lambda *a: _report())
         assert main(["--golden", str(golden), "--check", str(baseline), "--out", str(output)]) == 1
+
+
+
+def test_explicit_gate_cannot_be_bypassed_by_diagnostic_cli_modes(monkeypatch):
+    import pytest
+    import scripts.eval_retrieval as ev
+
+    def unexpected_settings():
+        raise AssertionError("conflicting gate flags must fail before accessing a live venue")
+
+    monkeypatch.setattr(ev, "load_settings", unexpected_settings)
+    for flag in ("--no-check", "--label-draft"):
+        with pytest.raises(SystemExit) as error:
+            main(["--check", "baseline.json", flag])
+        assert error.value.code == 2
