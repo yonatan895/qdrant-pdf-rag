@@ -32,7 +32,7 @@ must_not violations are gated to zero within the top-5 window.
 
 Exit codes: 0 green (or no gate requested); 1 regressions or query
 failures; 2 an explicitly requested gate could not be applied (baseline
-file missing, or collection mismatch — a skip is not a pass, issue #159).
+file missing, or collection/embed-mode mismatch — a skip is not a pass, issue #159).
 """
 
 from __future__ import annotations
@@ -392,6 +392,7 @@ def summarize(
 
     return {
         "n": len(rows),
+        "scored": len(scored),
         "failures": failures,
         "elapsed_s": elapsed_s,
         "embed_mode": embed_mode,
@@ -474,55 +475,81 @@ def _absolute_floors_apply(baseline: dict) -> bool:
     return collection not in RC_ONLY_COLLECTIONS
 
 
+def _finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def check_baseline(report: dict, baseline: dict | None) -> list[str]:
     if baseline is None:
         return []
     regressions: list[str] = []
-    if report.get("failures", 0) > 0:
+
+    def require_number(dotted: str, *, source: dict = report, label: str = "run") -> bool:
+        if not _finite_number(_get(source, dotted)):
+            regressions.append(f"{dotted}: {label} requires a finite numeric value")
+            return False
+        return True
+
+    for key in ("n", "scored"):
+        if require_number(key) and report[key] <= 0:
+            regressions.append(f"{key}: gate requires nonempty eligible scoring")
+    if require_number("failures") and report["failures"] > 0:
         regressions.append(f"failures: {report['failures']} > 0 query errors occurred during evaluation")
     for dotted in EVAL_ZERO_GATED_METRICS:
-        current = _get(report, dotted)
-        if current is None:
-            print(f"warn: {dotted} not scored in this run; not gated", file=sys.stderr)
-            continue
-        if current > 0:
-            regressions.append(f"{dotted}: {current} > 0 (absolute gate: must_not hits in the top-{MUST_NOT_WINDOW})")
+        if require_number(dotted) and _get(report, dotted) != 0:
+            regressions.append(f"{dotted}: {_get(report, dotted)} != 0 (absolute gate: must_not hits in the top-{MUST_NOT_WINDOW})")
+
+    # Baseline classes define coverage, not new per-class quality thresholds.
+    # Negative/abstain classes can intentionally have zero scored recall rows.
+    for cls, expected in baseline.get("classes", {}).items():
+        prefix = f"classes.{cls}"
+        for key in ("n", "scored"):
+            value = expected.get(key)
+            if value is not None:
+                dotted = f"{prefix}.{key}"
+                if (
+                    require_number(dotted, source=baseline, label="baseline")
+                    and value > 0
+                    and require_number(dotted)
+                    and _get(report, dotted) <= 0
+                ):
+                    regressions.append(f"{dotted}: required class has no eligible observations")
+        for key in (*EVAL_GATED_METRICS, "recall@3"):
+            if expected.get(key) is not None:
+                dotted = f"{prefix}.{key}"
+                require_number(dotted, source=baseline, label="baseline")
+                require_number(dotted)
+
     absolute_floors = _absolute_floors_apply(baseline)
     for dotted, floor in EVAL_ABSOLUTE_GATED_METRICS.items():
-        current = _get(report, dotted)
-        if current is None:
-            print(f"warn: {dotted} not scored in this run; not gated", file=sys.stderr)
+        current, base_val = _get(report, dotted), _get(baseline, dotted)
+        # A class absent from both instruments is deliberately unscored.
+        if current is None and base_val is None:
+            continue
+        valid = require_number(dotted)
+        if base_val is not None:
+            valid = require_number(dotted, source=baseline, label="baseline") and valid
+        if not valid:
             continue
         if not absolute_floors:
-            base_val = _get(baseline, dotted)
             if base_val is None:
-                print(f"warn: baseline has no {dotted}; not gated", file=sys.stderr)
-                continue
-            if current < base_val:
-                regressions.append(
-                    f"{dotted}: {current} < baseline {base_val} "
-                    "(real-corpus gate: identifier lookups must not drop)"
-                )
-            continue
-        if current < floor:
-            regressions.append(
-                f"{dotted}: {current} < {floor} (absolute gate: identifier lookups must not drop)"
-            )
+                regressions.append(f"{dotted}: baseline required for real-corpus no-drop gate")
+            elif current < base_val:
+                regressions.append(f"{dotted}: {current} < baseline {base_val} (real-corpus gate: identifier lookups must not drop)")
+        elif current < floor:
+            regressions.append(f"{dotted}: {current} < {floor} (absolute gate: identifier lookups must not drop)")
     for dotted, min_ratio in EVAL_GATED_METRICS.items():
-        current = _get(report, dotted)
-        if current is None:
-            print(f"warn: {dotted} not scored in this run; not gated", file=sys.stderr)
-            continue
         base_val = _get(baseline, dotted)
         if base_val is None:
-            print(f"warn: baseline has no {dotted}; not gated", file=sys.stderr)
             continue
-        # For accuracy, current must be >= base_val * min_ratio
+        valid = require_number(dotted, source=baseline, label="baseline")
+        valid = require_number(dotted) and valid
+        if not valid:
+            continue
+        current = _get(report, dotted)
         threshold = round(base_val * min_ratio, 3)
         if current < threshold:
-            regressions.append(
-                f"{dotted}: {current} < baseline {base_val} (min allowed {threshold} with ratio {min_ratio})"
-            )
+            regressions.append(f"{dotted}: {current} < baseline {base_val} (min allowed {threshold} with ratio {min_ratio})")
     return regressions
 
 
@@ -566,9 +593,9 @@ def summary_markdown(report: dict, baseline: dict | None = None) -> str:
     for key in ("recall@1", "recall@3", "recall@5", "recall@8", "mrr", "ndcg@8"):
         base_val = _get(baseline, key) if baseline else None
         min_ratio = EVAL_GATED_METRICS.get(key)
-        gate = f">= {round(base_val * min_ratio, 3)}" if (base_val is not None and min_ratio is not None) else "n/a"
+        gate = f">= {round(base_val * min_ratio, 3)}" if (_finite_number(base_val) and min_ratio is not None) else "n/a"
         lines.append(
-            f"| {key} | {report[key]} | {report['identifier'].get(key)} | {report['nl'].get(key)} | {base_val} | {gate} |"
+            f"| {key} | {report.get(key)} | {report.get('identifier', {}).get(key)} | {report.get('nl', {}).get(key)} | {base_val} | {gate} |"
         )
 
     classes = report.get("classes") or {}
@@ -721,9 +748,11 @@ def main(argv: list[str] | None = None) -> int:
             if meta.get("embed_mode") and meta["embed_mode"] != settings.embed_mode:
                 print(
                     f"warn: baseline embed_mode={meta['embed_mode']} but this run is {settings.embed_mode}; "
-                    "the numbers are not comparable",
+                    "the numbers are not comparable; skipping gate — exit 2",
                     file=sys.stderr,
                 )
+                baseline = None
+                gate_skipped = True
             if meta.get("collection") and meta["collection"] != settings.qdrant_collection:
                 print(
                     f"warn: baseline collection {meta['collection']!r} != run collection "
@@ -739,7 +768,17 @@ def main(argv: list[str] | None = None) -> int:
         update_baseline(report, args.update_baseline)
         print(f"baseline written to {args.update_baseline}", file=sys.stderr)
 
+    if check_path is None:
+        gate_status = "not_requested"
+    elif gate_skipped:
+        gate_status = "skipped"
+    elif regressions or report["failures"] > 0:
+        gate_status = "failed"
+    else:
+        gate_status = "passed"
+    report["gate"] = {"status": gate_status, "problems": regressions}
     summary = summary_markdown(report, baseline)
+    summary += f"\n\nGate: {gate_status} (ungated diagnostics are not acceptance).\n"
     print(summary, file=sys.stderr)
     if args.summary:
         args.summary.parent.mkdir(parents=True, exist_ok=True)
@@ -757,7 +796,7 @@ def main(argv: list[str] | None = None) -> int:
         metrics = {
             k: report[k]
             for k in (
-                "n", "failures", "recall@1", "recall@3", "recall@5", "mrr",
+                "n", "scored", "gate", "failures", "recall@1", "recall@3", "recall@5", "mrr",
                 "identifier", "nl", "classes", "abstain", "must_not", "page",
             )
             if k in report
