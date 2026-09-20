@@ -12,6 +12,7 @@ import pytest
 
 from tests.helpers_airgap import (
     REPO,
+    STUB_TOOL,
     assert_no_placeholders,
     assert_pull_secret_wired,
     make_bin_tree,
@@ -109,7 +110,7 @@ spec:
 
 @pytest.fixture
 def ingest_tree(tmp_path):
-    make_bin_tree(tmp_path, ["common.sh", "ingest.sh"])
+    make_bin_tree(tmp_path, ["common.sh", "ingest.sh", "map_values.py"])
     (tmp_path / "deploy" / "kustomize" / "overlays" / "openshift-ingest").mkdir(
         parents=True, exist_ok=True
     )
@@ -123,6 +124,11 @@ def ingest_tree(tmp_path):
             tmp_path / "bin" / name,
             STUB_BIN.format(stub_yaml=stub_yaml, stub_patched_yaml=stub_patched_yaml),
         )
+    # Issue #448 H2a: ingest.sh dry-run also maps release values and renders
+    # the chart Job (real mapper + real python3); helm stays stubbed here —
+    # real helm rendering is proven by test_helm_chart_shadow,
+    # test_map_values and the e2e dry-run gate.
+    write_stub(tmp_path / "bin" / "helm", STUB_TOOL)
     return tmp_path, kc_log
 
 

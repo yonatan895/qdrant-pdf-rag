@@ -1,0 +1,141 @@
+# One-shot production ingest Job (issues #15, #360, #391).
+# Rendered ONLY when ingest.enabled is true, and applied deliberately via an
+# explicit operation -- never installed automatically on helm upgrade, never
+# a Helm hook (D3). Example:
+# helm template <release> charts/mainframe-rag --namespace <ns>
+#   -f release-values.yaml --set ingest.enabled=true
+#   --show-only templates/ingest-job.yaml
+# Steady-state releases use ingest.enabled=false so no completed one-shot Job
+# with immutable fields blocks later ingestion.
+#
+# Parity target: deploy/kustomize/overlays/openshift-ingest after ingest.sh
+# substitution. The Job shares image/config/Secret/volume templates with the
+# rest of the deployment. Writer lock, publication modes and maintenance
+# authorization stay outside Helm (#391).
+{{- if .Values.ingest.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ingest
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: ingest
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 86400
+  template:
+    metadata:
+      labels:
+        app: ingest
+    spec:
+      restartPolicy: Never
+      {{- if .Values.pullSecret.name }}
+      imagePullSecrets:
+        - name: {{ .Values.pullSecret.name }}
+      {{- else }}
+      imagePullSecrets: []
+      {{- end }}
+      containers:
+        - name: ingest
+          image: {{ include "mainframe-rag.ingestImage" . }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --src
+            - /corpus
+            - --progress
+            - /work/inventory.jsonl
+            {{- if .Values.ingest.reingest }}
+            - --reingest
+            {{- end }}
+            {{- range .Values.ingest.retireDocs }}
+            - --retire-doc
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: QDRANT_URL
+              value: {{ include "mainframe-rag.qdrantUrl" . }}
+            - name: QDRANT_COLLECTION
+              value: mainframe_manuals
+            - name: QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mainframe-rag.qdrantSecretName" . }}
+                  key: api-key
+            - name: QDRANT_SHARD_NUMBER
+              value: {{ .Values.ingest.collectionPolicy.shardNumber }}
+            - name: QDRANT_REPLICATION_FACTOR
+              value: {{ .Values.ingest.collectionPolicy.replicationFactor }}
+            - name: QDRANT_WRITE_CONSISTENCY_FACTOR
+              value: {{ .Values.ingest.collectionPolicy.writeConsistencyFactor }}
+            - name: INGEST_ALIAS_PUBLISH
+              value: {{ .Values.ingest.aliasPublish | toString | quote }}
+            - name: EMBED_BASE_URL
+              value: {{ .Values.models.embedding.baseUrl }}
+            - name: EMBED_MODEL
+              value: {{ .Values.models.embedding.model }}
+            - name: DENSE_DIM
+              value: {{ .Values.models.embedding.dimension | quote }}
+            - name: EMBED_MODEL_REVISION
+              value: {{ .Values.models.embedding.revision }}
+            - name: IMAGE_SHA
+              value: {{ .Values.images.ingest.tag }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ include "mainframe-rag.otelEndpoint" . }}
+            - name: OTEL_SERVICE_NAME
+              value: mainframe-rag-ingest
+            - name: OTEL_DEPLOYMENT_ENVIRONMENT
+              value: {{ .Values.tracing.deploymentEnvironment }}
+            - name: INGEST_WORKERS
+              value: {{ .Values.ingest.workers | quote }}
+            - name: CONTEXTUAL_EMBED_ENABLED
+              value: {{ .Values.ingest.contextualEnabled | toString | quote }}
+            - name: CONTEXT_LLM_BASE_URL
+              value: {{ .Values.ingest.contextLlmBaseUrl }}
+            - name: CONTEXT_LLM_MODEL
+              value: {{ .Values.ingest.contextLlmModel }}
+            {{- if .Values.gateway.apiKeySecretName }}
+            - name: EMBED_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.apiKeySecretName }}
+                  key: embed-api-key
+            - name: CONTEXT_LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.apiKeySecretName }}
+                  key: context-llm-api-key
+            {{- end }}
+            {{- if .Values.gateway.caConfigMapName }}
+            - name: SSL_CERT_FILE
+              value: /etc/gateway-ca/ca-bundle.crt
+            {{- end }}
+          resources:
+            {{- toYaml .Values.ingest.resources | nindent 12 }}
+          volumeMounts:
+            - name: corpus
+              mountPath: /corpus
+              readOnly: true
+            - name: work
+              mountPath: /work
+            {{- if .Values.gateway.caConfigMapName }}
+            - name: gateway-ca
+              mountPath: /etc/gateway-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: corpus
+          persistentVolumeClaim:
+            claimName: {{ required "ingest.corpusPVC is required when ingest.enabled is true" .Values.ingest.corpusPVC }}
+            readOnly: true
+        - name: work
+          persistentVolumeClaim:
+            claimName: ingest-work
+        {{- if .Values.gateway.caConfigMapName }}
+        - name: gateway-ca
+          configMap:
+            name: {{ .Values.gateway.caConfigMapName }}
+            items:
+              - key: ca-bundle.crt
+                path: ca-bundle.crt
+        {{- end }}
+{{- end }}
