@@ -136,6 +136,57 @@ esac
         assert (tree / "replacement-applied").exists()
 
 
+@pytest.mark.parametrize("job_succeeds", [False, True])
+def test_ingest_logs_follow_retry_and_stop_owned_stream(ingest_tree, job_succeeds):
+    """A failed first pod must not hide the retry or leave its logs child alive."""
+    import os
+    from pathlib import Path
+
+    tree, _ = ingest_tree
+    write_stub(tree / "bin/kubectl", """#!/usr/bin/python3
+import os,signal,sys,time
+from pathlib import Path
+a=sys.argv[1:]
+if 'pvc' in a:
+ print('persistentvolumeclaim/ingest-work')
+elif 'pods' in a:
+ if any('items[0].status.phase' in x for x in a):print('Failed')
+ elif Path('first-followed').exists():print('ingest-first Failed\\ningest-second Running')
+ else:print('ingest-first Failed')
+elif 'logs' in a:
+ if 'ingest-second' in a:
+  def stopped(*_):
+   Path('stream-stopped').touch()
+   sys.exit(0)
+  signal.signal(signal.SIGTERM,stopped)
+  print('second pod progress',flush=True)
+  Path('stream-pid').write_text(str(os.getpid()))
+  Path('second-followed').touch()
+  time.sleep(60)
+ else:
+  print('first pod failure',flush=True)
+  Path('first-followed').touch()
+  sys.exit(1)
+elif 'wait' in a:
+ deadline=time.monotonic()+8
+ while not Path('second-followed').exists():
+  if time.monotonic()>deadline:sys.exit(2)
+  time.sleep(.02)
+ sys.exit(0 if os.environ['JOB_SUCCEEDS']=='true' else 1)
+""")
+    result = _run_ingest(
+        ingest_tree, ("AIRGAP_DRYRUN", "0"), ("JOB_SUCCEEDS", str(job_succeeds).lower())
+    )
+    assert "first pod failure" in result.stdout
+    assert "second pod progress" in result.stdout, result.stdout + result.stderr
+    assert result.returncode == (0 if job_succeeds else 1)
+    assert (tree / "stream-stopped").exists(), "launcher did not terminate its stream"
+    pid = int((tree / "stream-pid").read_text())
+    assert not Path(f"/proc/{pid}").exists(), f"owned logs child {pid} survived launcher exit"
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
 def test_ingest_missing_embed_revision_fails_closed(ingest_tree):
     r = _run_ingest(ingest_tree, ("EMBED_MODEL_REVISION", ""))
     assert r.returncode != 0

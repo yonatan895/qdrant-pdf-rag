@@ -636,7 +636,9 @@ flips, and the shared ingest-work progress path is fixed so one authorized
 publisher at a time is enforceable (host-local target lock, no distributed
 lock claim). Replacing the immutable Job waits for foreground deletion of its
 prior pods before applying the replacement; a deletion failure aborts the
-launcher. The scratch PVC and its durable progress remain intact. CI uses
+launcher. The scratch PVC and its durable progress remain intact. The log
+overlay follows successive retry pods and stops its owned stream when the Job
+wait returns; Job completion, not log activity, determines success. CI uses
 explicit synthetic values, never an attestation bypass. No
 real registry, URL, token or private environment file enters git or the transfer
 artifact.

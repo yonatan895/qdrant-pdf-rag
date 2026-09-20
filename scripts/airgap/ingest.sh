@@ -121,27 +121,56 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] rendered manifest kept at dist/ingest-rendered.yaml"
 else
     echo "==> Waiting for ingest Job (timeout: ${INGEST_TIMEOUT}s)..."
-    # Stream logs as an overlay in the background once pod starts
+    # Follow each pod once, including a replacement after a Job retry. The
+    # foreground Job wait remains authoritative; this is only a log overlay.
     (
-        for i in $(seq 1 60); do
-            pod_phase=$($KC -n "$NAMESPACE" get pods -l job-name=ingest -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)
-            if [ "$pod_phase" = "Running" ] || [ "$pod_phase" = "Succeeded" ] || [ "$pod_phase" = "Failed" ]; then
-                $KC -n "$NAMESPACE" logs -f job/ingest 2>/dev/null || true
-                break
-            fi
+        # A signal sets a flag rather than exiting between fork and assigning
+        # $!: the exit handler can then always reap the owned stream.
+        stopping=false
+        stream_pid=""
+        trap 'stopping=true' TERM INT
+        trap 'if [ -n "$stream_pid" ]; then kill "$stream_pid" 2>/dev/null || true; wait "$stream_pid" 2>/dev/null || true; fi' 0
+        followed_pods=" "
+        while [ "$stopping" = false ]; do
+            pod_rows=$($KC -n "$NAMESPACE" get pods -l job-name=ingest \
+                --sort-by=.metadata.creationTimestamp \
+                -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}' 2>/dev/null || true)
+            while read -r pod_name pod_phase; do
+                [ "$stopping" = false ] || break
+                [ -n "$pod_name" ] || continue
+                case "$followed_pods" in *" $pod_name "*) continue ;; esac
+                case "$pod_phase" in Running|Succeeded|Failed) ;; *) continue ;; esac
+                $KC -n "$NAMESPACE" logs -f "$pod_name" 2>/dev/null &
+                stream_pid=$!
+                [ "$stopping" = false ] || break
+                wait "$stream_pid" || true
+                [ "$stopping" = false ] || break
+                stream_pid=""
+                followed_pods="$followed_pods$pod_name "
+            done <<EOF
+$pod_rows
+EOF
+            [ "$stopping" = false ] || break
             sleep 2
         done
     ) &
     LOGS_PID=$!
+    stop_ingest_logs() {
+        [ -n "$LOGS_PID" ] || return 0
+        kill "$LOGS_PID" 2>/dev/null || true
+        wait "$LOGS_PID" 2>/dev/null || true
+        LOGS_PID=""
+    }
+    trap stop_ingest_logs 0
 
     if ! $KC -n "$NAMESPACE" wait --for=condition=complete job/ingest --timeout="${INGEST_TIMEOUT}s"; then
-        kill "$LOGS_PID" 2>/dev/null || true
+        stop_ingest_logs
         echo "::error::ingest Job did not complete successfully" >&2
         $KC -n "$NAMESPACE" logs job/ingest --tail=200 || true
         $KC -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -30 || true
         exit 1
     fi
-    kill "$LOGS_PID" 2>/dev/null || true
+    stop_ingest_logs
 fi
 
 next_step "sh scripts/tools/run-task.sh airgap:smoke"
