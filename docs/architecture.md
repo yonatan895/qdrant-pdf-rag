@@ -35,6 +35,10 @@ Local simulation exists so agent/ingest always exercise the production gateway w
 
 ## 2. System Context & Boundaries
 
+The diagram includes the intended ADR-0003 live-state tier. Its bridge/client
+code exists, but the current Helm deployment does not include the sidecar or
+complete its answer-context integration; see the workload status table below.
+
 ```
                     ┌─────────────────────────────────────────┐
   Connected LAN     │  Public GitHub  (this repo)             │

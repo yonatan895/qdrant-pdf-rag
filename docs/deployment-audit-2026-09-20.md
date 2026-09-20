@@ -33,6 +33,7 @@ volumes must survive. Production settings and serving safety gates stay intact.
 | Task drops `SERVED_NAME` CLI input | Real reasoning launch served directory basename instead of gateway model ID | Forwarded for all three model tasks; exact CLI/environment/literal round-trip regression passed |
 | Docker/WSL restart leaves stale bind mappings and gateway DNS | TLS containers refused mount startup; gateway DNS referenced the old address | Recreated containers preserving recorded hardened configuration and data; reattached Kind networks and refreshed CoreDNS |
 | README starts a third model beside the default 8 GiB pair | Quickstart launched reranker without selecting a compatible pack | Default quickstart now uses reasoning/embedding with reranking explicitly off |
+| Bastion prerequisites still recommend Helm 3.12+ | The current deployment launcher requires Helm 4 and the verified local run uses 4.3.0 | Corrected the prerequisite to the pinned 4.3.0 client and documented host standard-library Python for deployment rendering |
 | CRC and internal site qualification | Insufficient CRC startup headroom; no authorized internal GitLab/Quay/namespace supplied | Record NOT RUN and exact environment/acceptance requirements; Kind cannot close OpenShift or site controls |
 
 Private logs, snapshots, configuration and model checksum manifests stay outside
@@ -111,3 +112,10 @@ original and resumed migration logs, source-hash/mount proof, gateway probes,
 resource samples and rollback inventories are separate files. They are not
 committed or attached publicly. Live completion and ordinary-operation evidence
 will supersede this in-progress checkpoint.
+
+The verified release and private operator inputs have also been retained under
+`~/.config/mainframe-rag/helm-live-audit/runtime`, with Helm 4.3.0 and a scoped
+`run-airgap.sh` wrapper. Its `airgap:validate` passed (exit 0). The active ingest
+continues from its original workspace; this copy does not authorize overlapping
+writers. After ingestion completes, the persistent wrapper is available for the
+ordinary repeat and subsequent deployment operations.

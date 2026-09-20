@@ -47,7 +47,8 @@ Mainframe RAG is a citation-first retrieval-augmented generation engine designed
 ### Disconnected / Air-Gapped Bastion
 - **Host runner:** signed bundle bootstrap installs verified Task into `.tools/bin/task`; no Make, preinstalled Task, Go, application Python or internet is needed for bootstrap. Keep `git`, POSIX shell, `tar`, `sha256sum` and `openssl` available for its verification steps.
 - **OpenShift Client:** `oc` (v4.12+) or `kubectl`.
-- **Helm:** `helm` v3.12+ (do **not** run `helm repo add` in the air-gap; chart is vendored at `charts/qdrant-1.19.0.tgz`).
+- **Helm:** checksum-pinned **4.3.0**, as used by [the deployment workflow](../.github/workflows/e2e.yml); the launcher requires Helm 4. Transfer the verified client with the operator tools. Both `charts/mainframe-rag` and `charts/qdrant-1.19.0.tgz` are local; do **not** run `helm repo add` in the air gap.
+- **Rendering:** host `python3` with its standard library for release-value serialization and ownership checks. Bootstrap itself does not require Python; deployment does. No application packages or runtime dependency downloads are needed on the bastion.
 - **Image Tooling:** `skopeo` (for loading archives into the internal registry).
 - **Cluster Permissions:** Access to create/manage workloads in the target namespace with `restricted-v2` SCC.
 
