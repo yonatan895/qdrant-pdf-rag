@@ -235,7 +235,8 @@ tasks:
       the caller environment only (GATEWAY_MASTER_KEY etc.; the script mints
       per-start keys when absent and prints them once) — never Task vars,
       never CLI values. Foreground: Ctrl-C stops the gateway containers.
-      Needs the three backends up first.
+      Start the enabled model backends first. Two-model profiles keep reranking
+      disabled in agent/ingest consumers; the unused route is not a live backend.
     env:
       TASK_GATEWAY_PORT: '{{.GATEWAY_PORT}}'
     cmds:

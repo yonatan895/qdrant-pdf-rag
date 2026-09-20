@@ -100,6 +100,11 @@ An independent check inside the actual ingest container verified all 452 source
 hashes and a kernel read-only corpus mount. Serving snapshot writes returned HTTP
 403, and original Qdrant/Jaeger PVC identities were retained.
 
+During migration, the candidate's `/livez` and `/ui` returned 200. `/healthz`
+returned 503 with `representation=legacy`; both `/v1/search` and `/v1/answer`
+returned 503 with `code=representation_unavailable`. This verifies refusal before
+publication, not successful serving after it (`prepublication-serving-gate.log`).
+
 Host-tool candidate `67ad7ebde01731b83c5afaf2bc68f21c93746a2f` passed
 `sh scripts/tools/run-task.sh qa:check`: exit 0, 2,426 tests passed, 42 deselected,
 two warnings; Ruff and mypy (54 source files) passed. The focused launcher suites
