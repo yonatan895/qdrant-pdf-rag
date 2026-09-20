@@ -208,29 +208,51 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8087/ui
 
 ## 4. Qdrant persistence (read before rebooting or juggling GPUs)
 
-The local Qdrant container is ephemeral (`--rm`, no volume): a reboot,
-daemon restart, or container crash **destroys every collection**. Before
-any of those, snapshot to persistent disk and restore-test one collection:
+The standalone disposable Qdrant simulator is ephemeral (`--rm`, no volume): a
+reboot, daemon restart, or container crash **destroys its collections**. This is
+not the preserved Helm deployment, whose data/snapshot PVCs must be retained;
+use [the real-corpus recovery owner](local-real-corpus.md) for that stack.
+
+Before interrupting a simulator whose data matters, stop its writer and record
+the alias-to-physical mapping. Back up both the physical data collection and its
+`<physical>__completions` collection from that quiescent state. Alias mappings and
+operator progress are separate from collection snapshots. These loopback examples
+assume the unauthenticated disposable simulator; authenticated administrative
+operations use writer Secret references, never the serving key.
 
 ```sh
 mkdir -p "$SNAPSHOT_DIR"
-# per collection:
-curl -s -X POST "http://127.0.0.1:6333/collections/<name>/snapshots"
-curl -s -o "$SNAPSHOT_DIR/<name>.snapshot" \
+# Per physical data/control collection, with the writer stopped:
+curl -fsS -X POST "http://127.0.0.1:6333/collections/<name>/snapshots"
+curl -fsS -o "$SNAPSHOT_DIR/<name>.snapshot" \
   "http://127.0.0.1:6333/collections/<name>/snapshots/<snapshot-file>"
 ```
 
-Restore-test (fresh container, throwaway port, verify point count, remove it):
+Restore-test into a fresh container on a throwaway loopback port, retaining the
+original physical names. Select the matching pinned image from the verified
+artifact; restore both data and controls before validating the saved alias.
 
 ```sh
-docker run -d --name qdrant-restore-test -p 6334:6333 docker.io/qdrant/qdrant:v1.19.0-unprivileged
-curl -s -X POST "http://127.0.0.1:6334/collections/<name>/snapshots/upload?priority=snapshot" \
+: "${QDRANT_IMAGE:?Select the verified matching Qdrant image}"
+docker run -d --name qdrant-restore-test -p 127.0.0.1:6334:6333 "$QDRANT_IMAGE"
+curl -fsS -X POST "http://127.0.0.1:6334/collections/<name>/snapshots/upload?priority=snapshot&wait=true" \
   -F "snapshot=@$SNAPSHOT_DIR/<name>.snapshot"
-curl -s "http://127.0.0.1:6334/collections/<name>"   # expect status green + full points_count
-docker stop qdrant-restore-test && docker rm qdrant-restore-test
+curl -fsS "http://127.0.0.1:6334/collections/<name>"   # initial storage check only
 ```
 
-An untested backup is not a backup. Re-snapshot after any ingest that must survive.
+Green status and point count alone do not prove a usable recovery. Before removing
+the disposable restore target, compare actual stored payloads/vectors and control
+records with the backup evidence, validate the representation and alias binding,
+and prove the next ordinary search/ingest operation. A data-only historical backup
+may remain legacy and require the documented source migration. Stream large
+snapshot downloads/uploads; do not load a multi-gigabyte snapshot into Python RAM
+using the small synthetic CI helper. Re-snapshot after any ingest that must survive.
+
+After the recovery checks pass, remove only the disposable restore container:
+
+```sh
+docker stop qdrant-restore-test && docker rm qdrant-restore-test
+```
 
 ## 5. GPU rules (8 GB box)
 

@@ -115,8 +115,12 @@ Prepare a read-only corpus PVC containing the complete hash-matched originals.
 For Kind, a separately inventoried node directory and retained static corpus PV
 are suitable; no private PDFs enter Git or application images. The ingest pod
 must see every expected file and retain filename-stem identity. Keep shared
-`ingest-work` scratch and a single authorized publisher. Use one ingest worker
-and the existing local sizing override (500m/1Gi request, 2 CPU/2Gi limit).
+`ingest-work` scratch and a single authorized publisher. Set `INGEST_WORKERS`
+explicitly in the protected operator inputs and select a local resource override
+from measured peak usage with both models and Qdrant running. A container limit
+does not reserve host RAM. The [dated audit](deployment-audit-2026-09-20.md)
+records the four-worker recovery and failed six-worker memory trial; neither
+historical one-worker sizing nor a brief healthy sample establishes full-run fit.
 
 From the exact release checkout with protected `AIRGAP_ENV`, explicit kubeconfig
 and Helm 4 on PATH:
@@ -141,6 +145,10 @@ These are deliberate migration inputs, not new defaults. The Job has a 24-hour
 active deadline; choose a suitable operator wait within that boundary. Preserve
 logs and publication state on failure, inspect the actual Job before retrying,
 and resume through the same supported operation. Do not start overlapping writers.
+Verify the candidate's checkpoint behavior before claiming that a forced retry
+retains work: the historical published `cbcc74b` path redid every document, while
+the recovery candidate in the dated audit verifies same-build document checkpoints.
+Inventory counts alone do not establish that the actual target can skip work.
 Alias publication retains the old generation and promotes only after full coverage
 and representation checks. A failed or still-running Job is not acceptance.
 
