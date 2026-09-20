@@ -104,10 +104,12 @@ serving_mark() {
     kubectl -n "$NS" get deploy/rag-agent -o "jsonpath={.spec.template.spec.containers[?(@.name=='agent')].env[?(@.name=='OTEL_DEPLOYMENT_ENVIRONMENT')].value}"
 }
 pvc_uids() {
-    kubectl -n "$1" get pvc -o 'jsonpath={range .items[*]}{.metadata.uid}{"\n"}{end}' | sort
+    _uids=$(kubectl -n "$1" get pvc -o 'jsonpath={range .items[*]}{.metadata.uid}{"\n"}{end}') || return 1
+    printf '%s\n' "$_uids" | sort
 }
 chart_manifest_has_no_sts() {
-    ! helm get manifest "$RELEASE" -n "$NS" | grep -q '^kind: StatefulSet'
+    _manifest=$(helm get manifest "$RELEASE" -n "$NS") || return 1
+    ! printf '%s\n' "$_manifest" | grep -q '^kind: StatefulSet'
 }
 smoke() {
     # full: the rollout must complete (steady steps). retained: serving must
@@ -127,11 +129,12 @@ smoke() {
 # the chart release inventory or namespace.
 guards() {
     _expect="$1"
-    _have="$(pvc_uids "$NS")"
+    _have="$(pvc_uids "$NS")" || die "cannot read chart-namespace PVC identities"
     [ "$_have" = "$_expect" ] || die "chart-namespace PVC identities changed (want [$_expect] got [$_have])"
-    _data="$(pvc_uids "$DATA_NS")"
+    _data="$(pvc_uids "$DATA_NS")" || die "cannot read data-plane PVC identities"
     [ "$_data" = "$DATA_PVC_BASELINE" ] || die "data-plane PVC identities changed (want [$DATA_PVC_BASELINE] got [$_data])"
-    [ -z "$(kubectl -n "$NS" get sts --no-headers 2>/dev/null)" ] || die "chart namespace owns a StatefulSet"
+    _sts=$(kubectl -n "$NS" get sts --no-headers) || die "cannot read chart-namespace StatefulSets"
+    [ -z "$_sts" ] || die "chart namespace owns a StatefulSet"
     chart_manifest_has_no_sts || die "chart release manifest owns a StatefulSet"
 }
 expect_mark_a() {
@@ -144,16 +147,19 @@ expect_mark_b() {
     [ "$_mark" = "$B_MARKER" ] || die "serving B expected (want [$B_MARKER] got [$_mark])"
     echo "serving B (mark [$_mark])"
 }
-# helm -f argument list shared by install/upgrade (values-a, values-b or the
-# fault overlay all ride on the same base + optional quota overlay).
-values_flags() {
-    printf '%s' "-f $1"
-    [ -z "$SCALE_VALUES" ] || printf '%s' " -f $SCALE_VALUES"
+# Preserve each values path as one argument, including whitespace/glob characters.
+helm_values() {
+    _values="$1"
+    shift
+    set -- "$@" -f "$_values"
+    if [ -n "$SCALE_VALUES" ]; then
+        set -- "$@" -f "$SCALE_VALUES"
+    fi
+    helm "$@"
 }
 
 echo "==> chart-lifecycle: lint chart with values-a"
-# shellcheck disable=SC2086
-helm lint "$CHART_DIR" $(values_flags "$VALUES_A")
+helm_values "$VALUES_A" lint "$CHART_DIR"
 
 echo "==> chart-lifecycle: isolated namespace $NS (data plane $DATA_NS untouched)"
 if kubectl create namespace "$NS" >/dev/null 2>&1; then
@@ -189,8 +195,7 @@ DATA_PVC_BASELINE="$(pvc_uids "$DATA_NS")"
 [ -n "$DATA_PVC_BASELINE" ] || die "no PVCs in data-plane namespace $DATA_NS (ingested data plane required)"
 
 echo "==> chart-lifecycle: fresh A"
-# shellcheck disable=SC2086
-helm install "$RELEASE" "$CHART_DIR" -n "$NS" $(values_flags "$VALUES_A") --wait --timeout="$TIMEOUT"
+helm_values "$VALUES_A" install "$RELEASE" "$CHART_DIR" -n "$NS" --wait --timeout="$TIMEOUT"
 REV1="$(revision)"
 echo "A installed at revision $REV1"
 CHART_PVC="$(pvc_uids "$NS")"
@@ -200,16 +205,14 @@ smoke
 expect_mark_a
 
 echo "==> chart-lifecycle: unchanged A"
-# shellcheck disable=SC2086
-helm upgrade "$RELEASE" "$CHART_DIR" -n "$NS" $(values_flags "$VALUES_A") --wait --timeout="$TIMEOUT"
+helm_values "$VALUES_A" upgrade "$RELEASE" "$CHART_DIR" -n "$NS" --wait --timeout="$TIMEOUT"
 echo "unchanged A at revision $(revision) (was $REV1)"
 guards "$CHART_PVC"
 smoke
 expect_mark_a
 
 echo "==> chart-lifecycle: B"
-# shellcheck disable=SC2086
-helm upgrade "$RELEASE" "$CHART_DIR" -n "$NS" $(values_flags "$VALUES_B") --wait --timeout="$TIMEOUT"
+helm_values "$VALUES_B" upgrade "$RELEASE" "$CHART_DIR" -n "$NS" --wait --timeout="$TIMEOUT"
 REV_B="$(revision)"
 echo "B at revision $REV_B"
 guards "$CHART_PVC"
@@ -217,12 +220,18 @@ smoke
 expect_mark_b
 
 echo "==> chart-lifecycle: injected failed B (must fail, serving must retain B)"
-# shellcheck disable=SC2086
-if helm upgrade "$RELEASE" "$CHART_DIR" -n "$NS" $(values_flags "$VALUES_A") \
+if helm_values "$VALUES_A" upgrade "$RELEASE" "$CHART_DIR" -n "$NS" \
     --set "images.agent.tag=$BAD_TAG" --wait --timeout="$FAIL_TIMEOUT"; then
     die "fault injection unexpectedly succeeded (bad tag $BAD_TAG deployed)"
 fi
 [ "$(release_status)" = "failed" ] || die "expected a failed release after fault injection (got $(release_status))"
+# A failed Helm release alone also includes admission errors. Require the
+# bad image in the accepted Deployment so this exercises a failed rollout.
+_fault_image=$(kubectl -n "$NS" get deploy/rag-agent -o "jsonpath={.spec.template.spec.containers[?(@.name=='agent')].image}")
+case "$_fault_image" in
+    *:"$BAD_TAG") ;;
+    *) die "fault image was not admitted to the Deployment" ;;
+esac
 guards "$CHART_PVC"
 # No mark assert here: the failed upgrade rewrote the Deployment template
 # (values-A mark) while the running ReplicaSet is still B. The retained
@@ -238,16 +247,14 @@ smoke
 expect_mark_a
 
 echo "==> chart-lifecycle: successful B"
-# shellcheck disable=SC2086
-helm upgrade "$RELEASE" "$CHART_DIR" -n "$NS" $(values_flags "$VALUES_B") --wait --timeout="$TIMEOUT"
+helm_values "$VALUES_B" upgrade "$RELEASE" "$CHART_DIR" -n "$NS" --wait --timeout="$TIMEOUT"
 echo "B at revision $(revision) (was $REV_B)"
 guards "$CHART_PVC"
 smoke
 expect_mark_b
 
 echo "==> chart-lifecycle: explicit compatible redeploy A (upgrade, not rollback)"
-# shellcheck disable=SC2086
-helm upgrade "$RELEASE" "$CHART_DIR" -n "$NS" $(values_flags "$VALUES_A") --wait --timeout="$TIMEOUT"
+helm_values "$VALUES_A" upgrade "$RELEASE" "$CHART_DIR" -n "$NS" --wait --timeout="$TIMEOUT"
 echo "redeployed A at revision $(revision)"
 guards "$CHART_PVC"
 smoke

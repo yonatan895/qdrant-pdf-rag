@@ -792,3 +792,12 @@ def test_chart_shape_no_qdrant_no_hook_no_secret_values():
     assert "sk-" not in values_text
     assert "registry.example" not in text or "registry.example.internal" in (CHART / "values.yaml").read_text()
     assert "ghcr.io" not in text
+
+
+def test_numeric_looking_release_sha_remains_an_exact_env_string():
+    sha = '0' * 40
+    images = {'agent': {'tag': sha}, 'ingest': {'tag': sha}}
+    agent = run_new_template({'images': images})[('Deployment', 'rag-agent')]
+    job = run_new_job_only({'images': images, 'ingest': {'corpusPVC': 'corpus'}})[('Job', 'ingest')]
+    assert env_map(agent)['IMAGE_SHA']['value'] == sha
+    assert env_map(job, 'ingest')['IMAGE_SHA']['value'] == sha

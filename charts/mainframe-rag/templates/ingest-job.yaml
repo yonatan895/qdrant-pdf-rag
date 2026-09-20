@@ -78,7 +78,7 @@ spec:
             - name: EMBED_MODEL_REVISION
               value: {{ .Values.models.embedding.revision }}
             - name: IMAGE_SHA
-              value: {{ .Values.images.ingest.tag }}
+              value: {{ .Values.images.ingest.tag | quote }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ include "mainframe-rag.otelEndpoint" . }}
             - name: OTEL_SERVICE_NAME

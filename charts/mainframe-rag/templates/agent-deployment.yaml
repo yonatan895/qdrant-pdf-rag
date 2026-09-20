@@ -60,7 +60,7 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ include "mainframe-rag.otelEndpoint" . }}
             - name: IMAGE_SHA
-              value: {{ .Values.images.agent.tag }}
+              value: {{ .Values.images.agent.tag | quote }}
             - name: OTEL_DEPLOYMENT_ENVIRONMENT
               value: {{ .Values.tracing.deploymentEnvironment }}
             {{- if .Values.tracing.serviceName }}

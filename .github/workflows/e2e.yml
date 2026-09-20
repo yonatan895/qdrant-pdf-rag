@@ -701,6 +701,13 @@ jobs:
           cd gapbox/qdrant-pdf-rag
           sh scripts/ci/gateway_faults.sh "$NS"
 
+      - name: First-party Helm chart lifecycle from the published bundle
+        if: matrix.lane == 'lifecycle'
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd gapbox/qdrant-pdf-rag
+          sh scripts/ci/rehearse_chart.sh
+
       - name: Three-worker lifecycle and repeated pipeline
         if: matrix.lane == 'lifecycle'
         env:

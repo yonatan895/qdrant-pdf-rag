@@ -79,6 +79,22 @@ Qdrant deploys from the vendored chart (`charts/qdrant-1.19.0.tgz` — never
 kustomize overlays. Manifests use `__TOKEN__` placeholders that fail closed
 (`fail_on_placeholders`) when any `__[A-Z][A-Z0-9_]*__` survives rendering.
 
+Issue #448 is staged: `charts/mainframe-rag` and `map_values.py` are the
+first-party shadow renderer used by dry-run. The published-bundle Kind
+`lifecycle` lane also runs `scripts/ci/rehearse_chart.sh`: it resolves the
+operator inputs through `common.sh`, generates A/B values, and invokes the
+chart's install/upgrade/failure/rollback rehearsal in a separate namespace.
+The rehearsal requires successful cluster reads, unchanged PVC identities,
+an admitted bad-image Deployment for the injected rollout failure,
+and serving smoke checks; hermetic tests do not establish live acceptance.
+Chart image tags used as `IMAGE_SHA` env values are quoted: even an all-digit
+40-character SHA must reach Kubernetes as an exact string. This intentional
+serialization correction is covered for both agent and ingest by
+`test_numeric_looking_release_sha_remains_an_exact_env_string`.
+Production cutover requires H2 acceptance and the selected OpenShift controls;
+Kustomize retirement additionally requires H3 internal qualification under
+#446. Until those gates pass, the production renderer below remains authoritative.
+
 - Deploy defaults the Qdrant image tag by stripping the registry path and
   the `-unprivileged` suffix from `QDRANT_IMAGE`, because the chart
   re-appends that suffix when `useUnprivilegedImage` is set — passing the
