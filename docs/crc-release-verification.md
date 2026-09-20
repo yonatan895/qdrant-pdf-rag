@@ -9,7 +9,11 @@ blocks transfer. The pipeline's `OPERATIONAL & ACCEPTED` banner alone does not
 pass this gate. Copy [the record template](crc-release-record.md) outside Git
 for each candidate; initialize every result as `NOT RUN`.
 
-**Implementation status:** candidate `89e10d3926b2e7f6a2e6ad0c1450c68c60e1b5f8`
+**Historical qualification:** the following results apply only to the named
+14 September candidate. The [current Helm audit](deployment-audit-2026-09-20.md)
+records newer evidence and missing qualification separately.
+
+Candidate `89e10d3926b2e7f6a2e6ad0c1450c68c60e1b5f8`
 passed its required CI lanes and a 32-minute fully live CRC workload, but the
 12GiB cold start failed the 2GiB Windows headroom gate (1.62GiB after successful
 streams). At 10752MiB, the required one-worker ingest remained unschedulable:
@@ -331,7 +335,8 @@ change** through normal review and a new published-main bundle containing
 the OAuth archive. Editing a downloaded bundle invalidates its signature;
 do not bypass the pending-pin guard.
 
-Use [the production overlays](../overlays/openshift/values.yaml) and existing
+Use the [Qdrant production values](../overlays/openshift/values.yaml), the
+[first-party chart](../charts/mainframe-rag), and existing
 rehearsal override hooks. Keep local files outside the bootstrapped checkout.
 Local values for a tiny generated corpus (never production defaults):
 
@@ -406,7 +411,7 @@ including the OAuth container and completed Jobs.
    security context. Keep the original generated content and the loaded
    release ingest image. Require generator completion; set `CORPUS_PVC`.
 8. Run `sh scripts/tools/run-task.sh airgap:pipeline` without skip flags. This repeats load, deploys
-   the production overlays including the real OAuth sidecar, probes the
+   the production Helm charts including the real OAuth sidecar, probes the
    configured gateway from the agent pod, ingests, and checks smoke/tracing.
    Save stage exit statuses. Empty search or skipped ingest/tracing is a
    failed release check even if the script exits successfully.
