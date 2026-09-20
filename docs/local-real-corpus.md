@@ -172,12 +172,17 @@ then verify collection/control state, next ordinary search/answer and the exact
 **pre-replacement trace ID**. Stable PVC UIDs alone do not prove retained content.
 
 ```sh
-kubectl -n "$KIND_NAMESPACE" port-forward --address 127.0.0.1 svc/rag-agent 8080:8080
+kubectl -n "$KIND_NAMESPACE" port-forward --address 127.0.0.1 svc/rag-agent 8087:8080
 # Separate terminal:
 kubectl -n "$KIND_NAMESPACE" port-forward --address 127.0.0.1 svc/jaeger 16686:16686
 ```
 
-Open **http://localhost:8080/ui** and **http://localhost:16686**. Re-establish
+Open **http://localhost:8087/ui** and **http://localhost:16686**. On Windows/WSL,
+check listeners on both hosts and verify these URLs from the Windows side;
+a successful WSL curl does not prove the browser reaches the same listener.
+The September audit used 8087 because an unrelated Windows `AgentService`
+already occupied 8080. Leave unrelated services alone and select a free local
+port; the Kubernetes service remains on 8080. Re-establish
 port-forwards after pod or cluster replacement. Keep the pinned model/gateway
 launcher sessions, release workspace, protected restart configuration and backups
 available for ongoing use. Preserve the old generation until explicitly retired.

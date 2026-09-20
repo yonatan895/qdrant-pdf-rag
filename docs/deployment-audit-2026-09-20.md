@@ -34,6 +34,7 @@ volumes must survive. Production settings and serving safety gates stay intact.
 | Docker/WSL restart leaves stale bind mappings and gateway DNS | TLS containers refused mount startup; gateway DNS referenced the old address | Recreated containers preserving recorded hardened configuration and data; reattached Kind networks and refreshed CoreDNS |
 | README starts a third model beside the default 8 GiB pair | Quickstart launched reranker without selecting a compatible pack | Default quickstart now uses reasoning/embedding with reranking explicitly off |
 | Bastion prerequisites still recommend Helm 3.12+ | The current deployment launcher requires Helm 4 and the verified local run uses 4.3.0 | Corrected the prerequisite to the pinned 4.3.0 client and documented host standard-library Python for deployment rendering |
+| UI works in WSL but times out in the Windows browser | Windows `AgentService` occupies 8080; Windows HTTP probe timed out while WSL returned 200 | Forwarded 8087 to the unchanged service port 8080; Windows verified the UI, stylesheet and both scripts return 200. Jaeger remains available on 16686 |
 | CRC and internal site qualification | Insufficient CRC startup headroom; no authorized internal GitLab/Quay/namespace supplied | Record NOT RUN and exact environment/acceptance requirements; Kind cannot close OpenShift or site controls |
 
 Private logs, snapshots, configuration and model checksum manifests stay outside
