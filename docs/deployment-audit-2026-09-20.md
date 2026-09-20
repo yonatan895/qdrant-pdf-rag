@@ -147,6 +147,17 @@ benchmark against identical document sizes. Ingest/Qdrant cgroups and host
 memory pressure remain monitored. Whole-batch client timeout and ingestion
 errors must also remain absent; per-input model latency alone does not prove that.
 
+The six-worker trial subsequently failed the sustained-load check. By 19:55 UTC,
+available host RAM fell below 200 MiB with the 2 GiB swap allocation already full;
+memory-stall readings rose sharply and the metrics endpoint itself timed out.
+Five ingestion `ReadTimeout` errors followed between 19:55:27 and 19:56:13, even
+though vLLM's model error/abort counters remained zero. The writer was stopped
+with foreground deletion before another observed OOM, and a four-worker retry
+was launched at 19:57 UTC using the same checkpoints. The six-worker run had
+completed 40 additional documents (7,656 points); incomplete documents may replay.
+Six workers are not accepted under this host allocation. Request timeouts and
+model settings were not loosened to hide the overload.
+
 The durable recovery checkout and scoped ingest wrapper are under
 `~/.config/mainframe-rag/helm-live-audit/recovery-d03512c`. Evidence remains private
 under `/tmp/resume-391`. Final publication, full-run memory fit and post-publication
