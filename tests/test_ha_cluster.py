@@ -408,6 +408,51 @@ PART_CONTROL_POINTS = tuple(range(5001, 5003))
 PART_MINORITY_POINTS = tuple(range(6001, 6003))
 
 
+def _wait_points_exact(
+    urls: tuple[str, ...],
+    collection: str,
+    point_ids: tuple[int, ...],
+    prefix: str,
+    *,
+    timeout_s: float = 60.0,
+) -> None:
+    """Wait until every peer serves the exact expected ID set and payloads.
+    Permanent loss or divergence times out with the last mismatch instead of
+    passing silently."""
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    last: str = "no attempt"
+    while time.monotonic() < deadline:
+        try:
+            for url in urls:
+                _assert_points_exact(url, collection, point_ids, prefix)
+        except AssertionError as exc:
+            last = str(exc)
+            time.sleep(1.0)
+            continue
+        return
+    raise AssertionError(f"exact reads never converged on {collection}: {last}")
+
+
+def _wait_pair_exact(urls: tuple[str, ...], pair: SeededPair, *, timeout_s: float = 60.0) -> None:
+    """Same convergence wait for a seeded corpus/control pair."""
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    last: str = "no attempt"
+    while time.monotonic() < deadline:
+        try:
+            for url in urls:
+                _assert_exact_payloads(url, pair)
+        except AssertionError as exc:
+            last = str(exc)
+            time.sleep(1.0)
+            continue
+        return
+    raise AssertionError(f"seeded pair never converged: {last}")
+
+
 def _wait_points_agree(
     urls: tuple[str, ...],
     collection: str,
@@ -494,10 +539,17 @@ def test_partition_minority_writes_unacknowledged_and_majority_durable(
         wait_collection_placement(
             cluster.urls, collection, shard_number=SHARDS, replication_factor=RF
         )
-    for url in cluster.urls:
-        _assert_points_exact(url, seeded_pair.corpus, PART_CORPUS_POINTS, "corpus")
-        _assert_points_exact(url, seeded_pair.control, PART_CONTROL_POINTS, "control")
-        _assert_exact_payloads(url, seeded_pair)
+    # ACTIVE placement is not read convergence: a rejoined peer reports
+    # ACTIVE replicas before finishing data sync, so exact reads must be
+    # waited for, never asserted once. A permanent loss times the wait out
+    # instead of passing silently.
+    _wait_points_exact(
+        cluster.urls, seeded_pair.corpus, PART_CORPUS_POINTS, "corpus"
+    )
+    _wait_points_exact(
+        cluster.urls, seeded_pair.control, PART_CONTROL_POINTS, "control"
+    )
+    _wait_pair_exact(cluster.urls, seeded_pair)
     _wait_points_agree(
         cluster.urls, seeded_pair.corpus, PART_MINORITY_POINTS, "corpus"
     )

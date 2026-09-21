@@ -1232,7 +1232,11 @@ on three distinct peers again.
 - **Rolling maintenance** evicts/restarts one peer at a time
   (`maxUnavailable: 1` limits voluntary disruption only) and **waits for
   full shard recovery before the next eviction**. A PDB does not see
-  replica catch-up and does not cover involuntary failures.
+  replica catch-up and does not cover involuntary failures. ACTIVE
+  placement alone is not read convergence — observed 2026-09-21: a rejoined
+  peer reports ACTIVE replicas before finishing data sync — so verify exact
+  reads (not only the verifier's placement verdict) before the next
+  disruption or any cutover.
 
 #### Abort, retry, and recovery
 
