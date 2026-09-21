@@ -241,3 +241,93 @@ def test_peer_loss_is_degraded_and_rejoins_healthy(
     assert report is not None and report.state == "healthy"
     for url in cluster.urls:
         _assert_exact_payloads(url, seeded_pair)
+
+
+# New points for the write path must not collide with the seeded identity
+# (corpus 1..60, control 1001..1006).
+WRITE_CORPUS_POINTS = tuple(range(2001, 2011))
+WRITE_CONTROL_POINTS = tuple(range(3001, 3004))
+
+
+def _write_points(client: QdrantClient, collection: str, point_ids: tuple[int, ...], prefix: str) -> None:
+    """Upsert stable-ID points; returning under wait=True is the write
+    acknowledgement this lane demonstrates."""
+    points = [
+        models.PointStruct(
+            id=point_id,
+            vector={"dense": [float(point_id)] * DIM},
+            payload={"point": point_id, "tag": f"{prefix}-{point_id}"},
+        )
+        for point_id in point_ids
+    ]
+    client.upsert(collection, points=points, wait=True)
+
+
+def _assert_points_exact(url: str, collection: str, point_ids: tuple[int, ...], prefix: str) -> None:
+    """Exact ID set and payloads through one endpoint: a duplicate,
+    divergent, or missing copy fails here."""
+    reader = QdrantClient(url=url, timeout=30)
+    try:
+        records = reader.retrieve(collection, ids=list(point_ids), with_payload=True)
+        actual = {record.id: record.payload["tag"] for record in records}
+        assert actual == {point_id: f"{prefix}-{point_id}" for point_id in point_ids}, (
+            f"{url} {collection}"
+        )
+    finally:
+        reader.close()
+
+
+def test_acknowledged_writes_survive_one_peer_loss(cluster: QdrantCluster, seeded_pair: SeededPair):
+    """W=2 writes acknowledged while one peer is down must survive with
+    exact identity: written via one survivor, read back via the other, and
+    present on every peer after rejoin. Bounded synthetic RPO-0 target for
+    acknowledged writes only — unacknowledged writes are out of scope and
+    this is not a production SLA."""
+    dropped = f"{cluster.prefix}-2"
+    writer_url, reader_url = cluster.urls[0], cluster.urls[2]
+    try:
+        subprocess.run(
+            ["docker", "stop", dropped], check=True, capture_output=True, text=True
+        )
+        writer = QdrantClient(url=writer_url, timeout=60)
+        try:
+            _write_points(writer, seeded_pair.corpus, WRITE_CORPUS_POINTS, "corpus")
+            _write_points(writer, seeded_pair.control, WRITE_CONTROL_POINTS, "control")
+        finally:
+            writer.close()
+        # Acknowledged writes must be visible beyond the written peer.
+        _assert_points_exact(reader_url, seeded_pair.corpus, WRITE_CORPUS_POINTS, "corpus")
+        _assert_points_exact(reader_url, seeded_pair.control, WRITE_CONTROL_POINTS, "control")
+        # The previously published generation stays exact through survivors.
+        _assert_exact_payloads(reader_url, seeded_pair)
+    finally:
+        subprocess.run(
+            ["docker", "start", dropped], check=True, capture_output=True, text=True
+        )
+        wait_cluster_ready(cluster.urls)
+    for collection in (seeded_pair.corpus, seeded_pair.control):
+        wait_collection_placement(
+            cluster.urls, collection, shard_number=SHARDS, replication_factor=RF
+        )
+    for url in cluster.urls:
+        _assert_points_exact(url, seeded_pair.corpus, WRITE_CORPUS_POINTS, "corpus")
+        _assert_points_exact(url, seeded_pair.control, WRITE_CONTROL_POINTS, "control")
+        _assert_exact_payloads(url, seeded_pair)
+
+
+def test_identical_id_retry_converges_without_duplicates(
+    cluster: QdrantCluster, seeded_pair: SeededPair
+):
+    """Client-observable ambiguous-write retry: overlapping identical-ID
+    batches with identical content (as if the first batch ambiguously failed
+    mid-apply) must converge to the exact expected union on every peer, with
+    no duplicates or divergent content. This exercises publisher stable-ID
+    retry semantics, not replica-level fault injection."""
+    client = QdrantClient(url=cluster.urls[0], timeout=60)
+    try:
+        _write_points(client, seeded_pair.corpus, WRITE_CORPUS_POINTS[:5], "corpus")
+        _write_points(client, seeded_pair.corpus, WRITE_CORPUS_POINTS[3:], "corpus")
+    finally:
+        client.close()
+    for url in cluster.urls:
+        _assert_points_exact(url, seeded_pair.corpus, WRITE_CORPUS_POINTS, "corpus")

@@ -411,7 +411,10 @@ order, and rejoin waits for every shard to be ACTIVE on three distinct
 peers before re-qualifying (membership count alone is not catch-up). Three
 containers on one host prove distributed software behavior, not
 independent-worker or site tolerance. Existing one-node CRC/Kind lanes and
-the three-worker lifecycle lane are not distributed acceptance.
+the three-worker lifecycle lane are not distributed acceptance. The lane
+further demonstrates W=2 acknowledged writes under one-peer loss (exact
+corpus/control read-back via survivors and on every peer after rejoin)
+and identical-ID retry convergence.
 
 ## 6. Images and pins
 
