@@ -186,6 +186,35 @@ The durable recovery checkout and scoped ingest wrapper are under
 under `/tmp/resume-391`. Final publication, full-run memory fit and post-publication
 application verification are still pending.
 
+## 21 September: completed documents, publication refused
+
+The four-worker `d03512c` attempt finished with 424 documents completed or
+verified retained and 28 ingestion errors. Kubernetes automatically retried the
+same Job. The replacement pod verified and skipped all 424 checkpoints, then
+completed the remaining 28 documents without document-processing errors. This
+demonstrates recovery without restarting the whole corpus; incomplete documents
+still replay at document granularity.
+
+The replacement nevertheless exited 1 during final coverage verification at
+00:55 UTC. The Job reached `BackoffLimitExceeded`: this is **not a successful
+ingestion or publication acceptance**. Read-only inspection found 452 completion
+records accounting for 431,233 chunks, while staging contained 432,184 points.
+The 951-point difference consists entirely of legacy chunks without source
+revisions, belonging to one source document. That document also has 939
+replacement chunks; the completion verifier checked their actual stored IDs,
+text digest, source hash, revision and extraction rules successfully. Completion
+records alone therefore do not prove complete searchable coverage.
+
+The serving alias remains on the preserved old physical collection. No residue
+was deleted and no coverage check was bypassed. A private, paced export preserved
+all 951 legacy point IDs, payloads and vectors (18,701,900 bytes), with a recorded
+SHA-256 checksum. The exact staging-only removal plan is awaiting the explicit
+operator approval required by the publication contract. Private backup and plan
+are under `/tmp/helm-live-audit/residue-recovery`; the finalization traceback is
+in `recovery-finalization-private.log` in the parent evidence directory. Neither
+artifact belongs in Git. Recovery, successful publication, the next ordinary
+ingest and all post-publication acceptance remain outstanding.
+
 ## Remaining environment acceptance
 
 | Environment | Missing proof | Closure requirement |
