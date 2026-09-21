@@ -56,6 +56,8 @@ models:
     revision: dryrun-rev-1
     dimension: 768
   reasoning:
+    # Explicit opt-in for pronoun-only follow-ups; application default stays off.
+    condenseEnabled: false
     # Empty model disables /v1/answer; when set, baseUrl is required.
     baseUrl: ""
     model: ""

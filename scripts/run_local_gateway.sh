@@ -131,6 +131,9 @@ case "$_SCORE_BASE" in */) _SCORE_BASE="${_SCORE_BASE%/}" ;; esac
 case "$_SCORE_BASE" in */v1) ;; *) _SCORE_BASE="${_SCORE_BASE}/v1" ;; esac
 SCORE_TARGET="${_SCORE_BASE}/score"
 unset _SCORE_BASE
+_TOKENIZE_BASE="${GATEWAY_REASONING_URL%/}"
+TOKENIZE_TARGET="${_TOKENIZE_BASE%/v1}/tokenize"
+unset _TOKENIZE_BASE
 
 # Gateway-side tracing (local only): auto-detect the local Jaeger OTLP port
 # when no explicit endpoint was given. Dry-run stays hermetic (no probe).
@@ -142,6 +145,7 @@ fi
 
 CFG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/local-gateway.XXXXXX")"
 cp "$SCRIPT_DIR/gateway/strict_finish.py" "$CFG_DIR/strict_finish.py"
+cp "$SCRIPT_DIR/gateway/scoped_passthrough.py" "$CFG_DIR/scoped_passthrough.py"
 cat > "${CFG_DIR}/config.yaml" <<EOF
 # Rendered by scripts/run_local_gateway.sh (local-dev only, never committed).
 model_list:
@@ -169,6 +173,9 @@ model_list:
 general_settings:
   master_key: ${GATEWAY_MASTER_KEY}
   pass_through_endpoints:
+    - path: "/tokenize"
+      target: "${TOKENIZE_TARGET}"
+      methods: ["POST"]
     - path: "/v1/score"
       target: "${SCORE_TARGET}"
       methods: ["POST"]
@@ -179,8 +186,10 @@ litellm_settings:
 EOF
 if [ -n "$GATEWAY_OTEL_ENDPOINT" ]; then
     cat >> "${CFG_DIR}/config.yaml" <<EOF
-  callbacks: ["otel"]
+  callbacks: [scoped_passthrough.guard, "otel"]
 EOF
+else
+    echo '  callbacks: [scoped_passthrough.guard]' >> "${CFG_DIR}/config.yaml"
 fi
 
 # Leg env handoff (one writer; local-stack sources it). Nothing here is a

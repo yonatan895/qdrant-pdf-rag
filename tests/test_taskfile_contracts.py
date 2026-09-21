@@ -946,13 +946,29 @@ class TaskContractsTests(unittest.TestCase):
         argv = self.pip_calls()[0]["argv"]
         self.assertEqual(argv[argv.index("--baseline") + 1], "c.json")
 
+    def test_local_acceptance_and_repair_dispatch_exact_arguments(self):
+        self.prepare_controlled_runner()
+        self.make_venv_fake()
+        for task, prefix in (("local:check", ["scripts/check_live.py"]),
+                             ("local:repair-staging", ["-m", "mainframe_rag.ingest.repair"])):
+            self.log.unlink(missing_ok=True)
+            literal = "/private/a space;$(touch SENTINEL).json"
+            result = self.run_controlled(task, "--", "--report", literal,
+                                         extra_env=self.recorder_env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.calls()[0]["argv"], [*prefix, "--report", literal])
+            self.assertFalse((self.root / "SENTINEL").exists())
+            result = self.run_controlled(task, "--", "--help",
+                extra_env={**self.recorder_env, "RECORDER_EXIT": "1"})
+            self.assertNotEqual(result.returncode, 0)
+
     def test_local_registered_in_discovery(self):
         proc = self.run_task("--list")
         self.assertEqual(proc.returncode, 0, proc.stdout)
         for name in ("local:qdrant:up", "local:qdrant:down", "local:query", "local:ask",
                      "local:llm", "local:embed", "local:rerank", "local:gateway:up",
                      "local:gateway:down", "local:jaeger:up", "local:jaeger:down",
-                     "local:stack", "local:agent", "qa:sim", "qa:load", "qa:vllm-e2e"):
+                     "local:stack", "local:agent", "local:check", "local:repair-staging", "qa:sim", "qa:load", "qa:vllm-e2e"):
             self.assertIn(name, proc.stdout)
 
     def test_query_optional_flags_and_literal_values(self):

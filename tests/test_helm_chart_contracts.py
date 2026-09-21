@@ -59,6 +59,7 @@ def test_base_contract_with_independent_controls():
         "OTEL_DEPLOYMENT_ENVIRONMENT": "",
         "METRICS_ENABLED": "false",
         "UI_ENABLED": "true",
+        "CHAT_CONDENSE_ENABLED": "false",
         "RERANK_ENABLED": "false",
         "RERANK_BASE_URL": "",
         "RERANK_MODEL": "BAAI/bge-reranker-v2-m3",
@@ -513,3 +514,8 @@ def test_chart_preserves_positive_operator_dimension_and_worker_range():
     agent_env = env_map(rendered["Deployment", "rag-agent"])
     assert agent_env["DENSE_DIM"]["value"] == "8192"
     assert ingest_env_map(rendered["Job", "ingest"])["INGEST_WORKERS"]["value"] == "64"
+
+
+def test_explicit_followup_condensation_reaches_agent():
+    deployment = run_new_template({"models": {"reasoning": {"condenseEnabled": True}}})["Deployment", "rag-agent"]
+    assert env_map(deployment)["CHAT_CONDENSE_ENABLED"]["value"] == "true"

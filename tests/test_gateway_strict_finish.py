@@ -9,6 +9,33 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/gateway/strict_finish.py'
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize('allowed,model,denied', [
+    (['reasoning'], 'reasoning', False),
+    (['embed'], 'reasoning', True),
+    ([], 'reasoning', True),
+    (['reasoning'], None, True),
+    (['reasoning'], ['reasoning'], True),
+])
+async def test_passthrough_keeps_model_scope(monkeypatch, allowed, model, denied):
+    from fastapi import HTTPException
+
+    module = types.ModuleType('litellm.integrations.custom_logger')
+    module.CustomLogger = object
+    monkeypatch.setitem(sys.modules, 'litellm.integrations.custom_logger', module)
+    guard = runpy.run_path(str(SCRIPT.with_name('scoped_passthrough.py')))['guard']
+    auth = types.SimpleNamespace(models=allowed)
+    data = {'model': model, 'messages': [{'role': 'user', 'content': 'synthetic'}]}
+    if denied:
+        with pytest.raises(HTTPException) as exc:
+            await guard.async_pre_call_hook(auth, None, data, 'pass_through_endpoint')
+        assert exc.value.status_code == 403
+        assert exc.value.detail == 'model access denied'
+    else:
+        assert await guard.async_pre_call_hook(auth, None, data, 'pass_through_endpoint') is data
+    assert await guard.async_pre_call_hook(auth, None, data, 'completion') is data
+
+
 @pytest.fixture
 def gateway_provider(monkeypatch):
     # LiteLLM remains absent from the product environment. These stand-ins

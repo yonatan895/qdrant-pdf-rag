@@ -73,14 +73,17 @@ else
 fi
 
 echo ""
-echo ">>> STAGE 5/5: ACCEPTANCE & SMOKE VERIFICATION"
+echo ">>> STAGE 5/5: SMOKE VERIFICATION"
 sh scripts/airgap/smoke.sh
 
 echo ""
 echo "================================================================================"
-if [ "$INGEST_PERFORMED" -eq 1 ]; then
-    echo "   PIPELINE ORCHESTRATION COMPLETE: AIR-GAP SYSTEM OPERATIONAL & ACCEPTED"
+if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
+    echo "   PIPELINE DRY-RUN COMPLETE: rendering passed; live acceptance NOT RUN"
+elif [ "$INGEST_PERFORMED" -eq 1 ]; then
+    echo "   PIPELINE STAGES COMPLETE: deployment, ingest and smoke passed"
 else
-    echo "   PIPELINE ORCHESTRATION COMPLETE: DEPLOYMENT READY (Awaiting Corpus Ingest)"
+    echo "   PIPELINE STAGES COMPLETE: deployment and smoke passed; ingest NOT RUN"
 fi
+echo "   Full application/release acceptance remains separate: docs/live-stack.md"
 echo "================================================================================"

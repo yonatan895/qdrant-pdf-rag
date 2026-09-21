@@ -324,3 +324,28 @@ tasks:
         if [ -n "${TASK_UI_ENABLED:-}" ]; then export UI_ENABLED="$TASK_UI_ENABLED"; fi;
         PORT="${TASK_PORT:-${PORT:-8080}}";
         LLM_STREAM=true .venv/bin/python -m uvicorn mainframe_rag.agent.app:app --host 0.0.0.0 --port "$PORT"
+
+  check:
+    desc: Require grounded answers, completed console follow-up and a fresh trace
+    summary: |
+      Read-only acceptance against existing agent/Jaeger listeners; runs real
+      model requests sequentially. Requires --agent, --jaeger, --query,
+      --followup and a new private --report path after --. Nonzero on incomplete
+      answers, insufficient evidence, stream errors or a missing fresh trace.
+      Does not launch services or replace gateway/TLS/model identity checks.
+      CLI_ARGS are trusted operator shell arguments, as in qa:unit.
+    cmds:
+      - .venv/bin/python scripts/check_live.py {{.CLI_ARGS}}
+
+  repair-staging:
+    desc: Plan or explicitly apply a backed-up legacy staging residue repair
+    summary: |
+      Operator-only local maintenance; requires writer credentials and the
+      actual shared progress file. Pass plan/apply and required arguments after
+      --. Plan exports exact payloads/vectors to a new private directory; apply
+      requires that plan's SHA256. Never publishes or repairs a served collection.
+      Stop all writers first; see docs/local-real-corpus.md. For Kind, run the
+      same module in the retained ingest maintenance Job with its shared PVC.
+      CLI_ARGS are trusted operator shell arguments, as in qa:unit.
+    cmds:
+      - .venv/bin/python -m mainframe_rag.ingest.repair {{.CLI_ARGS}}

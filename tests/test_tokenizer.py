@@ -2,6 +2,9 @@
 
 import logging
 
+import httpx2
+import pytest
+
 from mainframe_rag.agent.tokenizer import (
     FallbackTokenizer,
     VllmTokenizer,
@@ -198,3 +201,29 @@ def test_vllm_tokenizer_remote_confirmed_flips_to_false_on_downgrade():
     assert tok.remote_confirmed is True
     tok.count_tokens("trigger downgrade")
     assert tok.remote_confirmed is False
+
+
+@pytest.mark.parametrize("count", [-1, True, "12", 1.5, None])
+def test_malformed_count_cannot_verify_even_with_tokens(count):
+    calls = []
+    def respond(request):
+        calls.append(request)
+        return httpx2.Response(200, json={"count": count, "tokens": [1, 2]})
+    with httpx2.Client(transport=httpx2.MockTransport(respond)) as client:
+        tokenizer = VllmTokenizer("http://synthetic/v1", "reasoning", client=client)
+        messages = [ChatMessage(role="user", content="synthetic question")]
+        expected = FallbackTokenizer().count_messages(messages)
+        assert tokenizer.count_messages(messages) == expected
+        assert not tokenizer.remote_confirmed
+        assert tokenizer.count_messages(messages) == expected
+        assert len(calls) == 1
+
+
+def test_chat_tokenizer_matches_inference_template_flags():
+    captured = {}
+    tokenizer = VllmTokenizer("http://synthetic/v1", "reasoning",
+                              client=TokenizerPostFake(count=12, capture=captured))
+    messages = [ChatMessage(role="user", content="synthetic question")]
+    assert tokenizer.count_messages(messages) == 12
+    assert captured["json"] == {"model": "reasoning", "messages": [messages[0].model_dump()],
+                                "add_generation_prompt": True, "add_special_tokens": False}

@@ -104,6 +104,8 @@ class VllmTokenizer:
         payload = {
             "model": self._model,
             "messages": [m.model_dump() for m in messages],
+            "add_generation_prompt": True,
+            "add_special_tokens": False,
         }
         count = self._remote_count(payload)
         if count is not None:
@@ -125,9 +127,9 @@ class VllmTokenizer:
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, dict):
-                    if "count" in data:
-                        return int(data["count"])
-                    if "tokens" in data and isinstance(data["tokens"], list):
+                    if type(data.get("count")) is int and data["count"] >= 0:
+                        return data["count"]
+                    if "count" not in data and isinstance(data.get("tokens"), list):
                         return len(data["tokens"])
             log.warning(
                 "vLLM /tokenize unusable at %s (status %s); pinning in-process token estimation",
@@ -138,7 +140,7 @@ class VllmTokenizer:
             log.warning(
                 "vLLM /tokenize unreachable at %s (%s); pinning in-process token estimation",
                 url,
-                str(exc)[:120],
+                type(exc).__name__,
             )
         self._downgraded = True
         return None

@@ -285,7 +285,9 @@ def build_values(deploy_only: bool = False) -> dict:
                 "revision": env("EMBED_MODEL_REVISION"),
                 "dimension": dimension,
             },
-            "reasoning": {"baseUrl": reasoning_base, "model": reasoning_model},
+            "reasoning": {"baseUrl": reasoning_base, "model": reasoning_model,
+                          "condenseEnabled": strict_bool("CHAT_CONDENSE_ENABLED",
+                                                         env("CHAT_CONDENSE_ENABLED"), False)},
             "rerank": {
                 "enabled": rerank_enabled,
                 "baseUrl": env("RERANK_BASE_URL"),

@@ -30,7 +30,7 @@ MAPPER_KEYS = [
     "INTERNAL_REGISTRY", "REGISTRY_INTERNAL", "NAMESPACE", "OPENSHIFT_NAMESPACE",
     "QDRANT_RELEASE", "IMAGE_SHA", "EMBED_BASE_URL", "VLLM_BASE_URL",
     "EMBED_MODEL", "DENSE_DIM", "EMBED_MODEL_REVISION",
-    "LLM_BASE_URL", "LLM_MODEL_REASONING",
+    "LLM_BASE_URL", "LLM_MODEL_REASONING", "CHAT_CONDENSE_ENABLED",
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
@@ -334,7 +334,7 @@ def test_reasoning_disabled_when_model_unset(monkeypatch, mapper_env):
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     reasoning = load_values(out)["models"]["reasoning"]
-    assert reasoning == {"baseUrl": "", "model": ""}
+    assert reasoning == {"baseUrl": "", "model": "", "condenseEnabled": False}
 
 
 def test_reasoning_mapped_when_both_set(monkeypatch, mapper_env):
@@ -343,7 +343,7 @@ def test_reasoning_mapped_when_both_set(monkeypatch, mapper_env):
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     reasoning = load_values(out)["models"]["reasoning"]
-    assert reasoning == {"baseUrl": "http://litellm:4000/v1", "model": "mock-reasoning"}
+    assert reasoning == {"baseUrl": "http://litellm:4000/v1", "model": "mock-reasoning", "condenseEnabled": False}
 
 
 def test_reasoning_fails_closed_when_model_set_without_base_url(monkeypatch, mapper_env):
@@ -362,3 +362,32 @@ def test_namespace_rejects_invalid_label_before_values_write(mapper_env, monkeyp
     assert result.returncode != 0
     assert "NAMESPACE must be a DNS label" in result.stderr
     assert not out.exists()
+
+
+@pytest.mark.parametrize("raw,want", [("", False), ("false", False), ("true", True)])
+def test_chat_condensation_operator_mapping(monkeypatch, mapper_env, raw, want):
+    monkeypatch.setenv("CHAT_CONDENSE_ENABLED", raw)
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    assert load_values(output)["models"]["reasoning"]["condenseEnabled"] is want
+
+
+def test_chat_condensation_rejects_typo(monkeypatch, mapper_env):
+    monkeypatch.setenv("CHAT_CONDENSE_ENABLED", "tru")
+    result, _ = mapper_env()
+    assert result.returncode != 0
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required for the round-trip")
+def test_condensation_mapper_to_agent_round_trip(monkeypatch, mapper_env):
+    monkeypatch.setenv("CHAT_CONDENSE_ENABLED", "true")
+    result, output = mapper_env()
+    assert result.returncode == 0, result.stderr
+    rendered = subprocess.run(["helm", "template", "app", str(CHART), "-f", str(output),
+        "--namespace", "ns", "--show-only", "templates/agent-deployment.yaml"],
+        capture_output=True, text=True, check=False)
+    assert rendered.returncode == 0, rendered.stderr
+    deployment = yaml.safe_load(rendered.stdout)
+    agent = deployment["spec"]["template"]["spec"]["containers"][0]
+    assert next(e for e in agent["env"] if e["name"] == "CHAT_CONDENSE_ENABLED") == {
+        "name": "CHAT_CONDENSE_ENABLED", "value": "true"}

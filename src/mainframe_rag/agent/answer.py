@@ -761,8 +761,7 @@ def build_messages(
         # drifted past the window. The verify limit prices the same terms as
         # the plan (reserved + thinking reserve + safety margin), so a prompt
         # that verifies can never eat the margin the plan kept. Bounded
-        # rounds; a prompt that still does not fit surfaces later as
-        # finish_reason=length (alerted in app).
+        # rounds; a prompt that still does not fit refuses before inference.
         verify_limit = model_len - reserved - thinking_reserve - margin
         verified_clean = False
         for _ in range(_MAX_TRIM_ROUNDS):
@@ -773,7 +772,7 @@ def build_messages(
                 ChatMessage(
                     role="user",
                     content=_user_content(
-                        _assemble_blocks(context_entries, question_text, packed, tail_part)
+                        _assemble_blocks(context_entries, question_text, packed, tail_part), order
                     ),
                 ),
             ]
@@ -792,13 +791,14 @@ def build_messages(
                 ChatMessage(
                     role="user",
                     content=_user_content(
-                        _assemble_blocks(context_entries, question_text, packed, tail_part)
+                        _assemble_blocks(context_entries, question_text, packed, tail_part), order
                     ),
                 ),
             ]
             used = tokenizer.count_messages(messages)
             if used > verify_limit:
                 raise PromptBudgetExceeded(used, verify_limit)
+            verified_clean = True
         budget_verified = verified_clean and bool(
             getattr(tokenizer, "remote_confirmed", False)
         )
@@ -858,7 +858,7 @@ def build_messages(
         _assemble_blocks(context_entries, question_text, packed, tail_part), order
     )
     return PreparedPrompt(
-        messages=[
+        messages=messages if tokenizer is not None else [
             ChatMessage(role="system", content=system_content),
             ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),
         ],
@@ -867,12 +867,9 @@ def build_messages(
     )
 
 
-def _user_content(blocks: list[PromptBlock]) -> str:
-    """The final user message from ordered blocks, used by the verification
-    loop to count the exact prompt that will be sent. Verification runs in
-    core order; token totals are order-invariant, and build_messages applies
-    the policy once to the final blocks."""
-    return "\n\n".join(text for _, text in blocks)
+def _user_content(blocks: list[PromptBlock], order: str) -> str:
+    """Serialize the selected order before counting; send that same candidate."""
+    return "\n\n".join(text for _, text in order_prompt_blocks(blocks, order))
 
 
 def as_chat_result(raw: ChatResult | str) -> ChatResult:
@@ -1701,7 +1698,7 @@ def build_chat_messages(
                 ChatMessage(
                     role="user",
                     content=_user_content(
-                        _assemble_blocks(context_entries, question_text, packed, tail_part)
+                        _assemble_blocks(context_entries, question_text, packed, tail_part), order
                     ),
                 ),
             ]
@@ -1725,13 +1722,14 @@ def build_chat_messages(
                 ChatMessage(
                     role="user",
                     content=_user_content(
-                        _assemble_blocks(context_entries, question_text, packed, tail_part)
+                        _assemble_blocks(context_entries, question_text, packed, tail_part), order
                     ),
                 ),
             ]
             used = tokenizer.count_messages(candidate)
             if used > verify_limit:
                 raise PromptBudgetExceeded(used, verify_limit)
+            verified_clean = True
         # Only a fitting remote measurement confirms compliance (issue
         # #368): estimator-only verification reports estimated.
         budget_verified = verified_clean and bool(
@@ -1788,7 +1786,7 @@ def build_chat_messages(
         _assemble_blocks(context_entries, question_text, packed, tail_part), order
     )
     return PreparedPrompt(
-        messages=[
+        messages=candidate if tokenizer is not None else [
             ChatMessage(role="system", content=system_content),
             *prior_messages,
             ChatMessage(role="user", content="\n\n".join(text for _, text in ordered)),

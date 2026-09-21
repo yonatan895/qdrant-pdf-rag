@@ -597,3 +597,21 @@ smallest call, preserve stable 404/405/500 contracts, and never leak internals.
 The approved local/CI gateway-only LiteLLM adapter exception is owned by
 [deployment policy](deploy.md#deployment-policy); production gateway protection
 remains the platform team's responsibility.
+
+
+### Exact local prompt counting
+
+The local LiteLLM launcher provides a model-scoped `/tokenize` passthrough to
+the reasoning backend. Chat counts include the assistant generation prefix and
+exclude additional special tokens, matching the pinned vLLM chat defaults.
+Verification counts the final selected block order and sends that same message
+list, including the final bounded empty-evidence recount. Invalid/negative/bool
+counts pin the process to estimation; restart after fixing the endpoint.
+`probe_gateway.py --require-tokenizer` distinguishes this degraded path from
+exact-count acceptance. Estimation remains available for gateways without this
+optional endpoint; it is never reported as verified. Model/window/output-budget
+defaults are unchanged.
+
+The Helm operator input `CHAT_CONDENSE_ENABLED` maps to
+`models.reasoning.condenseEnabled`; both default to false. Explicit local
+follow-up acceptance is described in [the real-corpus runbook](local-real-corpus.md).
