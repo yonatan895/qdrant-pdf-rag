@@ -93,6 +93,7 @@ def test_outbound_timeout_defaults_bounded():
     assert s.llm_temperature == 0.2
     assert s.llm_max_model_len == 4096
     assert s.llm_reserved_output_tokens == 1536
+    assert s.llm_thinking_reserve_tokens_simple == 0
     assert s.llm_thinking_reserve_tokens_complex == 1000
     assert s.llm_token_safety_margin == 128
     assert s.llm_max_chunk_tokens_narrative == 350
@@ -285,6 +286,21 @@ def test_bearer_auth_headers_matrix():
     assert bearer_auth_headers("  sk-test-key\n") == {"Authorization": "Bearer sk-test-key"}
 
 
+@pytest.mark.parametrize("reserve", [0, 1000, 16384])
+def test_simple_thinking_reserve_loads_from_env(monkeypatch, reserve):
+    monkeypatch.setenv("LLM_THINKING_RESERVE_TOKENS_SIMPLE", str(reserve))
+    settings = Settings(_env_file=None)
+    assert settings.llm_thinking_reserve_tokens_simple == reserve
+    assert settings.llm_thinking_reserve_tokens_complex == 1000
+    assert settings.llm_max_model_len == 4096
+
+
+@pytest.mark.parametrize("reserve", [-1, 16385])
+def test_simple_thinking_reserve_rejects_out_of_range(reserve):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, llm_thinking_reserve_tokens_simple=reserve)
+
+
 def test_gateway_api_keys_load_from_env(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "sk-llm")
     monkeypatch.setenv("EMBED_API_KEY", "sk-embed")
@@ -349,6 +365,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "llm_temperature": 0.2,
     "llm_max_model_len": 4096,
     "llm_reserved_output_tokens": 1536,
+    "llm_thinking_reserve_tokens_simple": 0,
     "llm_thinking_reserve_tokens_complex": 1000,
     "llm_token_safety_margin": 128,
     "llm_max_chunk_tokens_narrative": 350,
