@@ -18,9 +18,14 @@ data:
           api_key: dummy
     general_settings:
       master_key: os.environ/GATEWAY_MASTER_KEY
+      pass_through_endpoints:
+        - path: /tokenize
+          target: http://vllm-mock:8000/tokenize
+          methods: [POST]
     router_settings:
       num_retries: 0
     litellm_settings:
+      callbacks: [scoped_passthrough.guard]
       custom_provider_map:
         - provider: strict_openai
           custom_handler: strict_finish.strict_openai

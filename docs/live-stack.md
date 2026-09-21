@@ -348,3 +348,14 @@ Require `probe_gateway.py --require-reasoning --stream` from an actual applicati
 pod and preserve the exact tested bundle. The local/CI strict-finish provider
 protects against LiteLLM converting a missing provider finish into success;
 the platform-owned production gateway needs equivalent failure behavior.
+
+
+### Strict retained-local acceptance
+
+The [real-corpus runbook](local-real-corpus.md#4-verify-and-retain-the-complete-live-stack)
+uses `local:check` against existing agent/Jaeger listeners. A grounded first
+answer, grounded console follow-up, one terminal final without errors and a
+fresh matching search trace are required; HTTP success, a refusal or historical
+traces do not pass. Preserve the failing original question on recheck. Record
+the exact source/chart/image/configuration identity separately, particularly
+when testing a host gateway fix with an older published agent image.

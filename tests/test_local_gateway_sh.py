@@ -74,10 +74,10 @@ def test_render_otel_callback_only_when_endpoint_set():
     assert off['litellm_settings']['custom_provider_map'] == [
         {'provider': 'strict_openai', 'custom_handler': 'strict_finish.strict_openai'}
     ]
-    assert 'callbacks' not in off['litellm_settings']
+    assert off['litellm_settings']['callbacks'] == ['scoped_passthrough.guard']
     on = yaml.safe_load(_read_cfg(_render({"GATEWAY_OTEL_ENDPOINT": "http://host.docker.internal:4318"})))
     assert on['litellm_settings']['custom_provider_map'] == off['litellm_settings']['custom_provider_map']
-    assert on['litellm_settings']['callbacks'] == ['otel']
+    assert on['litellm_settings']['callbacks'] == ['scoped_passthrough.guard', 'otel']
 
 
 def test_render_includes_the_gateway_hook_beside_its_configuration():
@@ -86,8 +86,17 @@ def test_render_includes_the_gateway_hook_beside_its_configuration():
     directory = Path(proc.stdout.strip().splitlines()[-1])
     try:
         assert (directory / 'strict_finish.py').read_bytes() == (SCRIPT.parent / 'gateway/strict_finish.py').read_bytes()
+        assert (directory / 'scoped_passthrough.py').read_bytes() == (SCRIPT.parent / 'gateway/scoped_passthrough.py').read_bytes()
     finally:
         shutil.rmtree(directory)
+
+
+@pytest.mark.parametrize('url', ['http://gpu:8000', 'http://gpu:8000/v1', 'http://gpu:8000/v1/'])
+def test_tokenize_targets_reasoning_origin(url):
+    cfg = yaml.safe_load(_read_cfg(_render({'GATEWAY_REASONING_URL': url})))
+    routes = cfg['general_settings']['pass_through_endpoints']
+    route = next(r for r in routes if r['path'] == '/tokenize')
+    assert route == {'path': '/tokenize', 'target': 'http://gpu:8000/tokenize', 'methods': ['POST']}
 
 
 def test_render_honors_url_and_model_overrides():

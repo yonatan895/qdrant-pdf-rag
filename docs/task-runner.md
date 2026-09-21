@@ -202,3 +202,17 @@ explicit-empty simulation container/port fail closed; optional empty environment
 inputs retain script defaults; stdlib Qdrant pin lookup uses `python3`; discovery
 is a task list with per-command summaries. No model/baseline/schema/default or
 operational permission change is authorized by the runner migration.
+
+
+### Retained local Helm acceptance and maintenance
+
+`local:check -- --agent URL --jaeger URL --query '...' --followup '...'
+--report /private/new-report.json` checks existing listeners with real model
+requests and fails on non-grounded answers or incomplete streams. It neither
+starts services nor proves an exact release identity. `local:repair-staging --
+plan|apply ...` dispatches the narrow backed-up legacy-residue repair module;
+it requires the actual shared progress mount and writer credentials. These
+commands accept trusted operator shell arguments, like `qa:unit`; never feed
+untrusted text into Task CLI_ARGS. See [the owner runbook](local-real-corpus.md)
+for prerequisites, approved plan handling, durable evidence and the required
+next ordinary ingest. They are never implicit startup/cleanup operations.

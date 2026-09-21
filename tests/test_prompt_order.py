@@ -104,6 +104,63 @@ def test_excerpt_order_follows_input_not_cite_sort():
     assert user.index("[1] ZZZ") < user.index("[2] AAA") < user.index("[3] MMM")
 
 
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+def test_exact_final_messages_are_the_last_verified_candidate(chat, order):
+    from mainframe_rag.agent.answer import build_chat_messages
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    class RecordingTokenizer:
+        remote_confirmed = True
+
+        def __init__(self):
+            self.calls = []
+
+        def count_messages(self, messages):
+            self.calls.append([m.model_dump() for m in messages])
+            # Ordering adds actual template material; a count of retrieval
+            # order cannot certify a stable-cache candidate.
+            content = messages[-1].content
+            return 3000 if "Body one." in content and content.startswith("Instructions:") else 200
+
+    tok = RecordingTokenizer()
+    settings = Settings(_env_file=None)
+    hits = [_hit("SA22-0000-00 Synthetic, p. 1", "Body one.")]
+    kwargs = {"tokenizer": tok, "settings": settings, "order": order}
+    prepared = (
+        build_chat_messages(
+            [ChatMessage(role="user", content="Prior?"),
+             ChatMessage(role="assistant", content="Prior answer."),
+             ChatMessage(role="user", content="Next?")], hits, **kwargs,
+        ) if chat else build_messages("Next?", hits, **kwargs)
+    )
+    assert prepared.budget_verified
+    assert tok.calls[-1] == [m.model_dump() for m in prepared.messages]
+    if order == "stable_cache":
+        assert "Body one." not in prepared.messages[-1].content
+
+
+@pytest.mark.parametrize("chat", [False, True])
+def test_last_bounded_extra_count_can_confirm_budget(chat):
+    from mainframe_rag.agent.answer import build_chat_messages
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    class ExactEmptyTokenizer:
+        remote_confirmed = True
+
+        def count_messages(self, messages):
+            return 200
+
+    kwargs = {"tokenizer": ExactEmptyTokenizer(), "settings": Settings(_env_file=None)}
+    prepared = (
+        build_chat_messages([ChatMessage(role="user", content="Question?")], [], **kwargs)
+        if chat else build_messages("Question?", [], **kwargs)
+    )
+    assert prepared.budget_verified
+
+
 def _stable_blocks(hits=None, context_entries=None, question_text="Question: q?", tail_part="TAIL."):
     from mainframe_rag.agent.answer import (
         PackedExcerpt,

@@ -886,3 +886,18 @@ corrupt-as-legacy, pending and unreadable-serving paths; `tests/test_serving_gat
 checks physical metadata binding. These do not close the final-verifier or
 whole-data coverage gaps under #391. Observability has a separate bounded fail-open
 policy ([agent logging/tracing](agent.md)); do not copy it into required metadata.
+
+
+### Narrow legacy staging recovery
+
+For an unfinished snapshot-cloned migration with duplicate sourceless points,
+the explicit `mainframe_rag.ingest.repair` plan/apply command can export and
+remove only exact duplicates retained in the rollback collection after their
+replacement completion and stored content verify. It refuses served staging,
+changed plan/backups/inputs, ambiguous replacement attribution and new residue.
+It takes the existing publisher/run locks on the actual shared progress path;
+other writers must be stopped. It never edits controls, retires sources or
+publishes. See the [local repair procedure](local-real-corpus.md#explicit-recovery-of-duplicate-legacy-staging-points)
+for writer credentials, private backups, interrupted retries and the required
+ordinary ingest afterward. This is an explicit maintenance operation, never an
+automatic exception to the publication coverage gate.

@@ -6,8 +6,8 @@ use, including the `*_API_KEY` knobs) and exercises each configured model
 leg directly: embed (`/models` + `/embeddings` dimension check), reasoning
 (`/models` + `/chat/completions`, streaming optional), rerank (`/v1/score`
 vs `/v1/rerank` reachability — prints the recommended
-`RERANK_ENDPOINT_ORDER`), tokenizer (`/tokenize` presence; absent behind a
-gateway is expected — the agent pins its in-process estimator).
+`RERANK_ENDPOINT_ORDER`), tokenizer (chat-template-aware `/tokenize`; `--require-tokenizer` makes
+an absent or malformed route fail acceptance rather than allow estimation).
 
 Response shapes mirror the client contracts they diagnose (`embed.py`,
 `answer.py`, `rerank.py`, `tokenizer.py` own the parsing; this script only
@@ -268,30 +268,35 @@ def check_rerank(settings: Settings, timeout: float) -> tuple[str, str, str | No
     return "fail", detail, None
 
 
-def check_tokenize(settings: Settings, timeout: float) -> tuple[str, str]:
-    """POST {origin}/tokenize. Informational only: a gateway without it is
-    expected — the agent pins its in-process estimator after one warning."""
+def check_tokenize(settings: Settings, timeout: float, required: bool = False) -> tuple[str, str]:
+    """POST chat messages to /tokenize; optionally require exact remote counts.
+    Without required=True, unavailable routes retain estimator compatibility."""
     if not settings.llm_base_url or not settings.llm_model_reasoning:
-        return "skip", "tokenizer not configured (no reasoning model)"
+        return ("fail" if required else "skip"), "tokenizer not configured (no reasoning model)"
     origin = settings.llm_base_url.rstrip("/").removesuffix("/v1")
     try:
         resp = httpx2.post(
             f"{origin}/tokenize",
-            json={"model": settings.llm_model_reasoning, "prompt": PROBE_TEXT},
+            json={"model": settings.llm_model_reasoning,
+                  "messages": [{"role": "user", "content": PROBE_TEXT}],
+                  "add_generation_prompt": True, "add_special_tokens": False},
             timeout=timeout,
             headers=bearer_auth_headers(settings.llm_api_key),
         )
     except (httpx2.HTTPError, OSError):
-        return "ok", "tokenize unreachable — estimator fallback (expected behind LiteLLM)"
+        return ("fail" if required else "ok"), "tokenize unreachable — estimator fallback"
     if resp.status_code != 200:
-        return "ok", f"tokenize HTTP {resp.status_code} — estimator fallback (expected behind LiteLLM)"
+        return ("fail" if required else "ok"), f"tokenize HTTP {resp.status_code} — estimator fallback"
     try:
         data = resp.json()
     except ValueError:
-        return "ok", "tokenize non-JSON — estimator fallback (expected behind LiteLLM)"
-    if isinstance(data, dict) and ("count" in data or isinstance(data.get("tokens"), list)):
+        return ("fail" if required else "ok"), "tokenize non-JSON — estimator fallback"
+    if isinstance(data, dict) and (
+        (type(data.get("count")) is int and data["count"] > 0)
+        or ("count" not in data and isinstance(data.get("tokens"), list) and data["tokens"])
+    ):
         return "ok", "tokenize served"
-    return "ok", "tokenize unusable shape — estimator fallback (expected behind LiteLLM)"
+    return ("fail" if required else "ok"), "tokenize unusable shape — estimator fallback"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -299,9 +304,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=PROBE_TIMEOUT_S)
     parser.add_argument("--stream", action="store_true", help="require a successful chat stream ending in [DONE]")
     parser.add_argument("--require-reasoning", action="store_true", help="fail when reasoning is not configured")
+    parser.add_argument("--require-tokenizer", action="store_true", help="require chat-template-aware model token counts")
     parser.add_argument("--models", action="store_true", help="list served model ids and exit")
     args = parser.parse_args(argv)
-    if args.models and (args.stream or args.require_reasoning):
+    if args.models and (args.stream or args.require_reasoning or args.require_tokenizer):
         parser.error("--models cannot be combined with readiness requirements")
 
     settings = load_settings()
@@ -353,8 +359,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[{status.upper()}] {detail}")
     failures += status == "fail"
 
-    status, detail = check_tokenize(settings, args.timeout)
+    status, detail = check_tokenize(settings, args.timeout, args.require_tokenizer)
     print(f"[{status.upper()}] {detail}")
+    failures += status == "fail"
 
     if recommendation is not None:
         current = settings.rerank_endpoint_order

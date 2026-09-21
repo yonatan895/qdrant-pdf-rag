@@ -318,3 +318,21 @@ def test_probe_uses_application_simple_reasoning_effort(monkeypatch):
                     LLM_REASONING_EFFORT_SIMPLE='low')
     assert rc == 0
     assert [body['reasoning_effort'] for url, body in fake.bodies if url.endswith('/chat/completions')] == ['low']
+
+
+@pytest.mark.parametrize('status,body', [(404, {}), (200, {'count': -1}),
+    (200, {'count': True}), (200, {'count': 'bad'}), (200, {'tokens': []})])
+def test_required_tokenizer_does_not_accept_estimation(monkeypatch, status, body):
+    _, rc = _run(monkeypatch, [('POST', '/tokenize', status, body), *_healthy_routes()],
+                 argv=['--require-tokenizer'])
+    assert rc == 1
+
+
+def test_required_tokenizer_counts_chat_generation_template(monkeypatch):
+    fake, rc = _run(monkeypatch, [('POST', '/tokenize', 200, {'count': 12}), *_healthy_routes()],
+                    argv=['--require-tokenizer'])
+    assert rc == 0
+    body = next(b for url, b in fake.bodies if url.endswith('/tokenize'))
+    assert body['messages'] == [{'role': 'user', 'content': probe_mod.PROBE_TEXT}]
+    assert body['add_generation_prompt'] is True
+    assert body['add_special_tokens'] is False

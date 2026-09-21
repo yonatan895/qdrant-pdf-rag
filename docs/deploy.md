@@ -734,3 +734,16 @@ The opencode inline prompts are repository-controlled review entry points;
 they must follow [the review contract](agent-workflow.md#review-handoff), inspect
 affected unchanged callers and classify evidence gaps honestly. Their actual
 loader/environment acceptance remains an explicit audit item under #397.
+
+
+### Local follow-up and tokenizer acceptance
+
+`CHAT_CONDENSE_ENABLED` is an explicit boolean operator input mapped to Helm
+`models.reasoning.condenseEnabled` and the agent environment. It preserves the
+application's false default. Enable it deliberately when qualifying pronoun-only
+console follow-ups; require a grounded answer after the extra reasoning call.
+The local gateway's authenticated `/tokenize` passthrough enforces the per-leg
+key's model allowlist. Use `probe_gateway.py --require-tokenizer --stream
+--require-reasoning` and the [strict local check](local-real-corpus.md#4-verify-and-retain-the-complete-live-stack)
+for local full-stack acceptance. Platform-owned gateways may instead support
+the documented estimator fallback; that is not exact prompt-budget evidence.
