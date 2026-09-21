@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 from qdrant_client import QdrantClient, models
+from qdrant_client.http.exceptions import ResponseHandlingException
 from scripts.qdrant_cluster import (
     QdrantCluster,
     QdrantClusterError,
@@ -399,3 +400,104 @@ def test_identical_id_retry_converges_without_duplicates(
         client.close()
     for url in cluster.urls:
         _assert_points_exact(url, seeded_pair.corpus, WRITE_CORPUS_POINTS, "corpus")
+
+
+# Partition points must not collide with seeded or write-path identity.
+PART_CORPUS_POINTS = tuple(range(4001, 4006))
+PART_CONTROL_POINTS = tuple(range(5001, 5003))
+PART_MINORITY_POINTS = tuple(range(6001, 6003))
+
+
+def _wait_points_agree(
+    urls: tuple[str, ...],
+    collection: str,
+    point_ids: tuple[int, ...],
+    prefix: str,
+    *,
+    timeout_s: float = 60.0,
+) -> dict[int, str]:
+    """Wait until every peer reports the same state for the points and every
+    present record carries the exact expected payload. Which Raft winner
+    commits a timed-out minority write is timing-dependent; permanent
+    divergence or corrupt content is not — that is what fails here."""
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    last: list[dict[int, str]] = []
+    while time.monotonic() < deadline:
+        states: list[dict[int, str]] = []
+        for url in urls:
+            reader = QdrantClient(url=url, timeout=30)
+            try:
+                records = reader.retrieve(collection, ids=list(point_ids), with_payload=True)
+                states.append({record.id: record.payload["tag"] for record in records})
+            finally:
+                reader.close()
+        last = states
+        if states[0] == states[1] == states[2] and all(
+            tag == f"{prefix}-{point_id}" for point_id, tag in states[0].items()
+        ):
+            return states[0]
+        time.sleep(1.0)
+    raise AssertionError(f"peers never converged on {collection} {point_ids}: {last}")
+
+
+def test_partition_minority_writes_unacknowledged_and_majority_durable(
+    cluster: QdrantCluster, seeded_pair: SeededPair
+):
+    """2+1 partition: writes through the isolated minority peer must never
+    acknowledge — any transport refusal (client timeout or reset, never
+    asserted which) with no false W2 success — while majority-acked writes
+    stay exact across survivors. After heal every peer converges to one exact
+    state: the majority points exact everywhere, and the timed-out minority
+    points either all absent or all exact — a timed-out write may still commit
+    later via re-election, so retries must reuse identical IDs *and* identical
+    content. No publication is attempted from the minority side. Timing is
+    bounded by client timeouts, never asserted."""
+    isolated = f"{cluster.prefix}-3"
+    majority_writer, majority_reader = cluster.urls[0], cluster.urls[1]
+    minority_url = cluster.urls[2]
+    try:
+        subprocess.run(
+            ["docker", "network", "disconnect", cluster.network, isolated],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        majority = QdrantClient(url=majority_writer, timeout=60)
+        try:
+            _write_points(majority, seeded_pair.corpus, PART_CORPUS_POINTS, "corpus")
+            _write_points(majority, seeded_pair.control, PART_CONTROL_POINTS, "control")
+        finally:
+            majority.close()
+        _assert_points_exact(majority_reader, seeded_pair.corpus, PART_CORPUS_POINTS, "corpus")
+        _assert_points_exact(majority_reader, seeded_pair.control, PART_CONTROL_POINTS, "control")
+        _assert_exact_payloads(majority_reader, seeded_pair)
+        minority = QdrantClient(url=minority_url, timeout=15)
+        try:
+            # Every transport failure funnels through ResponseHandlingException
+            # (observed: client timeout or connection reset); the invariant is
+            # no acknowledgement, never the refusal flavor.
+            with pytest.raises(ResponseHandlingException):
+                _write_points(minority, seeded_pair.corpus, PART_MINORITY_POINTS, "corpus")
+        finally:
+            minority.close()
+    finally:
+        subprocess.run(
+            ["docker", "network", "connect", cluster.network, isolated],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        wait_cluster_ready(cluster.urls)
+    for collection in (seeded_pair.corpus, seeded_pair.control):
+        wait_collection_placement(
+            cluster.urls, collection, shard_number=SHARDS, replication_factor=RF
+        )
+    for url in cluster.urls:
+        _assert_points_exact(url, seeded_pair.corpus, PART_CORPUS_POINTS, "corpus")
+        _assert_points_exact(url, seeded_pair.control, PART_CONTROL_POINTS, "control")
+        _assert_exact_payloads(url, seeded_pair)
+    _wait_points_agree(
+        cluster.urls, seeded_pair.corpus, PART_MINORITY_POINTS, "corpus"
+    )

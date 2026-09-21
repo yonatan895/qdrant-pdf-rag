@@ -417,8 +417,10 @@ containers on one host prove distributed software behavior, not
 independent-worker or site tolerance. Existing one-node CRC/Kind lanes and
 the three-worker lifecycle lane are not distributed acceptance. The lane
 further demonstrates W=2 acknowledged writes under one-peer loss (exact
-corpus/control read-back via survivors and on every peer after rejoin)
-and identical-ID retry convergence.
+corpus/control read-back via survivors and on every peer after rejoin),
+identical-ID retry convergence, and 2+1 partition behavior (minority writes
+never acknowledge; majority writes stay exact; healed peers converge to one
+exact state, so retries must reuse identical IDs and identical content).
 
 ## 6. Images and pins
 
