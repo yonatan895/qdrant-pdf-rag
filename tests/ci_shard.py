@@ -22,4 +22,3 @@ def pytest_collection_modifyitems(config, items):
     deselected = ordered[2 - shard::2]
     config.hook.pytest_deselected(items=deselected)
     items[:] = selected
-
