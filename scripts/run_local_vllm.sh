@@ -182,4 +182,8 @@ fi
 if [ -t 0 ]; then
     set -- -it "$@"
 fi
+# Optional operator identity; omit to preserve existing anonymous launch behavior.
+if [ -n "${CONTAINER_NAME:-}" ]; then
+    set -- --name "$CONTAINER_NAME" "$@"
+fi
 exec "${RUNTIME}" run --rm "$@"
