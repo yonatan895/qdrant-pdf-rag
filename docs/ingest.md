@@ -895,6 +895,11 @@ the explicit `mainframe_rag.ingest.repair` plan/apply command can export and
 remove only exact duplicates retained in the rollback collection after their
 replacement completion and stored content verify. It refuses served staging,
 changed plan/backups/inputs, ambiguous replacement attribution and new residue.
+Both planning and applying validate the persisted pending manifest envelope: its
+target must be the staging completion collection and its stored digest must match
+the inner manifest. The validated target, state and digest are bound into the plan;
+corrupt metadata refuses before deletion. Other manifest readers retain their
+existing legacy decoding policy.
 It takes the existing publisher/run locks on the actual shared progress path;
 other writers must be stopped. It never edits controls, retires sources or
 publishes. See the [local repair procedure](local-real-corpus.md#explicit-recovery-of-duplicate-legacy-staging-points)

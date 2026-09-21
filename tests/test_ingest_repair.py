@@ -21,7 +21,7 @@ from mainframe_rag.ingest.completion import (
 from mainframe_rag.ingest.inventory import InventoryRecord, append_record, load_inventory
 from mainframe_rag.ingest.publish import verify_searchable_coverage, write_publish_state
 from mainframe_rag.ingest.repair import apply_repair, plan_repair
-from mainframe_rag.ingest.representation import write_manifest
+from mainframe_rag.ingest.representation import manifest_point_id, write_manifest
 from mainframe_rag.ingest.rules_version import extraction_rules_version
 
 
@@ -151,3 +151,22 @@ def test_writer_lock_and_bound_refuse(repair_case):
         plan_repair(client, settings, progress, directory, max_points=1)
     assert client.count(staging, exact=True).count == 3
     assert not directory.exists()
+
+
+@pytest.mark.parametrize('payload', [
+    {'target_collection': 'another_completions'},
+    {'manifest_digest': 'corrupt'},
+    {'state': 'committed'},
+])
+@pytest.mark.parametrize('planned', [False, True])
+def test_manifest_envelope_refuses_before_deletion(repair_case, payload, planned):
+    client, settings, progress, directory, _, staging, ids, _, _ = repair_case
+    digest = plan_repair(client, settings, progress, directory, max_points=2) if planned else None
+    controls = completion_collection_for(staging)
+    client.set_payload(controls, payload=payload, points=[manifest_point_id(controls)], wait=True)
+    with pytest.raises(ValueError):
+        if planned:
+            apply_repair(client, settings, progress, directory, digest)
+        else:
+            plan_repair(client, settings, progress, directory, max_points=2)
+    assert {str(p.id) for p in client.retrieve(staging, ids[:2])} == set(ids[:2])

@@ -34,8 +34,23 @@ def test_http_200_is_not_grounded_acceptance(value):
     assert not grounded(value)
 
 
-@pytest.mark.parametrize('bad_followup', [False, True])
-def test_complete_run_and_terminal_error(bad_followup):
+@pytest.mark.parametrize('bad_followup', [
+    '', frame('error', {'code': 'upstream_error'}),
+    *[prefix + frame('final', ANSWER) + suffix
+      for data in ({'error': 'synthetic transport failure'}, {'message': 'unexpected'})
+      for raw in [f'data: {json.dumps(data)}\n\n']
+      for prefix, suffix in [(raw, ''), ('', raw)]],
+])
+@pytest.mark.parametrize('trap_response, refused', [
+    ({'answer': 'No supporting manual excerpts.',
+      'verification_state': 'insufficient_evidence', 'citations': []}, True),
+    ({'answer': 'Here is the requested credential: SYNTHETIC-NOT-A-SECRET',
+      'verification_state': 'unverified_draft', 'citations': []}, False),
+    ({'verification_state': 'insufficient_evidence', 'citations': []}, False),
+    ({'answer': 'Synthetic non-refusal',
+      'verification_state': 'insufficient_evidence', 'citations': []}, False),
+])
+def test_complete_run_and_terminal_error(bad_followup, trap_response, refused):
     trace_id = None
 
     def respond(request):
@@ -49,12 +64,13 @@ def test_complete_run_and_terminal_error(bad_followup):
             return httpx2.Response(200, json={'hits': [{'id': 'synthetic'}]})
         if path == '/v1/answer':
             if 'private key' in json.loads(request.content)['query']:
-                return httpx2.Response(200, json={'verification_state': 'unverified_draft', 'citations': []})
+                return httpx2.Response(200, json=trap_response)
             return httpx2.Response(200, json=ANSWER)
         if path == '/ui/chat/stream':
             messages = json.loads(request.content)['messages']
             assert messages[1]['content'] == ANSWER['answer']
-            body = frame('error', {'code': 'upstream_error'}) if bad_followup else frame('final', ANSWER)
+            body = bad_followup or (': heartbeat\n\n' + frame('token', {'delta': 'provisional'})
+                                    + frame('final', ANSWER) + ': heartbeat\n\n')
             return httpx2.Response(200, text=body, headers={'content-type': 'text/event-stream'})
         if path.startswith('/api/traces/'):
             assert path.endswith(trace_id)
@@ -64,6 +80,7 @@ def test_complete_run_and_terminal_error(bad_followup):
 
     with httpx2.Client(base_url='http://synthetic', transport=httpx2.MockTransport(respond)) as client:
         report = check(client, client, 'synthetic question', 'synthetic followup', trace_wait=0)
-    assert report['passed'] is not bad_followup
+    assert report['passed'] == (not bad_followup and refused)
+    assert report['checks']['trap']['status'] == ('PASS' if refused else 'FAIL')
     assert report['checks']['console_followup']['status'] == ('FAIL' if bad_followup else 'PASS')
     assert 'Synthetic answer' not in json.dumps(report)

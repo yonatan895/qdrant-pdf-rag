@@ -75,11 +75,13 @@ def _binding(client: QdrantClient, settings: Settings, progress: Path) -> dict[s
     live = aliases.get(settings.qdrant_collection)
     if not live or staging in aliases.values():
         raise ValueError("repair requires a distinct, unserved staging collection")
-    record = read_manifest_record(client, completion_collection_for(staging))
+    controls = completion_collection_for(staging)
+    record = read_manifest_record(client, controls, validate_envelope=True)
     wanted = manifest_digest(settings, extraction_rules_version())
     if record is None or record.state != "pending" or digest_of(record.manifest) != wanted:
         raise ValueError("repair requires the pending representation for these exact inputs")
     return {"alias": settings.qdrant_collection, "staging": staging, "live": live,
+            "manifest_target": controls, "manifest_state": record.state,
             "manifest_digest": wanted, "state_sha256": _digest(publish_state_path(progress, settings.qdrant_collection).read_bytes()),
             "inventory_sha256": _digest(progress.read_bytes())}
 

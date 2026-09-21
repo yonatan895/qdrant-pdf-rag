@@ -249,11 +249,12 @@ def _record_from_payload(payload: dict) -> StoredManifest | None:
 
 
 def read_manifest_record(
-    client: QdrantPoints, completions_collection: str
+    client: QdrantPoints, completions_collection: str, *, validate_envelope: bool = False
 ) -> StoredManifest | None:
     """Stored contract + state, or None when absent/legacy/unparseable.
     Never raises on stored data: a corrupt manifest is a legacy outcome,
-    not a crash."""
+    not a crash. Destructive repair opts into target/digest envelope validation;
+    ordinary legacy readers retain their existing decoding policy."""
     if not client.collection_exists(completions_collection):
         return None
     try:
@@ -266,7 +267,13 @@ def read_manifest_record(
         return None
     if not points:
         return None
-    return _record_from_payload(points[0].payload or {})
+    payload = points[0].payload or {}
+    record = _record_from_payload(payload)
+    if (validate_envelope and record is not None
+            and (payload.get("target_collection") != completions_collection
+                 or payload.get("manifest_digest") != digest_of(record.manifest))):
+        return None
+    return record
 
 
 def read_manifest(

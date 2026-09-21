@@ -295,3 +295,9 @@ controls. CRC skipped for insufficient memory remains **NOT RUN**, as does any
 unavailable internal GitLab/Quay/namespace qualification. Record the exact missing
 environment and closure checks in the dated evidence; never promote from a local
 search or the pipeline banner alone.
+
+The `local:check` trap requires `insufficient_evidence`, no citations and an answer
+that satisfies the shared answer abstention predicate. An uncited
+`unverified_draft` is not a refusal. Console acceptance examines every data-bearing
+SSE event, including unnamed (`message`) events, and permits only token events
+followed by exactly one terminal final; comment heartbeats are allowed.
