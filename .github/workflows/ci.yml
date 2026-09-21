@@ -39,7 +39,12 @@ jobs:
 
   # Unit gate: hygiene (no PDFs in git) + hermetic pytest. The simulation
   # tier is deselected via pyproject addopts, so this job never needs docker.
-  test:
+  unit:
+    name: unit (${{ matrix.shard }}/2)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     env:
       TASK_CONTRACTS_REQUIRE_RUNNER: "1"
     runs-on: ubuntu-latest
@@ -66,7 +71,22 @@ jobs:
           tar xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/helm-unpack" linux-amd64/helm
           sudo install -m 0755 "$RUNNER_TEMP/helm-unpack/linux-amd64/helm" /usr/local/bin/helm
           /usr/local/bin/helm version --short
-      - run: pytest -q
+      - name: Run unit shard
+        run: python -m pytest -q -p tests.ci_shard --unit-shard=${{ matrix.shard }} --durations=20
+
+  # Preserve the existing required status name; a failed, cancelled or skipped
+  # shard must not turn into a successful aggregate.
+  test:
+    needs: unit
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Require both unit shards
+        env:
+          UNIT_RESULT: ${{ needs.unit.result }}
+        run: test "$UNIT_RESULT" = success
 
   # Simulation tier (marker 'integration', excluding the load tier):
   # real PDFs -> real ingest -> a real Qdrant server (the images.txt pin,

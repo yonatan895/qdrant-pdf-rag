@@ -29,6 +29,21 @@ disabled on short docs on purpose.
 
 ## Unit tests are hermetic
 
+GitHub CI runs the unit suite on two separate runner VMs. The opt-in
+`tests.ci_shard` pytest plugin sorts the selected node IDs after ordinary
+`-m`/`-k` filtering and assigns alternating cases to shards 1 and 2. Their
+disjoint union is the original selected suite, including parametrized cases;
+new tests join automatically. Both shards must pass the aggregate `test`
+status, and one failure does not cancel the other shard. Each runner prints
+its slowest 20 durations for checking balance. Equal test counts do not
+guarantee equal duration; measure the two jobs before claiming a speedup.
+
+Reproduce either shard with
+`sh scripts/tools/run-task.sh qa:unit -- -p tests.ci_shard --unit-shard=1`
+(or `2`). Invalid shard numbers and empty selections fail through pytest.
+Without the option, local and air-gapped GitLab runs retain the full suite.
+No extra pytest dependency or runtime model/service is needed.
+
 Do not call live Qdrant, vLLM, or the internet. Fake the client. Parse-only ingest
 tests can use `--dry-run`; persistence/publication regressions must exercise the
 real non-dry control path against faithful fakes so the claimed behavior runs.

@@ -108,6 +108,8 @@ test:
     - ': "${CI_TASK_ARCHIVE:?mount the approved pinned Task archive on the runner}"'
     - sh scripts/tools/install-task.sh --archive "$CI_TASK_ARCHIVE"
     - pytest -q
+  # GitHub partitions the same eligible suite across two VMs. This offline
+  # job keeps the complete suite; no internal runner-capacity change is needed.
   # Tests generate synthetic PDFs at runtime; no artifacts are cached or
   # uploaded anywhere (deliberately no artifacts: section).
 
@@ -155,4 +157,3 @@ lint:
   script:
     - ruff check src tests
     - mypy src
-

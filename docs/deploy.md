@@ -476,7 +476,8 @@ live in `.github/workflows/e2e.yml`.
   contract. Neither the runner nor path classification authorizes new network
   access or cluster operations.
 - `ci.yml`: hygiene (refuse committed PDFs), pytest (integration
-  deselected), sim (docker Qdrant, fail-closed on skips/zero-pass), gate-l1
+  deselected, split across two runner VMs with an aggregate `test` status
+  requiring both shards), sim (docker Qdrant, fail-closed on skips/zero-pass), gate-l1
   with PR delta comment. Least-privilege permissions, timeouts, and
   concurrency groups on every job; third-party actions SHA-pinned.
 - `load.yml`: path-allowlisted to agent/retrieve/ingest/mock/sim/loadtest
@@ -502,8 +503,11 @@ live in `.github/workflows/e2e.yml`.
 - Pinned third-party versions live in-repo (kubectl + sha256, helm, kind,
   node image); the local-path provisioner manifest is pinned to a source commit and
   sha256-verified before applying it. The opencode
-  reviewer workflow is GitHub-only: it runs on pull requests plus `/oc`
-  comments, never mirrored to GitLab.
+  reviewer workflow is GitHub-only: when enabled, it runs on pull requests
+  plus `/oc` comments, never mirrored to GitLab. To pause quota consumption
+  without deleting its file, use `gh workflow disable opencode.yml` and
+  cancel any already-running reviews explicitly. Restore it later with
+  `gh workflow enable opencode.yml`; workflow state lives in GitHub, not git.
 - `run_local_vllm.sh` resolves (never probes) launch flags from the
   `serve` Budget `LOCAL_RT_8GB` profile: pinned `v0.28.0` image (which
   removed `--task`, hence `--runner pooling --convert embed`), reasoning
