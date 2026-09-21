@@ -50,6 +50,76 @@ tasks:
     cmds:
       - '"$TASK_PY" scripts/agent_doctor.py --profile "$TASK_PROFILE"'
 
+  ai-doctor:
+    desc: Diagnose AI worker prerequisites and subscription routing (read-only)
+    summary: |
+      Runs `scripts/ai_worker.py doctor`. Checks Codex ChatGPT authentication,
+      OpenCode version, Go model catalog (deepseek-v4.1-flash), primary agent
+      registration, and Task runner presence. Read-only; makes no paid model calls.
+    vars:
+      PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}python3{{end}}'
+      PROFILE: '{{if hasKey . "PROFILE"}}{{.PROFILE}}{{else}}default{{end}}'
+    env:
+      TASK_PY: '{{.PY}}'
+      TASK_PROFILE: '{{.PROFILE}}'
+    cmds:
+      - '"$TASK_PY" scripts/ai_worker.py doctor --profile "$TASK_PROFILE"'
+
+  ai-run:
+    desc: Dispatch an AI worker for an approved task contract
+    summary: |
+      Runs `scripts/ai_worker.py run` with the supplied CONTRACT path.
+      Passes contract to OpenCode Go/DeepSeek worker in an isolated worktree,
+      captures events, freezes candidate, and runs focused verification.
+    vars:
+      PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}python3{{end}}'
+      CONTRACT: '{{if hasKey . "CONTRACT"}}{{.CONTRACT}}{{else}}{{end}}'
+      WORKTREE: '{{if hasKey . "WORKTREE"}}{{.WORKTREE}}{{else}}{{end}}'
+      ISSUE: '{{if hasKey . "ISSUE"}}{{.ISSUE}}{{else}}000{{end}}'
+    env:
+      TASK_PY: '{{.PY}}'
+      TASK_CONTRACT: '{{.CONTRACT}}'
+      TASK_WORKTREE: '{{.WORKTREE}}'
+      TASK_ISSUE: '{{.ISSUE}}'
+    cmds:
+      - 'test -n "$TASK_CONTRACT" || { echo "error: CONTRACT=path/to/contract.md is required" >&2; exit 1; }'
+      - '"$TASK_PY" scripts/ai_worker.py run --contract "$TASK_CONTRACT" --issue "$TASK_ISSUE" {{if .WORKTREE}}--worktree "$TASK_WORKTREE"{{end}}'
+
+  ai-resume:
+    desc: Resume a recorded AI worker session for bounded corrections
+    summary: |
+      Runs `scripts/ai_worker.py resume` with RUN_ID and CORRECTION packet path.
+      Resumes the exact recorded worker session rather than starting fresh.
+    vars:
+      PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}python3{{end}}'
+      RUN_ID: '{{if hasKey . "RUN_ID"}}{{.RUN_ID}}{{else}}{{end}}'
+      CORRECTION: '{{if hasKey . "CORRECTION"}}{{.CORRECTION}}{{else}}{{end}}'
+      ISSUE: '{{if hasKey . "ISSUE"}}{{.ISSUE}}{{else}}000{{end}}'
+    env:
+      TASK_PY: '{{.PY}}'
+      TASK_RUN_ID: '{{.RUN_ID}}'
+      TASK_CORRECTION: '{{.CORRECTION}}'
+      TASK_ISSUE: '{{.ISSUE}}'
+    cmds:
+      - 'test -n "$TASK_RUN_ID" || { echo "error: RUN_ID=<id> is required" >&2; exit 1; }'
+      - 'test -n "$TASK_CORRECTION" || { echo "error: CORRECTION=path/to/correction.md is required" >&2; exit 1; }'
+      - '"$TASK_PY" scripts/ai_worker.py resume --run-id "$TASK_RUN_ID" --correction "$TASK_CORRECTION" --issue "$TASK_ISSUE"'
+
+  ai-status:
+    desc: Display status of an AI worker run
+    summary: |
+      Runs `scripts/ai_worker.py status` for RUN_ID.
+    vars:
+      PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}python3{{end}}'
+      RUN_ID: '{{if hasKey . "RUN_ID"}}{{.RUN_ID}}{{else}}{{end}}'
+      ISSUE: '{{if hasKey . "ISSUE"}}{{.ISSUE}}{{else}}000{{end}}'
+    env:
+      TASK_PY: '{{.PY}}'
+      TASK_RUN_ID: '{{.RUN_ID}}'
+      TASK_ISSUE: '{{.ISSUE}}'
+    cmds:
+      - '"$TASK_PY" scripts/ai_worker.py status {{if .RUN_ID}}--run-id "$TASK_RUN_ID" --issue "$TASK_ISSUE"{{end}}'
+
   demo-pdfs:
     desc: Generate the original synthetic demo PDFs (dev only)
     summary: |

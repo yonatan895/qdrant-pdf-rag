@@ -47,8 +47,11 @@ TOOLING_PATTERNS = [
     "tests/test_agent_context.py",
     "tests/test_agent_doctor.py",
     "tests/test_review_tooling.py",
+    "tests/test_ai_worker.py",
     ".github/workflows/**",
     ".gitlab-ci.yml",
+    ".opencode/**",
+    ".agents/**",
     "NOTICE*",
     "Taskfile.yml",
     "taskfiles/**",
@@ -288,11 +291,11 @@ def classify_paths(paths: Iterable[str]) -> ProfileDecision:
             services.update(ALL_SERVICES)
             matched = True
         is_markdown = path.replace("\\", "/").endswith((".md", ".markdown"))
-        if _match_any(path, PROSE_PATTERNS):
-            categories.add("prose")
-            matched = True
         if _match_any(path, TOOLING_PATTERNS):
             categories.add("tooling")
+            matched = True
+        if _match_any(path, PROSE_PATTERNS) and not _match_any(path, TOOLING_PATTERNS):
+            categories.add("prose")
             matched = True
         if _match_any(path, TEST_PATTERNS):
             categories.add("tests")

@@ -28,7 +28,7 @@ tasks:
       No network, Docker, model or credentials required.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - '.venv/bin/python -m ruff check src tests'
+      - '.venv/bin/python -m ruff check src tests scripts/ai_worker.py'
 
   typecheck:
     desc: Run mypy typecheck over src
@@ -38,7 +38,7 @@ tasks:
       `task dev:setup` explicitly. Never creates or mutates the environment.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - '.venv/bin/python -m mypy src'
+      - '.venv/bin/python -m mypy src scripts/ai_worker.py'
 
   unit:
     desc: Run the unit test suite (integration deselected by pyproject)

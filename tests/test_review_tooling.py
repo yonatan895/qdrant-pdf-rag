@@ -208,6 +208,13 @@ class TestProfileClassification(unittest.TestCase):
         self.assertEqual(decision.services, [])
         self.assertIn("tests", decision.matched_categories)
 
+    def test_classify_agent_markdown_as_tooling_not_prose(self):
+        decision = classify_paths([".opencode/agents/rag-implementer.md"])
+        self.assertEqual(decision.profile, ProfileName.OFFLINE)
+        self.assertEqual(decision.services, [])
+        self.assertIn("tooling", decision.matched_categories)
+        self.assertNotIn("prose", decision.matched_categories)
+
     def test_classify_deploy_plus_code_takes_union_full(self):
         decision = classify_paths(["pyproject.toml", "src/mainframe_rag/ingest/publish.py"])
         self.assertEqual(decision.profile, ProfileName.FULL)
