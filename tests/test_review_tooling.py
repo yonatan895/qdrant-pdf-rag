@@ -1329,6 +1329,64 @@ class TestAcceptanceUnionAndReviewerAuthority(unittest.TestCase):
         self.assertEqual(reviewer.state, LaneState.SELECTED_MISSING)
 
 
+class TestCiUnitPartition(unittest.TestCase):
+    """Exercise real pytest collection, filtering and exit status in isolation."""
+
+    def test_shards_cover_each_selected_case_once_and_preserve_failure(self):
+        import xml.etree.ElementTree as ET
+
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "pytest.ini").write_text(
+                "[pytest]\naddopts = -m 'not integration'\nmarkers =\n    integration: excluded tier\n"
+            )
+            (root / "test_sample.py").write_text(textwrap.dedent('''\
+                import pytest
+
+                @pytest.mark.parametrize("value", [0, 1, 2, 3], ids=["a b", "c::d", "λ", "[x]"])
+                def test_case(value):
+                    assert value != 2
+
+                def test_other():
+                    pass
+
+                @pytest.mark.integration
+                def test_integration():
+                    raise AssertionError("integration must remain deselected")
+            '''))
+            env = {**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+                   "PYTHONPATH": str(pathlib.Path(__file__).resolve().parents[1])}
+            env.pop("PYTEST_ADDOPTS", None)
+            base = [sys.executable, "-m", "pytest", "-p", "tests.ci_shard", "-q"]
+            for selection in ([], ["-k", "test_case"]):
+                cases, results = [], []
+                for shard in (None, 1, 2):
+                    report = root / "report.xml"
+                    args = [] if shard is None else [f"--unit-shard={shard}"]
+                    proc = subprocess.run(base + selection + args + [f"--junitxml={report}"],
+                                          cwd=root, env=env, capture_output=True,
+                                          text=True, check=False, timeout=20)
+                    self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
+                    results.append(proc.returncode)
+                    names = [case.attrib["name"] for case in ET.parse(report).iter("testcase")]
+                    self.assertEqual(len(names), len(set(names)))
+                    cases.append(set(names))
+                self.assertEqual(len(cases[0]), 4 if selection else 5)
+                self.assertFalse(cases[1] & cases[2])
+                self.assertEqual(cases[1] | cases[2], cases[0])
+                self.assertLessEqual(abs(len(cases[1]) - len(cases[2])), 1)
+                self.assertEqual(results[0], 1)
+                self.assertEqual(sorted(results[1:]), [0, 1])
+
+            for value in ("0", "3", "bad"):
+                proc = subprocess.run(base + [f"--unit-shard={value}"], cwd=root,
+                                      env=env, capture_output=True, check=False, timeout=20)
+                self.assertEqual(proc.returncode, 4)
+            proc = subprocess.run(base + ["--unit-shard=1", "-k", "absent_case"],
+                                  cwd=root, env=env, capture_output=True, check=False, timeout=20)
+            self.assertEqual(proc.returncode, 5)
+
+
 class TestTaskCiConsumers(unittest.TestCase):
     """CI selection and shell guards; runner semantics live in Task contract tests."""
 
@@ -1349,13 +1407,31 @@ class TestTaskCiConsumers(unittest.TestCase):
 
     def test_github_unit_and_context_contract_lanes_require_the_runner(self):
         product = (self.root / ".github/workflows/ci.yml").read_text()
-        unit = product.split("  test:\n", 1)[1].split("  sim:\n", 1)[0]
+        unit = product.split("  unit:\n", 1)[1].split("  test:\n", 1)[0]
         self.assertIn('TASK_CONTRACTS_REQUIRE_RUNNER: "1"', unit)
         self.assertLess(unit.index("sh scripts/tools/install-task.sh"), unit.index("pytest -q"))
         context = (self.root / ".github/workflows/agent-context.yml").read_text()
         self.assertLess(context.index("sh scripts/tools/install-task.sh"),
                         context.index("sh scripts/tools/run-task.sh qa:context"))
         self.assertIn("TASK_CONTRACTS_REQUIRE_RUNNER=1 python -m unittest tests.test_taskfile_contracts", context)
+
+    def test_two_unit_vms_preserve_a_fail_closed_test_status(self):
+        import yaml
+
+        jobs = yaml.safe_load((self.root / ".github/workflows/ci.yml").read_text())["jobs"]
+        self.assertEqual(jobs["unit"]["strategy"]["matrix"], {"shard": [1, 2]})
+        self.assertIs(jobs["unit"]["strategy"]["fail-fast"], False)
+        command = next(s["run"] for s in jobs["unit"]["steps"] if s.get("name") == "Run unit shard")
+        self.assertIn("-p tests.ci_shard --unit-shard=${{ matrix.shard }}", command)
+        gate = jobs["test"]
+        self.assertEqual(gate["needs"], "unit")
+        self.assertEqual(gate["if"], "always()")
+        step = gate["steps"][0]
+        self.assertEqual(step["env"]["UNIT_RESULT"], "${{ needs.unit.result }}")
+        for result in ("success", "failure", "cancelled", "skipped", ""):
+            proc = subprocess.run(["sh", "-eu", "-c", step["run"]],
+                                  env={"UNIT_RESULT": result}, check=False)
+            self.assertEqual(proc.returncode == 0, result == "success")
 
     def test_load_step_preserves_failure_skip_and_no_tests_guards(self):
         text = (self.root / ".github/workflows/load.yml").read_text()
