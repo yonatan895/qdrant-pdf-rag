@@ -79,6 +79,13 @@ workspace binaries fail with remediation; installation is an explicit action.
 <a id="inputs"></a>
 ## Variables, arguments, cwd and exit codes
 
+`local:llm`, `local:embed` and `local:rerank` forward `SERVED_NAME` to
+the model launcher. Set it explicitly when `MODEL` is an immutable local
+directory: the served HTTP model ID must match the gateway configuration,
+not the directory basename. Nonempty CLI values override the ambient environment;
+without a CLI value the existing environment and launcher default apply.
+
+
 In this table, invoke each task with `sh scripts/tools/run-task.sh <task>`.
 CLI `NAME=value` wins over the caller environment. Per-task environment bridges
 preserve script ownership; there is no root `dotenv:` or global mode/venue.

@@ -15,7 +15,7 @@ owns context, conflicts, task/review and handoff formats.
 | **multi-peer HA** (collection distribution policy, placement, peer loss/rejoin, migration) | Common checks (`sh scripts/tools/run-task.sh qa:check`); policy propagation/precedence tests (`test_config`, `test_airgap_ingest_sh`, `test_airgap_validate_sh`, `test_openshift_identities`); strict fake/observed-topology suite (`test_placement`); `sh scripts/tools/run-task.sh qa:ha` three-peer pinned-image fixture (real 6/3/2 placement, false-HA refusal, degraded reads and healthy rejoin; fails on missing docker/image or skips); `sh scripts/tools/run-task.sh airgap:dryrun` when render/preset paths change; recorded production node-loss/site qualification stays separate | Disposable pinned three-peer Qdrant on CPU (docker); no GPU/model gateway; three containers prove distributed software behavior only, never independent-worker or site tolerance |
 | **extraction/ranking** (extraction, chunking, identifiers, filters, ranking, embedding representation) | Common checks (`sh scripts/tools/run-task.sh qa:check`); source-fidelity/retrieval tests; relevant L1 (`sh scripts/tools/run-task.sh eval:gate-l1`) / fresh-corpus regression (`sh scripts/tools/run-task.sh eval:paraphrase`); intended-mode semantic evaluation (`sh scripts/tools/run-task.sh eval:retrieval EMBED_MODE=vllm`) and before/after per-class attribution where retrieval behavior changes (full ladder rungs 1–7); chat/condensation requires `sh scripts/tools/run-task.sh eval:chat` | Real model/corpus evidence where semantics are claimed; synthetic/hash runs are not semantic acceptance; disposable simulation / mock vLLM for plumbing, GPU or live gateway for semantic evaluation |
 | **HTTP/lifecycle** (HTTP/MCP/browser lifecycle) | Common checks (`sh scripts/tools/run-task.sh qa:check`); Rung 6 live agent probes: actual relevant client/transport behavior, `/healthz`/`/livez`, trap refusal (0 citations), legit query grounded (≥1 citation), overlong 422 fixed envelope, SSE chunk token/final integrity, cancellation and finalization; browser execution only for browser behavior | Controllable test server/source; running agent + disposable Qdrant + mock/real gateway + local Jaeger; no live z/OS/Splunk by default |
-| **packaging/deploy** (packaging/deployment/defaults/identity) | Applicable union plus existing artifact/render/bootstrap/migration checks (`sh scripts/tools/run-task.sh qa:check` including `tests/test_airgap_*.py`, `sh scripts/tools/run-task.sh airgap:dryrun` with zero leftover placeholders, string quoting checks, storage class checks refusing NFS for block data, gateway key strip/substitute) and explicit compatibility decision; operational changes select relevant topology acceptance | Preserve air-gap and authorized site boundaries; hermetic shell stubs, local Kind cluster, or ephemeral lab namespace |
+| **packaging/deploy** (packaging/deployment/defaults/identity) | Applicable union plus existing artifact/render/bootstrap/migration checks (`sh scripts/tools/run-task.sh qa:check` including `tests/test_airgap_*.py`, `sh scripts/tools/run-task.sh airgap:dryrun` with zero leftover placeholders, string quoting checks, storage class checks refusing NFS for block data, gateway Secret references) and explicit compatibility decision; operational changes select relevant topology acceptance | Preserve air-gap and authorized site boundaries; hermetic shell stubs, local Kind cluster, or ephemeral lab namespace |
 | **release promotion** (release promotion) | Exact bundle/image, configuration, corpus/model and supported topology acceptance from release runbooks (`docs/crc-release-verification.md`); `probe_gateway.py --stream` from pod; frozen holdout evaluation under `VENUE=rc` (`sh scripts/tools/run-task.sh eval:holdout`); layered harness L1–L4 where applicable | Operator-authorized site / CRC acceptance cluster, platform model pool, real corpus; separate from ordinary PR merge; no substitution with a mock or skipped release lane |
 
 **Data invariant protection (cross-cutting):** Defaults, UUID5 chunk keys, 4-type vocabulary (`prose`, `code`, `table`, `heading`), residue audit, fail-closed contracts, and production constants require a dedicated approved concern split from features, evaluated against mode-keyed baselines with full A/B evidence. Documentation, tooling, or refactoring PRs cannot silently alter, suppress, or waive data invariants.
@@ -208,29 +208,51 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8087/ui
 
 ## 4. Qdrant persistence (read before rebooting or juggling GPUs)
 
-The local Qdrant container is ephemeral (`--rm`, no volume): a reboot,
-daemon restart, or container crash **destroys every collection**. Before
-any of those, snapshot to persistent disk and restore-test one collection:
+The standalone disposable Qdrant simulator is ephemeral (`--rm`, no volume): a
+reboot, daemon restart, or container crash **destroys its collections**. This is
+not the preserved Helm deployment, whose data/snapshot PVCs must be retained;
+use [the real-corpus recovery owner](local-real-corpus.md) for that stack.
+
+Before interrupting a simulator whose data matters, stop its writer and record
+the alias-to-physical mapping. Back up both the physical data collection and its
+`<physical>__completions` collection from that quiescent state. Alias mappings and
+operator progress are separate from collection snapshots. These loopback examples
+assume the unauthenticated disposable simulator; authenticated administrative
+operations use writer Secret references, never the serving key.
 
 ```sh
 mkdir -p "$SNAPSHOT_DIR"
-# per collection:
-curl -s -X POST "http://127.0.0.1:6333/collections/<name>/snapshots"
-curl -s -o "$SNAPSHOT_DIR/<name>.snapshot" \
+# Per physical data/control collection, with the writer stopped:
+curl -fsS -X POST "http://127.0.0.1:6333/collections/<name>/snapshots"
+curl -fsS -o "$SNAPSHOT_DIR/<name>.snapshot" \
   "http://127.0.0.1:6333/collections/<name>/snapshots/<snapshot-file>"
 ```
 
-Restore-test (fresh container, throwaway port, verify point count, remove it):
+Restore-test into a fresh container on a throwaway loopback port, retaining the
+original physical names. Select the matching pinned image from the verified
+artifact; restore both data and controls before validating the saved alias.
 
 ```sh
-docker run -d --name qdrant-restore-test -p 6334:6333 docker.io/qdrant/qdrant:v1.19.0-unprivileged
-curl -s -X POST "http://127.0.0.1:6334/collections/<name>/snapshots/upload?priority=snapshot" \
+: "${QDRANT_IMAGE:?Select the verified matching Qdrant image}"
+docker run -d --name qdrant-restore-test -p 127.0.0.1:6334:6333 "$QDRANT_IMAGE"
+curl -fsS -X POST "http://127.0.0.1:6334/collections/<name>/snapshots/upload?priority=snapshot&wait=true" \
   -F "snapshot=@$SNAPSHOT_DIR/<name>.snapshot"
-curl -s "http://127.0.0.1:6334/collections/<name>"   # expect status green + full points_count
-docker stop qdrant-restore-test && docker rm qdrant-restore-test
+curl -fsS "http://127.0.0.1:6334/collections/<name>"   # initial storage check only
 ```
 
-An untested backup is not a backup. Re-snapshot after any ingest that must survive.
+Green status and point count alone do not prove a usable recovery. Before removing
+the disposable restore target, compare actual stored payloads/vectors and control
+records with the backup evidence, validate the representation and alias binding,
+and prove the next ordinary search/ingest operation. A data-only historical backup
+may remain legacy and require the documented source migration. Stream large
+snapshot downloads/uploads; do not load a multi-gigabyte snapshot into Python RAM
+using the small synthetic CI helper. Re-snapshot after any ingest that must survive.
+
+After the recovery checks pass, remove only the disposable restore container:
+
+```sh
+docker stop qdrant-restore-test && docker rm qdrant-restore-test
+```
 
 ## 5. GPU rules (8 GB box)
 

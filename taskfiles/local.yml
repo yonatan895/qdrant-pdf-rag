@@ -134,7 +134,7 @@ tasks:
       sh scripts/run_local_vllm.sh`, replacing the retired `make local-vllm`. The venv
       interpreter is always used for Budget resolution (never exported
       globally). Inputs: ROLE (default reasoning), MODEL, PORT, BUDGET_PROFILE,
-      GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE. Foreground: Ctrl-C stops
+      GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE, SERVED_NAME. Foreground: Ctrl-C stops
       the server. Needs the 8GB GPU budget; see docs/live-stack.md.
     env:
       TASK_ROLE: '{{.ROLE}}'
@@ -145,6 +145,7 @@ tasks:
       TASK_MAX_LEN: '{{.MAX_LEN}}'
       TASK_SEQS: '{{.SEQS}}'
       TASK_VLLM_IMAGE: '{{.VLLM_IMAGE}}'
+      TASK_SERVED_NAME: '{{.SERVED_NAME}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - >-
@@ -157,6 +158,7 @@ tasks:
         if [ -n "${TASK_MAX_LEN:-}" ]; then export MAX_LEN="$TASK_MAX_LEN"; fi;
         if [ -n "${TASK_SEQS:-}" ]; then export SEQS="$TASK_SEQS"; fi;
         if [ -n "${TASK_VLLM_IMAGE:-}" ]; then export VLLM_IMAGE="$TASK_VLLM_IMAGE"; fi;
+        if [ -n "${TASK_SERVED_NAME:-}" ]; then export SERVED_NAME="$TASK_SERVED_NAME"; fi;
         sh scripts/run_local_vllm.sh
 
   embed:
@@ -165,7 +167,7 @@ tasks:
       Like `local:llm` for the embed role, replacing the retired `make local-vllm-embed`.
       Inputs: ROLE (default embed), MODEL (default
       Qwen/Qwen3-Embedding-0.6B), PORT (default 8001), BUDGET_PROFILE,
-      GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE. Never export MODEL
+      GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE, SERVED_NAME. Never export MODEL
       globally: it would hijack the sibling launchers' defaults.
     env:
       TASK_ROLE: '{{.ROLE}}'
@@ -176,6 +178,7 @@ tasks:
       TASK_MAX_LEN: '{{.MAX_LEN}}'
       TASK_SEQS: '{{.SEQS}}'
       TASK_VLLM_IMAGE: '{{.VLLM_IMAGE}}'
+      TASK_SERVED_NAME: '{{.SERVED_NAME}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - >-
@@ -188,6 +191,7 @@ tasks:
         if [ -n "${TASK_MAX_LEN:-}" ]; then export MAX_LEN="$TASK_MAX_LEN"; fi;
         if [ -n "${TASK_SEQS:-}" ]; then export SEQS="$TASK_SEQS"; fi;
         if [ -n "${TASK_VLLM_IMAGE:-}" ]; then export VLLM_IMAGE="$TASK_VLLM_IMAGE"; fi;
+        if [ -n "${TASK_SERVED_NAME:-}" ]; then export SERVED_NAME="$TASK_SERVED_NAME"; fi;
         sh scripts/run_local_vllm.sh
 
   rerank:
@@ -196,7 +200,7 @@ tasks:
       Like `local:llm` for the rerank role, mirroring
       the retired `make local-vllm-rerank`. Inputs: BUDGET_PROFILE (default TRIPLE_8GB),
       ROLE (default rerank), MODEL (default BAAI/bge-reranker-v2-m3), PORT
-      (default 8002), GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE. Never alongside
+      (default 8002), GPU_MEM, MAX_LEN, SEQS, VLLM_IMAGE, SERVED_NAME. Never alongside
       the default 8GB pair.
     env:
       TASK_BUDGET_PROFILE: '{{.BUDGET_PROFILE}}'
@@ -207,6 +211,7 @@ tasks:
       TASK_MAX_LEN: '{{.MAX_LEN}}'
       TASK_SEQS: '{{.SEQS}}'
       TASK_VLLM_IMAGE: '{{.VLLM_IMAGE}}'
+      TASK_SERVED_NAME: '{{.SERVED_NAME}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - >-
@@ -219,6 +224,7 @@ tasks:
         if [ -n "${TASK_MAX_LEN:-}" ]; then export MAX_LEN="$TASK_MAX_LEN"; fi;
         if [ -n "${TASK_SEQS:-}" ]; then export SEQS="$TASK_SEQS"; fi;
         if [ -n "${TASK_VLLM_IMAGE:-}" ]; then export VLLM_IMAGE="$TASK_VLLM_IMAGE"; fi;
+        if [ -n "${TASK_SERVED_NAME:-}" ]; then export SERVED_NAME="$TASK_SERVED_NAME"; fi;
         sh scripts/run_local_vllm.sh
 
   gateway:up:
@@ -229,7 +235,8 @@ tasks:
       the caller environment only (GATEWAY_MASTER_KEY etc.; the script mints
       per-start keys when absent and prints them once) — never Task vars,
       never CLI values. Foreground: Ctrl-C stops the gateway containers.
-      Needs the three backends up first.
+      Start the enabled model backends first. Two-model profiles keep reranking
+      disabled in agent/ingest consumers; the unused route is not a live backend.
     env:
       TASK_GATEWAY_PORT: '{{.GATEWAY_PORT}}'
     cmds:

@@ -19,7 +19,9 @@
 # alphanumerics/dash: anything else dies fail-closed (values render into
 # YAML unquoted).
 # URLs must be http(s); model ids travel verbatim into the routing table.
-# Needs docker + the three `sh scripts/tools/run-task.sh local:llm`, `local:embed` or `local:rerank` backends already up.
+# Needs Docker and the enabled model backends already up. Two-model profiles
+# run local:llm + local:embed and explicitly disable reranking in consumers;
+# the configured rerank route does not start a backend.
 # Never a product path; never in CI or the air gap.
 
 set -eu

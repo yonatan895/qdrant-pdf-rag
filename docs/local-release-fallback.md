@@ -64,7 +64,7 @@ The image bytes and application behavior remain those of the same candidate.
    original Kind nodes stopped. The smaller Qdrant request still matters for
    Kubernetes reservations even though GPU models are now off.
 6. Create a **new namespace** and separate corpus/data PVCs using the local
-   guide's production-overlay recipe. Use the same gateway/pull credentials and
+   guide's Helm deployment recipe. Use the same gateway/pull credentials and
    CA trust through operator-created Secrets/ConfigMaps. Generate original
    synthetic PDFs with the loaded candidate ingest image. Do not use the
    real-vector namespace or copy mock vectors into it.

@@ -52,19 +52,27 @@ kubectl -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gat
 # recommendation: RERANK_ENDPOINT_ORDER=rerank_first  (gateways; score_first for raw vLLM)
 ```
 
-Local full-stack simulation (Qdrant + gateway + agent + probe; optional ingest):
+Local full-stack simulation (Qdrant + gateway + agent + probe; optional ingest).
+Start the two model commands in separate terminals, waiting for each to become
+healthy before starting the next. The default 8 GiB pack has no reranker:
 
 ```bash
 sh scripts/tools/run-task.sh local:llm
 sh scripts/tools/run-task.sh local:embed
-sh scripts/tools/run-task.sh local:rerank   # one per terminal (GPU)
-sh scripts/tools/run-task.sh local:stack                                      # or CORPUS_DIR=<dir> sh scripts/tools/run-task.sh local:stack
+RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack
+# Optional: CORPUS_DIR=<dir> RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack
 ```
+
+The Helm deployment and preserved-corpus procedure is in
+[local real-corpus operations](docs/local-real-corpus.md). See the
+[current deployment audit](docs/deployment-audit-2026-09-20.md) for dated results
+and environment gaps. Reranking requires the separately selected compatible
+three-model pack; do not add it beside the default reasoning/embedding pair.
 
 ## Live State (Optional, Default Off)
 
 - **Splunk (system of record):** caller-supplied context — pass `splunk_context` with `/v1/answer`, `/v1/chat`, or a console request; the agent never crawls Splunk itself.
-- **Zowe MCP (agent-fetched):** read-only datasets / JES spool / USS / job status via a sidecar bridge (`zowe_mcp_enabled=false` default; mock backend in sim). See [docs/architecture.md](docs/architecture.md).
+- **Zowe MCP (agent-fetched):** bridge/client code for read-only datasets / JES spool / USS / job status (`zowe_mcp_enabled=false` default; mock backend in sim). Answer-context and Helm sidecar integration remain incomplete. See [docs/architecture.md](docs/architecture.md).
 
 ---
 

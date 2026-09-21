@@ -44,7 +44,7 @@ def ingest_tree(tmp_path):
     return tmp_path, tmp_path / "kc-args.log"
 
 
-def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1", "1")):
+def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1", "1"), runner=run_sh):
     """Run ingest.sh hermetically.
 
     `policy` defaults to the explicit single-node 1/1/1 selection; pass None
@@ -73,7 +73,7 @@ def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1
         ) = policy
     for k, v in extra_env:
         env[k] = v
-    return run_sh(tmp_path / "scripts" / "airgap" / "ingest.sh", env, tmp_path)
+    return runner(tmp_path / "scripts" / "airgap" / "ingest.sh", env, tmp_path)
 
 
 def _copy_collection_preset(tree):
@@ -97,6 +97,155 @@ def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
     # so the operator-declared value must reach the Job environment.
     assert re.search(r"(?m)^\s*- name: EMBED_MODEL_REVISION$", rendered)
     assert rendered_env(rendered, "ingest")["EMBED_MODEL_REVISION"] == "rev-1"
+
+
+@pytest.mark.parametrize("delete_fails", [False, True])
+def test_ingest_replacement_waits_for_prior_writer(ingest_tree, delete_fails):
+    """A deleted Job can still have a terminating pod holding the writer lock."""
+    tree, _ = ingest_tree
+    (tree / "old-writer").touch()
+    write_stub(tree / "bin/kubectl", """#!/bin/sh
+case "$*" in
+  *"get pvc ingest-work"*) echo persistentvolumeclaim/ingest-work ;;
+  *"delete job ingest"*)
+    [ "$DELETE_FAILS" != true ] || exit 23
+    case "$*" in
+      *--cascade=foreground*--wait=true*) rm old-writer ;;
+    esac
+    ;;
+  *"apply -f dist/ingest-rendered.yaml"*)
+    if [ -e old-writer ]; then echo 'prior writer still holds lock' >&2; exit 24; fi
+    touch replacement-applied
+    ;;
+  *"get pods"*) echo Succeeded ;;
+  *"wait --for=condition=complete"*) test -e replacement-applied ;;
+esac
+""")
+    result = _run_ingest(
+        ingest_tree,
+        ("AIRGAP_DRYRUN", "0"),
+        ("DELETE_FAILS", str(delete_fails).lower()),
+    )
+    if delete_fails:
+        assert result.returncode == 23, result.stderr
+        assert (tree / "old-writer").exists()
+        assert not (tree / "replacement-applied").exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert not (tree / "old-writer").exists()
+        assert (tree / "replacement-applied").exists()
+
+
+@pytest.mark.parametrize("job_succeeds", [False, True])
+def test_ingest_logs_follow_retry_and_stop_owned_stream(ingest_tree, job_succeeds):
+    """A failed first pod must not hide the retry or leave its logs child alive."""
+    import os
+    from pathlib import Path
+
+    tree, _ = ingest_tree
+    write_stub(tree / "bin/kubectl", """#!/usr/bin/python3
+import os,signal,sys,time
+from pathlib import Path
+a=sys.argv[1:]
+if 'pvc' in a:
+ print('persistentvolumeclaim/ingest-work')
+elif 'pods' in a:
+ if any('items[0].status.phase' in x for x in a):print('Failed')
+ elif Path('first-followed').exists():print('ingest-first Failed\\ningest-second Running')
+ else:print('ingest-first Failed')
+elif 'logs' in a:
+ if 'ingest-second' in a:
+  def stopped(*_):
+   Path('stream-stopped').touch()
+   sys.exit(0)
+  signal.signal(signal.SIGTERM,stopped)
+  print('second pod progress',flush=True)
+  Path('stream-pid').write_text(str(os.getpid()))
+  Path('second-followed').touch()
+  time.sleep(60)
+ else:
+  print('first pod failure',flush=True)
+  Path('first-followed').touch()
+  sys.exit(1)
+elif 'wait' in a:
+ deadline=time.monotonic()+8
+ while not Path('second-followed').exists():
+  if time.monotonic()>deadline:sys.exit(2)
+  time.sleep(.02)
+ sys.exit(0 if os.environ['JOB_SUCCEEDS']=='true' else 1)
+""")
+    result = _run_ingest(
+        ingest_tree, ("AIRGAP_DRYRUN", "0"), ("JOB_SUCCEEDS", str(job_succeeds).lower())
+    )
+    assert "first pod failure" in result.stdout
+    assert "second pod progress" in result.stdout, result.stdout + result.stderr
+    assert result.returncode == (0 if job_succeeds else 1)
+    assert (tree / "stream-stopped").exists(), "launcher did not terminate its stream"
+    pid = int((tree / "stream-pid").read_text())
+    assert not Path(f"/proc/{pid}").exists(), f"owned logs child {pid} survived launcher exit"
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+@pytest.mark.parametrize("cancel_signal", ["SIGTERM", "SIGINT"])
+@pytest.mark.parametrize("cancel_stage", ["logs", "pods"])
+def test_ingest_cancellation_reaps_local_observers(ingest_tree, cancel_signal, cancel_stage):
+    import os
+    import signal
+    import subprocess
+    import time
+    from pathlib import Path
+
+    tree, _ = ingest_tree
+    write_stub(tree / "bin/kubectl", """#!/usr/bin/python3
+import os,sys,time
+from pathlib import Path
+a=sys.argv[1:]
+with open('operations', 'a') as f: f.write(' '.join(a)+'\\n')
+if 'pvc' in a:
+ print('persistentvolumeclaim/ingest-work')
+elif 'wait' in a or os.environ['CANCEL_STAGE'] in a:
+ name='wait' if 'wait' in a else 'observer'
+ Path(name+'-pid').write_text(str(os.getpid()))
+ time.sleep(60)
+elif 'pods' in a:
+ print('ingest-first Running')
+""")
+
+    def start(script, env, cwd):
+        return subprocess.Popen(["sh", str(script)], env=env, cwd=cwd,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
+
+    # Repeat to prove no stale process/output handle blocks the next invocation.
+    for _ in range(2):
+        for name in ("wait-pid", "observer-pid"):
+            (tree / name).unlink(missing_ok=True)
+        proc = _run_ingest(ingest_tree, ("AIRGAP_DRYRUN", "0"),
+                           ("CANCEL_STAGE", cancel_stage), runner=start)
+        try:
+            deadline = time.monotonic() + 10
+            while not all((tree / name).exists() for name in ("wait-pid", "observer-pid")):
+                if proc.poll() is not None:
+                    pytest.fail(f"launcher exited before observers started: {proc.communicate()}")
+                assert time.monotonic() < deadline, "observers did not start"
+                time.sleep(.02)
+            children = [int((tree / name).read_text()) for name in ("wait-pid", "observer-pid")]
+            operations = (tree / "operations").read_text()
+            proc.send_signal(getattr(signal, cancel_signal))
+            _, stderr = proc.communicate(timeout=5)
+            assert proc.returncode == (143 if cancel_signal == "SIGTERM" else 130)
+            assert "job/ingest in namespace test-ns may still be running" in stderr
+            assert (tree / "operations").read_text() == operations
+            for pid in children:
+                assert not Path(f"/proc/{pid}").exists(), f"owned observer {pid} survived"
+        finally:
+            # Bounded harness cleanup also contains failures against the old code.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate(timeout=5)
 
 
 def test_ingest_missing_embed_revision_fails_closed(ingest_tree):
