@@ -1099,3 +1099,65 @@ def test_ui_stream_final_carries_verification_state(ui_client):
     final = next(payload for name, payload in _parse_sse_events(resp.text) if name == "final")
     assert final["verification_state"] == "accepted"
     assert final["script_review_required"] is False
+
+
+@pytest.mark.parametrize("role", ["assistant", "system"])
+def test_ui_stream_missing_user_is_fixed_validation_error(ui_client, role):
+    result = ui_client.post("/ui/chat/stream", json={"messages": [
+        {"role": role, "content": "No user question was supplied"},
+    ]})
+    assert result.status_code == 422
+    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert ui_client.mock_search.calls == []
+    assert app_mod.llm.calls == []
+    assert app_mod.llm.stream_calls == []
+
+
+@pytest.mark.parametrize("condense", [False, True])
+@pytest.mark.parametrize("tail_role", ["assistant", "system"])
+def test_ui_stream_retrieval_and_prompt_use_same_active_user(ui_client, monkeypatch, condense, tail_role):
+    monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", condense)
+    result = ui_client.post("/ui/chat/stream", json={"messages": [
+        {"role": "user", "content": "Earlier question"},
+        {"role": "assistant", "content": "Earlier answer"},
+        {"role": "user", "content": "  What does IEA500I mean?\n"},
+        {"role": tail_role, "content": "LATER_NON_USER S0C4"},
+    ]})
+    assert result.status_code == 200
+    events = _parse_sse_events(result.text)
+    assert events[-1][0] == "final"
+    assert [c["query"] for c in ui_client.mock_search.calls] == ["What does IEA500I mean?"]
+    assert app_mod.llm.calls == []
+    assert len(app_mod.llm.stream_calls) == 1
+    prompt = app_mod.llm.stream_calls[0]["messages"]
+    assert "Question: What does IEA500I mean?\n" in prompt[-1].content
+    assert all("LATER_NON_USER" not in m.content for m in prompt)
+
+
+@pytest.mark.parametrize("message", [" \t\n ", "x" * 2001])
+def test_ui_stream_invalid_active_user_refuses_before_work(ui_client, message):
+    result = ui_client.post("/ui/chat/stream", json={"messages": [
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": "Short tail"},
+    ]})
+    assert result.status_code == 422
+    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert ui_client.mock_search.calls == []
+    assert app_mod.llm.calls == app_mod.llm.stream_calls == []
+
+
+@pytest.mark.parametrize("htmx", [False, True])
+def test_ui_form_normalizes_current_message_with_real_history(ui_client, htmx):
+    result = ui_client.post("/ui/chat", headers={"HX-Request": "true"} if htmx else {}, data={
+        "message": " \tWhat does IEA500I mean?\n",
+        "messages": json.dumps([
+            {"role": "user", "content": "Earlier question"},
+            {"role": "assistant", "content": "Earlier answer"},
+        ]),
+    })
+    assert result.status_code == 200
+    assert [c["query"] for c in ui_client.mock_search.calls] == ["What does IEA500I mean?"]
+    prompt = app_mod.llm.calls[0]["messages"]
+    assert prompt[1].content == "Earlier question"
+    assert prompt[2].content == "Earlier answer"
+    assert "Question: What does IEA500I mean?\n" in prompt[-1].content

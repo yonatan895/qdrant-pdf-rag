@@ -46,11 +46,11 @@ from mainframe_rag.agent.answer_core import (
     AnswerCoreDeps,
     AnswerCoreInput,
     LLMChatError,
-    chat_body_chars,
     execute_answer_core,
     execute_answer_core_stream,
     resolve_search_query,
 )
+from mainframe_rag.agent.chat_turn import InvalidChatTurn, PreparedChatTurn, prepare_chat_turn
 from mainframe_rag.agent.metrics import endpoint_for_path, record_request, setup_metrics
 from mainframe_rag.agent.serving import ServingGate, ServingGeneration
 from mainframe_rag.agent.sse import (
@@ -134,11 +134,15 @@ def _require_query_length(request_id: str, query: str) -> None:
         raise AppError(422, "invalid_request", "request body failed validation")
 
 
-def _require_chat_body_length(request_id: str, req: ChatRequest) -> None:
-    total_chars = chat_body_chars(req.messages, req.splunk_context)
-    if total_chars > settings.chat_max_body_chars:
-        log.warning(json_log(request_id, "chat_body_too_long", chars=total_chars))
-        raise AppError(422, "invalid_request", "request body failed validation")
+def prepare_chat_request(
+    request_id: str, messages: list[ChatMessage], splunk_context: str | None = None
+) -> PreparedChatTurn:
+    """Map the common chat-input validation to the API/console error contract."""
+    try:
+        return prepare_chat_turn(messages, settings, splunk_context)
+    except InvalidChatTurn as exc:
+        log.warning(json_log(request_id, "invalid_chat_turn", reason=str(exc)))
+        raise AppError(422, "invalid_request", "request body failed validation") from exc
 
 
 async def _await_retrieval(res) -> tuple:
@@ -1342,15 +1346,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
     request_id = getattr(request.state, "request_id", uuid.uuid4().hex[:12])
     started = getattr(request.state, "started", time.monotonic())
 
-    latest_user_msgs = [m for m in req.messages if m.role == "user"]
-    if not latest_user_msgs:
-        # Contract-consistent (issue #314): a missing user turn IS a body
-        # validation failure, so it shares the fixed 422 message every other
-        # 422 path uses — no new client-visible shape.
-        raise AppError(422, "invalid_request", "request body failed validation")
-    latest_query = latest_user_msgs[-1].content.strip()
-    _require_query_length(request_id, latest_query)
-    _require_chat_body_length(request_id, req)
+    turn = prepare_chat_request(request_id, req.messages, req.splunk_context)
 
     try:
         assert_reasoning_model(settings)
@@ -1374,8 +1370,8 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
     )
 
     core_input = AnswerCoreInput(
-        query=latest_query,
-        messages=req.messages,
+        query=turn.query,
+        messages=turn.messages,
         product=req.product,
         version=req.version,
         splunk_context=req.splunk_context,

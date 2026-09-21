@@ -12,7 +12,7 @@ import inspect
 import logging
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 ReasoningEffort = Literal["low", "medium", "high"]
@@ -36,6 +36,10 @@ from mainframe_rag.agent.answer import (
     parse_answer,
     verification_state_for,
 )
+from mainframe_rag.agent.chat_turn import (
+    chat_body_chars as chat_body_chars,  # noqa: PLC0414 — preserve the existing helper import
+)
+from mainframe_rag.agent.chat_turn import prepare_chat_turn
 from mainframe_rag.agent.sse import fallback_stream
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, LLMClient, Tokenizer, TokenUsage
@@ -46,12 +50,6 @@ tracer: trace.Tracer = trace.get_tracer("mainframe-rag.agent")
 log = logging.getLogger(__name__)
 
 _EMPTY_ANSWER_MAX_TERMS = 5
-
-
-def chat_body_chars(messages: list[ChatMessage], splunk_context: str | None = None) -> int:
-    """Body-size arithmetic shared by /v1/chat and the /ui console so one cap
-    cannot cover the messages but not the attached incident context."""
-    return sum(len(m.content) for m in messages) + (len(splunk_context) if splunk_context else 0)
 
 
 def empty_hits_answer(query: str) -> str:
@@ -104,6 +102,13 @@ class AnswerCoreDeps:
     classify_query_complexity_fn: Any = None
 
 
+def _prepare_chat_input(input_data: AnswerCoreInput, settings: Settings) -> AnswerCoreInput:
+    if not input_data.is_chat:
+        return input_data
+    turn = prepare_chat_turn(input_data.messages or [], settings, input_data.splunk_context)
+    return replace(input_data, query=turn.query, messages=turn.messages)
+
+
 class LLMChatError(Exception):
     """Raised when the LLM chat invocation fails."""
 
@@ -130,6 +135,7 @@ async def resolve_search_query(
     first condense only when CHAT_CONDENSE_ENABLED is on; every other turn
     searches its literal text. Both the core retrieval branch and the route
     handlers call this so the flag cannot be honored on one path only."""
+    input_data = _prepare_chat_input(input_data, deps.settings)
     if (
         input_data.is_chat
         and input_data.messages
@@ -319,6 +325,7 @@ async def execute_answer_core(
 ) -> AnswerCoreOutput:
     """Execute the non-streaming core pipeline: retrieval, prompt build, LLM inference, and citation parsing."""
     settings = deps.settings
+    input_data = _prepare_chat_input(input_data, settings)
     _base_url, llm_model = assert_reasoning_model(settings)
     root_ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
 
@@ -437,6 +444,7 @@ async def execute_answer_core_stream(
 ) -> AsyncIterator[dict[str, Any]]:
     """Execute the streaming core pipeline: yields token deltas, then terminal citation/metadata record."""
     settings = deps.settings
+    input_data = _prepare_chat_input(input_data, settings)
     _base_url, llm_model = assert_reasoning_model(settings)
     root_ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
 

@@ -73,9 +73,18 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   splunk_context?, stream?, temperature?, model?, max_tokens?}`. At least one
    `user`-role message is required (missing user turn is a body-validation
    failure: `422 invalid_request` / `request body failed validation`, issue
-   #314); the latest user turn is stripped and length-guarded
-  by the shared `query_max_chars` rule, and the whole body is capped by
-  `chat_max_body_chars` (the same helper as `/ui`). `temperature` overrides
+   #314). `agent/chat_turn.prepare_chat_turn` owns active-turn normalization
+  for API, console, core execution, condensation and prompt assembly (#415).
+  The latest user message is stripped, must remain nonempty, and is guarded
+  by `query_max_chars`. Earlier user/assistant messages remain history; caller
+  system messages and entries after the latest user are excluded from model
+  input. Trailing assistant/system entries remain accepted request syntax and
+  never become a question or history for that user turn. The **entire supplied
+  body**, including excluded entries and Splunk context, is capped by
+  `chat_max_body_chars` before normalization removes anything. Missing, blank or
+  overlong active questions return the fixed 422 envelope before retrieval or
+  model work; the HTML form retains its existing safe error-banner mapping.
+  `temperature` overrides
    `Settings.llm_temperature`; `model` is accepted for OpenAI compatibility but
    ignored — inference always uses `Settings.llm_model_reasoning`, and the
   response `model` field reports that reasoning model (issue #313); `max_tokens` is
