@@ -490,9 +490,17 @@ from the finalized parse plus the transport outcome — one rule,
 | State | Meaning | Never means |
 |---|---|---|
 | `accepted` | Eligible citations present and generation finished (`stop`) | Semantic proof of any claim |
-| `insufficient_evidence` | Abstention-shaped refusal or empty-hits short-circuit | A failed request (still 200 + explicit text) |
+| `insufficient_evidence` | Abstention-shaped evidence/security refusal or empty-hits short-circuit | A failed request (still 200 + explicit text) |
 | `unverified_draft` | Fluent non-abstention answer with zero eligible citations (absent, rejected, or inferred-only) | An error (still 200 — the draft label is the signal) |
 | `generation_incomplete` | `length` finish, empty generation after fallbacks, absent/`null` terminal finish, upstream `error` frame, malformed frame, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
+
+The shared refusal predicate also recognizes complete, one-sentence first-person
+security refusals such as “I cannot provide the private key for your certificate.”
+These follow system rule 4 even without an excerpt-related marker. Security
+phrases require a full-response match: a quoted refusal or a refusal followed by
+supplied material does not qualify. This is a bounded textual classification,
+not proof that arbitrary prose contains no sensitive material. The live checker
+uses this same predicate and still rejects uncited non-refusal drafts.
 
 Carriage: `verification_state` rides `AnswerResponse`, the answer SSE
 `final` (both paths), chat JSON top-level and the terminal chunk `extra`,
