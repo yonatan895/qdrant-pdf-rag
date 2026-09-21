@@ -404,8 +404,10 @@ mutates.
 image as three loopback peers and `tests/test_ha_cluster.py`
 (`sh scripts/tools/run-task.sh qa:ha`) asserts real 6/3/2 placement, a
 false-HA (RF1) corpus+control refusal, degraded reads and healthy rejoin
-after stopping one peer, and exact corpus **and seeded control-record**
-ids/payloads through survivors and again on every peer after rejoin. Each
+after stopping one peer, exact corpus **and seeded control-record**
+ids/payloads through survivors and again on every peer after rejoin, and
+the publication cutover gate over real staging pairs (healthy 6/3/2
+passes; RF1 and control-only-mismatched staging refused). Each
 scenario creates its own corpus+control pair, so it runs alone or in any
 order, and rejoin waits for every shard to be ACTIVE on three distinct
 peers before re-qualifying (membership count alone is not catch-up). Three
