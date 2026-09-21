@@ -1873,6 +1873,61 @@ def test_build_messages_complex_budget_prices_thinking_reserve():
     assert tok.count_tokens(complex_msgs[1].content) <= tok.count_tokens(simple_msgs[1].content)
 
 
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("order", ["retrieval", "stable_cache"])
+@pytest.mark.parametrize("complexity", ["simple", "complex"])
+def test_prompt_budget_prices_simple_reasoning_without_changing_complex(chat, order, complexity):
+    from mainframe_rag.agent.answer import build_chat_messages, build_messages
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    class TemplateTokenizer(FallbackTokenizer):
+        def count_messages(self, messages):
+            # Whole-message template overhead is absent from the cheap planner.
+            return super().count_messages(messages) + 180
+
+    hits = [
+        _hit(text="Original synthetic manual guidance. " * 100).model_copy(
+            update={"chunk_id": f"budget-{i}", "cite": f"Synthetic Reference, p. {i}"}
+        )
+        for i in range(6)
+    ]
+    tok = TemplateTokenizer()
+    question = "What does IEA500I mean?"
+    history = [
+        ChatMessage(role="user", content="Earlier question " * 30),
+        ChatMessage(role="assistant", content="Earlier explanation " * 30),
+        ChatMessage(role="user", content=question),
+    ]
+
+    def prepare(simple_reserve):
+        settings = Settings(
+            llm_max_model_len=4096,
+            llm_reserved_output_tokens=1536,
+            llm_thinking_reserve_tokens_simple=simple_reserve,
+            llm_thinking_reserve_tokens_complex=600,
+            llm_token_safety_margin=128,
+            _env_file=None,
+        )
+        builder = build_chat_messages if chat else build_messages
+        return builder(
+            history if chat else question, hits, tokenizer=tok, settings=settings,
+            complexity=complexity, order=order,
+        )
+
+    old = prepare(0)
+    reserved = prepare(1000)
+    limit = 4096 - 1536 - 128 - (1000 if complexity == "simple" else 600)
+    assert tok.count_messages(reserved.messages) <= limit
+    assert reserved.evidence.entries
+    for entry in reserved.evidence.entries:
+        assert entry.cite in reserved.messages[-1].content
+    if complexity == "complex":
+        assert reserved == old
+    else:
+        assert tok.count_messages(reserved.messages) < tok.count_messages(old.messages)
+
+
 def test_build_messages_tokenizer_requires_settings():
     from mainframe_rag.agent.answer import build_messages
 

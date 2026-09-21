@@ -746,12 +746,13 @@ def build_messages(
         reserved = settings.llm_reserved_output_tokens
         margin = settings.llm_token_safety_margin
         narrative_token_cap = settings.llm_max_chunk_tokens_narrative
-        # Thinking reserve, complex path only (issue #298): high-effort
-        # thinking consumes the same window as the answer, so the complex
-        # prompt budget prices part of it. The simple path packs with the
-        # legacy math (zero thinking term).
+        # Thinking consumes the same window as the visible answer, including
+        # at low effort. Planning and whole-message verification price the
+        # selected reserve identically in both answer and chat prompts.
         thinking_reserve = (
-            settings.llm_thinking_reserve_tokens_complex if complexity == "complex" else 0
+            settings.llm_thinking_reserve_tokens_complex
+            if complexity == "complex"
+            else settings.llm_thinking_reserve_tokens_simple
         )
 
         # Planning is estimator-only (zero RPC): the budget for chunk bodies
@@ -1675,7 +1676,9 @@ def build_chat_messages(
         margin = settings.llm_token_safety_margin
         narrative_token_cap = settings.llm_max_chunk_tokens_narrative
         thinking_reserve = (
-            settings.llm_thinking_reserve_tokens_complex if complexity == "complex" else 0
+            settings.llm_thinking_reserve_tokens_complex
+            if complexity == "complex"
+            else settings.llm_thinking_reserve_tokens_simple
         )
 
         history_tokens = sum(estimate_tokens(m.content) for m in prior_messages)

@@ -255,8 +255,13 @@ select `complex`. Default is `simple`.
   trims in two tiers for up to `4*2 + len(prior turns)` rounds: excerpt
   bodies first, then it pops the oldest history turn. Never per-chunk
   tokenize RPCs.
-- Planning and verification both charge reserved output, complex thinking reserve
-  and safety margin; simple prompts use no thinking reserve.
+- Planning and verification both charge reserved output, the selected complexity's
+  thinking reserve and safety margin, for both single-turn answers and chat.
+  `llm_thinking_reserve_tokens_simple` accounts for low-effort reasoning separately
+  from `llm_thinking_reserve_tokens_complex`; setting the simple reserve to `0`
+  reproduces its earlier budget. Increasing a reserve leaves less space for
+  excerpts and chat history. It does not cap model thinking or guarantee completion;
+  `finish_reason=length` still produces `generation_incomplete`.
 - `splunk_context` truncates at 4000 chars with a suffix before packing, so
   caller context can never starve excerpts.
 - Evidence manifest (issue #364): `build_messages` / `build_chat_messages`
@@ -375,6 +380,7 @@ readers:
 | `answer_timeout_s` | 300.0 | reasoning client; no transport retries, explicit fallback policy below |
 | `llm_reasoning_effort_simple` / `_complex` / `llm_temperature` | low / high / 0.2 | answer path |
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 4096 / 1536 / 1000 / 128 / 350 / 5.0 | tokenizer-path budgeting (complex prompt budget prices high-effort thinking, issue #298) |
+| `llm_thinking_reserve_tokens_simple` | 0 | extra low-effort reasoning headroom in single-turn and chat prompt budgets; environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
 | `llm_stream` | `false` | server-side reasoning SSE |
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
