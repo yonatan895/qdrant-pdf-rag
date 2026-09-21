@@ -638,7 +638,12 @@ lock claim). Replacing the immutable Job waits for foreground deletion of its
 prior pods before applying the replacement; a deletion failure aborts the
 launcher. The scratch PVC and its durable progress remain intact. The log
 overlay follows successive retry pods and stops its owned stream when the Job
-wait returns; Job completion, not log activity, determines success. CI uses
+wait returns; Job completion, not log activity, determines success. SIGTERM or
+SIGINT to the launcher terminates and reaps its local wait, poll and log children
+and exits with status 143 or 130. Cancellation does not delete the cluster Job:
+`job/ingest` in the selected namespace may still be running. Inspect/reconcile
+that Job explicitly; the supported replacement launcher still waits for its
+foreground deletion before starting another writer. CI uses
 explicit synthetic values, never an attestation bypass. No
 real registry, URL, token or private environment file enters git or the transfer
 artifact.

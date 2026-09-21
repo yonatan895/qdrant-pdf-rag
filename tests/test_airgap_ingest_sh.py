@@ -44,7 +44,7 @@ def ingest_tree(tmp_path):
     return tmp_path, tmp_path / "kc-args.log"
 
 
-def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1", "1")):
+def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1", "1"), runner=run_sh):
     """Run ingest.sh hermetically.
 
     `policy` defaults to the explicit single-node 1/1/1 selection; pass None
@@ -73,7 +73,7 @@ def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1
         ) = policy
     for k, v in extra_env:
         env[k] = v
-    return run_sh(tmp_path / "scripts" / "airgap" / "ingest.sh", env, tmp_path)
+    return runner(tmp_path / "scripts" / "airgap" / "ingest.sh", env, tmp_path)
 
 
 def _copy_collection_preset(tree):
@@ -185,6 +185,67 @@ elif 'wait' in a:
     assert not Path(f"/proc/{pid}").exists(), f"owned logs child {pid} survived launcher exit"
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+@pytest.mark.parametrize("cancel_signal", ["SIGTERM", "SIGINT"])
+@pytest.mark.parametrize("cancel_stage", ["logs", "pods"])
+def test_ingest_cancellation_reaps_local_observers(ingest_tree, cancel_signal, cancel_stage):
+    import os
+    import signal
+    import subprocess
+    import time
+    from pathlib import Path
+
+    tree, _ = ingest_tree
+    write_stub(tree / "bin/kubectl", """#!/usr/bin/python3
+import os,sys,time
+from pathlib import Path
+a=sys.argv[1:]
+with open('operations', 'a') as f: f.write(' '.join(a)+'\\n')
+if 'pvc' in a:
+ print('persistentvolumeclaim/ingest-work')
+elif 'wait' in a or os.environ['CANCEL_STAGE'] in a:
+ name='wait' if 'wait' in a else 'observer'
+ Path(name+'-pid').write_text(str(os.getpid()))
+ time.sleep(60)
+elif 'pods' in a:
+ print('ingest-first Running')
+""")
+
+    def start(script, env, cwd):
+        return subprocess.Popen(["sh", str(script)], env=env, cwd=cwd,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
+
+    # Repeat to prove no stale process/output handle blocks the next invocation.
+    for _ in range(2):
+        for name in ("wait-pid", "observer-pid"):
+            (tree / name).unlink(missing_ok=True)
+        proc = _run_ingest(ingest_tree, ("AIRGAP_DRYRUN", "0"),
+                           ("CANCEL_STAGE", cancel_stage), runner=start)
+        try:
+            deadline = time.monotonic() + 10
+            while not all((tree / name).exists() for name in ("wait-pid", "observer-pid")):
+                if proc.poll() is not None:
+                    pytest.fail(f"launcher exited before observers started: {proc.communicate()}")
+                assert time.monotonic() < deadline, "observers did not start"
+                time.sleep(.02)
+            children = [int((tree / name).read_text()) for name in ("wait-pid", "observer-pid")]
+            operations = (tree / "operations").read_text()
+            proc.send_signal(getattr(signal, cancel_signal))
+            _, stderr = proc.communicate(timeout=5)
+            assert proc.returncode == (143 if cancel_signal == "SIGTERM" else 130)
+            assert "job/ingest in namespace test-ns may still be running" in stderr
+            assert (tree / "operations").read_text() == operations
+            for pid in children:
+                assert not Path(f"/proc/{pid}").exists(), f"owned observer {pid} survived"
+        finally:
+            # Bounded harness cleanup also contains failures against the old code.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate(timeout=5)
 
 
 def test_ingest_missing_embed_revision_fails_closed(ingest_tree):
