@@ -1175,4 +1175,95 @@ Citation validation runs on the accumulated text exactly as in JSON mode: the ci
 | **Stale dist/ tarballs fill disk** | `pack`/`load` fail with no-space errors after several rehearsals | Every pack leaves a ~1.5 GB `qdrant-pdf-rag-<sha>.tar` in gitignored `dist/`; only the MANIFEST-pinned one is live. Delete superseded tarballs (keep the `.tar.sha256` of the live one) — pack never prunes. |
 | **Kind ErrImagePull on localhost:5000** | mock/corpus-gen pods fail with `dial tcp [::1]:5000: connect: connection refused` | The Kind `containerdConfigPatches` in §4.7 must mirror **both** `localhost:5000` and `airgap-registry:5000` to the registry container — one key per naming family used by the manifests. Recreate the cluster with the documented config (containerd mirrors are set at creation). |
 | **Console Route deploy fail-close** | `sh scripts/tools/run-task.sh airgap:deploy` dies on the oauth-proxy `sha256:PENDING` pin or a missing `rag-agent-oauth-cookie` Secret | Record the digest in `images.txt` + repack and create the cookie Secret (§4.4.2); or deploy with `AGENT_ROUTE=false` (ClusterIP-only, `/ui` still served in-cluster). |
+
+### 5.4 Qdrant 6/3/2 topology operations (issue #360)
+
+Production topology is 3 peers on distinct workers, 6 shards / RF3 / W2 on
+both corpus and control collections (decision and failure contract:
+`deploy.md` §collection-policy). One unavailable peer at a time is the
+supported failure; two surviving copies are degraded, not healthy. The
+procedures below are the authorized operator paths — automation beyond
+them (replica-repair tooling, node-addressed restore) remains open under
+#360 and must not be improvised here.
+
+#### Safe inspection (read-only, any time)
+
+Run the placement verifier from the cluster network (agent/ingest pod or
+bastion with peer access); it mutates nothing:
+
+```bash
+# Strict production qualification: 6/3/2 across all three direct peers.
+QDRANT_URL=http://qdrant:6333 QDRANT_SHARD_NUMBER=6 \
+QDRANT_REPLICATION_FACTOR=3 QDRANT_WRITE_CONSISTENCY_FACTOR=2 \
+  python3 scripts/verify_placement.py --production \
+    --peer-url http://qdrant-0.qdrant-headless:6333 \
+    --peer-url http://qdrant-1.qdrant-headless:6333 \
+    --peer-url http://qdrant-2.qdrant-headless:6333
+
+# Pre-publication staging check: point QDRANT_COLLECTION at the staging
+# physical name (no alias carries that name, so the verifier checks the
+# staging corpus/control pair instead of live). Refuse cutover unless this
+# reports healthy; the ingest cutover gate additionally refuses unknown or
+# mismatched configured policy with the alias untouched.
+```
+
+`--allow-degraded` (never with `--production`) is for operational
+continuation during a positively established single-member loss only.
+Pod counts, `replication_factor` in config, or one passing search are
+never qualification. A degraded-but-readable generation may keep serving
+verified immutable reads; never use strict qualification as application
+liveness and never publish a new generation until every shard is ACTIVE
+on three distinct peers again.
+
+#### Mutation ownership
+
+- **Publication** is the one authorized writer path (`ingest.md`
+  publication contract, single target-held lock, alias swap only after
+  full verification). Retired generations and safety snapshots are kept;
+  rollback is alias re-pointing by the operator — never automatic
+  deletion, retirement, or garbage collection (#391 owns publication
+  integrity).
+- **Existing-collection topology changes** are snapshot-gated and explicit:
+  same-shard-count replication repair establishes actual copies and waits
+  for ACTIVE state; a shard-count change rebuilds a distinct 6/3/2
+  generation with preserved source identities and cuts over by alias.
+  Never PATCH shard count in place, never delete/recreate live, never
+  lower RF/W to hide a mismatch.
+- **Rolling maintenance** evicts/restarts one peer at a time
+  (`maxUnavailable: 1` limits voluntary disruption only) and **waits for
+  full shard recovery before the next eviction**. A PDB does not see
+  replica catch-up and does not cover involuntary failures.
+
+#### Abort, retry, and recovery
+
+- An interrupted clone, transfer, or build is resumed or retried, never
+  repaired by deleting live data. A superseded physical plus its safety
+  snapshot survive every swap until the operator removes them after
+  acceptance.
+- **Peer replacement is not stop/wipe/start.** Observed 2026-09-21 against
+  the pinned `v1.19.0-unprivileged` image: a fresh container restarted at
+  the same URI while the dead peer still holds shards is refused
+  (`peer URI ... already used by peer ... which still has shards, remove
+  its shards first or use a different URI`) and crash-loops. Replacement
+  is an explicit multi-step procedure — inspect, remove the dead peer's
+  shards/membership through the supported API, join, then verify placement
+  plus exact corpus/control data — whose acceptance is still open under
+  #360. Until then, the supported recovery for a lost peer with
+  unrecoverable storage is a tested fresh rebuild from protected originals
+  with explicitly accepted downtime (POC path, #447); no untested
+  distributed-restore or uninterrupted-HA promise is implied.
+- Loss of publisher scratch state is not repaired by Qdrant replication:
+  preserve progress/authorization/build state for deterministic resume
+  (`ingest.md`), and treat a missing sidecar as explicit operator recovery,
+  never as permission to publish unknown staging.
+
+#### Ownership and linkage
+
+Qdrant topology/placement acceptance stays under #360. Publication and
+data integrity belong to #391, operational recovery to #272, measured
+capacity to #374, POC scope to #447, cross-environment delivery to #446.
+Site qualification (peer→pod→worker layout, failure domains, storage
+headroom, measured failover/resync/restore) is recorded in the approved
+venue with private details kept out of git; three loopback containers
+prove distributed software behavior only.
 | **`/ui` returns 404** | Console request returns the stable `404 not_found` envelope | `UI_ENABLED` is unset/false for the agent process. The production chart sets it true; for local runs use `UI_ENABLED=true sh scripts/tools/run-task.sh local:agent` or `sh scripts/tools/run-task.sh local:stack`. |

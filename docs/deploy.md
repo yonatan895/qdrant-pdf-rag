@@ -375,7 +375,9 @@ ingestion, so a read-only diagnostic Job must override the command
 explicitly (run that image's `python3 /app/scripts/verify_placement.py
 --production --peer-url ...` with the same `QDRANT_*` environment instead
 of the ingest entrypoint); do not assume the agent image or a bastion has
-the same script/dependency layout.
+the same script/dependency layout. The operator runbook for inspection,
+mutation, abort, retry, and recovery ownership is
+[install and operations](install_and_ops.md#5-day-2-operations--maintenance).
 
 It examines cluster membership/consensus on every direct peer, the
 configured S/RF/W per required collection on every reachable peer, every
