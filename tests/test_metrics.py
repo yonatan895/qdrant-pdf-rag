@@ -1,8 +1,7 @@
-"""Unit tests for agent/metrics.py (issue #187): provider lifecycle only.
+"""Unit tests for agent/metrics.py (issue #187): lifecycle and request counters.
 
-No network, no lifespan: setup_metrics touches the in-process OTel globals,
-so these tests pin idempotency (double setup never double-registers a
-collector) and the disabled path. Route behavior lives in test_agent_api.py.
+Setup tests pin idempotency and the disabled path. Hermetic request tests
+exercise cumulative Prometheus counters through the application lifespan.
 """
 
 import pytest
@@ -148,7 +147,7 @@ def client(monkeypatch, servable_representation_gate):
         yield c
 
 
-def _series(body, name, **labels):
+def _series(body, name, *, default=None, **labels):
     # Subset match: the OTel exporter appends otel_scope_* labels to every
     # series, so pin our labels as all present rather than exactly equal.
     for line in body.splitlines():
@@ -158,31 +157,42 @@ def _series(body, name, **labels):
         pairs = dict(p.split("=", 1) for p in attrs.split(","))
         if all(pairs.get(k) == f'"{v}"' for k, v in labels.items()):
             return float(value)
+    if default is not None:
+        return default
     raise AssertionError(f"series {name} with {labels} missing")
 
 
 def test_search_success_records_ok_series(client):
-    resp = client.post("/v1/search", json={"query": "IEA500I SECRETXYZ"})
-    assert resp.status_code == 200
-    body = client.get("/metrics").text
-    assert _series(body, "rag_requests_total", endpoint="search", outcome="ok", query_class="identifier") == 1.0
-    # Cardinality law: the query text that triggered the request must never
-    # become a label value in the exposition.
-    assert "SECRETXYZ" not in body
+    labels = {"endpoint": "search", "outcome": "ok", "query_class": "identifier"}
+    # The provider is intentionally process-global. Earlier tests or the next
+    # ordinary request can populate this series; each request must add one.
+    for _ in range(2):
+        before = _series(client.get("/metrics").text, "rag_requests_total", default=0.0, **labels)
+        resp = client.post("/v1/search", json={"query": "IEA500I SECRETXYZ"})
+        assert resp.status_code == 200
+        body = client.get("/metrics").text
+        assert _series(body, "rag_requests_total", **labels) == before + 1.0
+        # Cardinality law: the query text that triggered the request must never
+        # become a label value in the exposition.
+        assert "SECRETXYZ" not in body
 
 
 def test_search_failure_records_outcome_series(client, monkeypatch):
     monkeypatch.setattr(app_mod, "retrieve_search", _Search(exc=RuntimeError("qdrant down")))
-    resp = client.post("/v1/search", json={"query": "IEA500I"})
-    assert resp.status_code == 502
-    body = client.get("/metrics").text
-    assert _series(body, "rag_requests_total", endpoint="search", outcome="upstream_error",
-                   query_class="unknown") == 1.0
+    labels = {"endpoint": "search", "outcome": "upstream_error", "query_class": "unknown"}
+    for _ in range(2):
+        before = _series(client.get("/metrics").text, "rag_requests_total", default=0.0, **labels)
+        resp = client.post("/v1/search", json={"query": "IEA500I"})
+        assert resp.status_code == 502
+        body = client.get("/metrics").text
+        assert _series(body, "rag_requests_total", **labels) == before + 1.0
 
 
 def test_overlong_query_records_invalid_request(client):
-    resp = client.post("/v1/search", json={"query": "Q" * 2001})
-    assert resp.status_code == 422
-    body = client.get("/metrics").text
-    assert _series(body, "rag_requests_total", endpoint="search", outcome="invalid_request",
-                   query_class="unknown") == 1.0
+    labels = {"endpoint": "search", "outcome": "invalid_request", "query_class": "unknown"}
+    for _ in range(2):
+        before = _series(client.get("/metrics").text, "rag_requests_total", default=0.0, **labels)
+        resp = client.post("/v1/search", json={"query": "Q" * 2001})
+        assert resp.status_code == 422
+        body = client.get("/metrics").text
+        assert _series(body, "rag_requests_total", **labels) == before + 1.0

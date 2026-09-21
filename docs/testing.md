@@ -43,6 +43,10 @@ Reproduce either shard with
 (or `2`). Invalid shard numbers and empty selections fail through pytest.
 Without the option, local and air-gapped GitLab runs retain the full suite.
 No extra pytest dependency or runtime model/service is needed.
+Request-counter assertions compare the scrape before and after each request:
+the metrics provider persists across lifespans, so an absolute total of one
+would depend on which earlier tests ran. The metrics suite repeats requests
+and requires an exact increment of one, retaining label/privacy assertions.
 
 Do not call live Qdrant, vLLM, or the internet. Fake the client. Parse-only ingest
 tests can use `--dry-run`; persistence/publication regressions must exercise the
