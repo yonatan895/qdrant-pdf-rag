@@ -3038,3 +3038,135 @@ def test_stale_completion_markers_revision_scoped_exclusion():
     )
     assert count_whole == 0
     assert labels_whole == []
+
+
+@pytest.mark.parametrize("changed_representation", [False, True])
+@pytest.mark.parametrize("damage", [None, "text", "point", "marker", "marker_digest", "wrong_target"])
+def test_forced_build_retry_keeps_verified_document_checkpoint(tmp_path, monkeypatch, changed_representation, damage):
+    """A completed document survives a later document failure without re-embedding.
+
+    Exercise the real planner, parser/embedding and completion proof with the
+    storage double; threads keep captured worker calls visible to the test.
+    """
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    monkeypatch.setenv("INGEST_UPSERT_STREAMS", "1")
+    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", lambda max_workers, mp_context: ThreadPoolExecutor(max_workers=max_workers))
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+    live_before = [p.model_dump() for p in fake.collections[live]]
+    if changed_representation:
+        monkeypatch.setenv("EMBED_MODEL_REVISION", "new-synthetic-revision")
+
+    original_parse = run_ingest._parse_one
+    parsed = []
+
+    def capture_parse(args):
+        parsed.append(Path(args[0]).stem)
+        return original_parse(args)
+
+    original_upsert = run_ingest._upsert_one
+    upserted = []
+
+    def failing_upsert(doc, *args, **kwargs):
+        if doc.doc_id == DOC_B:
+            raise RuntimeError("synthetic connection interruption")
+        upserted.append(doc.doc_id)
+        return original_upsert(doc, *args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "_parse_one", capture_parse)
+    monkeypatch.setattr(run_ingest, "_upsert_one", failing_upsert)
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 1
+    assert sorted(parsed) == ["doc_a", "doc_b"]  # New forced build must redo both.
+    assert upserted == [DOC_A]
+    assert fake.aliases[ALIAS] == live
+    assert [p.model_dump() for p in fake.collections[live]] == live_before
+    state_path = publish_state_path(progress, ALIAS)
+    staging = json.loads(state_path.read_text())["staging"]
+    checkpoint = [p.model_dump() for p in fake.collections[staging] if p.payload.get("doc_id") == DOC_A]
+    if damage == "text":
+        next(p for p in fake.collections[staging] if p.payload.get("doc_id") == DOC_A).payload["text"] = "Corrupt stored text"
+    elif damage == "point":
+        point = next(p for p in fake.collections[staging] if p.payload.get("doc_id") == DOC_A)
+        fake.collections[staging].remove(point)
+    elif damage in ("marker", "marker_digest", "wrong_target"):
+        markers = fake.collections[staging + "__completions"]
+        marker = next(p for p in markers if p.payload.get("doc_id") == DOC_A and p.payload.get("target_collection") == staging)
+        if damage == "marker":
+            markers.remove(marker)
+        elif damage == "marker_digest":
+            marker.payload["manifest_digest"] = "stale-contract"
+        else:
+            marker.payload["target_collection"] = live
+    parsed.clear()
+
+    def capture_upsert(doc, *args, **kwargs):
+        upserted.append(doc.doc_id)
+        return original_upsert(doc, *args, **kwargs)
+
+    upserted.clear()
+    monkeypatch.setattr(run_ingest, "_upsert_one", capture_upsert)
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    assert sorted(parsed) == (["doc_a", "doc_b"] if damage else ["doc_b"])
+    assert sorted(upserted) == ([DOC_A, DOC_B] if damage else [DOC_B])
+    assert fake.aliases[ALIAS] == staging and not state_path.exists()
+    if damage is None:
+        assert [p.model_dump() for p in fake.collections[staging] if p.payload.get("doc_id") == DOC_A] == checkpoint
+    assert [p.model_dump() for p in fake.collections[live]] == live_before
+    parsed.clear()
+    upserted.clear()
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert parsed == upserted == []  # The next ordinary operation is read-only.
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    assert sorted(parsed) == ["doc_a", "doc_b"]  # A new deliberate repair still rebuilds all.
+
+
+@pytest.mark.parametrize("after_commit", [False, True])
+def test_forced_retry_after_all_checkpoints_does_no_embedding(tmp_path, monkeypatch, after_commit):
+    """Crashing around manifest commit must not redo a fully checkpointed build."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    monkeypatch.setattr(run_ingest, "ProcessPoolExecutor", lambda max_workers, mp_context: ThreadPoolExecutor(max_workers=max_workers))
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    live = fake.aliases[ALIAS]
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "new-synthetic-revision")
+    real_commit = run_ingest._commit_migration_representation
+
+    def interrupted_commit(*args, **kwargs):
+        if after_commit:
+            real_commit(*args, **kwargs)
+        raise RuntimeError("synthetic crash around commit")
+
+    monkeypatch.setattr(run_ingest, "_commit_migration_representation", interrupted_commit)
+    with pytest.raises(RuntimeError, match="synthetic crash around commit"):
+        _run_main(monkeypatch, corpus, progress, "--reingest")
+    assert fake.aliases[ALIAS] == live
+    monkeypatch.setattr(run_ingest, "_commit_migration_representation", real_commit)
+
+    def no_more_embedding(*args, **kwargs):
+        raise AssertionError("all documents already have durable verified checkpoints")
+
+    monkeypatch.setattr(run_ingest, "_parse_one", no_more_embedding)
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    assert fake.aliases[ALIAS] != live
+    assert _run_main(monkeypatch, corpus, progress) == 0

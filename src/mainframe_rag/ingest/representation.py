@@ -48,9 +48,12 @@ Skip paths share the contract structurally, not per document: the
 preflight proves run-level compatibility before any skip is evaluated, so
 a stale completion can never cause a skip under a drifted
 representation; `--reingest` (the deliberate migration step) bypasses
-skips and re-embeds everything. Marker `manifest_digest` values are
-audit at skip time (the generation identity gate is the versioned
-fingerprint in `completion.py`) and the commit-time residue proof.
+ordinary skips and re-embeds the complete build. A retry of the same bound
+alias build can retain its strictly verified completed checkpoints. Marker
+`manifest_digest` values are audit for ordinary skips (the generation identity
+gate is the versioned fingerprint in `completion.py`); forced-build retries
+require an exact digest match. The digest also participates in the commit-time
+residue proof.
 """
 
 from __future__ import annotations
@@ -430,8 +433,9 @@ def check_ingest_compatible(
     - legacy unversioned target → `--reingest` to attest-and-migrate;
     - re-embed drift → `--reingest` to re-embed every doc.
     Callers bypass under `--reingest` (the one deliberate migration step,
-    same override idiom as the #124 rules gate); a bypassed run skips
-    nothing downstream, so it re-embeds everything instead of mixing.
+    same override idiom as the #124 rules gate). Fresh forced builds skip
+    nothing; the publisher's same-build retry path separately proves exact
+    contract and target-bound document checkpoints before retaining work.
     Never recreates a collection, never downgrades modes."""
     require_attested_revision(settings)
     wanted = build_manifest(settings, rules_v)

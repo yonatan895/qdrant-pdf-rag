@@ -409,9 +409,17 @@ thread pool.
   and enforced gone downstream. Unknown data is preserved, never deleted;
   `--limit` is refused for any migration (`refuse_limited_migration`)
   except a fresh empty-target bootstrap. A pending contract is never
-  skippable (`check_ingest_compatible`), servable
+  ordinarily skippable (`check_ingest_compatible`), servable
   (`serving_outcome`/lifespan; `/healthz` degrades), or swappable
-  (`verify_all_complete`); resumption is `--reingest`.
+  (`verify_all_complete`); resumption is `--reingest`. For alias publication,
+  retrying the same sidecar-bound build may reuse its completed document
+  checkpoints: the staging contract must exactly match the requested contract,
+  and each skip verifies a revision-scoped completion targeting that staging,
+  its exact manifest digest, and the actual stored point count/ID/content
+  digests. Inventory alone and inherited live completions never qualify.
+  Incomplete, missing or corrupt checkpoints are reprocessed. Recovery is at
+  document granularity; a document interrupted before its durable checkpoint
+  may be replayed. Full-corpus commit and alias-swap verification still run.
 - **Generation identity (issue #391 F2):** completion ids and staging
   names derive from the versioned fingerprint `rp2:` — a digest of the
   manifest's `REEMBED_FIELDS` projection, the same field policy
@@ -432,10 +440,12 @@ thread pool.
   migration step (same override idiom as the #124 rules gate, which runs
   first so its error precedence is unchanged). Skip paths share the
   contract structurally: the preflight proves run-level compatibility
-  before any skip is evaluated, so a stale completion can never cause a
-  skip under a drifted representation; marker `manifest_digest` values
-  are audit at skip time (the generation identity gate is the fingerprint)
-  and the commit-time scope proof.
+  before any ordinary skip is evaluated. A forced alias-build retry uses the
+  stricter checkpoint proof above, so a stale completion can never cause a
+  skip under a drifted representation. For ordinary skips, marker
+  `manifest_digest` values are audit (the generation identity gate is the
+  fingerprint); forced-build retries require an exact digest match. The
+  digest also participates in the commit-time scope proof.
 - **Source-revision identity** (issue #361, `ingest/identity.py` +
   revision-keyed pipeline): three identities — printed `doc_id`
   (family/citation key), `source_rev`
@@ -526,8 +536,10 @@ thread pool.
   preflight; the transfer is verified and repaired on reuse, issue #391
   F5); the inner run then enforces the same preflight, so a cloned staging
   under a changed representation fails closed until `--reingest`. With
-  `--reingest` the contract opens `pending` on the staging, every walked
-  doc re-embeds, the residue proof commits it, and only then does the
+  `--reingest` a new build re-embeds every walked document; a changed contract
+  opens `pending` on staging. A retry of that same bound build retains only
+  its verified completed documents. The residue proof commits a pending
+  contract, and only then does the
   alias swap. `verify_all_complete` rejects a present pending record and a
   missing/unreadable/drifted final manifest on a walked corpus, plus any
   searchable point no walked document accounts for (read-only residue
@@ -849,7 +861,7 @@ manifest envelope → `<physical>__completions` → ingest, publication, reader 
 | Explicitly empty/bootstrap | Establish no searchable data; readiness may allow bootstrap, requests still refuse |
 | Compatible committed | Eligible under the coverage/lifetime preconditions, not proof of those preconditions |
 | Record-only drift | Existing policy permits reads; record and evaluate query behavior |
-| Pending | Refuse serving/skipping/publication; resume deliberately, never promote merely on startup |
+| Pending | Refuse serving/ordinary skips/publication; a forced retry of the same bound alias build can verify completed document checkpoints, never promote merely on startup |
 | Missing on a populated target | Must refuse certification; serving classifies legacy; final publication guard has the gap above |
 | Corrupt | Must not authorize a populated target; decoder folds malformed records into absent/legacy |
 | Unsupported schema/state | No dedicated unsupported outcome: a schema-version mismatch compares as re-embed drift; an unfamiliar envelope state is noncommitted/pending |

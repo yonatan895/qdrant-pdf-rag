@@ -106,11 +106,14 @@ from mainframe_rag.ingest.qdrant_io import (
     upsert_chunks,
 )
 from mainframe_rag.ingest.representation import (
+    STATE_COMMITTED,
     STATE_PENDING,
     begin_manifest,
+    build_manifest,
     check_ingest_compatible,
     commit_manifest,
     manifest_digest,
+    read_manifest_record,
     refuse_limited_migration,
     require_attested_revision,
 )
@@ -594,6 +597,7 @@ def _run_impl(
     _pending_removals: frozenset[str] = frozenset(),
     retire_docs: tuple[str, ...] | None = None,
     _retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
+    _resume_verified_build: bool = False,
 ) -> int:
     workers = resolve_workers(workers, settings)
     rules_v = extraction_rules_version()
@@ -648,6 +652,7 @@ def _run_impl(
     client = None
     run_lock = None
     manifest_mode: str | None = None
+    resume_checkpoints = False
     if not dry_run:
         # Single-writer guard (issue #359 req 6): a second concurrent run
         # sharing the progress directory fails closed before any stage runs.
@@ -683,6 +688,25 @@ def _run_impl(
         # bypasses rejection of stored data, never the requirement to name
         # the representation it writes.
         require_attested_revision(settings)
+        # Force authorizes the migration; it must not discard this build's
+        # durable document checkpoints on a retry. The publisher grants this
+        # path only under its lock, for matching sidecar inputs and reused
+        # staging. A matching stored contract is necessary but not sufficient:
+        # each planner skip still verifies its target-bound completion and
+        # actual stored points. Inherited live markers cannot satisfy it.
+        if (
+            force_reingest
+            and _resume_verified_build
+            and _publish_target is not None
+            and _publish_target.staging == settings.qdrant_collection
+            and _publish_target.live != settings.qdrant_collection
+        ):
+            stored = read_manifest_record(client, completion_collection_name(settings))
+            resume_checkpoints = (
+                stored is not None
+                and stored.state in (STATE_PENDING, STATE_COMMITTED)
+                and stored.manifest == build_manifest(settings, rules_v)
+            )
         if not force_reingest:
             # Representation preflight (issue #362): the rules gate proves
             # extraction identity; this proves embedding identity — same
@@ -741,7 +765,7 @@ def _run_impl(
                     sha,
                     allow_dry=dry_run,
                     rules_version=rules_v,
-                    force_reingest=force_reingest,
+                    force_reingest=force_reingest and not resume_checkpoints,
                 ):
                     if dry_run:
                         files_ok += 1  # already ingested — an ok outcome
@@ -777,6 +801,9 @@ def _run_impl(
                             rules_v=rules_v,
                             source_labels=src_labels,
                             source_rev=bound_rev,
+                            required_manifest_digest=(
+                                manifest_digest(settings, rules_v) if resume_checkpoints else None
+                            ),
                         )
                     ):
                         files_ok += 1
@@ -853,6 +880,7 @@ def _run_impl(
                     "workers": workers,
                     "upsert_streams": settings.ingest_upsert_streams,
                     "bulk_load": bulk,
+                    "resume_checkpoints": resume_checkpoints,
                 }
             )
         )
@@ -1511,6 +1539,7 @@ def _run_publish_locked(
         _publish_target=target,
         _pending_removals=retired,
         _retire_plan=retire_plan,
+        _resume_verified_build=resumed and mode == "reused",
     )
     if rc != 0:
         return rc
@@ -1628,7 +1657,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--reingest",
         action="store_true",
-        help="Re-extract every doc (bypass inventory and Qdrant sha skips); "
+        help="Force a complete rebuild; an interrupted alias build resumes verified document checkpoints. "
         "required after an extraction-rules change so payloads match the "
         "current rules (issue #124)",
     )
