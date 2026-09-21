@@ -95,7 +95,13 @@ while `diagnostic_dualpath_enabled` remains default-off.
   trap checks still count. Missing required scores, NaN/Infinity, and empty or
   abstention-only scoring fail with exit **1**. Existing tolerances are unchanged.
 - **Skip semantics:** missing `--check` files and collection or embedding-mode
-  mismatches exit **2**. A skipped gate is not a pass. JSON reports and run
+  mismatches exit **2**. A supplied baseline must select at least one finite
+  relative or identifier comparison metric; empty, metadata-only, all-null,
+  and report-only policies cannot certify a requested gate (exit **2** with
+  an explicit unavailable-rule reason, unless scoring already failed).
+  Sparse policies and zero-valued comparison metrics remain valid; the pure
+  `check_baseline` helper retains its absolute-only use with `{}`.
+  A skipped gate is not a pass. Direct retrieval CLI JSON reports and run
   manifests record `gate.status` (`passed`, `failed`, `skipped`, or
   `not_requested`); the text summary labels the verdict. Exit 0 means a green
   applied gate or explicitly non-certifying diagnostics (`--no-check`, or no

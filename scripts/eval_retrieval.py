@@ -773,6 +773,12 @@ def main(argv: list[str] | None = None) -> int:
                 gate_skipped = True
             else:
                 regressions = check_baseline(report, baseline)
+                if baseline is not None and not regressions and not any(
+                    _finite_number(_get(baseline, key))
+                    for key in (*EVAL_GATED_METRICS, *EVAL_ABSOLUTE_GATED_METRICS)
+                ):
+                    regressions.append("baseline has no applicable comparison rule; requested gate unavailable")
+                    gate_skipped = True
     if args.update_baseline:
         update_baseline(report, args.update_baseline)
         print(f"baseline written to {args.update_baseline}", file=sys.stderr)
@@ -818,7 +824,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"warn: failed to append run manifest: {exc}", file=sys.stderr)
 
-    if regressions:
+    if regressions and not gate_skipped:
         print("REGRESSIONS:", file=sys.stderr)
         for r in regressions:
             print(f"  {r}", file=sys.stderr)

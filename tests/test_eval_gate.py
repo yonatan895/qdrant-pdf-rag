@@ -632,6 +632,25 @@ def test_cli_scores_actual_rows_before_deciding_gate(tmp_path, monkeypatch):
     assert report["abstain"]["n"] == 1
     assert report["classes"]["negative"]["recall@1"] is None
     assert report["recall@1"] == 1.0
+    # An actual NL row with no hits must not certify an empty comparison file.
+    monkeypatch.setattr(ev, "retrieve_search", lambda *a, **kw: ([], "nl", {}))
+    golden.write_text(json.dumps(answer) + "\n")
+    for policy, code in (
+        ({}, 2),
+        ({"_meta": {"collection": "c", "embed_mode": "hash"}}, 2),
+        ({"recall@1": None, "identifier": {"recall@1": None}}, 2),
+        ({"recall@3": 1.0}, 2),  # Reported, but not a comparison metric.
+        ({"recall@1": 1.0}, 1),
+        ({"recall@1": 0.0}, 0),  # Zero is a valid non-regression baseline.
+    ):
+        baseline.write_text(json.dumps(policy))
+        assert main(["--golden", str(golden), "--check", str(baseline), "--out", str(output)]) == code
+        report = json.loads(output.read_text())
+        assert report["n"] == report["scored"] == 1
+        assert report["recall@1"] == 0.0
+        assert report["gate"]["status"] == {0: "passed", 1: "failed", 2: "skipped"}[code]
+        if code == 2:
+            assert "no applicable comparison" in " ".join(report["gate"]["problems"])
     golden.write_text("")
     assert main(["--golden", str(golden), "--no-check", "--out", str(output)]) == 0
     assert json.loads(output.read_text())["gate"]["status"] == "not_requested"
