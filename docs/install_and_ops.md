@@ -1005,6 +1005,10 @@ never counts as distributed acceptance.
 
 ### 4.7 Local Cluster Testing Standard (Kind + Local Registry)
 
+For a clean local deployment with real models and an optional full corpus
+checkpoint, start with [the fresh Kind guide](local-kind.md). It uses no retained
+CRC services or credentials.
+
 To test the deployment scripts and Kubernetes manifests locally without access to an OpenShift cluster, the project standardizes on **Kind** (Kubernetes-in-Docker) paired with a local registry container on port 5000.
 
 Kind remains the fast development rehearsal. Production release transfer

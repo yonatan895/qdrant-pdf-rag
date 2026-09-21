@@ -216,3 +216,8 @@ commands accept trusted operator shell arguments, like `qa:unit`; never feed
 untrusted text into Task CLI_ARGS. See [the owner runbook](local-real-corpus.md)
 for prerequisites, approved plan handling, durable evidence and the required
 next ordinary ingest. They are never implicit startup/cleanup operations.
+
+Local model tasks (`local:llm`, `local:embed`, `local:rerank`) accept optional
+`CONTAINER_NAME` as a Task argument or environment variable. The launcher passes
+it as one runtime `--name` argument; a name collision fails instead of replacing
+a container. Omitting it retains the existing anonymous container behavior.

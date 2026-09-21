@@ -63,6 +63,8 @@ RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack
 # Optional: CORPUS_DIR=<dir> RERANK_ENABLED=false sh scripts/tools/run-task.sh local:stack
 ```
 
+For a fresh named Kind deployment from clone and published bundle, use
+[the clean Kind guide](docs/local-kind.md).
 The Helm deployment and preserved-corpus procedure is in
 [local real-corpus operations](docs/local-real-corpus.md). See the
 [current deployment audit](docs/deployment-audit-2026-09-20.md) for dated results

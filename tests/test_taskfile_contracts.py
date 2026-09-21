@@ -41,7 +41,7 @@ REQUIRE_RUNNER = os.environ.get("TASK_CONTRACTS_REQUIRE_RUNNER") == "1"
 # allowlist (never the whole environment): failure output must not leak
 # unrelated caller configuration, let alone secret-bearing variables.
 LOGGED_ENV_KEYS = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
-                   "ROLE", "MODEL", "SERVED_NAME", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
+                   "ROLE", "MODEL", "SERVED_NAME", "CONTAINER_NAME", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
                    "GATEWAY_PORT", "CORPUS_DIR", "LOCAL_AGENT_PORT", "JAEGER_PORT",
                    "SIM_CONTAINER", "SIM_PORT",
                    "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN")
@@ -53,7 +53,7 @@ python3 - "$RECORDER_LOG" "$RECORDER_TAG" "$@" <<'PYEOF'
 import json, os, sys
 log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
 keys = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
-        "ROLE", "MODEL", "SERVED_NAME", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
+        "ROLE", "MODEL", "SERVED_NAME", "CONTAINER_NAME", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
         "GATEWAY_PORT", "CORPUS_DIR", "LOCAL_AGENT_PORT", "JAEGER_PORT",
         "SIM_CONTAINER", "SIM_PORT",
         "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN")
@@ -73,7 +73,7 @@ python3 - "$RECORDER_LOG" "venv-python" "$@" <<'PYEOF'
 import json, os, sys
 log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
 keys = ("EMBED_MODE", "VENUE", "PYTHONPATH", "LLM_STREAM", "UI_ENABLED",
-        "ROLE", "MODEL", "SERVED_NAME", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
+        "ROLE", "MODEL", "SERVED_NAME", "CONTAINER_NAME", "PORT", "BUDGET_PROFILE", "BUDGET_PYTHON",
         "GATEWAY_PORT", "CORPUS_DIR", "LOCAL_AGENT_PORT", "JAEGER_PORT",
         "SIM_CONTAINER", "SIM_PORT",
         "GPU_MEM", "MAX_LEN", "SEQS", "LOCAL_STACK_DRYRUN")
@@ -1074,6 +1074,18 @@ class TaskContractsTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stdout)
                 self.assertEnvSubset(self.script_calls("run_local_vllm.sh")[0],
                                      {"SERVED_NAME": "ambient-name"})
+
+    def test_local_model_container_name_round_trip(self):
+        self.make_venv_fake()
+        self.make_script_recorder("run_local_vllm.sh")
+        for task in ("local:llm", "local:embed", "local:rerank"):
+            with self.subTest(task=task):
+                self.log.unlink(missing_ok=True)
+                proc = self.run_task(task, "CONTAINER_NAME=rag-kind-model",
+                                     extra_env=dict(self.tool_env(), CONTAINER_NAME="ambient-model"))
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                self.assertEnvSubset(self.script_calls("run_local_vllm.sh")[0],
+                                     {"CONTAINER_NAME": "rag-kind-model"})
 
     def test_gateway_down_ignores_absent_resources(self):
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "1"}

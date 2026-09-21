@@ -34,6 +34,7 @@ def _run_script(tmp_path: Path, extra_env: dict[str, str]) -> tuple[int, str, li
         "SEQS",
         "BUDGET_PROFILE",
         "SERVED_NAME",
+        "CONTAINER_NAME",
         "VLLM_IMAGE",
         "TASK",
         "CHAT_TEMPLATE",
@@ -207,6 +208,7 @@ def _run_script_with_stub_resolver(tmp_path: Path, extra_env: dict[str, str]) ->
         "SEQS",
         "BUDGET_PROFILE",
         "SERVED_NAME",
+        "CONTAINER_NAME",
         "VLLM_IMAGE",
         "TASK",
         "CHAT_TEMPLATE",
@@ -269,3 +271,17 @@ def test_crc_embed_explicitly_disables_caches(tmp_path):
     assert '--no-enable-prefix-caching' in argv
     assert '--no-enable-chunked-prefill' in argv
     assert '--language-model-only' not in argv
+
+
+def test_container_name_is_one_runtime_argument(tmp_path: Path):
+    name = "rag-kind-model;$(touch SHOULD_NOT_EXIST)"
+    rc, stderr, argv = _run_script(tmp_path, {"CONTAINER_NAME": name})
+    assert rc == 0, stderr
+    assert argv[:4] == ["run", "--rm", "--name", name]
+    assert not (REPO_ROOT / "SHOULD_NOT_EXIST").exists()
+
+
+def test_container_name_remains_optional(tmp_path: Path):
+    rc, stderr, argv = _run_script(tmp_path, {})
+    assert rc == 0, stderr
+    assert "--name" not in argv
