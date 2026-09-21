@@ -702,6 +702,74 @@ def verify_all_complete(
     return problems
 
 
+def verify_staging_distribution(
+    client: QdrantPoints,
+    staging_settings: Settings,
+) -> list[str]:
+    """Strict configured-distribution gate for publication cutover (issue #360).
+
+    The candidate corpus collection and its paired control collection must
+    both carry the explicitly selected policy verbatim. Unlike the lenient
+    ingest compatibility check (which treats unreadable live values as
+    unknown, not mismatches), an unreadable, missing, or mismatched value
+    here refuses cutover: publication must never certify an unknown
+    topology. Read-only: problems refuse the swap, never recreate or
+    downgrade. Empty when no explicit policy is selected (dev path).
+    """
+    policy = staging_settings.collection_distribution_kwargs()
+    if not policy:
+        return []
+    attrs = (
+        ("shard_number", "shard_number"),
+        ("replication_factor", "replication_factor"),
+        ("write_consistency_factor", "write_consistency_factor"),
+    )
+    staging = staging_settings.qdrant_collection
+    problems: list[str] = []
+    for collection in (staging, completion_collection_name(staging_settings)):
+        try:
+            exists = client.collection_exists(collection)
+        except Exception as exc:  # noqa: BLE001 - read failure is a refusal
+            problems.append(
+                f"{collection}: existence unreadable "
+                f"({type(exc).__name__}: {exc}) — cannot certify an unknown "
+                "topology (issue #360)"
+            )
+            continue
+        if not exists:
+            problems.append(
+                f"{collection}: required collection absent — cannot certify an "
+                "unknown topology (issue #360)"
+            )
+            continue
+        try:
+            params = client.get_collection(collection).config.params
+        except Exception as exc:  # noqa: BLE001 - read failure is a refusal
+            problems.append(
+                f"{collection}: configured policy unreadable "
+                f"({type(exc).__name__}: {exc}) — cannot certify an unknown "
+                "topology (issue #360)"
+            )
+            continue
+        for kwarg, attr in attrs:
+            if kwarg not in policy:
+                continue
+            want = policy[kwarg]
+            live = getattr(params, attr, None)
+            if live is None:
+                problems.append(
+                    f"{collection}: configured {attr} is unknown/unreadable; "
+                    "cannot certify an unknown policy (issue #360)"
+                )
+            elif live != want:
+                problems.append(
+                    f"{collection}: configured {attr}={live} != selected {want} "
+                    "(snapshot-gated replica/rebuild migration, issue #360) — "
+                    "never lower the production policy to hide it"
+                )
+    return problems
+
+
 def _is_point_retired(
     doc_id: str | None,
     source_rev: str | None,

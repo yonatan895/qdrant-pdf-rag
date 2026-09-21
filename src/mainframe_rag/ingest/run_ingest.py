@@ -91,6 +91,7 @@ from mainframe_rag.ingest.publish import (
     resolve_publish_staging,
     verify_all_complete,
     verify_searchable_coverage,
+    verify_staging_distribution,
     write_publication_metadata,
     write_publish_state,
 )
@@ -1453,6 +1454,14 @@ def _run_publish_locked(
             rules_v,
         )
         _log_record_drift(staging_settings, record_drift)
+        dist_problems = verify_staging_distribution(client, staging_settings)
+        if dist_problems:
+            raise RuntimeError(
+                f"live generation {live!r} fails distribution policy for "
+                f"{len(dist_problems)} check(s) "
+                f"(e.g. {dist_problems[0]!r}) — alias untouched, operator "
+                "intervention required (issue #360)."
+            )
         problems = verify_all_complete(
             client,
             staging_settings,
@@ -1557,6 +1566,14 @@ def _run_publish_locked(
                     "removed": {doc: count for doc, count in sorted(removed.items())},
                 }
             )
+        )
+    dist_problems = verify_staging_distribution(client, staging_settings)
+    if dist_problems:
+        raise RuntimeError(
+            f"staging {staging!r} fails distribution policy for "
+            f"{len(dist_problems)} check(s) "
+            f"(e.g. {dist_problems[0]!r}) — alias untouched, {live!r} still live "
+            "(issue #360)."
         )
     problems = verify_all_complete(
         client,

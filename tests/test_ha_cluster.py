@@ -2,7 +2,9 @@
 
 Starts the pinned image as a real three-peer cluster and exercises the
 placement verifier over actual placement: healthy, false-HA configuration,
-peer loss (degraded, reads survive), and rejoin. Each scenario creates and
+peer loss (degraded, reads survive), and rejoin, plus the publication
+cutover distribution gate over real staging pairs (healthy pass, false-HA
+and control-only-mismatch refusal). Each scenario creates and
 seeds its own physical corpus/control pair, so any test can run alone or in
 any order; expected point ids/payloads are declared here, independent of the
 verifier, and re-asserted through survivors after loss and on every peer
@@ -37,6 +39,7 @@ from scripts.verify_placement import perform_verification
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.completion import completion_collection_for
+from mainframe_rag.ingest.publish import verify_staging_distribution
 from mainframe_rag.ingest.qdrant_io import collection_vector_configs
 
 pytestmark = pytest.mark.integration
@@ -200,6 +203,71 @@ def test_false_ha_configuration_refused(cluster: QdrantCluster, capsys):
     assert report is not None
     assert report.configured_problems
     assert any("replication_factor=1" in problem for problem in report.configured_problems)
+
+
+def test_cutover_gate_passes_on_healthy_staging_pair(
+    cluster: QdrantCluster, seeded_pair: SeededPair
+):
+    """The exact cutover helper wired into publication must pass a real
+    healthy 6/3/2 staging pair through the same single-client surface the
+    publisher uses — guarding against fake/real client drift."""
+    settings = _settings(cluster.urls[0], seeded_pair.corpus)
+    client = QdrantClient(url=cluster.urls[0], timeout=60)
+    try:
+        assert verify_staging_distribution(client, settings) == []
+    finally:
+        client.close()
+
+
+def test_cutover_gate_refuses_false_ha_staging_pair(cluster: QdrantCluster):
+    """An RF1 staging pair must be refused at the publication layer even
+    though every collection exists and reads succeed."""
+    name = f"ha_cutover_false_{uuid.uuid4().hex[:8]}"
+    client = QdrantClient(url=cluster.urls[0], timeout=60)
+    try:
+        _create_pair(client, name, replication_factor=1)
+        settings = _settings(cluster.urls[0], name)
+        problems = verify_staging_distribution(client, settings)
+    finally:
+        client.close()
+    assert problems
+    assert any("replication_factor=1" in problem for problem in problems)
+    assert any("snapshot-gated" in problem for problem in problems)
+
+
+def test_cutover_gate_refuses_control_only_mismatch(cluster: QdrantCluster):
+    """A healthy corpus with an RF1 control collection must still refuse:
+    the gate covers the pair, not just the corpus."""
+    name = f"ha_cutover_ctl_{uuid.uuid4().hex[:8]}"
+    control = completion_collection_for(name)
+    vectors, sparse = collection_vector_configs(DIM)
+    client = QdrantClient(url=cluster.urls[0], timeout=60)
+    try:
+        client.create_collection(
+            name,
+            vectors_config=vectors,
+            sparse_vectors_config=sparse,
+            on_disk_payload=True,
+            shard_number=SHARDS,
+            replication_factor=RF,
+            write_consistency_factor=2,
+        )
+        client.create_collection(
+            control,
+            vectors_config=vectors,
+            sparse_vectors_config=sparse,
+            on_disk_payload=True,
+            shard_number=SHARDS,
+            replication_factor=1,
+            write_consistency_factor=1,
+        )
+        settings = _settings(cluster.urls[0], name)
+        problems = verify_staging_distribution(client, settings)
+    finally:
+        client.close()
+    assert problems
+    assert any(control in problem for problem in problems)
+    assert any("replication_factor=1" in problem for problem in problems)
 
 
 def test_peer_loss_is_degraded_and_rejoins_healthy(

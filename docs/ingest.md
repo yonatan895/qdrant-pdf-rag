@@ -771,8 +771,14 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   strict production verifier (`scripts/verify_placement.py`,
   [deploy policy](deploy.md#collection-policy)) refuses unknown placement
   and checks actual per-shard active copies for the corpus plus control
-  collection. Snapshot-gated migration of existing collections and
-  publication-eligibility integration remain later slices.
+  collection. Publication additionally re-checks the exact staging
+  candidate's configured policy for both collections immediately before
+  cutover (`publish.verify_staging_distribution`, also applied to the
+  already-live re-verify): a missing, unreadable, or mismatched value
+  refuses with the alias untouched and names the snapshot-gated migration,
+  never a policy downgrade. Per-shard ACTIVE-copy qualification of the
+  candidate via direct-peer verification remains the operator step before
+  relying on HA.
 - Representation migration writes `pending`, then commits after no document
   failures, `stale_completion_markers` finds no differently stamped markers,
   and the read-only scope proof attributes every searchable point to a verified

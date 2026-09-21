@@ -24,6 +24,7 @@ from mainframe_rag.ingest.publish import (
     generation_fingerprint,
     staging_name_for,
     verify_all_complete,
+    verify_staging_distribution,
 )
 from tests.test_run_ingest import _filter_doc_id
 
@@ -3170,3 +3171,146 @@ def test_forced_retry_after_all_checkpoints_does_no_embedding(tmp_path, monkeypa
     assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
     assert fake.aliases[ALIAS] != live
     assert _run_main(monkeypatch, corpus, progress) == 0
+
+
+# ------------------------------------------- staging distribution gate (#360)
+class _DistFake:
+    """Minimal QdrantPoints double for the cutover distribution gate."""
+
+    def __init__(self, params_by_collection=None, missing=(), get_error=None):
+        self.params_by_collection = dict(params_by_collection or {})
+        self.missing = set(missing)
+        self.get_error = get_error
+
+    def collection_exists(self, name):
+        return name not in self.missing
+
+    def get_collection(self, name):
+        if self.get_error is not None:
+            raise self.get_error
+        if name not in self.params_by_collection:
+            raise RuntimeError(f"collection {name} not found")
+        params = self.params_by_collection[name]
+        return SimpleNamespace(config=SimpleNamespace(params=params))
+
+
+def _dist_settings(staging="genA", **overrides):
+    kw = {
+        "embed_mode": "hash",
+        "qdrant_collection": staging,
+        "qdrant_shard_number": 6,
+        "qdrant_replication_factor": 3,
+        "qdrant_write_consistency_factor": 2,
+        "_env_file": None,
+    }
+    kw.update(overrides)
+    return Settings(**kw)
+
+
+def _dist_params(shards=6, rf=3, w=2):
+    return SimpleNamespace(
+        shard_number=shards, replication_factor=rf, write_consistency_factor=w
+    )
+
+
+def test_staging_distribution_no_policy_is_passthrough():
+    fake = _DistFake(missing=("genA", "genA__completions"))
+    assert verify_staging_distribution(fake, _settings()) == []
+
+
+def test_staging_distribution_matching_pair_passes():
+    staging = "genA"
+    fake = _DistFake(
+        {
+            staging: _dist_params(),
+            f"{staging}__completions": _dist_params(),
+        }
+    )
+    assert verify_staging_distribution(fake, _dist_settings(staging)) == []
+
+
+def test_staging_distribution_false_ha_corpus_refused():
+    """Three peers mean nothing with one copy: an RF1 staging corpus must
+    refuse cutover even when coverage would otherwise pass."""
+    staging = "genA"
+    fake = _DistFake(
+        {
+            staging: _dist_params(6, 1, 1),
+            f"{staging}__completions": _dist_params(),
+        }
+    )
+    problems = verify_staging_distribution(
+        fake, _dist_settings(staging, qdrant_write_consistency_factor=1)
+    )
+    assert problems
+    assert any("replication_factor=1" in p for p in problems)
+    assert any("snapshot-gated" in p for p in problems)
+    assert any(staging in p for p in problems)
+
+
+def test_staging_distribution_control_only_mismatch_refused():
+    """The paired control collection gates cutover too, not just the corpus."""
+    staging = "genA"
+    fake = _DistFake(
+        {
+            staging: _dist_params(),
+            f"{staging}__completions": _dist_params(6, 1, 1),
+        }
+    )
+    problems = verify_staging_distribution(
+        fake, _dist_settings(staging, qdrant_write_consistency_factor=1)
+    )
+    assert problems
+    assert any(f"{staging}__completions" in p for p in problems)
+    assert any("replication_factor=1" in p for p in problems)
+
+
+def test_staging_distribution_unknown_values_refused():
+    """Unlike the lenient ingest compatibility check, publication never
+    certifies an unknown topology."""
+    staging = "genA"
+    fake = _DistFake(
+        {
+            staging: SimpleNamespace(
+                shard_number=None, replication_factor=None, write_consistency_factor=None
+            ),
+            f"{staging}__completions": _dist_params(),
+        }
+    )
+    problems = verify_staging_distribution(fake, _dist_settings(staging))
+    assert problems
+    assert any("unknown/unreadable" in p for p in problems)
+
+
+def test_staging_distribution_missing_collection_refused():
+    fake = _DistFake(
+        {"genA__completions": _dist_params()},
+        missing=("genA",),
+    )
+    problems = verify_staging_distribution(fake, _dist_settings("genA"))
+    assert problems
+    assert any("absent" in p for p in problems)
+
+
+def test_staging_distribution_unreadable_collection_refused():
+    fake = _DistFake(get_error=RuntimeError("config read failed"))
+    fake.collection_exists = lambda _name: True  # type: ignore[method-assign]
+    problems = verify_staging_distribution(fake, _dist_settings("genA"))
+    assert problems
+    assert any("unreadable" in p for p in problems)
+
+
+def test_staging_distribution_partial_policy_checks_only_selected_keys():
+    """A partial explicit selection gates only its keys; unselected keys,
+    even wildly different, do not block."""
+    staging = "genA"
+    fake = _DistFake(
+        {
+            staging: _dist_params(shards=99, rf=3, w=2),
+            f"{staging}__completions": _dist_params(shards=99, rf=3, w=2),
+        }
+    )
+    settings = _settings(
+        qdrant_collection=staging, qdrant_replication_factor=3, _env_file=None
+    )
+    assert verify_staging_distribution(fake, settings) == []
