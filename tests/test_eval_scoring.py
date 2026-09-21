@@ -250,16 +250,17 @@ def test_summarize_abstain_score_calibration():
 
 
 def test_check_baseline_zero_gate_ignores_baseline_values():
-    report = {"failures": 0, "must_not": {"violations": 2, "checked": 10, "rate": 0.2}}
+    report = {"n": 10, "scored": 10, "failures": 0, "must_not": {"violations": 2, "checked": 10, "rate": 0.2}}
     regressions = check_baseline(report, {"must_not": {"violations": 2}})
     assert any("must_not.violations" in r for r in regressions)
-    report_ok = {"failures": 0, "must_not": {"violations": 0, "checked": 10, "rate": 0.0}}
+    report_ok = {"n": 10, "scored": 10, "failures": 0, "must_not": {"violations": 0, "checked": 10, "rate": 0.0}}
     assert check_baseline(report_ok, {"must_not": {"violations": 0}}) == []
 
 
 def test_check_baseline_ratio_gates_unchanged():
     baseline = {"recall@1": 0.5, "recall@5": 0.75, "mrr": 0.625, "identifier": {"recall@1": 1.0}}
     good = {
+        "n": 1, "scored": 1,
         "failures": 0,
         "recall@1": 0.5, "recall@5": 0.75, "mrr": 0.625,
         "identifier": {"recall@1": 1.0},

@@ -85,15 +85,31 @@ while `diagnostic_dualpath_enabled` remains default-off.
   (`baseline._meta.collection` in `venue.RC_ONLY_COLLECTIONS`, issue #286)
   where the baseline itself is below 1.0 — plus the absolute invariant:
   `must_not.violations == 0` regardless of baseline.
-- **Skip semantics:** missing metric or baseline warns and never gates; a
-  **collection** mismatch skips the gate (baseline dropped); an
-  **embed-mode** mismatch only warns and still gates. A requested gate
-  that cannot be applied — missing `--check` file or collection mismatch
-  — exits **2**, never 0 (issue #159): a skip is distinguishable from
-  green, so `sh scripts/tools/run-task.sh eval:retrieval` / `sh scripts/tools/run-task.sh eval:paraphrase` fail the job. Exit 0
-  remains only for a genuinely green gated run or a run with no gate
-  requested (`--no-check`, or no mode-keyed baseline recorded yet).
-- **`--check` vs `--update-baseline` are mutually exclusive.** Baselines
+- **Gate coverage (issue #367):** an applied gate requires positive total and
+  eligible scored counts, finite required metrics, and the zero-violation
+  invariant. Every class with a positive baseline `n` must be observed; a
+  positive baseline `scored` requires scored observations. Non-null baseline
+  class metrics require finite current values, without introducing new
+  per-class quality thresholds. Intentionally unscored abstention classes keep
+  null recall/MRR and remain outside those denominators; their presence and
+  trap checks still count. Missing required scores, NaN/Infinity, and empty or
+  abstention-only scoring fail with exit **1**. Existing tolerances are unchanged.
+- **Skip semantics:** missing `--check` files and collection or embedding-mode
+  mismatches exit **2**. A supplied baseline must select at least one finite
+  relative or identifier comparison metric; empty, metadata-only, all-null,
+  and report-only policies cannot certify a requested gate (exit **2** with
+  an explicit unavailable-rule reason, unless scoring already failed).
+  Sparse policies and zero-valued comparison metrics remain valid; the pure
+  `check_baseline` helper retains its absolute-only use with `{}`.
+  A skipped gate is not a pass. Direct retrieval CLI JSON reports and run
+  manifests record `gate.status` (`passed`, `failed`, `skipped`, or
+  `not_requested`); the text summary labels the verdict. Exit 0 means a green
+  applied gate or explicitly non-certifying diagnostics (`--no-check`, or no
+  mode-keyed baseline recorded yet). Baselines lacking a metric do not invent
+  a threshold for it. The existing baseline identity covers collection/mode;
+  it does not attest exact platform weights or semantic model acceptance.
+- **`--check` cannot be combined with `--update-baseline`, `--no-check`,
+  or `--label-draft`.** Conflicting modes fail before accessing the venue. Baselines
   record `_meta` (size, collection, mode, timestamp) plus the gated metrics;
   `must_not`/failures/per-query are intentionally omitted (the zero-gate is
   absolute).
