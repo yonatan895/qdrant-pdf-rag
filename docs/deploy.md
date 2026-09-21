@@ -747,3 +747,8 @@ key's model allowlist. Use `probe_gateway.py --require-tokenizer --stream
 --require-reasoning` and the [strict local check](local-real-corpus.md#4-verify-and-retain-the-complete-live-stack)
 for local full-stack acceptance. Platform-owned gateways may instead support
 the documented estimator fallback; that is not exact prompt-budget evidence.
+
+The pipeline's final banner reports only the stages it executed. Dry runs say
+live acceptance **NOT RUN**; a skipped ingest stays **NOT RUN**. Successful
+smoke stages do not certify grounded answers, console follow-ups or an exact
+production release. Complete the applicable live-stack acceptance separately.

@@ -86,12 +86,13 @@ def test_pipeline_dryrun_full(pipe_tree):
     assert "STAGE 3/5: STACK DEPLOYMENT" in r.stdout
     assert "exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py" in r.stdout
     assert "STAGE 4/5: CORPUS INGESTION" in r.stdout
-    assert "STAGE 5/5: ACCEPTANCE & SMOKE VERIFICATION" in r.stdout
-    assert "PIPELINE ORCHESTRATION COMPLETE: AIR-GAP SYSTEM OPERATIONAL & ACCEPTED" in r.stdout
+    assert "STAGE 5/5: SMOKE VERIFICATION" in r.stdout
+    assert "PIPELINE DRY-RUN COMPLETE: rendering passed; live acceptance NOT RUN" in r.stdout
 
 
 @pytest.mark.parametrize("probe_exit", [0, 1])
-def test_pipeline_live_gateway_probe_gates_ingest(pipe_tree, probe_exit):
+@pytest.mark.parametrize("skip_ingest", [False, True])
+def test_pipeline_live_gateway_probe_gates_ingest(pipe_tree, probe_exit, skip_ingest):
     # Run the real orchestrator with stage recorders. The gateway command
     # must run between deploy and ingest and use the selected cluster client.
     log = pipe_tree / "stages.log"
@@ -105,7 +106,7 @@ def test_pipeline_live_gateway_probe_gates_ingest(pipe_tree, probe_exit):
         '#!/bin/sh\nprintf "probe %s\\n" "$*" >> "$STAGE_LOG"\n'
         f'exit {probe_exit}\n',
     )
-    r = _run_pipeline(pipe_tree, extra_env={
+    r = _run_pipeline(pipe_tree, *(["--skip-ingest"] if skip_ingest else []), extra_env={
         "AIRGAP_DRYRUN": "0", "CORPUS_PVC": "test-corpus",
         "KC": "custom-kc", "STAGE_LOG": str(log),
     })
@@ -120,7 +121,11 @@ def test_pipeline_live_gateway_probe_gates_ingest(pipe_tree, probe_exit):
         assert "OPERATIONAL & ACCEPTED" not in r.stdout
     else:
         assert r.returncode == 0, r.stderr
-        assert stages[4:] == ["ingest", "smoke"]
+        assert stages[4:] == (["smoke"] if skip_ingest else ["ingest", "smoke"])
+        assert "PIPELINE STAGES COMPLETE" in r.stdout
+        assert ("ingest NOT RUN" in r.stdout) is skip_ingest
+        assert "Full application/release acceptance remains separate" in r.stdout
+    assert "OPERATIONAL & ACCEPTED" not in r.stdout
 
 
 def test_pipeline_dryrun_including_load(pipe_tree):
@@ -129,18 +134,18 @@ def test_pipeline_dryrun_including_load(pipe_tree):
     assert r.returncode == 0, r.stderr
     assert "STAGE 2/5: IMAGE LOADING & INTEGRITY" in r.stdout
     assert "Loaded 4 images into reg.internal:5000 (dry-run)" in r.stdout
-    assert "PIPELINE ORCHESTRATION COMPLETE: AIR-GAP SYSTEM OPERATIONAL & ACCEPTED" in r.stdout
+    assert "PIPELINE DRY-RUN COMPLETE: rendering passed; live acceptance NOT RUN" in r.stdout
 
 
 def test_pipeline_skip_ingest_flag(pipe_tree):
     r = _run_pipeline(pipe_tree, "--skip-load", "--skip-ingest", extra_env={"CORPUS_PVC": "test-corpus"})
     assert r.returncode == 0, r.stderr
     assert "STAGE 4/5: CORPUS INGESTION (SKIPPED via --skip-ingest)" in r.stdout
-    assert "PIPELINE ORCHESTRATION COMPLETE: DEPLOYMENT READY (Awaiting Corpus Ingest)" in r.stdout
+    assert "PIPELINE DRY-RUN COMPLETE: rendering passed; live acceptance NOT RUN" in r.stdout
 
 
 def test_pipeline_without_corpus_pvc_awaits_ingest(pipe_tree):
     r = _run_pipeline(pipe_tree, "--skip-load")
     assert r.returncode == 0, r.stderr
     assert "STAGE 4/5: CORPUS INGESTION (SKIPPED — CORPUS_PVC not set)" in r.stdout
-    assert "PIPELINE ORCHESTRATION COMPLETE: DEPLOYMENT READY (Awaiting Corpus Ingest)" in r.stdout
+    assert "PIPELINE DRY-RUN COMPLETE: rendering passed; live acceptance NOT RUN" in r.stdout
