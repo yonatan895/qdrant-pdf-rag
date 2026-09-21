@@ -166,12 +166,27 @@ REFUSAL_MARKERS = (
 )
 
 
+# Rule 4 also permits a one-sentence security refusal without an evidence
+# marker. Match the complete response: a quoted refusal or a refusal followed
+# by supplied material must not become an abstention merely by mentioning keys.
+_SECURITY_REFUSAL_RE = re.compile(
+    r"i (?:cannot|can't|can’t|will not|won't|won’t|am unable to) "
+    r"(?:provide|disclose|reveal|share|recite|supply) "
+    r"(?:(?:the|your|any) )?"
+    r"(?:private keys?|secrets|credentials|key material|secrets, credentials, or key material)"
+    r"(?: for (?:your|the) certificate)?[.!]?",
+    re.IGNORECASE,
+)
+
+
 def is_refusal(answer_body: str) -> bool:
     """True when the answer body explicitly declines to answer from the
-    excerpts. Case-folded substring semantics; shared by the answer-tier
-    eval's refusal verdicts and the abstention shape test below."""
+    excerpts or a complete one-sentence security refusal. Evidence markers
+    use case-folded substrings; security refusals require a full match. Shared
+    by the answer-tier eval and the abstention shape test below."""
     low = answer_body.lower()
-    return any(m in low for m in REFUSAL_MARKERS)
+    return (any(m in low for m in REFUSAL_MARKERS)
+            or _SECURITY_REFUSAL_RE.fullmatch(answer_body.strip()) is not None)
 
 
 # Abstention shape: an abstention's substance is the refusal itself. After
