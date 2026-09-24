@@ -286,6 +286,8 @@ def test_bootstrap_approved_upgrade_requires_explicit_checkout_preserves_operato
     sums = bundle_dir / "SHA256SUMS"
     sums.write_text(sums.read_text().replace(old_sha, new_sha))
     _resign(bundle_dir)
+    # The approved objects may already be fetched; HEAD still names the old release.
+    subprocess.run(["git", "fetch", str(bundle_dir / "repo.bundle"), "HEAD"], cwd=workspace, check=True, capture_output=True)
     refused = _bootstrap(bundle_dir)
     assert refused.returncode != 0
     assert "workspace HEAD does not match" in refused.stderr

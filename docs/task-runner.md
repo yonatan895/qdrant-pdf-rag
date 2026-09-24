@@ -251,3 +251,13 @@ Local model tasks (`local:llm`, `local:embed`, `local:rerank`) accept optional
 `CONTAINER_NAME` as a Task argument or environment variable. The launcher passes
 it as one runtime `--name` argument; a name collision fails instead of replacing
 a container. Omitting it retains the existing anonymous container behavior.
+
+### Historical hazard proof
+
+`qa:hazards OUT=/new/evidence/directory` runs the committed candidate through
+[the critical catalogue](testing.md#critical-historical-hazard-sensitivity-482-v2).
+Its `PY` default is `.venv/bin/python`; an explicit path selects a prepared CI
+interpreter. `OUT` is required and must not exist. Both values pass as literal
+arguments, including spaces. The runner performs the prerequisite check and
+never installs dependencies or tools. Full and focused runs are distinguished
+in the report; CI runs the full catalogue.

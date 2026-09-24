@@ -116,6 +116,20 @@ test:
   # Tests generate synthetic PDFs at runtime; no artifacts are cached or
   # uploaded anywhere (deliberately no artifacts: section).
 
+hazards:
+  extends: .py-base
+  stage: test
+  script:
+    - ': "${CI_TASK_ARCHIVE:?mount the approved pinned Task archive on the runner}"'
+    - sh scripts/tools/install-task.sh --archive "$CI_TASK_ARCHIVE"
+    - ': "${CI_HELM_ARCHIVE:?mount the approved pinned Helm archive on the runner}"'
+    - sh scripts/tools/install-helm.sh --archive "$CI_HELM_ARCHIVE"
+    - sh scripts/tools/run-task.sh qa:hazards PY="$(command -v python)" OUT="$CI_PROJECT_DIR/dist/critical-hazards"
+  artifacts:
+    when: always
+    paths: [dist/critical-hazards/]
+
+
 gate-l1:
   extends: .py-base
   stage: test
