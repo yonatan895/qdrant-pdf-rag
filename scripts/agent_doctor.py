@@ -69,6 +69,32 @@ def inspect_task(root: Path) -> Finding:
     return Finding("ready", "Task runner", f"pinned go-task {version} executable checksum verified")
 
 
+def inspect_helm(root: Path) -> Finding:
+    """Hash the renderer selected by PATH; never execute an unverified tool."""
+    try:
+        pin = dict(line.split(": ", 1) for line in
+                   (root / "scripts/tools/helm-pin.txt").read_text(encoding="utf-8").splitlines()
+                   if line and not line.startswith("#") and ": " in line)
+        expected, version = pin["binary-sha256"], pin["version"]
+        if not re.fullmatch(r"[a-f0-9]{64}", expected):
+            raise ValueError("invalid pin")
+    except (OSError, UnicodeError, KeyError, ValueError):
+        return Finding("unable to verify", "Helm", "Helm pin unreadable or incomplete")
+    executable = shutil.which("helm")
+    if executable is None:
+        return Finding("missing prerequisite", "Helm",
+                       "pinned Helm absent; explicitly prepare it with scripts/tools/install-helm.sh")
+    try:
+        with Path(executable).open("rb") as stream:
+            observed = hashlib.file_digest(stream, "sha256").hexdigest()
+    except OSError:
+        return Finding("unable to verify", "Helm", "selected Helm executable unreadable")
+    if observed != expected:
+        return Finding("missing prerequisite", "Helm",
+                       "selected Helm checksum differs from the pin; prepare the pinned tool and select its PATH")
+    return Finding("ready", "Helm", f"pinned Helm {version} executable checksum verified")
+
+
 def inspect_runtime(python: Path, packages: list[str]) -> dict | None:
     try:
         result = subprocess.run(
@@ -92,7 +118,8 @@ def inspect_runtime(python: Path, packages: list[str]) -> dict | None:
         return None  # Never echo subprocess output or exception text (may contain secrets).
 
 
-def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False) -> list[Finding]:
+def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
+             python: Path | None = None) -> list[Finding]:
     results: list[Finding] = []
 
     def add(status: str, subject: str, detail: str) -> None:
@@ -128,7 +155,7 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False) -> l
         add("unable to verify", "tracked configuration", "missing, unreadable or unsupported pin/config input")
         return results
 
-    tools = ["git", "helm"]  # Unit/deploy contracts execute the real chart renderer.
+    tools = ["git"]  # Unit/deploy contracts execute the real chart renderer.
     if profile == "sim":
         tools += ["docker"]
     if profile == "deploy":
@@ -139,24 +166,26 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False) -> l
         add("ready" if shutil.which(name) else "missing prerequisite", name, "CLI presence only")
 
     results.append(inspect_task(root))
+    results.append(inspect_helm(root))
 
     interpreters = [("checker runtime", Path(sys.executable))]
-    development = root/".venv/bin/python"
+    development = python.absolute() if python is not None else root/".venv/bin/python"
     if development.is_file():
         interpreters.append(("development environment", development))
     else:
         add("missing prerequisite", "development environment", ".venv/bin/python absent; no environment created")
-    for label, python in interpreters:
+    for label, interpreter in interpreters:
         packages = sorted(set(pins) | {"pytest", "ruff", "mypy"}) if label == "development environment" else []
-        runtime = inspect_runtime(python, packages)
+        runtime = inspect_runtime(interpreter, packages)
         if runtime is None:
             add("unable to verify", label, "bounded interpreter/metadata probe unavailable")
             continue
         compatible = (runtime.get("implementation") == "CPython"
-                      and tuple(runtime["version"][:2]) >= minimum_version
+                      and tuple(runtime["version"][:2]) == (3, 14)
+                      and (3, 14) >= minimum_version
                       and not runtime["gil_disabled"] and not runtime["jit_enabled"])
         add("ready" if compatible else "missing prerequisite", label,
-            "CPython minimum version, GIL and disabled experimental JIT requirement")
+            "CPython 3.14 GIL with experimental JIT disabled required")
         for package in packages:
             installed = runtime["packages"].get(package)
             if not installed:
@@ -189,9 +218,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--profile", choices=("unit", "sim", "deploy"), default="unit")
     parser.add_argument("--probe-docker", action="store_true", help="explicit five-second read of local /var/run/docker.sock")
+    parser.add_argument("--python", type=Path, help="prepared development/CI interpreter (default .venv/bin/python)")
     args = parser.parse_args(argv)
     try:
-        findings = diagnose(args.root, args.profile, args.probe_docker)
+        findings = diagnose(args.root, args.profile, args.probe_docker, args.python)
     except Exception:  # noqa: BLE001 — CLI boundary must redact unexpected failures
         print("internal checker failure: diagnosis unavailable", file=sys.stderr)
         return 1

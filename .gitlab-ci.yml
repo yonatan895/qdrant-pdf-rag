@@ -21,6 +21,8 @@
 #   CI_TASK_ARCHIVE (required for test) path to the approved pinned linux-amd64
 #                                   Task release archive on the runner, transferred
 #                                   offline (see scripts/tools/task-pin.txt).
+#   CI_HELM_ARCHIVE (required for test) transferred checksum-pinned Helm archive
+#                                   (scripts/tools/helm-pin.txt); no download fallback.
 #   CI_RUNNER_TAG   (optional)      runner tag, default "airgap"
 #   PIP_FIND_LINKS  (recommended)   path to a wheelhouse directory on the runner
 #                                   (e.g. /wheelhouse) built from requirements.lock.txt
@@ -107,6 +109,10 @@ test:
   script:
     - ': "${CI_TASK_ARCHIVE:?mount the approved pinned Task archive on the runner}"'
     - sh scripts/tools/install-task.sh --archive "$CI_TASK_ARCHIVE"
+    - ': "${CI_HELM_ARCHIVE:?mount the approved pinned Helm archive on the runner}"'
+    - sh scripts/tools/install-helm.sh --archive "$CI_HELM_ARCHIVE"
+    - export PATH="$CI_PROJECT_DIR/.tools/bin:$PATH"
+    - python scripts/agent_doctor.py --python "$(command -v python)"
     - pytest -q
   # GitHub partitions the same eligible suite across two VMs. This offline
   # job keeps the complete suite; no internal runner-capacity change is needed.

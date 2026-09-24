@@ -69,9 +69,36 @@ not an arbitrary system binary.
   artifacts. Old approved bundles use their own bundled bootstrap and Make
   contract in a separate workspace; do not mix old assets with a new checkout.
 
-Deployment render tests and air-gap deployment require Helm 4; use the
-checksum-pinned 4.3.0 client in [CI](../.github/workflows/ci.yml). Rendering
-uses the local chart and needs no cluster or remote chart repository.
+Deployment render tests require the existing Helm **4.3.0 linux-amd64** bytes
+recorded in [the Helm pin](../scripts/tools/helm-pin.txt). Prepare them explicitly:
+
+```sh
+# Connected preparation; installs only under this checkout's .tools/bin.
+sh scripts/tools/install-helm.sh
+# Disconnected preparation; fails on missing/corrupt archive, never downloads.
+sh scripts/tools/install-helm.sh --archive /approved/tools/helm-v4.3.0-linux-amd64.tar.gz
+```
+
+The installer verifies archive and binary hashes before execution and atomically
+replaces the destination only after verification. The controlled Task entry
+selects `.tools/bin` on PATH. For direct commands select that same directory on
+PATH explicitly; the doctor hashes the actual PATH-selected Helm without running
+it. Rendering uses the local chart and needs no cluster or chart repository.
+
+`qa:prerequisites` runs the read-only doctor before `qa:unit` and before any
+`qa:check` tools. Missing/foreign Helm fails before pytest collection. Python
+must be **CPython 3.14 GIL with experimental JIT disabled**; a later minor is not
+implicitly qualified. Prepared CI interpreters use
+`python scripts/agent_doctor.py --python "$(command -v python)"` without creating
+a local venv. Symlinks preserve virtualenv identity. GitHub unit shards run this
+gate after explicit preparation; GitLab transfers both `CI_TASK_ARCHIVE` and
+`CI_HELM_ARCHIVE` and installs them offline before the same gate.
+
+This first #482 V0 increment checks existing direct pins, dev-tool presence,
+Task/Helm executable hashes and tracked Qdrant agreement. It does **not** yet
+attest a complete transitive dependency inventory, installed image inventory,
+cached BM25 content or daemon/image availability. Those remain V0/#371 work;
+prerequisite success is neither application acceptance nor milestone completion.
 
 Discovery, doctor and verification never provision tools. Missing or foreign
 workspace binaries fail with remediation; installation is an explicit action.

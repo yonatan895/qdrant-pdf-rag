@@ -35,8 +35,9 @@ tasks:
     desc: Diagnose tool prerequisites (read-only)
     summary: |
       Runs `scripts/agent_doctor.py` (default unit profile; `PROFILE=sim`
-      adds Docker, `PROFILE=deploy` adds helm/skopeo/tar/openssl/sha256sum
-      plus oc-or-kubectl presence). Inputs: PY (default python3), PROFILE
+      adds Docker, `PROFILE=deploy` adds skopeo/tar/openssl/sha256sum
+      plus oc-or-kubectl presence). Every profile verifies pinned Task/Helm
+      bytes and CPython 3.14 GIL/no JIT. Inputs: PY (default python3), PROFILE
       (default unit). An explicit empty value is preserved and fails in the
       script rather than silently falling back; explicit false/zero-like
       strings pass through unchanged. Reads only: creates no environment,
