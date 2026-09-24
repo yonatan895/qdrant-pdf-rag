@@ -164,10 +164,11 @@ def normalize_native(
             'execution_sha': execution_commit['sha'], 'tests': counts, 'results': structured}
 
 
-def paginate(get, endpoint: str, key: str | None = None) -> list[dict[str, Any]]:
+def paginate(get, endpoint: str, key: str | None = None, *, identity_key: str = "id") -> list[dict[str, Any]]:
     """Read every native page; truncation, duplicate IDs and changing totals fail."""
     rows: list[dict[str, Any]] = []
-    ids: set[int] = set()
+    require(identity_key in {"id", "filename"})
+    ids: set[int | str] = set()
     total = None
     for page in range(1, 101):
         separator = '&' if '?' in endpoint else '?'
@@ -181,9 +182,11 @@ def paginate(get, endpoint: str, key: str | None = None) -> list[dict[str, Any]]
                 total = count
             require(count == total)
         for row in batch:
-            require(isinstance(row, dict) and type(row.get('id')) is int)
-            require(row['id'] not in ids)
-            ids.add(row['id'])
+            require(isinstance(row, dict))
+            identity = row.get(identity_key)
+            require(type(identity) is (int if identity_key == 'id' else str))
+            require(identity not in ids)
+            ids.add(identity)
             rows.append(row)
         if len(batch) < 100:
             require(total is None or len(rows) == total)

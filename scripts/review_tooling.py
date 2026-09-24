@@ -794,7 +794,7 @@ def validate_review_payload(
 LANE_REQUIREMENTS_BY_PROFILE: dict[str, set[str]] = {
     # Offline base is the minimal applicable set; tooling/tests categories add
     # lint_and_types and unit_tests in build_acceptance_summary. Prose-only
-    # changes never run the path-filtered ci/pytest lanes by policy.
+    # changes leave product lanes policy-unselected.
     ProfileName.OFFLINE.value: {"context_check", "reviewer"},
     ProfileName.DEPLOY.value: {"context_check", "lint_and_types", "unit_tests", "packaging", "reviewer"},
     ProfileName.STORAGE.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "gate_l1", "reviewer"},
@@ -803,15 +803,17 @@ LANE_REQUIREMENTS_BY_PROFILE: dict[str, set[str]] = {
     ProfileName.FULL.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "gate_l1", "reviewer"},
 }
 
-# agent_probes and eval_retrieval have no CI producer yet: live agent probes
-# stay a reviewer-side obligation (HTTP/lifecycle row) and semantic retrieval
-# evaluation is mode/venue-gated. They are reported as UNSELECTED unless a
-# producer supplies a status, and never block acceptance by themselves.
+# agent_probes and eval_retrieval remain explicit reviewer-side obligations
+# where selected by actual impact. Missing CI producers do not waive them;
+# the trusted consumer requires candidate-bound authorized human evidence.
 ALL_KNOWN_LANES = [
     "context_check",
     "lint_and_types",
     "unit_tests",
     "simulation",
+    "hazards",
+    "load",
+    "ha",
     "gate_l1",
     "packaging",
     "agent_probes",
@@ -908,17 +910,16 @@ class CandidateAcceptanceSummary:
         }
 
 
-def build_acceptance_summary(
-    manifest: dict[str, Any],
-    lane_statuses: dict[str, str],
-    review: NormalizedReviewResult | None = None,
-) -> CandidateAcceptanceSummary:
+def required_lanes(manifest: dict[str, Any]) -> set[str]:
     # Profile string or dict
-    raw_profile = manifest.get("profile", ProfileName.OFFLINE.value)
+    raw_profile = manifest.get("profile", ProfileName.FULL.value)
     if isinstance(raw_profile, dict):
-        profile_name = raw_profile.get("name", ProfileName.OFFLINE.value)
+        profile_name = raw_profile.get("name", ProfileName.FULL.value)
     else:
         profile_name = str(raw_profile)
+
+    if profile_name not in LANE_REQUIREMENTS_BY_PROFILE:
+        profile_name = ProfileName.FULL.value
 
     required_lanes = LANE_REQUIREMENTS_BY_PROFILE.get(
         profile_name,
@@ -934,8 +935,54 @@ def build_acceptance_summary(
     # Deploy always contributes the packaging obligation, even when the
     # cross-layer union selects the `full` profile (whose base set has no
     # packaging lane). A union of risks must never reduce verification.
-    if any(category in matched_cats for category in ("deploy", "unclassified", "unclassified_empty")):
+    if profile_name == ProfileName.FULL.value or any(
+            category in matched_cats for category in ("deploy", "unclassified", "unclassified_empty")):
         required_lanes = set(required_lanes) | {"packaging"}
+
+    required_lanes = set(required_lanes)
+    if "unit_tests" in required_lanes:
+        required_lanes.add("hazards")
+    if profile_name in {ProfileName.STORAGE.value, ProfileName.HTTP.value, ProfileName.FULL.value}:
+        required_lanes.add("load")
+    if profile_name in {ProfileName.STORAGE.value, ProfileName.FULL.value}:
+        required_lanes.add("ha")
+    paths = manifest.get("changed_paths", [])
+    if any(_match_any(path, ["Taskfile.yml", "taskfiles/**", "scripts/tools/**", "requirements*.txt",
+                              "locks/**", "scripts/dependency_lock.py", "scripts/prepare_python.py",
+                              "scripts/agent_doctor.py", "scripts/ci_evidence.py", "scripts/review_tooling.py",
+                              "scripts/acceptance_evidence.py", ".github/workflows/ci.yml"])
+           for path in paths):
+        required_lanes.update({"simulation", "gate_l1", "load", "ha", "packaging"})
+    if profile_name in {ProfileName.HTTP.value, ProfileName.FULL.value}:
+        required_lanes.add("agent_probes")
+    if (profile_name == ProfileName.FULL.value and (not paths or
+            any(category in matched_cats for category in ("unclassified", "unclassified_empty")))) or any(
+            _match_any(path, ["src/mainframe_rag/retrieve/**", "src/mainframe_rag/ingest/embed.py",
+                              "src/mainframe_rag/ingest/chunk.py", "src/mainframe_rag/ingest/identity.py",
+                              "src/mainframe_rag/ingest/ibm_pdf.py", "src/mainframe_rag/ingest/chrome.py",
+                              "src/mainframe_rag/ingest/classify.py", "src/mainframe_rag/ingest/context.py",
+                              "src/mainframe_rag/ingest/representation.py", "src/mainframe_rag/ingest/rules_version.py"])
+            for path in paths):
+        required_lanes.add("eval_retrieval")
+    if any(_match_any(path, ["scripts/verify_placement.py", "tests/test_placement.py",
+                            "tests/test_ha_cluster.py", "overlays/openshift/collection-policy.env",
+                            "overlays/openshift/values.yaml", ".github/workflows/ha.yml"])
+           for path in paths):
+        required_lanes.add("ha")
+    if any(_match_any(path, ["scripts/loadtest.py", "scripts/make_synthetic_pdf.py", "tests/test_load_tier.py", ".github/workflows/load.yml"])
+           for path in paths):
+        required_lanes.add("load")
+    return required_lanes
+
+
+def build_acceptance_summary(
+    manifest: dict[str, Any],
+    lane_statuses: dict[str, str],
+    review: NormalizedReviewResult | None = None,
+) -> CandidateAcceptanceSummary:
+    raw_profile = manifest.get("profile", ProfileName.FULL.value)
+    profile_name = raw_profile.get("name", ProfileName.FULL.value) if isinstance(raw_profile, dict) else str(raw_profile)
+    required = required_lanes(manifest)
 
     head_sha = str(manifest.get("head_sha", ""))
     base_sha = str(manifest.get("base_sha", ""))
@@ -950,7 +997,7 @@ def build_acceptance_summary(
     blocking_lanes: list[LaneEvaluation] = []
 
     for name in lanes_to_evaluate:
-        req = name in required_lanes
+        req = name in required
         status = lane_statuses.get(name)
         # If lane is 'reviewer', the validated candidate-bound review result
         # is authoritative. Workflow execution success alone is never code
@@ -1088,6 +1135,8 @@ def cmd_profile(args: argparse.Namespace) -> int:
         execution_sha=args.execution,
     )
 
+    manifest["changed_paths"] = paths
+    manifest["required_lanes"] = sorted(required_lanes(manifest))
     out_path = pathlib.Path(args.out or "candidate-manifest.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -1096,6 +1145,7 @@ def cmd_profile(args: argparse.Namespace) -> int:
     gh_output_path = args.github_output or os.environ.get("GITHUB_OUTPUT")
     if gh_output_path and os.path.exists(os.path.dirname(os.path.abspath(gh_output_path))):
         with open(gh_output_path, "a", encoding="utf-8") as f:
+            f.write("lanes=" + json.dumps(manifest["required_lanes"]) + "\n")
             f.write(f"profile={decision.profile.value}\n")
             f.write(f"needs_qdrant={str(decision.needs_qdrant).lower()}\n")
             f.write(f"needs_vllm={str(decision.needs_vllm).lower()}\n")

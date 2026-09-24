@@ -1,48 +1,8 @@
 name: ha
 on:
   pull_request:
-    paths:
-      - "src/mainframe_rag/config.py"
-      - "src/mainframe_rag/ingest/**"
-      - "scripts/verify_placement.py"
-      - "scripts/qdrant_cluster.py"
-      - "scripts/qdrant_pin.py"
-      - "overlays/openshift/collection-policy.env"
-      - "overlays/openshift/values.yaml"
-      - "tests/test_ha_cluster.py"
-      - "tests/test_placement.py"
-      - "images.txt"
-      - "Taskfile.yml"
-      - "taskfiles/**"
-      - "requirements*.lock.txt"
-      - "locks/**"
-      - "scripts/dependency_lock.py"
-      - "scripts/prepare_python.py"
-      - "scripts/agent_doctor.py"
-      - "scripts/tools/**"
-      - ".github/workflows/ha.yml"
   push:
     branches: [main]
-    paths:
-      - "src/mainframe_rag/config.py"
-      - "src/mainframe_rag/ingest/**"
-      - "scripts/verify_placement.py"
-      - "scripts/qdrant_cluster.py"
-      - "scripts/qdrant_pin.py"
-      - "overlays/openshift/collection-policy.env"
-      - "overlays/openshift/values.yaml"
-      - "tests/test_ha_cluster.py"
-      - "tests/test_placement.py"
-      - "images.txt"
-      - "Taskfile.yml"
-      - "taskfiles/**"
-      - "requirements*.lock.txt"
-      - "locks/**"
-      - "scripts/dependency_lock.py"
-      - "scripts/prepare_python.py"
-      - "scripts/agent_doctor.py"
-      - "scripts/tools/**"
-      - ".github/workflows/ha.yml"
 
 permissions:
   contents: read
@@ -52,6 +12,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      lanes: ${{ steps.profile.outputs.lanes }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - id: profile
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EXECUTION_SHA: ${{ github.sha }}
+        run: >-
+          python3 scripts/review_tooling.py profile --base "$BASE_SHA" --head "$EXECUTION_SHA"
+          --out "$RUNNER_TEMP/dispatch-manifest.json" --github-output "$GITHUB_OUTPUT"
+
   # Multi-peer placement/fault lane (tests/test_ha_cluster.py, `sh scripts/tools/run-task.sh qa:ha`):
   # starts the pinned Qdrant image (images.txt) as a real three-peer cluster
   # with separate storage and the checked-in production tuple (6 shards /
@@ -64,6 +43,8 @@ jobs:
   # Path-filtered (unrelated changes must not pay for the lane) and
   # GitHub-only: air-gap GitLab runners cannot pull Docker Hub.
   ha:
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.lanes), 'ha')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

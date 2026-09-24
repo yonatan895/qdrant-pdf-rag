@@ -27,6 +27,15 @@ executable files beneath `docs/` are not automatically prose. Shared test
 fixtures select their dependent suites; mixed and unknown impact cannot omit
 packaging simply because their combined profile is `full`.
 
+`review_tooling.required_lanes` is shared by native dispatch and the approved-base
+consumer. Workflow files always schedule their small selector; policy-unselected
+jobs can skip without disguising required-but-skipped work. Native hazard, load
+and HA obligations join the existing lane taxonomy. Shared verification inputs
+select the integration/packaging consumers they can affect. Missing or unknown
+profile metadata retains the full obligation set. Required live-agent and
+semantic-retrieval evidence remains an attributed human-review obligation where
+no native CI producer establishes it; absent automation is not a waiver.
+
 Take the union for cross-layer impact and test the interactions. A tooling label
 does not excuse retrieval changes from evaluation. Avoid expensive unrelated
 checks and record relevance decisions. Retrieval changes including chunking,

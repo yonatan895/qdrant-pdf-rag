@@ -11,11 +11,9 @@ Tests:
 """
 from __future__ import annotations
 
-import fnmatch
 import json
 import os
 import pathlib
-import re
 import shlex
 import subprocess
 import sys
@@ -744,23 +742,26 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
         self.assertEqual(lint.state, LaneState.UNSELECTED)
         self.assertEqual(unit.state, LaneState.UNSELECTED)
 
-    def test_producerless_lanes_are_unselected_and_do_not_block(self):
-        # agent_probes/eval_retrieval have no CI producer; they must never
-        # block purely by being absent.
+    def test_required_agent_probes_are_not_waived_by_a_missing_ci_producer(self):
+        # The HTTP contract requires actual agent probes even when no native
+        # producer reports them. An authorized human must supply the evidence.
         manifest = self._sample_manifest(profile="http")
         lane_statuses = {
             "context_check": "success",
             "lint_and_types": "success",
             "unit_tests": "success",
+            "hazards": "success",
+            "load": "success",
             "simulation": "success",
             "reviewer": "success",
         }
         summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
-        self.assertTrue(summary.all_prerequisites_met)
-        for name in ("agent_probes", "eval_retrieval"):
-            lane = next(l for l in summary.lanes if l.name == name)
-            self.assertFalse(lane.required)
-            self.assertEqual(lane.state, LaneState.UNSELECTED)
+        self.assertFalse(summary.all_prerequisites_met)
+        lane = next(l for l in summary.lanes if l.name == "agent_probes")
+        self.assertTrue(lane.required)
+        self.assertEqual(lane.state, LaneState.SELECTED_MISSING)
+        evaluation = next(l for l in summary.lanes if l.name == "eval_retrieval")
+        self.assertFalse(evaluation.required)
 
     def test_all_selected_lanes_passed_produces_ready(self):
         manifest = self._sample_manifest(profile="http")
@@ -768,6 +769,8 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
             "context_check": "success",
             "lint_and_types": "success",
             "unit_tests": "success",
+            "hazards": "success",
+            "load": "success",
             "simulation": "success",
             "agent_probes": "success",
             "reviewer": "success",
@@ -1441,17 +1444,25 @@ class TestTaskCiConsumers(unittest.TestCase):
     root = pathlib.Path(__file__).resolve().parents[1]
 
     def test_task_edits_trigger_context_and_load_on_push_and_pull_request(self):
+        import yaml
+        from scripts.review_tooling import classify_paths, required_lanes
+
         changes = ("Taskfile.yml", "taskfiles/quality.yml", "taskfiles/airgap.yml",
                    "scripts/tools/run-task.sh", "scripts/tools/task-pin.txt")
         for workflow in ("agent-context.yml", "load.yml"):
-            text = (self.root / ".github/workflows" / workflow).read_text()
-            blocks = re.findall(r"    paths:\n((?:      - .*\n)+)", text)
-            self.assertEqual(len(blocks), 2, workflow)
-            for block in blocks:
-                patterns = [line.strip()[3:-1] for line in block.splitlines()]
-                for path in changes:
-                    with self.subTest(workflow=workflow, path=path):
-                        self.assertTrue(any(fnmatch.fnmatch(path, p) for p in patterns))
+            document = yaml.safe_load((self.root / ".github/workflows" / workflow).read_text())
+            triggers = document.get("on", document.get(True))
+            self.assertIn("pull_request", triggers)
+            self.assertIn("push", triggers)
+            for event in ("pull_request", "push"):
+                self.assertFalse((triggers[event] or {}).get("paths"))
+                self.assertFalse((triggers[event] or {}).get("paths-ignore"))
+        for path in changes:
+            decision = classify_paths([path])
+            lanes = required_lanes({"profile": decision.profile.value,
+                                    "matched_categories": decision.matched_categories,
+                                    "changed_paths": [path]})
+            self.assertTrue({"context_check", "load", "ha", "simulation", "packaging"}.issubset(lanes), path)
 
     def test_github_unit_and_context_contract_lanes_require_the_runner(self):
         product = (self.root / ".github/workflows/ci.yml").read_text()
@@ -1478,13 +1489,13 @@ class TestTaskCiConsumers(unittest.TestCase):
         command = next(s["run"] for s in jobs["unit"]["steps"] if s.get("name") == "Run unit shard")
         self.assertIn("-p tests.ci_shard --unit-shard=${{ matrix.shard }}", command)
         gate = jobs["test"]
-        self.assertEqual(gate["needs"], "unit")
+        self.assertEqual(gate["needs"], ["select", "unit"])
         self.assertEqual(gate["if"], "always()")
         step = gate["steps"][0]
         self.assertEqual(step["env"]["UNIT_RESULT"], "${{ needs.unit.result }}")
         for result in ("success", "failure", "cancelled", "skipped", ""):
             proc = subprocess.run(["sh", "-eu", "-c", step["run"]],
-                                  env={"UNIT_RESULT": result}, check=False)
+                                  env={"SELECT_RESULT": "success", "UNIT_REQUIRED": "true", "UNIT_RESULT": result}, check=False)
             self.assertEqual(proc.returncode == 0, result == "success")
 
     def test_load_step_preserves_failure_skip_and_no_tests_guards(self):
@@ -1771,6 +1782,150 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
         raw = buffer.getvalue()
         return raw, "sha256:" + hashlib.sha256(raw).hexdigest()
 
+    def test_human_review_requires_authorized_current_api_record_and_preserves_rejection(self):
+        import copy
+
+        from scripts.acceptance import collect_review
+
+        candidate = self.fixture()[0]["candidate"]
+        payload = {"schema_version": 1, "head_sha": candidate["head_sha"], "base_sha": candidate["base_sha"],
+                   "execution_sha": candidate["execution_sha"], "code_assessment": "acceptable",
+                   "verification": "complete", "candidate_currentness": "current",
+                   "merge_readiness": "ready_for_maintainer", "material_findings": [], "evidence": {}}
+        comment = {"id": 11, "user": {"id": 7, "login": "synthetic", "type": "User"},
+                   "author_association": "OWNER", "created_at": "2026-09-24T10:00:00Z",
+                   "updated_at": "2026-09-24T10:00:00Z", "body": json.dumps(payload),
+                   "html_url": "https://github.com/synthetic/repository/pull/3#issuecomment-11"}
+        class API:
+            prefix = "repos/synthetic/repository/"
+            def __init__(self):
+                self.comment = copy.deepcopy(comment)
+                self.reviews = []
+                self.permission = "admin"
+            def get(self, endpoint):
+                if "/collaborators/" in endpoint:
+                    return {"permission": self.permission}
+                if "/reviews?" in endpoint:
+                    return self.reviews
+                return [self.comment]
+        api = API()
+        review, manual, identity = collect_review(api, {"number": 3, "user": {"id": 99}}, candidate)
+        self.assertEqual(review.merge_readiness, "ready_for_maintainer")
+        self.assertEqual(identity["actor_id"], 7)
+        self.assertEqual(manual, {})
+        for change in ("bot", "author", "stranger", "read-only", "stale", "changes-required", "native-rejection"):
+            with self.subTest(change=change):
+                api = API()
+                revised = copy.deepcopy(payload)
+                if change == "bot":
+                    api.comment["user"]["type"] = "Bot"
+                elif change == "author":
+                    api.comment["user"]["id"] = 99
+                elif change == "stranger":
+                    api.comment["author_association"] = "NONE"
+                elif change == "read-only":
+                    api.permission = "read"
+                elif change == "stale":
+                    revised["base_sha"] = "f" * 40
+                elif change == "changes-required":
+                    revised["code_assessment"] = "changes_required"
+                else:
+                    api.reviews = [{**copy.deepcopy(comment), "id": 12, "body": "",
+                                    "submitted_at": "2026-09-24T11:00:00Z", "state": "CHANGES_REQUESTED",
+                                    "commit_id": candidate["head_sha"]}]
+                api.comment["body"] = json.dumps(revised)
+                review, _, _ = collect_review(api, {"number": 3, "user": {"id": 99}}, candidate)
+                self.assertTrue(review is None or review.merge_readiness == "not_ready")
+        api = API()
+        previous = copy.deepcopy(payload)
+        previous["material_findings"] = [{"id": "F1", "disposition": "unresolved"}]
+        api.reviews = [{**copy.deepcopy(comment), "id": 9, "body": json.dumps(previous),
+                        "submitted_at": "2026-09-24T09:00:00Z", "state": "COMMENTED",
+                        "commit_id": candidate["head_sha"]}]
+        review, _, _ = collect_review(api, {"number": 3, "user": {"id": 99}}, candidate)
+        self.assertEqual(review.merge_readiness, "not_ready")
+        self.assertIn("earlier material finding", " ".join(review.validation_errors))
+
+    def test_collector_requires_all_native_shards_and_never_reuses_an_older_green_run(self):
+        import hashlib
+
+        from scripts.acceptance import collect_native
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "scripts").mkdir()
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "scripts/review_tooling.py").write_bytes(b"approved policy")
+            (root / "scripts/ci_evidence.py").write_bytes(b"approved producer")
+            (root / ".github/workflows/ci.yml").write_bytes(b"approved workflow")
+            def git(*args):
+                return subprocess.check_output(["git", *args], cwd=root, text=True,
+                                               stderr=subprocess.DEVNULL).strip()
+            git("init", "-b", "main")
+            git("config", "user.name", "Synthetic Test")
+            git("config", "user.email", "synthetic@example.invalid")
+            git("add", ".")
+            git("commit", "-m", "approved base")
+            base = git("rev-parse", "HEAD")
+            args, receipt, xml = self.fixture()
+            args["candidate"]["base_sha"] = receipt["base_sha"] = base
+            receipt["execution_parents"][0] = base
+            args["execution_commit"]["parents"][0]["sha"] = base
+            receipt["policy_sha256"] = hashlib.sha256(b"approved policy").hexdigest()
+            receipt["producer_sha256"] = hashlib.sha256(b"approved producer").hexdigest()
+            archive, digest = self.packed(receipt, xml)
+            args["artifact"].update(digest=digest, size_in_bytes=len(archive))
+            pr = {"number": 3, "user": {"id": 99}, "state": "open", "mergeable": True,
+                  "merge_commit_sha": "c" * 40,
+                  "head": {"sha": "a" * 40, "repo": {"id": 84}},
+                  "base": {"sha": base, "ref": "main",
+                           "repo": {"id": 42, "full_name": "synthetic/repository", "default_branch": "main"}}}
+            class API:
+                repository = "synthetic/repository"
+                prefix = "repos/synthetic/repository/"
+                def __init__(self):
+                    self.newer = False
+                    self.seen = []
+                def get(self, endpoint):
+                    self.seen.append(endpoint)
+                    if "actions/runs?" in endpoint:
+                        runs = [args["run"]]
+                        if self.newer:
+                            runs.append({**args["run"], "id": 124, "status": "in_progress"})
+                        return {"total_count": len(runs), "workflow_runs": runs}
+                    if endpoint.endswith("/jobs?per_page=100&page=1"):
+                        return {"total_count": 1, "jobs": [args["job"]]}
+                    if endpoint.endswith("/artifacts?per_page=100&page=1"):
+                        return {"total_count": 1, "artifacts": [args["artifact"]]}
+                    if "/commits/" in endpoint:
+                        return args["execution_commit"]
+                    if endpoint.endswith("/124"):
+                        return {**args["run"], "id": 124, "status": "in_progress"}
+                    return args["run"]
+                def raw(self, endpoint):
+                    return archive
+                def blob(self, sha, path):
+                    if path == "scripts/ci_evidence.py":
+                        return b"candidate producer" if getattr(self, "forged_producer", False) else b"approved producer"
+                    if path == "scripts/review_tooling.py":
+                        return b"approved policy"
+                    return b"approved workflow"
+            api = API()
+            result = collect_native(api, pr, root)
+            self.assertEqual(next(r for r in result["native"] if r["job"] == "unit (1/2)")["status"], "success")
+            self.assertNotIn("unit_tests", result["lane_statuses"])
+            api.newer = True
+            result = collect_native(api, pr, root)
+            self.assertEqual(result["runs"]["ci.yml"]["run_id"], 124)
+            self.assertTrue(all(r["status"] != "success" for r in result["native"]))
+            self.assertIn("repos/synthetic/repository/actions/runs/124/attempts/2/jobs?per_page=100&page=1", api.seen)
+            api.newer = False
+            api.forged_producer = True
+            # The receipt still claims the approved producer digest. Actual
+            # candidate source bytes must independently contradict that claim.
+            with self.assertRaises(ValueError):
+                collect_native(api, pr, root)
+
     def test_accepts_exact_native_job_attempt_and_actual_test_records(self):
         from scripts.acceptance_evidence import normalize_native
 
@@ -1888,3 +2043,237 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAcceptanceSnapshot(unittest.TestCase):
+    def test_unknown_or_missing_profile_keeps_full_obligations(self):
+        from scripts.review_tooling import required_lanes
+
+        for manifest in ({}, {"profile": {}}, {"profile": "unknown"}):
+            with self.subTest(manifest=manifest):
+                self.assertTrue({"simulation", "packaging", "load", "ha", "agent_probes",
+                                 "eval_retrieval", "unit_tests", "hazards"} <= required_lanes(manifest))
+
+    def test_paginated_pr_files_preserve_rename_bytes_and_refuse_truncation(self):
+        from scripts.acceptance import changed_pr_paths
+
+        class API:
+            prefix = "repos/synthetic/repository/"
+            def get(self, endpoint):
+                if endpoint.endswith("page=1"):
+                    return [{"filename": f"docs/page-{i}.md", "status": "modified"} for i in range(100)]
+                return [{"filename": "docs/new \r\nname.md", "previous_filename": "src/old \tname.py",
+                         "status": "renamed"}]
+        api = API()
+        paths = changed_pr_paths(api, {"number": 3, "changed_files": 101})
+        self.assertEqual(paths[-2:], ["docs/new \r\nname.md", "src/old \tname.py"])
+        with self.assertRaises(ValueError):
+            changed_pr_paths(api, {"number": 3, "changed_files": 102})
+
+    def test_recheck_refuses_candidate_review_and_attempt_movement(self):
+        import copy
+        from unittest.mock import patch
+
+        from scripts.acceptance import candidate_identity, recheck_current
+
+        pr = {"number": 3, "user": {"id": 99}, "state": "open", "mergeable": True, "draft": False,
+              "merge_commit_sha": "c" * 40, "head": {"sha": "a" * 40, "repo": {"id": 84}},
+              "base": {"sha": "b" * 40, "ref": "main", "repo": {
+                  "id": 42, "full_name": "synthetic/repository", "default_branch": "main"}}}
+        class API:
+            repository = "synthetic/repository"
+            prefix = "repos/synthetic/repository/"
+            def __init__(self):
+                self.pr = copy.deepcopy(pr)
+                self.run = {"id": 123, "path": ".github/workflows/ci.yml",
+                            "run_attempt": 1, "status": "completed"}
+            def get(self, endpoint):
+                if "actions/runs?" in endpoint:
+                    return {"total_count": 1, "workflow_runs": [self.run]}
+                return self.pr
+        result = {"candidate": candidate_identity(pr, API.repository), "draft": False,
+                  "review_identity": {"id": 10}, "all_prerequisites_met": False,
+                  "runs": {"ci.yml": {"run_id": 123, "run_attempt": 1, "status": "completed"}}}
+        with patch("scripts.acceptance.collect_review", return_value=(None, {}, {"id": 10})) as review:
+            recheck_current(API(), result)
+            for mutation in ("head", "base", "merge", "draft", "attempt", "run", "review"):
+                with self.subTest(mutation=mutation):
+                    api = API()
+                    review.return_value = (None, {}, {"id": 10})
+                    if mutation in {"head", "base"}:
+                        api.pr[mutation]["sha"] = "d" * 40
+                    elif mutation == "merge":
+                        api.pr["merge_commit_sha"] = "d" * 40
+                    elif mutation == "draft":
+                        api.pr["draft"] = True
+                    elif mutation == "attempt":
+                        api.run["run_attempt"] = 2
+                    elif mutation == "run":
+                        api.run["id"] = 124
+                    else:
+                        review.return_value = (None, {}, {"id": 11})
+                    with self.assertRaises(ValueError):
+                        recheck_current(api, result)
+
+
+    def test_read_only_cli_never_emits_success_after_recheck_failure(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        from scripts.acceptance import main
+
+        result = {"all_prerequisites_met": True}
+        with patch("scripts.acceptance.collect_acceptance", return_value=result), \
+             patch("scripts.acceptance.recheck_current") as recheck:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["--repository", "synthetic/repository", "--pr", "3"]), 0)
+            self.assertTrue(json.loads(output.getvalue())["all_prerequisites_met"])
+            recheck.side_effect = ValueError("sensitive upstream detail")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["--repository", "synthetic/repository", "--pr", "3"]), 1)
+            self.assertFalse(json.loads(output.getvalue())["all_prerequisites_met"])
+            self.assertNotIn("sensitive", output.getvalue())
+
+    def test_summary_consumes_current_review_and_draft_state(self):
+        import copy
+        from unittest.mock import patch
+
+        from scripts.acceptance import candidate_identity, collect_acceptance
+
+        pr = {"number": 3, "user": {"id": 99}, "state": "open", "mergeable": True, "draft": False, "changed_files": 1,
+              "merge_commit_sha": "c" * 40, "head": {"sha": "a" * 40, "repo": {"id": 84}},
+              "base": {"sha": "b" * 40, "ref": "main", "repo": {
+                  "id": 42, "full_name": "synthetic/repository", "default_branch": "main"}}}
+        candidate = candidate_identity(pr, "synthetic/repository")
+        payload = {"schema_version": 1, "head_sha": "a" * 40, "base_sha": "b" * 40,
+                   "execution_sha": "c" * 40, "code_assessment": "acceptable",
+                   "verification": "complete", "candidate_currentness": "current",
+                   "merge_readiness": "ready_for_maintainer", "material_findings": [], "evidence": {}}
+        class API:
+            repository = "synthetic/repository"
+            prefix = "repos/synthetic/repository/"
+            def __init__(self):
+                self.pr = copy.deepcopy(pr)
+                self.payload = copy.deepcopy(payload)
+            def get(self, endpoint):
+                if "/files?" in endpoint:
+                    return [{"filename": "docs/explanation.md", "status": "modified"}]
+                if "/reviews?" in endpoint:
+                    return []
+                if "/comments?" in endpoint:
+                    return [{"id": 11, "user": {"id": 7, "login": "reviewer", "type": "User"},
+                             "author_association": "COLLABORATOR", "created_at": "2026-09-24T10:00:00Z",
+                             "body": json.dumps(self.payload), "html_url": "https://example.invalid/review"}]
+                if "/permission" in endpoint:
+                    return {"permission": "write"}
+                return self.pr
+        native = {"candidate": candidate, "lane_statuses": {"context_check": "success"},
+                  "native": [], "runs": {}, "policy_sha256": "d" * 64}
+        with patch("scripts.acceptance.collect_native", return_value=native):
+            api = API()
+            result = collect_acceptance(api, 3, pathlib.Path.cwd())
+            self.assertTrue(result["all_prerequisites_met"])
+            self.assertEqual({lane["name"] for lane in result["lanes"] if lane["required"]},
+                             {"context_check", "reviewer"})
+            api.pr["draft"] = True
+            self.assertFalse(collect_acceptance(api, 3, pathlib.Path.cwd())["all_prerequisites_met"])
+            api.pr["draft"] = False
+            api.payload["code_assessment"] = "changes_required"
+            self.assertFalse(collect_acceptance(api, 3, pathlib.Path.cwd())["all_prerequisites_met"])
+            api.payload = payload
+            native["lane_statuses"]["context_check"] = "skipped"
+            self.assertFalse(collect_acceptance(api, 3, pathlib.Path.cwd())["all_prerequisites_met"])
+
+    def test_publisher_pending_precedes_collection_and_stale_result_is_failure(self):
+        import copy
+        from unittest.mock import patch
+
+        from scripts.acceptance import publish_acceptance
+
+        events = []
+        class API:
+            prefix = "repos/synthetic/repository/"
+            def get(self, endpoint):
+                return {"head": {"sha": "a" * 40}}
+            def write(self, endpoint, payload, *, method):
+                events.append((method, copy.deepcopy(payload)))
+                return {"id": 17}
+        def collect(*args):
+            self.assertEqual(events[0][1]["status"], "in_progress")
+            return {"candidate": {"head_sha": "a" * 40}, "all_prerequisites_met": True,
+                    "markdown_report": "Verified summary"}
+        with patch("scripts.acceptance.collect_acceptance", side_effect=collect), \
+             patch("scripts.acceptance.recheck_current") as recheck:
+            result = publish_acceptance(API(), 3, pathlib.Path.cwd())
+            self.assertTrue(result["all_prerequisites_met"])
+            self.assertEqual(events[-1][1]["conclusion"], "success")
+            events.clear()
+            recheck.side_effect = ValueError("upstream detail")
+            result = publish_acceptance(API(), 3, pathlib.Path.cwd())
+            self.assertFalse(result["all_prerequisites_met"])
+            self.assertEqual(events[-1][1]["conclusion"], "failure")
+            self.assertNotIn("upstream detail", json.dumps(events))
+
+    def test_publisher_workflow_keeps_candidate_data_out_of_privileged_execution(self):
+        import yaml
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        workflow = yaml.safe_load((root / '.github/workflows/acceptance.yml').read_text())
+        events = workflow.get('on', workflow.get(True))
+        self.assertTrue({'pull_request_target', 'workflow_run', 'issue_comment', 'push', 'schedule'} <= events.keys())
+        for name, job in workflow['jobs'].items():
+            self.assertIn("github.ref == 'refs/heads/main'", job['if'])
+            checkout = next(step for step in job['steps'] if 'actions/checkout@' in step.get('uses', ''))
+            self.assertEqual(checkout['with']['ref'], 'main')
+            self.assertFalse(checkout['with']['persist-credentials'])
+            commands = [step['run'] for step in job['steps'] if 'run' in step]
+            self.assertEqual(len(commands), 1)
+            self.assertIn('python -m scripts.acceptance', commands[0])
+            self.assertNotIn('github.event.', commands[0])
+            if name == 'trusted-app':
+                self.assertIn("ACCEPTANCE_APP_ENABLED == 'true'", job['if'])
+                self.assertEqual(job['environment'], 'acceptance-publisher')
+                token = next(step for step in job['steps'] if step.get('id') == 'app')
+                self.assertEqual(token['with']['permission-checks'], 'write')
+                self.assertEqual(token['with']['private-key'], '${{ secrets.ACCEPTANCE_APP_PRIVATE_KEY }}')
+            else:
+                self.assertNotIn('environment', job)
+        signal = yaml.safe_load((root / '.github/workflows/acceptance-review-signal.yml').read_text())
+        self.assertEqual(signal['permissions'], {})
+        self.assertEqual(signal['jobs']['signal']['steps'], [{'run': 'true'}])
+
+    def test_gitlab_l1_note_appends_literal_body_without_claiming_marker_ownership(self):
+        import yaml
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        workflow = yaml.safe_load((root / '.gitlab-ci.yml').read_text())
+        job = next(value for value in workflow.values() if isinstance(value, dict)
+                   and any('NOTE_BODY=' in step for step in value.get('script', []) if isinstance(step, str)))
+        script = next(step for step in job['script'] if 'NOTE_BODY=' in step)
+        with tempfile.TemporaryDirectory() as directory:
+            temp = pathlib.Path(directory)
+            capture = temp / 'curl-args.json'
+            stub = temp / 'curl'
+            stub.write_text('#!' + sys.executable + '\nimport json, os, sys\n'
+                            'open(os.environ["CURL_CAPTURE"], "w").write(json.dumps(sys.argv[1:]))\n')
+            stub.chmod(0o755)
+            (temp / 'eval-delta.md').write_text('@literal;type=text/plain\n<!-- gate-l1-report -->')
+            env = {**os.environ, 'PATH': str(temp) + os.pathsep + os.environ['PATH'],
+                   'CURL_CAPTURE': str(capture), 'CI_MERGE_REQUEST_IID': '3', 'GITLAB_TOKEN': 'synthetic',
+                   'CI_COMMIT_SHA': 'a' * 40, 'CI_PIPELINE_ID': '123', 'CI_JOB_URL': 'https://example.invalid/jobs/9',
+                   'CI_API_V4_URL': 'https://example.invalid/api/v4', 'CI_PROJECT_ID': '7'}
+            for key in ('CI_MERGE_REQUEST_SOURCE_BRANCH_SHA', 'CI_MERGE_REQUEST_TARGET_BRANCH_SHA',
+                        'CI_MERGE_REQUEST_DIFF_BASE_SHA'):
+                env.pop(key, None)
+            subprocess.run(['sh', '-c', script], cwd=temp, env=env, check=True)
+            args = json.loads(capture.read_text())
+            self.assertEqual(args[args.index('-X') + 1], 'POST')
+            self.assertEqual(args[args.index('-X') + 2], 'https://example.invalid/api/v4/projects/7/merge_requests/3/notes')
+            body = args[args.index('--form-string') + 1]
+            self.assertIn('Head: ' + 'a' * 40, body)
+            self.assertIn('Target: unavailable', body)
+            self.assertIn('@literal;type=text/plain', body)
+            self.assertIn('Job: https://example.invalid/jobs/9', body)

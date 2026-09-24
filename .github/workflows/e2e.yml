@@ -18,14 +18,8 @@ name: e2e
 
 on:
   pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.markdown"
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.markdown"
   workflow_dispatch:
 
 permissions:
@@ -41,8 +35,34 @@ env:
   AGENT_IMAGE_LOCAL: mainframe-rag/agent
 
 jobs:
+  select:
+    env:
+      SHARE: "false"
+    concurrency:
+      group: select-${{ github.ref || github.run_id }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      lanes: ${{ steps.profile.outputs.lanes }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - id: profile
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EXECUTION_SHA: ${{ github.sha }}
+        run: >-
+          python3 scripts/review_tooling.py profile --base "$BASE_SHA" --head "$EXECUTION_SHA"
+          --out "$RUNNER_TEMP/dispatch-manifest.json" --github-output "$GITHUB_OUTPUT"
+
   # ---------------------------------------------------------------- build
   build:
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.lanes), 'packaging')
     concurrency:
       group: build-${{ github.ref || github.run_id }}
       cancel-in-progress: false
@@ -795,6 +815,8 @@ jobs:
 
   # Offline rendering of the production Helm launchers.
   airgap-dryrun:
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.lanes), 'packaging')
     concurrency:
       group: airgap-dryrun-${{ github.ref || github.run_id }}
       cancel-in-progress: false
