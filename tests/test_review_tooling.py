@@ -1907,9 +1907,12 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                 prefix = "repos/synthetic/repository/"
                 def __init__(self):
                     self.newer = False
+                    self.live_base = base
                     self.seen = []
                 def get(self, endpoint):
                     self.seen.append(endpoint)
+                    if endpoint.endswith("git/ref/heads/main"):
+                        return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": self.live_base}}
                     if "actions/runs?" in endpoint:
                         runs = [args["run"]]
                         if self.newer:
@@ -1935,6 +1938,10 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                         return b"candidate dispatch" if getattr(self, "changed_input", None) == path else (root / path).read_bytes()
                     return b"approved workflow"
             api = API()
+            api.live_base = "d" * 40
+            with self.assertRaises(ValueError):
+                collect_native(api, pr, root)
+            api.live_base = base
             result = collect_native(api, pr, root)
             self.assertEqual(next(r for r in result["native"] if r["job"] == "unit (1/2)")["status"], "success")
             self.assertNotIn("unit_tests", result["lane_statuses"])
@@ -2204,9 +2211,12 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             prefix = "repos/synthetic/repository/"
             def __init__(self):
                 self.pr = copy.deepcopy(pr)
+                self.base_ref = "b" * 40
                 self.run = {"id": 123, "path": ".github/workflows/ci.yml",
                             "run_attempt": 1, "status": "completed"}
             def get(self, endpoint):
+                if endpoint.endswith("git/ref/heads/main"):
+                    return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": self.base_ref}}
                 if "actions/runs?" in endpoint:
                     return {"total_count": 1, "workflow_runs": [self.run]}
                 return self.pr
@@ -2215,7 +2225,7 @@ class TestAcceptanceSnapshot(unittest.TestCase):
                   "runs": {"ci.yml": {"run_id": 123, "run_attempt": 1, "status": "completed"}}}
         with patch("scripts.acceptance.collect_review", return_value=(None, {}, {"id": 10})) as review:
             recheck_current(API(), result)
-            for mutation in ("head", "base", "merge", "draft", "attempt", "run", "review"):
+            for mutation in ("head", "base", "merge", "draft", "attempt", "run", "review", "live_base"):
                 with self.subTest(mutation=mutation):
                     api = API()
                     review.return_value = (None, {}, {"id": 10})
@@ -2227,6 +2237,8 @@ class TestAcceptanceSnapshot(unittest.TestCase):
                         api.pr["draft"] = True
                     elif mutation == "attempt":
                         api.run["run_attempt"] = 2
+                    elif mutation == "live_base":
+                        api.base_ref = "d" * 40
                     elif mutation == "run":
                         api.run["id"] = 124
                     else:
@@ -2421,12 +2433,15 @@ class ReviewTemplateTests(unittest.TestCase):
             repository = 'synthetic/repository'
             prefix = 'repos/synthetic/repository/'
 
-            def __init__(self, move=False, wrong_parents=False):
+            def __init__(self, move=False, wrong_parents=False, base_refs=None):
+                self.base_refs = iter(base_refs or ["b" * 40, "b" * 40])
                 self.reads = 0
                 self.move = move
                 self.wrong_parents = wrong_parents
 
             def get(self, endpoint):
+                if endpoint.endswith('git/ref/heads/main'):
+                    return {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': next(self.base_refs)}}
                 if endpoint.endswith('pulls/3'):
                     self.reads += 1
                     result = copy.deepcopy(pr)
@@ -2441,9 +2456,43 @@ class ReviewTemplateTests(unittest.TestCase):
         self.assertEqual([result[k] for k in ('head_sha', 'base_sha', 'execution_sha')],
                          ['a' * 40, 'b' * 40, 'c' * 40])
         self.assertEqual(validate_review_payload(result).merge_readiness, 'not_ready')
-        for api in (API(move=True), API(wrong_parents=True)):
+        for api in (API(move=True), API(wrong_parents=True),
+                    API(base_refs=["d" * 40]), API(base_refs=["b" * 40, "d" * 40])):
             with self.subTest(api=api), self.assertRaises(ValueError):
                 review_template(api, 3)
+
+    def test_live_base_requires_exact_commit_ref_and_encodes_branch(self):
+        import copy
+
+        from scripts.acceptance import require_current_base
+
+        branch = 'release/topic#雪'
+        pr = {'base': {'ref': branch}}
+        candidate = {'base_sha': 'b' * 40}
+        valid = {'ref': 'refs/heads/' + branch, 'object': {'type': 'commit', 'sha': 'b' * 40}}
+
+        class API:
+            prefix = 'repos/synthetic/repository/'
+
+            def __init__(self, record):
+                self.record = record
+
+            def get(self, endpoint):
+                self.endpoint = endpoint
+                return self.record
+
+        api = API(valid)
+        require_current_base(api, pr, candidate)
+        self.assertEqual(api.endpoint, 'repos/synthetic/repository/git/ref/heads/'
+                         'release/topic%23%E9%9B%AA')
+        for key, value in [('ref', 'refs/heads/other'), ('type', 'tag'), ('sha', 'd' * 40)]:
+            wrong = copy.deepcopy(valid)
+            target = wrong if key == 'ref' else wrong['object']
+            target[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                require_current_base(API(wrong), pr, candidate)
+        with self.assertRaises(KeyError):
+            require_current_base(API({}), pr, candidate)
 
     def test_template_cli_refuses_publication_and_bulk_selection(self):
         import contextlib

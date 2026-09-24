@@ -8,6 +8,7 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from scripts.acceptance_evidence import LIMIT, PRODUCERS, normalize_native, paginate, require
 
@@ -72,6 +73,15 @@ def candidate_identity(pr: dict[str, Any], repository: str) -> dict[str, Any]:
     return result
 
 
+def require_current_base(api: GitHub, pr: dict[str, Any], candidate: dict[str, Any]) -> None:
+    """PR merge metadata may lag a default-branch push; read the live ref too."""
+    branch = pr['base']['ref']
+    require(isinstance(branch, str) and bool(branch))
+    ref = api.get(api.prefix + 'git/ref/heads/' + quote(branch, safe='/'))
+    require(ref['ref'] == 'refs/heads/' + branch and ref['object']['type'] == 'commit')
+    require(ref['object']['sha'] == candidate['base_sha'])
+
+
 def review_template(api: GitHub, number: int) -> dict[str, Any]:
     """Generate identity fields, never a verdict or a submitted review."""
     from scripts.review_tooling import SCHEMA_VERSION
@@ -79,11 +89,13 @@ def review_template(api: GitHub, number: int) -> dict[str, Any]:
     require(type(number) is int and number > 0)
     pr = api.get(api.prefix + f'pulls/{number}')
     candidate = candidate_identity(pr, api.repository)
+    require_current_base(api, pr, candidate)
     commit = api.get(api.prefix + 'commits/' + candidate['execution_sha'])
     require(commit['sha'] == candidate['execution_sha'])
     require([p['sha'] for p in commit['parents']] == [candidate['base_sha'], candidate['head_sha']])
     current = api.get(api.prefix + f'pulls/{number}')
     require(candidate_identity(current, api.repository) == candidate and current['draft'] == pr['draft'])
+    require_current_base(api, current, candidate)
     return {'schema_version': SCHEMA_VERSION,
             **{key: candidate[key] for key in ('head_sha', 'base_sha', 'execution_sha')},
             'candidate_currentness': 'current',
@@ -137,6 +149,7 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
     candidate = candidate_identity(pr, api.repository)
     root_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=approved_root, text=True).strip()
     require(root_sha == candidate['base_sha'])
+    require_current_base(api, pr, candidate)
     require(not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'],
                                         cwd=approved_root, text=True).strip())
     policy_digest = hashlib.sha256((approved_root / 'scripts/review_tooling.py').read_bytes()).hexdigest()
@@ -365,6 +378,7 @@ def recheck_current(api: GitHub, result: dict[str, Any]) -> None:
             run = max(matches, key=lambda run: run['id'])
             latest[producer.workflow] = {'run_id': run['id'], 'run_attempt': run['run_attempt'], 'status': run['status']}
     require(latest == result['runs'])
+    require_current_base(api, pr, candidate)
 
 
 def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
