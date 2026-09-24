@@ -6,6 +6,7 @@ Operator-to-render round trips also live in test_map_values and airgap suites.
 """
 import json
 
+import pytest
 import yaml
 
 from tests.helpers_helm import (
@@ -434,6 +435,7 @@ def test_schema_rejects_invalid_selected_configuration():
         ({"gateway": {"apiKeySecretName": "Bad_Name!"}}, "apiKeySecretName"),
         ({"models": {"rerank": {"endpointOrder": "nope"}}}, "endpointOrder"),
         ({"metrics": {"enabled": "false"}}, "metrics"),
+        ({"ui": {"enabled": "false"}}, "ui"),
         ({"models": {"reasoning": {"model": "foo", "baseUrl": ""}}}, "reasoning"),
         ({"route": {"enabled": True, "destinationCA": ""}}, "destinationCA"),
         ({"route": {"enabled": True, "timeoutSeconds": 0}}, "timeoutSeconds"),
@@ -519,3 +521,41 @@ def test_chart_preserves_positive_operator_dimension_and_worker_range():
 def test_explicit_followup_condensation_reaches_agent():
     deployment = run_new_template({"models": {"reasoning": {"condenseEnabled": True}}})["Deployment", "rag-agent"]
     assert env_map(deployment)["CHAT_CONDENSE_ENABLED"]["value"] == "true"
+
+
+def test_ui_disabled_renders_false_and_keeps_agent_contract():
+    """Issue #479: ui.enabled=false reaches the Deployment; probes,
+    selectors and read-only credentials are unchanged."""
+    new = run_new_template({"ui": {"enabled": False}})
+    dep = new["Deployment", "rag-agent"]
+    new_env = env_map(dep)
+    assert new_env["UI_ENABLED"]["value"] == "false"
+    agent = container_map(dep)["agent"]
+    assert agent["readinessProbe"]["httpGet"] == {"path": "/healthz", "port": "http"}
+    assert agent["livenessProbe"]["httpGet"] == {"path": "/livez", "port": "http"}
+    assert new_env["QDRANT_API_KEY"]["valueFrom"]["secretKeyRef"] == {
+        "key": "read-only-api-key",
+        "name": "qdrant-apikey",
+    }
+
+
+@pytest.mark.parametrize("route_enabled", [False, True])
+def test_ui_off_by_route_matrix(route_enabled):
+    """UI selection is independent of the Route: an API-only install keeps
+    Route/OAuth/TLS wiring exactly as selected, and Route-off is not UI-off."""
+    extra = {"ui": {"enabled": False}}
+    if route_enabled:
+        extra["route"] = {"enabled": True, "timeoutSeconds": 300, "destinationCA": FAKE_CA}
+        extra["images"] = {
+            "oauthProxy": {
+                "repository": "reg.internal/openshift4/ose-oauth-proxy",
+                "tag": "v4.14",
+            }
+        }
+    new = run_new_template(extra)
+    assert env_map(new["Deployment", "rag-agent"])["UI_ENABLED"]["value"] == "false"
+    assert (("Route", "rag-agent") in new) == route_enabled
+    assert (("ServiceAccount", "rag-agent") in new) == route_enabled
+    if route_enabled:
+        containers = container_map(new["Deployment", "rag-agent"])
+        assert "oauth-proxy" in containers

@@ -36,6 +36,7 @@ MAPPER_KEYS = [
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
     "OTEL_DEPLOYMENT_ENVIRONMENT", "OTEL_SERVICE_NAME",
     "METRICS_ENABLED", "AGENT_ROUTE", "ROUTE_DESTINATION_CA_FILE",
+    "UI_ENABLED",
     "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
     "CONTEXTUAL_EMBED_ENABLED", "CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL",
@@ -194,6 +195,26 @@ def test_strict_bool_rejects_garbage(monkeypatch, mapper_env):
     r, _ = mapper_env()
     assert r.returncode != 0
     assert "INGEST_REINGEST" in r.stderr
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("", True), ("true", True), ("1", True), ("yes", True),
+    ("false", False), ("0", False), ("no", False),
+])
+def test_ui_enabled_selection(monkeypatch, mapper_env, raw, expected):
+    # Issue #479: unset keeps the chart default (true); selected values map
+    # exactly; false must survive truthiness/defaulting all the way down.
+    monkeypatch.setenv("UI_ENABLED", raw)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["ui"] == {"enabled": expected}
+
+
+def test_ui_enabled_rejects_garbage(monkeypatch, mapper_env):
+    monkeypatch.setenv("UI_ENABLED", "maybe")
+    r, _ = mapper_env()
+    assert r.returncode != 0
+    assert "UI_ENABLED must be true/false" in r.stderr
 
 
 def test_ingest_enabled_block_and_tricky_retire(monkeypatch, mapper_env):

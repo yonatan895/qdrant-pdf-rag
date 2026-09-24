@@ -165,6 +165,10 @@ def build_values(deploy_only: bool = False) -> dict:
 
     rerank_enabled = lenient_bool(env("RERANK_ENABLED"))
     metrics_enabled = env("METRICS_ENABLED") == "true"
+    # Issue #479: operator console selection. Unset keeps the chart default
+    # (true); invalid nonempty values fail before mutation. Independent of
+    # AGENT_ROUTE — disabling the UI never touches Route/OAuth/TLS wiring.
+    ui_enabled = strict_bool("UI_ENABLED", env("UI_ENABLED"), True)
 
     agent_route = env("AGENT_ROUTE") == "true"
     route_ca = ""
@@ -306,6 +310,7 @@ def build_values(deploy_only: bool = False) -> dict:
             "serviceName": env("OTEL_SERVICE_NAME"),
         },
         "metrics": {"enabled": metrics_enabled},
+        "ui": {"enabled": ui_enabled},
         "route": {
             "enabled": agent_route,
             "timeoutSeconds": 300,
