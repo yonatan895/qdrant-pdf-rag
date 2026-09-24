@@ -12,6 +12,7 @@ concurrency:
 
 jobs:
   check-context:
+    if: ${{ false }} # Disposable M0 selected-skipped trial; do not merge
     runs-on: ubuntu-latest
     permissions:
       contents: read
