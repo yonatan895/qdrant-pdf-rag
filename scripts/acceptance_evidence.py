@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Read native CI receipts as bounded data for the approved-base acceptance policy.
 
 Callers supply API records fetched by numeric ID, the current candidate, and
