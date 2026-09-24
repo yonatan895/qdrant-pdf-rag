@@ -175,3 +175,5 @@ fi
 echo ""
 echo "SUCCESS: Pre-flight validation passed cleanly."
 next_step "sh scripts/tools/run-task.sh airgap:load"
+
+# Disposable M0 acceptance trial: exercise mixed storage/deployment selection.
