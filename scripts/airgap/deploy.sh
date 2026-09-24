@@ -23,6 +23,9 @@ esac
 # Cross-check against the packed MANIFEST when it is reachable (dist/ or ../).
 MANIFEST=$(find_manifest)
 check_manifest_sha
+# The executing checkout itself must resolve to the packed SHA (issue #414):
+# an explicitly set IMAGE_SHA alone never changes which code executes.
+check_checkout_sha
 require_kc
 command -v helm >/dev/null 2>&1 || die "helm is required on the air-gap bastion"
 

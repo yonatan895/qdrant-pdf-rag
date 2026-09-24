@@ -80,6 +80,9 @@ check_trusted_pub "$ARTDIR"
 packed_sha=$(awk '/^sha: /{print $2}' "$ARTDIR/MANIFEST.txt")
 [ "$IMAGE_SHA" = "$packed_sha" ] || \
     die "IMAGE_SHA=$IMAGE_SHA does not match the packed MANIFEST sha ($packed_sha) — wrong SHA for this sneakernet bundle"
+# The executing checkout itself must resolve to the packed SHA (issue #414):
+# loading B images with A scripts checked out must fail before any push.
+MANIFEST="$ARTDIR/MANIFEST.txt" check_checkout_sha
 
 # Task is a signed host artifact, never an image to push. Require its members
 # even if a malformed, signed checksum list omitted them.
