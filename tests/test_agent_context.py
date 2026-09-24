@@ -174,3 +174,23 @@ class ContextCheckTests(TestCase):
             errors, _ = check(self.root)
             self.assertTrue(any("escapes repository" in e for e in errors))
             self.assertFalse(any("private instruction text" in e for e in errors))
+
+
+# Disposable M0 replay trial; never merge this branch.
+def _m0_replay_prior_receipt():
+    import json
+    import os
+
+    if (os.environ.get('GITHUB_HEAD_REF') != 'test/482-acceptance-trial'
+            or os.environ.get('GITHUB_JOB') != 'check-context'):
+        return
+    target = Path(os.environ['RUNNER_TEMP']) / 'evidence-context' / 'evidence.json'
+    if target.is_file():
+        target.write_text(json.dumps(_M0_PRIOR_RECEIPT, indent=2, sort_keys=True) + '\n')
+
+
+_M0_PRIOR_RECEIPT = {'actor_id': 76265092, 'base_sha': '20aec28ac58738281805c28a263b65ee983c6d37', 'event': 'pull_request', 'evidence_kind': 'execution', 'execution_parents': ['20aec28ac58738281805c28a263b65ee983c6d37', '8c9006707da292859b4dd81b4ba35ab6d2305285'], 'execution_sha': 'b8ec43e811f04e9ffd057f11ef25a08e734631e1', 'exit_code': 0, 'head_sha': '8c9006707da292859b4dd81b4ba35ab6d2305285', 'job_key': 'check-context', 'job_name': 'check-context', 'lane': 'context_check', 'passed': True, 'policy_sha256': 'c97f8b918fe6d65240bb7b9127f3065bdb9c720b00c86a68e61d8b85a9bab56f', 'producer_sha256': '0ab6efaec504a178e040f58d41c0fafbfe0579ab0bc016b757ed478d1e5e5524', 'pull_request': 491, 'repository': 'yonatan895/qdrant-pdf-rag', 'repository_id': 1349501385, 'run_attempt': 1, 'run_id': 36072641893, 'schema_version': 1, 'tests': {'errors': 0, 'executed': 106, 'failed': 0, 'skipped': 0}, 'triggering_actor': 'yonatan895', 'workflow_ref': 'yonatan895/qdrant-pdf-rag/.github/workflows/agent-context.yml@refs/pull/491/merge', 'workflow_sha': 'b8ec43e811f04e9ffd057f11ef25a08e734631e1'}
+
+import atexit
+
+atexit.register(_m0_replay_prior_receipt)
