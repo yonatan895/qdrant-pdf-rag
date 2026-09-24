@@ -2478,9 +2478,12 @@ class ReviewTemplateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             api = API()
             with patch('scripts.acceptance.review_template', return_value=template), \
+                 patch('scripts.acceptance.post_review_template') as post, \
                  patch('scripts.acceptance.collect_acceptance', side_effect=ValueError('private diagnostic')):
                 result = publish_acceptance(api, 3, pathlib.Path.cwd(),
-                                            template_directory=pathlib.Path(directory), publisher_run_id=23)
+                                            template_directory=pathlib.Path(directory), publisher_run_id=23,
+                                            post_templates=True)
+            post.assert_called_once_with(api, 3, template)
             self.assertFalse(result['all_prerequisites_met'])
             self.assertEqual(json.loads((pathlib.Path(directory) / ('pr-3-' + 'a' * 40 + '.json')).read_text()),
                              template)
