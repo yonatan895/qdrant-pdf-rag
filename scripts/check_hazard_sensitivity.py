@@ -109,7 +109,7 @@ def run(root: Path, output: Path, python: Path, selected: list[str] | None = Non
         hazards = [h for h in hazards if h['id'] in selected]
     tool_env = dict(os.environ)
     tool_env['PATH'] = str(root / '.tools/bin') + os.pathsep + tool_env.get('PATH', '')
-    preflight = subprocess.run([str(python), '-I', str(root / 'scripts/agent_doctor.py'),
+    preflight = subprocess.run([str(python), '-E', str(root / 'scripts/agent_doctor.py'),
                                '--python', str(python)], cwd=root, env=tool_env,
                               capture_output=True, text=True, timeout=15, check=False)
     if preflight.returncode != 0:
@@ -161,7 +161,10 @@ def main() -> int:
     try:
         result = run(args.root, args.out, args.python, args.hazard)
         return 0 if result['passed'] else 1
-    except (HazardError, OSError, ValueError, subprocess.SubprocessError) as exc:
+    except HazardError as exc:
+        print(f'hazard sensitivity unavailable: {exc}', file=sys.stderr)
+        return 2
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f'hazard sensitivity unavailable: {type(exc).__name__}', file=sys.stderr)
         return 2
 
