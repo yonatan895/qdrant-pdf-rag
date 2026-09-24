@@ -32,7 +32,7 @@ def verify_manifest(cache_dir: Path, manifest: Path) -> None:
         raise SystemExit("verification failed: expected one unambiguous BM25 snapshot")
     snapshot = snapshots[0]
     reference = model_dir / "refs/main"
-    if not reference.is_file() or reference.read_text().strip() != snapshot.name:
+    if not reference.is_file() or reference.read_text() != snapshot.name:
         raise SystemExit("verification failed: BM25 selected revision does not match the verified snapshot")
     if not snapshot.resolve().is_relative_to(model_dir.resolve()):
         raise SystemExit("verification failed: snapshot leaves model cache")

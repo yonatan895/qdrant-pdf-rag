@@ -120,7 +120,8 @@ for authorization/rotation tests even with an external main server.
 
 These checks establish prerequisites, not application acceptance or an untested
 internal registry/runner's identity. GitLab's service provisioning stays runner
-owned, separate from the local Docker preparation path.
+owned, separate from the local Docker preparation path; its internal mirror must
+serve the approved repository digest used by the gate-L1 service reference.
 
 Discovery, doctor and verification never provision tools. Missing or foreign
 workspace binaries fail with remediation; installation is an explicit action.

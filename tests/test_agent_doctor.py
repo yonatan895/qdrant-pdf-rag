@@ -263,6 +263,9 @@ def test_bm25_cache_checks_the_selected_revision_and_exact_bytes(tmp_path, monke
     (tmp_path / 'bm25-weights.sha256').write_text(f'{digest}  weights.txt\n')
     monkeypatch.delenv('SIM_BM25_CACHE_DIR', raising=False)
     assert prepared_bm25_cache(tmp_path) == cache
+    reference.write_text('original\n')
+    with pytest.raises(SystemExit, match='selected revision'):
+        prepared_bm25_cache(tmp_path)
     reference.write_text('other')
     with pytest.raises(SystemExit, match='selected revision'):
         prepared_bm25_cache(tmp_path)
