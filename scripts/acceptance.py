@@ -36,9 +36,10 @@ class GitHub:
         return json.loads(self.raw(endpoint))
 
     def write(self, endpoint: str, payload: dict[str, Any], *, method: str) -> dict[str, Any]:
-        require(endpoint == self.prefix + 'check-runs' or bool(re.fullmatch(
-            re.escape(self.prefix) + r'check-runs/[0-9]+', endpoint)))
-        require(method in {'POST', 'PATCH'})
+        check_endpoint = endpoint == self.prefix + 'check-runs' or bool(re.fullmatch(
+            re.escape(self.prefix) + r'check-runs/[0-9]+', endpoint))
+        comment_endpoint = bool(re.fullmatch(re.escape(self.prefix) + r'issues/[1-9][0-9]*/comments', endpoint))
+        require((check_endpoint and method in {'POST', 'PATCH'}) or (comment_endpoint and method == 'POST'))
         result = subprocess.run(['gh', 'api', '--method', method, endpoint, '--input', '-'],
                                 input=json.dumps(payload), capture_output=True, text=True,
                                 check=False, timeout=60)
@@ -69,6 +70,61 @@ def candidate_identity(pr: dict[str, Any], repository: str) -> dict[str, Any]:
                 for key in ('head_sha', 'base_sha', 'execution_sha')))
     require(pr['state'] == 'open' and pr['mergeable'] is True)
     return result
+
+
+def review_template(api: GitHub, number: int) -> dict[str, Any]:
+    """Generate identity fields, never a verdict or a submitted review."""
+    from scripts.review_tooling import SCHEMA_VERSION
+
+    require(type(number) is int and number > 0)
+    pr = api.get(api.prefix + f'pulls/{number}')
+    candidate = candidate_identity(pr, api.repository)
+    commit = api.get(api.prefix + 'commits/' + candidate['execution_sha'])
+    require(commit['sha'] == candidate['execution_sha'])
+    require([p['sha'] for p in commit['parents']] == [candidate['base_sha'], candidate['head_sha']])
+    current = api.get(api.prefix + f'pulls/{number}')
+    require(candidate_identity(current, api.repository) == candidate and current['draft'] == pr['draft'])
+    return {'schema_version': SCHEMA_VERSION,
+            **{key: candidate[key] for key in ('head_sha', 'base_sha', 'execution_sha')},
+            'candidate_currentness': 'current',
+            'code_assessment': '<acceptable|changes_required|incomplete>',
+            'verification': '<complete|incomplete|failed>',
+            'merge_readiness': '<ready_for_maintainer|not_ready>',
+            'material_findings': [],
+            'evidence': {'review': '<reviewed scope and verification evidence>'}}
+
+
+def is_unfilled_review_template(payload: dict[str, Any]) -> bool:
+    """Exclude exact unfilled scaffolding, never actual or partially entered findings."""
+    legacy = [{'id': '<finding ID; use [] only if none>', 'disposition': 'unresolved',
+               'description': '<finding and evidence; carry forward prior findings>'}]
+    return (payload.get('code_assessment') == '<acceptable|changes_required|incomplete>'
+            and payload.get('verification') == '<complete|incomplete|failed>'
+            and payload.get('merge_readiness') == '<ready_for_maintainer|not_ready>'
+            and payload.get('material_findings') in ([], legacy))
+
+
+def review_template_comment(template: dict[str, Any]) -> str:
+    """A copyable skeleton, explicitly not an independent review."""
+    return ('<!-- generated-human-review-template -->\n'
+            '### Your review template\n\n'
+            'Copy the JSON below into a new comment or Comment review and fill the human judgment fields. '
+            'The commit IDs are already filled in. This generated template is **not a review or approval**. '
+            'Use the newest template if the PR changes; carry forward prior material findings. '
+            'If there are no findings, leave `material_findings` as the empty array `[]`; '
+            'do not put the string "[]" inside finding fields. Otherwise add finding objects with '
+            '`id`, `disposition`, and `description`. Replace the evidence placeholder with what you reviewed.\n\n'
+            '```json\n' + json.dumps(template, indent=2) + '\n```\n')
+
+
+def post_review_template(api: GitHub, number: int, template: dict[str, Any]) -> None:
+    """Append an exact template once; never edit comments or trust a marker alone."""
+    require(type(number) is int and number > 0)
+    body = review_template_comment(template)
+    endpoint = api.prefix + f'issues/{number}/comments'
+    comments = paginate(api.get, endpoint)
+    if not any(comment.get('body') == body for comment in comments):
+        api.write(endpoint, {'body': body}, method='POST')
 
 
 def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict[str, Any]:
@@ -194,7 +250,7 @@ def collect_review(api: GitHub, pr: dict[str, Any], candidate: dict[str, Any]):
                 if previous is None or (timestamp, record['id']) > previous[:2]:
                     opinions[actor['id']] = (timestamp, record['id'], record['state'])
             payload = extract_review_json(record.get('body') or '')
-            if payload is None:
+            if payload is None or is_unfilled_review_template(payload):
                 continue
             for finding in payload.get('material_findings', []):
                 if isinstance(finding, dict) and isinstance(finding.get('id'), str):
@@ -311,7 +367,9 @@ def recheck_current(api: GitHub, result: dict[str, Any]) -> None:
     require(latest == result['runs'])
 
 
-def publish_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[str, Any]:
+def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
+                       template_directory: Path | None = None, publisher_run_id: int | None = None,
+                       post_templates: bool = False) -> dict[str, Any]:
     """Publish a fresh pending check before collecting; only a rechecked pass goes green.
 
     Authentication determines the check's App source. Ordinary Actions tokens
@@ -329,6 +387,28 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
                    'summary': 'Acceptance is pending while current native checks and review are verified.'}},
         method='POST')
     require(type(check['id']) is int and check['id'] > 0)
+    template_note = ''
+    if template_directory is not None:
+        try:
+            require(type(publisher_run_id) is int and publisher_run_id > 0)
+            template = review_template(api, number)
+            require(template['head_sha'] == head)
+            template_directory.mkdir(parents=True, exist_ok=True)
+            filename = f'pr-{number}-{head}.json'
+            (template_directory / filename).write_text(json.dumps(template, indent=2) + '\n')
+            template_note = (f'\n\n### Human review template\nDownload `{filename}` from the '
+                             '`review-templates-<attempt>` artifact in '
+                             f'[this publisher run](https://github.com/{api.repository}/actions/runs/{publisher_run_id}). '
+                             'The artifact is available after the upload step completes. '
+                             'Fill the human judgment fields and submit your review; regenerate if the candidate changes.')
+            if post_templates:
+                try:
+                    post_review_template(api, number, template)
+                    template_note = '\n\nA copyable review template is posted in the PR conversation.' + template_note
+                except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError):
+                    template_note = '\n\nTemplate comment unavailable; use the artifact below.' + template_note
+        except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError):
+            template_note = '\n\nReview template unavailable: current candidate identity could not be verified.'
     try:
         result = collect_acceptance(api, number, approved_root)
         require(result['candidate']['head_sha'] == head)
@@ -339,6 +419,7 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
     ready = result['all_prerequisites_met']
     # The report contains generated lane/status text; no artifact commands run.
     summary = result.get('markdown_report', 'Current evidence is unavailable or changed; acceptance is not ready.')
+    summary = summary[:55000] + template_note
     api.write(api.prefix + f"check-runs/{check['id']}", {
         'status': 'completed', 'conclusion': 'success' if ready else 'failure',
         'output': {'title': 'Current prerequisites met' if ready else 'Unmet acceptance obligations',
@@ -357,17 +438,39 @@ def main(argv: list[str] | None = None) -> int:
     selection.add_argument('--pr', type=int)
     selection.add_argument('--all-open', action='store_true')
     parser.add_argument('--publish', action='store_true')
+    parser.add_argument('--review-template', action='store_true',
+                        help='print current identity and unset human review fields; never submit')
+    parser.add_argument('--review-templates-dir', type=Path)
+    parser.add_argument('--post-review-templates', action='store_true')
+    parser.add_argument('--publisher-run-id', type=int)
     parser.add_argument('--approved-root', type=Path, default=Path.cwd())
     args = parser.parse_args(argv)
+    if args.review_template and (args.publish or args.all_open):
+        parser.error('--review-template requires --pr and cannot be combined with --publish')
+    if ((args.review_templates_dir is not None or args.publisher_run_id is not None)
+            and (not args.publish or args.review_templates_dir is None
+                 or args.publisher_run_id is None or args.publisher_run_id <= 0)):
+        parser.error('--review-templates-dir and positive --publisher-run-id require --publish')
+    if args.post_review_templates and (not args.publish or args.review_templates_dir is None):
+        parser.error('--post-review-templates requires --publish and --review-templates-dir')
     results = []
     try:
         api = GitHub(args.repository)
+        if args.review_template:
+            print(json.dumps(review_template(api, args.pr), indent=2))
+            return 0
         numbers = ([args.pr] if args.pr is not None else
                    [pr['number'] for pr in paginate(api.get, api.prefix + 'pulls?state=open')])
         for number in numbers:
             require(type(number) is int and number > 0)
             if args.publish:
-                result = publish_acceptance(api, number, args.approved_root.resolve())
+                if args.review_templates_dir is not None:
+                    result = publish_acceptance(api, number, args.approved_root.resolve(),
+                                                template_directory=args.review_templates_dir,
+                                                publisher_run_id=args.publisher_run_id,
+                                                post_templates=args.post_review_templates)
+                else:
+                    result = publish_acceptance(api, number, args.approved_root.resolve())
             else:
                 result = collect_acceptance(api, number, args.approved_root.resolve())
                 recheck_current(api, result)
