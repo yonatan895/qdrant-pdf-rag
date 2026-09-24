@@ -1814,14 +1814,22 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
         self.assertEqual(review.merge_readiness, "ready_for_maintainer")
         self.assertEqual(identity["actor_id"], 7)
         self.assertEqual(manual, {})
-        for change in ("bot", "author", "stranger", "read-only", "stale", "changes-required", "native-rejection"):
+        # The maintainer independently reviews agent work using the same GitHub
+        # account that the agent uses to open PRs. Account equality is not a
+        # substitute for the actual human-review process.
+        api.comment["user"]["id"] = 99
+        shared_review, _, shared_identity = collect_review(api, {"number": 3, "user": {"id": 99}}, candidate)
+        self.assertEqual(shared_review.merge_readiness, "ready_for_maintainer")
+        self.assertEqual(shared_identity["actor_id"], 99)
+        for change in ("bot", "author-pass-table", "stranger", "read-only", "stale", "changes-required", "native-rejection"):
             with self.subTest(change=change):
                 api = API()
                 revised = copy.deepcopy(payload)
                 if change == "bot":
                     api.comment["user"]["type"] = "Bot"
-                elif change == "author":
+                elif change == "author-pass-table":
                     api.comment["user"]["id"] = 99
+                    revised = {"result": "PASS"}
                 elif change == "stranger":
                     api.comment["author_association"] = "NONE"
                 elif change == "read-only":

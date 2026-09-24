@@ -167,8 +167,6 @@ def collect_review(api: GitHub, pr: dict[str, Any], candidate: dict[str, Any]):
     """
     from scripts.review_tooling import extract_review_json, validate_review_payload
 
-    require(type(pr['user']['id']) is int)
-    author_id = pr['user']['id']
     reviews = paginate(api.get, api.prefix + f"pulls/{pr['number']}/reviews")
     comments = paginate(api.get, api.prefix + f"issues/{pr['number']}/comments")
     permissions: dict[str, bool] = {}
@@ -178,8 +176,6 @@ def collect_review(api: GitHub, pr: dict[str, Any], candidate: dict[str, Any]):
     for source, records in (('review', reviews), ('comment', comments)):
         for record in records:
             actor = record['user']
-            if actor['id'] == author_id:
-                continue  # An author's own PASS record cannot supply independent review.
             if actor['type'] != 'User' or record.get('author_association') not in {'OWNER', 'MEMBER', 'COLLABORATOR'}:
                 continue
             login = actor['login']

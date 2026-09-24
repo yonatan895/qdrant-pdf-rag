@@ -292,8 +292,12 @@ attempt identities. `--all-open` paginates open candidates. File pagination must
 match the PR's changed-file count and retain both rename names verbatim.
 
 Review authority is an API-visible human collaborator with write/maintain/admin
-permission, distinct from the PR author. A bot, marker, author PASS table or
-read-only collaborator cannot supply approval. The latest authorized structured
+permission. The maintainer may independently review agent work through the same
+GitHub account used by the agent to open the PR; account equality alone is not a
+rejection. GitHub API identity cannot distinguish human and agent activity under
+shared credentials. The maintainer must actually supply the independent review;
+agents must never submit approval for their own implementation. A bot, marker,
+unstructured author PASS table or read-only collaborator cannot supply approval. The latest authorized structured
 record must bind the exact head/base/execution. Native requests for changes and
 omitted dispositions from retrievable earlier structured findings block
 readiness. Deleted historical records cannot be reconstructed by this consumer;
@@ -309,7 +313,8 @@ credentials, install no project dependencies, and never execute candidate code
 or artifact commands. The signal workflow has no token permissions or checkout.
 Publication is serialized. API snapshots and events are not an atomic merge
 transaction; a state change can occur after the final read, and GitHub scheduling
-can be delayed. Required native approvals and branch currency remain necessary.
+can be delayed. The chosen review policy, branch currency and conversation
+resolution must be enforced by the maintainer's repository configuration.
 
 The default Actions-token check is **advisory**: another candidate workflow can
 imitate its check name/App source. Do not configure this advisory source as an
@@ -327,9 +332,13 @@ Maintainer activation, after the disposable-PR transition proof:
    variable `ACCEPTANCE_APP_ENABLED=true`. The optional environment job is disabled
    until this explicit activation.
 2. Require `current-candidate-acceptance` from that specific App, current/up-to-date
-   branches, independent native approval with stale approvals dismissed and
-   approval of the last push, plus conversation resolution. Record the ruleset
-   and actual rejected-merge tests, including a same-name Actions check.
+   branches and conversation resolution. In the shared-account authoring setup,
+   the App check enforces the maintainer's candidate-bound structured review;
+   GitHub cannot provide a native approval of one's own PR. Do not require an
+   impossible self-approval. Where distinct author/reviewer accounts are used,
+   native approval with stale approvals dismissed and last-push approval can add
+   another guard. Record the chosen approval policy and actual rejected-merge
+   tests, including a same-name Actions check and missing/stale structured review.
 3. Keep the App key unavailable to candidate workflows and preserve human
    approval for future publisher/policy changes. A candidate cannot authorize
    new producer/workflow bytes merely by supplying matching hashes; bootstrap
