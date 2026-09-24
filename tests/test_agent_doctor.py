@@ -303,9 +303,3 @@ def test_simulator_missing_image_never_starts_or_pulls(tmp_path, monkeypatch):
         qdrant_sim.start_simulator(tmp_path)
     assert calls == [['docker', 'info'], ['docker', 'image', 'inspect',
                       'docker.io/qdrant/qdrant@sha256:' + 'a' * 64]]
-
-
-def load_tests(loader, tests, pattern):
-    # Intentional zero-test discovery for the disposable M0 acceptance trial.
-    from unittest import TestSuite
-    return TestSuite()

@@ -174,9 +174,3 @@ class ContextCheckTests(TestCase):
             errors, _ = check(self.root)
             self.assertTrue(any("escapes repository" in e for e in errors))
             self.assertFalse(any("private instruction text" in e for e in errors))
-
-
-def load_tests(loader, tests, pattern):
-    # Intentional zero-test discovery for the disposable M0 acceptance trial.
-    from unittest import TestSuite
-    return TestSuite()
