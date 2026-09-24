@@ -21,6 +21,13 @@ except ModuleNotFoundError:  # direct `python scripts/agent_doctor.py` entry
 
     qdrant_image_pin = _local_qdrant_image_pin
 
+try:
+    from scripts.dependency_lock import load as load_dependency_lock
+except ModuleNotFoundError:
+    from dependency_lock import load as _local_load_dependency_lock
+
+    load_dependency_lock = _local_load_dependency_lock
+
 PROBE_TIMEOUT_S = 5
 # Executes only stdlib/metadata reads, never imports product packages or loads .env.
 RUNTIME_PROBE = '''
@@ -134,6 +141,19 @@ def inspect_runtime(python: Path, packages: list[str]) -> dict | None:
         return None  # Never echo subprocess output or exception text (may contain secrets).
 
 
+def inspect_locked_environment(root: Path, python: Path) -> bool:
+    """The target interpreter checks its complete inventory and editable source."""
+    try:
+        result = subprocess.run(
+            [str(python), "-I", str(root / "scripts/dependency_lock.py"),
+             "--root", str(root), "installed", "--profile", "dev", "--project"],
+            capture_output=True, text=True, timeout=PROBE_TIMEOUT_S, check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
              python: Path | None = None) -> list[Finding]:
     results: list[Finding] = []
@@ -141,7 +161,9 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
     def add(status: str, subject: str, detail: str) -> None:
         results.append(Finding(status, subject, detail))
 
-    required = ["pyproject.toml", "requirements.lock.txt", "images.txt", "bm25-weights.sha256"]
+    required = ["pyproject.toml", "requirements.lock.txt", "requirements.dev.lock.txt",
+                "requirements.build.lock.txt", "locks/cp314-linux-x86_64.json",
+                "images.txt", "bm25-weights.sha256"]
     if profile == "deploy":
         required += ["airgap.env.example", "scripts/airgap/common.sh",
                      "charts/mainframe-rag/Chart.yaml",
@@ -156,8 +178,8 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
             add("unable to verify", "Python requirement", "unsupported requirement syntax; inspect pyproject.toml")
             return results
         minimum_version = tuple(map(int, minimum.groups()))
-        lock = (root/"requirements.lock.txt").read_text(encoding="utf-8")
-        pins = dict(re.findall(r"^([A-Za-z0-9_.-]+)==([A-Za-z0-9.+_-]+)\s*$", lock, re.MULTILINE))
+        _, locked = load_dependency_lock(root, "dev")
+        pins = {name: entry["version"] for name, entry in locked.items()}
         if not pins or "qdrant-client" not in pins:
             add("missing prerequisite", "requirements.lock.txt", "expected dependency pins absent")
             return results
@@ -202,12 +224,17 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
                       and not runtime["gil_disabled"] and not runtime["jit_enabled"])
         add("ready" if compatible else "missing prerequisite", label,
             "CPython 3.14 GIL with experimental JIT disabled required")
+        if label == "development environment":
+            verified = inspect_locked_environment(root, interpreter)
+            add("ready" if verified else "missing prerequisite", "complete development inventory",
+                "full lock and editable source identity verified" if verified else
+                "installed inventory or editable source differs from the selected lock/worktree")
         for package in packages:
             installed = runtime["packages"].get(package)
             if not installed:
                 add("missing prerequisite", package, "not installed in development environment")
             elif package in pins and installed != pins[package]:
-                add("missing prerequisite", package, "installed version differs from requirements.lock.txt")
+                add("missing prerequisite", package, "installed version differs from requirements.dev.lock.txt")
             else:
                 add("ready", package, "development package present; locked version checked where specified")
 

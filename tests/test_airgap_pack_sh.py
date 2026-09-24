@@ -26,6 +26,7 @@ from tests.helpers_airgap import (
     skopeo_stub,
     symlink_tools,
 )
+from tests.helpers_image_inventory import image_files, write_image
 from tests.helpers_task_artifact import (
     TASK_ASSET,
     TASK_BINARY_SHA256,
@@ -37,7 +38,8 @@ from tests.helpers_task_artifact import (
 # Stub skopeo: materialize every docker-archive:DEST as a marker file;
 # answer inspect with a canned digest (pack binds it into MANIFEST, so the
 # self-consistency is what the test proves).
-STUB_SKOPEO = skopeo_stub("a", materialize=True)
+STUB_SKOPEO = skopeo_stub("a", materialize=True).replace(
+    "printf 'stub-image-tar\\n' > \"$dest\"", 'cp "$PACK_TEST_IMAGE" "$dest"')
 
 STUB_DIGEST = "sha256:" + "a" * 64
 
@@ -82,6 +84,9 @@ def pack_tree(tmp_path):
     # production pin is recorded. The recorded-pin test covers all five images.
     set_oauth_proxy_pin(tmp_path, "sha256:PENDING")
     shutil.copy(REPO / "requirements.lock.txt", tmp_path / "requirements.lock.txt")
+    shutil.copytree(REPO / "locks", tmp_path / "locks")
+    for script in ("dependency_lock.py", "image_inventory.py"):
+        shutil.copy(REPO / "scripts" / script, tmp_path / "scripts" / script)
     (tmp_path / "charts").mkdir(exist_ok=True)
     copy_chart(tmp_path)
 
@@ -104,6 +109,7 @@ def pack_tree(tmp_path):
     p.write_text(STUB_SKOPEO)
     p.chmod(0o755)
 
+    write_image(tmp_path / "synthetic-image.tar", [image_files(tmp_path)])
     # Throwaway signing key (mirrors the rehearsal flow: pack signs, the
     # bundle carries the derived pub, verification is self-consistent).
     key = gen_sign_keypair(tmp_path)
@@ -115,6 +121,7 @@ def _run_pack(tree, *extra_env):
     env = {
         "PATH": str(tmp_path / "bin"),
         "SKOPEO_LOG": str(tmp_path / "skopeo-args.log"),
+        "PACK_TEST_IMAGE": str(tmp_path / "synthetic-image.tar"),
         "AIRGAP_APP_REGISTRY": "ghcr.io/pack-test",
         "SNEAKERNET_SIGNING_KEY": str(key),
         "AIRGAP_TASK_ARCHIVE": str(task_archive()),
@@ -352,3 +359,23 @@ def test_pack_rejects_bad_task_before_image_calls(pack_tree, damage):
     assert result.returncode != 0
     assert "Task archive" in result.stderr
     assert not log.exists()
+
+
+@pytest.mark.parametrize("corruption", ["installed-only", "receipt-omission", "missing-package"])
+def test_pack_rejects_actual_inventory_drift_before_signing(pack_tree, corruption):
+    root = pack_tree[0]
+    files = image_files(root)
+    if corruption == "installed-only":
+        files["opt/app-root/lib/python3.14/site-packages/injected-1.0.dist-info/METADATA"] = b"Name: injected\nVersion: 1.0\n"
+    elif corruption == "missing-package":
+        del files[next(p for p in files if p.endswith(".dist-info/METADATA"))]
+    else:
+        key = "opt/rag-locks/installed-inventory.json"
+        receipt = json.loads(files[key])
+        del receipt["packages"][next(iter(receipt["packages"]))]
+        files[key] = json.dumps(receipt).encode()
+    write_image(root / "synthetic-image.tar", [files])
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    assert "SBOM reconciliation failed" in result.stderr
+    assert not list((root / "dist").glob("SHA256SUMS.sig"))

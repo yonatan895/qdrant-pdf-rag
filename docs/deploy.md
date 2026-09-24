@@ -277,8 +277,8 @@ cannot schedule on one node — proven).
 - Jaeger is on by default (unset `OTEL_EXPORTER_OTLP_ENDPOINT` resolves to
   `http://jaeger:4318`; the off sentinel disables both tracing and this
   deployment): 1 replica,
-  project-assigned UID and volume group from `restricted-v2` for Badger, 10Gi volume with 14-day span TTL, OTLP/HTTP 4318 only (no gRPC —
-  `grpcio` is not in the wheelhouse, so 4317 stays closed), UI on
+  project-assigned UID and volume group from `restricted-v2` for Badger, 10Gi volume with 14-day span TTL, OTLP/HTTP 4318 only (the configured exporter uses HTTP;
+  the Qdrant client independently brings a transitive `grpcio` wheel), UI on
   port-forward only, no archive store (debug data, not records).
 - Validate is read-only pre-flight: required keys, non-blank
   `EMBED_MODEL_REVISION` (the vllm attestation ingest/serving refuse when
@@ -495,7 +495,10 @@ live in `.github/workflows/e2e.yml`.
   never a skipped pass. Offline GitLab runners mount the approved
   `task_linux_amd64.tar.gz` at `CI_TASK_ARCHIVE`; the unit job verifies/installs
   it with `install-task.sh --archive`, with no public download. Prepared Python
-  jobs retain their interpreter and do not run `dev:setup`. Unit jobs also
+  jobs retain their interpreter and do not run `dev:setup`. Python preparation
+  uses [complete target hash locks](dependencies.md) and verifies the installed
+  inventory. Runtime images check approved wheel bytes before offline installation;
+  packaging reconciles actual image layers with the Python SBOM. Unit jobs also
   explicitly prepare the existing pinned Helm binary (offline GitLab input
   `CI_HELM_ARCHIVE`) and run `agent_doctor.py --python` before pytest collection.
   Both Task and the selected Helm executable are checksum-verified; the doctor
@@ -511,7 +514,7 @@ live in `.github/workflows/e2e.yml`.
   with PR delta comment. Least-privilege permissions, timeouts, and
   concurrency groups on every job; third-party actions SHA-pinned.
 - `load.yml`: path-allowlisted to agent/retrieve/ingest/mock/sim/loadtest
-  surface — other paths run nothing. `ha.yml` is path-allowlisted to the
+  surface and shared dependency/Task inputs — other paths run nothing. `ha.yml` is path-allowlisted to the
   collection-policy/placement surface and runs the three-peer fixture
   (`qa:ha`) fail-closed (no skips, at least one pass); unrelated changes
   do not pay for three containers.

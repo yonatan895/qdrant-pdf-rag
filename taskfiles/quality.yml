@@ -11,10 +11,10 @@ tasks:
   prerequisites:
     desc: Verify the prepared unit environment without installing anything
     summary: |
-      Checks CPython 3.14 GIL/no JIT, current direct dependency pins and dev
-      tool presence, verified Task/Helm binaries and tracked Qdrant inputs.
-      No network, environment repair or service startup. Full transitive
-      inventory attestation is a separate #371/V0 delivery.
+      Checks CPython 3.14 GIL/no JIT, the complete locked dev inventory and
+      editable source identity, verified Task/Helm binaries and tracked
+      Qdrant inputs. No network, environment repair or service startup.
+      Runtime-image inventory is checked during image build and packaging.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - '.venv/bin/python scripts/agent_doctor.py --python .venv/bin/python'

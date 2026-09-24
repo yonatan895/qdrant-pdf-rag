@@ -144,13 +144,13 @@ jobs:
       # Review latency: most of the wall clock is model turns. Give the
       # reviewer working pytest/mypy/ruff up front so it does not spend a
       # turn (plus ~30s of venv + pip install) bootstrapping them every run.
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0 (the pin does not cover the pip install below — it resolves from PyPI at run time)
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0; Python packages use the target hash lock below
         with:
           python-version: "3.14"
           cache: pip
       - name: Preinstall dev tools for the reviewer
         run: |
-          pip install -e ".[dev]"
+          python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected
           sh scripts/tools/install-task.sh
           echo "TASK_CONTRACTS_REQUIRE_RUNNER=1" >> "$GITHUB_ENV"
 
