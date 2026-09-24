@@ -411,3 +411,26 @@ skipped test reports, changed raw results, unsafe ZIP entries, and incomplete
 pagination. These local cases establish parser and attribution behavior; they do
 not establish a deployed acceptance check, actual human review, or merge-rule
 enforcement. Those require the real PR trials owned by #411.
+
+The consumer cases also execute file pagination with both rename paths, assemble
+current authorized human review with the native lane summary, and reject draft,
+author-written, stale and changes-required review records. Publication tests
+require pending before collection and failure after a failed currentness recheck.
+A controlled curl stub executes the GitLab report shell and verifies literal-body
+POST behavior. The GitHub report's actual API execution belongs to the native PR
+trial; YAML/source inspection alone does not prove a posted report.
+
+The publisher's independent API reads compare candidate producer/policy bytes
+with approved base bytes, rather than believing receipt hashes. Tests also
+exercise a candidate producer that claims the original digest. This establishes
+that particular refusal, not immunity to arbitrary malicious candidate code or
+proof that candidate-authored tests are sufficient independent review.
+
+The acceptance normalizer additionally checks the contents of the critical
+hazard report against the approved catalogue: complete membership, candidate and
+runner identity, exact mutation/test/assertion, successful baselines and intended
+behavioral kills. Hash-valid empty/partial/duplicate/surviving reports are negative
+cases. The consumer independently reads candidate Task dispatch and challenge
+policy bytes; a candidate cannot replace those inputs and merely claim their
+approved hashes. Changes to these verifier inputs follow the explicit policy
+bootstrap review path, rather than authorizing their own replacement verifier.

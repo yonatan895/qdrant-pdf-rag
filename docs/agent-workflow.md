@@ -260,7 +260,15 @@ current PR test merge with the exact current base/head parents. Matching parent
 names alone cannot authorize a different merge tree. ZIP members are read in
 memory; they are never extracted, imported, or executed.
 
-The approved base supplies policy, producer and workflow bytes. A candidate's
+The approved base supplies policy, producer and workflow bytes, Task dispatch
+(the root Taskfile, included modules, wrapper and binary pin), and the critical
+hazard runner/catalogue. Their candidate
+bytes are read independently from the commit API; receipt-supplied hashes alone
+do not attest which source was executed. Hazard reports must also contain the
+complete approved challenge set exactly once, bind its catalogue/runner hashes
+and candidate execution, and record each expected baseline pass and intended
+behavioral kill. A valid artifact digest over an empty, reduced or surviving
+challenge report cannot establish acceptance. A candidate's
 workflow cannot approve its own replacement verifier. Producer/bootstrap changes
 therefore require the existing explicit maintainer review path before a later
 consumer can trust those bytes. This does not waive their tests. The privileged
@@ -268,11 +276,79 @@ publisher, when enabled, must execute approved-base code only and recheck PR
 currentness before publishing. Native API provenance and valid receipts do not
 substitute for an authorized current review or its finding dispositions.
 
-Rollout status: native receipts and normalization are being introduced; an
-always-scheduled publisher, real PR transition proof, and maintainer activation
-of enforcement remain separate acceptance obligations. No ruleset or repository
-permission is changed by these helpers. GitLab's existing verification remains
-independent; GitHub receipt validation is not GitLab execution evidence.
+Both GitHub and GitLab L1 comment publishers append historical reports with
+candidate/run attribution. They never acquire ownership of an existing comment
+from its marker. Comments remain navigation aids; native evidence is the gate
+input. GitLab reports an unavailable target SHA explicitly when its pipeline does
+not supply one, rather than substituting the diff base as the tested target.
+
+`scripts/acceptance.py` now assembles the native evidence and the existing
+review schema/summary. Its read-only entry point is
+`python -m scripts.acceptance --repository OWNER/REPO --pr NUMBER` from the
+approved base checkout. It exits nonzero for unmet, unavailable or changing
+evidence. `--publish` explicitly creates a pending check before collection,
+then publishes success only after rereading candidate, review and latest run
+attempt identities. `--all-open` paginates open candidates. File pagination must
+match the PR's changed-file count and retain both rename names verbatim.
+
+Review authority is an API-visible human collaborator with write/maintain/admin
+permission. The maintainer may independently review agent work through the same
+GitHub account used by the agent to open the PR; account equality alone is not a
+rejection. GitHub API identity cannot distinguish human and agent activity under
+shared credentials. The maintainer must actually supply the independent review;
+agents must never submit approval for their own implementation. A bot, marker,
+unstructured author PASS table or read-only collaborator cannot supply approval. The latest authorized structured
+record must bind the exact head/base/execution. Native requests for changes and
+omitted dispositions from retrievable earlier structured findings block
+readiness. Deleted historical records cannot be reconstructed by this consumer;
+GitHub's retained review history and maintainer review remain necessary. Selected
+`agent_probes`/`eval_retrieval` obligations require an authorized review's evidence
+object keyed by lane with exact candidate SHAs, `status: success`, an HTTPS `url`,
+`command` and `result`. This is attributed human evidence, not an executed CI test.
+
+`acceptance.yml` always schedules on PR metadata, native workflow activity,
+review/comment signals and base pushes, with periodic reconciliation for missed
+signals. Both publisher paths check out `main` explicitly with no persisted git
+credentials, install no project dependencies, and never execute candidate code
+or artifact commands. The signal workflow has no token permissions or checkout.
+Publication is serialized. API snapshots and events are not an atomic merge
+transaction; a state change can occur after the final read, and GitHub scheduling
+can be delayed. The chosen review policy, branch currency and conversation
+resolution must be enforced by the maintainer's repository configuration.
+
+The default Actions-token check is **advisory**: another candidate workflow can
+imitate its check name/App source. Do not configure this advisory source as an
+enforced acceptance guarantee. The optional dedicated App path uses the pinned
+`actions/create-github-app-token` v3.2.0 action with repository-scoped Actions,
+contents, pull requests and issues read access, and checks write access. Its
+short-lived token is revoked by the action after the job.
+
+Maintainer activation, after the disposable-PR transition proof:
+
+1. Install a dedicated publisher App on this repository with those permissions.
+   Create environment `acceptance-publisher`, restrict its deployment branches to
+   `main` only, and store `ACCEPTANCE_APP_PRIVATE_KEY` there, never as a broadly
+   available repository secret. Set `ACCEPTANCE_APP_CLIENT_ID` and then repository
+   variable `ACCEPTANCE_APP_ENABLED=true`. The optional environment job is disabled
+   until this explicit activation.
+2. Require `current-candidate-acceptance` from that specific App, current/up-to-date
+   branches and conversation resolution. In the shared-account authoring setup,
+   the App check enforces the maintainer's candidate-bound structured review;
+   GitHub cannot provide a native approval of one's own PR. Do not require an
+   impossible self-approval. Where distinct author/reviewer accounts are used,
+   native approval with stale approvals dismissed and last-push approval can add
+   another guard. Record the chosen approval policy and actual rejected-merge
+   tests, including a same-name Actions check and missing/stale structured review.
+3. Keep the App key unavailable to candidate workflows and preserve human
+   approval for future publisher/policy changes. A candidate cannot authorize
+   new producer/workflow bytes merely by supplying matching hashes; bootstrap
+   changes retain the explicit maintainer review path above.
+
+Rollout status: consumer/publisher implementation is under verification; actual
+PR transition proof and maintainer activation remain required before declaring
+V1 enforced. No helper changes rulesets, repository permissions or environments.
+GitLab verification remains independent; GitHub evidence does not establish
+GitLab execution or enforcement.
 
 ### Triage a recurring baseline/environment failure once
 

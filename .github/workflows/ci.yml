@@ -1,14 +1,8 @@
 name: ci
 on:
+  pull_request:
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.markdown"
-  pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.markdown"
 
 permissions:
   contents: read
@@ -18,9 +12,30 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      lanes: ${{ steps.profile.outputs.lanes }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - id: profile
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EXECUTION_SHA: ${{ github.sha }}
+        run: >-
+          python3 scripts/review_tooling.py profile --base "$BASE_SHA" --head "$EXECUTION_SHA"
+          --out "$RUNNER_TEMP/dispatch-manifest.json" --github-output "$GITHUB_OUTPUT"
+
   # Deterministic lint and typechecking gate (#370): runs in parallel with test,
   # ensuring code hygiene, formatting, and typing without relying solely on the reviewer.
   lint:
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.lanes), 'lint_and_types')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -50,6 +65,8 @@ jobs:
   # Unit gate: hygiene (no PDFs in git) + hermetic pytest. The simulation
   # tier is deselected via pyproject addopts, so this job never needs docker.
   unit:
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.lanes), 'unit_tests')
     name: unit (${{ matrix.shard }}/2)
     strategy:
       fail-fast: false
@@ -98,7 +115,7 @@ jobs:
   # Preserve the existing required status name; a failed, cancelled or skipped
   # shard must not turn into a successful aggregate.
   test:
-    needs: unit
+    needs: [select, unit]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -106,10 +123,18 @@ jobs:
     steps:
       - name: Require both unit shards
         env:
+          SELECT_RESULT: ${{ needs.select.result }}
+          UNIT_REQUIRED: ${{ contains(fromJSON(needs.select.outputs.lanes || '[]'), 'unit_tests') }}
           UNIT_RESULT: ${{ needs.unit.result }}
-        run: test "$UNIT_RESULT" = success
+        run: |
+          test "$SELECT_RESULT" = success
+          if test "$UNIT_REQUIRED" = true; then
+            test "$UNIT_RESULT" = success
+          fi
 
   hazards:
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.lanes), 'hazards')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -154,6 +179,8 @@ jobs:
   # so its absolute concurrency contracts are asserted exactly once.
   # GitHub-only: air-gap GitLab runners cannot pull Docker Hub (AGENTS.md).
   sim:
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.lanes), 'simulation')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -203,6 +230,8 @@ jobs:
   # using an original synthetic corpus generated at runtime (CPU-only).
   # Compares against evals/baseline.json and posts a delta table comment on PRs.
   gate-l1:
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.lanes), 'gate_l1')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -235,30 +264,17 @@ jobs:
           script: |
             const fs = require('fs');
             const body = fs.readFileSync('eval-delta.md', 'utf8');
-            const header = '<!-- gate-l1-report -->';
-            const commentBody = `${header}\n${body}`;
-            const { data: comments } = await github.rest.issues.listComments({
+            const pr = context.payload.pull_request;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}/attempts/${process.env.GITHUB_RUN_ATTEMPT}`;
+            const attribution = `Historical L1 report; not merge approval.\n\nHead: ${pr.head.sha}\nBase: ${pr.base.sha}\nExecution: ${context.sha}\nJob: gate-l1\nRun: ${runUrl}`;
+            // Append an attributable run record. Never locate or replace another
+            // author's comment using a freely copyable marker.
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              per_page: 100,
+              body: `<!-- gate-l1-report -->\n${attribution}\n\n${body}`,
             });
-            const botComment = comments.find(c => c.body.includes(header));
-            if (botComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: commentBody,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: commentBody,
-              });
-            }
       - name: upload eval artifacts
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1

@@ -1,58 +1,8 @@
 name: agent-context
 on:
   pull_request:
-    paths:
-      - 'AGENTS.md'
-      - '**/AGENTS.md'
-      - '**/AGENTS.override.md'
-      - '**/CLAUDE.md'
-      - '**/GEMINI.md'
-      - '**/CONTEXT.md'
-      - 'ROADMAP.md'
-      - 'docs/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/pull_request_template.md'
-      - '.github/workflows/agent-context.yml'
-      - '.github/workflows/opencode.yml'
-      - 'scripts/check_agent_context.py'
-      - 'scripts/agent_doctor.py'
-      - 'scripts/qdrant_pin.py'
-      - 'scripts/tools/**'
-      - 'Taskfile.yml'
-      - 'taskfiles/**'
-      - 'docs/task-runner.md'
-      - 'tests/test_agent_context.py'
-      - 'tests/test_agent_doctor.py'
-      - 'tests/test_taskfile_contracts.py'
-      - '!.agents/**'
-      - '!vendor/**'
   push:
     branches: [main]
-    paths:
-      - 'AGENTS.md'
-      - '**/AGENTS.md'
-      - '**/AGENTS.override.md'
-      - '**/CLAUDE.md'
-      - '**/GEMINI.md'
-      - '**/CONTEXT.md'
-      - 'ROADMAP.md'
-      - 'docs/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/pull_request_template.md'
-      - '.github/workflows/agent-context.yml'
-      - '.github/workflows/opencode.yml'
-      - 'scripts/check_agent_context.py'
-      - 'scripts/agent_doctor.py'
-      - 'scripts/qdrant_pin.py'
-      - 'scripts/tools/**'
-      - 'Taskfile.yml'
-      - 'taskfiles/**'
-      - 'docs/task-runner.md'
-      - 'tests/test_agent_context.py'
-      - 'tests/test_agent_doctor.py'
-      - 'tests/test_taskfile_contracts.py'
-      - '!.agents/**'
-      - '!vendor/**'
 permissions:
   contents: read
 

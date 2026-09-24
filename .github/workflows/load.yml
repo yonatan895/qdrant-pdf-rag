@@ -1,48 +1,8 @@
 name: load
 on:
   pull_request:
-    paths:
-      - "src/mainframe_rag/agent/**"
-      - "src/mainframe_rag/retrieve/**"
-      - "src/mainframe_rag/ingest/**"
-      - "scripts/mock_vllm.py"
-      - "scripts/loadtest.py"
-      - "scripts/qdrant_sim.py"
-      - "scripts/qdrant_pin.py"
-      - "scripts/make_synthetic_pdf.py"
-      - "tests/test_load_tier.py"
-      - "Taskfile.yml"
-      - "taskfiles/**"
-      - "requirements*.lock.txt"
-      - "locks/**"
-      - "scripts/dependency_lock.py"
-      - "scripts/prepare_python.py"
-      - "scripts/agent_doctor.py"
-      - "scripts/tools/**"
-      - "images.txt"
-      - ".github/workflows/load.yml"
   push:
     branches: [main]
-    paths:
-      - "src/mainframe_rag/agent/**"
-      - "src/mainframe_rag/retrieve/**"
-      - "src/mainframe_rag/ingest/**"
-      - "scripts/mock_vllm.py"
-      - "scripts/loadtest.py"
-      - "scripts/qdrant_sim.py"
-      - "scripts/qdrant_pin.py"
-      - "scripts/make_synthetic_pdf.py"
-      - "tests/test_load_tier.py"
-      - "Taskfile.yml"
-      - "taskfiles/**"
-      - "requirements*.lock.txt"
-      - "locks/**"
-      - "scripts/dependency_lock.py"
-      - "scripts/prepare_python.py"
-      - "scripts/agent_doctor.py"
-      - "scripts/tools/**"
-      - "images.txt"
-      - ".github/workflows/load.yml"
 
 permissions:
   contents: read
@@ -52,6 +12,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      lanes: ${{ steps.profile.outputs.lanes }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - id: profile
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EXECUTION_SHA: ${{ github.sha }}
+        run: >-
+          python3 scripts/review_tooling.py profile --base "$BASE_SHA" --head "$EXECUTION_SHA"
+          --out "$RUNNER_TEMP/dispatch-manifest.json" --github-output "$GITHUB_OUTPUT"
+
   # Load tier (tests/test_load_tier.py, `sh scripts/tools/run-task.sh qa:load`): the same
   # composition developers run locally — real PDFs -> real hash-mode ingest
   # into docker Qdrant (images.txt pin) -> real uvicorn agent plus the
@@ -63,6 +42,8 @@ jobs:
   # passes must fail, not go green.
   # GitHub-only: air-gap GitLab runners cannot pull Docker Hub (AGENTS.md).
   load:
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.lanes), 'load')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

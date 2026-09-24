@@ -84,11 +84,52 @@ def artifact_members(raw: bytes, digest: str) -> dict[str, bytes]:
         return result
 
 
+def validate_hazard_report(report: dict[str, Any], execution: str, policy: dict[str, Any] | None) -> None:
+    """Require every approved challenge and its intended behavioral kill."""
+    require(isinstance(policy, dict))
+    assert policy is not None
+    catalogue_bytes = policy['catalogue']
+    catalogue = object_json(catalogue_bytes)
+    require(catalogue['schema_version'] == 1)
+    hazards = catalogue['hazards']
+    require(isinstance(hazards, list) and bool(hazards))
+    expected = {hazard['id']: hazard for hazard in hazards}
+    require(len(expected) == len(hazards))
+    require(type(report.get('schema_version')) is int and report['schema_version'] == 1)
+    require(report.get('candidate_sha') == execution)
+    require(report.get('catalogue_sha256') == hashlib.sha256(catalogue_bytes).hexdigest())
+    require(report.get('runner_sha256') == policy['runner_sha256'])
+    require(report.get('complete_catalogue') is True and report.get('passed') is True)
+    results = report['results']
+    require(isinstance(results, list) and len(results) == len(expected))
+    seen = set()
+    for result in results:
+        require(isinstance(result, dict) and isinstance(result.get('id'), str))
+        identity = result['id']
+        require(identity in expected and identity not in seen)
+        seen.add(identity)
+        hazard = expected[identity]
+        require(all(result.get(key) == hazard[source] for key, source in (
+            ('contract', 'contract'), ('target', 'target'), ('expected_test', 'test'),
+            ('expected_assertion', 'assertion'))))
+        replacement = result.get('replacement')
+        expected_replacement = {key: hazard[key] for key in ('before', 'after', 'occurrences', 'target_role')}
+        require(isinstance(replacement, dict) and replacement == expected_replacement)
+        require(all(type(replacement[key]) is type(value) for key, value in expected_replacement.items()))
+        baseline, mutation = result.get('baseline'), result.get('mutation')
+        require(isinstance(baseline, dict) and isinstance(mutation, dict))
+        require(baseline.get('status') == 'baseline_pass' and type(baseline.get('exit_code')) is int
+                and baseline['exit_code'] == 0)
+        require(mutation.get('status') == 'killed_by_behavior' and type(mutation.get('exit_code')) is int
+                and mutation['exit_code'] == 1 and mutation.get('cause') == hazard['assertion'])
+
+
 def normalize_native(
     *, candidate: dict[str, Any], producer: NativeProducer,
     run: dict[str, Any], job: dict[str, Any], artifact: dict[str, Any],
     execution_commit: dict[str, Any], archive: bytes,
     policy_digest: str, producer_digest: str, workflow_digest: str, workflow_source: bytes,
+    hazard_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Reject stale/misattributed receipts before returning a native lane result.
 
@@ -155,6 +196,8 @@ def normalize_native(
     if producer.structured:
         require(report['result_sha256'] == hashlib.sha256(files['results.json']).hexdigest())
         structured = object_json(files['results.json'])
+        if producer.lane == 'hazards':
+            validate_hazard_report(structured, candidate['execution_sha'], hazard_policy)
     else:
         require('results.json' not in files)
         structured = None
@@ -164,10 +207,11 @@ def normalize_native(
             'execution_sha': execution_commit['sha'], 'tests': counts, 'results': structured}
 
 
-def paginate(get, endpoint: str, key: str | None = None) -> list[dict[str, Any]]:
+def paginate(get, endpoint: str, key: str | None = None, *, identity_key: str = "id") -> list[dict[str, Any]]:
     """Read every native page; truncation, duplicate IDs and changing totals fail."""
     rows: list[dict[str, Any]] = []
-    ids: set[int] = set()
+    require(identity_key in {"id", "filename"})
+    ids: set[int | str] = set()
     total = None
     for page in range(1, 101):
         separator = '&' if '?' in endpoint else '?'
@@ -181,9 +225,11 @@ def paginate(get, endpoint: str, key: str | None = None) -> list[dict[str, Any]]
                 total = count
             require(count == total)
         for row in batch:
-            require(isinstance(row, dict) and type(row.get('id')) is int)
-            require(row['id'] not in ids)
-            ids.add(row['id'])
+            require(isinstance(row, dict))
+            identity = row.get(identity_key)
+            require(type(identity) is (int if identity_key == 'id' else str))
+            require(identity not in ids)
+            ids.add(identity)
             rows.append(row)
         if len(batch) < 100:
             require(total is None or len(rows) == total)
