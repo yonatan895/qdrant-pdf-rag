@@ -36,12 +36,31 @@ class DoctorTests(TestCase):
             path = self.root/name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(value)
+        # A small independent lock fixture exercises the same full-profile format.
+        entries = {name: {"version": version, "wheel": f"{name.replace('-', '_')}-{version}-py3-none-any.whl",
+                          "sha256": "a" * 64}
+                   for name, version in {"qdrant-client": "1.19.0", "pytest": "9", "ruff": "1", "mypy": "1"}.items()}
+        requirements = "".join(f"{name}=={entry['version']} --hash=sha256:{entry['sha256']}\n"
+                               for name, entry in sorted(entries.items()))
+        (self.root/'requirements.dev.lock.txt').write_text(requirements)
+        (self.root/'requirements.build.lock.txt').write_text('# fixture\n')
+        (self.root/'locks').mkdir()
+        (self.root/'locks/cp314-linux-x86_64.json').write_text(json.dumps({
+            "schema_version": 1, "target": "cp314-gil-linux-x86_64-glibc2.34",
+            "resolver": {"name": "pip", "version": "26.2.1"}, "packages": entries,
+            "profiles": {"dev": {"requirements": "requirements.dev.lock.txt",
+                                  "sha256": hashlib.sha256(requirements.encode()).hexdigest(),
+                                  "packages": sorted(entries)}},
+        }))
         (self.root/'.tools/bin/task').chmod(0o755)
         self.runtime = {'implementation': 'CPython', 'version': [3, 14, 5],
                         'gil_disabled': False, 'jit_enabled': False,
                         'packages': {'qdrant-client': '1.19.0', 'pytest': '9', 'ruff': '1', 'mypy': '1'}}
         tools_patch = patch.object(doctor.shutil, 'which', side_effect=lambda name: str(self.root/'bin/helm') if name == 'helm' else '/tools/'+name)
         self.runtime_patch = patch.object(doctor, 'inspect_runtime', side_effect=lambda *_: self.runtime)
+        inventory_patch = patch.object(doctor, 'inspect_locked_environment', return_value=True)
+        self.inventory_probe = inventory_patch.start()
+        self.addCleanup(inventory_patch.stop)
         self.which = tools_patch.start()
         self.probe = self.runtime_patch.start()
         self.addCleanup(tools_patch.stop)
@@ -91,6 +110,12 @@ class DoctorTests(TestCase):
         findings = doctor.diagnose(self.root, python=python)
         self.assertTrue(all(f.status == 'ready' for f in findings), findings)
         self.assertEqual(self.probe.call_args.args[0], python)
+
+    def test_complete_inventory_failure_is_not_ready_despite_matching_named_versions(self):
+        self.inventory_probe.return_value = False
+        findings = doctor.diagnose(self.root)
+        self.assertTrue(any(f.subject == 'complete development inventory' and f.status == 'missing prerequisite'
+                            for f in findings))
 
     def test_missing_tools_and_environment(self):
         self.which.side_effect = lambda name: None if name == 'docker' else str(self.root/'bin/helm') if name == 'helm' else '/tools/'+name

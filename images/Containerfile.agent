@@ -4,9 +4,15 @@
 # not a valid reference; tag here was 9.8, digest is the contract).
 FROM registry.access.redhat.com/ubi9/python-314-minimal@sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba
 
-COPY requirements.lock.txt /wheelhouse/requirements.lock.txt
+USER root
+COPY requirements.lock.txt /opt/rag-locks/requirements.lock.txt
+COPY locks/cp314-linux-x86_64.json /opt/rag-locks/locks/cp314-linux-x86_64.json
+COPY scripts/dependency_lock.py /opt/rag-tools/dependency_lock.py
 COPY --from=wheelhouse / /wheelhouse/
-RUN pip install --no-index --find-links /wheelhouse -r /wheelhouse/requirements.lock.txt \
+RUN python3 /opt/rag-tools/dependency_lock.py --root /opt/rag-locks wheelhouse --profile runtime --directory /wheelhouse \
+    && PIP_CONFIG_FILE=/dev/null python3 -m pip --isolated install --no-index --no-cache-dir --only-binary=:all: --require-hashes --find-links /wheelhouse -r /opt/rag-locks/requirements.lock.txt \
+    && python3 -m pip check \
+    && python3 /opt/rag-tools/dependency_lock.py --root /opt/rag-locks installed --profile runtime --image --output /opt/rag-locks/installed-inventory.json \
     && rm -rf /root/.cache
 
 # BM25 weights are needed for query-side sparse vectors (no runtime download).

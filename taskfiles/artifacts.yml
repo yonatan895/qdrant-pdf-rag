@@ -15,18 +15,11 @@ tasks:
   wheelhouse:
     desc: Build the offline pip wheelhouse from the lockfile (connected)
     summary: |
-      Runs `.venv/bin/python -m pip wheel -r requirements.lock.txt -w <dir>`
-      with the venv interpreter so wheel tags match the runtime (cp314),
-      replacing the retired `make wheelhouse`. Inputs: BUNDLE_DIR (default bundles;
-      wheelhouse lands in BUNDLE_DIR/wheelhouse). Freshness is proven by a
-      completion stamp recording the lockfile content, interpreter version
-      and platform, combined with an output-member receipt (.wheels.sha256)
-      re-verified on every run: content changes rebuild, mtime-only touches
-      do not, and a missing stamp or missing/modified wheel rebuilds even
-      when the output directory survives (a directory alone is never proof
-      of a finished build). Fails closed without `.venv` (run `task dev:setup`).
-      Fingerprint state is never used, so discovery (`--list`, JSON
-      listing, summaries) never writes state. Connected host only.
+      Explicit connected acquisition of the complete runtime profile's approved
+      wheel bytes; no resolver or source build. BUNDLE_DIR defaults to bundles.
+      Status verifies the lock identity, interpreter/platform and every wheel
+      against the approved manifest. Missing/tampered members are reacquired
+      only by this explicitly requested preparation task, never by verification.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       WHEELHOUSE: '{{.BUNDLE_DIR}}/wheelhouse'
@@ -34,15 +27,14 @@ tasks:
       TASK_WHEELHOUSE: '{{.WHEELHOUSE}}'
     status:
       - test -f "$TASK_WHEELHOUSE/.task-complete"
-      - test "$(cat "$TASK_WHEELHOUSE/.task-complete")" = "$(sha256sum requirements.lock.txt) $(.venv/bin/python -V 2>&1) $(uname -s -m)"
-      - test -f "$TASK_WHEELHOUSE/.wheels.sha256"
-      - (cd "$TASK_WHEELHOUSE" && sha256sum -c --status .wheels.sha256)
+      - test "$(cat "$TASK_WHEELHOUSE/.task-complete")" = "$(sha256sum requirements.lock.txt locks/cp314-linux-x86_64.json) $(.venv/bin/python -V 2>&1) $(uname -s -m)"
+      - python3 scripts/dependency_lock.py wheelhouse --profile runtime --directory "$TASK_WHEELHOUSE"
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - rm -rf "$TASK_WHEELHOUSE" && mkdir -p "$TASK_WHEELHOUSE"
-      - .venv/bin/python -m pip wheel -r requirements.lock.txt -w "$TASK_WHEELHOUSE"
-      - (cd "$TASK_WHEELHOUSE" && ls *.whl >/dev/null 2>&1 && sha256sum *.whl > .wheels.sha256 && sha256sum -c --status .wheels.sha256)
-      - echo "$(sha256sum requirements.lock.txt) $(.venv/bin/python -V 2>&1) $(uname -s -m)" > "$TASK_WHEELHOUSE/.task-complete"
+      - .venv/bin/python scripts/dependency_lock.py acquire --profile runtime --directory "$TASK_WHEELHOUSE"
+      - python3 scripts/dependency_lock.py wheelhouse --profile runtime --directory "$TASK_WHEELHOUSE"
+      - echo "$(sha256sum requirements.lock.txt locks/cp314-linux-x86_64.json) $(.venv/bin/python -V 2>&1) $(uname -s -m)" > "$TASK_WHEELHOUSE/.task-complete"
 
   bm25:
     desc: Fetch BM25 sparse weights verified against the sha256 manifest

@@ -25,8 +25,9 @@
 #                                   (scripts/tools/helm-pin.txt); no download fallback.
 #   CI_RUNNER_TAG   (optional)      runner tag, default "airgap"
 #   PIP_FIND_LINKS  (recommended)   path to a wheelhouse directory on the runner
-#                                   (e.g. /wheelhouse) built from requirements.lock.txt
-#   PIP_INDEX_URL   (alternative)   internal PyPI-compatible index
+#                                   (e.g. /wheelhouse) built from requirements.dev.lock.txt
+#   PIP_INDEX_URL   (alternative)   internal HTTPS PyPI-compatible index; prepared
+#                                   image must contain lock-qualified pip 26.2.1
 #
 # Air-gap contract: runners must not reach pypi.org, Docker Hub, or GitHub.
 # If neither PIP_FIND_LINKS nor PIP_INDEX_URL is set, jobs FAIL CLOSED.
@@ -71,13 +72,9 @@ default:
     - |
       set -eu
       if [ -n "${PIP_FIND_LINKS:-}" ]; then
-        echo "Installing pinned deps from wheelhouse: ${PIP_FIND_LINKS}"
-        pip install --no-cache-dir --no-index --find-links "${PIP_FIND_LINKS}" \
-          -r requirements.lock.txt -e ".[dev]"
+        python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse "$PIP_FIND_LINKS"
       elif [ -n "${PIP_INDEX_URL:-}" ]; then
-        echo "Installing pinned deps from internal index (PIP_INDEX_URL)"
-        pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" \
-          -r requirements.lock.txt -e ".[dev]"
+        python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --internal-index
       else
         echo "FAIL: no package source configured." >&2
         echo "Set PIP_FIND_LINKS (wheelhouse path) or PIP_INDEX_URL (internal mirror)" >&2

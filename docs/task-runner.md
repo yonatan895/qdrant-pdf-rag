@@ -94,12 +94,13 @@ a local venv. Symlinks preserve virtualenv identity. GitHub unit shards run this
 gate after explicit preparation; GitLab transfers both `CI_TASK_ARCHIVE` and
 `CI_HELM_ARCHIVE` and installs them offline before the same gate.
 
-This first #482 V0 increment checks existing direct pins, dev-tool presence,
-Task/Helm executable hashes, the cached Task archive needed by artifact tests,
-and tracked Qdrant agreement. It does **not** yet
-attest a complete transitive dependency inventory, installed image inventory,
-cached BM25 content or daemon/image availability. Those remain V0/#371 work;
-prerequisite success is neither application acceptance nor milestone completion.
+The complete runtime/dev/build wheel profiles, offline preparation, actual
+installed inventory checks and release SBOM reconciliation are owned by
+[the dependency contract](dependencies.md). The unit doctor verifies the full
+dev profile and editable source tree, plus Task/Helm bytes and the cached Task
+archive used by artifact tests. Cached BM25 content and daemon/image availability
+remain separate simulation prerequisites; a unit success does not attest them
+or establish application acceptance.
 
 Discovery, doctor and verification never provision tools. Missing or foreign
 workspace binaries fail with remediation; installation is an explicit action.
@@ -143,8 +144,9 @@ Cancellation remains a failure; existing foreground owners perform cleanup.
 
 `qa:check` runs lint → typecheck → unit sequentially, stopping at the first
 failure. Required verification has no result cache. `dev:setup` alone skips a
-completed installation when both `.venv/bin/python` and `.venv/.setup-complete`
-exist; failed preparation cannot create the completion marker. Separate
+completed installation only when `.venv/bin/python`, `.venv/.setup-complete`
+and a fresh full inventory/source check agree; failed preparation cannot create
+the completion marker. Separate
 concurrent setup/build processes must not share one environment/output directory.
 
 <a id="safety"></a>
@@ -181,7 +183,7 @@ executed. Prefix current tasks with `sh scripts/tools/run-task.sh`. Task
 | Former Make target(s) | Current Task command(s), in matching order | Retained owner |
 |---|---|---|
 | `help` (default) | `--list`, `<task> --summary` | root `Taskfile.yml` |
-| `venv` / `.venv` | `dev:setup` | Python venv/pip and `requirements.lock.txt` |
+| `venv` / `.venv` | `dev:setup` | Explicit owned venv and complete dev/build/runtime hash locks |
 | `agent-doctor`, `check-context` | `dev:doctor`, `qa:context` | `agent_doctor.py`, `check_agent_context.py` |
 | `lint`, `typecheck`, `test`, `check` | `qa:lint`, `qa:typecheck`, `qa:unit`, `qa:check` | Ruff, mypy, pytest; root aliases retained |
 | `wheelhouse`, `bm25-weights` | `artifacts:wheelhouse`, `artifacts:bm25` | artifact preparation and BM25 fetcher |

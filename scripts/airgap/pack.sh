@@ -179,12 +179,19 @@ python3 - <<'PYEOF'
 import json
 import os
 
-wheels = []
-with open(os.path.join(os.environ["REPO_ROOT"], "requirements.lock.txt"), encoding="utf-8") as fh:
-    for line in fh:
-        line = line.strip()
-        if line and not line.startswith("#"):
-            wheels.append(line)
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(os.environ["REPO_ROOT"]) / "scripts"))
+from dependency_lock import load, LockError
+from image_inventory import inventory, verify_sbom
+root = Path(os.environ["REPO_ROOT"])
+try:
+    _, locked = load(root, "runtime")
+    installed = {role: inventory(root, Path(os.environ["DIST"]) /
+        f"app-{role}-{os.environ['IMAGE_SHA']}.tar") for role in ("agent", "ingest")}
+except (LockError, OSError, ValueError, KeyError):
+    raise SystemExit("SBOM reconciliation failed: actual shipped Python inventory is not qualified")
+wheels = [{"name": name, **entry} for name, entry in sorted(locked.items())]
 
 sbom = {
     "generated": os.environ["SBOM_DATE"],
@@ -207,6 +214,8 @@ sbom = {
     "chart": os.environ["CHART_VERSION"],
     "chart_sha256": os.environ["CHART_SHA256"],
     "wheels": wheels,
+    "installed_python": installed,
+    "inventory_scope": "Locked Python distributions and explicit inherited pip; base OS, chart, JS and knowledge-asset rights/inventories have separate owners. Not a vulnerability or license approval.",
 }
 if os.environ.get("OAUTH_PROXY_REF"):
     sbom["images"].append(
@@ -219,6 +228,10 @@ if os.environ.get("OAUTH_PROXY_REF"):
 with open(os.path.join(os.environ["DIST"], "sbom.json"), "w", encoding="utf-8") as fh:
     json.dump(sbom, fh, indent=2, sort_keys=True)
     fh.write("\n")
+try:
+    verify_sbom(root, Path(os.environ["DIST"]), os.environ["IMAGE_SHA"])
+except (LockError, OSError, ValueError, KeyError):
+    raise SystemExit("SBOM reconciliation failed: serialized inventory differs from shipped bytes")
 PYEOF
 
 echo "==> Bootstrap helper & Packing Record"

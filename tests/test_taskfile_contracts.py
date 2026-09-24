@@ -83,8 +83,8 @@ with open(log, "a", encoding="utf-8") as fh:
 ret = int(os.environ.get("RECORDER_EXIT", "0"))
 if ret != 0:
     sys.exit(ret)
-if "-m" in argv and "pip" in argv and "wheel" in argv and "-w" in argv:
-    idx = argv.index("-w") + 1
+if "scripts/dependency_lock.py" in argv and "acquire" in argv:
+    idx = argv.index("--directory") + 1
     if idx < len(argv):
         os.makedirs(argv[idx], exist_ok=True)
         with open(os.path.join(argv[idx], "fake_pkg-1.0.0-py3-none-any.whl"), "w") as whl:
@@ -277,7 +277,19 @@ class TaskContractsTests(unittest.TestCase):
     def make_artifact_fixtures(self) -> None:
         """Minimal inputs the artifact tasks fingerprint (content inert)."""
         import hashlib
-        (self.root / "requirements.lock.txt").write_text("qdrant-client==1.19.0\n", encoding="utf-8")
+        self.copy_repo_script("dependency_lock.py")
+        wheel_digest = hashlib.sha256(b"fake-wheel-content\n").hexdigest()
+        requirement = f"fake-pkg==1.0.0 --hash=sha256:{wheel_digest}\n"
+        (self.root / "requirements.lock.txt").write_text(requirement)
+        (self.root / "locks").mkdir(exist_ok=True)
+        (self.root / "locks/cp314-linux-x86_64.json").write_text(json.dumps({
+            "schema_version": 1, "target": "cp314-gil-linux-x86_64-glibc2.34",
+            "resolver": {"name": "pip", "version": "26.2.1"},
+            "profiles": {"runtime": {"requirements": "requirements.lock.txt",
+                "sha256": hashlib.sha256(requirement.encode()).hexdigest(), "packages": ["fake-pkg"]}},
+            "packages": {"fake-pkg": {"version": "1.0.0",
+                "wheel": "fake_pkg-1.0.0-py3-none-any.whl", "sha256": wheel_digest}},
+        }))
         data = b"synthetic-weights-content\n"
         digest = hashlib.sha256(data).hexdigest()
         (self.root / "bm25-weights.sha256").write_text(f"{digest}  weights.bin\n", encoding="utf-8")
@@ -551,7 +563,7 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("artifacts:wheelhouse", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual([c["argv"] for c in self.pip_calls()],
-                         [["-m", "pip", "wheel", "-r", "requirements.lock.txt", "-w", "bundles/wheelhouse"]])
+                         [["scripts/dependency_lock.py", "acquire", "--profile", "runtime", "--directory", "bundles/wheelhouse"]])
         stamp = self.root / "bundles/wheelhouse/.task-complete"
         self.assertTrue(stamp.is_file(), "completion stamp published only after success")
         # Fresh: skip without invoking pip again.
@@ -560,7 +572,12 @@ class TaskContractsTests(unittest.TestCase):
         self.assertIn("up to date", proc.stdout)
         self.assertEqual(len(self.pip_calls()), 1)
         # Content change rebuilds; mtime-only touch does not (checksum method).
-        (self.root / "requirements.lock.txt").write_text("qdrant-client==1.19.0\n# comment\n", encoding="utf-8")
+        requirement = self.root / "requirements.lock.txt"
+        requirement.write_text(requirement.read_text() + "# comment\n")
+        manifest_path = self.root / "locks/cp314-linux-x86_64.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["profiles"]["runtime"]["sha256"] = hashlib.sha256(requirement.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
         proc = self.run_task("artifacts:wheelhouse", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual(len(self.pip_calls()), 2)
@@ -621,7 +638,7 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("artifacts:wheelhouse", "BUNDLE_DIR=alt", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual([c["argv"] for c in self.pip_calls()],
-                         [["-m", "pip", "wheel", "-r", "requirements.lock.txt", "-w", "alt/wheelhouse"]])
+                         [["scripts/dependency_lock.py", "acquire", "--profile", "runtime", "--directory", "alt/wheelhouse"]])
         self.assertTrue((self.root / "alt/wheelhouse/.task-complete").is_file())
         self.assertFalse((self.root / "bundles").exists())
 
@@ -714,7 +731,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual(
             [c["argv"] for c in self.pip_calls()],
-            [["-m", "pip", "wheel", "-r", "requirements.lock.txt", "-w", "alt/wheelhouse"],
+            [["scripts/dependency_lock.py", "acquire", "--profile", "runtime", "--directory", "alt/wheelhouse"],
              ["scripts/fetch_bm25_weights.py", "--model", "Qdrant/bm25",
               "--out", "alt/bm25-weights", "--verify-manifest", "bm25-weights.sha256"]])
         docker = [c["argv"] for c in self.tool_calls("docker")]
@@ -1504,7 +1521,7 @@ class TaskContractsTests(unittest.TestCase):
         py_path = self.root / "bin/fakepy"
         py_path.write_text(
             '#!/bin/sh\n'
-            'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
+            'if [ "$1" = "scripts/prepare_python.py" ]; then\n'
             '    mkdir -p .venv/bin\n'
             '    touch .venv/bin/python\n'
             '    chmod +x .venv/bin/python\n'
