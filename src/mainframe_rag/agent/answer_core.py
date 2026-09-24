@@ -23,9 +23,12 @@ from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
 from mainframe_rag.agent.answer import (
+    REASON_MALFORMED_FRAME,
+    REASON_MISSING_FINISH,
     ParsedAnswer,
     PreparedPrompt,
     PromptEvidence,
+    TruncatedStreamError,
     VerificationState,
     as_chat_result,
     assert_reasoning_model,
@@ -519,7 +522,11 @@ async def execute_answer_core_stream(
     t0 = time.monotonic()
     ttft_ms: int | None = None
     content_parts: list[str] = []
-    finish_reason = "stop"
+    # No synthesized terminal: a stream is complete only with an explicit
+    # non-empty string done finish (issue #365). The initial None means a
+    # stream that never yielded a valid done is incomplete, even when tokens
+    # arrived.
+    finish_reason: str | None = None
     usage = TokenUsage()
 
     if hasattr(deps.llm, "chat_stream"):
@@ -547,11 +554,24 @@ async def execute_answer_core_stream(
                         content_parts.append(delta)
                         yield {"type": "token", "delta": delta, "ttft_ms": ttft_ms}
                 elif itype == "done":
-                    finish_reason = item.get("finish_reason") or "stop"
+                    raw_finish = item.get("finish_reason")
+                    if raw_finish is None:
+                        raise TruncatedStreamError(
+                            len(content_parts), REASON_MISSING_FINISH
+                        )
+                    if not isinstance(raw_finish, str) or not raw_finish:
+                        raise TruncatedStreamError(
+                            len(content_parts), REASON_MALFORMED_FRAME
+                        )
+                    finish_reason = raw_finish
                     if item.get("usage"):
                         usage = item["usage"]
                     if ttft_ms is None and item.get("ttft_ms") is not None:
                         ttft_ms = item["ttft_ms"]
+
+            if finish_reason is None:
+                # No valid done item arrived: never finalize tokens as "stop".
+                raise TruncatedStreamError(len(content_parts), REASON_MISSING_FINISH)
 
             llm_span.set_attributes(
                 {

@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import pytest
 
+from mainframe_rag.agent.answer import (
+    REASON_MALFORMED_FRAME,
+    REASON_MISSING_FINISH,
+    TruncatedStreamError,
+)
 from mainframe_rag.agent.answer_core import (
     AnswerCoreDeps,
     AnswerCoreInput,
@@ -315,3 +320,86 @@ async def test_core_invalid_chat_refuses_even_with_precomputed_hits(stream, mess
         else:
             await execute_answer_core(source, deps)
     assert llm.calls == []
+
+
+class _DoneSeamLLM:
+    """chat_stream double yielding one grounded token, then a configurable
+    terminal item: used to pin the core's explicit-finish gate (issue #365).
+    A falsy done finish or a missing done must never finalize as "stop"."""
+
+    def __init__(self, done_item):
+        self._done_item = done_item
+
+    async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+        yield {"type": "token", "delta": "Reissue the command."}
+        if self._done_item is not None:
+            yield self._done_item
+
+    def chat(self, *a, **k):
+        raise AssertionError("buffered chat must not run on the stream path")
+
+
+def _stream_deps(llm) -> AnswerCoreDeps:
+    def retrieve(*_a, **_k):
+        return [_hit()], "identifier", {}
+
+    return _deps(_settings(), llm, retrieve)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "done_item, reason",
+    [
+        ({"type": "done", "finish_reason": None, "usage": TokenUsage()}, REASON_MISSING_FINISH),
+        ({"type": "done", "usage": TokenUsage()}, REASON_MISSING_FINISH),
+        ({"type": "done", "finish_reason": "", "usage": TokenUsage()}, REASON_MALFORMED_FRAME),
+        ({"type": "done", "finish_reason": 42, "usage": TokenUsage()}, REASON_MALFORMED_FRAME),
+    ],
+)
+async def test_core_stream_rejects_falsy_done_finish(done_item, reason):
+    """The shared core validates the terminal done finish with buffered-parser
+    parity (issue #365): missing/null finish and misshapen values raise fixed
+    truncation errors instead of finalizing the prefix as accepted "stop"."""
+    items = []
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        async for item in execute_answer_core_stream(
+            AnswerCoreInput(query="IEA500I rejected"), _stream_deps(_DoneSeamLLM(done_item))
+        ):
+            items.append(item)
+    assert excinfo.value.reason == reason
+    # The provisional token was already yielded and cannot be retracted; only
+    # the terminal outcome is refused (the app takes its event: error path).
+    assert [i["type"] for i in items] == ["token"]
+
+
+@pytest.mark.anyio
+async def test_core_stream_without_done_raises_missing_finish():
+    """A token-only stream with no terminal done item is incomplete: the core
+    must not fall back to an initial "stop" (issue #365)."""
+    items = []
+    with pytest.raises(TruncatedStreamError) as excinfo:
+        async for item in execute_answer_core_stream(
+            AnswerCoreInput(query="IEA500I rejected"), _stream_deps(_DoneSeamLLM(None))
+        ):
+            items.append(item)
+    assert excinfo.value.reason == REASON_MISSING_FINISH
+    assert [i["type"] for i in items] == ["token"]
+
+
+@pytest.mark.anyio
+async def test_core_stream_explicit_done_still_finalizes():
+    """Guard against over-strictness: a custom chat_stream double with an
+    explicit string done finish finalizes normally (issue #365)."""
+    items = [
+        item
+        async for item in execute_answer_core_stream(
+            AnswerCoreInput(query="IEA500I rejected"),
+            _stream_deps(
+                _DoneSeamLLM(
+                    {"type": "done", "finish_reason": "stop", "usage": TokenUsage()}
+                )
+            ),
+        )
+    ]
+    assert [i["type"] for i in items] == ["token", "final"]
+    assert items[-1]["output"].finish_reason == "stop"
