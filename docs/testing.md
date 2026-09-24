@@ -425,3 +425,12 @@ with approved base bytes, rather than believing receipt hashes. Tests also
 exercise a candidate producer that claims the original digest. This establishes
 that particular refusal, not immunity to arbitrary malicious candidate code or
 proof that candidate-authored tests are sufficient independent review.
+
+The acceptance normalizer additionally checks the contents of the critical
+hazard report against the approved catalogue: complete membership, candidate and
+runner identity, exact mutation/test/assertion, successful baselines and intended
+behavioral kills. Hash-valid empty/partial/duplicate/surviving reports are negative
+cases. The consumer independently reads candidate Task dispatch and challenge
+policy bytes; a candidate cannot replace those inputs and merely claim their
+approved hashes. Changes to these verifier inputs follow the explicit policy
+bootstrap review path, rather than authorizing their own replacement verifier.

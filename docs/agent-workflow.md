@@ -260,9 +260,15 @@ current PR test merge with the exact current base/head parents. Matching parent
 names alone cannot authorize a different merge tree. ZIP members are read in
 memory; they are never extracted, imported, or executed.
 
-The approved base supplies policy, producer and workflow bytes. Their candidate
+The approved base supplies policy, producer and workflow bytes, Task dispatch
+(the root Taskfile, included modules, wrapper and binary pin), and the critical
+hazard runner/catalogue. Their candidate
 bytes are read independently from the commit API; receipt-supplied hashes alone
-do not attest which source was executed. A candidate's
+do not attest which source was executed. Hazard reports must also contain the
+complete approved challenge set exactly once, bind its catalogue/runner hashes
+and candidate execution, and record each expected baseline pass and intended
+behavioral kill. A valid artifact digest over an empty, reduced or surviving
+challenge report cannot establish acceptance. A candidate's
 workflow cannot approve its own replacement verifier. Producer/bootstrap changes
 therefore require the existing explicit maintainer review path before a later
 consumer can trust those bytes. This does not waive their tests. The privileged

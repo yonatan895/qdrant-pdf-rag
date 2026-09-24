@@ -11,6 +11,12 @@ from typing import Any
 
 from scripts.acceptance_evidence import LIMIT, PRODUCERS, normalize_native, paginate, require
 
+VERIFICATION_INPUTS = (
+    'scripts/review_tooling.py', 'scripts/ci_evidence.py', 'Taskfile.yml',
+    'scripts/tools/run-task.sh', 'scripts/tools/task-pin.txt',
+    'scripts/check_hazard_sensitivity.py', 'tests/hazards/critical.json',
+)
+
 
 class GitHub:
     """Use the runner's existing gh authentication without exposing credentials."""
@@ -43,7 +49,7 @@ class GitHub:
 
     def blob(self, sha: str, path: str) -> bytes:
         require(bool(re.fullmatch('[a-f0-9]{40}', sha)))
-        require(path in {'scripts/review_tooling.py', 'scripts/ci_evidence.py'} or
+        require(path in VERIFICATION_INPUTS or bool(re.fullmatch(r'taskfiles/[A-Za-z0-9_-]+\.yml', path)) or
                 path in {'.github/workflows/' + p.workflow for p in PRODUCERS})
         data = self.get(self.prefix + f'contents/{path}?ref={sha}')
         require(data['type'] == 'file' and data['encoding'] == 'base64')
@@ -80,8 +86,13 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
     policy_digest = hashlib.sha256((approved_root / 'scripts/review_tooling.py').read_bytes()).hexdigest()
     producer_digest = hashlib.sha256((approved_root / 'scripts/ci_evidence.py').read_bytes()).hexdigest()
     # Receipt hashes are claims, not proof of the actual executed source.
-    for path, digest in (('scripts/review_tooling.py', policy_digest), ('scripts/ci_evidence.py', producer_digest)):
+    policy_inputs = {path: hashlib.sha256((approved_root / path).read_bytes()).hexdigest()
+                     for path in (*VERIFICATION_INPUTS, *(str(path.relative_to(approved_root))
+                                                          for path in (approved_root / 'taskfiles').glob('*.yml')))}
+    for path, digest in policy_inputs.items():
         require(hashlib.sha256(api.blob(candidate['execution_sha'], path)).hexdigest() == digest)
+    hazard_policy = {'catalogue': (approved_root / 'tests/hazards/critical.json').read_bytes(),
+                     'runner_sha256': policy_inputs['scripts/check_hazard_sensitivity.py']}
     runs = paginate(api.get, api.prefix + f"actions/runs?event=pull_request&head_sha={candidate['head_sha']}", 'workflow_runs')
     workflows = {p.workflow for p in PRODUCERS}
     latest = {}
@@ -124,7 +135,8 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
                 result = normalize_native(candidate=candidate, producer=producer, run=run, job=job,
                                           artifact=artifact, execution_commit=commit, archive=archive,
                                           policy_digest=policy_digest, producer_digest=producer_digest,
-                                          workflow_digest=workflow_digest, workflow_source=source)
+                                          workflow_digest=workflow_digest, workflow_source=source,
+                                          hazard_policy=hazard_policy)
                 record.update(result)
             except (KeyError, TypeError, ValueError, OSError):
                 record['status'] = 'unverified'
@@ -143,7 +155,7 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
         # An absent workflow, shard, or artifact stays missing in the existing
         # taxonomy: do not turn it into a reported execution failure.
     return {'candidate': candidate, 'native': native, 'lane_statuses': statuses, 'runs': snapshots,
-            'policy_sha256': policy_digest, 'producer_sha256': producer_digest}
+            'policy_sha256': policy_digest, 'producer_sha256': producer_digest, 'policy_inputs': policy_inputs}
 
 
 def collect_review(api: GitHub, pr: dict[str, Any], candidate: dict[str, Any]):
@@ -272,6 +284,7 @@ def collect_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
                         for record in native['native']]
     result['runs'] = native['runs']
     result['policy_sha256'] = native['policy_sha256']
+    result['policy_inputs'] = native['policy_inputs']
     result['markdown_report'] = summary.markdown_report
     result['candidate'] = candidate
     result['draft'] = pr['draft']

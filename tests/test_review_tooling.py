@@ -1858,7 +1858,7 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
     def test_collector_requires_all_native_shards_and_never_reuses_an_older_green_run(self):
         import hashlib
 
-        from scripts.acceptance import collect_native
+        from scripts.acceptance import VERIFICATION_INPUTS, collect_native
 
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -1867,6 +1867,11 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             (root / "scripts/review_tooling.py").write_bytes(b"approved policy")
             (root / "scripts/ci_evidence.py").write_bytes(b"approved producer")
             (root / ".github/workflows/ci.yml").write_bytes(b"approved workflow")
+            for relative in (*VERIFICATION_INPUTS, "taskfiles/quality.yml"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if not path.exists():
+                    path.write_bytes(b"approved verifier input")
             def git(*args):
                 return subprocess.check_output(["git", *args], cwd=root, text=True,
                                                stderr=subprocess.DEVNULL).strip()
@@ -1918,6 +1923,8 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                         return b"candidate producer" if getattr(self, "forged_producer", False) else b"approved producer"
                     if path == "scripts/review_tooling.py":
                         return b"approved policy"
+                    if path in VERIFICATION_INPUTS or path.startswith("taskfiles/"):
+                        return b"candidate dispatch" if getattr(self, "changed_input", None) == path else (root / path).read_bytes()
                     return b"approved workflow"
             api = API()
             result = collect_native(api, pr, root)
@@ -1934,6 +1941,13 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             # candidate source bytes must independently contradict that claim.
             with self.assertRaises(ValueError):
                 collect_native(api, pr, root)
+            api.forged_producer = False
+            for path in ("Taskfile.yml", "taskfiles/quality.yml", "scripts/tools/run-task.sh",
+                         "tests/hazards/critical.json", "scripts/check_hazard_sensitivity.py"):
+                with self.subTest(path=path):
+                    api.changed_input = path
+                    with self.assertRaises(ValueError):
+                        collect_native(api, pr, root)
 
     def test_accepts_exact_native_job_attempt_and_actual_test_records(self):
         from scripts.acceptance_evidence import normalize_native
@@ -1999,6 +2013,94 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
         receipt["execution_sha"] = receipt["workflow_sha"] = "f" * 40
         args["execution_commit"]["sha"] = "f" * 40
         args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
+        with self.assertRaises(ValueError):
+            normalize_native(**args)
+
+    def test_hazard_receipts_require_each_approved_behavioral_kill(self):
+        import copy
+        import hashlib
+        import io
+        import zipfile
+
+        from scripts.acceptance_evidence import PRODUCERS, normalize_native
+
+        hazard = {"id": "retained-state", "contract": "Preserve retained state", "target": "src/state.py",
+                  "test": "tests/test_state.py::test_retained", "assertion": "assert retained == expected",
+                  "before": "retained = expected", "after": "retained = None", "occurrences": 1,
+                  "target_role": "production"}
+        catalogue = json.dumps({"schema_version": 1, "hazards": [hazard]}).encode()
+        policy = {"catalogue": catalogue, "runner_sha256": "f" * 64}
+        result = {"id": "retained-state", "contract": "Preserve retained state", "target": "src/state.py",
+                  "expected_test": "tests/test_state.py::test_retained",
+                  "expected_assertion": "assert retained == expected",
+                  "replacement": {"before": "retained = expected", "after": "retained = None",
+                                  "occurrences": 1, "target_role": "production"},
+                  "baseline": {"status": "baseline_pass", "exit_code": 0},
+                  "mutation": {"status": "killed_by_behavior", "exit_code": 1,
+                               "cause": "assert retained == expected"}}
+        report = {"schema_version": 1, "candidate_sha": "c" * 40,
+                  "catalogue_sha256": hashlib.sha256(catalogue).hexdigest(), "runner_sha256": "f" * 64,
+                  "complete_catalogue": True, "passed": True, "results": [result]}
+
+        def normalize(value):
+            args, receipt, _ = self.fixture()
+            args["producer"] = next(p for p in PRODUCERS if p.lane == "hazards")
+            args["job"]["name"] = "hazards"
+            args["artifact"]["name"] = "evidence-hazards-attempt-2"
+            args["hazard_policy"] = policy
+            raw = json.dumps(value).encode()
+            receipt.update(job_key="hazards", job_name="hazards", lane="hazards", tests=None,
+                           result_sha256=hashlib.sha256(raw).hexdigest())
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                archive.writestr("evidence.json", json.dumps(receipt))
+                archive.writestr("results.json", raw)
+            args["archive"] = buffer.getvalue()
+            args["artifact"]["digest"] = "sha256:" + hashlib.sha256(args["archive"]).hexdigest()
+            return normalize_native(**args)
+
+        self.assertEqual(normalize(report)["status"], "success")
+        mutations = [({}, "empty report")]
+        for field, value in (("results", []), ("results", [result, result]), ("complete_catalogue", False),
+                             ("complete_catalogue", 1), ("passed", False), ("candidate_sha", "a" * 40),
+                             ("runner_sha256", "0" * 64), ("catalogue_sha256", "0" * 64)):
+            mutations.append(({**report, field: value}, field))
+        for field, value in (("id", "unapproved"), ("expected_assertion", "assert True"),
+                             ("target", "src/unrelated.py"),
+                             ("replacement", {**result["replacement"], "occurrences": True}),
+                             ("baseline", {"status": "baseline_failed", "exit_code": 1}),
+                             ("mutation", {"status": "survived", "exit_code": 0}),
+                             ("mutation", {"status": "killed_by_behavior", "exit_code": True,
+                                           "cause": "assert retained == expected"}),
+                             ("mutation", {"status": "killed_by_behavior", "exit_code": 1,
+                                           "cause": "unrelated assertion"})):
+            altered = copy.deepcopy(report)
+            altered["results"][0][field] = value
+            mutations.append((altered, field))
+        for altered, label in mutations:
+            with self.subTest(case=label, value=altered), self.assertRaises((ValueError, KeyError)):
+                normalize(altered)
+
+    def test_hazard_receipt_rejects_hash_valid_empty_structured_results(self):
+        import hashlib
+        import io
+        import zipfile
+
+        from scripts.acceptance_evidence import PRODUCERS, normalize_native
+
+        args, receipt, _ = self.fixture()
+        producer = next(p for p in PRODUCERS if p.lane == "hazards")
+        args["producer"] = producer
+        args["job"]["name"] = "hazards"
+        args["artifact"]["name"] = "evidence-hazards-attempt-2"
+        receipt.update(job_key="hazards", job_name="hazards", lane="hazards", tests=None,
+                       result_sha256=hashlib.sha256(b"{}").hexdigest())
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("evidence.json", json.dumps(receipt))
+            archive.writestr("results.json", b"{}")
+        args["archive"] = buffer.getvalue()
+        args["artifact"]["digest"] = "sha256:" + hashlib.sha256(args["archive"]).hexdigest()
         with self.assertRaises(ValueError):
             normalize_native(**args)
 
@@ -2180,7 +2282,7 @@ class TestAcceptanceSnapshot(unittest.TestCase):
                     return {"permission": "write"}
                 return self.pr
         native = {"candidate": candidate, "lane_statuses": {"context_check": "success"},
-                  "native": [], "runs": {}, "policy_sha256": "d" * 64}
+                  "native": [], "runs": {}, "policy_sha256": "d" * 64, "policy_inputs": {}}
         with patch("scripts.acceptance.collect_native", return_value=native):
             api = API()
             result = collect_acceptance(api, 3, pathlib.Path.cwd())
