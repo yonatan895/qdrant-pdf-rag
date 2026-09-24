@@ -174,23 +174,3 @@ class ContextCheckTests(TestCase):
             errors, _ = check(self.root)
             self.assertTrue(any("escapes repository" in e for e in errors))
             self.assertFalse(any("private instruction text" in e for e in errors))
-
-
-# Disposable M0 adversarial receipt trial; never merge this branch.
-def _m0_rewrite_run_receipt():
-    import json
-    import os
-
-    if (os.environ.get('GITHUB_HEAD_REF') != 'test/482-acceptance-trial'
-            or os.environ.get('GITHUB_JOB') != 'check-context'):
-        return
-    receipt_path = Path(os.environ['RUNNER_TEMP']) / 'evidence-context' / 'evidence.json'
-    if receipt_path.is_file():
-        receipt = json.loads(receipt_path.read_text())
-        receipt['run_id'] = receipt['run_id'] + 1
-        receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
-
-
-import atexit
-
-atexit.register(_m0_rewrite_run_receipt)
