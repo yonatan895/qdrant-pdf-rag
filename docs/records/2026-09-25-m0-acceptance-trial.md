@@ -133,11 +133,64 @@ passed 106 tests with correct actor/run attribution and zero failures/errors/ski
 Its downloaded receipt binds base20aec28 and test-merge
 `b8ec43e811f04e9ffd057f11ef25a08e734631e1`.
 
+## Live replay of a genuine prior receipt
+
+At disposable head `1327fad2cda30828808bc52e8f9d290f58fc824e`, a temporary
+teardown hook replaced the new context receipt with the genuine successful
+receipt from cleanup run `36072641893` (head `8c90067`). The uploaded JSON was
+verified byte-for-byte identical to the original downloaded receipt. No policy,
+producer or workflow bytes changed. This tests old evidence presented through
+a current upload, not reassignment of GitHub's native artifact ownership.
+
+[Current context 36073081515](https://github.com/yonatan895/qdrant-pdf-rag/actions/runs/36073081515)
+passed; job `107878211433`, artifact `10839196779`, ZIP digest
+`sha256:633e511484f5a05a72606abe46abb575c082932de2e19a97dd88b811f10351bd`.
+The replayed receipt claims 106 passing tests, but binds the prior run/head.
+[Publisher 36073079481](https://github.com/yonatan895/qdrant-pdf-rag/actions/runs/36073079481),
+check `107878371686`, classified context as unverified/SELECTED_FAILED.
+Approved-main normalization rejected the actual downloaded archive at its
+native-identity comparison. A local copy with only current identity fields
+restored passed normalization; that causal control was not uploaded as success.
+Probe `/tmp/m0-live-replay-probe.py` exited 0; evidence
+`/tmp/m0-live-replay-proof.json` and `/tmp/m0-live-replay-artifact.zip` are
+session-local, while the actual native artifact is retained in the linked run.
+
+The replay hook was removed at `8d7853de66256f28fec62d0481c8270fdf8e4f62`.
+[Cleanup context 36073204832](https://github.com/yonatan895/qdrant-pdf-rag/actions/runs/36073204832)
+passed 106 tests with current run/actor attribution. Its receipt binds test-merge
+`776baa4095d7f45ab6b7b66613db74338f7291b6` and approved base20aec28.
+
+## Synthetic marker does not supply review
+
+[Trial comment 5824014173](https://github.com/yonatan895/qdrant-pdf-rag/pull/491#issuecomment-5824014173)
+contains `gate-l1-report` and `current-candidate-acceptance` markers, current
+head/base/execution IDs, and synthetic PASS/reviewer-PASS text. It is explicitly
+labeled an untrusted negative probe, contains no structured review approval,
+and was not submitted as an independent assessment. Actual review collection
+before and after the comment selected the same old human record `5822648661`,
+with exact candidate mismatches and `not_ready`; the marker supplied no authority.
+[Publisher 36073355691](https://github.com/yonatan895/qdrant-pdf-rag/actions/runs/36073355691),
+check `107879194415`, accepted current context evidence but still rejected reviewer
+readiness. Local snapshots: `/tmp/m0-marker-trial-before.json` and
+`/tmp/m0-marker-trial-after.json`. This is marker-only refusal, not a substitute
+for the remaining human `changes_required` review-event test.
+
+A subsequent empty trial commit moved the head to
+`846b46589a29c87af41e70cdf83bc6ecade628e7` without changing its file tree,
+leaving the synthetic marker stale. [Context 36073490037](https://github.com/yonatan895/qdrant-pdf-rag/actions/runs/36073490037)
+passed. [Publisher 36073486513](https://github.com/yonatan895/qdrant-pdf-rag/actions/runs/36073486513),
+check `107879727554`, accepted fresh context evidence and still rejected reviewer
+readiness. Direct collection again selected old human record `5822648661`, not
+the marker (`/tmp/m0-marker-trial-stale.json`). The trial still changes only the
+original seven-line document relative to main; no tampering hooks remain.
+
 ## Remaining acceptance
 
 Live receipt actor/run misattribution and real base movement/refusal/recovery
-are now observed above. Actual alternate-actor execution, foreign-run artifact
-substitution and fake/stale marker cases remain distinct gaps. An authorized
+are now observed above. A genuine foreign-run receipt was also replayed through a current artifact
+upload and rejected. These establish actor/run attribution and replay refusal;
+actual alternate-account execution and native artifact ownership reassignment
+were not performed. Current and stale marker-only claims were refused above. An authorized
 current `changes_required` verdict despite a green review-signal job, automatic
 template delivery, and maintainer-only dedicated-App/ruleset activation plus
 rejected-merge proof also remain outstanding. Controlled local corruption does
@@ -149,3 +202,9 @@ same credentials. Agents submitted no approval and did not merge trial work.
 Review order is #494, then #495, then this evidence record (#492). The record
 is stacked on #495; retarget and reverify each successor after its base merges.
 Do not mark M0 complete from this record or from green native CI alone.
+
+A final read-only settings check found ruleset `21729258` active with deletion,
+non-fast-forward and pull-request rules, but no required status checks, zero
+required approving reviews and no required thread resolution. The only listed
+environment was `copilot`; `acceptance-publisher` was absent. No enforcement
+settings were modified, and an advisory refusal is not proof of merge prevention.
