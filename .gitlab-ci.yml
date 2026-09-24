@@ -134,7 +134,8 @@ gate-l1:
   extends: .py-base
   stage: test
   services:
-    - name: ${CI_REGISTRY}/qdrant/qdrant:v1.19.0-unprivileged
+    # Mirror the existing approved images.txt bytes; a mutable tag is insufficient.
+    - name: ${CI_REGISTRY}/qdrant/qdrant@sha256:a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e
       alias: qdrant
   variables:
     QDRANT_SIM_URL: "http://qdrant:6333"

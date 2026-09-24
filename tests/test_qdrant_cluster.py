@@ -35,7 +35,7 @@ def test_start_cluster_command_shape(monkeypatch, tmp_path):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(cluster, "qdrant_image", lambda _root: "qdrant/pinned:tag")
-    monkeypatch.setattr(cluster, "require_docker", lambda _image: None)
+    monkeypatch.setattr(cluster, "require_docker", lambda _image: "sha256:" + "b" * 64)
     monkeypatch.setattr(cluster, "_run", fake_run)
     monkeypatch.setattr(cluster, "wait_cluster_ready", lambda *_a, **_k: None)
 
@@ -50,6 +50,7 @@ def test_start_cluster_command_shape(monkeypatch, tmp_path):
     assert calls[0][:3] == ["docker", "network", "create"]
     runs = [call for call in calls if call[:2] == ["docker", "run"]]
     assert len(runs) == 3
+    assert all("--pull=never" in call and "sha256:" + "b" * 64 in call for call in runs)
     first, second, third = runs
     assert "--uri" in first and first[first.index("--uri") + 1] == "http://qdrant-ha-x-1:6335"
     for peer in (second, third):
@@ -77,30 +78,34 @@ def test_stop_removes_containers_and_network(monkeypatch):
     assert ["docker", "network", "rm", "ha-net"] in calls
 
 
-def test_require_docker_pulls_when_absent(monkeypatch):
-    calls: list[list[str]] = []
-    outcomes = {("image", "inspect"): 1, ("pull",): 0}
+@pytest.mark.parametrize('returncode, payload', [
+    (1, ''), (0, '[]'),
+    (0, '[{"Id": "sha256:' + 'b' * 64 + '", "RepoDigests": ["qdrant/qdrant@sha256:' + 'c' * 64 + '"]}]'),
+])
+def test_require_docker_rejects_missing_or_wrong_identity_without_pull(monkeypatch, returncode, payload):
+    from scripts import qdrant_pin
 
-    def fake_run(cmd, *, timeout=300.0, check=True):
-        calls.append(list(cmd))
-        if cmd[1] == "image":
-            return SimpleNamespace(returncode=1, stdout="", stderr="")
-        return SimpleNamespace(returncode=outcomes.get(("pull",), 1), stdout="", stderr="")
+    calls = []
+    def inspect(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=returncode, stdout=payload)
+    monkeypatch.setattr(qdrant_pin.subprocess, 'run', inspect)
+    with pytest.raises(cluster.QdrantClusterError):
+        cluster.require_docker('docker.io/qdrant/qdrant@sha256:' + 'a' * 64)
+    assert len(calls) == 1
+    assert calls[0][:3] == ['docker', 'image', 'inspect']
 
-    monkeypatch.setattr(cluster.shutil, "which", lambda _name: "/usr/bin/docker")
-    monkeypatch.setattr(cluster, "_run", fake_run)
-    cluster.require_docker("qdrant/pinned:tag")
-    assert ["docker", "pull", "qdrant/pinned:tag"] in calls
 
+def test_require_docker_returns_immutable_id_after_digest_attestation(monkeypatch):
+    import json
 
-def test_require_docker_missing_without_network_fails(monkeypatch):
-    def fake_run(cmd, *, timeout=300.0, check=True):
-        return SimpleNamespace(returncode=1, stdout="", stderr="no network")
+    from scripts import qdrant_pin
 
-    monkeypatch.setattr(cluster.shutil, "which", lambda _name: "/usr/bin/docker")
-    monkeypatch.setattr(cluster, "_run", fake_run)
-    with pytest.raises(cluster.QdrantClusterError, match="could not be pulled"):
-        cluster.require_docker("qdrant/pinned:tag")
+    reference = 'docker.io/qdrant/qdrant@sha256:' + 'a' * 64
+    image_id = 'sha256:' + 'b' * 64
+    monkeypatch.setattr(qdrant_pin.subprocess, 'run', lambda *a, **kw: SimpleNamespace(
+        returncode=0, stdout=json.dumps([{'Id': image_id, 'RepoDigests': [reference.removeprefix('docker.io/')]}])))
+    assert cluster.require_docker(reference) == image_id
 
 
 def test_wait_cluster_ready_requires_all_peers(monkeypatch):

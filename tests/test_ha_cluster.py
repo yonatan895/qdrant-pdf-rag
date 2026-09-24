@@ -12,7 +12,7 @@ after rejoin.
 
 Local disposable fixture only: three containers on one host prove
 distributed software behavior, not independent-worker or site tolerance.
-Requires docker and the pinned image (qa:ha downloads it on a connected
+Requires docker and the explicitly prepared pinned image (artifacts:qdrant on a connected
 host); a missing prerequisite fails rather than silently skipping.
 """
 

@@ -21,11 +21,17 @@ fi
 
 case "${1:?usage: sim_qdrant.sh up|down}" in
   up)
+    IMAGE_ID=$("$PY" "$REPO_ROOT/scripts/qdrant_pin.py" --prepared)
     if docker inspect "$SIM_CONTAINER" >/dev/null 2>&1; then
+      OBSERVED=$(docker inspect --format '{{.Image}} {{.State.Running}}' "$SIM_CONTAINER")
+      [ "$OBSERVED" = "$IMAGE_ID true" ] || {
+        echo "sim_qdrant: existing container is stopped or uses unapproved image bytes" >&2
+        exit 1
+      }
       echo "sim qdrant already running: QDRANT_SIM_URL=http://127.0.0.1:${SIM_PORT}"
     else
-      docker run -d --name "$SIM_CONTAINER" --rm -p "127.0.0.1:${SIM_PORT}:6333" \
-        "$("$PY" "$REPO_ROOT/scripts/qdrant_pin.py")"
+      docker run --pull=never -d --name "$SIM_CONTAINER" --rm -p "127.0.0.1:${SIM_PORT}:6333" \
+        "$IMAGE_ID"
       echo "Qdrant sim up: QDRANT_SIM_URL=http://127.0.0.1:${SIM_PORT} task qa:sim"
     fi
     ;;

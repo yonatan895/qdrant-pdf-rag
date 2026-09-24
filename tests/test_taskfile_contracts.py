@@ -93,8 +93,12 @@ if any("fetch_bm25_weights.py" in a for a in argv):
     if "--out" in argv:
         idx = argv.index("--out") + 1
         if idx < len(argv):
-            snap = os.path.join(argv[idx], "models--fake", "snapshots", "snap1")
+            snap = os.path.join(argv[idx], "models--Qdrant--bm25", "snapshots", "snap1")
             os.makedirs(snap, exist_ok=True)
+            refs = os.path.join(argv[idx], "models--Qdrant--bm25", "refs")
+            os.makedirs(refs, exist_ok=True)
+            with open(os.path.join(refs, "main"), "w") as ref:
+                ref.write("snap1")
             with open(os.path.join(snap, "weights.bin"), "wb") as wf:
                 wf.write(b"synthetic-weights-content\\n")
 PYEOF
@@ -221,6 +225,10 @@ class TaskContractsTests(unittest.TestCase):
             'log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]\n'
             'with open(log, "a", encoding="utf-8") as fh:\n'
             '    fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd()}) + "\\n")\n'
+            'if argv[:2] == ["image", "inspect"]:\n'
+            '    print(json.dumps([{"Id": "sha256:" + "b" * 64, "RepoDigests": ["example.com/qdrant/qdrant@sha256:" + "a" * 64]}]))\n'
+            'if argv[:2] == ["inspect", "--format"]:\n'
+            '    print(os.environ.get("DOCKER_RUNNING_IMAGE", "sha256:" + "b" * 64) + " true")\n'
             'PYEOF\n'
             'if [ "$1" = "inspect" ]; then exit "${DOCKER_INSPECT_EXIT:-1}"; fi\n'
             'exit 0\n',
@@ -229,7 +237,7 @@ class TaskContractsTests(unittest.TestCase):
 
     def make_sim_images_fixture(self) -> None:
         (self.root / "images.txt").write_text(
-            "example.com/qdrant/qdrant:v9.9.9-unprivileged sha256:fixture\n", encoding="utf-8")
+            "example.com/qdrant/qdrant:v9.9.9-unprivileged sha256:" + "a" * 64 + "\n", encoding="utf-8")
 
     def make_airgap_fixtures(self, file_env: dict | None = None) -> None:
         """Real common.sh (precedence under test) + fixture airgap.env."""
@@ -683,7 +691,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertIn("--model", self.pip_calls()[-1]["argv"])
         self.assertEqual(self.pip_calls()[-1]["argv"][2], "Other/model")
         # TR432-F1: delete one expected weight member while retaining stamp: refetches
-        weight = self.root / "bundles/bm25-weights/models--fake/snapshots/snap1/weights.bin"
+        weight = self.root / "bundles/bm25-weights/models--Qdrant--bm25/snapshots/snap1/weights.bin"
         self.assertTrue(weight.is_file())
         weight.unlink()
         proc = self.run_task("artifacts:bm25", extra_env=env)
@@ -1191,8 +1199,21 @@ class TaskContractsTests(unittest.TestCase):
                               timeout=60, check=False, text=True, env=env, cwd=str(self.root))
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("already running", proc.stdout)
-        docker = [c["argv"] for c in self.calls()]
-        self.assertEqual(docker, [["inspect", "qdrant-sim"]])
+        docker = [c["argv"] for c in self.calls() if c["argv"][:2] != ["image", "inspect"]]
+        self.assertEqual(docker, [["inspect", "qdrant-sim"], ["inspect", "--format", "{{.Image}} {{.State.Running}}", "qdrant-sim"]])
+
+    def test_sim_helper_rejects_existing_wrong_image_without_mutation(self):
+        self.copy_repo_script("sim_qdrant.sh")
+        self.copy_repo_script("qdrant_pin.py")
+        self.make_sim_images_fixture()
+        self.make_docker_fake()
+        env = dict(os.environ, PATH=str(self.root / "bin") + os.pathsep + os.environ.get("PATH", ""),
+                   RECORDER_LOG=str(self.log), DOCKER_INSPECT_EXIT="0", DOCKER_RUNNING_IMAGE="sha256:" + "c" * 64)
+        proc = subprocess.run(["sh", str(self.root / "scripts/sim_qdrant.sh"), "up"],
+                              capture_output=True, text=True, env=env, cwd=self.root, timeout=60, check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("unapproved image", proc.stderr)
+        self.assertFalse(any(c["argv"][0] in ("run", "stop", "pull", "rm") for c in self.calls()))
 
     def test_sim_helper_up_starts_pinned_image(self):
         self.copy_repo_script("sim_qdrant.sh")
@@ -1205,11 +1226,12 @@ class TaskContractsTests(unittest.TestCase):
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               timeout=60, check=False, text=True, env=env, cwd=str(self.root))
         self.assertEqual(proc.returncode, 0, proc.stdout)
-        docker = [c["argv"] for c in self.calls()]
+        docker = [c["argv"] for c in self.calls() if c["argv"][:2] != ["image", "inspect"]]
         self.assertEqual(len(docker), 2)
         self.assertEqual(docker[0], ["inspect", "qdrant-sim"])
         self.assertIn("127.0.0.1:6333:6333", docker[1])
-        self.assertIn("example.com/qdrant/qdrant:v9.9.9-unprivileged", docker[1])
+        self.assertIn("sha256:" + "b" * 64, docker[1])
+        self.assertIn("--pull=never", docker[1])
         self.assertIn("QDRANT_SIM_URL=http://127.0.0.1:6333", proc.stdout)
 
     def test_sim_helper_rejects_empty_names(self):
@@ -1240,7 +1262,7 @@ class TaskContractsTests(unittest.TestCase):
         env = dict(self.tool_env(), DOCKER_INSPECT_EXIT="1")
         proc = self.run_task("local:qdrant:up", "SIM_CONTAINER=custom", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
-        docker = [c["argv"] for c in self.tool_calls("docker")]
+        docker = [c["argv"] for c in self.tool_calls("docker") if c["argv"][:2] != ["image", "inspect"]]
         self.assertEqual(docker[0], ["inspect", "custom"])
         self.assertIn("--name", docker[1])
         self.assertIn("custom", docker[1])
@@ -1261,7 +1283,7 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("local:qdrant:up", "SIM_CONTAINER=requested-sim", "SIM_PORT=6334",
                              extra_env=dict(env, SIM_CONTAINER="ambient-sim", SIM_PORT="6333"))
         self.assertEqual(proc.returncode, 0, proc.stdout)
-        docker = [c["argv"] for c in self.tool_calls("docker")]
+        docker = [c["argv"] for c in self.tool_calls("docker") if c["argv"][:2] != ["image", "inspect"]]
         self.assertEqual(docker[0], ["inspect", "requested-sim"])
         self.assertIn("requested-sim", docker[1])
         self.assertIn("127.0.0.1:6334:6333", docker[1])
@@ -1327,7 +1349,8 @@ class TaskContractsTests(unittest.TestCase):
         env = self.tool_env()
         proc = self.run_task("qa:sim", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.pip_calls()[0]["argv"],
+        self.assertEqual(self.pip_calls()[0]["argv"], ["scripts/agent_doctor.py", "--profile", "sim", "--python", ".venv/bin/python"])
+        self.assertEqual(self.pip_calls()[1]["argv"],
                          ["-m", "pytest", "-m", "integration",
                           "--ignore=tests/test_load_tier.py",
                           "--ignore=tests/test_ha_cluster.py", "-v", "-rs"])
@@ -1335,13 +1358,15 @@ class TaskContractsTests(unittest.TestCase):
             self.log.unlink()
         proc = self.run_task("qa:load", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.pip_calls()[0]["argv"],
+        self.assertEqual(self.pip_calls()[0]["argv"], ["scripts/agent_doctor.py", "--profile", "load", "--python", ".venv/bin/python"])
+        self.assertEqual(self.pip_calls()[1]["argv"],
                          ["-m", "pytest", "-m", "integration", "tests/test_load_tier.py", "-v"])
         if (self.log).exists():
             self.log.unlink()
         proc = self.run_task("qa:ha", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(self.pip_calls()[0]["argv"],
+        self.assertEqual(self.pip_calls()[0]["argv"], ["scripts/agent_doctor.py", "--profile", "ha", "--python", ".venv/bin/python"])
+        self.assertEqual(self.pip_calls()[1]["argv"],
                          ["-m", "pytest", "-m", "integration", "tests/test_ha_cluster.py", "-v"])
 
     def test_vllm_e2e_optional_flags(self):

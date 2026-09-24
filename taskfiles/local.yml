@@ -20,9 +20,11 @@ tasks:
     summary: |
       `sh scripts/sim_qdrant.sh up` (shared owner with
       scripts/run_local_stack.sh): reuses the named container when it
-      already runs, else starts the images.txt-pinned image on
+      already runs with the approved image ID, else starts the prepared
+      images.txt digest-pinned image with pulling disabled on
       127.0.0.1:SIM_PORT. Inputs: SIM_CONTAINER (default qdrant-sim),
       SIM_PORT (default 6333); explicit empty fails closed in the helper.
+      Run artifacts:qdrant explicitly first on a connected preparation host.
     vars:
       SIM_CONTAINER: '{{if hasKey . "SIM_CONTAINER"}}{{.SIM_CONTAINER}}{{else}}qdrant-sim{{end}}'
       SIM_PORT: '{{if hasKey . "SIM_PORT"}}{{.SIM_PORT}}{{else}}6333{{end}}'

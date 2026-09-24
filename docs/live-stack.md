@@ -69,7 +69,10 @@ into the repo); `$SCRATCH_DIR` is scratch space outside the repo
 | Production / CRC acceptance | Operator-authorized site resources and exact candidate; private data under its runbook | Real SCC/TLS/identity/storage/model/corpus checks; CRC fit/fallback and missing combined coverage must be recorded |
 
 The current task's prerequisite check is `sh scripts/tools/run-task.sh dev:doctor` (default unit).
-It diagnoses tools/runtime, not application acceptance. It does not launch or
+It diagnoses tools/runtime, not application acceptance. Explicit `sim`, `load`
+and `ha` profiles also inspect the selected daemon image; `sim` verifies the
+selected cached BM25 bytes. See [prepared inputs](task-runner.md#inputs) and
+the preparation instructions immediately above that section. It does not launch or
 probe a deployment. Never use a documentation check as authority to start, stop,
 reconfigure, ingest into or test a private/live deployment. Keep synthetic
 rehearsal cleanup away from [preserved real-corpus resources](local-real-corpus.md).
@@ -81,7 +84,9 @@ its exact-bundle record; Kind and dry-run success cannot replace it.
 ### Component-debug bring-up (GPU / dev only)
 
 ```sh
-# Qdrant (docker, loopback port 6333)
+# Explicit connected prerequisite preparation (once per missing approved digest)
+sh scripts/tools/run-task.sh artifacts:qdrant
+# Qdrant (prepared image, docker, loopback port 6333)
 sh scripts/tools/run-task.sh local:qdrant:up
 curl -s -m 5 http://127.0.0.1:6333/collections | head -c 200
 

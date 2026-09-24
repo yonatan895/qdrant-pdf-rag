@@ -68,7 +68,7 @@ class DoctorTests(TestCase):
 
     def test_ready_profiles_no_daemon_calls(self):
         with patch.object(doctor.subprocess, 'run', side_effect=AssertionError('no service or Task calls')):
-            for profile in ('unit', 'sim', 'deploy'):
+            for profile in ('unit', 'deploy'):
                 findings = doctor.diagnose(self.root, profile)
                 self.assertTrue(all(f.status == 'ready' for f in findings), findings)
                 self.assertNotIn('make', {f.subject for f in findings})
@@ -122,7 +122,7 @@ class DoctorTests(TestCase):
         (self.root/'.venv/bin/python').unlink()
         findings = doctor.diagnose(self.root, 'sim')
         missing = {f.subject for f in findings if f.status == 'missing prerequisite'}
-        self.assertEqual(missing, {'docker', 'development environment'})
+        self.assertEqual(missing, {'docker', 'development environment', 'prepared Qdrant image', 'prepared BM25 cache'})
 
     def test_incompatible_python_gil_jit_and_package_version(self):
         for field, value in [('version', [3, 13, 9]), ('version', [3, 15, 0]), ('implementation', 'PyPy'),
@@ -245,3 +245,61 @@ class HelmPreparationTests(TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.marker.exists())
         self.assertEqual((self.destination/'helm').read_text(), 'previous approved tool')
+
+
+def test_bm25_cache_checks_the_selected_revision_and_exact_bytes(tmp_path, monkeypatch):
+    import pytest
+    from scripts.fetch_bm25_weights import prepared_bm25_cache
+
+    cache = tmp_path / 'bundles/bm25-weights'
+    model = cache / 'models--Qdrant--bm25'
+    snapshot = model / 'snapshots/original'
+    snapshot.mkdir(parents=True)
+    (snapshot / 'weights.txt').write_bytes(b'original synthetic weights')
+    (model / 'refs').mkdir()
+    reference = model / 'refs/main'
+    reference.write_text('original')
+    digest = hashlib.sha256(b'original synthetic weights').hexdigest()
+    (tmp_path / 'bm25-weights.sha256').write_text(f'{digest}  weights.txt\n')
+    monkeypatch.delenv('SIM_BM25_CACHE_DIR', raising=False)
+    assert prepared_bm25_cache(tmp_path) == cache
+    reference.write_text('original\n')
+    with pytest.raises(SystemExit, match='selected revision'):
+        prepared_bm25_cache(tmp_path)
+    reference.write_text('other')
+    with pytest.raises(SystemExit, match='selected revision'):
+        prepared_bm25_cache(tmp_path)
+    reference.write_text('original')
+    (model / 'snapshots/other').mkdir()
+    with pytest.raises(SystemExit, match='unambiguous'):
+        prepared_bm25_cache(tmp_path)
+    (model / 'snapshots/other').rmdir()
+    (snapshot / 'weights.txt').write_bytes(b'tampered')
+    with pytest.raises(SystemExit):
+        prepared_bm25_cache(tmp_path)
+    (snapshot / 'weights.txt').write_bytes(b'original synthetic weights')
+    monkeypatch.setenv('SIM_BM25_CACHE_DIR', str(tmp_path / 'absent'))
+    with pytest.raises(SystemExit):
+        prepared_bm25_cache(tmp_path)  # cannot fall back to the healthy default cache
+    monkeypatch.setenv('SIM_BM25_CACHE_DIR', '')
+    with pytest.raises(ValueError, match='must not be empty'):
+        prepared_bm25_cache(tmp_path)
+
+
+def test_simulator_missing_image_never_starts_or_pulls(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import pytest
+    from scripts import qdrant_sim
+
+    (tmp_path / 'images.txt').write_text('docker.io/qdrant/qdrant:v1 sha256:' + 'a' * 64)
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0 if command == ['docker', 'info'] else 1, stdout='')
+    monkeypatch.setattr(qdrant_sim.shutil, 'which', lambda _: '/bin/docker')
+    monkeypatch.setattr(subprocess, 'run', run)
+    with pytest.raises(qdrant_sim.QdrantSimError, match='explicit'):
+        qdrant_sim.start_simulator(tmp_path)
+    assert calls == [['docker', 'info'], ['docker', 'image', 'inspect',
+                      'docker.io/qdrant/qdrant@sha256:' + 'a' * 64]]

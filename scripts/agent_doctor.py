@@ -238,6 +238,36 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
             else:
                 add("ready", package, "development package present; locked version checked where specified")
 
+    external_load = profile == "load" and bool(os.environ.get("QDRANT_SIM_URL"))
+    if external_load:
+        add("ready", "external load server", "operator-selected QDRANT_SIM_URL; image identity is not attested")
+    if profile in ("sim", "load", "ha") and not external_load:
+        try:
+            try:
+                from scripts.qdrant_pin import prepared_image, qdrant_digest_pin
+            except ModuleNotFoundError:
+                from qdrant_pin import prepared_image as _local_prepared_image
+                from qdrant_pin import qdrant_digest_pin as _local_qdrant_digest_pin
+                prepared_image = _local_prepared_image
+                qdrant_digest_pin = _local_qdrant_digest_pin
+            image_id = prepared_image(qdrant_digest_pin(root / "images.txt"))
+            add("ready", "prepared Qdrant image", image_id)
+        except (OSError, ValueError):
+            add("missing prerequisite", "prepared Qdrant image",
+                "approved digest unavailable in selected daemon; explicitly run artifacts:qdrant")
+    if profile == "sim":
+        try:
+            try:
+                from scripts.fetch_bm25_weights import prepared_bm25_cache
+            except ModuleNotFoundError:
+                from fetch_bm25_weights import prepared_bm25_cache as _local_prepared_bm25_cache
+                prepared_bm25_cache = _local_prepared_bm25_cache
+            prepared_bm25_cache(root)
+            add("ready", "prepared BM25 cache", "selected snapshot and file hashes verified")
+        except (OSError, ValueError, SystemExit):
+            add("missing prerequisite", "prepared BM25 cache",
+                "selected cache missing, ambiguous or corrupt; explicitly run artifacts:bm25")
+
     if probe_docker:
         docker = shutil.which("docker")
         if not docker:
@@ -259,7 +289,7 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--profile", choices=("unit", "sim", "deploy"), default="unit")
+    parser.add_argument("--profile", choices=("unit", "sim", "load", "ha", "deploy"), default="unit")
     parser.add_argument("--probe-docker", action="store_true", help="explicit five-second read of local /var/run/docker.sock")
     parser.add_argument("--python", type=Path, help="prepared development/CI interpreter (default .venv/bin/python)")
     args = parser.parse_args(argv)

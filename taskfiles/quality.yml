@@ -113,11 +113,12 @@ tasks:
       are asserted exactly once, and the multi-peer HA fixture
       (`tests/test_ha_cluster.py`, run via `task qa:ha`) is excluded so the
       three-container placement/fault lane is not paid on every sim run. A skip
-      fails the run (a skip on missing local weights means symlink or rebuild
-      them, never ignore it). Needs docker (or QDRANT_SIM_URL) and the BM25
-      weights; no GPU or live gateway.
+      fails the run (missing or corrupt local weights fail before collection). Needs the prepared approved local Docker image and verified BM25
+      cache; no GPU or live gateway. The authorization tests need local Docker
+      even when QDRANT_SIM_URL supplies the other simulation server.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - .venv/bin/python scripts/agent_doctor.py --profile sim --python .venv/bin/python
       - .venv/bin/python -m pytest -m integration --ignore=tests/test_load_tier.py --ignore=tests/test_ha_cluster.py -v -rs
 
   ha:
@@ -129,12 +130,12 @@ tasks:
       real three-peer cluster with separate storage and asserts actual
       placement (6/3/2), refusal of a false-HA (RF1) configuration, degraded
       reads and healthy rejoin after one peer is stopped, and exact point
-      identity across survivors. Needs docker and the pinned image (pulled on
-      a connected host); a missing prerequisite fails — this lane must never
+      identity across survivors. Needs docker and the explicitly prepared digest-pinned image; a missing prerequisite fails — this lane must never
       skip. Three containers on one host prove distributed software behavior
       only, never independent-worker or site tolerance.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - .venv/bin/python scripts/agent_doctor.py --profile ha --python .venv/bin/python
       - .venv/bin/python -m pytest -m integration tests/test_ha_cluster.py -v
 
   load:
@@ -149,6 +150,7 @@ tasks:
       test itself).
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - .venv/bin/python scripts/agent_doctor.py --profile load --python .venv/bin/python
       - .venv/bin/python -m pytest -m integration tests/test_load_tier.py -v
 
   vllm-e2e:
