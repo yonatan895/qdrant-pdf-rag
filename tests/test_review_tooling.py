@@ -1468,6 +1468,11 @@ class TestTaskCiConsumers(unittest.TestCase):
             tool = root / "scripts/tools/install-task.sh"
             tool.parent.mkdir(parents=True)
             tool.write_text('printf "%s\\n" "$@" > archive-args\nexit "${INSTALL_STATUS:-0}"\n')
+            helm_tool = root / "scripts/tools/install-helm.sh"
+            helm_tool.write_text('printf "%s\\n" "$@" > helm-args\nexit "${HELM_INSTALL_STATUS:-0}"\n')
+            doctor = root / "python"
+            doctor.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > doctor-args\nexit "${DOCTOR_STATUS:-0}"\n')
+            doctor.chmod(0o755)
             test = root / "pytest"
             test.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > tests-ran\n')
             test.chmod(0o755)
@@ -1479,16 +1484,35 @@ class TestTaskCiConsumers(unittest.TestCase):
             self.assertFalse((root / "archive-args").exists())
             self.assertFalse((root / "tests-ran").exists())
             archive = str(root / "offline archive with spaces.tar.gz")
-            for status in (9, 0):
+            helm_archive = str(root / "offline helm with spaces.tar.gz")
+            missing_helm = subprocess.run(
+                ["sh", "-eu", "-c", script], cwd=root,
+                env={**env, "CI_TASK_ARCHIVE": archive},
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(missing_helm.returncode, 0)
+            self.assertFalse((root / "helm-args").exists())
+            self.assertFalse((root / "tests-ran").exists())
+            for task_status, helm_status, doctor_status in ((9, 0, 0), (0, 7, 0), (0, 0, 2), (0, 0, 0)):
+                for marker in ("archive-args", "helm-args", "doctor-args", "tests-ran"):
+                    (root / marker).unlink(missing_ok=True)
                 proc = subprocess.run(
                     ["sh", "-eu", "-c", script], cwd=root,
-                    env={**env, "CI_TASK_ARCHIVE": archive, "INSTALL_STATUS": str(status)},
+                    env={**env, "CI_TASK_ARCHIVE": archive, "CI_HELM_ARCHIVE": helm_archive,
+                         "CI_PROJECT_DIR": str(root), "INSTALL_STATUS": str(task_status),
+                         "HELM_INSTALL_STATUS": str(helm_status), "DOCTOR_STATUS": str(doctor_status)},
                     capture_output=True, text=True, check=False,
                 )
-                self.assertEqual(proc.returncode, status, proc.stdout + proc.stderr)
+                expected = task_status or helm_status or doctor_status
+                self.assertEqual(proc.returncode, expected, proc.stdout + proc.stderr)
                 self.assertEqual((root / "archive-args").read_text(), f"--archive\n{archive}\n")
-                self.assertEqual((root / "tests-ran").exists(), status == 0)
+                self.assertEqual((root / "tests-ran").exists(), expected == 0)
+                self.assertEqual((root / "doctor-args").exists(), task_status == helm_status == 0)
+                if task_status == 0:
+                    self.assertEqual((root / "helm-args").read_text(), f"--archive\n{helm_archive}\n")
             self.assertEqual((root / "tests-ran").read_text(), "-q\n")
+            self.assertEqual((root / "doctor-args").read_text(),
+                             f"scripts/agent_doctor.py\n--python\n{root / 'python'}\n")
             self.assertEqual(shlex.split(commands[1]),
                              ["sh", "scripts/tools/install-task.sh", "--archive", "$CI_TASK_ARCHIVE"])
 

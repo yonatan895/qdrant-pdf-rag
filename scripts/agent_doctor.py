@@ -51,7 +51,10 @@ def inspect_task(root: Path) -> Finding:
                    (root / "scripts/tools/task-pin.txt").read_text(encoding="utf-8").splitlines()
                    if line and not line.startswith("#") and ": " in line)
         version, expected = pin["version"], pin["binary-sha256"]
-        if not re.fullmatch(r"[a-f0-9]{64}", expected):
+        asset, archive_expected = pin["asset"], pin["sha256"]
+        if (asset != "task_linux_amd64.tar.gz"
+                or not re.fullmatch(r"[a-f0-9]{64}", archive_expected)
+                or not re.fullmatch(r"[a-f0-9]{64}", expected)):
             raise ValueError("invalid pin")
     except (OSError, UnicodeError, KeyError, ValueError):
         return Finding("unable to verify", "Task runner", "Task pin record unreadable or incomplete")
@@ -66,7 +69,20 @@ def inspect_task(root: Path) -> Finding:
     if observed != expected:
         return Finding("missing prerequisite", "Task runner",
                        "Task binary checksum mismatch; reinstall from the pinned archive")
-    return Finding("ready", "Task runner", f"pinned go-task {version} executable checksum verified")
+    # Artifact tests package the actual transferred archive, not a stand-in.
+    # A verified executable alone cannot establish that prerequisite.
+    archive = root / ".tools/cache" / asset
+    try:
+        with archive.open("rb") as stream:
+            archive_observed = hashlib.file_digest(stream, "sha256").hexdigest()
+    except OSError:
+        return Finding("missing prerequisite", "Task archive",
+                       "cached pinned Task archive unavailable; run explicit install-task.sh preparation")
+    if archive_observed != archive_expected:
+        return Finding("missing prerequisite", "Task archive",
+                       "cached Task archive checksum mismatch; rerun explicit preparation")
+    return Finding("ready", "Task runner",
+                   f"pinned go-task {version} executable and archive checksums verified")
 
 
 def inspect_helm(root: Path) -> Finding:
@@ -173,7 +189,7 @@ def diagnose(root: Path, profile: str = "unit", probe_docker: bool = False,
     if development.is_file():
         interpreters.append(("development environment", development))
     else:
-        add("missing prerequisite", "development environment", ".venv/bin/python absent; no environment created")
+        add("missing prerequisite", "development environment", "selected development interpreter absent; no environment created")
     for label, interpreter in interpreters:
         packages = sorted(set(pins) | {"pytest", "ruff", "mypy"}) if label == "development environment" else []
         runtime = inspect_runtime(interpreter, packages)

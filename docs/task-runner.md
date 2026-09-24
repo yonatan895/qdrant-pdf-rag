@@ -95,7 +95,8 @@ gate after explicit preparation; GitLab transfers both `CI_TASK_ARCHIVE` and
 `CI_HELM_ARCHIVE` and installs them offline before the same gate.
 
 This first #482 V0 increment checks existing direct pins, dev-tool presence,
-Task/Helm executable hashes and tracked Qdrant agreement. It does **not** yet
+Task/Helm executable hashes, the cached Task archive needed by artifact tests,
+and tracked Qdrant agreement. It does **not** yet
 attest a complete transitive dependency inventory, installed image inventory,
 cached BM25 content or daemon/image availability. Those remain V0/#371 work;
 prerequisite success is neither application acceptance nor milestone completion.

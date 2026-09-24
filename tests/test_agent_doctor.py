@@ -24,8 +24,9 @@ class DoctorTests(TestCase):
             'bm25-weights.sha256': 'example', 'charts/qdrant-1.19.0.tgz': 'example',
             '.venv/bin/python': 'fixture', 'airgap.env.example': '# public example',
             'scripts/airgap/common.sh': '# fixture',
-            'scripts/tools/task-pin.txt': 'version: v3.53.1\nbinary-sha256: ' + hashlib.sha256(b'fixture').hexdigest() + '\n',
+            'scripts/tools/task-pin.txt': 'version: v3.53.1\nasset: task_linux_amd64.tar.gz\nsha256: ' + hashlib.sha256(b'archive').hexdigest() + '\nbinary-sha256: ' + hashlib.sha256(b'fixture').hexdigest() + '\n',
             '.tools/bin/task': 'fixture',
+            '.tools/cache/task_linux_amd64.tar.gz': 'archive',
             'bin/helm': 'helm-fixture',
             'scripts/tools/helm-pin.txt': 'version: v4.3.0\nbinary-sha256: ' + hashlib.sha256(b'helm-fixture').hexdigest() + '\n',
             'charts/mainframe-rag/Chart.yaml': 'fixture',
@@ -64,6 +65,14 @@ class DoctorTests(TestCase):
             self.assertEqual(doctor.inspect_task(self.root).status, 'missing prerequisite')
             (self.root/'scripts/tools/task-pin.txt').unlink()
             self.assertEqual(doctor.inspect_task(self.root).status, 'unable to verify')
+
+    def test_missing_or_tampered_cached_task_archive_is_not_ready(self):
+        archive = self.root/'.tools/cache/task_linux_amd64.tar.gz'
+        archive.write_bytes(b'tampered')
+        self.assertEqual(doctor.inspect_task(self.root).subject, 'Task archive')
+        self.assertEqual(doctor.inspect_task(self.root).status, 'missing prerequisite')
+        archive.unlink()
+        self.assertEqual(doctor.inspect_task(self.root).status, 'missing prerequisite')
 
     def test_helm_missing_foreign_or_tampered_is_rejected_without_execution(self):
         with patch.object(doctor.subprocess, 'run', side_effect=AssertionError('never execute Helm')):
