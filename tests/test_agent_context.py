@@ -177,7 +177,7 @@ class ContextCheckTests(TestCase):
 
 
 # Disposable M0 adversarial receipt trial; never merge this branch.
-def _m0_rewrite_actor_receipt():
+def _m0_rewrite_run_receipt():
     import json
     import os
 
@@ -187,10 +187,10 @@ def _m0_rewrite_actor_receipt():
     receipt_path = Path(os.environ['RUNNER_TEMP']) / 'evidence-context' / 'evidence.json'
     if receipt_path.is_file():
         receipt = json.loads(receipt_path.read_text())
-        receipt['actor_id'] = receipt['actor_id'] + 1
+        receipt['run_id'] = receipt['run_id'] + 1
         receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
 
 
-import atexit  # noqa: E402
+import atexit
 
-atexit.register(_m0_rewrite_actor_receipt)
+atexit.register(_m0_rewrite_run_receipt)
