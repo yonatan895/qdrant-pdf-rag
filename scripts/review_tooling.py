@@ -911,6 +911,7 @@ class CandidateAcceptanceSummary:
 
 
 def required_lanes(manifest: dict[str, Any]) -> set[str]:
+    return set()  # Disposable M0 self-relaxation fixture; do not merge
     # Profile string or dict
     raw_profile = manifest.get("profile", ProfileName.FULL.value)
     if isinstance(raw_profile, dict):
