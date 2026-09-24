@@ -2396,3 +2396,280 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             self.assertIn('Target: unavailable', body)
             self.assertIn('@literal;type=text/plain', body)
             self.assertIn('Job: https://example.invalid/jobs/9', body)
+
+
+class ReviewTemplateTests(unittest.TestCase):
+    def test_template_binds_current_merge_without_approving_or_writing(self):
+        import copy
+
+        from scripts.acceptance import review_template
+        from scripts.review_tooling import validate_review_payload
+
+        pr = {'number': 3, 'state': 'open', 'mergeable': True, 'draft': False,
+              'head': {'sha': 'a' * 40, 'repo': {'id': 84}},
+              'base': {'sha': 'b' * 40, 'ref': 'main', 'repo': {
+                  'id': 42, 'full_name': 'synthetic/repository', 'default_branch': 'main'}},
+              'merge_commit_sha': 'c' * 40}
+
+        class API:
+            repository = 'synthetic/repository'
+            prefix = 'repos/synthetic/repository/'
+
+            def __init__(self, move=False, wrong_parents=False):
+                self.reads = 0
+                self.move = move
+                self.wrong_parents = wrong_parents
+
+            def get(self, endpoint):
+                if endpoint.endswith('pulls/3'):
+                    self.reads += 1
+                    result = copy.deepcopy(pr)
+                    if self.move and self.reads == 2:
+                        result['head']['sha'] = 'd' * 40
+                    return result
+                assert endpoint.endswith('commits/' + 'c' * 40)
+                return {'sha': 'c' * 40, 'parents': [
+                    {'sha': ('d' if self.wrong_parents else 'b') * 40}, {'sha': 'a' * 40}]}
+
+        result = review_template(API(), 3)
+        self.assertEqual([result[k] for k in ('head_sha', 'base_sha', 'execution_sha')],
+                         ['a' * 40, 'b' * 40, 'c' * 40])
+        self.assertEqual(validate_review_payload(result).merge_readiness, 'not_ready')
+        for api in (API(move=True), API(wrong_parents=True)):
+            with self.subTest(api=api), self.assertRaises(ValueError):
+                review_template(api, 3)
+
+    def test_template_cli_refuses_publication_and_bulk_selection(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        from scripts.acceptance import main
+
+        for extra in (['--pr', '3', '--publish'], ['--all-open']):
+            with self.subTest(extra=extra), patch('scripts.acceptance.GitHub') as api, \
+                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                main(['--repository', 'synthetic/repository', '--review-template', *extra])
+            self.assertEqual(error.exception.code, 2)
+            api.assert_not_called()
+
+    def test_failed_acceptance_still_exports_identity_template_and_check_link(self):
+        import tempfile
+        from unittest.mock import patch
+
+        from scripts.acceptance import publish_acceptance
+
+        class API:
+            repository = 'synthetic/repository'
+            prefix = 'repos/synthetic/repository/'
+
+            def __init__(self):
+                self.writes = []
+
+            def get(self, endpoint):
+                return {'head': {'sha': 'a' * 40}}
+
+            def write(self, endpoint, payload, *, method):
+                self.writes.append((method, payload))
+                return {'id': 17}
+
+        template = {'head_sha': 'a' * 40, 'base_sha': 'b' * 40, 'execution_sha': 'c' * 40,
+                    'code_assessment': '<human input>'}
+        with tempfile.TemporaryDirectory() as directory:
+            api = API()
+            with patch('scripts.acceptance.review_template', return_value=template), \
+                 patch('scripts.acceptance.post_review_template') as post, \
+                 patch('scripts.acceptance.collect_acceptance', side_effect=ValueError('private diagnostic')):
+                result = publish_acceptance(api, 3, pathlib.Path.cwd(),
+                                            template_directory=pathlib.Path(directory), publisher_run_id=23,
+                                            post_templates=True)
+            post.assert_called_once_with(api, 3, template)
+            self.assertFalse(result['all_prerequisites_met'])
+            self.assertEqual(json.loads((pathlib.Path(directory) / ('pr-3-' + 'a' * 40 + '.json')).read_text()),
+                             template)
+            summary = api.writes[-1][1]['output']['summary']
+            self.assertIn('https://github.com/synthetic/repository/actions/runs/23', summary)
+            self.assertIn('review-templates', summary)
+            self.assertNotIn('private diagnostic', summary)
+            self.assertEqual(api.writes[-1][1]['conclusion'], 'failure')
+
+    def test_moved_template_is_not_exported_for_old_check_head(self):
+        import tempfile
+        from unittest.mock import patch
+
+        from scripts.acceptance import publish_acceptance
+
+        class API:
+            prefix = 'repos/synthetic/repository/'
+
+            def __init__(self):
+                self.last = None
+
+            def get(self, endpoint):
+                return {'head': {'sha': 'a' * 40}}
+
+            def write(self, endpoint, payload, *, method):
+                self.last = payload
+                return {'id': 17}
+
+        with tempfile.TemporaryDirectory() as directory:
+            api = API()
+            with patch('scripts.acceptance.review_template', return_value={'head_sha': 'd' * 40}), \
+                 patch('scripts.acceptance.collect_acceptance', side_effect=ValueError):
+                publish_acceptance(api, 3, pathlib.Path.cwd(),
+                                   template_directory=pathlib.Path(directory), publisher_run_id=23)
+            self.assertEqual(list(pathlib.Path(directory).iterdir()), [])
+            self.assertIn('Review template unavailable', api.last['output']['summary'])
+
+    def test_both_publishers_upload_templates_after_unmet_acceptance(self):
+        import yaml
+
+        workflow = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] /
+                                   '.github/workflows/acceptance.yml').read_text())
+        for name in ('advisory', 'trusted-app'):
+            with self.subTest(job=name):
+                steps = workflow['jobs'][name]['steps']
+                command = next(s['run'] for s in steps if 'python -m scripts.acceptance' in s.get('run', ''))
+                self.assertIn('--review-templates-dir "$RUNNER_TEMP/review-templates"', command)
+                self.assertIn('--publisher-run-id "$GITHUB_RUN_ID"', command)
+                upload = next(s for s in steps if s.get('name') == 'Upload human review templates')
+                self.assertEqual(upload['if'], 'always()')
+                self.assertEqual(upload['with']['path'], '${{ runner.temp }}/review-templates/*.json')
+
+    def test_pr_template_shell_does_not_upload_failed_generation_as_a_template(self):
+        import os
+        import subprocess
+        import tempfile
+
+        import yaml
+
+        workflow = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] /
+                                   '.github/workflows/agent-context.yml').read_text())
+        job = workflow['jobs']['check-context']
+        self.assertEqual(job['permissions'], {'contents': 'read', 'pull-requests': 'read'})
+        command = next(s['run'] for s in job['steps'] if s.get('name') == 'Generate human review template')
+        upload = next(s for s in job['steps'] if s.get('name') == 'Upload human review template')
+        self.assertEqual(upload['with']['path'], '${{ runner.temp }}/review-template.json')
+        for failed in ('0', '1'):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                stub = root / 'python'
+                stub.write_text('#!/bin/sh\n'
+                                'if [ "$TEMPLATE_STUB_FAIL" = 1 ]; then\n'
+                                '  echo \'{"error":"unavailable"}\'; exit 1\n'
+                                'fi\n'
+                                'echo \'{"head_sha":"synthetic-current-head"}\'\n')
+                stub.chmod(0o755)
+                result = subprocess.run(['sh', '-c', command], capture_output=True, text=True, check=False,
+                                        env={**os.environ, 'PATH': directory + os.pathsep + os.environ['PATH'],
+                                             'RUNNER_TEMP': directory, 'TEMPLATE_STUB_FAIL': failed,
+                                             'REVIEW_REPOSITORY': 'synthetic/repository', 'REVIEW_PR': '3'})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                artifact = root / 'review-template.json'
+                self.assertEqual(artifact.exists(), failed == '0')
+                if failed == '0':
+                    self.assertEqual(json.loads(artifact.read_text())['head_sha'], 'synthetic-current-head')
+                else:
+                    self.assertIn('::warning::', result.stdout)
+
+    def test_template_comments_append_deduplicate_and_preserve_human_text(self):
+        import copy
+
+        from scripts.acceptance import post_review_template, review_template_comment
+
+        template = {'head_sha': 'a' * 40, 'base_sha': 'b' * 40, 'execution_sha': 'c' * 40,
+                    'code_assessment': '<human input>'}
+
+        class API:
+            prefix = 'repos/synthetic/repository/'
+
+            def __init__(self):
+                self.comments = [{'id': 1, 'body': '<!-- generated-human-review-template --> Human finding'}]
+                self.writes = []
+
+            def get(self, endpoint):
+                return copy.deepcopy(self.comments)
+
+            def write(self, endpoint, payload, *, method):
+                self.writes.append((endpoint, method))
+                self.comments.append({'id': len(self.comments) + 1, **payload})
+                return self.comments[-1]
+
+        api = API()
+        original = copy.deepcopy(api.comments[0])
+        post_review_template(api, 3, template)
+        post_review_template(api, 3, template)
+        self.assertEqual(len(api.writes), 1)
+        self.assertEqual(api.comments[0], original)
+        self.assertEqual(api.comments[1]['body'], review_template_comment(template))
+        template['execution_sha'] = 'd' * 40
+        post_review_template(api, 3, template)
+        self.assertEqual(api.writes, [('repos/synthetic/repository/issues/3/comments', 'POST')] * 2)
+        self.assertEqual(api.comments[0], original)
+
+    def test_comment_write_boundary_cannot_edit_reviews_or_other_repositories(self):
+        from unittest.mock import patch
+
+        from scripts.acceptance import GitHub
+
+        api = GitHub('synthetic/repository')
+        for endpoint, method in [('repos/synthetic/repository/issues/3/comments', 'PATCH'),
+                                 ('repos/synthetic/repository/issues/comments/17', 'PATCH'),
+                                 ('repos/synthetic/repository/pulls/3/reviews', 'POST'),
+                                 ('repos/other/repository/issues/3/comments', 'POST')]:
+            with self.subTest(endpoint=endpoint), patch('scripts.acceptance.subprocess.run') as run, \
+                 self.assertRaises(ValueError):
+                api.write(endpoint, {'body': 'template'}, method=method)
+            run.assert_not_called()
+
+    def test_shared_account_scaffolding_is_not_review_or_finding_history(self):
+        import copy
+
+        from scripts.acceptance import collect_review
+
+        candidate = {'head_sha': 'a' * 40, 'base_sha': 'b' * 40, 'execution_sha': 'c' * 40}
+        human = {'schema_version': 1, **candidate, 'candidate_currentness': 'current',
+                 'code_assessment': 'acceptable', 'verification': 'complete',
+                 'merge_readiness': 'ready_for_maintainer', 'material_findings': [], 'evidence': {}}
+        scaffold = {**human, 'code_assessment': '<acceptable|changes_required|incomplete>',
+                    'verification': '<complete|incomplete|failed>',
+                    'merge_readiness': '<ready_for_maintainer|not_ready>'}
+        legacy = [{'id': '<finding ID; use [] only if none>', 'disposition': 'unresolved',
+                   'description': '<finding and evidence; carry forward prior findings>'}]
+
+        def comment(number, payload):
+            return {'id': number, 'user': {'id': 7, 'login': 'synthetic', 'type': 'User'},
+                    'author_association': 'OWNER', 'updated_at': f'2026-09-24T10:00:0{number}Z',
+                    'body': '<!-- generated-human-review-template -->\n```json\n' + json.dumps(payload) + '\n```',
+                    'html_url': f'https://github.com/synthetic/repository/pull/3#issuecomment-{number}'}
+
+        class API:
+            prefix = 'repos/synthetic/repository/'
+
+            def __init__(self, comments):
+                self.comments = comments
+
+            def get(self, endpoint):
+                if '/collaborators/' in endpoint:
+                    return {'permission': 'admin'}
+                if '/reviews?' in endpoint:
+                    return []
+                return self.comments
+
+        for findings in ([], legacy):
+            with self.subTest(findings=findings):
+                template = {**scaffold, 'material_findings': findings}
+                api = API([comment(1, template), comment(2, human), comment(3, template)])
+                review, _, identity = collect_review(api, {'number': 3}, candidate)
+                self.assertEqual(review.merge_readiness, 'ready_for_maintainer')
+                self.assertEqual(identity['id'], 2)
+                review, _, _ = collect_review(API([comment(1, template)]), {'number': 3}, candidate)
+                self.assertIsNone(review)
+        real_finding = copy.deepcopy(scaffold)
+        real_finding['material_findings'] = [{'id': 'F1', 'disposition': 'unresolved', 'description': 'Real defect'}]
+        review, _, _ = collect_review(API([comment(1, real_finding), comment(2, human)]), {'number': 3}, candidate)
+        self.assertEqual(review.merge_readiness, 'not_ready')
+        self.assertTrue(any('omits earlier material finding' in e for e in review.validation_errors))
+        malformed = {**human, 'material_findings': [{'id': '[]', 'disposition': '[]', 'description': '[]'}]}
+        review, _, _ = collect_review(API([comment(1, malformed)]), {'number': 3}, candidate)
+        self.assertEqual(review.merge_readiness, 'not_ready')

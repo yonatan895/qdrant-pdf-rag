@@ -27,7 +27,7 @@ jobs:
       contents: read
       actions: read
       pull-requests: read
-      issues: read
+      issues: write
       checks: write
     steps:
       - name: Check out approved default branch only
@@ -43,7 +43,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ACCEPTANCE_REPOSITORY: ${{ github.repository }}
         run: |
-          python -m scripts.acceptance --repository "$ACCEPTANCE_REPOSITORY" --all-open --publish > "$RUNNER_TEMP/acceptance.json"
+          python -m scripts.acceptance --repository "$ACCEPTANCE_REPOSITORY" --all-open --publish --post-review-templates --review-templates-dir "$RUNNER_TEMP/review-templates" --publisher-run-id "$GITHUB_RUN_ID" > "$RUNNER_TEMP/acceptance.json"
+      - name: Upload human review templates
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: review-templates-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/review-templates/*.json
+          if-no-files-found: warn
       - name: Retain acceptance report
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
@@ -79,14 +86,21 @@ jobs:
           permission-actions: read
           permission-contents: read
           permission-pull-requests: read
-          permission-issues: read
+          permission-issues: write
           permission-checks: write
       - name: Recompute all open candidates from native API evidence
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           ACCEPTANCE_REPOSITORY: ${{ github.repository }}
         run: |
-          python -m scripts.acceptance --repository "$ACCEPTANCE_REPOSITORY" --all-open --publish > "$RUNNER_TEMP/acceptance.json"
+          python -m scripts.acceptance --repository "$ACCEPTANCE_REPOSITORY" --all-open --publish --post-review-templates --review-templates-dir "$RUNNER_TEMP/review-templates" --publisher-run-id "$GITHUB_RUN_ID" > "$RUNNER_TEMP/acceptance.json"
+      - name: Upload human review templates
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: review-templates-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/review-templates/*.json
+          if-no-files-found: warn
       - name: Retain acceptance report
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
