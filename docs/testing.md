@@ -176,6 +176,12 @@ Operator-phrased queries whose answers exist in the synthetic corpus WITHOUT the
 
 Ingest wall/docs/s/RSS, Qdrant RAM/CPU/disk, agent latency against the pinned image. `/v1/answer` uses the mock LLM — say so in every report. `--check benchmarks/baseline.json` (RSS/disk ×1.5, latency p95 ×3; improvements never fail). Re-baseline is a dedicated PR. GitLab has no bench.
 
+The CI workflow explicitly prepares the approved image with
+`python scripts/qdrant_pin.py --prepare` before either benchmark branch. For a
+local run, first use `sh scripts/tools/run-task.sh artifacts:qdrant` during
+preparation. Benchmark verification consumes that prepared digest and never
+pulls an image implicitly; failed preparation prevents measurement.
+
 Bench baselines must be captured in the gate's own environment (CI runners) via the `update_baseline` dispatch with repeats ≥3 (noise floor: `--repeats N` aggregates min latency/footprint, max errors/throughput) — never a dev machine: a 24-core-local baseline gating 4-vCPU CI runs at ×3 left near-zero p95 headroom and failed on runner contention (2026-09-02). `scripts/qdrant_sim.py` and `scripts/qdrant_pin.py` have exactly one owner each — do not fork them; `sh scripts/tools/run-task.sh local:qdrant:up` is a fixed-port wrapper.
 
 ### Harness invariants (all harness tiers L1/L2/L3/L4)
