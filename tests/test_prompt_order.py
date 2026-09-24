@@ -142,6 +142,74 @@ def test_exact_final_messages_are_the_last_verified_candidate(chat, order):
 
 
 @pytest.mark.parametrize("chat", [False, True])
+def test_stable_cache_only_overflow_trims_or_refuses_before_model(chat):
+    """Issue #368 counterexample: a prompt that fits in retrieval order can
+    overflow in stable_cache order (static instructions plus framing
+    material). The builder must judge the selected final order — the
+    retrieval candidate verifies intact while the stable_cache candidate
+    is trimmed down (or refused when irreducible), never certified from a
+    retrieval-order count."""
+    from mainframe_rag.agent.answer import PromptBudgetExceeded, build_chat_messages
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ports import ChatMessage
+
+    class LengthTokenizer:
+        remote_confirmed = True
+
+        def __init__(self):
+            self.calls = []
+
+        def count_messages(self, messages):
+            self.calls.append([m.model_dump() for m in messages])
+            return sum(len(m.content) for m in messages)
+
+    body = "Body one. " * 8
+    hits = [_hit("SA22-0000-00 Synthetic, p. 1", body)]
+    history = [ChatMessage(role="user", content="Next?")] if chat else "Next?"
+    wide = Settings(_env_file=None, llm_max_model_len=131072)
+
+    def build(order, settings, tok):
+        if chat:
+            return build_chat_messages(history, hits, tokenizer=tok, settings=settings, order=order)
+        return build_messages(history, hits, tokenizer=tok, settings=settings, order=order)
+
+    # Measure both final-order candidates with an unbounded window: the
+    # stable_cache form must carry strictly more material.
+    probe = LengthTokenizer()
+    len_r = sum(len(m.content) for m in build("retrieval", wide, probe).messages)
+    len_s = sum(len(m.content) for m in build("stable_cache", wide, probe).messages)
+    assert len_s > len_r
+
+    # Pin the window just above the retrieval candidate: it verifies
+    # intact, while the stable_cache candidate cannot survive unchanged.
+    limit = len_r + 20
+    assert limit < len_s
+    model_len = 1536 + 128 + limit  # reserved + margin + window (simple: no thinking reserve)
+    tight = Settings(_env_file=None, llm_max_model_len=model_len)
+
+    tok_r = LengthTokenizer()
+    ok = build("retrieval", tight, tok_r)
+    assert ok.budget_verified
+    assert "Body one." in ok.messages[-1].content
+    assert tok_r.calls[-1] == [m.model_dump() for m in ok.messages]
+
+    tok_s = LengthTokenizer()
+    try:
+        trimmed = build("stable_cache", tight, tok_s)
+    except PromptBudgetExceeded as exc:
+        # Irreducible fixed content alone over the window: explicit budget
+        # failure carrying counts, never prompt text, before any model call.
+        assert exc.used > exc.limit
+        assert "Body one." not in str(exc)
+    else:
+        # Every excerpt trimmed away: the survivor is judged in final
+        # order with an exactly corresponding (empty) manifest.
+        assert "Body one." not in trimmed.messages[-1].content
+        assert trimmed.evidence.entries == []
+        assert tok_s.calls[-1] == [m.model_dump() for m in trimmed.messages]
+
+
+@pytest.mark.parametrize("chat", [False, True])
 def test_last_bounded_extra_count_can_confirm_budget(chat):
     from mainframe_rag.agent.answer import build_chat_messages
     from mainframe_rag.config import Settings
