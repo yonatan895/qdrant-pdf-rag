@@ -354,3 +354,39 @@ are implementation details; their current values are unchanged. Lifecycle
 scripts separately exercise live adoption, upgrade/failure/rollback, readiness
 and retained storage. Render tests cannot establish OpenShift admission or
 internal GitLab/Quay/site qualification; missing runs stay explicit in PR evidence.
+
+### Critical historical hazard sensitivity (#482 V2)
+
+`tests/hazards/critical.json` maps ten existing historical regressions to concrete
+wrong implementations: omitted vector projection, append-only same-ID fake
+upsert, unmarked residue, destructive repair of a serving target, scope-losing
+fallback, invented terminal finish, counting the wrong final prompt order,
+using a later non-user turn, dropping an explicit operator false, and executing
+a new bundle through an old workspace. The same-ID mutation changes the faithful
+boundary fake, preserving the independent lifecycle assertions. The other
+mutations change source only inside the isolated copy. Exact-reference and
+revocation cases remain owned by #405 until their product contract is implemented.
+
+After explicit environment/tool preparation, run:
+
+```sh
+.venv/bin/python scripts/check_hazard_sensitivity.py --out /tmp/critical-hazards-candidate
+```
+
+The runner requires committed tracked changes and the prepared doctor gate,
+archives that exact HEAD into separate temporary trees, and runs each selected
+existing test unchanged before applying its exact mutation. The baseline must
+pass; an unapplied mutation, compile/import/setup error, timeout, skipped/zero
+tests, wrong test or unrelated assertion is not a kill. Only the selected
+behavioral assertion failing counts. Mutations never edit the working source,
+install dependencies, launch services or rewrite expected results.
+
+The output directory must be new. It contains the candidate SHA, runner/catalogue
+hashes, expected tests/assertions, exit codes, observed classification, XML and
+logs. `--hazard ID` supports focused diagnosis but marks the report as a partial
+catalogue; it cannot prove the complete V2 gate. Every selected hazard must be
+killed by its intended assertion. A surviving non-equivalent mutation blocks
+that claim; fix the owning regression or implementation in its existing suite
+instead of weakening the catalogue. An interrupted/incomplete report is not a
+pass. This narrow catalogue establishes sensitivity to the named historical
+counterexamples, not immunity to all faults or a global coverage percentage.

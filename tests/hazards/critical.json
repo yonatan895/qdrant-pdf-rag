@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "owner": "#370 / #482 V2",
+  "deferred": [
+    {
+      "id": "exact-reference-revocation",
+      "owner": "#405",
+      "reason": "Add when #405 implements exact references and revocation; current historical suite cannot certify that future contract."
+    }
+  ],
+  "hazards": [
+    {
+      "id": "vector-projection",
+      "contract": "Rekey preserves actual stored vectors, requesting the real client projection.",
+      "target": "src/mainframe_rag/ingest/representation.py",
+      "before": "        with_vectors=True,",
+      "after": "        with_vectors=False,",
+      "occurrences": 1,
+      "test": "tests/test_representation_gate.py::test_rekey_carries_contract_to_staging_id",
+      "assertion": "assert rekey_manifest(store, live_comp, staging_comp) is True",
+      "target_role": "production"
+    },
+    {
+      "id": "same-id-overwrite",
+      "contract": "A same-ID upsert replaces the prior control state; reads see the committed state.",
+      "target": "tests/test_representation_gate.py",
+      "before": "        stored[:] = [p for p in stored if str(p.id) not in ids]",
+      "after": "        stored[:] = list(stored)",
+      "occurrences": 1,
+      "test": "tests/test_representation_gate.py::test_begin_commit_lifecycle",
+      "assertion": "assert read_manifest_record(store, comp).state == STATE_COMMITTED",
+      "target_role": "boundary_fake"
+    },
+    {
+      "id": "unmarked-residue",
+      "contract": "Unattributable searchable residue blocks publication and remains untouched.",
+      "target": "src/mainframe_rag/ingest/publish.py",
+      "before": "    if residue:\n        return [",
+      "after": "    if False and residue:\n        return [",
+      "occurrences": 1,
+      "test": "tests/test_ingest_publish.py::test_unmarked_legacy_residue_blocks_cutover_without_deletion",
+      "assertion": "assert any(\"unmarked residue\" in p for p in problems)",
+      "target_role": "production"
+    },
+    {
+      "id": "reader-repair-overlap",
+      "contract": "Repair leaves the serving physical intact while readers remain admitted.",
+      "target": "src/mainframe_rag/ingest/run_ingest.py",
+      "before": "    mode = ensure_staging(client, settings, staging_settings, live)\n",
+      "after": "    mode = ensure_staging(client, settings, staging_settings, live)\n    if live is not None and force_reingest:\n        from qdrant_client import models\n        client.delete(live, points_selector=models.FilterSelector(filter=models.Filter()), wait=True)\n",
+      "occurrences": 1,
+      "test": "tests/test_ingest_publish.py::test_forced_repair_never_touches_live_during_build",
+      "assertion": "assert observed[\"live_points\"] == live_points",
+      "target_role": "production"
+    },
+    {
+      "id": "scope-losing-fallback",
+      "contract": "Identifier fallback retains explicit product/version scope.",
+      "target": "src/mainframe_rag/retrieve/query.py",
+      "before": "    fallback_flt = build_scope_filter(product=product, version=version)",
+      "after": "    fallback_flt = None",
+      "occurrences": 1,
+      "test": "tests/test_query_filters.py::test_search_filter_fallback_retains_explicit_scope_and_excludes_out_of_scope",
+      "assertion": "assert fallback_filter is not None",
+      "target_role": "production"
+    },
+    {
+      "id": "missing-terminal-finish",
+      "contract": "Neither stream exhaustion nor buffered fallback invents a successful finish.",
+      "target": "src/mainframe_rag/agent/answer.py",
+      "before": "    finish_reason = choice.get(\"finish_reason\")",
+      "after": "    finish_reason = choice.get(\"finish_reason\") or \"stop\"",
+      "occurrences": 1,
+      "test": "tests/test_stream_truncation.py::test_v1_answer_real_client_missing_finish_both_legs_is_502",
+      "assertion": "assert resp.status_code == 502",
+      "target_role": "production"
+    },
+    {
+      "id": "final-order-miscount",
+      "contract": "The final emitted prompt is the last tokenizer-verified candidate.",
+      "target": "src/mainframe_rag/agent/answer.py",
+      "before": "            used = tokenizer.count_messages(messages)",
+      "after": "            used = tokenizer.count_messages(messages[:-1] + [ChatMessage(role=\"user\", content=_user_content(_assemble_blocks(context_entries, question_text, packed, tail_part), \"retrieval\"))])",
+      "occurrences": 2,
+      "test": "tests/test_prompt_order.py::test_exact_final_messages_are_the_last_verified_candidate[stable_cache-False]",
+      "assertion": "assert tok.calls[-1] == [m.model_dump() for m in prepared.messages]",
+      "target_role": "production"
+    },
+    {
+      "id": "latest-user-mismatch",
+      "contract": "Retrieval and prompt both use the last user, ignoring later non-user messages.",
+      "target": "src/mainframe_rag/agent/chat_turn.py",
+      "before": "    active = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].role == \"user\"), None)",
+      "after": "    active = len(messages) - 1 if messages else None",
+      "occurrences": 1,
+      "test": "tests/test_webui.py::test_ui_stream_retrieval_and_prompt_use_same_active_user[assistant-False]",
+      "assertion": "assert [c[\"query\"] for c in ui_client.mock_search.calls] == [\"What does IEA500I mean?\"]",
+      "target_role": "production"
+    },
+    {
+      "id": "dropped-operator-value",
+      "contract": "Explicit false survives operator mapping instead of becoming the default true.",
+      "target": "scripts/airgap/map_values.py",
+      "before": "    ui_enabled = strict_bool(\"UI_ENABLED\", env(\"UI_ENABLED\"), True)",
+      "after": "    ui_enabled = True",
+      "occurrences": 1,
+      "test": "tests/test_map_values.py::test_ui_enabled_selection[false-False]",
+      "assertion": "assert load_values(out)[\"ui\"] == {\"enabled\": expected}",
+      "target_role": "production"
+    },
+    {
+      "id": "mixed-release-identity",
+      "contract": "A verified new bundle cannot execute through an old workspace until explicit checkout.",
+      "target": "scripts/airgap/bootstrap.sh",
+      "before": "[ \"$WORKSPACE_SHA\" = \"$PACKED_SHA\" ] || {",
+      "after": "[ -n \"$WORKSPACE_SHA\" ] || {",
+      "occurrences": 1,
+      "test": "tests/test_airgap_bootstrap_sh.py::test_bootstrap_approved_upgrade_requires_explicit_checkout_preserves_operator_state",
+      "assertion": "assert refused.returncode != 0",
+      "target_role": "production"
+    }
+  ]
+}
