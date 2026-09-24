@@ -18,7 +18,6 @@ integration test and the operator CLI:
 from __future__ import annotations
 
 import argparse
-import shutil
 import socket
 import subprocess
 import sys
@@ -66,28 +65,24 @@ def _run(cmd: list[str], *, timeout: float = 300.0, check: bool = True):
 def qdrant_image(repo_root: Path) -> str:
     """The images.txt pin — the same image every other Qdrant lane uses."""
     try:
-        from scripts.qdrant_pin import qdrant_image_pin
+        from scripts.qdrant_pin import qdrant_digest_pin
     except ImportError:  # script context: scripts/ itself is on sys.path
-        from qdrant_pin import qdrant_image_pin
+        from qdrant_pin import qdrant_digest_pin as _local_qdrant_digest_pin
+        qdrant_digest_pin = _local_qdrant_digest_pin
 
-    return qdrant_image_pin(repo_root / "images.txt")
+    return qdrant_digest_pin(repo_root / "images.txt")
 
 
-def require_docker(image: str) -> None:
-    if shutil.which("docker") is None:
-        raise QdrantClusterError("docker is required for the multi-peer fixture")
-    if _run(["docker", "image", "inspect", image], check=False).returncode == 0:
-        return
-    # Same implicit behavior as the single-node sim (docker run would pull);
-    # in the air gap there is no network, so absence fails with a clear path.
-    pulled = _run(["docker", "pull", image], check=False, timeout=900.0)
-    if pulled.returncode != 0:
-        raise QdrantClusterError(
-            f"pinned image {image} is not present and could not be pulled "
-            f"({(pulled.stderr or pulled.stdout).strip()[:200]}); fetch it on a "
-            "connected host first (for example: sh scripts/tools/run-task.sh "
-            "local:qdrant:up) and re-run"
-        )
+def require_docker(image: str) -> str:
+    try:
+        from scripts.qdrant_pin import prepared_image
+    except ImportError:
+        from qdrant_pin import prepared_image as _local_prepared_image
+        prepared_image = _local_prepared_image
+    try:
+        return prepared_image(image)
+    except ValueError as exc:
+        raise QdrantClusterError(str(exc)) from exc
 
 
 def free_port(start: int) -> int:
@@ -207,7 +202,7 @@ def start_cluster(
     if peers < 1:
         raise QdrantClusterError(f"peers must be >= 1, got {peers}")
     image = qdrant_image(repo_root)
-    require_docker(image)
+    image = require_docker(image)
     prefix = prefix or f"{DEFAULT_PREFIX}-{int(time.time())}"
     base = base_port if base_port is not None else free_port(DEFAULT_BASE_PORT)
     network = f"{prefix}-net"
@@ -218,7 +213,7 @@ def start_cluster(
             name = f"{prefix}-{index}"
             host_port = base + (index - 1) * 10
             command = [
-                "docker", "run", "-d", "--name", name,
+                "docker", "run", "--pull=never", "-d", "--name", name,
                 "--network", network,
                 "-p", f"127.0.0.1:{host_port}:{HTTP_PORT}",
                 "-e", "QDRANT__CLUSTER__ENABLED=true",

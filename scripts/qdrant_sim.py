@@ -48,7 +48,8 @@ def qdrant_image_pin(images_txt: Path) -> str:
     try:
         from scripts.qdrant_pin import qdrant_image_pin as _pin
     except ImportError:  # script context: scripts/ itself is on sys.path
-        from qdrant_pin import qdrant_image_pin as _pin
+        from qdrant_pin import qdrant_image_pin as _local_pin
+        _pin = _local_pin
     try:
         return _pin(images_txt)
     except ValueError as exc:
@@ -89,12 +90,18 @@ def start_simulator(repo_root: Path, external_url: str | None = None) -> QdrantS
     if info.returncode != 0:
         raise QdrantSimError("docker daemon not reachable")
 
-    image = qdrant_image_pin(repo_root / "images.txt")
-    if not _run(["docker", "images", "-q", image], timeout=30).stdout.strip():
-        pull = _run(["docker", "pull", image])
-        if pull.returncode != 0:
-            raise QdrantSimError(f"could not pull {image}: {pull.stderr.strip()[:200]}")
-    run = _run(["docker", "run", "-d", "--rm", "-p", f"127.0.0.1::{QDRANT_PORT}", image])
+    try:
+        from scripts.qdrant_pin import prepared_image, qdrant_digest_pin
+    except ImportError:
+        from qdrant_pin import prepared_image as _local_prepared_image
+        from qdrant_pin import qdrant_digest_pin as _local_qdrant_digest_pin
+        prepared_image = _local_prepared_image
+        qdrant_digest_pin = _local_qdrant_digest_pin
+    try:
+        image = prepared_image(qdrant_digest_pin(repo_root / "images.txt"))
+    except ValueError as exc:
+        raise QdrantSimError(str(exc)) from exc
+    run = _run(["docker", "run", "--pull=never", "-d", "--rm", "-p", f"127.0.0.1::{QDRANT_PORT}", image])
     if run.returncode != 0:
         raise QdrantSimError(f"could not start the qdrant container: {run.stderr.strip()[:200]}")
     cid = run.stdout.strip()

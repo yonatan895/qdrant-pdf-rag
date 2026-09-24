@@ -18,6 +18,7 @@ on:
       - "locks/**"
       - "scripts/dependency_lock.py"
       - "scripts/prepare_python.py"
+      - "scripts/agent_doctor.py"
       - "scripts/tools/**"
       - ".github/workflows/ha.yml"
   push:
@@ -39,6 +40,7 @@ on:
       - "locks/**"
       - "scripts/dependency_lock.py"
       - "scripts/prepare_python.py"
+      - "scripts/agent_doctor.py"
       - "scripts/tools/**"
       - ".github/workflows/ha.yml"
 
@@ -77,6 +79,10 @@ jobs:
       # Explicit preparation (verification never installs): the lane runs on
       # the explicitly prepared .venv/bin/python.
       - run: sh scripts/tools/run-task.sh dev:setup
+      - run: sh scripts/tools/install-helm.sh
+      - run: echo "$GITHUB_WORKSPACE/.tools/bin" >> "$GITHUB_PATH"
+      - name: Prepare approved Qdrant image explicitly
+        run: python scripts/qdrant_pin.py --prepare
       - name: run the three-peer HA lane (fail closed — no skips, at least one pass)
         run: |
           set -o pipefail

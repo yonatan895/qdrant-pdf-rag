@@ -12,6 +12,15 @@
 version: '3'
 
 tasks:
+  qdrant:
+    desc: Explicitly acquire and verify the approved Qdrant image (connected)
+    summary: |
+      Pulls the images.txt repository digest into the selected Docker daemon,
+      then verifies it and prints the immutable image ID. Does not start a
+      server. Verification tasks never call this preparation automatically.
+    cmds:
+      - python3 scripts/qdrant_pin.py --prepare
+
   wheelhouse:
     desc: Build the offline pip wheelhouse from the lockfile (connected)
     summary: |

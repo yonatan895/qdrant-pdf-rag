@@ -129,11 +129,18 @@ jobs:
       - name: docker must be present (the tier skips without it — skip is failure here)
         run: docker version
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected
+      - name: Prepare approved Qdrant image explicitly
+        run: python scripts/qdrant_pin.py --prepare
+      - run: sh scripts/tools/install-task.sh
+      - run: sh scripts/tools/install-helm.sh
+      - run: echo "$GITHUB_WORKSPACE/.tools/bin" >> "$GITHUB_PATH"
       - name: fetch + verify BM25 weights (vLLM-shaped embed variant)
         run: |
           python scripts/fetch_bm25_weights.py --out "$RUNNER_TEMP/bm25" \
             --verify-manifest bm25-weights.sha256
           echo "SIM_BM25_CACHE_DIR=$RUNNER_TEMP/bm25" >> "$GITHUB_ENV"
+      - name: Verify prepared simulation inputs before collection
+        run: python scripts/agent_doctor.py --profile sim --python "$(command -v python)"
       - name: run the simulation tier (fail closed — no skips, at least one pass)
         run: |
           set -o pipefail
@@ -164,6 +171,8 @@ jobs:
       - name: docker must be present for qdrant_sim
         run: docker version
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected
+      - name: Prepare approved Qdrant image explicitly
+        run: python scripts/qdrant_pin.py --prepare
       - name: run L1 retrieval gate
         run: |
           python scripts/gate_l1.py \

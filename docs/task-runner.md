@@ -98,9 +98,29 @@ The complete runtime/dev/build wheel profiles, offline preparation, actual
 installed inventory checks and release SBOM reconciliation are owned by
 [the dependency contract](dependencies.md). The unit doctor verifies the full
 dev profile and editable source tree, plus Task/Helm bytes and the cached Task
-archive used by artifact tests. Cached BM25 content and daemon/image availability
-remain separate simulation prerequisites; a unit success does not attest them
-or establish application acceptance.
+archive used by artifact tests. `qa:sim`, `qa:load` and `qa:ha` run the same
+inventory/tool gate plus their selected simulation prerequisites before collection.
+The explicit simulation profiles read the selected Docker daemon; the default
+unit profile still makes no daemon call. Prepare the approved Qdrant digest with
+`sh scripts/tools/run-task.sh artifacts:qdrant` on a connected host. The image
+checker resolves the approved repository digest, verifies its daemon record,
+and launchers use the resulting immutable image ID with `--pull=never`. A tag
+alone or an archive loaded without digest identity is insufficient. No missing
+image is pulled by a verification task or a simulation fixture.
+
+`sim` additionally verifies the exact selected `SIM_BM25_CACHE_DIR` (default
+`bundles/bm25-weights`) against `bm25-weights.sha256`. An explicit empty/missing
+cache never falls back. The cache must contain one Qdrant/bm25 snapshot selected
+by `refs/main`, with exactly the approved files and hashes. Prepare it separately
+with `artifacts:bm25`; the integration test forces FastEmbed's offline mode.
+`load` and `ha` use explicit dev hash fixtures and need no BM25 cache. An explicit
+`QDRANT_SIM_URL` retains the external-server load mode; its image identity is
+reported as unattested. The full sim tier still needs the local approved image
+for authorization/rotation tests even with an external main server.
+
+These checks establish prerequisites, not application acceptance or an untested
+internal registry/runner's identity. GitLab's service provisioning stays runner
+owned, separate from the local Docker preparation path.
 
 Discovery, doctor and verification never provision tools. Missing or foreign
 workspace binaries fail with remediation; installation is an explicit action.
@@ -122,7 +142,7 @@ preserve script ownership; there is no root `dotenv:` or global mode/venue.
 | Input | Task/example | Semantics |
 |---|---|---|
 | `PY` | `qa:context PY=python3.14`, `dev:*` | Default `python3`. Empty is preserved and fails; false/zero-like strings are not replaced. Explicit interpreter selection keeps preinstalled offline CI environments offline. |
-| `PROFILE` | `dev:doctor PROFILE=sim` | `unit` default, `sim` or `deploy`; `agent_doctor.py` owns diagnosis. Same empty/false/zero rule as `PY`. |
+| `PROFILE` | `dev:doctor PROFILE=sim` | `unit` default, `sim`, `load`, `ha` or `deploy`; `agent_doctor.py` owns diagnosis. Same empty/false/zero rule as `PY`. |
 | Focused argv | `qa:unit -- tests/test_agent_context.py -q` | Replaces default `pytest tests -v` once. Empty selection retains default integration exclusion. Shell word splitting applies to this trusted developer argument tail; never use it for untrusted text. |
 | `TASK_BIN` | runner tests' environment | Selects the actual pinned runner under test; default workspace binary then PATH. This test input does not override the controlled production entry. |
 | `EMBED_MODE` | `eval:retrieval EMBED_MODE=vllm` | Eval-family default `hash`; script-read and scoped to the selected task. Explicit empty is preserved and fails validation. Baselines derive from effective mode; mismatch/skipped gates are not passes. |

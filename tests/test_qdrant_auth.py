@@ -9,14 +9,13 @@ new keyset works and the old one is rejected without data loss.
 
 Ephemeral docker container with per-run random keys (``secrets`` module).
 Keys never reach test output: assertions compare status codes and payload
-shapes only, and failure messages carry no credentials. Skips cleanly when
-docker (or the pinned image) is unavailable, like the sim tier.
+shapes only, and failure messages carry no credentials. Fails before startup when the approved local image is unavailable;
+preparation is explicit and never part of this fixture.
 """
 
 from __future__ import annotations
 
 import secrets
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -31,53 +30,18 @@ COLLECTION = "authz"
 VEC = [0.1, 0.2, 0.3, 0.4]
 
 
-def _pinned_image() -> str:
-    for line in (REPO_ROOT / "images.txt").read_text(encoding="utf-8").splitlines():
-        if line.lstrip().startswith("#") or not line.strip():
-            continue
-        fields = line.split()
-        if fields and "qdrant" in fields[0]:
-            return fields[0]
-    raise ValueError("no qdrant image pin found in images.txt")
-
-
 def _docker(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["docker", *args], capture_output=True, text=True, timeout=timeout, check=False
     )
 
 
-def _have_image(pin: str) -> str | None:
-    """Image reference the local daemon actually serves. The pin is the
-    canonical ``docker.io/``-qualified ref, but a daemon fed from the local
-    registry mirror may tag it short — ``docker images -q`` does not
-    normalize the prefix, so probe both before attempting a pull."""
-    candidates = [pin]
-    if pin.startswith("docker.io/"):
-        candidates.append(pin[len("docker.io/"):])
-    for cand in candidates:
-        if _docker("images", "-q", cand, timeout=30).stdout.strip():
-            return cand
-    return None
-
-
 def _start(auth: dict[str, str], volume: str | None = None) -> tuple[str, str]:
-    """Start an ephemeral Qdrant with the given service keys. Returns
-    (base_url, container_id). Skips when docker cannot serve."""
-    if shutil.which("docker") is None:
-        pytest.skip("docker CLI not found")
-    if _docker("info", timeout=15).returncode != 0:
-        pytest.skip("docker daemon not reachable")
-    try:
-        pin = _pinned_image()
-    except ValueError as exc:
-        pytest.skip(str(exc))
-    image = _have_image(pin)
-    if image is None:
-        if _docker("pull", pin, timeout=300).returncode != 0:
-            pytest.skip(f"cannot pull pinned Qdrant image {pin}")
-        image = pin
-    cmd = ["run", "-d", "--rm", "-p", "127.0.0.1::6333"]
+    """Start an ephemeral server using the already prepared approved bytes."""
+    from scripts.qdrant_pin import prepared_image, qdrant_digest_pin
+
+    image = prepared_image(qdrant_digest_pin(REPO_ROOT / "images.txt"))
+    cmd = ["run", "--pull=never", "-d", "--rm", "-p", "127.0.0.1::6333"]
     for env_key, env_val in auth.items():
         cmd += ["-e", f"{env_key}={env_val}"]
     if volume is not None:

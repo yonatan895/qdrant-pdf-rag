@@ -127,14 +127,11 @@ def corpus(tmp_path_factory) -> Path:
     return root
 
 
-def _bm25_cache_dir() -> str | None:
-    """A fastembed cache containing Qdrant/bm25 (sh scripts/tools/run-task.sh artifacts:bm25 layout)."""
-    env = os.environ.get("SIM_BM25_CACHE_DIR")
-    candidates = ([Path(env)] if env else []) + [REPO_ROOT / "bundles" / "bm25-weights"]
-    for candidate in candidates:
-        if (candidate / "models--Qdrant--bm25").is_dir():
-            return str(candidate)
-    return None
+def _bm25_cache_dir() -> str:
+    """Verify the exact selected cache; never fall back from a bad explicit path."""
+    from scripts.fetch_bm25_weights import prepared_bm25_cache
+
+    return str(prepared_bm25_cache(REPO_ROOT))
 
 
 def _ingest(
@@ -868,9 +865,8 @@ def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_pa
 def test_vllm_shaped_embed_variant(qdrant_url, mock_url, corpus, tmp_path, monkeypatch):
     """The prod embed path: dense over real HTTP to the mock vLLM endpoint,
     sparse via local fastembed BM25 (weights must already be cached)."""
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     cache = _bm25_cache_dir()
-    if not cache:
-        pytest.skip("fastembed BM25 weights not cached; run `sh scripts/tools/run-task.sh artifacts:bm25` first")
 
     records = _ingest(
         monkeypatch,
