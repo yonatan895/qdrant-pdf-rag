@@ -243,6 +243,37 @@ the final aggregate. Until then, use the actual review link and explicit maintai
 do not claim an unenforced gate exists. A bot job's successful execution still does not mean approval.
 Don't infer approval from placeholders or require a second manually synchronized status table.
 
+### Native evidence and consumer rollout (#411)
+
+`scripts/ci_evidence.py` records the actual native job invocation and its PR
+head, base and execution identity. Test lanes retain counts from actual test
+records, reject zero tests and skips, and refuse pre-existing reports. Receipts
+use attempt-specific artifacts. Packaging receipts identify the checkout only;
+the native packaging job must finish successfully before they can contribute
+acceptance. A receipt is never a code review or permission to merge.
+
+`scripts/acceptance_evidence.py` owns native job/artifact mappings and bounded,
+data-only receipt validation. The consumer must fetch current native run, job,
+attempt, artifact and commit records, paginate collections, and compare the
+artifact digest and actual raw test records. The execution must be GitHub's
+current PR test merge with the exact current base/head parents. Matching parent
+names alone cannot authorize a different merge tree. ZIP members are read in
+memory; they are never extracted, imported, or executed.
+
+The approved base supplies policy, producer and workflow bytes. A candidate's
+workflow cannot approve its own replacement verifier. Producer/bootstrap changes
+therefore require the existing explicit maintainer review path before a later
+consumer can trust those bytes. This does not waive their tests. The privileged
+publisher, when enabled, must execute approved-base code only and recheck PR
+currentness before publishing. Native API provenance and valid receipts do not
+substitute for an authorized current review or its finding dispositions.
+
+Rollout status: native receipts and normalization are being introduced; an
+always-scheduled publisher, real PR transition proof, and maintainer activation
+of enforcement remain separate acceptance obligations. No ruleset or repository
+permission is changed by these helpers. GitLab's existing verification remains
+independent; GitHub receipt validation is not GitLab execution evidence.
+
 ### Triage a recurring baseline/environment failure once
 
 The repeated `test_reasoning_server_flags_come_from_budget` discrepancy in reviews is a reason

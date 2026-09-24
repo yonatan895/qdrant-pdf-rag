@@ -32,6 +32,7 @@ from scripts.review_tooling import (
     ProfileName,
     VerificationStatus,
     build_acceptance_summary,
+    changed_paths,
     classify_paths,
     evaluate_lane,
     evaluate_probe_response,
@@ -133,13 +134,56 @@ class TestProfileClassification(unittest.TestCase):
         self.assertIn("unclassified", decision.matched_categories)
 
     def test_classify_tests_only_offline_with_tests_category(self):
-        for path in ("tests/test_config.py", "tests/conftest.py", "tests/test_airgap_deploy_sh.py"):
+        for path in ("tests/test_config.py", "tests/test_airgap_deploy_sh.py"):
             decision = classify_paths([path])
             if path.startswith("tests/test_airgap_"):
                 self.assertEqual(decision.profile, ProfileName.DEPLOY)
             else:
                 self.assertEqual(decision.profile, ProfileName.OFFLINE)
                 self.assertIn("tests", decision.matched_categories)
+
+    def test_shared_fixtures_select_all_dependent_boundaries(self):
+        for path in ("tests/conftest.py", "tests/fakes.py", "tests/ci_shard.py"):
+            with self.subTest(path=path):
+                decision = classify_paths([path])
+                self.assertEqual(decision.profile, ProfileName.FULL)
+                self.assertTrue({"deploy", "storage", "http", "tests"} <= set(decision.matched_categories))
+
+    def test_instructions_and_executable_docs_are_not_prose_only(self):
+        for path in ("AGENTS.md", "src/AGENTS.override.md", ".agents/skills/example/SKILL.md", "docs/testing.md"):
+            with self.subTest(path=path):
+                decision = classify_paths([path])
+                self.assertIn("tooling", decision.matched_categories)
+                self.assertEqual(decision.services, [])
+        for path in ("docs/generated.json", "docs/example.sh"):
+            self.assertEqual(classify_paths([path]).profile, ProfileName.FULL)
+        self.assertEqual(classify_paths(["docs/explanation.md"]).matched_categories, ["prose"])
+
+    def test_narrow_deployment_helpers_keep_their_owner(self):
+        for path in ("tests/helpers_helm.py", "tests/helpers_image_inventory.py", "tests/helpers_task_artifact.py"):
+            self.assertEqual(classify_paths([path]).profile, ProfileName.DEPLOY)
+        self.assertEqual(classify_paths(["src/mainframe_rag/retrieve/query.py"]).profile, ProfileName.STORAGE)
+
+    def test_real_git_rename_retains_both_paths_and_literal_whitespace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            def git(*args):
+                return subprocess.check_output(["git", "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid",
+                                                "-c", "commit.gpgsign=false", *args], cwd=root, text=True).strip()
+            git("init", "-q")
+            old = "src/mainframe_rag/ingest/old name\r\n.py"
+            new = "docs/moved name\r\n.md"
+            (root / old).parent.mkdir(parents=True)
+            (root / old).write_text("unchanged synthetic contents\n")
+            git("add", "--", old)
+            git("commit", "-qm", "original")
+            base = git("rev-parse", "HEAD")
+            (root / new).parent.mkdir(parents=True)
+            git("mv", "--", old, new)
+            git("commit", "-qm", "rename")
+            self.assertEqual(changed_paths(base, cwd=root), [old, new])
+            self.assertIn("storage", classify_paths(changed_paths(base, cwd=root)).matched_categories)
+            self.assertEqual(changed_paths("nonexistent-ref", cwd=root), [])
 
     def test_classify_scripts_benchmarks_and_ci_mirror_as_tooling(self):
         for path in ("scripts/gate_l1.py", "benchmarks/harness.json", ".gitlab-ci.yml",
@@ -763,7 +807,7 @@ class TestReviewToolingCLI(unittest.TestCase):
                 "scripts/review_tooling.py",
                 "profile",
                 "--files",
-                "docs/testing.md",
+                "docs/explanation.md",
                 "README.md",
                 "--out",
                 str(out_file),
@@ -1417,7 +1461,13 @@ class TestTaskCiConsumers(unittest.TestCase):
         context = (self.root / ".github/workflows/agent-context.yml").read_text()
         self.assertLess(context.index("sh scripts/tools/install-task.sh"),
                         context.index("sh scripts/tools/run-task.sh qa:context"))
-        self.assertIn("TASK_CONTRACTS_REQUIRE_RUNNER=1 python -m unittest tests.test_taskfile_contracts", context)
+        import yaml
+
+        steps = yaml.safe_load(context)["jobs"]["check-context"]["steps"]
+        execution = next(step for step in steps if "--unittest" in step.get("run", ""))
+        self.assertEqual(execution["env"]["TASK_CONTRACTS_REQUIRE_RUNNER"], "1")
+        self.assertEqual(shlex.split(execution["run"])[-3:],
+                         ["tests.test_agent_context", "tests.test_agent_doctor", "tests.test_taskfile_contracts"])
 
     def test_two_unit_vms_preserve_a_fail_closed_test_status(self):
         import yaml
@@ -1438,9 +1488,11 @@ class TestTaskCiConsumers(unittest.TestCase):
             self.assertEqual(proc.returncode == 0, result == "success")
 
     def test_load_step_preserves_failure_skip_and_no_tests_guards(self):
-        text = (self.root / ".github/workflows/load.yml").read_text()
-        step = text.split("      - name: run the load tier ", 1)[1]
-        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        import yaml
+
+        workflow = yaml.safe_load((self.root / ".github/workflows/load.yml").read_text())
+        script = next(step["run"] for step in workflow["jobs"]["load"]["steps"]
+                      if step.get("name", "").startswith("run the load tier "))
         for output, status, success in (("2 passed", 0, True), ("2 passed", 7, False),
                                         ("2 passed, 1 skipped", 0, False),
                                         ("no tests ran", 0, False)):
@@ -1449,9 +1501,24 @@ class TestTaskCiConsumers(unittest.TestCase):
                 tool = root / "scripts/tools/run-task.sh"
                 tool.parent.mkdir(parents=True)
                 tool.write_text('printf "%s\\n" "$*" > calls\nprintf "%s\\n" "$OUTPUT"\nexit "$STATUS"\n')
+                # Exercise the real wrapper with a controlled identity and child Task.
+                # The separate provenance tests cover Git/event identity validation.
+                launcher = root / ".venv/bin/python"
+                launcher.parent.mkdir(parents=True)
+                launcher.write_text(
+                    "#!" + sys.executable + "\nimport sys\nfrom pathlib import Path\n"
+                    + "sys.path.insert(0, " + repr(str(self.root)) + ")\n"
+                    + "from scripts import ci_evidence\n"
+                    + "ci_evidence.ROOT = Path.cwd()\n"
+                    + "ci_evidence.identity = lambda: {'execution_sha': 'a' * 40}\n"
+                    + "sys.argv = sys.argv[1:]\nraise SystemExit(ci_evidence.main())\n")
+                launcher.chmod(0o755)
+                tool.write_text(tool.read_text().replace(
+                    'exit "$STATUS"',
+                    "printf '%s' '<testsuite><testcase name=\"task\"/></testsuite>' > \"$RUNNER_TEMP/load.xml\"\nexit \"$STATUS\""))
                 proc = subprocess.run(
                     ["bash", "-eu", "-c", script], cwd=root,
-                    env={**os.environ, "OUTPUT": output, "STATUS": str(status)},
+                    env={**os.environ, "OUTPUT": output, "STATUS": str(status), "RUNNER_TEMP": str(root)},
                     capture_output=True, text=True, check=False,
                 )
                 self.assertEqual(proc.returncode == 0, success, proc.stdout + proc.stderr)
@@ -1516,6 +1583,307 @@ class TestTaskCiConsumers(unittest.TestCase):
                              f"scripts/agent_doctor.py\n--python\n{root / 'python'}\n")
             self.assertEqual(shlex.split(commands[1]),
                              ["sh", "scripts/tools/install-task.sh", "--archive", "$CI_TASK_ARCHIVE"])
+
+
+
+class TestNativeExecutionEvidence(unittest.TestCase):
+    def test_junit_counts_actual_records_not_declared_totals(self):
+        from scripts.ci_evidence import junit_counts
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = pathlib.Path(directory) / "tests.xml"
+            report.write_text('<testsuite tests="999"><testcase name="one"/><testcase name="two"><skipped/></testcase></testsuite>')
+            counts = junit_counts(report)
+            self.assertEqual(counts["executed"], 2)
+            self.assertEqual(counts["skipped"], 1)
+            report.write_text('<testsuite tests="999"/>')
+            with self.assertRaisesRegex(ValueError, "no testcases"):
+                junit_counts(report)
+            report.write_text('<!DOCTYPE testsuite><testsuite><testcase/></testsuite>')
+            with self.assertRaisesRegex(ValueError, "unsupported"):
+                junit_counts(report)
+
+    def test_native_command_requires_nonzero_fresh_passing_results(self):
+        from unittest.mock import patch
+
+        from scripts import ci_evidence
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for name, xml, exit_code, expected in (
+                ("pass", '<testsuite><testcase name="actual"/></testsuite>', 0, 0),
+                ("zero", '<testsuite tests="99"/>', 0, 1),
+                ("skip", '<testsuite><testcase><skipped/></testcase></testsuite>', 0, 1),
+                ("error", '<testsuite><testcase><error/></testcase></testsuite>', 0, 1),
+                ("failed-command", '<testsuite><testcase/></testsuite>', 1, 1),
+            ):
+                with self.subTest(name=name):
+                    junit = root / (name + '.xml')
+                    output = root / name
+                    command = 'from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2]); sys.exit(int(sys.argv[3]))'
+                    argv = ['ci_evidence.py', '--lane', 'unit_tests', '--job-name', 'unit (1/2)',
+                            '--output', str(output), '--junit', str(junit), '--', sys.executable,
+                            '-c', command, str(junit), xml, str(exit_code)]
+                    with patch.object(ci_evidence, 'ROOT', root), patch.object(ci_evidence, 'identity', return_value={'execution_sha': 'a' * 40}), patch.object(sys, 'argv', argv):
+                        self.assertEqual(ci_evidence.main(), expected)
+                        evidence = json.loads((output / 'evidence.json').read_text())
+                        self.assertEqual(evidence['passed'], expected == 0)
+                        if expected == 0:
+                            self.assertEqual((output / 'tests.xml').read_text(), xml)
+                        # Reusing the existing report is refused before command execution.
+                        argv[argv.index('--output') + 1] = str(root / (name + '-retry'))
+                        self.assertEqual(ci_evidence.main(), 2)
+                        self.assertFalse((root / (name + '-retry')).exists())
+
+    def test_identity_binds_real_merge_parents_event_and_clean_checkout(self):
+        from unittest.mock import patch
+
+        from scripts import ci_evidence
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            def git(*args):
+                return subprocess.check_output(["git", *args], cwd=root, text=True,
+                                               stderr=subprocess.DEVNULL).strip()
+            git("init", "-b", "main")
+            git("config", "user.name", "Synthetic Test")
+            git("config", "user.email", "synthetic@example.invalid")
+            (root / "scripts").mkdir()
+            policy = root / "scripts/review_tooling.py"
+            policy.write_text("# synthetic policy\n")
+            git("add", ".")
+            git("commit", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            git("checkout", "-b", "candidate")
+            (root / "candidate").write_text("synthetic change")
+            git("add", ".")
+            git("commit", "-m", "candidate")
+            head = git("rev-parse", "HEAD")
+            git("checkout", "main")
+            git("merge", "--no-ff", "candidate", "-m", "test merge")
+            merge = git("rev-parse", "HEAD")
+            event = root / "event.json"
+            payload = {"pull_request": {"number": 3, "head": {"sha": head}, "base": {"sha": base}}}
+            event.write_text(json.dumps(payload))
+            env = {"GITHUB_EVENT_PATH": str(event), "GITHUB_REPOSITORY": "synthetic/repository",
+                   "GITHUB_REPOSITORY_ID": "42", "GITHUB_EVENT_NAME": "pull_request",
+                   "GITHUB_WORKFLOW_REF": "synthetic/repository/.github/workflows/ci.yml@refs/pull/3/merge",
+                   "GITHUB_WORKFLOW_SHA": merge, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+                   "GITHUB_JOB": "unit", "GITHUB_ACTOR_ID": "7", "GITHUB_TRIGGERING_ACTOR": "synthetic"}
+            with patch.object(ci_evidence, "ROOT", root), patch.dict(os.environ, env):
+                receipt = ci_evidence.identity()
+                self.assertEqual((receipt["head_sha"], receipt["base_sha"], receipt["execution_sha"]),
+                                 (head, base, merge))
+                self.assertEqual(receipt["execution_parents"], [base, head])
+                self.assertEqual((receipt["run_id"], receipt["run_attempt"]), (123, 2))
+                # An updated base or head cannot reuse an earlier test merge.
+                for field in ("base", "head"):
+                    original = payload["pull_request"][field]["sha"]
+                    payload["pull_request"][field]["sha"] = "f" * 40
+                    event.write_text(json.dumps(payload))
+                    with self.assertRaisesRegex(ValueError, "does not bind"):
+                        ci_evidence.identity()
+                    payload["pull_request"][field]["sha"] = original
+                event.write_text(json.dumps(payload))
+                policy.write_text("# dirty tracked policy\n")
+                with self.assertRaisesRegex(ValueError, "dirty"):
+                    ci_evidence.identity()
+                git("restore", "scripts/review_tooling.py")
+                git("checkout", "candidate")
+                self.assertEqual(ci_evidence.identity()["execution_sha"], head)
+
+    def test_identity_receipt_cannot_claim_test_results_or_reuse_structured_output(self):
+        from unittest.mock import patch
+
+        from scripts import ci_evidence
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            existing = root / "existing.json"
+            existing.write_text('{"passed": true}')
+            for extra in (["--identity-only", "--junit", str(root / "new.xml")],
+                          ["--identity-only", "--result-json", str(existing)],
+                          ["--result-json", str(existing), "--", sys.executable, "-c", "pass"]):
+                with self.subTest(extra=extra):
+                    argv = ["ci_evidence.py", "--lane", "packaging", "--job-name", "build",
+                            "--output", str(root / "out"), *extra]
+                    with patch.object(sys, "argv", argv), patch.object(ci_evidence, "identity", return_value={}):
+                        self.assertEqual(ci_evidence.main(), 2)
+                    self.assertFalse((root / "out").exists())
+
+    def test_execution_identity_movement_cannot_pass(self):
+        from unittest.mock import patch
+
+        from scripts import ci_evidence
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            argv = ['ci_evidence.py', '--lane', 'lint_and_types', '--job-name', 'lint', '--output', str(root / 'out'),
+                    '--', sys.executable, '-c', 'pass']
+            with patch.object(ci_evidence, 'ROOT', root), patch.object(sys, 'argv', argv), patch.object(
+                    ci_evidence, 'identity', side_effect=[{'execution_sha': 'a' * 40}, {'execution_sha': 'b' * 40}]):
+                self.assertEqual(ci_evidence.main(), 1)
+                self.assertFalse(json.loads((root / 'out/evidence.json').read_text())['passed'])
+
+class TestNativeEvidenceConsumer(unittest.TestCase):
+    def fixture(self):
+        import hashlib
+
+        from scripts.acceptance_evidence import PRODUCERS
+        from scripts.ci_evidence import junit_bytes
+
+        producer = next(p for p in PRODUCERS if p.job == "unit (1/2)")
+        candidate = {"repository": "synthetic/repository", "repository_id": 42, "number": 3,
+                     "head_sha": "a" * 40, "base_sha": "b" * 40, "execution_sha": "c" * 40,
+                     "head_repository_id": 84}
+        run = {"id": 123, "run_attempt": 2, "event": "pull_request", "path": ".github/workflows/ci.yml",
+               "head_sha": "a" * 40, "status": "completed", "repository": {"id": 42, "full_name": "synthetic/repository"},
+               "head_repository": {"id": 84}, "actor": {"id": 7}, "triggering_actor": {"login": "synthetic"}}
+        job = {"id": 456, "run_id": 123, "run_attempt": 2, "head_sha": "a" * 40,
+               "name": "unit (1/2)", "status": "completed", "conclusion": "success"}
+        artifact = {"id": 789, "expired": False, "name": "evidence-unit-1-attempt-2",
+                    "workflow_run": {"id": 123, "repository_id": 42, "head_repository_id": 84, "head_sha": "a" * 40}}
+        commit = {"sha": "c" * 40, "parents": [{"sha": "b" * 40}, {"sha": "a" * 40}]}
+        xml = b'<testsuite tests="999"><testcase name="actual"/></testsuite>'
+        receipt = {"schema_version": 1, "repository": "synthetic/repository", "repository_id": 42,
+                   "pull_request": 3, "head_sha": "a" * 40, "base_sha": "b" * 40,
+                   "execution_sha": "c" * 40, "execution_parents": ["b" * 40, "a" * 40],
+                   "event": "pull_request", "run_id": 123, "run_attempt": 2, "job_key": "unit",
+                   "job_name": "unit (1/2)", "lane": "unit_tests", "actor_id": 7,
+                   "triggering_actor": "synthetic", "workflow_sha": "c" * 40,
+                   "workflow_ref": "synthetic/repository/.github/workflows/ci.yml@refs/pull/3/merge",
+                   "policy_sha256": "d" * 64, "producer_sha256": "e" * 64,
+                   "evidence_kind": "execution", "passed": True, "exit_code": 0, "tests": junit_bytes(xml)}
+        return {"candidate": candidate, "producer": producer, "run": run, "job": job,
+                "artifact": artifact, "execution_commit": commit, "policy_digest": "d" * 64,
+                "producer_digest": "e" * 64, "workflow_source": b"approved workflow",
+                "workflow_digest": hashlib.sha256(b"approved workflow").hexdigest()}, receipt, xml
+
+    def packed(self, receipt, xml):
+        import hashlib
+        import io
+        import zipfile
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("evidence.json", json.dumps(receipt))
+            archive.writestr("tests.xml", xml)
+        raw = buffer.getvalue()
+        return raw, "sha256:" + hashlib.sha256(raw).hexdigest()
+
+    def test_accepts_exact_native_job_attempt_and_actual_test_records(self):
+        from scripts.acceptance_evidence import normalize_native
+
+        args, receipt, xml = self.fixture()
+        args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
+        result = normalize_native(**args)
+        self.assertEqual((result["run_id"], result["run_attempt"], result["job_id"], result["artifact_id"]),
+                         (123, 2, 456, 789))
+        self.assertEqual(result["tests"]["executed"], 1)
+
+    def test_rejects_wrong_actor_run_attempt_workflow_candidate_and_failed_execution(self):
+        from scripts.acceptance_evidence import normalize_native
+
+        for field, value in (("actor_id", 9), ("triggering_actor", "wrong"), ("run_id", 124),
+                             ("run_attempt", 1), ("job_key", "other"), ("job_name", "unit (2/2)"),
+                             ("head_sha", "f" * 40), ("base_sha", "f" * 40),
+                             ("workflow_sha", "a" * 40), ("workflow_ref", "other"),
+                             ("policy_sha256", "f" * 64), ("producer_sha256", "f" * 64),
+                             ("passed", False), ("passed", 1), ("exit_code", 3), ("exit_code", False)):
+            with self.subTest(field=field, value=value):
+                args, receipt, xml = self.fixture()
+                receipt[field] = value
+                args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
+                with self.assertRaises(ValueError):
+                    normalize_native(**args)
+        for field, value in (("run_attempt", 1), ("conclusion", "cancelled"), ("conclusion", "skipped"),
+                             ("conclusion", "failure"), ("status", "in_progress"), ("run_id", 124)):
+            with self.subTest(native_field=field, value=value):
+                args, receipt, xml = self.fixture()
+                args["job"][field] = value
+                args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
+                with self.assertRaises(ValueError):
+                    normalize_native(**args)
+
+    def test_missing_zero_skipped_or_different_raw_test_evidence_cannot_pass(self):
+        from scripts.acceptance_evidence import normalize_native
+        from scripts.ci_evidence import junit_bytes
+
+        for xml in (b'<testsuite tests="100"/>', b'<testsuite><testcase><skipped/></testcase></testsuite>',
+                    b'<testsuite><testcase name="different"/></testsuite>'):
+            args, receipt, _ = self.fixture()
+            # A green receipt must not cover different actual XML, even if both have one case.
+            args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
+            with self.assertRaises(ValueError):
+                normalize_native(**args)
+        args, receipt, _ = self.fixture()
+        xml = b'<testsuite><testcase><skipped/></testcase></testsuite>'
+        receipt["tests"] = junit_bytes(xml)
+        args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
+        with self.assertRaises(ValueError):
+            normalize_native(**args)
+
+    def test_candidate_cannot_substitute_workflow_or_a_different_merge_with_same_parents(self):
+        from scripts.acceptance_evidence import normalize_native
+
+        args, receipt, xml = self.fixture()
+        args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
+        args["workflow_source"] = b"candidate workflow that fabricates results"
+        with self.assertRaises(ValueError):
+            normalize_native(**args)
+        args, receipt, xml = self.fixture()
+        receipt["execution_sha"] = receipt["workflow_sha"] = "f" * 40
+        args["execution_commit"]["sha"] = "f" * 40
+        args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
+        with self.assertRaises(ValueError):
+            normalize_native(**args)
+
+    def test_native_pagination_reads_later_pages_and_refuses_inconsistent_results(self):
+        from scripts.acceptance_evidence import paginate
+
+        calls = []
+        def get(endpoint):
+            calls.append(endpoint)
+            page = 1 if endpoint.endswith("&page=1") else 2
+            rows = [{"id": number} for number in range(100)] if page == 1 else [{"id": 100}]
+            return {"total_count": 101, "jobs": rows}
+        result = paginate(get, "actions/runs/123/attempts/2/jobs", "jobs")
+        self.assertEqual(result[-1], {"id": 100})
+        self.assertEqual(calls, ["actions/runs/123/attempts/2/jobs?per_page=100&page=1",
+                                 "actions/runs/123/attempts/2/jobs?per_page=100&page=2"])
+        for response in ({"total_count": 101, "jobs": [{"id": 1}]},
+                         {"total_count": 2, "jobs": [{"id": 1}, {"id": 1}]}):
+            with self.subTest(response=response), self.assertRaises(ValueError):
+                paginate(lambda endpoint, response=response: response, "jobs", "jobs")
+
+    def test_artifact_tampering_paths_duplicates_and_symlinks_are_rejected(self):
+        import hashlib
+        import io
+        import stat
+        import warnings
+        import zipfile
+
+        from scripts.acceptance_evidence import artifact_members
+
+        for name, symlink, duplicate in (("../evidence.json", False, False), ("evidence.json", True, False),
+                                        ("evidence.json", False, True)):
+            with self.subTest(name=name, symlink=symlink, duplicate=duplicate):
+                buffer = io.BytesIO()
+                with warnings.catch_warnings(), zipfile.ZipFile(buffer, "w") as archive:
+                    warnings.simplefilter("ignore", UserWarning)
+                    info = zipfile.ZipInfo(name)
+                    if symlink:
+                        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                    archive.writestr(info, "{}")
+                    if duplicate:
+                        archive.writestr(name, "{}")
+                raw = buffer.getvalue()
+                with self.assertRaises(ValueError):
+                    artifact_members(raw, "sha256:" + hashlib.sha256(raw).hexdigest())
+        _args, receipt, xml = self.fixture()
+        raw, digest = self.packed(receipt, xml)
+        with self.assertRaises(ValueError):
+            artifact_members(raw + b"tampered", digest)
 
 
 if __name__ == "__main__":

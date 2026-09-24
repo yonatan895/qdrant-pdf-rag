@@ -33,7 +33,6 @@ SCHEMA_VERSION = 1
 PROSE_PATTERNS = [
     "*.md",
     "*.markdown",
-    "docs/**",
     "LICENSE*",
     "ROADMAP.md",
     ".github/pull_request_template.md",
@@ -94,6 +93,9 @@ DEPLOY_PATTERNS = [
     "airgap.env.example",
     "tests/test_airgap_*.py",
     "tests/helpers_airgap.py",
+    "tests/helpers_helm.py",
+    "tests/helpers_image_inventory.py",
+    "tests/helpers_task_artifact.py",
 ]
 
 TEST_PATTERNS = [
@@ -102,6 +104,7 @@ TEST_PATTERNS = [
 
 STORAGE_PATTERNS = [
     "src/mainframe_rag/ingest/**",
+    "src/mainframe_rag/retrieve/**",
     "scripts/qdrant_*.py",
     "scripts/fetch_bm25_weights.py",
     "bm25-weights.sha256",
@@ -135,6 +138,15 @@ TRACING_PATTERNS = [
     "scripts/run_local_jaeger.sh",
     "tests/test_tracing*.py",
 ]
+
+
+# Instruction changes affect the verification contract even when Markdown.
+INSTRUCTION_NAMES = {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "GEMINI.md", "CONTEXT.md", "SKILL.md"}
+POLICY_DOCUMENTS = {"docs/agent-workflow.md", "docs/live-stack.md", "docs/testing.md",
+                    "docs/task-runner.md", "docs/dependencies.md"}
+# These shared producers feed every selected suite. Narrow helpers retain their
+# actual deploy owner above instead of treating every tests/** file as global.
+SHARED_TEST_INPUTS = {"tests/conftest.py", "tests/fakes.py", "tests/ci_shard.py", "tests/__init__.py"}
 
 
 class ProfileName(str, enum.Enum):
@@ -257,7 +269,7 @@ ALL_SERVICES = ["agent", "jaeger", "qdrant", "vllm"]
 
 
 def classify_paths(paths: Iterable[str]) -> ProfileDecision:
-    path_list = [p.strip() for p in paths if p.strip()]
+    path_list = [p for p in paths if p]
     if not path_list:
         # An empty change set cannot be classified safely: an unreadable diff,
         # a bad SHA or a shallow checkout must not silently downgrade review.
@@ -268,6 +280,13 @@ def classify_paths(paths: Iterable[str]) -> ProfileDecision:
 
     for path in path_list:
         matched = False
+        if pathlib.PurePosixPath(path).name in INSTRUCTION_NAMES or path in POLICY_DOCUMENTS:
+            categories.add("tooling")
+            matched = True
+        if path in SHARED_TEST_INPUTS:
+            categories.update(("storage", "http", "tracing", "deploy", "tests"))
+            services.update(ALL_SERVICES)
+            matched = True
         is_markdown = path.replace("\\", "/").endswith((".md", ".markdown"))
         if _match_any(path, PROSE_PATTERNS):
             categories.add("prose")
@@ -915,7 +934,7 @@ def build_acceptance_summary(
     # Deploy always contributes the packaging obligation, even when the
     # cross-layer union selects the `full` profile (whose base set has no
     # packaging lane). A union of risks must never reduce verification.
-    if "deploy" in matched_cats:
+    if any(category in matched_cats for category in ("deploy", "unclassified", "unclassified_empty")):
         required_lanes = set(required_lanes) | {"packaging"}
 
     head_sha = str(manifest.get("head_sha", ""))
@@ -1020,22 +1039,46 @@ def build_acceptance_summary(
 # CLI Entrypoints
 # -----------------------------------------------------------------------------
 
+def changed_paths(base: str | None, head: str = "HEAD", *, cwd: pathlib.Path | None = None) -> list[str]:
+    """Read NUL-delimited path identities, retaining both sides of a rename.
+
+    Missing/unreadable data yields the existing full unknown-impact selection.
+    Never execute a candidate diff driver or normalize whitespace in filenames.
+    """
+    command = ["git", "diff", "--no-ext-diff", "--no-textconv", "--name-status", "-z", "--find-renames"]
+    if base:
+        command.append(f"{base}...{head}")
+    command.append("--")
+    try:
+        result = subprocess.run(command, cwd=cwd, capture_output=True, check=False)
+        if result.returncode:
+            return []
+        fields = result.stdout.decode("utf-8").split("\0")
+        if fields[-1] != "":
+            return []
+        fields.pop()
+        paths = []
+        while fields:
+            status = fields.pop(0)
+            count = 2 if status.startswith(("R", "C")) else 1
+            if not re.fullmatch(r"(?:[ACDMRTUXB]|[RC][0-9]+)", status) or len(fields) < count:
+                return []
+            for _ in range(count):
+                name = fields.pop(0)
+                if not name:
+                    return []
+                paths.append(name)
+        return paths
+    except (OSError, UnicodeError):
+        return []
+
+
 def cmd_profile(args: argparse.Namespace) -> int:
     # 1. Resolve paths
     if args.files:
         paths = args.files
     else:
-        # Check git diff
-        base = args.base
-        head = args.head or "HEAD"
-        cmd = ["git", "diff", "--name-only"]
-        if base:
-            cmd.append(f"{base}...{head}")
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            paths = [line.strip() for line in res.stdout.splitlines() if line.strip()]
-        except OSError:
-            paths = []
+        paths = changed_paths(args.base, args.head or "HEAD")
 
     decision = classify_paths(paths)
     manifest = generate_candidate_manifest(

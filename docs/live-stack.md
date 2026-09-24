@@ -20,6 +20,13 @@ owns context, conflicts, task/review and handoff formats.
 
 **Data invariant protection (cross-cutting):** Defaults, UUID5 chunk keys, 4-type vocabulary (`prose`, `code`, `table`, `heading`), residue audit, fail-closed contracts, and production constants require a dedicated approved concern split from features, evaluated against mode-keyed baselines with full A/B evidence. Documentation, tooling, or refactoring PRs cannot silently alter, suppress, or waive data invariants.
 
+The review selector retains both paths of renames, including literal filename
+whitespace, and treats an unreadable/empty diff as unknown impact. Instruction
+files and verification-policy documents are tooling inputs even when Markdown;
+executable files beneath `docs/` are not automatically prose. Shared test
+fixtures select their dependent suites; mixed and unknown impact cannot omit
+packaging simply because their combined profile is `full`.
+
 Take the union for cross-layer impact and test the interactions. A tooling label
 does not excuse retrieval changes from evaluation. Avoid expensive unrelated
 checks and record relevance decisions. Retrieval changes including chunking,
