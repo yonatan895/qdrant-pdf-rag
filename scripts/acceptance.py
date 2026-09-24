@@ -90,10 +90,18 @@ def review_template(api: GitHub, number: int) -> dict[str, Any]:
             'code_assessment': '<acceptable|changes_required|incomplete>',
             'verification': '<complete|incomplete|failed>',
             'merge_readiness': '<ready_for_maintainer|not_ready>',
-            'material_findings': [{'id': '<finding ID; use [] only if none>',
-                                   'disposition': 'unresolved',
-                                   'description': '<finding and evidence; carry forward prior findings>'}],
+            'material_findings': [],
             'evidence': {'review': '<reviewed scope and verification evidence>'}}
+
+
+def is_unfilled_review_template(payload: dict[str, Any]) -> bool:
+    """Exclude exact unfilled scaffolding, never actual or partially entered findings."""
+    legacy = [{'id': '<finding ID; use [] only if none>', 'disposition': 'unresolved',
+               'description': '<finding and evidence; carry forward prior findings>'}]
+    return (payload.get('code_assessment') == '<acceptable|changes_required|incomplete>'
+            and payload.get('verification') == '<complete|incomplete|failed>'
+            and payload.get('merge_readiness') == '<ready_for_maintainer|not_ready>'
+            and payload.get('material_findings') in ([], legacy))
 
 
 def review_template_comment(template: dict[str, Any]) -> str:
@@ -102,7 +110,10 @@ def review_template_comment(template: dict[str, Any]) -> str:
             '### Your review template\n\n'
             'Copy the JSON below into a new comment or Comment review and fill the human judgment fields. '
             'The commit IDs are already filled in. This generated template is **not a review or approval**. '
-            'Use the newest template if the PR changes; carry forward prior material findings.\n\n'
+            'Use the newest template if the PR changes; carry forward prior material findings. '
+            'If there are no findings, leave `material_findings` as the empty array `[]`; '
+            'do not put the string "[]" inside finding fields. Otherwise add finding objects with '
+            '`id`, `disposition`, and `description`. Replace the evidence placeholder with what you reviewed.\n\n'
             '```json\n' + json.dumps(template, indent=2) + '\n```\n')
 
 
@@ -239,7 +250,7 @@ def collect_review(api: GitHub, pr: dict[str, Any], candidate: dict[str, Any]):
                 if previous is None or (timestamp, record['id']) > previous[:2]:
                     opinions[actor['id']] = (timestamp, record['id'], record['state'])
             payload = extract_review_json(record.get('body') or '')
-            if payload is None:
+            if payload is None or is_unfilled_review_template(payload):
                 continue
             for finding in payload.get('material_findings', []):
                 if isinstance(finding, dict) and isinstance(finding.get('id'), str):

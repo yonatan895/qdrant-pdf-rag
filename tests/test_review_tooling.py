@@ -2621,3 +2621,55 @@ class ReviewTemplateTests(unittest.TestCase):
                  self.assertRaises(ValueError):
                 api.write(endpoint, {'body': 'template'}, method=method)
             run.assert_not_called()
+
+    def test_shared_account_scaffolding_is_not_review_or_finding_history(self):
+        import copy
+
+        from scripts.acceptance import collect_review
+
+        candidate = {'head_sha': 'a' * 40, 'base_sha': 'b' * 40, 'execution_sha': 'c' * 40}
+        human = {'schema_version': 1, **candidate, 'candidate_currentness': 'current',
+                 'code_assessment': 'acceptable', 'verification': 'complete',
+                 'merge_readiness': 'ready_for_maintainer', 'material_findings': [], 'evidence': {}}
+        scaffold = {**human, 'code_assessment': '<acceptable|changes_required|incomplete>',
+                    'verification': '<complete|incomplete|failed>',
+                    'merge_readiness': '<ready_for_maintainer|not_ready>'}
+        legacy = [{'id': '<finding ID; use [] only if none>', 'disposition': 'unresolved',
+                   'description': '<finding and evidence; carry forward prior findings>'}]
+
+        def comment(number, payload):
+            return {'id': number, 'user': {'id': 7, 'login': 'synthetic', 'type': 'User'},
+                    'author_association': 'OWNER', 'updated_at': f'2026-09-24T10:00:0{number}Z',
+                    'body': '<!-- generated-human-review-template -->\n```json\n' + json.dumps(payload) + '\n```',
+                    'html_url': f'https://github.com/synthetic/repository/pull/3#issuecomment-{number}'}
+
+        class API:
+            prefix = 'repos/synthetic/repository/'
+
+            def __init__(self, comments):
+                self.comments = comments
+
+            def get(self, endpoint):
+                if '/collaborators/' in endpoint:
+                    return {'permission': 'admin'}
+                if '/reviews?' in endpoint:
+                    return []
+                return self.comments
+
+        for findings in ([], legacy):
+            with self.subTest(findings=findings):
+                template = {**scaffold, 'material_findings': findings}
+                api = API([comment(1, template), comment(2, human), comment(3, template)])
+                review, _, identity = collect_review(api, {'number': 3}, candidate)
+                self.assertEqual(review.merge_readiness, 'ready_for_maintainer')
+                self.assertEqual(identity['id'], 2)
+                review, _, _ = collect_review(API([comment(1, template)]), {'number': 3}, candidate)
+                self.assertIsNone(review)
+        real_finding = copy.deepcopy(scaffold)
+        real_finding['material_findings'] = [{'id': 'F1', 'disposition': 'unresolved', 'description': 'Real defect'}]
+        review, _, _ = collect_review(API([comment(1, real_finding), comment(2, human)]), {'number': 3}, candidate)
+        self.assertEqual(review.merge_readiness, 'not_ready')
+        self.assertTrue(any('omits earlier material finding' in e for e in review.validation_errors))
+        malformed = {**human, 'material_findings': [{'id': '[]', 'disposition': '[]', 'description': '[]'}]}
+        review, _, _ = collect_review(API([comment(1, malformed)]), {'number': 3}, candidate)
+        self.assertEqual(review.merge_readiness, 'not_ready')

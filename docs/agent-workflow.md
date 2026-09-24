@@ -298,7 +298,13 @@ Comment review. Generation runs before acceptance evaluation, so missing review
 does not prevent the template appearing. Exact unchanged templates are not
 reposted; changed identities produce a new comment. The publisher never edits
 reviewer comments or treats a marker alone as authority. These generated,
-incomplete skeletons are not approval. Artifacts below remain a secondary copy.
+incomplete skeletons are not approval. Exact untouched scaffolding (including
+legacy placeholder finding objects) is excluded from review selection and finding
+history, even when posted through a shared human account. Real or partially
+entered findings remain subject to the existing carry-forward requirements;
+a marker alone never exempts a record. New templates use `material_findings: []`;
+reviewers add finding objects when needed rather than filling a dummy finding.
+Artifacts below remain a secondary copy.
 Comment-writing permission is confined to the approved-main publisher; ordinary
 candidate context CI remains read-only. If comment publication is unavailable,
 the check points to the retained artifact instead.
