@@ -1,6 +1,8 @@
 # Agent Deployment with optional OAuth sidecar when route.enabled.
 # Protected defaults (selectors, ports, probes, read-only Qdrant key,
-# UI_ENABLED=true, oauth args/ports/volumes, resource defaults) stay here (D5).
+# oauth args/ports/volumes, resource defaults) stay here (D5).
+# UI_ENABLED renders from the operator-selectable ui.enabled value
+# (issue #479); only the default-true selection is protected here.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -69,7 +71,7 @@ spec:
             - name: CHAT_CONDENSE_ENABLED
               value: {{ .Values.models.reasoning.condenseEnabled | toString | quote }}
             - name: UI_ENABLED
-              value: "true"
+              value: {{ .Values.ui.enabled | toString | quote }}
             - name: RERANK_ENABLED
               value: {{ .Values.models.rerank.enabled | toString | quote }}
             - name: RERANK_BASE_URL

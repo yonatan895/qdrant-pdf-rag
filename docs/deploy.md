@@ -144,6 +144,13 @@ Compatibility and lifecycle decisions under #448:
   sidecar and ServiceAccount, including an existing Route's CA/timeout.
   Route-on deployment therefore requires its namespace and operator Secrets
   to exist first. Dry-run uses an explicit `ROUTE_DESTINATION_CA_FILE`.
+- `UI_ENABLED=false` renders the API-only POC profile (issue #479): the
+  Deployment carries `UI_ENABLED="false"` and the application serves its
+  stable 404 envelope on every `/ui` path with zero model/retrieval calls.
+  Unset keeps the default `/ui` served. UI selection is independent of
+  `AGENT_ROUTE`: disabling the console never removes OAuth/TLS/access
+  controls, and Route-off is not a UI-off claim. Invalid nonempty values
+  fail before mutation (`UI_ENABLED must be true/false`).
 - Qdrant's tag still strips `-unprivileged` before the upstream chart appends it.
   Snapshot class falls back to `STORAGE_CLASS`. Rehearsal-only sizing inputs
   (`QDRANT_STORAGE_SIZE`, `QDRANT_EXTRA_VALUES`, `QDRANT_TAG`, `INGEST_WORK_SIZE`,

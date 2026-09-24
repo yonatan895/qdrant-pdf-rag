@@ -81,6 +81,7 @@ def base_values() -> dict:
             "serviceName": "",
         },
         "metrics": {"enabled": False},
+        "ui": {"enabled": True},
         "route": {"enabled": False, "timeoutSeconds": 300, "destinationCA": ""},
         "storage": {"className": BASE_ENV["STORAGE_CLASS"]},
         "ingest": {

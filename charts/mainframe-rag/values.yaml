@@ -93,6 +93,15 @@ metrics:
   # ServiceMonitor. True serves exposition and renders the monitor for UWM.
   enabled: false
 
+# Operator console selection (issue #479). True preserves the existing
+# default (UI_ENABLED="true", /ui served). False renders
+# UI_ENABLED="false": the application serves its stable disabled contract
+# for console form/stream/history/static entry points. Independent of
+# route.enabled below: disabling the UI never removes OAuth/TLS/access
+# controls, and turning the Route off is not a UI-off claim.
+ui:
+  enabled: true
+
 # Optional console Route via the oauth-proxy sidecar (ADR-0004, issue #373).
 # False keeps ClusterIP-only installs. True wires the sidecar, ServiceAccount,
 # Service oauth port/serving-cert annotation and a reencrypt Route. The CA is

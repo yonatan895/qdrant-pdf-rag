@@ -3,7 +3,7 @@
   "title": "mainframe-rag values",
   "type": "object",
   "additionalProperties": false,
-  "required": ["replicaCount", "images", "qdrantRelease", "models", "gateway", "tracing", "metrics", "route", "storage", "ingest", "pullSecret", "resources"],
+  "required": ["replicaCount", "images", "qdrantRelease", "models", "gateway", "tracing", "metrics", "ui", "route", "storage", "ingest", "pullSecret", "resources"],
   "properties": {
     "replicaCount": {
       "type": "integer",
@@ -245,6 +245,14 @@
       ]
     },
     "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "ui": {
       "type": "object",
       "additionalProperties": false,
       "required": ["enabled"],

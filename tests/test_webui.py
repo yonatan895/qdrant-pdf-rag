@@ -147,6 +147,36 @@ def test_ui_disabled_serves_404_envelope_on_every_path(ui_disabled_client):
         assert resp.json() == {"code": "not_found", "message": "not found"}, path
 
 
+def test_ui_disabled_blocks_stream_and_history_with_zero_model_calls(
+    monkeypatch, synthetic_pdf, servable_representation_gate
+):
+    """Issue #479: with UI disabled, every console entry point — including
+    stream and history-carrying form posts — serves the unavailable contract
+    over actual HTTP and initiates zero model/retrieval calls."""
+    llm = UiFakeLLM()
+    gen = _client(monkeypatch, ui_enabled=False, synthetic_pdf=synthetic_pdf, llm=llm)
+    client = next(gen)
+    try:
+        history = json.dumps([{"role": "user", "content": "earlier"}])
+        for method, path, kwargs in (
+            ("get", "/ui", {}),
+            ("get", "/ui/static/js/console.js", {}),
+            ("post", "/ui/chat", {"data": {"message": "hi", "messages": history}}),
+            ("post", "/ui/chat/stream", {"json": {"messages": [{"role": "user", "content": "hi"}]}}),
+        ):
+            resp = getattr(client, method)(path, **kwargs)
+            assert resp.status_code == 404, path
+            assert resp.json() == {"code": "not_found", "message": "not found"}, path
+    finally:
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+    assert llm.calls == []
+    assert llm.stream_calls == []
+    assert client.mock_search.calls == []
+
+
 def test_ui_shell_has_strict_csp_and_no_remote_assets(ui_client):
     resp = ui_client.get("/ui")
     assert resp.status_code == 200
