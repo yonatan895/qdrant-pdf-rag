@@ -394,3 +394,14 @@ counterexamples, not immunity to all faults or a global coverage percentage.
 The GitHub `hazards` job and offline GitLab `hazards` job run the full catalogue
 and retain its synthetic evidence. This producer is not yet an always-scheduled,
 trusted acceptance consumer; #411 owns that gate and maintainer enforcement.
+
+## Native CI execution evidence
+
+The existing review-tooling suite owns candidate selection, CI invocation and
+native receipt regression cases. It exercises real temporary Git merge histories
+and child processes, plus independently specified native API records and ZIP
+bytes. It rejects wrong producer/run/attempt/candidate identities, empty or
+skipped test reports, changed raw results, unsafe ZIP entries, and incomplete
+pagination. These local cases establish parser and attribution behavior; they do
+not establish a deployed acceptance check, actual human review, or merge-rule
+enforcement. Those require the real PR trials owned by #411.
