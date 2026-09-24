@@ -1458,14 +1458,11 @@ class TestTaskCiConsumers(unittest.TestCase):
                 self.assertEqual((root / "calls").read_text(), "qa:load\n")
 
     def test_offline_unit_job_requires_local_archive_before_running_tests(self):
-        text = (self.root / ".gitlab-ci.yml").read_text()
-        job = text.split("\ntest:\n", 1)[1].split("\ngate-l1:", 1)[0]
-        self.assertIn('TASK_CONTRACTS_REQUIRE_RUNNER: "1"', job)
-        commands = []
-        for line in job.split("  script:\n", 1)[1].splitlines():
-            if line.startswith("    - "):
-                command = line[6:]
-                commands.append(command[1:-1] if command.startswith("'") else command)
+        import yaml
+
+        job = yaml.safe_load((self.root / ".gitlab-ci.yml").read_text())["test"]
+        self.assertEqual(job["variables"]["TASK_CONTRACTS_REQUIRE_RUNNER"], "1")
+        commands = job["script"]
         script = "\n".join(commands)
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
