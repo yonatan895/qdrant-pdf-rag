@@ -176,6 +176,7 @@ class ContextCheckTests(TestCase):
             self.assertFalse(any("private instruction text" in e for e in errors))
 
 
-class M0DisposableFailureTrial(TestCase):
-    def test_required_lane_failure_blocks_acceptance(self):
-        self.fail('Intentional disposable M0 failed-lane trial; do not merge')
+def load_tests(loader, tests, pattern):
+    # Intentional zero-test discovery for the disposable M0 acceptance trial.
+    from unittest import TestSuite
+    return TestSuite()

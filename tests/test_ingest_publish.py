@@ -3542,5 +3542,3 @@ def test_peer_endpoints_parsing():
         _env_file=None, qdrant_peer_urls="http://a:6333, http://b:6333 ,,"
     )
     assert settings.qdrant_peer_endpoints() == ("http://a:6333", "http://b:6333")
-
-# Disposable M0 acceptance trial: exercise mixed storage/deployment selection.
