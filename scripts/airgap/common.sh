@@ -35,10 +35,23 @@ if [ -f overlays/openshift/collection-policy.env ]; then
     . overlays/openshift/collection-policy.env
 fi
 
+die() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
 if [ -n "${AIRGAP_ENV:-}" ]; then
-    if [ -f "$AIRGAP_ENV" ]; then
+    # Issue #478: an explicitly selected file must load or fail closed
+    # before any mutation. A missing/unreadable selection must never
+    # silently become an environment/default-only run. Relative paths
+    # resolve from the repository root (common.sh cds there above); the
+    # diagnostic names the path only, never file contents. Unset stays
+    # optional: default ./airgap.env when present, else environment-only.
+    if [ -f "$AIRGAP_ENV" ] && [ -r "$AIRGAP_ENV" ]; then
         # shellcheck disable=SC1091
         . "$AIRGAP_ENV"
+    else
+        die "AIRGAP_ENV selects '$AIRGAP_ENV' but it is not a readable regular file (fix the path or unset AIRGAP_ENV to use airgap.env/environment-only)"
     fi
 elif [ -f airgap.env ]; then
     # shellcheck disable=SC1091
@@ -50,11 +63,6 @@ for _k in $_cli_saved_keys; do
     eval "unset _cli_saved_${_k}"
 done
 unset _k _cli_saved_keys OPERATOR_ENV_KEYS
-
-die() {
-    echo "FAIL: $*" >&2
-    exit 1
-}
 
 require_env() {
     # Collect every missing key before failing, so one run tells the

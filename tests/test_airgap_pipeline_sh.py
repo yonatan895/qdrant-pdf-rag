@@ -33,10 +33,14 @@ def pipe_tree(tmp_path):
 def _run_pipeline(pipe_tree, *args, extra_env=None):
     import subprocess as _sp
 
+    # Issue #478: an empty regular file (not /dev/null) keeps the
+    # environment-only shape while ignoring repo ./airgap.env.
+    empty_env = pipe_tree / "empty.env"
+    empty_env.write_text("")
     env = {
         "PATH": f"{pipe_tree / 'bin'}:/usr/bin:/bin",
         "AIRGAP_DRYRUN": "1",
-        "AIRGAP_ENV": "/dev/null",
+        "AIRGAP_ENV": str(empty_env),
         "IMAGE_SHA": IMAGE_SHA,
         "INTERNAL_REGISTRY": "reg.internal:5000",
         "NAMESPACE": "mainframe-rag",

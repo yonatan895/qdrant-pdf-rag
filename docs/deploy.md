@@ -46,7 +46,11 @@ restores the snapshot over whatever the file assigned; empty stays unset
 (matching the `${VAR:-default}` idiom everywhere).
 
 - File selection: exported `AIRGAP_ENV` path wins, else local
-  `./airgap.env` when present, else no file.
+  `./airgap.env` when present, else no file. An explicitly selected
+  `AIRGAP_ENV` must be a readable regular file or the launcher fails
+  closed before any mutation (issue #478) — a missing selection never
+  silently becomes an environment/default-only run. Relative selections
+  resolve from the repository root; paths with spaces load as data.
 - Alias resolution: `INTERNAL_REGISTRY` falls back to `REGISTRY_INTERNAL`,
   `NAMESPACE` to `OPENSHIFT_NAMESPACE` (default `mainframe-rag`),
   `QDRANT_RELEASE` defaults to `qdrant`, empty `IMAGE_SHA` resolves from
