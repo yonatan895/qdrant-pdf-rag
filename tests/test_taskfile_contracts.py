@@ -1437,6 +1437,22 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(resolved["INTERNAL_REGISTRY"], "ambient-file-reg")
         self.assertEqual(resolved["NAMESPACE"], "ambient-file-ns")
 
+    def test_airgap_env_missing_file_fails_task_invocation(self):
+        # Issue #478: Task invocation parses through the same shipped
+        # common.sh, so a missing selection refuses identically and the
+        # stage double (recorder) is never reached — zero mutations.
+        self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
+        self.make_airgap_fixtures({"INTERNAL_REGISTRY": "default-file-reg", "NAMESPACE": "default-file-ns"})
+        self.make_airgap_stage_double("deploy.sh")
+        missing = self.root / "poc-478-missing.env"
+        self.assertFalse(missing.exists())
+        proc = self.run_task("airgap:deploy", f"AIRGAP_ENV={missing}",
+                             extra_env=dict(self.tool_env(), AIRGAP_ENV=str(missing)))
+        self.assertNotEqual(proc.returncode, 0)
+        # run_task merges stderr into stdout.
+        self.assertIn(f"AIRGAP_ENV selects '{missing}'", proc.stdout)
+        self.assertEqual(self.airgap_calls(), [])
+
     def test_dryrun_fixed_params_win(self):
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
         self.make_airgap_fixtures({"INTERNAL_REGISTRY": "file-reg"})

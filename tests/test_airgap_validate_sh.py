@@ -39,7 +39,10 @@ def _run(tree, extra_env=None):
     env = {
         "PATH": f"{tree / 'bin'}:/usr/bin:/bin",
         "AIRGAP_DRYRUN": "1",
-        "AIRGAP_ENV": "/dev/null",  # ignore repo ./airgap.env
+        # Issue #478: an empty regular file (not /dev/null) keeps the
+        # environment-only shape while ignoring repo ./airgap.env. A
+        # distinct name: case.env stays owned by per-test file content.
+        "AIRGAP_ENV": _write_empty_env_file(tree),
         "IMAGE_SHA": IMAGE_SHA,
         "INTERNAL_REGISTRY": "reg.internal:5000",
         "NAMESPACE": "mainframe-rag",
@@ -297,6 +300,12 @@ def _write_env_file(tree, content):
     return str(p)
 
 
+def _write_empty_env_file(tree):
+    p = tree / "empty.env"
+    p.write_text("")
+    return str(p)
+
+
 def test_explicit_env_beats_env_file(tree):
     # Every file value here would fail validation on its own (NFS storage,
     # non-http URL, non-integer dim); exit 0 proves the explicit environment
@@ -341,6 +350,79 @@ def test_empty_env_value_leaves_file_value(tree):
         {"AIRGAP_ENV": _write_env_file(tree, VALID_ENV_FILE), "INTERNAL_REGISTRY": ""},
     )
     assert r.returncode == 0, r.stderr
+
+
+RECORD_STUB = "#!/bin/sh\necho \"$0\" >> \"$STUB_SENTINEL\"\nexit 0\n"
+
+
+def _run_with_recording_stubs(tree, extra_env):
+    """Replace tool stubs with sentinel-recording ones: any external command
+    (registry/Helm/cluster mutation vector) leaves a trace to assert against."""
+    sentinel = tree / "stub-calls.log"
+    if sentinel.exists():
+        sentinel.unlink()
+    for name in ("skopeo", "helm", "kubectl", "oc"):
+        write_stub(tree / "bin" / name, RECORD_STUB)
+    env = {"STUB_SENTINEL": str(sentinel)}
+    env.update(extra_env)
+    r = _run(tree, env)
+    calls = sentinel.read_text().split() if sentinel.exists() else []
+    return r, calls
+
+
+def test_missing_explicit_env_file_fails_before_any_tool(tree):
+    # Issue #478: a typo'd selection must fail even when every other
+    # required variable is valid — never silently become env-only.
+    missing = str(tree / "poc-478-missing.env")
+    assert not os.path.exists(missing)
+    r, calls = _run_with_recording_stubs(tree, {"AIRGAP_ENV": missing})
+    assert r.returncode != 0, r.stdout
+    assert f"AIRGAP_ENV selects '{missing}'" in r.stderr
+    assert "not a readable regular file" in r.stderr
+    assert calls == [], f"loader refusal must precede every external command: {calls}"
+    # The diagnostic names the path only — no config values leak.
+    assert "reg.internal:5000" not in r.stderr
+
+
+def test_explicit_env_directory_fails_closed(tree):
+    # Directories fail the regular-file check even for root (chmod-based
+    # unreadable-file tests cannot fail closed for uid 0, so this is the
+    # permission-shape case that holds everywhere).
+    r, calls = _run_with_recording_stubs(tree, {"AIRGAP_ENV": str(tree)})
+    assert r.returncode != 0, r.stdout
+    assert f"AIRGAP_ENV selects '{tree}'" in r.stderr
+    assert calls == []
+
+
+def test_explicit_env_with_spaces_in_path_loads(tree):
+    spaced = tree / "my env" / "poc file.env"
+    spaced.parent.mkdir(parents=True, exist_ok=True)
+    spaced.write_text(VALID_ENV_FILE)
+    r = _run(
+        tree,
+        {
+            "AIRGAP_ENV": str(spaced),
+            "INTERNAL_REGISTRY": None,
+            "REGISTRY_INTERNAL": None,
+            "NAMESPACE": None,
+            "STORAGE_CLASS": None,
+            "EMBED_MODEL": None,
+            "EMBED_MODEL_REVISION": None,
+            "DENSE_DIM": None,
+            "VLLM_BASE_URL": None,
+        },
+    )
+    assert r.returncode == 0, r.stderr
+    assert "SUCCESS: Pre-flight validation passed (dry-run mode)." in r.stdout
+
+
+def test_unset_explicit_env_keeps_environment_only(tree):
+    # No mandatory config file: unset selection with no ./airgap.env stays
+    # environment-only (the fixture tree has no default file).
+    assert not (tree / "airgap.env").exists()
+    r = _run(tree, {"AIRGAP_ENV": None})
+    assert r.returncode == 0, r.stderr
+    assert "SUCCESS: Pre-flight validation passed (dry-run mode)." in r.stdout
 
 
 def test_taskfiles_do_not_load_airgap_env():

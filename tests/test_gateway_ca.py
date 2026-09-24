@@ -50,9 +50,13 @@ def test_ca_preflight_requires_configmap_and_key(tmp_path, state):
     kc = tmp_path / 'kc'
     kc.write_text('#!/bin/sh\n' + ('exit 1\n' if state == 'missing' else 'echo bundle\n' if state == 'present' else 'exit 0\n'))
     kc.chmod(0o755)
+    # Issue #478: an empty regular file (not /dev/null) keeps the
+    # environment-only shape while ignoring repo ./airgap.env.
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("")
     result = subprocess.run(['sh', '-c', '. "$COMMON"; check_gateway_ca'],
         capture_output=True, text=True, check=False,
-        env={**os.environ, 'AIRGAP_ENV': '/dev/null', 'COMMON': str(COMMON), 'KC': str(kc),
+        env={**os.environ, 'AIRGAP_ENV': str(empty_env), 'COMMON': str(COMMON), 'KC': str(kc),
              'NAMESPACE': 'test', 'AIRGAP_DRYRUN': '0', 'GATEWAY_CA_CONFIGMAP': 'gateway-ca'})
     assert (result.returncode == 0) == (state == 'present')
 
