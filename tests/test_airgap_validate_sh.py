@@ -421,3 +421,113 @@ def test_validate_live_missing_namespace_notices_secret(tree):
     r = _run(tree, {"AIRGAP_DRYRUN": "0", "GATEWAY_API_KEY_SECRET": "gateway-api-keys"})
     assert r.returncode == 0, r.stderr
     assert "does not exist yet" in r.stdout
+
+
+def _git_checkout(tree, manifest_sha):
+    """Turn the fixture tree into a git checkout at a different HEAD than
+    the packed manifest: the exact IMAGE_SHA-only bypass shape (issue #414).
+    Returns the checkout HEAD."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=tree, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tree, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tree, check=True)
+    subprocess.run(["git", "add", "."], cwd=tree, check=True)
+    subprocess.run(["git", "commit", "-m", "stale checkout"], cwd=tree, check=True, capture_output=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tree, text=True).strip()
+    assert head != manifest_sha
+    dist = tree / "dist"
+    dist.mkdir(exist_ok=True)
+    (dist / "MANIFEST.txt").write_text(f"sha: {manifest_sha}\n")
+    return head
+
+
+def test_validate_live_refuses_image_sha_only_bypass(tree):
+    """Issue #414: workspace HEAD=A with dist/MANIFEST from bundle B and
+    IMAGE_SHA=B must fail before any mutation — the operator setting alone
+    never establishes which code executes."""
+    _git_checkout(tree, IMAGE_SHA)
+    r = _run(tree, {"AIRGAP_DRYRUN": "0"})
+    assert r.returncode != 0
+    assert "executing checkout HEAD" in r.stderr
+    assert "overriding IMAGE_SHA alone" in r.stderr
+
+
+def test_validate_live_matching_checkout_passes_manifest_section(tree):
+    """The same gate stays green when the checkout resolves to the packed
+    SHA: identity established, preflight proceeds past the manifest check."""
+    import subprocess
+
+    dist = tree / "dist"
+    dist.mkdir(exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=tree, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tree, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tree, check=True)
+    subprocess.run(["git", "add", "."], cwd=tree, check=True)
+    subprocess.run(["git", "commit", "-m", "approved checkout"], cwd=tree, check=True, capture_output=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tree, text=True).strip()
+    (dist / "MANIFEST.txt").write_text(f"sha: {head}\n")
+    r = _run(tree, {"AIRGAP_DRYRUN": "0", "IMAGE_SHA": head})
+    assert r.returncode == 0, r.stderr
+    assert "Verified matching MANIFEST" in r.stdout
+
+
+def _guard_probe(tree):
+    probe = tree / "scripts" / "airgap" / "probe-guard.sh"
+    probe.write_text(
+        '#!/bin/sh\n. "$(dirname -- "$0")/common.sh"\n'
+        "MANIFEST=\"$GUARD_MANIFEST\"\n"
+        "check_checkout_sha\n"
+    )
+    return probe
+
+
+def _guard_run(tree, manifest_rel, extra_env=None):
+    import subprocess
+
+    env = {"PATH": "/usr/bin:/bin", "GUARD_MANIFEST": manifest_rel}
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        ["sh", str(_guard_probe(tree))], capture_output=True, text=True,
+        env=env, cwd=tree, check=False,
+    )
+
+
+def test_checkout_guard_dryrun_skips_mismatch(tree):
+    """Preview renders nothing, so the dry-run lane keeps its notice-only
+    behavior even with a mismatched checkout (issue #414)."""
+    import subprocess
+
+    (tree / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tree / "scripts" / "airgap" / "common.sh")
+    subprocess.run(["git", "init", "-b", "main"], cwd=tree, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tree, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tree, check=True)
+    (tree / "marker.txt").write_text("stale\n")
+    subprocess.run(["git", "add", "."], cwd=tree, check=True)
+    subprocess.run(["git", "commit", "-m", "stale"], cwd=tree, check=True, capture_output=True)
+    (tree / "dist").mkdir(exist_ok=True)
+    (tree / "dist" / "MANIFEST.txt").write_text(f"sha: {IMAGE_SHA}\n")
+    r = _guard_run(tree, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1"})
+    assert r.returncode == 0, r.stderr
+
+
+def test_checkout_guard_skips_without_manifest_or_checkout(tree):
+    """No reachable MANIFEST (connected development) or no git checkout
+    (unresolvable identity) keeps prior behavior: the guard judges only
+    positive mismatches (issue #414)."""
+    (tree / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tree / "scripts" / "airgap" / "common.sh")
+    assert _guard_run(tree, "dist/MANIFEST.txt").returncode == 0
+    (tree / "dist").mkdir(exist_ok=True)
+    (tree / "dist" / "MANIFEST.txt").write_text(f"sha: {IMAGE_SHA}\n")
+    assert _guard_run(tree, "dist/MANIFEST.txt").returncode == 0
+
+
+def test_checkout_guard_wired_into_all_launch_paths():
+    """deploy/ingest/validate/load each invoke the shared checkout guard
+    next to their manifest cross-check (issue #414)."""
+    for name in ("deploy.sh", "ingest.sh", "validate.sh", "load.sh"):
+        text = (REPO / "scripts" / "airgap" / name).read_text()
+        assert "check_checkout_sha" in text, name

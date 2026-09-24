@@ -95,6 +95,10 @@ if [ -n "$MANIFEST" ]; then
 else
     echo "    Notice: no MANIFEST.txt found in ./dist or ../ (using env IMAGE_SHA=$IMAGE_SHA)"
 fi
+# The executing checkout itself must resolve to the packed SHA when one is
+# reachable (issue #414): overriding IMAGE_SHA alone never changes which
+# code executes. No MANIFEST means connected-development notice path above.
+check_checkout_sha
 
 CHART=$(ls charts/qdrant-*.tgz 2>/dev/null | head -1 || true)
 [ -n "$CHART" ] || die "vendored chart missing (charts/qdrant-*.tgz)"

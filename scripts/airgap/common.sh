@@ -242,6 +242,24 @@ check_manifest_sha() {
     fi
 }
 
+# Executing-checkout identity for deploy/ingest/validate/load (issue #414):
+# when a packed MANIFEST is reachable, the git checkout these scripts run
+# from must resolve to the packed SHA. An explicitly set IMAGE_SHA alone
+# never establishes which code executes. Silent on success; skipped in
+# dry-run (preview mutates nothing) and when no MANIFEST is reachable
+# (connected development modes) or no git checkout exists (identity
+# unresolvable — the IMAGE_SHA/manifest cross-check still applies).
+check_checkout_sha() {
+    if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then return 0; fi
+    if [ -z "${MANIFEST:-}" ]; then return 0; fi
+    if [ ! -f "$MANIFEST" ]; then return 0; fi
+    packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
+    [ -n "$packed_sha" ] || return 0
+    checkout_sha=$(git rev-parse HEAD 2>/dev/null) || return 0
+    [ "$checkout_sha" = "$packed_sha" ] || \
+        die "executing checkout HEAD=$checkout_sha does not match the packed MANIFEST sha ($packed_sha) — run from the approved bundle checkout (see $MANIFEST); overriding IMAGE_SHA alone never changes which code executes"
+}
+
 # oc/kubectl must exist unless previewing (deploy/ingest only; validate and
 # load enforce their own tool rules).
 require_kc() {
