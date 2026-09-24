@@ -87,6 +87,7 @@ def inventory(root: Path, image: Path) -> dict:
             new_links: set[str] = set()
             replacements: set[str] = set()
             removals: set[str] = set()
+            directories: set[str] = set()
             with tarfile.open(fileobj=decoded, mode='r|') as layer:
                 for item in layer:
                     path = path_name(item.name)
@@ -95,11 +96,14 @@ def inventory(root: Path, image: Path) -> dict:
                         removed_path = parts.parent if parts.name == '.wh..wh..opq' else parts.with_name(parts.name[4:])
                         removals.add(str(removed_path))
                         continue
-                    if not item.isdir():
+                    if item.isdir():
+                        directories.add(path)
+                    else:
                         replacements.add(path)
                     if item.issym() or item.islnk():
                         new_links.add(path)
-                    wanted = path in (RECEIPT, LOCK, REQUIREMENTS) or (package_metadata(path) and not item.isdir())
+                    wanted = path in (RECEIPT, LOCK, REQUIREMENTS) or (
+                        package_metadata(path) and not (item.isdir() and path.endswith('.egg-info')))
                     if wanted:
                         if not item.isfile() or item.size > 8_000_000:
                             raise locks.LockError('installed metadata is not a bounded regular file')
@@ -111,6 +115,9 @@ def inventory(root: Path, image: Path) -> dict:
                 prefix = '' if target == '.' else target + '/'
                 retained = {p: v for p, v in retained.items() if p != target and not p.startswith(prefix)}
                 links = {p for p in links if p != target and not p.startswith(prefix)}
+            for directory in directories:
+                retained.pop(directory, None)
+                links.discard(directory)
             retained.update(additions)
             links.update(new_links)
     for path in retained:

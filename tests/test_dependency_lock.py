@@ -201,6 +201,11 @@ def test_actual_image_layers_and_receipt_reconcile(locked, compressed):
     write_image(archive, [files, {metadata: b'Name: example\nVersion: 9.0\n'}])
     with pytest.raises(locks.LockError, match='actual installed'):
         inventory(root, archive)
+    # Replacing the metadata file with a directory cannot preserve the old
+    # file's valid inventory as though it remained readable.
+    write_image(archive, [files, {metadata: None}])
+    with pytest.raises(locks.LockError, match='bounded regular file'):
+        inventory(root, archive)
     # Ordinary and opaque whiteouts remove lower-layer metadata; same-layer
     # replacement survives an opaque whiteout regardless of tar member order.
     directory = metadata.rsplit('/', 1)[0]

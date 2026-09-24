@@ -7,17 +7,21 @@ import tarfile
 from pathlib import Path
 
 
-def tar_bytes(files: dict[str, bytes]) -> bytes:
+def tar_bytes(files: dict[str, bytes | None]) -> bytes:
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode='w') as archive:
         for name, data in files.items():
             item = tarfile.TarInfo(name)
-            item.size = len(data)
-            archive.addfile(item, io.BytesIO(data))
+            if data is None:
+                item.type = tarfile.DIRTYPE
+                archive.addfile(item)
+            else:
+                item.size = len(data)
+                archive.addfile(item, io.BytesIO(data))
     return output.getvalue()
 
 
-def image_files(root: Path) -> dict[str, bytes]:
+def image_files(root: Path) -> dict[str, bytes | None]:
     manifest = json.loads((root / 'locks/cp314-linux-x86_64.json').read_bytes())
     packages = {name: manifest['packages'][name]['version'] for name in manifest['profiles']['runtime']['packages']}
     packages.update({'pip': '24.2'})
@@ -36,7 +40,7 @@ def image_files(root: Path) -> dict[str, bytes]:
     return files
 
 
-def write_image(path: Path, layers: list[dict[str, bytes]], *, compressed: bool = False) -> None:
+def write_image(path: Path, layers: list[dict[str, bytes | None]], *, compressed: bool = False) -> None:
     members = {f'{index}/layer.tar': tar_bytes(files) for index, files in enumerate(layers)}
     config = json.dumps({'os': 'linux', 'architecture': 'amd64',
                          'rootfs': {'type': 'layers', 'diff_ids': [
