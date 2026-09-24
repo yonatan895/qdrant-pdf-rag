@@ -222,3 +222,55 @@ def test_baseline_without_recorded_env_still_gates_metrics(tmp_path):
     baseline = json.loads(path.read_text())
     del baseline["_meta"]["env"]
     assert len(check_baseline(_scaled(4.0), baseline)) == len(GATED_METRICS)
+
+
+def test_ci_prepares_qdrant_before_check_or_record_and_stops_on_preparation_failure(tmp_path):
+    import os
+    import subprocess
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / '.github/workflows/bench.yml').read_text())
+    steps = workflow['jobs']['bench']['steps']
+    start = next(i for i, step in enumerate(steps) if step.get('name', '').startswith('run benchmark'))
+    preparation = steps[start - 1]['run']
+    assert preparation == 'python scripts/qdrant_pin.py --prepare'
+    benchmark = steps[start]['run']
+    for record in ('false', 'true'):
+        for prepare_status in (0, 7):
+            case = tmp_path / f'{record}-{prepare_status}'
+            case.mkdir()
+            python = case / 'python'
+            python.write_text(
+                '#!/bin/sh\n'
+                'printf "%s\\n" "$*" >> calls\n'
+                'if [ "$1" = scripts/qdrant_pin.py ]; then\n'
+                '  test "$2" = --prepare || exit 9\n'
+                '  test "$PREPARE_STATUS" = 0 || exit "$PREPARE_STATUS"\n'
+                '  touch prepared\n'
+                'elif [ "$1" = scripts/benchmark.py ]; then\n'
+                '  test -f prepared || exit 8\n'
+                '  touch measured\n'
+                'else\n'
+                '  exit 10\n'
+                'fi\n'
+            )
+            python.chmod(0o755)
+            command = preparation + '\n' + benchmark.replace('${{ inputs.update_baseline }}', record).replace(
+                "${{ inputs.repeats || '3' }}", '3')
+            result = subprocess.run(
+                ['sh', '-eu', '-c', command], cwd=case,
+                env={**os.environ, 'PATH': f"{case}:{os.environ['PATH']}", 'PREPARE_STATUS': str(prepare_status)},
+                capture_output=True, text=True, check=False,
+            )
+            assert result.returncode == prepare_status, result.stdout + result.stderr
+            assert (case / 'measured').exists() == (prepare_status == 0)
+            calls = (case / 'calls').read_text().splitlines()
+            assert calls[0] == 'scripts/qdrant_pin.py --prepare'
+            assert len(calls) == (2 if prepare_status == 0 else 1)
+            if prepare_status == 0:
+                expected = ('--update-baseline bench-baseline.json --repeats 3' if record == 'true'
+                            else '--check benchmarks/baseline.json')
+                assert calls[1].endswith(expected)

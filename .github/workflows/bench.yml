@@ -37,6 +37,8 @@ jobs:
         with:
           python-version: "3.14"
       - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected
+      - name: Prepare approved Qdrant image explicitly
+        run: python scripts/qdrant_pin.py --prepare
       - name: run benchmark (real ingest + Qdrant + agent; mock LLM)
         run: |
           ARGS="--collection bench --out bench-results.json --summary bench-summary.md"
