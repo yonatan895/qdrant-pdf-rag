@@ -177,7 +177,8 @@ def collect_review(api: GitHub, pr: dict[str, Any], candidate: dict[str, Any]):
                 permissions[login] = permission['permission'] in {'admin', 'maintain', 'write'}
             if not permissions[login]:
                 continue
-            timestamp = record.get('submitted_at') or record.get('created_at')
+            timestamp = ((record.get('updated_at') if source == 'comment' else record.get('submitted_at'))
+                         or record.get('created_at'))
             if not timestamp:
                 continue  # A pending native review is not submitted approval.
             if source == 'review' and record['state'] in {'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'}:

@@ -1801,13 +1801,14 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             def __init__(self):
                 self.comment = copy.deepcopy(comment)
                 self.reviews = []
+                self.older_comments = []
                 self.permission = "admin"
             def get(self, endpoint):
                 if "/collaborators/" in endpoint:
                     return {"permission": self.permission}
                 if "/reviews?" in endpoint:
                     return self.reviews
-                return [self.comment]
+                return [*self.older_comments, self.comment]
         api = API()
         review, manual, identity = collect_review(api, {"number": 3, "user": {"id": 99}}, candidate)
         self.assertEqual(review.merge_readiness, "ready_for_maintainer")
@@ -1845,6 +1846,14 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
         review, _, _ = collect_review(api, {"number": 3, "user": {"id": 99}}, candidate)
         self.assertEqual(review.merge_readiness, "not_ready")
         self.assertIn("earlier material finding", " ".join(review.validation_errors))
+        api = API()
+        rejection = {**copy.deepcopy(payload), "code_assessment": "changes_required"}
+        api.older_comments = [{**copy.deepcopy(comment), "id": 8,
+                               "created_at": "2026-09-24T08:00:00Z",
+                               "updated_at": "2026-09-24T12:00:00Z", "body": json.dumps(rejection)}]
+        review, _, identity = collect_review(api, {"number": 3, "user": {"id": 99}}, candidate)
+        self.assertEqual(identity["id"], 8)
+        self.assertEqual(review.merge_readiness, "not_ready")
 
     def test_collector_requires_all_native_shards_and_never_reuses_an_older_green_run(self):
         import hashlib
