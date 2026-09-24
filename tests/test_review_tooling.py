@@ -2568,3 +2568,53 @@ class ReviewTemplateTests(unittest.TestCase):
                     self.assertEqual(json.loads(artifact.read_text())['head_sha'], 'synthetic-current-head')
                 else:
                     self.assertIn('::warning::', result.stdout)
+
+    def test_template_comments_append_deduplicate_and_preserve_human_text(self):
+        import copy
+
+        from scripts.acceptance import post_review_template, review_template_comment
+
+        template = {'head_sha': 'a' * 40, 'base_sha': 'b' * 40, 'execution_sha': 'c' * 40,
+                    'code_assessment': '<human input>'}
+
+        class API:
+            prefix = 'repos/synthetic/repository/'
+
+            def __init__(self):
+                self.comments = [{'id': 1, 'body': '<!-- generated-human-review-template --> Human finding'}]
+                self.writes = []
+
+            def get(self, endpoint):
+                return copy.deepcopy(self.comments)
+
+            def write(self, endpoint, payload, *, method):
+                self.writes.append((endpoint, method))
+                self.comments.append({'id': len(self.comments) + 1, **payload})
+                return self.comments[-1]
+
+        api = API()
+        original = copy.deepcopy(api.comments[0])
+        post_review_template(api, 3, template)
+        post_review_template(api, 3, template)
+        self.assertEqual(len(api.writes), 1)
+        self.assertEqual(api.comments[0], original)
+        self.assertEqual(api.comments[1]['body'], review_template_comment(template))
+        template['execution_sha'] = 'd' * 40
+        post_review_template(api, 3, template)
+        self.assertEqual(api.writes, [('repos/synthetic/repository/issues/3/comments', 'POST')] * 2)
+        self.assertEqual(api.comments[0], original)
+
+    def test_comment_write_boundary_cannot_edit_reviews_or_other_repositories(self):
+        from unittest.mock import patch
+
+        from scripts.acceptance import GitHub
+
+        api = GitHub('synthetic/repository')
+        for endpoint, method in [('repos/synthetic/repository/issues/3/comments', 'PATCH'),
+                                 ('repos/synthetic/repository/issues/comments/17', 'PATCH'),
+                                 ('repos/synthetic/repository/pulls/3/reviews', 'POST'),
+                                 ('repos/other/repository/issues/3/comments', 'POST')]:
+            with self.subTest(endpoint=endpoint), patch('scripts.acceptance.subprocess.run') as run, \
+                 self.assertRaises(ValueError):
+                api.write(endpoint, {'body': 'template'}, method=method)
+            run.assert_not_called()

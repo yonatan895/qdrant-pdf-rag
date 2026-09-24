@@ -291,6 +291,18 @@ then publishes success only after rereading candidate, review and latest run
 attempt identities. `--all-open` paginates open candidates. File pagination must
 match the PR's changed-file count and retain both rename names verbatim.
 
+The approved-main acceptance workflow posts a **Your review template** comment
+on each open PR, with the current commit IDs filled in. Copy its JSON, replace
+the human judgment placeholders, and submit your review as a new comment or
+Comment review. Generation runs before acceptance evaluation, so missing review
+does not prevent the template appearing. Exact unchanged templates are not
+reposted; changed identities produce a new comment. The publisher never edits
+reviewer comments or treats a marker alone as authority. These generated,
+incomplete skeletons are not approval. Artifacts below remain a secondary copy.
+Comment-writing permission is confined to the approved-main publisher; ordinary
+candidate context CI remains read-only. If comment publication is unavailable,
+the check points to the retained artifact instead.
+
 PR context CI also publishes `review-template-pr-<number>-<attempt>` in the
 `agent-context` run's Artifacts section, before tests run. This read-only job
 uses candidate code, so its template is a convenience, not trusted approval;
@@ -350,7 +362,7 @@ The default Actions-token check is **advisory**: another candidate workflow can
 imitate its check name/App source. Do not configure this advisory source as an
 enforced acceptance guarantee. The optional dedicated App path uses the pinned
 `actions/create-github-app-token` v3.2.0 action with repository-scoped Actions,
-contents, pull requests and issues read access, and checks write access. Its
+contents and pull requests read access, and issues/comments plus checks write access. Its
 short-lived token is revoked by the action after the job.
 
 Maintainer activation, after the disposable-PR transition proof:
