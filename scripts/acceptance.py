@@ -71,6 +71,30 @@ def candidate_identity(pr: dict[str, Any], repository: str) -> dict[str, Any]:
     return result
 
 
+def review_template(api: GitHub, number: int) -> dict[str, Any]:
+    """Generate identity fields, never a verdict or a submitted review."""
+    from scripts.review_tooling import SCHEMA_VERSION
+
+    require(type(number) is int and number > 0)
+    pr = api.get(api.prefix + f'pulls/{number}')
+    candidate = candidate_identity(pr, api.repository)
+    commit = api.get(api.prefix + 'commits/' + candidate['execution_sha'])
+    require(commit['sha'] == candidate['execution_sha'])
+    require([p['sha'] for p in commit['parents']] == [candidate['base_sha'], candidate['head_sha']])
+    current = api.get(api.prefix + f'pulls/{number}')
+    require(candidate_identity(current, api.repository) == candidate and current['draft'] == pr['draft'])
+    return {'schema_version': SCHEMA_VERSION,
+            **{key: candidate[key] for key in ('head_sha', 'base_sha', 'execution_sha')},
+            'candidate_currentness': 'current',
+            'code_assessment': '<acceptable|changes_required|incomplete>',
+            'verification': '<complete|incomplete|failed>',
+            'merge_readiness': '<ready_for_maintainer|not_ready>',
+            'material_findings': [{'id': '<finding ID; use [] only if none>',
+                                   'disposition': 'unresolved',
+                                   'description': '<finding and evidence; carry forward prior findings>'}],
+            'evidence': {'review': '<reviewed scope and verification evidence>'}}
+
+
 def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict[str, Any]:
     """Collect the latest run/attempt, never fall back to an older green result.
 
@@ -357,11 +381,18 @@ def main(argv: list[str] | None = None) -> int:
     selection.add_argument('--pr', type=int)
     selection.add_argument('--all-open', action='store_true')
     parser.add_argument('--publish', action='store_true')
+    parser.add_argument('--review-template', action='store_true',
+                        help='print current identity and unset human review fields; never submit')
     parser.add_argument('--approved-root', type=Path, default=Path.cwd())
     args = parser.parse_args(argv)
+    if args.review_template and (args.publish or args.all_open):
+        parser.error('--review-template requires --pr and cannot be combined with --publish')
     results = []
     try:
         api = GitHub(args.repository)
+        if args.review_template:
+            print(json.dumps(review_template(api, args.pr), indent=2))
+            return 0
         numbers = ([args.pr] if args.pr is not None else
                    [pr['number'] for pr in paginate(api.get, api.prefix + 'pulls?state=open')])
         for number in numbers:

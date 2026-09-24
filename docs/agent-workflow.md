@@ -291,6 +291,19 @@ then publishes success only after rereading candidate, review and latest run
 attempt identities. `--all-open` paginates open candidates. File pagination must
 match the PR's changed-file count and retain both rename names verbatim.
 
+Generate a review skeleton with
+`python -m scripts.acceptance --repository OWNER/REPO --pr NUMBER --review-template`.
+This read-only command fills the current base (target branch), head (PR branch)
+and execution (GitHub test-merge) SHAs, verifies the merge parents and rereads
+candidate identity before returning. It leaves verdict, verification, readiness,
+findings and evidence for the human reviewer; the untouched skeleton cannot
+approve anything. Carry forward prior material finding IDs/dispositions. Fill
+those judgment fields and submit the JSON as a comment or Comment review. For a
+native review-event trial use Files changed → Review changes → Comment.
+Generation does not submit a review, prove CI success, or freeze the PR: regenerate
+and review again if head/base changes. `--publish` and `--all-open` cannot be
+combined with template generation.
+
 Review authority is an API-visible human collaborator with write/maintain/admin
 permission. The maintainer may independently review agent work through the same
 GitHub account used by the agent to open the PR; account equality alone is not a

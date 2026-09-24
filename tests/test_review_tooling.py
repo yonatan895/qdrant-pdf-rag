@@ -2396,3 +2396,59 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             self.assertIn('Target: unavailable', body)
             self.assertIn('@literal;type=text/plain', body)
             self.assertIn('Job: https://example.invalid/jobs/9', body)
+
+
+class ReviewTemplateTests(unittest.TestCase):
+    def test_template_binds_current_merge_without_approving_or_writing(self):
+        import copy
+
+        from scripts.acceptance import review_template
+        from scripts.review_tooling import validate_review_payload
+
+        pr = {'number': 3, 'state': 'open', 'mergeable': True, 'draft': False,
+              'head': {'sha': 'a' * 40, 'repo': {'id': 84}},
+              'base': {'sha': 'b' * 40, 'ref': 'main', 'repo': {
+                  'id': 42, 'full_name': 'synthetic/repository', 'default_branch': 'main'}},
+              'merge_commit_sha': 'c' * 40}
+
+        class API:
+            repository = 'synthetic/repository'
+            prefix = 'repos/synthetic/repository/'
+
+            def __init__(self, move=False, wrong_parents=False):
+                self.reads = 0
+                self.move = move
+                self.wrong_parents = wrong_parents
+
+            def get(self, endpoint):
+                if endpoint.endswith('pulls/3'):
+                    self.reads += 1
+                    result = copy.deepcopy(pr)
+                    if self.move and self.reads == 2:
+                        result['head']['sha'] = 'd' * 40
+                    return result
+                assert endpoint.endswith('commits/' + 'c' * 40)
+                return {'sha': 'c' * 40, 'parents': [
+                    {'sha': ('d' if self.wrong_parents else 'b') * 40}, {'sha': 'a' * 40}]}
+
+        result = review_template(API(), 3)
+        self.assertEqual([result[k] for k in ('head_sha', 'base_sha', 'execution_sha')],
+                         ['a' * 40, 'b' * 40, 'c' * 40])
+        self.assertEqual(validate_review_payload(result).merge_readiness, 'not_ready')
+        for api in (API(move=True), API(wrong_parents=True)):
+            with self.subTest(api=api), self.assertRaises(ValueError):
+                review_template(api, 3)
+
+    def test_template_cli_refuses_publication_and_bulk_selection(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        from scripts.acceptance import main
+
+        for extra in (['--pr', '3', '--publish'], ['--all-open']):
+            with self.subTest(extra=extra), patch('scripts.acceptance.GitHub') as api, \
+                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                main(['--repository', 'synthetic/repository', '--review-template', *extra])
+            self.assertEqual(error.exception.code, 2)
+            api.assert_not_called()
