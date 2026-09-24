@@ -348,7 +348,7 @@ def _record_stream_abort(
     endpoint: str,
     started: float,
     kind: str,
-    hits: int,
+    hits: int | None,
     span: trace.Span,
 ) -> None:
     """Client disconnect or cancellation before a terminal frame (issue #365):
@@ -366,7 +366,15 @@ def _record_stream_abort(
             verification_state="generation_incomplete",
         )
     )
-    _record_endpoint(request, endpoint, "client_disconnect", started, query_class=kind, hits=hits)
+    _record_endpoint(
+        request,
+        endpoint,
+        "client_disconnect",
+        started,
+        query_class=kind,
+        hits=hits,
+        verification_state="generation_incomplete",
+    )
 
 
 @asynccontextmanager
@@ -680,10 +688,11 @@ def _record_handler_error(request: Request, code: str) -> None:
     url = getattr(request, "url", None)
     path = getattr(url, "path", "") if url is not None else ""
     endpoint = endpoint_for_path(path)
-    if endpoint is None:
+    if endpoint is None or (endpoint == "console" and not settings.ui_enabled):
         return
     started = getattr(request.state, "started", None)
     elapsed = time.monotonic() - started if started is not None else 0.0
+    request.state.red_recorded = True
     record_request(endpoint, code, elapsed_s=elapsed)
 
 
@@ -697,10 +706,13 @@ def _record_endpoint(
     hits: int | None = None,
     ttft_ms: int | None = None,
     llm_model: str | None = None,
+    verification_state: str | None = None,
 ) -> None:
     """RED record for endpoint-leg outcomes (success and raised errors).
     Marks the request so the error handler does not double-count the
     AppError that follows a recorded raise."""
+    if getattr(request.state, "red_recorded", False):
+        return
     request.state.red_recorded = True
     record_request(
         endpoint,
@@ -710,6 +722,7 @@ def _record_endpoint(
         hits=hits,
         ttft_ms=ttft_ms,
         llm_model=llm_model,
+        verification_state=verification_state,
     )
 
 
@@ -1049,7 +1062,15 @@ async def v1_answer(
         if not output.hits:
             root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
             root_span.end()
-            _record_endpoint(request, "answer", "ok", started, query_class=kind, hits=0)
+            _record_endpoint(
+                request,
+                "answer",
+                "ok",
+                started,
+                query_class=kind,
+                hits=0,
+                verification_state=output.verification_state,
+            )
             timing_parts = _timing_parts(timings)
             if timing_parts:
                 response.headers["Server-Timing"] = ", ".join(timing_parts)
@@ -1124,6 +1145,7 @@ async def v1_answer(
             hits=len(output.hits),
             ttft_ms=output.ttft_ms,
             llm_model=llm_model,
+            verification_state=output.verification_state,
         )
         return AnswerResponse(
             request_id=request_id,
@@ -1183,7 +1205,15 @@ async def v1_answer(
                     output = item["output"]
                     if not output.hits:
                         root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
-                        _record_endpoint(request, "answer", "ok", started, query_class=kind, hits=0)
+                        _record_endpoint(
+                            request,
+                            "answer",
+                            "ok",
+                            started,
+                            query_class=kind,
+                            hits=0,
+                            verification_state=output.verification_state,
+                        )
                         log.info(
                             json_log(
                                 request_id,
@@ -1271,6 +1301,7 @@ async def v1_answer(
                         hits=len(output.hits),
                         ttft_ms=output.ttft_ms,
                         llm_model=llm_model,
+                        verification_state=output.verification_state,
                     )
                     terminal = True
                     yield format_sse_event("final", final)
@@ -1286,6 +1317,7 @@ async def v1_answer(
                 started,
                 query_class=kind,
                 hits=len(hits),
+                verification_state="generation_incomplete",
             )
             log.warning(json_log(request_id, "answer_stream", error=str(exc)[:200]))
             terminal = True
@@ -1310,6 +1342,7 @@ async def v1_answer(
                 started,
                 query_class=kind,
                 hits=len(hits),
+                verification_state="generation_incomplete",
             )
             log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
             terminal = True
@@ -1323,6 +1356,7 @@ async def v1_answer(
                 started,
                 query_class=kind,
                 hits=len(hits),
+                verification_state="generation_incomplete",
             )
             log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
             terminal = True
@@ -1434,7 +1468,15 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         if not output.hits:
             root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
             root_span.end()
-            _record_endpoint(request, "chat", "ok", started, query_class=kind, hits=0)
+            _record_endpoint(
+                request,
+                "chat",
+                "ok",
+                started,
+                query_class=kind,
+                hits=0,
+                verification_state=output.verification_state,
+            )
             return ChatCompletionsResponse(
                 id=f"chatcmpl-{request_id}",
                 created=int(time.time()),
@@ -1470,6 +1512,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
             hits=len(output.hits),
             ttft_ms=output.ttft_ms,
             llm_model=llm_model,
+            verification_state=output.verification_state,
         )
         root_span.end()
 
@@ -1524,13 +1567,21 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                             "script_lang": None,
                             "script_review_required": output.script_review_required,
                         }
+                        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
+                        _record_endpoint(
+                            request,
+                            "chat",
+                            "ok",
+                            started,
+                            query_class=kind,
+                            hits=0,
+                            verification_state=output.verification_state,
+                        )
                         terminal = True
                         yield format_openai_chunk(
                             chat_id, llm_model, finish_reason="stop", extra=extra_meta
                         )
                         yield format_openai_done()
-                        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
-                        _record_endpoint(request, "chat", "ok", started, query_class=kind, hits=0)
                         continue
 
                     if output.citations:
@@ -1549,11 +1600,6 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                         "script_lang": output.script_lang,
                         "script_review_required": output.script_review_required,
                     }
-                    terminal = True
-                    yield format_openai_chunk(
-                        chat_id, llm_model, finish_reason=output.finish_reason, extra=extra_meta
-                    )
-                    yield format_openai_done()
                     _record_endpoint(
                         request,
                         "chat",
@@ -1563,7 +1609,13 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                         hits=len(output.hits),
                         ttft_ms=output.ttft_ms,
                         llm_model=llm_model,
+                        verification_state=output.verification_state,
                     )
+                    terminal = True
+                    yield format_openai_chunk(
+                        chat_id, llm_model, finish_reason=output.finish_reason, extra=extra_meta
+                    )
+                    yield format_openai_done()
         except TruncatedStreamError as exc:
             _span_error(root_span, exc)
             log.warning(
@@ -1575,7 +1627,13 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                 )
             )
             _record_endpoint(
-                request, "chat", "upstream_error", started, query_class=kind, hits=len(hits)
+                request,
+                "chat",
+                "upstream_error",
+                started,
+                query_class=kind,
+                hits=len(hits),
+                verification_state="generation_incomplete",
             )
             log.error(json_log(request_id, "chat_stream", error=str(exc)[:200]))
             terminal = True
@@ -1584,7 +1642,13 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         except PromptBudgetExceeded as exc:
             _span_error(root_span, exc)
             _record_endpoint(
-                request, "chat", "prompt_budget_exceeded", started, query_class=kind, hits=len(hits)
+                request,
+                "chat",
+                "prompt_budget_exceeded",
+                started,
+                query_class=kind,
+                hits=len(hits),
+                verification_state="generation_incomplete",
             )
             log.warning(json_log(request_id, "chat_stream", error=str(exc)[:200]))
             terminal = True
@@ -1593,7 +1657,13 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         except Exception as exc:  # noqa: BLE001 — streaming SSE generator traps upstream error
             _span_error(root_span, exc)
             _record_endpoint(
-                request, "chat", "upstream_error", started, query_class=kind, hits=len(hits)
+                request,
+                "chat",
+                "upstream_error",
+                started,
+                query_class=kind,
+                hits=len(hits),
+                verification_state="generation_incomplete",
             )
             log.error(json_log(request_id, "chat_stream", error=str(exc)[:200]))
             terminal = True
