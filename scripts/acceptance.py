@@ -335,7 +335,8 @@ def recheck_current(api: GitHub, result: dict[str, Any]) -> None:
     require(latest == result['runs'])
 
 
-def publish_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[str, Any]:
+def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
+                       template_directory: Path | None = None, publisher_run_id: int | None = None) -> dict[str, Any]:
     """Publish a fresh pending check before collecting; only a rechecked pass goes green.
 
     Authentication determines the check's App source. Ordinary Actions tokens
@@ -353,6 +354,22 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
                    'summary': 'Acceptance is pending while current native checks and review are verified.'}},
         method='POST')
     require(type(check['id']) is int and check['id'] > 0)
+    template_note = ''
+    if template_directory is not None:
+        try:
+            require(type(publisher_run_id) is int and publisher_run_id > 0)
+            template = review_template(api, number)
+            require(template['head_sha'] == head)
+            template_directory.mkdir(parents=True, exist_ok=True)
+            filename = f'pr-{number}-{head}.json'
+            (template_directory / filename).write_text(json.dumps(template, indent=2) + '\n')
+            template_note = (f'\n\n### Human review template\nDownload `{filename}` from the '
+                             '`review-templates-<attempt>` artifact in '
+                             f'[this publisher run](https://github.com/{api.repository}/actions/runs/{publisher_run_id}). '
+                             'The artifact is available after the upload step completes. '
+                             'Fill the human judgment fields and submit your review; regenerate if the candidate changes.')
+        except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError):
+            template_note = '\n\nReview template unavailable: current candidate identity could not be verified.'
     try:
         result = collect_acceptance(api, number, approved_root)
         require(result['candidate']['head_sha'] == head)
@@ -363,6 +380,7 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
     ready = result['all_prerequisites_met']
     # The report contains generated lane/status text; no artifact commands run.
     summary = result.get('markdown_report', 'Current evidence is unavailable or changed; acceptance is not ready.')
+    summary = summary[:55000] + template_note
     api.write(api.prefix + f"check-runs/{check['id']}", {
         'status': 'completed', 'conclusion': 'success' if ready else 'failure',
         'output': {'title': 'Current prerequisites met' if ready else 'Unmet acceptance obligations',
@@ -383,10 +401,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--publish', action='store_true')
     parser.add_argument('--review-template', action='store_true',
                         help='print current identity and unset human review fields; never submit')
+    parser.add_argument('--review-templates-dir', type=Path)
+    parser.add_argument('--publisher-run-id', type=int)
     parser.add_argument('--approved-root', type=Path, default=Path.cwd())
     args = parser.parse_args(argv)
     if args.review_template and (args.publish or args.all_open):
         parser.error('--review-template requires --pr and cannot be combined with --publish')
+    if ((args.review_templates_dir is not None or args.publisher_run_id is not None)
+            and (not args.publish or args.review_templates_dir is None
+                 or args.publisher_run_id is None or args.publisher_run_id <= 0)):
+        parser.error('--review-templates-dir and positive --publisher-run-id require --publish')
     results = []
     try:
         api = GitHub(args.repository)
@@ -398,7 +422,12 @@ def main(argv: list[str] | None = None) -> int:
         for number in numbers:
             require(type(number) is int and number > 0)
             if args.publish:
-                result = publish_acceptance(api, number, args.approved_root.resolve())
+                if args.review_templates_dir is not None:
+                    result = publish_acceptance(api, number, args.approved_root.resolve(),
+                                                template_directory=args.review_templates_dir,
+                                                publisher_run_id=args.publisher_run_id)
+                else:
+                    result = publish_acceptance(api, number, args.approved_root.resolve())
             else:
                 result = collect_acceptance(api, number, args.approved_root.resolve())
                 recheck_current(api, result)

@@ -2452,3 +2452,119 @@ class ReviewTemplateTests(unittest.TestCase):
                 main(['--repository', 'synthetic/repository', '--review-template', *extra])
             self.assertEqual(error.exception.code, 2)
             api.assert_not_called()
+
+    def test_failed_acceptance_still_exports_identity_template_and_check_link(self):
+        import tempfile
+        from unittest.mock import patch
+
+        from scripts.acceptance import publish_acceptance
+
+        class API:
+            repository = 'synthetic/repository'
+            prefix = 'repos/synthetic/repository/'
+
+            def __init__(self):
+                self.writes = []
+
+            def get(self, endpoint):
+                return {'head': {'sha': 'a' * 40}}
+
+            def write(self, endpoint, payload, *, method):
+                self.writes.append((method, payload))
+                return {'id': 17}
+
+        template = {'head_sha': 'a' * 40, 'base_sha': 'b' * 40, 'execution_sha': 'c' * 40,
+                    'code_assessment': '<human input>'}
+        with tempfile.TemporaryDirectory() as directory:
+            api = API()
+            with patch('scripts.acceptance.review_template', return_value=template), \
+                 patch('scripts.acceptance.collect_acceptance', side_effect=ValueError('private diagnostic')):
+                result = publish_acceptance(api, 3, pathlib.Path.cwd(),
+                                            template_directory=pathlib.Path(directory), publisher_run_id=23)
+            self.assertFalse(result['all_prerequisites_met'])
+            self.assertEqual(json.loads((pathlib.Path(directory) / ('pr-3-' + 'a' * 40 + '.json')).read_text()),
+                             template)
+            summary = api.writes[-1][1]['output']['summary']
+            self.assertIn('https://github.com/synthetic/repository/actions/runs/23', summary)
+            self.assertIn('review-templates', summary)
+            self.assertNotIn('private diagnostic', summary)
+            self.assertEqual(api.writes[-1][1]['conclusion'], 'failure')
+
+    def test_moved_template_is_not_exported_for_old_check_head(self):
+        import tempfile
+        from unittest.mock import patch
+
+        from scripts.acceptance import publish_acceptance
+
+        class API:
+            prefix = 'repos/synthetic/repository/'
+
+            def __init__(self):
+                self.last = None
+
+            def get(self, endpoint):
+                return {'head': {'sha': 'a' * 40}}
+
+            def write(self, endpoint, payload, *, method):
+                self.last = payload
+                return {'id': 17}
+
+        with tempfile.TemporaryDirectory() as directory:
+            api = API()
+            with patch('scripts.acceptance.review_template', return_value={'head_sha': 'd' * 40}), \
+                 patch('scripts.acceptance.collect_acceptance', side_effect=ValueError):
+                publish_acceptance(api, 3, pathlib.Path.cwd(),
+                                   template_directory=pathlib.Path(directory), publisher_run_id=23)
+            self.assertEqual(list(pathlib.Path(directory).iterdir()), [])
+            self.assertIn('Review template unavailable', api.last['output']['summary'])
+
+    def test_both_publishers_upload_templates_after_unmet_acceptance(self):
+        import yaml
+
+        workflow = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] /
+                                   '.github/workflows/acceptance.yml').read_text())
+        for name in ('advisory', 'trusted-app'):
+            with self.subTest(job=name):
+                steps = workflow['jobs'][name]['steps']
+                command = next(s['run'] for s in steps if 'python -m scripts.acceptance' in s.get('run', ''))
+                self.assertIn('--review-templates-dir "$RUNNER_TEMP/review-templates"', command)
+                self.assertIn('--publisher-run-id "$GITHUB_RUN_ID"', command)
+                upload = next(s for s in steps if s.get('name') == 'Upload human review templates')
+                self.assertEqual(upload['if'], 'always()')
+                self.assertEqual(upload['with']['path'], '${{ runner.temp }}/review-templates/*.json')
+
+    def test_pr_template_shell_does_not_upload_failed_generation_as_a_template(self):
+        import os
+        import subprocess
+        import tempfile
+
+        import yaml
+
+        workflow = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] /
+                                   '.github/workflows/agent-context.yml').read_text())
+        job = workflow['jobs']['check-context']
+        self.assertEqual(job['permissions'], {'contents': 'read', 'pull-requests': 'read'})
+        command = next(s['run'] for s in job['steps'] if s.get('name') == 'Generate human review template')
+        upload = next(s for s in job['steps'] if s.get('name') == 'Upload human review template')
+        self.assertEqual(upload['with']['path'], '${{ runner.temp }}/review-template.json')
+        for failed in ('0', '1'):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                stub = root / 'python'
+                stub.write_text('#!/bin/sh\n'
+                                'if [ "$TEMPLATE_STUB_FAIL" = 1 ]; then\n'
+                                '  echo \'{"error":"unavailable"}\'; exit 1\n'
+                                'fi\n'
+                                'echo \'{"head_sha":"synthetic-current-head"}\'\n')
+                stub.chmod(0o755)
+                result = subprocess.run(['sh', '-c', command], capture_output=True, text=True,
+                                        env={**os.environ, 'PATH': directory + os.pathsep + os.environ['PATH'],
+                                             'RUNNER_TEMP': directory, 'TEMPLATE_STUB_FAIL': failed,
+                                             'REVIEW_REPOSITORY': 'synthetic/repository', 'REVIEW_PR': '3'})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                artifact = root / 'review-template.json'
+                self.assertEqual(artifact.exists(), failed == '0')
+                if failed == '0':
+                    self.assertEqual(json.loads(artifact.read_text())['head_sha'], 'synthetic-current-head')
+                else:
+                    self.assertIn('::warning::', result.stdout)

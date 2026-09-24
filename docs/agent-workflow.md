@@ -291,7 +291,24 @@ then publishes success only after rereading candidate, review and latest run
 attempt identities. `--all-open` paginates open candidates. File pagination must
 match the PR's changed-file count and retain both rename names verbatim.
 
-Generate a review skeleton with
+PR context CI also publishes `review-template-pr-<number>-<attempt>` in the
+`agent-context` run's Artifacts section, before tests run. This read-only job
+uses candidate code, so its template is a convenience, not trusted approval;
+the acceptance consumer independently validates submitted identities. A
+transient identity lookup failure warns and omits the template, without failing
+the context tests or uploading an error response as a review template.
+
+The approved-main acceptance workflow automatically generates human review
+skeletons, including when acceptance is blocked by missing checks or review.
+Open the PR's `current-candidate-acceptance` check: its **Human review template**
+section links the publisher run. Under **Artifacts**, download
+`review-templates-<attempt>` and open `pr-<number>-<head SHA>.json`.
+Fill only the human judgment fields and submit your review. The artifact appears
+after the upload step finishes; inability to verify current candidate identity
+produces an unavailable notice instead of a guessed template. Both advisory and
+trusted-App publisher paths upload templates even when acceptance fails.
+
+Generate the same review skeleton locally with
 `python -m scripts.acceptance --repository OWNER/REPO --pr NUMBER --review-template`.
 This read-only command fills the current base (target branch), head (PR branch)
 and execution (GitHub test-merge) SHAs, verifies the merge parents and rereads
