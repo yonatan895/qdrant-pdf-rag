@@ -17,8 +17,10 @@ implementation. Design rules (mirroring tracing.py):
   request path it observes.
 
 Cardinality law (standing): instrument labels come from bounded enums
-only (endpoint, query_class, outcome, model). Never doc_id, query text,
-headings, or any other unbounded value as a label.
+only (endpoint, query_class, outcome, verification_state, model). Never
+doc_id, query text, headings, or any other unbounded value as a label.
+verification_state attaches only from VERIFICATION_STATES (issue #375);
+records without a known state stay on the unlabeled series.
 
 Instruments (all `rag.` prefixed; Prometheus renders dots as underscores):
 - rag.requests.total (counter): endpoint x query_class x outcome. The
@@ -42,6 +44,8 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
 from prometheus_client import GCCollector, PlatformCollector, ProcessCollector
 
+from mainframe_rag.agent.answer import VERIFICATION_STATES
+
 log = logging.getLogger("otel.metrics")
 
 # Bucket boundaries are instrument-shape constants (not timeouts/limits):
@@ -57,11 +61,14 @@ TTFT_BOUNDARIES_MS: tuple[float, ...] = (
 HITS_BOUNDARIES: tuple[float, ...] = (0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 40.0)
 
 # The only endpoints RED instruments observe. Anything else (scrapes,
-# healthz, unknown paths) must not pollute request series.
+# healthz, unknown paths) must not pollute request series. Console form
+# and stream share one explicit label (issue #375); the serving pages
+# (/ui, /ui/static, /ui/healthz) are not countable product requests.
 _METRIC_ENDPOINTS: dict[str, tuple[str, ...]] = {
     "search": ("/v1/search",),
     "answer": ("/v1/answer",),
     "chat": ("/v1/chat", "/v1/chat/completions"),
+    "console": ("/ui/chat", "/ui/chat/stream"),
 }
 
 _provider: MeterProvider | None = None
@@ -148,16 +155,23 @@ def record_request(
     hits: int | None = None,
     ttft_ms: int | None = None,
     llm_model: str | None = None,
+    verification_state: str | None = None,
 ) -> None:
     """Record one finished request. No-op unless setup_metrics enabled the
     provider. hits/ttft are recorded only when measured (None means the leg
-    never ran — never record a zero for unmeasured work). Fail-open: never
-    raises, so a metrics fault cannot break the request it observes."""
+    never ran — never record a zero for unmeasured work). verification_state
+    attaches only when the caller supplies a member of VERIFICATION_STATES
+    (issue #375): the bounded answer-state vocabulary is the only
+    quality label permitted, preserving the cardinality law. Anything else
+    is dropped to the unlabeled series, never rejected — fail-open means a
+    metrics fault cannot break the request it observes."""
     instruments = _instruments
     if instruments is None or endpoint not in _METRIC_ENDPOINTS:
         return
     try:
         base = {"endpoint": endpoint, "query_class": query_class, "outcome": outcome}
+        if isinstance(verification_state, str) and verification_state in VERIFICATION_STATES:
+            base["verification_state"] = verification_state
         instruments.requests.add(1, base)
         instruments.duration.record(max(elapsed_s, 0.0), base)
         if hits is not None:

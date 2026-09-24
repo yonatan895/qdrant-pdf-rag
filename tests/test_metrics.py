@@ -196,3 +196,159 @@ def test_overlong_query_records_invalid_request(client):
         assert resp.status_code == 422
         body = client.get("/metrics").text
         assert _series(body, "rag_requests_total", **labels) == before + 1.0
+
+
+@pytest.mark.parametrize("path", ["/ui/chat", "/ui/chat/stream", "/ui/healthz", "/ui"])
+def test_console_path_mapping(path):
+    assert metrics_mod.endpoint_for_path(path) == (
+        "console" if path in ("/ui/chat", "/ui/chat/stream") else None
+    )
+
+
+@pytest.mark.parametrize("state", ["accepted", "insufficient_evidence", "unverified_draft",
+                                    "generation_incomplete", "SECRET-unknown-state"])
+def test_verification_label_is_bounded(monkeypatch, state):
+    reader = _hermetic_instruments(monkeypatch)
+    metrics_mod.record_request("answer", "ok", verification_state=state)
+    attrs = dict(_points(reader, "rag.requests.total")[0].attributes)
+    assert attrs.get("verification_state") == (None if state.startswith("SECRET") else state)
+    assert "SECRET" not in str(attrs)
+
+
+@pytest.fixture
+def outcome_client(client, monkeypatch):
+    from mainframe_rag.agent.tokenizer import FallbackTokenizer
+    monkeypatch.setattr(app_mod.settings, "ui_enabled", True)
+    monkeypatch.setattr(app_mod, "tokenizer", FallbackTokenizer())
+    return client
+
+
+class _OutcomeLLM:
+    def __init__(self, state):
+        self.state = state
+
+    def chat(self, messages, **kwargs):
+        from mainframe_rag.ports import ChatResult, TokenUsage
+        if self.state == "error":
+            raise RuntimeError("SECRET-upstream")
+        content = {
+            "accepted": "Synthetic response.\n\nCitations:\n- " + _hit().cite,
+            "unverified_draft": "Synthetic draft.",
+            "generation_incomplete": "Synthetic prefix.",
+        }[self.state]
+        return ChatResult(content=content, finish_reason=(
+            "length" if self.state == "generation_incomplete" else "stop"
+        ), usage=TokenUsage())
+
+    async def chat_stream(self, messages, **kwargs):
+        if self.state == "error":
+            yield {"type": "token", "delta": "Synthetic prefix."}
+            raise RuntimeError("SECRET-upstream")
+        result = self.chat(messages)
+        yield {"type": "token", "delta": result.content}
+        yield {"type": "done", "finish_reason": result.finish_reason, "usage": result.usage}
+
+
+def _post_outcome(client, path, stream):
+    if path == "/ui/chat":
+        return client.post(path, data={"message": "IEA500I SECRET-query"})
+    payload = ({"query": "IEA500I SECRET-query"} if path == "/v1/answer" else
+               {"messages": [{"role": "user", "content": "IEA500I SECRET-query"}]})
+    return client.post(path, json=payload if path == "/ui/chat/stream" else {**payload, "stream": stream})
+
+
+@pytest.mark.parametrize("path,stream,endpoint", [
+    ("/v1/answer", False, "answer"), ("/v1/answer", True, "answer"),
+    ("/v1/chat", False, "chat"), ("/v1/chat", True, "chat"),
+    ("/ui/chat", False, "console"), ("/ui/chat/stream", True, "console"),
+])
+@pytest.mark.parametrize("state", ["accepted", "unverified_draft", "generation_incomplete", "empty", "error"])
+def test_finalized_outcome_series(outcome_client, monkeypatch, path, stream, endpoint, state):
+    monkeypatch.setattr(app_mod, "llm", _OutcomeLLM(state))
+    if state == "empty":
+        monkeypatch.setattr(app_mod, "retrieve_search", lambda *a, **kw: ([], "identifier", {}))
+    reader = _hermetic_instruments(monkeypatch)
+    for count in (1, 2):
+        response = _post_outcome(outcome_client, path, stream)
+        assert response.status_code == (502 if state == "error" and not stream else 200)
+        points = _points(reader, "rag.requests.total")
+        assert len(points) == 1
+        assert points[0].value == count
+        attrs = dict(points[0].attributes)
+        assert attrs["endpoint"] == endpoint
+        assert attrs["outcome"] == ("upstream_error" if state == "error" else "ok")
+        expected = "insufficient_evidence" if state == "empty" else state
+        if state == "error":
+            expected = "generation_incomplete" if stream else None
+        assert attrs.get("verification_state") == expected
+        assert "SECRET" not in str(attrs)
+        durations = _points(reader, "rag.request.duration")
+        assert sum(p.count for p in durations) == count
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("endpoint", ["answer", "chat", "console"])
+@pytest.mark.parametrize("close_after", ["token", "final", "error"])
+async def test_stream_close_records_once(outcome_client, monkeypatch, endpoint, close_after):
+    from fastapi import Request, Response
+
+    from mainframe_rag.webui import routes
+    from tests.test_stream_truncation import _scope
+
+    monkeypatch.setattr(app_mod, "llm", _OutcomeLLM("error" if close_after == "error" else "accepted"))
+    reader = _hermetic_instruments(monkeypatch)
+    path = {"answer": "/v1/answer", "chat": "/v1/chat", "console": "/ui/chat/stream"}[endpoint]
+    request = Request(_scope(path))
+    messages = [{"role": "user", "content": "IEA500I"}]
+    if endpoint == "answer":
+        response = await app_mod.v1_answer(request, app_mod.AnswerRequest(query="IEA500I"), Response(), stream=True)
+    elif endpoint == "chat":
+        response = await app_mod.chat_completions(app_mod.ChatRequest(messages=messages, stream=True), request, Response())
+    else:
+        response = await routes.ui_chat_stream(request, routes.UiChatRequest(messages=messages))
+    body = response.body_iterator
+    async for chunk in body:
+        if close_after == "token" or (
+            close_after == "error" and '"error"' in chunk
+        ) or (close_after == "final" and '"verification_state"' in chunk):
+            break
+    else:
+        pytest.fail("target frame never emitted")
+    await body.aclose()
+    app_mod._record_handler_error(request, "internal_error")
+    points = _points(reader, "rag.requests.total")
+    assert len(points) == 1 and points[0].value == 1
+    attrs = dict(points[0].attributes)
+    assert attrs["outcome"] == {"token": "client_disconnect", "final": "ok", "error": "upstream_error"}[close_after]
+    assert attrs["verification_state"] == ("accepted" if close_after == "final" else "generation_incomplete")
+    assert sum(p.count for p in _points(reader, "rag.request.duration")) == 1
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_console_validation_only_counts_when_enabled(outcome_client, monkeypatch, enabled):
+    monkeypatch.setattr(app_mod.settings, "ui_enabled", enabled)
+    reader = _hermetic_instruments(monkeypatch)
+    response = outcome_client.post("/ui/chat/stream", json={})
+    assert response.status_code == (422 if enabled else 404)
+    if enabled:
+        points = _points(reader, "rag.requests.total")
+        assert len(points) == 1 and points[0].value == 1
+        assert dict(points[0].attributes) == {
+            "endpoint": "console", "outcome": "invalid_request", "query_class": "unknown",
+        }
+    else:
+        assert reader.get_metrics_data() is None
+
+
+def test_broken_metrics_instrument_does_not_break_request(outcome_client, monkeypatch):
+    from types import SimpleNamespace
+
+    class BrokenCounter:
+        def add(self, *args):
+            raise RuntimeError("instrument unavailable")
+
+    monkeypatch.setattr(metrics_mod, "_instruments", SimpleNamespace(requests=BrokenCounter()))
+    monkeypatch.setattr(app_mod, "llm", _OutcomeLLM("accepted"))
+    response = _post_outcome(outcome_client, "/ui/chat/stream", True)
+    assert response.status_code == 200
+    assert '"accepted"' in response.text

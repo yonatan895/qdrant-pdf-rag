@@ -21,6 +21,7 @@ import html
 import json
 import logging
 import re
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -607,6 +608,9 @@ async def ui_chat(
     version: str | None = Form(default=None),
     reasoning_effort: ReasoningEffort | None = Form(default=None),  # noqa: B008
 ) -> Response:
+    from mainframe_rag.agent import app as app_mod
+
+    started = time.monotonic()
     history = _parse_history(messages)
     context = splunk_context.strip() if splunk_context and splunk_context.strip() else None
     user_turn = _turn("user", message.strip(), splunk_context=context)
@@ -638,6 +642,16 @@ async def ui_chat(
             _BUDGET_ERROR_TEXT if isinstance(exc, PromptBudgetExceeded) else _ERROR_TEXT
         )
         status_code = 422 if isinstance(exc, PromptBudgetExceeded) else 502
+        outcome = (
+            "prompt_budget_exceeded"
+            if isinstance(exc, PromptBudgetExceeded)
+            else exc.code
+            if isinstance(exc, app_mod.AppError)
+            else "invalid_request"
+            if isinstance(exc, ValidationError)
+            else "upstream_error"
+        )
+        app_mod._record_endpoint(request, "console", outcome, started)
         if is_htmx:
             return _render_pair(
                 request,
@@ -647,6 +661,17 @@ async def ui_chat(
             )
         return _render_page(request, turns, error=error_text, form=form, status_code=status_code)
 
+    app_mod._record_endpoint(
+        request,
+        "console",
+        "ok",
+        started,
+        query_class=output.query_kind,
+        hits=len(output.hits),
+        ttft_ms=output.ttft_ms,
+        llm_model=app_mod.settings.llm_model_reasoning,
+        verification_state=output.verification_state,
+    )
     assistant_content = output.answer
     if output.script:
         # Tagged script fences (JCL/REXX/…) leave the answer body during
@@ -673,6 +698,7 @@ async def ui_chat(
 async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
     from mainframe_rag.agent import app as app_mod
 
+    started = time.monotonic()
     request_id = getattr(request.state, "request_id", "ui")
     turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
     # Serving gate before the stream opens (issues #391 F3/F4): a non-servable
@@ -697,6 +723,7 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
     )
 
     async def events():
+        terminal = False
         try:
             async for item in execute_answer_core_stream(
                 core_input, deps, parent_span=root_span
@@ -710,6 +737,18 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
                         )
                 elif itype == "final":
                     output = item["output"]
+                    app_mod._record_endpoint(
+                        request,
+                        "console",
+                        "ok",
+                        started,
+                        query_class=output.query_kind,
+                        hits=len(output.hits),
+                        ttft_ms=output.ttft_ms,
+                        llm_model=app_mod.settings.llm_model_reasoning,
+                        verification_state=output.verification_state,
+                    )
+                    terminal = True
                     yield format_sse_event(
                         "final",
                         final_payload(
@@ -736,8 +775,22 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
                 log.warning("ui_chat_stream budget exceeded: %s", str(exc)[:200])
             else:
                 log.error("ui_chat_stream failed: %s", str(exc)[:200])
+            app_mod._record_endpoint(
+                request,
+                "console",
+                "prompt_budget_exceeded"
+                if isinstance(exc, PromptBudgetExceeded)
+                else "upstream_error",
+                started,
+                verification_state="generation_incomplete",
+            )
+            terminal = True
             yield format_sse_event("error", error_payload())
         finally:
+            if not terminal:
+                app_mod._record_stream_abort(
+                    request, request_id, "console", started, "unknown", None, root_span
+                )
             root_span.end()
 
     headers = {**_SECURITY_HEADERS}

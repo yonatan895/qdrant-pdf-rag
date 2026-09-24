@@ -119,6 +119,23 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   `503 metrics_unavailable` / `metrics are not available`). No trace span by
   design (issue #187).
 
+Endpoint telemetry (#375): `rag.requests.total` and `rag.request.duration`
+record one outcome per request through the HTTP terminal owner. Enabled console
+form and SSE turns use `endpoint="console"`; pages, assets, badges and disabled
+console routes do not add request series. Successful JSON/SSE finals attach the
+core's bounded `verification_state` (the four states below). Empty retrieval and
+refusals remain `outcome="ok"`; this measures request completion, not semantic
+truth. Stream errors and disconnects before a terminal frame attach
+`generation_incomplete`, with an error or `client_disconnect` outcome. JSON
+errors and pre-stream refusals have no finalized quality state. Recording occurs
+before yielding the terminal frame; closing after that frame cannot omit or
+repeat the outcome. It establishes server production, not delivery acknowledgement.
+Unknown verification labels are dropped. No query, document or user labels are
+introduced; model labels remain deployment configuration. Metrics failures remain
+fail-open. `tests/test_metrics.py` checks emitted counters/durations and generator
+closure across API and console transports. Data-generation/admission metrics,
+SLO thresholds and the sanitized pilot diagnostic packet remain with #375/#374/#446.
+
 Per-endpoint flow: `search` runs the length guard, then retrieval under a
 root span — faults become `502 upstream_error / retrieval failed`, timings
 become `Server-Timing`, then the response. `answer` resolves streaming
