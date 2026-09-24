@@ -555,7 +555,9 @@ procedural/atomic content is omit-or-whole. The manifest records
 `units_total`/`units_retained` per entry plus `omitted_indices`, and wholly
 omitted chunks stay outside the citation allowlist. After trimming, the
 final messages are confirmed against the real tokenizer/template budget
-(fixed system/history/context/question text plus output/thinking reserves);
+(fixed system/history/context/question text plus output/thinking reserves),
+always counting the selected final-order candidate — a retrieval-order
+count never certifies a `stable_cache` prompt (issue #368);
 estimator-only and char-packing paths report `budget_verified: false`
 (estimated, never confirmed; the offline/caller-provided `tokenizer=None`
 char-packing path is estimated-only with no token budget claim, while production
