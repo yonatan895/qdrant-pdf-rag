@@ -2557,7 +2557,7 @@ class ReviewTemplateTests(unittest.TestCase):
                                 'fi\n'
                                 'echo \'{"head_sha":"synthetic-current-head"}\'\n')
                 stub.chmod(0o755)
-                result = subprocess.run(['sh', '-c', command], capture_output=True, text=True,
+                result = subprocess.run(['sh', '-c', command], capture_output=True, text=True, check=False,
                                         env={**os.environ, 'PATH': directory + os.pathsep + os.environ['PATH'],
                                              'RUNNER_TEMP': directory, 'TEMPLATE_STUB_FAIL': failed,
                                              'REVIEW_REPOSITORY': 'synthetic/repository', 'REVIEW_PR': '3'})
