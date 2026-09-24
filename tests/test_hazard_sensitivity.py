@@ -22,7 +22,7 @@ def report(tmp_path, *, name='test_original', classname='tests.test_behavior', r
 
 
 def test_only_intended_behavioral_failure_counts(tmp_path):
-    path = report(tmp_path, result='failure', text='assert received == expected\nE AssertionError: wrong received value')
+    path = report(tmp_path, result='failure', text='tests/test_behavior.py:10: in test_original\n    assert received == expected\nE AssertionError: wrong received value')
     assert assess(path, 1, HAZARD, baseline=False)['status'] == 'killed_by_behavior'
     assert assess(path, 2, HAZARD, baseline=False)['status'] == 'invalid'
     assert assess(path, 1, HAZARD, baseline=True)['status'] == 'baseline_failed'
@@ -59,3 +59,20 @@ def test_mutation_requires_exact_preimage_and_keeps_other_bytes(tmp_path):
     for target in ('../outside.py', '/tmp/outside.py', 'docs/unrelated.md'):
         with pytest.raises(HazardError, match='boundaries'):
             apply_mutation(tmp_path, {**hazard, 'target': target})
+
+
+@pytest.mark.parametrize('error', ['E   assert False', 'E   AssertionError: wrong value'])
+def test_pytest_rewritten_assertion_format_counts(tmp_path, error):
+    text = 'tests/test_behavior.py:10: in test_original\n    assert received == expected\n' + error
+    assert assess(report(tmp_path, result='failure', text=text), 1, HAZARD, baseline=False)['status'] == 'killed_by_behavior'
+
+
+@pytest.mark.parametrize('tail', [
+    'helper.py:20: in helper\n    assert unrelated\nE AssertionError',
+    'tests/test_behavior.py:20: in test_other\n    assert received == expected\nE AssertionError',
+    'tests/test_behavior.py:20: in test_original\n    assert unrelated\nE AssertionError',
+    'tests/test_behavior.py:20: in test_original\n    assert received == expected\nE ImportError: AssertionError',
+])
+def test_expected_assertion_in_earlier_frame_is_not_a_kill(tmp_path, tail):
+    text = 'tests/test_behavior.py:10: in test_original\n    assert received == expected\n' + tail
+    assert assess(report(tmp_path, result='failure', text=text), 1, HAZARD, baseline=False)['status'] == 'invalid'

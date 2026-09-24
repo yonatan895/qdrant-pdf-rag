@@ -492,6 +492,18 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(len(calls), 2, "one prerequisite check, one focused pytest invocation")
         self.assertEqual(calls[1]["argv"], ["-m", "pytest", "tests/test_agent_context.py", "-q"])
 
+    def test_hazard_paths_reach_runner_without_shell_interpretation(self):
+        self.make_recorder(self.root / "python with spaces")
+        output = str(self.root / "evidence $(touch PWNED)")
+        proc = self.run_task("qa:hazards", f"PY={self.root / 'python with spaces'}",
+                             f"OUT={output}", extra_env=self.recorder_env)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(self.calls()[0]["argv"], [
+            "scripts/check_hazard_sensitivity.py", "--python", str(self.root / "python with spaces"),
+            "--out", output,
+        ])
+        self.assertFalse((self.root / "PWNED").exists())
+
     def test_check_runs_lint_typecheck_unit_in_order(self):
         self.make_recorder(self.root / ".venv/bin/python")
         proc = self.run_task("qa:check", extra_env=self.recorder_env)

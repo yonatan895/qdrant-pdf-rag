@@ -370,7 +370,7 @@ revocation cases remain owned by #405 until their product contract is implemente
 After explicit environment/tool preparation, run:
 
 ```sh
-.venv/bin/python scripts/check_hazard_sensitivity.py --out /tmp/critical-hazards-candidate
+sh scripts/tools/run-task.sh qa:hazards OUT=/tmp/critical-hazards-candidate
 ```
 
 The runner requires committed tracked changes and the prepared doctor gate,
@@ -390,3 +390,7 @@ that claim; fix the owning regression or implementation in its existing suite
 instead of weakening the catalogue. An interrupted/incomplete report is not a
 pass. This narrow catalogue establishes sensitivity to the named historical
 counterexamples, not immunity to all faults or a global coverage percentage.
+
+The GitHub `hazards` job and offline GitLab `hazards` job run the full catalogue
+and retain its synthetic evidence. This producer is not yet an always-scheduled,
+trusted acceptance consumer; #411 owns that gate and maintainer enforcement.

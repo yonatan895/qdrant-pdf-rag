@@ -62,8 +62,18 @@ def assess(xml: Path, returncode: int, hazard: dict, *, baseline: bool) -> dict:
     if returncode == 0 and not failures:
         return {'status': 'survived', 'cause': 'wrong implementation passed the selected test'}
     text = '\n'.join(f.text or '' for f in failures)
-    if (returncode != 1 or len(failures) != 1 or hazard['assertion'] not in text
-            or 'AssertionError' not in text):
+    frames = list(re.finditer(r'^([^\n]+\.py):[0-9]+: in ([^\n]+)\n', text, re.MULTILINE))
+    final = text[frames[-1].end():] if frames else ''
+    location = frames[-1].group(1) if frames else ''
+    function = frames[-1].group(2) if frames else ''
+    assertion = next((line.strip() for line in final.splitlines() if line.strip()), '')
+    errors = [line for line in final.splitlines() if line.startswith('E ')]
+    assertion_error = bool(errors and re.match(r'E\s+(?:assert |AssertionError(?:$|:))', errors[0]))
+    if (returncode != 1 or len(failures) != 1
+            or location != hazard['test'].split('::')[0]
+            or function != expected.split('[')[0]
+            or not (assertion == hazard['assertion'] or assertion.startswith(hazard['assertion'] + ','))
+            or not assertion_error):
         return {'status': 'invalid', 'cause': 'failure was not the intended behavioral assertion'}
     return {'status': 'killed_by_behavior', 'cause': hazard['assertion'],
             'failure_message': failures[0].get('message', '')[:1500]}
@@ -92,6 +102,7 @@ def run_test(copy: Path, python: Path, hazard: dict, output: Path, *, baseline: 
 
 
 def run(root: Path, output: Path, python: Path, selected: list[str] | None = None) -> dict:
+    root, output, python = root.absolute(), output.absolute(), python.absolute()
     catalogue_path = root / CATALOGUE
     catalogue = json.loads(catalogue_path.read_text())
     if catalogue.get('schema_version') != 1 or not catalogue.get('hazards'):
@@ -101,9 +112,15 @@ def run(root: Path, output: Path, python: Path, selected: list[str] | None = Non
         raise HazardError('candidate identity is unavailable')
     if subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=root, text=True):
         raise HazardError('tracked candidate changes must be committed before sensitivity proof')
+    for relative, local in ((CATALOGUE, catalogue_path),
+                            ('scripts/check_hazard_sensitivity.py', Path(__file__))):
+        committed = subprocess.check_output(['git', 'show', f'{head}:{relative}'], cwd=root)
+        if local.read_bytes() != committed:
+            raise HazardError('runner and catalogue must match the committed candidate')
     hazards = catalogue['hazards']
     ids = [h['id'] for h in hazards]
-    if len(ids) != len(set(ids)) or (selected and set(selected) - set(ids)):
+    if (any(not re.fullmatch('[a-z0-9-]+', key) for key in ids)
+            or len(ids) != len(set(ids)) or (selected and set(selected) - set(ids))):
         raise HazardError('duplicate or unknown hazard selection')
     if selected:
         hazards = [h for h in hazards if h['id'] in selected]
@@ -125,7 +142,9 @@ def run(root: Path, output: Path, python: Path, selected: list[str] | None = Non
         subprocess.run(['git', 'archive', '--format=tar', '-o', str(archive), head], cwd=root, check=True)
         for hazard in hazards:
             result = {'id': hazard['id'], 'contract': hazard['contract'], 'target': hazard['target'],
-                      'expected_test': hazard['test'], 'expected_assertion': hazard['assertion']}
+                      'expected_test': hazard['test'], 'expected_assertion': hazard['assertion'],
+                      'replacement': {'before': hazard['before'], 'after': hazard['after'],
+                                      'occurrences': hazard['occurrences'], 'target_role': hazard['target_role']}}
             copy = scratch / hazard['id']
             copy.mkdir()
             with tarfile.open(archive) as source:

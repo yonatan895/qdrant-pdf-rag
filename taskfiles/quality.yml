@@ -56,6 +56,24 @@ tasks:
       - task: prerequisites
       - '.venv/bin/python -m pytest {{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}tests -v{{end}}'
 
+  hazards:
+    desc: Prove sensitivity to the selected critical historical hazards
+    summary: |
+      Requires a committed candidate and explicitly prepared locked Python,
+      Task and Helm. Runs unchanged baseline tests and isolated mutations;
+      only the intended behavioral assertion counts as a detection.
+      OUT must name a new evidence directory. PY defaults to .venv/bin/python;
+      CI may select its explicitly prepared interpreter. No service or install.
+    requires:
+      vars: [OUT]
+    vars:
+      PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}.venv/bin/python{{end}}'
+    env:
+      TASK_HAZARD_PY: '{{.PY}}'
+      TASK_HAZARD_OUT: '{{.OUT}}'
+    cmds:
+      - '"$TASK_HAZARD_PY" scripts/check_hazard_sensitivity.py --python "$TASK_HAZARD_PY" --out "$TASK_HAZARD_OUT"'
+
   check:
     desc: Run lint, then typecheck, then unit tests, in that order
     summary: |
