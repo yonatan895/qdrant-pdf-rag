@@ -361,7 +361,7 @@ class TaskContractsTests(unittest.TestCase):
         literal = "tests/a space;$(touch SENTINEL)אב.py"
         proc = self.run_controlled("qa:unit", "--", literal, "-q", extra_env=self.recorder_env)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.calls()[0]["argv"], ["-m", "pytest", literal, "-q"])
+        self.assertEqual(self.calls()[-1]["argv"], ["-m", "pytest", literal, "-q"])
         self.assertFalse((self.root / "SENTINEL").exists())
 
     def test_controlled_runner_rejects_corruption_config_and_path_overrides(self):
@@ -466,8 +466,9 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("qa:unit", extra_env=self.recorder_env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.calls()
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["argv"], ["-m", "pytest", "tests", "-v"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["argv"], ["scripts/agent_doctor.py", "--python", ".venv/bin/python"])
+        self.assertEqual(calls[1]["argv"], ["-m", "pytest", "tests", "-v"])
         self.assertEqual(calls[0]["cwd"], str(self.root))
 
     def test_unit_focused_selection_replaces_default(self):
@@ -476,8 +477,8 @@ class TaskContractsTests(unittest.TestCase):
                              extra_env=self.recorder_env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.calls()
-        self.assertEqual(len(calls), 1, "focused selection must run once, not default+selection")
-        self.assertEqual(calls[0]["argv"], ["-m", "pytest", "tests/test_agent_context.py", "-q"])
+        self.assertEqual(len(calls), 2, "one prerequisite check, one focused pytest invocation")
+        self.assertEqual(calls[1]["argv"], ["-m", "pytest", "tests/test_agent_context.py", "-q"])
 
     def test_check_runs_lint_typecheck_unit_in_order(self):
         self.make_recorder(self.root / ".venv/bin/python")
@@ -485,10 +486,23 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = [c["argv"] for c in self.calls()]
         self.assertEqual(argv, [
+            ["scripts/agent_doctor.py", "--python", ".venv/bin/python"],
             ["-m", "ruff", "check", "src", "tests"],
             ["-m", "mypy", "src"],
+            ["scripts/agent_doctor.py", "--python", ".venv/bin/python"],
             ["-m", "pytest", "tests", "-v"],
         ])
+
+    def test_failed_prerequisite_never_starts_pytest(self):
+        self.make_recorder(self.root / ".venv/bin/python")
+        for name in ("qa:unit", "qa:check"):
+            if self.log.exists():
+                self.log.unlink()
+            proc = self.run_task(name, extra_env={**self.recorder_env, "RECORDER_EXIT": "2"})
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertEqual([c["argv"] for c in self.calls()], [
+                ["scripts/agent_doctor.py", "--python", ".venv/bin/python"],
+            ])
 
     def test_cwd_is_workspace_root_from_subdirectory(self):
         self.make_recorder(self.root / ".venv/bin/python")

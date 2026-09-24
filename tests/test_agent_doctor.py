@@ -24,8 +24,11 @@ class DoctorTests(TestCase):
             'bm25-weights.sha256': 'example', 'charts/qdrant-1.19.0.tgz': 'example',
             '.venv/bin/python': 'fixture', 'airgap.env.example': '# public example',
             'scripts/airgap/common.sh': '# fixture',
-            'scripts/tools/task-pin.txt': 'version: v3.53.1\nbinary-sha256: ' + hashlib.sha256(b'fixture').hexdigest() + '\n',
+            'scripts/tools/task-pin.txt': 'version: v3.53.1\nasset: task_linux_amd64.tar.gz\nsha256: ' + hashlib.sha256(b'archive').hexdigest() + '\nbinary-sha256: ' + hashlib.sha256(b'fixture').hexdigest() + '\n',
             '.tools/bin/task': 'fixture',
+            '.tools/cache/task_linux_amd64.tar.gz': 'archive',
+            'bin/helm': 'helm-fixture',
+            'scripts/tools/helm-pin.txt': 'version: v4.3.0\nbinary-sha256: ' + hashlib.sha256(b'helm-fixture').hexdigest() + '\n',
             'charts/mainframe-rag/Chart.yaml': 'fixture',
             'charts/mainframe-rag/values.schema.json': 'fixture',
         }
@@ -37,7 +40,7 @@ class DoctorTests(TestCase):
         self.runtime = {'implementation': 'CPython', 'version': [3, 14, 5],
                         'gil_disabled': False, 'jit_enabled': False,
                         'packages': {'qdrant-client': '1.19.0', 'pytest': '9', 'ruff': '1', 'mypy': '1'}}
-        tools_patch = patch.object(doctor.shutil, 'which', side_effect=lambda name: '/tools/'+name)
+        tools_patch = patch.object(doctor.shutil, 'which', side_effect=lambda name: str(self.root/'bin/helm') if name == 'helm' else '/tools/'+name)
         self.runtime_patch = patch.object(doctor, 'inspect_runtime', side_effect=lambda *_: self.runtime)
         self.which = tools_patch.start()
         self.probe = self.runtime_patch.start()
@@ -63,15 +66,41 @@ class DoctorTests(TestCase):
             (self.root/'scripts/tools/task-pin.txt').unlink()
             self.assertEqual(doctor.inspect_task(self.root).status, 'unable to verify')
 
+    def test_missing_or_tampered_cached_task_archive_is_not_ready(self):
+        archive = self.root/'.tools/cache/task_linux_amd64.tar.gz'
+        archive.write_bytes(b'tampered')
+        self.assertEqual(doctor.inspect_task(self.root).subject, 'Task archive')
+        self.assertEqual(doctor.inspect_task(self.root).status, 'missing prerequisite')
+        archive.unlink()
+        self.assertEqual(doctor.inspect_task(self.root).status, 'missing prerequisite')
+
+    def test_helm_missing_foreign_or_tampered_is_rejected_without_execution(self):
+        with patch.object(doctor.subprocess, 'run', side_effect=AssertionError('never execute Helm')):
+            self.assertEqual(doctor.inspect_helm(self.root).status, 'ready')
+            (self.root/'bin/helm').write_text('foreign-or-tampered-binary')
+            self.assertEqual(doctor.inspect_helm(self.root).status, 'missing prerequisite')
+            self.which.side_effect = lambda _: None
+            self.assertEqual(doctor.inspect_helm(self.root).status, 'missing prerequisite')
+
+    def test_prepared_ci_interpreter_does_not_require_local_venv(self):
+        (self.root/'.venv/bin/python').unlink()
+        python = self.root/'ci-python'
+        target = self.root/'ci-python-target'
+        target.write_text('fixture')
+        python.symlink_to(target)
+        findings = doctor.diagnose(self.root, python=python)
+        self.assertTrue(all(f.status == 'ready' for f in findings), findings)
+        self.assertEqual(self.probe.call_args.args[0], python)
+
     def test_missing_tools_and_environment(self):
-        self.which.side_effect = lambda name: None if name == 'docker' else '/tools/'+name
+        self.which.side_effect = lambda name: None if name == 'docker' else str(self.root/'bin/helm') if name == 'helm' else '/tools/'+name
         (self.root/'.venv/bin/python').unlink()
         findings = doctor.diagnose(self.root, 'sim')
         missing = {f.subject for f in findings if f.status == 'missing prerequisite'}
         self.assertEqual(missing, {'docker', 'development environment'})
 
     def test_incompatible_python_gil_jit_and_package_version(self):
-        for field, value in [('version', [3, 13, 9]), ('implementation', 'PyPy'),
+        for field, value in [('version', [3, 13, 9]), ('version', [3, 15, 0]), ('implementation', 'PyPy'),
                              ('gil_disabled', True), ('jit_enabled', True)]:
             with self.subTest(field=field):
                 old = self.runtime[field]
@@ -132,3 +161,62 @@ class DoctorTests(TestCase):
         self.assertTrue(any(f.status == 'unable to verify' for f in doctor.diagnose(self.root)))
         (self.root/'pyproject.toml').write_text('[project]\nrequires-python="~=3.14"')
         self.assertTrue(any('unsupported requirement' in f.detail for f in doctor.diagnose(self.root)))
+
+
+class HelmPreparationTests(TestCase):
+    """Offline installation proves bytes before execution or destination mutation."""
+
+    def setUp(self):
+        import shutil
+        import tarfile
+
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        scripts = self.root/'scripts/tools'
+        scripts.mkdir(parents=True)
+        shutil.copy(Path(__file__).parents[1]/'scripts/tools/install-helm.sh', scripts)
+        self.marker = self.root/'executed'
+        self.tool = self.root/'linux-amd64/helm'
+        self.tool.parent.mkdir()
+        self.tool.write_text(f'#!/bin/sh\ntouch "{self.marker}"\nprintf "v4.3.0+fixture\\n"\n')
+        self.tool.chmod(0o755)
+        self.archive = self.root/'helm.tgz'
+        with tarfile.open(self.archive, 'w:gz') as archive:
+            archive.add(self.tool, arcname='linux-amd64/helm')
+        self.pin = scripts/'helm-pin.txt'
+        self.pin.write_text(
+            'version: v4.3.0\nsha256: '+hashlib.sha256(self.archive.read_bytes()).hexdigest()+
+            '\nbinary-sha256: '+hashlib.sha256(self.tool.read_bytes()).hexdigest()+'\n')
+        self.destination = self.root/'tools'
+        self.destination.mkdir()
+        (self.destination/'helm').write_text('previous approved tool')
+
+    def install(self, archive=None):
+        return subprocess.run([
+            'sh', str(self.root/'scripts/tools/install-helm.sh'),
+            '--archive', str(archive or self.archive), '--bin-dir', str(self.destination),
+        ], capture_output=True, text=True, timeout=10, check=False)
+
+    def test_offline_archive_installs_verified_tool(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.marker.exists())
+        self.assertEqual((self.destination/'helm').read_bytes(), self.tool.read_bytes())
+
+    def test_missing_or_tampered_archive_preserves_previous_tool(self):
+        for archive in (self.root/'absent.tgz', self.archive):
+            if archive == self.archive:
+                archive.write_bytes(b'tampered')
+            result = self.install(archive)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(self.marker.exists())
+            self.assertEqual((self.destination/'helm').read_text(), 'previous approved tool')
+
+    def test_wrong_member_digest_never_executes_or_installs(self):
+        self.pin.write_text(self.pin.read_text().replace(
+            hashlib.sha256(self.tool.read_bytes()).hexdigest(), '0'*64))
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.marker.exists())
+        self.assertEqual((self.destination/'helm').read_text(), 'previous approved tool')

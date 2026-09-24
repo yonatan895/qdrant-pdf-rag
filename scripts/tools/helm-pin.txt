@@ -1,0 +1,10 @@
+# Existing CI Helm pin; Linux x86_64 only. No version change (#482 V0).
+# Archive digest is the existing ci.yml/e2e.yml pin. Binary digest was measured
+# after verifying that archive; tools are verified before execution.
+version: v4.3.0
+asset: helm-v4.3.0-linux-amd64.tar.gz
+sha256: 86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb
+binary-sha256: 57ce7fc4ea77b28ee6fa91ae071abcade74d3f524e80c9decff5877a5ac8eda4
+origin: https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+license: Apache-2.0
+platforms: linux-amd64 only

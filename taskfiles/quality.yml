@@ -8,6 +8,17 @@
 version: '3'
 
 tasks:
+  prerequisites:
+    desc: Verify the prepared unit environment without installing anything
+    summary: |
+      Checks CPython 3.14 GIL/no JIT, current direct dependency pins and dev
+      tool presence, verified Task/Helm binaries and tracked Qdrant inputs.
+      No network, environment repair or service startup. Full transitive
+      inventory attestation is a separate #371/V0 delivery.
+    cmds:
+      - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - '.venv/bin/python scripts/agent_doctor.py --python .venv/bin/python'
+
   lint:
     desc: Run ruff lint over src and tests
     summary: |
@@ -38,9 +49,11 @@ tasks:
       `task qa:unit -- tests/test_agent_context.py -q` runs exactly that
       selection (shell word-splitting applies to CLI_ARGS; trusted developer
       input only — never untrusted free text). An empty selection keeps the
-      default. Fails closed when `.venv/bin/python` is absent.
+      default. Runs the read-only prerequisite gate before pytest; fails closed
+      when the prepared interpreter or verified tools are unavailable.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
+      - task: prerequisites
       - '.venv/bin/python -m pytest {{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}tests -v{{end}}'
 
   check:
@@ -51,6 +64,7 @@ tasks:
       `deps`, so one shared `.venv` is never installed into concurrently and
       a failed step stops the sequence with its own exit status.
     cmds:
+      - task: prerequisites
       - task: lint
       - task: typecheck
       - task: unit
