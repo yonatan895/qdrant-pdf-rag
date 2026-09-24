@@ -2432,7 +2432,9 @@ def test_v1_answer_refusal_zero_citations_streaming(client, monkeypatch):
                 "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n",
             ):
                 yield {"type": "token", "delta": delta, "token": delta, "ttft_ms": 10}
-            yield {"type": "done"}
+            # Explicit terminal finish (issue #365): a bare done without a
+            # finish is an incomplete stream, never a successful refusal.
+            yield {"type": "done", "finish_reason": "stop"}
 
     monkeypatch.setattr(app_mod, "llm", RefusingStreamLLM())
     resp = client.post("/v1/answer?stream=true", json={"query": "obscure request"})
@@ -3358,7 +3360,9 @@ def test_security_refusal_state_json_and_sse(client, monkeypatch, stream, answer
 
         async def chat_stream(self, messages, *args, **kwargs):
             yield {"type": "token", "delta": answer, "token": answer}
-            yield {"type": "done"}
+            # Explicit terminal finish (issue #365): a bare done without a
+            # finish is an incomplete stream, never a successful refusal.
+            yield {"type": "done", "finish_reason": "stop"}
 
     monkeypatch.setattr(app_mod, "llm", SecurityResponseLLM())
     response = client.post("/v1/answer" + ("?stream=true" if stream else ""), json={
