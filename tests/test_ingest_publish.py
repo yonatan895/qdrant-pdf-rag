@@ -25,6 +25,7 @@ from mainframe_rag.ingest.publish import (
     staging_name_for,
     verify_all_complete,
     verify_staging_distribution,
+    verify_staging_placement,
 )
 from tests.test_run_ingest import _filter_doc_id
 
@@ -3314,3 +3315,230 @@ def test_staging_distribution_partial_policy_checks_only_selected_keys():
         qdrant_collection=staging, qdrant_replication_factor=3, _env_file=None
     )
     assert verify_staging_distribution(fake, settings) == []
+
+
+class _PlacementFake:
+    """Per-endpoint client double for the ACTIVE-copy gate: cluster_status
+    plus collection_cluster_info, with failure injection per method."""
+
+    def __init__(
+        self,
+        *,
+        peer_id,
+        members=(101, 202, 303),
+        consensus="working",
+        status_error=None,
+        infos=None,
+        info_error=None,
+    ):
+        self._peer_id = peer_id
+        self._members = members
+        self._consensus = consensus
+        self._status_error = status_error
+        self._infos = dict(infos or {})
+        self._info_error = info_error
+
+    def cluster_status(self):
+        if self._status_error is not None:
+            raise self._status_error
+        return SimpleNamespace(
+            status="enabled",
+            peer_id=self._peer_id,
+            peers={str(p): SimpleNamespace(uri=f"http://peer{p}:6335") for p in self._members},
+            consensus_thread_status=SimpleNamespace(
+                consensus_thread_status=self._consensus
+            ),
+        )
+
+    def collection_cluster_info(self, name):
+        if self._info_error is not None:
+            raise self._info_error
+        return self._infos[name]
+
+
+def _placement_info(peer_id, shard_count, local_states, *, transfers=()):
+    from qdrant_client import models
+
+    return models.CollectionClusterInfo(
+        peer_id=peer_id,
+        shard_count=shard_count,
+        local_shards=[
+            models.LocalShardInfo(
+                shard_id=shard_id, points_count=10, state=models.ReplicaState[state]
+            )
+            for shard_id, state in local_states
+        ],
+        remote_shards=[],
+        shard_transfers=[
+            models.ShardTransferInfo(shard_id=shard_id, **{"from": src}, to=dst, sync=False)
+            for shard_id, src, dst in transfers
+        ],
+    )
+
+
+def _healthy_placement_map(staging="genA", peers=(101, 202, 303)):
+    from mainframe_rag.ingest.completion import completion_collection_for
+
+    control = completion_collection_for(staging)
+    mapping = {}
+    for index, peer in enumerate(peers):
+        infos = {
+            name: _placement_info(
+                peer, 6, [(shard, "ACTIVE") for shard in range(6)]
+            )
+            for name in (staging, control)
+        }
+        mapping[f"http://peer{index}:6333"] = _PlacementFake(peer_id=peer, infos=infos)
+    return mapping
+
+
+def _placement_settings(staging="genA", **overrides):
+    kw = {
+        "embed_mode": "hash",
+        "qdrant_collection": staging,
+        "qdrant_shard_number": 6,
+        "qdrant_replication_factor": 3,
+        "qdrant_write_consistency_factor": 2,
+        "_env_file": None,
+    }
+    kw.update(overrides)
+    return Settings(**kw)
+
+
+def test_staging_placement_no_policy_is_passthrough():
+    assert verify_staging_placement({}, _settings()) == []
+
+
+def test_staging_placement_healthy_pair_passes():
+    assert verify_staging_placement(_healthy_placement_map(), _placement_settings()) == []
+
+
+def test_staging_placement_partial_policy_refused():
+    """Actual copies cannot be judged without the complete tuple — unlike
+    the configured check, placement needs S and RF to know what to count."""
+    settings = _settings(qdrant_collection="genA", qdrant_replication_factor=3)
+    problems = verify_staging_placement(_healthy_placement_map(), settings)
+    assert problems
+    assert any("partial policy" in p for p in problems)
+
+
+def test_staging_placement_no_endpoints_refused():
+    """Zero observations never certify, even though the configured values
+    could match: unknown placement is unverifiable, never green."""
+    problems = verify_staging_placement({}, _placement_settings())
+    assert problems
+    assert any("QDRANT_PEER_URLS" in p for p in problems)
+    assert any("entry endpoint" in p for p in problems)
+
+
+def test_staging_placement_too_few_endpoints_refused():
+    mapping = _healthy_placement_map()
+    one = {next(iter(mapping)): mapping[next(iter(mapping))]}
+    problems = verify_staging_placement(one, _placement_settings())
+    assert problems
+    assert any("cannot hold replication_factor=3" in p for p in problems)
+
+
+def test_staging_placement_unreachable_peer_refused():
+    """A dead peer is degraded, not healthy: cutover waits for all three
+    ACTIVE copies while the old generation keeps serving."""
+    mapping = _healthy_placement_map()
+    dead_url = "http://peer2:6333"
+    mapping[dead_url] = _PlacementFake(
+        peer_id=None, status_error=ConnectionError("refused"), info_error=ConnectionError("refused")
+    )
+    problems = verify_staging_placement(mapping, _placement_settings())
+    assert problems
+    assert any("degraded" in p for p in problems)
+
+
+def test_staging_placement_duplicate_peer_identities_refused():
+    """Three URLs reaching two peers (a Service masquerading as a third
+    copy) must refuse, never count one peer's report twice."""
+    mapping = _healthy_placement_map()
+    urls = list(mapping)
+    mapping[urls[2]] = _PlacementFake(
+        peer_id=101, infos=mapping[urls[0]]._infos
+    )
+    problems = verify_staging_placement(mapping, _placement_settings())
+    assert problems
+    assert any("distinct peer id" in p for p in problems)
+
+
+def test_staging_placement_transfer_in_progress_refused():
+    """ACTIVE copies with a replica transfer still running are recovering,
+    not healthy: the swap waits for catch-up to finish."""
+    mapping = _healthy_placement_map()
+    urls = list(mapping)
+    first = mapping[urls[0]]
+    infos = dict(first._infos)
+    infos["genA"] = _placement_info(
+        101, 6, [(shard, "ACTIVE") for shard in range(6)], transfers=[(0, 101, 202)]
+    )
+    mapping[urls[0]] = _PlacementFake(peer_id=101, infos=infos)
+    problems = verify_staging_placement(mapping, _placement_settings("genA"))
+    assert problems
+    assert any("recovering" in p for p in problems)
+
+
+def test_staging_placement_under_replicated_shard_refused():
+    """A shard with only two ACTIVE copies (one stale) is degraded even
+    when every endpoint answers and the cluster looks coherent."""
+    mapping = _healthy_placement_map()
+    urls = list(mapping)
+    first = mapping[urls[0]]
+    infos = dict(first._infos)
+    local = [(shard, "ACTIVE") for shard in range(1, 6)] + [(0, "DEAD")]
+    infos["genA"] = _placement_info(101, 6, local)
+    mapping[urls[0]] = _PlacementFake(peer_id=101, infos=infos)
+    problems = verify_staging_placement(mapping, _placement_settings("genA"))
+    assert problems
+    assert any("genA" in p for p in problems)
+    assert any("degraded" in p or "2/3" in p for p in problems)
+
+
+def test_staging_placement_single_node_profile_passes():
+    """The explicit 1/1/1 profile judges its single ACTIVE copy through its
+    one endpoint — a standalone server reports no cluster peer id."""
+
+    class _Standalone:
+        def cluster_status(self):
+            return SimpleNamespace(status="disabled")
+
+        def collection_cluster_info(self, name):
+            return _placement_info(999, 1, [(0, "ACTIVE")])
+
+    settings = _settings(
+        qdrant_collection="genA",
+        qdrant_shard_number=1,
+        qdrant_replication_factor=1,
+        qdrant_write_consistency_factor=1,
+    )
+    assert verify_staging_placement({"http://127.0.0.1:6333": _Standalone()}, settings) == []
+
+
+def test_staging_placement_single_node_unreachable_refused():
+    class _Down:
+        def cluster_status(self):
+            raise ConnectionError("refused")
+
+        def collection_cluster_info(self, name):
+            raise ConnectionError("refused")
+
+    settings = _settings(
+        qdrant_collection="genA",
+        qdrant_shard_number=1,
+        qdrant_replication_factor=1,
+        qdrant_write_consistency_factor=1,
+    )
+    problems = verify_staging_placement({"http://127.0.0.1:6333": _Down()}, settings)
+    assert problems
+    assert any("unreachable" in p for p in problems)
+
+
+def test_peer_endpoints_parsing():
+    assert Settings(_env_file=None).qdrant_peer_endpoints() == ()
+    settings = Settings(
+        _env_file=None, qdrant_peer_urls="http://a:6333, http://b:6333 ,,"
+    )
+    assert settings.qdrant_peer_endpoints() == ("http://a:6333", "http://b:6333")

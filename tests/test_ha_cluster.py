@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +41,7 @@ from scripts.verify_placement import perform_verification
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.completion import completion_collection_for
-from mainframe_rag.ingest.publish import verify_staging_distribution
+from mainframe_rag.ingest.publish import verify_staging_distribution, verify_staging_placement
 from mainframe_rag.ingest.qdrant_io import collection_vector_configs
 
 pytestmark = pytest.mark.integration
@@ -269,6 +270,50 @@ def test_cutover_gate_refuses_control_only_mismatch(cluster: QdrantCluster):
     assert problems
     assert any(control in problem for problem in problems)
     assert any("replication_factor=1" in problem for problem in problems)
+
+
+def test_active_copy_gate_blocks_cutover_while_degraded(
+    cluster: QdrantCluster, seeded_pair: SeededPair
+):
+    """The in-process cutover gate must refuse while one peer is down and
+    pass again after rejoin: degraded placement blocks the swap while the
+    old generation keeps serving. Same per-endpoint client surface the
+    publisher builds from QDRANT_PEER_URLS."""
+    settings = _settings(cluster.urls[0], seeded_pair.corpus)
+    dropped = f"{cluster.prefix}-2"
+    clients = {url: QdrantClient(url=url, timeout=30) for url in cluster.urls}
+    try:
+        assert verify_staging_placement(clients, settings) == []
+        subprocess.run(
+            ["docker", "stop", dropped], check=True, capture_output=True, text=True
+        )
+        problems = verify_staging_placement(clients, settings)
+        assert problems
+        assert any(
+            word in problems[0] for word in ("degraded", "unreachable", "unverifiable")
+        )
+        subprocess.run(
+            ["docker", "start", dropped], check=True, capture_output=True, text=True
+        )
+        wait_cluster_ready(cluster.urls)
+        for collection in (seeded_pair.corpus, seeded_pair.control):
+            wait_collection_placement(
+                cluster.urls, collection, shard_number=SHARDS, replication_factor=RF
+            )
+        # Post-rejoin convergence is not instant: ACTIVE placement returns
+        # before catch-up finishes, so the gate is waited for, not asserted
+        # once. A permanent loss times the wait out instead of passing.
+        deadline = time.monotonic() + 120.0
+        problems = ["no attempt"]
+        while time.monotonic() < deadline:
+            problems = verify_staging_placement(clients, settings)
+            if not problems:
+                break
+            time.sleep(2.0)
+        assert problems == [], problems
+    finally:
+        for client in clients.values():
+            client.close()
 
 
 def test_peer_loss_is_degraded_and_rejoins_healthy(

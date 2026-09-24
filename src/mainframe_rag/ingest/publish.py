@@ -35,7 +35,9 @@ import hashlib
 import json
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +55,15 @@ from mainframe_rag.ingest.completion import (
     representation_fingerprint,
 )
 from mainframe_rag.ingest.inventory import InventoryRecord
+from mainframe_rag.ingest.placement import (
+    PeerClusterView,
+    PlacementPolicy,
+    consensus_name,
+    evaluate_cluster,
+    evaluate_collection_placement,
+    member_peer_ids,
+    observe_collection,
+)
 from mainframe_rag.ports import QdrantPoints
 
 
@@ -767,6 +778,180 @@ def verify_staging_distribution(
                     "(snapshot-gated replica/rebuild migration, issue #360) — "
                     "never lower the production policy to hide it"
                 )
+    return problems
+
+
+def _cluster_info_of(client: QdrantPoints, collection: str):
+    """Eagerly-bound collection_cluster_info fetch for observe_collection
+    (avoids loop-variable closures when observing several endpoints)."""
+    return client.collection_cluster_info(collection)
+
+
+def _placement_peer_view(endpoint: str, client: QdrantPoints) -> PeerClusterView:
+    """One direct peer endpoint's own control-plane view for the in-process
+    gate (mirrors the verify_placement CLI reader: an unreadable view is an
+    explicit error, never a missing member). A standalone server reports no
+    peer id or membership (`{"status":"disabled"}`); that shape is carried
+    verbatim so the single-node profile can judge it on its own terms."""
+    try:
+        status = client.cluster_status()
+    except Exception as exc:  # noqa: BLE001 - reported as unreadable membership
+        return PeerClusterView(
+            endpoint, False, None, (), "", f"{type(exc).__name__}: {exc}"
+        )
+    return PeerClusterView(
+        endpoint=endpoint,
+        reachable=True,
+        peer_id=getattr(status, "peer_id", None),
+        member_peer_ids=member_peer_ids(status),
+        consensus=consensus_name(status),
+    )
+
+
+def verify_staging_placement(
+    clients_by_endpoint: Mapping[str, QdrantPoints],
+    staging_settings: Settings,
+) -> list[str]:
+    """In-process ACTIVE-copy gate for publication cutover (issue #360).
+
+    Reuses the placement evaluation owner over per-endpoint observations:
+    every required shard of the staging corpus AND its paired control
+    collection needs RF ACTIVE copies on distinct peers, and the endpoints
+    must form one healthy cluster. Degraded, recovering, unverifiable and
+    unservable all refuse cutover while the old generation keeps serving;
+    only a healthy verdict passes. Read-only: problems refuse the swap,
+    never recreate or downgrade. Empty when no explicit policy is selected
+    (dev path).
+
+    `clients_by_endpoint` maps each direct peer endpoint to a client bound
+    to it. The entry URL must never appear here as a peer identity: a
+    load-balanced Service alternating backends would masquerade as distinct
+    copies, and duplicate peer identities refuse. An empty mapping refuses
+    for any explicit policy — zero observations never certify, not even
+    1/1/1 (the single-node caller supplies its one endpoint explicitly).
+    The explicit 1/1/1 profile judges its single ACTIVE copy from collection
+    info alone: a standalone server reports no cluster peer id, so no
+    membership binding is possible there — the same trust as every other
+    single-endpoint read in the pipeline.
+    """
+    policy = staging_settings.collection_distribution_kwargs()
+    if not policy:
+        return []
+    staging = staging_settings.qdrant_collection
+    missing_keys = [
+        key
+        for key in ("shard_number", "replication_factor", "write_consistency_factor")
+        if key not in policy
+    ]
+    if missing_keys:
+        return [
+            (f"{staging}: placement cannot be judged on a partial policy "
+            f"(missing: {', '.join(missing_keys)}) — select the complete tuple "
+            "(issue #360)")
+        ]
+    if not clients_by_endpoint:
+        return [
+            (f"{staging}: replication_factor={policy['replication_factor']} selected "
+            "but no direct peer endpoints were supplied (QDRANT_PEER_URLS) — "
+            "placement cannot be certified through the entry endpoint "
+            "(issue #360)")
+        ]
+    expected = PlacementPolicy(
+        shard_number=policy["shard_number"],
+        replication_factor=policy["replication_factor"],
+        write_consistency_factor=policy["write_consistency_factor"],
+    )
+    endpoints = list(clients_by_endpoint)
+    if expected.as_tuple == (1, 1, 1) and len(endpoints) == 1:
+        return _verify_single_node_placement(
+            endpoints[0], clients_by_endpoint[endpoints[0]], staging_settings
+        )
+    if len(endpoints) < expected.replication_factor:
+        return [
+            (f"{staging}: {len(endpoints)} peer endpoint(s) cannot hold "
+            f"replication_factor={expected.replication_factor} distinct copies — "
+            "configure every expected peer (issue #360)")
+        ]
+    views = tuple(
+        _placement_peer_view(endpoint, clients_by_endpoint[endpoint])
+        for endpoint in endpoints
+    )
+    cluster = evaluate_cluster(expected_peers=len(endpoints), views=views)
+    if cluster.state != "healthy":
+        detail = "; ".join(cluster.problems) or "no healthy cluster"
+        return [f"{staging}: cluster {cluster.state}: {detail} (issue #360)"]
+    collections = (staging, completion_collection_name(staging_settings))
+    observations = [
+        observe_collection(
+            collection,
+            endpoint,
+            fetch=partial(_cluster_info_of, clients_by_endpoint[endpoint]),
+        )
+        for endpoint in endpoints
+        for collection in collections
+    ]
+    problems: list[str] = []
+    for collection in collections:
+        verdict = evaluate_collection_placement(
+            collection, observations, expected, accepted_peers=cluster.member_ids
+        )
+        if verdict.state != "healthy":
+            detail = "; ".join(verdict.problems) or "no ACTIVE quorum"
+            problems.append(
+                f"{collection}: placement {verdict.state}: {detail} (issue #360)"
+            )
+    return problems
+
+
+def _verify_single_node_placement(
+    endpoint: str, client: QdrantPoints, staging_settings: Settings
+) -> list[str]:
+    """Judge the explicit 1/1/1 profile through its one endpoint: the single
+    copy of every required shard must be ACTIVE with no transfers. The peer
+    id comes from the collection observation itself — standalone servers
+    report no cluster-level identity."""
+    staging = staging_settings.qdrant_collection
+    expected = PlacementPolicy(1, 1, 1)
+    collections = (staging, completion_collection_name(staging_settings))
+    observations = [
+        observe_collection(
+            collection, endpoint, fetch=lambda name: client.collection_cluster_info(name)
+        )
+        for collection in collections
+    ]
+    unreachable = [view for view in observations if not view.reachable]
+    if unreachable:
+        return [
+            (f"{staging}: single peer endpoint {endpoint} unreachable "
+            f"({unreachable[0].error or 'no response'}) — placement unverifiable "
+            "(issue #360)")
+        ]
+    peer_ids: list[int] = []
+    for view in observations:
+        if view.peer_id is None:
+            return [
+                (
+                    f"{staging}: peer identity unreadable from {endpoint} — "
+                    "placement unverifiable (issue #360)"
+                )
+            ]
+        peer_ids.append(view.peer_id)
+    if len(set(peer_ids)) != 1:
+        return [
+            (f"{staging}: peer identity inconsistent across the required "
+            "collections — placement unverifiable (issue #360)")
+        ]
+    accepted = (peer_ids[0],)
+    problems: list[str] = []
+    for collection in collections:
+        verdict = evaluate_collection_placement(
+            collection, observations, expected, accepted_peers=accepted
+        )
+        if verdict.state != "healthy":
+            detail = "; ".join(verdict.problems) or "no ACTIVE copy"
+            problems.append(
+                f"{collection}: placement {verdict.state}: {detail} (issue #360)"
+            )
     return problems
 
 

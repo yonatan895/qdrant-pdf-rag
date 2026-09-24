@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -92,6 +92,7 @@ from mainframe_rag.ingest.publish import (
     verify_all_complete,
     verify_searchable_coverage,
     verify_staging_distribution,
+    verify_staging_placement,
     write_publication_metadata,
     write_publish_state,
 )
@@ -328,6 +329,59 @@ def _get_qdrant(settings: Settings):
             timeout=settings.qdrant_ingest_timeout_s,
         )
     return _worker_qdrant
+
+
+@contextmanager
+def _placement_clients(settings: Settings, main_client):
+    """Endpoint -> client map for the ACTIVE-copy cutover gate (issue #360).
+
+    Yields None when no explicit distribution policy is selected (dev
+    passthrough — the gate is a no-op). Otherwise every direct peer
+    endpoint from QDRANT_PEER_URLS gets its own client; constructed
+    clients are closed on exit, the shared publisher client never is.
+    With an RF>1 policy but no configured endpoints the gate fails
+    closed at the call site (unknown placement is unverifiable); the
+    explicit 1/1/1 profile judges its single copy through the entry
+    endpoint, mirroring the verifier's single-node claim.
+    """
+    if not settings.collection_distribution_kwargs():
+        yield None
+        return
+    endpoints = settings.qdrant_peer_endpoints()
+    if not endpoints:
+        selected = (
+            settings.qdrant_shard_number,
+            settings.qdrant_replication_factor,
+            settings.qdrant_write_consistency_factor,
+        )
+        if selected == (1, 1, 1):
+            yield {settings.qdrant_url: main_client}
+            return
+        raise RuntimeError(
+            "collection distribution policy selects "
+            f"{settings.qdrant_replication_factor or '?'}x replication but no "
+            "direct Qdrant peer endpoints are configured (QDRANT_PEER_URLS is "
+            "unset): placement cannot be certified through the entry endpoint "
+            "— alias untouched, operator intervention required (issue #360)."
+        )
+    from qdrant_client import QdrantClient
+
+    mapping = {
+        endpoint: QdrantClient(
+            url=endpoint,
+            api_key=settings.qdrant_api_key,
+            timeout=settings.qdrant_ingest_timeout_s,
+            prefer_grpc=False,
+        )
+        for endpoint in endpoints
+    }
+    try:
+        yield mapping
+    finally:
+        for peer_client in mapping.values():
+            close = getattr(peer_client, "close", None)
+            if callable(close):
+                close()
 
 
 class _DocLocks:
@@ -1462,6 +1516,20 @@ def _run_publish_locked(
                 f"(e.g. {dist_problems[0]!r}) — alias untouched, operator "
                 "intervention required (issue #360)."
             )
+        with _placement_clients(settings, client) as placement_map:
+            place_problems = (
+                []
+                if placement_map is None
+                else verify_staging_placement(placement_map, staging_settings)
+            )
+        if place_problems:
+            raise RuntimeError(
+                f"live generation {live!r} fails ACTIVE-copy placement for "
+                f"{len(place_problems)} check(s) "
+                f"(e.g. {place_problems[0]!r}) — alias untouched, the old "
+                "generation keeps serving reads, operator intervention "
+                "required (issue #360)."
+            )
         problems = verify_all_complete(
             client,
             staging_settings,
@@ -1574,6 +1642,19 @@ def _run_publish_locked(
             f"{len(dist_problems)} check(s) "
             f"(e.g. {dist_problems[0]!r}) — alias untouched, {live!r} still live "
             "(issue #360)."
+        )
+    with _placement_clients(settings, client) as placement_map:
+        place_problems = (
+            []
+            if placement_map is None
+            else verify_staging_placement(placement_map, staging_settings)
+        )
+    if place_problems:
+        raise RuntimeError(
+            f"staging {staging!r} fails ACTIVE-copy placement for "
+            f"{len(place_problems)} check(s) "
+            f"(e.g. {place_problems[0]!r}) — alias untouched, {live!r} still "
+            "live (issue #360)."
         )
     problems = verify_all_complete(
         client,

@@ -51,6 +51,20 @@ def test_collection_policy_env_override(monkeypatch):
     }
 
 
+def test_peer_endpoints_env_override(monkeypatch):
+    """Issue #360: direct peer endpoints load from the operator environment;
+    unset means unconfigured (never inferred)."""
+    assert Settings(_env_file=None).qdrant_peer_endpoints() == ()
+    monkeypatch.setenv(
+        "QDRANT_PEER_URLS", "http://qdrant-0:6333,http://qdrant-1:6333"
+    )
+    s = Settings(_env_file=None)
+    assert s.qdrant_peer_endpoints() == (
+        "http://qdrant-0:6333",
+        "http://qdrant-1:6333",
+    )
+
+
 def test_collection_policy_rejects_non_positive(monkeypatch):
     """Production numbers are explicit owner decisions, but zero/negative
     values are never a policy: fail closed at settings load."""
@@ -327,6 +341,7 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "qdrant_shard_number": None,
     "qdrant_replication_factor": None,
     "qdrant_write_consistency_factor": None,
+    "qdrant_peer_urls": None,
     "embed_mode": "vllm",
     "embed_base_url": None,
     "embed_model": None,

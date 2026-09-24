@@ -62,6 +62,12 @@ class QdrantPoints(Protocol):
 
     def get_collection(self, collection_name: str) -> models.CollectionInfo: ...
 
+    def collection_cluster_info(
+        self, collection_name: str
+    ) -> models.CollectionClusterInfo: ...
+
+    def cluster_status(self) -> models.ClusterStatus: ...
+
     def create_collection(
         self,
         collection_name: str,
