@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     qdrant_shard_number: int | None = Field(default=None, ge=1)
     qdrant_replication_factor: int | None = Field(default=None, ge=1)
     qdrant_write_consistency_factor: int | None = Field(default=None, ge=1)
+    # Direct Qdrant peer endpoints for in-process placement enforcement
+    # (issue #360): comma-separated REST URLs, one per expected peer. The
+    # entry QDRANT_URL (often a load-balanced Service) can never certify
+    # peer identities, so the cutover ACTIVE-copy gate needs these
+    # addresses. None means unconfigured — never inferred from pod count.
+    # Air-gap operator plumbing (example/keys/render/Task) is a follow-up
+    # slice; this field is settable via environment in this change.
+    qdrant_peer_urls: str | None = None
 
     # Embeddings. mode "vllm" = internal vLLM (prod, OpenAI-compatible);
     # mode "hash" = local deterministic hashing (CI/dev only, issue #8).
@@ -365,6 +373,17 @@ class Settings(BaseSettings):
         if self.qdrant_write_consistency_factor is not None:
             kwargs["write_consistency_factor"] = self.qdrant_write_consistency_factor
         return kwargs
+
+    def qdrant_peer_endpoints(self) -> tuple[str, ...]:
+        """Parsed direct peer endpoints: comma-split, stripped, empties
+        dropped. Duplicates are kept — the placement gate refuses them as
+        a misconfiguration (duplicate peer identities) rather than
+        silently deduping one peer into several copies."""
+        if not self.qdrant_peer_urls:
+            return ()
+        return tuple(
+            part.strip() for part in self.qdrant_peer_urls.split(",") if part.strip()
+        )
 
     def require_embed(self) -> tuple[str, str]:
         if self.embed_mode == "hash":

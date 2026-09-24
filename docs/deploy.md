@@ -398,9 +398,13 @@ observations stay nonzero. The verifier observes placement only — it
 performs no read or write request, so `healthy` is not read availability,
 write acknowledgement, or RPO/RTO evidence. Exit 2 is a usage or
 contradictory/incomplete claim. The final `VERDICT:` line is the
-machine-readable outcome. Moving replicas and integrating the verifier with
-publication eligibility are the later migration slice; this command never
-mutates.
+machine-readable outcome. Moving replicas is the later migration slice;
+this command never mutates. Publication eligibility is enforced in process
+as well as by this command: the cutover gate requires RF ACTIVE copies per
+shard on the staging pair through direct peer endpoints (`QDRANT_PEER_URLS`,
+[publication contract](ingest.md#publication-contract)) and refuses while
+degraded; operator plumbing of that setting through the air-gap render path
+is a follow-up slice.
 
 **Disposable local proof:** `scripts/qdrant_cluster.py` starts the pinned
 image as three loopback peers and `tests/test_ha_cluster.py`
@@ -409,7 +413,9 @@ false-HA (RF1) corpus+control refusal, degraded reads and healthy rejoin
 after stopping one peer, exact corpus **and seeded control-record**
 ids/payloads through survivors and again on every peer after rejoin, and
 the publication cutover gate over real staging pairs (healthy 6/3/2
-passes; RF1 and control-only-mismatched staging refused). Each
+passes; RF1 and control-only-mismatched staging refused) and the in-process
+ACTIVE-copy gate (refuses while one peer is down, passes again after
+rejoin). Each
 scenario creates its own corpus+control pair, so it runs alone or in any
 order, and rejoin waits for every shard to be ACTIVE on three distinct
 peers before re-qualifying (membership count alone is not catch-up). Three
@@ -675,8 +681,10 @@ one-node profile, never inferred). Values reach
 `Settings` and both collection constructors verbatim; shard defaults are not
 reconstructed from pod count or an assumed server default. Live placement
 verification exists (`scripts/verify_placement.py`,
-[collection policy](#collection-policy)); snapshot-gated migration of
-existing collections, publication eligibility integration and the recorded
+[collection policy](#collection-policy)) and the cutover gate enforces
+ACTIVE copies in process (`publish.verify_staging_placement`, fed by the
+`QDRANT_PEER_URLS` setting pending its operator-path plumbing);
+snapshot-gated migration of existing collections and the recorded
 node-loss/site qualification remain later slices.
 
 **Absent/blank semantics:** `common.sh` currently gives non-empty explicit env

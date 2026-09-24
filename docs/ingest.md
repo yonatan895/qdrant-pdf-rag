@@ -776,9 +776,17 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   cutover (`publish.verify_staging_distribution`, also applied to the
   already-live re-verify): a missing, unreadable, or mismatched value
   refuses with the alias untouched and names the snapshot-gated migration,
-  never a policy downgrade. Per-shard ACTIVE-copy qualification of the
-  candidate via direct-peer verification remains the operator step before
-  relying on HA.
+  never a policy downgrade. Publication then enforces per-shard ACTIVE
+  copies in process (`publish.verify_staging_placement`, same two call
+  sites): every required shard of the staging corpus and control pair must
+  hold RF ACTIVE copies on distinct peers observed through direct peer
+  endpoints (`QDRANT_PEER_URLS`), with a healthy cluster verdict —
+  degraded, recovering, unverifiable and unservable all refuse with the
+  alias untouched while the old generation keeps serving. Zero observations
+  never certify (RF>1 without peer endpoints fails closed); the explicit
+  1/1/1 profile judges its single copy through its one endpoint. Moving
+  replicas to repair an under-replicated candidate remains the
+  snapshot-gated migration slice, never automatic.
 - Representation migration writes `pending`, then commits after no document
   failures, `stale_completion_markers` finds no differently stamped markers,
   and the read-only scope proof attributes every searchable point to a verified
