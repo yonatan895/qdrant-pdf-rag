@@ -10,11 +10,14 @@ import hashlib
 import io
 import json
 import stat
+import xml.etree.ElementTree as ET
 import zipfile
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
 from scripts.ci_evidence import junit_bytes
+from scripts.unit_evidence import validate as validate_unit_coverage
 
 LIMIT = 16 * 1024 * 1024
 
@@ -39,6 +42,7 @@ PRODUCERS = (
     NativeProducer('ci.yml', 'unit (1/2)', 'unit', 'unit_tests', 'unit-1', 'execution', True),
     NativeProducer('ci.yml', 'unit (2/2)', 'unit', 'unit_tests', 'unit-2', 'execution', True),
     NativeProducer('ci.yml', 'sim', 'sim', 'simulation', 'sim', 'execution', True),
+    NativeProducer('agent-probes.yml', 'agent-probes', 'agent-probes', 'agent_probes', 'agent-probes', 'execution', True),
     NativeProducer('ci.yml', 'gate-l1', 'gate-l1', 'gate_l1', 'gate-l1', 'execution', structured=True),
     NativeProducer('ci.yml', 'hazards', 'hazards', 'hazards', 'hazards', 'execution', structured=True),
     NativeProducer('load.yml', 'load', 'load', 'load', 'load', 'execution', True),
@@ -130,6 +134,7 @@ def normalize_native(
     execution_commit: dict[str, Any], archive: bytes,
     policy_digest: str, producer_digest: str, workflow_digest: str, workflow_source: bytes,
     hazard_policy: dict[str, Any] | None = None,
+    unit_policy: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Reject stale/misattributed receipts before returning a native lane result.
 
@@ -191,8 +196,27 @@ def normalize_native(
             require('tests.xml' not in files)
         else:
             require(junit_bytes(files['tests.xml']) == counts)
+            if producer.lane == 'agent_probes':
+                # Counts alone cannot substitute unrelated passing tests for
+                # live transport, traced execution and cancellation witnesses.
+                records = Counter((case.get('classname'), case.get('name'))
+                                  for case in ET.fromstring(files['tests.xml']).iter('testcase'))
+                for name in (
+                    'test_live_agent_contract_and_fresh_trace',
+                    'test_live_agent_fixed_overlong_envelope',
+                    'test_live_agent_stream_final_matches_buffered',
+                    'test_live_agent_disconnect_closes_upstream_then_next_request',
+                ):
+                    require(records[('tests.live_agent_probes', name)] == 1)
+
     else:
         require(counts is None and 'tests.xml' not in files)
+    unit_coverage = None
+    if producer.lane == 'unit_tests':
+        if unit_policy is None:
+            raise ValueError("native unit selection policy is required")
+        shard = {'unit (1/2)': 1, 'unit (2/2)': 2}[producer.job]
+        unit_coverage = validate_unit_coverage(report['unit_coverage'], shard, files['tests.xml'], unit_policy)
     if producer.structured:
         require(report['result_sha256'] == hashlib.sha256(files['results.json']).hexdigest())
         structured = object_json(files['results.json'])
@@ -204,7 +228,8 @@ def normalize_native(
     return {'lane': producer.lane, 'status': 'success', 'run_id': run['id'],
             'run_attempt': run['run_attempt'], 'job_id': job['id'],
             'artifact_id': artifact['id'], 'artifact_digest': artifact['digest'],
-            'execution_sha': execution_commit['sha'], 'tests': counts, 'results': structured}
+            'execution_sha': execution_commit['sha'], 'tests': counts, 'results': structured,
+            'unit_coverage': unit_coverage}
 
 
 def paginate(get, endpoint: str, key: str | None = None, *, identity_key: str = "id") -> list[dict[str, Any]]:

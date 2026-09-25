@@ -197,6 +197,21 @@ with the failure and next action when validation is blocked.
 6. Live agent probes — `sh scripts/tools/run-task.sh local:agent` (or equivalent uvicorn) against the real stack, then the copy-paste probes below (agent on `:8087` in these examples; `Q` is the query). Green: trap refuses with zero validated citations, legit answers grounded with ≥1 citation, overlong 422s with the fixed envelope. `sh scripts/tools/run-task.sh local:stack` enables the operator console by default (`UI_ENABLED=true`, console at `/ui`, smoke-checked in the up sequence; the banner prints the URL, and `UI_ENABLED=false sh scripts/tools/run-task.sh local:stack` exercises the fail-closed route set); `sh scripts/tools/run-task.sh local:agent` honors `UI_ENABLED` (`UI_ENABLED=true sh scripts/tools/run-task.sh local:agent`; unset keeps the app fail-closed).
 7. Feature A/B numbers in the PR body — any retrieval/ranking change ships measured deltas (2×2 where applicable: off/on × base/context), per-query attribution for every moved query, must_not hard-zero.
 
+### Native transport and lifecycle probes
+
+`agent-probes.yml` explicitly prepares pinned Qdrant and Jaeger images before
+running the four tests in `tests/live_agent_probes.py`. With the approved dev
+wheelhouse, Task/Helm tools and those images already prepared, the local entry is
+`ALLOW_HASH_MODE=1 sh scripts/tools/run-task.sh qa:unit -- -m integration tests/live_agent_probes.py -v`.
+Verification uses `--pull=never`, original synthetic PDFs, actual agent HTTP and
+fresh Jaeger traces. The model stand-in scripts grounded text and trap refusal;
+this proves application transport, citation labeling and cleanup, not semantic
+model quality. A waiting upstream must observe the actual downstream disconnect,
+and the next ordinary answer must succeed. The dedicated filename avoids adding
+these service prerequisites to ordinary unit/simulation collection. Native
+acceptance validates the four named test records in addition to normal provenance
+and failure/skip checks. Semantic evaluation still needs an approved venue.
+
 ### Rung 6 probes (exact)
 
 ```sh
