@@ -460,7 +460,7 @@ async def test_closing_core_stream_releases_operation_without_closing_shared_mod
     assert closed == ["operation", "operation"]
 
 
-def test_core_import_graph_excludes_transports_and_application_singleton():
+def _assert_core_import_boundary():
     """Follow deferred imports too: a cold import alone misses function-local dependencies."""
     import ast
     from pathlib import Path
@@ -490,6 +490,38 @@ def test_core_import_graph_excludes_transports_and_application_singleton():
                 if node.module.startswith("mainframe_rag."):
                     pending.append(node.module)
                     pending.extend(node.module + "." + alias.name for alias in node.names)
+
+
+def test_core_import_graph_excludes_transports_and_application_singleton():
+    _assert_core_import_boundary()
+
+
+@pytest.mark.parametrize(
+    "module, injected, forbidden",
+    [
+        ("answer_core", "import mainframe_rag.agent.app", "mainframe_rag.agent.app"),
+        ("model_adapter", "def deferred():\n    from mainframe_rag.webui import routes",
+         "mainframe_rag.webui.routes"),
+        ("core_ports", "from mainframe_rag.agent import sse", "mainframe_rag.agent.sse"),
+    ],
+)
+def test_core_import_checker_rejects_forbidden_dependency(monkeypatch, module, injected, forbidden):
+    """Challenge the actual graph checker without importing or modifying application code."""
+    import re
+    from pathlib import Path
+
+    target = Path(__file__).resolve().parents[1] / "src/mainframe_rag/agent" / (module + ".py")
+    original_read = Path.read_text
+
+    def with_forbidden_import(path, *args, **kwargs):
+        source = original_read(path, *args, **kwargs)
+        return source + "\n" + injected + "\n" if path == target else source
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", with_forbidden_import)
+        with pytest.raises(AssertionError, match=re.escape(forbidden)):
+            _assert_core_import_boundary()
+    _assert_core_import_boundary()
 
 
 def test_core_type_boundary_rejects_storage_injection_and_write_use(tmp_path):
