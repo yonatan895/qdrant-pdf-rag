@@ -21,7 +21,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
@@ -51,7 +51,9 @@ from mainframe_rag.agent.answer_core import (
     resolve_search_query,
 )
 from mainframe_rag.agent.chat_turn import InvalidChatTurn, PreparedChatTurn, prepare_chat_turn
+from mainframe_rag.agent.core_ports import RetrievalResult
 from mainframe_rag.agent.metrics import endpoint_for_path, record_request, setup_metrics
+from mainframe_rag.agent.model_adapter import ModelAdapter
 from mainframe_rag.agent.serving import ServingGate, ServingGeneration
 from mainframe_rag.agent.sse import (
     empty_final_payload,
@@ -145,7 +147,10 @@ def prepare_chat_request(
         raise AppError(422, "invalid_request", "request body failed validation") from exc
 
 
-async def _await_retrieval(res) -> tuple:
+async def _await_retrieval(
+    res: tuple[list[SearchHit], str, dict[str, int]]
+    | Awaitable[tuple[list[SearchHit], str, dict[str, int]]],
+) -> tuple[list[SearchHit], str, dict[str, int]]:
     """Sync/async retrieval-leg shim: the pooled async client awaits while
     sync test doubles resolve inline — one helper serves both endpoints so
     the twin call sites cannot diverge (review S2)."""
@@ -159,14 +164,22 @@ def core_deps() -> AnswerCoreDeps:
     time, so tests that monkeypatch app_mod (llm, retrieve_search,
     build_messages) drive the core through the same seam as production, and
     the operator console reuses the identical retrieval/LLM wiring."""
+    client, embedding, ranking, retrieve_fn = qdrant, embedder, reranker, retrieve_search
+
+    async def retrieve(
+        query: str, *, product: str | None, version: str | None, settings: Settings
+    ) -> RetrievalResult:
+        hits, kind, timings = await _await_retrieval(retrieve_fn(
+            client, embedding, settings.qdrant_collection, query,
+            product=product, version=version, limit=8, settings=settings, reranker=ranking,
+        ))
+        return RetrievalResult(hits, kind, timings)
+
     return AnswerCoreDeps(
         settings=settings,
-        llm=llm,
-        qdrant=qdrant,
-        embedder=embedder,
-        reranker=reranker,
+        llm=ModelAdapter(llm),
+        retrieve=retrieve,
         tokenizer=tokenizer,
-        retrieve_search_fn=retrieve_search,
         build_messages_fn=build_messages,
         build_chat_messages_fn=build_chat_messages,
         classify_query_complexity_fn=classify_query_complexity,
@@ -1194,14 +1207,13 @@ async def v1_answer(
         nonlocal terminal
         try:
             async for item in execute_answer_core_stream(core_input, deps, parent_span=root_span):
-                itype = item.get("type")
-                if itype == "token":
-                    delta = item.get("delta") or ""
+                if item["type"] == "token":
+                    delta = item["delta"]
                     if delta:
                         yield format_sse_event(
                             "token", {"type": "token", "delta": delta, "token": delta}
                         )
-                elif itype == "final":
+                elif item["type"] == "final":
                     output = item["output"]
                     if not output.hits:
                         root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
@@ -1548,12 +1560,11 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         nonlocal terminal
         try:
             async for item in execute_answer_core_stream(core_input, deps, parent_span=root_span):
-                itype = item.get("type")
-                if itype == "token":
-                    delta = item.get("delta") or ""
+                if item["type"] == "token":
+                    delta = item["delta"]
                     if delta:
                         yield format_openai_chunk(chat_id, llm_model, delta_content=delta)
-                elif itype == "final":
+                elif item["type"] == "final":
                     output = item["output"]
                     if not output.hits:
                         yield format_openai_chunk(chat_id, llm_model, delta_content=output.answer)

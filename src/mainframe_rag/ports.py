@@ -51,6 +51,29 @@ class Reranker(Protocol):
 
 
 @runtime_checkable
+class QdrantSearch(Protocol):
+    """Read-only retrieval capability; sync/async SDK results meet one port.
+
+    A protocol restricts consumer operations, not credentials or Python
+    introspection. The serving connection must still use a read-only key.
+    Batch support is an optional separate capability.
+    """
+
+    def query_points(
+        self, collection_name: str, *, query: list[float] | models.SparseVector,
+        using: str, limit: int, query_filter: models.Filter | None,
+        with_payload: bool | list[str],
+    ) -> models.QueryResponse | Awaitable[models.QueryResponse]: ...
+
+
+@runtime_checkable
+class QdrantBatchSearch(Protocol):
+    def query_batch_points(
+        self, collection_name: str, *, requests: list[models.QueryRequest],
+    ) -> list[models.QueryResponse] | Awaitable[list[models.QueryResponse]]: ...
+
+
+@runtime_checkable
 class QdrantPoints(Protocol):
     """The Qdrant surface this project actually uses — only these methods may
     appear at layer edges. Unit tests fake this protocol, which is why the
@@ -331,15 +354,15 @@ class ZoweMCP(Protocol):
 @runtime_checkable
 class LLMClient(Protocol):
     """Reasoning-model chat (answer path only). Implementations fail closed
-    when no reasoning model is configured. May return ChatResult or Awaitable[ChatResult].
+    when no reasoning model is configured. Legacy callers may return a string;
+    the core adapter normalizes sync/async results to ChatResult.
 
     Implementations may additionally expose ``async chat_stream(messages, ...)
     -> AsyncIterator[dict]`` (yielding {"type": "token", ...} then a terminal
     {"type": "done", ...} item); /v1/answer streaming duck-types this
-    capability via hasattr and falls back to non-streaming chat otherwise.
-    There is deliberately no separate async-chat protocol: HttpxLLMClient's
-    chat() resolves to a coroutine when called on a running loop, and every
-    consumer funnels through as_chat_result / isawaitable.
+    capability at the model adapter and falls back to non-streaming chat otherwise.
+    This legacy protocol preserves HttpxLLMClient's sync tooling interface.
+    The core uses the separate async AnswerModel protocol through ModelAdapter.
     """
 
     def chat(
@@ -347,4 +370,4 @@ class LLMClient(Protocol):
         messages: list[ChatMessage],
         reasoning_effort: str | None = None,
         temperature: float | None = None,
-    ) -> ChatResult | Awaitable[ChatResult]: ...
+    ) -> ChatResult | str | Awaitable[ChatResult | str]: ...

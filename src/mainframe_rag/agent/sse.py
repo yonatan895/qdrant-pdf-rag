@@ -8,16 +8,13 @@ normal and empty-hits paths by construction — both call sites build it here.
 
 from __future__ import annotations
 
-import inspect
 import json
 import time
 from typing import TYPE_CHECKING, Any
 
-from mainframe_rag.agent.answer import as_chat_result
 from mainframe_rag.ports import TokenUsage
 
 if TYPE_CHECKING:
-    from mainframe_rag.ports import LLMClient
     from mainframe_rag.retrieve.query import SearchHit
 
 # Single error shape for every mid-stream failure (was two identical
@@ -133,19 +130,6 @@ def final_payload(
         "ttft_ms": ttft_ms,
         "usage": _usage_payload(usage),
     }
-
-
-async def fallback_stream(llm: LLMClient, messages: list, reasoning_effort: str, temperature: float):
-    """Non-streaming LLM fallback shaped as token/done items: one token
-    carrying the whole content, then done with finish_reason + usage."""
-    chat_call = llm.chat(
-        messages,
-        reasoning_effort=reasoning_effort,
-        temperature=temperature,
-    )
-    cr = as_chat_result(await chat_call if inspect.isawaitable(chat_call) else chat_call)
-    yield {"type": "token", "delta": cr.content, "token": cr.content, "ttft_ms": cr.ttft_ms}
-    yield {"type": "done", "finish_reason": cr.finish_reason, "usage": cr.usage, "ttft_ms": cr.ttft_ms}
 
 
 def format_openai_chunk(

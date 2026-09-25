@@ -599,6 +599,15 @@ assertions: eligibility and transport tests do not prove semantic support or all
 browser completion behavior. #365/#372 retain those gaps; no model run is claimed
 by this documentation audit.
 
+The shared core consumes typed operations from `core_ports`. Application
+composition captures request dependencies and passes the validated physical
+collection through the retrieval operation's settings. The model adapter owns
+legacy sync/async compatibility and validates stream token/terminal fields;
+malformed terminals remain incomplete generation errors, never successful finals.
+Closing a core stream closes its upstream operation without closing the shared
+model client. [Architecture](architecture.md#boundary-map) owns the dependency
+and capability restrictions.
+
 <a id="http-model-contract"></a>
 ## HTTP/model fallback and lifecycle policy
 

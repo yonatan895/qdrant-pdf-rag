@@ -149,7 +149,23 @@ imports and the operations available to a consumer, not infer read-only authorit
 from a protocol annotation alone. Runtime credentials remain independently
 read-only. Stream token/terminal/error types must preserve buffered recovery and
 post-emission no-replay behavior, along with cancellation and client ownership.
-These are A1 acceptance requirements, not claims that all current seams satisfy them.
+`AnswerCoreDeps` now receives `Retriever` and `AnswerModel` operations and typed
+prompt builders; it has no raw Qdrant/embedder/admin handle. `ModelAdapter`
+normalizes legacy sync/async/string results and token/done mappings; errors
+propagate as exceptions, including the existing typed `TruncatedStreamError`.
+`CoreToken`/`CoreFinal` discriminate the internal stream; transport wire schemas
+remain unchanged. The adapter closes per-operation generators, never shared
+clients. The application lifespan retains client ownership.
+
+`QdrantSearch` and optional `QdrantBatchSearch` expose retrieval reads, while
+`QdrantPoints`/`AsyncQdrantPoints` retain publication/admin operations. Structural
+protocols restrict checked consumer operations; they are not a Python sandbox
+and do not prove a supplied credential is read-only. Existing serving credential
+requirements remain mandatory. `tests/test_answer_core.py` checks the transitive
+core import graph, rejects raw storage injection/write use with the real type
+checker, and exercises adapter parity plus stream cleanup/next operation.
+Targeted strict type options apply to `answer_core`, `core_ports` and
+`model_adapter`; legacy modules gain no new ignore rules.
 
 ### 4.1 Document Ingest & Chunking
 

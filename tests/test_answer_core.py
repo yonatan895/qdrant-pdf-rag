@@ -7,6 +7,8 @@ condensation gate, and the empty-hits stream shape.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from mainframe_rag.agent.answer import (
@@ -24,6 +26,8 @@ from mainframe_rag.agent.answer_core import (
     execute_answer_core_stream,
     resolve_search_query,
 )
+from mainframe_rag.agent.core_ports import RetrievalResult
+from mainframe_rag.agent.model_adapter import ModelAdapter
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
@@ -74,13 +78,14 @@ class CoreFakeLLM:
 
 
 def _deps(settings: Settings, llm, retrieve) -> AnswerCoreDeps:
-    return AnswerCoreDeps(
-        settings=settings,
-        llm=llm,
-        qdrant=None,
-        embedder=None,
-        retrieve_search_fn=retrieve,
-    )
+    async def retrieve_adapter(query, *, product, version, settings):
+        result = retrieve(None, None, settings.qdrant_collection, query,
+                          product=product, version=version, settings=settings, limit=8)
+        if inspect.isawaitable(result):
+            result = await result
+        return RetrievalResult(*result)
+
+    return AnswerCoreDeps(settings=settings, llm=ModelAdapter(llm), retrieve=retrieve_adapter)
 
 
 def test_chat_body_chars_counts_messages_and_context():
@@ -403,3 +408,155 @@ async def test_core_stream_explicit_done_still_finalizes():
     ]
     assert [i["type"] for i in items] == ["token", "final"]
     assert items[-1]["output"].finish_reason == "stop"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_legacy_model_results_match_buffered_and_fallback_stream(asynchronous):
+    """Bare strings and awaitables are supported at the adapter, not in core branches."""
+    class LegacyModel:
+        def chat(self, messages, reasoning_effort=None, temperature=None):
+            async def result():
+                return "Synthetic answer."
+            return result() if asynchronous else "Synthetic answer."
+
+    deps = _stream_deps(LegacyModel())
+    source = AnswerCoreInput(query="IEA500I rejected")
+    buffered = await execute_answer_core(source, deps)
+    events = [item async for item in execute_answer_core_stream(source, deps)]
+    final = events[-1]["output"]
+    assert buffered.answer == final.answer == "Synthetic answer."
+    assert buffered.finish_reason == final.finish_reason == "stop"
+    assert buffered.citations == final.citations == []
+    assert buffered.verification_state == final.verification_state
+    assert [item["type"] for item in events] == ["token", "final"]
+
+
+@pytest.mark.anyio
+async def test_closing_core_stream_releases_operation_without_closing_shared_model():
+    closed = []
+
+    class Model(CoreFakeLLM):
+        async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+            try:
+                yield {"type": "token", "delta": "Provisional."}
+                yield {"type": "done", "finish_reason": "stop"}
+            finally:
+                closed.append("operation")
+
+        def close(self):
+            raise AssertionError("core does not own the shared client")
+
+    deps = _stream_deps(Model())
+    stream = execute_answer_core_stream(AnswerCoreInput(query="IEA500I"), deps)
+    assert (await anext(stream))["type"] == "token"
+    await stream.aclose()
+    assert closed == ["operation"]
+    # Cleanup must preserve the next ordinary operation, not only cancellation.
+    result = [event async for event in execute_answer_core_stream(
+        AnswerCoreInput(query="IEA500I"), deps
+    )]
+    assert result[-1]["type"] == "final"
+    assert closed == ["operation", "operation"]
+
+
+def test_core_import_graph_excludes_transports_and_application_singleton():
+    """Follow deferred imports too: a cold import alone misses function-local dependencies."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src"
+    pending = ["mainframe_rag.agent.answer_core", "mainframe_rag.agent.model_adapter"]
+    visited = set()
+    forbidden = ("mainframe_rag.agent.app", "mainframe_rag.agent.sse",
+                 "mainframe_rag.webui", "mainframe_rag.mcp")
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        assert not any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden), name
+        path = root.joinpath(*name.split(".")).with_suffix(".py")
+        if not path.is_file():
+            path = root.joinpath(*name.split("."), "__init__.py")
+        if not path.is_file():
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                pending.extend(alias.name for alias in node.names
+                               if alias.name.startswith("mainframe_rag."))
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                assert node.level == 0, "resolve relative imports in the boundary walker before use"
+                if node.module.startswith("mainframe_rag."):
+                    pending.append(node.module)
+                    pending.extend(node.module + "." + alias.name for alias in node.names)
+
+
+def test_core_type_boundary_rejects_storage_injection_and_write_use(tmp_path):
+    """The same checker used by qa:typecheck must accept reads and reject admin access."""
+    import subprocess
+    import sys
+
+    source = tmp_path / "capabilities.py"
+    imports = """
+from mainframe_rag.agent.answer_core import AnswerCoreDeps
+from mainframe_rag.agent.core_ports import AnswerModel, Retriever
+from mainframe_rag.config import Settings
+from mainframe_rag.ports import QdrantBatchSearch, QdrantPoints, QdrantSearch
+from qdrant_client import QdrantClient, AsyncQdrantClient
+"""
+    source.write_text(imports + """
+def good(settings: Settings, model: AnswerModel, read: Retriever) -> AnswerCoreDeps:
+    return AnswerCoreDeps(settings=settings, llm=model, retrieve=read)
+
+def real_clients(sync: QdrantClient, async_client: AsyncQdrantClient) -> None:
+    sync_read: QdrantSearch = sync
+    async_read: QdrantSearch = async_client
+    sync_batch: QdrantBatchSearch = sync
+    async_batch: QdrantBatchSearch = async_client
+""")
+    command = [sys.executable, "-m", "mypy", "--strict", "--follow-imports=silent",
+               "--no-incremental", str(source)]
+    good = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert good.returncode == 0, good.stdout + good.stderr
+    source.write_text(imports + """
+def bad(settings: Settings, model: AnswerModel, writer: QdrantPoints,
+        read: QdrantSearch, deps: AnswerCoreDeps) -> None:
+    AnswerCoreDeps(settings=settings, llm=model, retrieve=writer)
+    read.upsert("corpus", points=[])
+    deps.qdrant.upsert("corpus", points=[])
+""")
+    bad = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert bad.returncode == 1, bad.stdout + bad.stderr
+    assert 'incompatible type "QdrantPoints"; expected "Retriever"' in bad.stdout
+    assert '"QdrantSearch" has no attribute "upsert"' in bad.stdout
+    assert '"AnswerCoreDeps" has no attribute "qdrant"' in bad.stdout
+    assert "Found 3 errors" in bad.stdout
+
+
+@pytest.mark.anyio
+async def test_cancelling_pending_model_read_closes_operation_and_propagates():
+    import asyncio
+
+    waiting = asyncio.Event()
+    closed = []
+
+    class Model(CoreFakeLLM):
+        async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+            try:
+                yield {"type": "token", "delta": "Provisional."}
+                waiting.set()
+                await asyncio.Event().wait()
+            finally:
+                closed.append("operation")
+
+    deps = _stream_deps(Model())
+    stream = execute_answer_core_stream(AnswerCoreInput(query="IEA500I"), deps)
+    assert (await anext(stream))["type"] == "token"
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(waiting.wait(), timeout=2)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert closed == ["operation"]
+    assert (await execute_answer_core(AnswerCoreInput(query="IEA500I"), deps)).finish_reason == "stop"

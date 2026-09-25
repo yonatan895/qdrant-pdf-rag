@@ -23,6 +23,7 @@ from mainframe_rag.agent.answer_core import (
     execute_answer_core,
     execute_answer_core_stream,
 )
+from mainframe_rag.agent.model_adapter import ModelAdapter
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
@@ -94,11 +95,13 @@ class OvershootTokenizer(FallbackTokenizer):
 
 
 def _deps(settings: Settings, llm, **kwargs) -> AnswerCoreDeps:
+    async def unexpected_retrieval(*args, **kwargs):
+        raise AssertionError("precomputed evidence must not trigger another retrieval")
+
     return AnswerCoreDeps(
         settings=settings,
-        llm=llm,
-        qdrant=None,
-        embedder=None,
+        llm=ModelAdapter(llm),
+        retrieve=unexpected_retrieval,
         **kwargs,
     )
 

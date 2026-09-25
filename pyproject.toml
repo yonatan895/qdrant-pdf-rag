@@ -46,3 +46,14 @@ src = ["src", "tests"]
 python_version = "3.14"
 mypy_path = "src"
 ignore_missing_imports = true
+
+# M1: strict checking for the narrowed core, without broadening legacy ignores.
+[[tool.mypy.overrides]]
+module = ["mainframe_rag.agent.answer_core", "mainframe_rag.agent.core_ports", "mainframe_rag.agent.model_adapter"]
+disallow_untyped_defs = true
+disallow_untyped_calls = true
+disallow_any_generics = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true
+warn_unused_ignores = true
