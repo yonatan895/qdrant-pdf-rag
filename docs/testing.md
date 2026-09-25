@@ -437,6 +437,7 @@ approved hashes. Changes to these verifier inputs follow the explicit policy
 bootstrap review path, rather than authorizing their own replacement verifier.
 
 
+<a id="unit-coverage"></a>
 ### Required unit collection and shard union (#482 R488-1)
 
 Native unit receipts use `ci_evidence.py --unit-shard=1` or `=2`, not an arbitrary

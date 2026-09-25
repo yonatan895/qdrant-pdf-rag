@@ -278,7 +278,7 @@ root configuration/conftest and locked preparation inputs. Each shard retains an
 independent full collection and actual executed node IDs; the consumer compares
 raw JUnit identities and proves the two shards form a disjoint complete union.
 New tests change the expected set through actual collection, not a count update.
-See [the unit coverage contract](testing.md#required-unit-collection-and-shard-union-482-r488-1).
+See [the unit coverage contract](testing.md#unit-coverage).
 Their candidate bytes are read independently from the commit API; receipt-supplied hashes alone
 do not attest which source was executed. Hazard reports must also contain the
 complete approved challenge set exactly once, bind its catalogue/runner hashes
