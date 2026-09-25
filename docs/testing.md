@@ -380,8 +380,22 @@ sh scripts/tools/run-task.sh qa:hazards OUT=/tmp/critical-hazards-candidate
 ```
 
 The runner requires committed tracked changes and the prepared doctor gate,
-archives that exact HEAD into separate temporary trees, and runs each selected
-existing test unchanged before applying its exact mutation. The baseline must
+extracts that exact HEAD independently for each baseline and mutant, and runs
+both against pristine candidate bytes (only the mutant gets the approved edit).
+Each invocation has private temporary, XDG cache and Python bytecode directories;
+inherited `PYTEST_ADDOPTS` cannot narrow the selected witness. Changes to any
+snapshot file present at launch invalidate the result and are recorded by path.
+The runner is a hermetic-test harness, not a sandbox for hostile tests writing
+arbitrary external paths or escaping their process session.
+
+On supported Linux runners, each pytest invocation owns a new session/process
+group. The runner temporarily adopts orphan descendants as a child subreaper,
+terminates only its owned group (one-second TERM grace, then up to two seconds
+after KILL), and reaps/drains it before advancing. The existing 90-second test
+deadline is unchanged; timeout, surviving descendants or unproved cleanup never
+count as a kill. Partial output is retained even on timeout. Failed cleanup
+aborts the runner and preserves scratch inputs; a later ordinary test is not
+started against potentially live writers. The baseline must
 pass; an unapplied mutation, compile/import/setup error, timeout, skipped/zero
 tests, wrong test or unrelated assertion is not a kill. Only the selected
 behavioral assertion failing counts. Mutations never edit the working source,
