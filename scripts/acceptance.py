@@ -11,8 +11,11 @@ from typing import Any
 from urllib.parse import quote
 
 from scripts.acceptance_evidence import LIMIT, PRODUCERS, normalize_native, paginate, require
+from scripts.unit_evidence import INPUTS as UNIT_INPUTS
+from scripts.unit_evidence import validate_union
 
 VERIFICATION_INPUTS = (
+    *UNIT_INPUTS,
     'scripts/review_tooling.py', 'scripts/ci_evidence.py', 'Taskfile.yml',
     'scripts/tools/run-task.sh', 'scripts/tools/task-pin.txt',
     'scripts/check_hazard_sensitivity.py', 'tests/hazards/critical.json',
@@ -205,7 +208,8 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
                                           artifact=artifact, execution_commit=commit, archive=archive,
                                           policy_digest=policy_digest, producer_digest=producer_digest,
                                           workflow_digest=workflow_digest, workflow_source=source,
-                                          hazard_policy=hazard_policy)
+                                          hazard_policy=hazard_policy,
+                                          unit_policy={path: policy_inputs[path] for path in UNIT_INPUTS})
                 record.update(result)
             except (KeyError, TypeError, ValueError, OSError):
                 record['status'] = 'unverified'
@@ -221,6 +225,11 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
             statuses[lane] = 'cancelled' if 'cancelled' in values else 'skipped'
         elif len(results) == len(required_jobs) and values == {'success'}:
             statuses[lane] = 'success'
+            if lane == 'unit_tests':
+                try:
+                    validate_union([r['unit_coverage'] for r in results])
+                except (ValueError, KeyError, TypeError):
+                    statuses[lane] = 'unverified'
         # An absent workflow, shard, or artifact stays missing in the existing
         # taxonomy: do not turn it into a reported execution failure.
     return {'candidate': candidate, 'native': native, 'lane_statuses': statuses, 'runs': snapshots,

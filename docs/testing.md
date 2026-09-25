@@ -412,9 +412,10 @@ pagination. These local cases establish parser and attribution behavior; they do
 not establish a deployed acceptance check, actual human review, or merge-rule
 enforcement. Those require the real PR trials owned by #411.
 
-The consumer cases also execute file pagination with both rename paths, assemble
-current authorized human review with the native lane summary, and reject draft,
-author-written, stale and changes-required review records. Publication tests
+The consumer cases also execute file pagination with both rename paths. Legacy
+review-parser tests retain optional diagnostic compatibility; native technical
+verification ignores human comments and draft state. Only the maintainer controls
+ready/review/merge decisions. Publication tests
 require pending before collection and failure after a failed currentness recheck.
 A controlled curl stub executes the GitLab report shell and verifies literal-body
 POST behavior. The GitHub report's actual API execution belongs to the native PR
@@ -434,3 +435,43 @@ cases. The consumer independently reads candidate Task dispatch and challenge
 policy bytes; a candidate cannot replace those inputs and merely claim their
 approved hashes. Changes to these verifier inputs follow the explicit policy
 bootstrap review path, rather than authorizing their own replacement verifier.
+
+
+### Required unit collection and shard union (#482 R488-1)
+
+Native unit receipts use `ci_evidence.py --unit-shard=1` or `=2`, not an arbitrary
+pytest command. `unit_evidence.run_shard` starts an independent collect-only
+pytest process over `tests`, then a fresh execution process. Both explicitly
+load pinned pytest/AnyIO plus `tests.ci_shard`; ambient `PYTEST_ADDOPTS` and
+`PYTEST_PLUGINS` are refused and plugin auto-loading is disabled. Other plugin
+registrations are rejected. Local opt-in sharding without evidence keeps its
+existing selection behavior and does not qualify as native coverage evidence.
+
+The trusted collection wrapper observes all parametrized node IDs before
+filtering, refuses hook-driven removal/duplication/marker changes, and derives
+the eligible set by excluding only `integration` markers. Execution takes the
+sorted eligible IDs at indexes `shard - 1::2`. The final collection and actual
+call reports must agree with that selection. Passing subtests belong to their
+parent case; failure/skip/error checks still inspect the actual JUnit records.
+Each JUnit case carries one base64-encoded UTF-8 node ID property, preserving
+literal whitespace and delimiters without ambiguous name reconstruction.
+
+The data-only consumer compares each execution against its independently
+collected eligible set and raw JUnit, then checks that both shards report the
+same collection and have a disjoint, complete union. It does not hardcode a
+historical test count. Added tests join the collection automatically. It also
+reads actual candidate bytes for the selector, pytest configuration, root
+conftest, lock/preparation inputs and coverage producer against approved main;
+receipt-supplied hashes alone cannot establish those inputs. Effective discovery
+settings, loaded plugin classes and locked pytest/pluggy/AnyIO versions are
+recorded. Configuration changes, new conftest/plugin hooks, or selector changes
+need explicit review before approved-main consumers trust them. The publisher
+never executes candidate collection code itself.
+
+Regressions retain the eight-case canary counterexample (six failing cases must
+remain visible across ordinary shards), reject config/environment narrowing and
+collection-hook drops/duplicates, and prove newly added tests, intentional
+integration exclusion, cross-shard duplication rejection and literal node-ID
+round trips. Hash-valid, same-count XML substitutions are rejected. This proves
+collection/execution coverage under the approved producer, not the adequacy of
+test assertions or isolation from arbitrary malicious candidate code.

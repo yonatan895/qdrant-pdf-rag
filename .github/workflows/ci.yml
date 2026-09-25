@@ -102,8 +102,7 @@ jobs:
         run: >-
           python scripts/ci_evidence.py --lane unit_tests --job-name 'unit (${{ matrix.shard }}/2)'
           --output "$RUNNER_TEMP/evidence-unit-${{ matrix.shard }}" --junit "$RUNNER_TEMP/unit-${{ matrix.shard }}.xml"
-          -- python -m pytest -q -p tests.ci_shard --unit-shard=${{ matrix.shard }} --durations=20
-          --junitxml="$RUNNER_TEMP/unit-${{ matrix.shard }}.xml"
+          --unit-shard=${{ matrix.shard }}
       - name: Retain native execution evidence
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
