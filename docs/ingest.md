@@ -630,6 +630,15 @@ thread pool.
   manifest indistinguishable from a finished build — resume safety comes
   from the sidecar's fingerprint binding, converge re-verification before
   any swap, and never building into the serving generation. An existing
+  recovery record is validated before replay: v1 requires an integer version,
+  unambiguous JSON object keys, correctly typed retirement requests and complete
+  `revs`/boolean `legacy`/boolean `whole` plan entries. String-to-set and
+  truthiness coercions are forbidden. A plan with recorded requests must match
+  their document/revision/whole-document scope; corrupt entries are never
+  discarded. Older v1 records without either optional retirement field remain
+  readable under their existing replay rules. Invalid records preserve the
+  sidecar, progress and stored collections; restore the exact valid record or
+  explicitly abandon the build before retrying. An existing
   staging with no matching build record fails closed (remove it explicitly
   or resume the run that recorded it). Same-alias publishers must share the
   progress directory (already required for refresh lineage) so the target

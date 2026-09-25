@@ -1411,3 +1411,17 @@ def test_post_cutover_missing_control_preserves_retry_on_real_server(
     finally:
         client.close()
         _drop_publish_fixture(qdrant_url)
+
+
+def test_corrupt_retirement_record_refuses_before_real_deletion(qdrant_url, tmp_path, monkeypatch):
+    from qdrant_client import QdrantClient
+
+    from tests.test_ingest_publish import _exercise_corrupt_retirement_retry
+
+    _drop_publish_fixture(qdrant_url)
+    client = QdrantClient(url=qdrant_url, timeout=30)
+    try:
+        _exercise_corrupt_retirement_retry(tmp_path, monkeypatch, client, PUBLISH_ALIAS)
+    finally:
+        client.close()
+        _drop_publish_fixture(qdrant_url)
