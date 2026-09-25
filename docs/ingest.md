@@ -791,6 +791,11 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   1/1/1 profile judges its single copy through its one endpoint. Moving
   replicas to repair an under-replicated candidate remains the
   snapshot-gated migration slice, never automatic.
+  Supply the comma-separated non-secret URLs via the operator env file or
+  caller environment/Task variable (caller takes precedence). The launcher
+  maps this to chart `ingest.peerUrls` and the ingest Job environment;
+  runtime trims entry whitespace and uses the existing ingest credential.
+  No endpoints are inferred; duplicate identities cannot establish RF copies.
 - Representation migration writes `pending`, then commits after no document
   failures, `stale_completion_markers` finds no differently stamped markers,
   and the read-only scope proof attributes every searchable point to a verified

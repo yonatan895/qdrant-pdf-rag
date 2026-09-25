@@ -43,8 +43,12 @@ from mainframe_rag.config import Settings
 from mainframe_rag.ingest.completion import completion_collection_for
 from mainframe_rag.ingest.publish import verify_staging_distribution, verify_staging_placement
 from mainframe_rag.ingest.qdrant_io import collection_vector_configs
+from mainframe_rag.ingest.run_ingest import _placement_clients
+from tests import test_airgap_ingest_sh as ingest_shell
+from tests.helpers_airgap import rendered_env
 
 pytestmark = pytest.mark.integration
+ingest_tree = ingest_shell.ingest_tree
 
 REPO = Path(__file__).resolve().parents[1]
 DIM = 64
@@ -598,3 +602,52 @@ def test_partition_minority_writes_unacknowledged_and_majority_durable(
     _wait_points_agree(
         cluster.urls, seeded_pair.corpus, PART_MINORITY_POINTS, "corpus"
     )
+
+
+def test_operator_job_peers_reach_real_placement_gate(cluster, seeded_pair, ingest_tree):
+    """Rendered operator input drives real corpus/control placement observations."""
+    main_client = QdrantClient(url=cluster.urls[0], timeout=30)
+    healthy = " " + ",\n\t".join(cluster.urls) + " "
+    unreachable = f"http://127.0.0.1:{free_port(7900)}"
+    selections = [
+        (healthy, "healthy"),
+        ("", "missing"),
+        (",".join([cluster.urls[0]] * 3), "duplicate"),
+        (",".join([*cluster.urls[:2], unreachable]), "unreachable"),
+    ]
+    try:
+        for raw, outcome in selections:
+            result = ingest_shell._run_ingest(
+                ingest_tree, ("QDRANT_PEER_URLS", raw),
+                ("INGEST_ALIAS_PUBLISH", "true"), policy=("6", "3", "2"),
+            )
+            assert result.returncode == 0, result.stderr
+            rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
+            job_env = rendered_env(rendered, "ingest")
+            settings = _settings(
+                cluster.urls[0], seeded_pair.corpus,
+                qdrant_peer_urls=job_env.get("QDRANT_PEER_URLS", ""),
+                qdrant_shard_number=int(job_env["QDRANT_SHARD_NUMBER"]),
+                qdrant_replication_factor=int(job_env["QDRANT_REPLICATION_FACTOR"]),
+                qdrant_write_consistency_factor=int(job_env["QDRANT_WRITE_CONSISTENCY_FACTOR"]),
+                qdrant_ingest_timeout_s=2,
+            )
+            if outcome == "missing":
+                with (
+                    pytest.raises(RuntimeError, match="no direct Qdrant peer endpoints"),
+                    _placement_clients(settings, main_client),
+                ):
+                    pytest.fail("missing peers must refuse")
+                continue
+            with _placement_clients(settings, main_client) as clients:
+                if outcome == "healthy":
+                    assert job_env["QDRANT_PEER_URLS"] == healthy
+                    assert tuple(clients) == cluster.urls
+                    assert verify_staging_placement(clients, settings) == []
+                else:
+                    assert verify_staging_placement(clients, settings)
+            # Closing the per-peer clients must leave the shared client usable.
+            assert main_client.count(seeded_pair.corpus, exact=True).count == len(CORPUS_POINTS)
+        _assert_exact_payloads(cluster.urls[0], seeded_pair)
+    finally:
+        main_client.close()

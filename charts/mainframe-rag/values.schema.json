@@ -327,6 +327,10 @@
           "type": "integer",
           "minimum": 1
         },
+        "peerUrls": {
+          "type": "string",
+          "description": "Comma-separated direct Qdrant REST endpoints. Empty is unconfigured; runtime placement checks refuse missing multi-peer evidence."
+        },
         "aliasPublish": { "type": "boolean" },
         "reingest": { "type": "boolean" },
         "retireDocs": {
