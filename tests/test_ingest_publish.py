@@ -13,6 +13,7 @@ injection; real PDFs only where main() needs files (built at runtime).
 from __future__ import annotations
 
 import re
+from itertools import permutations
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -3542,3 +3543,14 @@ def test_peer_endpoints_parsing():
         _env_file=None, qdrant_peer_urls="http://a:6333, http://b:6333 ,,"
     )
     assert settings.qdrant_peer_endpoints() == ("http://a:6333", "http://b:6333")
+
+
+@pytest.mark.parametrize("fault", ["before", "after"])
+@pytest.mark.parametrize(
+    "operations",
+    tuple(permutations(("change", "repair", "retire"))),
+)
+def test_bounded_publication_lifecycle_traces(tmp_path, monkeypatch, operations, fault):
+    from tests.helpers_publication_lifecycle import exercise_publication_trace
+
+    exercise_publication_trace(tmp_path, monkeypatch, PublishFake(), operations, fault, ALIAS)

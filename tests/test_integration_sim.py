@@ -1292,3 +1292,29 @@ def test_forced_migration_retry_retains_verified_document_on_real_qdrant(qdrant_
             if collection.name.startswith(alias + "__gen"):
                 client.delete_collection(collection.name)
         client.close()
+
+
+@pytest.mark.parametrize(
+    ("operations", "fault"),
+    [
+        (("repair", "retire", "change"), "before"),
+        (("change", "repair", "retire"), "after"),
+    ],
+)
+def test_bounded_publication_trace_on_real_server(
+    qdrant_url, tmp_path, monkeypatch, operations, fault
+):
+    """Same literal oracle as the unit traces, with actual clone/alias storage."""
+    from qdrant_client import QdrantClient
+
+    from tests.helpers_publication_lifecycle import exercise_publication_trace
+
+    _drop_publish_fixture(qdrant_url)
+    client = QdrantClient(url=qdrant_url, timeout=30)
+    try:
+        exercise_publication_trace(
+            tmp_path, monkeypatch, client, operations, fault, PUBLISH_ALIAS
+        )
+    finally:
+        client.close()
+        _drop_publish_fixture(qdrant_url)
