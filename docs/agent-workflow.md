@@ -366,11 +366,14 @@ Maintainer activation, after the disposable-PR transition proof:
    new producer/workflow bytes merely by supplying matching hashes; bootstrap
    changes retain the explicit maintainer review path above.
 
-Rollout status: consumer/publisher implementation is under verification; actual
-PR transition proof and maintainer activation remain required before declaring
-V1 enforced. No helper changes rulesets, repository permissions or environments.
-GitLab verification remains independent; GitHub evidence does not establish
-GitLab execution or enforcement.
+GitHub rollout evidence: the maintainer activated the dedicated publisher and
+source-bound required check; [the dated enforcement proof](records/2026-09-25-m0-enforcement-proof.md)
+records actual cancelled/stale and wrong-source refusal, human ready transition,
+merge blocking and ordinary recovery. This is evidence for that configuration,
+not a waiver of activation/testing for another repository or changed policy.
+No helper changes rulesets, repository permissions or environments. GitLab
+verification remains independent; GitHub evidence does not establish GitLab
+execution or enforcement.
 
 ### Triage a recurring baseline/environment failure once
 
