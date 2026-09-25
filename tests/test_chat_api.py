@@ -647,7 +647,7 @@ def test_chat_blank_active_user_refuses_before_any_work(chat_client, stream):
     assert chat_client.fake_llm.stream_calls == []
 
 
-@pytest.mark.parametrize("mode", ["off", "on", "failure"])
+@pytest.mark.parametrize("mode", ["off", "on", "failure", "unstructured"])
 @pytest.mark.parametrize("stream", [False, True])
 def test_chat_condensation_uses_only_history_before_normalized_user(
     chat_client, monkeypatch, mode, stream
@@ -659,6 +659,8 @@ def test_chat_condensation_uses_only_history_before_normalized_user(
         result = original_chat(messages, **kwargs)
         if mode == "failure" and "rephrase the follow-up" in messages[0].content:
             raise RuntimeError("synthetic condensation failure")
+        if mode == "unstructured" and "rephrase the follow-up" in messages[0].content:
+            return "Invented query without structured completion metadata"
         return result
 
     monkeypatch.setattr(chat_client.fake_llm, "chat", chat)

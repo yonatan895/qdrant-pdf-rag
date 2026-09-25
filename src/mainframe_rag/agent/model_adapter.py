@@ -9,7 +9,7 @@ from mainframe_rag.agent.answer import (
     REASON_MALFORMED_FRAME,
     REASON_MISSING_FINISH,
     TruncatedStreamError,
-    as_chat_result,
+    require_chat_result,
 )
 from mainframe_rag.agent.core_ports import ModelDone, ModelEvent, ModelToken
 from mainframe_rag.ports import ChatMessage, ChatResult, LLMClient, TokenUsage
@@ -34,7 +34,7 @@ class ModelAdapter:
         result = self._client.chat(
             messages, reasoning_effort=reasoning_effort, temperature=temperature
         )
-        return as_chat_result(await result if inspect.isawaitable(result) else result)
+        return require_chat_result(await result if inspect.isawaitable(result) else result)
 
     async def stream(
         self, messages: list[ChatMessage], reasoning_effort: str, temperature: float,

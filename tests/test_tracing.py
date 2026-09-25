@@ -18,6 +18,7 @@ from mainframe_rag import tracing as tracing_mod
 from mainframe_rag.agent import answer_core as answer_core_mod
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
+from mainframe_rag.ports import ChatResult, TokenUsage
 from mainframe_rag.retrieve import query as query_mod
 from mainframe_rag.retrieve.query import async_search, search
 from tests.conftest import FakeEmbedder, FakeQdrant, MockReranker, _point
@@ -261,10 +262,14 @@ class MagicSearch:
 
 class FakeLLM:
     def chat(self, messages, reasoning_effort=None, temperature=None):
-        return (
-            "Answer text.\n\n"
-            "Citations:\n"
-            "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+        return ChatResult(
+            content=(
+                "Answer text.\n\n"
+                "Citations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(),
         )
 
 

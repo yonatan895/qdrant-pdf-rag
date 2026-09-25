@@ -412,24 +412,68 @@ async def test_core_stream_explicit_done_still_finalizes():
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_legacy_model_results_match_buffered_and_fallback_stream(asynchronous):
-    """Bare strings and awaitables are supported at the adapter, not in core branches."""
-    class LegacyModel:
+async def test_structured_model_results_match_buffered_and_fallback_stream(asynchronous):
+    """Sync/async boundary adaptation preserves structured completion metadata."""
+    expected = ChatResult(content="Synthetic answer.", finish_reason="stop",
+                          usage=TokenUsage(prompt_tokens=7, completion_tokens=3, total_tokens=10), ttft_ms=17)
+
+    class StructuredModel:
         def chat(self, messages, reasoning_effort=None, temperature=None):
             async def result():
-                return "Synthetic answer."
-            return result() if asynchronous else "Synthetic answer."
+                return expected
+            return result() if asynchronous else expected
 
-    deps = _stream_deps(LegacyModel())
+    deps = _stream_deps(StructuredModel())
     source = AnswerCoreInput(query="IEA500I rejected")
     buffered = await execute_answer_core(source, deps)
     events = [item async for item in execute_answer_core_stream(source, deps)]
     final = events[-1]["output"]
     assert buffered.answer == final.answer == "Synthetic answer."
     assert buffered.finish_reason == final.finish_reason == "stop"
+    assert buffered.usage == final.usage == expected.usage
+    assert buffered.ttft_ms == final.ttft_ms == expected.ttft_ms
     assert buffered.citations == final.citations == []
     assert buffered.verification_state == final.verification_state
     assert [item["type"] for item in events] == ["token", "final"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_unstructured_completion_fails_then_next_structured_answer_succeeds(asynchronous, streaming):
+    class Model:
+        response = "Unstructured answer must not become a completed result."
+
+        def chat(self, messages, reasoning_effort=None, temperature=None):
+            async def result():
+                return self.response
+            return result() if asynchronous else self.response
+
+    model = Model()
+    deps = _stream_deps(model)
+    source = AnswerCoreInput(query="IEA500I rejected")
+    events = []
+    if streaming:
+        with pytest.raises(TypeError, match="model completion must be ChatResult"):
+            async for item in execute_answer_core_stream(source, deps):
+                events.append(item)
+        assert events == []
+    else:
+        with pytest.raises(LLMChatError) as error:
+            await execute_answer_core(source, deps)
+        assert isinstance(error.value.original, TypeError)
+
+    model.response = ChatResult(content="Synthetic answer.", finish_reason="length", usage=TokenUsage())
+    if streaming:
+        events = [item async for item in execute_answer_core_stream(source, deps)]
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    assert output.finish_reason == "length"
+    assert output.verification_state == "generation_incomplete"
+    model.response = ChatResult(content="Synthetic answer.", finish_reason="stop", usage=TokenUsage())
+    output = await execute_answer_core(source, deps)
+    assert output.answer == "Synthetic answer." and output.finish_reason == "stop"
 
 
 @pytest.mark.anyio

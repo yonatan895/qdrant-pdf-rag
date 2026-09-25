@@ -17,7 +17,7 @@ from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.answer import parse_answer
 from mainframe_rag.agent.cites import extract_citation_lines, valid_citations
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
-from mainframe_rag.ports import TokenUsage
+from mainframe_rag.ports import ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
 from tests.fakes import make_evidence
 
@@ -82,12 +82,16 @@ class FakeLLM:
         self.last_temperature = temperature
         self.last_messages = messages
         assert messages[0].role == "system"
-        return (
-            "Reissue the command after initialization completes.\n\n"
-            "```jcl\n// example only\nIOSCMDS LIST\n```\n\n"
-            "Citations:\n"
-            "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
-            "- SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
+        return ChatResult(
+            content=(
+                "Reissue the command after initialization completes.\n\n"
+                "```jcl\n// example only\nIOSCMDS LIST\n```\n\n"
+                "Citations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+                "- SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(),
         )
 
 
@@ -95,12 +99,16 @@ class FabricatingBodyLLM:
     """Quotes a full citation line that is not in the hit set, mid-answer."""
 
     def chat(self, messages, *args, **kwargs):
-        return (
-            "Answer text.\n"
-            "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
-            "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n\n"
-            "Citations:\n"
-            "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+        return ChatResult(
+            content=(
+                "Answer text.\n"
+                "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
+                "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n\n"
+                "Citations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(),
         )
 
 
@@ -108,12 +116,16 @@ class FabricatingScriptLLM:
     """Puts a fabricated citation inside the fenced script block."""
 
     def chat(self, messages, *args, **kwargs):
-        return (
-            "Answer text.\n\n"
-            "```jcl\n// see SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
-            "IOSCMDS LIST\n```\n\n"
-            "Citations:\n"
-            "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+        return ChatResult(
+            content=(
+                "Answer text.\n\n"
+                "```jcl\n// see SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9\n"
+                "IOSCMDS LIST\n```\n\n"
+                "Citations:\n"
+                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(),
         )
 
 
@@ -122,7 +134,13 @@ class InferredOnlyLLM:
     fabrication path, issue #269)."""
 
     def chat(self, messages, *args, **kwargs):
-        return "Reissue the command after initialization completes [1]."
+        return ChatResult(
+            content=(
+                "Reissue the command after initialization completes [1]."
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(),
+        )
 
 
 def test_search_returns_cite_fields(client):
@@ -228,7 +246,13 @@ def test_answer_rejects_retrieved_but_unsupplied_citation(client, monkeypatch):
 
         def chat(self, messages, *a, **k):
             self.messages = messages
-            return f"Reissue the command.\n\nCitations:\n{hits[7].cite}\n"
+            return ChatResult(
+                content=(
+                    f"Reissue the command.\n\nCitations:\n{hits[7].cite}\n"
+                ),
+                finish_reason="stop",
+                usage=TokenUsage(),
+            )
 
     llm = CitingOmittedLLM()
     monkeypatch.setattr(app_mod, "llm", llm)
@@ -253,7 +277,13 @@ def test_answer_stream_rejects_retrieved_but_unsupplied_citation(client, monkeyp
 
     class StreamingCitingOmittedLLM:
         def chat(self, messages, *a, **k):
-            return content
+            return ChatResult(
+                content=(
+                    content
+                ),
+                finish_reason="stop",
+                usage=TokenUsage(),
+            )
 
         async def chat_stream(self, messages, *a, **k):
             yield {"type": "token", "delta": content, "token": content, "ttft_ms": 1}
@@ -1943,23 +1973,20 @@ def test_build_messages_ignores_none_settings_without_tokenizer():
     assert "[1]" in msgs[1].content
 
 
-def test_as_chat_result_wraps_bare_string():
-    from mainframe_rag.agent.answer import as_chat_result
-    from mainframe_rag.ports import ChatResult, TokenUsage
+@pytest.mark.parametrize("raw", ["plain answer", "", None, {"content": "answer"}])
+def test_require_chat_result_rejects_unstructured_completion(raw):
+    from mainframe_rag.agent.answer import require_chat_result
 
-    res = as_chat_result("plain answer")
-    assert isinstance(res, ChatResult)
-    assert res.content == "plain answer"
-    assert res.finish_reason == "stop"
-    assert res.usage == TokenUsage()
+    with pytest.raises(TypeError, match="model completion must be ChatResult"):
+        require_chat_result(raw)
 
 
-def test_as_chat_result_passthrough():
-    from mainframe_rag.agent.answer import as_chat_result
+def test_require_chat_result_passthrough():
+    from mainframe_rag.agent.answer import require_chat_result
     from mainframe_rag.ports import ChatResult, TokenUsage
 
     original = ChatResult(content="x", finish_reason="length", usage=TokenUsage(prompt_tokens=3))
-    assert as_chat_result(original) is original
+    assert require_chat_result(original) is original
 
 
 def test_chat_content_none_becomes_empty_string():
@@ -2196,7 +2223,13 @@ class StreamingFakeLLM:
         ]
 
     def chat(self, messages, *args, **kwargs):
-        return "".join(self.deltas)
+        return ChatResult(
+            content=(
+                "".join(self.deltas)
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(),
+        )
 
     async def chat_stream(self, messages, *args, **kwargs):
         for i, delta in enumerate(self.deltas):
@@ -2400,10 +2433,14 @@ def test_v1_answer_refusal_zero_citations_json(client, monkeypatch):
     2026-09-04)."""
     class RefusingLLM:
         def chat(self, messages, *args, **kwargs):
-            return (
-                "No information regarding private key material is available "
-                "in the excerpts.\n\nCitations:\n"
-                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            return ChatResult(
+                content=(
+                    "No information regarding private key material is available "
+                    "in the excerpts.\n\nCitations:\n"
+                    "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+                ),
+                finish_reason="stop",
+                usage=TokenUsage(),
             )
 
     monkeypatch.setattr(app_mod, "llm", RefusingLLM())
@@ -2420,9 +2457,13 @@ def test_v1_answer_refusal_zero_citations_streaming(client, monkeypatch):
 
     class RefusingStreamLLM:
         async def chat(self, messages, *args, **kwargs):
-            return (
-                "The excerpts do not contain that.\n\nCitations:\n"
-                "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+            return ChatResult(
+                content=(
+                    "The excerpts do not contain that.\n\nCitations:\n"
+                    "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
+                ),
+                finish_reason="stop",
+                usage=TokenUsage(),
             )
 
         async def chat_stream(self, messages, *args, **kwargs):
@@ -2550,7 +2591,13 @@ async def test_v1_answer_20_concurrent_requests_no_threadpool_starvation(
     class SlowAsyncLLM:
         async def chat(self, messages, *args, **kwargs):
             await asyncio.sleep(0.05)
-            return "Async response\n\nCitations:\nSA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+            return ChatResult(
+                content=(
+                    "Async response\n\nCitations:\nSA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6"
+                ),
+                finish_reason="stop",
+                usage=TokenUsage(),
+            )
 
     monkeypatch.setattr(app_mod, "retrieve_search", MagicMockSearch().search)
     monkeypatch.setattr(app_mod, "llm", SlowAsyncLLM())
@@ -2882,9 +2929,13 @@ class FluentNoCiteLLM:
     only, so nothing is eligible — but the shape is not an abstention."""
 
     def chat(self, messages, *args, **kwargs):
-        return (
-            "Reissue the command after initialization completes. "
-            "The IOSCMDS LIST output shows the pending requests."
+        return ChatResult(
+            content=(
+                "Reissue the command after initialization completes. "
+                "The IOSCMDS LIST output shows the pending requests."
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(),
         )
 
 
@@ -2894,22 +2945,36 @@ class FluentDraftWithScriptLLM:
     review flag together."""
 
     def chat(self, messages, *args, **kwargs):
-        return (
-            "Reissue the command after initialization completes.\n\n"
-            "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```\n"
+        return ChatResult(
+            content=(
+                "Reissue the command after initialization completes.\n\n"
+                "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(),
         )
 
 
 class RefusalLLM:
     def chat(self, messages, *args, **kwargs):
-        return "The excerpts do not contain this procedure."
+        return ChatResult(
+            content=(
+                "The excerpts do not contain this procedure."
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(),
+        )
 
 
 class RefusalWithScriptLLM:
     def chat(self, messages, *args, **kwargs):
-        return (
-            "The excerpts do not contain this procedure.\n\n"
-            "```jcl\n// example only\nIOSCMDS LIST\n```\n"
+        return ChatResult(
+            content=(
+                "The excerpts do not contain this procedure.\n\n"
+                "```jcl\n// example only\nIOSCMDS LIST\n```\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(),
         )
 
 
@@ -2936,12 +3001,16 @@ class PremiseCorrectingLLM:
     excerpt: correction prose must keep its citations (issue #365 req 5)."""
 
     def chat(self, messages, *args, **kwargs):
-        return (
-            "The question assumes JES3, but the excerpts describe JES2 spool "
-            "handling. For JES2, reissue the command after initialization "
-            "completes.\n\n"
-            "Citations:\n"
-            f"- {_ACCEPTED_CITE}\n"
+        return ChatResult(
+            content=(
+                "The question assumes JES3, but the excerpts describe JES2 spool "
+                "handling. For JES2, reissue the command after initialization "
+                "completes.\n\n"
+                "Citations:\n"
+                f"- {_ACCEPTED_CITE}\n"
+            ),
+            finish_reason="stop",
+            usage=TokenUsage(),
         )
 
 
@@ -3130,7 +3199,13 @@ def test_answer_empty_generation_is_incomplete(client, monkeypatch):
 
     class EmptyLLM:
         def chat(self, messages, *args, **kwargs):
-            return ""
+            return ChatResult(
+                content=(
+                    ""
+                ),
+                finish_reason="stop",
+                usage=TokenUsage(),
+            )
 
     monkeypatch.setattr(app_mod, "llm", EmptyLLM())
     body = client.post("/v1/answer", json={"query": "IEA500I"}).json()
@@ -3356,7 +3431,13 @@ def test_lifespan_cleanup_closes_created_clients_when_globals_replaced(monkeypat
 def test_security_refusal_state_json_and_sse(client, monkeypatch, stream, answer, state):
     class SecurityResponseLLM:
         async def chat(self, messages, *args, **kwargs):
-            return answer
+            return ChatResult(
+                content=(
+                    answer
+                ),
+                finish_reason="stop",
+                usage=TokenUsage(),
+            )
 
         async def chat_stream(self, messages, *args, **kwargs):
             yield {"type": "token", "delta": answer, "token": answer}

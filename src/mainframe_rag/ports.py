@@ -354,8 +354,9 @@ class ZoweMCP(Protocol):
 @runtime_checkable
 class LLMClient(Protocol):
     """Reasoning-model chat (answer path only). Implementations fail closed
-    when no reasoning model is configured. Legacy callers may return a string;
-    the core adapter normalizes sync/async results to ChatResult.
+    when no reasoning model is configured. Every completion returns ChatResult
+    with explicit finish/usage metadata;
+    the core adapter normalizes only the sync/async calling convention.
 
     Implementations may additionally expose ``async chat_stream(messages, ...)
     -> AsyncIterator[dict]`` (yielding {"type": "token", ...} then a terminal
@@ -370,4 +371,4 @@ class LLMClient(Protocol):
         messages: list[ChatMessage],
         reasoning_effort: str | None = None,
         temperature: float | None = None,
-    ) -> ChatResult | str | Awaitable[ChatResult | str]: ...
+    ) -> ChatResult | Awaitable[ChatResult]: ...

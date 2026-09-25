@@ -151,7 +151,8 @@ read-only. Stream token/terminal/error types must preserve buffered recovery and
 post-emission no-replay behavior, along with cancellation and client ownership.
 `AnswerCoreDeps` now receives `Retriever` and `AnswerModel` operations and typed
 prompt builders; it has no raw Qdrant/embedder/admin handle. `ModelAdapter`
-normalizes legacy sync/async/string results and token/done mappings; errors
+adapts sync/async calls with structured `ChatResult` completions and token/done
+mappings. Bare strings are rejected; finish/usage metadata is never invented. Errors
 propagate as exceptions, including the existing typed `TruncatedStreamError`.
 `CoreToken`/`CoreFinal` discriminate the internal stream; transport wire schemas
 remain unchanged. The adapter closes per-operation generators, never shared

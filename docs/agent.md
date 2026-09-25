@@ -602,8 +602,12 @@ by this documentation audit.
 The shared core consumes typed operations from `core_ports`. Application
 composition captures request dependencies and passes the validated physical
 collection through the retrieval operation's settings. The model adapter owns
-legacy sync/async compatibility and validates stream token/terminal fields;
-malformed terminals remain incomplete generation errors, never successful finals.
+sync/async calling compatibility and validates stream token/terminal fields.
+Both buffered and fallback-stream completions require `ChatResult`; bare strings
+are rejected rather than assigned a successful finish or invented usage. Test
+doubles implement the same structured contract. The core always awaits a
+`ChatResult`; synchronous tooling keeps the boundary client interface.
+Malformed terminals remain incomplete generation errors, never successful finals.
 Closing a core stream closes its upstream operation without closing the shared
 model client. [Architecture](architecture.md#boundary-map) owns the dependency
 and capability restrictions.
