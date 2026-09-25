@@ -651,3 +651,150 @@ def test_operator_job_peers_reach_real_placement_gate(cluster, seeded_pair, inge
         _assert_exact_payloads(cluster.urls[0], seeded_pair)
     finally:
         main_client.close()
+
+
+@pytest.mark.parametrize("refuse_first", [False, True], ids=["fresh", "refuse-recover"])
+def test_operator_job_publishes_exact_corpus_on_three_peers(cluster, ingest_tree, tmp_path, refuse_first):
+    """Operator render -> image entrypoint CLI -> real 6/3/2 publication."""
+    import json
+    import os
+    import signal
+    import sys
+
+    from mainframe_rag.ingest.publish import publish_state_path
+    from tests.helpers_airgap import rendered_container
+    from tests.helpers_publication_lifecycle import TEXTS, _records, _write_source
+
+    tree = ingest_tree[0]
+    shutil.copy(REPO / "Taskfile.yml", tree)
+    shutil.copytree(REPO / "taskfiles", tree / "taskfiles")
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    for name, text in TEXTS.items():
+        _write_source(corpus, name, text)
+    progress = tmp_path / "inventory.jsonl"
+    alias = "mainframe_manuals"  # actual canonical Job target, on an owned cluster
+    clients = [QdrantClient(url=url, timeout=30) for url in cluster.urls]
+
+    def task_runner(script, env, cwd):
+        return subprocess.run(
+            [str(REPO / ".tools/bin/task"), "airgap:ingest"],
+            env=env, cwd=cwd, capture_output=True, text=True, check=False,
+        )
+
+    launched = 0
+
+    def run_job(peers):
+        nonlocal launched
+        result = ingest_shell._run_ingest(
+            ingest_tree, ("QDRANT_PEER_URLS", peers), ("INGEST_ALIAS_PUBLISH", "true"),
+            ("INGEST_WORKERS", "1"), ("DENSE_DIM", str(DIM)),
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"),
+            policy=("6", "3", "2"), runner=task_runner,
+        )
+        assert result.returncode == 0, result.stderr
+        rendered = (tree / "dist/ingest-rendered.yaml").read_text()
+        container = rendered_container(rendered, "ingest")
+        job_env = rendered_env(rendered, "ingest")
+        assert job_env["QDRANT_COLLECTION"] == alias
+        assert job_env.get("QDRANT_PEER_URLS", "") == peers
+        assert [job_env[key] for key in ("QDRANT_SHARD_NUMBER", "QDRANT_REPLICATION_FACTOR",
+                                         "QDRANT_WRITE_CONSISTENCY_FACTOR")] == ["6", "3", "2"]
+        assert "EMBED_MODE" not in job_env and "ALLOW_HASH_MODE" not in job_env
+        # Execute the checked-in image's entrypoint with the rendered arguments.
+        entrypoint_line = next(line for line in (REPO / "images/Containerfile.ingest").read_text().splitlines()
+                               if line.startswith("ENTRYPOINT "))
+        entrypoint = json.loads(entrypoint_line.removeprefix("ENTRYPOINT "))
+        assert entrypoint == ["python3", "-m", "mainframe_rag.ingest.run_ingest"]
+        args = [str(corpus) if arg == "/corpus" else str(progress)
+                if arg == "/work/inventory.jsonl" else arg for arg in container["args"]]
+        # Lab adaptations only: Kubernetes service/mounts and deterministic compute.
+        # Peer/policy inputs stay exactly as emitted by the operator launcher.
+        env = {key: value for key, value in os.environ.items()
+               if key in {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"}}
+        env.update({key: value for key, value in job_env.items() if isinstance(value, str)})
+        env.update(QDRANT_URL=cluster.urls[0], EMBED_MODE="hash", ALLOW_HASH_MODE="true")
+        launched += 1
+        log = tmp_path / f"ingest-{launched}.log"
+        command = [sys.executable, *entrypoint[1:], *args]
+        with log.open("w") as output:
+            process = subprocess.Popen(
+                command, env=env, cwd=REPO, stdout=output,
+                stderr=subprocess.STDOUT, start_new_session=True,
+            )
+            try:
+                code = process.wait(timeout=120)
+            finally:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=10)
+        return subprocess.CompletedProcess(command, code, log.read_text(), "")
+
+    try:
+        state_path = publish_state_path(progress, alias)
+        recorded = None
+        if refuse_first:
+            # Missing peers cannot be repaired by replica counts or the healthy server.
+            refused = run_job("")
+            assert refused.returncode != 0
+            assert "no direct Qdrant peer endpoints" in refused.stdout
+            assert not any(a.alias_name == alias for a in clients[0].get_aliases().aliases)
+            recorded = json.loads(state_path.read_text())["staging"]
+            duplicate = run_job(",".join([cluster.urls[0]] * 3))
+            assert duplicate.returncode != 0
+            assert not any(a.alias_name == alias for a in clients[0].get_aliases().aliases)
+            assert json.loads(state_path.read_text())["staging"] == recorded
+        healthy = " " + ",\n\t".join(cluster.urls) + " "
+        published = run_job(healthy)
+        assert published.returncode == 0, published.stdout + published.stderr
+        actual = next(a.collection_name for a in clients[0].get_aliases().aliases if a.alias_name == alias)
+        if recorded is not None:
+            assert actual == recorded
+        recorded = actual
+        assert not state_path.exists()
+        frozen = None
+        for client in clients:
+            assert next(a.collection_name for a in client.get_aliases().aliases
+                        if a.alias_name == alias) == recorded
+            pair = (_records(client, recorded), _records(client, recorded + "__completions"))
+            for collection in (recorded, recorded + "__completions"):
+                params = client.get_collection(collection).config.params
+                assert (params.shard_number, params.replication_factor,
+                        params.write_consistency_factor) == (6, 3, 2)
+            manifests = [p for p, _ in pair[1].values() if p.get("record_type") == "representation-manifest"]
+            assert len(manifests) == 1 and manifests[0]["state"] == "committed"
+            assert manifests[0]["target_collection"] == recorded + "__completions"
+            receipts = [p for p, _ in pair[1].values() if p.get("record_type") == "publication-metadata"]
+            assert len(receipts) == 1 and receipts[0]["target_collection"] == recorded + "__completions"
+            by_doc = {}
+            for payload, _ in pair[0].values():
+                by_doc.setdefault(payload["doc_id"], []).append(payload["text"])
+            assert by_doc == {name: [text] for name, text in TEXTS.items()}
+            markers = [p for p, _ in pair[1].values() if "expected_chunks" in p]
+            assert {p["doc_id"] for p in markers} == set(TEXTS)
+            assert all(p["expected_chunks"] == 1 and p["target_collection"] == recorded for p in markers)
+            if frozen is None:
+                frozen = pair
+            assert pair == frozen
+        for _ in range(2):
+            repeated = run_job(healthy)
+            assert repeated.returncode == 0, repeated.stdout + repeated.stderr
+            for client in clients:
+                assert next(a.collection_name for a in client.get_aliases().aliases
+                            if a.alias_name == alias) == recorded
+                assert (_records(client, recorded), _records(client, recorded + "__completions")) == frozen
+            assert not state_path.exists()
+    finally:
+        try:
+            if any(a.alias_name == alias for a in clients[0].get_aliases().aliases):
+                clients[0].update_collection_aliases([
+                    models.DeleteAliasOperation(delete_alias=models.DeleteAlias(alias_name=alias))
+                ])
+            for collection in clients[0].get_collections().collections:
+                if collection.name.startswith(alias + "__gen"):
+                    clients[0].delete_collection(collection.name)
+        finally:
+            for client in clients:
+                client.close()

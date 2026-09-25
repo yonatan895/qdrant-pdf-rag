@@ -328,6 +328,18 @@ must allow recovery. Tests own and clean up their process groups, including pool
 workers. This qualifies publisher process death on one host with a shared progress
 directory, not power-loss durability, multi-host exclusion or distributed restore.
 
+The canonical-launcher cases in `test_ha_cluster.py` render through the real
+`airgap:ingest` Task, operator script and Helm chart, then execute the ingest
+image's module entrypoint with the emitted Job arguments and environment. An owned
+three-peer pinned Qdrant cluster exercises a fresh 6/3/2 publication, missing and
+duplicate direct-peer refusal, recovery of the recorded candidate, and two ordinary
+reruns. Each peer must expose exact literal corpus membership, paired committed
+controls, the same physical alias target and the actual 6/3/2 collection policy.
+Only lab service/mount addresses and explicit deterministic hash computation are
+adapted for local execution; rendered production configuration contains no hash
+mode. This closes the launcher/CLI/storage handoff, not image packaging, Kubernetes
+scheduling, Secret delivery, real-model quality or physical-worker qualification.
+
 ### C. Equivalent validation; explicit emission/commit boundaries
 
 Use a compact table for buffered/streaming or sync/async paths that implement the same validation rule. Include an error that coexists with a success-shaped field, wrong field types, and a healthy control. Expected verdicts must be independently specified.
