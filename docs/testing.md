@@ -287,6 +287,23 @@ publish -> force repair -> successful swap -> sidecar cleanup
 
 Assert stable logical identity, exact retained membership, and the absence of unnecessary mutations/embedding/allocation. Do not turn this into a timing benchmark when counters/read-only assertions answer the question. A crash-before-cleanup test is separate evidence, not a substitute. Preserve meaningful existing crash/retry/rollback tests without multiplying them across unrelated transports/models.
 
+The bounded publication traces in `test_ingest_publish.py` use a small,
+independent document-content model shared with representative real-server
+traces in `test_integration_sim.py`. They enumerate all six orderings of
+changed-source publication, forced repair and whole-document retirement,
+with interruption immediately before or after the second cutover. Each trace
+checks literal live text/membership, completion targets, exact retained
+IDs/payloads/vectors/controls, identical retry after interruption, two ordinary
+runs after each successful operation, and explicit retained rollback/roll-forward
+followed by an ordinary run. The model changes expected published membership
+only at cutover; it does not call product fingerprints or coverage helpers.
+
+This is bounded current-format, single-writer lifecycle evidence. Pinned
+physical reads establish retained content, not shared reader leases or global
+drain. These traces do not qualify automatic GC, unknown legacy formats,
+distributed snapshot restore, entitlement/revocation, real-model quality or
+production failure domains; those retain their separate acceptance owners.
+
 ### C. Equivalent validation; explicit emission/commit boundaries
 
 Use a compact table for buffered/streaming or sync/async paths that implement the same validation rule. Include an error that coexists with a success-shaped field, wrong field types, and a healthy control. Expected verdicts must be independently specified.
