@@ -5,6 +5,12 @@ Owner: [#482](https://github.com/yonatan895/qdrant-pdf-rag/issues/482),
 with [#411](https://github.com/yonatan895/qdrant-pdf-rag/issues/411).
 Contract: [current-candidate acceptance](../agent-workflow.md).
 
+Historical policy: the maintainer subsequently merged #497, replacing required
+JSON reviews, automatic templates and the draft veto with native human decisions.
+See the [post-merge audit](2026-09-25-m0-rollout-audit.md) for current obligations.
+The observations below are preserved as historical evidence; superseded review
+trials are not current requests. Disposable #491 is now closed unmerged.
+
 The disposable [PR #491](https://github.com/yonatan895/qdrant-pdf-rag/pull/491)
 initially used approved base `d390f0cc9ad6de4566ff02cc97da82529253bc57` (#490).
 It must not be merged. Deliberate failing tests, empty discovery hooks,
