@@ -1,6 +1,9 @@
 # M0 rollout audit after native maintainer decisions
 
-Status: **M0 remains open: technical publisher deployed, merge enforcement absent**.
+Status at the audit baseline: **technical publisher deployed, merge enforcement absent**.
+The subsequent [maintainer activation and enforcement proof](2026-09-25-m0-enforcement-proof.md)
+records the resolved GitHub enforcement gap. The observations below retain their
+original baseline and limits.
 Owners: [#482](https://github.com/yonatan895/qdrant-pdf-rag/issues/482),
 [#370](https://github.com/yonatan895/qdrant-pdf-rag/issues/370),
 [#371](https://github.com/yonatan895/qdrant-pdf-rag/issues/371) and
