@@ -3554,3 +3554,75 @@ def test_bounded_publication_lifecycle_traces(tmp_path, monkeypatch, operations,
     from tests.helpers_publication_lifecycle import exercise_publication_trace
 
     exercise_publication_trace(tmp_path, monkeypatch, PublishFake(), operations, fault, ALIAS)
+
+
+@pytest.mark.parametrize("operation", ["repair", "retire"])
+@pytest.mark.parametrize(
+    "gate",
+    [
+        "check_ingest_compatible", "verify_staging_distribution", "_placement_clients",
+        "verify_all_complete", "write_publication_metadata",
+    ],
+)
+def test_failed_post_cutover_revalidation_preserves_finalization(
+    tmp_path, monkeypatch, operation, gate
+):
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+    from tests.helpers_publication_lifecycle import _records
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _, removed = _two_doc_corpus(corpus)
+    progress = tmp_path / "inv.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    old = fake.aliases[ALIAS]
+    retained = (_records(fake, old), _records(fake, old + "__completions"))
+    extra = ("--reingest",)
+    if operation == "retire":
+        removed.unlink()
+        extra = ("--retire-doc", DOC_B)
+
+    original_swap = run_ingest.swap_alias_to
+
+    def after_cutover(*args, **kwargs):
+        original_swap(*args, **kwargs)
+        raise RuntimeError("interrupted finalization")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_ingest, "swap_alias_to", after_cutover)
+        with pytest.raises(RuntimeError, match="interrupted finalization"):
+            _run_main(monkeypatch, corpus, progress, *extra)
+    current = fake.aliases[ALIAS]
+    assert current != old
+    state_path = publish_state_path(progress, ALIAS)
+    saved_state = state_path.read_bytes()
+    saved_progress = progress.read_bytes()
+    published = (_records(fake, current), _records(fake, current + "__completions"))
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("unavailable certification evidence")
+
+    with monkeypatch.context() as patch:
+        if gate == "write_publication_metadata":
+            # Legacy already-live generations may require one-time receipt backfill.
+            patch.setattr(run_ingest, "read_publication_metadata", lambda *a, **k: None)
+        patch.setattr(run_ingest, gate, unavailable)
+        with pytest.raises(RuntimeError, match="unavailable certification evidence"):
+            _run_main(monkeypatch, corpus, progress, *extra)
+    assert state_path.exists(), "failed revalidation consumed the recovery sidecar"
+    assert state_path.read_bytes() == saved_state
+    assert progress.read_bytes() == saved_progress, "failed revalidation committed retirement"
+    assert fake.aliases[ALIAS] == current
+    assert (_records(fake, current), _records(fake, current + "__completions")) == published
+
+    assert _run_main(monkeypatch, corpus, progress, *extra) == 0
+    assert not state_path.exists()
+    for _ in range(2):
+        assert _run_main(monkeypatch, corpus, progress) == 0
+        assert fake.aliases[ALIAS] == current
+        assert (_records(fake, current), _records(fake, current + "__completions")) == published
+        assert (_records(fake, old), _records(fake, old + "__completions")) == retained

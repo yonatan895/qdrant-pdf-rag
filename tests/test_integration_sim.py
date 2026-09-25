@@ -1318,3 +1318,96 @@ def test_bounded_publication_trace_on_real_server(
     finally:
         client.close()
         _drop_publish_fixture(qdrant_url)
+
+
+def test_post_cutover_missing_control_preserves_retry_on_real_server(
+    qdrant_url, tmp_path, monkeypatch
+):
+    """Invalid live controls must not consume an interrupted retirement's recovery state."""
+    from qdrant_client import QdrantClient, models
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.inventory import load_inventory
+    from mainframe_rag.ingest.publish import publish_state_path
+    from mainframe_rag.ingest.representation import manifest_point_id
+    from tests.helpers_publication_lifecycle import TEXTS, _records, _write_source
+
+    _drop_publish_fixture(qdrant_url)
+    client = QdrantClient(url=qdrant_url, timeout=30)
+    alias = PUBLISH_ALIAS
+    corpus = tmp_path / "finalization-corpus"
+    corpus.mkdir()
+    progress = tmp_path / "finalization.jsonl"
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    monkeypatch.setenv("QDRANT_COLLECTION", alias)
+    monkeypatch.setenv("DENSE_DIM", "256")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: client)
+
+    def run(*extra):
+        return run_ingest.main([
+            "--src", str(corpus), "--progress", str(progress), "--workers", "1", *extra,
+        ])
+
+    def target():
+        return next(a.collection_name for a in client.get_aliases().aliases if a.alias_name == alias)
+
+    try:
+        for name, text in TEXTS.items():
+            _write_source(corpus, name, text)
+        assert run() == 0
+        old = target()
+        retained = (_records(client, old), _records(client, old + "__completions"))
+        (corpus / "beta.pdf").unlink()
+        original_swap = run_ingest.swap_alias_to
+
+        def interrupted(*args, **kwargs):
+            original_swap(*args, **kwargs)
+            raise RuntimeError("cutover completed before interruption")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(run_ingest, "swap_alias_to", interrupted)
+            with pytest.raises(RuntimeError, match="cutover completed before interruption"):
+                run("--retire-doc", "beta")
+        current = target()
+        assert current != old
+        controls = current + "__completions"
+        state = publish_state_path(progress, alias)
+        state_bytes, progress_bytes = state.read_bytes(), progress.read_bytes()
+        published = (_records(client, current), _records(client, controls))
+        manifest = client.retrieve(
+            controls, [manifest_point_id(controls)], with_payload=True, with_vectors=True
+        )[0]
+        client.delete(
+            controls, points_selector=models.PointIdsList(points=[manifest.id]), wait=True
+        )
+        with pytest.raises(RuntimeError):
+            run("--retire-doc", "beta")
+        assert state.read_bytes() == state_bytes
+        assert progress.read_bytes() == progress_bytes
+        assert target() == current
+        assert _records(client, current) == published[0]
+
+        # Explicit fixture recovery restores exact saved control bytes/vectors.
+        # Production never repairs corrupt live controls merely to pass a gate.
+        client.upsert(
+            controls,
+            points=[models.PointStruct(id=manifest.id, payload=manifest.payload, vector=manifest.vector)],
+            wait=True,
+        )
+        assert run("--retire-doc", "beta") == 0
+        assert not state.exists()
+        assert next(r for r in load_inventory(progress).values() if r.doc_id == "beta").status == "retired"
+        for _ in range(2):
+            assert run() == 0
+            assert target() == current
+            assert (_records(client, current), _records(client, controls)) == published
+            assert (_records(client, old), _records(client, old + "__completions")) == retained
+        assert [
+            (payload["doc_id"], payload["text"]) for payload, _ in _records(client, current).values()
+        ] == [("alpha", TEXTS["alpha"])]
+    finally:
+        client.close()
+        _drop_publish_fixture(qdrant_url)

@@ -619,7 +619,12 @@ thread pool.
   generations (issue #391 Q418-R1). An existing generation lacking a publication receipt
   performs a one-time metadata write when verified as `already_live`; once the receipt
   exists, subsequent ordinary runs perform zero writes (corpus, markers, and metadata remain
-  completely untouched). The resume path deliberately checks no
+  completely untouched). A post-cutover retry retains its build sidecar and
+  pending retirement inventory until representation, distribution, placement,
+  full coverage and any receipt backfill have succeeded. A failed revalidation
+  consumes neither recovery identity nor retirement authorization; after the
+  underlying problem is resolved, retry finalizes that same generation before
+  clearing the sidecar. The resume path deliberately checks no
   manifest state:
   staging is cloned from live, so an interrupted clone carries a COMMITTED
   manifest indistinguishable from a finished build — resume safety comes
