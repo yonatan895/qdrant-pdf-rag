@@ -10,7 +10,9 @@ import hashlib
 import io
 import json
 import stat
+import xml.etree.ElementTree as ET
 import zipfile
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,6 +42,7 @@ PRODUCERS = (
     NativeProducer('ci.yml', 'unit (1/2)', 'unit', 'unit_tests', 'unit-1', 'execution', True),
     NativeProducer('ci.yml', 'unit (2/2)', 'unit', 'unit_tests', 'unit-2', 'execution', True),
     NativeProducer('ci.yml', 'sim', 'sim', 'simulation', 'sim', 'execution', True),
+    NativeProducer('agent-probes.yml', 'agent-probes', 'agent-probes', 'agent_probes', 'agent-probes', 'execution', True),
     NativeProducer('ci.yml', 'gate-l1', 'gate-l1', 'gate_l1', 'gate-l1', 'execution', structured=True),
     NativeProducer('ci.yml', 'hazards', 'hazards', 'hazards', 'hazards', 'execution', structured=True),
     NativeProducer('load.yml', 'load', 'load', 'load', 'load', 'execution', True),
@@ -193,6 +196,19 @@ def normalize_native(
             require('tests.xml' not in files)
         else:
             require(junit_bytes(files['tests.xml']) == counts)
+            if producer.lane == 'agent_probes':
+                # Counts alone cannot substitute unrelated passing tests for
+                # live transport, traced execution and cancellation witnesses.
+                records = Counter((case.get('classname'), case.get('name'))
+                                  for case in ET.fromstring(files['tests.xml']).iter('testcase'))
+                for name in (
+                    'test_live_agent_contract_and_fresh_trace',
+                    'test_live_agent_fixed_overlong_envelope',
+                    'test_live_agent_stream_final_matches_buffered',
+                    'test_live_agent_disconnect_closes_upstream_then_next_request',
+                ):
+                    require(records[('tests.live_agent_probes', name)] == 1)
+
     else:
         require(counts is None and 'tests.xml' not in files)
     unit_coverage = None

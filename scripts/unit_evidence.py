@@ -51,7 +51,8 @@ def run_shard(root: Path, python: str, shard: int, junit: Path, output: Path) ->
 
 
 def node_list(value: object) -> list[str]:
-    require(isinstance(value, list) and bool(value))
+    if not isinstance(value, list) or not value:
+        raise ValueError('unit collection or execution does not satisfy selection policy')
     require(all(isinstance(n, str) and bool(n) for n in value))
     require(len(set(value)) == len(value))
     return value

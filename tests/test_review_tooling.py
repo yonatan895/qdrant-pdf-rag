@@ -2116,6 +2116,49 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                 with self.assertRaises((ValueError, KeyError)):
                     normalize_native(**args)
 
+    def test_native_agent_probes_require_all_named_transport_witnesses(self):
+        from scripts.acceptance_evidence import PRODUCERS, normalize_native
+        from scripts.ci_evidence import junit_bytes
+
+        names = [
+            "test_live_agent_contract_and_fresh_trace",
+            "test_live_agent_fixed_overlong_envelope",
+            "test_live_agent_stream_final_matches_buffered",
+            "test_live_agent_disconnect_closes_upstream_then_next_request",
+        ]
+        for variant in ("complete", "missing", "duplicate", "wrong-module", "unrelated"):
+            with self.subTest(variant=variant):
+                args, receipt, _ = self.fixture()
+                args["producer"] = next(p for p in PRODUCERS if p.lane == "agent_probes")
+                # Probe receipts have no unit coverage proof or unit policy.
+                receipt.pop("unit_coverage")
+                args["unit_policy"] = None
+                args["run"]["path"] = ".github/workflows/agent-probes.yml"
+                args["job"]["name"] = "agent-probes"
+                args["artifact"]["name"] = "evidence-agent-probes-attempt-2"
+                receipt.update(job_key="agent-probes", job_name="agent-probes", lane="agent_probes",
+                               workflow_ref="synthetic/repository/.github/workflows/agent-probes.yml@refs/pull/3/merge")
+                selected = names.copy()
+                module = "tests.live_agent_probes"
+                if variant == "missing":
+                    selected.pop()
+                elif variant == "duplicate":
+                    selected.append(names[0])
+                elif variant == "wrong-module":
+                    module = "tests.unrelated"
+                elif variant == "unrelated":
+                    selected[-1] = "test_unrelated"
+                xml = ("<testsuite>" + "".join(
+                    f'<testcase classname="{module}" name="{name}"/>' for name in selected
+                ) + "</testsuite>").encode()
+                receipt["tests"] = junit_bytes(xml)
+                args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
+                if variant == "complete":
+                    self.assertEqual(normalize_native(**args)["tests"]["executed"], 4)
+                else:
+                    with self.assertRaises(ValueError):
+                        normalize_native(**args)
+
     def test_accepts_exact_native_job_attempt_and_actual_test_records(self):
         from scripts.acceptance_evidence import normalize_native
 
