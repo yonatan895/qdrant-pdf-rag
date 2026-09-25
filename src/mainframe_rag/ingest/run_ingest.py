@@ -1494,13 +1494,10 @@ def _run_publish_locked(
         # rides along: it is the one place record-only drift (a new dense
         # query prefix keeps the same staging name — and is never a re-embed
         # trigger) is acknowledged, and it raises on a pending contract
-        # (interrupted run of the same representation). A stale sidecar
-        # (superseded build record) is forgotten, never acted on: the live
-        # generation is the ground truth here.
-        if state and state.get("retire_plan"):
-            commit_retired_inventory(progress, load_inventory(progress), state["retire_plan"])
-        if clear_publish_state(progress, alias):
-            log.info(json.dumps({"action": "publish_state_superseded", "alias": alias}))
+        # (interrupted run of the same representation). Preserve the bound
+        # sidecar and uncommitted retirement inventory until every check and
+        # any receipt backfill succeeds: failed certification must retain the
+        # exact build and removal authorization needed for another retry.
         _, record_drift = check_ingest_compatible(
             client,
             staging_settings,
@@ -1553,6 +1550,10 @@ def _run_publish_locked(
                 gen_fp=gen_fp,
                 corpus_fp=corp_fp,
             )
+        if state and state.get("retire_plan"):
+            commit_retired_inventory(progress, load_inventory(progress), state["retire_plan"])
+        if clear_publish_state(progress, alias):
+            log.info(json.dumps({"action": "publish_state_superseded", "alias": alias}))
         log.info(
             json.dumps(
                 {
