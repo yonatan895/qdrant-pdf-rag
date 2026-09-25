@@ -446,5 +446,12 @@ runner identity, exact mutation/test/assertion, successful baselines and intende
 behavioral kills. Hash-valid empty/partial/duplicate/surviving reports are negative
 cases. The consumer independently reads candidate Task dispatch and challenge
 policy bytes; a candidate cannot replace those inputs and merely claim their
-approved hashes. Changes to these verifier inputs follow the explicit policy
-bootstrap review path, rather than authorizing their own replacement verifier.
+approved hashes. Changes to verifier implementation inputs require the maintainer's
+[exact-candidate decision](agent-workflow.md#verifier-update-decision).
+Tests must cover actual producer-to-consumer decision artifacts, exact SHA/hash
+binding, native workflow/job/attempt/actor provenance, revocation and newer failed
+or pending decisions, plus a second currentness check before publication. An
+approved verifier with missing, failing, cancelled or skipped required native
+jobs still fails acceptance. Selection-policy and hazard-catalogue changes remain
+excluded. A successful decision records trust in bytes, not passing tests or
+permission to merge.
