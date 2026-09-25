@@ -320,7 +320,6 @@ def collect_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
     from scripts.review_tooling import (
         build_acceptance_summary,
         classify_paths,
-        validate_review_payload,
     )
 
     require(type(number) is int and number > 0)
@@ -332,19 +331,9 @@ def collect_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
                 'matched_categories': decision.matched_categories, 'changed_paths': paths}
     native = collect_native(api, pr, approved_root)
     require(native['candidate'] == candidate)
-    review, manual, review_identity = collect_review(api, pr, candidate)
     require(type(pr['draft']) is bool)
-    if pr['draft'] and review is not None:
-        review = validate_review_payload(review.to_dict(), expected_head=candidate['head_sha'],
-                                         expected_base=candidate['base_sha'], expected_execution=candidate['execution_sha'],
-                                         parse_error='Draft PR is not ready for acceptance')
-    summary = build_acceptance_summary(manifest, {**native['lane_statuses'], **manual}, review)
+    summary = build_acceptance_summary(manifest, native['lane_statuses'])
     result = summary.to_dict()
-    # Retain attributable metadata, not reviewer prose or manual/source content.
-    result['review'] = None if review is None else {
-        key: getattr(review, key) for key in ('code_assessment', 'verification',
-                                             'candidate_currentness', 'merge_readiness')}
-    result['review_identity'] = review_identity
     result['native'] = [{key: value for key, value in record.items() if key != 'results'}
                         for record in native['native']]
     result['runs'] = native['runs']
@@ -357,7 +346,7 @@ def collect_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
 
 
 def recheck_current(api: GitHub, result: dict[str, Any]) -> None:
-    """Refuse publication when a head/base, review or latest native attempt moved.
+    """Refuse publication when a head/base or latest native attempt moved.
 
     This is a bounded observation, not atomic merge authorization. Maintainer
     enforcement must also require an up-to-date branch and the trusted status
@@ -365,11 +354,7 @@ def recheck_current(api: GitHub, result: dict[str, Any]) -> None:
     """
     candidate = result['candidate']
     pr = api.get(api.prefix + f"pulls/{candidate['number']}")
-    require(candidate_identity(pr, api.repository) == candidate and pr['draft'] == result['draft'])
-    review, _, identity = collect_review(api, pr, candidate)
-    require(identity == result['review_identity'])
-    if result['all_prerequisites_met']:
-        require(review is not None and review.merge_readiness == 'ready_for_maintainer')
+    require(candidate_identity(pr, api.repository) == candidate)
     runs = paginate(api.get, api.prefix + f"actions/runs?event=pull_request&head_sha={candidate['head_sha']}", 'workflow_runs')
     latest = {}
     for producer in PRODUCERS:
@@ -398,7 +383,7 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
     check = api.write(api.prefix + 'check-runs', {
         'name': 'current-candidate-acceptance', 'head_sha': head, 'status': 'in_progress',
         'output': {'title': 'Collecting current candidate evidence',
-                   'summary': 'Acceptance is pending while current native checks and review are verified.'}},
+                   'summary': 'Acceptance is pending while current native execution evidence is verified.'}},
         method='POST')
     require(type(check['id']) is int and check['id'] > 0)
     template_note = ''
@@ -428,7 +413,7 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
         require(result['candidate']['head_sha'] == head)
         recheck_current(api, result)
     except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError, zipfile.BadZipFile):
-        result = {'all_prerequisites_met': False, 'recommended_readiness': 'not_ready',
+        result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
                   'error': 'acceptance_evidence_unavailable_or_changed'}
     ready = result['all_prerequisites_met']
     # The report contains generated lane/status text; no artifact commands run.
@@ -436,7 +421,7 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
     summary = summary[:55000] + template_note
     api.write(api.prefix + f"check-runs/{check['id']}", {
         'status': 'completed', 'conclusion': 'success' if ready else 'failure',
-        'output': {'title': 'Current prerequisites met' if ready else 'Unmet acceptance obligations',
+        'output': {'title': 'Technical verification passed' if ready else 'Technical verification incomplete',
                    'summary': summary[:60000]}}, method='PATCH')
     return {**result, 'check_run_id': check['id']}
 
@@ -491,11 +476,16 @@ def main(argv: list[str] | None = None) -> int:
             results.append(result)
     except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError, zipfile.BadZipFile):
         # Never print API errors, remote bodies or authentication diagnostics.
-        print(json.dumps({'schema_version': 1, 'all_prerequisites_met': False,
-                          'recommended_readiness': 'not_ready',
+        print(json.dumps({'schema_version': 2, 'all_prerequisites_met': False,
+                          'verification_status': 'incomplete',
                           'error': 'acceptance_evidence_unavailable_or_changed'}))
         return 1
     print(json.dumps(results if args.all_open else results[0], sort_keys=True))
+    # Bulk publisher health is separate from each PR's technical result.
+    # API/publication errors above still exit nonzero; red candidate checks
+    # remain red without failing an unrelated PR's aggregate workflow job.
+    if args.all_open and args.publish:
+        return 0
     return 0 if all(result['all_prerequisites_met'] for result in results) else 1
 
 

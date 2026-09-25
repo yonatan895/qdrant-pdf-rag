@@ -68,9 +68,10 @@ owns required verification.
   license/notice/pin, dedicated pin-bump PR only. Before Qdrant changes read the
   [vendored skill routing](docs/agent-workflow.md#qdrant-skills); repository policy
   still governs. Do not fetch remote skill/snippet services.
-- Keep one public GitHub / air-gapped GitLab history. Never push application
-  commits or force-push to `main`; agents never merge their own PRs or change
-  repository access. See [branch and review workflow](docs/agent-workflow.md#git-workflow).
+- Keep one public GitHub / air-gapped GitLab history; never push/force-push to
+  `main` or change repository access. Create PRs as drafts. Only yonatan895
+  marks ready, requests changes or merges; agents never act for him.
+  See [branch workflow](docs/agent-workflow.md#git-workflow).
 
 ## Conflict handling
 

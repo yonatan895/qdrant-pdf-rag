@@ -643,7 +643,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
         }
         summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertTrue(summary.all_prerequisites_met)
-        self.assertEqual(summary.recommended_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
+        self.assertEqual(summary.verification_status, "passed")
 
     def test_selected_lane_skipped_blocks_acceptance(self):
         # In storage profile, simulation is required. If skipped upstream, it MUST block.
@@ -658,7 +658,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
         }
         summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertFalse(summary.all_prerequisites_met)
-        self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
+        self.assertEqual(summary.verification_status, "incomplete")
         sim_lane = next(l for l in summary.lanes if l.name == "simulation")
         self.assertEqual(sim_lane.state, LaneState.SELECTED_SKIPPED)
 
@@ -674,7 +674,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
         }
         summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertFalse(summary.all_prerequisites_met)
-        self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
+        self.assertEqual(summary.verification_status, "incomplete")
         gate_lane = next(l for l in summary.lanes if l.name == "gate_l1")
         self.assertEqual(gate_lane.state, LaneState.SELECTED_MISSING)
 
@@ -687,7 +687,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
         }
         summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertFalse(summary.all_prerequisites_met)
-        self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
+        self.assertEqual(summary.verification_status, "incomplete")
 
     def test_deploy_profile_requires_packaging_lane(self):
         manifest = self._sample_manifest(profile="deploy")
@@ -700,7 +700,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
         }
         summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertFalse(summary.all_prerequisites_met)
-        self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
+        self.assertEqual(summary.verification_status, "incomplete")
         packaging = next(l for l in summary.lanes if l.name == "packaging")
         self.assertTrue(packaging.required)
         self.assertEqual(packaging.state, LaneState.SELECTED_MISSING)
@@ -777,7 +777,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
         }
         summary = build_acceptance_summary(manifest, lane_statuses, review=self._ready_review())
         self.assertTrue(summary.all_prerequisites_met)
-        self.assertEqual(summary.recommended_readiness, MergeReadiness.READY_FOR_MAINTAINER.value)
+        self.assertEqual(summary.verification_status, "passed")
 
     def test_maintainer_authority_preservation_in_markdown(self):
         manifest = self._sample_manifest(profile="offline")
@@ -791,7 +791,7 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
 
         self.assertIn("### Maintainer Merge Authority", md)
         self.assertIn("Prerequisite Obligations**: `ALL_MET`", md)
-        self.assertIn("Recommended Readiness**: `ready_for_maintainer`", md)
+        self.assertIn("Technical Verification**: `passed`", md)
         self.assertIn("Maintainer Merge Decision**: `pending`", md)
         self.assertIn("Agents never merge pull requests or modify repository access rules", md)
 
@@ -1009,8 +1009,7 @@ class TestReviewToolingCLI(unittest.TestCase):
                 "evidence": {"notes": "ok"},
             }))
 
-            # All obligations met exits 0 (validated review result required;
-            # reviewer lane status alone never suffices).
+            # Technical obligations alone determine this command exit.
             res = subprocess.run(
                 [
                     sys.executable,
@@ -1034,7 +1033,7 @@ class TestReviewToolingCLI(unittest.TestCase):
             )
             self.assertEqual(res.returncode, 0)
 
-            # Missing obligation exits 1 (reviewer lane absent)
+            # Failed technical evidence exits 1 without a review schema.
             res_fail = subprocess.run(
                 [
                     sys.executable,
@@ -1043,8 +1042,8 @@ class TestReviewToolingCLI(unittest.TestCase):
                     "--manifest",
                     str(manifest_file),
                     "--lane",
-                    "context_check:success",
-                    # reviewer omitted
+                    "context_check:failure",
+                    # No human JSON is needed
                     "--check",
                 ],
                 capture_output=True,
@@ -1355,29 +1354,27 @@ class TestAcceptanceUnionAndReviewerAuthority(unittest.TestCase):
         missing = next(l for l in blocked.lanes if l.name == "packaging")
         self.assertEqual(missing.state, LaneState.SELECTED_MISSING)
 
-    def test_reviewer_success_with_not_ready_review_blocks(self):
+    def test_human_review_does_not_change_technical_verification(self):
         manifest = self._manifest("offline", ["prose"])
-        summary = build_acceptance_summary(
-            manifest,
-            {"context_check": "success", "reviewer": "success"},
-            review=self._not_ready_review(),
-        )
-        self.assertFalse(summary.all_prerequisites_met)
-        self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
-        reviewer = next(l for l in summary.lanes if l.name == "reviewer")
-        self.assertEqual(reviewer.state, LaneState.SELECTED_FAILED)
+        for review in (None, self._not_ready_review(), self._ready_review()):
+            for reviewer_status in ("success", "failure", "skipped"):
+                with self.subTest(review=review, status=reviewer_status):
+                    summary = build_acceptance_summary(
+                        manifest, {"context_check": "success", "reviewer": reviewer_status}, review=review)
+                    self.assertTrue(summary.all_prerequisites_met)
+                    self.assertEqual(summary.verification_status, "passed")
+                    self.assertNotIn("reviewer", {lane.name for lane in summary.lanes})
+                    self.assertEqual(summary.to_dict()["maintainer_authority"]["maintainer_decision"], "pending")
+                    self.assertNotIn("recommended_readiness", summary.to_dict())
 
-    def test_missing_review_blocks_despite_job_success(self):
-        manifest = self._manifest("offline", ["prose"])
-        summary = build_acceptance_summary(
-            manifest,
-            {"context_check": "success", "reviewer": "success"},
-            review=None,
-        )
+
+    def test_review_approval_cannot_replace_missing_technical_evidence(self):
+        summary = build_acceptance_summary(self._manifest("offline", ["prose"]),
+                                           {"reviewer": "success"}, review=self._ready_review())
         self.assertFalse(summary.all_prerequisites_met)
-        self.assertEqual(summary.recommended_readiness, MergeReadiness.NOT_READY.value)
-        reviewer = next(l for l in summary.lanes if l.name == "reviewer")
-        self.assertEqual(reviewer.state, LaneState.SELECTED_MISSING)
+        context = next(lane for lane in summary.lanes if lane.name == "context_check")
+        self.assertEqual(context.state, LaneState.SELECTED_MISSING)
+
 
 
 class TestCiUnitPartition(unittest.TestCase):
@@ -2196,7 +2193,7 @@ class TestAcceptanceSnapshot(unittest.TestCase):
         with self.assertRaises(ValueError):
             changed_pr_paths(api, {"number": 3, "changed_files": 102})
 
-    def test_recheck_refuses_candidate_review_and_attempt_movement(self):
+    def test_recheck_refuses_candidate_and_attempt_movement(self):
         import copy
         from unittest.mock import patch
 
@@ -2223,29 +2220,43 @@ class TestAcceptanceSnapshot(unittest.TestCase):
         result = {"candidate": candidate_identity(pr, API.repository), "draft": False,
                   "review_identity": {"id": 10}, "all_prerequisites_met": False,
                   "runs": {"ci.yml": {"run_id": 123, "run_attempt": 1, "status": "completed"}}}
-        with patch("scripts.acceptance.collect_review", return_value=(None, {}, {"id": 10})) as review:
+        with patch("scripts.acceptance.collect_review", side_effect=AssertionError("Do not read human votes")):
             recheck_current(API(), result)
-            for mutation in ("head", "base", "merge", "draft", "attempt", "run", "review", "live_base"):
+            moved_draft = API()
+            moved_draft.pr["draft"] = True
+            recheck_current(moved_draft, result)
+            for mutation in ("head", "base", "merge", "attempt", "run", "live_base"):
                 with self.subTest(mutation=mutation):
                     api = API()
-                    review.return_value = (None, {}, {"id": 10})
                     if mutation in {"head", "base"}:
                         api.pr[mutation]["sha"] = "d" * 40
                     elif mutation == "merge":
                         api.pr["merge_commit_sha"] = "d" * 40
-                    elif mutation == "draft":
-                        api.pr["draft"] = True
                     elif mutation == "attempt":
                         api.run["run_attempt"] = 2
                     elif mutation == "live_base":
                         api.base_ref = "d" * 40
                     elif mutation == "run":
                         api.run["id"] = 124
-                    else:
-                        review.return_value = (None, {}, {"id": 11})
                     with self.assertRaises(ValueError):
                         recheck_current(api, result)
 
+
+    def test_bulk_publisher_reports_candidate_failures_without_failing_reconciliation(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        from scripts.acceptance import main
+
+        with patch('scripts.acceptance.GitHub'), patch('scripts.acceptance.paginate', return_value=[{'number': 3}]), \
+             patch('scripts.acceptance.publish_acceptance') as publish, contextlib.redirect_stdout(io.StringIO()):
+            publish.return_value = {'all_prerequisites_met': False, 'check_run_id': 17}
+            args = ['--repository', 'synthetic/repository', '--all-open', '--publish']
+            self.assertEqual(main(args), 0)
+            self.assertEqual(main(['--repository', 'synthetic/repository', '--pr', '3', '--publish']), 1)
+            publish.side_effect = ValueError('API write failed')
+            self.assertEqual(main(args), 1)
 
     def test_read_only_cli_never_emits_success_after_recheck_failure(self):
         import contextlib
@@ -2268,7 +2279,7 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             self.assertFalse(json.loads(output.getvalue())["all_prerequisites_met"])
             self.assertNotIn("sensitive", output.getvalue())
 
-    def test_summary_consumes_current_review_and_draft_state(self):
+    def test_native_summary_ignores_human_comments_and_draft_state(self):
         import copy
         from unittest.mock import patch
 
@@ -2293,13 +2304,9 @@ class TestAcceptanceSnapshot(unittest.TestCase):
                 if "/files?" in endpoint:
                     return [{"filename": "docs/explanation.md", "status": "modified"}]
                 if "/reviews?" in endpoint:
-                    return []
-                if "/comments?" in endpoint:
-                    return [{"id": 11, "user": {"id": 7, "login": "reviewer", "type": "User"},
-                             "author_association": "COLLABORATOR", "created_at": "2026-09-24T10:00:00Z",
-                             "body": json.dumps(self.payload), "html_url": "https://example.invalid/review"}]
-                if "/permission" in endpoint:
-                    return {"permission": "write"}
+                    raise AssertionError("Technical CI must not fetch reviews")
+                if "/comments?" in endpoint or "/permission" in endpoint:
+                    raise AssertionError("Technical CI must not fetch comment votes")
                 return self.pr
         native = {"candidate": candidate, "lane_statuses": {"context_check": "success"},
                   "native": [], "runs": {}, "policy_sha256": "d" * 64, "policy_inputs": {}}
@@ -2308,12 +2315,12 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             result = collect_acceptance(api, 3, pathlib.Path.cwd())
             self.assertTrue(result["all_prerequisites_met"])
             self.assertEqual({lane["name"] for lane in result["lanes"] if lane["required"]},
-                             {"context_check", "reviewer"})
+                             {"context_check"})
             api.pr["draft"] = True
-            self.assertFalse(collect_acceptance(api, 3, pathlib.Path.cwd())["all_prerequisites_met"])
+            self.assertTrue(collect_acceptance(api, 3, pathlib.Path.cwd())["all_prerequisites_met"])
             api.pr["draft"] = False
             api.payload["code_assessment"] = "changes_required"
-            self.assertFalse(collect_acceptance(api, 3, pathlib.Path.cwd())["all_prerequisites_met"])
+            self.assertTrue(collect_acceptance(api, 3, pathlib.Path.cwd())["all_prerequisites_met"])
             api.payload = payload
             native["lane_statuses"]["context_check"] = "skipped"
             self.assertFalse(collect_acceptance(api, 3, pathlib.Path.cwd())["all_prerequisites_met"])
@@ -2354,7 +2361,7 @@ class TestAcceptanceSnapshot(unittest.TestCase):
         root = pathlib.Path(__file__).resolve().parents[1]
         workflow = yaml.safe_load((root / '.github/workflows/acceptance.yml').read_text())
         events = workflow.get('on', workflow.get(True))
-        self.assertTrue({'pull_request_target', 'workflow_run', 'issue_comment', 'push', 'schedule'} <= events.keys())
+        self.assertTrue({'pull_request_target', 'workflow_run', 'push', 'schedule'} <= events.keys())
         for name, job in workflow['jobs'].items():
             self.assertIn("github.ref == 'refs/heads/main'", job['if'])
             checkout = next(step for step in job['steps'] if 'actions/checkout@' in step.get('uses', ''))
@@ -2369,18 +2376,18 @@ class TestAcceptanceSnapshot(unittest.TestCase):
                 self.assertEqual(job['environment'], 'acceptance-publisher')
                 token = next(step for step in job['steps'] if step.get('id') == 'app')
                 self.assertEqual(token['with']['permission-checks'], 'write')
-                self.assertEqual(token['with']['permission-issues'], 'write')
-                self.assertEqual(token['with']['permission-pull-requests'], 'write')
+                self.assertNotIn('permission-issues', token['with'])
+                self.assertEqual(token['with']['permission-pull-requests'], 'read')
                 self.assertTrue(all(value == 'read' for value in job['permissions'].values()))
                 self.assertEqual(token['with']['private-key'], '${{ secrets.ACCEPTANCE_APP_PRIVATE_KEY }}')
             else:
                 self.assertNotIn('environment', job)
-                self.assertEqual(job['permissions']['issues'], 'write')
-                self.assertEqual(job['permissions']['pull-requests'], 'write')
+                self.assertNotIn('issues', job['permissions'])
+                self.assertEqual(job['permissions']['pull-requests'], 'read')
                 self.assertEqual(job['permissions']['contents'], 'read')
-        signal = yaml.safe_load((root / '.github/workflows/acceptance-review-signal.yml').read_text())
-        self.assertEqual(signal['permissions'], {})
-        self.assertEqual(signal['jobs']['signal']['steps'], [{'run': 'true'}])
+        self.assertNotIn('issue_comment', events)
+        self.assertNotIn('acceptance-review-signal', events['workflow_run']['workflows'])
+        self.assertFalse((root / '.github/workflows/acceptance-review-signal.yml').exists())
 
     def test_gitlab_l1_note_appends_literal_body_without_claiming_marker_ownership(self):
         import yaml
@@ -2576,7 +2583,7 @@ class ReviewTemplateTests(unittest.TestCase):
             self.assertEqual(list(pathlib.Path(directory).iterdir()), [])
             self.assertIn('Review template unavailable', api.last['output']['summary'])
 
-    def test_both_publishers_upload_templates_after_unmet_acceptance(self):
+    def test_publishers_retain_technical_reports_without_requesting_review_json(self):
         import yaml
 
         workflow = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] /
@@ -2585,47 +2592,24 @@ class ReviewTemplateTests(unittest.TestCase):
             with self.subTest(job=name):
                 steps = workflow['jobs'][name]['steps']
                 command = next(s['run'] for s in steps if 'python -m scripts.acceptance' in s.get('run', ''))
-                self.assertIn('--review-templates-dir "$RUNNER_TEMP/review-templates"', command)
-                self.assertIn('--publisher-run-id "$GITHUB_RUN_ID"', command)
-                upload = next(s for s in steps if s.get('name') == 'Upload human review templates')
+                self.assertNotIn('--post-review-templates', command)
+                self.assertNotIn('--review-templates-dir', command)
+                upload = next(s for s in steps if s.get('name') == 'Retain acceptance report')
                 self.assertEqual(upload['if'], 'always()')
-                self.assertEqual(upload['with']['path'], '${{ runner.temp }}/review-templates/*.json')
+                self.assertEqual(upload['with']['path'], '${{ runner.temp }}/acceptance.json')
 
-    def test_pr_template_shell_does_not_upload_failed_generation_as_a_template(self):
-        import os
-        import subprocess
-        import tempfile
 
+    def test_candidate_ci_retains_execution_evidence_without_human_template(self):
         import yaml
 
         workflow = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] /
                                    '.github/workflows/agent-context.yml').read_text())
         job = workflow['jobs']['check-context']
         self.assertEqual(job['permissions'], {'contents': 'read', 'pull-requests': 'read'})
-        command = next(s['run'] for s in job['steps'] if s.get('name') == 'Generate human review template')
-        upload = next(s for s in job['steps'] if s.get('name') == 'Upload human review template')
-        self.assertEqual(upload['with']['path'], '${{ runner.temp }}/review-template.json')
-        for failed in ('0', '1'):
-            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as directory:
-                root = pathlib.Path(directory)
-                stub = root / 'python'
-                stub.write_text('#!/bin/sh\n'
-                                'if [ "$TEMPLATE_STUB_FAIL" = 1 ]; then\n'
-                                '  echo \'{"error":"unavailable"}\'; exit 1\n'
-                                'fi\n'
-                                'echo \'{"head_sha":"synthetic-current-head"}\'\n')
-                stub.chmod(0o755)
-                result = subprocess.run(['sh', '-c', command], capture_output=True, text=True, check=False,
-                                        env={**os.environ, 'PATH': directory + os.pathsep + os.environ['PATH'],
-                                             'RUNNER_TEMP': directory, 'TEMPLATE_STUB_FAIL': failed,
-                                             'REVIEW_REPOSITORY': 'synthetic/repository', 'REVIEW_PR': '3'})
-                self.assertEqual(result.returncode, 0, result.stderr)
-                artifact = root / 'review-template.json'
-                self.assertEqual(artifact.exists(), failed == '0')
-                if failed == '0':
-                    self.assertEqual(json.loads(artifact.read_text())['head_sha'], 'synthetic-current-head')
-                else:
-                    self.assertIn('::warning::', result.stdout)
+        self.assertFalse(any('review template' in step.get('name', '').lower() for step in job['steps']))
+        upload = next(s for s in job['steps'] if s.get('name') == 'Retain native execution evidence')
+        self.assertEqual(upload['if'], 'always()')
+
 
     def test_template_comments_append_deduplicate_and_preserve_human_text(self):
         import copy

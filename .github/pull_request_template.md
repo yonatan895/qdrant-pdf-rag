@@ -1,3 +1,7 @@
+<!-- Create this PR as a draft. Only the human maintainer yonatan895 may mark
+it ready, formally request changes, or merge. Agents report evidence/findings
+and leave lifecycle decisions to the maintainer, even after CI passes. -->
+
 ## Scope
 Issue/acceptance item; base SHA; one-sentence outcome.
 
@@ -29,8 +33,7 @@ The author supplies candidate attribution and evidence; the reviewer supplies in
 assessment; the maintainer records explicit merge authorization. Do not tick a field as
 someone else's approval. When scope narrows or a stacked PR is retargeted, update title, scope,
 dependencies, evidence, and limits before readiness. Preserve historical review/run links;
-do not rewrite an old failed attempt as a success. A new head invalidates automatic readiness
-until reconciled. The final record must name the actual candidate.
+do not rewrite an old failed attempt as a success. A new head requires current technical evidence; only the maintainer controls ready state. The final record must name the actual candidate.
 
 ### Candidate attribution and author claims
 - **Candidate head SHA**: `<commit-sha>`
@@ -40,12 +43,11 @@ until reconciled. The final record must name the actual candidate.
 - **Execution SHA / test-merge**: `<sha or not run>`
 - **Known limitations**: [not implemented vs not verified; owning issue]
 
-### Independent reviewer assessment
-- **Canonical review link**: [Link to latest candidate-bound review comment or artifact]
-- **Reviewed candidate SHA**: `<evaluated-commit-sha>`
-- **Summary readiness**: `ready_for_maintainer` | `not_ready`
-- **Material findings**: [IDs -> dispositions (fixed-and-verified / disproven-with-evidence / accepted-by-authorized-owner / unresolved), or none]
-- [Canonical review protocol](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/agent-workflow.md#review-handoff)
+### Maintainer review
+Only the human maintainer `yonatan895` marks ready, formally requests changes,
+and merges. Use native GitHub controls; no JSON review comment is required.
+Agents leave this PR in draft and provide findings/evidence without submitting
+approval or requesting changes on the maintainer's behalf.
 
 ### Verification run links
 - **Check-context & lint/types**: [Link to run/log]
@@ -53,7 +55,6 @@ until reconciled. The final record must name the actual candidate.
 - **Risk tier selected**: [prose-only | test/tool-only | publication/retirement lifecycle | extraction/ranking | HTTP/lifecycle | packaging/deploy | release promotion]
 - [Verification minimums](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/live-stack.md#verification-minimums)
 
-### Maintainer merge decision
-- **Decision**: `approved` | `changes_requested` | `rejected`
-- **Maintainer**: `@username`
-- **Rationale**: [Explicit merge decision; agents never self-merge or alter repository access]
+### Maintainer decision
+Link the maintainer's native review/discussion when available. Do not fill in
+another person's approval. Passing CI reports technical evidence only.

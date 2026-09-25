@@ -79,6 +79,17 @@ and baseline from [bootstrap](install_and_ops.md); do not require internet.
 Do not reuse an already-merged branch. Do not switch a tree used by running
 spawn workers. Experiments and temporary artifacts belong outside the tree.
 
+Create every PR as a draft (`gh pr create --draft`). Only the human maintainer
+`yonatan895` may mark it ready for review, submit a formal request for changes,
+or merge it. Agents leave PRs in draft after verification and report evidence
+and findings; passing CI never authorizes a lifecycle transition. Agents must
+not use `gh pr ready`, submit APPROVE/REQUEST_CHANGES reviews, or merge, even
+when using the maintainer's GitHub account. Findings and suggested corrections
+are allowed as comments; they are not a maintainer decision. Shared credentials
+cannot distinguish a human action from an agent action at the GitHub API, so
+this working agreement is not represented as an account-level enforcement
+mechanism. Repository access/ruleset changes remain maintainer-owned.
+
 Keep a bounded behavior and its necessary tests/docs in one PR. No application
 fixes in a docs-only PR. Rebase on the approved current main before requesting
 review; no merge commits unless requested. Force-push a feature branch only
@@ -231,17 +242,17 @@ permissions, change baselines, merge, or modify the author's implementation.
 Return one concise review summary with supporting detail and remaining limits.
 ```
 
-### One authoritative final assessment
+### Maintainer decisions and technical evidence
 
-Keep the author's scope/compatibility/evidence section. For the reviewer outcome,
-link the latest valid candidate-bound structured review/artifact and name its reviewed SHA,
-rather than hand-copying all disposition and verdict fields into a second editable report.
-Historical reviews remain visible; newer prose cannot overwrite their meaning.
-
-During #411's consumer rollout, the trusted current-candidate acceptance summary can be
-the final aggregate. Until then, use the actual review link and explicit maintainer decision;
-do not claim an unenforced gate exists. A bot job's successful execution still does not mean approval.
-Don't infer approval from placeholders or require a second manually synchronized status table.
+Use GitHub's draft/ready, review and merge controls for the PR lifecycle. The
+human maintainer `yonatan895` owns those decisions; no JSON review comment,
+manual commit-ID transcription, or second approval table is required. A ready
+PR means the maintainer requested review, not that CI has approved the code.
+Agents may provide findings and evidence as comments but never submit formal
+APPROVE/REQUEST_CHANGES reviews, mark ready, or merge on the maintainer's behalf.
+Optional structured model-review artifacts are diagnostic only and cannot grant
+or revoke technical verification or a human decision. Historical findings remain
+visible for the maintainer to assess; CI does not parse comment history as votes.
 
 ### Native evidence and consumer rollout (#411)
 
@@ -274,7 +285,7 @@ therefore require the existing explicit maintainer review path before a later
 consumer can trust those bytes. This does not waive their tests. The privileged
 publisher, when enabled, must execute approved-base code only and recheck PR
 currentness before publishing. Native API provenance and valid receipts do not
-substitute for an authorized current review or its finding dispositions.
+substitute for the maintainer's review and merge decision.
 
 Both GitHub and GitLab L1 comment publishers append historical reports with
 candidate/run attribution. They never acquire ownership of an existing comment
@@ -282,91 +293,46 @@ from its marker. Comments remain navigation aids; native evidence is the gate
 input. GitLab reports an unavailable target SHA explicitly when its pipeline does
 not supply one, rather than substituting the diff base as the tested target.
 
-`scripts/acceptance.py` now assembles the native evidence and the existing
-review schema/summary. Its read-only entry point is
+`scripts/acceptance.py` assembles current native **technical verification**.
+Its read-only entry point is
 `python -m scripts.acceptance --repository OWNER/REPO --pr NUMBER` from the
 approved base checkout. It exits nonzero for unmet, unavailable or changing
-evidence. `--publish` explicitly creates a pending check before collection,
-then publishes success only after rereading candidate, review and latest run
-attempt identities and the live default-branch ref. PR merge metadata can lag a
-base push; matching old PR snapshots alone do not establish currentness. Template
-generation checks the live ref before and after building its snapshot, and
-acceptance collection requires it to match the approved checkout. A mismatch
-refuses the template/result; it never substitutes new SHAs into old evidence.
-`--all-open` paginates open candidates. File pagination must
-match the PR's changed-file count and retain both rename names verbatim.
+technical evidence. The `current-candidate-acceptance` check name is retained,
+but it reports technical obligations only. Machine summary schema v2 exposes
+`verification_status` (`passed`/`incomplete`) instead of a readiness recommendation.
+There is no reviewer lane, required review JSON,
+comment-history parsing or draft-state veto. Required missing/skipped/failed
+execution still fails; passing checks on a draft do not mark it ready.
 
-The approved-main acceptance workflow posts a **Your review template** comment
-on each open PR, with the current commit IDs filled in. Copy its JSON, replace
-the human judgment placeholders, and submit your review as a new comment or
-Comment review. Generation runs before acceptance evaluation, so missing review
-does not prevent the template appearing. Exact unchanged templates are not
-reposted; changed identities produce a new comment. The publisher never edits
-reviewer comments or treats a marker alone as authority. These generated,
-incomplete skeletons are not approval. Exact untouched scaffolding (including
-legacy placeholder finding objects) is excluded from review selection and finding
-history, even when posted through a shared human account. Real or partially
-entered findings remain subject to the existing carry-forward requirements;
-a marker alone never exempts a record. New templates use `material_findings: []`;
-reviewers add finding objects when needed rather than filling a dummy finding.
-Artifacts below remain a secondary copy.
-Comment-writing permission is confined to the approved-main publisher; ordinary
-candidate context CI remains read-only. PR timeline comments require both issues
-and pull requests write on the publisher token; the dedicated-App job keeps its
-default Actions token read-only. This scope is for template comments, not review
-submission or merging. If comment publication is unavailable,
-the check points to the retained artifact instead.
+`--publish` creates a pending check before collection and publishes its result
+only after rereading candidate and latest run/attempt identities and the live
+default-branch ref. PR merge metadata can lag a base push; matching old snapshots
+alone do not establish currentness. The approved checkout, live ref and candidate
+base must agree. No new SHAs are substituted into old evidence. `--all-open`
+paginates candidates; file pagination must match the changed-file count and
+retain both rename names verbatim.
 
-PR context CI also publishes `review-template-pr-<number>-<attempt>` in the
-`agent-context` run's Artifacts section, before tests run. This read-only job
-uses candidate code, so its template is a convenience, not trusted approval;
-the acceptance consumer independently validates submitted identities. A
-transient identity lookup failure warns and omits the template, without failing
-the context tests or uploading an error response as a review template.
+In bulk publication, each candidate gets its own success/failure check. A
+successfully completed reconciliation exits zero even when some candidates have
+unmet technical obligations. Errors preventing candidate listing or check publication still fail the workflow;
+per-candidate evidence lookup failures remain red candidate checks.
+Thus the publisher's process status is not another PR's verification result.
+Read-only and single-PR commands retain nonzero exits for unmet obligations.
 
-The approved-main acceptance workflow automatically generates human review
-skeletons, including when acceptance is blocked by missing checks or review.
-Open the PR's `current-candidate-acceptance` check: its **Human review template**
-section links the publisher run. Under **Artifacts**, download
-`review-templates-<attempt>` and open `pr-<number>-<head SHA>.json`.
-Fill only the human judgment fields and submit your review. The artifact appears
-after the upload step finishes; inability to verify current candidate identity
-produces an unavailable notice instead of a guessed template. Both advisory and
-trusted-App publisher paths upload templates even when acceptance fails.
+Automatic review-template comments and CI review-template artifacts are retired.
+No comment-writing permission is needed by the publisher. Legacy explicit
+`--review-template` tooling remains optional for old integrations; generated or
+submitted JSON has no role in the native verification check. Its identity lookup
+still refuses stale candidates. Selected `agent_probes`/`eval_retrieval` remain
+technical obligations: where a native producer is unavailable, the lane stays
+missing. A review comment no longer supplies execution evidence or waives a lane.
 
-Generate the same review skeleton locally with
-`python -m scripts.acceptance --repository OWNER/REPO --pr NUMBER --review-template`.
-This read-only command fills the current base (target branch), head (PR branch)
-and execution (GitHub test-merge) SHAs, verifies the merge parents and rereads
-candidate identity before returning. It leaves verdict, verification, readiness,
-findings and evidence for the human reviewer; the untouched skeleton cannot
-approve anything. Carry forward prior material finding IDs/dispositions. Fill
-those judgment fields and submit the JSON as a comment or Comment review. For a
-native review-event trial use Files changed → Review changes → Comment.
-Generation does not submit a review, prove CI success, or freeze the PR: regenerate
-and review again if head/base changes. `--publish` and `--all-open` cannot be
-combined with template generation.
-
-Review authority is an API-visible human collaborator with write/maintain/admin
-permission. The maintainer may independently review agent work through the same
-GitHub account used by the agent to open the PR; account equality alone is not a
-rejection. GitHub API identity cannot distinguish human and agent activity under
-shared credentials. The maintainer must actually supply the independent review;
-agents must never submit approval for their own implementation. A bot, marker,
-unstructured author PASS table or read-only collaborator cannot supply approval. The latest authorized structured
-record must bind the exact head/base/execution. Native requests for changes and
-omitted dispositions from retrievable earlier structured findings block
-readiness. Deleted historical records cannot be reconstructed by this consumer;
-GitHub's retained review history and maintainer review remain necessary. Selected
-`agent_probes`/`eval_retrieval` obligations require an authorized review's evidence
-object keyed by lane with exact candidate SHAs, `status: success`, an HTTPS `url`,
-`command` and `result`. This is attributed human evidence, not an executed CI test.
-
-`acceptance.yml` always schedules on PR metadata, native workflow activity,
-review/comment signals and base pushes, with periodic reconciliation for missed
-signals. Both publisher paths check out `main` explicitly with no persisted git
+`acceptance.yml` schedules on PR metadata, native workflow activity and base
+pushes, with periodic reconciliation for missed signals. Review/comment activity
+is not an input to technical verification. Both publisher paths check out `main`
+explicitly with no persisted git
 credentials, install no project dependencies, and never execute candidate code
-or artifact commands. The signal workflow has no token permissions or checkout.
+or artifact commands. The obsolete review-signal workflow is removed.
 Publication is serialized. API snapshots and events are not an atomic merge
 transaction; a state change can occur after the final read, and GitHub scheduling
 can be delayed. The chosen review policy, branch currency and conversation
@@ -375,8 +341,8 @@ resolution must be enforced by the maintainer's repository configuration.
 The default Actions-token check is **advisory**: another candidate workflow can
 imitate its check name/App source. Do not configure this advisory source as an
 enforced acceptance guarantee. The optional dedicated App path uses the pinned
-`actions/create-github-app-token` v3.2.0 action with repository-scoped Actions
-and contents read access, and pull requests, issues/comments and checks write access. Its
+`actions/create-github-app-token` v3.2.0 action with repository-scoped Actions,
+contents and pull requests read access, and checks write access. Its
 short-lived token is revoked by the action after the job.
 
 Maintainer activation, after the disposable-PR transition proof:
@@ -387,14 +353,14 @@ Maintainer activation, after the disposable-PR transition proof:
    available repository secret. Set `ACCEPTANCE_APP_CLIENT_ID` and then repository
    variable `ACCEPTANCE_APP_ENABLED=true`. The optional environment job is disabled
    until this explicit activation.
-2. Require `current-candidate-acceptance` from that specific App, current/up-to-date
-   branches and conversation resolution. In the shared-account authoring setup,
-   the App check enforces the maintainer's candidate-bound structured review;
-   GitHub cannot provide a native approval of one's own PR. Do not require an
-   impossible self-approval. Where distinct author/reviewer accounts are used,
-   native approval with stale approvals dismissed and last-push approval can add
-   another guard. Record the chosen approval policy and actual rejected-merge
-   tests, including a same-name Actions check and missing/stale structured review.
+2. Require `current-candidate-acceptance` from that specific App and configure
+   branch currency/conversation resolution according to maintainer policy.
+   This check proves technical prerequisites, never human approval. The human
+   maintainer alone marks ready, requests changes and merges. Shared-account
+   credentials cannot distinguish an agent from that human; do not claim an
+   account-level restriction can enforce this distinction or require impossible
+   self-approval. Record actual rejected-merge tests for missing/stale technical
+   evidence and a same-name untrusted check before claiming enforcement.
 3. Keep the App key unavailable to candidate workflows and preserve human
    approval for future publisher/policy changes. A candidate cannot authorize
    new producer/workflow bytes merely by supplying matching hashes; bootstrap

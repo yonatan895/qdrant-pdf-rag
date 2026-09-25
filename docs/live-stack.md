@@ -27,6 +27,11 @@ executable files beneath `docs/` are not automatically prose. Shared test
 fixtures select their dependent suites; mixed and unknown impact cannot omit
 packaging simply because their combined profile is `full`.
 
+CI evaluates technical evidence independently of the PR's draft/ready state.
+Every PR starts as a draft; only the human maintainer `yonatan895` marks it ready,
+formally requests changes, or merges. Neither a green check nor a JSON review
+comment performs those actions. See [the lifecycle contract](agent-workflow.md#git-workflow).
+
 `review_tooling.required_lanes` is shared by native dispatch and the approved-base
 consumer. Workflow files always schedule their small selector; policy-unselected
 jobs can skip without disguising required-but-skipped work. Native hazard, load
