@@ -324,8 +324,16 @@ No comment-writing permission is needed by the publisher. Legacy explicit
 `--review-template` tooling remains optional for old integrations; generated or
 submitted JSON has no role in the native verification check. Its identity lookup
 still refuses stale candidates. Selected `agent_probes`/`eval_retrieval` remain
-technical obligations: where a native producer is unavailable, the lane stays
-missing. A review comment no longer supplies execution evidence or waives a lane.
+technical obligations. The dedicated `agent-probes.yml` producer runs
+`tests/live_agent_probes.py` against real loopback HTTP, disposable pinned
+Qdrant/Jaeger and a deterministic model stand-in. Its receipt must contain each
+of the four named transport/lifecycle tests exactly once: live contracts and a
+fresh trace, fixed overlong error, buffered/streamed final integrity, and upstream
+cancellation followed by a successful ordinary request. Scripted refusal checks
+propagation and citation labeling, not semantic model security or quality.
+`eval_retrieval` remains missing until an approved runner, model endpoint and
+evaluation corpus are supplied; mock probes cannot satisfy it. A review comment
+never supplies execution evidence or waives a lane.
 
 `acceptance.yml` schedules on PR metadata, native workflow activity and base
 pushes, with periodic reconciliation for missed signals. Review/comment activity
