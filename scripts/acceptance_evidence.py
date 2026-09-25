@@ -197,7 +197,8 @@ def normalize_native(
         require(counts is None and 'tests.xml' not in files)
     unit_coverage = None
     if producer.lane == 'unit_tests':
-        require(unit_policy is not None)
+        if unit_policy is None:
+            raise ValueError("native unit selection policy is required")
         shard = {'unit (1/2)': 1, 'unit (2/2)': 2}[producer.job]
         unit_coverage = validate_unit_coverage(report['unit_coverage'], shard, files['tests.xml'], unit_policy)
     if producer.structured:
