@@ -1545,3 +1545,155 @@ def test_inflight_and_warm_http_readers_keep_verified_generation(
         release.set()
         writer.close()
         _drop_publish_fixture(qdrant_url)
+
+@pytest.mark.parametrize("boundary", [
+    "sidecar", "corpus-clone", "control-clone", "rekey", "pending",
+    "invalidated", "deleted", "points", "completion", "inventory", "committed", "removals", "receipt",
+    "cutover", "retired-inventory", "cleanup", "writer-lock",
+])
+def test_publisher_process_death_resumes_same_build(
+    tmp_path, monkeypatch, qdrant_url, boundary,
+):
+    """Real publisher death, including partial retirement and live lock ownership."""
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    from qdrant_client import QdrantClient
+
+    from mainframe_rag.ingest.publish import publish_state_path
+    from tests.helpers_publication_lifecycle import TEXTS, _records, _write_source
+
+    _drop_publish_fixture(qdrant_url)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    wanted = {**TEXTS, "gamma": "The green reactor uses the eastern cooling channel."}
+    for name, text in wanted.items():
+        _write_source(corpus, name, text)
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.setenv("DENSE_DIM", "256")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress)
+    client = QdrantClient(url=qdrant_url, timeout=10)
+    receipt = tmp_path / "boundary.txt"
+    child_log = tmp_path / "publisher.log"
+    state_path = publish_state_path(progress, PUBLISH_ALIAS)
+
+    def target():
+        return next(a.collection_name for a in client.get_aliases().aliases
+                    if a.alias_name == PUBLISH_ALIAS)
+
+    def pair(physical):
+        return (_records(client, physical), _records(client, physical + "__completions"))
+
+    def collections():
+        return {c.name for c in client.get_collections().collections
+                if c.name.startswith(PUBLISH_ALIAS)}
+
+    def kill_owned_group(process):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=10)
+
+    old = target()
+    retained = pair(old)
+    before_collections = collections()
+    retire = boundary in {"removals", "retired-inventory", "cleanup"}
+    if retire:
+        for name in ("beta", "gamma"):
+            (corpus / f"{name}.pdf").unlink()
+            del wanted[name]
+        extra = ("--retire-doc", "beta", "--retire-doc", "gamma")
+    else:
+        extra = ("--reingest",)
+    if boundary in {"pending", "committed"}:
+        monkeypatch.setenv("EMBED_MODEL_REVISION", "rev-2")
+    args = ["--src", str(corpus), "--progress", str(progress), "--workers", "1", *extra]
+    worker = [sys.executable, "-m", "tests.helpers_ingest_crash_worker",
+              "--boundary", "sidecar" if boundary == "writer-lock" else boundary,
+              "--receipt", str(receipt)]
+    if boundary == "writer-lock":
+        worker.append("--hold")
+    try:
+        # A file, not a PIPE: orphaned pool workers cannot keep communicate open.
+        with child_log.open("w") as output:
+            process = subprocess.Popen(
+                [*worker, "--", *args], cwd=REPO_ROOT, env=os.environ.copy(),
+                stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+            try:
+                if boundary == "writer-lock":
+                    deadline = time.monotonic() + 30
+                    while not receipt.exists() and process.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    assert receipt.exists(), child_log.read_text()
+                    assert process.poll() is None
+                    saved_state = state_path.read_bytes()
+                    saved_inventory = progress.read_bytes()
+                    loser_log = tmp_path / "competing-writer.log"
+                    loser_args = list(args)
+                    loser_args[loser_args.index("--progress") + 1] = str(tmp_path / "other-progress.jsonl")
+                    with loser_log.open("w") as loser_output:
+                        loser = subprocess.Popen(
+                            [sys.executable, "-m", "mainframe_rag.ingest.run_ingest", *loser_args],
+                            cwd=REPO_ROOT, env=os.environ.copy(), stdout=loser_output,
+                            stderr=subprocess.STDOUT, start_new_session=True,
+                        )
+                        try:
+                            assert loser.wait(timeout=30) != 0
+                        finally:
+                            kill_owned_group(loser)
+                    assert "concurrent publishers for the same target are rejected" in loser_log.read_text()
+                    assert process.poll() is None
+                    assert state_path.read_bytes() == saved_state
+                    assert progress.read_bytes() == saved_inventory
+                    assert collections() == before_collections
+                else:
+                    assert process.wait(timeout=60) == 86, child_log.read_text()
+                assert receipt.read_text() == ("sidecar" if boundary == "writer-lock" else boundary)
+            finally:
+                kill_owned_group(process)
+        assert pair(old) == retained
+        if boundary == "cleanup":
+            assert not state_path.exists()
+            recorded = target()
+        else:
+            recorded = json.loads(state_path.read_text())["staging"]
+            assert recorded != old
+            assert target() == (recorded if boundary in {"cutover", "retired-inventory"} else old)
+        if boundary == "retired-inventory":
+            retired_rows = [json.loads(line) for line in progress.read_text().splitlines()
+                            if json.loads(line).get("status") == "retired"]
+            assert len(retired_rows) == 1  # Two removals authorized, only one finalized.
+        # A cleaned-up publish takes the next ordinary operation, not a new repair.
+        _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress,
+                extra=() if boundary == "cleanup" else extra)
+        assert target() == recorded
+        assert not state_path.exists()
+        assert pair(old) == retained
+        published = pair(recorded)
+        by_doc = {}
+        for payload, _ in published[0].values():
+            by_doc.setdefault(payload["doc_id"], []).append(payload["text"])
+        assert by_doc == {name: [text] for name, text in wanted.items()}
+        markers = [p for p, _ in published[1].values() if "expected_chunks" in p]
+        assert {p["doc_id"] for p in markers} == set(wanted)
+        assert all(p["expected_chunks"] == 1 and p["target_collection"] == recorded for p in markers)
+        after_collections = collections()
+        assert after_collections == before_collections | {recorded, recorded + "__completions"}
+        for _ in range(2):
+            _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress)
+            assert target() == recorded
+            assert pair(recorded) == published
+            assert pair(old) == retained
+            assert collections() == after_collections
+            assert not state_path.exists()
+    finally:
+        client.close()
+        _drop_publish_fixture(qdrant_url)
