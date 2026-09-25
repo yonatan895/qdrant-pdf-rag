@@ -51,12 +51,14 @@ class ModelAdapter:
         done = False
         try:
             async for item in stream:
+                if done or not isinstance(item, Mapping) or "error" in item:
+                    raise TruncatedStreamError(tokens, REASON_MALFORMED_FRAME)
                 kind = item.get("type")
                 ttft = item.get("ttft_ms")
                 if ttft is not None and (not isinstance(ttft, int) or isinstance(ttft, bool)):
                     raise TruncatedStreamError(tokens, REASON_MALFORMED_FRAME)
                 if kind == "token":
-                    delta = item.get("delta") or ""
+                    delta = item.get("delta")
                     if not isinstance(delta, str):
                         raise TruncatedStreamError(tokens, REASON_MALFORMED_FRAME)
                     if delta:
@@ -68,11 +70,13 @@ class ModelAdapter:
                         raise TruncatedStreamError(tokens, REASON_MISSING_FINISH)
                     if not isinstance(finish, str) or not finish:
                         raise TruncatedStreamError(tokens, REASON_MALFORMED_FRAME)
-                    usage = item.get("usage") or TokenUsage()
+                    usage = item.get("usage", TokenUsage())
                     if not isinstance(usage, TokenUsage):
                         raise TruncatedStreamError(tokens, REASON_MALFORMED_FRAME)
                     done = True
                     yield ModelDone(finish, usage, ttft)
+                else:
+                    raise TruncatedStreamError(tokens, REASON_MALFORMED_FRAME)
             if not done:
                 raise TruncatedStreamError(tokens, REASON_MISSING_FINISH)
         finally:

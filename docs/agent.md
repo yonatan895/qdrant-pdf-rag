@@ -662,3 +662,23 @@ defaults are unchanged.
 The Helm operator input `CHAT_CONDENSE_ENABLED` maps to
 `models.reasoning.condenseEnabled`; both default to false. Explicit local
 follow-up acceptance is described in [the real-corpus runbook](local-real-corpus.md).
+
+
+### Model-operation stream grammar
+
+The legacy `ModelAdapter` and typed answer-core seam accept zero or more token
+items followed by exactly one done item and end-of-iteration. A token's delta
+must be a string (an empty string is valid); a terminal's finish must be a
+nonempty string. Missing legacy usage defaults to empty `TokenUsage`; explicitly
+supplied usage must be `TokenUsage`, including when falsy. Optional timing is
+`None` or an integer, never a boolean. There are no ignorable metadata or error
+mapping events at this seam: unknown kinds, error-bearing frames, duplicate
+terminals and all postterminal items raise `TruncatedStreamError`. End of stream
+without a terminal retains the explicit missing-finish outcome. A later `stop`
+cannot replace an earlier `length` finish. The core emits a final only after
+iteration ends cleanly, and validates typed-adapter events defensively too.
+
+Wire metadata remains the HTTP model client's responsibility before it emits
+these normalized events. Existing buffered sync/async/string fallback,
+pre-emission retry and post-emission no-replay policy are unchanged. Cleanup
+closes the operation, never the shared model client.

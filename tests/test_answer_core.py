@@ -592,3 +592,113 @@ async def test_cancelling_pending_model_read_closes_operation_and_propagates():
         await pending
     assert closed == ["operation"]
     assert (await execute_answer_core(AnswerCoreInput(query="IEA500I"), deps)).finish_reason == "stop"
+
+
+_STREAM_BAD_SEQUENCES = [
+    [{"type": "token", "delta": "provisional"}, {"type": "error", "error": "synthetic"},
+     {"type": "done", "finish_reason": "stop"}],
+    [{"type": "done", "finish_reason": "length"}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "done", "finish_reason": "stop"}, {"type": "token", "delta": "late"}],
+    [{"type": "metadata"}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "token", "delta": False}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "token", "delta": 0}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "token", "delta": None}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "token", "delta": []}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "done", "finish_reason": "stop", "usage": False}],
+    [{"type": "done", "finish_reason": "stop", "usage": 0}],
+    [{"type": "done", "finish_reason": "stop", "usage": {}}],
+    [{"type": "done", "finish_reason": "stop", "usage": None}],
+    [{"type": "token", "delta": "text", "ttft_ms": False}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "done", "finish_reason": False}],
+    [{"type": "token", "delta": "text", "error": "synthetic"}, {"type": "done", "finish_reason": "stop"}],
+    [False, {"type": "done", "finish_reason": "stop"}],
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('seam', ['adapter', 'core-legacy', 'core-typed'])
+@pytest.mark.parametrize('frames', _STREAM_BAD_SEQUENCES)
+async def test_stream_grammar_rejects_invalid_sequences_and_next_operation_recovers(seam, frames):
+    from mainframe_rag.agent.core_ports import ModelDone, ModelToken
+
+    class Model(CoreFakeLLM):
+        def __init__(self):
+            self.frames = frames
+            self.closed = 0
+
+        async def chat_stream(self, *args, **kwargs):
+            try:
+                for frame in self.frames:
+                    yield frame
+            finally:
+                self.closed += 1
+
+        async def stream(self, *args, **kwargs):
+            # Exercise the public typed port directly, bypassing ModelAdapter.
+            try:
+                for frame in self.frames:
+                    if not isinstance(frame, dict) or 'error' in frame:
+                        yield frame
+                    elif frame.get('type') == 'token':
+                        yield ModelToken(frame.get('delta'), frame.get('ttft_ms'))
+                    elif frame.get('type') == 'done':
+                        yield ModelDone(frame.get('finish_reason'), frame.get('usage', TokenUsage()),
+                                        frame.get('ttft_ms'))
+                    else:
+                        yield frame
+            finally:
+                self.closed += 1
+
+    model = Model()
+    deps = _stream_deps(model)
+    if seam == 'core-typed':
+        deps.llm = model
+
+    seen = []
+
+    async def collect():
+        if seam == 'adapter':
+            return [event async for event in ModelAdapter(model).stream([], 'low', 0.0)]
+        async for event in execute_answer_core_stream(AnswerCoreInput(query='IEA500I'), deps):
+            seen.append(event)
+        return seen.copy()
+
+    with pytest.raises(TruncatedStreamError) as error:
+        await collect()
+    assert error.value.reason == REASON_MALFORMED_FRAME
+    assert model.closed == 1
+    assert not any(event['type'] == 'final' for event in seen)
+    seen.clear()
+    model.frames = [{"type": "token", "delta": ""}, {"type": "token", "delta": "Synthetic answer."},
+                    {"type": "done", "finish_reason": "stop"}]
+    healthy = await collect()
+    assert model.closed == 2
+    if seam == 'adapter':
+        assert isinstance(healthy[-1], ModelDone) and healthy[-1].finish_reason == 'stop'
+    else:
+        assert [event['type'] for event in healthy] == ['token', 'final']
+        assert healthy[-1]['output'].finish_reason == 'stop'
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('typed', [False, True])
+async def test_single_incomplete_terminal_remains_incomplete(typed):
+    from mainframe_rag.agent.core_ports import ModelDone, ModelToken
+
+    class Model(CoreFakeLLM):
+        async def chat_stream(self, *args, **kwargs):
+            yield {"type": "token", "delta": "Partial answer."}
+            yield {"type": "done", "finish_reason": "length"}
+
+        async def stream(self, *args, **kwargs):
+            yield ModelToken("Partial answer.")
+            yield ModelDone("length", TokenUsage())
+
+    model = Model()
+    deps = _stream_deps(model)
+    if typed:
+        deps.llm = model
+    events = [event async for event in execute_answer_core_stream(AnswerCoreInput(query='IEA500I'), deps)]
+    assert events[-1]['type'] == 'final'
+    assert events[-1]['output'].finish_reason == 'length'
+    assert events[-1]['output'].verification_state == 'generation_incomplete'

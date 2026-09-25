@@ -44,6 +44,7 @@ from mainframe_rag.agent.chat_turn import (
 from mainframe_rag.agent.chat_turn import prepare_chat_turn
 from mainframe_rag.agent.core_ports import (
     AnswerModel,
+    ModelDone,
     ModelToken,
     PromptBuilder,
     RetrievalResult,
@@ -491,14 +492,22 @@ async def execute_answer_core_stream(
     ) as llm_span:
         try:
             async for item in stream_gen:
+                # A typed adapter is still a runtime boundary. Never let a
+                # second terminal erase an incomplete finish or accept late text.
+                if (finish_reason is not None or not isinstance(item, (ModelToken, ModelDone))
+                        or (item.ttft_ms is not None and type(item.ttft_ms) is not int)):
+                    raise TruncatedStreamError(len(content_parts), REASON_MALFORMED_FRAME)
                 if isinstance(item, ModelToken):
+                    if not isinstance(item.delta, str):
+                        raise TruncatedStreamError(len(content_parts), REASON_MALFORMED_FRAME)
                     if item.delta:
                         if ttft_ms is None:
                             ttft_ms = item.ttft_ms or int((time.monotonic() - t0) * 1000)
                         content_parts.append(item.delta)
                         yield {"type": "token", "delta": item.delta, "ttft_ms": ttft_ms}
                 else:
-                    if not item.finish_reason:
+                    if (not isinstance(item.finish_reason, str) or not item.finish_reason
+                            or not isinstance(item.usage, TokenUsage)):
                         raise TruncatedStreamError(len(content_parts), REASON_MALFORMED_FRAME)
                     finish_reason = item.finish_reason
                     usage = item.usage
