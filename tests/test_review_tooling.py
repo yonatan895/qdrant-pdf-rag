@@ -1982,7 +1982,9 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             (root / ".github/workflows").mkdir(parents=True)
             (root / "scripts/review_tooling.py").write_bytes(b"approved policy")
             (root / "scripts/ci_evidence.py").write_bytes(b"approved producer")
-            (root / ".github/workflows/ci.yml").write_bytes(b"approved workflow")
+            from scripts.acceptance_evidence import PRODUCERS
+            for workflow in {p.workflow for p in PRODUCERS}:
+                (root / ".github/workflows" / workflow).write_bytes(b"approved workflow")
             for relative in (*VERIFICATION_INPUTS, "taskfiles/quality.yml"):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -2021,6 +2023,8 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                     self.seen.append(endpoint)
                     if endpoint.endswith("git/ref/heads/main"):
                         return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": self.live_base}}
+                    if "actions/workflows/verifier-update.yml/runs?" in endpoint:
+                        return {"total_count": 0, "workflow_runs": []}
                     if "actions/runs?" in endpoint:
                         runs = [args["run"]]
                         if self.newer:
@@ -2863,3 +2867,337 @@ class ReviewTemplateTests(unittest.TestCase):
         malformed = {**human, 'material_findings': [{'id': '[]', 'disposition': '[]', 'description': '[]'}]}
         review, _, _ = collect_review(API([comment(1, malformed)]), {'number': 3}, candidate)
         self.assertEqual(review.merge_readiness, 'not_ready')
+
+
+class TestVerifierUpdateDecision(unittest.TestCase):
+    """Trust changes must bind real native data, without relaxing test outcomes."""
+
+    def fixture(self):
+        import copy
+        import hashlib
+        import io
+        import zipfile
+
+        candidate = {"repository": "synthetic/repository", "repository_id": 42, "number": 3,
+                     "head_sha": "a" * 40, "base_sha": "b" * 40, "execution_sha": "c" * 40,
+                     "head_repository_id": 42}
+        class API:
+            repository = "synthetic/repository"
+            prefix = "repos/synthetic/repository/"
+            def __init__(self):
+                self.candidate = copy.deepcopy(candidate)
+                self.sources = {"scripts/check_hazard_sensitivity.py": b"changed runner"}
+                self.run = {"id": 900, "run_attempt": 1, "display_title": "Verifier PR 3: approve",
+                            "created_at": "2026-09-25T12:00:01Z",
+                            "event": "workflow_dispatch", "path": ".github/workflows/verifier-update.yml",
+                            "head_sha": "b" * 40, "head_branch": "main", "status": "completed",
+                            "conclusion": "success", "repository": {"id": 42, "full_name": self.repository},
+                            "head_repository": {"id": 42}, "actor": {"login": "yonatan895", "type": "User"},
+                            "triggering_actor": {"login": "yonatan895", "type": "User"}}
+                self.runs = [self.run]
+                self.job = {"id": 901, "name": "record-decision", "conclusion": "success", "status": "completed",
+                            "run_id": 900, "run_attempt": 1, "head_sha": "b" * 40}
+                self.artifact = {"id": 902, "expired": False, "name": "verifier-decision-1",
+                                 "workflow_run": {"id": 900, "repository_id": 42,
+                                                  "head_repository_id": 42, "head_sha": "b" * 40}}
+                self.record = {"schema_version": 1, "candidate": copy.deepcopy(candidate), "decision": "approve",
+                               "pr_updated_at": "2026-09-25T12:00:00Z",
+                               "run_id": 900, "run_attempt": 1,
+                               "inputs": {k: hashlib.sha256(v).hexdigest() for k, v in self.sources.items()}}
+                self.pack()
+                self.writes = []
+            def pack(self):
+                output = io.BytesIO()
+                with zipfile.ZipFile(output, "w") as z:
+                    z.writestr("evidence.json", json.dumps(self.record))
+                self.archive = output.getvalue()
+                self.artifact.update(size_in_bytes=len(self.archive),
+                                     digest="sha256:" + hashlib.sha256(self.archive).hexdigest())
+            def get(self, endpoint):
+                if "actions/workflows/verifier-update.yml/runs?" in endpoint:
+                    return {"total_count": len(self.runs), "workflow_runs": self.runs}
+                if endpoint.endswith(("/900", "/910")):
+                    return self.run
+                if "/jobs?" in endpoint:
+                    return {"total_count": 1, "jobs": [self.job]}
+                if "/artifacts?" in endpoint:
+                    return {"total_count": 1, "artifacts": [self.artifact]}
+                if "/pulls/3" in endpoint:
+                    c = self.candidate
+                    return {"number": 3, "state": "open", "mergeable": True, "draft": True,
+                            "merge_commit_sha": c["execution_sha"], "updated_at": "2026-09-25T12:00:00Z",
+                            "head": {"sha": c["head_sha"], "repo": {"id": c["head_repository_id"]}},
+                            "base": {"sha": c["base_sha"], "ref": "main", "repo": {
+                                "id": 42, "full_name": self.repository, "default_branch": "main"}}}
+                if endpoint.endswith("git/ref/heads/main"):
+                    return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": self.candidate["base_sha"]}}
+                if "/commits/" in endpoint:
+                    return {"sha": self.candidate["execution_sha"], "parents": [
+                        {"sha": self.candidate["base_sha"]}, {"sha": self.candidate["head_sha"]}]}
+                if "actions/runs?" in endpoint:
+                    return {"total_count": 0, "workflow_runs": []}
+                raise AssertionError(endpoint)
+            def blob(self, sha, path):
+                assert sha == self.candidate["execution_sha"]
+                return self.sources[path]
+            def raw(self, endpoint):
+                assert endpoint == self.prefix + "actions/artifacts/902/zip"
+                return self.archive
+            def write(self, endpoint, payload, *, method):
+                self.writes.append(copy.deepcopy(payload))
+                return {"id": 17}
+        return API()
+
+    def test_approved_exact_bytes_and_ordinary_unchanged_input(self):
+        import hashlib
+        from unittest.mock import patch
+
+        from scripts.verifier_approval import VerifierApprovalRequired, approved_inputs
+
+        api = self.fixture()
+        inputs = api.record["inputs"]
+        with patch.object(api, 'get', side_effect=AssertionError('Unchanged verifier needs no decision')):
+            self.assertEqual(approved_inputs(api, api.candidate, inputs), (inputs, None))
+        old = {k: hashlib.sha256(b'old runner').hexdigest() for k in inputs}
+        accepted, identity = approved_inputs(api, api.candidate, old)
+        self.assertEqual(accepted, inputs)
+        self.assertEqual(identity, {"run_id": 900, "run_attempt": 1, "inputs": inputs})
+        api.runs = []
+        with self.assertRaises(VerifierApprovalRequired):
+            approved_inputs(api, api.candidate, old)
+
+    def test_wrong_or_stale_native_decision_cannot_grant_trust(self):
+        from scripts.verifier_approval import validated_decision
+
+        mutations = [('candidate', key, 'd' * 40) for key in ('head_sha', 'base_sha', 'execution_sha')]
+        mutations += [('run', key, value) for key, value in (
+            ('head_branch', 'candidate'), ('head_sha', 'd' * 40), ('event', 'pull_request'),
+            ('path', '.github/workflows/ci.yml'), ('status', 'in_progress'), ('conclusion', 'failure'),
+            ('conclusion', 'cancelled'), ('run_attempt', 2), ('head_repository', {'id': 84}),
+            ('actor', {'login': 'other', 'type': 'User'}),
+            ('triggering_actor', {'login': 'other', 'type': 'User'}),
+            ('actor', {'login': 'yonatan895', 'type': 'Bot'}), ('display_title', 'Verifier PR 3: revoke'))]
+        mutations += [('job', 'conclusion', 'skipped'), ('job', 'run_attempt', 2),
+                      ('artifact', 'expired', True), ('artifact', 'name', 'verifier-decision-2'),
+                      ('artifact', 'digest', 'sha256:' + '0' * 64)]
+        mutations += [('record', 'decision', 'revoke'), ('record', 'inputs', {}),
+                      ('record', 'run_id', 800), ('record', 'run_attempt', 2),
+                      ('record', 'pr_updated_at', '2026-09-25T12:00:01Z'),
+                      ('record', 'pr_updated_at', '2026-09-25T12:00:02Z')]
+        for target, key, value in mutations:
+            with self.subTest(target=target, key=key, value=value):
+                api = self.fixture()
+                getattr(api, target)[key] = value
+                if target == 'record':
+                    api.pack()  # Correct archive digest does not prove valid content.
+                with self.assertRaises(ValueError):
+                    validated_decision(api, api.candidate, {k: v for k, v in self.fixture().record['inputs'].items()})
+
+    def test_latest_revoke_or_pending_decision_blocks_old_approval_and_recheck(self):
+        import copy
+
+        from scripts.acceptance import recheck_current
+        from scripts.verifier_approval import validated_decision
+
+        for status, conclusion, decision in [('completed', 'success', 'revoke'),
+                                             ('in_progress', None, 'approve'),
+                                             ('completed', 'cancelled', 'approve')]:
+            with self.subTest(status=status, decision=decision):
+                api = self.fixture()
+                identity = validated_decision(api, api.candidate, api.record['inputs'])
+                result = {'candidate': api.candidate, 'runs': {}, 'verifier_approval': identity}
+                recheck_current(api, result)
+                old = copy.deepcopy(api.run)
+                api.run.update(id=910, status=status, conclusion=conclusion,
+                               display_title='Verifier PR 3: ' + decision)
+                api.runs = [old, api.run]
+                with self.assertRaises(ValueError):
+                    recheck_current(api, result)
+
+    def test_selection_and_catalogue_cannot_use_the_exception(self):
+        from scripts.verifier_approval import VerifierApprovalRequired, approved_inputs
+
+        for path in ('scripts/review_tooling.py', 'tests/hazards/critical.json'):
+            api = self.fixture()
+            api.sources = {path: b'reduced obligations'}
+            with self.assertRaises(VerifierApprovalRequired):
+                approved_inputs(api, api.candidate, {path: '0' * 64})
+
+    def test_producer_artifact_round_trip_and_no_failed_evidence_waiver(self):
+        import hashlib
+        from unittest.mock import patch
+
+        from scripts.acceptance import collect_native, verification_inputs
+        from scripts.acceptance_evidence import PRODUCERS
+        from scripts.verifier_approval import record_decision, validated_decision
+
+        api = self.fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            from scripts.acceptance import VERIFICATION_INPUTS
+            for path in (*VERIFICATION_INPUTS, *{'.github/workflows/' + p.workflow for p in PRODUCERS}):
+                file = root / path
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(b'approved original')
+            def git(*args):
+                return subprocess.check_output(['git', *args], cwd=root, text=True,
+                                               stderr=subprocess.DEVNULL).strip()
+            git('init', '-b', 'main')
+            git('config', 'user.name', 'Synthetic Test')
+            git('config', 'user.email', 'synthetic@example.invalid')
+            git('add', '.')
+            git('commit', '-m', 'Approved original verifier')
+            base = git('rev-parse', 'HEAD')
+            api.candidate['base_sha'] = api.run['head_sha'] = api.job['head_sha'] = base
+            api.artifact['workflow_run']['head_sha'] = base
+            api.sources = {p: (root / p).read_bytes() for p in verification_inputs(root)}
+            api.sources['scripts/check_hazard_sensitivity.py'] = b'changed runner'
+            api.sources['scripts/ci_evidence.py'] = b'changed producer'
+            api.sources['tests/ci_shard.py'] = b'changed collector'
+            api.sources['.github/workflows/ci.yml'] = b'changed native workflow'
+            # Use actual producer output, not a separately hand-built positive record.
+            api.record = record_decision(api, 3, 'approve', root, 900, 1)
+            api.pack()
+            identity = validated_decision(api, api.candidate, api.record['inputs'])
+            self.assertEqual(identity['inputs']['scripts/check_hazard_sensitivity.py'],
+                             hashlib.sha256(b'changed runner').hexdigest())
+            result = collect_native(api, api.get(api.prefix + 'pulls/3'), root)
+            self.assertEqual(result['verifier_approval'], identity)
+            self.assertEqual(result['lane_statuses'], {})  # No native evidence is not a pass.
+            self.assertEqual(result['producer_sha256'], hashlib.sha256(b'changed producer').hexdigest())
+            # Approval also cannot suppress a normalizer's failed raw-test check.
+            fixture, receipt, xml = TestNativeEvidenceConsumer().fixture()
+            fixture['producer_digest'] = receipt['producer_sha256'] = result['producer_sha256']
+            from scripts.acceptance_evidence import normalize_native
+            receipt['tests']['failed'] = 1
+            archive, digest = TestNativeEvidenceConsumer().packed(receipt, xml)
+            fixture['artifact']['digest'] = digest
+            with self.assertRaises(ValueError):
+                normalize_native(**fixture, archive=archive)
+            # The same approval flows through the real collector and normalizer
+            # for both shards; failed/skipped/cancelled native jobs still block.
+            import copy
+            native, receipt, xml = TestNativeEvidenceConsumer().fixture()
+            native['run']['head_repository']['id'] = 42
+            receipt.update(base_sha=base, execution_parents=[base, 'a' * 40],
+                           policy_sha256=hashlib.sha256(b'approved original').hexdigest(),
+                           producer_sha256=result['producer_sha256'])
+            jobs, artifacts, archives = [], [], {}
+            for shard in (1, 2):
+                job = {**native['job'], 'id': 456 + shard, 'name': f'unit ({shard}/2)'}
+                import base64
+
+                from scripts.ci_evidence import junit_bytes
+                from scripts.unit_evidence import INPUTS
+
+                report = copy.deepcopy(receipt)
+                report['job_name'] = job['name']
+                proof = report['unit_coverage']
+                proof['shard'] = shard
+                selected = ['tests/test_example.py::actual'] if shard == 1 else ['tests/test_example.py::other']
+                for phase in ('collect', 'execute'):
+                    proof[phase]['inputs'] = {path: hashlib.sha256(api.sources[path]).hexdigest() for path in INPUTS}
+                proof['execute'].update(selected=selected, executed=selected)
+                node = base64.b64encode(selected[0].encode()).decode()
+                shard_xml = ('<testsuite><testcase name="literal"><properties>'
+                             f'<property name="native_nodeid" value="{node}"/>'
+                             '</properties></testcase></testsuite>').encode()
+                report['tests'] = junit_bytes(shard_xml)
+                packed, digest = TestNativeEvidenceConsumer().packed(report, shard_xml)
+                artifact = copy.deepcopy(native['artifact'])
+                artifact.update(id=789 + shard, name=f'evidence-unit-{shard}-attempt-2',
+                                digest=digest, size_in_bytes=len(packed))
+                artifact['workflow_run']['head_repository_id'] = 42
+                jobs.append(job)
+                artifacts.append(artifact)
+                archives[api.prefix + f"actions/artifacts/{artifact['id']}/zip"] = packed
+            original_get, original_raw = api.get, api.raw
+            def with_native_jobs(endpoint):
+                if 'actions/runs?event=pull_request' in endpoint:
+                    return {'total_count': 1, 'workflow_runs': [native['run']]}
+                if endpoint.endswith('/123'):
+                    return native['run']
+                if '/123/attempts/2/jobs?' in endpoint:
+                    return {'total_count': 2, 'jobs': jobs}
+                if '/123/artifacts?' in endpoint:
+                    return {'total_count': 2, 'artifacts': artifacts}
+                return original_get(endpoint)
+            def with_native_artifacts(endpoint):
+                return archives[endpoint] if endpoint in archives else original_raw(endpoint)
+            with patch.object(api, 'get', side_effect=with_native_jobs), \
+                 patch.object(api, 'raw', side_effect=with_native_artifacts):
+                pr = original_get(api.prefix + 'pulls/3')
+                accepted = collect_native(api, pr, root)
+                self.assertEqual(accepted['lane_statuses']['unit_tests'], 'success')
+                for conclusion in ('failure', 'skipped', 'cancelled'):
+                    with self.subTest(conclusion=conclusion):
+                        jobs[1]['conclusion'] = conclusion
+                        rejected = collect_native(api, pr, root)
+                        self.assertNotEqual(rejected['lane_statuses']['unit_tests'], 'success')
+                jobs[1]['conclusion'] = 'success'
+                for defect in ('missing coverage', 'different collection'):
+                    with self.subTest(defect=defect):
+                        bad = copy.deepcopy(report)  # second shard's otherwise valid receipt
+                        if defect == 'missing coverage':
+                            del bad['unit_coverage']
+                        else:
+                            # Each shard is locally self-consistent, but their
+                            # independently collected universes must also agree.
+                            for phase in ('collect', 'execute'):
+                                bad['unit_coverage'][phase]['all'] = [
+                                    'tests/test_example.py::different', 'tests/test_example.py::other']
+                                bad['unit_coverage'][phase]['eligible'] = bad['unit_coverage'][phase]['all']
+                            bad['unit_coverage']['collect']['selected'] = bad['unit_coverage']['collect']['all']
+                        packed, digest = TestNativeEvidenceConsumer().packed(bad, shard_xml)
+                        artifacts[1].update(digest=digest, size_in_bytes=len(packed))
+                        archives[api.prefix + 'actions/artifacts/791/zip'] = packed
+                        rejected = collect_native(api, pr, root)
+                        self.assertEqual(rejected['lane_statuses']['unit_tests'], 'unverified')
+            original_get = api.get
+            def move_during_snapshot(endpoint):
+                value = original_get(endpoint)
+                if '/commits/' in endpoint:
+                    api.candidate['head_sha'] = 'e' * 40
+                return value
+            with patch.object(api, 'get', side_effect=move_during_snapshot), self.assertRaises(ValueError):
+                record_decision(api, 3, 'approve', root, 900, 1)
+
+    def test_workflow_runs_only_approved_main_with_read_only_token(self):
+        import yaml
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        workflow = yaml.safe_load((root / '.github/workflows/verifier-update.yml').read_text())
+        self.assertEqual(set(workflow.get('on', workflow.get(True))), {'workflow_dispatch'})
+        self.assertEqual(workflow['permissions'], {'contents': 'read', 'pull-requests': 'read'})
+        job = workflow['jobs']['record-decision']
+        self.assertIn("github.ref == 'refs/heads/main'", job['if'])
+        self.assertIn("github.actor == 'yonatan895'", job['if'])
+        self.assertIn("github.triggering_actor == 'yonatan895'", job['if'])
+        self.assertEqual(job['steps'][0]['with']['ref'], '${{ github.sha }}')
+        self.assertFalse(job['steps'][0]['with']['persist-credentials'])
+        commands = '\n'.join(step.get('run', '') for step in job['steps'])
+        self.assertNotIn('${{', commands)
+        self.assertNotIn('git checkout', commands)
+        self.assertNotIn('secrets.', json.dumps(workflow))
+
+
+    def test_publisher_explains_required_decision_without_recommending_a_policy_bypass(self):
+        from unittest.mock import patch
+
+        from scripts.acceptance import publish_acceptance
+        from scripts.verifier_approval import VerifierApprovalRequired
+
+        for path, code in [('scripts/check_hazard_sensitivity.py', 'verifier_update_requires_maintainer_decision'),
+                           ('scripts/review_tooling.py', 'verifier_policy_change_not_supported')]:
+            with self.subTest(path=path):
+                api = self.fixture()
+                with patch('scripts.acceptance.collect_acceptance', side_effect=VerifierApprovalRequired([path])):
+                    result = publish_acceptance(api, 3, pathlib.Path.cwd())
+                self.assertEqual(result['error'], code)
+                self.assertFalse(result['all_prerequisites_met'])
+                self.assertEqual(api.writes[-1]['conclusion'], 'failure')
+                self.assertIn(path, api.writes[-1]['output']['summary'])
+                if path == 'scripts/review_tooling.py':
+                    self.assertNotIn('/actions/workflows/verifier-update.yml', api.writes[-1]['output']['summary'])
+                else:
+                    self.assertIn('/actions/workflows/verifier-update.yml', api.writes[-1]['output']['summary'])

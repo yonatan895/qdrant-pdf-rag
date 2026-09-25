@@ -286,11 +286,58 @@ and candidate execution, and record each expected baseline pass and intended
 behavioral kill. A valid artifact digest over an empty, reduced or surviving
 challenge report cannot establish acceptance. A candidate's
 workflow cannot approve its own replacement verifier. Producer/bootstrap changes
-therefore require the existing explicit maintainer review path before a later
-consumer can trust those bytes. This does not waive their tests. The privileged
+use the exact-candidate workflow below before the consumer can trust those
+bytes. This does not waive their tests. The privileged
 publisher, when enabled, must execute approved-base code only and recheck PR
 currentness before publishing. Native API provenance and valid receipts do not
 substitute for the maintainer's review and merge decision.
+
+<a id="verifier-update-decision"></a>
+### Approving verifier implementation updates
+
+A PR that changes a protected verifier or native producer workflow needs a
+separate trust decision. Marking it ready does not grant that trust. After
+reviewing the actual changes, **only the human maintainer yonatan895** runs
+Actions → **Verifier update decision** → Run workflow, selects **main**, enters
+the PR number, and selects **approve**. No SHA or JSON is entered manually.
+Agents must never dispatch or rerun this workflow on the maintainer's behalf.
+The workflow does not mark ready, submit a PR review, merge, or change settings.
+
+Approved-main code reads the current same-repository PR and records its exact
+base, head, GitHub test-merge SHA, and verifier hashes as a native artifact. It
+never checks out or executes the candidate. The publisher refuses snapshots of
+a PR updated at or after the dispatch, so a queued run cannot approve a newer
+state than the human click. Unrelated PR metadata changes can conservatively
+require another dispatch. The decision workflow's success means the snapshot
+was recorded; the acceptance check determines whether it can be used.
+The publisher validates the native
+run, attempt, actor, successful job, artifact digest and contents against current
+API state. The newest decision for this PR is authoritative; a pending, failed,
+cancelled, expired, malformed or **revoke** decision blocks fallback to an older
+approval. Use the same workflow with **revoke** to withdraw trust. The publisher
+runs after workflow completion and on its existing periodic reconciliation;
+revocation is not an atomic merge lock. An already-running merge is not undone.
+
+Any base, head, test-merge or verifier-byte change invalidates approval. Rerun the
+workflow only after reviewing the new candidate. Human identity is still a
+working-agreement boundary: shared account credentials cannot distinguish an
+agent from a human. The actor check does not claim otherwise.
+
+This path changes which verifier implementation bytes may produce evidence.
+The publisher still executes approved-main code and applies the approved-main
+lane selector, complete hazard catalogue and receipt schema. Native jobs must
+pass, their raw evidence must validate, and candidate/run/decision identity is
+rechecked before publication. Selection-policy and hazard-catalogue changes are
+excluded; incompatible evidence schemas still fail. Forks cannot use this path.
+Normal PRs with unchanged verifier inputs require no manual decision.
+
+Bootstrap: this implementation changes the consumer and adds its decision
+workflow, without changing any existing protected producer inputs. It can pass
+the current consumer before deployment. The maintainer reviews and merges this
+PR first. Only then does the new workflow become available on main. Afterwards,
+refresh prerequisite PRs against that approved base and use the decision workflow
+for each exact verifier candidate. No ruleset bypass or temporary disabling of
+required checks is part of this procedure.
 
 Both GitHub and GitLab L1 comment publishers append historical reports with
 candidate/run attribution. They never acquire ownership of an existing comment
