@@ -26,7 +26,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-      pull-requests: read
+      pull-requests: write
       issues: write
       checks: write
     steps:
@@ -85,7 +85,7 @@ jobs:
           private-key: ${{ secrets.ACCEPTANCE_APP_PRIVATE_KEY }}
           permission-actions: read
           permission-contents: read
-          permission-pull-requests: read
+          permission-pull-requests: write
           permission-issues: write
           permission-checks: write
       - name: Recompute all open candidates from native API evidence

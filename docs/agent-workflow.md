@@ -306,7 +306,10 @@ a marker alone never exempts a record. New templates use `material_findings: []`
 reviewers add finding objects when needed rather than filling a dummy finding.
 Artifacts below remain a secondary copy.
 Comment-writing permission is confined to the approved-main publisher; ordinary
-candidate context CI remains read-only. If comment publication is unavailable,
+candidate context CI remains read-only. PR timeline comments require both issues
+and pull requests write on the publisher token; the dedicated-App job keeps its
+default Actions token read-only. This scope is for template comments, not review
+submission or merging. If comment publication is unavailable,
 the check points to the retained artifact instead.
 
 PR context CI also publishes `review-template-pr-<number>-<attempt>` in the
@@ -367,8 +370,8 @@ resolution must be enforced by the maintainer's repository configuration.
 The default Actions-token check is **advisory**: another candidate workflow can
 imitate its check name/App source. Do not configure this advisory source as an
 enforced acceptance guarantee. The optional dedicated App path uses the pinned
-`actions/create-github-app-token` v3.2.0 action with repository-scoped Actions,
-contents and pull requests read access, and issues/comments plus checks write access. Its
+`actions/create-github-app-token` v3.2.0 action with repository-scoped Actions
+and contents read access, and pull requests, issues/comments and checks write access. Its
 short-lived token is revoked by the action after the job.
 
 Maintainer activation, after the disposable-PR transition proof:
