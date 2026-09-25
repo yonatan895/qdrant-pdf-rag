@@ -361,7 +361,9 @@ jobs:
             - Merge readiness requires acceptable code, complete required verification, current candidate attribution,
               and no unresolved material contract conflict. Never approve solely because prior blockers disappeared.
             - If time/tool limits leave material review incomplete, report incomplete rather than approval by default.
-            - Post exactly one review. Do not merge, change permissions, or weaken gates.
+            - Post findings only as a COMMENT review; never submit APPROVE or REQUEST_CHANGES.
+            - Only the human maintainer yonatan895 marks ready, requests changes or merges.
+            - Leave draft state unchanged. Do not merge, change permissions, or weaken gates.
 
       - name: Validate review result
         if: always()

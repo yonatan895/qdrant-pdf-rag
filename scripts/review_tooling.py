@@ -795,17 +795,16 @@ LANE_REQUIREMENTS_BY_PROFILE: dict[str, set[str]] = {
     # Offline base is the minimal applicable set; tooling/tests categories add
     # lint_and_types and unit_tests in build_acceptance_summary. Prose-only
     # changes leave product lanes policy-unselected.
-    ProfileName.OFFLINE.value: {"context_check", "reviewer"},
-    ProfileName.DEPLOY.value: {"context_check", "lint_and_types", "unit_tests", "packaging", "reviewer"},
-    ProfileName.STORAGE.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "gate_l1", "reviewer"},
-    ProfileName.HTTP.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "reviewer"},
-    ProfileName.TRACING.value: {"context_check", "lint_and_types", "unit_tests", "reviewer"},
-    ProfileName.FULL.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "gate_l1", "reviewer"},
+    ProfileName.OFFLINE.value: {"context_check"},
+    ProfileName.DEPLOY.value: {"context_check", "lint_and_types", "unit_tests", "packaging"},
+    ProfileName.STORAGE.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "gate_l1"},
+    ProfileName.HTTP.value: {"context_check", "lint_and_types", "unit_tests", "simulation"},
+    ProfileName.TRACING.value: {"context_check", "lint_and_types", "unit_tests"},
+    ProfileName.FULL.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "gate_l1"},
 }
 
-# agent_probes and eval_retrieval remain explicit reviewer-side obligations
-# where selected by actual impact. Missing CI producers do not waive them;
-# the trusted consumer requires candidate-bound authorized human evidence.
+# Technical obligations stay required when selected, including lanes whose
+# native producers are not yet wired. A human review is not CI evidence.
 ALL_KNOWN_LANES = [
     "context_check",
     "lint_and_types",
@@ -818,7 +817,6 @@ ALL_KNOWN_LANES = [
     "packaging",
     "agent_probes",
     "eval_retrieval",
-    "reviewer",
 ]
 
 
@@ -877,18 +875,18 @@ class CandidateAcceptanceSummary:
     lanes: list[LaneEvaluation]
     review: NormalizedReviewResult | None
     all_prerequisites_met: bool
-    recommended_readiness: str
+    verification_status: str
     markdown_report: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": 2,
             "profile": self.profile,
             "head_sha": self.head_sha,
             "base_sha": self.base_sha,
             "execution_sha": self.execution_sha,
             "all_prerequisites_met": self.all_prerequisites_met,
-            "recommended_readiness": self.recommended_readiness,
+            "verification_status": self.verification_status,
             "lanes": [
                 {
                     "name": l.name,
@@ -902,10 +900,10 @@ class CandidateAcceptanceSummary:
             "review": self.review.to_dict() if self.review else None,
             "maintainer_authority": {
                 "prerequisite_status": "ALL_MET" if self.all_prerequisites_met else "UNMET_OBLIGATIONS",
-                "recommended_readiness": self.recommended_readiness,
+                "verification_status": self.verification_status,
                 "maintainer_decision": "pending",
-                "maintainer": None,
-                "rule": "Agents never merge PRs or modify repository access rules; human maintainer decision required",
+                "maintainer": "yonatan895",
+                "rule": "Only yonatan895 marks ready, requests changes or merges; CI reports technical evidence only",
             },
         }
 
@@ -990,7 +988,7 @@ def build_acceptance_summary(
 
     lanes_to_evaluate = list(ALL_KNOWN_LANES)
     for extra in lane_statuses:
-        if extra not in lanes_to_evaluate:
+        if extra != "reviewer" and extra not in lanes_to_evaluate:
             lanes_to_evaluate.append(extra)
 
     lane_evaluations: list[LaneEvaluation] = []
@@ -999,49 +997,24 @@ def build_acceptance_summary(
     for name in lanes_to_evaluate:
         req = name in required
         status = lane_statuses.get(name)
-        # If lane is 'reviewer', the validated candidate-bound review result
-        # is authoritative. Workflow execution success alone is never code
-        # approval: a successful reviewer job can return changes_required /
-        # not_ready, and a missing normalized review blocks when reviewer
-        # acceptance is required.
-        if name == "reviewer" and req:
-            if review is None:
-                status = None
-            elif review.merge_readiness == MergeReadiness.READY_FOR_MAINTAINER.value:
-                status = "success"
-            else:
-                status = "failure"
-        elif name == "reviewer" and review:
-            if review.merge_readiness == MergeReadiness.READY_FOR_MAINTAINER.value:
-                status = "success"
-            else:
-                status = "failure"
-
         evaluation = evaluate_lane(name, req, status)
         lane_evaluations.append(evaluation)
         if evaluation.blocks_readiness:
             blocking_lanes.append(evaluation)
 
     all_prereqs_met = len(blocking_lanes) == 0
-    if review and review.merge_readiness != MergeReadiness.READY_FOR_MAINTAINER.value:
-        all_prereqs_met = False
-
-    recommended_readiness = (
-        MergeReadiness.READY_FOR_MAINTAINER.value
-        if all_prereqs_met
-        else MergeReadiness.NOT_READY.value
-    )
+    verification_status = "passed" if all_prereqs_met else "incomplete"
 
     # Build Markdown Summary
     md_lines: list[str] = [
-        "## Candidate Acceptance Summary",
+        "## Candidate Technical Verification",
         "",
         f"- **Selected Profile**: `{profile_name}`",
         f"- **Head SHA**: `{head_sha}`",
         f"- **Base SHA**: `{base_sha}`",
         f"- **Execution SHA**: `{execution_sha}`",
         f"- **Prerequisite Obligations**: `{'ALL_MET' if all_prereqs_met else 'UNMET_OBLIGATIONS'}`",
-        f"- **Recommended Readiness**: `{recommended_readiness}`",
+        f"- **Technical Verification**: `{verification_status}`",
         "",
         "### Verification Lanes",
         "| Lane | Required | Reported Status | Evaluation | Notes |",
@@ -1057,13 +1030,13 @@ def build_acceptance_summary(
     md_lines.append("")
     md_lines.append("### Maintainer Merge Authority")
     md_lines.append(f"- **Prerequisite Obligations**: `{'ALL_MET' if all_prereqs_met else 'UNMET_OBLIGATIONS'}`")
-    md_lines.append(f"- **Recommended Readiness**: `{recommended_readiness}`")
+    md_lines.append(f"- **Technical Verification**: `{verification_status}`")
     md_lines.append("- **Maintainer Merge Decision**: `pending`")
-    md_lines.append("- **Maintainer**: `@maintainer`")
+    md_lines.append("- **Maintainer**: `@yonatan895`")
     md_lines.append(
         "- **Rationale**: Agents never merge pull requests or modify repository access rules. "
-        "The automated acceptance summary validates required verification obligations fail-closed; "
-        "final merge authority strictly remains with human maintainers."
+        "CI verifies technical obligations only and does not approve code or change PR state. "
+        "Only yonatan895 marks ready, requests changes or merges."
     )
     md_lines.append("")
 
@@ -1077,7 +1050,7 @@ def build_acceptance_summary(
         lanes=lane_evaluations,
         review=review,
         all_prerequisites_met=all_prereqs_met,
-        recommended_readiness=recommended_readiness,
+        verification_status=verification_status,
         markdown_report=markdown_report,
     )
 
