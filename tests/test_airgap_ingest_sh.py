@@ -7,6 +7,7 @@ PULL_SECRET wiring, and strategic merge patches without a cluster.
 
 import re
 import shutil
+import subprocess
 
 import pytest
 
@@ -784,3 +785,40 @@ def test_ingest_gateway_secret_bad_name_fails_closed(ingest_tree):
     r = _run_ingest(ingest_tree, ("GATEWAY_API_KEY_SECRET", "Bad_Name!"))
     assert r.returncode == 1
     assert "GATEWAY_API_KEY_SECRET must be a DNS-subdomain name" in r.stderr
+
+
+@pytest.mark.parametrize("via_task", [False, True])
+@pytest.mark.parametrize("override", [False, True])
+def test_ingest_direct_peers_roundtrip_and_precedence(ingest_tree, override, via_task):
+    file_peers = "http://peer-0:6333, http://peer-1:6333,\n\thttp://peer-2:6333"
+    caller_peers = " http://override-0:6333 ,\thttp://override-1:6333,http://override-2:6333 "
+    env_file = ingest_tree[0] / "peers.env"
+    env_file.write_text("QDRANT_PEER_URLS='" + file_peers + "'\n")
+    extra = [("AIRGAP_ENV", str(env_file)), ("INGEST_ALIAS_PUBLISH", "true")]
+    if override:
+        extra.append(("QDRANT_PEER_URLS", caller_peers))
+    runner = run_sh
+    if via_task:
+        shutil.copy(REPO / "Taskfile.yml", ingest_tree[0])
+        shutil.copytree(REPO / "taskfiles", ingest_tree[0] / "taskfiles")
+
+        def runner(script, env, cwd):
+            cli = ["QDRANT_PEER_URLS=" + env.pop("QDRANT_PEER_URLS")] if override else []
+            return subprocess.run(
+                [str(REPO / ".tools/bin/task"), "airgap:ingest", *cli],
+                env=env, cwd=cwd, text=True, capture_output=True, check=False,
+            )
+
+    result = _run_ingest(ingest_tree, *extra, policy=("6", "3", "2"), runner=runner)
+    assert result.returncode == 0, result.stderr
+    rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
+    assert rendered_env(rendered, "ingest")["QDRANT_PEER_URLS"] == (
+        caller_peers if override else file_peers
+    )
+
+
+def test_ingest_does_not_infer_direct_peers(ingest_tree):
+    result = _run_ingest(ingest_tree, ("INGEST_ALIAS_PUBLISH", "true"), policy=("6", "3", "2"))
+    assert result.returncode == 0, result.stderr
+    rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
+    assert "QDRANT_PEER_URLS" not in rendered_env(rendered, "ingest")

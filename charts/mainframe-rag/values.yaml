@@ -130,6 +130,9 @@ ingest:
   corpusPVC: ""
   workers: 4
   workSize: 100Gi
+  # Explicit direct REST peers for placement evidence; never inferred from the Service.
+  # Comma-separated non-secret URLs. Existing runtime parser/gate owns validation.
+  peerUrls: ""
   aliasPublish: false
   reingest: false
   # Explicit approved removals (requires aliasPublish=true). Entries accept

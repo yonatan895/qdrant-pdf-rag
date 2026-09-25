@@ -701,9 +701,19 @@ reconstructed from pod count or an assumed server default. Live placement
 verification exists (`scripts/verify_placement.py`,
 [collection policy](#collection-policy)) and the cutover gate enforces
 ACTIVE copies in process (`publish.verify_staging_placement`, fed by the
-`QDRANT_PEER_URLS` setting pending its operator-path plumbing);
+`QDRANT_PEER_URLS` operator setting);
 snapshot-gated migration of existing collections and the recorded
 node-loss/site qualification remain later slices.
+
+Set `QDRANT_PEER_URLS` to a comma-separated list of non-secret direct REST
+endpoints reachable from the ingest Job. The shell and Task launchers preserve
+caller-over-file precedence and the exact string through mapper
+`ingest.peerUrls` to the Job environment. The runtime parser trims each entry;
+the existing placement gate requires distinct, reachable peers with the
+required ACTIVE copies on both collections. No peer endpoints are inferred
+from the Service or replica count. An unset list remains unconfigured and
+cannot certify RF>1 placement. Peer clients use the existing ingest credential;
+the serving Deployment does not receive this writer-side setting.
 
 **Absent/blank semantics:** `common.sh` currently gives non-empty explicit env
 precedence and otherwise permits file/default resolution; required attestation

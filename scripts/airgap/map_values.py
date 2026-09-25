@@ -202,6 +202,7 @@ def build_values(deploy_only: bool = False) -> dict:
         "workers": 4,
         "workSize": env("INGEST_WORK_SIZE") or "100Gi",
         "aliasPublish": False,
+        "peerUrls": "",
         "reingest": False,
         "retireDocs": [],
         "contextualEnabled": False,
@@ -242,6 +243,7 @@ def build_values(deploy_only: bool = False) -> dict:
             "contextLlmBaseUrl": env("CONTEXT_LLM_BASE_URL"),
             "contextLlmModel": env("CONTEXT_LLM_MODEL"),
             "collectionPolicy": qdrant_policy,
+            "peerUrls": env("QDRANT_PEER_URLS"),
             "resources": {
                 "requests": {"cpu": "4", "memory": "8Gi"},
                 "limits": {"cpu": "16", "memory": "32Gi"},

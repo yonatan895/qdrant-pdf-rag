@@ -559,3 +559,21 @@ def test_ui_off_by_route_matrix(route_enabled):
     if route_enabled:
         containers = container_map(new["Deployment", "rag-agent"])
         assert "oauth-proxy" in containers
+
+
+def test_direct_peers_are_typed_and_ingest_only():
+    peers = " http://peer-0:6333,\n\thttp://peer-1:6333 "
+    values = base_values()
+    values["ingest"].update(enabled=True, corpusPVC="manuals", peerUrls=peers)
+    rendered = _helm_template_with_values(values)
+    assert rendered.returncode == 0, rendered.stderr
+    objects = {
+        (obj["kind"], obj["metadata"]["name"]): obj
+        for obj in yaml.safe_load_all(rendered.stdout) if obj
+    }
+    assert ingest_env_map(objects["Job", "ingest"])["QDRANT_PEER_URLS"]["value"] == peers
+    assert "QDRANT_PEER_URLS" not in env_map(objects["Deployment", "rag-agent"])
+    values["ingest"]["peerUrls"] = ["http://peer-0:6333"]
+    rejected = _helm_template_with_values(values)
+    assert rejected.returncode != 0
+    assert "peerUrls" in rejected.stderr

@@ -60,6 +60,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "mainframe-rag.qdrantSecretName" . }}
                   key: api-key
+            {{- if .Values.ingest.peerUrls }}
+            - name: QDRANT_PEER_URLS
+              value: {{ .Values.ingest.peerUrls | quote }}
+            {{- end }}
             - name: QDRANT_SHARD_NUMBER
               value: {{ .Values.ingest.collectionPolicy.shardNumber | quote }}
             - name: QDRANT_REPLICATION_FACTOR
