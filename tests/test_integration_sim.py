@@ -1383,7 +1383,7 @@ def test_post_cutover_missing_control_preserves_retry_on_real_server(
         client.delete(
             controls, points_selector=models.PointIdsList(points=[manifest.id]), wait=True
         )
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="predates the representation manifest"):
             run("--retire-doc", "beta")
         assert state.read_bytes() == state_bytes
         assert progress.read_bytes() == progress_bytes
