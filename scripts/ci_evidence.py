@@ -9,11 +9,14 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if __package__ in (None, ''):
+    sys.path.insert(0, str(ROOT))  # direct native script entry imports its approved helpers
 
 
 def git(*arguments: str) -> str:
@@ -89,6 +92,7 @@ def main() -> int:
     parser.add_argument('--job-name', required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--junit', type=Path)
+    parser.add_argument('--unit-shard', type=int, choices=(1, 2))
     parser.add_argument('--identity-only', action='store_true')
     parser.add_argument('--result-json', type=Path)
     parser.add_argument('--unittest', nargs='+', dest='modules')
@@ -104,15 +108,26 @@ def main() -> int:
             raise ValueError('test evidence must be fresh and have one producer')
         args.output.mkdir(parents=True, exist_ok=False)
         command = args.command[1:] if args.command[:1] == ['--'] else args.command
-        if sum((bool(command), bool(args.modules), args.identity_only)) != 1:
+        if (args.lane == 'unit_tests') != bool(args.unit_shard):
+            raise ValueError('unit evidence requires the controlled shard producer')
+        if args.unit_shard and (not args.junit or args.result_json):
+            raise ValueError('unit coverage requires its raw JUnit')
+        if sum((bool(command), bool(args.modules), args.identity_only, bool(args.unit_shard))) != 1:
             raise ValueError('select one evidence producer')
         counts = None
+        unit_coverage = None
         if args.identity_only:
             code = 0
         elif args.modules:
             code, counts = run_unittest(args.modules)
         else:
-            code = subprocess.run(command, cwd=ROOT, check=False).returncode
+            if args.unit_shard:
+                from scripts.unit_evidence import run_shard
+                with tempfile.TemporaryDirectory(prefix='native-unit-') as directory:
+                    code, unit_coverage = run_shard(ROOT, sys.executable, args.unit_shard,
+                                                    args.junit.absolute(), Path(directory))
+            else:
+                code = subprocess.run(command, cwd=ROOT, check=False).returncode
             if args.junit:
                 try:
                     counts = junit_counts(args.junit)
@@ -123,9 +138,14 @@ def main() -> int:
         if counts is not None:
             valid = valid and counts['executed'] > 0 and not any(
                 counts.get(key) for key in ('failed', 'errors', 'skipped', 'invalid'))
+        if valid and unit_coverage is not None:
+            from scripts.unit_evidence import input_hashes, validate
+            validate(unit_coverage, args.unit_shard, args.junit.read_bytes(), input_hashes(ROOT))
         report = {'schema_version': 1, **before, 'lane': args.lane, 'job_name': args.job_name,
                   'exit_code': code, 'passed': bool(valid), 'tests': counts,
                   'evidence_kind': 'identity' if args.identity_only else 'execution'}
+        if unit_coverage is not None:
+            report['unit_coverage'] = unit_coverage
         if args.result_json:
             raw = args.result_json.read_bytes()
             if len(raw) > 16 * 1024 * 1024 or not isinstance(json.loads(raw), dict):

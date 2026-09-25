@@ -26,24 +26,78 @@ M1/A1 implements only the existing core's typed dependency boundaries.
 | Source family and revision | Preserve `identity.source_rev_key`, original source SHA-256 and normalized labels; printed `doc_id` and mount path are not revision identity. Existing UUID5 chunk keys and four chunk types remain unchanged. | Two editions sharing a printed number remain distinct; mount relocation preserves identity. Existing revision/identity suites own this proof. |
 | Representation | `representation` continues to own recipe compatibility; its digest is not a build ID. | Same recipe with different corpus or a fresh repair must not recreate an old reference. |
 | Build | Add a full UUID allocated once under the publication lock, persisted in the durable publish sidecar before any candidate collection write, then identically in paired control metadata. Resume reuses that UUID only after exact input/pair checks. Distinct repair/rollback-by-rebuild gets a fresh UUID. | Sidecar absent/corrupt/mismatched: refuse, never infer from a name or recipe. A crash after allocation resumes the recorded build; an unrecorded candidate is quarantined from publication. |
-| Canonical evidence unit | Retain exact normalized UTF-8 text plus source revision/hash, physical page, printed label when known, unit ID and atomic type in the generation. Preserve original source bytes or an authorized immutable source version in protected artifact storage. | A digest validates identity, not extraction quality. Missing/corrupt retained content cannot be replaced by re-extraction or current text. Tables/code are whole units or explicit refusal, never silent partial success. |
-| Exact reference v1 | Opaque `e1.` plus unpadded URL-safe base64 of build UUID (16 bytes), existing unit UUID (16), and SHA-256 of the canonical evidence envelope (32): 89 ASCII characters total. Reject noncanonical encoding, wrong length and unknown versions. The envelope uses UTF-8 JSON, sorted keys, compact separators, no NaN, and includes text, revision/hash, representation binding, location and atomic type. | Full build + unit + envelope digest bind the exact excerpt and provenance. No path, URL, collection name, user identity or authorization grant is accepted from a reference. Test exact producer/consumer round-trips and every changed envelope field independently. |
+| Canonical evidence unit | A v1 reference returns one complete retained `Chunk.text`, keyed by its existing `Chunk.chunk_id`. Retain its exact normalized UTF-8 bytes, all known atomic ranges and complete byte-to-source locations with the revision/hash. `UnitSpan` is a boundary annotation, not an independently addressable unit. Preserve original source bytes or an authorized immutable source version in protected artifact storage. | A digest validates identity, not extraction quality. Missing/corrupt retained content cannot be replaced by re-extraction or current text. Tables/code are whole units or explicit refusal, never silent partial success. |
+| Exact reference v1 | Opaque `e1.` plus unpadded URL-safe base64 of build UUID (16 bytes), existing chunk UUID (16), and SHA-256 of the canonical evidence envelope (32): 89 ASCII characters total. Reject noncanonical encoding, wrong length and unknown versions. The envelope uses UTF-8 JSON, sorted keys, compact separators, no NaN, and includes text, revision/hash, representation binding, location and atomic type. | Full build + chunk + envelope digest bind the exact excerpt and provenance. No path, URL, collection name, user identity or authorization grant is accepted from a reference. Test exact producer/consumer round-trips and every changed envelope field independently. |
+
+### Complete-chunk granularity and location
+
+V1 identifies **the whole retained chunk**, not a `UnitSpan`, a prompt prefix,
+a page, a table row selected from a chunk, or a separately minted sub-chunk ID.
+`chunk_id` is exactly the existing UUID5 Qdrant point identity produced by
+`make_chunk_id`; source revision, heading, start page and ordinal inputs do not
+change. Lookup is `(build_id, chunk_id)` in that build's immutable data target,
+followed by full envelope-digest verification. There is no second sub-unit index
+or UUID namespace. Overlapping chunks remain distinct existing points; a ref
+never searches for a matching span in another chunk. No parent ID is needed:
+the envelope's `chunk_id` is the parent binding for every range it contains.
+
+`UnitSpan(start, end, kind)` currently uses character offsets over stripped
+chunk text, has no UUID, and may contain multiple atomic items in one chunk.
+V1's `atomic_spans` retains every complete `kind == "atomic"` range as UTF-8 byte
+intervals. Convert offsets once against the exact retained text using the byte
+length of each character prefix, never by treating character counts as bytes.
+Spans are ordered, non-overlapping, nonempty and UTF-8-boundary aligned. They
+need not cover intervening prose or separators. They are annotations only:
+exact read returns **all** chunk bytes, including all atomic spans. A budget
+smaller than the complete chunk yields 413, never a prefix or just one span.
+This does not promise that a chunk contains a whole source manual/example/table;
+it promises that none of the producer's declared atomic items is partial.
+
+The current `_build_blocks` knows a page range but `Chunk` retains only
+`page_start` and a compressed display label. Those are insufficient to mint v1
+with complete location. E1 must retain a byte-to-page map before that lossy
+projection, without changing chunk identity or existing payload meaning. Every
+byte belongs to exactly one ordered `locations` segment: no gaps or overlaps.
+A `source` segment has its actual **one-based physical page** and printed label
+or null. Conversion from today's zero-based parser page indexes is explicit.
+An inserted join separator has origin `separator` and both page/printed label
+null; it is never attributed to a guessed page. Adjacent segments with identical
+origin/page/label are coalesced for canonical encoding. Unknown printed labels
+stay null even when neighboring labels are known. Neither `page_start` nor a
+compressed range string is presented as a complete location map.
+
+A declared atomic item may cross physical pages: preserve one atomic interval
+with multiple location segments, including any recorded separator, and return
+it whole. If ingestion split that item across chunks, lost its cross-page
+boundary, capped its unit metadata to unknown (`units=None`), or cannot recover
+the complete location map from retained ingest observations, v1 issuance is
+unavailable for that chunk. Do not reconstruct mappings from current text,
+page-label arithmetic or another generation. E1 must add these producer proofs
+before enabling issuance; this document does not assert today's chunker already
+retains them. Known prose with no atomic items uses `atomic_spans: []`; unknown
+atomic boundaries are not silently converted to an empty list.
 
 The proposed v1 envelope has exactly these keys: `schema` (integer 1),
-`build_id` and `unit_id` (lowercase hyphenated UUID strings), `source_revision`
+`build_id` and `chunk_id` (lowercase hyphenated UUID strings), `source_revision`
 (the existing revision key), `source_sha256` and `representation_sha256`
-(lowercase 64-character hexadecimal digests), `text` (string), `page`
-(positive integer physical page), `printed_label` (string or null), and
-`chunk_type` (the existing four-type vocabulary). No optional absent keys or
-additional keys are accepted in v1. Encode JSON with `ensure_ascii=False`,
-`sort_keys=True`, separators `(',', ':')`, and `allow_nan=False`, then strict
-UTF-8 without BOM or trailing newline. Reject unpaired surrogates and booleans
-where integers are required. The digest covers the entire encoded envelope,
-including the build and unit IDs repeated in the reference. E1 must freeze this
-schema with literal expected bytes, not an oracle calling the implementation. Missing printed labels remain null, never guessed
-from the physical page. Unicode text is retained exactly as normalized at ingest;
-reads do not perform a second whitespace/Unicode normalization. The public token
-is a locator, not a secret or bearer capability. Consumers treat it as opaque.
+(lowercase 64-character hexadecimal digests), `text` (string), `chunk_type`
+(the existing four-type vocabulary), `atomic_spans`, and `locations`.
+Each atomic span has exactly integer `start`/`end` byte offsets `[start, end)`.
+Each location has exactly `start`, `end`, `origin` (`source` or `separator`),
+`page` and `printed_label`, with the constraints above. There is no ambiguous
+top-level `page`, `printed_label` or `unit_id`. No optional absent or additional
+keys are accepted. Empty text, invalid ranges or incomplete locations refuse
+issuance. Range boundaries cannot split a UTF-8 code point.
+
+Encode JSON with `ensure_ascii=False`, `sort_keys=True`, compact separators
+`(',', ':')`, and `allow_nan=False`, then strict UTF-8 without BOM or trailing
+newline. Reject unpaired surrogates and booleans where integers are required.
+The digest covers the entire encoded envelope, including the build/chunk UUIDs
+repeated in the token. E1 must use independent literal expected bytes such as
+[the three design witnesses](evidence-v1-examples.md), not an oracle calling its
+own encoder. Reads perform no second whitespace/Unicode normalization. The
+public token is a locator, not a secret or bearer capability; consumers treat
+it as opaque.
 
 Build lookup reuses Qdrant's existing alias/control boundary: the trusted storage
 adapter derives private per-build data and control aliases from the configured
@@ -61,7 +115,7 @@ it adds no second database or general catalogue service.
 
 The retained control alias is also the retirement lookup path. A tombstone is
 not evidence content and cannot authorize a caller by itself. Its schema records
-the full build UUID, retired state and per-unit provenance required by the current
+the full build UUID, retired state and per-chunk provenance required by the current
 access policy. If that policy cannot establish access, return the same unavailable
 outcome as an unknown reference. Crash after tombstoning but before physical
 deletion remains retired; cleanup retries never republish it. Do not delete the
@@ -88,7 +142,7 @@ remain unsupported; a local file lock and RWO volume are not distributed locks.
 | allocated → building → sealed | Prepare non-live corpus/control pair; write content, completion/coverage and immutable evidence; verify full intended membership, representation and required placement before sealing. | Unknown residue, missing control, incomplete source observation or placement refuses cutover. #391/#360 own real storage/crash tests. |
 | sealed → published | Verify immutable controls and observed prior target; atomically create both build aliases and switch serving alias; finalize inventory/sidecar. | Pre-swap failure preserves old serving target. Post-swap interruption finalizes the same build read-only; never mutates live data on retry. |
 | published → retained | Successor publication changes the ordinary alias, not old content/control/build aliases. | Admitted old readers and old refs remain bound to the old build, subject to current access policy. |
-| retained → retiring → retired | Explicit policy-authorized retirement blocks new admissions first; drain all admitted readers; verify retention/recovery obligations; persist a retired tombstone in the paired control collection before deleting data and its build alias. Retain the control alias and minimal per-unit revision/digest/location metadata needed to authorize and distinguish retired references. Purging these records requires a separately approved tombstone horizon. | No drain/retention proof: refuse deletion. Tombstones must not disclose existence to unauthorized callers. #391 owns enforcement, #373 disclosure and #360 restore. |
+| retained → retiring → retired | Explicit policy-authorized retirement blocks new admissions first; drain all admitted readers; verify retention/recovery obligations; persist a retired tombstone in the paired control collection before deleting data and its build alias. Retain the control alias and minimal per-chunk revision/digest/location metadata needed to authorize and distinguish retired references. Purging these records requires a separately approved tombstone horizon. | No drain/retention proof: refuse deletion. Tombstones must not disclose existence to unauthorized callers. #391 owns enforcement, #373 disclosure and #360 restore. |
 | retained → serving rollback | Verify old data/control/schema, compatible executable/model/config and policy; swap ordinary alias under the same writer boundary. | Incompatible/missing artifacts refuse; no fallback to other vectors or regenerated text. |
 
 No automatic GC is introduced. Retain current, previous and any generation
@@ -121,7 +175,7 @@ The shared use case intersects caller authorization with requested product/relea
 scope before search, source listing or exact lookup. Explicit scope cannot widen
 on fallback; unknown applicability remains distinct candidates or clarification.
 An exact old reference is authorized on **every new read** before consulting a
-content cache. Content cache keys include full build/unit/digest; cached text is
+content cache. Content cache keys include full build/chunk/digest; cached text is
 not cached permission. Positive authorization is request-scoped initially.
 Unavailable policy fails closed. Recheck the authority's policy version before
 the first response byte, and reauthorize if it differs from admission; previously emitted bytes cannot be
@@ -137,8 +191,8 @@ promise is made. Platform owners must approve this timing model for their data.
 | authorized retired reference | 410 `evidence_retired` | No current-generation substitution. |
 | corrupt/missing retained bytes or controls | 503 `evidence_unavailable` | Internal reason remains distinct, public fixed message. |
 | unavailable access policy | 503 `access_unavailable` | No cache-based authorization bypass. |
-| atomic unit exceeds explicit budget | 413 `evidence_budget_exceeded` | No truncated table/code presented as complete. |
-| complete unit | 200 typed evidence result | Exact canonical bytes/provenance/digest; no LLM, embedding or approximate search. |
+| complete chunk exceeds explicit budget | 413 `evidence_budget_exceeded` | No truncated table/code presented as complete. |
+| complete chunk | 200 typed evidence result | Exact canonical bytes/provenance/digest; no LLM, embedding or approximate search. |
 
 These are proposed **additive** service outcomes, not changes to current endpoint
 status codes or messages. Existing source absence, retrieval no-hits and answer
