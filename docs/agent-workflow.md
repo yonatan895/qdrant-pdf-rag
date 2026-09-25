@@ -288,7 +288,12 @@ review schema/summary. Its read-only entry point is
 approved base checkout. It exits nonzero for unmet, unavailable or changing
 evidence. `--publish` explicitly creates a pending check before collection,
 then publishes success only after rereading candidate, review and latest run
-attempt identities. `--all-open` paginates open candidates. File pagination must
+attempt identities and the live default-branch ref. PR merge metadata can lag a
+base push; matching old PR snapshots alone do not establish currentness. Template
+generation checks the live ref before and after building its snapshot, and
+acceptance collection requires it to match the approved checkout. A mismatch
+refuses the template/result; it never substitutes new SHAs into old evidence.
+`--all-open` paginates open candidates. File pagination must
 match the PR's changed-file count and retain both rename names verbatim.
 
 The approved-main acceptance workflow posts a **Your review template** comment
