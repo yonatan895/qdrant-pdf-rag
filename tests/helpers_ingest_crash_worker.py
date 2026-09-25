@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import threading
 from pathlib import Path
 
 
@@ -18,14 +19,20 @@ def main():
     if ingest_args[:1] == ["--"]:
         ingest_args = ingest_args[1:]
 
+    stop_lock = threading.Lock()
+
     def stop():
-        with options.receipt.open("w") as receipt:
-            receipt.write(options.boundary)
-            receipt.flush()
-            os.fsync(receipt.fileno())
-        if options.hold:
-            os.kill(os.getpid(), signal.SIGSTOP)
-        os._exit(86)  # Deliberately bypass finally, atexit and Python lock cleanup.
+        # Document writes use several threads even with one parse worker.
+        # Exactly one callback may write the receipt before process-wide exit;
+        # another must not truncate it between flush and os._exit.
+        with stop_lock:
+            with options.receipt.open("w") as receipt:
+                receipt.write(options.boundary)
+                receipt.flush()
+                os.fsync(receipt.fileno())
+            if options.hold:
+                os.kill(os.getpid(), signal.SIGSTOP)
+            os._exit(86)  # Deliberately bypass finally, atexit and Python lock cleanup.
 
     boundary = options.boundary
     if boundary in {"corpus-clone", "control-clone"}:
