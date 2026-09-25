@@ -135,6 +135,22 @@ assertion?** A complete inventory does not prove complete searchable coverage;
 a physical name does not prove immutability; a local progress lock does not
 prove publication serialization. These are outstanding #391 proof boundaries.
 
+The [exact-evidence design](evidence-contract.md#evidence-contract) owns M1/A0's
+proposed build/reference identity, immutable publication, access, retention and
+compatibility decisions. Its state tables explicitly separate existing behavior
+from later #405/#391/#373/#360 implementation and platform acceptance.
+
+M1/A1 narrows the existing core boundaries: transports call shared use cases;
+core consumes typed retrieval/model ports; adapters own concrete storage and
+sync/async compatibility. Serving read capabilities remain separate from
+publication/admin writes. Core cannot depend on `agent.app`, console routes,
+deployment or MCP transport modules. Dependency checks must exercise actual
+imports and the operations available to a consumer, not infer read-only authority
+from a protocol annotation alone. Runtime credentials remain independently
+read-only. Stream token/terminal/error types must preserve buffered recovery and
+post-emission no-replay behavior, along with cancellation and client ownership.
+These are A1 acceptance requirements, not claims that all current seams satisfy them.
+
 ### 4.1 Document Ingest & Chunking
 
 [Ingest](ingest.md) owns generic discovery, parsing/sanitization, chrome removal,

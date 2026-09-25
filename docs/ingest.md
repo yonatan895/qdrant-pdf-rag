@@ -695,6 +695,10 @@ Contract tests: `tests/test_run_ingest.py` (`main`, `resolve_workers`,
 <a id="identity-contract"></a>
 ## Identity contract and proof boundaries
 
+Future full build IDs and retained exact references are proposed in the
+[exact-evidence contract](evidence-contract.md#evidence-contract). They do not
+change the existing identity formats described below in this documentation PR.
+
 **Status:** implemented with unit evidence for the named identity functions;
 complete publication safety remains partial. **Authority:** #361, #362 and #391;
 context/status clarification authorized by #397 (15 September 2026).
