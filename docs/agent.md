@@ -465,14 +465,19 @@ currently collapses and publication checks that remain incomplete.
 
 **Required assumptions and limits:** a physical name is not an immutable snapshot.
 Caching is safe with respect to alias movement only while the validated physical
-data/metadata remain stable for the entire request. In-place writes, a forced
-same-representation repair, an admin mutation or deletion can invalidate that
-assumption during a warm cache and after a request has obtained its target.
+data/metadata remain stable for the entire request. Legacy in-place repair,
+an admin mutation or deletion can invalidate that assumption during a warm
+cache and after a request has obtained its target. Alias-mode forced repair
+builds a distinct non-live generation and retains the prior target, as described
+in [maintenance mode](ingest.md#publication-contract).
 TTL expiry, `invalidate()`, a pending marker and a fresh readiness probe do not
 cancel/drain active readers. There is no reader lease or writer fence here.
-Repair therefore needs operator quiescence/draining; a same-representation repair
+In-place maintenance therefore needs operator quiescence/draining; its writes
 must not be described as atomic. Preserve old physical data plus metadata for
-rollback and keep settings compatible; do not GC targets still in use.
+rollback and keep settings compatible; do not GC targets still in use. The
+[exact-evidence design](evidence-contract.md#evidence-contract) specifies future
+retained-reference, authorization and retirement obligations; this TTL gate
+does not implement them.
 
 **Evidence:** `tests/test_serving_gate.py::test_resolve_binds_physical_and_reads_its_own_metadata`,
 `test_resolve_refuses_physical_drift_even_when_alias_metadata_is_compatible`,
