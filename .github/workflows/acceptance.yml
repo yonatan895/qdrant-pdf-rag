@@ -4,7 +4,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
     branches: [main]
   workflow_run:
-    workflows: [agent-context, ci, e2e, load, ha, agent-probes]
+    workflows: [agent-context, ci, e2e, load, ha, agent-probes, Verifier update decision]
     types: [requested, in_progress, completed]
   push:
     branches: [main]
