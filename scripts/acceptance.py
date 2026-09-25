@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import quote
 
 from scripts.acceptance_evidence import LIMIT, PRODUCERS, normalize_native, paginate, require
+from scripts.verifier_approval import VerifierApprovalRequired, approved_inputs, validated_decision
 
 VERIFICATION_INPUTS = (
     'scripts/review_tooling.py', 'scripts/ci_evidence.py', 'Taskfile.yml',
@@ -139,6 +140,12 @@ def post_review_template(api: GitHub, number: int, template: dict[str, Any]) -> 
         api.write(endpoint, {'body': body}, method='POST')
 
 
+def verification_inputs(root: Path) -> dict[str, str]:
+    paths = (*VERIFICATION_INPUTS, *(str(p.relative_to(root)) for p in (root / 'taskfiles').glob('*.yml')),
+             *sorted({'.github/workflows/' + p.workflow for p in PRODUCERS}))
+    return {path: hashlib.sha256((root / path).read_bytes()).hexdigest() for path in paths}
+
+
 def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict[str, Any]:
     """Collect the latest run/attempt, never fall back to an older green result.
 
@@ -153,13 +160,9 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
     require(not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'],
                                         cwd=approved_root, text=True).strip())
     policy_digest = hashlib.sha256((approved_root / 'scripts/review_tooling.py').read_bytes()).hexdigest()
-    producer_digest = hashlib.sha256((approved_root / 'scripts/ci_evidence.py').read_bytes()).hexdigest()
     # Receipt hashes are claims, not proof of the actual executed source.
-    policy_inputs = {path: hashlib.sha256((approved_root / path).read_bytes()).hexdigest()
-                     for path in (*VERIFICATION_INPUTS, *(str(path.relative_to(approved_root))
-                                                          for path in (approved_root / 'taskfiles').glob('*.yml')))}
-    for path, digest in policy_inputs.items():
-        require(hashlib.sha256(api.blob(candidate['execution_sha'], path)).hexdigest() == digest)
+    policy_inputs, verifier_approval = approved_inputs(api, candidate, verification_inputs(approved_root))
+    producer_digest = policy_inputs['scripts/ci_evidence.py']
     hazard_policy = {'catalogue': (approved_root / 'tests/hazards/critical.json').read_bytes(),
                      'runner_sha256': policy_inputs['scripts/check_hazard_sensitivity.py']}
     runs = paginate(api.get, api.prefix + f"actions/runs?event=pull_request&head_sha={candidate['head_sha']}", 'workflow_runs')
@@ -177,7 +180,7 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
         artifacts = paginate(api.get, api.prefix + f"actions/runs/{run['id']}/artifacts", 'artifacts')
         snapshots[workflow] = {'run_id': run['id'], 'run_attempt': run['run_attempt'], 'status': run['status']}
         source = api.blob(candidate['execution_sha'], '.github/workflows/' + workflow)
-        workflow_digest = hashlib.sha256((approved_root / '.github/workflows' / workflow).read_bytes()).hexdigest()
+        workflow_digest = policy_inputs['.github/workflows/' + workflow]
         commit = api.get(api.prefix + 'commits/' + candidate['execution_sha'])
         for producer in (p for p in PRODUCERS if p.workflow == workflow):
             record = {'lane': producer.lane, 'job': producer.job, 'status': 'missing'}
@@ -224,7 +227,8 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
         # An absent workflow, shard, or artifact stays missing in the existing
         # taxonomy: do not turn it into a reported execution failure.
     return {'candidate': candidate, 'native': native, 'lane_statuses': statuses, 'runs': snapshots,
-            'policy_sha256': policy_digest, 'producer_sha256': producer_digest, 'policy_inputs': policy_inputs}
+            'policy_sha256': policy_digest, 'producer_sha256': producer_digest, 'policy_inputs': policy_inputs,
+            'verifier_approval': verifier_approval}
 
 
 def collect_review(api: GitHub, pr: dict[str, Any], candidate: dict[str, Any]):
@@ -339,7 +343,14 @@ def collect_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
     result['runs'] = native['runs']
     result['policy_sha256'] = native['policy_sha256']
     result['policy_inputs'] = native['policy_inputs']
+    result['verifier_approval'] = native.get('verifier_approval')
     result['markdown_report'] = summary.markdown_report
+    if result['verifier_approval'] is not None:
+        run_id = result['verifier_approval']['run_id']
+        result['markdown_report'] += ('\n\nVerifier implementation trust: [maintainer decision]('
+                                      f'https://github.com/{api.repository}/actions/runs/{run_id}). '
+                                      'This binds the exact candidate bytes; it does not waive technical checks '
+                                      'or authorize merging.')
     result['candidate'] = candidate
     result['draft'] = pr['draft']
     return result
@@ -363,6 +374,9 @@ def recheck_current(api: GitHub, result: dict[str, Any]) -> None:
             run = max(matches, key=lambda run: run['id'])
             latest[producer.workflow] = {'run_id': run['id'], 'run_attempt': run['run_attempt'], 'status': run['status']}
     require(latest == result['runs'])
+    if result.get('verifier_approval') is not None:
+        require(validated_decision(api, candidate, result['verifier_approval']['inputs'])
+                == result['verifier_approval'])
     require_current_base(api, pr, candidate)
 
 
@@ -412,6 +426,19 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
         result = collect_acceptance(api, number, approved_root)
         require(result['candidate']['head_sha'] == head)
         recheck_current(api, result)
+    except VerifierApprovalRequired as exc:
+        guidance = ('The maintainer must review these exact changes, then run the '
+                    '[Verifier update decision](https://github.com/' + api.repository
+                    + '/actions/workflows/verifier-update.yml) workflow on main with this PR number. '
+                    'Ready-for-review is not a verifier trust decision. All selected technical checks still apply.')
+        if not exc.approval_allowed:
+            guidance = ('Selection-policy or hazard-catalogue changes cannot use a verifier implementation '
+                        'decision. They require a separately reviewed policy change; no obligations are waived.')
+        result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
+                  'error': ('verifier_update_requires_maintainer_decision' if exc.approval_allowed
+                            else 'verifier_policy_change_not_supported'),
+                  'markdown_report': ('Verifier files differ from approved main: ' + ', '.join(exc.paths)
+                                      + '.\n\n' + guidance)}
     except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError, zipfile.BadZipFile):
         result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
                   'error': 'acceptance_evidence_unavailable_or_changed'}
