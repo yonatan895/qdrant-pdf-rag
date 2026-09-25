@@ -1380,6 +1380,95 @@ class TestAcceptanceUnionAndReviewerAuthority(unittest.TestCase):
 class TestCiUnitPartition(unittest.TestCase):
     """Exercise real pytest collection, filtering and exit status in isolation."""
 
+    def coverage_tree(self, root, source, *, filename="test_sample.py"):
+        repository = pathlib.Path(__file__).resolve().parents[1]
+        for package in ("tests", "scripts"):
+            (root / package).mkdir()
+            (root / package / "__init__.py").write_text("")
+        for relative in ("tests/ci_shard.py", "scripts/unit_evidence.py", "requirements.dev.lock.txt",
+                         "locks/cp314-linux-x86_64.json", "scripts/prepare_python.py",
+                         "scripts/dependency_lock.py", "scripts/agent_doctor.py"):
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_bytes((repository / relative).read_bytes())
+        (root / "tests/conftest.py").write_text("")
+        (root / "pyproject.toml").write_text(
+            '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n'
+            'addopts = "-q -m \'not integration\'"\n'
+            'markers = ["integration: intentionally excluded"]\n')
+        (root / "tests" / filename).write_text(source)
+
+    def test_native_coverage_refuses_canary_narrowing_and_collection_hooks(self):
+        from scripts.unit_evidence import run_shard
+        source = ("import pytest\n" + "\n".join(
+            f"def test_failure_{i}():\n    assert False\n" for i in range(6)) +
+            "def test_canary_one():\n    pass\ndef test_canary_two():\n    pass\n")
+        for variant in ("ordinary", "config-canary", "environment-canary", "drop-hook", "duplicate-hook"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                self.coverage_tree(root, source)
+                if variant == "config-canary":
+                    p = root / "pyproject.toml"
+                    p.write_text(p.read_text().replace("not integration'", "not integration' -k canary"))
+                if variant.endswith("hook"):
+                    operation = "items[:] = [i for i in items if 'canary' in i.nodeid]" if variant == "drop-hook" else "items.append(items[0])"
+                    (root / "tests/conftest.py").write_text("def pytest_collection_modifyitems(items):\n    " + operation + "\n")
+                from unittest.mock import patch
+                with patch.dict(os.environ, {"PYTEST_ADDOPTS": "-k canary" if variant == "environment-canary" else ""}):
+                    for shard in (1, 2):
+                        out = root / f"out-{shard}"
+                        out.mkdir()
+                        if variant == "environment-canary":
+                            with self.assertRaises(ValueError):
+                                run_shard(root, sys.executable, shard, out / "result.xml", out)
+                        elif variant == "config-canary":
+                            with self.assertRaises(OSError):  # configuration rejected before any receipt
+                                run_shard(root, sys.executable, shard, out / "result.xml", out)
+                        else:
+                            code, proof = run_shard(root, sys.executable, shard, out / "result.xml", out)
+                            self.assertNotEqual(code, 0)
+                            if variant == "ordinary":
+                                self.assertEqual(code, 1)
+                                self.assertEqual(len(proof["collect"]["eligible"]), 8)
+                                self.assertEqual(len(proof["execute"]["executed"]), 4)
+                                import xml.etree.ElementTree as ET
+                                self.assertEqual(len(list(ET.parse(out / "result.xml").iter("failure"))), 3)
+                            else:
+                                self.assertFalse(proof["collect"]["passed"])
+
+    def test_native_union_tracks_added_tests_and_exact_whitespace_node_ids(self):
+        from scripts.unit_evidence import input_hashes, run_shard, validate, validate_union
+        source = ("import pytest\n"
+                  "@pytest.mark.parametrize('value', [1,2], ids=['a b','c::d'])\n"
+                  "def test_case(value):\n    assert value > 0\n"
+                  "def test_other():\n    pass\n"
+                  "@pytest.mark.integration\ndef test_integration():\n    assert False\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            filename = "test_ \t\n roundtrip.py"
+            self.coverage_tree(root, source, filename=filename)
+            expected = [f"tests/{filename}::test_case[a b]", f"tests/{filename}::test_case[c::d]",
+                        f"tests/{filename}::test_other"]
+            for added in (False, True):
+                if added:
+                    (root / "tests/test_added.py").write_text("def test_new():\n    pass\n")
+                    expected.append("tests/test_added.py::test_new")
+                records = []
+                for shard in (1, 2):
+                    out = root / f"out-{added}-{shard}"
+                    out.mkdir()
+                    xml = out / "result.xml"
+                    code, proof = run_shard(root, sys.executable, shard, xml, out)
+                    self.assertEqual(code, 0)
+                    record = validate(proof, shard, xml.read_bytes(), input_hashes(root))
+                    self.assertEqual(record["eligible"], sorted(expected))
+                    records.append(record)
+                validate_union(records)
+                self.assertEqual(sorted(records[0]["executed"] + records[1]["executed"]), sorted(expected))
+                with self.assertRaises(ValueError):
+                    validate_union([records[0], records[0]])
+                with self.assertRaises(ValueError):
+                    validate_union([records[0]])
+
     def test_shards_cover_each_selected_case_once_and_preserve_failure(self):
         import xml.etree.ElementTree as ET
 
@@ -1465,7 +1554,7 @@ class TestTaskCiConsumers(unittest.TestCase):
         product = (self.root / ".github/workflows/ci.yml").read_text()
         unit = product.split("  unit:\n", 1)[1].split("  test:\n", 1)[0]
         self.assertIn('TASK_CONTRACTS_REQUIRE_RUNNER: "1"', unit)
-        self.assertLess(unit.index("sh scripts/tools/install-task.sh"), unit.index("pytest -q"))
+        self.assertLess(unit.index("sh scripts/tools/install-task.sh"), unit.index("scripts/ci_evidence.py --lane unit_tests"))
         context = (self.root / ".github/workflows/agent-context.yml").read_text()
         self.assertLess(context.index("sh scripts/tools/install-task.sh"),
                         context.index("sh scripts/tools/run-task.sh qa:context"))
@@ -1484,7 +1573,9 @@ class TestTaskCiConsumers(unittest.TestCase):
         self.assertEqual(jobs["unit"]["strategy"]["matrix"], {"shard": [1, 2]})
         self.assertIs(jobs["unit"]["strategy"]["fail-fast"], False)
         command = next(s["run"] for s in jobs["unit"]["steps"] if s.get("name") == "Run unit shard")
-        self.assertIn("-p tests.ci_shard --unit-shard=${{ matrix.shard }}", command)
+        self.assertIn("--unit-shard=${{ matrix.shard }}", command)
+        self.assertIn("scripts/ci_evidence.py --lane unit_tests", command)
+        self.assertNotIn("-- python -m pytest", command)
         gate = jobs["test"]
         self.assertEqual(gate["needs"], ["select", "unit"])
         self.assertEqual(gate["if"], "always()")
@@ -1629,7 +1720,7 @@ class TestNativeExecutionEvidence(unittest.TestCase):
                     junit = root / (name + '.xml')
                     output = root / name
                     command = 'from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2]); sys.exit(int(sys.argv[3]))'
-                    argv = ['ci_evidence.py', '--lane', 'unit_tests', '--job-name', 'unit (1/2)',
+                    argv = ['ci_evidence.py', '--lane', 'simulation', '--job-name', 'sim',
                             '--output', str(output), '--junit', str(junit), '--', sys.executable,
                             '-c', command, str(junit), xml, str(exit_code)]
                     with patch.object(ci_evidence, 'ROOT', root), patch.object(ci_evidence, 'identity', return_value={'execution_sha': 'a' * 40}), patch.object(sys, 'argv', argv):
@@ -1752,7 +1843,26 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
         artifact = {"id": 789, "expired": False, "name": "evidence-unit-1-attempt-2",
                     "workflow_run": {"id": 123, "repository_id": 42, "head_repository_id": 84, "head_sha": "a" * 40}}
         commit = {"sha": "c" * 40, "parents": [{"sha": "b" * 40}, {"sha": "a" * 40}]}
-        xml = b'<testsuite tests="999"><testcase name="actual"/></testsuite>'
+        import base64
+        identity = base64.b64encode(b'tests/test_example.py::actual').decode()
+        xml = ('<testsuite tests="999"><testcase name="actual"><properties>'
+               f'<property name="native_nodeid" value="{identity}"/>'
+               '</properties></testcase></testsuite>').encode()
+        unit_policy = {path: hashlib.sha256(b"approved verifier input").hexdigest() for path in
+                       ("pyproject.toml", "tests/conftest.py", "tests/ci_shard.py", "scripts/unit_evidence.py",
+                        "requirements.dev.lock.txt", "locks/cp314-linux-x86_64.json",
+                        "scripts/prepare_python.py", "scripts/dependency_lock.py", "scripts/agent_doctor.py")}
+        eligible = ["tests/test_example.py::actual", "tests/test_example.py::other"]
+        collection = {"phase": "collect", "passed": True, "inputs": unit_policy,
+                      "versions": {"pytest": "synthetic", "pluggy": "synthetic", "anyio": "synthetic"},
+                      "policy": {"testpaths": ["tests"], "python_files": ["test_*.py", "*_test.py"],
+                                 "python_classes": ["Test"], "python_functions": ["test"],
+                                 "addopts": ["-q", "-m", "not integration"]},
+                      "plugins": ["_pytest", "anyio.pytest_plugin", "tests/ci_shard.py", "tests/conftest.py"],
+                      "all": eligible, "eligible": eligible, "integration": [],
+                      "selected": eligible, "executed": []}
+        execution = {**collection, "phase": "execute", "selected": eligible[:1], "executed": eligible[:1]}
+        coverage = {"schema_version": 1, "shard": 1, "collect": collection, "execute": execution}
         receipt = {"schema_version": 1, "repository": "synthetic/repository", "repository_id": 42,
                    "pull_request": 3, "head_sha": "a" * 40, "base_sha": "b" * 40,
                    "execution_sha": "c" * 40, "execution_parents": ["b" * 40, "a" * 40],
@@ -1761,8 +1871,9 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                    "triggering_actor": "synthetic", "workflow_sha": "c" * 40,
                    "workflow_ref": "synthetic/repository/.github/workflows/ci.yml@refs/pull/3/merge",
                    "policy_sha256": "d" * 64, "producer_sha256": "e" * 64,
-                   "evidence_kind": "execution", "passed": True, "exit_code": 0, "tests": junit_bytes(xml)}
-        return {"candidate": candidate, "producer": producer, "run": run, "job": job,
+                   "evidence_kind": "execution", "passed": True, "exit_code": 0, "tests": junit_bytes(xml),
+                   "unit_coverage": coverage}
+        return {"candidate": candidate, "producer": producer, "run": run, "job": job, "unit_policy": unit_policy,
                 "artifact": artifact, "execution_commit": commit, "policy_digest": "d" * 64,
                 "producer_digest": "e" * 64, "workflow_source": b"approved workflow",
                 "workflow_digest": hashlib.sha256(b"approved workflow").hexdigest()}, receipt, xml
@@ -1958,12 +2069,52 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             with self.assertRaises(ValueError):
                 collect_native(api, pr, root)
             api.forged_producer = False
-            for path in ("Taskfile.yml", "taskfiles/quality.yml", "scripts/tools/run-task.sh",
+            for path in ("pyproject.toml", "tests/conftest.py", "tests/ci_shard.py", "scripts/unit_evidence.py",
+                         "requirements.dev.lock.txt", "locks/cp314-linux-x86_64.json",
+                         "scripts/prepare_python.py", "scripts/dependency_lock.py", "scripts/agent_doctor.py",
+                         "Taskfile.yml", "taskfiles/quality.yml", "scripts/tools/run-task.sh",
                          "tests/hazards/critical.json", "scripts/check_hazard_sensitivity.py"):
                 with self.subTest(path=path):
                     api.changed_input = path
                     with self.assertRaises(ValueError):
                         collect_native(api, pr, root)
+
+    def test_unit_receipt_rejects_incomplete_selection_and_same_count_substitutions(self):
+        import base64
+        import copy
+
+        from scripts.acceptance_evidence import normalize_native
+        from scripts.ci_evidence import junit_bytes
+        for variant in ("missing", "wrong-shard", "narrowed-execution", "duplicate-call", "altered-input",
+                        "unexpected-plugin", "changed-integration", "same-count-xml", "duplicate-property"):
+            with self.subTest(variant=variant):
+                args, receipt, xml = self.fixture()
+                proof = copy.deepcopy(receipt['unit_coverage'])
+                if variant == "missing":
+                    receipt.pop('unit_coverage')
+                elif variant == "wrong-shard":
+                    proof['shard'] = 2
+                elif variant == "narrowed-execution":
+                    proof['execute']['eligible'] = proof['execute']['selected']
+                elif variant == "duplicate-call":
+                    proof['execute']['executed'] *= 2
+                elif variant == "altered-input":
+                    proof['execute']['inputs']['tests/ci_shard.py'] = 'f' * 64
+                elif variant == "unexpected-plugin":
+                    proof['collect']['plugins'].append('test-hook')
+                elif variant == "changed-integration":
+                    proof['collect']['integration'] = ['tests/test_example.py::other']
+                elif variant == "same-count-xml":
+                    xml = xml.replace(base64.b64encode(b'tests/test_example.py::actual'),
+                                      base64.b64encode(b'tests/test_example.py::other'))
+                else:
+                    xml = xml.replace(b'</properties>', b'<property name="native_nodeid" value=""/></properties>')
+                if variant != "missing":
+                    receipt['unit_coverage'] = proof
+                receipt['tests'] = junit_bytes(xml)  # raw XML digest/counts still agree
+                args['archive'], args['artifact']['digest'] = self.packed(receipt, xml)
+                with self.assertRaises((ValueError, KeyError)):
+                    normalize_native(**args)
 
     def test_native_agent_probes_require_all_named_transport_witnesses(self):
         from scripts.acceptance_evidence import PRODUCERS, normalize_native
@@ -1979,6 +2130,9 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             with self.subTest(variant=variant):
                 args, receipt, _ = self.fixture()
                 args["producer"] = next(p for p in PRODUCERS if p.lane == "agent_probes")
+                # Probe receipts have no unit coverage proof or unit policy.
+                receipt.pop("unit_coverage")
+                args["unit_policy"] = None
                 args["run"]["path"] = ".github/workflows/agent-probes.yml"
                 args["job"]["name"] = "agent-probes"
                 args["artifact"]["name"] = "evidence-agent-probes-attempt-2"
@@ -2942,6 +3096,7 @@ class TestVerifierUpdateDecision(unittest.TestCase):
             api.sources = {p: (root / p).read_bytes() for p in verification_inputs(root)}
             api.sources['scripts/check_hazard_sensitivity.py'] = b'changed runner'
             api.sources['scripts/ci_evidence.py'] = b'changed producer'
+            api.sources['tests/ci_shard.py'] = b'changed collector'
             api.sources['.github/workflows/ci.yml'] = b'changed native workflow'
             # Use actual producer output, not a separately hand-built positive record.
             api.record = record_decision(api, 3, 'approve', root, 900, 1)
@@ -2973,8 +3128,25 @@ class TestVerifierUpdateDecision(unittest.TestCase):
             jobs, artifacts, archives = [], [], {}
             for shard in (1, 2):
                 job = {**native['job'], 'id': 456 + shard, 'name': f'unit ({shard}/2)'}
-                report = {**receipt, 'job_name': job['name']}
-                packed, digest = TestNativeEvidenceConsumer().packed(report, xml)
+                import base64
+
+                from scripts.ci_evidence import junit_bytes
+                from scripts.unit_evidence import INPUTS
+
+                report = copy.deepcopy(receipt)
+                report['job_name'] = job['name']
+                proof = report['unit_coverage']
+                proof['shard'] = shard
+                selected = ['tests/test_example.py::actual'] if shard == 1 else ['tests/test_example.py::other']
+                for phase in ('collect', 'execute'):
+                    proof[phase]['inputs'] = {path: hashlib.sha256(api.sources[path]).hexdigest() for path in INPUTS}
+                proof['execute'].update(selected=selected, executed=selected)
+                node = base64.b64encode(selected[0].encode()).decode()
+                shard_xml = ('<testsuite><testcase name="literal"><properties>'
+                             f'<property name="native_nodeid" value="{node}"/>'
+                             '</properties></testcase></testsuite>').encode()
+                report['tests'] = junit_bytes(shard_xml)
+                packed, digest = TestNativeEvidenceConsumer().packed(report, shard_xml)
                 artifact = copy.deepcopy(native['artifact'])
                 artifact.update(id=789 + shard, name=f'evidence-unit-{shard}-attempt-2',
                                 digest=digest, size_in_bytes=len(packed))
@@ -3005,6 +3177,25 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                         jobs[1]['conclusion'] = conclusion
                         rejected = collect_native(api, pr, root)
                         self.assertNotEqual(rejected['lane_statuses']['unit_tests'], 'success')
+                jobs[1]['conclusion'] = 'success'
+                for defect in ('missing coverage', 'different collection'):
+                    with self.subTest(defect=defect):
+                        bad = copy.deepcopy(report)  # second shard's otherwise valid receipt
+                        if defect == 'missing coverage':
+                            del bad['unit_coverage']
+                        else:
+                            # Each shard is locally self-consistent, but their
+                            # independently collected universes must also agree.
+                            for phase in ('collect', 'execute'):
+                                bad['unit_coverage'][phase]['all'] = [
+                                    'tests/test_example.py::different', 'tests/test_example.py::other']
+                                bad['unit_coverage'][phase]['eligible'] = bad['unit_coverage'][phase]['all']
+                            bad['unit_coverage']['collect']['selected'] = bad['unit_coverage']['collect']['all']
+                        packed, digest = TestNativeEvidenceConsumer().packed(bad, shard_xml)
+                        artifacts[1].update(digest=digest, size_in_bytes=len(packed))
+                        archives[api.prefix + 'actions/artifacts/791/zip'] = packed
+                        rejected = collect_native(api, pr, root)
+                        self.assertEqual(rejected['lane_statuses']['unit_tests'], 'unverified')
             original_get = api.get
             def move_during_snapshot(endpoint):
                 value = original_get(endpoint)

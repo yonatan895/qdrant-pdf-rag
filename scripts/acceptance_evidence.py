@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from scripts.ci_evidence import junit_bytes
+from scripts.unit_evidence import validate as validate_unit_coverage
 
 LIMIT = 16 * 1024 * 1024
 
@@ -133,6 +134,7 @@ def normalize_native(
     execution_commit: dict[str, Any], archive: bytes,
     policy_digest: str, producer_digest: str, workflow_digest: str, workflow_source: bytes,
     hazard_policy: dict[str, Any] | None = None,
+    unit_policy: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Reject stale/misattributed receipts before returning a native lane result.
 
@@ -209,6 +211,12 @@ def normalize_native(
 
     else:
         require(counts is None and 'tests.xml' not in files)
+    unit_coverage = None
+    if producer.lane == 'unit_tests':
+        if unit_policy is None:
+            raise ValueError("native unit selection policy is required")
+        shard = {'unit (1/2)': 1, 'unit (2/2)': 2}[producer.job]
+        unit_coverage = validate_unit_coverage(report['unit_coverage'], shard, files['tests.xml'], unit_policy)
     if producer.structured:
         require(report['result_sha256'] == hashlib.sha256(files['results.json']).hexdigest())
         structured = object_json(files['results.json'])
@@ -220,7 +228,8 @@ def normalize_native(
     return {'lane': producer.lane, 'status': 'success', 'run_id': run['id'],
             'run_attempt': run['run_attempt'], 'job_id': job['id'],
             'artifact_id': artifact['id'], 'artifact_digest': artifact['digest'],
-            'execution_sha': execution_commit['sha'], 'tests': counts, 'results': structured}
+            'execution_sha': execution_commit['sha'], 'tests': counts, 'results': structured,
+            'unit_coverage': unit_coverage}
 
 
 def paginate(get, endpoint: str, key: str | None = None, *, identity_key: str = "id") -> list[dict[str, Any]]:
