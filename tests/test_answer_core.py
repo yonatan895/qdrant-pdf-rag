@@ -578,18 +578,12 @@ def test_core_type_boundary_rejects_storage_injection_and_write_use(tmp_path):
 from mainframe_rag.agent.answer_core import AnswerCoreDeps
 from mainframe_rag.agent.core_ports import AnswerModel, Retriever
 from mainframe_rag.config import Settings
-from mainframe_rag.ports import QdrantBatchSearch, QdrantPoints, QdrantSearch
-from qdrant_client import QdrantClient, AsyncQdrantClient
+from mainframe_rag.ports import QdrantPoints
 """
     source.write_text(imports + """
 def good(settings: Settings, model: AnswerModel, read: Retriever) -> AnswerCoreDeps:
     return AnswerCoreDeps(settings=settings, llm=model, retrieve=read)
 
-def real_clients(sync: QdrantClient, async_client: AsyncQdrantClient) -> None:
-    sync_read: QdrantSearch = sync
-    async_read: QdrantSearch = async_client
-    sync_batch: QdrantBatchSearch = sync
-    async_batch: QdrantBatchSearch = async_client
 """)
     command = [sys.executable, "-m", "mypy", "--strict", "--follow-imports=silent",
                "--no-incremental", str(source)]
@@ -597,7 +591,7 @@ def real_clients(sync: QdrantClient, async_client: AsyncQdrantClient) -> None:
     assert good.returncode == 0, good.stdout + good.stderr
     source.write_text(imports + """
 def bad(settings: Settings, model: AnswerModel, writer: QdrantPoints,
-        read: QdrantSearch, deps: AnswerCoreDeps) -> None:
+        read: Retriever, deps: AnswerCoreDeps) -> None:
     AnswerCoreDeps(settings=settings, llm=model, retrieve=writer)
     read.upsert("corpus", points=[])
     deps.qdrant.upsert("corpus", points=[])
@@ -605,7 +599,7 @@ def bad(settings: Settings, model: AnswerModel, writer: QdrantPoints,
     bad = subprocess.run(command, capture_output=True, text=True, check=False)
     assert bad.returncode == 1, bad.stdout + bad.stderr
     assert 'incompatible type "QdrantPoints"; expected "Retriever"' in bad.stdout
-    assert '"QdrantSearch" has no attribute "upsert"' in bad.stdout
+    assert '"Retriever" has no attribute "upsert"' in bad.stdout
     assert '"AnswerCoreDeps" has no attribute "qdrant"' in bad.stdout
     assert "Found 3 errors" in bad.stdout
 

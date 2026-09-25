@@ -1974,19 +1974,19 @@ def test_build_messages_ignores_none_settings_without_tokenizer():
 
 
 @pytest.mark.parametrize("raw", ["plain answer", "", None, {"content": "answer"}])
-def test_require_chat_result_rejects_unstructured_completion(raw):
-    from mainframe_rag.agent.answer import require_chat_result
+def test_as_chat_result_rejects_unstructured_completion(raw):
+    from mainframe_rag.agent.answer import as_chat_result
 
     with pytest.raises(TypeError, match="model completion must be ChatResult"):
-        require_chat_result(raw)
+        as_chat_result(raw)
 
 
-def test_require_chat_result_passthrough():
-    from mainframe_rag.agent.answer import require_chat_result
+def test_as_chat_result_passthrough():
+    from mainframe_rag.agent.answer import as_chat_result
     from mainframe_rag.ports import ChatResult, TokenUsage
 
     original = ChatResult(content="x", finish_reason="length", usage=TokenUsage(prompt_tokens=3))
-    assert require_chat_result(original) is original
+    assert as_chat_result(original) is original
 
 
 def test_chat_content_none_becomes_empty_string():

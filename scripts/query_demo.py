@@ -623,10 +623,10 @@ def execute_answer(
     from mainframe_rag.agent.answer import (
         HttpxLLMClient,
         ParsedAnswer,
+        as_chat_result,
         build_messages,
         classify_query_complexity,
         parse_answer,
-        require_chat_result,
         verification_state_for,
     )
 
@@ -701,7 +701,7 @@ def execute_answer(
         ) as llm_span:
             client = HttpxLLMClient(settings)
             try:
-                reply = require_chat_result(
+                reply = as_chat_result(
                     client.chat(
                         prepared.messages,
                         reasoning_effort=effort,

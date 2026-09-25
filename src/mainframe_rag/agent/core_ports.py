@@ -1,3 +1,4 @@
+# mypy: disallow_untyped_defs=True, disallow_untyped_calls=True, disallow_any_generics=True, warn_return_any=True, no_implicit_reexport=True, strict_equality=True, warn_unused_ignores=True
 """Typed operations supplied to the answer use case, without storage/admin handles."""
 from __future__ import annotations
 

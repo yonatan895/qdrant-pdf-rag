@@ -1,3 +1,4 @@
+# mypy: disallow_untyped_defs=True, disallow_untyped_calls=True, disallow_any_generics=True, warn_return_any=True, no_implicit_reexport=True, strict_equality=True, warn_unused_ignores=True
 """Shared core execution pipeline for single-turn and multi-turn mainframe technical RAG.
 
 Extracted from /v1/answer and /v1/chat to serve single-turn answer, OpenAI-compatible

@@ -888,7 +888,7 @@ def _user_content(blocks: list[PromptBlock], order: str) -> str:
     return "\n\n".join(text for _, text in order_prompt_blocks(blocks, order))
 
 
-def require_chat_result(raw: object) -> ChatResult:
+def as_chat_result(raw: object) -> ChatResult:
     """Reject unstructured completions without inventing finish or usage metadata."""
     if not isinstance(raw, ChatResult):
         raise TypeError("model completion must be ChatResult")
@@ -1572,7 +1572,7 @@ async def condense_query(
         res = llm.chat(prompt, reasoning_effort=effort, temperature=temp)
         if inspect.isawaitable(res):
             res = await res
-        condensed = require_chat_result(res).content.strip()
+        condensed = as_chat_result(res).content.strip()
         condensed = re.sub(r'^(Standalone (search )?query:|"|\')\s*', "", condensed, flags=re.IGNORECASE)
         condensed = condensed.strip('"\'')
         return condensed or latest_text

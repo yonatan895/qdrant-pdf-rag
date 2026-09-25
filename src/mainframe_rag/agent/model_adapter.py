@@ -1,3 +1,4 @@
+# mypy: disallow_untyped_defs=True, disallow_untyped_calls=True, disallow_any_generics=True, warn_return_any=True, no_implicit_reexport=True, strict_equality=True, warn_unused_ignores=True
 """Normalize legacy chat/stream seams once; never own or close the shared client."""
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ from mainframe_rag.agent.answer import (
     REASON_MALFORMED_FRAME,
     REASON_MISSING_FINISH,
     TruncatedStreamError,
-    require_chat_result,
+    as_chat_result,
 )
 from mainframe_rag.agent.core_ports import ModelDone, ModelEvent, ModelToken
 from mainframe_rag.ports import ChatMessage, ChatResult, LLMClient, TokenUsage
@@ -34,7 +35,7 @@ class ModelAdapter:
         result = self._client.chat(
             messages, reasoning_effort=reasoning_effort, temperature=temperature
         )
-        return require_chat_result(await result if inspect.isawaitable(result) else result)
+        return as_chat_result(await result if inspect.isawaitable(result) else result)
 
     async def stream(
         self, messages: list[ChatMessage], reasoning_effort: str, temperature: float,

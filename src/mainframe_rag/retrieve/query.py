@@ -21,7 +21,7 @@ from qdrant_client import models
 if TYPE_CHECKING:
     from mainframe_rag.config import Settings
 
-from mainframe_rag.ports import Embedder, QdrantBatchSearch, QdrantSearch, Reranker
+from mainframe_rag.ports import AsyncQdrantPoints, Embedder, QdrantPoints, Reranker
 from mainframe_rag.retrieve.filters import build_filter, build_scope_filter, parse_query, query_kind
 from mainframe_rag.retrieve.rewrite import expand_query, should_rewrite
 from mainframe_rag.retrieve.screen import screen_query
@@ -523,7 +523,7 @@ def _diversify_with_span(
 
 
 def search(
-    client: QdrantSearch | QdrantBatchSearch,
+    client: QdrantPoints,
     embedder: Embedder,
     collection: str,
     query: str,
@@ -567,7 +567,7 @@ def search(
 
 
 async def _async_prefetch_one(
-    client: QdrantSearch,
+    client: AsyncQdrantPoints | QdrantPoints,
     collection: str,
     vec: list[float] | models.SparseVector,
     using: str,
@@ -587,7 +587,7 @@ async def _async_prefetch_one(
 
 
 async def async_search(
-    client: QdrantSearch | QdrantBatchSearch,
+    client: AsyncQdrantPoints | QdrantPoints,
     embedder: Embedder,
     collection: str,
     query: str,
@@ -646,7 +646,7 @@ async def async_search(
         with tracer.start_as_current_span(
             "retrieve.prefetch",
             attributes={
-                "rag.batch": isinstance(client, QdrantBatchSearch),
+                "rag.batch": hasattr(client, "query_batch_points"),
                 "rag.prefetch_limit": prefetch_limit,
             },
         ):
@@ -662,7 +662,7 @@ async def async_search(
                     dense_vec, sparse_idx, sparse_val, flt, prefetch_limit
                 )
 
-                if isinstance(client, QdrantBatchSearch):
+                if hasattr(client, "query_batch_points"):
                     res = client.query_batch_points(collection, requests=[dense_req, sparse_req])
                     responses = await res if inspect.isawaitable(res) else res
                     dense_points = responses[0].points
@@ -682,7 +682,7 @@ async def async_search(
                     dense_req, sparse_req = _build_prefetch_requests(
                         dense_vec, sparse_idx, sparse_val, fallback_flt, prefetch_limit
                     )
-                    if isinstance(client, QdrantBatchSearch):
+                    if hasattr(client, "query_batch_points"):
                         res = client.query_batch_points(collection, requests=[dense_req, sparse_req])
                         responses = await res if inspect.isawaitable(res) else res
                         dense_points = responses[0].points

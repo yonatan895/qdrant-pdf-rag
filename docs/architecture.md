@@ -158,15 +158,16 @@ propagate as exceptions, including the existing typed `TruncatedStreamError`.
 remain unchanged. The adapter closes per-operation generators, never shared
 clients. The application lifespan retains client ownership.
 
-`QdrantSearch` and optional `QdrantBatchSearch` expose retrieval reads, while
-`QdrantPoints`/`AsyncQdrantPoints` retain publication/admin operations. Structural
-protocols restrict checked consumer operations; they are not a Python sandbox
-and do not prove a supplied credential is read-only. Existing serving credential
-requirements remain mandatory. `tests/test_answer_core.py` checks the transitive
-core import graph, rejects raw storage injection/write use with the real type
-checker, and exercises adapter parity plus stream cleanup/next operation.
-Targeted strict type options apply to `answer_core`, `core_ports` and
-`model_adapter`; legacy modules gain no new ignore rules.
+Retrieval SDK dispatch and its existing low-level ports remain unchanged. The
+core's `Retriever` operation is the read boundary: a storage/admin client cannot
+stand in for that operation, and the core has no storage handle on which to write.
+The three core modules carry their strict mypy options inline; ordinary
+`qa:typecheck` enforces them without changing shared pytest/verifier configuration.
+`tests/test_answer_core.py` checks forbidden imports, rejects storage injection and
+write use through the actual core operation, and exercises model parity and
+stream cleanup followed by the next operation. Low-level SDK protocol assignment
+pins are retired with the removed SDK-interface rewrite; existing retrieval
+client behavior tests remain unchanged.
 
 ### 4.1 Document Ingest & Chunking
 
