@@ -7,6 +7,8 @@ condensation gate, and the empty-hits stream shape.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from mainframe_rag.agent.answer import (
@@ -24,6 +26,8 @@ from mainframe_rag.agent.answer_core import (
     execute_answer_core_stream,
     resolve_search_query,
 )
+from mainframe_rag.agent.core_ports import RetrievalResult
+from mainframe_rag.agent.model_adapter import ModelAdapter
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage, ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
@@ -74,13 +78,14 @@ class CoreFakeLLM:
 
 
 def _deps(settings: Settings, llm, retrieve) -> AnswerCoreDeps:
-    return AnswerCoreDeps(
-        settings=settings,
-        llm=llm,
-        qdrant=None,
-        embedder=None,
-        retrieve_search_fn=retrieve,
-    )
+    async def retrieve_adapter(query, *, product, version, settings):
+        result = retrieve(None, None, settings.qdrant_collection, query,
+                          product=product, version=version, settings=settings, limit=8)
+        if inspect.isawaitable(result):
+            result = await result
+        return RetrievalResult(*result)
+
+    return AnswerCoreDeps(settings=settings, llm=ModelAdapter(llm), retrieve=retrieve_adapter)
 
 
 def test_chat_body_chars_counts_messages_and_context():
@@ -403,3 +408,335 @@ async def test_core_stream_explicit_done_still_finalizes():
     ]
     assert [i["type"] for i in items] == ["token", "final"]
     assert items[-1]["output"].finish_reason == "stop"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_structured_model_results_match_buffered_and_fallback_stream(asynchronous):
+    """Sync/async boundary adaptation preserves structured completion metadata."""
+    expected = ChatResult(content="Synthetic answer.", finish_reason="stop",
+                          usage=TokenUsage(prompt_tokens=7, completion_tokens=3, total_tokens=10), ttft_ms=17)
+
+    class StructuredModel:
+        def chat(self, messages, reasoning_effort=None, temperature=None):
+            async def result():
+                return expected
+            return result() if asynchronous else expected
+
+    deps = _stream_deps(StructuredModel())
+    source = AnswerCoreInput(query="IEA500I rejected")
+    buffered = await execute_answer_core(source, deps)
+    events = [item async for item in execute_answer_core_stream(source, deps)]
+    final = events[-1]["output"]
+    assert buffered.answer == final.answer == "Synthetic answer."
+    assert buffered.finish_reason == final.finish_reason == "stop"
+    assert buffered.usage == final.usage == expected.usage
+    assert buffered.ttft_ms == final.ttft_ms == expected.ttft_ms
+    assert buffered.citations == final.citations == []
+    assert buffered.verification_state == final.verification_state
+    assert [item["type"] for item in events] == ["token", "final"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_unstructured_completion_fails_then_next_structured_answer_succeeds(asynchronous, streaming):
+    class Model:
+        response = "Unstructured answer must not become a completed result."
+
+        def chat(self, messages, reasoning_effort=None, temperature=None):
+            async def result():
+                return self.response
+            return result() if asynchronous else self.response
+
+    model = Model()
+    deps = _stream_deps(model)
+    source = AnswerCoreInput(query="IEA500I rejected")
+    events = []
+    if streaming:
+        with pytest.raises(TypeError, match="model completion must be ChatResult"):
+            async for item in execute_answer_core_stream(source, deps):
+                events.append(item)
+        assert events == []
+    else:
+        with pytest.raises(LLMChatError) as error:
+            await execute_answer_core(source, deps)
+        assert isinstance(error.value.original, TypeError)
+
+    model.response = ChatResult(content="Synthetic answer.", finish_reason="length", usage=TokenUsage())
+    if streaming:
+        events = [item async for item in execute_answer_core_stream(source, deps)]
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    assert output.finish_reason == "length"
+    assert output.verification_state == "generation_incomplete"
+    model.response = ChatResult(content="Synthetic answer.", finish_reason="stop", usage=TokenUsage())
+    output = await execute_answer_core(source, deps)
+    assert output.answer == "Synthetic answer." and output.finish_reason == "stop"
+
+
+@pytest.mark.anyio
+async def test_closing_core_stream_releases_operation_without_closing_shared_model():
+    closed = []
+
+    class Model(CoreFakeLLM):
+        async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+            try:
+                yield {"type": "token", "delta": "Provisional."}
+                yield {"type": "done", "finish_reason": "stop"}
+            finally:
+                closed.append("operation")
+
+        def close(self):
+            raise AssertionError("core does not own the shared client")
+
+    deps = _stream_deps(Model())
+    stream = execute_answer_core_stream(AnswerCoreInput(query="IEA500I"), deps)
+    assert (await anext(stream))["type"] == "token"
+    await stream.aclose()
+    assert closed == ["operation"]
+    # Cleanup must preserve the next ordinary operation, not only cancellation.
+    result = [event async for event in execute_answer_core_stream(
+        AnswerCoreInput(query="IEA500I"), deps
+    )]
+    assert result[-1]["type"] == "final"
+    assert closed == ["operation", "operation"]
+
+
+def _assert_core_import_boundary():
+    """Follow deferred imports too: a cold import alone misses function-local dependencies."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src"
+    pending = ["mainframe_rag.agent.answer_core", "mainframe_rag.agent.model_adapter"]
+    visited = set()
+    forbidden = ("mainframe_rag.agent.app", "mainframe_rag.agent.sse",
+                 "mainframe_rag.webui", "mainframe_rag.mcp")
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        assert not any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden), name
+        path = root.joinpath(*name.split(".")).with_suffix(".py")
+        if not path.is_file():
+            path = root.joinpath(*name.split("."), "__init__.py")
+        if not path.is_file():
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                pending.extend(alias.name for alias in node.names
+                               if alias.name.startswith("mainframe_rag."))
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                assert node.level == 0, "resolve relative imports in the boundary walker before use"
+                if node.module.startswith("mainframe_rag."):
+                    pending.append(node.module)
+                    pending.extend(node.module + "." + alias.name for alias in node.names)
+
+
+def test_core_import_graph_excludes_transports_and_application_singleton():
+    _assert_core_import_boundary()
+
+
+@pytest.mark.parametrize(
+    "module, injected, forbidden",
+    [
+        ("answer_core", "import mainframe_rag.agent.app", "mainframe_rag.agent.app"),
+        ("model_adapter", "def deferred():\n    from mainframe_rag.webui import routes",
+         "mainframe_rag.webui.routes"),
+        ("core_ports", "from mainframe_rag.agent import sse", "mainframe_rag.agent.sse"),
+    ],
+)
+def test_core_import_checker_rejects_forbidden_dependency(monkeypatch, module, injected, forbidden):
+    """Challenge the actual graph checker without importing or modifying application code."""
+    import re
+    from pathlib import Path
+
+    target = Path(__file__).resolve().parents[1] / "src/mainframe_rag/agent" / (module + ".py")
+    original_read = Path.read_text
+
+    def with_forbidden_import(path, *args, **kwargs):
+        source = original_read(path, *args, **kwargs)
+        return source + "\n" + injected + "\n" if path == target else source
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", with_forbidden_import)
+        with pytest.raises(AssertionError, match=re.escape(forbidden)):
+            _assert_core_import_boundary()
+    _assert_core_import_boundary()
+
+
+def test_core_type_boundary_rejects_storage_injection_and_write_use(tmp_path):
+    """The same checker used by qa:typecheck must accept reads and reject admin access."""
+    import subprocess
+    import sys
+
+    source = tmp_path / "capabilities.py"
+    imports = """
+from mainframe_rag.agent.answer_core import AnswerCoreDeps
+from mainframe_rag.agent.core_ports import AnswerModel, Retriever
+from mainframe_rag.config import Settings
+from mainframe_rag.ports import QdrantPoints
+"""
+    source.write_text(imports + """
+def good(settings: Settings, model: AnswerModel, read: Retriever) -> AnswerCoreDeps:
+    return AnswerCoreDeps(settings=settings, llm=model, retrieve=read)
+
+""")
+    command = [sys.executable, "-m", "mypy", "--strict", "--follow-imports=silent",
+               "--no-incremental", str(source)]
+    good = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert good.returncode == 0, good.stdout + good.stderr
+    source.write_text(imports + """
+def bad(settings: Settings, model: AnswerModel, writer: QdrantPoints,
+        read: Retriever, deps: AnswerCoreDeps) -> None:
+    AnswerCoreDeps(settings=settings, llm=model, retrieve=writer)
+    read.upsert("corpus", points=[])
+    deps.qdrant.upsert("corpus", points=[])
+""")
+    bad = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert bad.returncode == 1, bad.stdout + bad.stderr
+    assert 'incompatible type "QdrantPoints"; expected "Retriever"' in bad.stdout
+    assert '"Retriever" has no attribute "upsert"' in bad.stdout
+    assert '"AnswerCoreDeps" has no attribute "qdrant"' in bad.stdout
+    assert "Found 3 errors" in bad.stdout
+
+
+@pytest.mark.anyio
+async def test_cancelling_pending_model_read_closes_operation_and_propagates():
+    import asyncio
+
+    waiting = asyncio.Event()
+    closed = []
+
+    class Model(CoreFakeLLM):
+        async def chat_stream(self, messages, reasoning_effort=None, temperature=None):
+            try:
+                yield {"type": "token", "delta": "Provisional."}
+                waiting.set()
+                await asyncio.Event().wait()
+            finally:
+                closed.append("operation")
+
+    deps = _stream_deps(Model())
+    stream = execute_answer_core_stream(AnswerCoreInput(query="IEA500I"), deps)
+    assert (await anext(stream))["type"] == "token"
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(waiting.wait(), timeout=2)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert closed == ["operation"]
+    assert (await execute_answer_core(AnswerCoreInput(query="IEA500I"), deps)).finish_reason == "stop"
+
+
+_STREAM_BAD_SEQUENCES = [
+    [{"type": "token", "delta": "provisional"}, {"type": "error", "error": "synthetic"},
+     {"type": "done", "finish_reason": "stop"}],
+    [{"type": "done", "finish_reason": "length"}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "done", "finish_reason": "stop"}, {"type": "token", "delta": "late"}],
+    [{"type": "metadata"}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "token", "delta": False}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "token", "delta": 0}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "token", "delta": None}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "token", "delta": []}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "done", "finish_reason": "stop", "usage": False}],
+    [{"type": "done", "finish_reason": "stop", "usage": 0}],
+    [{"type": "done", "finish_reason": "stop", "usage": {}}],
+    [{"type": "done", "finish_reason": "stop", "usage": None}],
+    [{"type": "token", "delta": "text", "ttft_ms": False}, {"type": "done", "finish_reason": "stop"}],
+    [{"type": "done", "finish_reason": False}],
+    [{"type": "token", "delta": "text", "error": "synthetic"}, {"type": "done", "finish_reason": "stop"}],
+    [False, {"type": "done", "finish_reason": "stop"}],
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('seam', ['adapter', 'core-legacy', 'core-typed'])
+@pytest.mark.parametrize('frames', _STREAM_BAD_SEQUENCES)
+async def test_stream_grammar_rejects_invalid_sequences_and_next_operation_recovers(seam, frames):
+    from mainframe_rag.agent.core_ports import ModelDone, ModelToken
+
+    class Model(CoreFakeLLM):
+        def __init__(self):
+            self.frames = frames
+            self.closed = 0
+
+        async def chat_stream(self, *args, **kwargs):
+            try:
+                for frame in self.frames:
+                    yield frame
+            finally:
+                self.closed += 1
+
+        async def stream(self, *args, **kwargs):
+            # Exercise the public typed port directly, bypassing ModelAdapter.
+            try:
+                for frame in self.frames:
+                    if not isinstance(frame, dict) or 'error' in frame:
+                        yield frame
+                    elif frame.get('type') == 'token':
+                        yield ModelToken(frame.get('delta'), frame.get('ttft_ms'))
+                    elif frame.get('type') == 'done':
+                        yield ModelDone(frame.get('finish_reason'), frame.get('usage', TokenUsage()),
+                                        frame.get('ttft_ms'))
+                    else:
+                        yield frame
+            finally:
+                self.closed += 1
+
+    model = Model()
+    deps = _stream_deps(model)
+    if seam == 'core-typed':
+        deps.llm = model
+
+    seen = []
+
+    async def collect():
+        if seam == 'adapter':
+            return [event async for event in ModelAdapter(model).stream([], 'low', 0.0)]
+        async for event in execute_answer_core_stream(AnswerCoreInput(query='IEA500I'), deps):
+            seen.append(event)
+        return seen.copy()
+
+    with pytest.raises(TruncatedStreamError) as error:
+        await collect()
+    assert error.value.reason == REASON_MALFORMED_FRAME
+    assert model.closed == 1
+    assert not any(event['type'] == 'final' for event in seen)
+    seen.clear()
+    model.frames = [{"type": "token", "delta": ""}, {"type": "token", "delta": "Synthetic answer."},
+                    {"type": "done", "finish_reason": "stop"}]
+    healthy = await collect()
+    assert model.closed == 2
+    if seam == 'adapter':
+        assert isinstance(healthy[-1], ModelDone) and healthy[-1].finish_reason == 'stop'
+    else:
+        assert [event['type'] for event in healthy] == ['token', 'final']
+        assert healthy[-1]['output'].finish_reason == 'stop'
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('typed', [False, True])
+async def test_single_incomplete_terminal_remains_incomplete(typed):
+    from mainframe_rag.agent.core_ports import ModelDone, ModelToken
+
+    class Model(CoreFakeLLM):
+        async def chat_stream(self, *args, **kwargs):
+            yield {"type": "token", "delta": "Partial answer."}
+            yield {"type": "done", "finish_reason": "length"}
+
+        async def stream(self, *args, **kwargs):
+            yield ModelToken("Partial answer.")
+            yield ModelDone("length", TokenUsage())
+
+    model = Model()
+    deps = _stream_deps(model)
+    if typed:
+        deps.llm = model
+    events = [event async for event in execute_answer_core_stream(AnswerCoreInput(query='IEA500I'), deps)]
+    assert events[-1]['type'] == 'final'
+    assert events[-1]['output'].finish_reason == 'length'
+    assert events[-1]['output'].verification_state == 'generation_incomplete'

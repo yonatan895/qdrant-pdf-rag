@@ -728,14 +728,13 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
             async for item in execute_answer_core_stream(
                 core_input, deps, parent_span=root_span
             ):
-                itype = item.get("type")
-                if itype == "token":
-                    delta = item.get("delta") or ""
+                if item["type"] == "token":
+                    delta = item["delta"]
                     if delta:
                         yield format_sse_event(
                             "token", {"type": "token", "delta": delta, "token": delta}
                         )
-                elif itype == "final":
+                elif item["type"] == "final":
                     output = item["output"]
                     app_mod._record_endpoint(
                         request,

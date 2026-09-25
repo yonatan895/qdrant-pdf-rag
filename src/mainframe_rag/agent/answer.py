@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -888,14 +888,11 @@ def _user_content(blocks: list[PromptBlock], order: str) -> str:
     return "\n\n".join(text for _, text in order_prompt_blocks(blocks, order))
 
 
-def as_chat_result(raw: ChatResult | str) -> ChatResult:
-    """Single adapter for LLMClient.chat() results: the production client
-    returns ChatResult; test doubles may still return a bare string. Every
-    consumer (app, query_demo) funnels through here instead of carrying its
-    own isinstance/hasattr branch."""
-    if isinstance(raw, ChatResult):
-        return raw
-    return ChatResult(content=str(raw), finish_reason="stop", usage=TokenUsage())
+def as_chat_result(raw: object) -> ChatResult:
+    """Reject unstructured completions without inventing finish or usage metadata."""
+    if not isinstance(raw, ChatResult):
+        raise TypeError("model completion must be ChatResult")
+    return raw
 
 
 def assert_reasoning_model(settings: Settings) -> tuple[str, str]:
@@ -1158,7 +1155,7 @@ class HttpxLLMClient:
         messages: list[ChatMessage],
         reasoning_effort: str | None = None,
         temperature: float | None = None,
-    ) -> ChatResult | Any:
+    ) -> ChatResult | Awaitable[ChatResult]:
         if isinstance(self._client, httpx2.AsyncClient):
             return self.achat(messages, reasoning_effort=reasoning_effort, temperature=temperature)
         try:
@@ -1575,7 +1572,7 @@ async def condense_query(
         res = llm.chat(prompt, reasoning_effort=effort, temperature=temp)
         if inspect.isawaitable(res):
             res = await res
-        condensed = res.content.strip() if hasattr(res, "content") else str(res).strip()
+        condensed = as_chat_result(res).content.strip()
         condensed = re.sub(r'^(Standalone (search )?query:|"|\')\s*', "", condensed, flags=re.IGNORECASE)
         condensed = condensed.strip('"\'')
         return condensed or latest_text

@@ -1,3 +1,4 @@
+# mypy: disallow_untyped_defs=True, disallow_untyped_calls=True, disallow_any_generics=True, warn_return_any=True, no_implicit_reexport=True, strict_equality=True, warn_unused_ignores=True
 """Shared core execution pipeline for single-turn and multi-turn mainframe technical RAG.
 
 Extracted from /v1/answer and /v1/chat to serve single-turn answer, OpenAI-compatible
@@ -8,18 +9,18 @@ retrieval, and inference logic.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Literal
+from typing import Literal, TypedDict
 
 ReasoningEffort = Literal["low", "medium", "high"]
 VALID_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset({"low", "medium", "high"})
 
 
 from opentelemetry import trace
+from opentelemetry.context import Context
 from opentelemetry.trace import Status, StatusCode
 
 from mainframe_rag.agent.answer import (
@@ -30,7 +31,6 @@ from mainframe_rag.agent.answer import (
     PromptEvidence,
     TruncatedStreamError,
     VerificationState,
-    as_chat_result,
     assert_reasoning_model,
     build_chat_messages,
     build_messages,
@@ -43,9 +43,16 @@ from mainframe_rag.agent.chat_turn import (
     chat_body_chars as chat_body_chars,  # noqa: PLC0414 — preserve the existing helper import
 )
 from mainframe_rag.agent.chat_turn import prepare_chat_turn
-from mainframe_rag.agent.sse import fallback_stream
+from mainframe_rag.agent.core_ports import (
+    AnswerModel,
+    ModelDone,
+    ModelToken,
+    PromptBuilder,
+    RetrievalResult,
+    Retriever,
+)
 from mainframe_rag.config import Settings
-from mainframe_rag.ports import ChatMessage, LLMClient, Tokenizer, TokenUsage
+from mainframe_rag.ports import ChatMessage, Tokenizer, TokenUsage
 from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
 
@@ -94,15 +101,12 @@ class AnswerCoreInput:
 @dataclass
 class AnswerCoreDeps:
     settings: Settings
-    llm: LLMClient
-    qdrant: Any
-    embedder: Any
-    reranker: Any = None
+    llm: AnswerModel
+    retrieve: Retriever
     tokenizer: Tokenizer | None = None
-    retrieve_search_fn: Any = None
-    build_messages_fn: Any = None
-    build_chat_messages_fn: Any = None
-    classify_query_complexity_fn: Any = None
+    build_messages_fn: PromptBuilder[str] | None = None
+    build_chat_messages_fn: PromptBuilder[list[ChatMessage]] | None = None
+    classify_query_complexity_fn: Callable[[str], str] | None = None
 
 
 def _prepare_chat_input(input_data: AnswerCoreInput, settings: Settings) -> AnswerCoreInput:
@@ -186,10 +190,18 @@ class AnswerCoreOutput:
     budget_verified: bool = False
 
 
-async def _await_retrieval(res: Any) -> tuple[list[SearchHit], str, dict[str, int]]:
-    if inspect.isawaitable(res):
-        return await res
-    return res
+class CoreToken(TypedDict):
+    type: Literal["token"]
+    delta: str
+    ttft_ms: int | None
+
+
+class CoreFinal(TypedDict):
+    type: Literal["final"]
+    output: AnswerCoreOutput
+
+
+type CoreEvent = CoreToken | CoreFinal
 
 
 def _resolve_reasoning_effort(
@@ -212,7 +224,7 @@ async def _build_prepared_prompt(
     hits: list[SearchHit],
     complexity: str,
     effort: str,
-    root_ctx: Any,
+    root_ctx: Context | None,
 ) -> PreparedPrompt:
     """One prompt-build owner for the JSON and streaming executors: identical
     budget inputs, identical evidence manifest, one prompt.build span."""
@@ -321,6 +333,44 @@ def _finalize_answer(
     )
 
 
+async def _retrieve_inputs(
+    source: AnswerCoreInput, deps: AnswerCoreDeps, parent_span: trace.Span | None,
+) -> RetrievalResult:
+    if source.hits is not None:
+        return RetrievalResult(source.hits, source.query_kind or "unknown", source.timings or {})
+    query = await resolve_search_query(source, deps, parent_span)
+    try:
+        return await deps.retrieve(
+            query, product=source.product, version=source.version, settings=deps.settings,
+        )
+    except Exception as exc:
+        raise RetrievalError(exc) from exc
+
+
+def _empty_output(query: str, kind: str, timings: dict[str, int], complexity: str) -> AnswerCoreOutput:
+    empty_text = empty_hits_answer(query)
+    return AnswerCoreOutput(
+        answer=empty_text,
+        citations=[],
+        citations_inferred=False,
+        inferred_indices=[],
+        script=None,
+        script_lang=None,
+        verification_state="insufficient_evidence",
+        script_review_required=False,
+        query_kind=kind,
+        hits=[],
+        finish_reason="stop",
+        usage=TokenUsage(),
+        timings=timings,
+        llm_ms=0,
+        ttft_ms=None,
+        complexity=complexity,
+        parsed=ParsedAnswer(answer=empty_text),
+        evidence=PromptEvidence(),
+    )
+
+
 async def execute_answer_core(
     input_data: AnswerCoreInput,
     deps: AnswerCoreDeps,
@@ -332,60 +382,14 @@ async def execute_answer_core(
     _base_url, llm_model = assert_reasoning_model(settings)
     root_ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
 
-    # 1. Retrieval
-    if input_data.hits is None:
-        search_query = await resolve_search_query(input_data, deps, parent_span)
-
-        retrieve_fn = deps.retrieve_search_fn
-        if retrieve_fn is None:
-            from mainframe_rag.retrieve.query import async_search as retrieve_fn
-
-        try:
-            res = retrieve_fn(
-                deps.qdrant,
-                deps.embedder,
-                settings.qdrant_collection,
-                search_query,
-                product=input_data.product,
-                version=input_data.version,
-                limit=8,
-                settings=settings,
-                reranker=deps.reranker,
-            )
-            hits, kind, timings = await _await_retrieval(res)
-        except Exception as exc:
-            raise RetrievalError(exc) from exc
-    else:
-        hits = input_data.hits
-        kind = input_data.query_kind or "unknown"
-        timings = input_data.timings or {}
+    retrieved = await _retrieve_inputs(input_data, deps, parent_span)
+    hits, kind, timings = retrieved.hits, retrieved.kind, retrieved.timings
 
     classify_fn = deps.classify_query_complexity_fn or classify_query_complexity
     complexity = classify_fn(input_data.query)
 
-    # 2. Empty hits short-circuit
     if not hits:
-        empty_text = empty_hits_answer(input_data.query)
-        return AnswerCoreOutput(
-            answer=empty_text,
-            citations=[],
-            citations_inferred=False,
-            inferred_indices=[],
-            script=None,
-            script_lang=None,
-            verification_state="insufficient_evidence",
-            script_review_required=False,
-            query_kind=kind,
-            hits=[],
-            finish_reason="stop",
-            usage=TokenUsage(),
-            timings=timings,
-            llm_ms=0,
-            ttft_ms=None,
-            complexity=complexity,
-            parsed=ParsedAnswer(answer=empty_text),
-            evidence=PromptEvidence(),
-        )
+        return _empty_output(input_data.query, kind, timings, complexity)
 
     # 3. Prompt building (shared with the streaming executor)
     effort = _resolve_reasoning_effort(input_data, settings, complexity)
@@ -402,13 +406,10 @@ async def execute_answer_core(
         attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
     ) as llm_span:
         try:
-            chat_call = deps.llm.chat(
+            chat_res = await deps.llm.chat(
                 prepared.messages,
                 reasoning_effort=effort,
                 temperature=temperature,
-            )
-            chat_res = as_chat_result(
-                await chat_call if inspect.isawaitable(chat_call) else chat_call
             )
             llm_span.set_attributes(
                 {
@@ -444,40 +445,15 @@ async def execute_answer_core_stream(
     input_data: AnswerCoreInput,
     deps: AnswerCoreDeps,
     parent_span: trace.Span | None = None,
-) -> AsyncIterator[dict[str, Any]]:
+) -> AsyncGenerator[CoreEvent]:
     """Execute the streaming core pipeline: yields token deltas, then terminal citation/metadata record."""
     settings = deps.settings
     input_data = _prepare_chat_input(input_data, settings)
     _base_url, llm_model = assert_reasoning_model(settings)
     root_ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
 
-    # 1. Retrieval
-    if input_data.hits is None:
-        search_query = await resolve_search_query(input_data, deps, parent_span)
-
-        retrieve_fn = deps.retrieve_search_fn
-        if retrieve_fn is None:
-            from mainframe_rag.retrieve.query import async_search as retrieve_fn
-
-        try:
-            res = retrieve_fn(
-                deps.qdrant,
-                deps.embedder,
-                settings.qdrant_collection,
-                search_query,
-                product=input_data.product,
-                version=input_data.version,
-                limit=8,
-                settings=settings,
-                reranker=deps.reranker,
-            )
-            hits, kind, timings = await _await_retrieval(res)
-        except Exception as exc:
-            raise RetrievalError(exc) from exc
-    else:
-        hits = input_data.hits
-        kind = input_data.query_kind or "unknown"
-        timings = input_data.timings or {}
+    retrieved = await _retrieve_inputs(input_data, deps, parent_span)
+    hits, kind, timings = retrieved.hits, retrieved.kind, retrieved.timings
 
     classify_fn = deps.classify_query_complexity_fn or classify_query_complexity
     complexity = classify_fn(input_data.query)
@@ -487,28 +463,7 @@ async def execute_answer_core_stream(
     # single `final` (schema parity, review S6) and the chat routes emit the
     # canned text from the final output themselves.
     if not hits:
-        empty_text = empty_hits_answer(input_data.query)
-        output = AnswerCoreOutput(
-            answer=empty_text,
-            citations=[],
-            citations_inferred=False,
-            inferred_indices=[],
-            script=None,
-            script_lang=None,
-            verification_state="insufficient_evidence",
-            script_review_required=False,
-            query_kind=kind,
-            hits=[],
-            finish_reason="stop",
-            usage=TokenUsage(),
-            timings=timings,
-            llm_ms=0,
-            ttft_ms=None,
-            complexity=complexity,
-            parsed=ParsedAnswer(answer=empty_text),
-            evidence=PromptEvidence(),
-        )
-        yield {"type": "final", "output": output}
+        yield {"type": "final", "output": _empty_output(input_data.query, kind, timings, complexity)}
         return
 
     # 3. Prompt building (shared with the buffered executor)
@@ -529,14 +484,7 @@ async def execute_answer_core_stream(
     finish_reason: str | None = None
     usage = TokenUsage()
 
-    if hasattr(deps.llm, "chat_stream"):
-        stream_gen = deps.llm.chat_stream(
-            prepared.messages,
-            reasoning_effort=effort,
-            temperature=temperature,
-        )
-    else:
-        stream_gen = fallback_stream(deps.llm, prepared.messages, effort, temperature)
+    stream_gen = deps.llm.stream(prepared.messages, effort, temperature)
 
     with tracer.start_as_current_span(
         "llm.chat",
@@ -545,29 +493,27 @@ async def execute_answer_core_stream(
     ) as llm_span:
         try:
             async for item in stream_gen:
-                itype = item.get("type")
-                if itype == "token":
-                    delta = item.get("delta") or ""
-                    if delta:
+                # A typed adapter is still a runtime boundary. Never let a
+                # second terminal erase an incomplete finish or accept late text.
+                if (finish_reason is not None or not isinstance(item, (ModelToken, ModelDone))
+                        or (item.ttft_ms is not None and type(item.ttft_ms) is not int)):
+                    raise TruncatedStreamError(len(content_parts), REASON_MALFORMED_FRAME)
+                if isinstance(item, ModelToken):
+                    if not isinstance(item.delta, str):
+                        raise TruncatedStreamError(len(content_parts), REASON_MALFORMED_FRAME)
+                    if item.delta:
                         if ttft_ms is None:
-                            ttft_ms = item.get("ttft_ms") or int((time.monotonic() - t0) * 1000)
-                        content_parts.append(delta)
-                        yield {"type": "token", "delta": delta, "ttft_ms": ttft_ms}
-                elif itype == "done":
-                    raw_finish = item.get("finish_reason")
-                    if raw_finish is None:
-                        raise TruncatedStreamError(
-                            len(content_parts), REASON_MISSING_FINISH
-                        )
-                    if not isinstance(raw_finish, str) or not raw_finish:
-                        raise TruncatedStreamError(
-                            len(content_parts), REASON_MALFORMED_FRAME
-                        )
-                    finish_reason = raw_finish
-                    if item.get("usage"):
-                        usage = item["usage"]
-                    if ttft_ms is None and item.get("ttft_ms") is not None:
-                        ttft_ms = item["ttft_ms"]
+                            ttft_ms = item.ttft_ms or int((time.monotonic() - t0) * 1000)
+                        content_parts.append(item.delta)
+                        yield {"type": "token", "delta": item.delta, "ttft_ms": ttft_ms}
+                else:
+                    if (not isinstance(item.finish_reason, str) or not item.finish_reason
+                            or not isinstance(item.usage, TokenUsage)):
+                        raise TruncatedStreamError(len(content_parts), REASON_MALFORMED_FRAME)
+                    finish_reason = item.finish_reason
+                    usage = item.usage
+                    if ttft_ms is None and item.ttft_ms is not None:
+                        ttft_ms = item.ttft_ms
 
             if finish_reason is None:
                 # No valid done item arrived: never finalize tokens as "stop".
@@ -587,6 +533,8 @@ async def execute_answer_core_stream(
             llm_span.record_exception(exc)
             llm_span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
             raise
+        finally:
+            await stream_gen.aclose()
 
     full_content = "".join(content_parts)
     llm_ms = int((time.monotonic() - t0) * 1000)

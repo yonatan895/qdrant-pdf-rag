@@ -14,6 +14,7 @@ from scripts.query_demo import (
 )
 
 from mainframe_rag.config import Settings
+from mainframe_rag.ports import ChatResult, TokenUsage
 from mainframe_rag.retrieve.query import SearchHit
 from tests.fakes import embedding_mock, vllm_models_mock
 
@@ -141,10 +142,14 @@ def test_render_answer_html():
 @patch("qdrant_client.QdrantClient")
 def test_main_cli_answer_mode(mock_qdrant, mock_chat, mock_embed, mock_search, tmp_path: Path):
     mock_search.return_value = ([_sample_hit()], "identifier", {"embed_ms": 2, "qdrant_ms": 8})
-    mock_chat.return_value = (
-        "Command rejected.\n\n"
-        "Citations:\n"
-        "SA22-0000-00 z/OS Messages, Chapter 1 > IEA Messages, p. 1-5"
+    mock_chat.return_value = ChatResult(
+        content=(
+            "Command rejected.\n\n"
+            "Citations:\n"
+            "SA22-0000-00 z/OS Messages, Chapter 1 > IEA Messages, p. 1-5"
+        ),
+        finish_reason="stop",
+        usage=TokenUsage(),
     )
     out_file = tmp_path / "answer.json"
 
@@ -172,7 +177,13 @@ def test_main_cli_answer_json_carries_verification_contract(
     from mainframe_rag.agent.answer import ParsedAnswer
 
     mock_search.return_value = ([_sample_hit()], "identifier", {"embed_ms": 2, "qdrant_ms": 8})
-    mock_chat.return_value = "Reissue the command after initialization completes."
+    mock_chat.return_value = ChatResult(
+        content=(
+            "Reissue the command after initialization completes."
+        ),
+        finish_reason="stop",
+        usage=TokenUsage(),
+    )
     out_file = tmp_path / "draft.json"
 
     rc = main(["--query", "IEA500I", "--answer", "--format", "json", "--out", str(out_file)])
@@ -183,9 +194,13 @@ def test_main_cli_answer_json_carries_verification_contract(
     assert exported["citations"] == []
 
     # Script-carrying draft: review flag rides text render and export alike.
-    mock_chat.return_value = (
-        "Reissue the command after initialization completes.\n\n"
-        "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```\n"
+    mock_chat.return_value = ChatResult(
+        content=(
+            "Reissue the command after initialization completes.\n\n"
+            "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```\n"
+        ),
+        finish_reason="stop",
+        usage=TokenUsage(),
     )
     out_script = tmp_path / "script.json"
     rc = main(["--query", "IEA500I", "--answer", "--format", "json", "--out", str(out_script)])
@@ -468,14 +483,10 @@ def test_execute_answer_emits_v1_answer_and_child_spans():
     provider.add_span_processor(SimpleSpanProcessor(exporter))
 
     mock_hit = _sample_hit()
-    mock_chat_res = MagicMock()
-    mock_chat_res.content = "Answer text."
-    mock_chat_res.ttft_ms = 150
-    mock_chat_res.finish_reason = "stop"
-    mock_chat_res.usage.prompt_tokens = 100
-    mock_chat_res.usage.completion_tokens = 50
-    mock_chat_res.usage.reasoning_tokens = 20
-    mock_chat_res.usage.total_tokens = 150
+    mock_chat_res = ChatResult(
+        content="Answer text.", ttft_ms=150, finish_reason="stop",
+        usage=TokenUsage(prompt_tokens=100, completion_tokens=50, reasoning_tokens=20, total_tokens=150),
+    )
 
     dummy_settings = Settings(qdrant_collection="test_coll")
     with (
@@ -483,8 +494,7 @@ def test_execute_answer_emits_v1_answer_and_child_spans():
         patch("scripts.query_demo.retrieve_search", return_value=([mock_hit], "identifier", {"embed_ms": 5, "qdrant_ms": 10})),
         patch("scripts.query_demo.build_embedder"),
         patch("qdrant_client.QdrantClient"),
-        patch("mainframe_rag.agent.answer.HttpxLLMClient"),
-        patch("mainframe_rag.agent.answer.as_chat_result", return_value=mock_chat_res),
+        patch("mainframe_rag.agent.answer.HttpxLLMClient") as model_factory,
         patch("mainframe_rag.agent.answer.parse_answer") as mock_parse,
     ):
         mock_parsed = MagicMock()
@@ -493,6 +503,7 @@ def test_execute_answer_emits_v1_answer_and_child_spans():
         mock_parsed.script = None
         mock_parse.return_value = mock_parsed
 
+        model_factory.return_value.chat.return_value = mock_chat_res
         execute_answer("What does message IEA500I mean?", settings=dummy_settings)
 
     spans = exporter.get_finished_spans()

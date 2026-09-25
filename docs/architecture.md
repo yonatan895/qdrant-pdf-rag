@@ -149,7 +149,25 @@ imports and the operations available to a consumer, not infer read-only authorit
 from a protocol annotation alone. Runtime credentials remain independently
 read-only. Stream token/terminal/error types must preserve buffered recovery and
 post-emission no-replay behavior, along with cancellation and client ownership.
-These are A1 acceptance requirements, not claims that all current seams satisfy them.
+`AnswerCoreDeps` now receives `Retriever` and `AnswerModel` operations and typed
+prompt builders; it has no raw Qdrant/embedder/admin handle. `ModelAdapter`
+adapts sync/async calls with structured `ChatResult` completions and token/done
+mappings. Bare strings are rejected; finish/usage metadata is never invented. Errors
+propagate as exceptions, including the existing typed `TruncatedStreamError`.
+`CoreToken`/`CoreFinal` discriminate the internal stream; transport wire schemas
+remain unchanged. The adapter closes per-operation generators, never shared
+clients. The application lifespan retains client ownership.
+
+Retrieval SDK dispatch and its existing low-level ports remain unchanged. The
+core's `Retriever` operation is the read boundary: a storage/admin client cannot
+stand in for that operation, and the core has no storage handle on which to write.
+The three core modules carry their strict mypy options inline; ordinary
+`qa:typecheck` enforces them without changing shared pytest/verifier configuration.
+`tests/test_answer_core.py` checks forbidden imports, rejects storage injection and
+write use through the actual core operation, and exercises model parity and
+stream cleanup followed by the next operation. Low-level SDK protocol assignment
+pins are retired with the removed SDK-interface rewrite; existing retrieval
+client behavior tests remain unchanged.
 
 ### 4.1 Document Ingest & Chunking
 
