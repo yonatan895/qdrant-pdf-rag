@@ -61,8 +61,8 @@ _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO / "src") not in sys.path:
     sys.path.insert(0, str(_REPO / "src"))
 
-from mainframe_rag.config import load_settings  # noqa: E402
-from mainframe_rag.eval.datasets import (  # noqa: E402
+from mainframe_rag.config import load_settings
+from mainframe_rag.eval.datasets import (
     QUERY_CLASSES,
     GoldenEntry,
     VenueError,
@@ -71,7 +71,7 @@ from mainframe_rag.eval.datasets import (  # noqa: E402
     require_rc_for_collection,
     require_rc_for_golden,
 )
-from mainframe_rag.eval.retrieval import (  # noqa: E402
+from mainframe_rag.eval.retrieval import (
     EVAL_ABSOLUTE_GATED_METRICS,
     EVAL_GATED_METRICS,
     EVAL_ZERO_GATED_METRICS,
@@ -92,17 +92,21 @@ from mainframe_rag.eval.retrieval import (  # noqa: E402
     summary_markdown,
     update_baseline,
 )
-from mainframe_rag.manifest import write_run_manifest  # noqa: E402
-from mainframe_rag.retrieve.query import search as retrieve_search  # noqa: E402
+from mainframe_rag.manifest import write_run_manifest
+from mainframe_rag.retrieve.query import search as retrieve_search
 
 __all__ = [
-    "GoldenEntry",
+    "EVAL_ABSOLUTE_GATED_METRICS",
+    "EVAL_GATED_METRICS",
+    "EVAL_ZERO_GATED_METRICS",
+    "MUST_NOT_WINDOW",
     "QUERY_CLASSES",
     "SEARCH_LIMIT",
-    "MUST_NOT_WINDOW",
-    "EVAL_GATED_METRICS",
-    "EVAL_ABSOLUTE_GATED_METRICS",
-    "EVAL_ZERO_GATED_METRICS",
+    "GoldenEntry",
+    "_absolute_floors_apply",
+    "_finite_number",
+    "_get",
+    "_set",
     "check_baseline",
     "default_baseline_path",
     "evaluate",
