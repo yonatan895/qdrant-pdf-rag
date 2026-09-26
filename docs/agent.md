@@ -458,6 +458,16 @@ search, answer, both chat routes and console. `/healthz` requests fresh validati
 **Allowed states:** compatible/record-only drift may serve; empty is bootstrap
 readiness only; drift, legacy, pending and unknown refuse with the stable
 `representation_unavailable` envelope before retrieval/model/stream work.
+For a new-format publication, `agent.serving.resolve_published_generation` also
+validates the full build UUID, supported control schema and immutable data/control
+aliases before the gate caches a servable result. Missing or redirected build
+controls produce the existing fixed refusal. These are publication-lifetime
+checks; embedding-representation comparison remains unchanged. An alias advance
+between the representation read and build validation may leave the resolved
+physical retained: its complete immutable pair remains valid for the admitted
+reader. A subsequent fresh validation resolves the successor. Completed legacy
+generations retain their supported read contract without an invented build UUID.
+
 The gate binds a request to a validated physical name, and aliases become visible
 after revalidation. Negative results are cached too. See
 [metadata outcomes](ingest.md#metadata-contract) for distinctions the reader

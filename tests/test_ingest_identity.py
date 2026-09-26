@@ -304,6 +304,9 @@ def test_nondry_collision_writes_nothing(tmp_path, monkeypatch):
             self.upserts: list[int] = []
             self.deletes = 0
 
+        def get_aliases(self):
+            return SimpleNamespace(aliases=[])
+
         def collection_exists(self, name):
             return True
 

@@ -616,7 +616,7 @@ thread pool.
   fingerprints `(gen_fp, corpus_fp)` are committed to the generation's metadata
   (`<collection>__completions`), allowing subsequent ordinary runs to recognize
   successful repair generations as steady state without allocating further staging
-  generations (issue #391 Q418-R1). An existing generation lacking a publication receipt
+  generations (issue #391 Q418-R1). A completed legacy generation lacking a publication receipt
   performs a one-time metadata write when verified as `already_live`; once the receipt
   exists, subsequent ordinary runs perform zero writes (corpus, markers, and metadata remain
   completely untouched). A post-cutover retry retains its build sidecar and
@@ -636,7 +636,9 @@ thread pool.
   truthiness coercions are forbidden. A plan with recorded requests must match
   their document/revision/whole-document scope; corrupt entries are never
   discarded. Older v1 records without either optional retirement field remain
-  readable under their existing replay rules. Invalid records preserve the
+  readable for diagnosis, but the new writer refuses unfinished v1 builds before
+  mutation. Finish with the matching old release or explicitly abandon the
+  candidate; a new verified build receives a new UUID. Invalid records preserve the
   sidecar, progress and stored collections; restore the exact valid record or
   explicitly abandon the build before retrying. An existing
   staging with no matching build record fails closed (remove it explicitly
@@ -647,6 +649,25 @@ thread pool.
   Lock filenames sanitize the alias charset: aliases differing only in
   sanitised-away characters share a lock (over-serialization, never
   concurrent publication).
+- **Durable build identity:** new publication sidecars use version 2 and record a
+  full canonical UUID plus the observed predecessor under the target lock before
+  collection writes. The UUID is independent of representation and chunk UUID5
+  identity and survives retries. After complete coverage and placement checks,
+  the paired publication receipt records `build_schema: 1`, that UUID, logical
+  corpus, physical pair and input fingerprints. This seals the candidate: retry
+  re-verifies it without rewriting its stored data or controls, even with
+  `--reingest`. One atomic alias operation creates
+  `<alias>__build_<uuid>` and `<alias>__build_<uuid>__completions` and switches
+  the serving alias. Existing build aliases are never rebound. A successor
+  leaves the old pair and build aliases intact. Readers validate the binding
+  and both immutable aliases; missing, redirected or unknown-version controls
+  refuse instead of downgrading to legacy behavior. Completed legacy generations
+  remain readable but acquire no full build UUID through metadata backfill.
+  In-place ingest refuses these builds through logical, physical or build-alias
+  targets, including retained builds. Post-cutover recovery validates the same
+  UUID before read-only finalization.
+  Sidecar persistence uses atomic replacement for process-crash recovery; this
+  is not qualification of power-loss or storage-device durability.
 - **Fingerprint-format upgrade (one-time, fail-closed):** the pre-#391
   fingerprint omitted the operator revision and other re-embed-required
   fields, so it cannot be trusted for skip eligibility. Existing
@@ -657,14 +678,17 @@ thread pool.
   physical retains its old data **and its own contract
   metadata** (`<old>__completions`), so an alias rollback selects matching
   metadata, not the new contract.
-- **Rollback / GC (operator actions, never automatic):** the superseded
-  physical and a safety snapshot are kept on every swap. Roll back by
-  re-pointing the alias (any Qdrant client):
-  `update_collection_aliases([DeleteAlias(alias), CreateAlias(prev, alias)])`.
-  When confident, delete the old physical, its `<old>__completions`, and
-  the safety snapshot (`delete_collection`, `delete_snapshot`). Verify
-  counts/dim against the run log (`action: publish` carries
-  alias/physical/previous/safety_snapshot/docs) before and after.
+- **Rollback / disposal (operator actions, never automatic):** superseded
+  data/control pairs, immutable build aliases and safety snapshots remain
+  retained. Direct alias repointing is not a verified administrative rollback:
+  the accepted [lifecycle contract](evidence-contract.md) requires target schema,
+  content, executable/config compatibility and policy checks under writer
+  serialization. Retained disposal additionally requires maintenance-wide
+  admission stop and drain, explicit platform retention/recovery inputs, and
+  persistent tombstones before data deletion while retaining required controls.
+  Counts, dimensions or elapsed cache TTL alone authorize neither operation.
+  Guarded administrative rollback/disposal remain separate L1 work; do not
+  delete retained pairs or their controls using the old manual GC recipe.
 - `should_skip`: exact-sha plus (`upserted` always, or `dry` only when the
   current run is also dry — a real run never skips prior `dry`).
 - `load_inventory`: latest record per path; torn lines ignored; appends
@@ -848,8 +872,9 @@ operator-serialized jobs, not a claim of distributed lock enforcement. No HA
 claim follows from a single-node run.
 
 **Maintenance and rollback:** in-place mode (`INGEST_ALIAS_PUBLISH=false`)
-repairs the live collection directly, so operators must quiesce writers and
-drain affected readers first; setting a manifest pending or waiting a TTL
+is limited to legacy collections without full build controls or immutable build
+aliases. It refuses new-format published, sealed and retained builds. For a
+legacy repair, operators must quiesce writers and drain affected readers first; setting a manifest pending or waiting a TTL
 alone does not drain in-flight requests. Alias-mode repair is a normal
 distinct-generation publish: the old physical keeps serving until the
 verified atomic swap, and is retained afterward. Preserve a restorable backup

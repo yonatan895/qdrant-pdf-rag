@@ -130,7 +130,7 @@ async def test_gate_caches_within_ttl_and_revalidates(monkeypatch):
         calls.append(settings.qdrant_collection)
         return "physical-1", "compatible", []
 
-    monkeypatch.setattr(serving_mod, "resolve_serving_generation", fake_resolve)
+    monkeypatch.setattr(serving_mod, "resolve_published_generation", fake_resolve)
     s = _settings()
     gate = serving_mod.ServingGate(ttl_s=5.0)
 
@@ -163,10 +163,108 @@ async def test_gate_zero_ttl_validates_every_request_and_caches_refusals(monkeyp
         calls.append(1)
         return "physical-1", "pending", []
 
-    monkeypatch.setattr(serving_mod, "resolve_serving_generation", fake_resolve)
+    monkeypatch.setattr(serving_mod, "resolve_published_generation", fake_resolve)
     s = _settings()
     gate = serving_mod.ServingGate(ttl_s=0.0)
     generation = await gate.generation(object(), s, RULES)
     await gate.generation(object(), s, RULES)
     assert len(calls) == 2
     assert generation.outcome == "pending" and not generation.servable
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("damage", [None, "version", "uuid", "pair", "logical", "missing-record",
+                                    "missing-data-alias", "missing-control-alias", "redirect-control"])
+@pytest.mark.parametrize("direct", [False, True])
+async def test_serving_requires_full_published_build_pair(damage, direct):
+    s = _settings()
+    alias = s.qdrant_collection
+    physical = alias + "__gen_build_test"
+    control = physical + "__completions"
+    build_id = "12345678-1234-4234-8234-123456789abc"
+    data_alias = alias + "__build_" + build_id
+    control_alias = data_alias + "__completions"
+    payload = {"record_type": "publication-metadata", "target_collection": control,
+               "build_schema": 1, "build_id": build_id, "logical_alias": alias,
+               "data_collection": physical, "gen_fp": "recipe", "corpus_fp": "corpus"}
+    qd = AliasQdrant(
+        aliases={alias: physical, data_alias: physical, control_alias: control},
+        manifests={control: manifest_envelope(s, RULES, control)},
+        publications={control: payload}, points={physical},
+    )
+    if damage == "version":
+        payload["build_schema"] = 99
+    elif damage == "uuid":
+        payload["build_id"] = build_id.upper()
+    elif damage == "pair":
+        payload["data_collection"] = "another-generation"
+    elif damage == "logical":
+        payload["logical_alias"] = "another-corpus"
+    elif damage == "missing-record":
+        qd.publications.clear()
+    elif damage == "missing-data-alias":
+        del qd.aliases[data_alias]
+    elif damage == "missing-control-alias":
+        del qd.aliases[control_alias]
+    elif damage == "redirect-control":
+        qd.aliases[control_alias] = "wrong__completions"
+    configured = s.model_copy(update={"qdrant_collection": physical}) if direct else s
+    from mainframe_rag.agent.serving import ServingGate
+
+    generation = await ServingGate(ttl_s=0).generation(qd, configured, RULES)
+    assert generation.physical == physical
+    assert generation.outcome == ("compatible" if damage is None else "unknown")
+    assert generation.details == (() if damage is None else ("build_control",))
+    assert not qd.writes
+
+
+@pytest.mark.anyio
+async def test_publication_during_validation_preserves_resolved_reader(monkeypatch):
+    from mainframe_rag.agent.serving import ServingGate
+
+    settings = _settings()
+    alias = settings.qdrant_collection
+    old, new = alias + "__old", alias + "__new"
+    aliases = {alias: old}
+    records = {}
+    for physical, build_id in ((old, "12345678-1234-4234-8234-123456789abc"),
+                               (new, "22345678-1234-4234-8234-123456789abc")):
+        controls = physical + "__completions"
+        private = alias + "__build_" + build_id
+        aliases[private] = physical
+        aliases[private + "__completions"] = controls
+        records[controls] = {
+            "record_type": "publication-metadata", "target_collection": controls,
+            "build_schema": 1, "build_id": build_id, "logical_alias": alias,
+            "data_collection": physical, "gen_fp": "recipe", "corpus_fp": physical,
+        }
+    client = AliasQdrant(aliases=aliases, publications=records, points={old, new},
+                        manifests={physical + "__completions": manifest_envelope(
+                            settings, RULES, physical + "__completions") for physical in (old, new)})
+    get_aliases = client.get_aliases
+    def advance_after_resolution():
+        observed = get_aliases()
+        client.aliases[alias] = new
+        return observed
+    monkeypatch.setattr(client, "get_aliases", advance_after_resolution)
+    gate = ServingGate(ttl_s=0)
+    admitted = await gate.generation(client, settings, RULES)
+    assert admitted.physical == old and admitted.servable
+    following = await gate.generation(client, settings, RULES)
+    assert following.physical == new and following.servable
+    assert not client.writes
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("alias", ["corpus__build_notes", "corpus__build_notes__completions"])
+async def test_legacy_corpus_name_with_build_substring_remains_readable(alias):
+    from mainframe_rag.agent.serving import ServingGate
+
+    settings = _settings(qdrant_collection=alias)
+    physical = alias + "__legacy"
+    controls = physical + "__completions"
+    client = AliasQdrant(aliases={alias: physical}, points={physical},
+                        manifests={controls: manifest_envelope(settings, RULES, controls)})
+    generation = await ServingGate(ttl_s=0).generation(client, settings, RULES)
+    assert generation.physical == physical and generation.servable
+    assert not client.writes

@@ -75,6 +75,11 @@ class RevisionFake:
         self.upserts = 0
         self.deletes = 0
 
+    def get_aliases(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(aliases=[])
+
     def collection_exists(self, name):
         return True
 

@@ -156,6 +156,11 @@ class _FakeQdrant:
         self._points: dict[str, list] = {}
         self.created_collections: list[str] = []
 
+    def get_aliases(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(aliases=[])
+
     def collection_exists(self, collection_name):
         return True
 

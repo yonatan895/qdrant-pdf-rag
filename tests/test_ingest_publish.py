@@ -1024,16 +1024,21 @@ def test_subsequent_ordinary_run_recognizes_repair_steady_state(tmp_path, monkey
         (p.id, dict(p.payload or {})) for p in fake.collections[repaired]
     ] == points_after_repair
 
-    # 4. Missing/malformed receipt control: deleting receipt forces rebuild/staging
+    # 4. A new-format build cannot lose its binding and silently become legacy.
     from mainframe_rag.ingest.publish import completion_collection_for, delete_publication_metadata
 
     repaired_completions = completion_collection_for(repaired)
+    from copy import deepcopy
+
+    saved_controls = deepcopy(fake.collections[repaired_completions])
     delete_publication_metadata(fake, repaired_completions)
+    damaged = deepcopy(fake.collections)
+    with pytest.raises(RuntimeError, match="live build controls"):
+        _run_main(monkeypatch, corpus, progress)
+    assert fake.aliases[ALIAS] == repaired
+    assert fake.collections == damaged
+    fake.collections[repaired_completions] = saved_controls
     assert _run_main(monkeypatch, corpus, progress) == 0
-    after_missing_receipt = fake.aliases[ALIAS]
-    assert after_missing_receipt != repaired, (
-        "missing receipt must allocate staging rather than falsely accepting repair"
-    )
 
     # 5. Counterexample 1: Changed corpus derives new generation
     _build_doc_with_id(corpus, "doc_b", DOC_B)
@@ -3561,7 +3566,7 @@ def test_bounded_publication_lifecycle_traces(tmp_path, monkeypatch, operations,
     "gate",
     [
         "check_ingest_compatible", "verify_staging_distribution", "_placement_clients",
-        "verify_all_complete", "write_publication_metadata",
+        "verify_all_complete", "read_build_binding",
     ],
 )
 def test_failed_post_cutover_revalidation_preserves_finalization(
@@ -3607,9 +3612,6 @@ def test_failed_post_cutover_revalidation_preserves_finalization(
         raise RuntimeError("unavailable certification evidence")
 
     with monkeypatch.context() as patch:
-        if gate == "write_publication_metadata":
-            # Legacy already-live generations may require one-time receipt backfill.
-            patch.setattr(run_ingest, "read_publication_metadata", lambda *a, **k: None)
         patch.setattr(run_ingest, gate, unavailable)
         with pytest.raises(RuntimeError, match="unavailable certification evidence"):
             _run_main(monkeypatch, corpus, progress, *extra)
@@ -3702,8 +3704,9 @@ def test_corrupt_publish_record_refuses_without_rewriting(tmp_path, damage):
     assert path.read_text() == raw
 
 
+@pytest.mark.parametrize("version", [1, 2])
 @pytest.mark.parametrize("fields", ["neither", "plan", "requests", "both"])
-def test_valid_publish_record_preserves_supported_optional_fields(tmp_path, fields):
+def test_valid_publish_record_preserves_supported_optional_fields(tmp_path, fields, version):
     from mainframe_rag.ingest.publish import read_publish_state, write_publish_state
 
     plan = {
@@ -3718,8 +3721,18 @@ def test_valid_publish_record_preserves_supported_optional_fields(tmp_path, fiel
         kwargs["retire_docs"] = flags
     progress = tmp_path / "progress.jsonl"
     write_publish_state(progress, ALIAS, ALIAS + "__genbuild", "build", "corpus", **kwargs)
+    if version == 1:
+        import json
+
+        from mainframe_rag.ingest.publish import publish_state_path
+
+        path = publish_state_path(progress, ALIAS)
+        record = json.loads(path.read_text())
+        record["version"] = 1
+        del record["build_id"], record["previous"]
+        path.write_text(json.dumps(record))
     result = read_publish_state(progress, ALIAS)
-    assert result["version"] == 1
+    assert result["version"] == version
     assert result["staging"] == ALIAS + "__genbuild"
     if "retire_plan" in kwargs:
         assert result["retire_plan"] == plan
@@ -3800,3 +3813,249 @@ def _exercise_corrupt_retirement_retry(tmp_path, monkeypatch, client, alias):
 
 def test_corrupt_retirement_retry_preserves_stored_state(tmp_path, monkeypatch):
     _exercise_corrupt_retirement_retry(tmp_path, monkeypatch, PublishFake(), ALIAS)
+
+
+def _exercise_build_uuid_recovery(tmp_path, monkeypatch, fake, alias):
+    import json
+    import uuid
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+    from tests.helpers_publication_lifecycle import _records
+
+    _publish_env(monkeypatch)
+    monkeypatch.setenv("QDRANT_COLLECTION", alias)
+    monkeypatch.setenv("DENSE_DIM", "256")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    sidecar = publish_state_path(progress, alias)
+    create = fake.create_collection
+    allocated = []
+
+    def require_allocation(*args, **kwargs):
+        state = json.loads(sidecar.read_text())
+        assert state["version"] == 2
+        assert str(uuid.UUID(state["build_id"])) == state["build_id"]
+        allocated.append(state["build_id"])
+        return create(*args, **kwargs)
+
+    monkeypatch.setattr(fake, "create_collection", require_allocation)
+    swap = run_ingest.swap_alias_to
+    def fail_swap(*args, **kwargs):
+        raise RuntimeError("injected swap failure")
+    monkeypatch.setattr(run_ingest, "swap_alias_to", fail_swap)
+    with pytest.raises(RuntimeError, match="injected swap failure"):
+        _run_main(monkeypatch, corpus, progress)
+    state = json.loads(sidecar.read_text())
+    build_id = state["build_id"]
+    physical = state["staging"]
+    assert allocated and set(allocated) == {build_id}
+    def aliases():
+        return {a.alias_name: a.collection_name for a in fake.get_aliases().aliases}
+
+    assert not any(name == alias or name.startswith(alias + "__build_") for name in aliases())
+    frozen = (_records(fake, physical), _records(fake, physical + "__completions"))
+    receipts = [p for p, _ in frozen[1].values() if p.get("record_type") == "publication-metadata"]
+    assert len(receipts) == 1
+    assert receipts[0]["build_id"] == build_id
+    assert receipts[0]["build_schema"] == 1
+    assert receipts[0]["data_collection"] == physical
+    assert receipts[0]["logical_alias"] == alias
+
+    monkeypatch.setattr(run_ingest, "swap_alias_to", swap)
+    with monkeypatch.context() as patch:
+        def refuse_mutation(*args, **kwargs):
+            pytest.fail("sealed retry or ordinary read-only run mutated stored points")
+        for method in ("create_collection", "upsert", "delete", "recover_snapshot"):
+            patch.setattr(fake, method, refuse_mutation)
+        for extra in (("--reingest",), (), ()):
+            assert _run_main(monkeypatch, corpus, progress, *extra) == 0
+            assert not sidecar.exists()
+            assert (_records(fake, physical), _records(fake, physical + "__completions")) == frozen
+    assert {name: target for name, target in aliases().items()
+            if name == alias or name.startswith(alias + "__build_")} == {
+        alias: physical,
+        f"{alias}__build_{build_id}": physical,
+        f"{alias}__build_{build_id}__completions": physical + "__completions",
+    }
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    successor = aliases()[alias]
+    assert successor != physical
+    assert (_records(fake, physical), _records(fake, physical + "__completions")) == frozen
+    successor_receipts = [p for p, _ in _records(fake, successor + "__completions").values()
+                          if p.get("record_type") == "publication-metadata"]
+    assert len(successor_receipts) == 1
+    assert successor_receipts[0]["build_id"] != build_id
+    assert aliases()[f"{alias}__build_{build_id}"] == physical
+
+
+def test_new_writer_refuses_unfinished_old_format_before_mutation(tmp_path, monkeypatch):
+    import json
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    sidecar = publish_state_path(progress, ALIAS)
+    sidecar.write_text(json.dumps({
+        "version": 1, "alias": ALIAS, "staging": "legacy-candidate",
+        "gen_fp": "old-recipe", "corpus_fp": "old-corpus",
+    }))
+    before = sidecar.read_bytes()
+    with pytest.raises(RuntimeError, match="old-format"):
+        _run_main(monkeypatch, corpus, progress)
+    assert sidecar.read_bytes() == before
+    assert not fake.collections and not fake.aliases
+    assert not progress.exists()
+
+
+def test_build_uuid_precedes_writes_and_sealed_retry_is_read_only(tmp_path, monkeypatch):
+    _exercise_build_uuid_recovery(tmp_path, monkeypatch, PublishFake(), ALIAS)
+
+
+@pytest.mark.parametrize("damage", ["version", "uuid", "predecessor", "control", "partial-alias", "redirect-alias", "missing-control"])
+def test_sealed_retry_refuses_inconsistent_build_without_mutation(tmp_path, monkeypatch, damage):
+    import json
+    from copy import deepcopy
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publication_metadata_point_id, publish_state_path
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    sidecar = publish_state_path(progress, ALIAS)
+    fake.fail_swap = "raise"
+    with pytest.raises(RuntimeError, match="injected swap failure"):
+        _run_main(monkeypatch, corpus, progress)
+    state = json.loads(sidecar.read_text())
+    physical = state["staging"]
+    control = physical + "__completions"
+    data_alias = ALIAS + "__build_" + state["build_id"]
+    receipt = next(p for p in fake.collections[control]
+                   if str(p.id) == publication_metadata_point_id(control))
+    if damage == "version":
+        state["version"] = 99
+    elif damage == "uuid":
+        state["build_id"] = "00000000-0000-0000-0000-000000000000"
+    elif damage == "predecessor":
+        state["previous"] = "unobserved-predecessor"
+    elif damage == "control":
+        receipt.payload["build_id"] = "12345678-1234-4234-8234-123456789abc"
+    elif damage == "partial-alias":
+        fake.aliases[data_alias] = physical
+    elif damage == "redirect-alias":
+        fake.aliases[data_alias] = "another-physical"
+    elif damage == "missing-control":
+        fake.aliases[data_alias] = physical
+        fake.collections[control].remove(receipt)
+    sidecar.write_text(json.dumps(state))
+    before = deepcopy(fake.collections), dict(fake.aliases), sidecar.read_bytes(), progress.read_bytes()
+    fake.fail_swap = None
+    with pytest.raises(RuntimeError):
+        _run_main(monkeypatch, corpus, progress, "--reingest")
+    assert (fake.collections, fake.aliases, sidecar.read_bytes(), progress.read_bytes()) == before
+
+
+@pytest.mark.parametrize("target_kind", ["logical", "physical", "build-alias", "retained"])
+def test_in_place_writer_cannot_mutate_full_build(tmp_path, monkeypatch, target_kind):
+    from copy import deepcopy
+
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    physical = fake.aliases[ALIAS]
+    target = ALIAS
+    if target_kind in ("physical", "retained"):
+        target = physical
+    elif target_kind == "build-alias":
+        target = next(name for name, value in fake.aliases.items()
+                      if name != ALIAS and value == physical)
+    if target_kind == "retained":
+        assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "false")
+    monkeypatch.setenv("QDRANT_COLLECTION", target)
+    before = deepcopy(fake.collections), dict(fake.aliases), progress.read_bytes()
+    with pytest.raises(RuntimeError, match="immutable build"):
+        _run_main(monkeypatch, corpus, progress, "--reingest")
+    assert (fake.collections, fake.aliases, progress.read_bytes()) == before
+
+
+def test_completed_legacy_backfill_never_creates_build_identity(tmp_path, monkeypatch):
+    from copy import deepcopy
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import delete_publication_metadata, read_publication_record
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    physical = fake.aliases[ALIAS]
+    controls = physical + "__completions"
+    # Construct the supported old completed format: committed manifest and
+    # completion/content records, ordinary alias, no full build aliases/receipt.
+    fake.aliases = {ALIAS: physical}
+    delete_publication_metadata(fake, controls)
+    before = deepcopy(fake.collections), dict(fake.aliases), progress.read_bytes()
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("legacy receipt unavailable")
+    with monkeypatch.context() as patch:
+        patch.setattr(run_ingest, "write_publication_metadata", unavailable)
+        with pytest.raises(RuntimeError, match="legacy receipt unavailable"):
+            _run_main(monkeypatch, corpus, progress)
+    assert (fake.collections, fake.aliases, progress.read_bytes()) == before
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    record = read_publication_record(fake, controls)
+    assert record is not None
+    assert not {"build_schema", "build_id", "logical_alias", "data_collection"}.intersection(record)
+    assert fake.aliases == {ALIAS: physical}
+    published = deepcopy(fake.collections)
+    for _ in range(2):
+        assert _run_main(monkeypatch, corpus, progress) == 0
+        assert fake.collections == published
+    assert fake.collections[physical] == before[0][physical]
+
+
+def test_new_allocation_never_reuses_orphan_controls():
+    from copy import deepcopy
+
+    from mainframe_rag.ingest.publish import _fresh_staging_candidate, resolve_publish_staging
+
+    fake = PublishFake()
+    settings = Settings(_env_file=None, qdrant_collection=ALIAS, embed_mode="hash")
+    base = staging_name_for(ALIAS, "recipe", "corpus")
+    # Controls alone reserve a physical name, even if its data was lost.
+    fake.collections[base + "__completions"] = []
+    fake.collections[base + "_1__completions"] = []
+    before = deepcopy(fake.collections)
+    with pytest.raises(RuntimeError, match="unrecorded unfinished build"):
+        resolve_publish_staging(fake, settings, gen_fp="recipe", corpus_fp="corpus",
+                                live=None, force_reingest=False, state=None)
+    assert _fresh_staging_candidate(fake, base, None) == base + "_2"
+    assert fake.collections == before

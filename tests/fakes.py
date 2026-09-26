@@ -372,9 +372,12 @@ class ServingManifestQdrant:
 
     async def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
         self._refuse()
-        if self.envelope is None:
+        from mainframe_rag.ingest.representation import manifest_point_id
+
+        if self.envelope is None or manifest_point_id(name) not in {str(i) for i in ids}:
             return []
-        return [SimpleNamespace(payload=self.envelope, vector=None)]
+        return [SimpleNamespace(id=manifest_point_id(name), payload=self.envelope if with_payload else None,
+                                vector=None)]
 
     async def scroll(self, name, *, scroll_filter=None, limit=10, with_payload=None,
                      offset=None):
@@ -423,9 +426,10 @@ class AliasQdrant:
     agent's isawaitable shim, mirroring the other doubles.
     """
 
-    def __init__(self, aliases=None, manifests=None, points=()):
+    def __init__(self, aliases=None, manifests=None, points=(), publications=None):
         self.aliases = dict(aliases or {})
         self.manifests = dict(manifests or {})
+        self.publications = dict(publications or {})
         self.points = set(points)
         self.retrieved: list[str] = []
         self.writes: list[str] = []  # any mutating call records here (read-only proof)
@@ -439,14 +443,18 @@ class AliasQdrant:
         )
 
     def collection_exists(self, name):
-        return name in self.manifests or name in self.points
+        return name in self.manifests or name in self.publications or name in self.points
 
     async def retrieve(self, name, ids, *, with_payload=True, with_vectors=False):
+        from mainframe_rag.ingest.publish import publication_metadata_point_id
+        from mainframe_rag.ingest.representation import manifest_point_id
+
         self.retrieved.append(name)
-        payload = self.manifests.get(name)
-        if payload is None:
-            return []
-        return [SimpleNamespace(payload=payload, vector=None)]
+        stored = {manifest_point_id(name): self.manifests.get(name),
+                  publication_metadata_point_id(name): self.publications.get(name)}
+        return [SimpleNamespace(id=str(point_id), payload=stored[str(point_id)] if with_payload else None,
+                                vector=None)
+                for point_id in ids if stored.get(str(point_id)) is not None]
 
     async def scroll(self, name, *, scroll_filter=None, limit=10, with_payload=None,
                      offset=None):
