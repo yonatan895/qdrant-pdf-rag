@@ -1,4 +1,4 @@
-"""Unit tests for the answer-tier eval helpers (scripts/eval_answers.py):
+"""Unit tests for the answer-tier eval helpers (mainframe_rag.eval.answers):
 verdict logic (judge), deterministic stratified sampling (select_sample),
 and aggregation (summarize).
 
@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 import logging
 
-from scripts.eval_answers import (
+from mainframe_rag.agent.answer import is_abstention, is_refusal
+from mainframe_rag.eval.answers import (
     ZERO_HITS_ANSWER,
-    _AnswerCapture,
+    AnswerCapture,
     answer_completeness,
     is_zero_hits_answer,
     judge,
@@ -21,8 +22,6 @@ from scripts.eval_answers import (
     select_sample,
     summarize,
 )
-
-from mainframe_rag.agent.answer import is_abstention, is_refusal
 
 
 def _entry(**overrides) -> dict:
@@ -42,7 +41,7 @@ def test_refusal_helper_shared_with_agent() -> None:
     """Issues #135/#305: the eval's refusal verdicts and the agent's
     zero-citation rule use the same predicates — one helper, one marker
     list, one shape floor."""
-    import scripts.eval_answers as ea
+    import mainframe_rag.eval.answers as ea
 
     assert ea.is_refusal is is_refusal
     assert ea.is_abstention is is_abstention
@@ -399,7 +398,7 @@ def test_summarize_counts_inferred_rows() -> None:
 def test_summarize_packing_attribution_is_report_only() -> None:
     """Issue #368 signals aggregate without touching verdicts: omitted-unit
     totals and the confirmed-budget share over signaled rows only."""
-    from scripts.eval_answers import summarize
+    from mainframe_rag.eval.answers import summarize
 
     results = [
         {"verdict": "pass", "expected_behavior": "answer", "query_class": "syntax",
@@ -423,7 +422,7 @@ def _answer_log_record(**payload) -> logging.LogRecord:
 
 
 def test_answer_capture_keeps_answer_lines_only() -> None:
-    cap = _AnswerCapture()
+    cap = AnswerCapture()
     cap.emit(_answer_log_record(query_complexity="complex", finish_reason="length",
                                 prompt_tokens=2500, completion_tokens=1500,
                                 reasoning_tokens=1100, total_tokens=4000,
@@ -542,7 +541,7 @@ def test_summarize_by_complexity_counts_pass() -> None:
 
 # ------------------------------------------------- issue #299 WHY taxonomy
 def test_failure_bucket_redacts_quoted_substrings() -> None:
-    from scripts.eval_answers import failure_bucket
+    from mainframe_rag.eval.answers import failure_bucket
     assert failure_bucket("trap answered: 3 validated citation(s)") == "trap answered"
     assert failure_bucket("trap answered: 5 validated citation(s)") == "trap answered"
     assert failure_bucket("missing required substring: 'LFAREA 1M'") == "missing required substring"
@@ -603,7 +602,7 @@ def test_summarize_by_failure_histogram() -> None:
 # --------------------------------------------- issue #299 citation WHY modes
 def test_why_mode_precedence_and_branches() -> None:
     """Every mode fires on its claimed shape; most-specific wins."""
-    from scripts.eval_answers import why_mode
+    from mainframe_rag.eval.answers import why_mode
 
     assert why_mode({"verdict": "error"}) == "error"
     assert why_mode({"verdict": "pass", "path": "zero_hits"}) == "zero_hits"
@@ -634,7 +633,7 @@ def test_why_mode_precedence_and_branches() -> None:
 
 
 def test_inferred_index_off_gold_maps_indices_to_pool_order() -> None:
-    from scripts.eval_answers import inferred_index_off_gold
+    from mainframe_rag.eval.answers import inferred_index_off_gold
 
     gold_pool = {"verdict": "pass", "inferred_indices": [2],
                  "expected_doc_ids": ["SA23-1380-09"],
@@ -689,7 +688,7 @@ def test_summarize_by_why_and_off_gold() -> None:
 
 # ------------------------------------------------------- verification states #365
 def test_judge_expected_verification_state_opt_in() -> None:
-    from scripts.eval_answers import judge
+    from mainframe_rag.eval.answers import judge
 
     grounded = (
         "LFAREA reserves frames above the bar.\n"
@@ -715,7 +714,7 @@ def test_judge_expected_verification_state_opt_in() -> None:
 
 
 def test_summarize_splits_false_refusal_and_unsafe_rates() -> None:
-    from scripts.eval_answers import summarize
+    from mainframe_rag.eval.answers import summarize
 
     results = [
         {"verdict": "pass", "expected_behavior": "answer", "query_class": "message_id",
@@ -789,3 +788,40 @@ def test_security_refusal_requires_the_complete_response():
     ):
         assert not is_refusal(body)
         assert not is_abstention(body)
+
+
+def test_answer_delegate_and_l2_share_canonical_measurements():
+    """Compatibility and L2 cannot create separate capture/scoring identities."""
+    from scripts import eval_answers, harness_l2
+
+    from mainframe_rag.eval import answers
+
+    for name in eval_answers.__all__:
+        canonical = "AnswerCapture" if name == "_AnswerCapture" else name
+        assert getattr(eval_answers, name) is getattr(answers, canonical)
+    for name in ("AnswerCapture", "run_query", "select_sample", "answer_completeness",
+                 "failure_bucket", "inferred_index_off_gold", "why_mode"):
+        assert getattr(harness_l2, name) is getattr(answers, name)
+
+
+def test_answer_entry_points_preserve_help_and_holdout_refusal(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, VENUE="dev", PYTHONPATH=str(root / "src"))
+    commands = ([sys.executable, str(root / "scripts/eval_answers.py")],
+                [sys.executable, "-m", "mainframe_rag.eval.answers"])
+    for command in commands:
+        help_result = subprocess.run([*command, "--help"], cwd=tmp_path, env=env,
+                                     capture_output=True, text=True, check=False)
+        assert help_result.returncode == 0, help_result.stderr
+        for flag in ("--golden", "--max-queries", "--all", "--out", "--summary"):
+            assert flag in help_result.stdout
+        # Refuse before reading even a missing protected asset or starting clients.
+        refused = subprocess.run([*command, "--golden", "holdout.jsonl"], cwd=tmp_path,
+                                 env=env, capture_output=True, text=True, check=False)
+        assert refused.returncode == 2
+        assert "requires VENUE=rc" in refused.stderr
