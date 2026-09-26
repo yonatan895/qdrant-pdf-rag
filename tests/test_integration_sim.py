@@ -1425,3 +1425,123 @@ def test_corrupt_retirement_record_refuses_before_real_deletion(qdrant_url, tmp_
     finally:
         client.close()
         _drop_publish_fixture(qdrant_url)
+
+
+@pytest.mark.parametrize("operation", ["change", "repair", "retire"])
+def test_inflight_and_warm_http_readers_keep_verified_generation(
+    qdrant_url, mock_url, tmp_path, monkeypatch, operation
+):
+    """An actual delayed SDK query remains bound across publication and rollback."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from qdrant_client import QdrantClient, models
+
+    from mainframe_rag.agent import app as app_mod
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.qdrant_io import swap_alias_to
+    from mainframe_rag.ingest.representation import manifest_point_id
+    from tests.helpers_publication_lifecycle import REPLACEMENT, TEXTS, _records, _write_source
+
+    _drop_publish_fixture(qdrant_url)
+    monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
+    monkeypatch.setenv("ALLOW_HASH_MODE", "true")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+    monkeypatch.setenv("DENSE_DIM", "256")
+    monkeypatch.setenv("REPRESENTATION_CACHE_TTL_S", "300")
+    corpus = tmp_path / "reader-corpus"
+    corpus.mkdir()
+    for name, text in TEXTS.items():
+        _write_source(corpus, name, text)
+    progress = tmp_path / "reader-progress.jsonl"
+    _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress)
+    writer = QdrantClient(url=qdrant_url, timeout=30)
+    entered, release = threading.Event(), threading.Event()
+    seen = []
+
+    def target():
+        return next(
+            a.collection_name for a in writer.get_aliases().aliases if a.alias_name == PUBLISH_ALIAS
+        )
+
+    def texts(response):
+        assert response.status_code == 200, response.text
+        hits = response.json()["hits"]
+        result = {hit["doc_id"]: hit["text"] for hit in hits}
+        assert len(hits) == len(result), "one literal chunk per document, no duplicate revisions"
+        return result
+
+    try:
+        old = target()
+        retained = (_records(writer, old), _records(writer, old + "__completions"))
+        with _agent(monkeypatch, qdrant_url, mock_url, PUBLISH_ALIAS) as http:
+            query = {"query": "reactor cooling channel", "limit": 10}
+            assert texts(http.post("/v1/search", json=query)) == TEXTS
+            original = app_mod.qdrant.query_batch_points
+
+            async def delayed(collection_name, *args, **kwargs):
+                seen.append(collection_name)
+                if not entered.is_set():
+                    entered.set()
+                    assert await asyncio.to_thread(release.wait, 30), "publisher never released reader"
+                return await original(collection_name, *args, **kwargs)
+
+            monkeypatch.setattr(app_mod.qdrant, "query_batch_points", delayed)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(http.post, "/v1/search", json=query)
+                try:
+                    assert entered.wait(15), "search never reached its real storage query"
+                    assert seen == [old]
+                    expected = dict(TEXTS)
+                    extra = ()
+                    if operation == "change":
+                        (corpus / "alpha.pdf").unlink()
+                        _write_source(corpus, "alpha", REPLACEMENT)
+                        expected["alpha"] = REPLACEMENT
+                    elif operation == "retire":
+                        (corpus / "beta.pdf").unlink()
+                        del expected["beta"]
+                        extra = ("--retire-doc", "beta")
+                    else:
+                        extra = ("--reingest",)
+                    _ingest(monkeypatch, qdrant_url, PUBLISH_ALIAS, corpus, progress, extra=extra)
+                    new = target()
+                    assert new != old
+                finally:
+                    release.set()
+                assert texts(future.result(timeout=30)) == TEXTS
+
+            assert texts(http.post("/v1/search", json=query)) == TEXTS
+            assert seen[-1] == old, "warm cache must retain its validated binding"
+            # Fresh admission must reject successor control loss, without querying it.
+            controls = new + "__completions"
+            manifest = writer.retrieve(
+                controls, [manifest_point_id(controls)], with_payload=True, with_vectors=True
+            )[0]
+            writer.delete(
+                controls, points_selector=models.PointIdsList(points=[manifest.id]), wait=True
+            )
+            assert http.get("/healthz").status_code == 503
+            queries_before_refusal = len(seen)
+            assert http.post("/v1/search", json=query).status_code == 503
+            assert len(seen) == queries_before_refusal
+            writer.upsert(
+                controls,
+                points=[models.PointStruct(id=manifest.id, payload=manifest.payload, vector=manifest.vector)],
+                wait=True,
+            )
+            assert http.get("/healthz").status_code == 200
+            assert texts(http.post("/v1/search", json=query)) == expected
+            assert seen[-1] == new
+
+            settings = Settings(_env_file=None, qdrant_collection=PUBLISH_ALIAS)
+            swap_alias_to(writer, settings, old, new)
+            assert http.get("/healthz").status_code == 200
+            assert texts(http.post("/v1/search", json=query)) == TEXTS
+            assert seen[-1] == old
+            assert PUBLISH_ALIAS not in seen, "storage must receive physical names, never the alias"
+            assert (_records(writer, old), _records(writer, old + "__completions")) == retained
+    finally:
+        release.set()
+        writer.close()
+        _drop_publish_fixture(qdrant_url)

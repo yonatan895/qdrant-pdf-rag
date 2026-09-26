@@ -298,6 +298,16 @@ runs after each successful operation, and explicit retained rollback/roll-forwar
 followed by an ordinary run. The model changes expected published membership
 only at cutover; it does not call product fingerprints or coverage helpers.
 
+The real-server warm-reader test in `test_integration_sim.py` pauses the actual
+async Qdrant query after HTTP generation admission. While it waits, ordinary
+source replacement, forced repair or explicit document retirement publishes a
+successor. The released request and the warm cache must return the old literal
+text; fresh readiness revalidation must refuse missing successor controls,
+recover after exact control restoration and read the successor. Reader revalidation after
+rollback returns the retained text without restarting the agent. Actual
+payload/vector/control equality and recorded physical query targets complement
+the HTTP assertions; the alias itself must never reach the query method.
+
 This is bounded current-format, single-writer lifecycle evidence. Pinned
 physical reads establish retained content, not shared reader leases or global
 drain. These traces do not qualify automatic GC, unknown legacy formats,
