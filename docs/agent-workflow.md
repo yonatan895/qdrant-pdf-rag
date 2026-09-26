@@ -404,6 +404,27 @@ propagation and citation labeling, not semantic model security or quality.
 evaluation corpus are supplied; mock probes cannot satisfy it. A review comment
 never supplies execution evidence or waives a lane.
 
+Evaluation code under `src/mainframe_rag/eval/` is tooling, including code moved
+from the evaluation scripts under #508. Package changes and the retained
+`scripts/eval_retrieval.py`, `scripts/harness_l1.py` and `scripts/venue.py`
+entry points select context, lint/types, unit/hazard evidence, simulation and
+the synthetic L1 gate. Package Markdown alone does not select service lanes.
+The existing native CI producers dispatch these obligations from the selector;
+no new evidence format or human attestation is involved. Mixed diffs retain the
+union of obligations: production retrieval/embedding changes still select real
+semantic `eval_retrieval`, deployment changes retain packaging, and unknown
+source paths still fail closed to the full profile. Review actual behavior
+against the verification minimums; a tooling location never waives a semantic
+change's evidence requirements.
+
+This classification takes effect only after its policy is adopted into the
+approved base and dependent PRs are refreshed. An exact maintainer decision
+can authorize candidate selector bytes as execution provenance, as described
+[above](#verifier-update-decision); it cannot make the publisher apply the
+candidate's proposed lane-selection rules before adoption.
+The separate missing real-model producer remains unresolved for changes that
+actually select `eval_retrieval`.
+
 `acceptance.yml` schedules on PR metadata, native workflow activity and base
 pushes, with periodic reconciliation for missed signals. Review/comment activity
 is not an input to technical verification. Both publisher paths check out `main`
