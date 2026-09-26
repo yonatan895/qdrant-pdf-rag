@@ -517,10 +517,12 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("qa:check", extra_env=self.recorder_env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = [c["argv"] for c in self.calls()]
+        # Issue #468: the stdlib-only controller must stay inside the
+        # lint/typecheck gate, so the pinned scope includes it explicitly.
         self.assertEqual(argv, [
             ["scripts/agent_doctor.py", "--python", ".venv/bin/python"],
-            ["-m", "ruff", "check", "src", "tests"],
-            ["-m", "mypy", "src"],
+            ["-m", "ruff", "check", "src", "tests", "scripts/ai_worker.py"],
+            ["-m", "mypy", "src", "scripts/ai_worker.py"],
             ["scripts/agent_doctor.py", "--python", ".venv/bin/python"],
             ["-m", "pytest", "tests", "-v"],
         ])
