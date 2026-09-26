@@ -1697,3 +1697,17 @@ def test_publisher_process_death_resumes_same_build(
     finally:
         client.close()
         _drop_publish_fixture(qdrant_url)
+
+
+def test_full_build_identity_survives_real_sealed_retry(qdrant_url, tmp_path, monkeypatch):
+    from qdrant_client import QdrantClient
+
+    from tests.test_ingest_publish import _exercise_build_uuid_recovery
+
+    _drop_publish_fixture(qdrant_url)
+    client = QdrantClient(url=qdrant_url, timeout=30)
+    try:
+        _exercise_build_uuid_recovery(tmp_path, monkeypatch, client, PUBLISH_ALIAS)
+    finally:
+        client.close()
+        _drop_publish_fixture(qdrant_url)

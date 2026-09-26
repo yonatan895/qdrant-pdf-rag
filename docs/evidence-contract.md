@@ -113,6 +113,17 @@ Never rebind an existing build alias to a new build or use a current alias to
 repair an old reference. This extends the existing alias publication operation;
 it adds no second database or general catalogue service.
 
+The L1 writer introduces publication sidecar version 2 and build binding schema 1
+independently of E1's future per-chunk evidence envelope. The full UUID is recorded
+under the target writer lock before collection writes, then stored with logical
+corpus, physical data/control pairing and input fingerprints in the verified
+publication receipt. Existing completed generations receive no retroactive build
+identity. This binding does not by itself enable exact references or exact reads.
+The maintainer's rollout decision is to refuse unfinished old-format builds:
+finish them with the matching old release or explicitly abandon them before a new
+verified build. An older executable ignoring these controls is not a qualified
+reader/writer for newly published builds.
+
 The retained control alias is also the retirement lookup path. A tombstone is
 not evidence content and cannot authorize a caller by itself. Its schema records
 the full build UUID, retired state and per-chunk provenance required by the current
@@ -221,6 +232,7 @@ read_evidence(caller=trusted_context, reference=opaque_ref, budget=caller_budget
 |---|---|---|---|
 | Current representation/completion formats, no full build/evidence record | Preserve existing supported search/answer behavior. | Cannot mint v1 refs; explicit capability unavailable. | Explicit verified new-generation publication; never invent missing provenance in place. |
 | v1 build/evidence controls and `e1.` ref | Existing routes remain additive-compatible only after their schema checks pass. | Exact read only after full controls, digest and current-access checks. | One writer emits v1 after reviewed schema introduction; chunk UUID5 and vocabulary remain unchanged. |
+| Unfinished v1 publication sidecar from the old writer | Completed legacy generations remain readable; unfinished candidates are not adopted. | No reference capability is inferred. | The new writer refuses without mutation. Finish with the matching old release, or explicitly abandon the candidate and allocate a newly verified build. |
 | Unknown mandatory control/ref version | No interpretation by field resemblance. | Refuse before serving. | Explicit migration/qualified executable pair, never silently downgrade controls. |
 | Retained previous release/build | Serve only its tested executable/config/schema combination. | Old references resolve only if that reader supports their version and retained bytes. | Restore matching artifacts/config together; record the actual supported previous pair at release qualification. |
 

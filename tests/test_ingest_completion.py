@@ -104,6 +104,11 @@ class FailingFakeQdrant:
         self.fail_delete: BaseException | None = None
 
     # -- collection surface -------------------------------------------
+    def get_aliases(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(aliases=[])
+
     def collection_exists(self, collection_name):
         return True
 

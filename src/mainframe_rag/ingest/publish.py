@@ -42,6 +42,12 @@ from pathlib import Path
 from typing import Any
 
 from mainframe_rag.config import Settings
+from mainframe_rag.ingest.build import (
+    BUILD_SCHEMA,
+    BuildBinding,
+    canonical_build_id,
+    decode_build_binding,
+)
 from mainframe_rag.ingest.completion import (
     _doc_id_filter,
     _verify_batch,
@@ -105,7 +111,7 @@ def staging_name_for(collection: str, gen_fp: str, corpus_fp: str) -> str:
     return f"{collection}__gen{gen_fp}{corpus_fp}"
 
 
-PUBLISH_STATE_VERSION = 1
+PUBLISH_STATE_VERSION = 2
 
 # Cap on suffixed staging candidates when the derived name collides with a
 # retained published generation (rollback-by-republish): collisions are rare
@@ -131,6 +137,9 @@ def write_publish_state(
     corpus_fp: str,
     retire_plan: dict[str, dict[str, set[str] | bool]] | None = None,
     retire_docs: tuple[str, ...] | None = None,
+    *,
+    build_id: str | None = None,
+    previous: str | None = None,
 ) -> None:
     """Record the in-flight build atomically (tmp + rename: a crash never
     leaves a torn sidecar). Overwrites any superseded state with a log at
@@ -140,6 +149,8 @@ def write_publish_state(
     tmp = path.with_name(path.name + ".tmp")
     payload: dict = {
         "version": PUBLISH_STATE_VERSION,
+        "build_id": canonical_build_id(build_id) if build_id is not None else str(uuid.uuid4()),
+        "previous": previous,
         "alias": alias,
         "staging": staging,
         "gen_fp": gen_fp,
@@ -244,7 +255,7 @@ def read_publish_state(progress: Path, alias: str) -> dict | None:
     if (
         not isinstance(state, dict)
         or type(state.get("version")) is not int
-        or state.get("version") != PUBLISH_STATE_VERSION
+        or state.get("version") not in (1, PUBLISH_STATE_VERSION)
         or state.get("alias") != alias
         or not isinstance(state.get("staging"), str)
         or not state["staging"]
@@ -257,6 +268,14 @@ def read_publish_state(progress: Path, alias: str) -> dict | None:
             f"unrecognized publish state at {path}: refusing to guess the "
             "recorded build — remove it explicitly to abandon it, then rerun."
         )
+    if state["version"] == PUBLISH_STATE_VERSION:
+        try:
+            canonical_build_id(state.get("build_id"))
+            if "previous" not in state or (state["previous"] is not None and
+                                           (not isinstance(state["previous"], str) or not state["previous"])):
+                raise ValueError("invalid previous target")
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("invalid build identity in publish state; refusing to infer it") from exc
     try:
         _validate_recorded_retirements(state)
     except (ValueError, TypeError) as exc:
@@ -338,6 +357,8 @@ def write_publication_metadata(
     *,
     gen_fp: str,
     corpus_fp: str,
+    build_id: str | None = None,
+    logical_alias: str | None = None,
 ) -> None:
     """Record publication fingerprints on cutover (issue #391 Q418-R1).
     Allows subsequent ordinary runs to recognize successful repair generations
@@ -349,6 +370,12 @@ def write_publication_metadata(
     except RuntimeError:
         dim = None
     dummy_dim = dim or 1
+    build_fields = {}
+    if build_id is not None:
+        if not logical_alias:
+            raise ValueError("new builds require their logical alias")
+        build_fields = {"build_schema": BUILD_SCHEMA, "build_id": canonical_build_id(build_id),
+                        "logical_alias": logical_alias, "data_collection": settings.qdrant_collection}
     client.upsert(
         completions_collection,
         points=[
@@ -363,6 +390,7 @@ def write_publication_metadata(
                     "target_collection": completions_collection,
                     "gen_fp": gen_fp,
                     "corpus_fp": corpus_fp,
+                    **build_fields,
                 },
             )
         ],
@@ -370,22 +398,34 @@ def write_publication_metadata(
     )
 
 
-def read_publication_metadata(
-    client: QdrantPoints,
-    completions_collection: str,
-) -> tuple[str, str] | None:
-    """Read stored (gen_fp, corpus_fp) for a published generation."""
+def read_publication_record(client: QdrantPoints, completions_collection: str) -> dict | None:
     if not client.collection_exists(completions_collection):
         return None
-    point_id = publication_metadata_point_id(completions_collection)
-    points = client.retrieve(completions_collection, ids=[point_id], with_payload=True)
+    points = client.retrieve(completions_collection,
+                             ids=[publication_metadata_point_id(completions_collection)], with_payload=True)
     if not points:
         return None
     payload = points[0].payload or {}
     if payload.get("record_type") != _PUBLICATION_METADATA_PREFIX:
+        raise RuntimeError("invalid publication control record")
+    try:
+        decode_build_binding(payload, completions_collection)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("invalid or unsupported build control record") from exc
+    return payload
+
+
+def read_build_binding(client: QdrantPoints, completions_collection: str) -> BuildBinding | None:
+    payload = read_publication_record(client, completions_collection)
+    return decode_build_binding(payload, completions_collection) if payload is not None else None
+
+
+def read_publication_metadata(client: QdrantPoints, completions_collection: str) -> tuple[str, str] | None:
+    """Read fingerprints; a present unknown mandatory build schema fails closed."""
+    payload = read_publication_record(client, completions_collection)
+    if payload is None:
         return None
-    gen_fp = payload.get("gen_fp")
-    corpus_fp = payload.get("corpus_fp")
+    gen_fp, corpus_fp = payload.get("gen_fp"), payload.get("corpus_fp")
     if isinstance(gen_fp, str) and isinstance(corpus_fp, str):
         return gen_fp, corpus_fp
     return None
@@ -445,7 +485,9 @@ def _fresh_staging_candidate(
     but allocation still terminates fail-closed."""
     for attempt in range(1, _MAX_STAGING_SUFFIX_ATTEMPTS + 1):
         candidate = f"{base}_{attempt}"
-        if candidate != live and candidate not in skip and not client.collection_exists(candidate):
+        if (candidate != live and candidate not in skip
+                and not client.collection_exists(candidate)
+                and not client.collection_exists(completion_collection_for(candidate))):
             return candidate
     raise RuntimeError(
         f"derived staging {base!r} is a retained published generation and "
@@ -538,7 +580,7 @@ def resolve_publish_staging(
             if not force_reingest and not has_retirements:
                 return live, False
             return _fresh_staging_candidate(client, base, live), False
-    if client.collection_exists(base):
+    if client.collection_exists(base) or client.collection_exists(completion_collection_for(base)):
         staging_settings = settings.model_copy(update={"qdrant_collection": base})
         from mainframe_rag.ingest.representation import STATE_COMMITTED, read_manifest_record
 

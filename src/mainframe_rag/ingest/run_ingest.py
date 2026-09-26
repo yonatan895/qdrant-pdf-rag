@@ -23,6 +23,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     import pymupdf
 
 from mainframe_rag.config import Settings, load_settings
+from mainframe_rag.ingest.build import BuildBinding, build_phase, require_published_binding
 from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import Chunk, make_chunks
 from mainframe_rag.ingest.completion import (
@@ -78,14 +80,17 @@ from mainframe_rag.ingest.inventory import (
     should_skip,
 )
 from mainframe_rag.ingest.publish import (
+    PUBLISH_STATE_VERSION,
     PublishTarget,
     apply_approved_removals,
     clear_publish_state,
     commit_retired_inventory,
     corpus_fingerprint,
+    delete_publication_metadata,
     ensure_staging,
     generation_fingerprint,
     plan_approved_removals,
+    read_build_binding,
     read_publication_metadata,
     read_publish_state,
     resolve_publish_staging,
@@ -711,8 +716,17 @@ def _run_impl(
     if not dry_run:
         # Single-writer guard (issue #359 req 6): a second concurrent run
         # sharing the progress directory fails closed before any stage runs.
-        run_lock = acquire_run_lock(progress)
         client = _get_qdrant(settings)
+        if _publish_target is None:
+            aliases = {a.alias_name: a.collection_name for a in client.get_aliases().aliases}
+            physical = aliases.get(settings.qdrant_collection, settings.qdrant_collection)
+            existing_build = read_build_binding(client, physical + "__completions")
+            if existing_build is not None or any(
+                "__build_" in name and target in (physical, physical + "__completions")
+                for name, target in aliases.items()
+            ):
+                raise RuntimeError("in-place ingest cannot modify an immutable build; use alias publication")
+        run_lock = acquire_run_lock(progress)
         ensure_collection(client, settings)
         ensure_completion_collection(client, settings)
         # Extraction-rules gate (issue #124): a non-empty collection whose
@@ -1397,6 +1411,23 @@ def _run_publish_locked(
     gen_fp = generation_fingerprint(settings, rules_v, labels)
     corp_fp = corpus_fingerprint(prewalked)
     state = read_publish_state(progress, alias)
+    if state is not None and state["version"] != PUBLISH_STATE_VERSION:
+        raise RuntimeError(
+            "unfinished old-format build: finish with the matching old release or explicitly "
+            "abandon the recorded candidate before starting a new verified build"
+        )
+    observed_aliases = {a.alias_name: a.collection_name for a in client.get_aliases().aliases}
+    live_binding = None
+    if live is not None:
+        live_binding = read_build_binding(client, live + "__completions")
+        try:
+            require_published_binding(live_binding, alias, live, observed_aliases)
+        except ValueError as exc:
+            raise RuntimeError("live build controls or immutable aliases are inconsistent") from exc
+        if state is not None and state["staging"] == live:
+            expected = BuildBinding(state["build_id"], alias, live, gen_fp, corp_fp)
+            if live_binding != expected:
+                raise RuntimeError("published build does not match its recorded identity; refusing finalization")
 
     prior_inventory = load_inventory(progress)
     # Check whether an in-flight publish state binds the authorized removal plan (S424-F2):
@@ -1542,7 +1573,9 @@ def _run_publish_locked(
                 f"live generation {live!r} fails verification for {len(problems)} "
                 f"path(s) (e.g. {problems[0]!r}) — operator intervention required."
             )
-        if read_publication_metadata(client, completion_collection_name(staging_settings)) is None:
+        if live_binding is None and read_publication_metadata(
+            client, completion_collection_name(staging_settings)
+        ) is None:
             write_publication_metadata(
                 client,
                 completion_collection_name(staging_settings),
@@ -1574,6 +1607,26 @@ def _run_publish_locked(
     # reaching here always matches these inputs (resolve fails a
     # foreign record closed), so this write only creates or re-affirms
     # the record.
+    build_id = state["build_id"] if state is not None else str(uuid.uuid4())
+    candidate_binding = read_build_binding(client, completion_collection_name(staging_settings))
+    sealed = candidate_binding is not None
+    if not sealed and any(target in (staging, staging + "__completions")
+                          for target in observed_aliases.values()):
+        raise RuntimeError("candidate has aliases but lacks its build control; refusing mutation")
+    if sealed:
+        expected = BuildBinding(build_id, alias, staging, gen_fp, corp_fp)
+        if candidate_binding != expected:
+            raise RuntimeError("sealed candidate does not match its recorded build identity")
+        try:
+            if build_phase(candidate_binding, observed_aliases) != "sealed":
+                raise ValueError("candidate was already published")
+        except ValueError as exc:
+            raise RuntimeError("candidate immutable aliases are inconsistent; refusing mutation") from exc
+    # A sealed legacy migration may have cleared the old physical name before
+    # its atomic alias operation. The verified pair can finish without rebuild.
+    if (state is not None and state["previous"] != live
+            and not (sealed and state["previous"] == alias and live is None)):
+        raise RuntimeError("live target no longer matches the recorded build predecessor")
     write_publish_state(
         progress,
         alias,
@@ -1582,60 +1635,64 @@ def _run_publish_locked(
         corp_fp,
         retire_plan=retire_plan,
         retire_docs=tuple(retire_docs or ()),
+        build_id=build_id,
+        previous=state["previous"] if state is not None else live,
     )
     if resumed:
         log.info(json.dumps({"action": "publish_resume", "alias": alias, "staging": staging}))
-    mode = ensure_staging(client, settings, staging_settings, live)
-    log.info(
-        json.dumps(
-            {
-                "action": "publish_stage",
-                "alias": settings.qdrant_collection,
-                "staging": staging,
-                "live": live,
-                "mode": mode,
-            }
-        )
-    )
-    target = PublishTarget(
-        alias=settings.qdrant_collection, staging=staging, live=live, legacy=legacy
-    )
-    rc = _run_impl(
-        src,
-        progress,
-        workers,
-        None,
-        False,
-        staging_settings,
-        tracer,
-        root,
-        vendor=vendor,
-        product=product,
-        version=version,
-        force_reingest=force_reingest,
-        prewalked=prewalked,
-        _publish_target=target,
-        _pending_removals=retired,
-        _retire_plan=retire_plan,
-        _resume_verified_build=resumed and mode == "reused",
-    )
-    if rc != 0:
-        return rc
-    if retire_plan:
-        # Explicit removals only (issue #405 R1): a missing file never
-        # deletes. Applied after the build, before verification, so the
-        # read-only audit certifies the exact candidate being published.
-        removed = apply_approved_removals(client, staging_settings, retire_plan)
+    mode = "sealed"
+    if not sealed:
+        mode = ensure_staging(client, settings, staging_settings, live)
         log.info(
             json.dumps(
                 {
-                    "action": "publish_retire",
-                    "alias": alias,
+                    "action": "publish_stage",
+                    "alias": settings.qdrant_collection,
                     "staging": staging,
-                    "removed": {doc: count for doc, count in sorted(removed.items())},
+                    "live": live,
+                    "mode": mode,
                 }
             )
         )
+        target = PublishTarget(
+            alias=settings.qdrant_collection, staging=staging, live=live, legacy=legacy
+        )
+        rc = _run_impl(
+            src,
+            progress,
+            workers,
+            None,
+            False,
+            staging_settings,
+            tracer,
+            root,
+            vendor=vendor,
+            product=product,
+            version=version,
+            force_reingest=force_reingest,
+            prewalked=prewalked,
+            _publish_target=target,
+            _pending_removals=retired,
+            _retire_plan=retire_plan,
+            _resume_verified_build=resumed and mode == "reused",
+        )
+        if rc != 0:
+            return rc
+        if retire_plan:
+            # Explicit removals only (issue #405 R1): a missing file never
+            # deletes. Applied after the build, before verification, so the
+            # read-only audit certifies the exact candidate being published.
+            removed = apply_approved_removals(client, staging_settings, retire_plan)
+            log.info(
+                json.dumps(
+                    {
+                        "action": "publish_retire",
+                        "alias": alias,
+                        "staging": staging,
+                        "removed": {doc: count for doc, count in sorted(removed.items())},
+                    }
+                )
+            )
     dist_problems = verify_staging_distribution(client, staging_settings)
     if dist_problems:
         raise RuntimeError(
@@ -1683,6 +1740,15 @@ def _run_publish_locked(
             "another publisher cut over first — alias untouched, retry against "
             "the current live generation."
         )
+    if not sealed:
+        # Remove only staging copies of the ancestor's publication receipt.
+        # The new receipt seals this exact pair; retries verify it read-only.
+        delete_publication_metadata(client, completion_collection_name(staging_settings),
+                                    ancestor_completions=live + "__completions" if live else None)
+        write_publication_metadata(
+            client, completion_collection_name(staging_settings), staging_settings,
+            gen_fp=gen_fp, corpus_fp=corp_fp, build_id=build_id, logical_alias=alias,
+        )
     previous = live
     migrated = None
     if legacy and live is not None:
@@ -1693,14 +1759,7 @@ def _run_publish_locked(
         client.delete_collection(live)
         migrated = live
         previous = None
-    write_publication_metadata(
-        client,
-        completion_collection_name(staging_settings),
-        staging_settings,
-        gen_fp=gen_fp,
-        corpus_fp=corp_fp,
-    )
-    summary = swap_alias_to(client, settings, staging, previous)
+    summary = swap_alias_to(client, settings, staging, previous, build_id=build_id)
     summary["docs"] = str(len(prewalked))
     summary["staging_mode"] = mode
     if migrated is not None:

@@ -346,7 +346,8 @@ def clone_collection(
 
 
 def swap_alias_to(
-    client: QdrantPoints, settings: Settings, new_physical: str, old_physical: str | None
+    client: QdrantPoints, settings: Settings, new_physical: str, old_physical: str | None,
+    *, build_id: str | None = None,
 ) -> dict[str, str | None]:
     """Point the `<collection>` alias at a verified generation (issue #359
     req 4/5). The delete+create pair rides one atomic alias call, so readers
@@ -357,6 +358,12 @@ def swap_alias_to(
     deleted by the caller first (a delete-alias op for a non-existent alias
     would fail the batch). Returns the publication summary for the run log."""
     alias = settings.qdrant_collection
+    from mainframe_rag.ingest.build import build_aliases
+
+    observed = {item.alias_name: item.collection_name for item in client.get_aliases().aliases}
+    immutable = build_aliases(alias, build_id) if build_id is not None else ()
+    if any(name in observed for name in immutable):
+        raise RuntimeError("immutable build alias already exists; refusing to rebind it")
     safety_snapshot: str | None = None
     if old_physical is not None:
         safety_snapshot = snapshot_collection(client, old_physical)
@@ -371,6 +378,11 @@ def swap_alias_to(
             create_alias=models.CreateAlias(collection_name=new_physical, alias_name=alias)
         )
     )
+    if immutable:
+        for name, target in zip(immutable, (new_physical, new_physical + "__completions"), strict=True):
+            ops.append(models.CreateAliasOperation(
+                create_alias=models.CreateAlias(collection_name=target, alias_name=name)
+            ))
     if not client.update_collection_aliases(ops):
         raise RuntimeError(
             f"alias swap {alias!r} -> {new_physical!r} rejected — previous generation still live."

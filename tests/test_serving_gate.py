@@ -59,7 +59,7 @@ async def test_resolve_binds_physical_and_reads_its_own_metadata():
     )
     got, outcome, details = await resolve_serving_generation(qd, s, RULES)
     assert (got, outcome, details) == (physical, "compatible", [])
-    assert qd.retrieved == [f"{physical}__completions"], "alias-derived metadata was read"
+    assert qd.retrieved == [f"{physical}__completions"] * 2, "alias-derived metadata was read"
     assert qd.writes == [], "resolution and validation must stay read-only"
 
 
@@ -170,3 +170,47 @@ async def test_gate_zero_ttl_validates_every_request_and_caches_refusals(monkeyp
     await gate.generation(object(), s, RULES)
     assert len(calls) == 2
     assert generation.outcome == "pending" and not generation.servable
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("damage", [None, "version", "uuid", "pair", "logical", "missing-record",
+                                    "missing-data-alias", "missing-control-alias", "redirect-control"])
+@pytest.mark.parametrize("direct", [False, True])
+async def test_serving_requires_full_published_build_pair(damage, direct):
+    s = _settings()
+    alias = s.qdrant_collection
+    physical = alias + "__gen_build_test"
+    control = physical + "__completions"
+    build_id = "12345678-1234-4234-8234-123456789abc"
+    data_alias = alias + "__build_" + build_id
+    control_alias = data_alias + "__completions"
+    payload = {"record_type": "publication-metadata", "target_collection": control,
+               "build_schema": 1, "build_id": build_id, "logical_alias": alias,
+               "data_collection": physical, "gen_fp": "recipe", "corpus_fp": "corpus"}
+    qd = AliasQdrant(
+        aliases={alias: physical, data_alias: physical, control_alias: control},
+        manifests={control: manifest_envelope(s, RULES, control)},
+        publications={control: payload}, points={physical},
+    )
+    if damage == "version":
+        payload["build_schema"] = 99
+    elif damage == "uuid":
+        payload["build_id"] = build_id.upper()
+    elif damage == "pair":
+        payload["data_collection"] = "another-generation"
+    elif damage == "logical":
+        payload["logical_alias"] = "another-corpus"
+    elif damage == "missing-record":
+        qd.publications.clear()
+    elif damage == "missing-data-alias":
+        del qd.aliases[data_alias]
+    elif damage == "missing-control-alias":
+        del qd.aliases[control_alias]
+    elif damage == "redirect-control":
+        qd.aliases[control_alias] = "wrong__completions"
+    configured = s.model_copy(update={"qdrant_collection": physical}) if direct else s
+    got, outcome, details = await resolve_serving_generation(qd, configured, RULES)
+    assert got == physical
+    assert outcome == ("compatible" if damage is None else "unknown")
+    assert details == ([] if damage is None else ["build_control"])
+    assert not qd.writes
