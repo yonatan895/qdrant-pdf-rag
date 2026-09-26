@@ -30,97 +30,57 @@ Per-query metric values are returned so the gate can bootstrap PAIRED
 deltas against the stored baseline — retrieval is deterministic against
 the pinned snapshot, so per-entry differences measure the change, not
 run-to-run noise.
+
+Compatibility delegate (issue #508 C2): pure scoring lives in
+:mod:`mainframe_rag.eval.retrieval` and dataset identity in
+:mod:`mainframe_rag.eval.datasets`. This module re-exports the same
+functions (not a copy); live collection stays here until its family moves.
+
+Retirement condition: all known callers import the package directly, the
+successor is documented and qualified, and the maintainer approves removing
+this shim.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+import sys
+from pathlib import Path
 
-from eval_retrieval import GoldenEntry, is_relevant_hit, must_not_violations
-from eval_retrieval import ndcg_at_k as _ndcg_at_k
+_REPO = Path(__file__).resolve().parents[1]
+if str(_REPO / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO / "src"))
 
-L1_LIMIT = 8  # recall@8 headroom; matches the answer path's retrieval depth
+from mainframe_rag.eval.datasets import GoldenEntry  # noqa: E402
+from mainframe_rag.eval.retrieval import (  # noqa: E402
+    L1_KEYS,
+    L1_LIMIT,
+    aggregate,
+    is_relevant_hit,
+    must_not_violations,
+    ndcg_at_k as _ndcg_at_k,
+    score_row,
+)
 
-
-def score_row(hits: Sequence[Any], entry: GoldenEntry) -> dict[str, Any]:
-    """Per-entry L1 metrics. Pure function (hits in, dict out) so hermetic
-    tests can fire every branch."""
-    abstain = entry.expected_behavior == "abstain"
-    row: dict[str, Any] = {
-        "id": entry.id,
-        "query_class": entry.query_class,
-        "expected_behavior": entry.expected_behavior,
-    }
-    violations = must_not_violations(list(hits), entry)
-    if violations:
-        row["violations"] = violations
-    if abstain:
-        row["top_scores"] = [round(h.score, 4) for h in hits[:5]]
-        return row
-    reciprocal_rank = 0.0
-    for rank, hit in enumerate(hits[:L1_LIMIT], 1):
-        if is_relevant_hit(hit.doc_id, hit.heading, entry):
-            reciprocal_rank = 1.0 / rank
-            break
-    row["recall@5"] = 1.0 if any(is_relevant_hit(h.doc_id, h.heading, entry) for h in hits[:5]) else 0.0
-    row["recall@8"] = 1.0 if any(is_relevant_hit(h.doc_id, h.heading, entry) for h in hits[:L1_LIMIT]) else 0.0
-    row["mrr"] = reciprocal_rank
-    ndcg = _ndcg_at_k(hits, entry)
-    if ndcg is not None:
-        row["ndcg@8"] = round(ndcg, 4)
-    return row
-
-
-L1_KEYS = ("recall@5", "recall@8", "mrr", "ndcg@8")
-
-
-def _mean(rows: list[dict], key: str) -> float | None:
-    vals = [r[key] for r in rows if key in r]
-    return round(sum(vals) / len(vals), 4) if vals else None
-
-
-def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Per-class + overall L1 summary. Aggregates are reported NEXT TO the
-    per-class breakdown and per-query values (paired-delta inputs for the
-    gate), never instead of them."""
-    scored = [r for r in rows if "recall@5" in r]
-    trap_failed = [r["id"] for r in rows if r.get("violations")]
-
-    def block(sub: list[dict]) -> dict[str, Any]:
-        return {
-            "n": len(sub),
-            "scored": len([r for r in sub if "recall@5" in r]),
-            **{k: _mean(sub, k) for k in L1_KEYS},
-        }
-
-    classes: dict[str, dict[str, Any]] = {}
-    for r in sorted(rows, key=lambda x: x["id"]):
-        classes.setdefault(r["query_class"], []).append(r)
-    per_query = {
-        r["id"]: {k: r[k] for k in L1_KEYS if k in r}
-        for r in sorted(rows, key=lambda x: x["id"])
-    }
-    return {
-        "overall": block(scored),
-        "classes": {cls: block(sub) for cls, sub in sorted(classes.items())},
-        "traps": {
-            "checked": len(rows),
-            "failed": trap_failed,
-            "precision": round(1.0 - len(trap_failed) / len(rows), 4) if rows else None,
-        },
-        "per_query": per_query,
-    }
+__all__ = [
+    "GoldenEntry",
+    "L1_KEYS",
+    "L1_LIMIT",
+    "aggregate",
+    "collect_rows",
+    "is_relevant_hit",
+    "must_not_violations",
+    "score_row",
+]
 
 
 def collect_rows(
     entries: list[GoldenEntry], qdrant, embedder, collection: str, settings
-) -> list[dict[str, Any]]:
+) -> list[dict]:
     """Retrieve (limit=8, same depth as the answer path) and score every
     entry. Live-stack tier; pure helpers above are unit-tested without it."""
     from mainframe_rag.retrieve.query import search as retrieve_search
 
-    rows: list[dict[str, Any]] = []
+    rows: list[dict] = []
     for entry in entries:
         hits, _kind, _timings = retrieve_search(
             qdrant, embedder, collection, entry.query, limit=L1_LIMIT, settings=settings

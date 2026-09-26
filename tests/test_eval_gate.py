@@ -4,15 +4,15 @@ import hashlib
 import json
 from pathlib import Path
 
-from scripts.eval_retrieval import (
+from scripts.eval_retrieval import main
+
+from mainframe_rag.config import Settings
+from mainframe_rag.eval.retrieval import (
     _get,
     _set,
     check_baseline,
-    main,
     update_baseline,
 )
-
-from mainframe_rag.config import Settings
 
 
 def _report() -> dict:
@@ -198,8 +198,8 @@ def test_main_exit_1_when_query_failures_despite_skip(tmp_path, monkeypatch):
 
 
 def test_load_golden_validates_and_rejects_empty(tmp_path: Path):
-    from scripts.eval_retrieval import load_golden, score_entry
-
+    from mainframe_rag.eval.datasets import load_golden
+    from mainframe_rag.eval.retrieval import score_entry
     from mainframe_rag.retrieve.query import SearchHit
 
     # Valid file with comments and blanks
@@ -272,8 +272,8 @@ def test_check_baseline_detects_ndcg8_regression():
 
 
 def test_gain_and_ndcg_at_k_calculation():
-    from scripts.eval_retrieval import GoldenEntry, gain, ndcg_at_k
-
+    from mainframe_rag.eval.datasets import GoldenEntry
+    from mainframe_rag.eval.retrieval import gain, ndcg_at_k
     from mainframe_rag.retrieve.query import SearchHit
 
     entry = GoldenEntry(
@@ -538,7 +538,8 @@ def test_table_query_class_is_valid():
     """`table` joins the class vocabulary; unknown classes stay rejected."""
     import pydantic
     import pytest
-    from scripts.eval_retrieval import QUERY_CLASSES, GoldenEntry
+
+    from mainframe_rag.eval.datasets import QUERY_CLASSES, GoldenEntry
 
     assert "table" in QUERY_CLASSES
     entry = GoldenEntry(
@@ -563,7 +564,8 @@ def test_table_class_entries_are_authored_and_well_formed():
 
 # Issue 367: requested gates need actual eligible observations, not just numbers.
 def test_requested_gate_rejects_empty_and_abstain_only_reports():
-    from scripts.eval_retrieval import GoldenEntry, score_entry, summarize
+    from mainframe_rag.eval.datasets import GoldenEntry
+    from mainframe_rag.eval.retrieval import score_entry, summarize
 
     for rows in ([], [score_entry([], GoldenEntry(query="unknown", expected_behavior="abstain"))]):
         rep = summarize(rows, failures=0, elapsed_s=0, embed_mode="hash", collection="c")
