@@ -14,7 +14,10 @@ from scripts.acceptance_evidence import LIMIT, artifact_members, object_json, pa
 
 WORKFLOW = 'verifier-update.yml'
 MAINTAINER = 'yonatan895'
-FIXED_POLICY = {'scripts/review_tooling.py', 'tests/hazards/critical.json'}
+# Selector bytes may be trusted as receipt provenance after exact human
+# approval. The consumer still selects obligations with approved-main code.
+# Catalogue changes cannot use this path to reduce the challenge oracle.
+FIXED_POLICY = {'tests/hazards/critical.json'}
 
 
 class VerifierApprovalRequired(ValueError):

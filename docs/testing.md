@@ -506,9 +506,15 @@ Tests must cover actual producer-to-consumer decision artifacts, exact SHA/hash
 binding, native workflow/job/attempt/actor provenance, revocation and newer failed
 or pending decisions, plus a second currentness check before publication. An
 approved verifier with missing, failing, cancelled or skipped required native
-jobs still fails acceptance. Selection-policy and hazard-catalogue changes remain
-excluded. A successful decision records trust in bytes, not passing tests or
-permission to merge.
+jobs still fails acceptance. Selector updates additionally exercise the actual
+decision-artifact to native-receipt round-trip: approved candidate selector
+digests are accepted as provenance, old or unapproved digests are rejected, and
+candidate selector code is never executed by the consumer. The acceptance lane
+set still comes from the approved base, including missing semantic requirements
+that the candidate might remove. Missing/stale/revoked decisions fail closed.
+Hazard-catalogue changes remain excluded. A successful decision records trust
+in bytes, not passing tests, adoption of proposed selection rules or permission
+to merge.
 
 
 <a id="unit-coverage"></a>

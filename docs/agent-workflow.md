@@ -328,9 +328,25 @@ This path changes which verifier implementation bytes may produce evidence.
 The publisher still executes approved-main code and applies the approved-main
 lane selector, complete hazard catalogue and receipt schema. Native jobs must
 pass, their raw evidence must validate, and candidate/run/decision identity is
-rechecked before publication. Selection-policy and hazard-catalogue changes are
-excluded; incompatible evidence schemas still fail. Forks cannot use this path.
+rechecked before publication. An exact decision can also authorize the selector
+bytes executed by candidate jobs, including `scripts/review_tooling.py`. Native
+receipts must identify those approved candidate bytes. This is execution
+provenance only: the publisher never imports the candidate selector and still
+derives all required lanes from approved-main code. A candidate that omits an
+old-policy-required lane still fails, even if its proposed policy would omit
+that lane. The reported policy digest continues to identify the approved-base
+selection policy; the approved input map separately identifies execution bytes.
+The proposed selection rules take effect only after maintainer adoption into
+main. Hazard-catalogue changes remain excluded; incompatible evidence schemas
+still fail. Forks cannot use this path.
 Normal PRs with unchanged verifier inputs require no manual decision.
+
+For the selector-approval bootstrap, the consumer and trust validator change
+without changing the selector, catalogue, native producer or receipt format.
+The current consumer can verify that bootstrap under its existing policy. After
+the maintainer merges it, refresh dependent selector PRs against the new base
+and record a new exact-candidate decision. An approval issued against the old
+base/head/test-merge cannot transfer to the refreshed candidate.
 
 Bootstrap: this implementation changes the consumer and adds its decision
 workflow, without changing any existing protected producer inputs. It can pass

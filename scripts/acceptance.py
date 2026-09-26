@@ -165,6 +165,10 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
     policy_digest = hashlib.sha256((approved_root / 'scripts/review_tooling.py').read_bytes()).hexdigest()
     # Receipt hashes are claims, not proof of the actual executed source.
     policy_inputs, verifier_approval = approved_inputs(api, candidate, verification_inputs(approved_root))
+    # The receipt describes the selector that ran in the candidate job. Its
+    # approved bytes may differ from main, but cannot select acceptance lanes:
+    # collect_acceptance continues to use this approved-base process's policy.
+    execution_policy_digest = policy_inputs['scripts/review_tooling.py']
     producer_digest = policy_inputs['scripts/ci_evidence.py']
     hazard_policy = {'catalogue': (approved_root / 'tests/hazards/critical.json').read_bytes(),
                      'runner_sha256': policy_inputs['scripts/check_hazard_sensitivity.py']}
@@ -209,7 +213,7 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
                 archive = api.raw(api.prefix + f"actions/artifacts/{artifact['id']}/zip")
                 result = normalize_native(candidate=candidate, producer=producer, run=run, job=job,
                                           artifact=artifact, execution_commit=commit, archive=archive,
-                                          policy_digest=policy_digest, producer_digest=producer_digest,
+                                          policy_digest=execution_policy_digest, producer_digest=producer_digest,
                                           workflow_digest=workflow_digest, workflow_source=source,
                                           hazard_policy=hazard_policy,
                                           unit_policy={path: policy_inputs[path] for path in UNIT_INPUTS})
@@ -441,8 +445,8 @@ def publish_acceptance(api: GitHub, number: int, approved_root: Path, *,
                     + '/actions/workflows/verifier-update.yml) workflow on main with this PR number. '
                     'Ready-for-review is not a verifier trust decision. All selected technical checks still apply.')
         if not exc.approval_allowed:
-            guidance = ('Selection-policy or hazard-catalogue changes cannot use a verifier implementation '
-                        'decision. They require a separately reviewed policy change; no obligations are waived.')
+            guidance = ('Hazard-catalogue changes cannot use a verifier implementation '
+                        'decision. They require a separately reviewed catalogue change; no obligations are waived.')
         result = {'all_prerequisites_met': False, 'verification_status': 'incomplete',
                   'error': ('verifier_update_requires_maintainer_decision' if exc.approval_allowed
                             else 'verifier_policy_change_not_supported'),

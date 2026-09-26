@@ -3057,7 +3057,9 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     recheck_current(api, result)
 
-    def test_selection_and_catalogue_cannot_use_the_exception(self):
+    def test_selector_requires_exact_approval_and_catalogue_remains_excluded(self):
+        import hashlib
+
         from scripts.verifier_approval import VerifierApprovalRequired, approved_inputs
 
         for path in ('scripts/review_tooling.py', 'tests/hazards/critical.json'):
@@ -3065,12 +3067,31 @@ class TestVerifierUpdateDecision(unittest.TestCase):
             api.sources = {path: b'reduced obligations'}
             with self.assertRaises(VerifierApprovalRequired):
                 approved_inputs(api, api.candidate, {path: '0' * 64})
+            api.record['inputs'] = {path: hashlib.sha256(api.sources[path]).hexdigest()}
+            api.pack()
+            if path == 'tests/hazards/critical.json':
+                with self.assertRaises(VerifierApprovalRequired) as rejected:
+                    approved_inputs(api, api.candidate, {path: '0' * 64})
+                self.assertFalse(rejected.exception.approval_allowed)
+            else:
+                accepted, _ = approved_inputs(api, api.candidate, {path: '0' * 64})
+                self.assertEqual(accepted, api.record['inputs'])
+                for defect in ('changed bytes', 'revoked', 'new head'):
+                    with self.subTest(defect=defect):
+                        original = api.sources[path]
+                        api.sources[path] = b'other selector' if defect == 'changed bytes' else original
+                        api.record['decision'] = 'revoke' if defect == 'revoked' else 'approve'
+                        api.record['candidate']['head_sha'] = 'e' * 40 if defect == 'new head' else 'a' * 40
+                        api.pack()
+                        with self.assertRaises(VerifierApprovalRequired):
+                            approved_inputs(api, api.candidate, {path: '0' * 64})
+                        api.sources[path] = original
 
     def test_producer_artifact_round_trip_and_no_failed_evidence_waiver(self):
         import hashlib
         from unittest.mock import patch
 
-        from scripts.acceptance import collect_native, verification_inputs
+        from scripts.acceptance import collect_acceptance, collect_native, verification_inputs
         from scripts.acceptance_evidence import PRODUCERS
         from scripts.verifier_approval import record_decision, validated_decision
 
@@ -3096,6 +3117,9 @@ class TestVerifierUpdateDecision(unittest.TestCase):
             api.sources = {p: (root / p).read_bytes() for p in verification_inputs(root)}
             api.sources['scripts/check_hazard_sensitivity.py'] = b'changed runner'
             api.sources['scripts/ci_evidence.py'] = b'changed producer'
+            # A trusted receipt may identify these bytes, but the consumer
+            # must never execute them or use them to choose its obligations.
+            api.sources['scripts/review_tooling.py'] = b'raise AssertionError("candidate policy executed")'
             api.sources['tests/ci_shard.py'] = b'changed collector'
             api.sources['.github/workflows/ci.yml'] = b'changed native workflow'
             # Use actual producer output, not a separately hand-built positive record.
@@ -3108,6 +3132,7 @@ class TestVerifierUpdateDecision(unittest.TestCase):
             self.assertEqual(result['verifier_approval'], identity)
             self.assertEqual(result['lane_statuses'], {})  # No native evidence is not a pass.
             self.assertEqual(result['producer_sha256'], hashlib.sha256(b'changed producer').hexdigest())
+            self.assertEqual(result['policy_sha256'], hashlib.sha256(b'approved original').hexdigest())
             # Approval also cannot suppress a normalizer's failed raw-test check.
             fixture, receipt, xml = TestNativeEvidenceConsumer().fixture()
             fixture['producer_digest'] = receipt['producer_sha256'] = result['producer_sha256']
@@ -3123,7 +3148,7 @@ class TestVerifierUpdateDecision(unittest.TestCase):
             native, receipt, xml = TestNativeEvidenceConsumer().fixture()
             native['run']['head_repository']['id'] = 42
             receipt.update(base_sha=base, execution_parents=[base, 'a' * 40],
-                           policy_sha256=hashlib.sha256(b'approved original').hexdigest(),
+                           policy_sha256=hashlib.sha256(api.sources['scripts/review_tooling.py']).hexdigest(),
                            producer_sha256=result['producer_sha256'])
             jobs, artifacts, archives = [], [], {}
             for shard in (1, 2):
@@ -3156,6 +3181,10 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                 archives[api.prefix + f"actions/artifacts/{artifact['id']}/zip"] = packed
             original_get, original_raw = api.get, api.raw
             def with_native_jobs(endpoint):
+                if endpoint.endswith('/pulls/3'):
+                    return {**original_get(endpoint), 'changed_files': 1}
+                if '/pulls/3/files?' in endpoint:
+                    return [{'filename': 'src/mainframe_rag/retrieve/query.py', 'status': 'modified'}]
                 if 'actions/runs?event=pull_request' in endpoint:
                     return {'total_count': 1, 'workflow_runs': [native['run']]}
                 if endpoint.endswith('/123'):
@@ -3172,6 +3201,22 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                 pr = original_get(api.prefix + 'pulls/3')
                 accepted = collect_native(api, pr, root)
                 self.assertEqual(accepted['lane_statuses']['unit_tests'], 'success')
+                summary = collect_acceptance(api, 3, root)
+                required = {lane['name'] for lane in summary['lanes'] if lane['required']}
+                self.assertTrue({'eval_retrieval', 'gate_l1', 'simulation', 'ha', 'load'} <= required)
+                self.assertFalse(summary['all_prerequisites_met'])
+                original_artifact = copy.deepcopy(artifacts[1])
+                original_archive = archives[api.prefix + 'actions/artifacts/791/zip']
+                for stale in (hashlib.sha256(b'approved original').hexdigest(), 'f' * 64):
+                    bad = copy.deepcopy(report)
+                    bad['policy_sha256'] = stale
+                    packed, digest = TestNativeEvidenceConsumer().packed(bad, shard_xml)
+                    artifacts[1].update(digest=digest, size_in_bytes=len(packed))
+                    archives[api.prefix + 'actions/artifacts/791/zip'] = packed
+                    rejected = collect_native(api, pr, root)
+                    self.assertEqual(rejected['lane_statuses']['unit_tests'], 'unverified')
+                artifacts[1] = original_artifact
+                archives[api.prefix + 'actions/artifacts/791/zip'] = original_archive
                 for conclusion in ('failure', 'skipped', 'cancelled'):
                     with self.subTest(conclusion=conclusion):
                         jobs[1]['conclusion'] = conclusion
@@ -3231,7 +3276,8 @@ class TestVerifierUpdateDecision(unittest.TestCase):
         from scripts.verifier_approval import VerifierApprovalRequired
 
         for path, code in [('scripts/check_hazard_sensitivity.py', 'verifier_update_requires_maintainer_decision'),
-                           ('scripts/review_tooling.py', 'verifier_policy_change_not_supported')]:
+                           ('scripts/review_tooling.py', 'verifier_update_requires_maintainer_decision'),
+                           ('tests/hazards/critical.json', 'verifier_policy_change_not_supported')]:
             with self.subTest(path=path):
                 api = self.fixture()
                 with patch('scripts.acceptance.collect_acceptance', side_effect=VerifierApprovalRequired([path])):
@@ -3240,7 +3286,7 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                 self.assertFalse(result['all_prerequisites_met'])
                 self.assertEqual(api.writes[-1]['conclusion'], 'failure')
                 self.assertIn(path, api.writes[-1]['output']['summary'])
-                if path == 'scripts/review_tooling.py':
+                if path == 'tests/hazards/critical.json':
                     self.assertNotIn('/actions/workflows/verifier-update.yml', api.writes[-1]['output']['summary'])
                 else:
                     self.assertIn('/actions/workflows/verifier-update.yml', api.writes[-1]['output']['summary'])
