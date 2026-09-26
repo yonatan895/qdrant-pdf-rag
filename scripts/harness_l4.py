@@ -52,7 +52,9 @@ if str(REPO) not in sys.path:
 if str(REPO / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO / "scripts"))
 
-from harness_l2 import RELEVANCE_LABELS, run_l2
+from harness_l2 import run_l2
+
+from mainframe_rag.eval.judging import RELEVANCE_LABELS
 from venue import VenueError, require_rc_for_collection, resolve_golden_paths
 
 DEFAULT_THRESHOLDS = REPO / "evals" / "harness-l4-thresholds.json"
