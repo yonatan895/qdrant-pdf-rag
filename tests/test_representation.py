@@ -132,6 +132,9 @@ class _ManifestFake:
     def __init__(self):
         self.points: dict[str, dict[str, object]] = {}
 
+    def get_aliases(self):
+        return SimpleNamespace(aliases=[])
+
     def collection_exists(self, name):
         return True
 
