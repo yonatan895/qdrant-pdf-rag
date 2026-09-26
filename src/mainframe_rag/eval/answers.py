@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Answer-tier golden eval: run /v1/answer against the live stack and judge
 grounding honesty, not fluency.
 
