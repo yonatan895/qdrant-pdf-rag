@@ -8,7 +8,8 @@ stack, no environment mutation outside monkeypatch.
 from pathlib import Path
 
 import pytest
-from scripts.venue import (
+
+from mainframe_rag.eval.datasets import (
     DEV,
     DEV_GOLDEN_PATH,
     HOLDOUT_PATH,
@@ -136,3 +137,43 @@ def test_replay_sweep_refuses_holdout_without_rc(monkeypatch, capfd, tmp_path):
     pools.write_text("")
     assert sweep_main(["--pools", str(pools), "--golden", str(HOLDOUT_PATH)]) == 2
     assert "frozen holdout" in capfd.readouterr().err
+
+
+def test_venue_delegate_is_canonical():
+    """Issue #508 C2: scripts/venue.py re-exports the package owner."""
+    import scripts.venue as venue_shim
+
+    from mainframe_rag.eval import datasets as canonical
+
+    for name in (
+        "VenueError",
+        "resolve_venue",
+        "require_rc_for_golden",
+        "require_rc_for_collection",
+        "resolve_golden_paths",
+    ):
+        assert getattr(venue_shim, name) is getattr(canonical, name), name
+
+
+def test_holdout_copy_elsewhere_still_requires_rc(tmp_path):
+    """Filename identity crosses installs: a holdout copy outside evals/ is
+    still the frozen holdout in dev."""
+    elsewhere = tmp_path / "elsewhere" / "holdout.jsonl"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_text("{}\n")
+    with pytest.raises(VenueError, match="frozen holdout"):
+        require_rc_for_golden([elsewhere], venue=DEV)
+    require_rc_for_golden([elsewhere], venue=RC)
+
+
+def test_holdout_symlink_alias_resolves_consistently(tmp_path):
+    """A symlink alias for holdout content resolves to the holdout name."""
+    target = tmp_path / "holdout.jsonl"
+    target.write_text("{}\n")
+    alias = tmp_path / "golden-alias.jsonl"
+    try:
+        alias.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(VenueError, match="frozen holdout"):
+        require_rc_for_golden([alias], venue=DEV)

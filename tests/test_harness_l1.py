@@ -10,7 +10,6 @@ import json
 
 import pytest
 from scripts.bootstrap_ci import ci95, ci95_paired, ci_excludes_zero
-from scripts.eval_retrieval import GoldenEntry
 from scripts.harness import (
     DEFAULT_CLASS_FLOOR,
     baseline_path_for,
@@ -22,7 +21,19 @@ from scripts.harness import (
     save_baseline,
     snapshot_fingerprint,
 )
-from scripts.harness_l1 import aggregate, score_row
+
+from mainframe_rag.eval.datasets import GoldenEntry
+from mainframe_rag.eval.retrieval import aggregate, score_row
+
+
+def test_l1_delegates_are_canonical_objects():
+    """Issue #508 C2: scripts/harness_l1.py re-exports the package owners
+    (same objects, not a second implementation)."""
+    import scripts.harness_l1 as h1
+
+    assert h1.score_row is score_row
+    assert h1.aggregate is aggregate
+    assert h1.GoldenEntry is GoldenEntry
 
 
 # ---------------------------------------------------------------- bootstrap

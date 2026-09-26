@@ -8,18 +8,16 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from scripts.eval_retrieval import (
-    GoldenEntry,
+
+from mainframe_rag.eval.datasets import GoldenEntry, default_baseline_path, load_golden
+from mainframe_rag.eval.retrieval import (
     check_baseline,
-    default_baseline_path,
     is_relevant_hit,
     is_sibling_exception,
-    load_golden,
     score_entry,
     summarize,
     update_baseline,
 )
-
 from mainframe_rag.retrieve.query import SearchHit
 
 
@@ -321,3 +319,29 @@ def test_load_golden_abstain_roundtrip(tmp_path: Path):
     bad.write_text(json.dumps({"query": "x", "expected_behavior": "abstain", "expected_doc_ids": ["D"]}) + "\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="abstain entries"):
         load_golden(bad)
+
+
+def test_eval_delegates_are_canonical_objects():
+    """Issue #508 C2: scripts/eval_retrieval.py re-exports the package owners
+    (same objects, not a second scoring implementation)."""
+    import scripts.eval_retrieval as ev
+
+    from mainframe_rag.eval import datasets as canonical_datasets
+    from mainframe_rag.eval import retrieval as canonical_retrieval
+
+    assert ev.GoldenEntry is canonical_datasets.GoldenEntry
+    assert ev.load_golden is canonical_datasets.load_golden
+    assert ev.default_baseline_path is canonical_datasets.default_baseline_path
+    for name in (
+        "is_sibling_exception",
+        "is_relevant_hit",
+        "must_not_violations",
+        "gain",
+        "ndcg_at_k",
+        "score_entry",
+        "summarize",
+        "check_baseline",
+        "update_baseline",
+        "summary_markdown",
+    ):
+        assert getattr(ev, name) is getattr(canonical_retrieval, name), name
