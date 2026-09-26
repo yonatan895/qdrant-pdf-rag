@@ -113,7 +113,7 @@ Never rebind an existing build alias to a new build or use a current alias to
 repair an old reference. This extends the existing alias publication operation;
 it adds no second database or general catalogue service.
 
-The L1 writer introduces publication sidecar version 2 and build binding schema 1
+The L1 writer introduces publication sidecar version 2 and build binding schema 2
 independently of E1's future per-chunk evidence envelope. The full UUID is recorded
 under the target writer lock before collection writes, then stored with logical
 corpus, physical data/control pairing and input fingerprints in the verified
@@ -155,6 +155,18 @@ remain unsupported; a local file lock and RWO volume are not distributed locks.
 | published → retained | Successor publication changes the ordinary alias, not old content/control/build aliases. | Admitted old readers and old refs remain bound to the old build, subject to current access policy. |
 | retained → retiring → retired | Explicit policy-authorized retirement blocks new admissions first; drain all admitted readers; verify retention/recovery obligations; persist a retired tombstone in the paired control collection before deleting data and its build alias. Retain the control alias and minimal per-chunk revision/digest/location metadata needed to authorize and distinguish retired references. Purging these records requires a separately approved tombstone horizon. | No drain/retention proof: refuse deletion. Tombstones must not disclose existence to unauthorized callers. #391 owns enforcement, #373 disclosure and #360 restore. |
 | retained → serving rollback | Verify old data/control/schema, compatible executable/model/config and policy; swap ordinary alias under the same writer boundary. | Incompatible/missing artifacts refuse; no fallback to other vectors or regenerated text. |
+
+New build schema-2 receipts retain a versioned content seal over the complete
+verified stored data and non-receipt controls, including vectors. Publication
+and retry enforcement lives in [ingest publication](ingest.md#publication-contract).
+This preserves the expected member set independently of surviving completion
+records; deleting a revision and its completion cannot erase its membership
+from the seal. Completed older builds remain readable without this capability;
+there is no retroactive certification. The read-only seal verifier distinguishes
+absence from a match and raises on mismatch. A future administrative rollback
+must require the match **and** the schema/executable/config/placement/policy
+checks above. The seal alone is not a rollback or disposal operation, an access
+grant, or proof of backup/recovery obligations.
 
 No automatic GC is introduced. Retain current, previous and any generation
 needed by an admitted reader or explicit evidence obligation. Capacity preflight

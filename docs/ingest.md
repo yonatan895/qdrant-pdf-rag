@@ -653,7 +653,7 @@ thread pool.
   full canonical UUID plus the observed predecessor under the target lock before
   collection writes. The UUID is independent of representation and chunk UUID5
   identity and survives retries. After complete coverage and placement checks,
-  the paired publication receipt records `build_schema: 1`, that UUID, logical
+  the paired publication receipt records `build_schema: 2`, that UUID, logical
   corpus, physical pair and input fingerprints. This seals the candidate: retry
   re-verifies it without rewriting its stored data or controls, even with
   `--reingest`. One atomic alias operation creates
@@ -666,6 +666,30 @@ thread pool.
   In-place ingest refuses these builds through logical, physical or build-alias
   targets, including retained builds. Post-cutover recovery validates the same
   UUID before read-only finalization.
+  Build schema 2 additionally requires a separately versioned **content seal**.
+  After the full intended-set/representation/placement proof, the writer reads
+  all stored payloads and named dense/sparse vectors and records SHA-256 roots
+  and counts for data and controls. Only the exact publication receipt point is
+  excluded to avoid self-reference. The roots bind the build UUID, logical and
+  physical corpus, recipe and corpus fingerprints. They cover actual content,
+  not just completion markers: removing a whole revision and its completion
+  still breaks the retained seal. The codec and schema are owned by
+  `ingest/seal.py`: sorted JSON object keys, unchanged string/list contents,
+  finite stored numbers, typed point IDs and deterministic sorted leaf hashes.
+  The scan retains one page of content and one ID/hash entry per point; it does
+  not write corpus text to local temporary files. Unreadable projections,
+  duplicate IDs, stalled pagination and resource failures prevent sealing.
+  The receipt is read back and checked before cutover; sealed retry and ordinary
+  steady verification compare stored bytes read-only. A scan/certificate error
+  never authorizes repair of the sealed pair.
+  Completed schema-1 builds and pre-build generations remain readable, but no
+  seal is retroactively inferred or backfilled. An unfinished sealed schema-1
+  candidate must finish with its matching release or be explicitly abandoned.
+  A newly verified successor gains the capability. Deploy readers that support
+  schema 2 before publishing it; older readers fail closed on the new version.
+  The seal assumes the existing single authorized writer and immutable retained
+  storage boundary; it is not protection against an administrator rewriting both
+  content and its certificate. It grants no rollback, access or deletion policy.
   Sidecar persistence uses atomic replacement for process-crash recovery; this
   is not qualification of power-loss or storage-device durability.
 - **Fingerprint-format upgrade (one-time, fail-closed):** the pre-#391

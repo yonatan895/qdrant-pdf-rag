@@ -100,6 +100,7 @@ from mainframe_rag.ingest.publish import (
     read_publish_state,
     resolve_publish_staging,
     verify_all_complete,
+    verify_publication_seal,
     verify_searchable_coverage,
     verify_staging_distribution,
     verify_staging_placement,
@@ -1578,6 +1579,7 @@ def _run_publish_locked(
                 f"live generation {live!r} fails verification for {len(problems)} "
                 f"path(s) (e.g. {problems[0]!r}) — operator intervention required."
             )
+        verify_publication_seal(client, completion_collection_name(staging_settings))
         if live_binding is None and read_publication_metadata(
             client, completion_collection_name(staging_settings)
         ) is None:
@@ -1619,6 +1621,8 @@ def _run_publish_locked(
                           for target in observed_aliases.values()):
         raise RuntimeError("candidate has aliases but lacks its build control; refusing mutation")
     if sealed:
+        if not verify_publication_seal(client, completion_collection_name(staging_settings)):
+            raise RuntimeError("unfinished old-format build: finish with its release or explicitly abandon")
         expected = BuildBinding(build_id, alias, staging, gen_fp, corp_fp)
         if candidate_binding != expected:
             raise RuntimeError("sealed candidate does not match its recorded build identity")
@@ -1755,6 +1759,8 @@ def _run_publish_locked(
             client, completion_collection_name(staging_settings), staging_settings,
             gen_fp=gen_fp, corpus_fp=corp_fp, build_id=build_id, logical_alias=alias,
         )
+    if not sealed and not verify_publication_seal(client, completion_collection_name(staging_settings)):
+        raise RuntimeError("new publication lacks its content seal")
     previous = live
     migrated = None
     if legacy and live is not None:
