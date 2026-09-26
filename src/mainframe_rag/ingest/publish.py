@@ -163,6 +163,71 @@ def write_publish_state(
     tmp.replace(path)
 
 
+
+def _publish_state_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """JSON objects must not hide conflicting fields through last-key-wins."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate publish state field")
+        result[key] = value
+    return result
+
+
+def _validate_recorded_retirements(state: dict) -> None:
+    """Validate persisted authorization before converting revision lists to sets.
+
+    Older v1 records may omit either optional retirement field. When both
+    exist, the plan must express exactly the recorded request, never widen it.
+    """
+    requests: dict[str, set[str | None]] | None = None
+    if "retire_docs" in state:
+        flags = state["retire_docs"]
+        if not isinstance(flags, list) or any(not isinstance(flag, str) for flag in flags):
+            raise ValueError("invalid recorded retirement requests")
+        requests = {}
+        for flag in flags:
+            doc_id, sep, rev = flag.partition("@")
+            doc_id = doc_id.strip()
+            if not doc_id or (sep and not rev.strip()):
+                raise ValueError("invalid recorded retirement request")
+            requests.setdefault(doc_id, set()).add(rev.strip() if sep else None)
+    if "retire_plan" not in state:
+        return
+    plan = state["retire_plan"]
+    if not isinstance(plan, dict):
+        raise TypeError("invalid recorded retirement plan")
+    normalized = {}
+    for doc_id, entry in plan.items():
+        if not isinstance(doc_id, str) or not doc_id.strip() or not isinstance(entry, dict):
+            raise ValueError("invalid recorded retirement entry")
+        if set(entry) != {"revs", "legacy", "whole"}:
+            raise ValueError("invalid recorded retirement fields")
+        revs = entry["revs"]
+        if (
+            not isinstance(revs, list)
+            or any(not isinstance(rev, str) or not rev.strip() for rev in revs)
+            or type(entry["legacy"]) is not bool
+            or type(entry["whole"]) is not bool
+        ):
+            raise ValueError("invalid recorded retirement types")
+        if len(set(revs)) != len(revs) or (entry["legacy"] and not entry["whole"]):
+            raise ValueError("invalid recorded retirement scope")
+        if not revs and not entry["legacy"]:
+            raise ValueError("empty recorded retirement selection")
+        normalized[doc_id] = {**entry, "revs": set(revs)}
+    if requests is not None:
+        if set(requests) != set(normalized):
+            raise ValueError("recorded retirement request and plan disagree")
+        for doc_id, selected in requests.items():
+            entry = normalized[doc_id]
+            if entry["whole"] != (None in selected):
+                raise ValueError("recorded whole-document retirement disagrees")
+            if None not in selected and entry["revs"] != selected:
+                raise ValueError("recorded revision retirement disagrees")
+    state["retire_plan"] = normalized
+
+
 def read_publish_state(progress: Path, alias: str) -> dict | None:
     """Return the recorded build, None when absent. A present-but-corrupt
     sidecar fails closed: unknown build state must never be guessed."""
@@ -170,7 +235,7 @@ def read_publish_state(progress: Path, alias: str) -> dict | None:
     if not path.exists():
         return None
     try:
-        state = json.loads(path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_publish_state_object)
     except (ValueError, OSError) as exc:
         raise RuntimeError(
             f"unreadable publish state at {path}: {exc} — remove it explicitly "
@@ -178,6 +243,7 @@ def read_publish_state(progress: Path, alias: str) -> dict | None:
         ) from exc
     if (
         not isinstance(state, dict)
+        or type(state.get("version")) is not int
         or state.get("version") != PUBLISH_STATE_VERSION
         or state.get("alias") != alias
         or not isinstance(state.get("staging"), str)
@@ -191,15 +257,14 @@ def read_publish_state(progress: Path, alias: str) -> dict | None:
             f"unrecognized publish state at {path}: refusing to guess the "
             "recorded build — remove it explicitly to abandon it, then rerun."
         )
-    if "retire_plan" in state and isinstance(state["retire_plan"], dict):
-        state["retire_plan"] = {
-            doc_id: {
-                **entry,
-                "revs": set(entry["revs"]) if "revs" in entry else set(),
-            }
-            for doc_id, entry in state["retire_plan"].items()
-            if isinstance(entry, dict)
-        }
+    try:
+        _validate_recorded_retirements(state)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(
+            f"invalid retirement authorization in publish state at {path}: "
+            "refusing to guess the recorded build — restore its valid record "
+            "or explicitly abandon it before retrying."
+        ) from exc
     return state
 
 

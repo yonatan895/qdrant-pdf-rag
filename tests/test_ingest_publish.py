@@ -3626,3 +3626,177 @@ def test_failed_post_cutover_revalidation_preserves_finalization(
         assert fake.aliases[ALIAS] == current
         assert (_records(fake, current), _records(fake, current + "__completions")) == published
         assert (_records(fake, old), _records(fake, old + "__completions")) == retained
+
+
+@pytest.mark.parametrize("damage", [
+    "version_bool", "version_float", "plan_list", "entry_scalar", "revs_string",
+    "revs_nested", "revs_number", "legacy_string", "whole_number", "missing_whole",
+    "extra_entry_field", "empty_doc", "partial_legacy", "empty_selection",
+    "requests_string", "request_number", "request_empty", "plan_extra_doc",
+    "partial_widened", "whole_widened", "duplicate_key",
+])
+def test_corrupt_publish_record_refuses_without_rewriting(tmp_path, damage):
+    import json
+
+    from mainframe_rag.ingest.publish import (
+        publish_state_path,
+        read_publish_state,
+        write_publish_state,
+    )
+
+    progress = tmp_path / "progress.jsonl"
+    write_publish_state(
+        progress, ALIAS, ALIAS + "__genbuild", "build", "corpus",
+        retire_plan={"Manual Alpha": {"revs": {"rev-1"}, "legacy": False, "whole": False}},
+        retire_docs=("Manual Alpha@rev-1",),
+    )
+    path = publish_state_path(progress, ALIAS)
+    record = json.loads(path.read_text())
+    entry = record["retire_plan"]["Manual Alpha"]
+    if damage == "version_bool":
+        record["version"] = True
+    elif damage == "version_float":
+        record["version"] = 1.0
+    elif damage == "plan_list":
+        record["retire_plan"] = []
+    elif damage == "entry_scalar":
+        record["retire_plan"]["Manual Alpha"] = "discard me"
+    elif damage == "revs_string":
+        entry["revs"] = "rev-1"
+    elif damage == "revs_nested":
+        entry["revs"] = [["rev-1"]]
+    elif damage == "revs_number":
+        entry["revs"] = [1]
+    elif damage == "legacy_string":
+        entry["legacy"] = "false"
+    elif damage == "whole_number":
+        entry["whole"] = 1
+    elif damage == "missing_whole":
+        del entry["whole"]
+    elif damage == "extra_entry_field":
+        entry["all_revisions"] = True
+    elif damage == "empty_doc":
+        record["retire_plan"][""] = record["retire_plan"].pop("Manual Alpha")
+    elif damage == "partial_legacy":
+        entry["legacy"] = True
+    elif damage == "empty_selection":
+        entry["revs"] = []
+    elif damage == "requests_string":
+        record["retire_docs"] = "Manual Alpha@rev-1"
+    elif damage == "request_number":
+        record["retire_docs"] = [1]
+    elif damage == "request_empty":
+        record["retire_docs"] = ["Manual Alpha@"]
+    elif damage == "plan_extra_doc":
+        record["retire_plan"]["Unrequested"] = dict(entry)
+    elif damage == "partial_widened":
+        entry["revs"] = ["rev-1", "rev-2"]
+    elif damage == "whole_widened":
+        entry["whole"] = True
+    raw = json.dumps(record)
+    if damage == "duplicate_key":
+        raw = raw.replace('"legacy": false', '"legacy": false, "legacy": true')
+    path.write_text(raw)
+    with pytest.raises(RuntimeError, match="publish state"):
+        read_publish_state(progress, ALIAS)
+    assert path.read_text() == raw
+
+
+@pytest.mark.parametrize("fields", ["neither", "plan", "requests", "both"])
+def test_valid_publish_record_preserves_supported_optional_fields(tmp_path, fields):
+    from mainframe_rag.ingest.publish import read_publish_state, write_publish_state
+
+    plan = {
+        "Manual Alpha": {"revs": {"rev-1", "rev-2"}, "legacy": True, "whole": True},
+        "Manual Beta": {"revs": {"rev-3"}, "legacy": False, "whole": False},
+    }
+    flags = (" Manual Alpha ", "Manual Beta@rev-3")
+    kwargs = {}
+    if fields in ("plan", "both"):
+        kwargs["retire_plan"] = plan
+    if fields in ("requests", "both"):
+        kwargs["retire_docs"] = flags
+    progress = tmp_path / "progress.jsonl"
+    write_publish_state(progress, ALIAS, ALIAS + "__genbuild", "build", "corpus", **kwargs)
+    result = read_publish_state(progress, ALIAS)
+    assert result["version"] == 1
+    assert result["staging"] == ALIAS + "__genbuild"
+    if "retire_plan" in kwargs:
+        assert result["retire_plan"] == plan
+    else:
+        assert "retire_plan" not in result
+    if "retire_docs" in kwargs:
+        assert result["retire_docs"] == list(flags)
+    else:
+        assert "retire_docs" not in result
+
+
+def _exercise_corrupt_retirement_retry(tmp_path, monkeypatch, client, alias):
+    import json
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+    from tests.helpers_publication_lifecycle import TEXTS, _records, _write_source
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    for name, text in TEXTS.items():
+        _write_source(corpus, name, text)
+    progress = tmp_path / "progress.jsonl"
+    _publish_env(monkeypatch)
+    monkeypatch.setenv("QDRANT_COLLECTION", alias)
+    monkeypatch.setenv("DENSE_DIM", "256")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: client)
+
+    def run(*args):
+        return _run_main(monkeypatch, corpus, progress, *args)
+
+    def target():
+        return next(a.collection_name for a in client.get_aliases().aliases if a.alias_name == alias)
+
+    assert run() == 0
+    live = target()
+    (corpus / "beta.pdf").unlink()
+
+    def interrupt(*args, **kwargs):
+        raise RuntimeError("interrupted before retirement deletion")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_ingest, "apply_approved_removals", interrupt)
+        with pytest.raises(RuntimeError, match="interrupted before retirement deletion"):
+            run("--retire-doc", "beta")
+    state_path = publish_state_path(progress, alias)
+    valid = state_path.read_bytes()
+    state = json.loads(valid)
+    staging = state["staging"]
+    collections = (live, live + "__completions", staging, staging + "__completions")
+    before = {name: _records(client, name) for name in collections}
+    progress_before = progress.read_bytes()
+    state["retire_plan"]["beta"]["legacy"] = "false"
+    state_path.write_text(json.dumps(state))
+    corrupt = state_path.read_bytes()
+    with pytest.raises(RuntimeError, match="invalid retirement authorization in publish state"):
+        run("--retire-doc", "beta")
+    assert target() == live
+    assert state_path.read_bytes() == corrupt
+    assert progress.read_bytes() == progress_before
+    assert {name: _records(client, name) for name in collections} == before
+
+    # Restoring the original record is an explicit test recovery, never a parser fallback.
+    state_path.write_bytes(valid)
+    assert run("--retire-doc", "beta") == 0
+    assert target() == staging
+    assert not state_path.exists()
+    published = (_records(client, staging), _records(client, staging + "__completions"))
+    assert [(p["doc_id"], p["text"]) for p, _ in published[0].values()] == [("alpha", TEXTS["alpha"])]
+    for _ in range(2):
+        assert run() == 0
+        assert target() == staging
+        assert (_records(client, staging), _records(client, staging + "__completions")) == published
+        assert _records(client, live) == before[live]
+        assert _records(client, live + "__completions") == before[live + "__completions"]
+
+
+def test_corrupt_retirement_retry_preserves_stored_state(tmp_path, monkeypatch):
+    _exercise_corrupt_retirement_retry(tmp_path, monkeypatch, PublishFake(), ALIAS)
