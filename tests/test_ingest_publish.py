@@ -398,7 +398,11 @@ def test_incomplete_metadata_transfer_never_publishes(tmp_path, monkeypatch):
     from mainframe_rag.ingest.publish import ensure_staging
 
     class _NoVectorStore(PublishFake):
+        omit_vectors = False
+
         def retrieve(self, collection, ids, *, with_payload=True, with_vectors=False):
+            if not self.omit_vectors:
+                return super().retrieve(collection, ids, with_payload=with_payload, with_vectors=with_vectors)
             wanted = {str(i) for i in ids}
             return [
                 SimpleNamespace(id=p.id, payload=p.payload, vector=None)
@@ -417,6 +421,7 @@ def test_incomplete_metadata_transfer_never_publishes(tmp_path, monkeypatch):
     live_points = list(fake.collections[live])
     live_completions = list(fake.collections[f"{live}__completions"])
 
+    fake.omit_vectors = True  # Inject the transfer fault after the initial verified publication.
     staging = "mainframe_manuals__gen00112233445566778899"
     with pytest.raises(RuntimeError, match="staging metadata transfer failed"):
         ensure_staging(fake, _settings(), _staging_settings(staging), live)
