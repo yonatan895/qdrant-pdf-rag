@@ -91,8 +91,7 @@ def test_dev_collection_allowed_without_rc():
 
 # ------------------------------------------------------- entry-point wiring
 def test_eval_answers_refuses_holdout_without_rc(monkeypatch, capfd):
-    import scripts.eval_answers as ea
-
+    import mainframe_rag.eval.answers as ea
     from mainframe_rag.config import Settings
 
     monkeypatch.delenv("VENUE", raising=False)
