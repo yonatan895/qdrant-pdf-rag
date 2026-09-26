@@ -20,25 +20,25 @@ tasks:
       - '.venv/bin/python scripts/agent_doctor.py --python .venv/bin/python'
 
   lint:
-    desc: Run ruff lint over src and tests
+    desc: Run ruff lint over src, tests and scripts/ai_worker.py
     summary: |
-      Runs `.venv/bin/python -m ruff check src tests` (same tool and scope as
-      the retired `make lint`). Fails closed when `.venv/bin/python` is absent — run
+      Runs `.venv/bin/python -m ruff check src tests scripts/ai_worker.py` (same tool and scope as
+      the retired `make lint`, plus the issue-#468 stdlib-only controller). Fails closed when `.venv/bin/python` is absent — run
       `task dev:setup` explicitly. Never creates or mutates the environment.
       No network, Docker, model or credentials required.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - '.venv/bin/python -m ruff check src tests'
+      - '.venv/bin/python -m ruff check src tests scripts/ai_worker.py'
 
   typecheck:
-    desc: Run mypy typecheck over src
+    desc: Run mypy typecheck over src and scripts/ai_worker.py
     summary: |
-      Runs `.venv/bin/python -m mypy src` (same tool and scope as
-      the retired `make typecheck`). Fails closed when `.venv/bin/python` is absent — run
+      Runs `.venv/bin/python -m mypy src scripts/ai_worker.py` (same tool and scope as
+      the retired `make typecheck`, plus the issue-#468 stdlib-only controller). Fails closed when `.venv/bin/python` is absent — run
       `task dev:setup` explicitly. Never creates or mutates the environment.
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - '.venv/bin/python -m mypy src'
+      - '.venv/bin/python -m mypy src scripts/ai_worker.py'
 
   unit:
     desc: Run the unit test suite (integration deselected by pyproject)

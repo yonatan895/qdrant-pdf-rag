@@ -462,6 +462,19 @@ let independent agents mutate the same workspace or redefine one contract.
 Supply each subagent its relevant task packet explicitly. No orchestration
 service is required by this workflow.
 
+<a id="ai-worker-delegation"></a>
+## AI worker delegation
+
+Delegation between Codex/Astra (planning, architecture, review) and OpenCode
+Go/DeepSeek (bounded implementation) follows the operational runbook in
+[docs/codex-opencode.md](codex-opencode.md).
+
+Astra resolves decisions and specifies the task packet; the OpenCode worker
+implements settled outcomes within an isolated worktree under safe permission
+defaults (`.opencode/agents/rag-implementer.md`). The trusted controller
+(`scripts/ai_worker.py`) enforces candidate capture, process timeouts, and
+deterministic verification; independent final review uses fresh Schema v1 evaluation.
+
 <a id="qdrant-skills"></a>
 ## Vendored Qdrant skills
 
