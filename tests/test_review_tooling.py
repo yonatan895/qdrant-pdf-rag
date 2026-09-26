@@ -89,6 +89,70 @@ class TestProfileClassification(unittest.TestCase):
                 self.assertEqual(decision.services, [])
                 self.assertIn("deploy", decision.matched_categories)
 
+    def test_evaluation_package_and_delegates_select_executable_tooling_lanes(self):
+        from scripts.review_tooling import required_lanes
+
+        expected = {"context_check", "lint_and_types", "unit_tests", "hazards",
+                    "simulation", "gate_l1"}
+        for path in ("src/mainframe_rag/eval/__init__.py",
+                     "src/mainframe_rag/eval/datasets.py",
+                     "src/mainframe_rag/eval/retrieval.py",
+                     "scripts/eval_retrieval.py", "scripts/harness_l1.py", "scripts/venue.py"):
+            with self.subTest(path=path):
+                decision = classify_paths([path])
+                self.assertEqual(decision.profile, ProfileName.OFFLINE)
+                self.assertEqual(decision.services, [])
+                manifest = {"profile": decision.profile.value,
+                            "matched_categories": decision.matched_categories,
+                            "changed_paths": [path]}
+                self.assertEqual(required_lanes(manifest), expected)
+                statuses = dict.fromkeys(expected, "success")
+                self.assertTrue(build_acceptance_summary(manifest, statuses).all_prerequisites_met)
+                for lane in expected:
+                    for status in (None, "failure", "skipped", "cancelled", "unverified"):
+                        missing = {key: value for key, value in statuses.items() if key != lane}
+                        if status is not None:
+                            missing[lane] = status
+                        self.assertFalse(build_acceptance_summary(manifest, missing).all_prerequisites_met,
+                                         (path, lane, status))
+
+    def test_evaluation_move_preserves_mixed_diff_obligations(self):
+        from scripts.review_tooling import required_lanes
+
+        # Both rename names are supplied by changed_pr_paths; retain the old
+        # instrument and new package obligations in the same decision.
+        moved = ["scripts/eval_retrieval.py", "src/mainframe_rag/eval/retrieval.py",
+                 "src/mainframe_rag/eval/datasets.py", "tests/test_eval_scoring.py"]
+        for extra, required in (
+            ([], {"simulation", "gate_l1", "unit_tests", "hazards"}),
+            (["src/mainframe_rag/retrieve/query.py"], {"eval_retrieval", "simulation", "gate_l1"}),
+            (["src/mainframe_rag/ingest/representation.py"], {"eval_retrieval", "simulation", "gate_l1"}),
+            (["images/Containerfile.agent"], {"packaging", "simulation", "gate_l1"}),
+            (["src/mainframe_rag/agent/app.py"], {"agent_probes", "simulation", "gate_l1"}),
+            (["src/mainframe_rag/new_module.py"], {"eval_retrieval", "packaging", "agent_probes"}),
+        ):
+            with self.subTest(extra=extra):
+                paths = moved + extra
+                decision = classify_paths(paths)
+                manifest = {"profile": decision.profile.value,
+                            "matched_categories": decision.matched_categories,
+                            "changed_paths": paths}
+                self.assertTrue(required <= required_lanes(manifest))
+                if not extra:
+                    self.assertNotIn("eval_retrieval", required_lanes(manifest))
+                    self.assertNotIn("unclassified", decision.matched_categories)
+
+    def test_evaluation_documentation_does_not_select_service_lanes(self):
+        from scripts.review_tooling import required_lanes
+
+        paths = ["src/mainframe_rag/eval/README.md"]
+        decision = classify_paths(paths)
+        lanes = required_lanes({"profile": decision.profile.value,
+                                "matched_categories": decision.matched_categories,
+                                "changed_paths": paths})
+        self.assertEqual(decision.profile, ProfileName.OFFLINE)
+        self.assertFalse({"simulation", "gate_l1", "eval_retrieval"} & lanes)
+
     def test_classify_empty_paths_fails_closed(self):
         # An empty change set means the diff could not be read (bad SHA,
         # shallow checkout). It must not silently downgrade to a docs review.
@@ -798,6 +862,29 @@ class TestCandidateAcceptanceSummary(unittest.TestCase):
 
 class TestReviewToolingCLI(unittest.TestCase):
     """Tests for CLI invocations and end-to-end command exits."""
+
+    def test_cli_evaluation_move_dispatches_the_required_native_lanes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = pathlib.Path(tmpdir) / "manifest.json"
+            output_path = pathlib.Path(tmpdir) / "github-output"
+            result = subprocess.run([
+                sys.executable, "scripts/review_tooling.py", "profile", "--files",
+                "scripts/eval_retrieval.py", "src/mainframe_rag/eval/retrieval.py",
+                "src/mainframe_rag/eval/datasets.py", "tests/test_eval_scoring.py",
+                "--out", str(manifest_path), "--github-output", str(output_path),
+            ], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(manifest_path.read_text())
+            outputs = dict(line.split("=", 1) for line in output_path.read_text().splitlines())
+            expected = ["context_check", "gate_l1", "hazards", "lint_and_types", "simulation", "unit_tests"]
+            self.assertEqual(manifest["profile"], "offline")
+            self.assertEqual(manifest["required_lanes"], expected)
+            self.assertEqual(json.loads(outputs["lanes"]), expected)
+            # The existing workflow must use lane dispatch, not the offline
+            # reviewer service profile, to run these two real consumers.
+            workflow = pathlib.Path(".github/workflows/ci.yml").read_text()
+            for lane in ("simulation", "gate_l1"):
+                self.assertIn(f"contains(fromJSON(needs.select.outputs.lanes), '{lane}')", workflow)
 
     def test_cli_profile_offline(self):
         with tempfile.TemporaryDirectory() as tmpdir:

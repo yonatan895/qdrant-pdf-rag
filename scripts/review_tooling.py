@@ -42,6 +42,7 @@ PROSE_PATTERNS = [
 
 TOOLING_PATTERNS = [
     "scripts/**",
+    "src/mainframe_rag/eval/**",
     "benchmarks/**",
     "vendor/**",
     "tests/test_agent_context.py",
@@ -945,6 +946,13 @@ def required_lanes(manifest: dict[str, Any]) -> set[str]:
     if profile_name in {ProfileName.STORAGE.value, ProfileName.FULL.value}:
         required_lanes.add("ha")
     paths = manifest.get("changed_paths", [])
+    # Evaluation is tooling regardless of its package location (#508).
+    # Exercise its real retrieval consumers as well as unit scoring tests;
+    # these synthetic lanes do not substitute for production semantic checks.
+    if any(_match_any(path, ["src/mainframe_rag/eval/**", "scripts/eval_retrieval.py",
+                            "scripts/harness_l1.py", "scripts/venue.py"])
+           and not path.replace("\\", "/").endswith((".md", ".markdown")) for path in paths):
+        required_lanes.update({"simulation", "gate_l1"})
     if any(_match_any(path, ["Taskfile.yml", "taskfiles/**", "scripts/tools/**", "requirements*.txt",
                               "locks/**", "scripts/dependency_lock.py", "scripts/prepare_python.py",
                               "scripts/agent_doctor.py", "scripts/ci_evidence.py", "scripts/review_tooling.py",
