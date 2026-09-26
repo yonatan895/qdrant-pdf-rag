@@ -651,6 +651,10 @@ def test_legacy_verification_refuses_corrupt_points_on_real_server(
     try:
         live, _ = resolve_live_collection(client, settings)
         assert live is not None
+        # The bridge concerns completed pre-build generations, not mutation of
+        # newly sealed content. Construct that format explicitly on real storage.
+        from tests.test_ingest_publish import _make_completed_legacy_fixture
+        _make_completed_legacy_fixture(client, live, PUBLISH_ALIAS)
         rules_v = extraction_rules_version()
         point_id = "00000000-0000-0000-0000-000000000392"
         legacy_doc_id = "SA22-7777-01"
@@ -1708,6 +1712,21 @@ def test_full_build_identity_survives_real_sealed_retry(qdrant_url, tmp_path, mo
     client = QdrantClient(url=qdrant_url, timeout=30)
     try:
         _exercise_build_uuid_recovery(tmp_path, monkeypatch, client, PUBLISH_ALIAS)
+    finally:
+        client.close()
+        _drop_publish_fixture(qdrant_url)
+
+
+@pytest.mark.parametrize("damage", ["lost-document", "dense", "sparse"])
+def test_retained_content_seal_detects_real_stored_content_loss(qdrant_url, tmp_path, monkeypatch, damage):
+    from qdrant_client import QdrantClient
+
+    from tests.test_ingest_publish import _exercise_retained_content_seal
+
+    _drop_publish_fixture(qdrant_url)
+    client = QdrantClient(url=qdrant_url, timeout=30)
+    try:
+        _exercise_retained_content_seal(tmp_path, monkeypatch, client, PUBLISH_ALIAS, damage)
     finally:
         client.close()
         _drop_publish_fixture(qdrant_url)

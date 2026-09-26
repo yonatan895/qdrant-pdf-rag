@@ -70,6 +70,7 @@ from mainframe_rag.ingest.placement import (
     member_peer_ids,
     observe_collection,
 )
+from mainframe_rag.ingest.seal import capture_content_seal
 from mainframe_rag.ports import QdrantPoints
 
 
@@ -376,6 +377,11 @@ def write_publication_metadata(
             raise ValueError("new builds require their logical alias")
         build_fields = {"build_schema": BUILD_SCHEMA, "build_id": canonical_build_id(build_id),
                         "logical_alias": logical_alias, "data_collection": settings.qdrant_collection}
+        build_fields["content_seal"] = capture_content_seal(
+            client, build_id=build_id, alias=logical_alias, physical=settings.qdrant_collection,
+            gen_fp=gen_fp, corpus_fp=corpus_fp,
+            receipt_id=publication_metadata_point_id(completions_collection),
+        )
     client.upsert(
         completions_collection,
         points=[
@@ -413,6 +419,28 @@ def read_publication_record(client: QdrantPoints, completions_collection: str) -
     except (ValueError, TypeError) as exc:
         raise RuntimeError("invalid or unsupported build control record") from exc
     return payload
+
+
+def verify_publication_seal(client: QdrantPoints, completions_collection: str) -> bool:
+    """Compare retained content independently of surviving completions/inventory.
+
+    Older completed receipts remain readable, without acquiring this capability.
+    A future rollback consumer must require True, never backfill a missing seal.
+    """
+    payload = read_publication_record(client, completions_collection)
+    if payload is None or "content_seal" not in payload:
+        return False
+    binding = decode_build_binding(payload, completions_collection)
+    if binding is None:
+        raise RuntimeError("content seal lacks build identity")
+    observed = capture_content_seal(
+        client, build_id=binding.build_id, alias=binding.alias, physical=binding.physical,
+        gen_fp=binding.gen_fp, corpus_fp=binding.corpus_fp,
+        receipt_id=publication_metadata_point_id(completions_collection),
+    )
+    if observed != payload["content_seal"]:
+        raise RuntimeError("stored build content does not match its seal")
+    return True
 
 
 def read_build_binding(client: QdrantPoints, completions_collection: str) -> BuildBinding | None:

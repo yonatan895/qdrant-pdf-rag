@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from qdrant_client import models
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest.publish import (
@@ -397,7 +398,11 @@ def test_incomplete_metadata_transfer_never_publishes(tmp_path, monkeypatch):
     from mainframe_rag.ingest.publish import ensure_staging
 
     class _NoVectorStore(PublishFake):
+        omit_vectors = False
+
         def retrieve(self, collection, ids, *, with_payload=True, with_vectors=False):
+            if not self.omit_vectors:
+                return super().retrieve(collection, ids, with_payload=with_payload, with_vectors=with_vectors)
             wanted = {str(i) for i in ids}
             return [
                 SimpleNamespace(id=p.id, payload=p.payload, vector=None)
@@ -416,6 +421,7 @@ def test_incomplete_metadata_transfer_never_publishes(tmp_path, monkeypatch):
     live_points = list(fake.collections[live])
     live_completions = list(fake.collections[f"{live}__completions"])
 
+    fake.omit_vectors = True  # Inject the transfer fault after the initial verified publication.
     staging = "mainframe_manuals__gen00112233445566778899"
     with pytest.raises(RuntimeError, match="staging metadata transfer failed"):
         ensure_staging(fake, _settings(), _staging_settings(staging), live)
@@ -2067,6 +2073,7 @@ def test_walked_doc_unapproved_legacy_stray_refuses(tmp_path, monkeypatch):
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
+    _make_completed_legacy_fixture(fake, live)
 
     fake.collections[live].append(
         SimpleNamespace(id="stray-a", payload={"doc_id": DOC_A, "text": "pre-361B"})
@@ -2095,6 +2102,7 @@ def test_walked_doc_approved_legacy_stray_publishes(tmp_path, monkeypatch):
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
+    _make_completed_legacy_fixture(fake, live)
 
     rules_v = extraction_rules_version()
     legacy_pt = SimpleNamespace(
@@ -2123,6 +2131,7 @@ def test_walked_doc_approved_legacy_unexpected_chunk_id_refuses(tmp_path, monkey
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
+    _make_completed_legacy_fixture(fake, live)
 
     rules_v = extraction_rules_version()
     expected_pt = SimpleNamespace(
@@ -2155,6 +2164,7 @@ def test_walked_doc_approved_legacy_altered_text_refuses(tmp_path, monkeypatch):
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
+    _make_completed_legacy_fixture(fake, live)
 
     rules_v = extraction_rules_version()
     expected_pt = SimpleNamespace(
@@ -2196,6 +2206,7 @@ def test_walked_doc_approved_legacy_incompatible_rules_refuses(tmp_path, monkeyp
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
+    _make_completed_legacy_fixture(fake, live)
 
     legacy_pt = SimpleNamespace(
         id="legacy-a",
@@ -2223,6 +2234,7 @@ def test_walked_doc_approved_legacy_extra_chunk_refuses(tmp_path, monkeypatch):
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
+    _make_completed_legacy_fixture(fake, live)
 
     rules_v = extraction_rules_version()
     pt1 = SimpleNamespace(
@@ -2266,6 +2278,7 @@ def test_walked_doc_legacy_no_digests_fails_closed_with_reingest(tmp_path, monke
     progress = tmp_path / "inv.jsonl"
     assert _run_main(monkeypatch, corpus, progress) == 0
     live = fake.aliases[ALIAS]
+    _make_completed_legacy_fixture(fake, live)
 
     rules_v = extraction_rules_version()
     legacy_pt = SimpleNamespace(
@@ -2588,6 +2601,7 @@ def test_retire_revision_a_while_retaining_and_walking_revision_b_succeeds(tmp_p
     _build_doc_with_id(corpus, "doc_b", DOC_B)
     assert _run_main(monkeypatch, corpus, progress) == 0
     live_1 = fake.aliases[ALIAS]
+    _make_completed_legacy_fixture(fake, live_1)
     inv_1 = load_inventory(progress)
     rev_a = inv_1[str(a_path)].source_rev
     assert rev_a is not None
@@ -2598,6 +2612,7 @@ def test_retire_revision_a_while_retaining_and_walking_revision_b_succeeds(tmp_p
     rules_v = extraction_rules_version()
     legacy_pt = SimpleNamespace(
         id="legacy-doc-a",
+        vector={"dense": [0.25] * 256, "bm25": models.SparseVector(indices=[3], values=[0.5])},
         payload={
             "doc_id": DOC_A,
             "sha256": "a" * 64,
@@ -2732,6 +2747,7 @@ def test_retire_revision_a_with_deleted_legacy_sibling_fails_verification(tmp_pa
     rules_v = extraction_rules_version()
     legacy_pt = SimpleNamespace(
         id="legacy-doc-a",
+        vector={"dense": [0.25] * 256, "bm25": models.SparseVector(indices=[3], values=[0.5])},
         payload={
             "doc_id": DOC_A,
             "sha256": "a" * 64,
@@ -2788,6 +2804,7 @@ def test_whole_doc_retire_deletes_both_named_and_legacy_history(tmp_path, monkey
     rules_v = extraction_rules_version()
     legacy_pt = SimpleNamespace(
         id="legacy-doc-a",
+        vector={"dense": [0.25] * 256, "bm25": models.SparseVector(indices=[3], values=[0.5])},
         payload={
             "doc_id": DOC_A,
             "sha256": "a" * 64,
@@ -3862,7 +3879,7 @@ def _exercise_build_uuid_recovery(tmp_path, monkeypatch, fake, alias):
     receipts = [p for p, _ in frozen[1].values() if p.get("record_type") == "publication-metadata"]
     assert len(receipts) == 1
     assert receipts[0]["build_id"] == build_id
-    assert receipts[0]["build_schema"] == 1
+    assert receipts[0]["build_schema"] == 2
     assert receipts[0]["data_collection"] == physical
     assert receipts[0]["logical_alias"] == alias
 
@@ -4059,3 +4076,275 @@ def test_new_allocation_never_reuses_orphan_controls():
                                 live=None, force_reingest=False, state=None)
     assert _fresh_staging_candidate(fake, base, None) == base + "_2"
     assert fake.collections == before
+
+
+def _make_completed_legacy_fixture(client, physical, alias=ALIAS):
+    """Legacy coverage tests predate build certificates; construct that exact format."""
+    from mainframe_rag.ingest.publish import publication_metadata_point_id
+
+    control = physical + "__completions"
+    record = client.retrieve(control, [publication_metadata_point_id(control)],
+                             with_payload=True, with_vectors=True)[0]
+    payload = dict(record.payload)
+    for key in ("build_schema", "build_id", "logical_alias", "data_collection", "content_seal"):
+        payload.pop(key, None)
+    client.upsert(control, points=[models.PointStruct(id=record.id, payload=payload, vector=record.vector)], wait=True)
+    operations = [models.DeleteAliasOperation(delete_alias=models.DeleteAlias(alias_name=a.alias_name))
+                  for a in client.get_aliases().aliases
+                  if a.alias_name.startswith(alias + "__build_") and
+                  a.collection_name in (physical, control)]
+    if operations:
+        client.update_collection_aliases(operations)
+
+
+@pytest.mark.parametrize("damage", ["lost-document", "text", "dense", "sparse", "control", "seal-missing", "seal-schema"])
+def test_sealed_content_damage_refuses_retry_without_mutation(tmp_path, monkeypatch, damage):
+    import json
+    from copy import deepcopy
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publication_metadata_point_id, publish_state_path
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _two_doc_corpus(corpus)
+    progress = tmp_path / "inventory.jsonl"
+    fake.fail_swap = "raise"
+    with pytest.raises(RuntimeError, match="injected swap failure"):
+        _run_main(monkeypatch, corpus, progress)
+    sidecar = publish_state_path(progress, ALIAS)
+    physical = json.loads(sidecar.read_text())["staging"]
+    control = physical + "__completions"
+    receipt = next(p for p in fake.collections[control] if str(p.id) == publication_metadata_point_id(control))
+    if damage == "lost-document":
+        for name in (physical, control):
+            fake.collections[name] = [p for p in fake.collections[name] if p.payload.get("doc_id") != DOC_A]
+    elif damage == "text":
+        fake.collections[physical][0].payload["text"] = "Unexpected replacement"
+    elif damage == "dense":
+        fake.collections[physical][0].vector["dense"][0] += 0.25
+    elif damage == "sparse":
+        fake.collections[physical][0].vector["bm25"].values[0] += 0.5
+    elif damage == "control":
+        next(p for p in fake.collections[control] if p.payload.get("doc_id") == DOC_A).payload["finished_at"] += 1
+    elif damage == "seal-missing":
+        del receipt.payload["content_seal"]
+    else:
+        receipt.payload["content_seal"]["schema"] = 999
+    before = deepcopy(fake.collections), dict(fake.aliases), sidecar.read_bytes(), progress.read_bytes()
+    fake.fail_swap = None
+    with pytest.raises(RuntimeError, match="seal|build control"):
+        _run_main(monkeypatch, corpus, progress, "--reingest")
+    assert (fake.collections, fake.aliases, sidecar.read_bytes(), progress.read_bytes()) == before
+
+
+def _exercise_retained_content_seal(tmp_path, monkeypatch, client, alias, damage):
+    from qdrant_client import models
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import verify_publication_seal
+    from tests.helpers_publication_lifecycle import TEXTS, _records, _write_source
+
+    _publish_env(monkeypatch)
+    monkeypatch.setenv("QDRANT_COLLECTION", alias)
+    monkeypatch.setenv("DENSE_DIM", "256")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "")
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: client)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    for name, text in TEXTS.items():
+        _write_source(corpus, name, text)
+    progress = tmp_path / "inventory.jsonl"
+    def target():
+        return next(a.collection_name for a in client.get_aliases().aliases if a.alias_name == alias)
+
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    retained = target()
+    control = retained + "__completions"
+    original = _records(client, retained)
+    assert sorted((p["doc_id"], p["text"]) for p, _ in original.values()) == sorted(TEXTS.items())
+    assert verify_publication_seal(client, control) is True
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    current = target()
+    assert current != retained
+    assert _records(client, retained) == original
+    assert verify_publication_seal(client, control) is True
+    current_before = (_records(client, current), _records(client, current + "__completions"))
+    receipt_before = {i: value for i, value in _records(client, control).items()
+                      if value[0].get("record_type") == "publication-metadata"}
+    if damage == "lost-document":
+        # Remove a whole intended member AND its completion. Surviving markers
+        # cannot establish what is missing; the retained seal can.
+        for collection in (retained, control):
+            ids = [i for i, (payload, _) in _records(client, collection).items() if payload.get("doc_id") == "beta"]
+            assert ids
+            client.delete(collection, points_selector=models.PointIdsList(points=ids), wait=True)
+        assert [(p["doc_id"], p["text"]) for p, _ in _records(client, retained).values()] == [("alpha", TEXTS["alpha"])]
+    else:
+        point_id, (payload, vector) = next(iter(original.items()))
+        vector = dict(vector)
+        if damage == "dense":
+            vector["dense"] = [1.0] + [0.0] * 255
+        else:
+            assert damage == "sparse"
+            vector["bm25"] = models.SparseVector(indices=[2147483646], values=[9.0])
+        client.upsert(retained, points=[models.PointStruct(id=point_id, payload=payload, vector=vector)], wait=True)
+        observed = _records(client, retained)
+        assert {i: p for i, (p, _) in observed.items()} == {i: p for i, (p, _) in original.items()}
+        assert observed[point_id][1]["dense" if damage == "dense" else "bm25"] != original[point_id][1]["dense" if damage == "dense" else "bm25"]
+    damaged = (_records(client, retained), _records(client, control))
+    assert {i: value for i, value in damaged[1].items()
+            if value[0].get("record_type") == "publication-metadata"} == receipt_before
+    with pytest.raises(RuntimeError, match="does not match its seal"):
+        verify_publication_seal(client, control)
+    assert (_records(client, retained), _records(client, control)) == damaged
+    for _ in range(2):
+        assert _run_main(monkeypatch, corpus, progress) == 0
+        assert target() == current
+        assert (_records(client, current), _records(client, current + "__completions")) == current_before
+        assert (_records(client, retained), _records(client, control)) == damaged
+
+
+@pytest.mark.parametrize("damage", ["lost-document", "dense", "sparse"])
+def test_retained_seal_detects_stored_content_loss(tmp_path, monkeypatch, damage):
+    _exercise_retained_content_seal(tmp_path, monkeypatch, PublishFake(), ALIAS, damage)
+
+
+def test_content_seal_canonical_projection_and_pagination():
+    import hashlib
+    import json
+    import uuid
+
+    from qdrant_client import models
+
+    from mainframe_rag.ingest.seal import capture_content_seal
+
+    data_id = "12345678-1234-4234-8234-123456789abc"
+    point = models.Record(id=data_id, payload={"text": "Alpha\nβ", "n": 2},
+                          vector={"dense": [0.25, -0.5], "bm25": models.SparseVector(indices=[3], values=[1.5])})
+    fake = PublishFake()
+    fake.collections = {"physical": [point], "physical__completions": []}
+    args = {"build_id": data_id, "alias": "corpus | x", "physical": "physical", "gen_fp": "g", "corpus_fp": "c", "receipt_id": "receipt"}
+    seal = capture_content_seal(fake, **args)
+    # Independent literal serialization: catches omission of vectors, payload,
+    # identity, whitespace, Unicode or the whole binding from the certificate.
+    literal = b'["12345678-1234-4234-8234-123456789abc",{"n":2,"text":"Alpha\\n\\u03b2"},{"bm25":{"indices":[3],"values":[1.5]},"dense":[0.25,-0.5]}]'
+    prefix = b'["build-content-seal",1,["12345678-1234-4234-8234-123456789abc","corpus | x","physical","g","c"],"data",1]'
+    assert seal["data"] == {"count": 1, "sha256": hashlib.sha256(prefix + hashlib.sha256(literal).digest()).hexdigest()}
+    # More than one page; traversal and object-key order do not change the root.
+    fake.collections["physical"] = [point.model_copy(update={"id": str(uuid.UUID(int=n+1))}) for n in range(300)]
+    many = capture_content_seal(fake, **args)
+    assert many["data"]["count"] == 300
+    fake.collections["physical"].reverse()
+    for p in fake.collections["physical"]:
+        p.payload = json.loads('{"n":2,"text":"Alpha\\nβ"}')
+    assert capture_content_seal(fake, **args) == many
+    assert capture_content_seal(fake, **{**args, "build_id": "another"}) != many
+
+
+@pytest.mark.parametrize("damage", ["projection", "nonfinite", "duplicate", "offset-loop"])
+def test_content_seal_refuses_incomplete_scan(damage):
+    from qdrant_client import models
+
+    from mainframe_rag.ingest.seal import capture_content_seal
+
+    point = SimpleNamespace(id="12345678-1234-4234-8234-123456789abc", payload={"text": "Original"}, vector={"dense": [0.25], "bm25": models.SparseVector(indices=[1], values=[1.0])})
+    fake = PublishFake()
+    fake.collections = {"physical": [point], "physical__completions": []}
+    if damage == "projection":
+        point.vector = None
+    elif damage == "nonfinite":
+        point.vector["dense"][0] = float("nan")
+    elif damage == "duplicate":
+        fake.collections["physical"].append(point)
+    else:
+        fake.scroll = lambda *a, **kw: ([point], "never-progresses")
+    with pytest.raises(ValueError):
+        capture_content_seal(fake, build_id="b", alias="a", physical="physical", gen_fp="g", corpus_fp="c", receipt_id="receipt")
+
+
+def test_completed_binding_without_seal_is_not_retroactively_certified(tmp_path, monkeypatch):
+    from copy import deepcopy
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import verify_publication_seal
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    physical = fake.aliases[ALIAS]
+    control = physical + "__completions"
+    receipt = next(p for p in fake.collections[control] if p.payload.get("record_type") == "publication-metadata")
+    receipt.payload["build_schema"] = 1
+    del receipt.payload["content_seal"]
+    before = deepcopy(fake.collections), dict(fake.aliases)
+    assert verify_publication_seal(fake, control) is False
+    assert _run_main(monkeypatch, corpus, progress) == 0
+    assert (fake.collections, fake.aliases) == before
+    assert _run_main(monkeypatch, corpus, progress, "--reingest") == 0
+    assert fake.aliases[ALIAS] != physical
+    assert verify_publication_seal(fake, fake.aliases[ALIAS] + "__completions") is True
+    assert fake.collections[physical] == before[0][physical]
+    assert fake.collections[control] == before[0][control]
+
+
+@pytest.mark.parametrize("damage", ["missing-receipt", "corrupt-seal"])
+def test_publication_verifies_receipt_readback_before_cutover(tmp_path, monkeypatch, damage):
+    from mainframe_rag.ingest import run_ingest
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    upsert = fake.upsert
+    def lose_receipt(collection, *, points, wait=True):
+        if any(p.payload.get("record_type") == "publication-metadata" for p in points):
+            if damage == "missing-receipt":
+                return SimpleNamespace()
+            points[0].payload["content_seal"]["data"]["sha256"] = "0" * 64
+        return upsert(collection, points=points, wait=wait)
+    monkeypatch.setattr(fake, "upsert", lose_receipt)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    with pytest.raises(RuntimeError, match="seal"):
+        _run_main(monkeypatch, corpus, progress)
+    assert not fake.aliases and not fake.alias_calls
+
+
+def test_unfinished_schema_one_sealed_build_requires_its_old_release(tmp_path, monkeypatch):
+    import json
+    from copy import deepcopy
+
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.publish import publish_state_path
+
+    _publish_env(monkeypatch)
+    fake = PublishFake()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _build_doc_with_id(corpus, "doc_a", DOC_A)
+    progress = tmp_path / "inventory.jsonl"
+    fake.fail_swap = "raise"
+    with pytest.raises(RuntimeError, match="injected swap failure"):
+        _run_main(monkeypatch, corpus, progress)
+    sidecar = publish_state_path(progress, ALIAS)
+    control = json.loads(sidecar.read_text())["staging"] + "__completions"
+    receipt = next(p for p in fake.collections[control] if p.payload.get("record_type") == "publication-metadata")
+    receipt.payload["build_schema"] = 1
+    del receipt.payload["content_seal"]
+    before = deepcopy(fake.collections), sidecar.read_bytes(), progress.read_bytes()
+    fake.fail_swap = None
+    with pytest.raises(RuntimeError, match="old-format"):
+        _run_main(monkeypatch, corpus, progress)
+    assert (fake.collections, sidecar.read_bytes(), progress.read_bytes()) == before
+    assert not fake.aliases

@@ -113,7 +113,7 @@ Never rebind an existing build alias to a new build or use a current alias to
 repair an old reference. This extends the existing alias publication operation;
 it adds no second database or general catalogue service.
 
-The L1 writer introduces publication sidecar version 2 and build binding schema 1
+The L1 writer introduces publication sidecar version 2 and build binding schema 2
 independently of E1's future per-chunk evidence envelope. The full UUID is recorded
 under the target writer lock before collection writes, then stored with logical
 corpus, physical data/control pairing and input fingerprints in the verified
@@ -155,6 +155,18 @@ remain unsupported; a local file lock and RWO volume are not distributed locks.
 | published → retained | Successor publication changes the ordinary alias, not old content/control/build aliases. | Admitted old readers and old refs remain bound to the old build, subject to current access policy. |
 | retained → retiring → retired | Explicit policy-authorized retirement blocks new admissions first; drain all admitted readers; verify retention/recovery obligations; persist a retired tombstone in the paired control collection before deleting data and its build alias. Retain the control alias and minimal per-chunk revision/digest/location metadata needed to authorize and distinguish retired references. Purging these records requires a separately approved tombstone horizon. | No drain/retention proof: refuse deletion. Tombstones must not disclose existence to unauthorized callers. #391 owns enforcement, #373 disclosure and #360 restore. |
 | retained → serving rollback | Verify old data/control/schema, compatible executable/model/config and policy; swap ordinary alias under the same writer boundary. | Incompatible/missing artifacts refuse; no fallback to other vectors or regenerated text. |
+
+New build schema-2 receipts retain a versioned content seal over the complete
+verified stored data and non-receipt controls, including vectors. Publication
+and retry enforcement lives in [ingest publication](ingest.md#publication-contract).
+This preserves the expected member set independently of surviving completion
+records; deleting a revision and its completion cannot erase its membership
+from the seal. Completed older builds remain readable without this capability;
+there is no retroactive certification. The read-only seal verifier distinguishes
+absence from a match and raises on mismatch. A future administrative rollback
+must require the match **and** the schema/executable/config/placement/policy
+checks above. The seal alone is not a rollback or disposal operation, an access
+grant, or proof of backup/recovery obligations.
 
 No automatic GC is introduced. Retain current, previous and any generation
 needed by an admitted reader or explicit evidence obligation. Capacity preflight
@@ -231,7 +243,9 @@ read_evidence(caller=trusted_context, reference=opaque_ref, budget=caller_budget
 | Stored/API version | Existing consumers | New exact-evidence service | Write/migration rule |
 |---|---|---|---|
 | Current representation/completion formats, no full build/evidence record | Preserve existing supported search/answer behavior. | Cannot mint v1 refs; explicit capability unavailable. | Explicit verified new-generation publication; never invent missing provenance in place. |
-| v1 build/evidence controls and `e1.` ref | Existing routes remain additive-compatible only after their schema checks pass. | Exact read only after full controls, digest and current-access checks. | One writer emits v1 after reviewed schema introduction; chunk UUID5 and vocabulary remain unchanged. |
+| Future v1 evidence controls and `e1.` ref | Existing routes remain additive-compatible only after their schema checks pass. | Exact read only after full controls, digest and current-access checks. | One writer emits v1 after reviewed schema introduction; chunk UUID5 and vocabulary remain unchanged. |
+| Completed build binding schema 1, no content seal | Preserve validated published/retained reads. | Build identity alone does not supply complete immutable evidence. | Never backfill a seal; publish a newly verified successor for that capability. Unpublished sealed candidates require the matching old release or explicit abandonment. |
+| Build binding schema 2 with content-seal schema 1 | Supporting readers require a well-formed mandatory seal and valid immutable aliases; they do not rescan the corpus on each request. | No exact-read API is introduced by this storage certificate. | Publication/steady verification compare the full stored seal; future administrative rollback must additionally validate compatibility and policy. |
 | Unfinished v1 publication sidecar from the old writer | Completed legacy generations remain readable; unfinished candidates are not adopted. | No reference capability is inferred. | The new writer refuses without mutation. Finish with the matching old release, or explicitly abandon the candidate and allocate a newly verified build. |
 | Unknown mandatory control/ref version | No interpretation by field resemblance. | Refuse before serving. | Explicit migration/qualified executable pair, never silently downgrade controls. |
 | Retained previous release/build | Serve only its tested executable/config/schema combination. | Old references resolve only if that reader supports their version and retained bytes. | Restore matching artifacts/config together; record the actual supported previous pair at release qualification. |

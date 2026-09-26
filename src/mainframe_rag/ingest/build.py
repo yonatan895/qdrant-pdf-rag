@@ -6,7 +6,9 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-BUILD_SCHEMA = 1
+from mainframe_rag.ingest.seal import decode_content_seal
+
+BUILD_SCHEMA = 2
 
 
 def canonical_build_id(value: object) -> str:
@@ -49,8 +51,10 @@ def decode_build_binding(payload: dict, control: str) -> BuildBinding | None:
     """Absent build fields mean the supported pre-build format, never a new ID."""
     fields = {"build_schema", "build_id", "logical_alias", "data_collection"}
     if not fields.intersection(payload):
+        if "content_seal" in payload:
+            raise ValueError("content seal lacks build identity")
         return None
-    if type(payload.get("build_schema")) is not int or payload["build_schema"] != BUILD_SCHEMA:
+    if type(payload.get("build_schema")) is not int or payload["build_schema"] not in (1, BUILD_SCHEMA):
         raise ValueError("unsupported build schema")
     if (
         payload.get("record_type") != "publication-metadata"
@@ -62,6 +66,10 @@ def decode_build_binding(payload: dict, control: str) -> BuildBinding | None:
             raise ValueError("invalid build control fields")
     if payload["data_collection"] + "__completions" != control:
         raise ValueError("invalid build control pair")
+    if payload["build_schema"] == BUILD_SCHEMA and "content_seal" not in payload:
+        raise ValueError("build lacks mandatory content seal")
+    if "content_seal" in payload:
+        decode_content_seal(payload["content_seal"])
     return BuildBinding(
         canonical_build_id(payload.get("build_id")),
         payload["logical_alias"],

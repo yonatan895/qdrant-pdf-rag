@@ -174,9 +174,10 @@ async def test_gate_zero_ttl_validates_every_request_and_caches_refusals(monkeyp
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("damage", [None, "version", "uuid", "pair", "logical", "missing-record",
-                                    "missing-data-alias", "missing-control-alias", "redirect-control"])
+                                    "missing-data-alias", "missing-control-alias", "redirect-control", "seal-missing", "seal-schema", "seal-count"])
 @pytest.mark.parametrize("direct", [False, True])
-async def test_serving_requires_full_published_build_pair(damage, direct):
+@pytest.mark.parametrize("schema", [1, 2])
+async def test_serving_requires_full_published_build_pair(damage, direct, schema):
     s = _settings()
     alias = s.qdrant_collection
     physical = alias + "__gen_build_test"
@@ -185,8 +186,18 @@ async def test_serving_requires_full_published_build_pair(damage, direct):
     data_alias = alias + "__build_" + build_id
     control_alias = data_alias + "__completions"
     payload = {"record_type": "publication-metadata", "target_collection": control,
-               "build_schema": 1, "build_id": build_id, "logical_alias": alias,
+               "build_schema": schema, "build_id": build_id, "logical_alias": alias,
                "data_collection": physical, "gen_fp": "recipe", "corpus_fp": "corpus"}
+    if schema == 2 or (damage and damage.startswith("seal-")):
+        payload["build_schema"] = 2
+        payload["content_seal"] = {"schema": 1, "data": {"count": 1, "sha256": "a" * 64},
+                                   "control": {"count": 2, "sha256": "b" * 64}}
+    if damage == "seal-missing":
+        del payload["content_seal"]
+    elif damage == "seal-schema":
+        payload["content_seal"]["schema"] = 999
+    elif damage == "seal-count":
+        payload["content_seal"]["data"]["count"] = True
     qd = AliasQdrant(
         aliases={alias: physical, data_alias: physical, control_alias: control},
         manifests={control: manifest_envelope(s, RULES, control)},
