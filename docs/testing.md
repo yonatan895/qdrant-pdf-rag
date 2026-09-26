@@ -314,6 +314,20 @@ drain. These traces do not qualify automatic GC, unknown legacy formats,
 distributed snapshot restore, entitlement/revocation, real-model quality or
 production failure domains; those retain their separate acceptance owners.
 
+The process-death matrix in `test_integration_sim.py` runs a separate publisher
+against pinned Qdrant and terminates it after acknowledged sidecar, corpus/control
+clone, re-key, pending/committed manifest, completion invalidation, revision delete,
+point upsert, completion, progress, removal, receipt,
+cutover, partial retirement-inventory and cleanup boundaries. Test-only wrappers
+call the real operation before `os._exit`; no product fault switches or replacement
+storage results are used. Retry must publish the recorded build, preserve the
+retained corpus/control pair, match independently specified literal membership,
+and leave two subsequent ordinary runs stable. A stopped live publisher also
+holds the actual target lock while a second process is refused; killing the owner
+must allow recovery. Tests own and clean up their process groups, including pool
+workers. This qualifies publisher process death on one host with a shared progress
+directory, not power-loss durability, multi-host exclusion or distributed restore.
+
 ### C. Equivalent validation; explicit emission/commit boundaries
 
 Use a compact table for buffered/streaming or sync/async paths that implement the same validation rule. Include an error that coexists with a success-shaped field, wrong field types, and a healthy control. Expected verdicts must be independently specified.
