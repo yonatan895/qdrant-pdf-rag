@@ -598,7 +598,7 @@ def resolve_publish_staging(
 def ensure_staging(
     client: QdrantPoints, settings: Settings, staging_settings: Settings, live: str | None
 ) -> str:
-    """Prepare the staging generation; returns reused | repaired | cloned | fresh.
+    """Prepare staging; returns sealed | reused | repaired | cloned | fresh.
 
     Reuse is safe by construction: the converge pipeline re-verifies every
     document (PR-1 logic), so partial or older staging states heal instead
@@ -620,6 +620,10 @@ def ensure_staging(
     from mainframe_rag.ingest.representation import read_manifest
 
     staging = staging_settings.qdrant_collection
+    # A verified build is immutable even if preparation is called directly.
+    # Its caller revalidates coverage/placement instead of repairing metadata.
+    if read_build_binding(client, completion_collection_for(staging)) is not None:
+        return "sealed"
     if client.collection_exists(staging):
         staging_completions = completion_collection_name(staging_settings)
         if read_manifest(client, staging_completions) is not None:

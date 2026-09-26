@@ -1640,9 +1640,10 @@ def _run_publish_locked(
     )
     if resumed:
         log.info(json.dumps({"action": "publish_resume", "alias": alias, "staging": staging}))
-    mode = "sealed"
+    mode = ensure_staging(client, settings, staging_settings, live)
+    if sealed != (mode == "sealed"):
+        raise RuntimeError("candidate build state changed during preparation; refusing mutation")
     if not sealed:
-        mode = ensure_staging(client, settings, staging_settings, live)
         log.info(
             json.dumps(
                 {
