@@ -59,7 +59,7 @@ async def test_resolve_binds_physical_and_reads_its_own_metadata():
     )
     got, outcome, details = await resolve_serving_generation(qd, s, RULES)
     assert (got, outcome, details) == (physical, "compatible", [])
-    assert qd.retrieved == [f"{physical}__completions"] * 2, "alias-derived metadata was read"
+    assert qd.retrieved == [f"{physical}__completions"], "alias-derived metadata was read"
     assert qd.writes == [], "resolution and validation must stay read-only"
 
 
@@ -130,7 +130,7 @@ async def test_gate_caches_within_ttl_and_revalidates(monkeypatch):
         calls.append(settings.qdrant_collection)
         return "physical-1", "compatible", []
 
-    monkeypatch.setattr(serving_mod, "resolve_serving_generation", fake_resolve)
+    monkeypatch.setattr(serving_mod, "resolve_published_generation", fake_resolve)
     s = _settings()
     gate = serving_mod.ServingGate(ttl_s=5.0)
 
@@ -163,7 +163,7 @@ async def test_gate_zero_ttl_validates_every_request_and_caches_refusals(monkeyp
         calls.append(1)
         return "physical-1", "pending", []
 
-    monkeypatch.setattr(serving_mod, "resolve_serving_generation", fake_resolve)
+    monkeypatch.setattr(serving_mod, "resolve_published_generation", fake_resolve)
     s = _settings()
     gate = serving_mod.ServingGate(ttl_s=0.0)
     generation = await gate.generation(object(), s, RULES)
@@ -209,8 +209,47 @@ async def test_serving_requires_full_published_build_pair(damage, direct):
     elif damage == "redirect-control":
         qd.aliases[control_alias] = "wrong__completions"
     configured = s.model_copy(update={"qdrant_collection": physical}) if direct else s
-    got, outcome, details = await resolve_serving_generation(qd, configured, RULES)
-    assert got == physical
-    assert outcome == ("compatible" if damage is None else "unknown")
-    assert details == ([] if damage is None else ["build_control"])
+    from mainframe_rag.agent.serving import ServingGate
+
+    generation = await ServingGate(ttl_s=0).generation(qd, configured, RULES)
+    assert generation.physical == physical
+    assert generation.outcome == ("compatible" if damage is None else "unknown")
+    assert generation.details == (() if damage is None else ("build_control",))
     assert not qd.writes
+
+
+@pytest.mark.anyio
+async def test_publication_during_validation_preserves_resolved_reader(monkeypatch):
+    from mainframe_rag.agent.serving import ServingGate
+
+    settings = _settings()
+    alias = settings.qdrant_collection
+    old, new = alias + "__old", alias + "__new"
+    aliases = {alias: old}
+    records = {}
+    for physical, build_id in ((old, "12345678-1234-4234-8234-123456789abc"),
+                               (new, "22345678-1234-4234-8234-123456789abc")):
+        controls = physical + "__completions"
+        private = alias + "__build_" + build_id
+        aliases[private] = physical
+        aliases[private + "__completions"] = controls
+        records[controls] = {
+            "record_type": "publication-metadata", "target_collection": controls,
+            "build_schema": 1, "build_id": build_id, "logical_alias": alias,
+            "data_collection": physical, "gen_fp": "recipe", "corpus_fp": physical,
+        }
+    client = AliasQdrant(aliases=aliases, publications=records, points={old, new},
+                        manifests={physical + "__completions": manifest_envelope(
+                            settings, RULES, physical + "__completions") for physical in (old, new)})
+    get_aliases = client.get_aliases
+    def advance_after_resolution():
+        observed = get_aliases()
+        client.aliases[alias] = new
+        return observed
+    monkeypatch.setattr(client, "get_aliases", advance_after_resolution)
+    gate = ServingGate(ttl_s=0)
+    admitted = await gate.generation(client, settings, RULES)
+    assert admitted.physical == old and admitted.servable
+    following = await gate.generation(client, settings, RULES)
+    assert following.physical == new and following.servable
+    assert not client.writes

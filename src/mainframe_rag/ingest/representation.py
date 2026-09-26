@@ -631,23 +631,6 @@ async def resolve_serving_generation(
     outcome, details = await serving_outcome(
         async_client, bound, completion_collection_for(physical), rules_v
     )
-    if outcome in ("compatible", "record_only_drift"):
-        from mainframe_rag.ingest.build import decode_build_binding, require_published_binding
-        from mainframe_rag.ingest.publish import publication_metadata_point_id
-
-        control = completion_collection_for(physical)
-        try:
-            records = await _await_client(async_client.retrieve(
-                control, ids=[publication_metadata_point_id(control)], with_payload=True,
-            ))
-            payload = (records[0].payload or {}) if records else None
-            if payload is not None and payload.get("record_type") != "publication-metadata":
-                raise ValueError("invalid publication control record")
-            binding = decode_build_binding(payload, control) if payload is not None else None
-            require_published_binding(binding, alias, physical,
-                                      {a.alias_name: a.collection_name for a in aliases.aliases})
-        except Exception:  # noqa: BLE001 — fixed refusal, never upstream/storage text
-            return physical, "unknown", ["build_control"]
     return physical, outcome, details
 
 
