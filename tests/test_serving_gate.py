@@ -253,3 +253,18 @@ async def test_publication_during_validation_preserves_resolved_reader(monkeypat
     following = await gate.generation(client, settings, RULES)
     assert following.physical == new and following.servable
     assert not client.writes
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("alias", ["corpus__build_notes", "corpus__build_notes__completions"])
+async def test_legacy_corpus_name_with_build_substring_remains_readable(alias):
+    from mainframe_rag.agent.serving import ServingGate
+
+    settings = _settings(qdrant_collection=alias)
+    physical = alias + "__legacy"
+    controls = physical + "__completions"
+    client = AliasQdrant(aliases={alias: physical}, points={physical},
+                        manifests={controls: manifest_envelope(settings, RULES, controls)})
+    generation = await ServingGate(ttl_s=0).generation(client, settings, RULES)
+    assert generation.physical == physical and generation.servable
+    assert not client.writes

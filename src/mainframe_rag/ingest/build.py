@@ -24,6 +24,18 @@ def build_aliases(alias: str, build_id: str) -> tuple[str, str]:
     return data, data + "__completions"
 
 
+def is_build_alias(name: str) -> bool:
+    """Recognize the private UUID namespace, not incidental corpus-name text."""
+    logical, separator, identity = name.rpartition("__build_")
+    if not logical or not separator:
+        return False
+    identity = identity.removesuffix("__completions")
+    try:
+        return str(uuid.UUID(identity)) == identity.lower()
+    except ValueError:
+        return False
+
+
 @dataclass(frozen=True)
 class BuildBinding:
     build_id: str
@@ -82,7 +94,7 @@ def require_published_binding(
 ) -> None:
     if binding is None:
         if any(
-            "__build_" in name and target in (physical, physical + "__completions")
+            is_build_alias(name) and target in (physical, physical + "__completions")
             for name, target in aliases.items()
         ):
             raise ValueError("immutable build aliases lack their control record")

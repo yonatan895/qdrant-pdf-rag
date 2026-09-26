@@ -38,7 +38,12 @@ if TYPE_CHECKING:
     import pymupdf
 
 from mainframe_rag.config import Settings, load_settings
-from mainframe_rag.ingest.build import BuildBinding, build_phase, require_published_binding
+from mainframe_rag.ingest.build import (
+    BuildBinding,
+    build_phase,
+    is_build_alias,
+    require_published_binding,
+)
 from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import Chunk, make_chunks
 from mainframe_rag.ingest.completion import (
@@ -722,7 +727,7 @@ def _run_impl(
             physical = aliases.get(settings.qdrant_collection, settings.qdrant_collection)
             existing_build = read_build_binding(client, physical + "__completions")
             if existing_build is not None or any(
-                "__build_" in name and target in (physical, physical + "__completions")
+                is_build_alias(name) and target in (physical, physical + "__completions")
                 for name, target in aliases.items()
             ):
                 raise RuntimeError("in-place ingest cannot modify an immutable build; use alias publication")
