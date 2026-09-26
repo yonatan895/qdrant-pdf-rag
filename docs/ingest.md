@@ -872,8 +872,9 @@ operator-serialized jobs, not a claim of distributed lock enforcement. No HA
 claim follows from a single-node run.
 
 **Maintenance and rollback:** in-place mode (`INGEST_ALIAS_PUBLISH=false`)
-repairs the live collection directly, so operators must quiesce writers and
-drain affected readers first; setting a manifest pending or waiting a TTL
+is limited to legacy collections without full build controls or immutable build
+aliases. It refuses new-format published, sealed and retained builds. For a
+legacy repair, operators must quiesce writers and drain affected readers first; setting a manifest pending or waiting a TTL
 alone does not drain in-flight requests. Alias-mode repair is a normal
 distinct-generation publish: the old physical keeps serving until the
 verified atomic swap, and is retained afterward. Preserve a restorable backup
