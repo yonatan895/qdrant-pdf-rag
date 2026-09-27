@@ -42,7 +42,6 @@ import argparse
 import json
 import sys
 import time
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -54,276 +53,28 @@ if str(REPO / "scripts") not in sys.path:
 
 from harness_l2 import run_l2
 
-from mainframe_rag.eval.judging import RELEVANCE_LABELS
-from venue import VenueError, require_rc_for_collection, resolve_golden_paths
+from mainframe_rag.eval.datasets import VenueError, require_rc_for_collection, resolve_golden_paths
 
 DEFAULT_THRESHOLDS = REPO / "evals" / "harness-l4-thresholds.json"
 
-# Sampling-noise band for the rate reference. With the default N=24 the
-# judged rate denominators are ~15-25 rows; a single run's binomial sigma
-# is ~0.10 at p=0.5 and ~0.065 for a 3-repeat mean, so a 0.05 band flags
-# noise as regressions (measured: two metrics flipped on re-run of the same
-# tier). 0.15 is ~2.3 sigma — honest for this sample size; raise N to
-# tighten it. The reference stores the live value in _meta.tolerance.
-DEFAULT_TOLERANCE = 0.15
-
-# (metric path in the L2 metrics dict, gate direction). Every key must be
-# present in the reference: a missing key would silently stop gating it.
-GATED_METRICS: tuple[tuple[str, str], ...] = (
-    ("grounded_rate", "min"),
-    ("citation_precision", "min"),
-    ("citation_recall", "min"),
-    ("truncation_rate", "max"),
-    ("syntax_compliance", "min"),
-    ("faithfulness.entailed", "min"),
-    ("faithfulness.contradiction", "max"),
-    ("relevance.relevant", "min"),
-    ("relevance.irrelevant", "max"),
+from mainframe_rag.eval.quality import (  # noqa: F401 — compatibility exports
+    DEFAULT_TOLERANCE,
+    GATED_METRICS,
+    ThresholdError,
+    _FAITHFULNESS_IDEAL,
+    _RELEVANCE_IDEAL,
+    _sum_state_histograms,
+    build_review_queue,
+    classify,
+    gate_l4,
+    get_nested,
+    load_thresholds,
+    mean_metric,
+    record_blockers,
+    save_thresholds,
+    summarize_l4,
+    write_summary,
 )
-
-
-class ThresholdError(RuntimeError):
-    """The L4 reference is missing, malformed, or from another tier."""
-
-
-def get_nested(data: dict[str, Any], dotted: str) -> Any:
-    node: Any = data
-    for part in dotted.split("."):
-        if not isinstance(node, dict) or part not in node:
-            return None
-        node = node[part]
-    return node
-
-
-def load_thresholds(path: Path) -> dict[str, Any]:
-    """Load + validate the reference. Fail closed on anything malformed —
-    a gate that cannot name its reference must not score."""
-    if not path.exists():
-        raise ThresholdError(
-            f"no L4 reference at {path}; record one on the RC host with `sh scripts/tools/run-task.sh eval:harness:l4-record`"
-        )
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        raise ThresholdError(f"unreadable L4 reference {path}: {exc}") from exc
-    if not isinstance(doc, dict):
-        raise ThresholdError(f"L4 reference {path}: top level must be an object")
-    meta = doc.get("_meta")
-    if not isinstance(meta, dict):
-        raise ThresholdError(f"L4 reference {path}: missing _meta")
-    tolerance = meta.get("tolerance")
-    if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or not 0 <= tolerance <= 1:
-        raise ThresholdError(f"L4 reference {path}: _meta.tolerance must be a number in [0, 1]")
-    for key in ("venue", "embed_mode", "llm_model_reasoning"):
-        if not isinstance(meta.get(key), str) or not meta[key]:
-            raise ThresholdError(f"L4 reference {path}: _meta.{key} is required")
-    metrics = doc.get("metrics")
-    if not isinstance(metrics, dict):
-        raise ThresholdError(f"L4 reference {path}: missing metrics object")
-    expected = {name for name, _ in GATED_METRICS}
-    if set(metrics) != expected:
-        missing = sorted(expected - set(metrics))
-        extra = sorted(set(metrics) - expected)
-        raise ThresholdError(
-            f"L4 reference {path}: metric keys must match exactly (missing {missing}, unknown {extra})"
-        )
-    for name, value in metrics.items():
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
-            raise ThresholdError(f"L4 reference {path}: metric {name!r} must be a rate in [0, 1]")
-    return doc
-
-
-def mean_metric(runs: list[dict[str, Any]], dotted: str) -> float | None:
-    """Mean of one metric across repeats. None when any repeat lacks it —
-    a rate that only half the repeats computed cannot be gated."""
-    values: list[float] = []
-    for run in runs:
-        value = get_nested(run["metrics"], dotted)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        values.append(float(value))
-    if not values:
-        return None
-    return sum(values) / len(values)
-
-
-def summarize_l4(runs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregate repeats: structural counts are sums (any occurrence gates),
-    rates are means (sampling noise is the reason for repeats)."""
-    if not runs:
-        raise ValueError("L4 needs at least one run")
-    return {
-        "repeats": len(runs),
-        "queries_per_run": runs[0]["metrics"].get("queries", 0),
-        "structural_fails": sum(r["metrics"]["structural_fails"] for r in runs),
-        "errors": sum(r["metrics"]["errors"] for r in runs),
-        "judge_errors": sum(
-            r["metrics"]["faithfulness"]["judge_errors"] + r["metrics"]["relevance"]["judge_errors"]
-            for r in runs
-        ),
-        "metrics": {name: mean_metric(runs, name) for name, _ in GATED_METRICS},
-        # Verification states (issue #365): report-only acceptance shape
-        # across repeats — never a threshold key (GATED_METRICS validation
-        # stays exact), so recording a reference cannot silently adopt it.
-        "by_verification_state": _sum_state_histograms(runs),
-        "state_mismatches": sum(r["metrics"].get("state_mismatches", 0) for r in runs),
-        "per_run": [r["metrics"] for r in runs],
-    }
-
-
-def _sum_state_histograms(runs: list[dict[str, Any]]) -> dict[str, int]:
-    total: Counter[str] = Counter()
-    for run in runs:
-        for state, n in (run["metrics"].get("by_verification_state") or {}).items():
-            total[str(state)] += int(n)
-    return dict(sorted(total.items()))
-
-
-def classify(value: float, reference: float, tolerance: float, direction: str) -> str:
-    """pass / borderline / fail for one metric against its reference band."""
-    if direction == "min":
-        if value >= reference:
-            return "pass"
-        if value >= reference - tolerance:
-            return "borderline"
-        return "fail"
-    if value <= reference:
-        return "pass"
-    if value <= reference + tolerance:
-        return "borderline"
-    return "fail"
-
-
-def gate_l4(summary: dict[str, Any], thresholds: dict[str, Any]) -> tuple[str, list[str], list[str]]:
-    """Verdict from the repeat summary. Fail-closed: structural faults fail
-    even when every rate is healthy; an uncomputed metric fails rather than
-    vanishing from the gate."""
-    tolerance = float(thresholds["_meta"]["tolerance"])
-    refs = thresholds["metrics"]
-    failures: list[str] = []
-    borderline: list[str] = []
-    if summary["structural_fails"]:
-        failures.append(f"{summary['structural_fails']} structural failure(s)")
-    if summary["errors"]:
-        failures.append(f"{summary['errors']} request error(s)")
-    if summary["judge_errors"]:
-        failures.append(f"{summary['judge_errors']} judge infra error(s)")
-    for name, direction in GATED_METRICS:
-        value = summary["metrics"].get(name)
-        if value is None:
-            failures.append(f"{name}: not computed in every repeat")
-            continue
-        verdict = classify(float(value), float(refs[name]), tolerance, direction)
-        if verdict == "fail":
-            failures.append(
-                f"{name} {value:.4f} outside the {direction} band of reference "
-                f"{refs[name]:.4f} (tolerance {tolerance})"
-            )
-        elif verdict == "borderline":
-            borderline.append(name)
-    if failures:
-        return "fail", failures, borderline
-    if borderline:
-        return "hold", [f"borderline metric(s): {', '.join(borderline)}"], borderline
-    return "pass", [], borderline
-
-
-_FAITHFULNESS_IDEAL = ("entailed",)
-_RELEVANCE_IDEAL = ("relevant",)
-
-
-def build_review_queue(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Rows that are not clean in every repeat: failures, non-ideal judge
-    labels, or truncation. The queue is where a human adjudicates a hold —
-    per-repeat verdicts/labels/citations, never manual text."""
-    by_id: dict[str, dict[str, Any]] = {}
-    for k, run in enumerate(runs, 1):
-        for row in run["rows"]:
-            rec = by_id.setdefault(
-                row["id"],
-                {
-                    "id": row["id"],
-                    "query": row.get("query"),
-                    "query_class": row.get("query_class"),
-                    "expected_behavior": row.get("expected_behavior"),
-                    "verdicts": [],
-                    "faithfulness": [],
-                    "relevance": [],
-                    "truncated": [],
-                    "citation_precision": [],
-                    "citation_recall": [],
-                    "citations": row.get("citations"),
-                    "failures": [],
-                },
-            )
-            rec["verdicts"].append(row.get("verdict"))
-            if row.get("judge_label") in ("entailed", "neutral", "contradiction"):
-                rec["faithfulness"].append(row["judge_label"])
-            if row.get("relevance_label") in RELEVANCE_LABELS:
-                rec["relevance"].append(row["relevance_label"])
-            if row.get("truncated") is not None:
-                rec["truncated"].append(row["truncated"])
-            for key in ("citation_precision", "citation_recall"):
-                if row.get(key) is not None:
-                    rec[key].append(row[key])
-            for failure in row.get("failures") or []:
-                rec["failures"].append(f"run {k}: {failure}")
-    queue = []
-    for rec in sorted(by_id.values(), key=lambda r: r["id"]):
-        weak = (
-            any(v in ("fail", "error") for v in rec["verdicts"])
-            or any(lbl not in _FAITHFULNESS_IDEAL for lbl in rec["faithfulness"])
-            or any(lbl not in _RELEVANCE_IDEAL for lbl in rec["relevance"])
-            or any(t is True for t in rec["truncated"])
-            or bool(rec["failures"])
-        )
-        if weak:
-            queue.append(rec)
-    return queue
-
-
-def write_summary(
-    path: Path,
-    summary: dict[str, Any],
-    verdict: str,
-    reasons: list[str],
-    thresholds: dict[str, Any],
-    queue_path: Path,
-    queue_n: int,
-) -> None:
-    tolerance = thresholds["_meta"]["tolerance"]
-    refs = thresholds["metrics"]
-    lines: list[str] = [
-        "# Harness L4 — answer-quality gate",
-        "",
-        f"- repeats: {summary['repeats']} × {summary['queries_per_run']} queries",
-        (
-            f"- structural fails: {summary['structural_fails']}, errors: {summary['errors']}, "
-            f"judge errors: {summary['judge_errors']}"
-        ),
-        (
-            f"- reference: {thresholds['_meta'].get('updated')} "
-            f"(venue {thresholds['_meta'].get('venue')}, tolerance {tolerance})"
-        ),
-        f"- human-review queue: {queue_n} row(s) -> {queue_path.name}",
-        f"- VERDICT: {verdict}",
-        "",
-        "| metric | direction | reference | mean | verdict |",
-        "|---|---|---|---|---|",
-    ]
-    for name, direction in GATED_METRICS:
-        value = summary["metrics"].get(name)
-        shown = f"{value:.4f}" if value is not None else "—"
-        if value is None:
-            cell = "fail (uncomputed)"
-        else:
-            cell = classify(float(value), float(refs[name]), tolerance, direction)
-        lines.append(f"| {name} | {direction} | {refs[name]:.4f} | {shown} | {cell} |")
-    if reasons:
-        lines.append("")
-        lines.append("## Reasons")
-        lines.extend(f"- {r}" for r in reasons)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def run_l4(entries: list[dict[str, Any]], max_queries: int | None, repeats: int) -> list[dict[str, Any]]:
@@ -335,47 +86,6 @@ def run_l4(entries: list[dict[str, Any]], max_queries: int | None, repeats: int)
         rows, metrics = run_l2(entries, max_queries, judge_enabled=True, relevance_enabled=True)
         runs.append({"rows": rows, "metrics": metrics})
     return runs
-
-
-def record_blockers(summary: dict[str, Any]) -> list[str]:
-    """Why a run must not become the rate reference. Product structural
-    debt is deliberately not a blocker: it gates every L4 run on its own."""
-    blockers: list[str] = []
-    if summary["errors"]:
-        blockers.append(f"{summary['errors']} request error(s)")
-    if summary["judge_errors"]:
-        blockers.append(f"{summary['judge_errors']} judge infra error(s)")
-    uncomputed = [name for name, _ in GATED_METRICS if summary["metrics"].get(name) is None]
-    if uncomputed:
-        blockers.append(f"uncomputed metric(s): {', '.join(uncomputed)}")
-    return blockers
-
-
-def save_thresholds(path: Path, summary: dict[str, Any], settings: Any, repeats: int) -> dict[str, Any]:
-    doc = {
-        "_meta": {
-            "note": (
-                "L4 answer-quality reference rates; record with `sh scripts/tools/run-task.sh eval:harness:l4-record` "
-                "(dedicated PR, AGENTS.md). Gate compares repeat means against these with "
-                "_meta.tolerance (default 0.15 = ~2.3 sigma of the 3-repeat mean at N=24; "
-                "raise N to tighten). An uncomputed metric fails. Structural fails gate "
-                "independently of the rate reference and are stored for context; grounding "
-                "counts explicit citations only (#269)."
-            ),
-            "updated": time.strftime("%Y-%m-%d", time.gmtime()),
-            "venue": settings.qdrant_collection,
-            "embed_mode": settings.embed_mode,
-            "llm_model_reasoning": settings.llm_model_reasoning,
-            "tolerance": DEFAULT_TOLERANCE,
-            "repeats": repeats,
-            "queries_per_run": summary["queries_per_run"],
-            "structural_fails": summary["structural_fails"],
-        },
-        "metrics": {name: round(float(value), 4) for name, value in summary["metrics"].items()},
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-    return doc
 
 
 def main(argv: list[str] | None = None) -> int:

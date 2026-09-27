@@ -11,7 +11,8 @@ import json
 from pathlib import Path
 
 import pytest
-from scripts.harness_l4 import (
+
+from mainframe_rag.eval.quality import (
     GATED_METRICS,
     ThresholdError,
     build_review_queue,
@@ -300,3 +301,31 @@ def test_main_exit_2_when_reference_missing(tmp_path: Path, monkeypatch, capfd):
     rc = l4_main(["--thresholds", str(tmp_path / "nope.json")])
     assert rc == 2
     assert "no L4 reference" in capfd.readouterr().err
+
+
+def test_l4_delegate_preserves_quality_identity():
+    from scripts import harness_l4
+
+    from mainframe_rag.eval import quality
+
+    for name in ("ThresholdError", "GATED_METRICS", "DEFAULT_TOLERANCE",
+                 "summarize_l4", "gate_l4", "load_thresholds", "save_thresholds",
+                 "build_review_queue", "record_blockers", "write_summary"):
+        assert getattr(harness_l4, name) is getattr(quality, name)
+
+
+def test_l4_repeats_preserve_sample_and_judge_legs(monkeypatch):
+    from scripts import harness_l4
+
+    entries = [{"id": "original-fixture"}]
+    calls = []
+
+    def measure(actual_entries, max_queries, **kwargs):
+        assert actual_entries is entries
+        calls.append((max_queries, kwargs))
+        return [{"repeat": len(calls)}], {"queries": 1}
+
+    monkeypatch.setattr(harness_l4, "run_l2", measure)
+    result = harness_l4.run_l4(entries, 7, 3)
+    assert calls == [(7, {"judge_enabled": True, "relevance_enabled": True})] * 3
+    assert result == [{"rows": [{"repeat": n}], "metrics": {"queries": 1}} for n in (1, 2, 3)]

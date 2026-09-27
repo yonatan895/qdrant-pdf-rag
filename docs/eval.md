@@ -17,6 +17,13 @@ judge-call parameters live in `mainframe_rag.eval.judging`. L2 orchestration and
 L4 repeated quality gates remain distinct; both consume the canonical labels.
 Legacy `scripts.harness_l2` helper exports retain object identity during migration.
 
+L4 threshold validation, repeat aggregation, quality verdicts and recorded
+reports are owned by `mainframe_rag.eval.quality`, with explicit inputs and
+paths. `scripts/harness_l4.py` retains live repeat execution, CLI defaults,
+venue checks and the explicit record-versus-check operation. Its compatibility
+exports reference the same quality objects; moving ownership does not change
+rate thresholds, structural failure gates, sampling or repeat counts.
+
 Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 `docs/live-stack.md`. Design overview: `docs/architecture.md` §5.
 
