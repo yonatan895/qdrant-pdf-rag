@@ -164,7 +164,7 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_answers.py --max-queries "${TASK_N:-24}" --out "$TASK_BUNDLE_DIR/eval-answers-report.json" --summary "$TASK_BUNDLE_DIR/eval-answers-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_answers.py {{if .N}}--max-queries "$TASK_N"{{end}} --out "$TASK_BUNDLE_DIR/eval-answers-report.json" --summary "$TASK_BUNDLE_DIR/eval-answers-summary.md"
 
   chat:
     desc: Multi-turn condensation A/B on the dev golden set (evidence only)
@@ -184,7 +184,7 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_chat.py --limit "${TASK_N:-12}" --out "$TASK_BUNDLE_DIR/eval-chat-report.json" --summary "$TASK_BUNDLE_DIR/eval-chat-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_chat.py {{if .N}}--limit "$TASK_N"{{end}} --out "$TASK_BUNDLE_DIR/eval-chat-report.json" --summary "$TASK_BUNDLE_DIR/eval-chat-summary.md"
 
   harness:gate:
     desc: Layered harness L1 retrieval + promotion gate
@@ -245,7 +245,7 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l2.py --max-queries "${TASK_N:-24}" --out "$TASK_BUNDLE_DIR/harness-l2-report.json" --summary "$TASK_BUNDLE_DIR/harness-l2-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l2.py {{if .N}}--max-queries "$TASK_N"{{end}} --out "$TASK_BUNDLE_DIR/harness-l2-report.json" --summary "$TASK_BUNDLE_DIR/harness-l2-summary.md"
 
   harness:l3:
     desc: Harness L3 performance tier against a running agent (RC only)
@@ -323,7 +323,7 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l4.py --max-queries "${TASK_N:-24}" --repeats "${TASK_REPEATS:-3}" --out "$TASK_BUNDLE_DIR/harness-l4-report.json" --summary "$TASK_BUNDLE_DIR/harness-l4-summary.md" --queue "$TASK_BUNDLE_DIR/harness-l4-review-queue.json"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l4.py {{if .N}}--max-queries "$TASK_N"{{end}} {{if .REPEATS}}--repeats "$TASK_REPEATS"{{end}} --out "$TASK_BUNDLE_DIR/harness-l4-report.json" --summary "$TASK_BUNDLE_DIR/harness-l4-summary.md" --queue "$TASK_BUNDLE_DIR/harness-l4-review-queue.json"
 
   harness:l4-record:
     desc: Re-record L4 thresholds (dedicated PR only)
@@ -343,7 +343,7 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l4.py --max-queries "${TASK_N:-24}" --repeats "${TASK_REPEATS:-3}" --update-thresholds --out "$TASK_BUNDLE_DIR/harness-l4-report.json" --summary "$TASK_BUNDLE_DIR/harness-l4-summary.md" --queue "$TASK_BUNDLE_DIR/harness-l4-review-queue.json"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l4.py {{if .N}}--max-queries "$TASK_N"{{end}} {{if .REPEATS}}--repeats "$TASK_REPEATS"{{end}} --update-thresholds --out "$TASK_BUNDLE_DIR/harness-l4-report.json" --summary "$TASK_BUNDLE_DIR/harness-l4-summary.md" --queue "$TASK_BUNDLE_DIR/harness-l4-review-queue.json"
 
   draft:
     desc: Draft golden-set candidates from collection payloads
