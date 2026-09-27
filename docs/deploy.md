@@ -54,7 +54,9 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Alias resolution: `INTERNAL_REGISTRY` falls back to `REGISTRY_INTERNAL`,
   `NAMESPACE` to `OPENSHIFT_NAMESPACE` (default `mainframe-rag`),
   `QDRANT_RELEASE` defaults to `qdrant`, empty `IMAGE_SHA` resolves from
-  `git rev-parse HEAD`, and `EMBED_BASE_URL` derives from the vLLM URL with
+  `git rev-parse HEAD`. Explicit model-operation URLs win over
+  `GATEWAY_BASE_URL`, a shared API base including `/v1`; the legacy
+  `EMBED_BASE_URL` fallback derives from the vLLM URL with
   trailing slashes and a trailing `/v1` stripped.
 - `require_env` collects **all** missing keys before failing, so one run
   tells the operator everything to fill in. `EMBED_MODEL_REVISION` is a
@@ -133,8 +135,11 @@ Compatibility and lifecycle decisions under #448:
   Secret references. An absent pull Secret renders `imagePullSecrets: []` for
   first-party pods and `imagePullSecrets=null` for Qdrant. An absent gateway
   Secret omits key env entries. Selected refs require nonempty keys before
-  mutation: agent `llm/embed/rerank-api-key`, ingest
+  mutation: by default agent `llm/embed/rerank-api-key`, ingest
   `embed/context-llm-api-key`, pull `.dockerconfigjson`, OAuth `cookie-secret`.
+  With `GATEWAY_API_KEY_SECRET_KEY` set, every model leg references that one
+  data-key name instead, and deploy/ingest check that selected key. It requires
+  `GATEWAY_API_KEY_SECRET`; neither setting contains credential material.
   No key values enter generated files or logs. Plaintext gateway key settings
   remain rejected by `enforce_product_rules`.
 - `GATEWAY_CA_CONFIGMAP` remains a reference to `ca-bundle.crt`, mounted only
@@ -477,6 +482,30 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
   `/metrics` (prerequisite and sizing in `docs/install_and_ops.md`).
 - Application transfer uses the signed bundle and verified `skopeo` loading
   path above; this repository ships no alternate mirroring configuration.
+
+### Shared LiteLLM configuration
+
+`GATEWAY_BASE_URL=https://sample-api/v1` illustrates the shared API-base
+convention; replace the example URL with the platform endpoint. The operator
+loader resolves unset `EMBED_BASE_URL`, `LLM_BASE_URL`, `RERANK_BASE_URL` and
+`CONTEXT_LLM_BASE_URL` to it before rendering. Explicit operation-specific
+URLs take precedence. A caller value beats the operator file for the same
+setting. With no shared setting, the legacy vLLM embedding-origin fallback
+and existing per-operation behavior remain available. Clients append operation
+paths without adding another `/v1`.
+
+Model settings are opaque gateway aliases: for example `EMBED_MODEL=embedding-v1`
+and `LLM_MODEL_REASONING=code`. No upstream-name lookup or intent-based routing
+is performed. Reranking and contextual embedding remain opt-in and require
+their own configured model aliases when used. Embedding dimension and immutable
+revision remain explicit; switching an alias's underlying representation still
+requires the existing deliberate migration.
+
+`GATEWAY_API_KEY_SECRET_KEY=api-key` selects one data key in the Secret named by
+`GATEWAY_API_KEY_SECRET`. Helm exposes that same Secret reference through the
+existing per-operation runtime variables, including contextual ingestion.
+Direct Helm users set `gateway.apiKeySecretKey`; an empty value preserves legacy
+per-leg data keys. The API key value never enters Helm values or `airgap.env`.
 
 ## 7. CI inventory
 
