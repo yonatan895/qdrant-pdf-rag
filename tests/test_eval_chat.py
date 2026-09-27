@@ -6,7 +6,7 @@ aggregation only. The live tier runs via `sh scripts/tools/run-task.sh eval:chat
 
 from __future__ import annotations
 
-from scripts.eval_chat import (
+from mainframe_rag.eval.chat import (
     ARM_CONDENSED,
     ARM_LITERAL,
     DEFAULT_FOLLOW_UP,
@@ -17,7 +17,7 @@ from scripts.eval_chat import (
     summarize_arms,
     summary_markdown,
 )
-from scripts.eval_retrieval import GoldenEntry
+from mainframe_rag.eval.datasets import GoldenEntry
 
 
 def _entry(entry_id: str = "g-1", query_class: str = "message_id") -> GoldenEntry:
@@ -145,3 +145,92 @@ def test_summary_markdown_names_both_arms_and_the_decision_rule():
     assert "| literal |" in body
     assert "| condensed |" in body
     assert "separate, dedicated decision" in body
+
+
+def test_evaluate_sessions_preserves_both_arms_and_condensation_accounting(monkeypatch):
+    from types import SimpleNamespace
+
+    import qdrant_client
+
+    from mainframe_rag.eval import chat
+    from mainframe_rag.ingest import embed
+    from mainframe_rag.retrieve import rerank
+
+    events = []
+    settings = SimpleNamespace(qdrant_url="http://synthetic.invalid", qdrant_api_key=None,
+                               qdrant_timeout_s=9, qdrant_collection="synthetic",
+                               embed_mode="hash", llm_model_reasoning="synthetic-model")
+
+    class Storage:
+        def __init__(self, **kwargs):
+            assert kwargs == {"url": "http://synthetic.invalid", "api_key": None, "timeout": 9}
+
+        def close(self):
+            events.append(("close", "storage"))
+
+    class LLM:
+        def __init__(self, actual):
+            assert actual is settings
+
+        def close(self):
+            events.append(("close", "llm"))
+
+    async def condense(llm, messages, actual):
+        assert isinstance(llm, LLM) and actual is settings
+        assert [message.role for message in messages] == ["user", "assistant", "user"]
+        opener = messages[0].content
+        events.append(("condense", opener))
+        if opener == "broken":
+            raise RuntimeError("synthetic condensation failure")
+        return "rewritten identifier" if opener == "rewrite" else ""
+
+    def search(client, embedder, collection, query, **kwargs):
+        assert isinstance(client, Storage) and embedder is sentinel
+        assert collection == "synthetic" and kwargs["limit"] == 8
+        assert kwargs["settings"] is settings and kwargs["reranker"] is None
+        events.append(("retrieve", query))
+        return [], "identifier", {"synthetic_ms": 1}
+
+    sentinel = object()
+    monkeypatch.setattr(qdrant_client, "QdrantClient", Storage)
+    monkeypatch.setattr(embed, "build_embedder", lambda actual: sentinel)
+    monkeypatch.setattr(rerank, "build_reranker", lambda actual: None)
+    monkeypatch.setattr(chat, "HttpxLLMClient", LLM)
+    monkeypatch.setattr(chat, "condense_query", condense)
+    monkeypatch.setattr(chat, "retrieve_search", search)
+    entries = [GoldenEntry(id=name, query=name, expected_doc_ids=["doc"])
+               for name in ("rewrite", "broken", "fallback")]
+    report = chat.evaluate_sessions(entries, settings)
+    follow_up = "Tell me more about this."
+    assert events == [
+        ("retrieve", follow_up), ("condense", "rewrite"), ("retrieve", "rewritten identifier"),
+        ("retrieve", follow_up), ("condense", "broken"),
+        ("retrieve", follow_up), ("condense", "fallback"), ("retrieve", follow_up),
+        ("close", "llm"), ("close", "storage"),
+    ]
+    assert [(row["session"], row["arm"]) for row in report["rows"]] == [
+        ("rewrite", "literal"), ("rewrite", "condensed"),
+        ("broken", "literal"), ("broken", "condensed"),
+        ("fallback", "literal"), ("fallback", "condensed"),
+    ]
+    assert report["rows"][3]["error"] == "synthetic condensation failure"
+    assert report["rows"][1]["follow_up"] == "rewritten identifier"
+    assert report["rows"][5]["follow_up"] == follow_up
+    assert report["failures"] == 1
+    assert report["summary"]["literal"]["n"] == 3
+    assert report["summary"]["condensed"]["n"] == 2
+    assert report["summary"]["delta_recall@1"] == 0.0
+
+
+def test_chat_compatibility_exports_are_canonical():
+    from scripts import eval_chat
+
+    from mainframe_rag.eval import chat, datasets, retrieval
+
+    for name in ("main", "evaluate_sessions", "_retrieve_arm", "follow_up_query",
+                 "session_messages", "arm_entry", "summarize_arms", "select_entries",
+                 "summary_markdown", "FOLLOW_UPS", "DEFAULT_FOLLOW_UP",
+                 "ASSISTANT_PLACEHOLDER", "ARM_LITERAL", "ARM_CONDENSED"):
+        assert getattr(eval_chat, name) is getattr(chat, name)
+    assert chat.GoldenEntry is datasets.GoldenEntry
+    assert chat.score_entry is retrieval.score_entry

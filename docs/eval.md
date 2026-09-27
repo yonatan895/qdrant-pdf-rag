@@ -42,6 +42,14 @@ same-object compatibility exports; baseline persistence, snapshots and CLI
 execution stay in `scripts/harness.py`. Trap rejection, class floors, paired
 improvement criteria and reason strings retain their existing behavior.
 
+Multi-turn condensation A/B measurement is owned by `mainframe_rag.eval.chat`,
+using the shared dataset and retrieval scorers. `scripts/eval_chat.py` delegates
+to the same CLI operation and retains same-object helper exports. Both literal
+and condensed arms, templates, scoring, call accounting and report fields are
+unchanged. Outside a workspace, supply explicit golden/output paths; the default
+`evals/golden.jsonl` stays relative to the working directory. Importing the
+module does not execute a session or connect to services.
+
 Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 `docs/live-stack.md`. Design overview: `docs/architecture.md` §5.
 
