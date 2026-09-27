@@ -68,7 +68,7 @@ exit "${RECORDER_EXIT:-0}"
 VENV_FAKE = """#!/bin/sh
 # Fake .venv interpreter: answers `-V` from $FAKE_PY_VERSION without logging
 # (status probes stay observable through rebuild/skip behavior), records all
-# real build invocations as JSON. Produces deterministic stand-in members on success.
+# real preparation invocations as JSON. Does not implement artifact semantics.
 if [ "$1" = "-V" ]; then echo "${FAKE_PY_VERSION:-Python 3.14.5}"; exit 0; fi
 python3 - "$RECORDER_LOG" "venv-python" "$@" <<'PYEOF'
 import json, os, sys
@@ -80,18 +80,6 @@ with open(log, "a", encoding="utf-8") as fh:
 ret = int(os.environ.get("RECORDER_EXIT", "0"))
 if ret != 0:
     sys.exit(ret)
-if any("fetch_bm25_weights.py" in a for a in argv):
-    if "--out" in argv:
-        idx = argv.index("--out") + 1
-        if idx < len(argv):
-            snap = os.path.join(argv[idx], "models--Qdrant--bm25", "snapshots", "snap1")
-            os.makedirs(snap, exist_ok=True)
-            refs = os.path.join(argv[idx], "models--Qdrant--bm25", "refs")
-            os.makedirs(refs, exist_ok=True)
-            with open(os.path.join(refs, "main"), "w") as ref:
-                ref.write("snap1")
-            with open(os.path.join(snap, "weights.bin"), "wb") as wf:
-                wf.write(b"synthetic-weights-content\\n")
 PYEOF
 exit "${RECORDER_EXIT:-0}"
 """.replace("__LOGGED_ENV_KEYS__", _LOGGED_KEYS_LITERAL)
@@ -650,29 +638,11 @@ class TaskContractsTests(unittest.TestCase):
             [c["argv"] for c in self.pip_calls()],
             [["scripts/fetch_bm25_weights.py", "--model", "Qdrant/bm25",
               "--out", "bundles/bm25-weights", "--verify-manifest", "bm25-weights.sha256"]])
-        stamp = (self.root / "bundles/bm25-weights/.task-complete").read_text(encoding="utf-8").strip()
-        self.assertTrue(stamp.endswith(" Qdrant/bm25"), stamp)
-        proc = self.run_task("artifacts:bm25", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(len(self.pip_calls()), 1, "fresh stamp must skip the fetch")
         proc = self.run_task("artifacts:bm25", "BM25_MODEL=Other/model", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(len(self.pip_calls()), 2, "model change must refetch, not reuse cached weights")
-        self.assertIn("--model", self.pip_calls()[-1]["argv"])
         self.assertEqual(self.pip_calls()[-1]["argv"][2], "Other/model")
-        # TR432-F1: delete one expected weight member while retaining stamp: refetches
-        weight = self.root / "bundles/bm25-weights/models--Qdrant--bm25/snapshots/snap1/weights.bin"
-        self.assertTrue(weight.is_file())
-        weight.unlink()
-        proc = self.run_task("artifacts:bm25", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(len(self.pip_calls()), 3, "deleted weight member must refetch")
-        self.assertTrue(weight.is_file())
-        # TR432-F1: corrupt weight content: refetches
-        weight.write_bytes(b"corrupted-weight-data\n")
-        proc = self.run_task("artifacts:bm25", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(len(self.pip_calls()), 4, "corrupted weight member must refetch")
+        # This recorder proves literal forwarding only; supported-model and
+        # cache lifecycle outcomes belong to test_bm25_weights.py.
 
     def test_chart_check_fails_closed_then_passes(self):
         proc = self.run_task("artifacts:chart-check")
@@ -1536,9 +1506,8 @@ class TaskContractsTests(unittest.TestCase):
         self.assertNotIn("export EMBED_MODE", code)
         self.assertNotIn("airgap.env", code)
         # Verification and evaluation never cache (`sources:` fingerprints
-        # even write state on `--list --json`); only artifact builds (plus
-        # the explicit dev:setup presence check) may carry freshness state,
-        # proven by content-bearing completion stamps re-verified on every run.
+        # even write state on `--list --json`). Artifact freshness is delegated
+        # to its preparation owners; dev:setup retains its presence check.
         verify_code = "\n".join(
             line for line in (root_text + quality_text + eval_text).splitlines()
             if not line.lstrip().startswith("#")
@@ -1547,8 +1516,9 @@ class TaskContractsTests(unittest.TestCase):
         build_code = "\n".join(
             line for line in artifacts_text.splitlines() if not line.lstrip().startswith("#")
         )
-        self.assertIn(".task-complete", build_code)
-        self.assertIn("sha256sum", build_code)
+        # Artifact completion is now owned by the Python preparers; behavior
+        # suites prove freshness/recovery and the actual Task-to-owner boundary.
+        self.assertNotIn("status:", build_code)
         dev_code = "\n".join(
             line for line in dev_text.splitlines() if not line.lstrip().startswith("#")
         )

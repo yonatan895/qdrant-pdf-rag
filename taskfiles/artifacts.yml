@@ -1,7 +1,7 @@
 # Artifact tasks — issue #402 increment B1.
 #
-# Wheelhouse preparation/freshness belongs to dependency_lock.py. BM25 retains
-# its Task-owned completion stamp until its separate lifecycle migration.
+# Preparation/freshness belongs to dependency_lock.py and fetch_bm25_weights.py.
+# Task transports inputs; owners verify content and publish completion records.
 # Verification tasks never cache: they re-verify on request.
 # Included with `dir: .` from the root Taskfile: always runs at repo root.
 version: '3'
@@ -40,13 +40,10 @@ tasks:
       <model> --out <dir> --verify-manifest bm25-weights.sha256`, mirroring
       the retired `make bm25-weights` (upstream drift fails closed in the script).
       Inputs: BM25_MODEL (default Qdrant/bm25), BUNDLE_DIR (default bundles).
-      Freshness is proven by a completion stamp recording the manifest and
-      fetcher content plus the model selection, combined with an offline
-      member check against the sha256 manifest, re-verified on every run:
-      content or model changes rebuild, mtime-only touches do not, and a
-      missing stamp or missing/modified weight file rebuilds even when the
-      output directory survives. Fingerprint state is never used, so
-      discovery never writes state. Connected host only.
+      The Python owner verifies pinned bytes on every preparation and stages
+      acquisition before replacing an invalid cache. Verified bytes are reused;
+      the owner records manifest/model/recipe identity after verification.
+      Explicit preparation requires readers to be stopped. Connected host only.
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       BM25_MODEL: '{{if hasKey . "BM25_MODEL"}}{{.BM25_MODEL}}{{else}}Qdrant/bm25{{end}}'
@@ -54,16 +51,9 @@ tasks:
     env:
       TASK_BM25_WEIGHTS: '{{.BM25_WEIGHTS}}'
       TASK_BM25_MODEL: '{{.BM25_MODEL}}'
-    status:
-      - test -f "$TASK_BM25_WEIGHTS/.task-complete"
-      - test "$(cat "$TASK_BM25_WEIGHTS/.task-complete")" = "$(cat bm25-weights.sha256 scripts/fetch_bm25_weights.py | sha256sum) $TASK_BM25_MODEL"
-      - python3 scripts/fetch_bm25_weights.py --verify-only --out "$TASK_BM25_WEIGHTS" --verify-manifest bm25-weights.sha256
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - rm -rf "$TASK_BM25_WEIGHTS" && mkdir -p "$TASK_BM25_WEIGHTS"
       - .venv/bin/python scripts/fetch_bm25_weights.py --model "$TASK_BM25_MODEL" --out "$TASK_BM25_WEIGHTS" --verify-manifest bm25-weights.sha256
-      - python3 scripts/fetch_bm25_weights.py --verify-only --out "$TASK_BM25_WEIGHTS" --verify-manifest bm25-weights.sha256
-      - echo "$(cat bm25-weights.sha256 scripts/fetch_bm25_weights.py | sha256sum) $TASK_BM25_MODEL" > "$TASK_BM25_WEIGHTS/.task-complete"
 
   chart-check:
     desc: Verify the vendored Qdrant chart archive is present
