@@ -7,8 +7,9 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from scripts.loadtest import (
-    export_to_baseline,
+from scripts.loadtest import export_to_baseline
+
+from mainframe_rag.eval.load import (
     parse_server_timing,
     query_vram_mb,
     run_load,
@@ -127,7 +128,7 @@ def test_export_to_baseline_preserves_existing_keys(tmp_path: Path):
 
 
 def test_query_gpu_name_success_and_fail(monkeypatch):
-    from scripts.loadtest import query_gpu_name
+    from mainframe_rag.eval.load import query_gpu_name
 
     mock_run = MagicMock(
         return_value=subprocess.CompletedProcess(
@@ -216,3 +217,15 @@ def test_run_load_extracts_stages_and_percentiles(monkeypatch):
     assert "embed_ms" in res["stages"]
     assert res["stages"]["embed_ms"]["p50"] == 15.0
     assert res["stages"]["qdrant_ms"]["p50"] == 25.0
+
+
+def test_load_measurement_consumers_share_canonical_owner():
+    from scripts import benchmark, harness_l3, loadtest
+
+    from mainframe_rag.eval import load
+
+    for name in ("DEFAULT_QUERIES", "_percentile", "parse_server_timing",
+                 "query_gpu_name", "query_vram_mb", "run_load"):
+        assert getattr(loadtest, name) is getattr(load, name)
+    assert benchmark.run_load is harness_l3.run_load is load.run_load
+    assert benchmark.DEFAULT_QUERIES is harness_l3.DEFAULT_QUERIES is load.DEFAULT_QUERIES

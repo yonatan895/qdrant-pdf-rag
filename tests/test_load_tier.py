@@ -390,7 +390,7 @@ def _read_stream(base_url: str, query: str) -> tuple[int, dict[str, str], str]:
 
 
 def test_search_load_has_zero_errors_and_full_timings(agent_url):
-    from scripts.loadtest import run_load
+    from mainframe_rag.eval.load import run_load
 
     conc = _env_int("LOAD_SEARCH_CONCURRENCY", 8)
     dur = _env_float("LOAD_SEARCH_DURATION_S", 10.0)
@@ -402,7 +402,7 @@ def test_search_load_has_zero_errors_and_full_timings(agent_url):
 
 
 def test_answer_load_has_zero_errors_and_ttft(agent_url):
-    from scripts.loadtest import run_load
+    from mainframe_rag.eval.load import run_load
 
     conc = _env_int("LOAD_ANSWER_CONCURRENCY", 4)
     dur = _env_float("LOAD_ANSWER_DURATION_S", 10.0)
@@ -417,7 +417,7 @@ def test_answer_streams_keep_integrity_under_concurrency(agent_url):
     """Per-stream contract under concurrency: token deltas, then exactly one
     final (stop, >= 1 citation, ttft set) and no error event — the shape the
     truncation fix (PR #107) protects."""
-    from scripts.loadtest import parse_server_timing
+    from mainframe_rag.eval.load import parse_server_timing
 
     n_streams = _env_int("LOAD_STREAMS", 16)
     workers = _env_int("LOAD_STREAM_WORKERS", 4)

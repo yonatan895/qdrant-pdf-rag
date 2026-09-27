@@ -50,6 +50,15 @@ unchanged. Outside a workspace, supply explicit golden/output paths; the default
 `evals/golden.jsonl` stays relative to the working directory. Importing the
 module does not execute a session or connect to services.
 
+Reusable concurrent HTTP load measurement, Server-Timing parsing, percentiles
+and optional GPU observations are owned by `mainframe_rag.eval.load`. The L3
+harness, ingestion benchmark and load integration tier consume that owner.
+`scripts/loadtest.py` retains CLI dispatch and baseline persistence, including
+reserved CI-baseline protection, with same-object measurement exports. Query
+load and ingestion benchmark workloads remain distinct. L3 policy, environment
+capture and baseline-default resolution remain operational script concerns for
+the next migration slice.
+
 Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 `docs/live-stack.md`. Design overview: `docs/architecture.md` §5.
 
