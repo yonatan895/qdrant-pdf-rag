@@ -880,22 +880,21 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEnvSubset(calls[0], {"EMBED_MODE": "", "VENUE": "dev"})
         self.assertIn("evals/baseline.json", calls[0]["argv"])
 
-    def test_harness_golden_flag_iff_hash_mode(self):
+    def test_harness_delegates_dataset_and_baseline_selection(self):
         self.make_venv_fake()
         env = self.tool_env()
         proc = self.run_task("eval:harness:gate", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = self.pip_calls()[0]["argv"]
-        self.assertIn("--golden", argv)
-        self.assertEqual(argv[argv.index("--golden") + 1], "evals/golden.jsonl")
-        self.assertIn("benchmarks/harness.json", argv)
+        self.assertNotIn("--golden", argv)
+        self.assertNotIn("--baseline", argv)
         if (self.log).exists():
             self.log.unlink()
         proc = self.run_task("eval:harness:gate", "EMBED_MODE=vllm", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = self.pip_calls()[0]["argv"]
         self.assertNotIn("--golden", argv)
-        self.assertIn("benchmarks/harness-vllm.json", argv)
+        self.assertNotIn("--baseline", argv)
 
     def test_holdout_transports_forced_rc_venue(self):
         self.make_venv_fake()

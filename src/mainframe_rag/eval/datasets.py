@@ -192,6 +192,23 @@ def resolve_golden_paths(
     return paths
 
 
+def resolve_harness_golden_paths(
+    embed_mode: str,
+    explicit: Sequence[Path | str] | None = None,
+    venue: str | None = None,
+) -> list[Path]:
+    """L1 harness defaults for the caller's normalized Settings mode.
+
+    The synthetic/hash venue uses dev golden only, even under RC. The
+    vLLM venue uses the existing venue-controlled set. Explicit selections
+    retain the ordinary holdout authorization rule. Other evaluators keep
+    their own defaults through ``resolve_golden_paths``.
+    """
+    if not explicit and embed_mode != "vllm":
+        explicit = [DEV_GOLDEN_PATH]
+    return resolve_golden_paths(explicit, venue)
+
+
 def read_golden_text(path: Path | str) -> str:
     """Read once; authorize and verify frozen holdout bytes before decoding.
 
