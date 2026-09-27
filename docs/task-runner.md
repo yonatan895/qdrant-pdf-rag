@@ -139,6 +139,9 @@ without a CLI value the existing environment and launcher default apply.
 In this table, invoke each task with `sh scripts/tools/run-task.sh <task>`.
 CLI `NAME=value` wins over the caller environment. Per-task environment bridges
 preserve script ownership; there is no root `dotenv:` or global mode/venue.
+Air-gap operator stages share one YAML environment map, resolved for each
+invoked task. `common.sh` remains the input-policy owner; `airgap:dryrun`
+keeps its separate fixed rehearsal inputs.
 
 | Input | Task/example | Semantics |
 |---|---|---|
