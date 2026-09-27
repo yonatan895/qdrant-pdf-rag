@@ -1001,19 +1001,19 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--report") + 1], "/r.json")
         self.assertEqual(argv[argv.index("--baseline") + 1], "/b.json")
 
-    def test_harness_l3_baseline_nesting(self):
+    def test_harness_l3_transports_only_explicit_baseline(self):
         self.make_venv_fake()
         env = self.tool_env()
         proc = self.run_task("eval:harness:l3", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = self.pip_calls()[0]["argv"]
-        self.assertEqual(argv[argv.index("--baseline") + 1], "benchmarks/harness-l3.json")
+        self.assertNotIn("--baseline", argv)
         if (self.log).exists():
             self.log.unlink()
         proc = self.run_task("eval:harness:l3", "EMBED_MODE=vllm", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = self.pip_calls()[0]["argv"]
-        self.assertEqual(argv[argv.index("--baseline") + 1], "benchmarks/harness-l3-vllm.json")
+        self.assertNotIn("--baseline", argv)
         if (self.log).exists():
             self.log.unlink()
         proc = self.run_task("eval:harness:l3", "EMBED_MODE=vllm", "HARNESS_L3_BASELINE=c.json",

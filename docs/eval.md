@@ -63,6 +63,12 @@ invocation. This replaces the script's import-time `EMBED_MODE` and
 filename, case-insensitive vllm keeps its dedicated filename, and explicit
 `--baseline` still takes precedence. Environment capture, baseline persistence
 and live load orchestration remain operational script concerns.
+Both L3 Task commands delegate baseline defaults to this Python operation.
+`HARNESS_L3_BASELINE` supplies an explicit override only when present (CLI
+Task input wins over ambient input); an explicitly empty override remains an
+empty `--baseline` argument and does not fall back to the mode default.
+Case-insensitive mode selection therefore agrees between Task and direct
+Python. Gate runs never record baselines; recording remains explicit.
 
 Rendering and comparison of recorded retrieval/benchmark JSON are owned by
 `mainframe_rag.eval.reports`. The L1 gate imports this renderer directly;
