@@ -560,16 +560,22 @@ into the pinned Qdrant image, then loads a real uvicorn agent backed by the
 mock LLM, measuring peak RSS, Qdrant container RAM/disk, and search/answer
 latencies.
 
-- An explicit `--check` reference must load as a JSON object before simulator,
-  corpus, measurement, output or manifest work. Missing/unreadable files,
-  invalid encoding/JSON and non-object JSON fail with exit 2 and preserve
-  existing output files. The gate uses that parsed reference throughout the
-  run; replacing its file during measurement cannot change the verdict.
-  No-check diagnostic runs and explicit recording retain their existing
-  behavior. This preflight checks file availability/shape, not completeness
-  of metric fields: the existing partial-baseline and unmeasured-metric
-  compatibility rules remain. Stricter numeric/completeness validation is a
-  separate remaining C3 concern; this change does not qualify those cases.
+- An explicit `--check` reference must be a readable JSON object containing
+  all five gated metrics as finite, nonnegative numbers (booleans are invalid).
+  Optional `_meta` and `_meta.env` must be objects when present. Invalid
+  references fail with exit 2 before CLI workload or output effects. The gate
+  uses the parsed reference throughout the run, including concurrent replacement.
+- Requested checking and recording validate each measurement pass before
+  aggregation: all gated metrics must be available and valid, and both endpoint
+  error counts must be integer zero with positive integer request counts. Empty
+  workloads cannot qualify as zero-latency successes. Failure returns exit 2,
+  stops the simulator, and preserves existing baseline/result/summary files without appending a
+  manifest. The baseline writer also refuses invalid or failed measurements.
+  This deliberately replaces partial-baseline and unmeasured-metric success:
+  external Qdrant reuse without measurable RAM/disk cannot qualify a requested
+  gate or baseline recording. Run without `--check` for diagnostic measurements;
+  diagnostic output is not gate acceptance. Valid-input aggregation, thresholds
+  and optional legacy environment identity checks are unchanged.
 - Gated metrics with tolerances: RSS, Qdrant mem, Qdrant disk ×1.5;
   search/answer p95 ×3.0. Improvements never fail. Baselines refuse to
   record from broken runs.

@@ -26,8 +26,8 @@ def _result() -> dict:
         "ingest": {"peak_rss_mb": 100.0},
         "qdrant": {"mem_mb": 50.0, "disk_mb": 4.0},
         "agent": {
-            "search": {"latency_ms": {"p95": 40.0}, "errors": 0},
-            "answer": {"latency_ms": {"p95": 50.0}, "errors": 0},
+            "search": {"latency_ms": {"p95": 40.0}, "errors": 0, "requests": 10},
+            "answer": {"latency_ms": {"p95": 50.0}, "errors": 0, "requests": 10},
         },
     }
 
@@ -65,9 +65,9 @@ def test_update_baseline_emits_nested_shape_that_the_gate_reads(tmp_path):
     assert check_baseline(_scaled(0.001), baseline) == [], "improvements never fail"
 
 
-def test_unmeasured_metrics_warn_and_skip(tmp_path, capsys):
+def test_unmeasured_metrics_refuse_required_gate(tmp_path):
     """qdrant mem/disk are unmeasurable on the QDRANT_SIM_URL reuse path —
-    warn, never regress."""
+    a requested gate cannot qualify unavailable measurements."""
     path = tmp_path / "baseline.json"
     update_baseline(_result(), path)
     baseline = json.loads(path.read_text())
@@ -75,8 +75,11 @@ def test_unmeasured_metrics_warn_and_skip(tmp_path, capsys):
     _set(partial, "qdrant.mem_mb", None)
     _set(partial, "qdrant.disk_mb", None)
 
-    assert check_baseline(partial, baseline) == []
-    assert "not measured this run" in capsys.readouterr().err
+    issues = check_baseline(partial, baseline)
+    assert issues == [
+        "qdrant.mem_mb: required finite nonnegative number unavailable",
+        "qdrant.disk_mb: required finite nonnegative number unavailable",
+    ]
 
 
 def test_errors_under_load_fail_the_gate(tmp_path):
@@ -92,11 +95,12 @@ def test_errors_under_load_fail_the_gate(tmp_path):
     assert check_baseline(_result(), baseline) == []
 
 
-def test_baseline_missing_keys_warn_and_skip(tmp_path, capsys):
+def test_baseline_missing_keys_refuse_required_gate(tmp_path):
     path = tmp_path / "baseline.json"
     path.write_text(json.dumps({"_meta": {}}))
-    assert check_baseline(_result(), json.loads(path.read_text())) == []
-    assert "baseline has no ingest.peak_rss_mb" in capsys.readouterr().err
+    issues = check_baseline(_result(), json.loads(path.read_text()))
+    assert len(issues) == 5
+    assert "ingest.peak_rss_mb: required finite nonnegative number unavailable" in issues
 
 
 def test_parse_size_mb():
@@ -122,8 +126,8 @@ def _pass(p95_search: float, errors: int = 0, rps: float = 200.0, note: str = "x
         "qdrant": {"mem_mb": 95.0, "disk_mb": 1.7, "points": 211, "metrics_available": True},
         "agent": {
             "model_note": note,
-            "search": {"rps": rps, "latency_ms": {"p50": 30.0, "p95": p95_search}, "errors": errors},
-            "answer": {"rps": rps, "latency_ms": {"p50": 55.0, "p95": 100.0}, "errors": errors},
+            "search": {"rps": rps, "latency_ms": {"p50": 30.0, "p95": p95_search}, "errors": errors, "requests": 10},
+            "answer": {"rps": rps, "latency_ms": {"p50": 55.0, "p95": 100.0}, "errors": errors, "requests": 10},
         },
     }
 
@@ -383,3 +387,115 @@ def test_no_check_and_explicit_record_keep_their_operations(benchmark_cli, tmp_p
     assert recorded['_meta']['capture']['repeats'] == 2
     assert check_baseline(result, recorded) == []
     assert benchmark.main(['--check', str(reference), '--out', str(output)]) == 0
+
+
+@pytest.mark.parametrize("dotted", [
+    "ingest.peak_rss_mb", "qdrant.mem_mb", "qdrant.disk_mb",
+    "agent.search.latency_ms.p95", "agent.answer.latency_ms.p95",
+])
+@pytest.mark.parametrize("value", [None, True, "10", -1, float("nan"), float("inf"), float("-inf"), 10**400])
+def test_invalid_gate_numbers_refuse_baseline_result_and_recording(tmp_path, dotted, value):
+    baseline = _result()
+    broken = _result()
+    _set(broken, dotted, value)
+    assert any(dotted in issue for issue in check_baseline(_result(), broken))
+    assert any(dotted in issue for issue in check_baseline(broken, baseline))
+    reference = tmp_path / "reference.json"
+    reference.write_bytes(b"previous approved reference")
+    with pytest.raises(ValueError, match="cannot record invalid benchmark measurements"):
+        update_baseline(broken, reference)
+    assert reference.read_bytes() == b"previous approved reference"
+    update_baseline(_result(), reference)
+    assert check_baseline(_result(), json.loads(reference.read_text())) == []
+
+
+@pytest.mark.parametrize("value", [None, False, "0", -1, 0.0, float("nan"), 1])
+@pytest.mark.parametrize("endpoint", ["search", "answer"])
+def test_invalid_or_failed_error_counts_cannot_qualify_or_record(tmp_path, endpoint, value):
+    broken = _result()
+    broken["agent"][endpoint]["errors"] = value
+    assert any(f"agent.{endpoint}.errors" in issue for issue in check_baseline(broken, _result()))
+    reference = tmp_path / "reference.json"
+    with pytest.raises(ValueError):
+        update_baseline(broken, reference)
+    assert not reference.exists()
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+@pytest.mark.parametrize("operation", ["--check", "--update-baseline"])
+def test_invalid_pass_cannot_hide_in_aggregation_or_overwrite_outputs(
+    benchmark_cli, monkeypatch, tmp_path, bad_first, operation,
+):
+    import copy
+    benchmark, events, result = benchmark_cli
+    reference = tmp_path / "reference.json"
+    update_baseline(result, reference)
+    before = reference.read_bytes()
+    out = tmp_path / "out.json"
+    summary = tmp_path / "summary.md"
+    out.write_text("previous output")
+    summary.write_text("previous summary")
+    broken = copy.deepcopy(result)
+    broken["ingest"]["peak_rss_mb"] = float("nan")
+    passes = iter([broken, result] if bad_first else [result, broken])
+    def measure(*args):
+        events.append("measure")
+        return next(passes)
+    monkeypatch.setattr(benchmark, "measure_once", measure)
+    args = [operation, str(reference), "--repeats", "2", "--out", str(out), "--summary", str(summary)]
+    assert benchmark.main(args) == 2
+    assert events == ["start", "corpus"] + ["measure"] * (1 if bad_first else 2) + ["stop"]
+    assert reference.read_bytes() == before
+    assert out.read_text() == "previous output"
+    assert summary.read_text() == "previous summary"
+    monkeypatch.setattr(benchmark, "measure_once", lambda *args: result)
+    assert benchmark.main(args) == 0
+    assert json.loads(out.read_text())["ingest"]["peak_rss_mb"] == 170.0
+
+
+@pytest.mark.parametrize("reference", [
+    {}, {"ingest": {"peak_rss_mb": float("nan")}},
+    {**_result(), "_meta": []}, {**_result(), "_meta": {"env": "bad"}},
+])
+def test_semantically_invalid_reference_refuses_before_work(benchmark_cli, tmp_path, reference):
+    benchmark, events, result = benchmark_cli
+    path = tmp_path / "reference.json"
+    path.write_text(json.dumps(reference))
+    assert benchmark.main(["--check", str(path)]) == 2
+    assert events == []
+    update_baseline(result, path)
+    assert benchmark.main(["--check", str(path)]) == 0
+
+
+@pytest.mark.parametrize("operation", ["--check", "--update-baseline"])
+def test_real_empty_load_cannot_qualify_benchmark(benchmark_cli, monkeypatch, tmp_path, operation):
+    from mainframe_rag.eval import load
+    benchmark, events, result = benchmark_cli
+    reference = tmp_path / "reference.json"
+    update_baseline(result, reference)
+    before = reference.read_bytes()
+    monkeypatch.setattr(load, "query_vram_mb", lambda: None)
+    for endpoint in ("search", "answer"):
+        result["agent"][endpoint] = load.run_load("http://unused.invalid", endpoint, ["original"], 0, 0)
+        assert result["agent"][endpoint]["requests"] == 0
+        assert result["agent"][endpoint]["errors"] == 0
+        assert result["agent"][endpoint]["latency_ms"]["p95"] == 0
+    output = tmp_path / "out.json"
+    assert benchmark.main([operation, str(reference), "--out", str(output)]) == 2
+    assert events == ["start", "corpus", "measure", "stop"]
+    assert reference.read_bytes() == before
+    assert not output.exists()
+    # Still usable as an explicitly ungated diagnostic.
+    assert benchmark.main(["--out", str(output)]) == 0
+    assert json.loads(output.read_text())["agent"]["search"]["requests"] == 0
+
+
+@pytest.mark.parametrize("requests", [None, False, "1", 0, -1, 1.0])
+@pytest.mark.parametrize("endpoint", ["search", "answer"])
+def test_required_measurements_have_positive_integer_request_counts(tmp_path, endpoint, requests):
+    result = _result()
+    result["agent"][endpoint]["requests"] = requests
+    assert any(f"agent.{endpoint}.requests" in issue for issue in check_baseline(result, _result()))
+    with pytest.raises(ValueError):
+        update_baseline(result, tmp_path / "reference.json")
+    assert not (tmp_path / "reference.json").exists()
