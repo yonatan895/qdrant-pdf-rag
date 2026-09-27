@@ -55,9 +55,14 @@ and optional GPU observations are owned by `mainframe_rag.eval.load`. The L3
 harness, ingestion benchmark and load integration tier consume that owner.
 `scripts/loadtest.py` retains CLI dispatch and baseline persistence, including
 reserved CI-baseline protection, with same-object measurement exports. Query
-load and ingestion benchmark workloads remain distinct. L3 policy, environment
-capture and baseline-default resolution remain operational script concerns for
-the next migration slice.
+load and ingestion benchmark workloads remain distinct. L3 verdicts and report formatting live in `mainframe_rag.eval.performance`.
+Its `default_baseline_path(workspace_root, embed_mode)` takes explicit inputs;
+the CLI supplies its existing workspace root and reads `EMBED_MODE` on each
+invocation. This replaces the script's import-time `EMBED_MODE` and
+`DEFAULT_L3_BASELINE` snapshots. Missing, empty and non-vllm modes keep the hash
+filename, case-insensitive vllm keeps its dedicated filename, and explicit
+`--baseline` still takes precedence. Environment capture, baseline persistence
+and live load orchestration remain operational script concerns.
 
 Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 `docs/live-stack.md`. Design overview: `docs/architecture.md` §5.

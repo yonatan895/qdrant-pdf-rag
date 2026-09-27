@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scripts.harness_l3 import gate_verdict_l3, summary_markdown_l3
+from mainframe_rag.eval.performance import gate_verdict_l3, summary_markdown_l3
 
 
 def _sample_report() -> dict:
@@ -194,3 +194,55 @@ def test_summary_markdown_renders_tables_and_vram():
     assert "ttft_ms" in md
     assert "VRAM Footprint (trend data; not gated)" in md
     assert "4000.0 MB" in md
+
+
+def _stub_l3_operations(monkeypatch):
+    from types import SimpleNamespace
+
+    from scripts import harness_l3
+
+    from mainframe_rag import config, manifest
+
+    monkeypatch.setattr(config, "load_settings", lambda: SimpleNamespace(qdrant_collection="synthetic"))
+    monkeypatch.setattr(manifest, "write_run_manifest", lambda *args: {"git_sha": "synthetic"})
+    monkeypatch.setattr(harness_l3, "run_load", lambda url, endpoint, *args, **kwargs: _sample_report()[endpoint])
+    monkeypatch.setattr(harness_l3, "query_vram_mb", lambda: None)
+    monkeypatch.setattr(harness_l3, "env_snapshot", lambda **kwargs: {})
+    return harness_l3
+
+
+def test_main_resolves_mode_baseline_per_invocation(tmp_path, monkeypatch):
+    import json
+
+    harness_l3 = _stub_l3_operations(monkeypatch)
+    root = tmp_path / "workspace with spaces"
+    directory = root / "benchmarks"
+    directory.mkdir(parents=True)
+    monkeypatch.setattr(harness_l3, "REPO", root)
+    hash_path = directory / "harness-l3.json"
+    real_path = directory / "harness-l3-vllm.json"
+    hash_path.write_text(json.dumps(_sample_baseline()), encoding="utf-8")
+    low_latency_baseline = _sample_baseline()
+    low_latency_baseline["agent"]["search"]["latency_ms"]["p95"] = 1.0
+    real_path.write_text(json.dumps(low_latency_baseline), encoding="utf-8")
+    original = (hash_path.read_bytes(), real_path.read_bytes())
+
+    # Both orders in the same imported interpreter; no reload or reset.
+    for mode, expected in (("hash", 0), ("vllm", 1), ("vllm", 1), ("hash", 0), ("VLLM", 1), ("", 0)):
+        monkeypatch.setenv("EMBED_MODE", mode)
+        assert harness_l3.main(["--gate"]) == expected
+    monkeypatch.delenv("EMBED_MODE", raising=False)
+    assert harness_l3.main(["--gate"]) == 0
+    monkeypatch.setenv("EMBED_MODE", "vllm")
+    assert harness_l3.main(["--gate", "--baseline", str(hash_path)]) == 0
+    assert (hash_path.read_bytes(), real_path.read_bytes()) == original
+
+
+def test_l3_policy_exports_share_canonical_owner():
+    from scripts import harness_l3
+
+    from mainframe_rag.eval import performance
+
+    for name in ("_ENV_GATE_KEYS", "_get_nested", "default_baseline_path",
+                 "gate_verdict_l3", "summary_markdown_l3"):
+        assert getattr(harness_l3, name) is getattr(performance, name)
