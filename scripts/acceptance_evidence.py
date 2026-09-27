@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 import stat
 import xml.etree.ElementTree as ET
 import zipfile
@@ -131,7 +132,7 @@ def validate_hazard_report(report: dict[str, Any], execution: str, policy: dict[
 def normalize_native(
     *, candidate: dict[str, Any], producer: NativeProducer,
     run: dict[str, Any], job: dict[str, Any], artifact: dict[str, Any],
-    execution_commit: dict[str, Any], archive: bytes,
+    execution_commit: dict[str, Any], candidate_commit: dict[str, Any], archive: bytes,
     policy_digest: str, producer_digest: str, workflow_digest: str, workflow_source: bytes,
     hazard_policy: dict[str, Any] | None = None,
     unit_policy: dict[str, str] | None = None,
@@ -179,9 +180,17 @@ def normalize_native(
     require(report['passed'] is True and type(report['exit_code']) is int and report['exit_code'] == 0)
     # Native API head_sha is the PR head, whereas checkout/workflow SHA is the
     # merge revision. The commit API, not the receipt, establishes its parents.
-    require(report['execution_sha'] == execution_commit['sha'] == candidate['execution_sha'])
-    parents = [parent['sha'] for parent in execution_commit['parents']]
-    require(parents == [candidate['base_sha'], candidate['head_sha']])
+    require(report['execution_sha'] == execution_commit['sha'])
+    require(candidate_commit['sha'] == candidate['execution_sha'])
+    parents = [candidate['base_sha'], candidate['head_sha']]
+    require([parent['sha'] for parent in execution_commit['parents']] == parents)
+    require([parent['sha'] for parent in candidate_commit['parents']] == parents)
+    # GitHub can regenerate a test merge with a different timestamp/SHA.
+    # Parent names alone do not prove the executed source: compare trees from
+    # independently fetched commit records, never a receipt-supplied tree.
+    tree = execution_commit['commit']['tree']['sha']
+    require(isinstance(tree, str) and re.fullmatch('[a-f0-9]{40}', tree) is not None)
+    require(tree == candidate_commit['commit']['tree']['sha'])
     require(report['execution_parents'] == parents)
     require(report['workflow_sha'] == execution_commit['sha'])
     counts = report['tests']
@@ -221,7 +230,7 @@ def normalize_native(
         require(report['result_sha256'] == hashlib.sha256(files['results.json']).hexdigest())
         structured = object_json(files['results.json'])
         if producer.lane == 'hazards':
-            validate_hazard_report(structured, candidate['execution_sha'], hazard_policy)
+            validate_hazard_report(structured, execution_commit['sha'], hazard_policy)
     else:
         require('results.json' not in files)
         structured = None

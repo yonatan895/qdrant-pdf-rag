@@ -10,7 +10,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from scripts.acceptance_evidence import LIMIT, PRODUCERS, normalize_native, paginate, require
+from scripts.acceptance_evidence import (
+    LIMIT,
+    PRODUCERS,
+    artifact_members,
+    normalize_native,
+    object_json,
+    paginate,
+    require,
+)
 from scripts.unit_evidence import INPUTS as UNIT_INPUTS
 from scripts.unit_evidence import validate_union
 from scripts.verifier_approval import VerifierApprovalRequired, approved_inputs, validated_decision
@@ -211,8 +219,14 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
                 artifact = selected_artifacts[0]
                 require(type(artifact['id']) is int and 0 < artifact['size_in_bytes'] <= LIMIT)
                 archive = api.raw(api.prefix + f"actions/artifacts/{artifact['id']}/zip")
+                report = object_json(artifact_members(archive, artifact['digest'])['evidence.json'])
+                tested_sha = report['execution_sha']
+                require(isinstance(tested_sha, str) and re.fullmatch('[a-f0-9]{40}', tested_sha) is not None)
+                tested_commit = (commit if tested_sha == candidate['execution_sha'] else
+                                 api.get(api.prefix + 'commits/' + tested_sha))
                 result = normalize_native(candidate=candidate, producer=producer, run=run, job=job,
-                                          artifact=artifact, execution_commit=commit, archive=archive,
+                                          artifact=artifact, execution_commit=tested_commit,
+                                          candidate_commit=commit, archive=archive,
                                           policy_digest=execution_policy_digest, producer_digest=producer_digest,
                                           workflow_digest=workflow_digest, workflow_source=source,
                                           hazard_policy=hazard_policy,
@@ -358,6 +372,13 @@ def collect_acceptance(api: GitHub, number: int, approved_root: Path) -> dict[st
     result['policy_inputs'] = native['policy_inputs']
     result['verifier_approval'] = native.get('verifier_approval')
     result['markdown_report'] = summary.markdown_report
+    tested_shas = sorted({record['execution_sha'] for record in native['native']
+                          if record.get('status') == 'success' and record.get('execution_sha')})
+    if any(sha != candidate['execution_sha'] for sha in tested_shas):
+        result['markdown_report'] += ('\n\nNative evidence tested execution SHA(s): '
+                                      + ', '.join(f'`{sha}`' for sha in tested_shas)
+                                      + '. GitHub commit records verify identical file trees and exact '
+                                      'current base/head parents against the current test merge.')
     if result['verifier_approval'] is not None:
         run_id = result['verifier_approval']['run_id']
         result['markdown_report'] += ('\n\nVerifier implementation trust: [maintainer decision]('
