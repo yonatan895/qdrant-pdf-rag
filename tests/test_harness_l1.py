@@ -1,6 +1,5 @@
-"""Unit tests for harness PR A: seeded bootstrap CIs (scripts/bootstrap_ci.py),
-L1 per-class metrics (scripts/harness_l1.py), and the promotion gate verdict
-(scripts/harness.py gate_verdict / baseline round-trip).
+"""Unit tests for canonical evaluation statistics, retrieval and promotion,
+plus operational harness baseline round-trip and snapshot behavior.
 
 Hermetic: no Qdrant, no vLLM — every helper under test is pure."""
 
@@ -10,9 +9,7 @@ import json
 
 import pytest
 from scripts.harness import (
-    DEFAULT_CLASS_FLOOR,
     baseline_path_for,
-    gate_verdict,
     load_baseline,
     pin_snapshot,
     resolve_snapshot_action,
@@ -22,6 +19,7 @@ from scripts.harness import (
 )
 
 from mainframe_rag.eval.datasets import GoldenEntry
+from mainframe_rag.eval.promotion import DEFAULT_CLASS_FLOOR, gate_verdict
 from mainframe_rag.eval.retrieval import aggregate, score_row
 from mainframe_rag.eval.statistics import ci95, ci95_paired, ci_excludes_zero
 
@@ -512,9 +510,14 @@ def test_ndcg_graded_ideal_single_max_gain_for_multi_doc():
 def test_bootstrap_delegate_and_promotion_share_statistics():
     from scripts import bootstrap_ci, harness
 
-    from mainframe_rag.eval import statistics
+    from mainframe_rag.eval import promotion, statistics
 
     for name in bootstrap_ci.__all__:
         assert getattr(bootstrap_ci, name) is getattr(statistics, name)
     assert harness.ci95_paired is statistics.ci95_paired
     assert harness.ci_excludes_zero is statistics.ci_excludes_zero
+    assert harness.gate_verdict is promotion.gate_verdict
+    assert harness.PRIMARY_METRICS is promotion.PRIMARY_METRICS
+    assert harness.DEFAULT_CLASS_FLOOR is promotion.DEFAULT_CLASS_FLOOR
+    assert promotion.ci95_paired is statistics.ci95_paired
+    assert promotion.ci_excludes_zero is statistics.ci_excludes_zero

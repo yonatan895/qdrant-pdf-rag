@@ -25,9 +25,15 @@ exports reference the same quality objects; moving ownership does not change
 rate thresholds, structural failure gates, sampling or repeat counts.
 
 Seeded bootstrap intervals are owned by `mainframe_rag.eval.statistics`.
-The promotion harness imports that owner directly; `scripts.bootstrap_ci`
+The promotion policy imports that owner directly; `scripts.bootstrap_ci`
 retains same-object compatibility exports. Resampling, pairing, seeds,
 percentile bounds and the promotion decision remain unchanged.
+
+Pure promotion verdicts and their metric/floor constants are owned by
+`mainframe_rag.eval.promotion`. The harness calls that owner and retains
+same-object compatibility exports; baseline persistence, snapshots and CLI
+execution stay in `scripts/harness.py`. Trap rejection, class floors, paired
+improvement criteria and reason strings retain their existing behavior.
 
 Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 `docs/live-stack.md`. Design overview: `docs/architecture.md` §5.
