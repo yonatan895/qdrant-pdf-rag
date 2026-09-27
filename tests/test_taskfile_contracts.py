@@ -913,8 +913,7 @@ class TaskContractsTests(unittest.TestCase):
         base_calls = self.tool_calls("python3base")
         self.assertEqual(len(base_calls), 1)
         self.assertEqual(base_calls[0]["argv"], [
-            "scripts/loadtest.py", "--url", "http://x:9999", "--endpoint", "search",
-            "--concurrency", "8", "--duration", "30"])
+            "scripts/loadtest.py", "--url", "http://x:9999"])
         self.assertEnvSubset(base_calls[0], {"EMBED_MODE": None, "VENUE": None})
 
     def test_capture_pool_transports_bundle_and_explicit_paths(self):
