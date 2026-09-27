@@ -934,14 +934,15 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--out") + 1], "/tmp/x.jsonl")
         self.assertEqual(argv[argv.index("--golden") + 1], "g.jsonl")
 
-    def test_report_inputs_default_and_override(self):
+    def test_report_transports_bundle_and_explicit_inputs(self):
         self.make_venv_fake()
         env = self.tool_env()
         proc = self.run_task("eval:report", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = self.pip_calls()[0]["argv"]
-        self.assertEqual(argv[argv.index("--report") + 1], "bundles/eval-report.json")
-        self.assertEqual(argv[argv.index("--baseline") + 1], "evals/baseline.json")
+        self.assertEqual(argv[argv.index("--bundle-dir") + 1], "bundles")
+        self.assertNotIn("--report", argv)
+        self.assertNotIn("--baseline", argv)
         if (self.log).exists():
             self.log.unlink()
         proc = self.run_task("eval:report", "REPORT=/r.json", "BASELINE=/b.json", extra_env=env)
