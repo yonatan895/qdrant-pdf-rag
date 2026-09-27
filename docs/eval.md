@@ -185,6 +185,22 @@ while `diagnostic_dualpath_enabled` remains default-off.
   mode-keyed baseline recorded yet). Baselines lacking a metric do not invent
   a threshold for it. The existing baseline identity covers collection/mode;
   it does not attest exact platform weights or semantic model acceptance.
+- **Retrieval input selection (#508):** `eval.datasets.default_retrieval_paths`
+  owns the workspace-relative dataset/baseline pair for `--suite dev` (default)
+  or `--suite paraphrase`. It uses the current invocation's normalized Settings
+  mode: vllm selects the `-vllm` baseline; other modes select the hash-family
+  filename. An explicitly empty mode remains empty, without promising a usable
+  model backend. Explicit `--golden`, `--check PATH`, and
+  `--update-baseline PATH` remain authoritative.
+  A bare `--check` requires the selected default baseline (missing means exit 2);
+  a bare `--update-baseline` explicitly records that default. Omitting both
+  retains the legacy implicit check only when the default exists.
+  Task `eval:retrieval`, `eval:paraphrase`, and `eval:baseline` pass suite and
+  operation intent to this owner. This fixes raw-mode YAML selection disagreeing
+  with Settings for mixed-case/space-padded vllm, including recording into the
+  wrong baseline. Existing Task `EVAL_BASELINE`/`PARAPHRASE_BASELINE` inputs were
+  ignored by their unconditional definitions; explicit paths use the Python CLI.
+  Approved baseline contents, scoring and holdout access rules are unchanged.
 - **`--check` cannot be combined with `--update-baseline`, `--no-check`,
   or `--label-draft`.** Conflicting modes fail before accessing the venue. Baselines
   record `_meta` (size, collection, mode, timestamp) plus the gated metrics;

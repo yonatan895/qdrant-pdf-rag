@@ -90,10 +90,25 @@ def parse_golden_text(text: str) -> list[GoldenEntry]:
     return entries
 
 
+def default_retrieval_paths(
+    embed_mode: str, suite: Literal["dev", "paraphrase"] = "dev",
+) -> tuple[Path, Path]:
+    """Workspace-relative dataset/baseline pair for the normalized Settings mode.
+
+    Explicit CLI paths override these defaults. Selecting a pair neither reads
+    data nor authorizes recording; the calling operation owns those decisions.
+    """
+    if suite not in ("dev", "paraphrase"):
+        raise ValueError("unsupported retrieval suite")
+    golden = "golden.jsonl" if suite == "dev" else "paraphrase.jsonl"
+    family = "" if suite == "dev" else "-paraphrase"
+    mode = "-vllm" if embed_mode == "vllm" else ""
+    return Path("evals") / golden, Path("evals") / f"baseline{family}{mode}.json"
+
+
 def default_baseline_path(embed_mode: str) -> Path:
-    """Mode-keyed baselines: hash numbers gate CI/dev; vllm numbers gate
-    release-candidate runs on the live stack. The two are not comparable."""
-    return Path("evals/baseline-vllm.json") if embed_mode == "vllm" else Path("evals/baseline.json")
+    """Compatibility entry for the dev retrieval baseline selection."""
+    return default_retrieval_paths(embed_mode)[1]
 
 
 DEV_GOLDEN_PATH = Path("evals/golden.jsonl")

@@ -345,3 +345,18 @@ def test_eval_delegates_are_canonical_objects():
         "summary_markdown",
     ):
         assert getattr(ev, name) is getattr(canonical_retrieval, name), name
+
+
+def test_retrieval_defaults_resolve_each_normalized_invocation(monkeypatch):
+    from mainframe_rag.config import Settings
+    from mainframe_rag.eval.datasets import default_retrieval_paths
+
+    for modes in (("hash", " VLLM "), (" VLLM ", "hash")):
+        for mode in modes:
+            monkeypatch.setenv("EMBED_MODE", mode)
+            normalized = Settings(_env_file=None).embed_mode
+            suffix = "-vllm" if mode == " VLLM " else ""
+            assert default_retrieval_paths(normalized) == (
+                Path("evals/golden.jsonl"), Path(f"evals/baseline{suffix}.json"))
+            assert default_retrieval_paths(normalized, "paraphrase") == (
+                Path("evals/paraphrase.jsonl"), Path(f"evals/baseline-paraphrase{suffix}.json"))

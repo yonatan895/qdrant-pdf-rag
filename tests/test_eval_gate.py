@@ -2,8 +2,13 @@
 
 import hashlib
 import json
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 from scripts.eval_retrieval import main
 
 from mainframe_rag.config import Settings
@@ -786,3 +791,191 @@ def test_task_holdout_uses_real_cli_pin_validation_and_recovers(tmp_path):
     assert json.loads(measured.read_text()) == expected
     assert baseline.read_bytes() == baseline_bytes
     assert not (tmp_path / "SENTINEL").exists()
+
+
+# Task supplies operation intent; this bridge keeps the parser, data acquisition,
+# scorer, gate and writer real. Only model/storage/manifest effects are replaced.
+@pytest.fixture
+def retrieval_task_workspace(tmp_path):
+    from tests.test_taskfile_contracts import REQUIRE_RUNNER, find_task
+
+    task = find_task()
+    if task is None:
+        if REQUIRE_RUNNER:
+            pytest.fail("pinned Task unavailable in required lane")
+        pytest.skip("pinned Task unavailable")
+    repo = Path(__file__).resolve().parents[1]
+    shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
+    shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
+    (tmp_path / "scripts").mkdir()
+    shutil.copy2(repo / "scripts/eval_retrieval.py", tmp_path / "scripts/eval_retrieval.py")
+    (tmp_path / ".venv/bin").mkdir(parents=True)
+    launcher = tmp_path / ".venv/bin/python"
+    launcher.write_text(f"#!{sys.executable}\n" + f"sys_path = {str(repo / 'src')!r}\n" + '''
+import importlib.util, json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys_path)
+spec = importlib.util.spec_from_file_location('actual_eval_cli', sys.argv[1])
+ev = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ev)
+from mainframe_rag.config import Settings
+from mainframe_rag.ingest import embed, qdrant_io
+from mainframe_rag.retrieve import rerank
+from mainframe_rag.retrieve.query import SearchHit
+import qdrant_client
+ev.load_settings = lambda: Settings(_env_file=None, qdrant_collection='test-corpus')
+qdrant_client.QdrantClient = lambda **kw: object()
+embed.build_embedder = lambda settings: object()
+qdrant_io.stored_rules_version = lambda *a: None
+rerank.build_reranker = lambda settings: None
+def search(client, embedder, collection, query, **kw):
+    with Path('queries.jsonl').open('a') as out:
+        out.write(json.dumps({'query': query, 'mode': kw['settings'].embed_mode, 'venue': os.environ.get('VENUE')}) + '\\n')
+    doc = 'P' if query.startswith('Paraphrase') else 'D'
+    hit = SearchHit(chunk_id='synthetic-row', doc_id=doc, text='Original evidence', score=1.0,
+                    cite='p. 1', heading='Example', title='Original', page_label='1', chunk_type='prose', message_ids=())
+    return [hit], 'nl', {}
+ev.retrieve_search = search
+ev.write_run_manifest = lambda *a, **kw: {'git_sha': 'synthetic'}
+raise SystemExit(ev.main(sys.argv[2:]))
+''')
+    launcher.chmod(0o755)
+    evals = tmp_path / "evals"
+    evals.mkdir()
+    for suite, filename, doc in (("Dev", "golden.jsonl", "D"), ("Paraphrase", "paraphrase.jsonl", "P")):
+        (evals / filename).write_text(json.dumps({"query": f"{suite} אב; $(touch SENTINEL)", "expected_doc_ids": [doc], "query_class": "table"}) + "\n")
+    for family in ("", "-paraphrase"):
+        for suffix, mode in (("", "hash"), ("-vllm", "vllm")):
+            (evals / f"baseline{family}{suffix}.json").write_text(json.dumps({
+                "_meta": {"collection": "test-corpus", "embed_mode": mode},
+                "recall@1": 0.5, "classes": {"table": {"n": 1, "scored": 1}}}))
+    def run(operation, *args, ambient=None):
+        env = {"PATH": os.defpath, "HOME": str(tmp_path), **(ambient or {})}
+        command = ([str(launcher), "scripts/eval_retrieval.py"] if operation == "cli" else
+                   [task, "--taskfile", str(tmp_path / "Taskfile.yml"), f"eval:{operation}"])
+        return subprocess.run([*command, *args], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30, check=False)
+    return tmp_path, run
+
+
+@pytest.mark.parametrize("operation", ["retrieval", "paraphrase"])
+@pytest.mark.parametrize("args,ambient,mode,venue", [
+    ([], {}, "hash", "dev"),
+    (["EMBED_MODE=vllm"], {"EMBED_MODE": "hash"}, "vllm", "dev"),
+    (["EMBED_MODE=hash", "VENUE=dev"], {"EMBED_MODE": "vllm", "VENUE": "rc"}, "hash", "dev"),
+    ([], {"EMBED_MODE": "vllm", "VENUE": "rc"}, "vllm", "rc"),
+    (["EMBED_MODE= VLLM "], {}, "vllm", "dev"),
+    (["EMBED_MODE="], {"EMBED_MODE": "vllm"}, "", "dev"),
+])
+def test_task_retrieval_inputs(retrieval_task_workspace, operation, args, ambient, mode, venue):
+    root, run = retrieval_task_workspace
+    # Empty mode remains empty. No claim that a real backend accepts that mode.
+    if mode == "":
+        for baseline in (root / "evals").glob("baseline*.json"):
+            value = json.loads(baseline.read_text())
+            value["_meta"]["embed_mode"] = ""
+            baseline.write_text(json.dumps(value))
+    before = {p: p.read_bytes() for p in (root / "evals").glob("*.json")}
+    output = "report space אב;$(touch SENTINEL)"
+    proc = run(operation, *args, f"BUNDLE_DIR={output}", ambient=ambient)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    family = "-paraphrase" if operation == "paraphrase" else ""
+    report = json.loads((root / output / f"eval{family}-report.json").read_text())
+    assert report["gate"]["status"] == "passed"
+    assert report["embed_mode"] == mode
+    assert report["n"] == report["scored"] == 1
+    assert report["recall@1"] == 1.0
+    queries = [json.loads(line) for line in (root / "queries.jsonl").read_text().splitlines()]
+    prefix = "Paraphrase" if operation == "paraphrase" else "Dev"
+    assert queries == [{"query": f"{prefix} אב; $(touch SENTINEL)", "mode": mode, "venue": venue}]
+    assert {p: p.read_bytes() for p in before} == before
+    assert not (root / "SENTINEL").exists()
+
+
+@pytest.mark.parametrize("mode,suffix", [("hash", ""), ("VLLM", "-vllm")])
+def test_task_retrieval_record_then_gate(retrieval_task_workspace, mode, suffix):
+    root, run = retrieval_task_workspace
+    before = {p: p.read_bytes() for p in (root / "evals").glob("*.json")}
+    proc = run("baseline", f"EMBED_MODE={mode}")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    target = root / f"evals/baseline{suffix}.json"
+    recorded = json.loads(target.read_text())
+    assert recorded["_meta"]["embed_mode"] == mode.lower()
+    assert recorded["_meta"]["n"] == 1
+    assert recorded["classes"]["table"]["scored"] == 1
+    assert recorded["recall@1"] == 1.0
+    for path, content in before.items():
+        if path != target:
+            assert path.read_bytes() == content
+    recorded_bytes = target.read_bytes()
+    proc = run("retrieval", f"EMBED_MODE={mode}")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads((root / "bundles/eval-report.json").read_text())["gate"]["status"] == "passed"
+    assert target.read_bytes() == recorded_bytes
+
+
+@pytest.mark.parametrize("operation,family", [("retrieval", ""), ("paraphrase", "-paraphrase")])
+@pytest.mark.parametrize("fault", ["missing", "corrupt", "mode", "empty", "regression"])
+def test_task_retrieval_required_gate_refuses_and_recovers(retrieval_task_workspace, operation, family, fault):
+    root, run = retrieval_task_workspace
+    baseline = root / f"evals/baseline{family}-vllm.json"
+    good = baseline.read_bytes()
+    if fault == "missing":
+        baseline.unlink()
+    elif fault == "corrupt":
+        baseline.write_text("not json")
+    else:
+        policy = json.loads(good)
+        if fault == "mode":
+            policy["_meta"]["embed_mode"] = "hash"
+        elif fault == "empty":
+            policy = {}
+        else:
+            policy["recall@1"] = 2.0
+        baseline.write_text(json.dumps(policy))
+    proc = run(operation, "EMBED_MODE=VLLM")
+    assert proc.returncode != 0
+    if fault != "corrupt":
+        report = json.loads((root / f"bundles/eval{family}-report.json").read_text())
+        assert report["gate"]["status"] == ("failed" if fault == "regression" else "skipped")
+    baseline.write_bytes(good)
+    proc = run(operation, "EMBED_MODE=VLLM")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads((root / f"bundles/eval{family}-report.json").read_text())["gate"]["status"] == "passed"
+    assert baseline.read_bytes() == good
+
+
+def test_retrieval_cli_explicit_paths_and_required_default(retrieval_task_workspace):
+    root, run = retrieval_task_workspace
+    ambient = {"EMBED_MODE": "vllm", "VENUE": "dev"}
+    original = {p: p.read_bytes() for p in (root / "evals").glob("*.json")}
+    baseline = root / "explicit baseline אב;$(touch SENTINEL).json"
+    baseline.write_bytes((root / "evals/baseline-vllm.json").read_bytes())
+    golden = root / "explicit golden אב;$(touch SENTINEL).jsonl"
+    golden.write_bytes((root / "evals/golden.jsonl").read_bytes())
+    args = ["--suite", "paraphrase", "--golden", str(golden), "--out", "report.json"]
+    proc = run("cli", *args, "--update-baseline", str(baseline), ambient=ambient)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(baseline.read_text())["recall@1"] == 1.0
+    recorded = baseline.read_bytes()
+    proc = run("cli", *args, "--check", str(baseline), ambient=ambient)
+    assert proc.returncode == 0, proc.stderr
+    report = json.loads((root / "report.json").read_text())
+    assert report["gate"]["status"] == "passed"
+    assert report["rows"][0]["query"].startswith("Dev")
+    assert baseline.read_bytes() == recorded
+    assert {p: p.read_bytes() for p in original} == original
+    for flag in ("--check", "--update-baseline"):
+        proc = run("cli", *args, flag, "", ambient=ambient)
+        assert proc.returncode != 0  # explicit empty Path is not default intent
+    for conflict in ("--update-baseline", "--no-check", "--label-draft"):
+        proc = run("cli", "--check", conflict, ambient=ambient)
+        assert proc.returncode == 2
+    # Bare required default is distinct from legacy implicit diagnostic fallback.
+    (root / "evals/baseline-paraphrase-vllm.json").unlink()
+    proc = run("cli", "--suite", "paraphrase", "--check", "--out", "report.json", ambient=ambient)
+    assert proc.returncode == 2
+    assert json.loads((root / "report.json").read_text())["gate"]["status"] == "skipped"
+    proc = run("cli", "--suite", "paraphrase", "--out", "report.json", ambient=ambient)
+    assert proc.returncode == 0
+    assert json.loads((root / "report.json").read_text())["gate"]["status"] == "not_requested"
+    assert not (root / "SENTINEL").exists()

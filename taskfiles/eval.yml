@@ -29,16 +29,14 @@ tasks:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
-      EVAL_BASELINE: '{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}evals/baseline-vllm.json{{else}}evals/baseline.json{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
       TASK_EMBED_MODE: '{{.EMBED_MODE}}'
       TASK_VENUE: '{{.VENUE}}'
-      TASK_EVAL_BASELINE: '{{.EVAL_BASELINE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --check "$TASK_EVAL_BASELINE" --out "$TASK_BUNDLE_DIR/eval-report.json" --summary "$TASK_BUNDLE_DIR/eval-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_retrieval.py --suite dev --check --out "$TASK_BUNDLE_DIR/eval-report.json" --summary "$TASK_BUNDLE_DIR/eval-summary.md"
 
   paraphrase:
     desc: Score the paraphrase set against its mode-keyed baseline
@@ -50,16 +48,14 @@ tasks:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
-      PARAPHRASE_BASELINE: '{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}evals/baseline-paraphrase-vllm.json{{else}}evals/baseline-paraphrase.json{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
       TASK_EMBED_MODE: '{{.EMBED_MODE}}'
       TASK_VENUE: '{{.VENUE}}'
-      TASK_PARAPHRASE_BASELINE: '{{.PARAPHRASE_BASELINE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_retrieval.py --golden evals/paraphrase.jsonl --check "$TASK_PARAPHRASE_BASELINE" --out "$TASK_BUNDLE_DIR/eval-paraphrase-report.json" --summary "$TASK_BUNDLE_DIR/eval-paraphrase-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_retrieval.py --suite paraphrase --check --out "$TASK_BUNDLE_DIR/eval-paraphrase-report.json" --summary "$TASK_BUNDLE_DIR/eval-paraphrase-summary.md"
 
   gate-l1:
     desc: Run the L1 retrieval gate (PR check instrument)
@@ -118,16 +114,14 @@ tasks:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
-      EVAL_BASELINE: '{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}evals/baseline-vllm.json{{else}}evals/baseline.json{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
       TASK_EMBED_MODE: '{{.EMBED_MODE}}'
       TASK_VENUE: '{{.VENUE}}'
-      TASK_EVAL_BASELINE: '{{.EVAL_BASELINE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_retrieval.py --golden evals/golden.jsonl --update-baseline "$TASK_EVAL_BASELINE" --out "$TASK_BUNDLE_DIR/eval-report.json" --summary "$TASK_BUNDLE_DIR/eval-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/eval_retrieval.py --suite dev --update-baseline --out "$TASK_BUNDLE_DIR/eval-report.json" --summary "$TASK_BUNDLE_DIR/eval-summary.md"
 
   capture-pool:
     desc: Record live prefetch pools for offline replay (RC/gap only)

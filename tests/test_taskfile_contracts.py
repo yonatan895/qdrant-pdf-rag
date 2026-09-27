@@ -356,7 +356,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(len(self.calls()), 2, "requested verification must rerun")
         for call in self.calls():
             self.assertEqual(call["env"]["EMBED_MODE"], "vllm")
-            self.assertIn("evals/baseline-vllm.json", call["argv"])
+            self.assertEqual(call["argv"][1:4], ["--suite", "dev", "--check"])
             self.assertEqual(call["cwd"], str(self.root))
 
     def test_controlled_discovery_and_literal_focused_selection(self):
@@ -808,77 +808,28 @@ class TaskContractsTests(unittest.TestCase):
         for call in self.tool_calls("docker"):
             self.assertEqual(call["cwd"], str(self.root))
 
-    def test_eval_mode_venue_defaults(self):
+    def test_retrieval_transports_required_operation_and_literal_output(self):
         self.make_venv_fake()
-        proc = self.run_task("eval:retrieval", extra_env=self.tool_env())
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.pip_calls()
-        self.assertEqual(len(calls), 1)
-        self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "dev"})
-        self.assertEqual(
-            calls[0]["argv"],
-            ["scripts/eval_retrieval.py", "--golden", "evals/golden.jsonl",
-             "--check", "evals/baseline.json", "--out", "bundles/eval-report.json",
-             "--summary", "bundles/eval-summary.md"])
-
-    def test_eval_mode_override_cli_and_env_forms(self):
-        self.make_venv_fake()
-        env = self.tool_env()
-        proc = self.run_task("eval:retrieval", "EMBED_MODE=vllm", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.pip_calls()
-        self.assertEnvSubset(calls[0], {"EMBED_MODE": "vllm", "VENUE": "dev"})
-        self.assertIn("evals/baseline-vllm.json", calls[0]["argv"])
-        if (self.log).exists():
-            self.log.unlink()
-        proc = self.run_task("eval:retrieval", extra_env=dict(env, EMBED_MODE="vllm", VENUE="rc"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.pip_calls()
-        self.assertEnvSubset(calls[0], {"EMBED_MODE": "vllm", "VENUE": "rc"})
-        self.assertIn("evals/baseline-vllm.json", calls[0]["argv"])
-        if (self.log).exists():
-            self.log.unlink()
-        # Conflicting forms: CLI wins over ambient environment (TR433-F1)
-        # 1. Ambient hash + CLI vllm -> child and baseline select vllm
-        proc = self.run_task("eval:retrieval", "EMBED_MODE=vllm", extra_env=dict(env, EMBED_MODE="hash"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.pip_calls()
-        self.assertEnvSubset(calls[0], {"EMBED_MODE": "vllm", "VENUE": "dev"})
-        self.assertIn("evals/baseline-vllm.json", calls[0]["argv"])
-        if (self.log).exists():
-            self.log.unlink()
-        # 2. Ambient vllm + CLI hash -> child and baseline select hash
-        proc = self.run_task("eval:retrieval", "EMBED_MODE=hash", extra_env=dict(env, EMBED_MODE="vllm"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.pip_calls()
-        self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "dev"})
-        self.assertIn("evals/baseline.json", calls[0]["argv"])
-        if (self.log).exists():
-            self.log.unlink()
-        # 3. Ambient rc + CLI dev for VENUE -> child selects dev
-        proc = self.run_task("eval:retrieval", "VENUE=dev", extra_env=dict(env, VENUE="rc"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.pip_calls()
-        self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "dev"})
-
-    def test_eval_explicit_empty_mode_preserved_with_hash_baseline(self):
-        # Mirrors Make `$(filter vllm,"")` (hash branch) plus an empty export:
-        # the baseline cannot disagree with the effective mode, and the empty
-        # value reaches the script instead of silently becoming the default.
-        self.make_venv_fake()
-        proc = self.run_task("eval:retrieval", "EMBED_MODE=", extra_env=self.tool_env())
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.pip_calls()
-        self.assertEnvSubset(calls[0], {"EMBED_MODE": "", "VENUE": "dev"})
-        self.assertIn("evals/baseline.json", calls[0]["argv"])
-        if (self.log).exists():
-            self.log.unlink()
-        # Explicit empty CLI overrides nonempty ambient value (TR433-F1)
-        proc = self.run_task("eval:retrieval", "EMBED_MODE=", extra_env=dict(self.tool_env(), EMBED_MODE="vllm"))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        calls = self.pip_calls()
-        self.assertEnvSubset(calls[0], {"EMBED_MODE": "", "VENUE": "dev"})
-        self.assertIn("evals/baseline.json", calls[0]["argv"])
+        output = "report space אב;$(touch SENTINEL)"
+        for task, suite, operation in (
+            ("retrieval", "dev", "--check"),
+            ("paraphrase", "paraphrase", "--check"),
+            ("baseline", "dev", "--update-baseline"),
+        ):
+            with self.subTest(task=task):
+                if self.log.exists():
+                    self.log.unlink()
+                proc = self.run_task(f"eval:{task}", f"BUNDLE_DIR={output}",
+                                     extra_env=self.tool_env())
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                calls = self.pip_calls()
+                self.assertEqual(len(calls), 1)
+                argv = calls[0]["argv"]
+                self.assertEqual(argv[:4], ["scripts/eval_retrieval.py", "--suite", suite, operation])
+                self.assertEqual(argv[4], "--out")
+                self.assertTrue(argv[5].startswith(output + "/"))
+                self.assertFalse((self.root / "SENTINEL").exists())
+        # Mode/venue/precedence and actual verdicts live in test_eval_gate.
 
     def test_harness_delegates_dataset_and_baseline_selection(self):
         self.make_venv_fake()
