@@ -16,9 +16,8 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 | Path | What |
 |---|---|
 | `charts/qdrant-*.tgz` | Vendored Qdrant Helm chart (Apache-2.0); never `helm repo add` in the air-gap |
-| `overlays/openshift/values.yaml` | Qdrant OpenShift values: 3-replica StatefulSet, unprivileged, RWO block, ClusterIP only |
+| `charts/qdrant-openshift.values.yaml` | Qdrant OpenShift values: 3-replica StatefulSet, unprivileged, RWO block, ClusterIP only |
 | `charts/mainframe-rag/` | 2-replica agent Deployment, one-shot ingest Job, Jaeger (tracing on by default); `AGENT_ROUTE=true` renders the OAuth sidecar and a reencrypt Route — fails closed while the oauth-proxy pin is `sha256:PENDING` |
-| `oc-mirror/` | `ImageSetConfiguration` for disconnected mirroring |
 | `src/mainframe_rag/ingest/` | PDF walk, IBM-style parse, chrome strip, chunk, classify, embed, Qdrant IO |
 | `src/mainframe_rag/retrieve/` | Hybrid search (dense + BM25 prefetch, batched query, weighted RRF), query-class screen, optional cross-encoder rerank (`RERANK_ENDPOINT_ORDER`), diversification, filters |
 | `src/mainframe_rag/agent/` | Async FastAPI `/healthz` + `/livez`, `/v1/search`, `/v1/answer`, multi-turn `/v1/chat` + `/v1/chat/completions` (shared `answer_core`, optional SSE streaming), opt-in `GET /metrics` |

@@ -2,4 +2,3 @@
 .agents/skills/** linguist-vendored
 LICENSE.qdrant-skills linguist-vendored
 NOTICE.qdrant-skills linguist-vendored
-vendor/** linguist-vendored
