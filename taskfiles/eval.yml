@@ -11,8 +11,8 @@
 # (CLI form) converge; CLI wins on conflict; an explicit empty value is
 # preserved for `?=`-style inputs and fails in the script, while `$(or)`-style
 # inputs fall back to their default via shell `:-` exactly like Make.
-# Baseline paths are derived from the effective mode with `coalesce`, so the
-# hash/vllm selection and the checked baseline can never disagree.
+# L3 delegates baseline defaults to its Python CLI; other families retain
+# their existing YAML baseline selectors during the #508 migration.
 # Evaluations always run on request: no freshness caching.
 # Included with `dir: .` from the root Taskfile: always runs at repo root.
 version: '3'
@@ -263,8 +263,8 @@ tasks:
       `scripts/harness_l3.py --gate`, replacing the retired `make harness-l3`. The agent
       under test must run with LLM_STREAM=true for TTFT streaming. Inputs:
       AGENT_URL (default http://127.0.0.1:8080), CONCURRENCY/DURATION/
-      REQUEST_TIMEOUT (defaults 8/30/30), HARNESS_L3_BASELINE (mode-keyed
-      default, overridable).
+      REQUEST_TIMEOUT (defaults 8/30/30), HARNESS_L3_BASELINE (explicit override;
+      when absent the Python CLI selects its mode-keyed default).
     vars:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
@@ -273,7 +273,6 @@ tasks:
       CONCURRENCY: '{{if hasKey . "CONCURRENCY"}}{{.CONCURRENCY}}{{else}}8{{end}}'
       DURATION: '{{if hasKey . "DURATION"}}{{.DURATION}}{{else}}30{{end}}'
       REQUEST_TIMEOUT: '{{if hasKey . "REQUEST_TIMEOUT"}}{{.REQUEST_TIMEOUT}}{{else}}30{{end}}'
-      HARNESS_L3_BASELINE: '{{if hasKey . "HARNESS_L3_BASELINE"}}{{.HARNESS_L3_BASELINE}}{{else}}{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}benchmarks/harness-l3-vllm.json{{else}}benchmarks/harness-l3.json{{end}}{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
       TASK_EMBED_MODE: '{{.EMBED_MODE}}'
@@ -286,7 +285,7 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l3.py --url "$TASK_AGENT_URL" --baseline "$TASK_HARNESS_L3_BASELINE" --concurrency "$TASK_CONCURRENCY" --duration "$TASK_DURATION" --request-timeout "$TASK_REQUEST_TIMEOUT" --gate --out "$TASK_BUNDLE_DIR/harness-l3-report.json" --summary "$TASK_BUNDLE_DIR/harness-l3-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l3.py --url "$TASK_AGENT_URL" {{if hasKey . "HARNESS_L3_BASELINE"}}--baseline "$TASK_HARNESS_L3_BASELINE"{{end}} --concurrency "$TASK_CONCURRENCY" --duration "$TASK_DURATION" --request-timeout "$TASK_REQUEST_TIMEOUT" --gate --out "$TASK_BUNDLE_DIR/harness-l3-report.json" --summary "$TASK_BUNDLE_DIR/harness-l3-summary.md"
 
   harness:l3-baseline:
     desc: Re-record the L3 baseline (dedicated PR only)
@@ -301,7 +300,6 @@ tasks:
       CONCURRENCY: '{{if hasKey . "CONCURRENCY"}}{{.CONCURRENCY}}{{else}}8{{end}}'
       DURATION: '{{if hasKey . "DURATION"}}{{.DURATION}}{{else}}30{{end}}'
       REQUEST_TIMEOUT: '{{if hasKey . "REQUEST_TIMEOUT"}}{{.REQUEST_TIMEOUT}}{{else}}30{{end}}'
-      HARNESS_L3_BASELINE: '{{if hasKey . "HARNESS_L3_BASELINE"}}{{.HARNESS_L3_BASELINE}}{{else}}{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}benchmarks/harness-l3-vllm.json{{else}}benchmarks/harness-l3.json{{end}}{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
       TASK_EMBED_MODE: '{{.EMBED_MODE}}'
@@ -314,7 +312,7 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l3.py --url "$TASK_AGENT_URL" --baseline "$TASK_HARNESS_L3_BASELINE" --concurrency "$TASK_CONCURRENCY" --duration "$TASK_DURATION" --request-timeout "$TASK_REQUEST_TIMEOUT" --update-baseline --out "$TASK_BUNDLE_DIR/harness-l3-report.json" --summary "$TASK_BUNDLE_DIR/harness-l3-summary.md"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness_l3.py --url "$TASK_AGENT_URL" {{if hasKey . "HARNESS_L3_BASELINE"}}--baseline "$TASK_HARNESS_L3_BASELINE"{{end}} --concurrency "$TASK_CONCURRENCY" --duration "$TASK_DURATION" --request-timeout "$TASK_REQUEST_TIMEOUT" --update-baseline --out "$TASK_BUNDLE_DIR/harness-l3-report.json" --summary "$TASK_BUNDLE_DIR/harness-l3-summary.md"
 
   harness:l4:
     desc: Harness L4 answer-quality gate (live GPU stack, RC only)
