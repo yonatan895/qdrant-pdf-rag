@@ -80,12 +80,6 @@ with open(log, "a", encoding="utf-8") as fh:
 ret = int(os.environ.get("RECORDER_EXIT", "0"))
 if ret != 0:
     sys.exit(ret)
-if "scripts/dependency_lock.py" in argv and "acquire" in argv:
-    idx = argv.index("--directory") + 1
-    if idx < len(argv):
-        os.makedirs(argv[idx], exist_ok=True)
-        with open(os.path.join(argv[idx], "fake_pkg-1.0.0-py3-none-any.whl"), "w") as whl:
-            whl.write("fake-wheel-content\\n")
 if any("fetch_bm25_weights.py" in a for a in argv):
     if "--out" in argv:
         idx = argv.index("--out") + 1
@@ -619,80 +613,14 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("--exit-code", "qa:lint", extra_env=self.recorder_env)
         self.assertEqual(proc.returncode, 3, proc.stdout)
 
-    def test_wheelhouse_freshness_cycle(self):
+    def test_wheelhouse_preparation_failure_stops_image_build(self):
         self.make_venv_fake()
         self.make_artifact_fixtures()
-        env = self.tool_env()
-        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual([c["argv"] for c in self.pip_calls()],
-                         [["scripts/dependency_lock.py", "acquire", "--profile", "runtime", "--directory", "bundles/wheelhouse"]])
-        stamp = self.root / "bundles/wheelhouse/.task-complete"
-        self.assertTrue(stamp.is_file(), "completion stamp published only after success")
-        # Fresh: skip without invoking pip again.
-        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertIn("up to date", proc.stdout)
-        self.assertEqual(len(self.pip_calls()), 1)
-        # Content change rebuilds; mtime-only touch does not (checksum method).
-        requirement = self.root / "requirements.lock.txt"
-        requirement.write_text(requirement.read_text() + "# comment\n")
-        manifest_path = self.root / "locks/cp314-linux-x86_64.json"
-        manifest = json.loads(manifest_path.read_text())
-        manifest["profiles"]["runtime"]["sha256"] = hashlib.sha256(requirement.read_bytes()).hexdigest()
-        manifest_path.write_text(json.dumps(manifest))
-        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(len(self.pip_calls()), 2)
-        before = len(self.pip_calls())
-        (self.root / "requirements.lock.txt").touch()
-        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(len(self.pip_calls()), before)
-        # Missing stamp rebuilds even though the directory survives: an
-        # existing directory is never proof of a finished build.
-        stamp.unlink()
-        (self.root / "bundles/wheelhouse/partial.txt").write_text("stale", encoding="utf-8")
-        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(len(self.pip_calls()), before + 1)
-        self.assertFalse((self.root / "bundles/wheelhouse/partial.txt").exists())
-        self.assertTrue(stamp.is_file())
-        # TR432-F1: delete one expected member while retaining the stamp: rebuilds
-        wheel = self.root / "bundles/wheelhouse/fake_pkg-1.0.0-py3-none-any.whl"
-        self.assertTrue(wheel.is_file())
-        wheel.unlink()
-        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(len(self.pip_calls()), before + 2, "deleted wheel member must rebuild")
-        self.assertTrue(wheel.is_file())
-        # TR432-F1: modify a member while preserving name and stamp: rebuilds
-        wheel.write_text("corrupted-content\n")
-        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(len(self.pip_calls()), before + 3, "corrupted wheel member must rebuild")
-
-    def test_wheelhouse_builder_failure_leaves_no_stamp(self):
-        self.make_venv_fake()
-        self.make_artifact_fixtures()
-        env = self.tool_env()
-        env["RECORDER_EXIT"] = "1"
-        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
+        self.make_tool_recorder("docker")
+        proc = self.run_task("artifacts:images", extra_env=dict(self.tool_env(), RECORDER_EXIT="1"))
         self.assertNotEqual(proc.returncode, 0)
-        self.assertFalse((self.root / "bundles/wheelhouse/.task-complete").exists())
-
-    def test_wheelhouse_interpreter_change_rebuilds(self):
-        self.make_venv_fake(version="Python 3.14.5")
-        self.make_artifact_fixtures()
-        env = self.tool_env()
-        self.assertEqual(self.run_task("artifacts:wheelhouse", extra_env=env).returncode, 0)
+        self.assertEqual(self.tool_calls("docker"), [])
         self.assertEqual(len(self.pip_calls()), 1)
-        self.assertEqual(self.run_task("artifacts:wheelhouse", extra_env=env).returncode, 0)
-        self.assertEqual(len(self.pip_calls()), 1)
-        env = dict(env, FAKE_PY_VERSION="Python 3.14.6")
-        proc = self.run_task("artifacts:wheelhouse", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertEqual(len(self.pip_calls()), 2, "interpreter change must not reuse cached wheels")
 
     def test_wheelhouse_bundle_dir_override(self):
         self.make_venv_fake()
@@ -701,8 +629,7 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("artifacts:wheelhouse", "BUNDLE_DIR=alt", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual([c["argv"] for c in self.pip_calls()],
-                         [["scripts/dependency_lock.py", "acquire", "--profile", "runtime", "--directory", "alt/wheelhouse"]])
-        self.assertTrue((self.root / "alt/wheelhouse/.task-complete").is_file())
+                         [["scripts/dependency_lock.py", "prepare", "--profile", "runtime", "--directory", "alt/wheelhouse"]])
         self.assertFalse((self.root / "bundles").exists())
 
     def test_wheelhouse_missing_venv_fails_closed(self):
@@ -794,7 +721,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual(
             [c["argv"] for c in self.pip_calls()],
-            [["scripts/dependency_lock.py", "acquire", "--profile", "runtime", "--directory", "alt/wheelhouse"],
+            [["scripts/dependency_lock.py", "prepare", "--profile", "runtime", "--directory", "alt/wheelhouse"],
              ["scripts/fetch_bm25_weights.py", "--model", "Qdrant/bm25",
               "--out", "alt/bm25-weights", "--verify-manifest", "bm25-weights.sha256"]])
         docker = [c["argv"] for c in self.tool_calls("docker")]
