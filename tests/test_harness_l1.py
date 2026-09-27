@@ -521,3 +521,178 @@ def test_bootstrap_delegate_and_promotion_share_statistics():
     assert harness.DEFAULT_CLASS_FLOOR is promotion.DEFAULT_CLASS_FLOOR
     assert promotion.ci95_paired is statistics.ci95_paired
     assert promotion.ci_excludes_zero is statistics.ci_excludes_zero
+
+
+@pytest.fixture
+def harness_input_workspace(tmp_path):
+    """Actual Task/CLI/scorers/verdicts; original data and inert external boundaries."""
+    import hashlib
+    import os
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from tests.test_taskfile_contracts import REQUIRE_RUNNER, find_task
+
+    task = find_task()
+    if task is None:
+        if REQUIRE_RUNNER:
+            pytest.fail("pinned Task unavailable in required lane")
+        pytest.skip("pinned Task unavailable")
+    repo = Path(__file__).resolve().parents[1]
+    shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
+    shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
+    (tmp_path / "scripts").mkdir()
+    for name in ("harness.py", "harness_l1.py"):
+        shutil.copy2(repo / "scripts" / name, tmp_path / "scripts" / name)
+    (tmp_path / ".venv/bin").mkdir(parents=True)
+    launcher = tmp_path / ".venv/bin/python"
+    launcher.write_text(
+        f"#!{sys.executable}\n"
+        "import importlib.util, json, sys\n"
+        "from pathlib import Path\n"
+        "from types import SimpleNamespace\n"
+        f"sys.path.insert(0, {str(repo / 'src')!r})\n"
+        "spec = importlib.util.spec_from_file_location('actual_harness_cli', sys.argv[1])\n"
+        "cli = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(cli)\n"
+        "import qdrant_client\n"
+        "from mainframe_rag import manifest\n"
+        "from mainframe_rag.ingest import embed\n"
+        "from mainframe_rag.retrieve import query\n"
+        "def effect(kind, value=None):\n"
+        "    with Path('effects.jsonl').open('a') as f: f.write(json.dumps([kind, value])+'\\n')\n"
+        "def client(**kwargs):\n"
+        "    effect('client'); return object()\n"
+        "qdrant_client.QdrantClient = client\n"
+        "embed.build_embedder = lambda *a: object()\n"
+        "manifest.write_run_manifest = lambda *a: {'git_sha': 'synthetic'}\n"
+        "cli.snapshot_fingerprint = lambda *a, prefer_name=None: {'points_count': 7, 'snapshot_names': [prefer_name or 'fresh-pin']}\n"
+        "cli.pin_snapshot = lambda *a, **k: {'points_count': 7, 'snapshot_name': 'fresh-pin'}\n"
+        "def search(client, embedder, collection, text, **kwargs):\n"
+        "    effect('query', text)\n"
+        "    doc = {'Synthetic dev query': 'synthetic-dev', 'Synthetic holdout query': 'synthetic-hold'}[text]\n"
+        "    return [SimpleNamespace(doc_id=doc, heading='Chapter', page_label='1', score=1.0, message_ids=())], 'nl', {}\n"
+        "query.search = search\n"
+        "raise SystemExit(cli.main(sys.argv[2:]))\n"
+    )
+    launcher.chmod(0o755)
+    evals = tmp_path / "evals"
+    evals.mkdir()
+    for filename, identity, query in (("golden.jsonl", "dev", "Synthetic dev query"),
+                                      ("holdout.jsonl", "hold", "Synthetic holdout query")):
+        path = evals / filename
+        path.write_text(json.dumps({"id": identity, "query": query, "query_class": "syntax",
+                                    "expected_doc_ids": [f"synthetic-{identity}"]}) + "\n")
+    holdout = evals / "holdout.jsonl"
+    holdout.with_name("holdout.jsonl.sha256").write_text(hashlib.sha256(holdout.read_bytes()).hexdigest() + "  evals/holdout.jsonl\n")
+    benchmarks = tmp_path / "benchmarks"
+    benchmarks.mkdir()
+    for filename, identities, pin in (("harness.json", ["dev"], "hash-pin"),
+                                      ("harness-vllm.json", ["dev", "hold"], "vllm-pin")):
+        (benchmarks / filename).write_text(json.dumps({
+            "_meta": {"golden_entries": len(identities), "snapshot": {"points_count": 7, "snapshot_name": pin}},
+            "classes": {"syntax": {"recall@5": 0.0, "mrr": 0.0}},
+            "per_query": {identity: {"recall@5": 0.0, "mrr": 0.0} for identity in identities},
+        }))
+    before = {p: p.read_bytes() for p in benchmarks.iterdir()}
+    def run(mode, venue, *, direct=False, record=False, extra=()):
+        output = tmp_path / ("direct.json" if direct else "bundles/harness-report.json")
+        output.unlink(missing_ok=True)
+        (tmp_path / "effects.jsonl").unlink(missing_ok=True)
+        env = {"PATH": os.defpath, "HOME": str(tmp_path), "QDRANT_COLLECTION": "synthetic",
+               "EMBED_MODE": "hash", "VENUE": "dev", "HARNESS_BASELINE": "ignored ambient.json"}
+        if direct:
+            env.update(EMBED_MODE=mode, VENUE=venue)
+            command = [str(launcher), "scripts/harness.py", "--update-baseline" if record else "--gate",
+                       "--out", str(output), *extra]
+        else:
+            command = [task, "--taskfile", str(tmp_path / "Taskfile.yml"),
+                       "eval:harness:baseline" if record else "eval:harness:gate",
+                       f"EMBED_MODE={mode}", f"VENUE={venue}", *extra]
+        result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30, check=False)
+        report = json.loads(output.read_text()) if output.exists() else None
+        effects_path = tmp_path / "effects.jsonl"
+        effects = [json.loads(line) for line in effects_path.read_text().splitlines()] if effects_path.exists() else []
+        return result, report, effects
+    return run, tmp_path, before
+
+
+@pytest.mark.parametrize("mode,venue,ids,pin,verdict", [
+    ("hash", "dev", ["dev"], "hash-pin", "merge"),
+    ("hash", "rc", ["dev"], "hash-pin", "merge"),
+    ("", "rc", ["dev"], "hash-pin", "merge"),
+    ("vllm", "rc", ["dev", "hold"], "vllm-pin", "merge"),
+    ("VLLM", "rc", ["dev", "hold"], "vllm-pin", "merge"),
+    (" VLLM ", "rc", ["dev", "hold"], "vllm-pin", "merge"),
+    ("vllm", "dev", ["dev"], "vllm-pin", "hold"),
+])
+def test_harness_task_and_cli_select_same_mode_inputs(harness_input_workspace, mode, venue, ids, pin, verdict):
+    run, _, before = harness_input_workspace
+    for direct in (False, True):
+        result, report, effects = run(mode, venue, direct=direct)
+        assert (result.returncode == 0) == (verdict == "merge"), result.stdout + result.stderr
+        assert list(report["summary"]["per_query"]) == ids
+        assert report["snapshot"]["snapshot_name"] == pin
+        assert report["verdict"] == verdict
+        assert [row[1] for row in effects if row[0] == "query"] == [
+            "Synthetic dev query" if identity == "dev" else "Synthetic holdout query" for identity in ids]
+        assert {path: path.read_bytes() for path in before} == before
+
+
+@pytest.mark.parametrize("mode,ids,filename", [
+    ("hash", ["dev"], "harness.json"),
+    ("VLLM", ["dev", "hold"], "harness-vllm.json"),
+])
+def test_harness_task_records_selected_dataset_then_next_gate(harness_input_workspace, mode, ids, filename):
+    run, root, before = harness_input_workspace
+    result, report, _ = run(mode, "rc", record=True, extra=("HARNESS_BASELINE=ignored CLI.json",))
+    assert result.returncode == 0, result.stdout + result.stderr
+    selected = root / "benchmarks" / filename
+    stored = json.loads(selected.read_text())
+    assert list(stored["per_query"]) == ids
+    assert stored["_meta"]["golden_entries"] == len(ids)
+    assert stored["_meta"]["embed_mode"] == mode.lower()
+    assert stored["overall"]["recall@5"] == 1.0
+    for path, original in before.items():
+        if path != selected:
+            assert path.read_bytes() == original
+    after = selected.read_bytes()
+    result, report, _ = run(mode, "rc")
+    assert result.returncode != 0  # No improvement over itself: valid promotion hold.
+    assert report["verdict"] == "hold"
+    assert report["reasons"] == ["no primary metric improved beyond CI overlap (recall@5, mrr)"]
+    assert list(report["summary"]["per_query"]) == ids
+    assert selected.read_bytes() == after
+    assert not (root / "ignored CLI.json").exists()
+    assert not (root / "ignored ambient.json").exists()
+
+
+def test_harness_direct_explicit_dataset_and_baseline_remain_authoritative(harness_input_workspace):
+    run, root, before = harness_input_workspace
+    explicit = root / "custom אב;$(touch SENTINEL).json"
+    explicit.write_bytes((root / "benchmarks/harness-vllm.json").read_bytes())
+    original = explicit.read_bytes()
+    result, report, _ = run("hash", "rc", direct=True, extra=(
+        "--golden", "evals/golden.jsonl", "--golden", "evals/holdout.jsonl", "--baseline", str(explicit)))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert list(report["summary"]["per_query"]) == ["dev", "hold"]
+    assert report["snapshot"]["snapshot_name"] == "vllm-pin"
+    assert explicit.read_bytes() == original
+    assert {path: path.read_bytes() for path in before} == before
+    assert not (root / "SENTINEL").exists()
+
+
+@pytest.mark.parametrize("fault", ["missing_baseline", "bad_pin"])
+def test_harness_task_refuses_invalid_inputs_before_external_effects(harness_input_workspace, fault):
+    run, root, before = harness_input_workspace
+    if fault == "missing_baseline":
+        (root / "benchmarks/harness-vllm.json").unlink()
+    else:
+        (root / "evals/holdout.jsonl").write_text("corrupt before parsing\n")
+    result, report, effects = run("VLLM", "rc")
+    assert result.returncode != 0
+    assert report is None
+    assert effects == []
+    assert (root / "benchmarks/harness.json").read_bytes() == before[root / "benchmarks/harness.json"]

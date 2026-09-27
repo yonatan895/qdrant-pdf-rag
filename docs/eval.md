@@ -229,8 +229,18 @@ verdict.
   `real_manuals` — 435057 pts, `VENUE=rc` + `QDRANT_COLLECTION=real_manuals`,
   re-recorded 2026-09-12 on the re-frozen set) and `benchmarks/harness.json`
   (hash venue: **dev golden set only**, `evals/golden.jsonl`, over the
-  snapshot-pinned synthetic hash corpus — the Task harness commands pin
-  `--golden` per mode, issue #158). Venue architecture: harness ↔ real
+  snapshot-pinned synthetic hash corpus). Python now selects both the
+  mode baseline and this dataset default for Task and direct invocations
+  (#508 C3, preserving the #158 venue contract). The harness-specific
+  `resolve_harness_golden_paths` uses the normalized Settings mode: hash
+  defaults to dev golden only even under RC, while vllm uses the ordinary
+  venue-controlled set. This corrects direct hash+RC including holdout and
+  Task mixed-case vllm selecting the hash inputs. Explicit Python `--golden`
+  and `--baseline` remain authoritative; holdout still requires RC and its
+  approved pin. The Task commands continue to ignore `HARNESS_BASELINE`
+  inputs; they never exposed an effective override. L2/L4/answer defaults,
+  snapshot policy and promotion criteria are unchanged. Venue architecture:
+  harness ↔ real
   (`real_manuals` promotion signal with discriminating power) alongside
   holdout ↔ real (`real_manuals` via `sh scripts/tools/run-task.sh eval:holdout` — the honest
   real-corpus semantic gate); the synthetic dev venue (`mainframe_manuals`,

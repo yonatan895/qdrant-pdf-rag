@@ -48,7 +48,8 @@ from mainframe_rag.eval.datasets import (
     DatasetError,
     load_golden,
     require_rc_for_collection,
-    resolve_golden_paths,
+    resolve_golden_paths,  # noqa: F401 — compatibility export
+    resolve_harness_golden_paths,
 )
 
 # Retain historical imports as same-object compatibility exports.
@@ -253,7 +254,7 @@ def restore_snapshot(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Layered harness: L1 retrieval + promotion gate")
     parser.add_argument("--golden", type=Path, action="append", default=None,
-                        help="golden JSONL (repeatable; default: dev golden, +holdout under VENUE=rc)")
+                        help="golden JSONL (repeatable; default: dev golden; vllm adds holdout under VENUE=rc)")
     parser.add_argument("--collection", default=None, help="Qdrant collection (default: settings)")
     parser.add_argument("--restore", choices=("drift", "always", "never"), default="drift",
                         help="snapshot restore policy (default drift: only when the fingerprint differs)")
@@ -271,10 +272,9 @@ def main(argv: list[str] | None = None) -> int:
     collection = args.collection or settings.qdrant_collection
     baseline_path = args.baseline or baseline_path_for(REPO, settings.embed_mode)
     try:
-        # Venue rule (issue #268): dev defaults to the golden set only; the
-        # frozen holdout joins the run only under VENUE=rc, and the real
-        # corpus collection requires the same declaration.
-        golden_paths = resolve_golden_paths(args.golden)
+        # The hash venue defaults to dev golden only; vllm may add the
+        # frozen holdout under RC. Explicit selections remain authoritative.
+        golden_paths = resolve_harness_golden_paths(settings.embed_mode, args.golden)
         require_rc_for_collection(collection)
         entries: list = []
         for p in golden_paths:

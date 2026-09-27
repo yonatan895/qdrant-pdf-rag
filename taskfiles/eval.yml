@@ -11,7 +11,7 @@
 # (CLI form) converge; CLI wins on conflict; an explicit empty value is
 # preserved for `?=`-style inputs and fails in the script, while `$(or)`-style
 # inputs fall back to their default via shell `:-` exactly like Make.
-# L3 delegates baseline defaults to its Python CLI; other families retain
+# L1/L3 harnesses delegate input defaults to Python; other families retain
 # their existing YAML baseline selectors during the #508 migration.
 # Evaluations always run on request: no freshness caching.
 # Included with `dir: .` from the root Taskfile: always runs at repo root.
@@ -204,17 +204,15 @@ tasks:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
-      HARNESS_BASELINE: '{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}benchmarks/harness-vllm.json{{else}}benchmarks/harness.json{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
       TASK_EMBED_MODE: '{{.EMBED_MODE}}'
       TASK_VENUE: '{{.VENUE}}'
-      TASK_HARNESS_BASELINE: '{{.HARNESS_BASELINE}}'
       TASK_RESTORE: '{{.RESTORE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness.py --gate --baseline "$TASK_HARNESS_BASELINE" --restore "${TASK_RESTORE:-drift}" {{if eq (coalesce .EMBED_MODE "hash") "vllm"}}{{else}}--golden evals/golden.jsonl{{end}} --out "$TASK_BUNDLE_DIR/harness-report.json"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness.py --gate --restore "${TASK_RESTORE:-drift}" --out "$TASK_BUNDLE_DIR/harness-report.json"
 
   harness:baseline:
     desc: Re-record the harness baseline (dedicated PR only)
@@ -226,17 +224,15 @@ tasks:
       BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
       EMBED_MODE: '{{if hasKey . "EMBED_MODE"}}{{.EMBED_MODE}}{{else}}hash{{end}}'
       VENUE: '{{if hasKey . "VENUE"}}{{.VENUE}}{{else}}dev{{end}}'
-      HARNESS_BASELINE: '{{if eq (coalesce .EMBED_MODE "hash") "vllm"}}benchmarks/harness-vllm.json{{else}}benchmarks/harness.json{{end}}'
     env:
       TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
       TASK_EMBED_MODE: '{{.EMBED_MODE}}'
       TASK_VENUE: '{{.VENUE}}'
-      TASK_HARNESS_BASELINE: '{{.HARNESS_BASELINE}}'
       TASK_RESTORE: '{{.RESTORE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness.py --update-baseline --baseline "$TASK_HARNESS_BASELINE" --restore "${TASK_RESTORE:-drift}" {{if eq (coalesce .EMBED_MODE "hash") "vllm"}}{{else}}--golden evals/golden.jsonl{{end}} --out "$TASK_BUNDLE_DIR/harness-report.json"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/harness.py --update-baseline --restore "${TASK_RESTORE:-drift}" --out "$TASK_BUNDLE_DIR/harness-report.json"
 
   harness:l2:
     desc: Harness L2 answer tier (live GPU stack, never a PR gate)
