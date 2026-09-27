@@ -90,9 +90,9 @@ still goes to stdout unless `--out` is given. Task transports only nonempty
 path overrides: explicit empty overrides restore defaults even over ambient
 values. Direct empty Path arguments still refuse rather than defaulting.
 For compatibility, an empty `BUNDLE_DIR` retains root-relative default reads
-for text/compare and is refused for HTML directory preparation. Input JSON
-bytes are never changed by rendering; missing/corrupt inputs fail before an
-existing output is replaced.
+for text/compare and is refused for HTML directory preparation. With a distinct output path, input JSON bytes remain unchanged; explicit
+output aliases retain the existing writer behavior. Missing/corrupt inputs
+fail before an existing output is replaced.
 
 Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 `docs/live-stack.md`. Design overview: `docs/architecture.md` §5.
