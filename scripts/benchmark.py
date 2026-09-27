@@ -19,7 +19,8 @@ One JSON result object on --out / stdout; markdown table on --summary
 
 fails when a gated metric exceeds its baseline tolerance (RSS/disk 1.5x,
 latency p95 3x — shared-runner wall time is noisy, resource footprints less
-so; improvements never fail). Missing baseline warns and passes.
+so; improvements never fail). A requested baseline must load as a JSON
+object before any workload starts; unavailable or malformed references fail.
 
     python scripts/benchmark.py --update-baseline benchmarks/baseline.json
 
@@ -508,6 +509,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.check and args.update_baseline:
         parser.error("--check and --update-baseline are mutually exclusive")
+    baseline = None
+    if args.check is not None:
+        try:
+            baseline = json.loads(args.check.read_text(encoding="utf-8"))
+            if not isinstance(baseline, dict):
+                raise TypeError("baseline must be an object")
+        except (OSError, ValueError, TypeError):
+            print("error: requested benchmark baseline must be a readable JSON object", file=sys.stderr)
+            return 2
     repeats = max(1, int(args.repeats))
 
     concurrency = int(os.environ.get("BENCH_CONCURRENCY", "8"))
@@ -540,14 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         **aggregate_runs(passes),
     }
 
-    baseline = None
-    regressions: list[str] = []
-    if args.check:
-        if not args.check.exists():
-            print(f"warn: baseline {args.check} missing; nothing gated", file=sys.stderr)
-        else:
-            baseline = json.loads(args.check.read_text())
-            regressions = check_baseline(result, baseline)
+    regressions = check_baseline(result, baseline) if args.check is not None else []
     if args.update_baseline:
         update_baseline(result, args.update_baseline)
         print(f"baseline written to {args.update_baseline}", file=sys.stderr)
