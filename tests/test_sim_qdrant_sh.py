@@ -66,8 +66,11 @@ class SimQdrantScriptTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2, proc.stdout)
         self.assertIn("must not be empty", proc.stdout)
         self.assertEqual(self.calls(), [], "docker must not run on invalid input")
+        # Restore valid configuration so this call reaches command dispatch.
+        env["SIM_CONTAINER"] = "qdrant-sim"
         proc = subprocess.run(["sh", str(self.root / "scripts/sim_qdrant.sh"), "bogus"],
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               timeout=60, check=False, text=True, env=env, cwd=str(self.root))
         self.assertEqual(proc.returncode, 2)
-
+        self.assertIn("usage: sim_qdrant.sh up|down", proc.stdout)
+        self.assertEqual(self.calls(), [], "docker must not run on an unknown command")
