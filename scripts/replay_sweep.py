@@ -233,13 +233,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", type=Path, default=None, help="write full per-query results here")
     args = parser.parse_args(argv)
 
-    from venue import VenueError, require_rc_for_golden
+    from mainframe_rag.eval.datasets import DatasetError, require_rc_for_golden
 
     try:
         # Venue rule (issue #316): the frozen holdout is an RC-only
-        # instrument, even for offline replays. Fail closed before any I/O.
+        # instrument, even for offline replays. Verify before parsing or scoring.
         require_rc_for_golden([args.golden])
-    except VenueError as exc:
+        entries = load_golden(args.golden)
+    except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
 
@@ -251,7 +252,6 @@ def main(argv: list[str] | None = None) -> int:
         line = line.strip()
         if line:
             records.append(json.loads(line))
-    entries = load_golden(args.golden)
     entries_by_query = {entry.query: entry for entry in entries}
 
     results = [run_config(records, entries_by_query, cfg, settings) for cfg in candidate_configs(settings)]

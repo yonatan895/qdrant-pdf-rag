@@ -44,13 +44,12 @@ if str(REPO_ROOT / "scripts") not in sys.path:
 from eval_retrieval import (
     check_baseline,
     evaluate,
-    load_golden,
     update_baseline,
 )
 from qdrant_sim import QdrantSimError, start_simulator
-from venue import VenueError, require_rc_for_golden
 
 from mainframe_rag.config import load_settings
+from mainframe_rag.eval.datasets import DatasetError, parse_golden_text, read_golden_text
 from mainframe_rag.eval.reports import render_eval
 from mainframe_rag.ingest import run_ingest
 from mainframe_rag.manifest import write_run_manifest
@@ -188,19 +187,19 @@ def run_gate(
     """
     try:
         # Venue rule (issue #316): the frozen holdout is an RC-only
-        # instrument, even through this gate. Fail closed before any I/O.
-        require_rc_for_golden([golden_path])
-    except VenueError as exc:
+        # instrument, even through this gate. Verify before parsing or external work.
+        golden_text = read_golden_text(golden_path)
+    except DatasetError as exc:
         msg = f"FAIL: {exc}"
         print(msg, file=sys.stderr)
         return 2, f"## Retrieval Evaluation Gate (L1)\n\n**ERROR:** {msg}\n"
     target_collection = collection or f"gate-l1-{os.getpid()}"
     raw_entries: list[dict[str, Any]] = [
         json.loads(line)
-        for line in golden_path.read_text(encoding="utf-8").splitlines()
+        for line in golden_text.splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
-    entries = load_golden(golden_path)
+    entries = parse_golden_text(golden_text)
     sim_url = qdrant_url or os.environ.get("QDRANT_SIM_URL") or os.environ.get("QDRANT_URL")
 
     # A skipped gate is not a pass: a missing or wrong-mode baseline, or a

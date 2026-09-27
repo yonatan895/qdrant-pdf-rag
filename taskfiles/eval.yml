@@ -92,7 +92,7 @@ tasks:
   holdout:
     desc: Verify the holdout pin, then score the frozen holdout (RC only)
     summary: |
-      `sha256sum -c evals/holdout.jsonl.sha256` first, then the holdout eval
+      The Python dataset owner verifies the frozen pin before the holdout eval
       against its own baseline, replacing the retired `make eval-holdout`. Release
       candidates only: never iterate against the holdout. VENUE is forced to
       rc (caller VENUE is ignored, same as Make); EMBED_MODE stays
@@ -106,7 +106,6 @@ tasks:
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
       - mkdir -p "$TASK_BUNDLE_DIR"
-      - sha256sum -c evals/holdout.jsonl.sha256
       - EMBED_MODE="$TASK_EMBED_MODE" VENUE=rc .venv/bin/python scripts/eval_retrieval.py --golden evals/holdout.jsonl --check evals/holdout-baseline.json --out "$TASK_BUNDLE_DIR/eval-holdout-report.json" --summary "$TASK_BUNDLE_DIR/eval-holdout-summary.md"
 
   baseline:

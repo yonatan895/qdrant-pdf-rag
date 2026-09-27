@@ -42,8 +42,9 @@ from pathlib import Path
 from mainframe_rag.agent.answer import HttpxLLMClient, condense_query
 from mainframe_rag.config import load_settings
 from mainframe_rag.eval.datasets import (
+    DatasetError,
     GoldenEntry,
-    VenueError,
+    VenueError,  # noqa: F401 — compatibility export
     load_golden,
     require_rc_for_collection,
     require_rc_for_golden,
@@ -272,10 +273,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         require_rc_for_golden([args.golden])
         require_rc_for_collection(settings.qdrant_collection)
-    except VenueError as exc:
+    except DatasetError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    entries = select_entries(load_golden(args.golden), args.limit)
+    try:
+        entries = load_golden(args.golden)
+    except DatasetError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+    entries = select_entries(entries, args.limit)
     if not entries:
         print("no eligible sessions in the golden set", file=sys.stderr)
         return 2

@@ -51,7 +51,12 @@ if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
 from mainframe_rag.eval.answer_tier import run_l2
-from mainframe_rag.eval.datasets import VenueError, require_rc_for_collection, resolve_golden_paths
+from mainframe_rag.eval.datasets import (
+    DatasetError,
+    read_golden_text,
+    require_rc_for_collection,
+    resolve_golden_paths,
+)
 
 DEFAULT_THRESHOLDS = REPO / "evals" / "harness-l4-thresholds.json"
 
@@ -111,16 +116,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         golden_paths = resolve_golden_paths(args.golden)
         require_rc_for_collection(settings.qdrant_collection)
-    except VenueError as exc:
+        entries: list[dict[str, Any]] = []
+        for p in golden_paths:
+            for line in read_golden_text(p).splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    entries.append(json.loads(line))
+    except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
-
-    entries: list[dict[str, Any]] = []
-    for p in golden_paths:
-        for line in p.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                entries.append(json.loads(line))
     if len({e["id"] for e in entries}) != len(entries):
         print("L4 FAILED: duplicate entry ids across golden files", file=sys.stderr)
         return 1

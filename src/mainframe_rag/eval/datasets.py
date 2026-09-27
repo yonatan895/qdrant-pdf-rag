@@ -1,9 +1,9 @@
 """Dataset identity, loading, venue and pinned-set access (issue #508 C2).
 
 Canonical owner for ``eval_retrieval.GoldenEntry``, golden loaders,
-``venue.py`` rules and mode-keyed baseline selection. Mechanical move from
-``scripts/eval_retrieval.py`` and ``scripts/venue.py``: no metric, default,
-gate or label change.
+``venue.py`` rules and mode-keyed baseline selection. Protected holdout
+reads enforce the RC venue and adjacent approved pin before parsing.
+Scoring, mode defaults, baseline and label rules remain separate owners.
 
 Data-path rule: pure functions accept explicit paths. Default dataset paths
 are workspace-relative (``evals/...``) so source checkouts and installed
@@ -22,7 +22,9 @@ unaffected.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal
@@ -70,8 +72,13 @@ class GoldenEntry(BaseModel):
 
 
 def load_golden(path: Path) -> list[GoldenEntry]:
+    return parse_golden_text(read_golden_text(path))
+
+
+def parse_golden_text(text: str) -> list[GoldenEntry]:
+    """Parse an already acquired dataset without reopening its source."""
     entries: list[GoldenEntry] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -100,7 +107,15 @@ DEV = "dev"
 RC = "rc"
 
 
-class VenueError(RuntimeError):
+class DatasetError(RuntimeError):
+    """A dataset cannot be used under its declared access contract."""
+
+
+class DatasetPinError(DatasetError):
+    """A protected dataset is unavailable or does not match its pin."""
+
+
+class VenueError(DatasetError):
     """An RC-only instrument was requested without a declared RC venue."""
 
 
@@ -175,3 +190,35 @@ def resolve_golden_paths(
             paths.append(HOLDOUT_PATH)
     require_rc_for_golden(paths, venue)
     return paths
+
+
+def read_golden_text(path: Path | str) -> str:
+    """Read once; authorize and verify frozen holdout bytes before decoding.
+
+    A resolved holdout uses its target's adjacent ``.sha256`` file. The
+    single SHA256 record identifies the target basename, either alone or
+    with the historical ``evals/`` prefix; it never redirects the read.
+    The pin travels with the approved dataset, including installed usage.
+    Ordinary dev datasets retain their existing unpinned read semantics.
+    """
+    path = Path(path)
+    try:
+        target = path.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise DatasetPinError("dataset path cannot be resolved") from exc
+    protected = path.name == HOLDOUT_FILENAME or target.name == HOLDOUT_FILENAME
+    require_rc_for_golden([HOLDOUT_PATH if protected else target])
+    if not protected:
+        return target.read_text(encoding="utf-8")
+    try:
+        pin = target.with_name(target.name + ".sha256")
+        record = pin.read_text(encoding="utf-8")
+        match = re.fullmatch(r"([0-9a-fA-F]{64}) [ *]([^\r\n]+)\n?", record)
+        if match is None or match[2] not in (target.name, f"evals/{target.name}"):
+            raise DatasetPinError("frozen holdout requires one valid sha256 record naming its dataset")
+        data = target.read_bytes()
+        if hashlib.sha256(data).hexdigest() != match[1].lower():
+            raise DatasetPinError("frozen holdout sha256 mismatch")
+        return data.decode("utf-8")
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise DatasetPinError("frozen holdout or its sha256 pin is unavailable or invalid") from exc
