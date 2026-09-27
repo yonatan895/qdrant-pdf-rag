@@ -48,10 +48,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import httpx2
-from loadtest import DEFAULT_QUERIES, run_load
 from qdrant_sim import QdrantSim, start_simulator
 
 from mainframe_rag.config import load_settings
+from mainframe_rag.eval.load import DEFAULT_QUERIES, run_load
 from mainframe_rag.manifest import write_run_manifest
 
 GATED_METRICS = {

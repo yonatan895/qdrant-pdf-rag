@@ -33,8 +33,13 @@ if str(REPO) not in sys.path:
 if str(REPO / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO / "scripts"))
 
-from loadtest import DEFAULT_QUERIES, export_to_baseline, query_gpu_name, query_vram_mb, run_load
+if str(REPO / "src") not in sys.path:
+    sys.path.insert(0, str(REPO / "src"))
+
+from loadtest import export_to_baseline
 from venue import VenueError, require_rc_for_collection
+
+from mainframe_rag.eval.load import DEFAULT_QUERIES, query_gpu_name, query_vram_mb, run_load
 
 EMBED_MODE = os.environ.get("EMBED_MODE", "hash").lower()
 DEFAULT_L3_BASELINE = (

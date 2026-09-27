@@ -15,7 +15,8 @@ from scripts.benchmark import (
     check_baseline,
     update_baseline,
 )
-from scripts.loadtest import _percentile
+
+from mainframe_rag.eval.load import _percentile
 
 
 def _result() -> dict:
