@@ -1,5 +1,15 @@
 # Evaluation, harness, and benchmark reference
 
+Retrieval scoring and measured execution are owned by
+`mainframe_rag.eval.retrieval`: `evaluate` constructs the configured clients,
+measures each selected query and reports query failures; `collect_rows` uses
+the caller's clients for L1 and propagates query failures. Both retain their
+existing query depth and scoring rules. The retrieval CLI and L1 compatibility
+module export these same objects; the simulator gate and promotion harness
+consume the canonical operations directly. Client imports occur when an
+operation is called. CLI handling, label drafting, simulator lifecycle and
+snapshot/restore orchestration remain in their operational scripts.
+
 Answer-tier measurement is owned by `mainframe_rag.eval.answers`: deterministic
 sampling, request-attributed `AnswerCapture`, structural judging, aggregation,
 and report writing share that import identity with L2. The supported

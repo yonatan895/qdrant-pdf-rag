@@ -41,16 +41,16 @@ if str(REPO_ROOT / "src") not in sys.path:
 if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from eval_retrieval import (
-    check_baseline,
-    evaluate,
-    update_baseline,
-)
 from qdrant_sim import QdrantSimError, start_simulator
 
 from mainframe_rag.config import load_settings
 from mainframe_rag.eval.datasets import DatasetError, parse_golden_text, read_golden_text
 from mainframe_rag.eval.reports import render_eval
+from mainframe_rag.eval.retrieval import (
+    check_baseline,
+    evaluate,
+    update_baseline,
+)
 from mainframe_rag.ingest import run_ingest
 from mainframe_rag.manifest import write_run_manifest
 

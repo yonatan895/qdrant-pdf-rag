@@ -6,6 +6,7 @@ Hermetic: no Qdrant, no network — score_entry and summarize are pure."""
 import json
 from pathlib import Path
 
+import httpx2
 import pytest
 from pydantic import ValidationError
 
@@ -343,8 +344,54 @@ def test_eval_delegates_are_canonical_objects():
         "check_baseline",
         "update_baseline",
         "summary_markdown",
+        "evaluate",
     ):
         assert getattr(ev, name) is getattr(canonical_retrieval, name), name
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("original failure"),
+                                   OSError("original failure"), ValueError("original failure"),
+                                   httpx2.HTTPError("original failure")])
+def test_measurement_preserves_calls_errors_and_next_run(monkeypatch, failure):
+    from types import SimpleNamespace
+
+    import qdrant_client
+
+    from mainframe_rag.eval.retrieval import evaluate
+    from mainframe_rag.ingest import embed, qdrant_io
+    from mainframe_rag.retrieve import query, rerank
+
+    settings = SimpleNamespace(qdrant_url="http://unused.invalid", qdrant_api_key=None,
+                               qdrant_timeout_s=17, qdrant_collection="original", embed_mode="hash")
+    client, embedder, reranker = object(), object(), object()
+    constructors, calls = [], []
+    monkeypatch.setattr(qdrant_client, "QdrantClient",
+                        lambda **kwargs: constructors.append(kwargs) or client)
+    monkeypatch.setattr(embed, "build_embedder", lambda actual: embedder if actual is settings else None)
+    monkeypatch.setattr(rerank, "build_reranker", lambda actual: reranker if actual is settings else None)
+    monkeypatch.setattr(qdrant_io, "stored_rules_version", lambda *args: None)
+    entries = [GoldenEntry(query="broken", expected_doc_ids=["missing"]),
+               GoldenEntry(query="answer", expected_doc_ids=["SC23-6883-70"]),
+               GoldenEntry(query="abstain", expected_behavior="abstain")]
+
+    def search(*args, **kwargs):
+        calls.append((args, kwargs))
+        if args[3] == "broken":
+            raise failure
+        return ([_hit()] if args[3] == "answer" else []), "nl", {}
+
+    monkeypatch.setattr(query, "search", search)
+    report = evaluate(entries, settings)
+    assert constructors == [{"url": "http://unused.invalid", "api_key": None, "timeout": 17}]
+    assert calls == [((client, embedder, "original", entry.query),
+                      {"limit": 8, "settings": settings, "reranker": reranker}) for entry in entries]
+    assert report["n"] == 3 and report["failures"] == 1 and report["scored"] == 1
+    assert report["recall@1"] == 1.0 and report["mrr"] == 1.0
+    assert report["abstain"]["n"] == 1
+    calls.clear()
+    next_report = evaluate(entries[1:2], settings)
+    assert next_report["n"] == next_report["scored"] == 1
+    assert next_report["failures"] == 0 and len(calls) == 1
 
 
 def test_retrieval_defaults_resolve_each_normalized_invocation(monkeypatch):

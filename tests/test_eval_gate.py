@@ -606,7 +606,7 @@ def test_cli_scores_actual_rows_before_deciding_gate(tmp_path, monkeypatch):
     import scripts.eval_retrieval as ev
 
     from mainframe_rag.ingest import embed, qdrant_io
-    from mainframe_rag.retrieve import rerank
+    from mainframe_rag.retrieve import query, rerank
     from mainframe_rag.retrieve.query import SearchHit
 
     monkeypatch.setattr(qdrant_client, "QdrantClient", lambda **kw: object())
@@ -617,7 +617,7 @@ def test_cli_scores_actual_rows_before_deciding_gate(tmp_path, monkeypatch):
     monkeypatch.setattr(ev, "write_run_manifest", lambda *a, **kw: {"git_sha": "synthetic"})
     hit = SearchHit(chunk_id="original-row", doc_id="A", text="Original test evidence", score=1.0,
                     cite="A p. 1", heading="Example", title="Original", page_label="1", chunk_type="narrative", message_ids=())
-    monkeypatch.setattr(ev, "retrieve_search", lambda *a, **kw: ([hit], "nl", {}))
+    monkeypatch.setattr(query, "search", lambda *a, **kw: ([hit], "nl", {}))
     answer = {"query": "original question", "expected_doc_ids": ["A"], "query_class": "table"}
     abstain = {"query": "unsupported premise", "expected_behavior": "abstain", "query_class": "negative"}
     baseline = tmp_path / "baseline.json"
@@ -640,7 +640,7 @@ def test_cli_scores_actual_rows_before_deciding_gate(tmp_path, monkeypatch):
     assert report["classes"]["negative"]["recall@1"] is None
     assert report["recall@1"] == 1.0
     # An actual NL row with no hits must not certify an empty comparison file.
-    monkeypatch.setattr(ev, "retrieve_search", lambda *a, **kw: ([], "nl", {}))
+    monkeypatch.setattr(query, "search", lambda *a, **kw: ([], "nl", {}))
     golden.write_text(json.dumps(answer) + "\n")
     for policy, code in (
         ({}, 2),
@@ -820,7 +820,7 @@ ev = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ev)
 from mainframe_rag.config import Settings
 from mainframe_rag.ingest import embed, qdrant_io
-from mainframe_rag.retrieve import rerank
+from mainframe_rag.retrieve import query, rerank
 from mainframe_rag.retrieve.query import SearchHit
 import qdrant_client
 ev.load_settings = lambda: Settings(_env_file=None, qdrant_collection='test-corpus')
@@ -835,7 +835,7 @@ def search(client, embedder, collection, query, **kw):
     hit = SearchHit(chunk_id='synthetic-row', doc_id=doc, text='Original evidence', score=1.0,
                     cite='p. 1', heading='Example', title='Original', page_label='1', chunk_type='prose', message_ids=())
     return [hit], 'nl', {}
-ev.retrieve_search = search
+query.search = search
 ev.write_run_manifest = lambda *a, **kw: {'git_sha': 'synthetic'}
 raise SystemExit(ev.main(sys.argv[2:]))
 ''')

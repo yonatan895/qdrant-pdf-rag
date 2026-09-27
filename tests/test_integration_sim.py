@@ -835,14 +835,13 @@ def test_eval_retrieval_on_synthetic_corpus(qdrant_url, mock_url, corpus, tmp_pa
     guarantee them); the nl query must reach its doc within recall@5
     (membership, never top-1 across equal-text chunks). Baseline checking
     must produce zero regressions."""
-    from scripts.eval_retrieval import (
-        GoldenEntry,
+    from mainframe_rag.config import load_settings
+    from mainframe_rag.eval.datasets import GoldenEntry
+    from mainframe_rag.eval.retrieval import (
         check_baseline,
         evaluate,
         update_baseline,
     )
-
-    from mainframe_rag.config import load_settings
 
     _ingest(monkeypatch, qdrant_url, "sim-hash", corpus, tmp_path / "inv.jsonl")
     monkeypatch.setenv("QDRANT_URL", qdrant_url)
