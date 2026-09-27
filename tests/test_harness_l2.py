@@ -10,7 +10,8 @@ import logging
 import re
 
 import pytest
-from scripts.harness_l2 import (
+
+from mainframe_rag.eval.answer_tier import (
     _AlertCapture,
     _by_complexity_truncation,
     apply_l2_measurements,
@@ -18,7 +19,6 @@ from scripts.harness_l2 import (
     summarize_l2,
     syntax_check,
 )
-
 from mainframe_rag.eval.judging import (
     JUDGE_MAX_EVIDENCE_CHARS,
     JUDGE_REASONING_EFFORT,
@@ -498,7 +498,7 @@ def test_summarize_carries_by_complexity_slice():
 
 # --------------------------------------------- issue #299 WHY aggregations
 def test_summarize_by_class_pr_means():
-    from scripts.harness_l2 import _by_class_pr
+    from mainframe_rag.eval.answer_tier import _by_class_pr
     rows = [
         _row("A", query_class="syntax", citation_precision=1.0, citation_recall=0.5),
         _row("B", query_class="syntax", citation_precision=0.5, citation_recall=0.5),
@@ -510,7 +510,7 @@ def test_summarize_by_class_pr_means():
 
 
 def test_summarize_by_failure_histogram():
-    from scripts.harness_l2 import _by_failure_histogram
+    from mainframe_rag.eval.answer_tier import _by_failure_histogram
     rows = [
         _row("A", verdict="fail", failures=["zero validated citations"]),
         _row("B", verdict="fail", failures=["zero validated citations"]),
@@ -528,7 +528,7 @@ def test_summarize_carries_why_slices():
 
 
 def test_summarize_by_why_modes_and_off_gold():
-    from scripts.harness_l2 import _by_why
+    from mainframe_rag.eval.answer_tier import _by_why
     rows = [
         _row("A"),
         _row("B", citations=[], truncated=True, citations_header_present=False),
@@ -550,9 +550,112 @@ def test_summarize_by_why_modes_and_off_gold():
 def test_judge_compatibility_identity():
     from scripts import harness_l2
 
-    from mainframe_rag.eval import judging
+    from mainframe_rag.eval import answer_tier, judging
 
     for name in ("JudgeError", "judge_chat", "judge_messages", "relevance_messages",
                  "parse_judge_label", "parse_relevance_label", "evidence_for_citations",
                  "citation_to_hit", "cited_doc_ids", "precision_recall", "RELEVANCE_LABELS"):
         assert getattr(harness_l2, name) is getattr(judging, name)
+    from scripts import harness_l4
+
+    for name in ("run_l2", "_AlertCapture", "apply_l2_measurements", "summarize_l2",
+                 "gate_l2", "syntax_check", "write_summary"):
+        assert getattr(harness_l2, name) is getattr(answer_tier, name)
+    assert harness_l4.run_l2 is answer_tier.run_l2
+
+
+@pytest.mark.parametrize("relevance_enabled", [False, True])
+@pytest.mark.parametrize("search_failure", [False, True])
+def test_run_l2_http_sequence_attribution_and_next_run(monkeypatch, relevance_enabled, search_failure):
+    import json
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    from mainframe_rag import config
+    from mainframe_rag.agent import answer as answer_mod
+    from mainframe_rag.agent import app as app_mod
+    from mainframe_rag.eval.answer_tier import run_l2
+
+    app = FastAPI()
+    events = []
+    clients = []
+    state = {"fail": search_failure, "signals": True, "answers": 0}
+    logger = logging.getLogger("agent")
+    monkeypatch.setattr(logger, "level", logging.INFO)
+    prior_handlers = list(logger.handlers)
+
+    @app.post("/v1/search")
+    def search(body: dict):
+        assert body["limit"] == 8
+        events.append(("search", body["query"]))
+        if state["fail"]:
+            raise RuntimeError("synthetic search failed")
+        return {"hits": [{"cite": "Synthetic reference p. 1", "doc_id": "doc", "text": "Use the documented command."}]}
+
+    @app.post("/v1/answer")
+    def answer(body: dict):
+        events.append(("answer", body["query"]))
+        state["answers"] += 1
+        rid = f"request-{state['answers']}"
+        if state["signals"]:
+            logger.info(json.dumps({"action": "answer", "request_id": rid,
+                                    "completion_tokens": state["answers"], "finish_reason": "stop"}))
+            if state["answers"] == 1:
+                logger.warning(json.dumps({"action": "answer_alert", "request_id": rid,
+                                           "alert": "finish_reason_non_stop", "finish_reason": "length"}))
+        return {"request_id": rid, "answer": "Use the documented command.",
+                "citations": [] if body["query"] == "missing" else ["[1] Synthetic reference p. 1"]}
+
+    class Judge:
+        def __init__(self, settings):
+            self.closed = False
+            clients.append(self)
+
+        def chat(self, messages, *, temperature, reasoning_effort):
+            assert temperature == 0.0
+            assert reasoning_effort == "low"
+            faithfulness = messages[1].content.startswith("EXCERPTS:")
+            events.append(("judge", "faithfulness" if faithfulness else "relevance"))
+            return SimpleNamespace(content='{"label":"entailed"}' if faithfulness else '{"label":"relevant"}')
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(app_mod, "app", app)
+    monkeypatch.setattr(answer_mod, "HttpxLLMClient", Judge)
+    monkeypatch.setattr(config, "load_settings", lambda: object())
+    entries = [_entry("A", gold=["doc"]), _entry("B", gold=["doc"]),
+               {**_entry("C", gold=["doc"]), "query": "missing"}]
+    judge_events = [("judge", "faithfulness")]
+    if relevance_enabled:
+        judge_events.append(("judge", "relevance"))
+    expected = [("search", "q"), ("answer", "q"), *judge_events,
+                ("answer", "q"), *judge_events, ("search", "missing"), ("answer", "missing")]
+
+    if search_failure:
+        with pytest.raises(RuntimeError, match="synthetic search failed"):
+            run_l2(entries, None, relevance_enabled=relevance_enabled)
+        assert events == [("search", "q")]
+    else:
+        rows, metrics = run_l2(entries, None, relevance_enabled=relevance_enabled)
+        assert events == expected
+        assert [row["verdict"] for row in rows] == ["pass", "pass", "fail"]
+        assert [row["completion_tokens"] for row in rows] == [1, 2, 3]
+        assert [row["truncated"] for row in rows] == [True, False, False]
+        assert metrics["structural_fails"] == 1
+    assert logger.handlers == prior_handlers
+    assert len(clients) == 1 and clients[0].closed
+
+    # Same request ids and queries in the next ordinary run must not inherit
+    # either the previous cache or its answer/alert records.
+    events.clear()
+    state.update(fail=False, signals=False, answers=0)
+    rows, metrics = run_l2(entries, None, relevance_enabled=relevance_enabled)
+    assert events == expected
+    assert [row["verdict"] for row in rows] == ["pass", "pass", "fail"]
+    assert [row["completion_tokens"] for row in rows] == [None, None, None]
+    assert [row["truncated"] for row in rows] == [False, False, False]
+    assert metrics["structural_fails"] == 1
+    assert logger.handlers == prior_handlers
+    assert len(clients) == 2 and all(client.closed for client in clients)

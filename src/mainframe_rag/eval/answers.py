@@ -100,7 +100,7 @@ class AnswerCapture(logging.Handler):
     rows can carry the token budget facts the response contract
     deliberately omits (issue #298): query complexity, finish reason,
     and prompt/completion/reasoning/total usage, joined by request_id.
-    Sibling to harness_l2._AlertCapture, which joins the non-stop alert
+    Sibling to answer_tier._AlertCapture, which joins the non-stop alert
     subset; this one keeps the full answer line for attribution."""
 
     def __init__(self) -> None:
