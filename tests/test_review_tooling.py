@@ -1929,7 +1929,8 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                "name": "unit (1/2)", "status": "completed", "conclusion": "success"}
         artifact = {"id": 789, "expired": False, "name": "evidence-unit-1-attempt-2",
                     "workflow_run": {"id": 123, "repository_id": 42, "head_repository_id": 84, "head_sha": "a" * 40}}
-        commit = {"sha": "c" * 40, "parents": [{"sha": "b" * 40}, {"sha": "a" * 40}]}
+        commit = {"sha": "c" * 40, "parents": [{"sha": "b" * 40}, {"sha": "a" * 40}],
+                  "commit": {"tree": {"sha": "1" * 40}}}
         import base64
         identity = base64.b64encode(b'tests/test_example.py::actual').decode()
         xml = ('<testsuite tests="999"><testcase name="actual"><properties>'
@@ -1961,7 +1962,8 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                    "evidence_kind": "execution", "passed": True, "exit_code": 0, "tests": junit_bytes(xml),
                    "unit_coverage": coverage}
         return {"candidate": candidate, "producer": producer, "run": run, "job": job, "unit_policy": unit_policy,
-                "artifact": artifact, "execution_commit": commit, "policy_digest": "d" * 64,
+                "artifact": artifact, "execution_commit": commit,
+                "candidate_commit": json.loads(json.dumps(commit)), "policy_digest": "d" * 64,
                 "producer_digest": "e" * 64, "workflow_source": b"approved workflow",
                 "workflow_digest": hashlib.sha256(b"approved workflow").hexdigest()}, receipt, xml
 
@@ -2090,6 +2092,7 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             args["candidate"]["base_sha"] = receipt["base_sha"] = base
             receipt["execution_parents"][0] = base
             args["execution_commit"]["parents"][0]["sha"] = base
+            args["candidate_commit"]["parents"][0]["sha"] = base
             receipt["policy_sha256"] = hashlib.sha256(b"approved policy").hexdigest()
             receipt["producer_sha256"] = hashlib.sha256(b"approved producer").hexdigest()
             archive, digest = self.packed(receipt, xml)
@@ -2122,7 +2125,11 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                     if endpoint.endswith("/artifacts?per_page=100&page=1"):
                         return {"total_count": 1, "artifacts": [args["artifact"]]}
                     if "/commits/" in endpoint:
-                        return args["execution_commit"]
+                        if endpoint.endswith(args["candidate_commit"]["sha"]):
+                            return args["candidate_commit"]
+                        if endpoint.endswith(args["execution_commit"]["sha"]):
+                            return args["execution_commit"]
+                        raise AssertionError("unexpected commit lookup")
                     if endpoint.endswith("/124"):
                         return {**args["run"], "id": 124, "status": "in_progress"}
                     return args["run"]
@@ -2144,6 +2151,19 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             result = collect_native(api, pr, root)
             self.assertEqual(next(r for r in result["native"] if r["job"] == "unit (1/2)")["status"], "success")
             self.assertNotIn("unit_tests", result["lane_statuses"])
+            # GitHub regenerates only the merge metadata: resolve the tested
+            # commit from its receipt and independently compare both API trees.
+            pr["merge_commit_sha"] = args["candidate_commit"]["sha"] = "f" * 40
+            for tree, expected in (("1" * 40, "success"), ("2" * 40, "unverified"), ("1" * 40, "success")):
+                args["execution_commit"]["commit"]["tree"]["sha"] = tree
+                result = collect_native(api, pr, root)
+                record = next(r for r in result["native"] if r["job"] == "unit (1/2)")
+                self.assertEqual(record["status"], expected)
+                if expected == "success":
+                    self.assertEqual(record["execution_sha"], "c" * 40)
+                    self.assertEqual(result["candidate"]["execution_sha"], "f" * 40)
+            self.assertIn(api.prefix + "commits/" + "c" * 40, api.seen)
+            self.assertIn(api.prefix + "commits/" + "f" * 40, api.seen)
             api.newer = True
             result = collect_native(api, pr, root)
             self.assertEqual(result["runs"]["ci.yml"]["run_id"], 124)
@@ -2309,9 +2329,52 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
         args, receipt, xml = self.fixture()
         receipt["execution_sha"] = receipt["workflow_sha"] = "f" * 40
         args["execution_commit"]["sha"] = "f" * 40
+        args["execution_commit"]["commit"]["tree"]["sha"] = "2" * 40
         args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
         with self.assertRaises(ValueError):
             normalize_native(**args)
+
+    def test_regenerated_merge_requires_api_tree_and_exact_parents_retaining_tested_sha(self):
+        from scripts.acceptance_evidence import normalize_native
+
+        for fault in (None, "changed-tree", "missing-tree", "empty-tree", "invalid-tree",
+                      "stale-base", "stale-head", "reversed-parents", "extra-parent",
+                      "current-parents", "wrong-current-sha", "wrong-tested-sha", "wrong-workflow-sha"):
+            with self.subTest(fault=fault):
+                args, receipt, xml = self.fixture()
+                args["candidate"]["execution_sha"] = "f" * 40
+                args["candidate_commit"]["sha"] = "f" * 40
+                tested = args["execution_commit"]
+                current = args["candidate_commit"]
+                if fault == "changed-tree":
+                    tested["commit"]["tree"]["sha"] = "2" * 40
+                elif fault == "missing-tree":
+                    del tested["commit"]["tree"]
+                elif fault in {"empty-tree", "invalid-tree"}:
+                    tested["commit"]["tree"]["sha"] = current["commit"]["tree"]["sha"] = (
+                        "" if fault == "empty-tree" else "not-a-tree-sha")
+                elif fault in {"stale-base", "stale-head"}:
+                    tested["parents"][int(fault == "stale-head")]["sha"] = "0" * 40
+                elif fault == "reversed-parents":
+                    tested["parents"].reverse()
+                elif fault == "extra-parent":
+                    tested["parents"].append({"sha": "0" * 40})
+                elif fault == "current-parents":
+                    current["parents"][0]["sha"] = "0" * 40
+                elif fault == "wrong-current-sha":
+                    current["sha"] = "0" * 40
+                elif fault == "wrong-tested-sha":
+                    tested["sha"] = "0" * 40
+                elif fault == "wrong-workflow-sha":
+                    receipt["workflow_sha"] = "f" * 40
+                args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
+                if fault is None:
+                    result = normalize_native(**args)
+                    self.assertEqual(result["status"], "success")
+                    self.assertEqual(result["execution_sha"], "c" * 40)
+                else:
+                    with self.assertRaises((ValueError, KeyError)):
+                        normalize_native(**args)
 
     def test_hazard_receipts_require_each_approved_behavioral_kill(self):
         import copy
@@ -2339,8 +2402,10 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                   "catalogue_sha256": hashlib.sha256(catalogue).hexdigest(), "runner_sha256": "f" * 64,
                   "complete_catalogue": True, "passed": True, "results": [result]}
 
-        def normalize(value):
+        def normalize(value, *, regenerated=False):
             args, receipt, _ = self.fixture()
+            if regenerated:
+                args["candidate"]["execution_sha"] = args["candidate_commit"]["sha"] = "e" * 40
             args["producer"] = next(p for p in PRODUCERS if p.lane == "hazards")
             args["job"]["name"] = "hazards"
             args["artifact"]["name"] = "evidence-hazards-attempt-2"
@@ -2357,6 +2422,11 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             return normalize_native(**args)
 
         self.assertEqual(normalize(report)["status"], "success")
+        regenerated = normalize(report, regenerated=True)
+        self.assertEqual(regenerated["execution_sha"], "c" * 40)
+        self.assertEqual(regenerated["results"]["candidate_sha"], "c" * 40)
+        with self.assertRaises(ValueError):
+            normalize({**report, "candidate_sha": "e" * 40}, regenerated=True)
         mutations = [({}, "empty report")]
         for field, value in (("results", []), ("results", [result, result]), ("complete_catalogue", False),
                              ("complete_catalogue", 1), ("passed", False), ("candidate_sha", "a" * 40),
@@ -2601,6 +2671,11 @@ class TestAcceptanceSnapshot(unittest.TestCase):
             self.assertTrue(result["all_prerequisites_met"])
             self.assertEqual({lane["name"] for lane in result["lanes"] if lane["required"]},
                              {"context_check"})
+            native["native"] = [{"status": "success", "lane": "context_check", "execution_sha": "f" * 40}]
+            regenerated = collect_acceptance(api, 3, pathlib.Path.cwd())
+            self.assertIn("`" + "f" * 40 + "`", regenerated["markdown_report"])
+            self.assertIn("identical file trees", regenerated["markdown_report"])
+            self.assertEqual(regenerated["candidate"]["execution_sha"], "c" * 40)
             api.pr["draft"] = True
             self.assertTrue(collect_acceptance(api, 3, pathlib.Path.cwd())["all_prerequisites_met"])
             api.pr["draft"] = False
@@ -3062,7 +3137,7 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                 if endpoint.endswith("git/ref/heads/main"):
                     return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": self.candidate["base_sha"]}}
                 if "/commits/" in endpoint:
-                    return {"sha": self.candidate["execution_sha"], "parents": [
+                    return {"sha": self.candidate["execution_sha"], "commit": {"tree": {"sha": "1" * 40}}, "parents": [
                         {"sha": self.candidate["base_sha"]}, {"sha": self.candidate["head_sha"]}]}
                 if "actions/runs?" in endpoint:
                     return {"total_count": 0, "workflow_runs": []}

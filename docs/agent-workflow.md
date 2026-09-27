@@ -267,10 +267,16 @@ acceptance. A receipt is never a code review or permission to merge.
 `scripts/acceptance_evidence.py` owns native job/artifact mappings and bounded,
 data-only receipt validation. The consumer must fetch current native run, job,
 attempt, artifact and commit records, paginate collections, and compare the
-artifact digest and actual raw test records. The execution must be GitHub's
-current PR test merge with the exact current base/head parents. Matching parent
-names alone cannot authorize a different merge tree. ZIP members are read in
-memory; they are never extracted, imported, or executed.
+artifact digest and actual raw test records. Both the tested execution and
+GitHub's current PR test merge must have the exact ordered current base/head
+parents. GitHub may regenerate that merge with a different timestamp and SHA;
+the consumer accepts native evidence across those SHAs only when independently
+fetched commit records also have identical valid Git tree IDs. Matching parents
+alone cannot authorize a different merge tree; receipt-supplied tree claims are
+not trusted. Native records and the check summary retain the actual tested SHA,
+and hazard results must bind that tested execution. The current candidate and
+maintainer verifier decision still bind the exact current test-merge SHA.
+ZIP members are read in memory; they are never extracted, imported, or executed.
 
 The approved base supplies policy, producer and workflow bytes, Task dispatch
 (the root Taskfile, included modules, wrapper and binary pin), and the critical
