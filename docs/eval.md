@@ -24,6 +24,11 @@ venue checks and the explicit record-versus-check operation. Its compatibility
 exports reference the same quality objects; moving ownership does not change
 rate thresholds, structural failure gates, sampling or repeat counts.
 
+Seeded bootstrap intervals are owned by `mainframe_rag.eval.statistics`.
+The promotion harness imports that owner directly; `scripts.bootstrap_ci`
+retains same-object compatibility exports. Resampling, pairing, seeds,
+percentile bounds and the promotion decision remain unchanged.
+
 Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 `docs/live-stack.md`. Design overview: `docs/architecture.md` §5.
 

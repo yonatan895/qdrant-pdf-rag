@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 
 import pytest
-from scripts.bootstrap_ci import ci95, ci95_paired, ci_excludes_zero
 from scripts.harness import (
     DEFAULT_CLASS_FLOOR,
     baseline_path_for,
@@ -24,6 +23,7 @@ from scripts.harness import (
 
 from mainframe_rag.eval.datasets import GoldenEntry
 from mainframe_rag.eval.retrieval import aggregate, score_row
+from mainframe_rag.eval.statistics import ci95, ci95_paired, ci_excludes_zero
 
 
 def test_l1_delegates_are_canonical_objects():
@@ -507,3 +507,14 @@ def test_ndcg_graded_ideal_single_max_gain_for_multi_doc():
     row = score_row(hits, e)
     # deduped: D1 rank1 gain2; ideal [2,1]: (2/1) / (2/1 + 1/1.585) = 0.7604
     assert row["ndcg@8"] == pytest.approx(0.7604, abs=0.001)
+
+
+def test_bootstrap_delegate_and_promotion_share_statistics():
+    from scripts import bootstrap_ci, harness
+
+    from mainframe_rag.eval import statistics
+
+    for name in bootstrap_ci.__all__:
+        assert getattr(bootstrap_ci, name) is getattr(statistics, name)
+    assert harness.ci95_paired is statistics.ci95_paired
+    assert harness.ci_excludes_zero is statistics.ci_excludes_zero

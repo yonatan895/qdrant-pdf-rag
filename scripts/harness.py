@@ -40,9 +40,17 @@ if str(REPO) not in sys.path:
 if str(REPO / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO / "scripts"))
 
-from bootstrap_ci import ci95_paired, ci_excludes_zero
-from eval_retrieval import load_golden
-from venue import VenueError, require_rc_for_collection, resolve_golden_paths
+# Canonical package imports also work in the supported uninstalled checkout.
+if str(REPO / "src") not in sys.path:
+    sys.path.insert(0, str(REPO / "src"))
+
+from mainframe_rag.eval.datasets import (
+    VenueError,
+    load_golden,
+    require_rc_for_collection,
+    resolve_golden_paths,
+)
+from mainframe_rag.eval.statistics import ci95_paired, ci_excludes_zero
 
 PRIMARY_METRICS = ("recall@5", "mrr")
 DEFAULT_CLASS_FLOOR = 0.05
