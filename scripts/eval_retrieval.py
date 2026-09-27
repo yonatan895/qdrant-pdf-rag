@@ -68,6 +68,7 @@ from mainframe_rag.eval.datasets import (
     GoldenEntry,
     VenueError,  # noqa: F401 — compatibility export
     default_baseline_path,
+    default_retrieval_paths,
     load_golden,
     require_rc_for_collection,
     require_rc_for_golden,
@@ -241,12 +242,13 @@ def label_draft(collection: str, settings, docs: int) -> list[_LabelDraft]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--golden", type=Path, default=Path("evals/golden.jsonl"), help="golden JSONL path (default: dev set)")
+    parser.add_argument("--suite", choices=("dev", "paraphrase"), default="dev", help="dataset/baseline defaults (default: dev)")
+    parser.add_argument("--golden", type=Path, default=None, help="override the suite golden JSONL path")
     parser.add_argument("--out", type=Path, default=None, help="write the JSON report here")
     parser.add_argument("--summary", type=Path, default=None, help="write a markdown table here")
-    parser.add_argument("--check", type=Path, default=None, help="fail on accuracy regressions vs this baseline (default when unset: mode-keyed baseline if it exists)")
+    parser.add_argument("--check", type=Path, nargs="?", const=True, default=None, help="require a gate against PATH, or the suite/mode baseline when bare (when omitted: gate only if the default exists)")
     parser.add_argument("--no-check", action="store_true", help="disable baseline gating entirely")
-    parser.add_argument("--update-baseline", type=Path, default=None, help="record a new baseline here")
+    parser.add_argument("--update-baseline", type=Path, nargs="?", const=True, default=None, help="record a baseline at PATH, or the suite/mode default when bare")
     parser.add_argument(
         "--label-draft", action="store_true",
         help="draft golden entries from collection payload instead of scoring",
@@ -260,6 +262,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--check cannot be combined with --no-check or --label-draft")
 
     settings = load_settings()
+    golden_default, baseline_default = default_retrieval_paths(settings.embed_mode, args.suite)
+    if args.golden is None:
+        args.golden = golden_default
+    # True denotes a bare operation flag, not a missing optional gate. Resolve
+    # only after Settings normalization, and retain explicit Path values.
+    if args.check is True:
+        args.check = baseline_default
+    if args.update_baseline is True:
+        args.update_baseline = baseline_default
     try:
         # Venue rule (issue #268): the frozen holdout and the real-corpus
         # collection are RC-only instruments.
@@ -289,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
     if check_path is None and not args.no_check and not args.update_baseline:
         # Mode-keyed default: gate against the baseline for this embed mode
         # when it has been recorded; a missing baseline warns, never gates.
-        candidate = default_baseline_path(settings.embed_mode)
+        candidate = baseline_default
         if candidate.exists():
             check_path = candidate
         else:
