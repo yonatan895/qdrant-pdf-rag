@@ -856,35 +856,68 @@ def main(argv: list[str] | None = None) -> int:
 
     # eval
     p_eval = subparsers.add_parser("eval", help="Render retrieval evaluation report")
-    p_eval.add_argument("--report", type=Path, required=True, help="Path to eval JSON report")
+    p_eval.add_argument("--report", type=Path, default=None, help="Path to eval JSON report")
     p_eval.add_argument("--baseline", type=Path, default=None, help="Optional baseline JSON path")
     p_eval.add_argument("--format", choices=["text", "markdown", "html"], default="text")
     p_eval.add_argument("--out", type=Path, default=None, help="Write output to file")
 
     # bench
     p_bench = subparsers.add_parser("bench", help="Render benchmark report")
-    p_bench.add_argument("--report", type=Path, required=True, help="Path to bench JSON report")
+    p_bench.add_argument("--report", type=Path, default=None, help="Path to bench JSON report")
     p_bench.add_argument("--baseline", type=Path, default=None, help="Optional baseline JSON path")
     p_bench.add_argument("--format", choices=["text", "markdown", "html"], default="text")
     p_bench.add_argument("--out", type=Path, default=None, help="Write output to file")
 
     # compare-eval
     p_ceval = subparsers.add_parser("compare-eval", help="Compare two eval JSON reports")
-    p_ceval.add_argument("--base", type=Path, required=True, help="Base eval JSON path")
-    p_ceval.add_argument("--current", type=Path, required=True, help="Current eval JSON path")
+    p_ceval.add_argument("--base", type=Path, default=None, help="Base eval JSON path")
+    p_ceval.add_argument("--current", type=Path, default=None, help="Current eval JSON path")
     p_ceval.add_argument("--format", choices=["text", "markdown", "html"], default="text")
     p_ceval.add_argument("--fail-on-regression", action="store_true", help="Exit non-zero if a regression is detected")
     p_ceval.add_argument("--out", type=Path, default=None, help="Write output to file")
 
     # compare-bench
     p_cbench = subparsers.add_parser("compare-bench", help="Compare two bench JSON reports")
-    p_cbench.add_argument("--base", type=Path, required=True, help="Base bench JSON path")
-    p_cbench.add_argument("--current", type=Path, required=True, help="Current bench JSON path")
+    p_cbench.add_argument("--base", type=Path, default=None, help="Base bench JSON path")
+    p_cbench.add_argument("--current", type=Path, default=None, help="Current bench JSON path")
     p_cbench.add_argument("--format", choices=["text", "markdown", "html"], default="text")
     p_cbench.add_argument("--fail-on-regression", action="store_true", help="Exit non-zero if a regression is detected")
     p_cbench.add_argument("--out", type=Path, default=None, help="Write output to file")
 
+    for command in (p_eval, p_bench, p_ceval, p_cbench):
+        command.add_argument(
+            "--bundle-dir", default=None,
+            help="select Task-compatible report/baseline defaults; render HTML into this directory",
+        )
     args = parser.parse_args(argv)
+
+    comparing = args.command in ("compare-eval", "compare-bench")
+    if args.bundle_dir is not None:
+        family = "bench" if args.command in ("bench", "compare-bench") else "eval"
+        baseline = Path("benchmarks/baseline.json" if family == "bench" else "evals/baseline.json")
+        # Retain the Task input contract: an empty bundle means a root-relative
+        # default read for text/compare, but HTML's directory preparation refuses.
+        report = Path(f"{args.bundle_dir}/{family}-report.json")
+        if comparing:
+            if args.base is None:
+                args.base = baseline
+            if args.current is None:
+                args.current = report
+        else:
+            if args.report is None:
+                args.report = report
+            if args.baseline is None:
+                args.baseline = baseline
+            if args.format == "html":
+                if args.bundle_dir == "":
+                    parser.error("--bundle-dir must not be empty for HTML output")
+                Path(args.bundle_dir).mkdir(parents=True, exist_ok=True)
+                if args.out is None:
+                    args.out = Path(args.bundle_dir) / f"{family}-report.html"
+    if comparing and (args.base is None or args.current is None):
+        parser.error("--base and --current are required unless --bundle-dir is supplied")
+    if not comparing and args.report is None:
+        parser.error("--report is required unless --bundle-dir is supplied")
 
     exit_code = 0
     if args.command == "eval":

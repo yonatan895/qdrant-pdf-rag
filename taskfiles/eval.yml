@@ -378,7 +378,7 @@ tasks:
       TASK_BASELINE: '{{.BASELINE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py eval --report "${TASK_REPORT:-"$TASK_BUNDLE_DIR/eval-report.json"}" --baseline "${TASK_BASELINE:-evals/baseline.json}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py eval --bundle-dir "$TASK_BUNDLE_DIR" {{if .REPORT}}--report "$TASK_REPORT"{{end}} {{if .BASELINE}}--baseline "$TASK_BASELINE"{{end}}
 
   html:
     desc: Render the eval report as a self-contained HTML dashboard
@@ -399,9 +399,7 @@ tasks:
       TASK_OUT: '{{.OUT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py eval --report "${TASK_REPORT:-"$TASK_BUNDLE_DIR/eval-report.json"}" --baseline "${TASK_BASELINE:-evals/baseline.json}" --format html --out "${TASK_OUT:-"$TASK_BUNDLE_DIR/eval-report.html"}"
-      - echo "Rendered ${TASK_OUT:-"$TASK_BUNDLE_DIR/eval-report.html"}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py eval --bundle-dir "$TASK_BUNDLE_DIR" {{if .REPORT}}--report "$TASK_REPORT"{{end}} {{if .BASELINE}}--baseline "$TASK_BASELINE"{{end}} --format html {{if .OUT}}--out "$TASK_OUT"{{end}}
 
   compare:
     desc: Compare two eval baselines
@@ -420,7 +418,7 @@ tasks:
       TASK_CURRENT: '{{.CURRENT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py compare-eval --base "${TASK_BASE:-evals/baseline.json}" --current "${TASK_CURRENT:-"$TASK_BUNDLE_DIR/eval-report.json"}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py compare-eval --bundle-dir "$TASK_BUNDLE_DIR" {{if .BASE}}--base "$TASK_BASE"{{end}} {{if .CURRENT}}--current "$TASK_CURRENT"{{end}}
 
   bench-report:
     desc: Render the benchmark report (text/markdown)
@@ -440,7 +438,7 @@ tasks:
       TASK_BASELINE: '{{.BASELINE}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py bench --report "${TASK_REPORT:-"$TASK_BUNDLE_DIR/bench-report.json"}" --baseline "${TASK_BASELINE:-benchmarks/baseline.json}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py bench --bundle-dir "$TASK_BUNDLE_DIR" {{if .REPORT}}--report "$TASK_REPORT"{{end}} {{if .BASELINE}}--baseline "$TASK_BASELINE"{{end}}
 
   bench-html:
     desc: Render the benchmark report as HTML
@@ -461,9 +459,7 @@ tasks:
       TASK_OUT: '{{.OUT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - mkdir -p "$TASK_BUNDLE_DIR"
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py bench --report "${TASK_REPORT:-"$TASK_BUNDLE_DIR/bench-report.json"}" --baseline "${TASK_BASELINE:-benchmarks/baseline.json}" --format html --out "${TASK_OUT:-"$TASK_BUNDLE_DIR/bench-report.html"}"
-      - echo "Rendered ${TASK_OUT:-"$TASK_BUNDLE_DIR/bench-report.html"}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py bench --bundle-dir "$TASK_BUNDLE_DIR" {{if .REPORT}}--report "$TASK_REPORT"{{end}} {{if .BASELINE}}--baseline "$TASK_BASELINE"{{end}} --format html {{if .OUT}}--out "$TASK_OUT"{{end}}
 
   bench-compare:
     desc: Compare two benchmark baselines
@@ -482,7 +478,7 @@ tasks:
       TASK_CURRENT: '{{.CURRENT}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py compare-bench --base "${TASK_BASE:-benchmarks/baseline.json}" --current "${TASK_CURRENT:-"$TASK_BUNDLE_DIR/bench-report.json"}"
+      - EMBED_MODE="$TASK_EMBED_MODE" VENUE="$TASK_VENUE" .venv/bin/python scripts/render_report.py compare-bench --bundle-dir "$TASK_BUNDLE_DIR" {{if .BASE}}--base "$TASK_BASE"{{end}} {{if .CURRENT}}--current "$TASK_CURRENT"{{end}}
 
   bench:
     desc: Run the benchmark workload against the committed baseline

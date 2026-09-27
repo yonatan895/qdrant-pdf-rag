@@ -75,7 +75,24 @@ Rendering and comparison of recorded retrieval/benchmark JSON are owned by
 `scripts/render_report.py` delegates to its CLI and retains same-object helper
 exports. Text, Markdown, HTML, escaping, comparison rules and exit codes are
 unchanged. The renderer consumes supplied files and never reruns evaluation.
-All report/baseline/output paths remain explicit CLI inputs.
+Explicit report/baseline/output paths remain authoritative. The opt-in
+`--bundle-dir DIR` selects the existing Task defaults: `DIR/eval-report.json`
+and `evals/baseline.json`, or `DIR/bench-report.json` and
+`benchmarks/baseline.json`. These report baselines are fixed, never selected by
+embedding mode. Render subcommands with HTML format also default output to
+`DIR/<family>-report.html`; comparison subcommands keep stdout unless `--out`
+is supplied. Python prepares the HTML bundle and output parent and prints the
+written path once (the duplicate Task echo is retired).
+
+Without `--bundle-dir`, the renderer still requires `--report`, or both `--base`
+and `--current` for comparison; a render baseline remains optional and HTML
+still goes to stdout unless `--out` is given. Task transports only nonempty
+path overrides: explicit empty overrides restore defaults even over ambient
+values. Direct empty Path arguments still refuse rather than defaulting.
+For compatibility, an empty `BUNDLE_DIR` retains root-relative default reads
+for text/compare and is refused for HTML directory preparation. Input JSON
+bytes are never changed by rendering; missing/corrupt inputs fail before an
+existing output is replaced.
 
 Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 `docs/live-stack.md`. Design overview: `docs/architecture.md` §5.

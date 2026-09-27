@@ -1,7 +1,14 @@
 """Unit tests for scripts/render_report.py (pure functions, no network/docker)."""
 
 import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from mainframe_rag.eval.reports import (
     compare_bench,
@@ -234,3 +241,180 @@ def test_report_delegate_and_l1_consumer_share_canonical_owner():
                  "main", "BASE_HTML_STYLE"):
         assert getattr(render_report, name) is getattr(reports, name)
     assert gate_l1.render_eval is reports.render_eval
+
+
+@pytest.fixture
+def report_workspace(tmp_path):
+    from tests.test_taskfile_contracts import REQUIRE_RUNNER, find_task
+
+    task = find_task()
+    if task is None:
+        if REQUIRE_RUNNER:
+            pytest.fail("pinned Task unavailable in required lane")
+        pytest.skip("pinned Task unavailable")
+    repo = Path(__file__).resolve().parents[1]
+    shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
+    shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
+    (tmp_path / "scripts").mkdir()
+    shutil.copy2(repo / "scripts/render_report.py", tmp_path / "scripts/render_report.py")
+    (tmp_path / ".venv/bin").mkdir(parents=True)
+    launcher = tmp_path / ".venv/bin/python"
+    launcher.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+    launcher.chmod(0o755)
+    paths, values = {}, {}
+    for family, make_report, baseline_dir in (("eval", _eval_report, "evals"), ("bench", _bench_report, "benchmarks")):
+        for override in (False, True):
+            current, baseline = make_report(), make_report()
+            if family == "eval":
+                current["collection"] = "<b>Original override</b>" if override else "Original default"
+                current["recall@1"] = 0.125 if override else 0.5
+                baseline["recall@1"] = 0.875 if override else 0.75
+            else:
+                current["env"]["qdrant_image"] = "<b>Original override</b>" if override else "Original default"
+                current["agent"]["search"]["rps"] = 125 if override else 400
+                baseline["agent"]["search"]["rps"] = 875 if override else 600
+            current_path = (f"explicit {family} אב;$(touch SENTINEL).json" if override else f"bundles/{family}-report.json")
+            baseline_path = (f"explicit {family} baseline אב;$(touch SENTINEL).json" if override else f"{baseline_dir}/baseline.json")
+            for path, data in ((current_path, current), (baseline_path, baseline)):
+                target = tmp_path / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(json.dumps(data))
+            paths[family, override] = current_path, baseline_path
+            values[family, override] = current, baseline
+    # Report defaults are deliberately not the retrieval mode-keyed baseline.
+    (tmp_path / "evals/baseline-vllm.json").write_text("wrong mode-selected file")
+    def run(operation, *args, ambient=None):
+        return subprocess.run([task, "--taskfile", str(tmp_path / "Taskfile.yml"), f"eval:{operation}", *args],
+            cwd=tmp_path, env={"PATH": os.defpath, "HOME": str(tmp_path), "PYTHONPATH": str(repo / "src"),
+                               "EMBED_MODE": "vllm", **(ambient or {})},
+            capture_output=True, text=True, timeout=30, check=False)
+    return tmp_path, run, paths, values
+
+
+@pytest.mark.parametrize("operation,family,kind", [
+    ("report", "eval", "text"), ("html", "eval", "html"), ("compare", "eval", "compare"),
+    ("bench-report", "bench", "text"), ("bench-html", "bench", "html"), ("bench-compare", "bench", "compare"),
+])
+@pytest.mark.parametrize("selection", ["default", "empty", "override", "ambient"])
+def test_report_task_selects_recorded_inputs(report_workspace, operation, family, kind, selection):
+    root, run, paths, values = report_workspace
+    override = selection in ("override", "ambient")
+    current, baseline = values[family, override]
+    current_path, baseline_path = paths[family, override]
+    first, second = ("CURRENT", "BASE") if kind == "compare" else ("REPORT", "BASELINE")
+    ambient, args = {}, []
+    if selection == "empty":
+        args = [f"{first}=", f"{second}=", "OUT="]
+        ambient = {first: "missing.json", second: "missing.json", "OUT": "wrong.html"}
+    elif override:
+        selected = {first: current_path, second: baseline_path, "OUT": "output אב;$(touch SENTINEL)/chosen.html"}
+        if selection == "override":
+            args = [f"{key}={value}" for key, value in selected.items()]
+            ambient = {first: "missing.json", second: "missing.json", "OUT": "wrong.html"}
+        else:
+            ambient = selected
+    before = {p: p.read_bytes() for p in root.rglob("*.json")}
+    proc = run(operation, *args, ambient=ambient)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    if kind == "compare":
+        expected, _ = (compare_eval if family == "eval" else compare_bench)(baseline, current, "text")
+        assert proc.stdout == expected + "\n"
+    else:
+        expected = (render_eval if family == "eval" else render_bench)(current, baseline, kind)
+        if kind == "html":
+            output = root / ("output אב;$(touch SENTINEL)/chosen.html" if override else f"bundles/{family}-report.html")
+            assert output.read_text() == expected
+            assert str(output.relative_to(root)) in proc.stdout
+            if override:
+                assert "&lt;b&gt;Original override&lt;/b&gt;" in expected
+                assert "<b>Original override</b>" not in expected
+        else:
+            assert proc.stdout == expected + "\n"
+    assert {p: p.read_bytes() for p in before} == before
+    assert not (root / "SENTINEL").exists()
+    assert not (root / "wrong.html").exists()
+
+
+@pytest.mark.parametrize("family,operation", [("eval", "html"), ("bench", "bench-html")])
+@pytest.mark.parametrize("input_index", [0, 1])
+def test_report_invalid_input_preserves_output_and_recovers(report_workspace, family, operation, input_index):
+    root, run, paths, _values = report_workspace
+    assert run(operation).returncode == 0
+    output = root / f"bundles/{family}-report.html"
+    before = output.read_bytes()
+    source = root / paths[family, False][input_index]
+    original = source.read_bytes()
+    for corrupt in (False, True):
+        if corrupt:
+            source.write_text("broken json")
+        else:
+            source.unlink()
+        proc = run(operation)
+        assert proc.returncode != 0
+        assert output.read_bytes() == before
+        source.write_bytes(original)
+        proc = run(operation)
+        assert proc.returncode == 0, proc.stderr
+        assert output.read_bytes() == before
+
+
+@pytest.mark.parametrize("family", ["eval", "bench"])
+def test_report_bundle_defaults_require_explicit_opt_in(tmp_path, monkeypatch, capsys, family):
+    monkeypatch.chdir(tmp_path)
+    current = _eval_report() if family == "eval" else _bench_report()
+    baseline = json.loads(json.dumps(current))
+    bundle = tmp_path / "bundle אב;$(touch SENTINEL)"
+    bundle.mkdir()
+    report = bundle / f"{family}-report.json"
+    report.write_text(json.dumps(current))
+    base = tmp_path / ("evals/baseline.json" if family == "eval" else "benchmarks/baseline.json")
+    base.parent.mkdir()
+    base.write_text(json.dumps(baseline))
+    output = bundle / f"{family}-report.html"
+    # Legacy explicit CLI: optional baseline and stdout HTML are preserved.
+    assert main([family, "--report", str(report), "--format", "html"]) == 0
+    assert "<!DOCTYPE html>" in capsys.readouterr().out
+    assert not output.exists()
+    for command in (family, f"compare-{family}"):
+        with pytest.raises(SystemExit) as exc:
+            main([command])
+        assert exc.value.code == 2
+    assert main([family, "--bundle-dir", str(bundle), "--format", "html"]) == 0
+    renderer = render_eval if family == "eval" else render_bench
+    assert output.read_text() == renderer(current, baseline, "html")
+    assert str(output) in capsys.readouterr().out
+    assert main([f"compare-{family}", "--bundle-dir", str(bundle), "--fail-on-regression"]) == 0
+    if family == "eval":
+        current["rows"][0].update({"recall@1": 0.0, "recall@5": 0.0, "mrr": 0.0})
+    else:
+        current["agent"]["search"]["rps"] = 1.0
+    report.write_text(json.dumps(current))
+    assert main([f"compare-{family}", "--bundle-dir", str(bundle), "--fail-on-regression"]) == 1
+    assert main([f"compare-{family}", "--bundle-dir", str(bundle)]) == 0
+    for flag in ("--report", "--baseline", "--out"):
+        with pytest.raises(IsADirectoryError):
+            main([family, "--bundle-dir", str(bundle), flag, ""])
+    assert not (tmp_path / "SENTINEL").exists()
+
+
+@pytest.mark.parametrize("command", ["eval", "bench", "compare-eval", "compare-bench"])
+def test_empty_report_bundle_preserves_root_relative_read_contract(monkeypatch, command):
+    from mainframe_rag.eval import reports
+
+    family = "bench" if command.endswith("bench") else "eval"
+    seen = []
+    def load(path):
+        seen.append(path)
+        return _eval_report() if family == "eval" else _bench_report()
+    # Inspect the actual loader boundary without accessing host-root files.
+    monkeypatch.setattr(reports, "_load_json", load)
+    assert main([command, "--bundle-dir", ""]) == 0
+    current = Path(f"/{family}-report.json")
+    baseline = Path("evals/baseline.json" if family == "eval" else "benchmarks/baseline.json")
+    assert seen == ([baseline, current] if command.startswith("compare") else [current, baseline])
+    if not command.startswith("compare"):
+        seen.clear()
+        with pytest.raises(SystemExit) as exc:
+            main([command, "--bundle-dir", "", "--format", "html"])
+        assert exc.value.code == 2
+        assert seen == []
