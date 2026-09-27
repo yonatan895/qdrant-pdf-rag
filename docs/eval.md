@@ -1,5 +1,17 @@
 # Evaluation, harness, and benchmark reference
 
+Answer-tier measurement is owned by `mainframe_rag.eval.answers`: deterministic
+sampling, request-attributed `AnswerCapture`, structural judging, aggregation,
+and report writing share that import identity with L2. The supported
+`python scripts/eval_answers.py` command delegates to its `main(argv)`;
+`python -m mainframe_rag.eval.answers` uses the same operation in a prepared
+installation. Supply explicit `--golden`, `--out`, and `--summary` paths outside
+a workspace; default datasets remain relative to the working directory and
+missing files fail without acquisition. Venue guards apply before live work.
+The legacy `_AnswerCapture` import remains an alias during migration. Delegate
+retirement requires migrated callers, qualified successor commands, and an
+explicit maintainer decision. L2 judgment and L4 quality policy remain separate.
+
 Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 `docs/live-stack.md`. Design overview: `docs/architecture.md` §5.
 

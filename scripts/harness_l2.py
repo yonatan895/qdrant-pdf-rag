@@ -16,7 +16,7 @@ Judging contract (inherits the answer-tier eval's rules)
     validated citations, so this harness NEVER re-parses model text for
     citations.     Structural verdicts (refusal on answer rows, trap answered,
     zero validated citations on the LLM path, gold substrings, inferred-only
-    citations) come from scripts/eval_answers.py's runner — one judging path,
+    citations) come from mainframe_rag.eval.answers runner — one judging path,
     not two. Grounding is explicit-provenance only (issue #269): the
     `citations_inferred` flag never counts toward `grounded_rate`.
 
@@ -90,16 +90,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-REPO = Path(__file__).resolve().parents[1]
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
-if str(REPO / "scripts") not in sys.path:
-    # script-path imports (eval_answers) must resolve both when run as
-    # `python scripts/harness_l2.py` and when imported as scripts.harness_l2
-    sys.path.insert(0, str(REPO / "scripts"))
+# Preserve the supported uninstalled-checkout script entry.
+_SOURCE = Path(__file__).resolve().parents[1] / "src"
+if str(_SOURCE) not in sys.path:
+    sys.path.insert(0, str(_SOURCE))
 
-from eval_answers import (
-    _AnswerCapture,
+from mainframe_rag.eval.answers import (
+    AnswerCapture,
     answer_completeness,
     failure_bucket,
     inferred_index_off_gold,
@@ -107,7 +104,7 @@ from eval_answers import (
     select_sample,
     why_mode,
 )
-from venue import VenueError, require_rc_for_collection, resolve_golden_paths
+from mainframe_rag.eval.datasets import VenueError, require_rc_for_collection, resolve_golden_paths
 
 # Shared citation-index shape ([n] / [n, m]); see the inference rule in
 # agent/answer.py — parentheses are IBM-manual noise, never markers.
@@ -668,7 +665,7 @@ def run_l2(
 
     capture = _AlertCapture()
     logging.getLogger("agent").addHandler(capture)
-    answers = _AnswerCapture()
+    answers = AnswerCapture()
     logging.getLogger("agent").addHandler(answers)
 
     judge_client: Any = None
