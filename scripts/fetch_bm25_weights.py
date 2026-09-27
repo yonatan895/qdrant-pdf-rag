@@ -139,6 +139,9 @@ def _owned_cache(cache: Path, members: set[str]) -> None:
             raise ValueError("refusing special BM25 cache member")
         if parts[0] == ".task-complete":
             allowed = len(parts) == 1 and stat.S_ISREG(mode)
+        elif parts[0] == "CACHEDIR.TAG":
+            allowed = (len(parts) == 1 and stat.S_ISREG(mode)
+                       and path.read_bytes().startswith(b"Signature: 8a477f597d28d172789f06886806bc55\n"))
         elif parts[0] == ".locks":
             allowed = (
                 len(parts) == 1 and stat.S_ISDIR(mode)
@@ -148,7 +151,7 @@ def _owned_cache(cache: Path, members: set[str]) -> None:
             )
         elif parts[0] == MODEL_DIR:
             allowed = stat.S_ISDIR(mode) if len(parts) == 1 else parts[1] in {
-                "blobs", "snapshots", "refs", "files_metadata.json", ".no_exist",
+                "blobs", "snapshots", "refs", "files_metadata.json", ".no_exist", "trees",
             }
             if len(parts) == 2:
                 allowed = allowed and (stat.S_ISREG(mode) if parts[1] == "files_metadata.json"
@@ -158,6 +161,11 @@ def _owned_cache(cache: Path, members: set[str]) -> None:
             if len(parts) > 2 and parts[1] == "blobs":
                 allowed = (len(parts) == 3 and stat.S_ISREG(mode)
                            and re.fullmatch(_BLOB_NAME + r"(?:\.incomplete)?", parts[2]) is not None)
+            if len(parts) > 2 and parts[1] == "trees":
+                # The pinned HF snapshot downloader caches the repository
+                # listing alongside refs/blobs, outside the weight snapshot.
+                allowed = (len(parts) == 3 and stat.S_ISREG(mode)
+                           and re.fullmatch(r"[0-9a-f]{40}\.json", parts[2]) is not None)
             if len(parts) == 3 and parts[1] in {"snapshots", ".no_exist"}:
                 allowed = stat.S_ISDIR(mode)
             if len(parts) > 3 and parts[1] == ".no_exist":
@@ -238,6 +246,9 @@ def prepare(cache: Path, manifest: Path, model: str = MODEL) -> None:
                     incoming = stage / name
                     if incoming.exists():
                         incoming.replace(old)
+                tag = stage / "CACHEDIR.TAG"
+                if tag.exists():
+                    tag.replace(cache / tag.name)
             verify_manifest(cache, manifest)
             staged_marker = stage / ".task-complete"
             staged_marker.write_text(receipt)

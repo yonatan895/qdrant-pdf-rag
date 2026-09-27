@@ -198,9 +198,10 @@ def test_interrupted_publication_withholds_receipt_and_next_prepare_repairs(prep
     assert len(calls) == 3
 
 
-@pytest.mark.parametrize("foreign", ["notes.txt", "models--Other--model/file", "models--Qdrant--bm25/notes.txt",
+@pytest.mark.parametrize("foreign", ["notes.txt", "CACHEDIR.TAG", "models--Other--model/file", "models--Qdrant--bm25/notes.txt",
                                     "models--Qdrant--bm25/snapshots/original/foreign.txt",
                                     "models--Qdrant--bm25/blobs/notes.txt",
+                                    "models--Qdrant--bm25/trees/notes.txt",
                                     ".locks/models--Qdrant--bm25/notes.txt"])
 def test_preparation_refuses_unowned_members_without_mutation(preparation, foreign):
     cache, manifest, calls = preparation
@@ -329,12 +330,15 @@ def test_verified_snapshot_remains_loadable_after_cache_relocation(tmp_path, mon
 
     monkeypatch.setattr(socket.socket, "connect", refuse_network)
     from fastembed import SparseTextEmbedding
+    from huggingface_hub._local_folder import _create_cachedir_tag
+    from huggingface_hub._tree_cache import TreeCacheEntry, write_tree_cache
 
     cache = tmp_path / "staged cache"
     model = cache / "models--Qdrant--bm25"
     revision = "1" * 40
     snapshot = model / "snapshots" / revision
     snapshot.mkdir(parents=True)
+    _create_cachedir_tag(cache)
     (model / "blobs").mkdir()
     (model / "refs").mkdir()
     (model / "refs/main").write_text(revision)
@@ -345,6 +349,14 @@ def test_verified_snapshot_remains_loadable_after_cache_relocation(tmp_path, mon
     (model / "files_metadata.json").write_text(json.dumps({
         f"snapshots/{revision}/english.txt": {"size": len(stopwords), "blob_id": blob},
     }))
+    # Use the pinned downloader's producer: hand-building only refs/blobs
+    # previously missed its trees/<commit>.json sidecar and broke real CI.
+    write_tree_cache(str(model), revision, {
+        "english.txt": TreeCacheEntry(size=len(stopwords), blob_id=blob),
+    })
+    tree_metadata = model / "trees" / f"{revision}.json"
+    assert tree_metadata.is_file()
+    tree_bytes = tree_metadata.read_bytes()
     manifest = tmp_path / "original.sha256"
     manifest.write_text(f"{hashlib.sha256(stopwords).hexdigest()}  english.txt\n")
     bm25.verify_manifest(cache, manifest)
@@ -362,6 +374,8 @@ def test_verified_snapshot_remains_loadable_after_cache_relocation(tmp_path, mon
     selected = destination / "models--Qdrant--bm25/snapshots" / revision
     assert (selected / "english.txt").is_symlink()
     assert (selected / "english.txt").read_bytes() == stopwords
+    assert (destination / "CACHEDIR.TAG").read_bytes().startswith(b"Signature: 8a477f597d28d172789f06886806bc55\n")
+    assert (destination / bm25.MODEL_DIR / "trees" / f"{revision}.json").read_bytes() == tree_bytes
     embedder = SparseTextEmbedding(
         model_name="Qdrant/bm25", cache_dir=str(destination), local_files_only=True,
     )
