@@ -11,24 +11,27 @@ import re
 
 import pytest
 from scripts.harness_l2 import (
-    JUDGE_MAX_EVIDENCE_CHARS,
-    JUDGE_REASONING_EFFORT,
-    JudgeError,
     _AlertCapture,
     _by_complexity_truncation,
     apply_l2_measurements,
+    gate_l2,
+    summarize_l2,
+    syntax_check,
+)
+
+from mainframe_rag.eval.judging import (
+    JUDGE_MAX_EVIDENCE_CHARS,
+    JUDGE_REASONING_EFFORT,
+    JudgeError,
     citation_to_hit,
     cited_doc_ids,
     evidence_for_citations,
-    gate_l2,
     judge_chat,
     judge_messages,
     parse_judge_label,
     parse_relevance_label,
     precision_recall,
     relevance_messages,
-    summarize_l2,
-    syntax_check,
 )
 
 
@@ -542,3 +545,14 @@ def test_summarize_by_why_modes_and_off_gold():
     m = summarize_l2(rows)
     assert m["by_why"]["cited_explicit"] == 1
     assert m["inferred_index_off_gold"] == 0
+
+
+def test_judge_compatibility_identity():
+    from scripts import harness_l2
+
+    from mainframe_rag.eval import judging
+
+    for name in ("JudgeError", "judge_chat", "judge_messages", "relevance_messages",
+                 "parse_judge_label", "parse_relevance_label", "evidence_for_citations",
+                 "citation_to_hit", "cited_doc_ids", "precision_recall", "RELEVANCE_LABELS"):
+        assert getattr(harness_l2, name) is getattr(judging, name)

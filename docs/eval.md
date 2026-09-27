@@ -12,6 +12,11 @@ The legacy `_AnswerCapture` import remains an alias during migration. Delegate
 retirement requires migrated callers, qualified successor commands, and an
 explicit maintainer decision. L2 judgment and L4 quality policy remain separate.
 
+L2 judge prompts, bounded evidence assembly, citation mapping, label parsing and
+judge-call parameters live in `mainframe_rag.eval.judging`. L2 orchestration and
+L4 repeated quality gates remain distinct; both consume the canonical labels.
+Legacy `scripts.harness_l2` helper exports retain object identity during migration.
+
 Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 `docs/live-stack.md`. Design overview: `docs/architecture.md` §5.
 
