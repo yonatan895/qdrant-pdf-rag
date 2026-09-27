@@ -689,3 +689,100 @@ def test_explicit_gate_cannot_be_bypassed_by_diagnostic_cli_modes(monkeypatch):
         with pytest.raises(SystemExit) as error:
             main(["--check", "baseline.json", flag])
         assert error.value.code == 2
+
+
+def test_holdout_invalid_pin_refuses_before_scoring(tmp_path, monkeypatch, capfd):
+    import scripts.eval_retrieval as ev
+
+    _hermetic_main(monkeypatch, tmp_path)
+    monkeypatch.setenv("VENUE", "rc")
+    holdout = tmp_path / "holdout.jsonl"
+    holdout.write_text(json.dumps({"query": "Original synthetic question", "expected_doc_ids": ["synthetic"]}) + "\n")
+    holdout.with_suffix(".jsonl.sha256").write_text("0" * 64 + "  holdout.jsonl\n")
+    measured = []
+    monkeypatch.setattr(ev, "evaluate", lambda entries, settings: measured.append(entries) or _report())
+    assert main(["--golden", str(holdout), "--no-check"]) == 2
+    assert measured == []
+    assert "sha256 mismatch" in capfd.readouterr().err
+
+
+def test_task_holdout_uses_real_cli_pin_validation_and_recovers(tmp_path):
+    """Actual pinned Task + actual evaluator parser, with only runtime effects replaced."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    import pytest
+
+    from tests.test_taskfile_contracts import REQUIRE_RUNNER, find_task
+
+    task = find_task()
+    if task is None:
+        if REQUIRE_RUNNER:
+            pytest.fail("pinned Task unavailable in required lane")
+        pytest.skip("pinned Task unavailable")
+    repo = Path(__file__).resolve().parents[1]
+    shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
+    shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
+    (tmp_path / "scripts").mkdir()
+    shutil.copy2(repo / "scripts/eval_retrieval.py", tmp_path / "scripts/eval_retrieval.py")
+    (tmp_path / ".venv/bin").mkdir(parents=True)
+    launcher = tmp_path / ".venv/bin/python"
+    # This process adapter executes the actual requested script/main/parser.
+    # Model/storage and manifest boundaries alone are instrumented.
+    launcher.write_text(
+        f"#!{sys.executable}\n"
+        "import importlib.util, json, os, sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(repo / 'src')!r})\n"
+        "spec = importlib.util.spec_from_file_location('actual_eval_cli', sys.argv[1])\n"
+        "ev = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(ev)\n"
+        "from mainframe_rag.config import Settings\n"
+        "ev.load_settings = lambda: Settings(_env_file=None, qdrant_collection='test-corpus')\n"
+        "def measure(entries, settings):\n"
+        "    Path('measured.json').write_text(json.dumps({'queries': [e.query for e in entries], 'mode': settings.embed_mode, 'venue': os.environ.get('VENUE')}))\n"
+        f"    return {dict(_report(), embed_mode='vllm')!r}\n"
+        "ev.evaluate = measure\n"
+        "ev.write_run_manifest = lambda *a, **k: {'git_sha': 'synthetic'}\n"
+        "raise SystemExit(ev.main(sys.argv[2:]))\n"
+    )
+    launcher.chmod(0o755)
+    evals = tmp_path / "evals"
+    evals.mkdir()
+    holdout = evals / "holdout.jsonl"
+    original = (json.dumps({"query": "Synthetic אב; $(touch SENTINEL)", "expected_doc_ids": ["synthetic"]}) + "\n").encode()
+    holdout.write_bytes(original)
+    pin = evals / "holdout.jsonl.sha256"
+    pin.write_text(hashlib.sha256(original).hexdigest() + "  evals/holdout.jsonl\n")
+    baseline = evals / "holdout-baseline.json"
+    baseline.write_text(json.dumps({"recall@1": 0.5, "_meta": {"embed_mode": "vllm", "collection": "test-corpus"}}))
+    baseline_bytes = baseline.read_bytes()
+    output_dir = "report space אב;$(touch SENTINEL)"
+    env = {"PATH": os.defpath, "HOME": str(tmp_path), "VENUE": "dev", "EMBED_MODE": "hash"}
+    command = [task, "--taskfile", str(tmp_path / "Taskfile.yml"), "eval:holdout",
+               "VENUE=dev", "EMBED_MODE=vllm", f"BUNDLE_DIR={output_dir}"]
+    def run():
+        return subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30, check=False)
+    good = run()
+    assert good.returncode == 0, good.stdout + good.stderr
+    measured = tmp_path / "measured.json"
+    expected = {"queries": ["Synthetic אב; $(touch SENTINEL)"], "mode": "vllm", "venue": "rc"}
+    assert json.loads(measured.read_text()) == expected
+    report = tmp_path / output_dir / "eval-holdout-report.json"
+    assert json.loads(report.read_text())["gate"]["status"] == "passed"
+    report_bytes = report.read_bytes()
+    measured.unlink()
+    holdout.write_bytes(b"tampered and not JSON\n")
+    bad = run()
+    assert bad.returncode != 0
+    assert "sha256 mismatch" in bad.stderr
+    assert not measured.exists()
+    assert report.read_bytes() == report_bytes
+    holdout.write_bytes(original)
+    recovered = run()
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    assert json.loads(measured.read_text()) == expected
+    assert baseline.read_bytes() == baseline_bytes
+    assert not (tmp_path / "SENTINEL").exists()

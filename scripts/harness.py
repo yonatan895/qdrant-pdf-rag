@@ -45,7 +45,7 @@ if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
 from mainframe_rag.eval.datasets import (
-    VenueError,
+    DatasetError,
     load_golden,
     require_rc_for_collection,
     resolve_golden_paths,
@@ -276,12 +276,12 @@ def main(argv: list[str] | None = None) -> int:
         # corpus collection requires the same declaration.
         golden_paths = resolve_golden_paths(args.golden)
         require_rc_for_collection(collection)
-    except VenueError as exc:
+        entries: list = []
+        for p in golden_paths:
+            entries.extend(load_golden(p))
+    except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
-    entries: list = []
-    for p in golden_paths:
-        entries.extend(load_golden(p))
     baseline = load_baseline(baseline_path)
     # Fail closed BEFORE anything runs: a gate (or any non-recording run)
     # without a baseline would otherwise be invited to create one from

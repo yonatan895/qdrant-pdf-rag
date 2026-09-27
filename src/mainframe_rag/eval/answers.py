@@ -144,7 +144,13 @@ class AnswerCapture(logging.Handler):
 # answer's scope caveat is not scored as a refusal (#305).
 from mainframe_rag.agent.answer import VERIFICATION_STATES, is_abstention, is_refusal
 from mainframe_rag.config import load_settings
-from mainframe_rag.eval.datasets import VenueError, require_rc_for_collection, resolve_golden_paths
+from mainframe_rag.eval.datasets import (
+    DatasetError,
+    VenueError,  # noqa: F401 — compatibility export
+    read_golden_text,
+    require_rc_for_collection,
+    resolve_golden_paths,
+)
 
 
 def judge(
@@ -707,15 +713,15 @@ def main(argv: list[str] | None = None) -> int:
         # holdout and the real-corpus collection require VENUE=rc.
         golden_paths = resolve_golden_paths(args.golden)
         require_rc_for_collection(load_settings().qdrant_collection)
-    except VenueError as exc:
+        entries: list[dict[str, Any]] = []
+        for p in golden_paths:
+            for line in read_golden_text(p).splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    entries.append(json.loads(line))
+    except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
-    entries: list[dict[str, Any]] = []
-    for p in golden_paths:
-        for line in p.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                entries.append(json.loads(line))
     if len({e["id"] for e in entries}) != len(entries):
         print("BUILD FAILED: duplicate entry ids across golden files", file=sys.stderr)
         return 1

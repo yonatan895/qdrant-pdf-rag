@@ -449,7 +449,7 @@ committed (the real-corpus venue guard refuses `real_manuals` without
 ## 7. Golden corpus discipline
 
 `golden.jsonl` (121 dev) and `holdout.jsonl` (72, sha256-pinned, verified
-with `sha256sum -c` on RC-only `sh scripts/tools/run-task.sh eval:holdout`) are built from
+by the Python dataset owner before protected parsing/scoring) are built from
 `expert_golden_seed.jsonl` plus payload mining by `build_golden_corpus.py`:
 manual bindings for out-of-pattern families, authored corrections,
 forced-abstain ids, absent-trap ids, then a deterministic ~60/40 per-class
@@ -590,3 +590,30 @@ committed row is the pointer, the manifest is the detail.
 | 2026-09-16 | 080385c | `real_manuals_v2` (rebuilt) | RC corpus rebuild under current extraction rules + committed representation contract (`--reingest` into a clean target; the legacy `real_manuals` and its alias are retained unchanged) + `verify-golden` + `eval-holdout` | 452 docs / 431233 pts (was 435057); `verify-golden` 0 FAIL/0 WARN; frozen-holdout retrieval green vs baseline: r@1 0.631 (flat), r@5 0.892→0.908, MRR 0.726→0.733, nDCG@8 0.758→0.767; identifier r@1 0.744→0.718, nl r@1 0.462→0.50; 0 failures, 0 must_not violations. Triggered by the #365 acceptance prerequisite (the legacy collection predates the #362/#391 contract); a corpus-lifecycle record for the swap/GC decision is owned by the data-integrity track |
 | 2026-09-16 | 080385c | `real_manuals_v2` + LOCAL_CRC_32GB (8GB stand-in) | `eval-answers` N=24 (VENUE=rc, gateway-routed E4B + Qwen3-Embedding-0.6B, rerank off) — #365 acceptance set | 12/24 pass, 0 errors; answer-tier 10/21, abstain 2/3; `false_refusal_rate` 0.0952 (2/21: CMP-02, DOC-03), `unsafe_answer_rate` 0.3333 (1/3: MSG-01 length-truncated before the required identifier); `by_verification_state` accepted 10 / generation_incomplete 10 / insufficient_evidence 4; `state_mismatches` 12; **every** incomplete row is `finish_reason=length` at the stand-in's 4096 window (prompt ~3.1k + completion ~1k) — a stand-in window limit, not a contract defect; `units_omitted_total` 137; `budget_verified` 0 (the gateway exposes no `/tokenize`); `answer_completeness` not computed by this instrument (no pool join — the `harness-l2` row below carries it). DOC-03 is measured as a zero-cite refusal against the adjudicated premise-correction expectation (#307/#365); experimental reference only, not a production-model result |
 | 2026-09-16 | 17d388c | `real_manuals_v2` + LOCAL_CRC_32GB (8GB stand-in) | `harness-l2` N=12 (VENUE=rc, gateway) — #365 claim-support / completeness slice | 0 errors, 5 structural fails; grounded 0.5455, truncation 0.3636 (stand-in window), citation P/R 0.583/0.273, `answer_completeness` 0.1818 (2/11 gold-retrieved); `by_verification_state` accepted 6 / generation_incomplete 4 / insufficient_evidence 2; `state_mismatches` 5; faithfulness judged 6: entailed 0.50, neutral 0.33, contradiction 0.17; `faithfulness_by_class`: comparative 1.0 entailed (n=2), table 1.0 (n=1), diagnostic 0 entailed / 0.5 contradiction (n=2), doc_number neutral 1.0 (n=1); syntax/version/message classes produced no eligible-cite rows to judge in this sample. Experimental reference; judge-assisted, never an entailment proof |
+
+### Protected holdout acquisition (#508 C3)
+
+`mainframe_rag.eval.datasets.read_golden_text` owns protected input access.
+The retrieval, answer, chat, L1/L2/L4 harness, L1 gate, capture and replay
+entry points use it before model/storage work. The Task holdout command
+retains its explicit RC venue and argument transport; its duplicate shell
+checksum check is removed. Direct Python entry points enforce the same pin.
+
+A path named `holdout.jsonl`, or resolving to that name, requires `VENUE=rc`.
+Resolve the target once and load its adjacent `<target-name>.sha256` pin.
+The pin must contain one SHA256 record naming the target basename, either
+alone or with the historical `evals/` prefix; the record never selects a
+different file. Copies used outside the checkout must carry their approved
+pin. Symlink aliases use the resolved target's pin. This authenticates bytes
+against the supplied approved dataset/pin pair, not the provenance of an
+arbitrarily replaced pair; dataset re-freezing remains a dedicated concern.
+
+The reader hashes and decodes the same byte buffer, with no reopen between
+verification and parsing. Missing, malformed or mismatched pins refuse with
+CLI exit 2 before scoring or output publication. Every invocation verifies
+again; repairing the dataset/pin permits the next ordinary run. Dev inputs
+remain unpinned, and each evaluator retains its own row schema. L1's existing
+dev-golden pin check remains separate. No release baseline or scoring rule
+changes. Tests live in `test_venue.py` and `test_eval_gate.py`; the latter
+executes actual Task and the actual retrieval CLI with runtime effects
+instrumented, including corruption, recovery, precedence and literal paths.

@@ -64,8 +64,9 @@ if str(_REPO / "src") not in sys.path:
 from mainframe_rag.config import load_settings
 from mainframe_rag.eval.datasets import (
     QUERY_CLASSES,
+    DatasetError,
     GoldenEntry,
-    VenueError,
+    VenueError,  # noqa: F401 — compatibility export
     default_baseline_path,
     load_golden,
     require_rc_for_collection,
@@ -264,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         # collection are RC-only instruments.
         require_rc_for_golden([args.golden])
         require_rc_for_collection(settings.qdrant_collection)
-    except VenueError as exc:
+    except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
     if args.rerank:
@@ -275,7 +276,12 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(d, ensure_ascii=False))
         return 0
 
-    report = evaluate(load_golden(args.golden), settings)
+    try:
+        entries = load_golden(args.golden)
+    except DatasetError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+    report = evaluate(entries, settings)
 
     baseline = None
     regressions: list[str] = []

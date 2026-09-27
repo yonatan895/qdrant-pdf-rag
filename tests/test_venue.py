@@ -176,3 +176,120 @@ def test_holdout_symlink_alias_resolves_consistently(tmp_path):
         pytest.skip("symlinks unavailable")
     with pytest.raises(VenueError, match="frozen holdout"):
         require_rc_for_golden([alias], venue=DEV)
+
+
+def _synthetic_holdout(tmp_path, data=b'{"query":"Synthetic?","expected_doc_ids":["synthetic"]}\n'):
+    import hashlib
+
+    root = tmp_path / "data with spaces אב"
+    root.mkdir()
+    path = root / "holdout.jsonl"
+    path.write_bytes(data)
+    pin = path.with_name(path.name + ".sha256")
+    pin.write_text(hashlib.sha256(data).hexdigest() + "  evals/holdout.jsonl\n")
+    return path, pin
+
+
+@pytest.mark.parametrize("fault", ["missing", "empty", "digest", "target", "multiple", "invalid_utf8", "missing_data"])
+def test_holdout_pin_fails_closed(tmp_path, monkeypatch, fault):
+    from mainframe_rag.eval.datasets import DatasetPinError, load_golden
+
+    monkeypatch.setenv("VENUE", "rc")
+    path, pin = _synthetic_holdout(tmp_path)
+    if fault == "missing":
+        pin.unlink()
+    elif fault == "empty":
+        pin.write_text("")
+    elif fault == "digest":
+        path.write_bytes(b"invalid JSON must not reach the parser")
+    elif fault == "target":
+        pin.write_text(pin.read_text().replace("holdout.jsonl", "other.jsonl"))
+    elif fault == "multiple":
+        pin.write_text(pin.read_text() * 2)
+    elif fault == "invalid_utf8":
+        pin.write_bytes(b"\xff")
+    else:
+        path.unlink()
+    with pytest.raises(DatasetPinError):
+        load_golden(path)
+
+
+def test_holdout_venue_refuses_before_read(tmp_path, monkeypatch):
+    from mainframe_rag.eval.datasets import read_golden_text
+
+    monkeypatch.setenv("VENUE", "dev")
+    path, _ = _synthetic_holdout(tmp_path)
+    def forbidden(*args, **kwargs):
+        pytest.fail("dataset/pin read before RC authorization")
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    with pytest.raises(VenueError):
+        read_golden_text(path)
+
+
+@pytest.mark.parametrize("alias", [False, True])
+def test_holdout_verified_bytes_are_the_parsed_bytes_and_next_read_revalidates(tmp_path, monkeypatch, alias):
+    from mainframe_rag.eval.datasets import DatasetPinError, load_golden
+
+    monkeypatch.setenv("VENUE", "rc")
+    target, _ = _synthetic_holdout(tmp_path)
+    path = tmp_path / "ordinary alias.jsonl" if alias else target
+    if alias:
+        path.symlink_to(target)
+    read_bytes = Path.read_bytes
+    reads = []
+    original = target.read_bytes()
+    def replace_after_read(candidate):
+        result = read_bytes(candidate)
+        if candidate == target:
+            reads.append(candidate)
+            candidate.write_bytes(b"not the approved bytes")
+        return result
+    monkeypatch.setattr(Path, "read_bytes", replace_after_read)
+    assert [entry.query for entry in load_golden(path)] == ["Synthetic?"]
+    assert reads == [target]
+    with pytest.raises(DatasetPinError, match="sha256 mismatch"):
+        load_golden(path)
+    target.write_bytes(original)
+    assert [entry.expected_doc_ids for entry in load_golden(path)] == [["synthetic"]]
+
+
+@pytest.mark.parametrize("module_name,extra", [
+    ("scripts.eval_retrieval", ["--no-check"]),
+    ("mainframe_rag.eval.answers", []),
+    ("mainframe_rag.eval.chat", []),
+    ("scripts.harness", []),
+    ("scripts.harness_l2", []),
+    ("scripts.harness_l4", []),
+    ("scripts.gate_l1", []),
+    ("scripts.capture_pool", ["--out", "must-not-create.jsonl"]),
+    ("scripts.replay_sweep", ["--pools", "must-not-read.jsonl"]),
+])
+def test_all_holdout_entry_points_refuse_bad_pin_before_effects(tmp_path, monkeypatch, capfd, module_name, extra):
+    import importlib
+
+    from mainframe_rag import config
+    from mainframe_rag.config import Settings
+
+    module = importlib.import_module(module_name)
+    path, pin = _synthetic_holdout(tmp_path)
+    pin.write_text("0" * 64 + "  holdout.jsonl\n")
+    monkeypatch.setenv("VENUE", "rc")
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(embed_mode="vllm", qdrant_collection="synthetic", _env_file=None)
+    monkeypatch.setattr(config, "load_settings", lambda: settings)
+    if hasattr(module, "load_settings"):
+        monkeypatch.setattr(module, "load_settings", lambda: settings)
+    def forbidden(*args, **kwargs):
+        pytest.fail("external work before pin validation")
+    import qdrant_client
+
+    from mainframe_rag.ingest import embed
+    monkeypatch.setattr(qdrant_client, "QdrantClient", forbidden)
+    monkeypatch.setattr(embed, "build_embedder", forbidden)
+    for name in ("evaluate", "run_l2", "run_query", "start_simulator"):
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, forbidden)
+    assert module.main(["--golden", str(path), *extra]) == 2
+    assert "sha256 mismatch" in capfd.readouterr().err
+    assert not (tmp_path / "must-not-create.jsonl").exists()

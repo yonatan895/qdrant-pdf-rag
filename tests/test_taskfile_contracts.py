@@ -308,16 +308,6 @@ class TaskContractsTests(unittest.TestCase):
         fetch.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / "scripts/fetch_bm25_weights.py", fetch)
 
-    def make_eval_fixtures(self) -> None:
-        """Holdout file plus a matching sha256 manifest (tamperable)."""
-        import hashlib
-        data = b"frozen-holdout-fixture\n"
-        evals = self.root / "evals"
-        evals.mkdir(parents=True, exist_ok=True)
-        (evals / "holdout.jsonl").write_bytes(data)
-        (evals / "holdout.jsonl.sha256").write_text(
-            f"{hashlib.sha256(data).hexdigest()}  evals/holdout.jsonl\n", encoding="utf-8")
-
     def pip_calls(self) -> list[dict]:
         return [c for c in self.calls() if c["tag"] == "venv-python"]
 
@@ -907,15 +897,14 @@ class TaskContractsTests(unittest.TestCase):
         self.assertNotIn("--golden", argv)
         self.assertIn("benchmarks/harness-vllm.json", argv)
 
-    def test_holdout_forces_rc_venue_and_verifies_first(self):
+    def test_holdout_transports_forced_rc_venue(self):
         self.make_venv_fake()
-        self.make_eval_fixtures()
         env = self.tool_env()
         # CLI VENUE=dev cannot override holdout's VENUE=rc
         proc = self.run_task("eval:holdout", "VENUE=dev", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         calls = self.pip_calls()
-        self.assertEqual(len(calls), 1, "sha256sum pre-check must precede the single python run")
+        self.assertEqual(len(calls), 1, "holdout delegates once to the Python owner")
         self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "rc"})
         self.assertIn("evals/holdout.jsonl", calls[0]["argv"])
         if (self.log).exists():
@@ -934,12 +923,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEnvSubset(calls[0], {"EMBED_MODE": "hash", "VENUE": "rc"})
         if (self.log).exists():
             self.log.unlink()
-        # Tampered holdout fails before any python invocation.
-        with (self.root / "evals/holdout.jsonl").open("ab") as fh:
-            fh.write(b"tampered\n")
-        proc = self.run_task("eval:holdout", extra_env=env)
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(self.pip_calls(), [])
+        # Pin refusal and recovery run through the real CLI in test_eval_gate.
 
     def test_eval_count_inputs_default_and_override(self):
         self.make_venv_fake()

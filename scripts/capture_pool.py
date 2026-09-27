@@ -36,7 +36,12 @@ if str(REPO / "scripts") not in sys.path:
     # `python scripts/capture_pool.py` and when imported as scripts.capture_pool
     sys.path.insert(0, str(REPO / "scripts"))
 
-from venue import VenueError, require_rc_for_collection, require_rc_for_golden
+from mainframe_rag.eval.datasets import (
+    DatasetError,
+    read_golden_text,
+    require_rc_for_collection,
+    require_rc_for_golden,
+)
 
 # Pure record helpers below are unit-tested in tests/test_capture_pool.py
 # (precedent: tests import pure helpers from scripts/).
@@ -377,14 +382,13 @@ def capture_query(
 
 def _iter_queries(golden_path: str, max_queries: int | None) -> list[str]:
     queries = []
-    with open(golden_path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            queries.append(json.loads(line)["query"])
-            if max_queries is not None and len(queries) >= max_queries:
-                break
+    for line in read_golden_text(golden_path).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        queries.append(json.loads(line)["query"])
+        if max_queries is not None and len(queries) >= max_queries:
+            break
     return queries
 
 
@@ -408,7 +412,8 @@ def main(argv: list[str] | None = None) -> int:
         # collection are RC-only instruments; capture runs where models live.
         require_rc_for_golden([args.golden])
         require_rc_for_collection(settings.qdrant_collection)
-    except VenueError as exc:
+        queries = _iter_queries(args.golden, args.max_queries)
+    except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
     client = QdrantClient(
@@ -418,7 +423,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     embedder = build_embedder(settings)
 
-    queries = _iter_queries(args.golden, args.max_queries)
     failures = 0
     started = time.perf_counter()
     with open(args.out, "w", encoding="utf-8") as fh:
