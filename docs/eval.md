@@ -15,7 +15,14 @@ explicit maintainer decision. L2 judgment and L4 quality policy remain separate.
 L2 judge prompts, bounded evidence assembly, citation mapping, label parsing and
 judge-call parameters live in `mainframe_rag.eval.judging`. L2 orchestration and
 L4 repeated quality gates remain distinct; both consume the canonical labels.
-Legacy `scripts.harness_l2` helper exports retain object identity during migration.
+L2 row enrichment, request-attributed alert capture, aggregation, structural
+verdicts and measured execution live in `mainframe_rag.eval.answer_tier`.
+L4 imports this runner directly. L2's CLI retains dataset/venue resolution and
+output/manifest composition. Legacy `scripts.harness_l2` helper exports retain
+object identity during migration. Importing the measurement package does not
+start the app or connect to model/storage services; execution does so only
+when explicitly requested. The synthetic HTTP runner test covers per-run search
+caching, judge-leg order/eligibility, request attribution, cleanup and the next run.
 
 L4 threshold validation, repeat aggregation, quality verdicts and recorded
 reports are owned by `mainframe_rag.eval.quality`, with explicit inputs and

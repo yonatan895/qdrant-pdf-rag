@@ -46,23 +46,21 @@ from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
-if str(REPO / "scripts") not in sys.path:
-    sys.path.insert(0, str(REPO / "scripts"))
+# Preserve the supported uninstalled-checkout command; no sibling CLI imports.
+if str(REPO / "src") not in sys.path:
+    sys.path.insert(0, str(REPO / "src"))
 
-from harness_l2 import run_l2
-
+from mainframe_rag.eval.answer_tier import run_l2
 from mainframe_rag.eval.datasets import VenueError, require_rc_for_collection, resolve_golden_paths
 
 DEFAULT_THRESHOLDS = REPO / "evals" / "harness-l4-thresholds.json"
 
 from mainframe_rag.eval.quality import (  # noqa: F401 — compatibility exports
+    _FAITHFULNESS_IDEAL,
+    _RELEVANCE_IDEAL,
     DEFAULT_TOLERANCE,
     GATED_METRICS,
     ThresholdError,
-    _FAITHFULNESS_IDEAL,
-    _RELEVANCE_IDEAL,
     _sum_state_histograms,
     build_review_queue,
     classify,
