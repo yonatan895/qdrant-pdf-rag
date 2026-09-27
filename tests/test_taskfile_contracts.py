@@ -30,6 +30,8 @@ import time
 import unittest
 from pathlib import Path
 
+from tests.helpers_simulator import prepare_simulator
+
 REPO = Path(__file__).resolve().parents[1]
 PIN_VERSION = ""
 for _line in (REPO / "scripts/tools/task-pin.txt").read_text(encoding="utf-8").splitlines():
@@ -197,32 +199,6 @@ class TaskContractsTests(unittest.TestCase):
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / "scripts" / name, dest)
         dest.chmod(0o755)
-
-    def make_docker_fake(self) -> None:
-        """Fake docker: `inspect` exits $DOCKER_INSPECT_EXIT (default 1)."""
-        bindir = self.root / "bin"
-        bindir.mkdir(parents=True, exist_ok=True)
-        path = bindir / "docker"
-        path.write_text(
-            '#!/bin/sh\n'
-            'python3 - "$RECORDER_LOG" "tool-docker" "$@" <<\'PYEOF\'\n'
-            'import json, os, sys\n'
-            'log, tag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]\n'
-            'with open(log, "a", encoding="utf-8") as fh:\n'
-            '    fh.write(json.dumps({"tag": tag, "argv": argv, "cwd": os.getcwd()}) + "\\n")\n'
-            'if argv[:2] == ["image", "inspect"]:\n'
-            '    print(json.dumps([{"Id": "sha256:" + "b" * 64, "RepoDigests": ["example.com/qdrant/qdrant@sha256:" + "a" * 64]}]))\n'
-            'if argv[:2] == ["inspect", "--format"]:\n'
-            '    print(os.environ.get("DOCKER_RUNNING_IMAGE", "sha256:" + "b" * 64) + " true")\n'
-            'PYEOF\n'
-            'if [ "$1" = "inspect" ]; then exit "${DOCKER_INSPECT_EXIT:-1}"; fi\n'
-            'exit 0\n',
-            encoding="utf-8")
-        path.chmod(0o755)
-
-    def make_sim_images_fixture(self) -> None:
-        (self.root / "images.txt").write_text(
-            "example.com/qdrant/qdrant:v9.9.9-unprivileged sha256:" + "a" * 64 + "\n", encoding="utf-8")
 
     def make_airgap_fixtures(self, file_env: dict | None = None) -> None:
         """Real common.sh (precedence under test) + fixture airgap.env."""
@@ -1051,79 +1027,10 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual([c["argv"] for c in self.tool_calls("docker")],
                          [["stop", "local-jaeger"]])
 
-    def test_sim_helper_up_reuses_running_container(self):
-        self.copy_repo_script("sim_qdrant.sh")
-        self.copy_repo_script("qdrant_pin.py")
-        self.make_sim_images_fixture()
-        self.make_docker_fake()
-        env = dict(os.environ, PATH=str(self.root / "bin") + os.pathsep + os.environ.get("PATH", ""),
-                   RECORDER_LOG=str(self.log), RECORDER_EXIT="0", DOCKER_INSPECT_EXIT="0")
-        proc = subprocess.run(["sh", str(self.root / "scripts/sim_qdrant.sh"), "up"],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              timeout=60, check=False, text=True, env=env, cwd=str(self.root))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertIn("already running", proc.stdout)
-        docker = [c["argv"] for c in self.calls() if c["argv"][:2] != ["image", "inspect"]]
-        self.assertEqual(docker, [["inspect", "qdrant-sim"], ["inspect", "--format", "{{.Image}} {{.State.Running}}", "qdrant-sim"]])
-
-    def test_sim_helper_rejects_existing_wrong_image_without_mutation(self):
-        self.copy_repo_script("sim_qdrant.sh")
-        self.copy_repo_script("qdrant_pin.py")
-        self.make_sim_images_fixture()
-        self.make_docker_fake()
-        env = dict(os.environ, PATH=str(self.root / "bin") + os.pathsep + os.environ.get("PATH", ""),
-                   RECORDER_LOG=str(self.log), DOCKER_INSPECT_EXIT="0", DOCKER_RUNNING_IMAGE="sha256:" + "c" * 64)
-        proc = subprocess.run(["sh", str(self.root / "scripts/sim_qdrant.sh"), "up"],
-                              capture_output=True, text=True, env=env, cwd=self.root, timeout=60, check=False)
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("unapproved image", proc.stderr)
-        self.assertFalse(any(c["argv"][0] in ("run", "stop", "pull", "rm") for c in self.calls()))
-
-    def test_sim_helper_up_starts_pinned_image(self):
-        self.copy_repo_script("sim_qdrant.sh")
-        self.copy_repo_script("qdrant_pin.py")
-        self.make_sim_images_fixture()
-        self.make_docker_fake()
-        env = dict(os.environ, PATH=str(self.root / "bin") + os.pathsep + os.environ.get("PATH", ""),
-                   RECORDER_LOG=str(self.log), RECORDER_EXIT="0", DOCKER_INSPECT_EXIT="1")
-        proc = subprocess.run(["sh", str(self.root / "scripts/sim_qdrant.sh"), "up"],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              timeout=60, check=False, text=True, env=env, cwd=str(self.root))
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        docker = [c["argv"] for c in self.calls() if c["argv"][:2] != ["image", "inspect"]]
-        self.assertEqual(len(docker), 2)
-        self.assertEqual(docker[0], ["inspect", "qdrant-sim"])
-        self.assertIn("127.0.0.1:6333:6333", docker[1])
-        self.assertIn("sha256:" + "b" * 64, docker[1])
-        self.assertIn("--pull=never", docker[1])
-        self.assertIn("QDRANT_SIM_URL=http://127.0.0.1:6333", proc.stdout)
-
-    def test_sim_helper_rejects_empty_names(self):
-        self.copy_repo_script("sim_qdrant.sh")
-        self.copy_repo_script("qdrant_pin.py")
-        self.make_sim_images_fixture()
-        self.make_docker_fake()
-        env = dict(os.environ, PATH=str(self.root / "bin") + os.pathsep + os.environ.get("PATH", ""),
-                   RECORDER_LOG=str(self.log), RECORDER_EXIT="0",
-                   SIM_CONTAINER="", DOCKER_INSPECT_EXIT="1")
-        proc = subprocess.run(["sh", str(self.root / "scripts/sim_qdrant.sh"), "up"],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              timeout=60, check=False, text=True, env=env, cwd=str(self.root))
-        self.assertEqual(proc.returncode, 2, proc.stdout)
-        self.assertIn("must not be empty", proc.stdout)
-        self.assertEqual(self.calls(), [], "docker must not run on invalid input")
-        proc = subprocess.run(["sh", str(self.root / "scripts/sim_qdrant.sh"), "bogus"],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              timeout=60, check=False, text=True, env=env, cwd=str(self.root))
-        self.assertEqual(proc.returncode, 2)
-
     def test_qdrant_tasks_delegate_to_helper(self):
-        self.copy_repo_script("sim_qdrant.sh")
-        self.copy_repo_script("qdrant_pin.py")
-        self.make_sim_images_fixture()
-        self.make_docker_fake()
+        simulator_env = prepare_simulator(self.root, self.log)
         self.recorder_env = {"RECORDER_LOG": str(self.log), "RECORDER_TAG": "x", "RECORDER_EXIT": "0"}
-        env = dict(self.tool_env(), DOCKER_INSPECT_EXIT="1")
+        env = {**self.tool_env(), **simulator_env}
         proc = self.run_task("local:qdrant:up", "SIM_CONTAINER=custom", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         docker = [c["argv"] for c in self.tool_calls("docker") if c["argv"][:2] != ["image", "inspect"]]
