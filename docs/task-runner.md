@@ -205,10 +205,37 @@ content. The marker publishes last. Ordinary `wheelhouse` verification remains
 read-only, ignores markers, and never acquires content. No cache marker can
 substitute for complete wheel verification.
 
-`artifacts:bm25` retains its existing Task-owned completion stamp, model/recipe
-identity and member verification until its separate lifecycle migration. Its
-missing/stale/partial cache rules are unchanged. Neither task uses Task
-`sources:`/`method:` fingerprints during discovery, nor remote/optional includes.
+`artifacts:bm25` delegates preparation to `scripts/fetch_bm25_weights.py`.
+The direct CLI uses the repository's `bm25-weights.sha256` unless a manifest
+is explicitly supplied. This pin supports `Qdrant/bm25`; a different model
+is refused before acquisition or destination mutation. Every preparation
+verifies selected snapshot bytes independently of its completion record.
+Valid bytes are reused when the record is missing or the manifest/recipe
+identity changes; mtime-only changes do not invalidate them. The record is
+published only after successful verification. `--verify-only` remains
+read-only and never imports FastEmbed or acquires files. It also checks the
+optional FastEmbed metadata sidecar: malformed entries or file-size mismatches
+fail verification instead of certifying a cache the offline loader cannot use.
+
+For invalid caches, acquisition and checksum verification happen in an owned
+sibling staging directory before publication touches the old cache. Download
+or staged-verification failure preserves previous bytes. Preparation accepts
+the selected model's Hugging Face cache layout, including internal snapshot
+links to blobs, metadata and lock files. Foreign root/model members, unexpected
+snapshot files, special files and external/directory symlinks are refused;
+use a separate destination for a different inventory. It removes only the
+selected model and its cache locks, never the caller's entire directory.
+Cooperative preparers serialize through a sibling advisory lock.
+
+Stop cache readers during explicit preparation. Publication replaces cache
+members and writes the completion record last; it is not an atomic directory
+swap. Interruption can leave missing members, which the next explicit
+preparation revalidates and repairs. A partial directory or old stamp cannot
+pass byte verification. Image builds continue to consume the same cache layout after explicit
+preparation verifies the pin; this does not change model weights or inference.
+
+Verification never uses preparation stamps. No `sources:`/`method:` fingerprints
+run during discovery, and there are no remote or optional includes.
 
 <a id="inventory"></a>
 ## Older command reference
