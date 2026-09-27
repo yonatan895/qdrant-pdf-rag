@@ -94,6 +94,12 @@ client fixtures — endpoint tests that monkeypatch the
 retrieval/LLM seams get a servable generation while gate/refusal tests
 install the real `ServingGate` with a scripted Qdrant double, and
 integration-marked tests keep the real gate against the real server.
+The simulation `_agent` helper models a fresh process for each client lifespan:
+it constructs a real gate from that invocation's settings and restores any
+caller-owned gate afterward. A preceding lifespan's TTL must not determine a
+later fixture's warm-generation behavior. The HTTP reader regression seeds an
+expired prior gate to prove change, repair and retirement stay bound until the
+current fixture explicitly refreshes readiness.
 Pure/tool tests request nothing and never import the serving application.
 
 ## Tests must lock the claimed path
