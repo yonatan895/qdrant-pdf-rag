@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from scripts.render_report import (
+from mainframe_rag.eval.reports import (
     compare_bench,
     compare_eval,
     main,
@@ -222,3 +222,15 @@ def test_compare_eval_mixed_directional_change_regression(tmp_path: Path):
 
     assert main(["compare-eval", "--base", str(base_p), "--current", str(cur_p), "--fail-on-regression"]) == 1
 
+
+
+def test_report_delegate_and_l1_consumer_share_canonical_owner():
+    from scripts import gate_l1, render_report
+
+    from mainframe_rag.eval import reports
+
+    for name in ("_load_json", "_get", "_diff_badge", "_html_esc", "_md_esc",
+                 "render_eval", "render_bench", "compare_eval", "compare_bench",
+                 "main", "BASE_HTML_STYLE"):
+        assert getattr(render_report, name) is getattr(reports, name)
+    assert gate_l1.render_eval is reports.render_eval
