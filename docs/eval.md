@@ -343,6 +343,18 @@ verdict.
 
 ## 5. Answer eval (`eval_answers.py`)
 
+Sample/repeat defaults belong to the Python parsers: answers and L2/L4 use
+24 queries, chat uses 12 sessions, and L4 uses 3 repeats. Task transports
+nonempty `N`/`REPEATS` values literally and omits the option for missing or
+empty values; an explicit empty Task input overrides a nonempty ambient value
+and restores the parser default. Zero stays zero, and malformed values reach
+the parser and fail. Direct CLI empty integer arguments remain invalid.
+`tests/test_eval_task_sampling.py` exercises the actual parsers, sampling and
+repeat loops, reports and quality verdicts with synthetic runtime boundaries.
+Existing zero-sample exit differences remain: answers/L2 emit empty results;
+chat refuses an empty sample and L4 cannot gate/record uncomputed metrics.
+None of these empty runs establishes semantic acceptance.
+
 In-process `/v1/answer` grounding honesty: deterministic stratified
 round-robin sampling (sorted classes and ids, no RNG, small classes
 revisited first; default 24 queries, `--all` for full runs), then judge:

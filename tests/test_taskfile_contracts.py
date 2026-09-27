@@ -875,7 +875,7 @@ class TaskContractsTests(unittest.TestCase):
             self.log.unlink()
         # Pin refusal and recovery run through the real CLI in test_eval_gate.
 
-    def test_eval_count_inputs_default_and_override(self):
+    def test_eval_counts_transport_only_nonempty_values(self):
         self.make_venv_fake()
         env = self.tool_env()
         proc = self.run_task("eval:answers", "N=5", extra_env=env)
@@ -887,13 +887,13 @@ class TaskContractsTests(unittest.TestCase):
         proc = self.run_task("eval:answers", "N=", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = self.pip_calls()[0]["argv"]
-        self.assertEqual(argv[argv.index("--max-queries") + 1], "24")
+        self.assertNotIn("--max-queries", argv)
         if (self.log).exists():
             self.log.unlink()
         proc = self.run_task("eval:chat", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = self.pip_calls()[0]["argv"]
-        self.assertEqual(argv[argv.index("--limit") + 1], "12")
+        self.assertNotIn("--limit", argv)
 
     def test_bench_verify_and_load_carry_no_mode_exports(self):
         self.make_venv_fake()
