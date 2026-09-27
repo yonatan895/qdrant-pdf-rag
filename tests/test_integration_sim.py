@@ -200,8 +200,13 @@ def _agent(
         monkeypatch.setenv("DENSE_DIM", str(MOCK_DIM))
         if bm25_cache:
             monkeypatch.setenv("BM25_CACHE_DIR", bm25_cache)
-    with TestClient(app_mod.app) as client:
-        yield client
+    # Each helper invocation models a fresh agent process. Lifespan preserves
+    # an injected gate, so a prior TestClient's configured TTL must not leak.
+    # Scope this patch to the client lifetime and restore any caller-owned gate.
+    with monkeypatch.context() as agent_context:
+        agent_context.setattr(app_mod, "serving_gate", None)
+        with TestClient(app_mod.app) as client:
+            yield client
 
 
 _MESSAGE_CITE = (
@@ -1442,11 +1447,15 @@ def test_inflight_and_warm_http_readers_keep_verified_generation(
     from qdrant_client import QdrantClient, models
 
     from mainframe_rag.agent import app as app_mod
+    from mainframe_rag.agent.serving import ServingGate
     from mainframe_rag.config import Settings
     from mainframe_rag.ingest.qdrant_io import swap_alias_to
     from mainframe_rag.ingest.representation import manifest_point_id
     from tests.helpers_publication_lifecycle import REPLACEMENT, TEXTS, _records, _write_source
 
+    # A previous in-process app lifespan may have a different configured TTL.
+    # Model an already-expired prior gate deterministically, without sleeps.
+    monkeypatch.setattr(app_mod, "serving_gate", ServingGate(0))
     _drop_publish_fixture(qdrant_url)
     monkeypatch.setenv("INGEST_ALIAS_PUBLISH", "true")
     monkeypatch.setenv("ALLOW_HASH_MODE", "true")
