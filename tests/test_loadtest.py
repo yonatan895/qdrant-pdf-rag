@@ -229,3 +229,104 @@ def test_load_measurement_consumers_share_canonical_owner():
         assert getattr(loadtest, name) is getattr(load, name)
     assert benchmark.run_load is harness_l3.run_load is load.run_load
     assert benchmark.DEFAULT_QUERIES is harness_l3.DEFAULT_QUERIES is load.DEFAULT_QUERIES
+
+
+def test_task_load_defaults_and_literal_url_reach_actual_measurement(tmp_path):
+    """Task and direct CLI exercise the real load loop with controlled IO/time."""
+    import os
+    import shutil
+    import sys
+
+    from mainframe_rag.eval.load import DEFAULT_QUERIES
+
+    repo = Path(__file__).resolve().parents[1]
+    task = repo / '.tools/bin/task'
+    (tmp_path / 'taskfiles').mkdir()
+    shutil.copy(repo / 'taskfiles/eval.yml', tmp_path / 'taskfiles/eval.yml')
+    (tmp_path / 'Taskfile.yml').write_text('version: "3"\nincludes:\n  eval: taskfiles/eval.yml\n')
+    (tmp_path / '.venv/bin').mkdir(parents=True)
+    launcher = tmp_path / '.venv/bin/python'
+    launcher.write_text(f'#!{sys.executable}\n' + f'repo = {str(repo)!r}\n' + '''
+import importlib.util, itertools, json, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+sys.path.insert(0, str(Path(repo) / 'src'))
+from mainframe_rag.eval import load
+spec = importlib.util.spec_from_file_location('actual_load_cli', Path(repo) / 'scripts/loadtest.py')
+cli = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cli)
+events = []
+clock = SimpleNamespace(now=0.0)
+load.time = SimpleNamespace(monotonic=lambda: clock.now, perf_counter=itertools.count(0, 0.001).__next__)
+load.query_vram_mb = lambda: None
+class Thread:
+    def __init__(self, target): self.target = target
+    def start(self):
+        clock.now = 0.0
+        self.target()
+    def join(self): pass
+load.threading.Thread = Thread
+class Client:
+    def __init__(self, timeout): events.append(['client', timeout])
+    def post(self, url, json):
+        events.append(['post', url, json])
+        clock.now += 30.0
+        if not url.startswith('http'):
+            raise load.httpx2.UnsupportedProtocol('synthetic relative URL')
+        return SimpleNamespace(status_code=200, headers={'server-timing': 'embed;dur=2, qdrant;dur=3'})
+    def close(self): events.append(['close'])
+load.httpx2.Client = Client
+actual = cli.run_load
+def observed(url, endpoint, queries, concurrency, duration_s, **kwargs):
+    events.append(['invocation', url, endpoint, queries, concurrency, duration_s, kwargs,
+                   {key: os.environ.get(key) for key in ('EMBED_MODE', 'VENUE')}])
+    return actual(url, endpoint, queries, concurrency, duration_s, **kwargs)
+cli.run_load = observed
+try:
+    raise SystemExit(cli.main(sys.argv[2:]))
+finally:
+    Path('events.json').write_text(json.dumps(events))
+''')
+    launcher.chmod(0o755)
+    literal = 'http://example.invalid/אב space;$(touch SENTINEL)/'
+    cases = [([], {}, 'http://127.0.0.1:8080'),
+             ([], {'AGENT_URL': literal}, literal),
+             ([f'AGENT_URL={literal}'], {'AGENT_URL': 'http://wrong.invalid'}, literal),
+             (['AGENT_URL='], {'AGENT_URL': 'http://wrong.invalid'}, ''),
+             ([], {'AGENT_URL': ''}, ''),
+             (['AGENT_URL=false'], {}, 'false')]
+    for args, ambient, expected_url in cases:
+        env = {'PATH': os.defpath, 'HOME': str(tmp_path), **ambient}
+        direct_args = [] if not args and 'AGENT_URL' not in ambient else ['--url', expected_url]
+        direct = subprocess.run([str(launcher), 'scripts/loadtest.py', *direct_args],
+                                cwd=tmp_path, env=env, text=True, capture_output=True, timeout=10, check=False)
+        direct_events = json.loads((tmp_path / 'events.json').read_text())
+        invoked = subprocess.run([str(task), '--taskfile', str(tmp_path / 'Taskfile.yml'),
+                                  'eval:load', f'PY={launcher}', *args],
+                                 cwd=tmp_path, env=env, text=True, capture_output=True, timeout=10, check=False)
+        assert direct.returncode == invoked.returncode == 0, direct.stderr + invoked.stderr
+        events = json.loads((tmp_path / 'events.json').read_text())
+        assert events == direct_events
+        assert events[0] == ['invocation', expected_url, 'search', DEFAULT_QUERIES, 8, 30.0,
+                             {'request_timeout_s': 30.0}, {'EMBED_MODE': None, 'VENUE': None}]
+        posts = [e for e in events if e[0] == 'post']
+        assert len(posts) == 8
+        assert all(e[1] == expected_url.rstrip('/') + '/v1/search' and e[2]['limit'] == 8 for e in posts)
+        assert [e[2]['query'] for e in posts] == [DEFAULT_QUERIES[i % len(DEFAULT_QUERIES)] for i in range(8)]
+        assert events.count(['client', 30.0]) == events.count(['close']) == 8
+        result = json.loads(invoked.stdout)
+        assert result == json.loads(direct.stdout)
+        assert result['requests'] == 8
+        assert result['errors'] == (0 if expected_url.startswith('http') else 8)
+        assert result['stages'] == ({} if result['errors'] else {
+            'embed_ms': {'p50': 2.0, 'p90': 2.0, 'p95': 2.0, 'p99': 2.0, 'max': 2.0},
+            'qdrant_ms': {'p50': 3.0, 'p90': 3.0, 'p95': 3.0, 'p99': 3.0, 'max': 3.0}})
+        assert not (tmp_path / 'SENTINEL').exists()
+    # An ordinary default invocation after explicit invalid URL diagnostics
+    # must resolve defaults anew, rather than retaining the previous URL.
+    recovered = subprocess.run([str(task), '--taskfile', str(tmp_path / 'Taskfile.yml'),
+                                'eval:load', f'PY={launcher}'], cwd=tmp_path,
+                               env={'PATH': os.defpath, 'HOME': str(tmp_path)},
+                               text=True, capture_output=True, timeout=10, check=False)
+    assert recovered.returncode == 0
+    assert json.loads(recovered.stdout)['errors'] == 0

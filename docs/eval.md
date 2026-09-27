@@ -54,8 +54,16 @@ Reusable concurrent HTTP load measurement, Server-Timing parsing, percentiles
 and optional GPU observations are owned by `mainframe_rag.eval.load`. The L3
 harness, ingestion benchmark and load integration tier consume that owner.
 `scripts/loadtest.py` retains CLI dispatch and baseline persistence, including
-reserved CI-baseline protection, with same-object measurement exports. Query
-load and ingestion benchmark workloads remain distinct. L3 verdicts and report formatting live in `mainframe_rag.eval.performance`.
+reserved CI-baseline protection, with same-object measurement exports.
+The `eval:load` Task delegates endpoint, worker-count, duration and absent-URL
+defaults to this CLI: search, eight workers, 30 seconds and
+`http://127.0.0.1:8080`. Explicit `AGENT_URL` values (including empty) are
+transported literally; CLI Task inputs override ambient values. `PY` still
+selects the base interpreter and no model-mode or venue defaults are exported.
+Relative URLs retain the existing diagnostic behavior: request errors
+appear in the report; an ordinary run without baseline export still exits zero.
+Query load and ingestion benchmark workloads remain distinct. L3 verdicts and
+report formatting live in `mainframe_rag.eval.performance`.
 Its `default_baseline_path(workspace_root, embed_mode)` takes explicit inputs;
 the CLI supplies its existing workspace root and reads `EMBED_MODE` on each
 invocation. This replaces the script's import-time `EMBED_MODE` and

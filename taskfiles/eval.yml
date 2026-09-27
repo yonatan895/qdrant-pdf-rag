@@ -521,10 +521,9 @@ tasks:
       no mode exports (same as Make).
     vars:
       PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}python3{{end}}'
-      AGENT_URL: '{{if hasKey . "AGENT_URL"}}{{.AGENT_URL}}{{else}}http://127.0.0.1:8080{{end}}'
     env:
       TASK_PY: '{{.PY}}'
       TASK_AGENT_URL: '{{.AGENT_URL}}'
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - '"$TASK_PY" scripts/loadtest.py --url "$TASK_AGENT_URL" --endpoint search --concurrency 8 --duration 30'
+      - '"$TASK_PY" scripts/loadtest.py {{if hasKey . "AGENT_URL"}}--url "$TASK_AGENT_URL"{{end}}'
