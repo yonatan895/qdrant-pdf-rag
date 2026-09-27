@@ -479,6 +479,17 @@ VENUE=rc sh scripts/tools/run-task.sh eval:capture-pool          # records into 
 #        --golden evals/golden.jsonl --json bundles/sweep.json
 ```
 
+Capture path defaults live in `capture_pool.main`, selected explicitly with
+`--bundle-dir DIR`: the default input is `evals/golden.jsonl` and the output is
+`DIR/pools-YYYYMMDD.jsonl`, using the local calendar date at each invocation.
+Task passes its `BUNDLE_DIR` and only nonempty `GOLDEN`/`OUT` overrides; explicit
+empty Task overrides restore these defaults even over nonempty ambient values.
+Direct `--golden`/`--out` paths remain authoritative, including empty-path refusal.
+Without `--bundle-dir`, both paths are still required. An empty bundle directory
+is rejected. Python creates the selected bundle after dataset/venue checks;
+parents of arbitrary explicit output paths must already exist. Checked holdout
+access precedes client startup and output replacement on either entry point.
+
 Rules: CE-less pools (bypassed queries, `--no-ce`) replay RRF-only —
 rerank refuses them fail-closed, never fabricate scores. Split
 recordings replay per-leg (`record_to_rows(record, leg=i)`); merging

@@ -7,6 +7,8 @@ The capture→replay seam is pinned structurally: rows emitted by
 (ranked id lists, chunk table, optional finite CE).
 """
 
+from datetime import UTC
+
 import pytest
 from scripts.capture_pool import capture_query, legs_to_record, record_to_rows
 
@@ -250,3 +252,205 @@ def test_capture_query_explicit_reranker_scores_nl_pool():
     assert reranker.call_count == 1
     assert record["ce"] == {"p1": 0.5}
     assert record["_meta"]["ce_scored"] is True
+
+
+@pytest.fixture
+def capture_workspace(tmp_path):
+    """Actual Task/CLI/capture serializer, with shared runtime client fakes."""
+    import json
+    import os
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from tests.test_taskfile_contracts import REQUIRE_RUNNER, find_task
+
+    task = find_task()
+    if task is None:
+        if REQUIRE_RUNNER:
+            pytest.fail("pinned Task unavailable in required lane")
+        pytest.skip("pinned Task unavailable")
+    repo = Path(__file__).resolve().parents[1]
+    shutil.copy2(repo / "Taskfile.yml", tmp_path / "Taskfile.yml")
+    shutil.copytree(repo / "taskfiles", tmp_path / "taskfiles")
+    (tmp_path / "scripts").mkdir()
+    shutil.copy2(repo / "scripts/capture_pool.py", tmp_path / "scripts/capture_pool.py")
+    (tmp_path / ".venv/bin").mkdir(parents=True)
+    launcher = tmp_path / ".venv/bin/python"
+    launcher.write_text(f"#!{sys.executable}\n" + f"repo = {str(repo)!r}\n" + '''
+import importlib.util, json, sys
+from pathlib import Path
+sys.path[:0] = [str(Path(repo) / 'src'), repo]
+from mainframe_rag import config
+from mainframe_rag.ingest import embed
+from tests.fakes import QdrantFake, EmbedderFake, make_point
+import qdrant_client
+
+def settings():
+    return config.Settings(_env_file=None, qdrant_collection='synthetic', dense_dim=3, rerank_enabled=False)
+config.load_settings = settings
+point = make_point('synthetic-id').model_copy(update={'payload': {
+    'doc_id': 'original-doc', 'page_label': '7', 'chunk_type': 'prose',
+    'text': 'PRIVATE-TEXT-SENTINEL', 'heading_path': 'Example', 'message_ids': []}})
+def client(**kwargs):
+    Path('client-started').write_text('yes')
+    return QdrantFake(dense=[point], sparse=[point])
+qdrant_client.QdrantClient = client
+embed.build_embedder = lambda settings: EmbedderFake()
+spec = importlib.util.spec_from_file_location('actual_capture_cli', sys.argv[1])
+cli = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cli)
+raise SystemExit(cli.main(sys.argv[2:]))
+''')
+    launcher.chmod(0o755)
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals/golden.jsonl").write_text(json.dumps({"query": "Original default question"}) + "\n")
+    (tmp_path / "custom אב;$(touch SENTINEL).jsonl").write_text(json.dumps({"query": "Original override question אב;$(touch SENTINEL)"}) + "\n")
+    def run(*args, direct=False, ambient=None):
+        command = ([str(launcher), "scripts/capture_pool.py"] if direct else
+                   [task, "--taskfile", str(tmp_path / "Taskfile.yml"), "eval:capture-pool"])
+        return subprocess.run([*command, *args], cwd=tmp_path,
+            env={"PATH": os.defpath, "HOME": str(tmp_path), "TZ": "UTC", **(ambient or {})},
+            capture_output=True, text=True, timeout=30, check=False)
+    return tmp_path, run
+
+
+def _assert_capture(path, query):
+    import json
+
+    from scripts.capture_pool import replay_pool
+
+    content = path.read_text()
+    records = [json.loads(line) for line in content.splitlines()]
+    assert len(records) == 1
+    record = records[0]
+    assert record["query"] == query
+    assert record["legs"][0]["dense"] == record["legs"][0]["sparse"] == ["synthetic-id"]
+    assert record["chunks"] == {"synthetic-id": {"doc_id": "original-doc", "page": "7", "chunk_type": "prose"}}
+    assert record["ce"] == {}
+    assert "PRIVATE-TEXT-SENTINEL" not in content
+    dense, sparse, ce = replay_pool(record_to_rows(record))
+    assert [p.id for p in dense] == [p.id for p in sparse] == ["synthetic-id"]
+    assert ce == {"synthetic-id": None}
+
+
+@pytest.mark.parametrize("args,ambient,override", [
+    ([], {}, False),
+    (["GOLDEN=", "OUT="], {"GOLDEN": "missing.jsonl", "OUT": "wrong.jsonl"}, False),
+    (["GOLDEN=custom אב;$(touch SENTINEL).jsonl", "OUT=chosen אב;$(touch SENTINEL).jsonl"],
+     {"GOLDEN": "missing.jsonl", "OUT": "wrong.jsonl"}, True),
+    ([], {"GOLDEN": "custom אב;$(touch SENTINEL).jsonl", "OUT": "chosen אב;$(touch SENTINEL).jsonl"}, True),
+])
+def test_task_capture_defaults_and_overrides(capture_workspace, args, ambient, override):
+    from datetime import datetime
+
+    root, run = capture_workspace
+    before = datetime.now(UTC).strftime("%Y%m%d")
+    bundle = "bundle אב;$(touch SENTINEL)"
+    proc = run(*args, f"BUNDLE_DIR={bundle}", ambient=ambient)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    if override:
+        output = root / "chosen אב;$(touch SENTINEL).jsonl"
+    else:
+        outputs = list((root / bundle).glob("pools-*.jsonl"))
+        assert len(outputs) == 1
+        output = outputs[0]
+        after = datetime.now(UTC).strftime("%Y%m%d")
+        assert output.name in {f"pools-{day}.jsonl" for day in (before, after)}
+    _assert_capture(output, "Original override question אב;$(touch SENTINEL)" if override else "Original default question")
+    assert not (root / "wrong.jsonl").exists()
+    assert not (root / "SENTINEL").exists()
+
+
+def test_task_capture_holdout_refusal_and_recovery(capture_workspace):
+    import hashlib
+    import json
+
+    root, run = capture_workspace
+    holdout = root / "evals/holdout.jsonl"
+    original = (json.dumps({"query": "Original protected question"}) + "\n").encode()
+    holdout.write_bytes(original)
+    pin = holdout.with_suffix(".jsonl.sha256")
+    pin.write_text(hashlib.sha256(original).hexdigest() + "  holdout.jsonl\n")
+    args = ["GOLDEN=evals/holdout.jsonl", "OUT=capture.jsonl"]
+    good = run(*args, "VENUE=rc")
+    assert good.returncode == 0, good.stderr
+    output = root / "capture.jsonl"
+    _assert_capture(output, "Original protected question")
+    good_bytes = output.read_bytes()
+    for venue, content in (("dev", original), ("rc", b"broken, not JSON")):
+        (root / "client-started").unlink()
+        holdout.write_bytes(content)
+        bad = run(*args, f"VENUE={venue}")
+        assert bad.returncode != 0
+        assert not (root / "client-started").exists()
+        assert output.read_bytes() == good_bytes
+        holdout.write_bytes(original)
+        recovered = run(*args, "VENUE=rc")
+        assert recovered.returncode == 0, recovered.stderr
+        _assert_capture(output, "Original protected question")
+
+
+def test_capture_explicit_cli_and_empty_inputs(capture_workspace):
+    root, run = capture_workspace
+    proc = run("--golden", "evals/golden.jsonl", "--out", "explicit.jsonl", direct=True)
+    assert proc.returncode == 0, proc.stderr
+    _assert_capture(root / "explicit.jsonl", "Original default question")
+    for args in ([], ["--golden", "evals/golden.jsonl"], ["--out", "explicit.jsonl"],
+                 ["--golden", "", "--out", "explicit.jsonl"],
+                 ["--golden", "evals/golden.jsonl", "--out", ""]):
+        assert run(*args, direct=True).returncode != 0
+    assert run("BUNDLE_DIR=").returncode != 0
+
+
+def test_capture_bundle_defaults_match_task_and_preserve_explicit_paths(capture_workspace):
+    from datetime import UTC, datetime
+
+    root, run = capture_workspace
+    bundle = "direct bundle אב;$(touch SENTINEL)"
+    before = datetime.now(UTC).strftime("%Y%m%d")
+    proc = run("--bundle-dir", bundle, direct=True)
+    assert proc.returncode == 0, proc.stderr
+    outputs = list((root / bundle).glob("pools-*.jsonl"))
+    assert len(outputs) == 1
+    after = datetime.now(UTC).strftime("%Y%m%d")
+    assert outputs[0].name in {f"pools-{day}.jsonl" for day in (before, after)}
+    _assert_capture(outputs[0], "Original default question")
+    original = outputs[0].read_bytes()
+    proc = run("--bundle-dir", bundle, "--golden", "custom אב;$(touch SENTINEL).jsonl",
+               "--out", "direct override.jsonl", direct=True)
+    assert proc.returncode == 0, proc.stderr
+    _assert_capture(root / "direct override.jsonl", "Original override question אב;$(touch SENTINEL)")
+    assert outputs[0].read_bytes() == original
+    assert run("--bundle-dir", "", direct=True).returncode != 0
+    assert run("--bundle-dir", bundle, "--out", "", direct=True).returncode != 0
+    assert run("--bundle-dir", bundle, "--golden", "", direct=True).returncode != 0
+    assert run("--bundle-dir", bundle, "--out", "unprepared-parent/out.jsonl", direct=True).returncode != 0
+    assert not (root / "unprepared-parent").exists()
+    assert not (root / "SENTINEL").exists()
+
+
+def test_capture_date_is_resolved_for_each_invocation(tmp_path, monkeypatch):
+    import json
+
+    import qdrant_client
+    from scripts import capture_pool
+
+    from mainframe_rag import config
+    from mainframe_rag.ingest import embed
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VENUE", "dev")
+    monkeypatch.setattr(config, "load_settings", lambda: _settings(_env_file=None, rerank_enabled=False))
+    monkeypatch.setattr(qdrant_client, "QdrantClient", lambda **kwargs: FakeQdrant(dense=[_cpoint("p1", "D1", "1", "prose")], sparse=[]))
+    monkeypatch.setattr(embed, "build_embedder", lambda settings: FakeEmbedder())
+    (tmp_path / "evals").mkdir()
+    golden = tmp_path / "evals/golden.jsonl"
+    for day, query in (("20260101", "first original question"), ("20260102", "second original question")):
+        monkeypatch.setattr(capture_pool.time, "strftime", lambda fmt, day=day: day)
+        golden.write_text(json.dumps({"query": query}) + "\n")
+        assert capture_pool.main(["--bundle-dir", "bundles"]) == 0
+        output = tmp_path / "bundles" / f"pools-{day}.jsonl"
+        assert json.loads(output.read_text())["query"] == query
+    assert json.loads((tmp_path / "bundles/pools-20260101.jsonl").read_text())["query"] == "first original question"
