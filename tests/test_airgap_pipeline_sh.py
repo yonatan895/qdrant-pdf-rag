@@ -8,9 +8,11 @@ Tests pipeline.sh in dry-run mode against hermetic stubs:
 """
 
 
+import shutil
+
 import pytest
 
-from tests.helpers_airgap import copy_chart, install_rendering_helm, make_bin_tree, write_stub
+from tests.helpers_airgap import REPO, copy_chart, install_rendering_helm, make_bin_tree, write_stub
 
 IMAGE_SHA = "e" * 40
 
@@ -24,6 +26,7 @@ def pipe_tree(tmp_path):
         ["common.sh", "validate.sh", "load.sh", "deploy.sh", "ingest.sh", "smoke.sh", "pipeline.sh", "map_values.py"],
     )
     copy_chart(tmp_path)
+    shutil.copy(REPO / "charts" / "qdrant-openshift.values.yaml", tmp_path / "charts")
     for name in ("skopeo", "helm", "kubectl", "oc"):
         write_stub(tmp_path / "bin" / name, STUB_PIPE_TOOL)
     install_rendering_helm(tmp_path)
