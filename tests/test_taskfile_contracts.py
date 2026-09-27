@@ -1195,16 +1195,34 @@ class TaskContractsTests(unittest.TestCase):
     def test_bridge_set_matches_operator_keys(self):
         import re
         common = (REPO / "scripts/airgap/common.sh").read_text(encoding="utf-8")
-        expected = set(re.search(r'OPERATOR_ENV_KEYS="([^"]+)"', common).group(1).split())
-        self.assertGreater(len(expected), 50, "operator key list unexpectedly small")
-        self.assertIn("AIRGAP_ENV", expected, "AIRGAP_ENV must be an operator key")
-        yml = (REPO / "taskfiles/airgap.yml").read_text(encoding="utf-8")
-        blocks = re.findall(r"    env:\n((?:      TASK_[A-Z_]+: .*\n)+)", yml)
-        # Seven bridged stages; dryrun carries fixed params instead of bridges.
-        self.assertEqual(len(blocks), 7)
-        for block in blocks:
-            bridged = set(re.findall(r"^      TASK_([A-Z_]+): ", block, re.MULTILINE)) - {"OP_KEYS"}
-            self.assertEqual(bridged, expected)
+        keys = re.search(r'OPERATOR_ENV_KEYS="([^"]+)"', common).group(1).split()
+        self.assertIn("AIRGAP_ENV", keys, "AIRGAP_ENV must be an operator key")
+        self.make_airgap_fixtures({})
+        self.recorder_env = {"RECORDER_LOG": str(self.log)}
+        values = {key: f"cli {key} Ω ;$(touch SENTINEL) ' \"\t\nend" for key in keys}
+        values.update(AIRGAP_ENV=str(self.root / "airgap.env"),
+                      AIRGAP_DRYRUN="0", UI_ENABLED="false")
+        ambient = {key: f"ambient {key}" for key in keys}
+        # Exercise the public stages, not the number/indentation of YAML maps.
+        # Existing precedence cases below separately exercise real common.sh.
+        for stage in ("pack", "load", "deploy", "ingest", "smoke", "validate", "pipeline"):
+            script = self.root / "scripts/airgap" / f"{stage}.sh"
+            script.write_text(
+                '#!/bin/sh\npython3 - <<\'PY\'\nimport json, os\n'
+                + f'keys = {keys!r}\n'
+                + 'with open(os.environ["RECORDER_LOG"], "a") as fh:\n'
+                + '    fh.write(json.dumps({k: os.environ.get(k) for k in keys}) + "\\n")\nPY\n',
+                encoding="utf-8")
+            for mode in ("cli", "ambient", "empty"):
+                with self.subTest(stage=stage, mode=mode):
+                    self.log.unlink(missing_ok=True)
+                    expected = values if mode == "cli" else ambient if mode == "ambient" else dict.fromkeys(keys, "")
+                    args = () if mode == "ambient" else tuple(f"{k}={v}" for k, v in expected.items())
+                    proc = self.run_task(f"airgap:{stage}", *args,
+                                         extra_env={**self.tool_env(), **ambient})
+                    self.assertEqual(proc.returncode, 0, proc.stdout)
+                    self.assertEqual(json.loads(self.log.read_text(encoding="utf-8")), expected)
+                    self.assertFalse((self.root / "SENTINEL").exists())
 
     def test_operator_precedence_three_way_conflict(self):
         # Three conflicting values: ambient env, CLI, and env file (TR435-F1)
