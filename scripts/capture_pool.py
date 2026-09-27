@@ -37,6 +37,7 @@ if str(REPO / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO / "scripts"))
 
 from mainframe_rag.eval.datasets import (
+    DEV_GOLDEN_PATH,
     DatasetError,
     read_golden_text,
     require_rc_for_collection,
@@ -394,11 +395,24 @@ def _iter_queries(golden_path: str, max_queries: int | None) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Record live prefetch pools for offline replay.")
-    parser.add_argument("--golden", required=True, help="Golden jsonl file (uses each entry's query).")
-    parser.add_argument("--out", required=True, help="Output JSONL path (one record per line).")
+    parser.add_argument("--golden", default=None, help="Golden jsonl file (uses each entry's query).")
+    parser.add_argument("--out", default=None, help="Output JSONL path (one record per line).")
+    parser.add_argument(
+        "--bundle-dir", default=None,
+        help="select dev-golden and pools-YYYYMMDD.jsonl defaults in this directory; explicit paths win",
+    )
     parser.add_argument("--max-queries", type=int, default=None)
     parser.add_argument("--no-ce", action="store_true", help="Skip cross-encoder scoring (RRF-only pools).")
     args = parser.parse_args(argv)
+    if args.bundle_dir == "":
+        parser.error("--bundle-dir must not be empty")
+    if args.bundle_dir is None and (args.golden is None or args.out is None):
+        parser.error("--golden and --out are required unless --bundle-dir is supplied")
+    if args.golden is None:
+        args.golden = str(DEV_GOLDEN_PATH)
+    if args.out is None:
+        # Match the former shell date convention, resolved once per invocation.
+        args.out = str(Path(args.bundle_dir) / f"pools-{time.strftime('%Y%m%d')}.jsonl")
 
     import httpx2
     from qdrant_client import QdrantClient
@@ -416,6 +430,11 @@ def main(argv: list[str] | None = None) -> int:
     except DatasetError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
+    if args.bundle_dir is not None:
+        # Dataset/venue refusal must not replace a prior capture or start clients.
+        # Only the explicitly selected bundle is prepared; arbitrary OUT parents
+        # retain their existing requirement to exist already.
+        Path(args.bundle_dir).mkdir(parents=True, exist_ok=True)
     client = QdrantClient(
         url=settings.qdrant_url,
         api_key=settings.qdrant_api_key,

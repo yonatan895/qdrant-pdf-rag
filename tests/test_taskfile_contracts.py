@@ -917,16 +917,15 @@ class TaskContractsTests(unittest.TestCase):
             "--concurrency", "8", "--duration", "30"])
         self.assertEnvSubset(base_calls[0], {"EMBED_MODE": None, "VENUE": None})
 
-    def test_capture_pool_out_defaults_to_dated_bundle(self):
-        import re
+    def test_capture_pool_transports_bundle_and_explicit_paths(self):
         self.make_venv_fake()
         env = self.tool_env()
         proc = self.run_task("eval:capture-pool", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout)
         argv = self.pip_calls()[0]["argv"]
-        out = argv[argv.index("--out") + 1]
-        self.assertTrue(re.fullmatch(r"bundles/pools-\d{8}\.jsonl", out), out)
-        self.assertEqual(argv[argv.index("--golden") + 1], "evals/golden.jsonl")
+        self.assertEqual(argv[argv.index("--bundle-dir") + 1], "bundles")
+        self.assertNotIn("--golden", argv)
+        self.assertNotIn("--out", argv)
         if (self.log).exists():
             self.log.unlink()
         proc = self.run_task("eval:capture-pool", "OUT=/tmp/x.jsonl", "GOLDEN=g.jsonl", extra_env=env)
