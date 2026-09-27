@@ -7,6 +7,7 @@ Verification uses only the standard library and never repairs an environment.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import importlib.metadata
 import json
@@ -217,6 +218,74 @@ def acquire(root: Path, profile: str, directory: Path) -> dict:
     return verify_wheelhouse(root, profile, directory)
 
 
+def _preparation_destination(directory: Path, expected: set[str]) -> None:
+    # Local operator-owned directories only; do not resolve away a symlink.
+    if directory == Path(directory.anchor):
+        raise LockError("refusing a filesystem root wheelhouse")
+    for path in (directory, *directory.parents):
+        if path.is_symlink():
+            raise LockError("refusing a symlink wheelhouse path")
+    if directory.exists():
+        if not directory.is_dir():
+            raise LockError("wheelhouse destination is not a directory")
+        for path in directory.iterdir():
+            if path.name not in expected | {".task-complete"} or not path.is_file() or path.is_symlink():
+                raise LockError("refusing a wheelhouse containing unowned or symlink members")
+
+
+def prepare(root: Path, profile: str, directory: Path) -> dict:
+    """Explicit preparation; stage acquisition before publishing selected members.
+
+    Operators must keep readers off this destination during preparation. Member
+    replacement is atomic, not the whole directory; the marker is published last.
+    Verification always checks actual wheel bytes independently of this marker.
+    """
+    target = check_target()
+    _, packages = load(root, profile)
+    expected = {entry["wheel"] for entry in packages.values()}
+    directory = Path(os.path.abspath(directory))
+    _preparation_destination(directory, expected)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    lock = directory.parent / ("." + directory.name + ".prepare.lock")
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "r+") as locked:
+        fcntl.flock(locked, fcntl.LOCK_EX)
+        _preparation_destination(directory, expected)
+        identity = {
+            "schema_version": 1, "profile": profile, "target": target,
+            "python": platform.python_version(), "system": platform.system(),
+            "machine": platform.machine(), "lock_sha256": digest(root / MANIFEST),
+            "requirements_sha256": digest(root / PROFILE_FILES[profile]),
+            "recipe_sha256": digest(Path(__file__)),
+        }
+        marker = directory / ".task-complete"
+        try:
+            receipt = verify_wheelhouse(root, profile, directory)
+            if read_json(marker) == identity:
+                return receipt
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        with tempfile.TemporaryDirectory(prefix="." + directory.name + ".prepare-", dir=directory.parent) as temp:
+            stage = Path(temp)
+            for entry in packages.values():
+                source = directory / entry["wheel"]
+                if source.is_file() and digest(source) == entry["sha256"]:
+                    shutil.copyfile(source, stage / entry["wheel"])
+            receipt = acquire(root, profile, stage)
+            # The independent verifier checks the complete staged inventory.
+            verify_wheelhouse(root, profile, stage)
+            _preparation_destination(directory, expected)
+            directory.mkdir(exist_ok=True)
+            marker.unlink(missing_ok=True)
+            for name in sorted(expected):
+                (stage / name).replace(directory / name)
+            verify_wheelhouse(root, profile, directory)
+            staged_marker = stage / ".task-complete"
+            staged_marker.write_text(json.dumps(identity, sort_keys=True) + "\n", encoding="utf-8")
+            staged_marker.replace(marker)
+            return receipt
+
+
 def check_target() -> dict:
     libc, version = platform.libc_ver()
     gil_disabled = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
@@ -274,10 +343,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("target")
     generate_parser = sub.add_parser("generate")
     generate_parser.add_argument("--reports", type=Path, required=True)
-    for command in ("validate", "wheelhouse", "acquire", "installed"):
+    for command in ("validate", "wheelhouse", "acquire", "prepare", "installed"):
         child = sub.add_parser(command)
         child.add_argument("--profile", choices=PROFILE_FILES, required=True)
-        if command in ("wheelhouse", "acquire"):
+        if command in ("wheelhouse", "acquire", "prepare"):
             child.add_argument("--directory", type=Path, required=True)
         if command == "installed":
             child.add_argument("--project", action="store_true")
@@ -297,6 +366,8 @@ def main(argv: list[str] | None = None) -> int:
                       "lock_sha256": digest(args.root / MANIFEST)}
         elif args.command == "acquire":
             result = acquire(args.root, args.profile, args.directory)
+        elif args.command == "prepare":
+            result = prepare(args.root, args.profile, args.directory)
         elif args.command == "wheelhouse":
             result = verify_wheelhouse(args.root, args.profile, args.directory)
         else:

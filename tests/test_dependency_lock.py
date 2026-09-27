@@ -263,3 +263,207 @@ def test_serialized_sbom_omission_is_rejected_against_actual_archives(locked):
     path.write_text(json.dumps(sbom))
     with pytest.raises(locks.LockError, match='serialized SBOM'):
         verify_sbom(root, root, commit)
+
+
+def test_preparation_revalidates_identity_without_reacquiring_approved_bytes(locked, monkeypatch):
+    root, _, wheels = locked
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', lambda *a, **kw: pytest.fail('unexpected acquisition'))
+    expected = locks.verify_wheelhouse(root, 'dev', wheels)
+    assert locks.prepare(root, 'dev', wheels) == expected
+    marker = wheels / '.task-complete'
+    first = json.loads(marker.read_text())
+    monkeypatch.setattr(locks.platform, 'python_version', lambda: '3.14.99')
+    assert locks.prepare(root, 'dev', wheels) == expected
+    second = json.loads(marker.read_text())
+    assert second['python'] == '3.14.99'
+    assert first != second
+    before = marker.stat().st_mtime_ns
+    assert locks.prepare(root, 'dev', wheels) == expected
+    assert marker.stat().st_mtime_ns == before
+    marker.unlink()
+    assert locks.prepare(root, 'dev', wheels) == expected
+    assert marker.exists()
+
+
+def test_staged_acquisition_failure_preserves_previous_cache_then_recovers(locked, monkeypatch):
+    import io
+    root, reports, wheels = locked
+    locks.prepare(root, 'dev', wheels)
+    before = {p.name: p.read_bytes() for p in wheels.iterdir()}
+    replacement = b'new original synthetic approved wheel bytes'
+    for report in reports.glob('*.json'):
+        value = json.loads(report.read_text())
+        for entry in value['install']:
+            if entry['metadata']['name'] == 'example':
+                entry['download_info']['archive_info']['hashes']['sha256'] = hashlib.sha256(replacement).hexdigest()
+        report.write_text(json.dumps(value))
+    locks.generate(root, reports)
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', lambda *a, **kw: io.BytesIO(b'incorrect acquisition'))
+    with pytest.raises(locks.LockError, match='downloaded wheel'):
+        locks.prepare(root, 'dev', wheels)
+    assert {p.name: p.read_bytes() for p in wheels.iterdir()} == before
+    assert not list(root.glob('.wheels.prepare-*'))
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', lambda *a, **kw: io.BytesIO(replacement))
+    locks.prepare(root, 'dev', wheels)
+    assert (wheels / 'example-1.0-py3-none-any.whl').read_bytes() == replacement
+    assert locks.verify_wheelhouse(root, 'dev', wheels)['profile'] == 'dev'
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', lambda *a, **kw: pytest.fail('unexpected acquisition'))
+    assert locks.prepare(root, 'dev', wheels)['profile'] == 'dev'
+
+
+@pytest.mark.parametrize('kind', ['extra', 'directory', 'member-link', 'root-link', 'ancestor-link', 'marker-link'])
+def test_preparation_refuses_unowned_and_symlink_destinations(locked, monkeypatch, kind):
+    root, _, wheels = locked
+    sentinel = root / 'sentinel'
+    sentinel.write_bytes(b'unrelated data')
+    destination = wheels
+    if kind == 'extra':
+        (wheels / 'notes.txt').write_bytes(b'not owned')
+    elif kind == 'directory':
+        (wheels / 'nested').mkdir()
+    elif kind in ('member-link', 'marker-link'):
+        member = wheels / ('example-1.0-py3-none-any.whl' if kind == 'member-link' else '.task-complete')
+        member.unlink(missing_ok=True)
+        member.symlink_to(sentinel)
+    else:
+        link = root / 'alias'
+        link.symlink_to(wheels if kind == 'root-link' else root, target_is_directory=True)
+        destination = link if kind == 'root-link' else link / 'wheels'
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', lambda *a, **kw: pytest.fail('acquisition before refusal'))
+    with pytest.raises(locks.LockError, match='symlink|unowned'):
+        locks.prepare(root, 'dev', destination)
+    assert sentinel.read_bytes() == b'unrelated data'
+    assert not (wheels / '.task-complete').is_file() or kind == 'marker-link'
+
+
+def test_interrupted_member_publication_has_no_marker_and_next_prepare_recovers(locked, monkeypatch):
+    from pathlib import Path
+    root, _, wheels = locked
+    locks.prepare(root, 'dev', wheels)
+    marker = wheels / '.task-complete'
+    marker.write_text('{}')
+    original = Path.replace
+    def interrupt(path, target):
+        if path.name.startswith('pip-'):
+            raise OSError('synthetic publication interruption')
+        return original(path, target)
+    monkeypatch.setattr(Path, 'replace', interrupt)
+    with pytest.raises(OSError, match='publication interruption'):
+        locks.prepare(root, 'dev', wheels)
+    assert not marker.exists()
+    assert not list(root.glob('.wheels.prepare-*'))
+    monkeypatch.setattr(Path, 'replace', original)
+    assert locks.prepare(root, 'dev', wheels)['profile'] == 'dev'
+    assert json.loads(marker.read_text())['profile'] == 'dev'
+    assert locks.verify_wheelhouse(root, 'dev', wheels)['profile'] == 'dev'
+
+
+def test_preparers_serialize_and_second_reuses_complete_result(locked, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    root, _, wheels = locked
+    entered = threading.Event()
+    release = threading.Event()
+    second_lock_attempt = threading.Event()
+    original_acquire, original_flock = locks.acquire, locks.fcntl.flock
+    calls = []
+    attempts = []
+    def acquire(*args):
+        calls.append('acquire')
+        entered.set()
+        assert release.wait(5)
+        return original_acquire(*args)
+    def flock(*args):
+        attempts.append('lock')
+        if len(attempts) == 2:
+            second_lock_attempt.set()
+        return original_flock(*args)
+    monkeypatch.setattr(locks, 'acquire', acquire)
+    monkeypatch.setattr(locks.fcntl, 'flock', flock)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(locks.prepare, root, 'dev', wheels)
+        try:
+            assert entered.wait(5)
+            second = pool.submit(locks.prepare, root, 'dev', wheels)
+            assert second_lock_attempt.wait(5)
+            assert not second.done()
+            assert calls == ['acquire']
+        finally:
+            release.set()
+        assert first.result(timeout=5) == second.result(timeout=5)
+    assert calls == ['acquire']
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'corrupt', 'stamp', 'mtime', 'requirements'])
+def test_preparation_freshness_uses_content_and_repair_is_explicit(locked, monkeypatch, mutation):
+    import io
+    root, _, wheels = locked
+    locks.prepare(root, 'dev', wheels)
+    wheel = wheels / 'example-1.0-py3-none-any.whl'
+    approved = wheel.read_bytes()
+    downloaded = []
+    def fetch(*args, **kwargs):
+        downloaded.append(args[0])
+        return io.BytesIO(approved)
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', fetch)
+    marker = wheels / '.task-complete'
+    previous = marker.read_bytes()
+    if mutation == 'missing':
+        wheel.unlink()
+    elif mutation == 'corrupt':
+        wheel.write_bytes(b'corrupted')
+    elif mutation == 'stamp':
+        marker.unlink()
+    elif mutation == 'mtime':
+        (root / 'requirements.dev.lock.txt').touch()
+    else:
+        req = root / 'requirements.dev.lock.txt'
+        req.write_text(req.read_text() + '# harmless identity change\n')
+        manifest = root / locks.MANIFEST
+        data = json.loads(manifest.read_text())
+        data['profiles']['dev']['sha256'] = locks.digest(req)
+        manifest.write_text(json.dumps(data))
+    if mutation in ('missing', 'corrupt'):
+        with pytest.raises(locks.LockError):
+            locks.verify_wheelhouse(root, 'dev', wheels)
+        assert downloaded == []
+    locks.prepare(root, 'dev', wheels)
+    assert wheel.read_bytes() == approved
+    assert len(downloaded) == (1 if mutation in ('missing', 'corrupt') else 0)
+    assert (marker.read_bytes() != previous) == (mutation == 'requirements')
+
+
+def test_task_wheelhouse_reaches_real_preparation_owner_with_literal_path():
+    import sys
+
+    from tests.test_taskfile_contracts import TaskContractsTests
+    case = TaskContractsTests()
+    try:
+        case.setUp()
+        case.make_artifact_fixtures()
+        python = case.root / '.venv/bin/python'
+        python.parent.mkdir(parents=True)
+        python.symlink_to(sys.executable)
+        literal = 'cache space אב;$(touch SENTINEL)'
+        destination = case.root / literal / 'wheelhouse'
+        destination.mkdir(parents=True)
+        wheel = destination / 'fake_pkg-1.0.0-py3-none-any.whl'
+        wheel.write_bytes(b'fake-wheel-content\n')
+        run = case.run_task('artifacts:wheelhouse', f'BUNDLE_DIR={literal}', extra_env={'BUNDLE_DIR': 'ambient'})
+        assert run.returncode == 0, run.stdout
+        marker = destination / '.task-complete'
+        assert json.loads(marker.read_text())['profile'] == 'runtime'
+        assert wheel.read_bytes() == b'fake-wheel-content\n'
+        assert not (case.root / 'ambient').exists()
+        assert not (case.root / 'SENTINEL').exists()
+        # Owner's mixed-file refusal must survive Task unchanged, with no deletion.
+        unrelated = destination / 'notes.txt'
+        unrelated.write_bytes(b'unrelated')
+        run = case.run_task('artifacts:wheelhouse', f'BUNDLE_DIR={literal}')
+        assert run.returncode != 0
+        assert unrelated.read_bytes() == b'unrelated'
+        assert wheel.read_bytes() == b'fake-wheel-content\n'
+        unrelated.unlink()
+        assert case.run_task('artifacts:wheelhouse', f'BUNDLE_DIR={literal}').returncode == 0
+    finally:
+        case.doCleanups()

@@ -1,13 +1,8 @@
 # Artifact tasks — issue #402 increment B1.
 #
-# Dispatch only: pip/helm/docker keep their own semantics. Freshness uses a
-# completion stamp (`.task-complete`, written only after builder success and
-# output verification) combined with input identity and output member checks
-# in `status`. An existing output directory is therefore never proof of a
-# finished build — this deliberately improves on Make's directory-mtime
-# shortcut, which can skip a rebuild after a failed `pip wheel`/fetch left a
-# partial directory behind. Verification tasks (`chart:check`, `helm:lint`)
-# never cache: they re-verify on request.
+# Wheelhouse preparation/freshness belongs to dependency_lock.py. BM25 retains
+# its Task-owned completion stamp until its separate lifecycle migration.
+# Verification tasks never cache: they re-verify on request.
 # Included with `dir: .` from the root Taskfile: always runs at repo root.
 version: '3'
 
@@ -26,7 +21,7 @@ tasks:
     summary: |
       Explicit connected acquisition of the complete runtime profile's approved
       wheel bytes; no resolver or source build. BUNDLE_DIR defaults to bundles.
-      Status verifies the lock identity, interpreter/platform and every wheel
+      The Python preparation owner verifies lock identity, interpreter/platform and every wheel
       against the approved manifest. Missing/tampered members are reacquired
       only by this explicitly requested preparation task, never by verification.
     vars:
@@ -34,16 +29,9 @@ tasks:
       WHEELHOUSE: '{{.BUNDLE_DIR}}/wheelhouse'
     env:
       TASK_WHEELHOUSE: '{{.WHEELHOUSE}}'
-    status:
-      - test -f "$TASK_WHEELHOUSE/.task-complete"
-      - test "$(cat "$TASK_WHEELHOUSE/.task-complete")" = "$(sha256sum requirements.lock.txt locks/cp314-linux-x86_64.json) $(.venv/bin/python -V 2>&1) $(uname -s -m)"
-      - python3 scripts/dependency_lock.py wheelhouse --profile runtime --directory "$TASK_WHEELHOUSE"
     cmds:
       - 'test -x .venv/bin/python || { echo "missing development environment: .venv/bin/python absent; run: task dev:setup (verification never installs)" >&2; exit 1; }'
-      - rm -rf "$TASK_WHEELHOUSE" && mkdir -p "$TASK_WHEELHOUSE"
-      - .venv/bin/python scripts/dependency_lock.py acquire --profile runtime --directory "$TASK_WHEELHOUSE"
-      - python3 scripts/dependency_lock.py wheelhouse --profile runtime --directory "$TASK_WHEELHOUSE"
-      - echo "$(sha256sum requirements.lock.txt locks/cp314-linux-x86_64.json) $(.venv/bin/python -V 2>&1) $(uname -s -m)" > "$TASK_WHEELHOUSE/.task-complete"
+      - .venv/bin/python scripts/dependency_lock.py prepare --profile runtime --directory "$TASK_WHEELHOUSE"
 
   bm25:
     desc: Fetch BM25 sparse weights verified against the sha256 manifest

@@ -187,12 +187,28 @@ Other operator inputs remain owned by `common.sh`, `deploy.sh` and `ingest.sh`.
 <a id="freshness"></a>
 ## Artifact freshness
 
-`artifacts:wheelhouse` and `artifacts:bm25` check a `.task-complete` record of
-content inputs, model selection, interpreter and platform on every run, and
-write it only after success. Changed content or a missing stamp rebuilds;
-mtime-only changes do not. A partial directory never counts as completed.
-Verification never uses these stamps. No `sources:`/`method:` fingerprints
-run during discovery, and there are no remote or optional includes.
+`artifacts:wheelhouse` delegates to `dependency_lock.py prepare`. That owner
+checks the target, interpreter, platform, lock, requirements and preparation
+recipe identity, then verifies every approved wheel on every invocation.
+Missing or stale identity triggers revalidation and staged preparation;
+identical verified bytes are reused without downloading them again. Acquisition
+and staged verification finish before existing wheel members are replaced.
+Download/checksum failure preserves the previous cache and completion record.
+The owner refuses symlink paths and mixed/unselected members instead of deleting
+an arbitrary directory; use a new destination for a different wheel-name set.
+
+Cooperative preparers serialize on a sibling lock. Preparation requires exclusive
+operator use of the destination: wheel members are replaced individually, not
+as an atomic directory snapshot for active readers. Interruption during member
+publication leaves no new completion marker; retry verifies and repairs actual
+content. The marker publishes last. Ordinary `wheelhouse` verification remains
+read-only, ignores markers, and never acquires content. No cache marker can
+substitute for complete wheel verification.
+
+`artifacts:bm25` retains its existing Task-owned completion stamp, model/recipe
+identity and member verification until its separate lifecycle migration. Its
+missing/stale/partial cache rules are unchanged. Neither task uses Task
+`sources:`/`method:` fingerprints during discovery, nor remote/optional includes.
 
 <a id="inventory"></a>
 ## Older command reference
