@@ -560,6 +560,16 @@ into the pinned Qdrant image, then loads a real uvicorn agent backed by the
 mock LLM, measuring peak RSS, Qdrant container RAM/disk, and search/answer
 latencies.
 
+- An explicit `--check` reference must load as a JSON object before simulator,
+  corpus, measurement, output or manifest work. Missing/unreadable files,
+  invalid encoding/JSON and non-object JSON fail with exit 2 and preserve
+  existing output files. The gate uses that parsed reference throughout the
+  run; replacing its file during measurement cannot change the verdict.
+  No-check diagnostic runs and explicit recording retain their existing
+  behavior. This preflight checks file availability/shape, not completeness
+  of metric fields: the existing partial-baseline and unmeasured-metric
+  compatibility rules remain. Stricter numeric/completeness validation is a
+  separate remaining C3 concern; this change does not qualify those cases.
 - Gated metrics with tolerances: RSS, Qdrant mem, Qdrant disk ×1.5;
   search/answer p95 ×3.0. Improvements never fail. Baselines refuse to
   record from broken runs.

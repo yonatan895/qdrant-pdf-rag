@@ -6,6 +6,7 @@ a permanent no-op against the tool's own output (review round 1, blocker 1).
 
 import json
 
+import pytest
 from scripts.benchmark import (
     GATED_METRICS,
     _get,
@@ -275,3 +276,110 @@ def test_ci_prepares_qdrant_before_check_or_record_and_stops_on_preparation_fail
                 expected = ('--update-baseline bench-baseline.json --repeats 3' if record == 'true'
                             else '--check benchmarks/baseline.json')
                 assert calls[1].endswith(expected)
+
+
+@pytest.fixture
+def benchmark_cli(monkeypatch, tmp_path):
+    """Actual CLI/gate/output with only workload and environment effects controlled."""
+    import copy
+    from types import SimpleNamespace
+
+    from scripts import benchmark
+
+    events = []
+    result = _pass(50.0)
+    for endpoint in ('search', 'answer'):
+        result['agent'][endpoint]['latency_ms']['p99'] = 110.0
+    env = {'cpu_count': 4, 'mem_total_mb': 1000, 'qdrant_image': 'synthetic'}
+    result['env'] = env
+    def simulator(*args):
+        events.append('start')
+        return SimpleNamespace(stop=lambda: events.append('stop'))
+    def corpus(root, docs):
+        events.append('corpus')
+        return {'root': tmp_path / 'corpus', 'docs': 31}
+    def measure(*args):
+        events.append('measure')
+        return copy.deepcopy(result)
+    def manifest(*args):
+        events.append('manifest')
+        return {'git_sha': 'synthetic'}
+    monkeypatch.setattr(benchmark, 'start_simulator', simulator)
+    monkeypatch.setattr(benchmark, 'generate_corpus', corpus)
+    monkeypatch.setattr(benchmark, 'measure_once', measure)
+    monkeypatch.setattr(benchmark, 'env_snapshot', lambda: env)
+    monkeypatch.setattr(benchmark, 'load_settings', lambda: None)
+    monkeypatch.setattr(benchmark, 'write_run_manifest', manifest)
+    return benchmark, events, result
+
+
+@pytest.mark.parametrize('contents', [None, b'{broken', b'\xff', b'null', b'[]', b'"text"', b'1', b'false', 'directory'])
+def test_requested_baseline_refuses_before_work_and_preserves_outputs_then_recovers(
+    benchmark_cli, tmp_path, contents, capsys,
+):
+    benchmark, events, result = benchmark_cli
+    reference = tmp_path / 'required.json'
+    if contents == 'directory':
+        reference.mkdir()
+    elif contents is not None:
+        reference.write_bytes(contents)
+    out, summary = tmp_path / 'result.json', tmp_path / 'summary.md'
+    out.write_text('previous JSON')
+    summary.write_text('previous summary')
+    args = ['--check', str(reference), '--out', str(out), '--summary', str(summary)]
+    assert benchmark.main(args) == 2
+    assert events == []
+    assert out.read_text() == 'previous JSON'
+    assert summary.read_text() == 'previous summary'
+    assert 'requested benchmark baseline' in capsys.readouterr().err
+    if reference.is_dir():
+        reference.rmdir()
+    update_baseline(result, reference)
+    before = reference.read_bytes()
+    assert benchmark.main(args) == 0
+    assert events == ['start', 'corpus', 'measure', 'stop', 'manifest']
+    assert reference.read_bytes() == before
+    assert json.loads(out.read_text())['agent']['search']['latency_ms']['p95'] == 50.0
+    assert '| agent.search.latency_ms.p95 | 50.0 | 50.0 | <= 150.0 |' in summary.read_text()
+
+
+def test_requested_baseline_uses_preflight_snapshot_and_still_fails_regressions(
+    benchmark_cli, monkeypatch, tmp_path,
+):
+    benchmark, events, result = benchmark_cli
+    reference = tmp_path / 'required.json'
+    update_baseline(_result(), reference)
+    original = json.loads(reference.read_text())
+    # The actual observed result is too large for the initial resource pin.
+    # Replacing the file during measurement must not select a more lenient gate.
+    result['ingest']['peak_rss_mb'] = 1000
+    def measure(*args):
+        events.append('measure')
+        update_baseline(result, reference)
+        return result
+    monkeypatch.setattr(benchmark, 'measure_once', measure)
+    output = tmp_path / 'out.json'
+    summary = tmp_path / 'summary.md'
+    assert benchmark.main(['--check', str(reference), '--out', str(output), '--summary', str(summary)]) == 1
+    assert events == ['start', 'corpus', 'measure', 'stop', 'manifest']
+    assert json.loads(output.read_text())['ingest']['peak_rss_mb'] == 1000
+    assert '| ingest.peak_rss_mb | 1000 | 100.0 | <= 150.0 |' in summary.read_text()
+    assert json.loads(reference.read_text()) != original
+    # Next ordinary invocation sees the new reference and passes.
+    assert benchmark.main(['--check', str(reference), '--out', str(output)]) == 0
+
+
+def test_no_check_and_explicit_record_keep_their_operations(benchmark_cli, tmp_path):
+    benchmark, events, result = benchmark_cli
+    output = tmp_path / 'out.json'
+    reference = tmp_path / 'recorded.json'
+    assert benchmark.main(['--out', str(output)]) == 0
+    assert not reference.exists()
+    assert json.loads(output.read_text())['repeats'] == 1
+    events.clear()
+    assert benchmark.main(['--update-baseline', str(reference), '--repeats', '2', '--out', str(output)]) == 0
+    assert events == ['start', 'corpus', 'measure', 'measure', 'stop', 'manifest']
+    recorded = json.loads(reference.read_text())
+    assert recorded['_meta']['capture']['repeats'] == 2
+    assert check_baseline(result, recorded) == []
+    assert benchmark.main(['--check', str(reference), '--out', str(output)]) == 0
