@@ -64,6 +64,13 @@ filename, case-insensitive vllm keeps its dedicated filename, and explicit
 `--baseline` still takes precedence. Environment capture, baseline persistence
 and live load orchestration remain operational script concerns.
 
+Rendering and comparison of recorded retrieval/benchmark JSON are owned by
+`mainframe_rag.eval.reports`. The L1 gate imports this renderer directly;
+`scripts/render_report.py` delegates to its CLI and retains same-object helper
+exports. Text, Markdown, HTML, escaping, comparison rules and exit codes are
+unchanged. The renderer consumes supplied files and never reruns evaluation.
+All report/baseline/output paths remain explicit CLI inputs.
+
 Owner: this file. Test-writing rules: `docs/testing.md`. Live ladder:
 `docs/live-stack.md`. Design overview: `docs/architecture.md` §5.
 

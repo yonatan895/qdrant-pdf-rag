@@ -48,10 +48,10 @@ from eval_retrieval import (
     update_baseline,
 )
 from qdrant_sim import QdrantSimError, start_simulator
-from render_report import render_eval
 from venue import VenueError, require_rc_for_golden
 
 from mainframe_rag.config import load_settings
+from mainframe_rag.eval.reports import render_eval
 from mainframe_rag.ingest import run_ingest
 from mainframe_rag.manifest import write_run_manifest
 
