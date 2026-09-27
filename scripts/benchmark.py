@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import re
@@ -382,10 +383,45 @@ def aggregate_runs(runs: list[dict]) -> dict:
 _ENV_GATE_KEYS = ("cpu_count", "qdrant_image")
 
 
+def _metric_issues(document: dict, *, measurement: bool = False) -> list[str]:
+    """Required gate inputs; validate each pass before noise-floor aggregation."""
+    issues = []
+    for dotted in GATED_METRICS:
+        value = _get(document, dotted)
+        try:
+            valid = type(value) in (int, float) and math.isfinite(value) and value >= 0
+        except OverflowError:
+            valid = False
+        if not valid:
+            issues.append(f"{dotted}: required finite nonnegative number unavailable")
+    if measurement:
+        for endpoint in ("search", "answer"):
+            requests = _get(document, f"agent.{endpoint}.requests")
+            if type(requests) is not int or requests <= 0:
+                issues.append(f"agent.{endpoint}.requests: required positive integer unavailable")
+            dotted = f"agent.{endpoint}.errors"
+            errors = _get(document, dotted)
+            if type(errors) is not int or errors < 0:
+                issues.append(f"{dotted}: required nonnegative integer unavailable")
+            elif errors:
+                issues.append(f"{dotted}: {errors} > 0 — the agent failed under load")
+    return issues
+
+
+def _baseline_issues(baseline: dict) -> list[str]:
+    issues = _metric_issues(baseline)
+    meta = baseline.get("_meta", {})
+    if not isinstance(meta, dict) or not isinstance(meta.get("env", {}), dict):
+        issues.append("baseline metadata and environment must be objects when present")
+    return issues
+
+
 def check_baseline(result: dict, baseline: dict | None) -> list[str]:
     if baseline is None:
         return []
-    regressions = []
+    regressions = _baseline_issues(baseline) + _metric_issues(result, measurement=True)
+    if regressions:
+        return regressions
     recorded_env = (baseline.get("_meta") or {}).get("env") or {}
     for key in _ENV_GATE_KEYS:
         recorded = recorded_env.get(key)
@@ -404,30 +440,19 @@ def check_baseline(result: dict, baseline: dict | None) -> list[str]:
         return regressions
     for dotted, tolerance in GATED_METRICS.items():
         current = _get(result, dotted)
-        if current is None:
-            # Metric could not be measured this run (e.g. qdrant mem/disk on
-            # the QDRANT_SIM_URL reuse path) — warn and skip, not regress.
-            print(f"warn: {dotted} not measured this run; not gated", file=sys.stderr)
-            continue
         allowed = _get(baseline, dotted)
-        if allowed is None:
-            print(f"warn: baseline has no {dotted}; not gated", file=sys.stderr)
-            continue
         limit = allowed * tolerance
         if current > limit:
             regressions.append(
                 f"{dotted}: {current} > {allowed} x{tolerance} (limit {round(limit, 2)})"
             )
-    for endpoint in ("search", "answer"):
-        errors = _get(result, f"agent.{endpoint}.errors")
-        if errors:
-            regressions.append(
-                f"agent.{endpoint}.errors: {errors} > 0 — the agent failed under load"
-            )
     return regressions
 
 
 def update_baseline(result: dict, baseline_path: Path) -> None:
+    issues = _metric_issues(result, measurement=True)
+    if issues:
+        raise ValueError("cannot record invalid benchmark measurements: " + "; ".join(issues))
     payload: dict = {
         "_meta": {
             "note": "Re-baseline via `sh scripts/tools/run-task.sh eval:bench-baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/benchmark.py GATED_METRICS.",
@@ -515,8 +540,10 @@ def main(argv: list[str] | None = None) -> int:
             baseline = json.loads(args.check.read_text(encoding="utf-8"))
             if not isinstance(baseline, dict):
                 raise TypeError("baseline must be an object")
+            if _baseline_issues(baseline):
+                raise ValueError("invalid required baseline metrics or metadata")
         except (OSError, ValueError, TypeError):
-            print("error: requested benchmark baseline must be a readable JSON object", file=sys.stderr)
+            print("error: requested benchmark baseline must contain valid required metrics and metadata", file=sys.stderr)
             return 2
     repeats = max(1, int(args.repeats))
 
@@ -535,10 +562,17 @@ def main(argv: list[str] | None = None) -> int:
             / "bench-corpus",
             int(os.environ.get("BENCH_DOCS", "30")),
         )
-        passes = [
-            measure_once(sim, args.collection, corpus_info["root"], concurrency, search_s, answer_s)
-            for _ in range(repeats)
-        ]
+        passes = []
+        for _ in range(repeats):
+            measured = measure_once(
+                sim, args.collection, corpus_info["root"], concurrency, search_s, answer_s
+            )
+            if args.check is not None or args.update_baseline is not None:
+                issues = _metric_issues(measured, measurement=True)
+                if issues:
+                    print("error: invalid benchmark measurement: " + "; ".join(issues), file=sys.stderr)
+                    return 2
+            passes.append(measured)
     finally:
         if sim is not None:
             sim.stop()
