@@ -45,6 +45,8 @@ PRODUCERS = (
     NativeProducer('ci.yml', 'sim', 'sim', 'simulation', 'sim', 'execution', True),
     NativeProducer('agent-probes.yml', 'agent-probes', 'agent-probes', 'agent_probes', 'agent-probes', 'execution', True),
     NativeProducer('ci.yml', 'gate-l1', 'gate-l1', 'gate_l1', 'gate-l1', 'execution', structured=True),
+    NativeProducer('ci.yml', 'eval-retrieval', 'eval-retrieval', 'eval_retrieval', 'eval-retrieval',
+                   'execution', structured=True),
     NativeProducer('ci.yml', 'hazards', 'hazards', 'hazards', 'hazards', 'execution', structured=True),
     NativeProducer('load.yml', 'load', 'load', 'load', 'load', 'execution', True),
     NativeProducer('ha.yml', 'ha', 'ha', 'ha', 'ha', 'execution', True),
