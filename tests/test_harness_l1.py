@@ -20,7 +20,7 @@ from scripts.harness import (
 
 from mainframe_rag.eval.datasets import GoldenEntry
 from mainframe_rag.eval.promotion import DEFAULT_CLASS_FLOOR, gate_verdict
-from mainframe_rag.eval.retrieval import aggregate, score_row
+from mainframe_rag.eval.retrieval import aggregate, collect_rows, score_row
 from mainframe_rag.eval.statistics import ci95, ci95_paired, ci_excludes_zero
 
 
@@ -32,6 +32,38 @@ def test_l1_delegates_are_canonical_objects():
     assert h1.score_row is score_row
     assert h1.aggregate is aggregate
     assert h1.GoldenEntry is GoldenEntry
+    assert h1.collect_rows is collect_rows
+
+
+def test_collect_rows_uses_exact_order_depth_and_propagates_errors(monkeypatch):
+    from mainframe_rag.retrieve import query
+    from mainframe_rag.retrieve.query import SearchHit
+
+    client, embedder, settings = object(), object(), object()
+    calls = []
+    entries = [GoldenEntry(id="row-a", query="first", expected_doc_ids=["A"]),
+               GoldenEntry(id="row-b", query="second", expected_doc_ids=["B"])]
+    hit = SearchHit(chunk_id="original", doc_id="A", text="Original evidence", score=1.0,
+                    cite="A p. 1", heading="Example", title="Original", page_label="1",
+                    chunk_type="narrative", message_ids=())
+
+    def search(*args, **kwargs):
+        calls.append((args, kwargs))
+        return [hit], "nl", {}
+
+    monkeypatch.setattr(query, "search", search)
+    rows = collect_rows(entries, client, embedder, "original", settings)
+    assert calls == [((client, embedder, "original", entry.query),
+                      {"limit": 8, "settings": settings}) for entry in entries]
+    assert [row["id"] for row in rows] == ["row-a", "row-b"]
+    assert [row["recall@5"] for row in rows] == [1.0, 0.0]
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("original query failure")
+
+    monkeypatch.setattr(query, "search", fail)
+    with pytest.raises(RuntimeError, match="original query failure"):
+        collect_rows(entries, client, embedder, "original", settings)
 
 
 # ---------------------------------------------------------------- bootstrap

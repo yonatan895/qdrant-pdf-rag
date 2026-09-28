@@ -13,15 +13,16 @@ relevance implementation (``is_relevant_hit``), one sibling allowance
 Pure module: no live imports, no I/O, no ``sys.path`` mutation, no global
 environment changes at import. Product hit types are referenced under
 ``TYPE_CHECKING`` only; ``find_message_ids`` (shared identifier regexes) is
-the single product import and is itself pure. Live execution
-(``evaluate``/``collect_rows``/``label_draft``/``main``) stays in the script
-delegates until its family moves.
+the single import-time product dependency and is itself pure. Measurement
+(``evaluate``/``collect_rows``) imports clients and retrieval only when called.
+CLI, label drafting and simulator/snapshot orchestration remain in scripts.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -558,3 +559,82 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "per_query": per_query,
     }
+
+
+def evaluate(golden: list[GoldenEntry], settings) -> dict:
+    import httpx2
+    from qdrant_client import QdrantClient
+
+    from mainframe_rag.ingest.embed import build_embedder
+    from mainframe_rag.retrieve.query import search as retrieve_search
+
+    client = QdrantClient(
+        url=settings.qdrant_url,
+        api_key=settings.qdrant_api_key,
+        timeout=settings.qdrant_timeout_s,
+    )
+    embedder = build_embedder(settings)
+    # Extraction-rules desync warning (issue #124): the eval is the
+    # instrument that caught the #120 silent-recall loss — payload
+    # message_ids extracted under older regex rules made the prefetch
+    # filter match nothing. Warning only: the run still produces numbers
+    # (trend data), but they are not comparable to a same-rules baseline.
+    from mainframe_rag.ingest.qdrant_io import stored_rules_version
+    from mainframe_rag.ingest.rules_version import extraction_rules_version
+
+    stored_v = stored_rules_version(client, settings)
+    if stored_v is not None and stored_v != extraction_rules_version():
+        print(
+            f"warn: collection {settings.qdrant_collection!r} payloads were extracted under rules "
+            f"{stored_v!r}; this tree computes {extraction_rules_version()!r} — "
+            "re-ingest required for numbers comparable to a same-rules baseline",
+            file=sys.stderr,
+        )
+    from mainframe_rag.retrieve.rerank import build_reranker
+
+    reranker = build_reranker(settings)
+    collection = settings.qdrant_collection
+
+    rows, failures = [], 0
+    started = time.perf_counter()
+    for entry in golden:
+        try:
+            hits, kind, _timings = retrieve_search(
+                client,
+                embedder,
+                collection,
+                entry.query,
+                limit=SEARCH_LIMIT,
+                settings=settings,
+                reranker=reranker,
+            )
+            rows.append(score_entry(hits, entry))
+            rows[-1]["kind"] = kind
+        except (httpx2.HTTPError, RuntimeError, OSError, ValueError) as exc:
+            # One bad query must not kill the eval; counted as a failure.
+            failures += 1
+            rows.append({"query": entry.query, "error": str(exc)[:200], "kind": "error"})
+
+    return summarize(
+        rows,
+        failures=failures,
+        elapsed_s=round(time.perf_counter() - started, 2),
+        embed_mode=settings.embed_mode,
+        collection=collection,
+    )
+
+
+def collect_rows(
+    entries: list[GoldenEntry], qdrant, embedder, collection: str, settings
+) -> list[dict]:
+    """Retrieve (limit=8, same depth as the answer path) and score every
+    entry. Live-stack tier; pure helpers above are unit-tested without it."""
+    from mainframe_rag.retrieve.query import search as retrieve_search
+
+    rows: list[dict] = []
+    for entry in entries:
+        hits, _kind, _timings = retrieve_search(
+            qdrant, embedder, collection, entry.query, limit=L1_LIMIT, settings=settings
+        )
+        rows.append(score_row(hits, entry))
+    return rows

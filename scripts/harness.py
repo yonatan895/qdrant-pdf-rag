@@ -35,11 +35,6 @@ from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
-if str(REPO / "scripts") not in sys.path:
-    sys.path.insert(0, str(REPO / "scripts"))
-
 # Canonical package imports also work in the supported uninstalled checkout.
 if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
@@ -340,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         "snapshot_name": payload if action == "skip" else fp.get("snapshot_name"),
     }
 
-    from harness_l1 import aggregate, collect_rows
+    from mainframe_rag.eval.retrieval import aggregate, collect_rows
 
     rows = collect_rows(entries, qdrant, embedder, collection, settings)
     summary = aggregate(rows)

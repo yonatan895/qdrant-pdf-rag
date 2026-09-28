@@ -34,7 +34,7 @@ run-to-run noise.
 Compatibility delegate (issue #508 C2): pure scoring lives in
 :mod:`mainframe_rag.eval.retrieval` and dataset identity in
 :mod:`mainframe_rag.eval.datasets`. This module re-exports the same
-functions (not a copy); live collection stays here until its family moves.
+functions (not a copy), including the canonical live measurement operation.
 
 Retirement condition: all known callers import the package directly, the
 successor is documented and qualified, and the maintainer approves removing
@@ -50,40 +50,27 @@ _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO / "src") not in sys.path:
     sys.path.insert(0, str(_REPO / "src"))
 
-from mainframe_rag.eval.datasets import GoldenEntry  # noqa: E402
-from mainframe_rag.eval.retrieval import (  # noqa: E402
+from mainframe_rag.eval.datasets import GoldenEntry
+from mainframe_rag.eval.retrieval import (
     L1_KEYS,
     L1_LIMIT,
     aggregate,
+    collect_rows,
     is_relevant_hit,
     must_not_violations,
-    ndcg_at_k as _ndcg_at_k,
     score_row,
+)
+from mainframe_rag.eval.retrieval import (  # noqa: F401 — historical compatibility alias
+    ndcg_at_k as _ndcg_at_k,
 )
 
 __all__ = [
-    "GoldenEntry",
     "L1_KEYS",
     "L1_LIMIT",
+    "GoldenEntry",
     "aggregate",
     "collect_rows",
     "is_relevant_hit",
     "must_not_violations",
     "score_row",
 ]
-
-
-def collect_rows(
-    entries: list[GoldenEntry], qdrant, embedder, collection: str, settings
-) -> list[dict]:
-    """Retrieve (limit=8, same depth as the answer path) and score every
-    entry. Live-stack tier; pure helpers above are unit-tested without it."""
-    from mainframe_rag.retrieve.query import search as retrieve_search
-
-    rows: list[dict] = []
-    for entry in entries:
-        hits, _kind, _timings = retrieve_search(
-            qdrant, embedder, collection, entry.query, limit=L1_LIMIT, settings=settings
-        )
-        rows.append(score_row(hits, entry))
-    return rows

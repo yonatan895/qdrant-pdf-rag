@@ -37,7 +37,7 @@ file missing, or collection/embed-mode mismatch — a skip is not a pass, issue 
 Compatibility delegate (issue #508 C2): pure dataset/scoring owners live in
 :mod:`mainframe_rag.eval.datasets` and :mod:`mainframe_rag.eval.retrieval`.
 This module re-exports the same classes/functions (not a copy) and keeps the
-live ``evaluate`` / ``label_draft`` / ``main`` entry points so documented
+operational ``label_draft`` / ``main`` entry points so documented
 ``python scripts/eval_retrieval.py ...`` invocations and Task bridges keep
 working during migration.
 
@@ -51,11 +51,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from pathlib import Path
 from typing import NotRequired, TypedDict
-
-import httpx2
 
 _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO / "src") not in sys.path:
@@ -84,6 +81,7 @@ from mainframe_rag.eval.retrieval import (
     _get,
     _set,
     check_baseline,
+    evaluate,
     gain,
     is_relevant_hit,
     is_sibling_exception,
@@ -95,7 +93,6 @@ from mainframe_rag.eval.retrieval import (
     update_baseline,
 )
 from mainframe_rag.manifest import write_run_manifest
-from mainframe_rag.retrieve.query import search as retrieve_search
 
 __all__ = [
     "EVAL_ABSOLUTE_GATED_METRICS",
@@ -125,67 +122,6 @@ __all__ = [
     "summary_markdown",
     "update_baseline",
 ]
-
-
-def evaluate(golden: list[GoldenEntry], settings) -> dict:
-    from qdrant_client import QdrantClient
-
-    from mainframe_rag.ingest.embed import build_embedder
-
-    client = QdrantClient(
-        url=settings.qdrant_url,
-        api_key=settings.qdrant_api_key,
-        timeout=settings.qdrant_timeout_s,
-    )
-    embedder = build_embedder(settings)
-    # Extraction-rules desync warning (issue #124): the eval is the
-    # instrument that caught the #120 silent-recall loss — payload
-    # message_ids extracted under older regex rules made the prefetch
-    # filter match nothing. Warning only: the run still produces numbers
-    # (trend data), but they are not comparable to a same-rules baseline.
-    from mainframe_rag.ingest.qdrant_io import stored_rules_version
-    from mainframe_rag.ingest.rules_version import extraction_rules_version
-
-    stored_v = stored_rules_version(client, settings)
-    if stored_v is not None and stored_v != extraction_rules_version():
-        print(
-            f"warn: collection {settings.qdrant_collection!r} payloads were extracted under rules "
-            f"{stored_v!r}; this tree computes {extraction_rules_version()!r} — "
-            "re-ingest required for numbers comparable to a same-rules baseline",
-            file=sys.stderr,
-        )
-    from mainframe_rag.retrieve.rerank import build_reranker
-
-    reranker = build_reranker(settings)
-    collection = settings.qdrant_collection
-
-    rows, failures = [], 0
-    started = time.perf_counter()
-    for entry in golden:
-        try:
-            hits, kind, _timings = retrieve_search(
-                client,
-                embedder,
-                collection,
-                entry.query,
-                limit=SEARCH_LIMIT,
-                settings=settings,
-                reranker=reranker,
-            )
-            rows.append(score_entry(hits, entry))
-            rows[-1]["kind"] = kind
-        except (httpx2.HTTPError, RuntimeError, OSError, ValueError) as exc:
-            # One bad query must not kill the eval; counted as a failure.
-            failures += 1
-            rows.append({"query": entry.query, "error": str(exc)[:200], "kind": "error"})
-
-    return summarize(
-        rows,
-        failures=failures,
-        elapsed_s=round(time.perf_counter() - started, 2),
-        embed_mode=settings.embed_mode,
-        collection=collection,
-    )
 
 
 class _LabelDraft(TypedDict):
