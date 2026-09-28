@@ -41,6 +41,7 @@ from mainframe_rag.agent.answer import (
     build_chat_messages,
     build_messages,
     classify_query_complexity,
+    truncation_alert_detail,
 )
 from mainframe_rag.agent.answer_core import (
     AnswerCoreDeps,
@@ -1348,15 +1349,15 @@ async def v1_answer(
             yield format_sse_event("error", error_payload())
         except TruncatedStreamError as exc:
             # Truncation observability: the partial prefix already went out
-            # as token events, so the answer_alert carries counts only —
-            # never response text.
+            # as token events, so the answer_alert carries the fixed reason
+            # label only — never response text or the exception body.
             _span_error(root_span, exc)
             log.warning(
                 json_log(
                     request_id,
                     "answer_alert",
                     alert="stream_truncated",
-                    detail=error_type(exc),
+                    detail=truncation_alert_detail(exc),
                 )
             )
             _record_endpoint(
@@ -1647,7 +1648,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                     request_id,
                     "answer_alert",
                     alert="stream_truncated",
-                    detail=error_type(exc),
+                    detail=truncation_alert_detail(exc),
                 )
             )
             _record_endpoint(

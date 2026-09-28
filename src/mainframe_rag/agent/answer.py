@@ -116,6 +116,21 @@ class TruncatedStreamError(RuntimeError):
         self.reason = reason
 
 
+_TRUNCATION_REASONS = frozenset(
+    {REASON_MISSING_DONE, REASON_UPSTREAM_ERROR, REASON_MALFORMED_FRAME, REASON_MISSING_FINISH}
+)
+
+
+def truncation_alert_detail(exc: TruncatedStreamError) -> str:
+    """Fixed-vocabulary truncation detail for `answer_alert` (OBS-1A §4.4):
+    the structured reason label plus the error type — never the exception
+    body, counts, or response text. A reason outside the fixed vocabulary
+    falls back to the type alone so a future free-form reason cannot become
+    log text."""
+    reason = exc.reason if exc.reason in _TRUNCATION_REASONS else "unknown truncation"
+    return f"{reason} ({error_type(exc)})"
+
+
 class PromptBudgetExceeded(Exception):
     """Fixed mandatory prompt content exceeds the model token window with
     nothing left to trim (issue #368): all excerpts and history dropped and

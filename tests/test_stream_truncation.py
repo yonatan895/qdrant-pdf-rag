@@ -857,3 +857,24 @@ async def test_chat_stream_disconnect_records_generation_incomplete(
     assert len(aborts) == 1
     assert '"verification_state": "generation_incomplete"' in aborts[0].getMessage()
     assert recorded[-1] == ("chat", "client_disconnect")
+
+
+def test_truncation_alert_detail_is_fixed_vocabulary():
+    """OBS-1A §4.4 vs load-tier contract: the stream_truncated answer_alert
+    names the missing terminator via the fixed reason label plus the error
+    type — never the exception body (which carries the chunk count) or
+    response text."""
+    from mainframe_rag.agent.answer import REASON_MISSING_DONE, truncation_alert_detail
+
+    exc = TruncatedStreamError(7, REASON_MISSING_DONE)
+    detail = truncation_alert_detail(exc)
+    assert "[DONE]" in detail, "alert must name the missing terminator"
+    assert "TruncatedStreamError" in detail
+    assert "after 7 content chunks" not in detail, "exception body must not reach the alert"
+    assert "upstream completion incomplete" not in detail
+    assert "Partial" not in detail
+
+    rogue = TruncatedStreamError(0, "custom free-form reason with SECRET-TEXT")
+    rogue_detail = truncation_alert_detail(rogue)
+    assert rogue_detail == "unknown truncation (TruncatedStreamError)"
+    assert "SECRET-TEXT" not in rogue_detail
