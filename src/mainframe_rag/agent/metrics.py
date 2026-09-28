@@ -45,6 +45,7 @@ from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, V
 from prometheus_client import GCCollector, PlatformCollector, ProcessCollector
 
 from mainframe_rag.agent.answer import VERIFICATION_STATES
+from mainframe_rag.logs import error_type
 
 log = logging.getLogger("otel.metrics")
 
@@ -198,7 +199,7 @@ def setup_metrics(enabled: bool) -> MeterProvider | None:
     try:
         metrics.set_meter_provider(provider)
     except Exception as exc:  # noqa: BLE001
-        log.warning("otel global meter provider already set: %s", exc)
+        log.warning("otel global meter provider already set: %s", error_type(exc))
     if not _platform_collectors_registered:
         # Runtime defaults for the scrape: GC, interpreter, and process
         # stats. Bounded, no labels — no cardinality risk. Tolerant of

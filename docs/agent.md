@@ -169,7 +169,9 @@ status (`/ui` failures render HTML banners instead, §1):
 | `method_not_allowed` / `method not allowed` | 405 | Wrong method |
 | `http_error` / `request failed` | framework's | Framework-raised `HTTPException` (nothing in `src/` raises it; `detail` is stripped) |
 
-Server side keeps `str(exc)[:200]` in logs. The 502/500 split is deliberate:
+Server side keeps error types (`error_type`, the exception class name) in
+logs and span events/status — never exception bodies (issue #529 OBS-1A).
+The 502/500 split is deliberate:
 same fault → same code on every endpoint, and a model/parse fault is never
 mislabeled as retrieval.
 
@@ -423,15 +425,18 @@ timings, citation counts, script presence, finish reason, the finalized
 WHY telemetry (`inline_bracket_present`, `citations_header_present`,
 `cites_rejected_shape_bad`, `cites_rejected_unmapped`) and the supplied
 `evidence` count (issue #364 — counts only; the gap to `hits` is packing
-omission). Errors log `str(exc)[:200]` server-side only. **Never query text,
-PDF/manual text, or secrets** — the JSON-log rule is unchanged by tracing.
+omission). Errors log error types server-side only. **Never query text,
+prompts, evidence, responses, headers, exception bodies, or secrets, and no
+document identifiers on spans** — the JSON-log rule is unchanged by tracing.
 
 Spans mirror the log contract (one request = one trace: a
 `v1.search`/`v1.answer`/`v1.chat`/`ui.chat` root → (`chat.condense` before
 retrieval on an eligible chat follow-up) → retrieve
 embed/prefetch/RRF/rerank/diversify → prompt build → LLM chat with
-model/effort/TTFT/finish/tokens). The bounded query text is the one
-allowed free-text span attribute; PDF text and secrets never enter spans.
+model/effort/TTFT/finish/tokens). Span attributes carry finite labels,
+counts, and operator config only — raw query text was removed as an
+explicit telemetry-policy change (issue #529 OBS-1A); PDF text and
+secrets never enter spans.
 The OTel API/SDK/exporter dependency pins stay version-locked. Spawn parse workers
 stay untraced; parent stages own their records/spans. Outbound model headers carry
 W3C traceparent via `bearer_auth_headers` when tracing is enabled.

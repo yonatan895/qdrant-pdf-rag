@@ -39,7 +39,9 @@ from mainframe_rag.agent.answer_core import (
 )
 from mainframe_rag.agent.sse import error_payload, final_payload, format_sse_event
 from mainframe_rag.ingest.chunk import detect_code_region
+from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage
+from mainframe_rag.tracing import start_span
 
 log = logging.getLogger("agent.webui")
 
@@ -553,7 +555,8 @@ async def _run_turn(request: Request, req: UiChatRequest):
     # Serving gate before the span (issues #391 F3/F4): the console refuses
     # with the same stable 503 as the API when the generation is unverified.
     deps = await app_mod.serving_deps()
-    root_span = app_mod.tracer.start_span(
+    root_span = start_span(
+        app_mod.tracer,
         "ui.chat",
         context=app_mod.parent_context(request.headers),
         attributes={"http.request_id": request_id, "rag.stream": False},
@@ -593,7 +596,7 @@ async def ui_healthz() -> Response:
         css = "badge-ok" if online else "badge-warn"
         label = "Online" if online else "Degraded"
     except Exception as exc:  # noqa: BLE001 — badge degrades, never a 500
-        log.warning("ui_healthz failed: %s", str(exc)[:200])
+        log.warning("ui_healthz failed: %s", error_type(exc))
         css, label = "badge-down", "Offline"
     return _secure(HTMLResponse(f'<span class="badge {css}">&#9679; {label}</span>'))
 
@@ -635,7 +638,7 @@ async def ui_chat(
     except Exception as exc:  # noqa: BLE001 — fixed banner to the operator, detail to logs
         from mainframe_rag.agent.answer import PromptBudgetExceeded
 
-        log.error("ui_chat failed: %s", str(exc)[:200])
+        log.error("ui_chat failed: %s", error_type(exc))
         # An irreducible budget overflow is the operator's request to
         # shrink, not a server fault: distinct fixed banner (issue #368).
         error_text = (
@@ -705,7 +708,8 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
     # generation is the same stable 503 JSON the API returns, never an SSE
     # error frame after a 200 was already committed.
     deps = await app_mod.serving_deps()
-    root_span = app_mod.tracer.start_span(
+    root_span = start_span(
+        app_mod.tracer,
         "ui.chat",
         context=app_mod.parent_context(request.headers),
         attributes={"http.request_id": request_id, "rag.stream": True},
@@ -771,9 +775,9 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
             from mainframe_rag.agent.answer import PromptBudgetExceeded
 
             if isinstance(exc, PromptBudgetExceeded):
-                log.warning("ui_chat_stream budget exceeded: %s", str(exc)[:200])
+                log.warning("ui_chat_stream budget exceeded: %s", error_type(exc))
             else:
-                log.error("ui_chat_stream failed: %s", str(exc)[:200])
+                log.error("ui_chat_stream failed: %s", error_type(exc))
             app_mod._record_endpoint(
                 request,
                 "console",

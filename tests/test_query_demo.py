@@ -467,7 +467,8 @@ def test_execute_query_emits_v1_search_span():
     search_spans = [s for s in spans if s.name == "v1.search"]
     assert len(search_spans) == 1
     root = search_spans[0]
-    assert root.attributes["rag.query"] == "IEA500I"
+    # Issue #529 OBS-1A: raw query text never enters span attributes.
+    assert "rag.query" not in root.attributes
     assert root.attributes["rag.query_kind"] == "identifier"
     assert root.attributes["rag.hits"] == 1
 
@@ -513,7 +514,8 @@ def test_execute_answer_emits_v1_answer_and_child_spans():
     assert "llm.chat" in span_names
 
     root = next(s for s in spans if s.name == "v1.answer")
-    assert root.attributes["rag.query"] == "What does message IEA500I mean?"
+    # Issue #529 OBS-1A: raw query text never enters span attributes.
+    assert "rag.query" not in root.attributes
     assert root.attributes["rag.hits"] == 1
     assert root.attributes["rag.citations"] == 1
 

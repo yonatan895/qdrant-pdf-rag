@@ -5,6 +5,7 @@ structure, and bounded attributes — never on timing values.
 """
 
 import asyncio
+import json
 from typing import ClassVar
 
 import pytest
@@ -321,7 +322,8 @@ def test_search_request_renders_one_root_span(client):
     assert "v1.search" in names
     root = _spans(exporter)["v1.search"][0]
     assert root.attributes["http.request_id"] == resp.json()["request_id"]
-    assert root.attributes["rag.query"] == "IEA500I"
+    # Issue #529 OBS-1A: raw query text never enters span attributes.
+    assert "rag.query" not in root.attributes
     assert root.attributes["rag.query_kind"] == "identifier"
 
 
@@ -467,7 +469,8 @@ def test_search_stage_tree_identifier_bypass():
     root = by_name["retrieve.search"][0]
     assert root.attributes["rag.rerank_bypass_reason"] == "identifier"
     assert root.attributes["rag.rerank_active"] is False
-    assert root.attributes["rag.query"] == "IEA500I rejected"
+    # Issue #529 OBS-1A: raw query text never enters span attributes.
+    assert "rag.query" not in root.attributes
     # parent-child: every stage hangs off retrieve.search
     for name in ("retrieve.embed", "retrieve.prefetch", "retrieve.rrf", "retrieve.diversify"):
         assert by_name[name][0].parent.span_id == root.context.span_id
@@ -610,23 +613,26 @@ def test_async_search_stage_tree_matches_sync():
 
 
 def test_span_attributes_bounded():
-    """The query attr is the only free-text span attribute, and it is
-    pre-bounded by the request guardrail. Assert no span ever carries a
-    manual/PDF-shaped attribute set: only the enumerated keys below exist."""
+    """No span carries free text (issue #529 OBS-1A): raw queries, document
+    identifiers, and exception bodies are out; only the enumerated bounded
+    keys below exist. The query text driving this search must appear in no
+    attribute of any finished span."""
     fake = FakeQdrant(dense=[_point("a")], sparse=[_point("b")])
     (_hits, _kind, _timings), exporter = _run_and_collect(
         search, fake, FakeEmbedder(), "mainframe_manuals", "IEA500I rejected", limit=5
     )
     allowed = {
-        "rag.query", "rag.limit", "rag.rerank_active", "rag.prefetch_limit",
+        "rag.limit", "rag.rerank_active", "rag.prefetch_limit",
         "rag.filter_present", "rag.rerank_bypass_reason", "rag.query_kind",
         "rag.hits", "rag.filter_fallback", "rag.rrf_k", "rag.rrf_weights", "rag.candidates_in",
-        "rag.candidates_out", "rag.doc_ids", "rag.batch", "rag.embedder",
+        "rag.candidates_out", "rag.batch", "rag.embedder",
         "rag.rerank_scores", "rag.rerank_alpha", "rag.split_paths", "rag.split_mode",
     }
     for span in exporter.get_finished_spans():
         for key in span.attributes:
             assert key in allowed, f"unexpected span attribute {key!r} on {span.name}"
+        blob = json.dumps({k: v for k, v in span.attributes.items() if isinstance(v, str)})
+        assert "IEA500I rejected" not in blob
     # The new fallback signal is a bounded bool, never free text: non-empty
     # filtered results must not have fallen back.
     root = next(s for s in exporter.get_finished_spans() if s.name == "retrieve.search")

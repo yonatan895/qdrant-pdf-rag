@@ -16,10 +16,11 @@ lifecycle have exactly one implementation. Design rules:
 - Service name comes from OTEL_SERVICE_NAME when the operator sets it,
   defaulting to "mainframe-rag-agent".
 
-Span attribute discipline mirrors logs.py: ids, counts, scores, timings.
-Query text is the one deliberate exception, bounded by the caller (the
-agent already caps it at query_max_chars). Never PDF/manual text, never
-secrets.
+Span attribute discipline mirrors logs.py: request ids, finite labels,
+counts, scores, timings, operator config. Raw query text, prompts,
+evidence, responses, headers, credentials, and source paths are never span
+attributes, events, or status descriptions (issue #529 OBS-1A). Never
+PDF/manual text, never secrets.
 """
 
 from __future__ import annotations
@@ -40,6 +41,28 @@ log = logging.getLogger("otel")
 
 DEFAULT_SERVICE_NAME: Final = "mainframe-rag-agent"
 DEFAULT_OTLP_TRACES_PATH: Final = "/v1/traces"
+
+
+def start_as_current_span(tracer, name: str, **kwargs):
+    """Open a child span that never auto-exports exception bodies.
+
+    The SDK's context-manager exit records escaping exceptions with their
+    full message and stack text (issue #529 OBS-1A canary probe). All
+    failure telemetry here is explicit and type-only (see logs.error_type
+    and the callers' span-error helpers), so the automatic recording and
+    status are disabled; ending behavior is unchanged.
+    """
+    kwargs.setdefault("record_exception", False)
+    kwargs.setdefault("set_status_on_exception", False)
+    return tracer.start_as_current_span(name, **kwargs)
+
+
+def start_span(tracer, name: str, **kwargs):
+    """Detached-span variant of start_as_current_span: same no-auto-export
+    rule for manually ended spans."""
+    kwargs.setdefault("record_exception", False)
+    kwargs.setdefault("set_status_on_exception", False)
+    return tracer.start_span(name, **kwargs)
 
 _provider: TracerProvider | None = None
 
@@ -157,7 +180,7 @@ def setup_tracing(
     try:
         trace.set_tracer_provider(provider)
     except Exception as exc:  # noqa: BLE001
-        log.warning("otel global tracer provider already set: %s", exc)
+        log.warning("otel global tracer provider already set: %s", type(exc).__name__)
     log.info("otel tracing enabled: endpoint=%s service=%s", endpoint, service_name)
     return provider.get_tracer("mainframe-rag")
 
@@ -174,7 +197,7 @@ def flush_tracing(timeout_ms: int = 5000) -> None:
     try:
         _provider.force_flush(timeout_millis=timeout_ms)
     except Exception as exc:  # noqa: BLE001
-        log.warning("otel flush failed: %s", exc)
+        log.warning("otel flush failed: %s", type(exc).__name__)
 
 
 def shutdown_tracing() -> None:
@@ -188,5 +211,5 @@ def shutdown_tracing() -> None:
         _provider.force_flush(timeout_millis=5000)
         _provider.shutdown()
     except Exception as exc:  # noqa: BLE001
-        log.warning("otel flush on shutdown failed: %s", exc)
+        log.warning("otel flush on shutdown failed: %s", type(exc).__name__)
     _provider = None

@@ -70,7 +70,7 @@ from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.ingest.representation import require_attested_revision
 from mainframe_rag.ingest.rules_version import extraction_rules_version
-from mainframe_rag.logs import configure_logging
+from mainframe_rag.logs import configure_logging, error_type
 from mainframe_rag.ports import (
     AsyncQdrantPoints,
     ChatMessage,
@@ -85,7 +85,13 @@ from mainframe_rag.ports import (
 from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import async_search as retrieve_search
 from mainframe_rag.retrieve.rerank import build_reranker, probe_reranker
-from mainframe_rag.tracing import parent_context, setup_tracing, shutdown_tracing
+from mainframe_rag.tracing import (
+    parent_context,
+    setup_tracing,
+    shutdown_tracing,
+    start_as_current_span,
+    start_span,
+)
 from mainframe_rag.webui.routes import router as webui_router
 
 log = logging.getLogger("agent")
@@ -110,9 +116,12 @@ tracer: trace.Tracer = trace.get_tracer("mainframe-rag.agent")
 
 def _span_error(span: trace.Span, exc: Exception) -> None:
     """Record a failure on the active span. Observability only — never on
-    the client response path (export errors surface in logs, if at all)."""
-    span.record_exception(exc)
-    span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+    the client response path (export errors surface in logs, if at all).
+    Type only (issue #529 OBS-1A): the SDK's record_exception would export
+    the exception message and stack text, which routinely carry query text,
+    URLs, or file paths."""
+    span.add_event("exception", {"exception.type": error_type(exc)})
+    span.set_status(Status(StatusCode.ERROR, error_type(exc)))
 
 
 class AppError(Exception):
@@ -143,7 +152,7 @@ def prepare_chat_request(
     try:
         return prepare_chat_turn(messages, settings, splunk_context)
     except InvalidChatTurn as exc:
-        log.warning(json_log(request_id, "invalid_chat_turn", reason=str(exc)))
+        log.warning(json_log(request_id, "invalid_chat_turn", reason=error_type(exc)))
         raise AppError(422, "invalid_request", "request body failed validation") from exc
 
 
@@ -251,7 +260,6 @@ def _search_span_attrs(kind: str, hits: list[SearchHit]) -> dict:
     return {
         "rag.query_kind": kind,
         "rag.hits": len(hits),
-        "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
     }
 
 
@@ -267,10 +275,11 @@ def _answer_span_attrs(
         "rag.hits": len(hits),
         # Supplied excerpts (issue #364): counts only, never cite text. The
         # gap between rag.hits and rag.evidence is packing/trim omission.
+        # Per-document identifiers stay out of span attributes (issue #529
+        # OBS-1A); request_id joins logs to traces.
         "rag.evidence": evidence,
         "rag.citations": citations,
         "rag.has_script": has_script,
-        "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
     }
 
 
@@ -779,7 +788,7 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
     if span is not None and span.is_recording():
         _span_error(span, exc)
     request_id = getattr(request.state, "request_id", "unknown")
-    log.exception(json_log(request_id, "unhandled", error=str(exc)[:200]))
+    log.exception(json_log(request_id, "unhandled", error=error_type(exc)))
     return JSONResponse(
         status_code=500,
         content=ErrorEnvelope(code="internal", message="internal error").model_dump(),
@@ -819,7 +828,7 @@ async def metrics() -> Response:
 
         body = generate_latest()
     except Exception as exc:
-        log.warning(json_log("metrics", "scrape_failed", error=str(exc)[:200]))
+        log.warning(json_log("metrics", "scrape_failed", error=error_type(exc)))
         raise AppError(503, "metrics_unavailable", "metrics are not available") from exc
     return Response(content=body, media_type=CONTENT_TYPE_LATEST)
 
@@ -843,10 +852,11 @@ async def evaluate_healthz() -> tuple[HealthzResponse, int]:
         resp = await http.get(f"{base}/readyz", timeout=settings.health_qdrant_timeout_s)
         qdrant_ok = resp.status_code == 200 and resp.text.strip().lower() == "all shards are ready"
         if not qdrant_ok:
-            # Upstream response bodies go to the log, never the client body.
-            log.warning(json_log("healthz", "health", qdrant_detail=resp.text[:200]))
+            # Upstream response bodies stay out of logs and client bodies
+            # alike (issue #529 OBS-1A); the status code is the diagnosis.
+            log.warning(json_log("healthz", "health", qdrant_status=resp.status_code))
     except Exception as exc:
-        log.warning(json_log("healthz", "health", error=str(exc)[:200]))
+        log.warning(json_log("healthz", "health", error=error_type(exc)))
         raise AppError(503, "qdrant_unready", "qdrant is not ready") from exc
 
     if settings.embed_base_url and settings.embed_model:
@@ -860,7 +870,7 @@ async def evaluate_healthz() -> tuple[HealthzResponse, int]:
             embed_ok = resp.status_code == 200
         except Exception as exc:  # noqa: BLE001
             embed_ok = False
-            log.warning(json_log("healthz", "health", embed_error=str(exc)[:200]))
+            log.warning(json_log("healthz", "health", embed_error=error_type(exc)))
 
     # Readiness is the live, uncached evaluation (F4): probe scrapes must see
     # an alias rollback or a degraded contract immediately, not a cached
@@ -909,10 +919,11 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
     # Gate before any retrieval work (issue #391 F3/F4): 503 when the
     # resolved generation is not validated; otherwise bind to its physical.
     bound = await serving_settings()
-    with tracer.start_as_current_span(
+    with start_as_current_span(
+        tracer,
         "v1.search",
         context=parent_context(request.headers),
-        attributes={"http.request_id": request_id, "rag.limit": req.limit, "rag.query": req.query},
+        attributes={"http.request_id": request_id, "rag.limit": req.limit},
     ) as span:
         try:
             res = retrieve_search(
@@ -930,7 +941,7 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
         except Exception as exc:
             _span_error(span, exc)
             _record_endpoint(request, "search", "upstream_error", started)
-            log.error(json_log(request_id, "search", error=str(exc)[:200]))
+            log.error(json_log(request_id, "search", error=error_type(exc)))
             raise AppError(502, "upstream_error", "retrieval failed") from exc
         span.set_attributes(_search_span_attrs(kind, hits))
     timing_parts = _timing_parts(timings)
@@ -974,7 +985,7 @@ async def v1_answer(
         assert_reasoning_model(settings)
     except RuntimeError as exc:
         _record_endpoint(request, "answer", "not_configured", started)
-        log.warning(json_log(request_id, "answer", error=str(exc)[:200]))
+        log.warning(json_log(request_id, "answer", error=error_type(exc)))
         raise AppError(503, "not_configured", "reasoning model is not configured") from exc
     llm_model = settings.require_reasoning_model()
     # Serving gate before retrieval and before the root span (issue #391
@@ -985,10 +996,11 @@ async def v1_answer(
     # cheap fail-fast gates and lives until the response body is produced.
     # For SSE the span is ended inside the generator so the LLM stage (the
     # longest leg) is a child of the same trace, not a detached one.
-    root_span = tracer.start_span(
+    root_span = start_span(
+        tracer,
         "v1.answer",
         context=parent_context(request.headers),
-        attributes={"http.request_id": request_id, "rag.query": req.query, "rag.stream": is_stream},
+        attributes={"http.request_id": request_id, "rag.stream": is_stream},
     )
 
     # Retrieval and LLM legs are guarded separately: the same fault must map
@@ -1016,7 +1028,7 @@ async def v1_answer(
         _span_error(root_span, exc)
         root_span.end()
         _record_endpoint(request, "answer", "upstream_error", started)
-        log.error(json_log(request_id, "answer", error=str(exc)[:200]))
+        log.error(json_log(request_id, "answer", error=error_type(exc)))
         raise AppError(502, "upstream_error", "retrieval failed") from exc
 
     core_input = AnswerCoreInput(
@@ -1052,7 +1064,7 @@ async def v1_answer(
                 query_class=kind,
                 hits=len(hits),
             )
-            log.warning(json_log(request_id, "answer", error=str(exc)[:200]))
+            log.warning(json_log(request_id, "answer", error=error_type(exc)))
             raise AppError(
                 422, "prompt_budget_exceeded", "prompt exceeds the model token budget"
             ) from exc
@@ -1067,7 +1079,7 @@ async def v1_answer(
                 query_class=kind,
                 hits=len(hits),
             )
-            log.error(json_log(request_id, "answer", error=str(exc)[:200]))
+            log.error(json_log(request_id, "answer", error=error_type(exc)))
             raise AppError(502, "upstream_error", "answer failed") from exc
 
         _alert_finish_reason_non_stop(request_id, output.finish_reason)
@@ -1331,7 +1343,7 @@ async def v1_answer(
                 hits=len(hits),
                 verification_state="generation_incomplete",
             )
-            log.warning(json_log(request_id, "answer_stream", error=str(exc)[:200]))
+            log.warning(json_log(request_id, "answer_stream", error=error_type(exc)))
             terminal = True
             yield format_sse_event("error", error_payload())
         except TruncatedStreamError as exc:
@@ -1344,7 +1356,7 @@ async def v1_answer(
                     request_id,
                     "answer_alert",
                     alert="stream_truncated",
-                    detail=str(exc)[:200],
+                    detail=error_type(exc),
                 )
             )
             _record_endpoint(
@@ -1356,7 +1368,7 @@ async def v1_answer(
                 hits=len(hits),
                 verification_state="generation_incomplete",
             )
-            log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
+            log.error(json_log(request_id, "answer_stream", error=error_type(exc)))
             terminal = True
             yield format_sse_event("error", error_payload())
         except Exception as exc:  # noqa: BLE001
@@ -1370,7 +1382,7 @@ async def v1_answer(
                 hits=len(hits),
                 verification_state="generation_incomplete",
             )
-            log.error(json_log(request_id, "answer_stream", error=str(exc)[:200]))
+            log.error(json_log(request_id, "answer_stream", error=error_type(exc)))
             terminal = True
             yield format_sse_event("error", error_payload())
 
@@ -1398,7 +1410,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         assert_reasoning_model(settings)
     except RuntimeError as exc:
         _record_endpoint(request, "chat", "not_configured", started)
-        log.warning(json_log(request_id, "chat", error=str(exc)[:200]))
+        log.warning(json_log(request_id, "chat", error=error_type(exc)))
         raise AppError(503, "not_configured", "reasoning model is not configured") from exc
     # The response `model` reports what actually ran: inference is always
     # the reasoning model (issue #313), so the caller-supplied OpenAI-compat
@@ -1409,7 +1421,8 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
     # Serving gate before the root span (issue #391 F3/F4): bind the request
     # to the validated physical generation or refuse with the stable 503.
     deps = await serving_deps()
-    root_span = tracer.start_span(
+    root_span = start_span(
+        tracer,
         "v1.chat",
         context=parent_context(request.headers),
         attributes={"rag.stream": is_stream},
@@ -1446,7 +1459,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         _span_error(root_span, exc)
         root_span.end()
         _record_endpoint(request, "chat", "upstream_error", started)
-        log.error(json_log(request_id, "chat_retrieval", error=str(exc)[:200]))
+        log.error(json_log(request_id, "chat_retrieval", error=error_type(exc)))
         raise AppError(502, "upstream_error", "retrieval failed") from exc
 
     core_input.hits = hits
@@ -1462,7 +1475,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
             _record_endpoint(
                 request, "chat", "prompt_budget_exceeded", started, query_class=kind, hits=len(hits)
             )
-            log.warning(json_log(request_id, "chat_answer", error=str(exc)[:200]))
+            log.warning(json_log(request_id, "chat_answer", error=error_type(exc)))
             raise AppError(
                 422, "prompt_budget_exceeded", "prompt exceeds the model token budget"
             ) from exc
@@ -1472,7 +1485,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
             _record_endpoint(
                 request, "chat", "upstream_error", started, query_class=kind, hits=len(hits)
             )
-            log.error(json_log(request_id, "chat_answer", error=str(exc)[:200]))
+            log.error(json_log(request_id, "chat_answer", error=error_type(exc)))
             raise AppError(502, "upstream_error", "answer failed") from exc
 
         _alert_finish_reason_non_stop(request_id, output.finish_reason)
@@ -1634,7 +1647,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                     request_id,
                     "answer_alert",
                     alert="stream_truncated",
-                    detail=str(exc)[:200],
+                    detail=error_type(exc),
                 )
             )
             _record_endpoint(
@@ -1646,7 +1659,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                 hits=len(hits),
                 verification_state="generation_incomplete",
             )
-            log.error(json_log(request_id, "chat_stream", error=str(exc)[:200]))
+            log.error(json_log(request_id, "chat_stream", error=error_type(exc)))
             terminal = True
             yield format_openai_error()
             yield format_openai_done()
@@ -1661,7 +1674,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                 hits=len(hits),
                 verification_state="generation_incomplete",
             )
-            log.warning(json_log(request_id, "chat_stream", error=str(exc)[:200]))
+            log.warning(json_log(request_id, "chat_stream", error=error_type(exc)))
             terminal = True
             yield format_openai_error()
             yield format_openai_done()
@@ -1676,7 +1689,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                 hits=len(hits),
                 verification_state="generation_incomplete",
             )
-            log.error(json_log(request_id, "chat_stream", error=str(exc)[:200]))
+            log.error(json_log(request_id, "chat_stream", error=error_type(exc)))
             terminal = True
             yield format_openai_error()
             yield format_openai_done()

@@ -31,6 +31,7 @@ from mainframe_rag.ingest.chunk import (
     UnitSpan,
     units_for_text,
 )
+from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage, ChatResult, LLMClient, Tokenizer, TokenUsage
 from mainframe_rag.regexes import find_message_ids
 from mainframe_rag.retrieve.query import SearchHit
@@ -1207,7 +1208,7 @@ class HttpxLLMClient:
                     usage = _token_usage_from_dict(state.usage_data)
                     return ChatResult(content=content, finish_reason=_completed_finish_reason(state), usage=usage, ttft_ms=state.ttft_ms)
             except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
-                log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
+                log.warning("streaming chat failed (%s); falling back to non-streaming POST", error_type(exc))
 
         # Fallback note: this re-asks the reasoning model — a second full
         # think. Accepted on purpose: empty/failed content channels are a
@@ -1364,7 +1365,7 @@ class HttpxLLMClient:
                     usage = _token_usage_from_dict(state.usage_data)
                     return ChatResult(content=content, finish_reason=_completed_finish_reason(state), usage=usage, ttft_ms=state.ttft_ms)
             except (httpx2.HTTPError, json.JSONDecodeError, KeyError, ValueError, OSError, TruncatedStreamError) as exc:
-                log.warning("streaming chat failed (%s); falling back to non-streaming POST", exc)
+                log.warning("streaming chat failed (%s); falling back to non-streaming POST", error_type(exc))
 
         resp = self._sync_http().post(
             f"{base_url.rstrip('/')}/chat/completions",
@@ -1577,7 +1578,7 @@ async def condense_query(
         condensed = condensed.strip('"\'')
         return condensed or latest_text
     except Exception as exc:  # noqa: BLE001 — coreference fallback must not abort chat
-        log.warning("query condensation failed (%s); using raw latest text", exc)
+        log.warning("query condensation failed (%s); using raw latest text", error_type(exc))
         return latest_text
 
 

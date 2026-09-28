@@ -134,7 +134,7 @@ from mainframe_rag.ingest.rules_version import extraction_rules_version
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
 from mainframe_rag.logs import configure_logging
 from mainframe_rag.ports import SparseVector
-from mainframe_rag.tracing import setup_tracing, shutdown_tracing
+from mainframe_rag.tracing import setup_tracing, shutdown_tracing, start_as_current_span, start_span
 
 log = logging.getLogger("ingest")
 
@@ -578,7 +578,7 @@ def run(
         export_timeout_ms=settings.otel_export_timeout_ms,
         service_name=os.environ.get("OTEL_SERVICE_NAME") or "mainframe-rag-ingest",
     )
-    root = tracer.start_span("ingest.run")
+    root = start_span(tracer, "ingest.run")
     token = otel_context.attach(trace.set_span_in_context(root))
     try:
         return _run_impl(
@@ -808,7 +808,7 @@ def _run_impl(
             set_bulk_indexing(client, settings.qdrant_collection, bulk=True)
             bulk_active = True
     try:
-        with tracer.start_as_current_span("ingest.plan") as plan_span:
+        with start_as_current_span(tracer, "ingest.plan") as plan_span:
             if prewalked is None:
                 pdfs = walk_pdfs(src)
                 if limit:
@@ -1064,7 +1064,6 @@ def _run_impl(
                                         "path": path_str,
                                         "action": "error",
                                         "error_type": type(exc).__name__,
-                                        "error": str(exc)[:500],
                                     }
                                 )
                             )
@@ -1080,7 +1079,6 @@ def _run_impl(
                                         "path": path_str,
                                         "action": "error",
                                         "error_type": record.error_type,
-                                        "error": record.error,
                                     }
                                 )
                             )
@@ -1227,7 +1225,7 @@ def _run_impl(
                 set_bulk_indexing(client, settings.qdrant_collection, bulk=False)
             except Exception as exc:  # noqa: BLE001
                 log.warning(
-                    json.dumps({"action": "restore_bulk_indexing_failed", "error": str(exc)[:200]})
+                    json.dumps({"action": "restore_bulk_indexing_failed", "error_type": type(exc).__name__})
                 )
 
     root.set_attribute("ingest.files_ok", files_ok)

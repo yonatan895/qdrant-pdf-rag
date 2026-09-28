@@ -41,6 +41,7 @@ from mainframe_rag.tracing import (
     flush_tracing,
     setup_tracing,
     shutdown_tracing,
+    start_as_current_span,
     trace_enabled,
 )
 
@@ -586,10 +587,10 @@ def execute_query(
     current_span = trace.get_current_span()
     is_root = not (current_span and current_span.get_span_context().is_valid)
     cm = (
-        tracer.start_as_current_span(
+        start_as_current_span(
+            tracer,
             "v1.search",
             attributes={
-                "rag.query": query,
                 "rag.limit": limit,
                 "rag.collection": target_coll,
             },
@@ -607,7 +608,6 @@ def execute_query(
             span.set_attributes({
                 "rag.query_kind": kind,
                 "rag.hits": len(hits),
-                "rag.doc_ids": ",".join(h.doc_id for h in hits[:8]),
             })
         return hits, kind, timings
 
@@ -633,10 +633,10 @@ def execute_answer(
     if settings is None:
         settings = resolve_runtime_settings(collection=collection)
 
-    with tracer.start_as_current_span(
+    with start_as_current_span(
+        tracer,
         "v1.answer",
         attributes={
-            "rag.query": query,
             "rag.limit": limit,
             "rag.collection": collection or settings.qdrant_collection,
         },
@@ -666,7 +666,8 @@ def execute_answer(
         )
         tokenizer = build_tokenizer(settings)
         root_ctx = trace.set_span_in_context(root_span)
-        with tracer.start_as_current_span(
+        with start_as_current_span(
+            tracer,
             "prompt.build",
             context=root_ctx,
             attributes={
@@ -691,7 +692,8 @@ def execute_answer(
                 order=settings.prompt_order,
             )
 
-        with tracer.start_as_current_span(
+        with start_as_current_span(
+            tracer,
             "llm.chat",
             context=root_ctx,
             attributes={
@@ -741,7 +743,6 @@ def execute_answer(
             "rag.evidence": prepared.evidence.supplied_count,
             "rag.citations": len(parsed.citations),
             "rag.has_script": parsed.script is not None,
-            "rag.doc_ids": ",".join(h.doc_id for h in hits[:8]),
         })
         return parsed, hits, kind, timings
 
