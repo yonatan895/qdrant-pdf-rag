@@ -91,7 +91,7 @@ def test_mock_mode_never_reaches_prod_manifests() -> None:
     """Hygiene gate (EMBED_MODE=hash precedent): MCP_MOCK_DIR is test-only.
     A prod manifest carrying it would serve fixture data as live state."""
     hits = []
-    for base in ("overlays", "deploy", "charts"):
+    for base in ("scripts/airgap", "deploy", "charts"):
         root = REPO / base
         if not root.is_dir():
             continue

@@ -41,10 +41,10 @@ PROSE_PATTERNS = [
 ]
 
 TOOLING_PATTERNS = [
+    ".agents/qdrant-skills-provenance.md",
     "scripts/**",
     "src/mainframe_rag/eval/**",
     "benchmarks/**",
-    "vendor/**",
     "tests/test_agent_context.py",
     "tests/test_agent_doctor.py",
     "tests/test_review_tooling.py",
@@ -65,8 +65,6 @@ TOOLING_PATTERNS = [
 DEPLOY_PATTERNS = [
     "deploy/**",
     "images/**",
-    "overlays/**",
-    "oc-mirror/**",
     "charts/**",
     "Dockerfile*",
     "Containerfile*",
@@ -971,8 +969,8 @@ def required_lanes(manifest: dict[str, Any]) -> set[str]:
             for path in paths):
         required_lanes.add("eval_retrieval")
     if any(_match_any(path, ["scripts/verify_placement.py", "tests/test_placement.py",
-                            "tests/test_ha_cluster.py", "overlays/openshift/collection-policy.env",
-                            "overlays/openshift/values.yaml", ".github/workflows/ha.yml"])
+                            "tests/test_ha_cluster.py", "scripts/airgap/collection-policy.env",
+                            "charts/qdrant-openshift.values.yaml", ".github/workflows/ha.yml"])
            for path in paths):
         required_lanes.add("ha")
     if any(_match_any(path, ["scripts/loadtest.py", "scripts/make_synthetic_pdf.py", "tests/test_load_tier.py", ".github/workflows/load.yml"])

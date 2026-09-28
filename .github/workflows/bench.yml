@@ -6,7 +6,6 @@ on:
       - "**/*.md"
       - "**/*.markdown"
       - ".agents/**"
-      - "vendor/**"
   schedule:
     - cron: "37 3 * * *" # nightly, off the hour
   workflow_dispatch:

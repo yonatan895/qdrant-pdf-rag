@@ -80,9 +80,9 @@ def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1
 def _copy_collection_preset(tree):
     """Place the checked-in production preset in the copied tree."""
     tmp_path, _ = tree
-    target = tmp_path / "overlays" / "openshift"
+    target = tmp_path / "scripts" / "airgap"
     target.mkdir(parents=True, exist_ok=True)
-    shutil.copy(REPO / "overlays" / "openshift" / "collection-policy.env", target)
+    shutil.copy(REPO / "scripts" / "airgap" / "collection-policy.env", target)
 
 
 def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
@@ -655,7 +655,7 @@ def test_production_preset_is_the_owner_decision():
     not an inferred default. Local lanes override it explicitly."""
     from tests.helpers_airgap import REPO as repo
 
-    text = (repo / "overlays" / "openshift" / "collection-policy.env").read_text()
+    text = (repo / "scripts" / "airgap" / "collection-policy.env").read_text()
     for line in (
         "QDRANT_SHARD_NUMBER=6",
         "QDRANT_REPLICATION_FACTOR=3",
@@ -822,3 +822,35 @@ def test_ingest_does_not_infer_direct_peers(ingest_tree):
     assert result.returncode == 0, result.stderr
     rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
     assert "QDRANT_PEER_URLS" not in rendered_env(rendered, "ingest")
+
+
+@pytest.mark.parametrize("via_task", [False, True])
+def test_shared_gateway_ingest_and_context_refs(ingest_tree, via_task):
+    path = ingest_tree[0] / "gateway.env"
+    path.write_text("GATEWAY_BASE_URL=https://file-gateway/v1\nGATEWAY_API_KEY_SECRET_KEY=file-key\n")
+    runner = run_sh
+    if via_task:
+        shutil.copy(REPO / "Taskfile.yml", ingest_tree[0])
+        shutil.copytree(REPO / "taskfiles", ingest_tree[0] / "taskfiles")
+
+        def runner(script, env, cwd):
+            cli = [f"{key}={env.pop(key)}" for key in ("GATEWAY_BASE_URL", "GATEWAY_API_KEY_SECRET_KEY")]
+            env["GATEWAY_BASE_URL"] = "https://ambient-gateway/v1"
+            return subprocess.run([str(REPO / ".tools/bin/task"), "airgap:ingest", *cli],
+                                  env=env, cwd=cwd, text=True, capture_output=True, check=False)
+
+    result = _run_ingest(ingest_tree, ("AIRGAP_ENV", str(path)), ("VLLM_BASE_URL", ""),
+                         ("GATEWAY_BASE_URL", "https://sample-api/v1"),
+                         ("GATEWAY_API_KEY_SECRET", "shared"), ("GATEWAY_API_KEY_SECRET_KEY", "api-key"),
+                         ("EMBED_MODEL", "embedding-v1"), ("CONTEXTUAL_EMBED_ENABLED", "true"),
+                         ("CONTEXT_LLM_MODEL", "fast"), runner=runner)
+    assert result.returncode == 0, result.stderr
+    rendered = (ingest_tree[0] / "dist/ingest-rendered.yaml").read_text()
+    values = rendered_env(rendered, "ingest")
+    assert values["EMBED_BASE_URL"] == "https://sample-api/v1"
+    assert values["CONTEXT_LLM_BASE_URL"] == "https://sample-api/v1"
+    assert values["EMBED_MODEL"] == "embedding-v1"
+    assert values["CONTEXT_LLM_MODEL"] == "fast"
+    entries = {entry["name"]: entry for entry in rendered_container(rendered, "ingest")["env"]}
+    for key in ("EMBED_API_KEY", "CONTEXT_LLM_API_KEY"):
+        assert entries[key]["valueFrom"]["secretKeyRef"] == {"name": "shared", "key": "api-key"}

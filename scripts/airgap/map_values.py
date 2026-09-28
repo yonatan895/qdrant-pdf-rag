@@ -303,6 +303,7 @@ def build_values(deploy_only: bool = False) -> dict:
         },
         "gateway": {
             "apiKeySecretName": env("GATEWAY_API_KEY_SECRET"),
+            "apiKeySecretKey": env("GATEWAY_API_KEY_SECRET_KEY"),
             "caConfigMapName": env("GATEWAY_CA_CONFIGMAP"),
         },
         "tracing": {

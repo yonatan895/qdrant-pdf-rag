@@ -12,7 +12,7 @@ enforce_product_rules
 resolve_aliases
 
 echo "==> 1. Validating environment variables"
-require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION VLLM_BASE_URL
+require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION EMBED_BASE_URL
 require_embed_revision
 refuse_nfs_storage
 # Issue #360: a partial, impossible or absent collection policy must fail
@@ -25,8 +25,8 @@ case "$DENSE_DIM" in
     0) die "DENSE_DIM must be greater than 0, got 0" ;;
 esac
 
-case "$VLLM_BASE_URL" in
-    http://*|https://*) ;;
+case "${VLLM_BASE_URL:-}" in
+    ""|http://*|https://*) ;;
     *) die "VLLM_BASE_URL must begin with http:// or https://, got '$VLLM_BASE_URL'" ;;
 esac
 
@@ -63,7 +63,7 @@ echo "    STORAGE_CLASS:     $STORAGE_CLASS"
 echo "    EMBED_MODEL:       $EMBED_MODEL"
 echo "    EMBED_MODEL_REVISION: $EMBED_MODEL_REVISION"
 echo "    DENSE_DIM:         $DENSE_DIM"
-echo "    VLLM_BASE_URL:     $VLLM_BASE_URL"
+echo "    EMBED_BASE_URL:    $EMBED_BASE_URL"
 echo "    Collection policy: S=$QDRANT_SHARD_NUMBER RF=$QDRANT_REPLICATION_FACTOR W=$QDRANT_WRITE_CONSISTENCY_FACTOR"
 echo "    IMAGE_SHA:         $IMAGE_SHA"
 if [ "$OTEL_TRACING_ENABLED" = "1" ]; then

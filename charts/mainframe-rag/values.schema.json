@@ -203,11 +203,21 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["apiKeySecretName"],
+      "allOf": [{
+        "if": {"required": ["apiKeySecretKey"], "properties": {"apiKeySecretKey": {"minLength": 1}}},
+        "then": {"properties": {"apiKeySecretName": {"minLength": 1}}}
+      }],
       "properties": {
         "apiKeySecretName": {
           "type": "string",
           "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$",
           "description": "Secret name only; values never carry key material (D7)."
+        },
+        "apiKeySecretKey": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9._-]*$",
+          "description": "Optional shared Secret data-key name for all model legs, never the API key value."
         },
         "caConfigMapName": {
           "type": "string",

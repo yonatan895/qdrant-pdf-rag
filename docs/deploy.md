@@ -54,7 +54,9 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Alias resolution: `INTERNAL_REGISTRY` falls back to `REGISTRY_INTERNAL`,
   `NAMESPACE` to `OPENSHIFT_NAMESPACE` (default `mainframe-rag`),
   `QDRANT_RELEASE` defaults to `qdrant`, empty `IMAGE_SHA` resolves from
-  `git rev-parse HEAD`, and `EMBED_BASE_URL` derives from the vLLM URL with
+  `git rev-parse HEAD`. Explicit model-operation URLs win over
+  `GATEWAY_BASE_URL`, a shared API base including `/v1`; the legacy
+  `EMBED_BASE_URL` fallback derives from the vLLM URL with
   trailing slashes and a trailing `/v1` stripped.
 - `require_env` collects **all** missing keys before failing, so one run
   tells the operator everything to fill in. `EMBED_MODEL_REVISION` is a
@@ -133,8 +135,11 @@ Compatibility and lifecycle decisions under #448:
   Secret references. An absent pull Secret renders `imagePullSecrets: []` for
   first-party pods and `imagePullSecrets=null` for Qdrant. An absent gateway
   Secret omits key env entries. Selected refs require nonempty keys before
-  mutation: agent `llm/embed/rerank-api-key`, ingest
+  mutation: by default agent `llm/embed/rerank-api-key`, ingest
   `embed/context-llm-api-key`, pull `.dockerconfigjson`, OAuth `cookie-secret`.
+  With `GATEWAY_API_KEY_SECRET_KEY` set, every model leg references that one
+  data-key name instead, and deploy/ingest check that selected key. It requires
+  `GATEWAY_API_KEY_SECRET`; neither setting contains credential material.
   No key values enter generated files or logs. Plaintext gateway key settings
   remain rejected by `enforce_product_rules`.
 - `GATEWAY_CA_CONFIGMAP` remains a reference to `ca-bundle.crt`, mounted only
@@ -311,7 +316,7 @@ cannot schedule on one node — proven).
 **Production default (checked in, non-secret):** 6 logical shards,
 replication factor 3, write consistency 2, across the three Qdrant peers,
 applied to both the corpus collection and its paired completion/control
-collection. `overlays/openshift/collection-policy.env` carries the tuple;
+collection. `scripts/airgap/collection-policy.env` carries the tuple;
 `scripts/airgap/common.sh` loads it with explicit caller > operator file >
 preset precedence, and `airgap.env.example` documents concrete values. This
 is the **production default**, distinct from the verifier's stricter
@@ -334,7 +339,10 @@ platform model/gateway tier. Capacity follows: RF=3 stores three physical
 copies of the logical generation plus snapshots and staging, so a peer is
 never sized as one third of the corpus.
 
-**Placement is a hard requirement:** `overlays/openshift/values.yaml` sets
+The deploy launcher refuses a missing or unreadable
+`charts/qdrant-openshift.values.yaml` before running Helm or cluster commands.
+
+**Placement is a hard requirement:** `charts/qdrant-openshift.values.yaml` sets
 required pod anti-affinity across `kubernetes.io/hostname`. A capacity
 squeeze leaves a peer Pending with a diagnostic instead of silently
 colocating. The PDB (`maxUnavailable: 1`) limits voluntary disruption only
@@ -472,8 +480,32 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
 - `METRICS_ENABLED=true` additionally renders/applies
   the first-party chart ServiceMonitor so the OpenShift UWM stack scrapes
   `/metrics` (prerequisite and sizing in `docs/install_and_ops.md`).
-- The `oc-mirror` config still uses tag form and is otherwise unreferenced
-  (optional path) — reconcile to digests before relying on it.
+- Application transfer uses the signed bundle and verified `skopeo` loading
+  path above; this repository ships no alternate mirroring configuration.
+
+### Shared LiteLLM configuration
+
+`GATEWAY_BASE_URL=https://sample-api/v1` illustrates the shared API-base
+convention; replace the example URL with the platform endpoint. The operator
+loader resolves unset `EMBED_BASE_URL`, `LLM_BASE_URL`, `RERANK_BASE_URL` and
+`CONTEXT_LLM_BASE_URL` to it before rendering. Explicit operation-specific
+URLs take precedence. A caller value beats the operator file for the same
+setting. With no shared setting, the legacy vLLM embedding-origin fallback
+and existing per-operation behavior remain available. Clients append operation
+paths without adding another `/v1`.
+
+Model settings are opaque gateway aliases: for example `EMBED_MODEL=embedding-v1`
+and `LLM_MODEL_REASONING=code`. No upstream-name lookup or intent-based routing
+is performed. Reranking and contextual embedding remain opt-in and require
+their own configured model aliases when used. Embedding dimension and immutable
+revision remain explicit; switching an alias's underlying representation still
+requires the existing deliberate migration.
+
+`GATEWAY_API_KEY_SECRET_KEY=api-key` selects one data key in the Secret named by
+`GATEWAY_API_KEY_SECRET`. Helm exposes that same Secret reference through the
+existing per-operation runtime variables, including contextual ingestion.
+Direct Helm users set `gateway.apiKeySecretKey`; an empty value preserves legacy
+per-leg data keys. The API key value never enters Helm values or `airgap.env`.
 
 ## 7. CI inventory
 
@@ -526,7 +558,7 @@ live in `.github/workflows/e2e.yml`.
   skip). `airgap-acceptance` (main/dispatch): black-box handoff in a fresh
   dir — digest verify, unpack, bootstrap, manifest/SHA assertions, dry-run
   pipeline with standin env passed explicitly, both pull-secret branches.
-  `kind-live-rehearsal` (main/dispatch) is a three-lane matrix described below.
+  `kind-live-rehearsal` (main/dispatch) is a four-lane matrix described below.
   The lab OpenShift rehearsal remains secret-gated, and PRs never touch the lab cluster.
   `airgap-rehearsal` downloads and bootstraps the published bundle; it does not
   independently repack. It retains both outline-message and generic widget
@@ -563,6 +595,7 @@ include actual runner CPU, RAM and disk capacity; cleanup runs even after failur
 | `kind-pipeline` | Authenticated registry, real product containers, real LiteLLM/PostgreSQL, synthetic ingest, search and application streams |
 | `kind-gateway-faults` | TLS/auth, both model legs, malformed/upstream/dimension/timeout/truncated-stream failures through LiteLLM, followed by healthy recovery |
 | `kind-lifecycle` | Three-worker Kind; synthetic snapshot recovery, PVC identity, Qdrant/agent/Jaeger replacement, old trace persistence and repeat pipeline |
+| `kind-shared-gateway` | Same live pipeline/probe/contracts/smoke but through the shared `GATEWAY_BASE_URL` fallback and the single `api-key` Secret data-key (issue #551); explicit per-operation URLs stay unset so fallback is exercised |
 | Manual Windows CRC | Actual SCC, Service CA, OAuth, Routes, node trust/pulls and runtime egress; record the fit outcome and fallback mode separately |
 
 Only computation behind LiteLLM is deterministic in the Kind lanes. The existing
@@ -573,7 +606,11 @@ behavior, not answer quality. The mock, CI deployment helpers and gateway module
 are excluded from application images and production manifests.
 
 The rehearsal now configures **both** embedding and reasoning URLs through the
-real test gateway. Service existence is awaited before readiness checks. Fault
+real test gateway. The `pipeline`, `gateway-faults` and `lifecycle` lanes keep
+explicit per-operation URLs and per-leg Secret keys; the `shared-gateway` lane
+instead sets only `GATEWAY_BASE_URL` and `GATEWAY_API_KEY_SECRET_KEY=api-key`
+(one virtual key for both mock models) so `common.sh` fallback and the shared
+Secret reference are proven live. Service existence is awaited before readiness checks. Fault
 transitions wait for the requested mock state through the actual upstream Service,
 so a rollout's success cannot leave a test hitting the old backend state.
 The gateway's configuration and strict-finish module share a projected volume;
@@ -693,7 +730,7 @@ snapshot/restore, Task `TASK_*` bridges (pinned equal by
 `validate.sh`/`ingest.sh`, rendered only into the ingest Job (the agent
 never creates collections, so the agent render deliberately excludes them).
 Precedence is explicit caller > operator file > checked-in production default
-(`overlays/openshift/collection-policy.env`, 6/3/2); partial overrides
+(`scripts/airgap/collection-policy.env`, 6/3/2); partial overrides
 inherit the remaining preset values (explicit 1/1/1 is the supported
 one-node profile, never inferred). Values reach
 `Settings` and both collection constructors verbatim; shard defaults are not

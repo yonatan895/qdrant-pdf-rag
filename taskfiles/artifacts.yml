@@ -79,11 +79,11 @@ tasks:
     desc: Render the Qdrant chart with placeholder overrides
     summary: |
       Runs `helm template` against the vendored chart with the fixed
-      placeholder `--set` values and `overlays/openshift/values.yaml`,
+      placeholder `--set` values and `charts/qdrant-openshift.values.yaml`,
       replacing the retired `make helm-template`. Verifies chart presence first.
     cmds:
       - task: chart-check
-      - helm template qdrant charts/qdrant-*.tgz -f overlays/openshift/values.yaml --set image.repository=PLACEHOLDER_REGISTRY/qdrant/qdrant --set imagePullSecrets[0].name=PLACEHOLDER_PULL_SECRET --set persistence.storageClassName=PLACEHOLDER_STORAGE_CLASS --set snapshotPersistence.storageClassName=PLACEHOLDER_STORAGE_CLASS
+      - helm template qdrant charts/qdrant-*.tgz -f charts/qdrant-openshift.values.yaml --set image.repository=PLACEHOLDER_REGISTRY/qdrant/qdrant --set imagePullSecrets[0].name=PLACEHOLDER_PULL_SECRET --set persistence.storageClassName=PLACEHOLDER_STORAGE_CLASS --set snapshotPersistence.storageClassName=PLACEHOLDER_STORAGE_CLASS
 
   helm-lint:
     desc: Lint the Qdrant chart against the OpenShift values
@@ -92,7 +92,7 @@ tasks:
       the retired `make helm-lint`. Verifies chart presence first; always re-verifies.
     cmds:
       - task: chart-check
-      - helm lint charts/qdrant-*.tgz -f overlays/openshift/values.yaml
+      - helm lint charts/qdrant-*.tgz -f charts/qdrant-openshift.values.yaml
 
   app-helm-lint:
     desc: Lint the first-party application chart (issue #448)

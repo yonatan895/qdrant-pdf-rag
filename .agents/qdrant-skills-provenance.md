@@ -7,15 +7,20 @@
   pin; keep SHA-only pins until upstream tags again)
 - **Copied into:** `.agents/skills/` (upstream `skills/` only — `index.md`
   plus the skill directories; no `evals/`, `webapp/`, blog assets, or CI)
-- **License:** Apache-2.0, kept verbatim in `LICENSE.qdrant-skills`
+- **License:** Apache-2.0, kept verbatim in `LICENSE.qdrant-skills`;
+  attribution is recorded in `NOTICE.qdrant-skills`.
+
+This is a repository-owned provenance record. The full pinned snapshot remains
+in place while #458 owns the proposed operational-skill curation. Relocation
+under #523 does not change the approved copied paths or upstream pin.
 
 ## Air-gap note
 
 `.agents/skills/` is the complete skill set for this repository. Upstream
 files may reference `skills.qdrant.tech` (llms.txt, snippet search, online
 skill URLs) or `qcloud-cli`; none of that is available or permitted here —
-see the Qdrant skills section in AGENTS.md. Do not patch the vendored tree
-to fix such references; the AGENTS.md overlay is the durable place.
+see [vendored skill routing](../docs/agent-workflow.md#qdrant-skills). Do not
+patch the vendored tree to fix such references; repository policy owns them.
 
 ## Updating
 
@@ -27,7 +32,7 @@ the snapshot, they do not rewrite vendor files:
     rm -rf .agents/skills && mkdir -p .agents/skills
     cp -r /tmp/qdrant-skills/skills/* .agents/skills/
     cp /tmp/qdrant-skills/LICENSE LICENSE.qdrant-skills
-    # update the SHA/date lines above, then one PR
+    # update .agents/qdrant-skills-provenance.md SHA/date lines, then one PR
 
 Commands used for this vendoring (connected host):
 

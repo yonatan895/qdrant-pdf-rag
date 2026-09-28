@@ -44,8 +44,9 @@ def test_service_wait_retries_only_read_before_creating_keys(setup_gateway, monk
             raise failure
         if request.get_method() == 'POST':
             assert timeout == 30
-            created.append(json.loads(request.data)['models'][0])
-            return io.BytesIO(json.dumps({'key': 'sk-' + created[-1]}).encode())
+            models = json.loads(request.data)['models']
+            created.append(models)
+            return io.BytesIO(json.dumps({'key': 'sk-' + models[0]}).encode())
         if request.get_header('Authorization') in ('Bearer ', 'Bearer sk-wrong'):
             raise urllib.error.HTTPError(request.full_url, 401, 'Unauthorized', None, None)
         return io.BytesIO(b'{"data": []}')
@@ -56,7 +57,9 @@ def test_service_wait_retries_only_read_before_creating_keys(setup_gateway, monk
     keys = json.loads(capsys.readouterr().out)
     assert keys['llm-api-key'] == 'sk-mock-reasoning'
     assert keys['embed-api-key'] == 'sk-mock-embed'
-    assert created == ['mock-reasoning', 'mock-embed']
+    # Shared-gateway lane (issue #551): one key for both mock models.
+    assert keys['api-key'] == 'sk-mock-reasoning'
+    assert created == [['mock-reasoning'], ['mock-embed'], ['mock-reasoning', 'mock-embed']]
     assert [r.get_method() for r in requests[:3]] == ['GET', 'GET', 'POST']
     assert clock == [1.0]
 

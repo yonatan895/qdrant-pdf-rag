@@ -56,9 +56,8 @@ exit 0
 @pytest.fixture
 def tree(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "deploy.sh", "map_values.py"])
-    (tmp_path / "overlays" / "openshift").mkdir(parents=True, exist_ok=True)
     copy_chart(tmp_path)
-    shutil.copy(REPO / "overlays" / "openshift" / "values.yaml", tmp_path / "overlays" / "openshift")
+    shutil.copy(REPO / "charts" / "qdrant-openshift.values.yaml", tmp_path / "charts")
     shutil.copy(REPO / "images.txt", tmp_path / "images.txt")
     helm_log = tmp_path / "helm-args.log"
     for name in ("helm", "kubectl", "oc"):
@@ -182,6 +181,14 @@ def test_storage_size_knob_covers_persistence_and_snapshot(tree):
     assert "snapshotPersistence.size=1Gi" in log
 
 
+def test_missing_production_values_fails_before_mutation(tree):
+    (tree[0] / "charts" / "qdrant-openshift.values.yaml").unlink()
+    result = _run(tree, ("AIRGAP_DRYRUN", "0"))
+    assert result.returncode != 0
+    assert "required Qdrant values file is missing or unreadable" in result.stderr
+    assert not tree[1].exists(), "no Helm or cluster command may run without base values"
+
+
 def test_missing_extra_values_file_fails_closed(tree):
     r = _run(tree, ("QDRANT_EXTRA_VALUES", "/nonexistent/vals.yaml"))
     assert r.returncode == 1
@@ -196,6 +203,7 @@ def test_extra_values_file_reaches_helm(tree):
     args = _helm_log(tree).splitlines()
     assert str(vals) in args
     assert args[args.index(str(vals)) - 1] == "-f"
+    assert args.index("charts/qdrant-openshift.values.yaml") < args.index(str(vals))
 
 
 def test_rendered_manifest_substituted_and_written(tree):
@@ -629,3 +637,108 @@ def test_legacy_cleanup_waits_for_successful_rollouts(tree):
     log = _helm_log(tree)
     assert "upgrade" in log
     assert "delete" not in log
+
+
+@pytest.mark.parametrize("from_file", [False, True])
+def test_shared_gateway_aliases_and_secret_reach_requests(tree, from_file):
+    import json
+
+    import httpx2
+
+    from mainframe_rag.agent.answer import HttpxLLMClient
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.embed import VllmEmbedder
+    from mainframe_rag.ports import ChatMessage
+    from tests.helpers_airgap import rendered_container
+
+    options = {
+        "GATEWAY_BASE_URL": "https://sample-api/v1/",
+        "GATEWAY_API_KEY_SECRET": "shared-gateway",
+        "GATEWAY_API_KEY_SECRET_KEY": "api-key",
+        "EMBED_MODEL": "embedding-v1",
+        "LLM_MODEL_REASONING": "code",
+    }
+    if from_file:
+        path = tree[0] / "gateway.env"
+        path.write_text("\n".join(f"{key}='{value}'" for key, value in options.items()))
+        # _run's synthetic embed model is a caller override, so explicitly
+        # select the requested alias there while resolving URL/Secret from file.
+        extra = [("AIRGAP_ENV", str(path)), ("EMBED_MODEL", "embedding-v1")]
+    else:
+        extra = list(options.items())
+    result = _run(tree, *extra)
+    assert result.returncode == 0, result.stderr
+    rendered = (tree[0] / "dist/agent-rendered.yaml").read_text()
+    scalars = rendered_env(rendered, "agent")
+    for key in ("EMBED_BASE_URL", "LLM_BASE_URL", "RERANK_BASE_URL"):
+        assert scalars[key] == "https://sample-api/v1/"
+    assert scalars["EMBED_MODEL"] == "embedding-v1"
+    assert scalars["LLM_MODEL_REASONING"] == "code"
+    env = {entry["name"]: entry for entry in rendered_container(rendered, "agent")["env"]}
+    for key in ("EMBED_API_KEY", "LLM_API_KEY", "RERANK_API_KEY"):
+        assert env[key]["valueFrom"]["secretKeyRef"] == {
+            "name": "shared-gateway", "key": "api-key",
+        }
+    seen = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        seen.append((str(request.url), body["model"], request.headers["Authorization"]))
+        if request.url.path == "/v1/embeddings":
+            return httpx2.Response(200, json={"data": [{"index": 0, "embedding": [0.25, 0.75]}]})
+        assert request.url.path == "/v1/chat/completions"
+        return httpx2.Response(200, json={"choices": [
+            {"message": {"content": "Synthetic answer"}, "finish_reason": "stop"},
+        ]})
+
+    # Simulate Kubernetes resolving the single referenced Secret, then use
+    # real runtime clients/HTTP serialization with an in-process transport.
+    settings = Settings(
+        _env_file=None, embed_base_url=scalars["EMBED_BASE_URL"],
+        embed_model=scalars["EMBED_MODEL"], llm_base_url=scalars["LLM_BASE_URL"],
+        llm_model_reasoning=scalars["LLM_MODEL_REASONING"], llm_stream=False,
+        embed_api_key="synthetic-shared-key", llm_api_key="synthetic-shared-key",
+    )
+    with httpx2.Client(transport=httpx2.MockTransport(respond)) as client:
+        assert VllmEmbedder(settings, client=client).dense(["Synthetic input"]) == [[0.25, 0.75]]
+        answer = HttpxLLMClient(settings, client=client).chat([ChatMessage(role="user", content="Hello")])
+        assert answer.content == "Synthetic answer"
+    assert seen == [
+        ("https://sample-api/v1/embeddings", "embedding-v1", "Bearer synthetic-shared-key"),
+        ("https://sample-api/v1/chat/completions", "code", "Bearer synthetic-shared-key"),
+    ]
+
+
+def test_shared_gateway_specific_url_and_caller_override_win(tree):
+    path = tree[0] / "gateway.env"
+    path.write_text("GATEWAY_BASE_URL=https://file-gateway/v1\nGATEWAY_API_KEY_SECRET_KEY=file-key\n")
+    result = _run(tree, ("AIRGAP_ENV", str(path)),
+                  ("GATEWAY_BASE_URL", "https://caller-gateway/v1"),
+                  ("LLM_BASE_URL", "https://reasoning-override/v1"),
+                  ("LLM_MODEL_REASONING", "code"),
+                  ("GATEWAY_API_KEY_SECRET", "shared"), ("GATEWAY_API_KEY_SECRET_KEY", "caller-key"))
+    assert result.returncode == 0, result.stderr
+    rendered = (tree[0] / "dist/agent-rendered.yaml").read_text()
+    values = rendered_env(rendered, "agent")
+    assert values["EMBED_BASE_URL"] == "https://caller-gateway/v1"
+    assert values["LLM_BASE_URL"] == "https://reasoning-override/v1"
+    assert 'key: "caller-key"' in rendered
+    assert "file-key" not in rendered
+
+
+def test_missing_shared_gateway_key_blocks_before_mutation(tree):
+    result = _run(tree, ("AIRGAP_DRYRUN", "0"),
+                  ("GATEWAY_API_KEY_SECRET", "shared"), ("GATEWAY_API_KEY_SECRET_KEY", "shared-key"),
+                  ("MISSING_KEY", "shared-key"))
+    assert result.returncode != 0
+    assert "required Secret key is missing or empty: shared-key" in result.stderr
+    log = _helm_log(tree)
+    assert "upgrade" not in log and "apply" not in log
+
+
+@pytest.mark.parametrize("key,secret", [('bad"key', "shared"), ("a" * 254, "shared"), ("api-key", "")])
+def test_invalid_shared_gateway_key_refuses_before_commands(tree, key, secret):
+    result = _run(tree, ("GATEWAY_API_KEY_SECRET", secret), ("GATEWAY_API_KEY_SECRET_KEY", key))
+    assert result.returncode != 0
+    assert "GATEWAY_API_KEY_SECRET_KEY" in result.stderr
+    assert not tree[1].exists()

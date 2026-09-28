@@ -80,9 +80,9 @@ def test_validate_reports_selected_policy(tree):
 def test_validate_production_preset_supplies_tuple(tree):
     """Issue #360: with no explicit selection the checked-in production
     preset supplies 6/3/2 to preflight (and therefore to the ingest render)."""
-    target = tree / "overlays" / "openshift"
+    target = tree / "scripts" / "airgap"
     target.mkdir(parents=True, exist_ok=True)
-    shutil.copy(REPO / "overlays" / "openshift" / "collection-policy.env", target)
+    shutil.copy(REPO / "scripts" / "airgap" / "collection-policy.env", target)
     r = _run(
         tree,
         {
@@ -613,3 +613,16 @@ def test_checkout_guard_wired_into_all_launch_paths():
     for name in ("deploy.sh", "ingest.sh", "validate.sh", "load.sh"):
         text = (REPO / "scripts" / "airgap" / name).read_text()
         assert "check_checkout_sha" in text, name
+
+
+def test_shared_gateway_needs_no_legacy_vllm_url(tree):
+    result = _run(tree, {"VLLM_BASE_URL": None, "GATEWAY_BASE_URL": "https://sample-api/v1",
+                         "GATEWAY_API_KEY_SECRET": "shared", "GATEWAY_API_KEY_SECRET_KEY": "api-key"})
+    assert result.returncode == 0, result.stderr
+    assert "EMBED_BASE_URL:    https://sample-api/v1" in result.stdout
+
+
+def test_shared_gateway_invalid_url_refuses(tree):
+    result = _run(tree, {"GATEWAY_BASE_URL": "sample-api/v1"})
+    assert result.returncode != 0
+    assert "GATEWAY_BASE_URL must begin with http:// or https://" in result.stderr

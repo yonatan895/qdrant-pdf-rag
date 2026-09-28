@@ -363,7 +363,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [pipeline, gateway-faults, lifecycle]
+        lane: [pipeline, gateway-faults, lifecycle, shared-gateway]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -535,7 +535,22 @@ jobs:
             -e 's|^QDRANT_REPLICATION_FACTOR=.*|QDRANT_REPLICATION_FACTOR=1|' \
             -e 's|^QDRANT_WRITE_CONSISTENCY_FACTOR=.*|QDRANT_WRITE_CONSISTENCY_FACTOR=1|' \
             airgap.env
-          cat >> airgap.env <<'EOF'
+          if [ "${{ matrix.lane }}" = "shared-gateway" ]; then
+            # Shared-gateway lane (issue #551): prove GATEWAY_BASE_URL fallback
+            # and the single shared Secret key live. Explicit per-operation URLs
+            # stay unset so common.sh must resolve them from the shared base;
+            # per-leg keys remain in the Secret for the other lanes.
+            sed -i -e '/^VLLM_BASE_URL=/d' -e '/^EMBED_BASE_URL=/d' -e '/^LLM_BASE_URL=/d' airgap.env
+            cat >> airgap.env <<'EOF'
+          GATEWAY_BASE_URL=https://test-gateway:4000/v1
+          LLM_MODEL_REASONING=mock-reasoning
+          RERANK_ENABLED=false
+          GATEWAY_API_KEY_SECRET=test-gateway-keys
+          GATEWAY_API_KEY_SECRET_KEY=api-key
+          GATEWAY_CA_CONFIGMAP=test-gateway-ca
+          EOF
+          else
+            cat >> airgap.env <<'EOF'
           EMBED_BASE_URL=https://test-gateway:4000/v1
           LLM_BASE_URL=https://test-gateway:4000/v1
           LLM_MODEL_REASONING=mock-reasoning
@@ -543,6 +558,7 @@ jobs:
           GATEWAY_API_KEY_SECRET=test-gateway-keys
           GATEWAY_CA_CONFIGMAP=test-gateway-ca
           EOF
+          fi
           grep -E "^(INTERNAL_REGISTRY|NAMESPACE|STORAGE_CLASS|IMAGE_SHA|EMBED_MODEL|EMBED_MODEL_REVISION|DENSE_DIM|VLLM_BASE_URL|CORPUS_PVC|INSECURE_REGISTRY)" airgap.env
 
       - name: Write Kind-scale Qdrant overrides (runner quota only; git prod values untouched)
@@ -700,6 +716,25 @@ jobs:
           # step above (mock and corpus-gen pods pulled them); skip the
           # second push — same flag an operator re-running pipeline uses.
           sh scripts/airgap/pipeline.sh --skip-load
+
+      - name: Assert shared-gateway rendering (no explicit URLs, one key)
+        if: matrix.lane == 'shared-gateway'
+        run: |
+          export PATH="/usr/local/bin:$PATH"
+          cd gapbox/qdrant-pdf-rag
+          # airgap.env proves the fallback path was taken: shared base set,
+          # explicit per-operation URLs absent, one shared data-key selected.
+          grep -q "^GATEWAY_BASE_URL=https://test-gateway:4000/v1$" airgap.env
+          grep -q "^GATEWAY_API_KEY_SECRET_KEY=api-key$" airgap.env
+          test "$(grep -c "^EMBED_BASE_URL=" airgap.env || true)" = "0"
+          test "$(grep -c "^LLM_BASE_URL=" airgap.env || true)" = "0"
+          # Rendered values prove common.sh resolved both legs from the shared
+          # base; manifests prove every leg references the single shared key.
+          grep -q "https://test-gateway:4000/v1" dist/mainframe-rag-release-values.yaml
+          grep -q 'key: "api-key"' dist/agent-rendered.yaml
+          grep -q 'key: "api-key"' dist/ingest-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml
+          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml
 
       - name: Require reasoning and complete streams from the application pod
         run: |
@@ -1260,7 +1295,7 @@ jobs:
           export INTERNAL_REGISTRY
           sh scripts/tools/run-task.sh airgap:load
 
-      - name: airgap-deploy (PROD overlays, helm-knobbed sizes, fail-closed checks)
+      - name: airgap-deploy (production values, helm-knobbed sizes, fail-closed checks)
         env:
           IMAGE_SHA: ${{ env.SHA }}
           EMBED_MODEL: mock-embed
