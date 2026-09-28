@@ -46,6 +46,30 @@ def test_kind_uses_real_gateway_for_both_legs():
     assert any('--require-reasoning --stream' in s.get('run', '') for s in steps)
 
 
+def test_shared_gateway_lane_proves_fallback_and_single_key():
+    workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
+    steps = workflow['jobs']['kind-live-rehearsal']['steps']
+    assert 'shared-gateway' in workflow['jobs']['kind-live-rehearsal']['strategy']['matrix']['lane']
+    env_step = next(s['run'] for s in steps if s.get('name', '').startswith('Operator airgap.env'))
+    # Shared lane selects the PR #552 contract: one base URL plus one key.
+    assert 'GATEWAY_BASE_URL=https://test-gateway:4000/v1' in env_step
+    assert 'GATEWAY_API_KEY_SECRET_KEY=api-key' in env_step
+    # Explicit per-operation URLs must stay unset in that branch so
+    # common.sh fallback is exercised, not bypassed.
+    assert "sed -i -e '/^VLLM_BASE_URL=/d'" in env_step
+    assert 'shared-gateway' in env_step
+    assertion = next(s['run'] for s in steps
+                     if s.get('name', '').startswith('Assert shared-gateway rendering'))
+    assert 'GATEWAY_BASE_URL=https://test-gateway:4000/v1' in assertion
+    assert 'GATEWAY_API_KEY_SECRET_KEY=api-key' in assertion
+    assert 'dist/mainframe-rag-release-values.yaml' in assertion
+    assert 'dist/agent-rendered.yaml' in assertion
+    assert 'dist/ingest-rendered.yaml' in assertion
+    assert steps[[s.get('name', '') for s in steps].index(
+        'Assert shared-gateway rendering (no explicit URLs, one key)')]['if'] == \
+        "matrix.lane == 'shared-gateway'"
+
+
 def test_gateway_fixture_keeps_local_pins_and_real_routing():
     docs = list(yaml.safe_load_all((ROOT / 'scripts/ci/test-gateway.yaml').read_text()))
     launcher = (ROOT / 'scripts/run_local_gateway.sh').read_text()
@@ -77,6 +101,7 @@ if os.environ['FAIL_AT'] and os.environ['FAIL_AT'] in sys.argv:
     sys.exit(1)
 if 'exec' in sys.argv:
     print(json.dumps({'llm-api-key': 'sk-test-llm', 'embed-api-key': 'sk-test-embed',
+                      'api-key': 'sk-test-shared',
                       'context-llm-api-key': 'sk-test-llm', 'rerank-api-key': 'sk-unused'}))
 ''')
     stub.chmod(0o755)
@@ -104,7 +129,7 @@ def test_rehearsal_lanes_share_published_bundle_and_bound_jobs():
     workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
     jobs = workflow['jobs']
     kind = jobs['kind-live-rehearsal']
-    assert kind['strategy']['matrix']['lane'] == ['pipeline', 'gateway-faults', 'lifecycle']
+    assert kind['strategy']['matrix']['lane'] == ['pipeline', 'gateway-faults', 'lifecycle', 'shared-gateway']
     assert kind['strategy']['fail-fast'] is False
     lab = jobs['airgap-rehearsal']
     assert 'airgap-package' in lab['needs']

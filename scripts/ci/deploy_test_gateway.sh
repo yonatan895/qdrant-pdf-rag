@@ -45,4 +45,5 @@ for name, value in json.loads((root / 'keys.json').read_text()).items():
 PY
 kubectl -n "$NS" create secret generic test-gateway-keys \
     --from-file="$KEY_DIR/llm-api-key" --from-file="$KEY_DIR/embed-api-key" \
+    --from-file="$KEY_DIR/api-key" \
     --from-file="$KEY_DIR/context-llm-api-key" --from-file="$KEY_DIR/rerank-api-key"

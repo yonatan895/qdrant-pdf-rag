@@ -48,6 +48,13 @@ def main():
         key = call('/key/generate', master, {'models': [model]})['key']
         call('/v1/models', key)
         keys[leg + '-api-key'] = key
+    # Shared-gateway lane (issue #551): one key authorized for both mock
+    # models, stored under the documented shared data-key name. Per-leg keys
+    # above remain for the explicit-URL lanes; this key proves the
+    # GATEWAY_API_KEY_SECRET_KEY path live without inventing prod aliases.
+    shared = call('/key/generate', master, {'models': ['mock-reasoning', 'mock-embed']})['key']
+    call('/v1/models', shared)
+    keys['api-key'] = shared
     # Both absent and wrong credentials must be refused by the real gateway.
     for key in ['', 'sk-wrong']:
         try:
