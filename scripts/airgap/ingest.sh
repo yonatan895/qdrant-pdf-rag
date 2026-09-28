@@ -11,7 +11,7 @@
 
 enforce_product_rules
 resolve_aliases
-require_env INTERNAL_REGISTRY NAMESPACE IMAGE_SHA CORPUS_PVC EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION VLLM_BASE_URL STORAGE_CLASS
+require_env INTERNAL_REGISTRY NAMESPACE IMAGE_SHA CORPUS_PVC EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION EMBED_BASE_URL STORAGE_CLASS
 require_embed_revision
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
@@ -99,7 +99,7 @@ if [ -n "$INGEST_EXTRA_PATCH" ]; then
     mv dist/ingest-rendered-patched.yaml dist/ingest-rendered.yaml
 fi
 check_ingest_qdrant_key dist/ingest-rendered.yaml ingest
-require_secret_keys "${GATEWAY_API_KEY_SECRET:-}" embed-api-key context-llm-api-key
+require_gateway_secret_keys embed-api-key context-llm-api-key
 require_secret_keys "${PULL_SECRET:-}" .dockerconfigjson
 
 # The external scratch PVC is deliberately not owned by the app release.

@@ -84,17 +84,17 @@ spec:
             - name: LLM_API_KEY
               valueFrom:
                 secretKeyRef:
-                  key: llm-api-key
+                  key: {{ .Values.gateway.apiKeySecretKey | default "llm-api-key" | quote }}
                   name: {{ .Values.gateway.apiKeySecretName }}
             - name: EMBED_API_KEY
               valueFrom:
                 secretKeyRef:
-                  key: embed-api-key
+                  key: {{ .Values.gateway.apiKeySecretKey | default "embed-api-key" | quote }}
                   name: {{ .Values.gateway.apiKeySecretName }}
             - name: RERANK_API_KEY
               valueFrom:
                 secretKeyRef:
-                  key: rerank-api-key
+                  key: {{ .Values.gateway.apiKeySecretKey | default "rerank-api-key" | quote }}
                   name: {{ .Values.gateway.apiKeySecretName }}
             {{- end }}
             {{- if .Values.gateway.caConfigMapName }}

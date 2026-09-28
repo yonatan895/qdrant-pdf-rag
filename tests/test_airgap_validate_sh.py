@@ -613,3 +613,16 @@ def test_checkout_guard_wired_into_all_launch_paths():
     for name in ("deploy.sh", "ingest.sh", "validate.sh", "load.sh"):
         text = (REPO / "scripts" / "airgap" / name).read_text()
         assert "check_checkout_sha" in text, name
+
+
+def test_shared_gateway_needs_no_legacy_vllm_url(tree):
+    result = _run(tree, {"VLLM_BASE_URL": None, "GATEWAY_BASE_URL": "https://sample-api/v1",
+                         "GATEWAY_API_KEY_SECRET": "shared", "GATEWAY_API_KEY_SECRET_KEY": "api-key"})
+    assert result.returncode == 0, result.stderr
+    assert "EMBED_BASE_URL:    https://sample-api/v1" in result.stdout
+
+
+def test_shared_gateway_invalid_url_refuses(tree):
+    result = _run(tree, {"GATEWAY_BASE_URL": "sample-api/v1"})
+    assert result.returncode != 0
+    assert "GATEWAY_BASE_URL must begin with http:// or https://" in result.stderr

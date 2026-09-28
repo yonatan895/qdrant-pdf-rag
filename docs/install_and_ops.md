@@ -643,20 +643,17 @@ INSECURE_REGISTRY=false
 # QDRANT_REPLICATION_FACTOR=3
 # QDRANT_WRITE_CONSISTENCY_FACTOR=2
 
-# Authenticated TLS gateway endpoints supplied by the platform team.
-# VLLM_BASE_URL takes the bare server origin (a trailing /v1 is tolerated:
-# the deploy scripts strip it before deriving EMBED_BASE_URL).
-VLLM_BASE_URL=https://gateway.example.test
-EMBED_BASE_URL=https://gateway.example.test/v1
-LLM_BASE_URL=https://gateway.example.test/v1
-EMBED_MODEL=REPLACE_WITH_PLATFORM_EMBED_MODEL
+# Shared authenticated LiteLLM API base; replace this example URL.
+GATEWAY_BASE_URL=https://sample-api/v1
+EMBED_MODEL=embedding-v1
 DENSE_DIM=REPLACE_WITH_PLATFORM_DIMENSION
 EMBED_MODEL_REVISION=REPLACE_WITH_PLATFORM_EMBED_REVISION
-LLM_MODEL_REASONING=REPLACE_WITH_PLATFORM_REASONING_MODEL
+LLM_MODEL_REASONING=code
+# Optional EMBED_BASE_URL/LLM_BASE_URL/RERANK_BASE_URL overrides win over shared.
 
-# Gateway virtual keys: name of ONE operator-created Secret holding the
-# platform team's LiteLLM keys (unset = keyless). Never put key values here.
+# One operator-created Secret, one data-key name. No key value in this file.
 GATEWAY_API_KEY_SECRET=gateway-api-keys
+GATEWAY_API_KEY_SECRET_KEY=api-key
 GATEWAY_CA_CONFIGMAP=gateway-ca
 
 # Optional pull secret name (if registry requires credentials)
@@ -676,6 +673,11 @@ a reranker. Set the actual model IDs and dimensions in `airgap.env`; the example
 placeholders above are not deployment values. Keep reranking disabled unless
 the site explicitly enables it:
 
+All model IDs below may be platform aliases. `GATEWAY_BASE_URL` supplies missing
+per-operation API bases. With `GATEWAY_API_KEY_SECRET_KEY` set, that shared data
+key replaces every per-leg key named in the table; leaving it unset preserves
+legacy Secret layouts.
+
 | Role | URL key | Model key | Notes |
 |---|---|---|---|
 | Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
@@ -691,16 +693,13 @@ export NAMESPACE=mainframe-rag
 oc create namespace "$NAMESPACE" --dry-run=client -o yaml | oc apply -f -
 ```
 
-Create the key Secret **before** `sh scripts/tools/run-task.sh airgap:deploy` (one Secret, four data keys; the contextual-gist key rides the ingest Job):
+Create the key Secret **before** `sh scripts/tools/run-task.sh airgap:deploy`
+(one shared data key as selected above, used by agent and ingest):
 
 ```bash
 # Files are mode 600, supplied through the platform credential process.
-# Include all referenced keys, even when an optional leg is disabled.
 oc -n "$NAMESPACE" create secret generic gateway-api-keys \
-  --from-file=llm-api-key=/secure/gateway/llm-api-key \
-  --from-file=embed-api-key=/secure/gateway/embed-api-key \
-  --from-file=rerank-api-key=/secure/gateway/rerank-api-key \
-  --from-file=context-llm-api-key=/secure/gateway/context-llm-api-key
+  --from-file=api-key=/secure/gateway/api-key
 oc -n "$NAMESPACE" create configmap gateway-ca \
   --from-file=ca-bundle.crt=/secure/gateway/ca-bundle.crt
 ```

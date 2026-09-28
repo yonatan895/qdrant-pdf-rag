@@ -68,10 +68,11 @@ models:
     endpointOrder: score_first
 
 # Single operator-created Secret read via secretKeyRef (D7), or empty for
-# keyless deployments. Data keys are fixed per consumer (agent:
-# llm/embed/rerank-api-key); values never carry key material.
+# keyless deployments. Empty apiKeySecretKey retains the per-leg data keys;
+# set it to reference one shared key for all model operations. No key material.
 gateway:
   apiKeySecretName: ""
+  apiKeySecretKey: ""
   # Optional complete trust bundle ConfigMap (key ca-bundle.crt) in the
   # release namespace; empty disables the mount. Matches wire_gateway_ca.
   caConfigMapName: ""

@@ -14,7 +14,7 @@
 
 enforce_product_rules
 resolve_aliases
-require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION VLLM_BASE_URL
+require_env INTERNAL_REGISTRY NAMESPACE STORAGE_CLASS EMBED_MODEL DENSE_DIM EMBED_MODEL_REVISION EMBED_BASE_URL
 require_embed_revision
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
@@ -80,7 +80,7 @@ if [ "$AGENT_ROUTE" = "true" ]; then
     cp dist/app-helm-render/mainframe-rag/templates/route.yaml dist/agent-route.yaml
 fi
 
-require_secret_keys "${GATEWAY_API_KEY_SECRET:-}" llm-api-key embed-api-key rerank-api-key
+require_gateway_secret_keys llm-api-key embed-api-key rerank-api-key
 require_secret_keys "${PULL_SECRET:-}" .dockerconfigjson
 # Only first-party objects listed by this render may be adopted. Never take
 # resources belonging to a different release/controller. All deployments
