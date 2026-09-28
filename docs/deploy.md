@@ -558,7 +558,7 @@ live in `.github/workflows/e2e.yml`.
   skip). `airgap-acceptance` (main/dispatch): black-box handoff in a fresh
   dir — digest verify, unpack, bootstrap, manifest/SHA assertions, dry-run
   pipeline with standin env passed explicitly, both pull-secret branches.
-  `kind-live-rehearsal` (main/dispatch) is a three-lane matrix described below.
+  `kind-live-rehearsal` (main/dispatch) is a four-lane matrix described below.
   The lab OpenShift rehearsal remains secret-gated, and PRs never touch the lab cluster.
   `airgap-rehearsal` downloads and bootstraps the published bundle; it does not
   independently repack. It retains both outline-message and generic widget
@@ -595,6 +595,7 @@ include actual runner CPU, RAM and disk capacity; cleanup runs even after failur
 | `kind-pipeline` | Authenticated registry, real product containers, real LiteLLM/PostgreSQL, synthetic ingest, search and application streams |
 | `kind-gateway-faults` | TLS/auth, both model legs, malformed/upstream/dimension/timeout/truncated-stream failures through LiteLLM, followed by healthy recovery |
 | `kind-lifecycle` | Three-worker Kind; synthetic snapshot recovery, PVC identity, Qdrant/agent/Jaeger replacement, old trace persistence and repeat pipeline |
+| `kind-shared-gateway` | Same live pipeline/probe/contracts/smoke but through the shared `GATEWAY_BASE_URL` fallback and the single `api-key` Secret data-key (issue #551); explicit per-operation URLs stay unset so fallback is exercised |
 | Manual Windows CRC | Actual SCC, Service CA, OAuth, Routes, node trust/pulls and runtime egress; record the fit outcome and fallback mode separately |
 
 Only computation behind LiteLLM is deterministic in the Kind lanes. The existing
@@ -605,7 +606,11 @@ behavior, not answer quality. The mock, CI deployment helpers and gateway module
 are excluded from application images and production manifests.
 
 The rehearsal now configures **both** embedding and reasoning URLs through the
-real test gateway. Service existence is awaited before readiness checks. Fault
+real test gateway. The `pipeline`, `gateway-faults` and `lifecycle` lanes keep
+explicit per-operation URLs and per-leg Secret keys; the `shared-gateway` lane
+instead sets only `GATEWAY_BASE_URL` and `GATEWAY_API_KEY_SECRET_KEY=api-key`
+(one virtual key for both mock models) so `common.sh` fallback and the shared
+Secret reference are proven live. Service existence is awaited before readiness checks. Fault
 transitions wait for the requested mock state through the actual upstream Service,
 so a rollout's success cannot leave a test hitting the old backend state.
 The gateway's configuration and strict-finish module share a projected volume;
