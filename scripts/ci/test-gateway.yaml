@@ -1,4 +1,4 @@
-# CI-only platform stand-in. Never referenced by production overlays.
+# CI-only platform stand-in. Never referenced by production manifests.
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: test-gateway}

@@ -80,9 +80,9 @@ def test_validate_reports_selected_policy(tree):
 def test_validate_production_preset_supplies_tuple(tree):
     """Issue #360: with no explicit selection the checked-in production
     preset supplies 6/3/2 to preflight (and therefore to the ingest render)."""
-    target = tree / "overlays" / "openshift"
+    target = tree / "scripts" / "airgap"
     target.mkdir(parents=True, exist_ok=True)
-    shutil.copy(REPO / "overlays" / "openshift" / "collection-policy.env", target)
+    shutil.copy(REPO / "scripts" / "airgap" / "collection-policy.env", target)
     r = _run(
         tree,
         {

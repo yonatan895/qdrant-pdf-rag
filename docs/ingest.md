@@ -828,7 +828,7 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   `QDRANT_WRITE_CONSISTENCY_FACTOR`) to creation verbatim. The air-gap
   production default is the checked-in 6/3/2 tuple, and the loader validates
   the complete effective tuple after explicit caller > operator file >
-  `overlays/openshift/collection-policy.env` precedence; a partial override
+  `scripts/airgap/collection-policy.env` precedence; a partial override
   inherits the remaining preset values and local/one-node lanes select 1/1/1
   explicitly. An existing collection
   whose configured values differ from the selected policy refuses before

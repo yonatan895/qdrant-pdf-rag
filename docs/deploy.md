@@ -311,7 +311,7 @@ cannot schedule on one node — proven).
 **Production default (checked in, non-secret):** 6 logical shards,
 replication factor 3, write consistency 2, across the three Qdrant peers,
 applied to both the corpus collection and its paired completion/control
-collection. `overlays/openshift/collection-policy.env` carries the tuple;
+collection. `scripts/airgap/collection-policy.env` carries the tuple;
 `scripts/airgap/common.sh` loads it with explicit caller > operator file >
 preset precedence, and `airgap.env.example` documents concrete values. This
 is the **production default**, distinct from the verifier's stricter
@@ -334,7 +334,10 @@ platform model/gateway tier. Capacity follows: RF=3 stores three physical
 copies of the logical generation plus snapshots and staging, so a peer is
 never sized as one third of the corpus.
 
-**Placement is a hard requirement:** `overlays/openshift/values.yaml` sets
+The deploy launcher refuses a missing or unreadable
+`charts/qdrant-openshift.values.yaml` before running Helm or cluster commands.
+
+**Placement is a hard requirement:** `charts/qdrant-openshift.values.yaml` sets
 required pod anti-affinity across `kubernetes.io/hostname`. A capacity
 squeeze leaves a peer Pending with a diagnostic instead of silently
 colocating. The PDB (`maxUnavailable: 1`) limits voluntary disruption only
@@ -472,8 +475,8 @@ bytes. Combined tag+digest refs are invalid — digest-only form is the pin.
 - `METRICS_ENABLED=true` additionally renders/applies
   the first-party chart ServiceMonitor so the OpenShift UWM stack scrapes
   `/metrics` (prerequisite and sizing in `docs/install_and_ops.md`).
-- The `oc-mirror` config still uses tag form and is otherwise unreferenced
-  (optional path) — reconcile to digests before relying on it.
+- Application transfer uses the signed bundle and verified `skopeo` loading
+  path above; this repository ships no alternate mirroring configuration.
 
 ## 7. CI inventory
 
@@ -693,7 +696,7 @@ snapshot/restore, Task `TASK_*` bridges (pinned equal by
 `validate.sh`/`ingest.sh`, rendered only into the ingest Job (the agent
 never creates collections, so the agent render deliberately excludes them).
 Precedence is explicit caller > operator file > checked-in production default
-(`overlays/openshift/collection-policy.env`, 6/3/2); partial overrides
+(`scripts/airgap/collection-policy.env`, 6/3/2); partial overrides
 inherit the remaining preset values (explicit 1/1/1 is the supported
 one-node profile, never inferred). Values reach
 `Settings` and both collection constructors verbatim; shard defaults are not

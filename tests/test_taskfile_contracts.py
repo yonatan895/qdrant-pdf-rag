@@ -643,7 +643,7 @@ class TaskContractsTests(unittest.TestCase):
         calls = self.tool_calls("helm")
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["argv"], [
-            "template", "qdrant", "charts/qdrant-1.19.0.tgz", "-f", "overlays/openshift/values.yaml",
+            "template", "qdrant", "charts/qdrant-1.19.0.tgz", "-f", "charts/qdrant-openshift.values.yaml",
             "--set", "image.repository=PLACEHOLDER_REGISTRY/qdrant/qdrant",
             "--set", "imagePullSecrets[0].name=PLACEHOLDER_PULL_SECRET",
             "--set", "persistence.storageClassName=PLACEHOLDER_STORAGE_CLASS",

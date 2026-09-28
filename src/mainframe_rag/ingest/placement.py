@@ -42,7 +42,7 @@ POLICY_KEYS = (
 )
 
 # Owner decision for the air-gapped production topology and the explicit
-# single-node profile (both checked in: overlays/openshift/collection-policy.env
+# single-node profile (both checked in: scripts/airgap/collection-policy.env
 # and the explicit rehearsal profiles in .github/workflows/e2e.yml).
 PRODUCTION_POLICY = (6, 3, 2)
 SINGLE_NODE_POLICY = (1, 1, 1)
@@ -122,7 +122,7 @@ def _parse_policy(values: tuple[int | None, int | None, int | None]) -> Placemen
             "collection distribution policy is incomplete (missing: "
             + " ".join(missing)
             + ") — select all three keys; production is 6/3/2 and the one-node "
-            "profile is 1/1/1 (see overlays/openshift/collection-policy.env)"
+            "profile is 1/1/1 (see scripts/airgap/collection-policy.env)"
         )
     shard_number, replication_factor, write_consistency_factor = values
     assert shard_number is not None

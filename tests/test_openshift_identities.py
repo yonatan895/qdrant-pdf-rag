@@ -1,7 +1,6 @@
 """OpenShift must select identities; chart defaults must not reintroduce IDs."""
 from pathlib import Path
 
-import pytest
 import yaml
 
 from tests.helpers_helm import run_new_template
@@ -9,9 +8,8 @@ from tests.helpers_helm import run_new_template
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize('overlay', ['openshift', 'ci'])
-def test_qdrant_removes_chart_identity_defaults(overlay):
-    values = yaml.safe_load((ROOT / 'overlays' / overlay / 'values.yaml').read_text())
+def test_qdrant_removes_chart_identity_defaults():
+    values = yaml.safe_load((ROOT / 'charts' / 'qdrant-openshift.values.yaml').read_text())
     container = values['containerSecurityContext']
     # Explicit null is required: omission inherits the vendored chart's IDs.
     assert container['runAsUser'] is None
@@ -27,7 +25,7 @@ def test_production_qdrant_requires_hard_worker_separation():
     ScheduleAnyway spreading and a PDB are not proof of independent copies;
     a capacity squeeze must leave a peer Pending, never colocated."""
     values = yaml.safe_load(
-        (ROOT / 'overlays' / 'openshift' / 'values.yaml').read_text()
+        (ROOT / 'charts' / 'qdrant-openshift.values.yaml').read_text()
     )
     assert values['replicaCount'] == 3
     assert 'topologySpreadConstraints' not in values

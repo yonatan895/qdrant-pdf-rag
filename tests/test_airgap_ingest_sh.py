@@ -80,9 +80,9 @@ def _run_ingest(tree, *extra_env, policy: tuple[str, str, str] | None = ("1", "1
 def _copy_collection_preset(tree):
     """Place the checked-in production preset in the copied tree."""
     tmp_path, _ = tree
-    target = tmp_path / "overlays" / "openshift"
+    target = tmp_path / "scripts" / "airgap"
     target.mkdir(parents=True, exist_ok=True)
-    shutil.copy(REPO / "overlays" / "openshift" / "collection-policy.env", target)
+    shutil.copy(REPO / "scripts" / "airgap" / "collection-policy.env", target)
 
 
 def test_ingest_dryrun_renders_clean_manifest(ingest_tree):
@@ -655,7 +655,7 @@ def test_production_preset_is_the_owner_decision():
     not an inferred default. Local lanes override it explicitly."""
     from tests.helpers_airgap import REPO as repo
 
-    text = (repo / "overlays" / "openshift" / "collection-policy.env").read_text()
+    text = (repo / "scripts" / "airgap" / "collection-policy.env").read_text()
     for line in (
         "QDRANT_SHARD_NUMBER=6",
         "QDRANT_REPLICATION_FACTOR=3",

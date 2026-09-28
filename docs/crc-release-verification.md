@@ -335,7 +335,7 @@ change** through normal review and a new published-main bundle containing
 the OAuth archive. Editing a downloaded bundle invalidates its signature;
 do not bypass the pending-pin guard.
 
-Use the [Qdrant production values](../overlays/openshift/values.yaml), the
+Use the [Qdrant production values](../charts/qdrant-openshift.values.yaml), the
 [first-party chart](../charts/mainframe-rag), and existing
 rehearsal override hooks. Keep local files outside the bootstrapped checkout.
 Local values for a tiny generated corpus (never production defaults):

@@ -509,7 +509,7 @@ service is required by this workflow.
 ## Vendored Qdrant skills
 
 The complete snapshot is [.agents/skills](../.agents/skills), pinned by
-[vendor/qdrant-skills.sha](../vendor/qdrant-skills.sha). Do not fetch
+[.agents/qdrant-skills-provenance.md](../.agents/qdrant-skills-provenance.md). Do not fetch
 `skills.qdrant.tech`, `/llms.txt`, snippet APIs, Cloud console or `qcloud-cli`.
 A missing required skill needs an owner decision. Frontmatter grants no additional
 permissions. Dedicated pin bumps replace the snapshot at a pinned SHA without

@@ -25,14 +25,14 @@ done
 unset _k _is_set
 
 # Production collection distribution preset (issue #360): the checked-in
-# target topology (6 shards / RF 3 / W 2; overlays/openshift/collection-policy.env).
+# target topology (6 shards / RF 3 / W 2; scripts/airgap/collection-policy.env).
 # Lowest precedence by construction — it loads before the operator env file,
 # while explicit caller values were snapshotted above and are restored after.
 # A tree without the fragment (hermetic fixtures, one-node lanes) must select
 # its own complete policy explicitly.
-if [ -f overlays/openshift/collection-policy.env ]; then
+if [ -f scripts/airgap/collection-policy.env ]; then
     # shellcheck disable=SC1091
-    . overlays/openshift/collection-policy.env
+    . scripts/airgap/collection-policy.env
 fi
 
 die() {
@@ -111,7 +111,7 @@ validate_collection_policy() {
             unset _key _val _missing
             return 0
         fi
-        die "collection distribution policy is incomplete (missing: $_missing) — select all three of QDRANT_SHARD_NUMBER/QDRANT_REPLICATION_FACTOR/QDRANT_WRITE_CONSISTENCY_FACTOR (production preset: 6/3/2 in overlays/openshift/collection-policy.env; one-node rehearsal: 1/1/1 explicitly); see airgap.env.example"
+        die "collection distribution policy is incomplete (missing: $_missing) — select all three of QDRANT_SHARD_NUMBER/QDRANT_REPLICATION_FACTOR/QDRANT_WRITE_CONSISTENCY_FACTOR (production preset: 6/3/2 in scripts/airgap/collection-policy.env; one-node rehearsal: 1/1/1 explicitly); see airgap.env.example"
     fi
     if [ "${QDRANT_WRITE_CONSISTENCY_FACTOR}" -gt "${QDRANT_REPLICATION_FACTOR}" ]; then
         die "QDRANT_WRITE_CONSISTENCY_FACTOR=${QDRANT_WRITE_CONSISTENCY_FACTOR} exceeds QDRANT_REPLICATION_FACTOR=${QDRANT_REPLICATION_FACTOR}: writes could never acknowledge"

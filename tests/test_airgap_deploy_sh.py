@@ -56,9 +56,8 @@ exit 0
 @pytest.fixture
 def tree(tmp_path):
     make_bin_tree(tmp_path, ["common.sh", "deploy.sh", "map_values.py"])
-    (tmp_path / "overlays" / "openshift").mkdir(parents=True, exist_ok=True)
     copy_chart(tmp_path)
-    shutil.copy(REPO / "overlays" / "openshift" / "values.yaml", tmp_path / "overlays" / "openshift")
+    shutil.copy(REPO / "charts" / "qdrant-openshift.values.yaml", tmp_path / "charts")
     shutil.copy(REPO / "images.txt", tmp_path / "images.txt")
     helm_log = tmp_path / "helm-args.log"
     for name in ("helm", "kubectl", "oc"):
@@ -182,6 +181,14 @@ def test_storage_size_knob_covers_persistence_and_snapshot(tree):
     assert "snapshotPersistence.size=1Gi" in log
 
 
+def test_missing_production_values_fails_before_mutation(tree):
+    (tree[0] / "charts" / "qdrant-openshift.values.yaml").unlink()
+    result = _run(tree, ("AIRGAP_DRYRUN", "0"))
+    assert result.returncode != 0
+    assert "required Qdrant values file is missing or unreadable" in result.stderr
+    assert not tree[1].exists(), "no Helm or cluster command may run without base values"
+
+
 def test_missing_extra_values_file_fails_closed(tree):
     r = _run(tree, ("QDRANT_EXTRA_VALUES", "/nonexistent/vals.yaml"))
     assert r.returncode == 1
@@ -196,6 +203,7 @@ def test_extra_values_file_reaches_helm(tree):
     args = _helm_log(tree).splitlines()
     assert str(vals) in args
     assert args[args.index(str(vals)) - 1] == "-f"
+    assert args.index("charts/qdrant-openshift.values.yaml") < args.index(str(vals))
 
 
 def test_rendered_manifest_substituted_and_written(tree):

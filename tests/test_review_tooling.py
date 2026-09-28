@@ -249,10 +249,23 @@ class TestProfileClassification(unittest.TestCase):
 
     def test_classify_scripts_benchmarks_and_ci_mirror_as_tooling(self):
         for path in ("scripts/gate_l1.py", "benchmarks/harness.json", ".gitlab-ci.yml",
-                     "vendor/qdrant-skills.sha"):
+                     ".agents/qdrant-skills-provenance.md"):
             decision = classify_paths([path])
             self.assertEqual(decision.profile, ProfileName.OFFLINE)
             self.assertIn("tooling", decision.matched_categories)
+
+    def test_relocated_production_contracts_keep_ha_and_packaging(self):
+        from scripts.review_tooling import required_lanes
+
+        for path in ("charts/qdrant-openshift.values.yaml",
+                     "scripts/airgap/collection-policy.env"):
+            with self.subTest(path=path):
+                decision = classify_paths([path])
+                manifest = {"profile": decision.profile.value,
+                            "matched_categories": decision.matched_categories,
+                            "changed_paths": [path]}
+                self.assertTrue({"ha", "packaging"} <= required_lanes(manifest))
+                self.assertNotIn("unclassified", decision.matched_categories)
 
     def test_markdown_never_selects_live_services(self):
         # The prose resource boundary is strictly offline even when the file

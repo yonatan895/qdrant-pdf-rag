@@ -20,12 +20,9 @@ build
 tests
 docs
 deploy
-overlays
 charts
-oc-mirror
 .github
 .agents
-vendor
 NOTICE.qdrant-skills
 LICENSE.qdrant-skills
 # CI-only mock server: must never ship inside a prod image (runs from a

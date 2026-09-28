@@ -1260,7 +1260,7 @@ jobs:
           export INTERNAL_REGISTRY
           sh scripts/tools/run-task.sh airgap:load
 
-      - name: airgap-deploy (PROD overlays, helm-knobbed sizes, fail-closed checks)
+      - name: airgap-deploy (production values, helm-knobbed sizes, fail-closed checks)
         env:
           IMAGE_SHA: ${{ env.SHA }}
           EMBED_MODEL: mock-embed

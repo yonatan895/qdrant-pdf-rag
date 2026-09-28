@@ -5,9 +5,12 @@
 #   sh scripts/tools/run-task.sh airgap:deploy
 #
 # Prod Qdrant: 3 replicas / 500Gi RWO block / unprivileged / ClusterIP, no
-# Route (overlays/openshift/values.yaml is never shrunk). No NFS. No Cloud.
+# Route (charts/qdrant-openshift.values.yaml is never shrunk). No NFS. No Cloud.
 
 . "$(dirname -- "$0")/common.sh"
+
+[ -f charts/qdrant-openshift.values.yaml ] && [ -r charts/qdrant-openshift.values.yaml ] ||
+    die "required Qdrant values file is missing or unreadable: charts/qdrant-openshift.values.yaml"
 
 enforce_product_rules
 resolve_aliases
@@ -139,7 +142,7 @@ fi
 echo "==> Helm: Qdrant from the vendored chart with PROD values"
 set -- helm upgrade -i "$QDRANT_RELEASE" "$CHART" \
     -n "$NAMESPACE" \
-    -f overlays/openshift/values.yaml \
+    -f charts/qdrant-openshift.values.yaml \
     --set "image.repository=$INTERNAL_REGISTRY/qdrant/qdrant" \
     --set "image.tag=$QDRANT_TAG" \
     --set "persistence.storageClassName=$STORAGE_CLASS" \

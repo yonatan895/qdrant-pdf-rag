@@ -636,7 +636,7 @@ RERANK_ENABLED=false
 INSECURE_REGISTRY=false
 
 # Collection distribution policy (issue #360): the checked-in production
-# preset overlays/openshift/collection-policy.env supplies 6 shards / RF 3 /
+# preset scripts/airgap/collection-policy.env supplies 6 shards / RF 3 /
 # W 2 when these are unset. A one-node rehearsal must select 1/1/1
 # explicitly (never infer a downgrade). Values here win over the preset.
 # QDRANT_SHARD_NUMBER=6
@@ -809,7 +809,7 @@ Do not grant `anyuid`, substitute another project's IDs, or hide security
 changes in `QDRANT_EXTRA_VALUES`.
 
 #### Qdrant Inter-Node Gossip (p2p TLS) Note
-In `overlays/openshift/values.yaml`, `config.cluster.p2p.enable_tls: false` is set because cluster gossip is plaintext on the CNI; we do not mount `./tls/cert.pem` (avoiding crashloops on startup).
+In `charts/qdrant-openshift.values.yaml`, `config.cluster.p2p.enable_tls: false` is set because cluster gossip is plaintext on the CNI; we do not mount `./tls/cert.pem` (avoiding crashloops on startup).
 
 Verify pod statuses and readiness:
 ```bash
