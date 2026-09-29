@@ -406,8 +406,11 @@ of the four named transport/lifecycle tests exactly once: live contracts and a
 fresh trace, fixed overlong error, buffered/streamed final integrity, and upstream
 cancellation followed by a successful ordinary request. Scripted refusal checks
 propagation and citation labeling, not semantic model security or quality.
-`eval_retrieval` remains missing until an approved runner, model endpoint and
-evaluation corpus are supplied; mock probes cannot satisfy it. A review comment
+`eval_retrieval` is supplied by the dedicated `ci.yml` `eval-retrieval`
+producer, which runs the same `scripts/gate_l1.py` L1 retrieval eval the gate
+lane runs (synthetic fixtures, disposable Qdrant, hash-mode pipeline integrity:
+ingest, indexing, prefetch filters, RRF, scoring — not live-model semantic
+quality). Its receipt carries the structured per-class report. A review comment
 never supplies execution evidence or waives a lane.
 
 Evaluation code under `src/mainframe_rag/eval/` is tooling, including code moved

@@ -3465,3 +3465,174 @@ class TestVerifierUpdateDecision(unittest.TestCase):
                     self.assertNotIn('/actions/workflows/verifier-update.yml', api.writes[-1]['output']['summary'])
                 else:
                     self.assertIn('/actions/workflows/verifier-update.yml', api.writes[-1]['output']['summary'])
+
+
+class TestEvalRetrievalProducer(unittest.TestCase):
+    """The eval_retrieval lane has a native CI producer (ci.yml eval-retrieval
+    job running scripts/gate_l1.py). These tests pin the receipt binding and
+    the collection into lane statuses."""
+
+    def _eval_receipt(self, candidate, policy_sha256, producer_sha256, results):
+        import hashlib
+
+        raw = json.dumps(results).encode()
+        return {
+            "schema_version": 1, "repository": candidate["repository"],
+            "repository_id": candidate["repository_id"], "pull_request": candidate["number"],
+            "head_sha": candidate["head_sha"], "base_sha": candidate["base_sha"],
+            "execution_sha": candidate["execution_sha"],
+            "execution_parents": [candidate["base_sha"], candidate["head_sha"]],
+            "event": "pull_request", "run_id": 123, "run_attempt": 2,
+            "job_key": "eval-retrieval", "job_name": "eval-retrieval", "lane": "eval_retrieval",
+            "actor_id": 7, "triggering_actor": "synthetic",
+            "workflow_ref": "synthetic/repository/.github/workflows/ci.yml@refs/pull/3/merge",
+            "workflow_sha": candidate["execution_sha"],
+            "policy_sha256": policy_sha256, "producer_sha256": producer_sha256,
+            "evidence_kind": "execution", "passed": True, "exit_code": 0, "tests": None,
+            "result_sha256": hashlib.sha256(raw).hexdigest(),
+        }, raw
+
+    def test_eval_retrieval_receipt_normalizes_to_success(self):
+        import hashlib
+        import io
+        import zipfile
+
+        from scripts.acceptance_evidence import PRODUCERS, normalize_native
+
+        args, _, _ = TestNativeEvidenceConsumer().fixture()
+        producer = next(p for p in PRODUCERS if p.lane == "eval_retrieval")
+        self.assertEqual((producer.workflow, producer.job, producer.artifact, producer.kind),
+                         ("ci.yml", "eval-retrieval", "eval-retrieval", "execution"))
+        self.assertTrue(producer.structured)
+        args["producer"] = producer
+        args["job"]["name"] = "eval-retrieval"
+        args["artifact"]["name"] = "evidence-eval-retrieval-attempt-2"
+        candidate = args["candidate"]
+        report = {"n": 121, "scored": 108, "failures": 0, "recall@5": 1.0, "mrr": 0.995}
+        receipt, raw = self._eval_receipt(candidate, args["policy_digest"], args["producer_digest"], report)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("evidence.json", json.dumps(receipt))
+            archive.writestr("results.json", raw)
+        args["archive"] = buffer.getvalue()
+        args["artifact"]["digest"] = "sha256:" + hashlib.sha256(args["archive"]).hexdigest()
+        result = normalize_native(**args)
+        self.assertEqual((result["lane"], result["status"]), ("eval_retrieval", "success"))
+        self.assertEqual(result["results"]["recall@5"], 1.0)
+        # A receipt mislabeled to another lane must not satisfy this producer.
+        args["archive"] = buffer.getvalue()
+        tampered = dict(receipt, lane="gate_l1")
+        tampered_buffer = io.BytesIO()
+        with zipfile.ZipFile(tampered_buffer, "w") as archive:
+            archive.writestr("evidence.json", json.dumps(tampered))
+            archive.writestr("results.json", raw)
+        args["archive"] = tampered_buffer.getvalue()
+        args["artifact"]["digest"] = "sha256:" + hashlib.sha256(args["archive"]).hexdigest()
+        with self.assertRaises(ValueError):
+            normalize_native(**args)
+
+    def test_collect_native_maps_eval_retrieval_job_to_lane_success(self):
+        import hashlib
+        import io
+        import zipfile
+
+        from scripts.acceptance import VERIFICATION_INPUTS, collect_native
+
+        candidate = {"repository": "synthetic/repository", "repository_id": 42, "number": 3,
+                     "head_sha": "a" * 40, "base_sha": None, "execution_sha": "c" * 40,
+                     "head_repository_id": 84}
+        run = {"id": 123, "run_attempt": 2, "event": "pull_request", "path": ".github/workflows/ci.yml",
+               "head_sha": "a" * 40, "status": "completed", "repository": {"id": 42, "full_name": "synthetic/repository"},
+               "head_repository": {"id": 84}, "actor": {"id": 7}, "triggering_actor": {"login": "synthetic"}}
+        commit = {"sha": "c" * 40, "parents": [{"sha": None}, {"sha": "a" * 40}],
+                  "commit": {"tree": {"sha": "1" * 40}}}
+        jobs = [{"id": 456 + i, "run_id": 123, "run_attempt": 2, "head_sha": "a" * 40,
+                 "name": name, "status": "completed", "conclusion": "success"}
+                for i, name in enumerate(("gate-l1", "eval-retrieval"))]
+        lanes = {"gate-l1": "gate_l1", "eval-retrieval": "eval_retrieval"}
+        results = {"gate_l1": {"verdict": "pass"}, "eval_retrieval": {"n": 121, "failures": 0}}
+        archives = {}
+        artifacts = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "scripts").mkdir()
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "scripts/review_tooling.py").write_bytes(b"approved policy")
+            (root / "scripts/ci_evidence.py").write_bytes(b"approved producer")
+            from scripts.acceptance_evidence import PRODUCERS
+            for workflow in {p.workflow for p in PRODUCERS}:
+                (root / ".github/workflows" / workflow).write_bytes(b"approved workflow")
+            for relative in (*VERIFICATION_INPUTS, "taskfiles/quality.yml"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if not path.exists():
+                    path.write_bytes(b"approved verifier input")
+            def git(*args):
+                return subprocess.check_output(["git", *args], cwd=root, text=True,
+                                               stderr=subprocess.DEVNULL).strip()
+            git("init", "-b", "main")
+            git("config", "user.name", "Synthetic Test")
+            git("config", "user.email", "synthetic@example.invalid")
+            git("add", ".")
+            git("commit", "-m", "approved base")
+            base = git("rev-parse", "HEAD")
+            candidate["base_sha"] = base
+            commit["parents"][0]["sha"] = base
+            policy_sha256 = hashlib.sha256(b"approved policy").hexdigest()
+            producer_sha256 = hashlib.sha256(b"approved producer").hexdigest()
+            aid = 789
+            for job in jobs:
+                lane = lanes[job["name"]]
+                receipt, raw = self._eval_receipt(
+                    {**candidate, "number": 3}, policy_sha256, producer_sha256, results[lane])
+                receipt.update(job_key=job["name"], job_name=job["name"], lane=lane)
+                buffer = io.BytesIO()
+                with zipfile.ZipFile(buffer, "w") as archive:
+                    archive.writestr("evidence.json", json.dumps(receipt))
+                    archive.writestr("results.json", raw)
+                blob = buffer.getvalue()
+                archives[aid] = blob
+                artifacts.append({"id": aid, "expired": False,
+                                  "name": f"evidence-{job['name']}-attempt-2",
+                                  "size_in_bytes": len(blob),
+                                  "digest": "sha256:" + hashlib.sha256(blob).hexdigest(),
+                                  "workflow_run": {"id": 123, "repository_id": 42,
+                                                   "head_repository_id": 84, "head_sha": "a" * 40}})
+                aid += 1
+            pr = {"number": 3, "user": {"id": 99}, "state": "open", "mergeable": True,
+                  "merge_commit_sha": "c" * 40,
+                  "head": {"sha": "a" * 40, "repo": {"id": 84}},
+                  "base": {"sha": base, "ref": "main",
+                           "repo": {"id": 42, "full_name": "synthetic/repository", "default_branch": "main"}}}
+            class API:
+                repository = "synthetic/repository"
+                prefix = "repos/synthetic/repository/"
+                def get(self, endpoint):
+                    if endpoint.endswith("git/ref/heads/main"):
+                        return {"ref": "refs/heads/main",
+                                "object": {"type": "commit", "sha": base}}
+                    if "actions/workflows/verifier-update.yml/runs?" in endpoint:
+                        return {"total_count": 0, "workflow_runs": []}
+                    if "actions/runs?" in endpoint:
+                        return {"total_count": 1, "workflow_runs": [run]}
+                    if endpoint.endswith("/jobs?per_page=100&page=1"):
+                        return {"total_count": len(jobs), "jobs": jobs}
+                    if endpoint.endswith("/artifacts?per_page=100&page=1"):
+                        return {"total_count": len(artifacts), "artifacts": artifacts}
+                    if "/commits/" in endpoint:
+                        return commit
+                    return run
+                def raw(self, endpoint):
+                    aid = int(endpoint.rstrip("/").rsplit("/", 2)[-2])
+                    return archives[aid]
+                def blob(self, sha, path):
+                    if path == "scripts/ci_evidence.py":
+                        return b"approved producer"
+                    if path == "scripts/review_tooling.py":
+                        return b"approved policy"
+                    if path in VERIFICATION_INPUTS or path.startswith("taskfiles/"):
+                        return (root / path).read_bytes()
+                    return b"approved workflow"
+            result = collect_native(API(), pr, root)
+            self.assertEqual(result["lane_statuses"].get("gate_l1"), "success")
+            self.assertEqual(result["lane_statuses"].get("eval_retrieval"), "success")

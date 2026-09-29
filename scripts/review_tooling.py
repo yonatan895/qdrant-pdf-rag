@@ -802,8 +802,8 @@ LANE_REQUIREMENTS_BY_PROFILE: dict[str, set[str]] = {
     ProfileName.FULL.value: {"context_check", "lint_and_types", "unit_tests", "simulation", "gate_l1"},
 }
 
-# Technical obligations stay required when selected, including lanes whose
-# native producers are not yet wired. A human review is not CI evidence.
+# Technical obligations stay required when selected. Every known lane has a
+# native CI producer; a human review is not CI evidence.
 ALL_KNOWN_LANES = [
     "context_check",
     "lint_and_types",
