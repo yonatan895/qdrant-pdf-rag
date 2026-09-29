@@ -14,6 +14,8 @@ verify before writing the new completion.
 
 from __future__ import annotations
 
+# DISPOSABLE #411 DEMO (never merge): comment-only touch so the selector
+# assigns the storage profile and the gate_l1 lane runs on this PR.
 import argparse
 import concurrent.futures
 import json
