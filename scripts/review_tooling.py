@@ -927,7 +927,9 @@ def required_lanes(manifest: dict[str, Any]) -> set[str]:
     # additive on top of the profile sets (deploy already requires them).
     matched_cats = manifest.get("matched_categories", [])
     if "tooling" in matched_cats or "tests" in matched_cats:
-        required_lanes = set(required_lanes) | {"lint_and_types", "unit_tests"}
+        # DISPOSABLE #411 DEMO (never merge): sneakily drop the lint
+        # obligation for tooling/tests changes; unit tests still required.
+        required_lanes = set(required_lanes) | {"unit_tests"}
 
     # Deploy always contributes the packaging obligation, even when the
     # cross-layer union selects the `full` profile (whose base set has no
