@@ -20,6 +20,7 @@ check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
 check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
 resolve_otel_endpoint
+resolve_bundle_choices
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -70,10 +71,10 @@ cat dist/app-helm-render/mainframe-rag/templates/*.yaml > dist/agent-rendered.ya
 fail_on_placeholders dist/agent-rendered.yaml agent
 check_agent_qdrant_key dist/agent-rendered.yaml agent
 rm -f dist/jaeger-rendered.yaml dist/servicemonitor-rendered.yaml dist/agent-route.yaml
-if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+if [ "$JAEGER_DEPLOY" = "1" ]; then
     cat dist/app-helm-render/mainframe-rag/templates/jaeger-*.yaml > dist/jaeger-rendered.yaml
 fi
-if [ "${METRICS_ENABLED:-false}" = "true" ]; then
+if [ "$SERVICEMONITOR_DEPLOY" = "1" ]; then
     cp dist/app-helm-render/mainframe-rag/templates/servicemonitor.yaml dist/servicemonitor-rendered.yaml
 fi
 if [ "$AGENT_ROUTE" = "true" ]; then
@@ -94,7 +95,7 @@ if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     # inventory selected for removal. Failed discovery/reads stop deployment.
     _app_apis=$($KC api-resources -o name) || die "cannot discover optional application APIs"
     set --
-    if [ "$OTEL_TRACING_ENABLED" != "1" ]; then
+    if [ "$JAEGER_DEPLOY" != "1" ]; then
         set -- "$@" deployment.apps/jaeger service/jaeger configmap/jaeger-config
     fi
     if [ "$AGENT_ROUTE" != "true" ]; then
@@ -103,7 +104,7 @@ if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
             set -- "$@" route.route.openshift.io/rag-agent
         fi
     fi
-    if [ "${METRICS_ENABLED:-false}" != "true" ]; then
+    if [ "$SERVICEMONITOR_DEPLOY" != "1" ]; then
         if printf '%s\n' "$_app_apis" | grep -qx 'servicemonitors.monitoring.coreos.com'; then
             set -- "$@" servicemonitor.monitoring.coreos.com/rag-agent
         fi

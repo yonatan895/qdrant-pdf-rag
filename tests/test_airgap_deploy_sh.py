@@ -742,3 +742,46 @@ def test_invalid_shared_gateway_key_refuses_before_commands(tree, key, secret):
     assert result.returncode != 0
     assert "GATEWAY_API_KEY_SECRET_KEY" in result.stderr
     assert not tree[1].exists()
+
+
+# --------------------------------- Decoupled backends (issue #529 OBS-2)
+
+
+def test_jaeger_explicit_false_skips_backend_but_keeps_export(tree):
+    r = _run(tree, ("JAEGER_ENABLED", "false"))
+    assert r.returncode == 0, r.stderr
+    assert not (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://jaeger:4318"
+
+
+def test_jaeger_explicit_true_with_tracing_on(tree):
+    r = _run(tree, ("JAEGER_ENABLED", "true"))
+    assert r.returncode == 0, r.stderr
+    assert (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
+
+
+def test_jaeger_true_with_tracing_off_fails_closed(tree):
+    r = _run(tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"), ("JAEGER_ENABLED", "true"))
+    assert r.returncode != 0
+    assert "JAEGER_ENABLED=true requires tracing" in r.stderr
+
+
+def test_jaeger_garbage_fails_closed(tree):
+    r = _run(tree, ("JAEGER_ENABLED", "maybe"))
+    assert r.returncode != 0
+    assert "JAEGER_ENABLED must be true/false" in r.stderr
+
+
+def test_monitor_decoupled_from_exposition(tree):
+    r = _run(tree, ("METRICS_ENABLED", "true"), ("SERVICEMONITOR_ENABLED", "false"))
+    assert r.returncode == 0, r.stderr
+    assert not (tree[0] / "dist" / "servicemonitor-rendered.yaml").exists()
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert rendered_env(rendered, "agent")["METRICS_ENABLED"] == "true"
+
+
+def test_monitor_true_with_metrics_off_fails_closed(tree):
+    r = _run(tree, ("SERVICEMONITOR_ENABLED", "true"))
+    assert r.returncode != 0
+    assert "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true" in r.stderr

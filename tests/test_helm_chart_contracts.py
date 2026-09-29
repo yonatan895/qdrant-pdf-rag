@@ -577,3 +577,71 @@ def test_direct_peers_are_typed_and_ingest_only():
     rejected = _helm_template_with_values(values)
     assert rejected.returncode != 0
     assert "peerUrls" in rejected.stderr
+
+
+def _jaeger_keys(docs):
+    return {k for k in docs if k[1] in ("jaeger", "jaeger-badger", "jaeger-config")}
+
+
+def test_jaeger_decoupled_from_export():
+    """OBS-2 item 3: external export without the bundled backend. The
+    endpoint stays wired while every Jaeger object disappears."""
+    new = run_new_template({"tracing": {"jaeger": {"enabled": False}}})
+    assert _jaeger_keys(new) == set()
+    env = env_map(new["Deployment", "rag-agent"])
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://jaeger:4318"
+
+
+def test_jaeger_explicit_true_with_tracing_on():
+    """OBS-2 item 3: redundant-but-valid override keeps the backend."""
+    new = run_new_template({"tracing": {"jaeger": {"enabled": True}}})
+    assert ("Deployment", "jaeger") in new
+    assert ("Service", "jaeger") in new
+
+
+def test_jaeger_enabled_with_tracing_off_fails():
+    """OBS-2 item 3: a bundled backend nothing exports to is rejected
+    before mutation, not deployed idle."""
+    values = base_values()
+    values["tracing"]["enabled"] = False
+    values["tracing"]["jaeger"] = {"enabled": True}
+    raw = _helm_template_with_values(values)
+    assert raw.returncode != 0
+    assert "tracing.jaeger.enabled=true requires tracing.enabled=true" in raw.stderr
+
+
+def test_jaeger_string_override_rejected_by_schema():
+    """OBS-2 item 3: explicit overrides are booleans, not truthy strings."""
+    values = base_values()
+    values["tracing"]["jaeger"] = {"enabled": "false"}
+    raw = _helm_template_with_values(values)
+    assert raw.returncode != 0
+    assert "tracing/jaeger/enabled" in raw.stderr
+
+
+def test_servicemonitor_decoupled_from_exposition():
+    """OBS-2 item 3: exposition without the monitor (platform-UWM modes).
+    METRICS_ENABLED stays true while the object disappears."""
+    new = run_new_template({"metrics": {"enabled": True, "serviceMonitor": {"enabled": False}}})
+    assert ("ServiceMonitor", "rag-agent") not in new
+    assert env_map(new["Deployment", "rag-agent"])["METRICS_ENABLED"]["value"] == "true"
+
+
+def test_servicemonitor_enabled_with_metrics_off_fails():
+    """OBS-2 item 3: monitoring a disabled endpoint is rejected."""
+    values = base_values()
+    values["metrics"]["serviceMonitor"] = {"enabled": True}
+    raw = _helm_template_with_values(values)
+    assert raw.returncode != 0
+    assert "metrics.serviceMonitor.enabled=true requires metrics.enabled=true" in raw.stderr
+
+
+def test_omitted_subflags_preserve_historical_coupling():
+    """OBS-2 item 3: omitted new options change nothing — tracing on keeps
+    Jaeger, metrics off keeps no monitor, and the default values validate."""
+    new = run_new_template({})
+    assert ("Deployment", "jaeger") in new
+    assert ("ServiceMonitor", "rag-agent") not in new
+    off = run_new_template({"tracing": {"enabled": False, "endpoint": ""}})
+    assert _jaeger_keys(off) == set()
+    assert off["Deployment", "rag-agent"] is not None

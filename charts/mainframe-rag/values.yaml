@@ -83,6 +83,14 @@ tracing:
   # Jaeger resources. Custom collectors set a full http(s) URL.
   enabled: true
   endpoint: http://jaeger:4318
+  jaeger:
+    # Bundled Jaeger all-in-one backend (issue #529 OBS-2). Null (default)
+    # follows tracing.enabled, preserving the historical coupling. Set false
+    # to export to an external collector without the bundled backend;
+    # setting true while tracing.enabled is false is rejected (a backend
+    # nothing exports to). Explicit values must be booleans, not truthy
+    # strings (enforced by values.schema.json).
+    enabled: null
   # Optional deploy identity; empty renders an empty string (no attribute).
   deploymentEnvironment: ""
   # Optional service name; empty strips the entry entirely so the agent
@@ -93,6 +101,13 @@ metrics:
   # False renders METRICS_ENABLED="false" (/metrics 404s) and skips the
   # ServiceMonitor. True serves exposition and renders the monitor for UWM.
   enabled: false
+  serviceMonitor:
+    # UWM ServiceMonitor for the agent /metrics (issue #529 OBS-2). Null
+    # (default) follows metrics.enabled. Set false to serve exposition
+    # without the monitor (e.g. platform-UWM scrape modes); setting true
+    # while metrics.enabled is false is rejected (a monitor for a disabled
+    # endpoint). Explicit values must be booleans, not truthy strings.
+    enabled: null
 
 # Operator console selection (issue #479). True preserves the existing
 # default (UI_ENABLED="true", /ui served). False renders
