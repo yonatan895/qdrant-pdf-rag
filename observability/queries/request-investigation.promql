@@ -1,0 +1,32 @@
+# Request-investigation queries for #529 OBS-3 (backend-independent slice).
+# Each query was verified against live dev-stack exposition: every metric
+# name and label key exists on the wire, histogram cumulativity holds, and
+# the aggregation math was recomputed over parsed exposition
+# (answer error share 1/2, search avg hits 8.0, search p95 inside the 0.5s
+# bucket). No Prometheus runs in dev, so these were not executed by an
+# engine — re-run verbatim once a qualified backend scrapes /metrics.
+# Conventions: 5m rate windows; `verification_state=""` matches unclassified
+# series (the key is always emitted); never filter on label presence.
+
+# M1 request rate by endpoint and outcome (the countable signal; alerts build here)
+sum by (endpoint, outcome) (rate(rag_requests_total[5m]))
+
+# M2 error share by endpoint (starts every failed-request investigation;
+# framework 422s appear here with no corresponding trace)
+sum by (endpoint) (rate(rag_requests_total{outcome!="ok"}[5m]))
+  / sum by (endpoint) (rate(rag_requests_total[5m]))
+
+# M3 latency p50/p95/p99 by endpoint, seconds (buckets cover the 300s answer tail)
+histogram_quantile(0.50, sum by (endpoint, le) (rate(rag_request_duration_seconds_bucket[5m])))
+histogram_quantile(0.95, sum by (endpoint, le) (rate(rag_request_duration_seconds_bucket[5m])))
+histogram_quantile(0.99, sum by (endpoint, le) (rate(rag_request_duration_seconds_bucket[5m])))
+
+# M4 mean retrieved hits by endpoint (hits has no outcome label by design)
+sum by (endpoint) (rate(rag_retrieval_hits_sum[5m]))
+  / sum by (endpoint) (rate(rag_retrieval_hits_count[5m]))
+
+# M5 time-to-first-token p95 by model, milliseconds (model is the only label)
+histogram_quantile(0.95, sum by (model, le) (rate(rag_llm_ttft_milliseconds_bucket[5m])))
+
+# M6 answer verification-state breakdown (quality split; "" = state unknown)
+sum by (verification_state) (rate(rag_requests_total{endpoint="answer"}[5m]))
