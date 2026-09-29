@@ -15,6 +15,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from opentelemetry import trace
+from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, ConfigDict
 from qdrant_client import models
 
@@ -26,11 +27,12 @@ from mainframe_rag.retrieve.filters import build_filter, build_scope_filter, par
 from mainframe_rag.retrieve.rewrite import expand_query, should_rewrite
 from mainframe_rag.retrieve.screen import screen_query
 from mainframe_rag.retrieve.split import split_query
-from mainframe_rag.tracing import start_as_current_span
+from mainframe_rag.tracing import bind_module_tracer, start_as_current_span
 
 # Proxy tracer: no-op until a real provider is installed (issue #83 — the
 # agent's lifespan installs one when OTEL_EXPORTER_OTLP_ENDPOINT is set).
 tracer = trace.get_tracer("mainframe-rag.retrieve")
+bind_module_tracer(__name__, "tracer", "mainframe-rag.retrieve")
 
 PREFETCH_LIMIT = 40
 RRF_K = 2
@@ -632,7 +634,9 @@ async def async_search(
         # request for the duration of the embed call (review S1).
         with start_as_current_span(
             tracer,
-            "retrieve.embed", attributes={"rag.embedder": type(embedder).__name__}
+            "retrieve.embed",
+            kind=SpanKind.CLIENT,
+            attributes={"rag.embedder": type(embedder).__name__},
         ):
             t0 = time.monotonic()
             # One embed per retrieval leg, sequential (parity over fan-out;
@@ -647,6 +651,7 @@ async def async_search(
         with start_as_current_span(
             tracer,
             "retrieve.prefetch",
+            kind=SpanKind.CLIENT,
             attributes={
                 "rag.batch": hasattr(client, "query_batch_points"),
                 "rag.prefetch_limit": prefetch_limit,
@@ -737,7 +742,9 @@ async def async_search(
             # offload like the embed leg above (review S1).
             with start_as_current_span(
                 tracer,
-                "retrieve.rerank", attributes={"rag.candidates": len(fused)}
+                "retrieve.rerank",
+                kind=SpanKind.CLIENT,
+                attributes={"rag.candidates": len(fused)},
             ) as rr_span:
                 fusion_alpha = settings.rerank_fusion_alpha if settings else 1.0
                 reranked = await asyncio.to_thread(

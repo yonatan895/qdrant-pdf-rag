@@ -22,6 +22,7 @@ from opentelemetry import trace
 from mainframe_rag.agent.zowe_mcp import ZoweMCPError
 from mainframe_rag.ports import ZoweMCP
 from mainframe_rag.retrieve.screen import screen_query
+from mainframe_rag.tracing import bind_module_tracer
 
 if TYPE_CHECKING:
     from mainframe_rag.config import Settings
@@ -30,6 +31,7 @@ log = logging.getLogger("agent")
 
 # Proxy tracer: upgrades via the global provider like every other module.
 tracer = trace.get_tracer("mainframe-rag.agent")
+bind_module_tracer(__name__, "tracer", "mainframe-rag.agent")
 
 _JOB_ID_RE = re.compile(r"\bJOB\d{5}\b", re.IGNORECASE)
 _JES_WORD_RE = re.compile(r"\bJES\b", re.IGNORECASE)

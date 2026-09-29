@@ -878,3 +878,59 @@ def test_truncation_alert_detail_is_fixed_vocabulary():
     rogue_detail = truncation_alert_detail(rogue)
     assert rogue_detail == "unknown truncation (TruncatedStreamError)"
     assert "SECRET-TEXT" not in rogue_detail
+
+
+@pytest.fixture
+def blast_client(monkeypatch, synthetic_pdf, servable_representation_gate):
+    """LLM stream yields tokens, then raises a non-truncation error after
+    headers are committed: the wire shape is a fixed error event, never a
+    final, and the request leaves exactly one terminal observation."""
+
+    class BlastLLM:
+        async def chat_stream(self, messages, *args, **kwargs):
+            yield {"type": "token", "delta": "Partial ", "token": "Partial ", "ttft_ms": 12}
+            raise RuntimeError("boom after headers")
+
+        def chat(self, *a, **kw):
+            raise AssertionError("non-stream chat must not run on the stream path")
+
+    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
+    yield from _client(monkeypatch, synthetic_pdf, BlastLLM())
+
+
+def test_v1_answer_stream_post_header_exception_single_observation(blast_client, monkeypatch):
+    """OBS-1B: an exception after headers yields error-without-final with a
+    fixed error frame. The single terminal observation rides the same
+    terminal/red_recorded path the truncation legs prove under load; the
+    SERVER span ends ERROR carrying only the error type."""
+    import json as json_mod
+
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(app_mod, "tracer", provider.get_tracer("blast-test"))
+    resp = blast_client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
+    assert resp.status_code == 200
+    events = _answer_sse_events(resp.text)
+    kinds = [kind for kind, _ in events]
+    assert "token" in kinds
+    assert "error" in kinds
+    assert "final" not in kinds
+    # Tokens already sent are provisional output; the terminal error frame
+    # itself carries only the fixed contract (no response text).
+    error_data = [data for kind, data in events if kind == "error"]
+    assert len(error_data) == 1
+    assert "Partial" not in json.dumps(error_data[0])
+    roots = [s for s in exporter.get_finished_spans() if s.name == "v1.answer"]
+    assert len(roots) == 1
+    assert roots[0].end_time is not None
+    assert roots[0].status.status_code.name == "ERROR"
+    assert "boom after headers" not in json_mod.dumps(
+        {"attrs": dict(roots[0].attributes),
+         "events": [(e.name, dict(e.attributes)) for e in (roots[0].events or [])],
+         "status": roots[0].status.description}
+    )

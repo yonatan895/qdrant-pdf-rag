@@ -1191,3 +1191,25 @@ def test_ui_form_normalizes_current_message_with_real_history(ui_client, htmx):
     assert prompt[1].content == "Earlier question"
     assert prompt[2].content == "Earlier answer"
     assert "Question: What does IEA500I mean?\n" in prompt[-1].content
+
+
+def test_ui_chat_root_is_server_and_ends(ui_client, monkeypatch):
+    """OBS-1B §4.3: the console turn runs under a SERVER root that ends."""
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import SpanKind
+
+    from mainframe_rag.agent import answer_core as answer_core_mod
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(app_mod, "tracer", provider.get_tracer("ui-test"))
+    monkeypatch.setattr(answer_core_mod, "tracer", provider.get_tracer("ui-test"))
+    resp = ui_client.post("/ui/chat", data={"message": "What is IEA500I?", "messages": ""})
+    assert resp.status_code == 200
+    roots = [s for s in exporter.get_finished_spans() if s.name == "ui.chat"]
+    assert len(roots) == 1
+    assert roots[0].kind == SpanKind.SERVER
+    assert roots[0].end_time is not None

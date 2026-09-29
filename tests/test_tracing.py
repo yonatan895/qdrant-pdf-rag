@@ -746,3 +746,182 @@ def test_bearer_headers_trims_key_without_propagation_context():
 
     assert bearer_auth_headers("  sk-x\n") == {"Authorization": "Bearer sk-x"}
     assert bearer_auth_headers("   ") == {}
+
+
+# ---------------------------------------------------------------- OBS-1B tree
+
+
+def test_server_client_kinds_and_parentage(client):
+    """OBS-1B §4.3: admitted HTTP work runs under a SERVER root; outbound
+    legs are CLIENT children of it; local stages stay INTERNAL."""
+    from opentelemetry.trace import SpanKind
+
+    c, exporter = client
+    resp = c.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp.status_code == 200
+    by_name = _spans(exporter)
+    root = by_name["v1.answer"][0]
+    assert root.kind == SpanKind.SERVER
+    llm = by_name["llm.chat"][0]
+    assert llm.kind == SpanKind.CLIENT
+    assert llm.parent.span_id == root.context.span_id
+    prompt = by_name["prompt.build"][0]
+    assert prompt.kind == SpanKind.INTERNAL
+    assert prompt.parent.span_id == root.context.span_id
+
+    chat_resp = c.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "IEA500I"}]},
+    )
+    assert chat_resp.status_code == 200
+    by_name = _spans(exporter)
+    chat_root = [s for s in by_name["v1.chat"] if s.kind == SpanKind.SERVER]
+    assert chat_root, "expected a SERVER v1.chat root"
+
+
+def test_retrieve_stage_kinds():
+    """OBS-1B §4.3: embed/prefetch/rerank are CLIENT outbound legs under
+    the INTERNAL retrieve.search stage."""
+    from opentelemetry.trace import SpanKind
+
+    reranker = MockReranker()
+    fake = FakeQdrant(dense=[_point("a")], sparse=[_point("b")])
+    (_hits, _kind, _timings), exporter = _run_and_collect(
+        search, fake, FakeEmbedder(), "mainframe_manuals", "sizing the lookaside facility",
+        limit=5, reranker=reranker,
+    )
+    by_name = _spans(exporter)
+    assert by_name["retrieve.search"][0].kind == SpanKind.INTERNAL
+    for name in ("retrieve.embed", "retrieve.prefetch", "retrieve.rerank"):
+        span = by_name[name][0]
+        assert span.kind == SpanKind.CLIENT
+        assert span.parent.span_id == by_name["retrieve.search"][0].context.span_id
+
+
+def test_search_root_covers_length_rejection(client):
+    """OBS-1B §4.3: the SERVER span starts before the fail-fast gates, so a
+    422 rejection is covered by the trace and ends unset (client fault)."""
+    c, exporter = client
+    resp = c.post("/v1/search", json={"query": "Q" * 2001})
+    assert resp.status_code == 422
+    roots = _spans(exporter).get("v1.search", [])
+    assert len(roots) == 1
+    assert roots[0].kind == trace.SpanKind.SERVER
+    assert roots[0].status.status_code == trace.StatusCode.UNSET
+
+
+def test_serving_refusal_marks_server_span(client, monkeypatch):
+    """OBS-1B §4.3: a 5xx-class gate failure marks the SERVER span; the
+    error handler still records the single terminal observation."""
+    from mainframe_rag.agent.app import AppError
+
+    async def refused():
+        raise AppError(503, "representation_unavailable", "unavailable")
+
+    monkeypatch.setattr(app_mod, "serving_settings", refused)
+    c, exporter = client
+    resp = c.post("/v1/search", json={"query": "IEA500I"})
+    assert resp.status_code == 503
+    root = _spans(exporter)["v1.search"][0]
+    assert root.status.status_code == trace.StatusCode.ERROR
+    assert any(
+        e.name == "exception" and e.attributes.get("exception.type") == "AppError"
+        for e in root.events
+    )
+
+
+def test_final_logs_join_the_trace(client):
+    """OBS-1B: final JSON/SSE logs carry the root span's trace id."""
+    import io
+    import logging
+
+    from mainframe_rag.logs import JsonFormatter
+
+    c, exporter = client
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JsonFormatter())
+    logger = logging.getLogger("agent")
+    level = logger.level
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    try:
+        assert c.post("/v1/search", json={"query": "IEA500I"}).status_code == 200
+        assert c.post("/v1/answer", json={"query": "IEA500I"}).status_code == 200
+        assert c.post("/v1/answer?stream=true", json={"query": "IEA500I"}).status_code == 200
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(level)
+    lines = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+    by_action = {}
+    for line in lines:
+        by_action.setdefault(line.get("action"), []).append(line)
+    spans = _spans(exporter)
+    search_root = spans["v1.search"][0]
+    assert search_root.context.trace_id is not None
+    search_final = [line for line in by_action.get("search", []) if line.get("hits") == 1]
+    assert search_final, "expected a final search log line"
+    assert search_final[0]["trace_id"] == trace.format_trace_id(search_root.context.trace_id)
+    answer_roots = {trace.format_trace_id(s.context.trace_id) for s in spans["v1.answer"]}
+    answer_finals = [line for line in by_action.get("answer", []) if "trace_id" in line]
+    assert answer_finals, "expected joined answer final logs (JSON and SSE)"
+    assert {line["trace_id"] for line in answer_finals} <= answer_roots
+
+
+def test_unsampled_trace_ids_stay_out_of_logs():
+    """OBS-1B: a valid-but-unsampled span context must not emit ids that no
+    backend will ever store (that misreports sampling as backend loss)."""
+    from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, TraceState
+
+    dropped = SpanContext(
+        trace_id=0x1234567890ABCDEF1234567890ABCDEF,
+        span_id=0x1234567890ABCDEF,
+        is_remote=False,
+        trace_flags=TraceFlags(0x00),
+        trace_state=TraceState(),
+    )
+    assert dropped.is_valid
+    with trace.use_span(NonRecordingSpan(dropped), end_on_exit=False):
+        assert tracing_mod.current_trace_ids() == {}
+    provider, _ = _provider()
+    with provider.get_tracer("sample-test").start_as_current_span("recording") as span:
+        ids = tracing_mod.current_trace_ids()
+        assert ids["trace_id"] == trace.format_trace_id(span.get_span_context().trace_id)
+
+
+def test_lifespan_cycle_rebinds_without_duplicates(monkeypatch):
+    """OBS-1B lifecycle: shutdown clears the provider (pinned); a re-setup
+    rebinds module tracers so spans keep flowing, and a repeat setup
+    without shutdown reuses the provider instead of stacking exporters."""
+    import mainframe_rag.agent.live_state as live_state_mod
+
+    saved = {
+        mod: mod.tracer
+        for mod in (app_mod, query_mod, answer_core_mod, live_state_mod)
+    }
+    created = []
+
+    class CountingExporter(FakeOTLPExporter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+    monkeypatch.setattr(tracing_mod, "OTLPSpanExporter", CountingExporter)
+    try:
+        tracing_mod.setup_tracing("http://collector.internal:4318")
+        first = tracing_mod._provider
+        assert query_mod.tracer.start_span("cycle-a").is_recording()
+        tracing_mod.setup_tracing("http://collector.internal:4318")
+        assert tracing_mod._provider is first
+        assert len(created) == 1
+        tracing_mod.shutdown_tracing()
+        assert tracing_mod._provider is None
+        tracing_mod.setup_tracing("http://collector.internal:4318")
+        assert tracing_mod._provider is not first
+        assert len(created) == 2
+        for mod in saved:
+            assert mod.tracer.start_span("cycle-b").is_recording()
+    finally:
+        for mod, tracer in saved.items():
+            mod.tracer = tracer
+        tracing_mod._provider = None

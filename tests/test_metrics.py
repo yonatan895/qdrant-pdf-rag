@@ -352,3 +352,20 @@ def test_broken_metrics_instrument_does_not_break_request(outcome_client, monkey
     response = _post_outcome(outcome_client, "/ui/chat/stream", True)
     assert response.status_code == 200
     assert '"accepted"' in response.text
+
+
+def test_answer_not_configured_records_once(client, monkeypatch):
+    """OBS-1B: the pre-retrieval model gate records exactly one terminal
+    observation (the error handler owns it; the route must not double)."""
+
+    def _boom(_settings):
+        raise RuntimeError("LLM_BASE_URL is unset")
+
+    monkeypatch.setattr(app_mod, "assert_reasoning_model", _boom)
+    labels = {"endpoint": "answer", "outcome": "not_configured", "query_class": "unknown"}
+    for _ in range(2):
+        before = _series(client.get("/metrics").text, "rag_requests_total", default=0.0, **labels)
+        resp = client.post("/v1/answer", json={"query": "IEA500I"})
+        assert resp.status_code == 503
+        body = client.get("/metrics").text
+        assert _series(body, "rag_requests_total", **labels) == before + 1.0

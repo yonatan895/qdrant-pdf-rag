@@ -16,6 +16,7 @@ clients must treat "stream ended with no final" as failure.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -30,7 +31,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
-from opentelemetry.trace import Status, StatusCode
+from opentelemetry.trace import SpanKind, Status, StatusCode
 from pydantic import BaseModel, ConfigDict, Field
 
 from mainframe_rag.agent.answer import (
@@ -87,10 +88,10 @@ from mainframe_rag.retrieve.query import SearchHit
 from mainframe_rag.retrieve.query import async_search as retrieve_search
 from mainframe_rag.retrieve.rerank import build_reranker, probe_reranker
 from mainframe_rag.tracing import (
+    bind_module_tracer,
     parent_context,
     setup_tracing,
     shutdown_tracing,
-    start_as_current_span,
     start_span,
 )
 from mainframe_rag.webui.routes import router as webui_router
@@ -113,6 +114,7 @@ serving_gate: ServingGate | None = None
 # Lifespan reassigns it when tracing is enabled (issue #83); tests swap it
 # directly with a tracer backed by InMemorySpanExporter.
 tracer: trace.Tracer = trace.get_tracer("mainframe-rag.agent")
+bind_module_tracer(__name__, "tracer", "mainframe-rag.agent")
 
 
 def _span_error(span: trace.Span, exc: Exception) -> None:
@@ -123,6 +125,26 @@ def _span_error(span: trace.Span, exc: Exception) -> None:
     URLs, or file paths."""
     span.add_event("exception", {"exception.type": error_type(exc)})
     span.set_status(Status(StatusCode.ERROR, error_type(exc)))
+
+
+@contextlib.asynccontextmanager
+async def _admission_guard(span: trace.Span):
+    """End the SERVER root span on a pre-admission rejection (issue #529
+    OBS-1B §4.3): the same trace covers cheap fail-fast gates and serving
+    refusals, not just admitted work. A 5xx-class gate failure marks the
+    span; a 4xx client rejection ends it unset. Always reraises so the
+    error handlers record the single terminal observation."""
+    try:
+        yield
+    except AppError as exc:
+        if exc.status >= 500:
+            _span_error(span, exc)
+        span.end()
+        raise
+    except Exception as exc:
+        _span_error(span, exc)
+        span.end()
+        raise
 
 
 class AppError(Exception):
@@ -916,16 +938,22 @@ async def livez() -> dict[str, str]:
 async def v1_search(request: Request, req: SearchRequest, response: Response) -> SearchResponse:
     request_id = request.state.request_id
     started = time.monotonic()
-    _require_query_length(request_id, req.query)
-    # Gate before any retrieval work (issue #391 F3/F4): 503 when the
-    # resolved generation is not validated; otherwise bind to its physical.
-    bound = await serving_settings()
-    with start_as_current_span(
+    # One SERVER span per request (issue #529 OBS-1B §4.3): created before
+    # the fail-fast gates so length rejections and serving refusals are
+    # covered by the same trace as admitted work.
+    root_span = start_span(
         tracer,
         "v1.search",
         context=parent_context(request.headers),
+        kind=SpanKind.SERVER,
         attributes={"http.request_id": request_id, "rag.limit": req.limit},
-    ) as span:
+    )
+    async with _admission_guard(root_span):
+        _require_query_length(request_id, req.query)
+        # Gate before any retrieval work (issue #391 F3/F4): 503 when the
+        # resolved generation is not validated; otherwise bind to its physical.
+        bound = await serving_settings()
+    with trace.use_span(root_span, end_on_exit=False):
         try:
             res = retrieve_search(
                 qdrant,
@@ -940,27 +968,29 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
             )
             hits, kind, timings = await _await_retrieval(res)
         except Exception as exc:
-            _span_error(span, exc)
+            _span_error(root_span, exc)
+            root_span.end()
             _record_endpoint(request, "search", "upstream_error", started)
             log.error(json_log(request_id, "search", error=error_type(exc)))
             raise AppError(502, "upstream_error", "retrieval failed") from exc
-        span.set_attributes(_search_span_attrs(kind, hits))
+        root_span.set_attributes(_search_span_attrs(kind, hits))
+        log.info(
+            json_log(
+                request_id,
+                "search",
+                query_kind=kind,
+                hits=len(hits),
+                embed_ms=timings.get("embed_ms"),
+                qdrant_ms=timings.get("qdrant_ms"),
+                rerank_ms=timings.get("rerank_ms"),
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
+        )
     timing_parts = _timing_parts(timings)
     if timing_parts:
         response.headers["Server-Timing"] = ", ".join(timing_parts)
     _record_endpoint(request, "search", "ok", started, query_class=kind, hits=len(hits))
-    log.info(
-        json_log(
-            request_id,
-            "search",
-            query_kind=kind,
-            hits=len(hits),
-            embed_ms=timings.get("embed_ms"),
-            qdrant_ms=timings.get("qdrant_ms"),
-            rerank_ms=timings.get("rerank_ms"),
-            elapsed_ms=int((time.monotonic() - started) * 1000),
-        )
-    )
+    root_span.end()
     return SearchResponse(
         request_id=request_id,
         query_kind=kind,
@@ -978,31 +1008,34 @@ async def v1_answer(
     request_id = request.state.request_id
     started = time.monotonic()
     is_stream = stream if stream is not None else req.stream
-    _require_query_length(request_id, req.query)
-    # Fail fast before any retrieval: the reasoning model (and its endpoint)
-    # must be configured; nothing else is callable. Config errors get a fixed
-    # client message — the exception text stays in the log.
-    try:
-        assert_reasoning_model(settings)
-    except RuntimeError as exc:
-        _record_endpoint(request, "answer", "not_configured", started)
-        log.warning(json_log(request_id, "answer", error=error_type(exc)))
-        raise AppError(503, "not_configured", "reasoning model is not configured") from exc
-    llm_model = settings.require_reasoning_model()
-    # Serving gate before retrieval and before the root span (issue #391
-    # F3/F4): the request binds to the validated physical generation.
-    bound = await serving_settings()
-
-    # One trace per request (issue #83): the root span starts after the
-    # cheap fail-fast gates and lives until the response body is produced.
-    # For SSE the span is ended inside the generator so the LLM stage (the
+    # One SERVER span per request (issue #83, #529 OBS-1B §4.3): the root
+    # span starts before the cheap fail-fast gates and lives until the
+    # response body is produced, so early rejections share the admitted
+    # trace. For SSE it is ended inside the generator so the LLM stage (the
     # longest leg) is a child of the same trace, not a detached one.
     root_span = start_span(
         tracer,
         "v1.answer",
         context=parent_context(request.headers),
+        kind=SpanKind.SERVER,
         attributes={"http.request_id": request_id, "rag.stream": is_stream},
     )
+    async with _admission_guard(root_span):
+        _require_query_length(request_id, req.query)
+        # Fail fast before any retrieval: the reasoning model (and its endpoint)
+        # must be configured; nothing else is callable. Config errors get a fixed
+        # client message — the exception text stays in the log. The error
+        # handler records the single terminal observation (same series the
+        # explicit record produced: endpoint answer, not_configured, unknown).
+        try:
+            assert_reasoning_model(settings)
+        except RuntimeError as exc:
+            log.warning(json_log(request_id, "answer", error=error_type(exc)))
+            raise AppError(503, "not_configured", "reasoning model is not configured") from exc
+        # Serving gate before retrieval and before the root stream opens (issue
+        # #391 F3/F4): the request binds to the validated physical generation.
+        bound = await serving_settings()
+    llm_model = settings.require_reasoning_model()
 
     # Retrieval and LLM legs are guarded separately: the same fault must map
     # to the same code+message on every endpoint — a retrieval failure reads
@@ -1056,6 +1089,8 @@ async def v1_answer(
             output = await execute_answer_core(core_input, deps, parent_span=root_span)
         except PromptBudgetExceeded as exc:
             _span_error(root_span, exc)
+            with trace.use_span(root_span, end_on_exit=False):
+                log.warning(json_log(request_id, "answer", error=error_type(exc)))
             root_span.end()
             _record_endpoint(
                 request,
@@ -1065,12 +1100,13 @@ async def v1_answer(
                 query_class=kind,
                 hits=len(hits),
             )
-            log.warning(json_log(request_id, "answer", error=error_type(exc)))
             raise AppError(
                 422, "prompt_budget_exceeded", "prompt exceeds the model token budget"
             ) from exc
         except LLMChatError as exc:
             _span_error(root_span, exc.original)
+            with trace.use_span(root_span, end_on_exit=False):
+                log.error(json_log(request_id, "answer", error=error_type(exc)))
             root_span.end()
             _record_endpoint(
                 request,
@@ -1080,14 +1116,11 @@ async def v1_answer(
                 query_class=kind,
                 hits=len(hits),
             )
-            log.error(json_log(request_id, "answer", error=error_type(exc)))
             raise AppError(502, "upstream_error", "answer failed") from exc
 
         _alert_finish_reason_non_stop(request_id, output.finish_reason)
 
         if not output.hits:
-            root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
-            root_span.end()
             _record_endpoint(
                 request,
                 "answer",
@@ -1100,15 +1133,18 @@ async def v1_answer(
             timing_parts = _timing_parts(timings)
             if timing_parts:
                 response.headers["Server-Timing"] = ", ".join(timing_parts)
-            log.info(
-                json_log(
-                    request_id,
-                    "answer",
-                    query_kind=kind,
-                    hits=0,
-                    rerank_ms=timings.get("rerank_ms"),
+            with trace.use_span(root_span, end_on_exit=False):
+                root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
+                log.info(
+                    json_log(
+                        request_id,
+                        "answer",
+                        query_kind=kind,
+                        hits=0,
+                        rerank_ms=timings.get("rerank_ms"),
+                    )
                 )
-            )
+            root_span.end()
             return AnswerResponse(
                 request_id=request_id,
                 answer=output.answer,
@@ -1125,42 +1161,43 @@ async def v1_answer(
         if timing_parts:
             response.headers["Server-Timing"] = ", ".join(timing_parts)
 
-        log.info(
-            json_log(
-                request_id,
-                "answer",
-                **_answer_log_fields(
+        with trace.use_span(root_span, end_on_exit=False):
+            log.info(
+                json_log(
+                    request_id,
+                    "answer",
+                    **_answer_log_fields(
+                        kind,
+                        output.complexity,
+                        output.hits,
+                        timings,
+                        len(output.citations),
+                        output.script is not None,
+                        output.finish_reason,
+                        output.usage,
+                        output.llm_ms,
+                        output.ttft_ms,
+                        started,
+                        evidence=output.evidence.supplied_count,
+                        inline_bracket_present=output.parsed.inline_bracket_present,
+                        citations_header_present=output.parsed.citations_header_present,
+                        cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
+                        cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
+                        verification_state=output.verification_state,
+                        budget_verified=output.budget_verified,
+                        units_omitted=output.evidence.units_omitted,
+                    ),
+                )
+            )
+            root_span.set_attributes(
+                _answer_span_attrs(
                     kind,
-                    output.complexity,
                     output.hits,
-                    timings,
                     len(output.citations),
                     output.script is not None,
-                    output.finish_reason,
-                    output.usage,
-                    output.llm_ms,
-                    output.ttft_ms,
-                    started,
                     evidence=output.evidence.supplied_count,
-                    inline_bracket_present=output.parsed.inline_bracket_present,
-                    citations_header_present=output.parsed.citations_header_present,
-                    cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
-                    cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
-                    verification_state=output.verification_state,
-                    budget_verified=output.budget_verified,
-                    units_omitted=output.evidence.units_omitted,
-                ),
+                )
             )
-        )
-        root_span.set_attributes(
-            _answer_span_attrs(
-                kind,
-                output.hits,
-                len(output.citations),
-                output.script is not None,
-                evidence=output.evidence.supplied_count,
-            )
-        )
         root_span.end()
         _record_endpoint(
             request,
@@ -1205,16 +1242,18 @@ async def v1_answer(
         # try/finally, not a per-branch end(): a mid-stream failure (both
         # except branches return) or a client disconnect (GeneratorExit
         # raised at a yield) must still end the root span — an unended trace
-        # would linger in the backend until TTL.
-        try:
-            async for chunk in _sse_events():
-                yield chunk
-        finally:
-            if not terminal:
-                _record_stream_abort(
-                    request, request_id, "answer", started, kind, len(hits), root_span
-                )
-            root_span.end()
+        # would linger in the backend until TTL. The span is attached while
+        # the generator runs so token/final/alert logs join the same trace.
+        with trace.use_span(root_span, end_on_exit=False):
+            try:
+                async for chunk in _sse_events():
+                    yield chunk
+            finally:
+                if not terminal:
+                    _record_stream_abort(
+                        request, request_id, "answer", started, kind, len(hits), root_span
+                    )
+        root_span.end()
 
     async def _sse_events() -> AsyncIterator[str]:
         nonlocal terminal
@@ -1405,29 +1444,33 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
     request_id = getattr(request.state, "request_id", uuid.uuid4().hex[:12])
     started = getattr(request.state, "started", time.monotonic())
 
-    turn = prepare_chat_request(request_id, req.messages, req.splunk_context)
-
-    try:
-        assert_reasoning_model(settings)
-    except RuntimeError as exc:
-        _record_endpoint(request, "chat", "not_configured", started)
-        log.warning(json_log(request_id, "chat", error=error_type(exc)))
-        raise AppError(503, "not_configured", "reasoning model is not configured") from exc
-    # The response `model` reports what actually ran: inference is always
-    # the reasoning model (issue #313), so the caller-supplied OpenAI-compat
-    # field stays accepted-and-ignored, exactly like `max_tokens`.
-    llm_model = settings.require_reasoning_model()
-
-    is_stream = req.stream
-    # Serving gate before the root span (issue #391 F3/F4): bind the request
-    # to the validated physical generation or refuse with the stable 503.
-    deps = await serving_deps()
+    # One SERVER span per request (issue #529 OBS-1B §4.3): created before
+    # turn validation and the fail-fast gates so rejections share the trace.
     root_span = start_span(
         tracer,
         "v1.chat",
         context=parent_context(request.headers),
-        attributes={"rag.stream": is_stream},
+        kind=SpanKind.SERVER,
+        attributes={"rag.stream": req.stream},
     )
+    async with _admission_guard(root_span):
+        turn = prepare_chat_request(request_id, req.messages, req.splunk_context)
+        try:
+            assert_reasoning_model(settings)
+        except RuntimeError as exc:
+            log.warning(json_log(request_id, "chat", error=error_type(exc)))
+            raise AppError(503, "not_configured", "reasoning model is not configured") from exc
+        # The response `model` reports what actually ran: inference is always
+        # the reasoning model (issue #313), so the caller-supplied OpenAI-compat
+        # field stays accepted-and-ignored, exactly like `max_tokens`.
+        llm_model = settings.require_reasoning_model()
+
+        is_stream = req.stream
+        # Serving gate before the stream opens (issue #391 F3/F4): bind the
+        # request to the validated physical generation or refuse with the
+        # stable 503. The error handler records the single terminal
+        # observation (same series the explicit record produced).
+        deps = await serving_deps()
 
     core_input = AnswerCoreInput(
         query=turn.query,
@@ -1472,28 +1515,28 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
             output = await execute_answer_core(core_input, deps, parent_span=root_span)
         except PromptBudgetExceeded as exc:
             _span_error(root_span, exc)
+            with trace.use_span(root_span, end_on_exit=False):
+                log.warning(json_log(request_id, "chat_answer", error=error_type(exc)))
             root_span.end()
             _record_endpoint(
                 request, "chat", "prompt_budget_exceeded", started, query_class=kind, hits=len(hits)
             )
-            log.warning(json_log(request_id, "chat_answer", error=error_type(exc)))
             raise AppError(
                 422, "prompt_budget_exceeded", "prompt exceeds the model token budget"
             ) from exc
         except LLMChatError as exc:
             _span_error(root_span, exc.original)
+            with trace.use_span(root_span, end_on_exit=False):
+                log.error(json_log(request_id, "chat_answer", error=error_type(exc)))
             root_span.end()
             _record_endpoint(
                 request, "chat", "upstream_error", started, query_class=kind, hits=len(hits)
             )
-            log.error(json_log(request_id, "chat_answer", error=error_type(exc)))
             raise AppError(502, "upstream_error", "answer failed") from exc
 
         _alert_finish_reason_non_stop(request_id, output.finish_reason)
 
         if not output.hits:
-            root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
-            root_span.end()
             _record_endpoint(
                 request,
                 "chat",
@@ -1503,6 +1546,10 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                 hits=0,
                 verification_state=output.verification_state,
             )
+            with trace.use_span(root_span, end_on_exit=False):
+                root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
+                log.info(json_log(request_id, "chat", query_kind=kind, hits=0))
+            root_span.end()
             return ChatCompletionsResponse(
                 id=f"chatcmpl-{request_id}",
                 created=int(time.time()),
@@ -1529,6 +1576,35 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         if output.citations:
             content += "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in output.citations)
 
+        with trace.use_span(root_span, end_on_exit=False):
+            log.info(
+                json_log(
+                    request_id,
+                    "chat",
+                    **_answer_log_fields(
+                        kind,
+                        output.complexity,
+                        output.hits,
+                        timings,
+                        len(output.citations),
+                        output.script is not None,
+                        output.finish_reason,
+                        output.usage,
+                        output.llm_ms,
+                        output.ttft_ms,
+                        started,
+                        evidence=output.evidence.supplied_count,
+                        inline_bracket_present=output.parsed.inline_bracket_present,
+                        citations_header_present=output.parsed.citations_header_present,
+                        cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
+                        cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
+                        verification_state=output.verification_state,
+                        budget_verified=output.budget_verified,
+                        units_omitted=output.evidence.units_omitted,
+                    ),
+                )
+            )
+        root_span.end()
         _record_endpoint(
             request,
             "chat",
@@ -1540,7 +1616,6 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
             llm_model=llm_model,
             verification_state=output.verification_state,
         )
-        root_span.end()
 
         return ChatCompletionsResponse(
             id=f"chatcmpl-{request_id}",
@@ -1602,6 +1677,15 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                             hits=0,
                             verification_state=output.verification_state,
                         )
+                        log.info(
+                            json_log(
+                                request_id,
+                                "chat",
+                                query_kind=kind,
+                                hits=0,
+                                stream=True,
+                            )
+                        )
                         terminal = True
                         yield format_openai_chunk(
                             chat_id, llm_model, finish_reason="stop", extra=extra_meta
@@ -1635,6 +1719,34 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                         ttft_ms=output.ttft_ms,
                         llm_model=llm_model,
                         verification_state=output.verification_state,
+                    )
+                    log.info(
+                        json_log(
+                            request_id,
+                            "chat",
+                            **_answer_log_fields(
+                                kind,
+                                output.complexity,
+                                output.hits,
+                                timings,
+                                len(output.citations),
+                                output.script is not None,
+                                output.finish_reason,
+                                output.usage,
+                                output.llm_ms,
+                                output.ttft_ms,
+                                started,
+                                stream=True,
+                                evidence=output.evidence.supplied_count,
+                                inline_bracket_present=output.parsed.inline_bracket_present,
+                                citations_header_present=output.parsed.citations_header_present,
+                                cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
+                                cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
+                                verification_state=output.verification_state,
+                                budget_verified=output.budget_verified,
+                                units_omitted=output.evidence.units_omitted,
+                            ),
+                        )
                     )
                     terminal = True
                     yield format_openai_chunk(
@@ -1696,15 +1808,18 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
             yield format_openai_done()
 
     async def sse_event_generator() -> AsyncIterator[str]:
-        try:
-            async for chunk in _chat_sse_events():
-                yield chunk
-        finally:
-            if not terminal:
-                _record_stream_abort(
-                    request, request_id, "chat", started, kind, len(hits), root_span
-                )
-            root_span.end()
+        # Same lifetime rule as the answer path: the span stays attached
+        # while the generator runs so stream logs join the trace.
+        with trace.use_span(root_span, end_on_exit=False):
+            try:
+                async for chunk in _chat_sse_events():
+                    yield chunk
+            finally:
+                if not terminal:
+                    _record_stream_abort(
+                        request, request_id, "chat", started, kind, len(hits), root_span
+                    )
+        root_span.end()
 
     return StreamingResponse(sse_event_generator(), media_type="text/event-stream")
 
