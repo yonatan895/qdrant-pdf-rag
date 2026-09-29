@@ -41,6 +41,14 @@ case "$LOCAL_RERANK_ENABLED" in
     true|false) ;;
     *) echo "ERROR: RERANK_ENABLED must be true or false" >&2; exit 1 ;;
 esac
+# Prometheus exposition is opt-in (metrics_enabled defaults False): set
+# METRICS_ENABLED=true to serve GET /metrics on the local agent for scrape
+# and contract capture. Dev-stack only; production stays off unless the
+# operator enables it through the chart/ServiceMonitor path.
+case "${METRICS_ENABLED:-false}" in
+    true|false) ;;
+    *) echo "ERROR: METRICS_ENABLED must be true or false" >&2; exit 1 ;;
+esac
 GATEWAY_PORT="${GATEWAY_PORT:-4000}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${TMPDIR:-/tmp}/local-stack-gateway-${GATEWAY_PORT}.env}"
 JAEGER_PORT="${JAEGER_PORT:-16686}"
@@ -113,7 +121,7 @@ if [ "$DRYRUN" = "1" ]; then
     else
         echo "[plan] 6. ingest:  skipped (CORPUS_DIR unset)"
     fi
-    echo "[plan] 7. agent:   UI_ENABLED=$UI_ENABLED OTEL_EXPORTER_OTLP_ENDPOINT=$OTEL_ENDPOINT $PY -m uvicorn mainframe_rag.agent.app:app --port $LOCAL_AGENT_PORT"
+    echo "[plan] 7. agent:   UI_ENABLED=$UI_ENABLED METRICS_ENABLED=${METRICS_ENABLED:-false} OTEL_EXPORTER_OTLP_ENDPOINT=$OTEL_ENDPOINT $PY -m uvicorn mainframe_rag.agent.app:app --port $LOCAL_AGENT_PORT"
     if [ "$UI_ENABLED" = "true" ]; then
         echo "[plan] 8. smoke:   POST http://127.0.0.1:$LOCAL_AGENT_PORT/v1/search + GET /ui"
     else
@@ -257,7 +265,7 @@ if [ "$_health_code" = "200" ]; then
     die "port $LOCAL_AGENT_PORT already serves — stop the other agent or set LOCAL_AGENT_PORT"
 fi
 step "Starting agent on :$LOCAL_AGENT_PORT (OTLP $OTEL_ENDPOINT)"
-OTEL_SERVICE_NAME="$AGENT_SERVICE_NAME" LLM_STREAM=true UI_ENABLED="$UI_ENABLED" "$PY" -m uvicorn mainframe_rag.agent.app:app \
+OTEL_SERVICE_NAME="$AGENT_SERVICE_NAME" LLM_STREAM=true UI_ENABLED="$UI_ENABLED" METRICS_ENABLED="${METRICS_ENABLED:-false}" "$PY" -m uvicorn mainframe_rag.agent.app:app \
     --host 127.0.0.1 --port "$LOCAL_AGENT_PORT" >"$LOG_DIR/local-stack-agent.log" 2>&1 &
 AGENT_PID=$!
 
