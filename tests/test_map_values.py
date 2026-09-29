@@ -34,8 +34,8 @@ MAPPER_KEYS = [
     "RERANK_ENABLED", "RERANK_BASE_URL", "RERANK_MODEL", "RERANK_ENDPOINT_ORDER",
     "GATEWAY_API_KEY_SECRET", "GATEWAY_API_KEY_SECRET_KEY", "GATEWAY_CA_CONFIGMAP", "PULL_SECRET",
     "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT_RESOLVED", "OTEL_TRACING_ENABLED",
-    "OTEL_DEPLOYMENT_ENVIRONMENT", "OTEL_SERVICE_NAME",
-    "METRICS_ENABLED", "AGENT_ROUTE", "ROUTE_DESTINATION_CA_FILE",
+    "OTEL_DEPLOYMENT_ENVIRONMENT", "OTEL_SERVICE_NAME", "JAEGER_ENABLED",
+    "METRICS_ENABLED", "SERVICEMONITOR_ENABLED", "AGENT_ROUTE", "ROUTE_DESTINATION_CA_FILE",
     "UI_ENABLED",
     "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
@@ -412,3 +412,89 @@ def test_condensation_mapper_to_agent_round_trip(monkeypatch, mapper_env):
     agent = deployment["spec"]["template"]["spec"]["containers"][0]
     assert next(e for e in agent["env"] if e["name"] == "CHAT_CONDENSE_ENABLED") == {
         "name": "CHAT_CONDENSE_ENABLED", "value": "true"}
+
+
+def test_decoupled_backend_flags_omitted_by_default(mapper_env):
+    """OBS-2: unset subflags render no subkey (omitted preserves behavior)."""
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    v = load_values(out)
+    assert "jaeger" not in v["tracing"]
+    assert "serviceMonitor" not in v["metrics"]
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("true", True), ("1", True), ("YES", True), ("false", False), ("0", False),
+])
+def test_jaeger_enabled_selection(monkeypatch, mapper_env, raw, expected):
+    monkeypatch.setenv("JAEGER_ENABLED", raw)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["tracing"]["jaeger"] == {"enabled": expected}
+
+
+@pytest.mark.parametrize("raw,expected", [("true", True), ("false", False)])
+def test_servicemonitor_enabled_selection(monkeypatch, mapper_env, raw, expected):
+    monkeypatch.setenv("METRICS_ENABLED", "true")
+    monkeypatch.setenv("SERVICEMONITOR_ENABLED", raw)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert load_values(out)["metrics"] == {"enabled": True, "serviceMonitor": {"enabled": expected}}
+
+
+@pytest.mark.parametrize("key", ["JAEGER_ENABLED", "SERVICEMONITOR_ENABLED"])
+def test_decoupled_flags_reject_garbage(monkeypatch, mapper_env, key):
+    monkeypatch.setenv(key, "maybe")
+    r, _ = mapper_env()
+    assert r.returncode != 0
+    assert key in r.stderr
+
+
+def test_jaeger_for_disabled_tracing_fails_closed(monkeypatch, mapper_env):
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "off")
+    monkeypatch.setenv("JAEGER_ENABLED", "true")
+    r, _ = mapper_env()
+    assert r.returncode != 0
+    assert "JAEGER_ENABLED=true requires tracing" in r.stderr
+
+
+def test_monitor_for_disabled_metrics_fails_closed(monkeypatch, mapper_env):
+    monkeypatch.setenv("SERVICEMONITOR_ENABLED", "true")
+    r, _ = mapper_env()
+    assert r.returncode != 0
+    assert "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true" in r.stderr
+
+
+def test_mapper_to_helm_round_trip_decoupled(mapper_env, tmp_path):
+    """Producer-to-consumer: decoupled flags survive env -> values -> helm."""
+    os.environ["JAEGER_ENABLED"] = "false"
+    os.environ["METRICS_ENABLED"] = "true"
+    os.environ["SERVICEMONITOR_ENABLED"] = "false"
+    try:
+        out = tmp_path / "release-values.yaml"
+        r = subprocess.run(
+            ["python3", str(MAPPER), "--out", str(out)], capture_output=True,
+            text=True, cwd=REPO, check=False,
+        )
+        assert r.returncode == 0, r.stderr
+        v = load_values(out)
+        assert v["tracing"]["jaeger"] == {"enabled": False}
+        assert v["metrics"]["serviceMonitor"] == {"enabled": False}
+        t = subprocess.run(
+            ["helm", "template", "app", str(CHART), "-f", str(out),
+             "--namespace", "ns"],
+            capture_output=True, text=True, cwd=REPO, check=False,
+        )
+        assert t.returncode == 0, t.stderr
+        kinds = {(d["kind"], d["metadata"]["name"]) for d in yaml.safe_load_all(t.stdout) if d}
+        assert not {k for k in kinds if k[1] in ("jaeger", "jaeger-badger", "jaeger-config")}
+        assert ("ServiceMonitor", "rag-agent") not in kinds
+        agent = next(d for d in yaml.safe_load_all(t.stdout) if d
+                     and (d["kind"], d["metadata"]["name"]) == ("Deployment", "rag-agent"))
+        env = {e["name"]: e["value"] for e in agent["spec"]["template"]["spec"]["containers"][0]["env"]
+               if "value" in e}
+        assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://jaeger:4318"
+        assert env["METRICS_ENABLED"] == "true"
+    finally:
+        for k in ("JAEGER_ENABLED", "METRICS_ENABLED", "SERVICEMONITOR_ENABLED"):
+            os.environ.pop(k, None)

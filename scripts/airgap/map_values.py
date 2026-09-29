@@ -66,6 +66,20 @@ def strict_bool(name: str, raw: str, default: bool) -> bool:
     die(f"{name} must be true/false (got {raw!r})")
 
 
+def optional_bool(name: str, raw: str) -> bool | None:
+    """Decoupled backend flags (issue #529 OBS-2): unset follows the parent
+    leg (None renders no subkey); an explicit value must be a boolean.
+    Mirror resolve_bundle_flag in common.sh — keep in sync."""
+    if raw == "":
+        return None
+    low = raw.lower()
+    if low in ("true", "1", "yes"):
+        return True
+    if low in ("false", "0", "no"):
+        return False
+    die(f"{name} must be true/false (got {raw!r})")
+
+
 def lenient_bool(raw: str) -> bool:
     """Operator flags without shell validation (rerank/metrics semantics).
 
@@ -165,6 +179,15 @@ def build_values(deploy_only: bool = False) -> dict:
 
     rerank_enabled = lenient_bool(env("RERANK_ENABLED"))
     metrics_enabled = env("METRICS_ENABLED") == "true"
+    # Decoupled backend choices (issue #529 OBS-2): explicit overrides only;
+    # unset follows the parent leg (no subkey rendered). A backend for a
+    # disabled leg fails before mutation, mirroring the chart fail guards.
+    jaeger_enabled = optional_bool("JAEGER_ENABLED", env("JAEGER_ENABLED"))
+    if jaeger_enabled and not tracing_enabled:
+        die("JAEGER_ENABLED=true requires tracing (OTEL_EXPORTER_OTLP_ENDPOINT is off)")
+    monitor_enabled = optional_bool("SERVICEMONITOR_ENABLED", env("SERVICEMONITOR_ENABLED"))
+    if monitor_enabled and not metrics_enabled:
+        die("SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true")
     # Issue #479: operator console selection. Unset keeps the chart default
     # (true); invalid nonempty values fail before mutation. Independent of
     # AGENT_ROUTE — disabling the UI never touches Route/OAuth/TLS wiring.
@@ -311,8 +334,16 @@ def build_values(deploy_only: bool = False) -> dict:
             "endpoint": otel_endpoint,
             "deploymentEnvironment": env("OTEL_DEPLOYMENT_ENVIRONMENT"),
             "serviceName": env("OTEL_SERVICE_NAME"),
+            **({"jaeger": {"enabled": jaeger_enabled}} if jaeger_enabled is not None else {}),
         },
-        "metrics": {"enabled": metrics_enabled},
+        "metrics": {
+            "enabled": metrics_enabled,
+            **(
+                {"serviceMonitor": {"enabled": monitor_enabled}}
+                if monitor_enabled is not None
+                else {}
+            ),
+        },
         "ui": {"enabled": ui_enabled},
         "route": {
             "enabled": agent_route,

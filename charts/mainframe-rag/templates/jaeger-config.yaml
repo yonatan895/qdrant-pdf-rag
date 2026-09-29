@@ -1,7 +1,7 @@
 # Jaeger badger storage config (issue #83). Single primary store on the
 # mounted RWO volume (no archive store); OTLP/HTTP receiver only (4317 stays
 # closed); telemetry metrics at basic level, not exposed by the Service.
-{{- if .Values.tracing.enabled }}
+{{- if include "mainframe-rag.jaegerEnabled" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

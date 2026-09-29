@@ -1,6 +1,6 @@
 # Jaeger Service (issue #83). ClusterIP only. 4318 is OTLP/HTTP (the agent's
 # only exporter transport); 16686 is the UI for port-forward. No Route, ever.
-{{- if .Values.tracing.enabled }}
+{{- if include "mainframe-rag.jaegerEnabled" . }}
 apiVersion: v1
 kind: Service
 metadata:

@@ -47,6 +47,7 @@ check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET
 check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
 resolve_otel_endpoint
+resolve_bundle_choices
 
 case "${RERANK_ENDPOINT_ORDER:-score_first}" in
     score_first|rerank_first) ;;
@@ -70,6 +71,16 @@ if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
     echo "    Tracing:           ON ($OTEL_ENDPOINT_RESOLVED)"
 else
     echo "    Tracing:           OFF (OTEL_EXPORTER_OTLP_ENDPOINT=off)"
+fi
+if [ "$JAEGER_DEPLOY" = "1" ]; then
+    echo "    Jaeger backend:    bundled"
+else
+    echo "    Jaeger backend:    not deployed"
+fi
+if [ "$SERVICEMONITOR_DEPLOY" = "1" ]; then
+    echo "    ServiceMonitor:    rendered"
+else
+    echo "    ServiceMonitor:    not rendered"
 fi
 if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
     echo "    GATEWAY_API_KEY_SECRET: $GATEWAY_API_KEY_SECRET"

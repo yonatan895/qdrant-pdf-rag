@@ -7,6 +7,7 @@
 
 resolve_aliases
 resolve_otel_endpoint
+resolve_bundle_choices
 require_env NAMESPACE
 KC=${KC:-$(kc)}
 QUERY=${QUERY:-IEA500I operator message}
@@ -16,8 +17,10 @@ JAEGER_QUERY_URL=${JAEGER_QUERY_URL:-http://jaeger:16686}
 if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 -c '... check /healthz ...'"
     echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 - \"$QUERY\""
-    if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+    if [ "$OTEL_TRACING_ENABLED" = "1" ] && [ "$JAEGER_DEPLOY" = "1" ]; then
         echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 - '... poll $JAEGER_QUERY_URL for a v1.search trace ...'"
+    elif [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+        echo "[dryrun] tracing check skipped (external collector — no bundled Jaeger query path)"
     else
         echo "[dryrun] tracing check skipped (OTEL_EXPORTER_OTLP_ENDPOINT=off)"
     fi
@@ -61,8 +64,10 @@ fi
 
 if [ "$status" -eq 3 ]; then
     echo "SKIP: nothing ingested yet — run sh scripts/tools/run-task.sh airgap:ingest CORPUS_PVC=<pvc> first"
-    if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+    if [ "$OTEL_TRACING_ENABLED" = "1" ] && [ "$JAEGER_DEPLOY" = "1" ]; then
         TRACING_LINE="Tracing:       SKIPPED (nothing ingested — no request traced yet)"
+    elif [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+        TRACING_LINE="Tracing:       SKIPPED (external collector — no bundled Jaeger query path)"
     else
         TRACING_LINE="Tracing:       OFF (disabled)"
     fi
@@ -82,12 +87,17 @@ elif [ "$status" -ne 0 ]; then
 fi
 
 # Tracing check (OTel Phase 3): tracing is ON by default, so the search above
-# must have landed a v1.search span in the Jaeger query API — /healthz alone
-# renders green with a broken endpoint/URL. Polls from the agent pod (same net
-# as the OTLP exporter); the export batch interval means spans arrive seconds
-# after the request. Only an explicit off sentinel skips the check.
+# must have landed a v1.search span in the bundled Jaeger query API —
+# /healthz alone renders green with a broken endpoint/URL. Polls from the
+# agent pod (same net as the OTLP exporter); the export batch interval means
+# spans arrive seconds after the request. Only an explicit off sentinel or
+# an external collector without the bundled backend skips the check (the
+# SigNoz-equivalent queryable-evidence check belongs to backend
+# qualification, not this smoke).
 if [ "$OTEL_TRACING_ENABLED" != "1" ]; then
     TRACING_LINE="Tracing:       OFF (disabled)"
+elif [ "$JAEGER_DEPLOY" != "1" ]; then
+    TRACING_LINE="Tracing:       SKIPPED (external collector — no bundled Jaeger query path)"
 elif $KC -n "$NAMESPACE" exec -i deploy/rag-agent -- python3 - "$TRACE_TIMEOUT" "$JAEGER_QUERY_URL" <<'PYEOF'
 import httpx2
 import sys

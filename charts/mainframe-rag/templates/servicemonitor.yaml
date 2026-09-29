@@ -1,7 +1,8 @@
 # ServiceMonitor for UWM scrapes of the agent /metrics (issue #187).
-# Rendered only when metrics.enabled is true. Selector + port name must track
+# Rendered only when the serviceMonitorEnabled helper resolves true
+# (metrics.serviceMonitor.enabled, defaulting to metrics.enabled). Selector + port name must track
 # the agent Service (rag-agent, port http). ClusterIP only; no Route, ever.
-{{- if .Values.metrics.enabled }}
+{{- if include "mainframe-rag.serviceMonitorEnabled" . }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:

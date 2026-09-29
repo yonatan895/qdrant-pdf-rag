@@ -1,9 +1,9 @@
 # Jaeger all-in-one Deployment (issue #83).
-# Rendered only when tracing.enabled is true. Badger on RWO block,
+# Rendered only when the jaegerEnabled helper resolves true (tracing.jaeger.enabled, defaulting to tracing.enabled). Badger on RWO block,
 # ClusterIP only, UI via port-forward — no Route. Project UID/volume group
 # from restricted-v2 (no fixed IDs). Recreate strategy for the single Badger
 # writer. OTLP/HTTP 4318 only; 4317 stays closed (no grpcio in wheelhouse).
-{{- if .Values.tracing.enabled }}
+{{- if include "mainframe-rag.jaegerEnabled" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

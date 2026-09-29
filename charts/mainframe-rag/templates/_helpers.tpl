@@ -42,3 +42,34 @@ http://{{ required "qdrantRelease is required" .Values.qdrantRelease }}:6333
 {{- else -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Decoupled backend choices (issue #529 OBS-2): whether to deploy the bundled
+Jaeger and whether to render the ServiceMonitor are independent of export
+and exposition. A null sub-flag follows its parent leg (the historical
+coupling); an explicit boolean overrides. kindIs (not default) reads the
+override: Helm's default treats an explicit false as empty. Contradictions
+fail the render before any mutation. Renders "true" or nothing so callers
+use {{- if include ... }} directly (a "false" string would be truthy).
+*/}}
+{{- define "mainframe-rag.jaegerEnabled" -}}
+{{- $enabled := .Values.tracing.enabled -}}
+{{- if kindIs "bool" .Values.tracing.jaeger.enabled -}}
+{{- $enabled = .Values.tracing.jaeger.enabled -}}
+{{- end -}}
+{{- if and $enabled (not .Values.tracing.enabled) -}}
+{{- fail "tracing.jaeger.enabled=true requires tracing.enabled=true: refusing to deploy a bundled Jaeger nothing exports to" -}}
+{{- end -}}
+{{- if $enabled -}}true{{- end -}}
+{{- end -}}
+
+{{- define "mainframe-rag.serviceMonitorEnabled" -}}
+{{- $enabled := .Values.metrics.enabled -}}
+{{- if kindIs "bool" .Values.metrics.serviceMonitor.enabled -}}
+{{- $enabled = .Values.metrics.serviceMonitor.enabled -}}
+{{- end -}}
+{{- if and $enabled (not .Values.metrics.enabled) -}}
+{{- fail "metrics.serviceMonitor.enabled=true requires metrics.enabled=true: refusing to monitor a disabled exposition endpoint" -}}
+{{- end -}}
+{{- if $enabled -}}true{{- end -}}
+{{- end -}}
