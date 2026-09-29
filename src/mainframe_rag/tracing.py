@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Final
 
 from opentelemetry import propagate, trace
@@ -66,6 +67,40 @@ def start_span(tracer, name: str, **kwargs):
 
 _provider: TracerProvider | None = None
 
+# Module-global tracers rebound across lifespans (issue #529 OBS-1B).
+# Import-time `trace.get_tracer` proxies resolve through the global
+# provider, which the API refuses to replace a second time — after a
+# shutdown/re-setup cycle they would keep emitting into the shut-down
+# provider and silently drop every non-app span. Owners register their
+# module global here (one line at import); setup rebinds it to the live
+# provider whenever a fresh one is built. Entries are (module, attr,
+# tracer scope name); unknown or unloaded modules are skipped, never
+# fatal — telemetry must not break the setup path.
+_tracer_bindings: list[tuple[str, str, str]] = []
+
+
+def bind_module_tracer(module_name: str, attr: str, tracer_name: str) -> None:
+    """Register a module-global tracer for lifespan re-binding (see above).
+    Idempotent for repeated imports of the same holder."""
+    entry = (module_name, attr, tracer_name)
+    if entry not in _tracer_bindings:
+        _tracer_bindings.append(entry)
+
+
+def _rebind_module_tracers(provider: TracerProvider) -> None:
+    # Real SDK providers only: test doubles must never permanently rebind
+    # live module globals for the rest of the session.
+    if not isinstance(provider, TracerProvider):
+        return
+    for module_name, attr, tracer_name in _tracer_bindings:
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        try:
+            setattr(module, attr, provider.get_tracer(tracer_name))
+        except Exception:  # noqa: BLE001
+            log.debug("otel tracer rebind skipped for %s.%s", module_name, attr)
+
 
 def trace_enabled(endpoint: str | None) -> bool:
     """Enabled iff an endpoint is configured. One rule, shared by lifespan
@@ -91,16 +126,20 @@ def parent_context(headers) -> Context:
 def current_trace_ids() -> dict[str, str]:
     """trace_id/span_id of the active span for log correlation (issue #185).
 
-    Returns {} when no valid span is active (tracing off, unsampled drop,
-    or outside any span) so callers can unconditionally merge the result.
-    Values are opaque hex IDs — never query text, payloads, or secrets.
-    Fail-open by design: telemetry must never break the logging path.
+    Returns {} when no recording span is active (tracing off, outside any
+    span, or a valid-but-unsampled context). A dropped trace's IDs must
+    never reach logs: they are unqueryable in the backend, and printing
+    them misreports an ordinary sampling decision as backend loss
+    (issue #529 OBS-1B). Values are opaque hex IDs — never query text,
+    payloads, or secrets. Fail-open by design: telemetry must never break
+    the logging path.
     """
     try:
-        ctx = trace.get_current_span().get_span_context()
+        span = trace.get_current_span()
+        ctx = span.get_span_context()
     except Exception:  # noqa: BLE001
         return {}
-    if not ctx.is_valid:
+    if not ctx.is_valid or not span.is_recording():
         return {}
     return {
         "trace_id": trace.format_trace_id(ctx.trace_id),
@@ -181,6 +220,11 @@ def setup_tracing(
         trace.set_tracer_provider(provider)
     except Exception as exc:  # noqa: BLE001
         log.warning("otel global tracer provider already set: %s", type(exc).__name__)
+    # A second provider in one process only happens across a shutdown/re-setup
+    # cycle (lifespan re-entry): the global still points at the shut-down
+    # provider, so rebound registered module tracers explicitly — otherwise
+    # every non-app span is silently dropped after the first restart.
+    _rebind_module_tracers(provider)
     log.info("otel tracing enabled: endpoint=%s service=%s", endpoint, service_name)
     return provider.get_tracer("mainframe-rag")
 

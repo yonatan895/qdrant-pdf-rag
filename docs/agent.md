@@ -136,9 +136,14 @@ fail-open. `tests/test_metrics.py` checks emitted counters/durations and generat
 closure across API and console transports. Data-generation/admission metrics,
 SLO thresholds and the sanitized pilot diagnostic packet remain with #375/#374/#446.
 
-Per-endpoint flow: `search` runs the length guard, then retrieval under a
-root span — faults become `502 upstream_error / retrieval failed`, timings
-become `Server-Timing`, then the response. `answer` resolves streaming
+Per-endpoint flow: each product route opens one SERVER root span first, so
+length-guard rejections and serving refusals share the admitted trace
+(issue #529 OBS-1B §4.3); outbound legs (embed, Qdrant prefetch, rerank,
+LLM) are CLIENT children of it and local stages stay INTERNAL. Final logs
+are emitted while the span is attached and it ends after them, so they
+join by trace id; unsampled contexts emit no ids. `search` retrieves under
+the root span — faults become `502 upstream_error / retrieval failed`,
+timings become `Server-Timing`, then the response. `answer` resolves streaming
 first (`?stream=` wins over the body field when set), runs the length
 guard, asserts the reasoning model is configured (`503 not_configured`,
 before any retrieval), retrieves under the root span (same `502` as
@@ -146,7 +151,10 @@ search), classifies complexity, short-circuits empty hits (§3), builds the
 prompt, and either chats once (JSON) or streams (SSE). `chat` runs the same
 assertion and retrieval (hardcoded `limit=8` for both endpoints), resolving
 the follow-up search query through `resolve_search_query` first so the
-condense gate cannot be honored on one path only.
+condense gate cannot be honored on one path only. The SSE generators hold
+the span attached while streaming and end it in a `finally`, so mid-stream
+failures and disconnects stay in the same trace with exactly one terminal
+metric observation.
 
 ## 2. Error contract
 

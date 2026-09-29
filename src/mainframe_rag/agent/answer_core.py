@@ -21,7 +21,7 @@ VALID_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset({"low", "medium"
 
 from opentelemetry import trace
 from opentelemetry.context import Context
-from opentelemetry.trace import Status, StatusCode
+from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from mainframe_rag.agent.answer import (
     REASON_MALFORMED_FRAME,
@@ -56,9 +56,10 @@ from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage, Tokenizer, TokenUsage
 from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
-from mainframe_rag.tracing import start_as_current_span
+from mainframe_rag.tracing import bind_module_tracer, start_as_current_span
 
 tracer: trace.Tracer = trace.get_tracer("mainframe-rag.agent")
+bind_module_tracer(__name__, "tracer", "mainframe-rag.agent")
 log = logging.getLogger(__name__)
 
 _EMPTY_ANSWER_MAX_TERMS = 5
@@ -152,7 +153,7 @@ async def resolve_search_query(
         and deps.settings.chat_condense_enabled
     ):
         ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
-        with start_as_current_span(tracer, "chat.condense", context=ctx):
+        with start_as_current_span(tracer, "chat.condense", kind=SpanKind.CLIENT, context=ctx):
             return await condense_query(deps.llm, input_data.messages, deps.settings)
     return input_data.query
 
@@ -406,6 +407,7 @@ async def execute_answer_core(
     with start_as_current_span(
         tracer,
         "llm.chat",
+        kind=SpanKind.CLIENT,
         context=root_ctx,
         attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
     ) as llm_span:
@@ -493,6 +495,7 @@ async def execute_answer_core_stream(
     with start_as_current_span(
         tracer,
         "llm.chat",
+        kind=SpanKind.CLIENT,
         context=root_ctx,
         attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
     ) as llm_span:
