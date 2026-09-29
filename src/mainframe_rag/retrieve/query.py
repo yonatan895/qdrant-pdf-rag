@@ -26,6 +26,7 @@ from mainframe_rag.retrieve.filters import build_filter, build_scope_filter, par
 from mainframe_rag.retrieve.rewrite import expand_query, should_rewrite
 from mainframe_rag.retrieve.screen import screen_query
 from mainframe_rag.retrieve.split import split_query
+from mainframe_rag.tracing import start_as_current_span
 
 # Proxy tracer: no-op until a real provider is installed (issue #83 — the
 # agent's lifespan installs one when OTEL_EXPORTER_OTLP_ENDPOINT is set).
@@ -393,7 +394,6 @@ def _needs_filter_fallback(
 
 
 def _retrieve_span_attrs(
-    query: str,
     limit: int,
     rerank_active: bool,
     prefetch_limit: int,
@@ -402,8 +402,8 @@ def _retrieve_span_attrs(
     split_paths: int,
     split_mode: str,
 ) -> dict[str, str | bool | int | float]:
+    # No raw query text (issue #529 OBS-1A): kind/counts/config only.
     attrs: dict[str, str | bool | int | float] = {
-        "rag.query": query,
         "rag.limit": limit,
         "rag.rerank_active": rerank_active,
         "rag.prefetch_limit": prefetch_limit,
@@ -500,7 +500,8 @@ def _fuse_with_span(
     limit: int,
     type_boosts: dict[str, float] | None = None,
 ) -> list[SearchHit]:
-    with tracer.start_as_current_span(
+    with start_as_current_span(
+        tracer,
         "retrieve.rrf",
         attributes=_rrf_span_attrs(weights, k, len(dense_points) + len(sparse_points), type_boosts),
     ):
@@ -510,13 +511,12 @@ def _fuse_with_span(
 def _diversify_with_span(
     fused: list[SearchHit], limit: int, max_per_page: int, max_per_doc: int
 ) -> list[SearchHit]:
-    with tracer.start_as_current_span("retrieve.diversify") as dv_span:
+    with start_as_current_span(tracer, "retrieve.diversify") as dv_span:
         hits = diversify_hits(fused, limit=limit, max_per_page=max_per_page, max_per_doc=max_per_doc)
         dv_span.set_attributes(
             {
                 "rag.candidates_in": len(fused),
                 "rag.candidates_out": len(hits),
-                "rag.doc_ids": ",".join(dict.fromkeys(h.doc_id for h in hits)),
             }
         )
     return hits
@@ -622,15 +622,16 @@ async def async_search(
 
     timings: dict[str, int] = {}
     span_attrs = _retrieve_span_attrs(
-        query, limit, rerank_active, prefetch_limit, flt, bypass_reason, len(eff_legs), split_mode
+        limit, rerank_active, prefetch_limit, flt, bypass_reason, len(eff_legs), split_mode
     )
 
-    with tracer.start_as_current_span("retrieve.search", attributes=span_attrs) as span:
+    with start_as_current_span(tracer, "retrieve.search", attributes=span_attrs) as span:
         # dense_query is a sync HTTP POST to the embed server and sparse is
         # CPU-bound FastEmbed/BM25; both are sync by protocol. Offload to a worker
         # thread — running them on the event loop would block every in-flight
         # request for the duration of the embed call (review S1).
-        with tracer.start_as_current_span(
+        with start_as_current_span(
+            tracer,
             "retrieve.embed", attributes={"rag.embedder": type(embedder).__name__}
         ):
             t0 = time.monotonic()
@@ -643,7 +644,8 @@ async def async_search(
                 leg_vecs.append((dense_vec, sparse_idx, sparse_val))
             timings["embed_ms"] = int((time.monotonic() - t0) * 1000)
 
-        with tracer.start_as_current_span(
+        with start_as_current_span(
+            tracer,
             "retrieve.prefetch",
             attributes={
                 "rag.batch": hasattr(client, "query_batch_points"),
@@ -733,7 +735,8 @@ async def async_search(
             t_rr = time.monotonic()
             # Cross-encoder scoring is sync HTTP (batches of settings.rerank_batch_size);
             # offload like the embed leg above (review S1).
-            with tracer.start_as_current_span(
+            with start_as_current_span(
+                tracer,
                 "retrieve.rerank", attributes={"rag.candidates": len(fused)}
             ) as rr_span:
                 fusion_alpha = settings.rerank_fusion_alpha if settings else 1.0

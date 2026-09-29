@@ -52,9 +52,11 @@ from mainframe_rag.agent.core_ports import (
     Retriever,
 )
 from mainframe_rag.config import Settings
+from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage, Tokenizer, TokenUsage
 from mainframe_rag.retrieve.filters import parse_query
 from mainframe_rag.retrieve.query import SearchHit
+from mainframe_rag.tracing import start_as_current_span
 
 tracer: trace.Tracer = trace.get_tracer("mainframe-rag.agent")
 log = logging.getLogger(__name__)
@@ -150,7 +152,7 @@ async def resolve_search_query(
         and deps.settings.chat_condense_enabled
     ):
         ctx = trace.set_span_in_context(parent_span) if parent_span is not None else None
-        with tracer.start_as_current_span("chat.condense", context=ctx):
+        with start_as_current_span(tracer, "chat.condense", context=ctx):
             return await condense_query(deps.llm, input_data.messages, deps.settings)
     return input_data.query
 
@@ -234,7 +236,8 @@ async def _build_prepared_prompt(
         if complexity == "complex"
         else settings.prompt_max_context_chars
     )
-    with tracer.start_as_current_span(
+    with start_as_current_span(
+        tracer,
         "prompt.build",
         context=root_ctx,
         attributes={
@@ -400,7 +403,8 @@ async def execute_answer_core(
         input_data.temperature if input_data.temperature is not None else settings.llm_temperature
     )
     t0 = time.monotonic()
-    with tracer.start_as_current_span(
+    with start_as_current_span(
+        tracer,
         "llm.chat",
         context=root_ctx,
         attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
@@ -422,8 +426,8 @@ async def execute_answer_core(
                 }
             )
         except Exception as exc:
-            llm_span.record_exception(exc)
-            llm_span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            llm_span.add_event("exception", {"exception.type": error_type(exc)})
+            llm_span.set_status(Status(StatusCode.ERROR, error_type(exc)))
             raise LLMChatError(exc) from exc
 
     llm_ms = int((time.monotonic() - t0) * 1000)
@@ -486,7 +490,8 @@ async def execute_answer_core_stream(
 
     stream_gen = deps.llm.stream(prepared.messages, effort, temperature)
 
-    with tracer.start_as_current_span(
+    with start_as_current_span(
+        tracer,
         "llm.chat",
         context=root_ctx,
         attributes={"llm.model": llm_model, "llm.reasoning_effort": effort},
@@ -530,8 +535,8 @@ async def execute_answer_core_stream(
                 }
             )
         except Exception as exc:
-            llm_span.record_exception(exc)
-            llm_span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            llm_span.add_event("exception", {"exception.type": error_type(exc)})
+            llm_span.set_status(Status(StatusCode.ERROR, error_type(exc)))
             raise
         finally:
             await stream_gen.aclose()

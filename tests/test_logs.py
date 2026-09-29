@@ -54,7 +54,10 @@ def test_exception_goes_into_payload_one_line():
     assert "\n" not in line
     payload = json.loads(line)
     assert payload["error_type"] == "ValueError"
-    assert "boom" in payload["trace"]
+    # Issue #529 OBS-1A: the exception body never enters telemetry — only
+    # the type and frame locations (no message, no source text).
+    assert "boom" not in line
+    assert "trace" in payload and "test_logs.py" in payload["trace"]
 
 
 def test_configure_logging_is_idempotent(monkeypatch):
