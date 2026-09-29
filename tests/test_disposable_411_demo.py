@@ -3,3 +3,7 @@
 
 def test_placeholder():
     assert True
+
+
+def test_second_case():
+    assert 1 + 1 == 2
