@@ -13,7 +13,6 @@ import re
 import stat
 import xml.etree.ElementTree as ET
 import zipfile
-from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -72,6 +71,17 @@ def object_json(raw: bytes) -> dict[str, Any]:
     value = json.loads(raw, object_pairs_hook=unique)
     require(isinstance(value, dict))
     return value
+
+
+def _witness_base_name(name: Any) -> Any:
+    """Strip pytest's trailing ``[params]`` so a parametrized witness still matches.
+
+    Plain test function names cannot contain brackets, so a trailing ``[...]``
+    segment is always parametrization, never part of the defined name.
+    """
+    if isinstance(name, str) and name.endswith(']') and '[' in name:
+        return name.split('[', 1)[0]
+    return name
 
 
 def artifact_members(raw: bytes, digest: str) -> dict[str, bytes]:
@@ -210,15 +220,25 @@ def normalize_native(
             if producer.lane == 'agent_probes':
                 # Counts alone cannot substitute unrelated passing tests for
                 # live transport, traced execution and cancellation witnesses.
-                records = Counter((case.get('classname'), case.get('name'))
-                                  for case in ET.fromstring(files['tests.xml']).iter('testcase'))
+                # Pytest renders each parametrized case as ``name[params]``,
+                # so group by the defined base name: covering more endpoints
+                # must not read as a missing witness. Multiple records for one
+                # witness are only accepted as distinct parametrized cases;
+                # exact duplicates or plain-name multiples stay rejected.
+                groups: dict[tuple[Any, Any], list[Any]] = {}
+                for case in ET.fromstring(files['tests.xml']).iter('testcase'):
+                    key = (case.get('classname'), _witness_base_name(case.get('name')))
+                    groups.setdefault(key, []).append(case.get('name'))
                 for name in (
                     'test_live_agent_contract_and_fresh_trace',
                     'test_live_agent_fixed_overlong_envelope',
                     'test_live_agent_stream_final_matches_buffered',
                     'test_live_agent_disconnect_closes_upstream_then_next_request',
                 ):
-                    require(records[('tests.live_agent_probes', name)] == 1)
+                    members = groups.get(('tests.live_agent_probes', name), [])
+                    require(bool(members))
+                    require(len(set(members)) == len(members))
+                    require(len(members) == 1 or all(member != name for member in members))
 
     else:
         require(counts is None and 'tests.xml' not in files)

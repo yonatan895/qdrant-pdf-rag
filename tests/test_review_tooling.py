@@ -2246,7 +2246,8 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             "test_live_agent_stream_final_matches_buffered",
             "test_live_agent_disconnect_closes_upstream_then_next_request",
         ]
-        for variant in ("complete", "missing", "duplicate", "wrong-module", "unrelated"):
+        for variant in ("complete", "missing", "duplicate", "wrong-module", "unrelated",
+                          "parametrized", "parametrized-duplicate", "mixed-duplicate"):
             with self.subTest(variant=variant):
                 args, receipt, _ = self.fixture()
                 args["producer"] = next(p for p in PRODUCERS if p.lane == "agent_probes")
@@ -2268,13 +2269,24 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                     module = "tests.unrelated"
                 elif variant == "unrelated":
                     selected[-1] = "test_unrelated"
+                elif variant == "parametrized":
+                    selected[-1:] = [f"{names[-1]}[{param}]" for param in (
+                        "answer-/v1/answer-v1.answer",
+                        "chat-/v1/chat-v1.chat",
+                        "console-/ui/chat/stream-ui.chat",
+                    )]
+                elif variant == "parametrized-duplicate":
+                    selected[-1:] = [f"{names[-1]}[answer]", f"{names[-1]}[answer]"]
+                elif variant == "mixed-duplicate":
+                    selected.append(f"{names[-1]}[answer]")
                 xml = ("<testsuite>" + "".join(
                     f'<testcase classname="{module}" name="{name}"/>' for name in selected
                 ) + "</testsuite>").encode()
                 receipt["tests"] = junit_bytes(xml)
                 args["archive"], args["artifact"]["digest"] = self.packed(receipt, xml)
-                if variant == "complete":
-                    self.assertEqual(normalize_native(**args)["tests"]["executed"], 4)
+                expected = {"complete": 4, "parametrized": 6}.get(variant)
+                if expected is not None:
+                    self.assertEqual(normalize_native(**args)["tests"]["executed"], expected)
                 else:
                     with self.assertRaises(ValueError):
                         normalize_native(**args)
