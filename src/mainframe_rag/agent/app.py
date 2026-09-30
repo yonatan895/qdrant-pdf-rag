@@ -93,6 +93,7 @@ from mainframe_rag.tracing import (
     setup_tracing,
     shutdown_tracing,
     start_span,
+    use_span,
 )
 from mainframe_rag.webui.routes import router as webui_router
 
@@ -953,7 +954,7 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
         # Gate before any retrieval work (issue #391 F3/F4): 503 when the
         # resolved generation is not validated; otherwise bind to its physical.
         bound = await serving_settings()
-    with trace.use_span(root_span, end_on_exit=False):
+    with use_span(root_span, end_on_exit=False):
         try:
             res = retrieve_search(
                 qdrant,
@@ -1045,7 +1046,7 @@ async def v1_answer(
         # retrieve.* stage spans must land under this request's trace, so the
         # root is made current for the retrieval leg (the root span itself is
         # not created "as current" — the SSE generator outlives this block).
-        with trace.use_span(root_span, end_on_exit=False):
+        with use_span(root_span, end_on_exit=False):
             res = retrieve_search(
                 qdrant,
                 embedder,
@@ -1089,7 +1090,7 @@ async def v1_answer(
             output = await execute_answer_core(core_input, deps, parent_span=root_span)
         except PromptBudgetExceeded as exc:
             _span_error(root_span, exc)
-            with trace.use_span(root_span, end_on_exit=False):
+            with use_span(root_span, end_on_exit=False):
                 log.warning(json_log(request_id, "answer", error=error_type(exc)))
             root_span.end()
             _record_endpoint(
@@ -1105,7 +1106,7 @@ async def v1_answer(
             ) from exc
         except LLMChatError as exc:
             _span_error(root_span, exc.original)
-            with trace.use_span(root_span, end_on_exit=False):
+            with use_span(root_span, end_on_exit=False):
                 log.error(json_log(request_id, "answer", error=error_type(exc)))
             root_span.end()
             _record_endpoint(
@@ -1133,7 +1134,7 @@ async def v1_answer(
             timing_parts = _timing_parts(timings)
             if timing_parts:
                 response.headers["Server-Timing"] = ", ".join(timing_parts)
-            with trace.use_span(root_span, end_on_exit=False):
+            with use_span(root_span, end_on_exit=False):
                 root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
                 log.info(
                     json_log(
@@ -1161,7 +1162,7 @@ async def v1_answer(
         if timing_parts:
             response.headers["Server-Timing"] = ", ".join(timing_parts)
 
-        with trace.use_span(root_span, end_on_exit=False):
+        with use_span(root_span, end_on_exit=False):
             log.info(
                 json_log(
                     request_id,
@@ -1244,7 +1245,7 @@ async def v1_answer(
         # raised at a yield) must still end the root span — an unended trace
         # would linger in the backend until TTL. The span is attached while
         # the generator runs so token/final/alert logs join the same trace.
-        with trace.use_span(root_span, end_on_exit=False):
+        with use_span(root_span, end_on_exit=False):
             try:
                 async for chunk in _sse_events():
                     yield chunk
@@ -1451,7 +1452,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         "v1.chat",
         context=parent_context(request.headers),
         kind=SpanKind.SERVER,
-        attributes={"rag.stream": req.stream},
+        attributes={"http.request_id": request_id, "rag.stream": req.stream},
     )
     async with _admission_guard(root_span):
         turn = prepare_chat_request(request_id, req.messages, req.splunk_context)
@@ -1485,7 +1486,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
     )
 
     try:
-        with trace.use_span(root_span, end_on_exit=False):
+        with use_span(root_span, end_on_exit=False):
             search_query = await resolve_search_query(core_input, deps, parent_span=root_span)
             retrieval_coro = retrieve_search(
                 qdrant,
@@ -1515,7 +1516,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
             output = await execute_answer_core(core_input, deps, parent_span=root_span)
         except PromptBudgetExceeded as exc:
             _span_error(root_span, exc)
-            with trace.use_span(root_span, end_on_exit=False):
+            with use_span(root_span, end_on_exit=False):
                 log.warning(json_log(request_id, "chat_answer", error=error_type(exc)))
             root_span.end()
             _record_endpoint(
@@ -1526,7 +1527,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
             ) from exc
         except LLMChatError as exc:
             _span_error(root_span, exc.original)
-            with trace.use_span(root_span, end_on_exit=False):
+            with use_span(root_span, end_on_exit=False):
                 log.error(json_log(request_id, "chat_answer", error=error_type(exc)))
             root_span.end()
             _record_endpoint(
@@ -1546,7 +1547,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
                 hits=0,
                 verification_state=output.verification_state,
             )
-            with trace.use_span(root_span, end_on_exit=False):
+            with use_span(root_span, end_on_exit=False):
                 root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
                 log.info(json_log(request_id, "chat", query_kind=kind, hits=0))
             root_span.end()
@@ -1576,7 +1577,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         if output.citations:
             content += "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in output.citations)
 
-        with trace.use_span(root_span, end_on_exit=False):
+        with use_span(root_span, end_on_exit=False):
             log.info(
                 json_log(
                     request_id,
@@ -1810,7 +1811,7 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
     async def sse_event_generator() -> AsyncIterator[str]:
         # Same lifetime rule as the answer path: the span stays attached
         # while the generator runs so stream logs join the trace.
-        with trace.use_span(root_span, end_on_exit=False):
+        with use_span(root_span, end_on_exit=False):
             try:
                 async for chunk in _chat_sse_events():
                     yield chunk

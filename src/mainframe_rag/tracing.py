@@ -65,6 +65,21 @@ def start_span(tracer, name: str, **kwargs):
     kwargs.setdefault("set_status_on_exception", False)
     return tracer.start_span(name, **kwargs)
 
+
+def use_span(span: trace.Span, *, end_on_exit: bool = False):
+    """Attach a span without automatic exception events or status text.
+
+    Attachment has its own SDK exception policy, independent of creation.
+    Callers retain type-only error classification and span lifetime ownership.
+    """
+    return trace.use_span(
+        span,
+        end_on_exit=end_on_exit,
+        record_exception=False,
+        set_status_on_exception=False,
+    )
+
+
 _provider: TracerProvider | None = None
 
 # Module-global tracers rebound across lifespans (issue #529 OBS-1B).
