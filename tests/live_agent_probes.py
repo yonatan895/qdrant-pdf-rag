@@ -12,6 +12,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -144,6 +145,7 @@ def live_agent(qdrant_url, ingested, model_server, jaeger_url, tmp_path_factory)
     with pytest.MonkeyPatch.context() as environment:
         for key, value in {
             "UI_ENABLED": "true", "OTEL_EXPORTER_OTLP_ENDPOINT": jaeger_url[1],
+            "METRICS_ENABLED": "true",
             "LLM_API_KEY": "", "QDRANT_API_KEY": "",
         }.items():
             environment.setenv(key, value)
@@ -187,9 +189,61 @@ def test_live_agent_stream_final_matches_buffered(live_agent):
     assert final["finish_reason"] == "stop"
 
 
-def test_live_agent_disconnect_closes_upstream_then_next_request(live_agent, model_server):
+@pytest.mark.parametrize(
+    "endpoint,path,operation",
+    [
+        ("answer", "/v1/answer", "v1.answer"),
+        ("chat", "/v1/chat", "v1.chat"),
+        ("console", "/ui/chat/stream", "ui.chat"),
+    ],
+)
+def test_live_agent_disconnect_closes_upstream_then_next_request(
+    live_agent,
+    model_server,
+    jaeger_url,
+    endpoint,
+    path,
+    operation,
+):
+    from prometheus_client.parser import text_string_to_metric_families
+
+    trace_id = uuid.uuid4().hex
+    parent_id = "aabbccddeeff0011"
+    payload = (
+        {"query": CANCEL_QUERY, "stream": True}
+        if endpoint == "answer"
+        else {"messages": [{"role": "user", "content": CANCEL_QUERY}], "stream": True}
+    )
+    if endpoint == "console":
+        payload.pop("stream")
+    model_server[1].clear()
+    model_server[2].clear()
     with httpx2.Client(base_url=live_agent[0], timeout=10) as client:
-        with client.stream("POST", "/v1/answer?stream=true", json={"query": CANCEL_QUERY}) as response:
+
+        def counts():
+            result = {}
+            response = client.get("/metrics")
+            assert response.status_code == 200
+            for family in text_string_to_metric_families(response.text):
+                for sample in family.samples:
+                    if sample.name == "rag_requests_total":
+                        key = (
+                            sample.labels["endpoint"],
+                            sample.labels["outcome"],
+                            sample.labels.get("verification_state"),
+                        )
+                        result[key] = result.get(key, 0) + sample.value
+            return result
+
+        before = counts()
+        with client.stream(
+            "POST",
+            path,
+            json=payload,
+            headers={
+                "traceparent": f"00-{trace_id}-{parent_id}-01",
+            },
+        ) as response:
             assert response.status_code == 200
             for line in response.iter_lines():
                 if line.startswith("data:") and "Provisional " in line:
@@ -198,6 +252,61 @@ def test_live_agent_disconnect_closes_upstream_then_next_request(live_agent, mod
                 pytest.fail("waiting upstream never produced its provisional token")
         assert model_server[1].is_set(), "the upstream must have been waiting during disconnect"
         assert model_server[2].wait(5), "disconnect did not close the waiting upstream operation"
+        key = (endpoint, "client_disconnect", "generation_incomplete")
+        deadline = time.monotonic() + 10
+        while counts().get(key, 0) != before.get(key, 0) + 1:
+            assert time.monotonic() < deadline, "disconnect outcome missing"
+            time.sleep(0.05)
+        assert sum(counts().values()) == sum(before.values()) + 1
+        with httpx2.Client(base_url=jaeger_url[0], timeout=5) as jaeger:
+            deadline = time.monotonic() + 20
+            while True:
+                response = jaeger.get(f"/api/traces/{trace_id}")
+                spans = [
+                    span
+                    for trace_data in (response.json().get("data") or [])
+                    for span in trace_data.get("spans", [])
+                ]
+                roots = [span for span in spans if span["operationName"] == operation]
+                if roots:
+                    break
+                assert time.monotonic() < deadline, "cancelled request root never finished"
+                time.sleep(0.1)
+        assert len(roots) == 1
+        root = roots[0]
+        assert root["traceID"] == trace_id and root["duration"] > 0
+        assert any(reference["spanID"] == parent_id for reference in root["references"])
+        tags = {tag["key"]: tag["value"] for tag in root["tags"]}
+        assert tags["rag.stream_aborted"] is True
+        events = [
+            json.loads(line)
+            for line in live_agent[1].read_text().splitlines()
+            if line.startswith("{")
+        ]
+        owned = [event for event in events if event.get("request_id") == tags["http.request_id"]]
+        assert len(owned) == 1 and owned[0]["alert"] == "client_disconnect"
+        assert owned[0]["trace_id"] == trace_id and owned[0]["span_id"] == root["spanID"]
         # The shared client must survive closing the operation.
-        response = client.post("/v1/answer", json={"query": QUERY})
-        assert response.status_code == 200 and grounded(response.json())
+        next_payload = (
+            {"query": QUERY, "stream": True}
+            if endpoint == "answer"
+            else {"messages": [{"role": "user", "content": QUERY}], "stream": True}
+        )
+        if endpoint == "console":
+            next_payload.pop("stream")
+        response = client.post(path, json=next_payload)
+        assert response.status_code == 200
+        if endpoint == "chat":
+            packets = [json.loads(line[6:]) for line in response.text.splitlines()
+                       if line.startswith("data: ") and line != "data: [DONE]"]
+            finals = [choice for packet in packets for choice in packet["choices"]
+                      if "verification_state" in choice]
+            assert len(finals) == 1 and "data: [DONE]" in response.text
+            content = "".join(packet["choices"][0]["delta"].get("content", "") for packet in packets)
+            assert grounded({**finals[0], "answer": content})
+        else:
+            assert grounded(final_event(response.text))
+        after = counts()
+        assert sum(after.values()) == sum(before.values()) + 2
+        success = (endpoint, "ok", "accepted")
+        assert after[success] == before.get(success, 0) + 1

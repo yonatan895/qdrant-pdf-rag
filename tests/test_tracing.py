@@ -5,7 +5,9 @@ structure, and bounded attributes — never on timing values.
 """
 
 import asyncio
+import contextlib
 import json
+import logging
 from typing import ClassVar
 
 import pytest
@@ -19,10 +21,713 @@ from mainframe_rag import tracing as tracing_mod
 from mainframe_rag.agent import answer_core as answer_core_mod
 from mainframe_rag.agent import app as app_mod
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
+from mainframe_rag.logs import JsonFormatter
 from mainframe_rag.ports import ChatResult, TokenUsage
 from mainframe_rag.retrieve import query as query_mod
 from mainframe_rag.retrieve.query import async_search, search
 from tests.conftest import FakeEmbedder, FakeQdrant, MockReranker, _point
+from tests.test_metrics import _hermetic_instruments, _OutcomeLLM, _points
+from tests.test_stream_truncation import _scope
+
+
+@pytest.fixture
+def terminal_telemetry(client, monkeypatch):
+    monkeypatch.setattr(app_mod.settings, "ui_enabled", True)
+    reader = _hermetic_instruments(monkeypatch)
+    events = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            events.append(json.loads(self.format(record)))
+
+    handler = Capture()
+    handler.setFormatter(JsonFormatter())
+    logger = logging.getLogger("agent")
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    context_logger = logging.getLogger("opentelemetry.context")
+    context_logger.addHandler(handler)
+    try:
+        yield client[0], client[1], reader, events
+    finally:
+        logger.removeHandler(handler)
+        context_logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+        handler.close()
+
+
+async def _direct_turn(route, request, stream=False):
+    from fastapi import Response
+
+    from mainframe_rag.webui import routes as ui_mod
+
+    if route == "search":
+        return await app_mod.v1_search(request, app_mod.SearchRequest(query="IEA500I"), Response())
+    if route == "answer":
+        return await app_mod.v1_answer(
+            request, app_mod.AnswerRequest(query="IEA500I"), Response(), stream=stream
+        )
+    if route == "chat":
+        return await app_mod.chat_completions(
+            app_mod.ChatRequest(messages=[{"role": "user", "content": "IEA500I"}], stream=stream),
+            request,
+            Response(),
+        )
+    if stream:
+        return await ui_mod.ui_chat_stream(
+            request, ui_mod.UiChatRequest(messages=[{"role": "user", "content": "IEA500I"}])
+        )
+    return await ui_mod.ui_chat(
+        request,
+        message="IEA500I",
+        messages=None,
+        splunk_context=None,
+        product=None,
+        version=None,
+        reasoning_effort=None,
+    )
+
+
+def _assert_root_join(events, root, request_id):
+    assert not any("Failed to detach context" in event.get("message", "") for event in events)
+    owned = [event for event in events if event.get("request_id") == request_id]
+    assert owned, "no owned terminal log"
+    for event in owned:
+        assert event.get("trace_id") == f"{root.context.trace_id:032x}", (
+            f"terminal log trace_id: {event}"
+        )
+        assert event.get("span_id") == f"{root.context.span_id:016x}", (
+            f"terminal log span_id: {event}"
+        )
+
+
+@pytest.mark.parametrize(
+    "stage,route,stream",
+    [
+        (stage, route, stream)
+        for stage in ("admission", "retrieval")
+        for route, stream in (
+            ("search", False),
+            ("answer", False),
+            ("answer", True),
+            ("chat", False),
+            ("chat", True),
+            ("console", False),
+            ("console", True),
+        )
+        if (stage, route, stream) != ("retrieval", "console", True)
+    ],
+)
+def test_request_cancellation_ends_root_before_headers(
+    terminal_telemetry, monkeypatch, route, stream, stage
+):
+    from fastapi import Request
+
+    _client, exporter, reader, events = terminal_telemetry
+
+    async def run():
+        entered = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        async def suspended(*args, **kwargs):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        monkeypatch.setattr(
+            app_mod, "serving_settings" if stage == "admission" else "retrieve_search", suspended
+        )
+        path = (
+            ("/ui/chat/stream" if stream else "/ui/chat") if route == "console" else f"/v1/{route}"
+        )
+        request = Request(_scope(path))
+        task = asyncio.create_task(_direct_turn(route, request, stream=stream))
+        await asyncio.wait_for(entered.wait(), 2)
+        assert not exporter.get_finished_spans()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert cleaned.is_set()
+        app_mod._record_handler_error(request, "internal")
+
+    asyncio.run(run())
+    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
+    assert len(roots) == 1, "cancelled request root must finish exactly once"
+    _assert_root_join(events, roots[0], "disconnect-test")
+    points = _points(reader, "rag.requests.total")
+    assert sum(point.value for point in points) == 1
+    assert points[0].attributes["outcome"] == "client_disconnect"
+    assert "verification_state" not in points[0].attributes
+    assert sum(point.count for point in _points(reader, "rag.request.duration")) == 1
+
+
+def test_console_stream_cancel_during_postheader_retrieval(terminal_telemetry, monkeypatch):
+    from fastapi import Request
+
+    _client, exporter, reader, events = terminal_telemetry
+
+    async def run():
+        entered = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        async def retrieve(*args, **kwargs):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        monkeypatch.setattr(app_mod, "retrieve_search", retrieve)
+        response = await _direct_turn("console", Request(_scope("/ui/chat/stream")), stream=True)
+        assert not exporter.get_finished_spans()
+        task = asyncio.create_task(response.body_iterator.__anext__())
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert cleaned.is_set()
+
+    asyncio.run(run())
+    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
+    assert len(roots) == 1
+    _assert_root_join(events, roots[0], "disconnect-test")
+    points = _points(reader, "rag.requests.total")
+    assert sum(point.value for point in points) == 1
+    assert points[0].attributes["outcome"] == "client_disconnect"
+    assert points[0].attributes["verification_state"] == "generation_incomplete"
+
+
+@pytest.mark.parametrize("route", ["answer", "chat", "console"])
+@pytest.mark.parametrize(
+    "operation", ["close", "cancel", "disconnect", "disconnect_send", "send_failure"]
+)
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+def test_stream_cancellation_finishes_root_and_closes_owned_io(
+    terminal_telemetry,
+    monkeypatch,
+    route,
+    operation,
+    cleanup_failure,
+):
+    from fastapi import Request
+
+    _client, exporter, reader, events = terminal_telemetry
+
+    async def run():
+        entered = asyncio.Event()
+        sending = asyncio.Event()
+        cleaned = asyncio.Event()
+        frames = []
+
+        class WaitingResponse:
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                yield 'data: {"choices": [{"delta": {"content": "Synthetic prefix."}, "finish_reason": null}]}'
+                entered.set()
+                await asyncio.Event().wait()
+
+        class WaitingHTTP:
+            @contextlib.asynccontextmanager
+            async def stream(self, *args, **kwargs):
+                try:
+                    yield WaitingResponse()
+                finally:
+                    await asyncio.sleep(0)
+                    cleaned.set()
+                    if cleanup_failure:
+                        raise RuntimeError("synthetic cleanup failure")
+
+            async def post(self, *args, **kwargs):
+                pytest.fail("cancelled generation must never retry")
+
+        monkeypatch.setattr(
+            app_mod, "llm", app_mod.HttpxLLMClient(app_mod.settings, client=WaitingHTTP())
+        )
+        path = "/ui/chat/stream" if route == "console" else f"/v1/{route}"
+        request = Request(_scope(path))
+        response = await _direct_turn(route, request, stream=True)
+        assert not [
+            span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER
+        ]
+        if operation == "close":
+            frames.append(await response.body_iterator.__anext__())
+            await asyncio.wait_for(response.body_iterator.aclose(), 2)
+            await response.body_iterator.aclose()
+        else:
+            scope = dict(
+                request.scope,
+                asgi={
+                    "version": "3.0",
+                    "spec_version": "2.0" if operation.startswith("disconnect") else "2.4",
+                },
+            )
+
+            async def receive():
+                if operation.startswith("disconnect"):
+                    await (sending if operation == "disconnect_send" else entered).wait()
+                    return {"type": "http.disconnect"}
+                await asyncio.Event().wait()
+
+            async def send(message):
+                if message["type"] == "http.response.body":
+                    frames.append(message.get("body", b"").decode())
+                    if operation == "send_failure":
+                        raise OSError("synthetic closed transport")
+                    if operation == "disconnect_send":
+                        sending.set()
+                        await asyncio.Event().wait()
+
+            task = asyncio.create_task(response(scope, receive, send))
+            if operation == "cancel":
+                await asyncio.wait_for(entered.wait(), 2)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 2)
+            elif operation.startswith("disconnect"):
+                await asyncio.wait_for(task, 2)
+            else:
+                from starlette.requests import ClientDisconnect
+
+                with pytest.raises(ClientDisconnect):
+                    await asyncio.wait_for(task, 2)
+        assert cleaned.is_set(), "owned model response must close before handoff completes"
+        assert frames and not any(
+            "event: final" in frame or '"finish_reason": "stop"' in frame for frame in frames
+        )
+        app_mod._record_handler_error(request, "internal")
+
+    asyncio.run(run())
+    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
+    assert len(roots) == 1, "cancelled stream root must finish exactly once"
+    _assert_root_join(events, roots[0], "disconnect-test")
+    points = _points(reader, "rag.requests.total")
+    assert sum(point.value for point in points) == 1
+    assert points[0].attributes["outcome"] == "client_disconnect"
+    assert points[0].attributes["verification_state"] == "generation_incomplete"
+    assert sum(point.count for point in _points(reader, "rag.request.duration")) == 1
+
+
+@pytest.mark.parametrize(
+    "path,stream",
+    [
+        ("/v1/search", False),
+        ("/v1/answer", False),
+        ("/v1/answer", True),
+        ("/v1/chat", False),
+        ("/v1/chat", True),
+        ("/ui/chat", False),
+        ("/ui/chat/stream", True),
+    ],
+)
+def test_retrieval_failure_terminal_logs_join_recording_root(
+    terminal_telemetry, monkeypatch, path, stream
+):
+    client, exporter, reader, events = terminal_telemetry
+    monkeypatch.setattr(
+        app_mod, "retrieve_search", MagicSearch(exc=RuntimeError("synthetic failure"))
+    )
+    payload = (
+        {"query": "IEA500I"}
+        if path in ("/v1/search", "/v1/answer")
+        else {
+            "messages": [{"role": "user", "content": "IEA500I"}],
+        }
+    )
+    response = (
+        client.post(path, data={"message": "IEA500I"})
+        if path == "/ui/chat"
+        else client.post(
+            path, json={**payload, "stream": stream} if path != "/ui/chat/stream" else payload
+        )
+    )
+    assert response.status_code == (200 if path == "/ui/chat/stream" else 502)
+    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
+    assert len(roots) == 1
+    _assert_root_join(events, roots[0], roots[0].attributes["http.request_id"])
+    assert sum(point.value for point in _points(reader, "rag.requests.total")) == 1
+
+
+TERMINAL_ROUTES = [
+    ("/v1/search", False),
+    ("/v1/answer", False),
+    ("/v1/answer", True),
+    ("/v1/chat", False),
+    ("/v1/chat", True),
+    ("/ui/chat", False),
+    ("/ui/chat/stream", True),
+]
+
+
+def _post_terminal(client, path, stream):
+    if path == "/ui/chat":
+        return client.post(path, data={"message": "IEA500I"})
+    payload = (
+        {"query": "IEA500I"}
+        if path in ("/v1/search", "/v1/answer")
+        else {"messages": [{"role": "user", "content": "IEA500I"}]}
+    )
+    if path != "/ui/chat/stream":
+        payload["stream"] = stream
+    return client.post(path, json=payload)
+
+
+@pytest.mark.parametrize("path,stream", TERMINAL_ROUTES)
+@pytest.mark.parametrize("outcome", ["success", "empty", "admission"])
+def test_terminal_log_contract_across_transports(
+    terminal_telemetry, monkeypatch, path, stream, outcome
+):
+    client, exporter, reader, events = terminal_telemetry
+    if outcome == "empty":
+        monkeypatch.setattr(
+            app_mod, "retrieve_search", lambda *args, **kwargs: ([], "identifier", {})
+        )
+    elif outcome == "admission":
+
+        async def refuse():
+            raise app_mod.AppError(
+                503, "representation_unavailable", app_mod._REPRESENTATION_UNAVAILABLE
+            )
+
+        monkeypatch.setattr(app_mod, "serving_settings", refuse)
+    response = _post_terminal(client, path, stream)
+    expected_status = (502 if path == "/ui/chat" else 503) if outcome == "admission" else 200
+    assert response.status_code == expected_status
+    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
+    assert len(roots) == 1
+    root = roots[0]
+    _assert_root_join(events, root, root.attributes["http.request_id"])
+    assert root.status.status_code == (
+        trace.StatusCode.ERROR if outcome == "admission" else trace.StatusCode.UNSET
+    )
+    assert sum(point.value for point in _points(reader, "rag.requests.total")) == 1
+
+
+@pytest.mark.parametrize("path,stream", TERMINAL_ROUTES[1:])
+@pytest.mark.parametrize("outcome", ["budget", "model_error", "non_stop", "invalid_finalize"])
+def test_generation_terminal_logs_join_specific_root(
+    terminal_telemetry, monkeypatch, path, stream, outcome
+):
+    client, exporter, reader, events = terminal_telemetry
+    if outcome == "budget":
+        monkeypatch.setattr(app_mod.settings, "llm_max_model_len", 10)
+        monkeypatch.setattr(app_mod.settings, "llm_reserved_output_tokens", 0)
+    elif outcome == "invalid_finalize":
+
+        def fail_parse(*args, **kwargs):
+            raise RuntimeError("synthetic parser failure")
+
+        monkeypatch.setattr(answer_core_mod, "parse_answer", fail_parse)
+        client = TestClient(app_mod.app, raise_server_exceptions=False)
+    else:
+        monkeypatch.setattr(
+            app_mod,
+            "llm",
+            _OutcomeLLM("error" if outcome == "model_error" else "generation_incomplete"),
+        )
+    response = _post_terminal(client, path, stream)
+    expected = (
+        200
+        if stream or outcome == "non_stop"
+        else 422
+        if outcome == "budget"
+        else 502
+        if path == "/ui/chat" or outcome == "model_error"
+        else 500
+    )
+    assert response.status_code == expected
+    if stream and outcome != "non_stop":
+        assert (
+            "event: final" not in response.text
+            and '"verification_state": "accepted"' not in response.text
+        )
+    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
+    assert len(roots) == 1
+    root = roots[0]
+    _assert_root_join(events, root, root.attributes["http.request_id"])
+    assert sum(point.value for point in _points(reader, "rag.requests.total")) == 1
+    if outcome == "non_stop" and path in ("/v1/answer", "/v1/chat") and not stream:
+        assert any(event.get("alert") == "finish_reason_non_stop" for event in events)
+
+
+@pytest.mark.parametrize("path,stream", TERMINAL_ROUTES[3:])
+def test_condense_failure_terminal_log_joins_root(terminal_telemetry, monkeypatch, path, stream):
+    client, exporter, reader, events = terminal_telemetry
+
+    async def fail_condense(*args, **kwargs):
+        raise RuntimeError("synthetic escaped condense failure")
+
+    monkeypatch.setattr(app_mod, "resolve_search_query", fail_condense)
+    monkeypatch.setattr(answer_core_mod, "resolve_search_query", fail_condense)
+    response = _post_terminal(client, path, stream)
+    assert response.status_code == (200 if path == "/ui/chat/stream" else 502)
+    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
+    assert len(roots) == 1
+    _assert_root_join(events, roots[0], roots[0].attributes["http.request_id"])
+    assert sum(point.value for point in _points(reader, "rag.requests.total")) == 1
+
+
+@pytest.mark.parametrize("path,stream", TERMINAL_ROUTES)
+@pytest.mark.parametrize("sampling", ["disabled", "dropped"])
+def test_nonrecording_failures_never_invent_correlation(
+    terminal_telemetry, monkeypatch, path, stream, sampling
+):
+    from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
+
+    client, exporter, reader, events = terminal_telemetry
+    provider = (
+        TracerProvider(sampler=ALWAYS_OFF) if sampling == "dropped" else trace.NoOpTracerProvider()
+    )
+    monkeypatch.setattr(app_mod, "tracer", provider.get_tracer("nonrecording"))
+    monkeypatch.setattr(answer_core_mod, "tracer", provider.get_tracer("nonrecording"))
+    monkeypatch.setattr(
+        app_mod, "retrieve_search", MagicSearch(exc=RuntimeError("synthetic failure"))
+    )
+    response = _post_terminal(client, path, stream)
+    assert response.status_code == (200 if path == "/ui/chat/stream" else 502)
+    assert events and not exporter.get_finished_spans()
+    for event in events:
+        assert "trace_id" not in event and "span_id" not in event
+        assert len(event["request_id"]) == 12
+    assert sum(point.value for point in _points(reader, "rag.requests.total")) == 1
+    if sampling == "dropped":
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("route", ["answer", "chat", "console"])
+def test_stream_response_failure_before_iteration_finishes_root(terminal_telemetry, route):
+    from fastapi import Request
+    from starlette.requests import ClientDisconnect
+
+    _client, exporter, reader, events = terminal_telemetry
+
+    async def run():
+        path = "/ui/chat/stream" if route == "console" else f"/v1/{route}"
+        request = Request(_scope(path))
+        response = await _direct_turn(route, request, stream=True)
+
+        async def send(message):
+            assert message["type"] == "http.response.start"
+            raise OSError("synthetic disconnected transport")
+
+        async def receive():
+            await asyncio.Event().wait()
+
+        with pytest.raises(ClientDisconnect):
+            await response(
+                dict(request.scope, asgi={"version": "3.0", "spec_version": "2.4"}), receive, send
+            )
+        await response.body_iterator.aclose()
+
+    asyncio.run(run())
+    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
+    assert len(roots) == 1
+    _assert_root_join(events, roots[0], "disconnect-test")
+    assert sum(point.value for point in _points(reader, "rag.requests.total")) == 1
+
+
+@pytest.mark.parametrize("route", ["search", "answer", "chat", "console"])
+def test_overlapping_awaited_requests_keep_independent_roots(
+    terminal_telemetry, monkeypatch, route
+):
+    from fastapi import Request
+
+    _client, exporter, reader, events = terminal_telemetry
+
+    async def run():
+        entered = [asyncio.Event(), asyncio.Event()]
+        release = [asyncio.Event(), asyncio.Event()]
+        active = []
+
+        async def retrieve(*args, **kwargs):
+            index = len(active)
+            active.append(trace.get_current_span())
+            entered[index].set()
+            await release[index].wait()
+            return MagicSearch()()
+
+        monkeypatch.setattr(app_mod, "retrieve_search", retrieve)
+        path = "/ui/chat" if route == "console" else f"/v1/{route}"
+        requests = []
+        for index in range(2):
+            scope = _scope(path)
+            scope["state"]["request_id"] = f"overlap-{index}"
+            scope["headers"] = [
+                (b"traceparent", f"00-{index + 1:032x}-{index + 10:016x}-01".encode())
+            ]
+            requests.append(Request(scope))
+        tasks = [asyncio.create_task(_direct_turn(route, request)) for request in requests]
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered)), 2)
+        assert len(active) == 2 and all(span.is_recording() for span in active)
+        assert not [
+            span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER
+        ]
+        tasks[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(tasks[0], 2)
+        assert not active[0].is_recording() and active[1].is_recording()
+        release[1].set()
+        await asyncio.wait_for(tasks[1], 2)
+        assert not active[1].is_recording()
+
+    asyncio.run(run())
+    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
+    assert len(roots) == 2
+    for index, root in enumerate(roots):
+        assert root.context.trace_id == index + 1
+        assert root.parent.span_id == index + 10
+        assert root.attributes["http.request_id"] == f"overlap-{index}"
+        _assert_root_join(events, root, f"overlap-{index}")
+    points = _points(reader, "rag.requests.total")
+    assert sum(point.value for point in points) == 2
+    assert {point.attributes["outcome"] for point in points} == {"client_disconnect", "ok"}
+
+
+@pytest.mark.parametrize("route", ["answer", "chat", "console"])
+def test_overlapping_streams_do_not_end_or_borrow_other_root(
+    terminal_telemetry, monkeypatch, route
+):
+    from fastapi import Request
+
+    _client, exporter, reader, events = terminal_telemetry
+
+    async def run():
+        entered = [asyncio.Event(), asyncio.Event()]
+        release = [asyncio.Event(), asyncio.Event()]
+        cleaned = [asyncio.Event(), asyncio.Event()]
+        active = {}
+        frames = [[], []]
+
+        async def retrieve(*args, **kwargs):
+            root = trace.get_current_span()
+            active[root.get_span_context().trace_id] = root
+            return MagicSearch()()
+
+        class WaitingResponse:
+            def __init__(self, index):
+                self.index = index
+
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                token = {
+                    "choices": [
+                        {"delta": {"content": FakeLLM().chat([]).content}, "finish_reason": None}
+                    ]
+                }
+                yield "data: " + json.dumps(token)
+                entered[self.index].set()
+                await release[self.index].wait()
+                yield 'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}'
+                yield "data: [DONE]"
+
+        class WaitingHTTP:
+            @contextlib.asynccontextmanager
+            async def stream(self, *args, **kwargs):
+                index = trace.get_current_span().get_span_context().trace_id - 1
+                try:
+                    yield WaitingResponse(index)
+                finally:
+                    await asyncio.sleep(0)
+                    cleaned[index].set()
+
+            async def post(self, *args, **kwargs):
+                pytest.fail("visible output must never retry")
+
+        monkeypatch.setattr(app_mod, "retrieve_search", retrieve)
+        monkeypatch.setattr(
+            app_mod, "llm", app_mod.HttpxLLMClient(app_mod.settings, client=WaitingHTTP())
+        )
+        path = "/ui/chat/stream" if route == "console" else f"/v1/{route}"
+
+        async def drive(index):
+            scope = _scope(path)
+            scope["state"]["request_id"] = f"stream-overlap-{index}"
+            scope["headers"] = [
+                (b"traceparent", f"00-{index + 1:032x}-{index + 10:016x}-01".encode())
+            ]
+            scope["asgi"]["spec_version"] = "2.4"
+            response = await _direct_turn(route, Request(scope), stream=True)
+
+            async def receive():
+                await asyncio.Event().wait()
+
+            async def send(message):
+                if message["type"] == "http.response.body":
+                    frames[index].append(message.get("body", b"").decode())
+
+            await response(scope, receive, send)
+
+        tasks = [asyncio.create_task(drive(index)) for index in range(2)]
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered)), 2)
+        assert all(root.is_recording() for root in active.values())
+        tasks[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(tasks[0], 2)
+        assert cleaned[0].is_set() and not cleaned[1].is_set()
+        assert not active[1].is_recording() and active[2].is_recording()
+        release[1].set()
+        await asyncio.wait_for(tasks[1], 2)
+        assert cleaned[1].is_set() and not active[2].is_recording()
+        assert not any(
+            "event: final" in frame or '"finish_reason": "stop"' in frame for frame in frames[0]
+        )
+        assert any('"verification_state": "accepted"' in frame for frame in frames[1])
+        assert not trace.get_current_span().is_recording()
+
+    asyncio.run(run())
+    roots = [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.SERVER]
+    assert len(roots) == 2
+    for index, root in enumerate(roots):
+        assert root.context.trace_id == index + 1 and root.parent.span_id == index + 10
+        _assert_root_join(events, root, f"stream-overlap-{index}")
+    points = _points(reader, "rag.requests.total")
+    assert sum(point.value for point in points) == 2
+    assert {point.attributes["outcome"] for point in points} == {"client_disconnect", "ok"}
+
+
+def test_cancellation_regression_rejects_end_after_finally(terminal_telemetry, monkeypatch):
+    from fastapi.responses import StreamingResponse
+
+    def unsafe_stream(owner, source, **kwargs):
+        async def events():
+            with tracing_mod.use_span(owner.span):
+                try:
+                    async for chunk in source:
+                        yield chunk
+                finally:
+                    owner.abort()
+            owner.end()
+
+        owner.streaming = True
+        kwargs.pop("query_class", None)
+        kwargs.pop("hits", None)
+        return StreamingResponse(events(), **kwargs)
+
+    monkeypatch.setattr(app_mod._RequestSpan, "stream", unsafe_stream)
+    with pytest.raises(AssertionError, match="cancelled stream root must finish exactly once"):
+        test_stream_cancellation_finishes_root_and_closes_owned_io(
+            terminal_telemetry, monkeypatch, "answer", "cancel", False
+        )
+
+
+def test_failure_log_regression_rejects_end_before_log(terminal_telemetry, monkeypatch):
+    original = app_mod.log.error
+
+    def ended_log(message, *args, **kwargs):
+        trace.get_current_span().end()
+        original(message, *args, **kwargs)
+
+    monkeypatch.setattr(app_mod.log, "error", ended_log)
+    with pytest.raises(AssertionError, match="terminal log trace_id"):
+        test_retrieval_failure_terminal_logs_join_recording_root(
+            terminal_telemetry, monkeypatch, "/v1/search", False
+        )
 
 
 def _provider() -> tuple[TracerProvider, InMemorySpanExporter]:
