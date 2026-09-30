@@ -14,9 +14,11 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import anyio
 import httpx2
 from pydantic import BaseModel, Field
 
@@ -1151,6 +1153,26 @@ class HttpxLLMClient:
             )
         return self._cached_async_client
 
+    @asynccontextmanager
+    async def _stream_http(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        """Shield operation cleanup, never model I/O or the shared client."""
+        stream = self._async_http().stream(*args, **kwargs)
+
+        async def close(*exception_info: Any) -> Any:
+            with anyio.CancelScope(shield=True):
+                try:
+                    return await stream.__aexit__(*exception_info)
+                except Exception as exc:
+                    if isinstance(exception_info[1], (asyncio.CancelledError, GeneratorExit)):
+                        log.warning("model stream cleanup failed (%s)", error_type(exc))
+                        return False
+                    raise
+
+        async with AsyncExitStack() as cleanup:
+            response = await stream.__aenter__()
+            cleanup.push_async_exit(close)
+            yield response
+
     def close(self) -> None:
         if self._client is not None and hasattr(self._client, "close"):
             self._client.close()
@@ -1197,7 +1219,7 @@ class HttpxLLMClient:
                 t0 = time.monotonic()
                 state = _SseStreamState()
                 body_stream = _chat_body(model, serialized, reasoning_effort, temperature, stream=True)
-                async with self._async_http().stream(
+                async with self._stream_http(
                     "POST",
                     f"{base_url.rstrip('/')}/chat/completions",
                     json=body_stream,
@@ -1257,7 +1279,7 @@ class HttpxLLMClient:
         state = _SseStreamState()
         yielded_tokens = 0
 
-        async with self._async_http().stream(
+        async with self._stream_http(
             "POST",
             f"{base_url.rstrip('/')}/chat/completions",
             json=body,

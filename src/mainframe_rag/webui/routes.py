@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -42,7 +42,7 @@ from mainframe_rag.agent.sse import error_payload, final_payload, format_sse_eve
 from mainframe_rag.ingest.chunk import detect_code_region
 from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage
-from mainframe_rag.tracing import start_span, use_span
+from mainframe_rag.tracing import start_span
 
 log = logging.getLogger("agent.webui")
 
@@ -546,27 +546,17 @@ def _render_pair(
     return _secure(HTMLResponse(body))
 
 
-async def _run_turn(request: Request, req: UiChatRequest):
+async def _run_turn(request: Request, req: UiChatRequest, root_span):
     """Run one console turn through the shared answer core; the caller owns
     client-facing error mapping (fixed text, detail to logs only)."""
     from mainframe_rag.agent import app as app_mod
 
     request_id = getattr(request.state, "request_id", "ui")
-    # One SERVER span per turn (issue #529 OBS-1B §4.3): created before turn
-    # validation and the serving gate so rejections share the trace.
-    root_span = start_span(
-        app_mod.tracer,
-        "ui.chat",
-        context=app_mod.parent_context(request.headers),
-        kind=SpanKind.SERVER,
-        attributes={"http.request_id": request_id, "rag.stream": False},
-    )
-    async with app_mod._admission_guard(root_span):
-        turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
-        # Serving gate before any retrieval (issues #391 F3/F4): the console
-        # refuses with the same stable 503 as the API when the generation is
-        # unverified.
-        deps = await app_mod.serving_deps()
+    turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
+    # Serving gate before any retrieval (issues #391 F3/F4): the console
+    # refuses with the same stable 503 as the API when the generation is
+    # unverified.
+    deps = await app_mod.serving_deps()
     core_input = AnswerCoreInput(
         query=turn.query,
         messages=turn.messages,
@@ -577,25 +567,22 @@ async def _run_turn(request: Request, req: UiChatRequest):
         is_chat=True,
         reasoning_effort=req.reasoning_effort,
     )
-    with use_span(root_span, end_on_exit=False):
-        try:
-            output = await execute_answer_core(core_input, deps, parent_span=root_span)
-        except Exception as exc:
-            app_mod._span_error(root_span, exc)
-            raise
-        else:
-            log.info(
-                app_mod.json_log(
-                    request_id,
-                    "console",
-                    query_kind=output.query_kind,
-                    hits=len(output.hits),
-                    verification_state=output.verification_state,
-                )
+    try:
+        output = await execute_answer_core(core_input, deps, parent_span=root_span)
+    except Exception as exc:
+        app_mod._span_error(root_span, exc)
+        raise
+    else:
+        log.info(
+            app_mod.json_log(
+                request_id,
+                "console",
+                query_kind=output.query_kind,
+                hits=len(output.hits),
+                verification_state=output.verification_state,
             )
-            return output
-        finally:
-            root_span.end()
+        )
+        return output
 
 
 def history_to_turns(history: list[ChatMessage]) -> list[dict[str, Any]]:
@@ -635,87 +622,100 @@ async def ui_chat(
     from mainframe_rag.agent import app as app_mod
 
     started = time.monotonic()
-    history = _parse_history(messages)
-    context = splunk_context.strip() if splunk_context and splunk_context.strip() else None
-    user_turn = _turn("user", message.strip(), splunk_context=context)
-    turns = history_to_turns(history) + [user_turn]
-    form = {
-        "splunk_context": splunk_context or "",
-        "product": product or "",
-        "version": version or "",
-        "reasoning_effort": reasoning_effort or "low",
-    }
-    is_htmx = request.headers.get("HX-Request") == "true"
+    request_id = getattr(request.state, "request_id", "ui")
+    # One SERVER span per turn (issue #529 OBS-1B §4.3): created before turn
+    # validation and the serving gate so rejections share the trace.
+    root_span = start_span(
+        app_mod.tracer,
+        "ui.chat",
+        context=app_mod.parent_context(request.headers),
+        kind=SpanKind.SERVER,
+        attributes={"http.request_id": request_id, "rag.stream": False},
+    )
+    with app_mod._request_span(request, root_span, "console", started):
+        history = _parse_history(messages)
+        context = splunk_context.strip() if splunk_context and splunk_context.strip() else None
+        user_turn = _turn("user", message.strip(), splunk_context=context)
+        turns = history_to_turns(history) + [user_turn]
+        form = {
+            "splunk_context": splunk_context or "",
+            "product": product or "",
+            "version": version or "",
+            "reasoning_effort": reasoning_effort or "low",
+        }
+        is_htmx = request.headers.get("HX-Request") == "true"
 
-    try:
-        req = UiChatRequest(
-            messages=[*history, ChatMessage(role="user", content=message.strip())],
-            splunk_context=context,
-            product=(product or None),
-            version=(version or None),
-            reasoning_effort=reasoning_effort,
-        )
-        output = await _run_turn(request, req)
-    except Exception as exc:  # noqa: BLE001 — fixed banner to the operator, detail to logs
-        from mainframe_rag.agent.answer import PromptBudgetExceeded
-
-        log.error("ui_chat failed: %s", error_type(exc))
-        # An irreducible budget overflow is the operator's request to
-        # shrink, not a server fault: distinct fixed banner (issue #368).
-        error_text = (
-            _BUDGET_ERROR_TEXT if isinstance(exc, PromptBudgetExceeded) else _ERROR_TEXT
-        )
-        status_code = 422 if isinstance(exc, PromptBudgetExceeded) else 502
-        outcome = (
-            "prompt_budget_exceeded"
-            if isinstance(exc, PromptBudgetExceeded)
-            else exc.code
-            if isinstance(exc, app_mod.AppError)
-            else "invalid_request"
-            if isinstance(exc, ValidationError)
-            else "upstream_error"
-        )
-        app_mod._record_endpoint(request, "console", outcome, started)
-        if is_htmx:
-            return _render_pair(
-                request,
-                [user_turn],
-                history_json=_history_json(turns[:-1]),
-                error=error_text,
+        try:
+            req = UiChatRequest(
+                messages=[*history, ChatMessage(role="user", content=message.strip())],
+                splunk_context=context,
+                product=(product or None),
+                version=(version or None),
+                reasoning_effort=reasoning_effort,
             )
-        return _render_page(request, turns, error=error_text, form=form, status_code=status_code)
+            output = await _run_turn(request, req, root_span)
+        except Exception as exc:  # noqa: BLE001 — fixed banner to the operator, detail to logs
+            from mainframe_rag.agent.answer import PromptBudgetExceeded
 
-    app_mod._record_endpoint(
-        request,
-        "console",
-        "ok",
-        started,
-        query_class=output.query_kind,
-        hits=len(output.hits),
-        ttft_ms=output.ttft_ms,
-        llm_model=app_mod.settings.llm_model_reasoning,
-        verification_state=output.verification_state,
-    )
-    assistant_content = output.answer
-    if output.script:
-        # Tagged script fences (JCL/REXX/…) leave the answer body during
-        # citation parsing; the console renders them with their threaded
-        # language tag (issue #337), falling back to unlabeled when None.
-        tag = output.script_lang or ""
-        assistant_content += f"\n\n```{tag}\n{output.script}\n```"
-    assistant_turn = _turn(
-        "assistant",
-        assistant_content,
-        citations=output.citations,
-        history_content=_assistant_content(assistant_content, output.citations),
-        verification_state=output.verification_state,
-        citations_inferred=output.citations_inferred,
-        script_review_required=output.script_review_required,
-    )
-    turns.append(assistant_turn)
-    if is_htmx:
-        return _render_pair(request, [user_turn, assistant_turn], history_json=_history_json(turns))
-    return _render_page(request, turns, form=form)
+            if isinstance(exc, app_mod.AppError) and exc.status >= 500:
+                app_mod._span_error(root_span, exc)
+            log.error(app_mod.json_log(request_id, "console", error=error_type(exc)))
+            # An irreducible budget overflow is the operator's request to
+            # shrink, not a server fault: distinct fixed banner (issue #368).
+            error_text = (
+                _BUDGET_ERROR_TEXT if isinstance(exc, PromptBudgetExceeded) else _ERROR_TEXT
+            )
+            status_code = 422 if isinstance(exc, PromptBudgetExceeded) else 502
+            outcome = (
+                "prompt_budget_exceeded"
+                if isinstance(exc, PromptBudgetExceeded)
+                else exc.code
+                if isinstance(exc, app_mod.AppError)
+                else "invalid_request"
+                if isinstance(exc, ValidationError)
+                else "upstream_error"
+            )
+            app_mod._record_endpoint(request, "console", outcome, started)
+            if is_htmx:
+                return _render_pair(
+                    request,
+                    [user_turn],
+                    history_json=_history_json(turns[:-1]),
+                    error=error_text,
+                )
+            return _render_page(request, turns, error=error_text, form=form, status_code=status_code)
+
+        app_mod._record_endpoint(
+            request,
+            "console",
+            "ok",
+            started,
+            query_class=output.query_kind,
+            hits=len(output.hits),
+            ttft_ms=output.ttft_ms,
+            llm_model=app_mod.settings.llm_model_reasoning,
+            verification_state=output.verification_state,
+        )
+        assistant_content = output.answer
+        if output.script:
+            # Tagged script fences (JCL/REXX/…) leave the answer body during
+            # citation parsing; the console renders them with their threaded
+            # language tag (issue #337), falling back to unlabeled when None.
+            tag = output.script_lang or ""
+            assistant_content += f"\n\n```{tag}\n{output.script}\n```"
+        assistant_turn = _turn(
+            "assistant",
+            assistant_content,
+            citations=output.citations,
+            history_content=_assistant_content(assistant_content, output.citations),
+            verification_state=output.verification_state,
+            citations_inferred=output.citations_inferred,
+            script_review_required=output.script_review_required,
+        )
+        turns.append(assistant_turn)
+        if is_htmx:
+            return _render_pair(request, [user_turn, assistant_turn], history_json=_history_json(turns))
+        return _render_page(request, turns, form=form)
 
 
 @router.post("/chat/stream")
@@ -733,12 +733,22 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
         kind=SpanKind.SERVER,
         attributes={"http.request_id": request_id, "rag.stream": True},
     )
-    async with app_mod._admission_guard(root_span):
-        turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
-        # Serving gate before the stream opens (issues #391 F3/F4): a non-servable
-        # generation is the same stable 503 JSON the API returns, never an SSE
-        # error frame after a 200 was already committed.
-        deps = await app_mod.serving_deps()
+    with app_mod._request_span(request, root_span, "console", started) as owner:
+        return await _console_stream_response(req, owner)
+
+
+async def _console_stream_response(req, owner):
+    from mainframe_rag.agent import app as app_mod
+
+    request = owner.request
+    root_span = owner.span
+    request_id = request.state.request_id
+    started = owner.started
+    turn = app_mod.prepare_chat_request(request_id, req.messages, req.splunk_context)
+    # Serving gate before the stream opens (issues #391 F3/F4): a non-servable
+    # generation is the same stable 503 JSON the API returns, never an SSE
+    # error frame after a 200 was already committed.
+    deps = await app_mod.serving_deps()
     core_input = AnswerCoreInput(
         query=turn.query,
         messages=turn.messages,
@@ -752,93 +762,89 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
     )
 
     async def events():
-        terminal = False
-        # Attached while the generator runs so stream logs join the trace.
-        with use_span(root_span, end_on_exit=False):
-            try:
-                async for item in execute_answer_core_stream(
-                    core_input, deps, parent_span=root_span
-                ):
-                    if item["type"] == "token":
-                        delta = item["delta"]
-                        if delta:
-                            yield format_sse_event(
-                                "token", {"type": "token", "delta": delta, "token": delta}
-                            )
-                    elif item["type"] == "final":
-                        output = item["output"]
-                        app_mod._record_endpoint(
-                            request,
-                            "console",
-                            "ok",
-                            started,
-                            query_class=output.query_kind,
-                            hits=len(output.hits),
-                            ttft_ms=output.ttft_ms,
-                            llm_model=app_mod.settings.llm_model_reasoning,
-                            verification_state=output.verification_state,
-                        )
-                        log.info(
-                            app_mod.json_log(
-                                request_id,
-                                "console",
-                                query_kind=output.query_kind,
-                                hits=len(output.hits),
-                                verification_state=output.verification_state,
-                                stream=True,
-                            )
-                        )
-                        terminal = True
+        core_events = execute_answer_core_stream(core_input, deps, parent_span=root_span)
+        try:
+            async for item in core_events:
+                if item["type"] == "token":
+                    delta = item["delta"]
+                    if delta:
                         yield format_sse_event(
-                            "final",
-                            final_payload(
-                                request_id,
-                                output.answer,
-                                output.citations,
-                                output.citations_inferred,
-                                output.script,
-                                output.query_kind,
-                                output.hits,
-                                output.finish_reason,
-                                output.ttft_ms,
-                                output.usage,
-                                inferred_indices=output.inferred_indices,
-                                script_lang=output.script_lang,
-                                verification_state=output.verification_state,
-                                script_review_required=output.script_review_required,
-                            ),
+                            "token", {"type": "token", "delta": delta, "token": delta}
                         )
-            except Exception as exc:  # noqa: BLE001 — mid-stream: error event, no final
-                from mainframe_rag.agent.answer import PromptBudgetExceeded
-
-                app_mod._span_error(root_span, exc)
-                if isinstance(exc, PromptBudgetExceeded):
-                    log.warning("ui_chat_stream budget exceeded: %s", error_type(exc))
-                else:
-                    log.error("ui_chat_stream failed: %s", error_type(exc))
-                app_mod._record_endpoint(
-                    request,
-                    "console",
-                    "prompt_budget_exceeded"
-                    if isinstance(exc, PromptBudgetExceeded)
-                    else "upstream_error",
-                    started,
-                    verification_state="generation_incomplete",
-                )
-                terminal = True
-                yield format_sse_event("error", error_payload())
-            finally:
-                if not terminal:
-                    app_mod._record_stream_abort(
-                        request, request_id, "console", started, "unknown", None, root_span
+                elif item["type"] == "final":
+                    output = item["output"]
+                    app_mod._record_endpoint(
+                        request,
+                        "console",
+                        "ok",
+                        started,
+                        query_class=output.query_kind,
+                        hits=len(output.hits),
+                        ttft_ms=output.ttft_ms,
+                        llm_model=app_mod.settings.llm_model_reasoning,
+                        verification_state=output.verification_state,
                     )
-        root_span.end()
+                    log.info(
+                        app_mod.json_log(
+                            request_id,
+                            "console",
+                            query_kind=output.query_kind,
+                            hits=len(output.hits),
+                            verification_state=output.verification_state,
+                            stream=True,
+                        )
+                    )
+                    yield format_sse_event(
+                        "final",
+                        final_payload(
+                            request_id,
+                            output.answer,
+                            output.citations,
+                            output.citations_inferred,
+                            output.script,
+                            output.query_kind,
+                            output.hits,
+                            output.finish_reason,
+                            output.ttft_ms,
+                            output.usage,
+                            inferred_indices=output.inferred_indices,
+                            script_lang=output.script_lang,
+                            verification_state=output.verification_state,
+                            script_review_required=output.script_review_required,
+                        ),
+                    )
+        except Exception as exc:  # noqa: BLE001 — mid-stream: error event, no final
+            from mainframe_rag.agent.answer import PromptBudgetExceeded
+
+            app_mod._span_error(root_span, exc)
+            if isinstance(exc, PromptBudgetExceeded):
+                log.warning(
+                    app_mod.json_log(request_id, "console", error=error_type(exc), stream=True)
+                )
+            else:
+                log.error(
+                    app_mod.json_log(request_id, "console", error=error_type(exc), stream=True)
+                )
+            app_mod._record_endpoint(
+                request,
+                "console",
+                "prompt_budget_exceeded"
+                if isinstance(exc, PromptBudgetExceeded)
+                else "upstream_error",
+                started,
+                verification_state="generation_incomplete",
+            )
+            yield format_sse_event("error", error_payload())
+
+        finally:
+            await core_events.aclose()
 
     headers = {**_SECURITY_HEADERS}
     headers.pop("Cache-Control", None)
     headers["Cache-Control"] = "no-cache"
     headers["X-Accel-Buffering"] = "no"
-    return StreamingResponse(events(), media_type="text/event-stream", headers=headers)
+
+    return owner.stream(events(), media_type="text/event-stream", headers=headers)
 
 
 @router.get("/static/{path:path}")
