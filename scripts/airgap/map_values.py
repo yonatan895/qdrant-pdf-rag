@@ -29,6 +29,11 @@ import sys
 import typing
 from pathlib import Path
 
+try:
+    from scripts.airgap.model_config import MODEL_CONFIG_KEYS, validate_model_config
+except ModuleNotFoundError:
+    from model_config import MODEL_CONFIG_KEYS, validate_model_config
+
 DEFAULT_OUT = "dist/mainframe-rag-release-values.yaml"
 
 
@@ -169,6 +174,12 @@ def build_values(deploy_only: bool = False) -> dict:
     embed_base = env("EMBED_BASE_URL")
     if not embed_base and env("VLLM_BASE_URL"):
         embed_base = re.sub(r"(/v1)?/*$", "", env("VLLM_BASE_URL")) + "/v1"
+    model_config = {name: env(name) for name in MODEL_CONFIG_KEYS}
+    model_config["EMBED_BASE_URL"] = embed_base
+    try:
+        validate_model_config(model_config)
+    except ValueError as exc:
+        die(str(exc))
     for key in ("EMBED_MODEL", "EMBED_MODEL_REVISION"):
         nonempty(key, "is required for deploy/ingest (see airgap.env.example)")
     if not re.search(r"\S", env("EMBED_MODEL_REVISION")):
@@ -277,7 +288,7 @@ def build_values(deploy_only: bool = False) -> dict:
 
     reasoning_model = env("LLM_MODEL_REASONING")
     if reasoning_model:
-        reasoning_base = nonempty("LLM_BASE_URL", "is required when LLM_MODEL_REASONING is set")
+        reasoning_base = env("LLM_BASE_URL")
     else:
         reasoning_base = ""
         reasoning_model = ""

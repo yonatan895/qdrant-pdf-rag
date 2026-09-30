@@ -375,6 +375,18 @@ def test_reasoning_fails_closed_when_model_set_without_base_url(monkeypatch, map
     assert "LLM_BASE_URL is required when LLM_MODEL_REASONING is set" in r.stderr
 
 
+@pytest.mark.parametrize("missing", ["CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL"])
+def test_contextual_pair_matches_preflight_validation(monkeypatch, mapper_env, missing):
+    monkeypatch.setenv("CONTEXTUAL_EMBED_ENABLED", "true")
+    monkeypatch.setenv("CONTEXT_LLM_BASE_URL", "https://context/v1")
+    monkeypatch.setenv("CONTEXT_LLM_MODEL", "context-model")
+    monkeypatch.delenv(missing, raising=False)
+    result, output = mapper_env()
+    assert result.returncode != 0
+    assert f"{missing} is required when CONTEXTUAL_EMBED_ENABLED is set" in result.stderr
+    assert not output.exists()
+
+
 
 @pytest.mark.parametrize("namespace", ["bad\nfield: value", "bad.name", "Upper", "-bad", "bad-", "a" * 64])
 def test_namespace_rejects_invalid_label_before_values_write(mapper_env, monkeypatch, namespace):

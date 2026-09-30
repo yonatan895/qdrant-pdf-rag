@@ -25,23 +25,7 @@ case "$DENSE_DIM" in
     0) die "DENSE_DIM must be greater than 0, got 0" ;;
 esac
 
-case "${VLLM_BASE_URL:-}" in
-    ""|http://*|https://*) ;;
-    *) die "VLLM_BASE_URL must begin with http:// or https://, got '$VLLM_BASE_URL'" ;;
-esac
-
-# Optional model-endpoint overrides: empty means "derived/disabled", anything
-# else must be an http(s) URL — a gateway hostname without a scheme fails
-# here, not as a cryptic connect error inside the cluster.
-for _url_var in EMBED_BASE_URL LLM_BASE_URL RERANK_BASE_URL CONTEXT_LLM_BASE_URL; do
-    eval "_url=\${$_url_var:-}"
-    case "$_url" in
-        "") ;;
-        http://*|https://*) ;;
-        *) die "$_url_var must begin with http:// or https://, got '$_url'" ;;
-    esac
-done
-unset _url_var _url
+validate_model_config
 
 check_secret_name "${GATEWAY_API_KEY_SECRET:-}" GATEWAY_API_KEY_SECRET
 check_secret_name "${PULL_SECRET:-}" PULL_SECRET

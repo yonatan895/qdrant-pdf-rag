@@ -156,3 +156,19 @@ def test_pipeline_without_corpus_pvc_awaits_ingest(pipe_tree):
     assert r.returncode == 0, r.stderr
     assert "STAGE 4/5: CORPUS INGESTION (SKIPPED — CORPUS_PVC not set)" in r.stdout
     assert "PIPELINE DRY-RUN COMPLETE: rendering passed; live acceptance NOT RUN" in r.stdout
+
+
+def test_incomplete_reasoning_stops_before_load_then_corrected_config_runs(pipe_tree):
+    calls = pipe_tree / "stage-calls"
+    for stage in ("load", "deploy", "ingest", "smoke"):
+        write_stub(pipe_tree / "scripts/airgap" / f"{stage}.sh",
+                   f'#!/bin/sh\nprintf "{stage}\\n" >> "{calls}"\n')
+    config = {"LLM_MODEL_REASONING": "code", "CORPUS_PVC": "corpus"}
+    result = _run_pipeline(pipe_tree, extra_env=config)
+    assert result.returncode != 0
+    assert "LLM_BASE_URL is required when LLM_MODEL_REASONING is set" in result.stderr
+    assert not calls.exists()
+    config["GATEWAY_BASE_URL"] = "https://shared.example/v1"
+    result = _run_pipeline(pipe_tree, extra_env=config)
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == ["load", "deploy", "ingest", "smoke"]

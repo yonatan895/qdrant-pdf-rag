@@ -65,6 +65,14 @@ restores the snapshot over whatever the file assigned; empty stays unset
 - Product rules: `EMBED_MODE=hash` dies (case-sensitive match on that exact
   string); storage classes containing `nfs` (any case) die — but only
   `STORAGE_CLASS` is checked, not snapshot/corpus classes.
+- `scripts/airgap/model_config.py` owns pure validation of the resolved model
+  inputs for both preflight and the values mapper. A reasoning alias requires
+  a resolved reasoning/shared URL; enabled contextual embedding requires its
+  URL and model. Invalid endpoint schemes or required model/URL pairs fail
+  before the pipeline reaches image loading. Diagnostics name the field, not
+  its value. Python 3 is required on the bastion for this check as well as
+  mapping. URL resolution and caller/file precedence remain `common.sh`-owned;
+  rerank's existing embedding-URL/model fallback is unchanged.
 - **Maintenance warning:** a new `.example` key that is not added to
   `OPERATOR_ENV_KEYS` silently regresses to file-wins. The list and the
   example must change together.
@@ -557,7 +565,8 @@ live in `.github/workflows/e2e.yml`.
   `airgap-package` (main/dispatch): pack + 90-day bundle artifact (PRs
   skip). `airgap-acceptance` (main/dispatch): black-box handoff in a fresh
   dir — digest verify, unpack, bootstrap, manifest/SHA assertions, dry-run
-  pipeline with standin env passed explicitly, both pull-secret branches.
+  pipeline with explicit shared-gateway reasoning and legacy embedding-only
+  (reasoning explicitly disabled) configurations, both pull-secret branches.
   `kind-live-rehearsal` (main/dispatch) is a four-lane matrix described below.
   The lab OpenShift rehearsal remains secret-gated, and PRs never touch the lab cluster.
   `airgap-rehearsal` downloads and bootstraps the published bundle; it does not
@@ -591,7 +600,7 @@ include actual runner CPU, RAM and disk capacity; cleanup runs even after failur
 
 | Job / lane | Real services and assertions |
 |---|---|
-| `airgap-acceptance` | Fresh bundle integrity/bootstrap, manifest SHA and both pull-secret render branches |
+| `airgap-acceptance` | Fresh bundle integrity/bootstrap, manifest SHA, explicit shared-reasoning and legacy embedding-only configurations, and both pull-secret render branches |
 | `kind-pipeline` | Authenticated registry, real product containers, real LiteLLM/PostgreSQL, synthetic ingest, search and application streams |
 | `kind-gateway-faults` | TLS/auth, both model legs, malformed/upstream/dimension/timeout/truncated-stream failures through LiteLLM, followed by healthy recovery |
 | `kind-lifecycle` | Three-worker Kind; synthetic snapshot recovery, PVC identity, Qdrant/agent/Jaeger replacement, old trace persistence and repeat pipeline |
@@ -610,11 +619,30 @@ real test gateway. The `pipeline`, `gateway-faults` and `lifecycle` lanes keep
 explicit per-operation URLs and per-leg Secret keys; the `shared-gateway` lane
 instead sets only `GATEWAY_BASE_URL` and `GATEWAY_API_KEY_SECRET_KEY=api-key`
 (one virtual key for both mock models) so `common.sh` fallback and the shared
-Secret reference are proven live. Service existence is awaited before readiness checks. Fault
+Secret reference are exercised live. Service existence is awaited before readiness checks. Fault
 transitions wait for the requested mock state through the actual upstream Service,
 so a rollout's success cannot leave a test hitting the old backend state.
 The gateway's configuration and strict-finish module share a projected volume;
 there is no nested read-only `subPath` mount to fail during container creation.
+
+`scripts/ci/check_gateway_rendering.py` checks the selected source mode and
+parses the final rendered Kubernetes YAML through `kubectl patch --local`
+with an empty merge patch. It matches each resource/container/env identity:
+agent LLM/embed/rerank and ingest embed/context URLs and mandatory Secret
+name/data-key references, including dormant legs. Quote formatting is not
+an invariant: the rehearsal's local ingest resource patch can remove quotes
+without changing a reference. Missing/duplicate consumers, wrong precedence,
+wrong model aliases, optional or plaintext keys, and unresolved placeholders
+fail with an attributable nonsecret message. Its retained JSON projects only
+five consumer identities, sanitized endpoint locations, Secret reference
+names/keys, and fixed errors; no Secret data or unrestricted env/YAML dump.
+Local decoding has a 30-second timeout; diagnostic reference/host strings are
+bounded to 253 characters, with credential/query/fragment and nonstandard path
+data omitted from endpoint projections. These are CI diagnostic controls, not
+new model-operation timeouts or production defaults.
+The following reasoning/complete-stream and application-contract steps still
+must run successfully on the same final candidate bundle. Local rendering or
+synthetic signed-handoff tests do not supply that final-tree Kind evidence.
 
 `probe_gateway.py --require-reasoning --stream` fails when reasoning is absent,
 the stream reports an error, no successful finish arrives, or `[DONE]` is missing.
