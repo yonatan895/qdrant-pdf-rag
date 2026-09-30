@@ -10,6 +10,7 @@ the real SDK exporters and test readers, never around them.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -31,6 +32,7 @@ from mainframe_rag.agent import metrics as metrics_mod
 from mainframe_rag.agent.tokenizer import FallbackTokenizer
 from mainframe_rag.logs import JsonFormatter, error_type
 from mainframe_rag.ports import ChatResult, TokenUsage
+from tests.test_metrics import _points
 
 CANARY_QUERY = "canary-query-ZK7xq Kostenstelle"
 CANARY_HEADER = "canary-header-QQ9vv"
@@ -134,19 +136,8 @@ def metric_reader(monkeypatch):
 
 
 def _span_text(spans):
-    """Every string the spans export: attribute values, event fields,
-    status descriptions."""
-    texts = []
-    for span in spans:
-        for value in (span.attributes or {}).values():
-            texts.append(str(value))
-        for event in span.events or []:
-            texts.append(event.name)
-            for value in (event.attributes or {}).values():
-                texts.append(str(value))
-        if span.status and span.status.description:
-            texts.append(span.status.description)
-    return "\n".join(texts)
+    """Complete SDK records, including attributes, events and status text."""
+    return "\n".join(span.to_json() for span in spans)
 
 
 def _metric_text(reader):
@@ -245,6 +236,190 @@ def test_failure_hides_canaries_but_keeps_error_type(client, caplog, monkeypatch
         and e.attributes.get("exception.type") == "RuntimeError"
         for e in root.events
     )
+
+
+_ATTACHMENT_ROUTES = [
+    ("/v1/answer", False, "answer"),
+    ("/v1/answer", True, "answer"),
+    ("/v1/answer?stream=true", False, "answer"),
+    ("/v1/chat", False, "chat"),
+    ("/v1/chat", True, "chat"),
+    ("/v1/chat/completions", False, "chat"),
+    ("/v1/chat/completions", True, "chat"),
+    ("/ui/chat", False, "console"),
+    ("/ui/chat/stream", True, "console"),
+]
+
+
+@pytest.mark.parametrize(
+    ("path", "stream", "endpoint", "failure"),
+    [
+        (*route, failure)
+        for route in _ATTACHMENT_ROUTES
+        for failure in (
+            "sync_retrieval", "awaited_retrieval", "sync_condensation", "awaited_condensation",
+        )
+        if route[2] != "answer" or failure.endswith("retrieval")
+    ],
+)
+def test_attachment_failures_hide_canaries(
+    client, metric_reader, caplog, monkeypatch, path, stream, endpoint, failure,
+):
+    """Issue #563: escaping failures must be private before SDK export."""
+    connection, exporter = client
+    calls = []
+
+    def fail_sync(*args, **kwargs):
+        calls.append(failure)
+        raise RuntimeError(" / ".join(CANARIES))
+
+    async def fail_awaited(*args, **kwargs):
+        await asyncio.sleep(0)
+        fail_sync(*args, **kwargs)
+
+    fail = fail_awaited if failure.startswith("awaited") else fail_sync
+    condensation = failure.endswith("condensation")
+    if condensation:
+        monkeypatch.setattr(answer_core_mod, "condense_query", fail)
+        monkeypatch.setattr(app_mod.settings, "chat_condense_enabled", True)
+    else:
+        monkeypatch.setattr(app_mod, "retrieve_search", fail)
+    monkeypatch.setattr(app_mod.settings, "ui_enabled", True)
+    messages = [
+        {"role": "user", "content": "Original synthetic question"},
+        {"role": "assistant", "content": "Original synthetic answer"},
+        {"role": "user", "content": CANARY_QUERY},
+    ]
+    headers = {
+        "X-Canary-Probe": CANARY_HEADER,
+        "traceparent": "00-1234567890abcdef1234567890abcdef-abcdef1234567890-01",
+    }
+    with caplog.at_level(logging.INFO):
+        if path == "/ui/chat":
+            response = connection.post(path, headers=headers, data={
+                "message": CANARY_QUERY, "messages": json.dumps(messages[:-1]),
+            })
+        else:
+            payload = {} if endpoint == "console" else {"stream": stream}
+            payload.update({"query": CANARY_QUERY} if endpoint == "answer" else {"messages": messages})
+            response = connection.post(path, headers=headers, json=payload)
+    assert calls == [failure]
+    if path == "/ui/chat/stream":
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        frames = response.text.strip().split("\n")
+        assert frames[0] == "event: error"
+        assert json.loads(frames[1].removeprefix("data: ")) == {
+            "type": "error", "code": "upstream_error", "message": "stream failed",
+            "verification_state": "generation_incomplete",
+        }
+        assert "event: final" not in response.text
+    elif path == "/ui/chat":
+        assert response.status_code == 502
+        assert "The reasoning agent could not complete this request." in response.text
+    else:
+        assert response.status_code == 502
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json() == {"code": "upstream_error", "message": "retrieval failed"}
+
+    spans = exporter.get_finished_spans()
+    assert spans, "failure must still render spans"
+    logs_blob = "\n".join(_formatted_logs(caplog))
+    spans_blob = _span_text(spans)
+    metrics_blob = _metric_text(metric_reader)
+    for canary in CANARIES:
+        assert canary not in spans_blob, f"{canary} leaked into spans"
+        assert canary not in logs_blob, f"{canary} leaked into stdout JSON"
+        assert canary not in metrics_blob, f"{canary} leaked into metric labels"
+    assert _metric_label_keys(metric_reader) <= FINITE_METRIC_LABELS
+    root_name = "ui.chat" if endpoint == "console" else f"v1.{endpoint}"
+    roots = [span for span in spans if span.name == root_name]
+    assert len(roots) == 1
+    root = roots[0]
+    expected_type = "RetrievalError" if endpoint == "console" and not condensation else "RuntimeError"
+    assert root.status.status_code == trace.StatusCode.ERROR
+    assert root.status.description == expected_type
+    assert [dict(event.attributes) for event in root.events if event.name == "exception"] == [
+        {"exception.type": expected_type},
+    ]
+    assert root.kind == trace.SpanKind.SERVER
+    assert root.context.trace_id == 0x1234567890ABCDEF1234567890ABCDEF
+    assert root.parent.span_id == 0xABCDEF1234567890
+    assert len(root.attributes["http.request_id"]) == 12
+    if endpoint != "console":
+        assert root.attributes["http.request_id"] in logs_blob
+    if condensation:
+        children = [span for span in spans if span.name == "chat.condense"]
+        assert len(children) == 1
+        assert children[0].parent.span_id == root.context.span_id
+    counts = _points(metric_reader, "rag.requests.total")
+    assert len(counts) == 1 and counts[0].value == 1
+    assert dict(counts[0].attributes) == {
+        "endpoint": endpoint, "outcome": "upstream_error", "query_class": "unknown",
+        **({"verification_state": "generation_incomplete"} if path == "/ui/chat/stream" else {}),
+    }
+    assert sum(point.count for point in _points(metric_reader, "rag.request.duration")) == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["sync_retrieval", "awaited_retrieval", "sync_condensation", "awaited_condensation"],
+)
+def test_attachment_privacy_negative_control(client, metric_reader, caplog, monkeypatch, failure):
+    """Restoring SDK attachment defaults must trip the endpoint canary."""
+    monkeypatch.setattr(app_mod, "use_span", trace.use_span)
+    endpoint = "chat" if failure.endswith("condensation") else "answer"
+    with pytest.raises(AssertionError, match="leaked into spans"):
+        test_attachment_failures_hide_canaries(
+            client, metric_reader, caplog, monkeypatch, f"/v1/{endpoint}", False, endpoint, failure,
+        )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("end_on_exit", [False, True])
+@pytest.mark.parametrize("awaited", [False, True])
+def test_safe_attachment_preserves_parent_and_lifetime(enabled, end_on_exit, awaited):
+    provider, exporter = _provider()
+    span_tracer = (
+        provider.get_tracer("attachment") if enabled else trace.NoOpTracerProvider().get_tracer("off")
+    )
+    root = tracing_mod.start_span(span_tracer, "root")
+    ambient = trace.get_current_span()
+
+    async def escape():
+        with tracing_mod.use_span(root, end_on_exit=end_on_exit):
+            assert trace.get_current_span() is root
+            with tracing_mod.start_as_current_span(span_tracer, "child"):
+                pass
+            if awaited:
+                await asyncio.sleep(0)
+            raise RuntimeError(CANARY_EXC)
+
+    try:
+        with pytest.raises(RuntimeError, match=CANARY_EXC):
+            asyncio.run(escape())
+        assert trace.get_current_span() is ambient
+        assert root.is_recording() == (enabled and not end_on_exit)
+        if not end_on_exit:
+            app_mod._span_error(root, RuntimeError(CANARY_EXC))
+            root.end()
+        spans = exporter.get_finished_spans()
+        assert CANARY_EXC not in _span_text(spans)
+        if enabled:
+            assert {span.name for span in spans} == {"root", "child"}
+            child = next(span for span in spans if span.name == "child")
+            assert child.parent.span_id == root.get_span_context().span_id
+            finished_root = next(span for span in spans if span.name == "root")
+            assert finished_root.status.status_code == (
+                trace.StatusCode.UNSET if end_on_exit else trace.StatusCode.ERROR
+            )
+            assert [dict(event.attributes) for event in finished_root.events] == (
+                [] if end_on_exit else [{"exception.type": "RuntimeError"}]
+            )
+        else:
+            assert not spans
+    finally:
+        provider.shutdown()
 
 
 def test_metric_labels_hide_canaries_and_stay_finite(

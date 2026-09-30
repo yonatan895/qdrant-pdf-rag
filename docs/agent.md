@@ -445,6 +445,15 @@ model/effort/TTFT/finish/tokens). Span attributes carry finite labels,
 counts, and operator config only — raw query text was removed as an
 explicit telemetry-policy change (issue #529 OBS-1A); PDF text and
 secrets never enter spans.
+`tracing.py` owns both safe span creation and manual attachment: application
+scopes use `start_span`, `start_as_current_span`, and `use_span`, with SDK
+automatic exception recording and exception status text disabled at each
+boundary (issue #563). Creation-time flags alone do not protect attachment.
+Callers record only the error class and retain their existing end/cancellation
+ownership; attachment does not end a manually managed root. Real-SDK canaries
+in `tests/test_telemetry_privacy.py` cover escaping synchronous and awaited
+retrieval/condensation failures across answer, chat, and console transports,
+including a negative control that restores unsafe SDK attachment defaults.
 The OTel API/SDK/exporter dependency pins stay version-locked. Spawn parse workers
 stay untraced; parent stages own their records/spans. Outbound model headers carry
 W3C traceparent via `bearer_auth_headers` when tracing is enabled.

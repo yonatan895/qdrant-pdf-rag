@@ -29,7 +29,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -43,7 +42,7 @@ from mainframe_rag.agent.sse import error_payload, final_payload, format_sse_eve
 from mainframe_rag.ingest.chunk import detect_code_region
 from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage
-from mainframe_rag.tracing import start_span
+from mainframe_rag.tracing import start_span, use_span
 
 log = logging.getLogger("agent.webui")
 
@@ -550,8 +549,6 @@ def _render_pair(
 async def _run_turn(request: Request, req: UiChatRequest):
     """Run one console turn through the shared answer core; the caller owns
     client-facing error mapping (fixed text, detail to logs only)."""
-    from opentelemetry import trace
-
     from mainframe_rag.agent import app as app_mod
 
     request_id = getattr(request.state, "request_id", "ui")
@@ -580,7 +577,7 @@ async def _run_turn(request: Request, req: UiChatRequest):
         is_chat=True,
         reasoning_effort=req.reasoning_effort,
     )
-    with trace.use_span(root_span, end_on_exit=False):
+    with use_span(root_span, end_on_exit=False):
         try:
             output = await execute_answer_core(core_input, deps, parent_span=root_span)
         except Exception as exc:
@@ -757,7 +754,7 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
     async def events():
         terminal = False
         # Attached while the generator runs so stream logs join the trace.
-        with trace.use_span(root_span, end_on_exit=False):
+        with use_span(root_span, end_on_exit=False):
             try:
                 async for item in execute_answer_core_stream(
                     core_input, deps, parent_span=root_span
