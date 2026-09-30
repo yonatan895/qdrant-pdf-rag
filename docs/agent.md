@@ -152,9 +152,23 @@ prompt, and either chats once (JSON) or streams (SSE). `chat` runs the same
 assertion and retrieval (hardcoded `limit=8` for both endpoints), resolving
 the follow-up search query through `resolve_search_query` first so the
 condense gate cannot be honored on one path only. The SSE generators hold
-the span attached while streaming and end it in a `finally`, so mid-stream
-failures and disconnects stay in the same trace with exactly one terminal
-metric observation.
+the request root for each iterator operation. A single lifetime owner starts
+before admission and ends buffered work in `finally`; a streaming response
+transfers that ownership to the actual body iterator. Exhaustion, explicit
+close, cancelled dependency I/O, and failed ASGI delivery (even before the
+iterator starts) close owned iterators and end the root exactly once. Terminal
+logs, including admission/retrieval/condense failures, generation alerts and
+console errors, attach to that recording root before it ends. Concurrent turns
+retain independent roots; disabled or non-recording spans add no correlation
+IDs. Cancellation propagates without a success final or another model call.
+Only operation cleanup is shielded from ASGI cancellation; model I/O remains
+cancellable, and cleanup never closes the shared HTTP client. Pre-header
+cancellation records `client_disconnect` without a finalized quality state;
+stream cancellation before a produced terminal records `generation_incomplete`.
+Both use the existing one-outcome guard. `tests/test_tracing.py` exercises
+real-SDK lifecycle, correlation and overlapping requests; the native
+`tests/live_agent_probes.py` verifies socket disconnect, upstream closure,
+finished Jaeger roots, exact JSON log joins and the next ordinary request.
 
 ## 2. Error contract
 
