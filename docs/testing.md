@@ -534,6 +534,15 @@ load pinned pytest/AnyIO plus `tests.ci_shard`; ambient `PYTEST_ADDOPTS` and
 registrations are rejected. Local opt-in sharding without evidence keeps its
 existing selection behavior and does not qualify as native coverage evidence.
 
+The producer and approved-main consumer also support an explicit
+`--unit-shards=4` layout. The rollout first merges this compatibility support
+while GitHub still runs two jobs, then activates four in a separate PR.
+The consumer derives the expected job names and total from the independently
+approved `ci.yml` bytes, never a receipt-supplied count. Only the literal,
+complete two- or four-job matrices are supported; missing, duplicated, mixed
+or partial shards cannot qualify. Local opt-in sharding defaults to two;
+ordinary unsharded local/GitLab execution is unchanged.
+
 The trusted collection wrapper observes all parametrized node IDs before
 filtering, refuses hook-driven removal/duplication/marker changes, and derives
 the eligible set by excluding only `integration` markers. Execution takes the

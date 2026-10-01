@@ -1,4 +1,4 @@
-"""Opt-in, dependency-free two-runner partition of pytest's selected items."""
+"""Opt-in, dependency-free partition of pytest's selected items."""
 
 import base64
 import importlib.metadata
@@ -17,9 +17,10 @@ from scripts.unit_evidence import POLICY, input_hashes
 def pytest_addoption(parser):
     parser.addoption('--unit-evidence')
     parser.addoption('--unit-phase', choices=('collect', 'execute'))
+    parser.addoption('--unit-shards', type=int, choices=(2, 4), default=2)
     parser.addoption(
-        "--unit-shard", type=int, choices=(1, 2), default=None,
-        help="Run shard 1 or 2 of the selected tests (omit to run all tests).",
+        "--unit-shard", type=int, choices=(1, 2, 3, 4), default=None,
+        help="Run one shard of the selected tests (omit to run all tests).",
     )
 
 
@@ -31,8 +32,12 @@ def pytest_collection_modifyitems(config, items):
     if shard is None or config.getoption("--unit-evidence"):
         return
     ordered = sorted(items, key=lambda item: item.nodeid)
-    selected = ordered[shard - 1::2]
-    deselected = ordered[2 - shard::2]
+    shards = config.getoption('--unit-shards')
+    if shard > shards:
+        raise pytest.UsageError('unit shard exceeds the configured shard count')
+    selected = ordered[shard - 1::shards]
+    selected_ids = {item.nodeid for item in selected}
+    deselected = [item for item in ordered if item.nodeid not in selected_ids]
     config.hook.pytest_deselected(items=deselected)
     items[:] = selected
 
@@ -49,9 +54,11 @@ class UnitCoverage:
         self.output = Path(config.getoption('--unit-evidence'))
         self.phase = config.getoption('--unit-phase')
         self.shard = config.getoption('--unit-shard')
+        self.shards = config.getoption('--unit-shards')
         self.executed = []
         self.record = None
-        if self.output.exists() or self.phase is None or self.shard not in (1, 2):
+        if (self.output.exists() or self.phase is None or self.shard is None
+                or not 1 <= self.shard <= self.shards):
             raise pytest.UsageError('native unit coverage needs fresh output and explicit phase/shard')
         if os.environ.get('PYTEST_ADDOPTS') or os.environ.get('PYTEST_PLUGINS'):
             raise pytest.UsageError('ambient pytest selection/plugins are not native evidence')
@@ -102,7 +109,7 @@ class UnitCoverage:
         if before != after or len({node for node, _ in before}) != len(before) or plugins != self.plugins():
             raise pytest.UsageError('collection hook removed, duplicated or changed required items')
         eligible = [node for node, integration in before if not integration]
-        selected = eligible if self.phase == 'collect' else eligible[self.shard - 1::2]
+        selected = eligible if self.phase == 'collect' else eligible[self.shard - 1::self.shards]
         self.record = {'phase': self.phase, 'inputs': self.inputs, 'policy': self.policy, 'versions': self.versions,
                        'plugins': plugins, 'all': [node for node, _ in before], 'eligible': eligible,
                        'integration': [node for node, integration in before if integration], 'selected': selected}

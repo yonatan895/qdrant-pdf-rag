@@ -347,6 +347,14 @@ main. Hazard-catalogue changes remain excluded; incompatible evidence schemas
 still fail. Forks cannot use this path.
 Normal PRs with unchanged verifier inputs require no manual decision.
 
+For unit-layout changes, merge approved-main compatibility support before
+activating a different producer matrix. The consumer supports only the complete
+two- and four-job layouts read from independently approved workflow bytes, and
+checks every shard's exact execution plus the complete disjoint union. An exact
+verifier decision authorizes producer bytes, not a smaller receipt-declared
+coverage obligation. Refresh activation PRs after the compatibility merge and
+obtain a new exact-candidate decision; old approvals do not transfer.
+
 For the selector-approval bootstrap, the consumer and trust validator change
 without changing the selector, catalogue, native producer or receipt format.
 The current consumer can verify that bootstrap under its existing policy. After

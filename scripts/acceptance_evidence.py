@@ -59,6 +59,20 @@ def require(condition: bool) -> None:
         raise ValueError('native evidence identity or execution does not satisfy policy')
 
 
+def unit_producers(source: bytes, digest: str) -> tuple[NativeProducer, ...]:
+    """Select only a supported layout from independently approved workflow bytes."""
+    require(hashlib.sha256(source).hexdigest() == digest)
+    text = source.decode('utf-8')
+    names = re.findall(r'^    name: unit \(\$\{\{ matrix\.shard \}\}/([24])\)$', text, re.MULTILINE)
+    matrices = re.findall(r'^        shard: \[([^\n]+)\]$', text, re.MULTILINE)
+    require(len(names) == len(matrices) == 1)
+    shards = int(names[0])
+    require(matrices[0] == ', '.join(str(shard) for shard in range(1, shards + 1)))
+    return tuple(NativeProducer('ci.yml', f'unit ({shard}/{shards})', 'unit', 'unit_tests',
+                                f'unit-{shard}', 'execution', True)
+                 for shard in range(1, shards + 1))
+
+
 def object_json(raw: bytes) -> dict[str, Any]:
     def unique(pairs):
         result = {}
@@ -246,8 +260,12 @@ def normalize_native(
     if producer.lane == 'unit_tests':
         if unit_policy is None:
             raise ValueError("native unit selection policy is required")
-        shard = {'unit (1/2)': 1, 'unit (2/2)': 2}[producer.job]
-        unit_coverage = validate_unit_coverage(report['unit_coverage'], shard, files['tests.xml'], unit_policy)
+        layout = re.fullmatch(r'unit \(([1-4])/([24])\)', producer.job)
+        require(layout is not None)
+        assert layout is not None
+        shard, shards = map(int, layout.groups())
+        unit_coverage = validate_unit_coverage(report['unit_coverage'], shard, files['tests.xml'],
+                                              unit_policy, shards=shards)
     if producer.structured:
         require(report['result_sha256'] == hashlib.sha256(files['results.json']).hexdigest())
         structured = object_json(files['results.json'])

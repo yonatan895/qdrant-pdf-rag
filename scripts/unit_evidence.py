@@ -26,9 +26,11 @@ def input_hashes(root: Path) -> dict[str, str]:
     return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in INPUTS}
 
 
-def run_shard(root: Path, python: str, shard: int, junit: Path, output: Path) -> tuple[int, dict]:
+def run_shard(root: Path, python: str, shard: int, junit: Path, output: Path,
+              *, shards: int = 2) -> tuple[int, dict]:
     """Independent full collection, then execution in a fresh pytest process."""
-    require(shard in (1, 2) and not junit.exists())
+    require(type(shards) is int and shards in (2, 4)
+            and type(shard) is int and 1 <= shard <= shards and not junit.exists())
     require(not os.environ.get('PYTEST_ADDOPTS') and not os.environ.get('PYTEST_PLUGINS'))
     env = {**os.environ, 'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1'}
     before = input_hashes(root)
@@ -40,7 +42,7 @@ def run_shard(root: Path, python: str, shard: int, junit: Path, output: Path) ->
         command = [python, '-m', 'pytest', '-p', 'anyio.pytest_plugin', '-p', 'tests.ci_shard',
                    '-o', 'addopts=', '-m', '', '-k', '', 'tests', '-q',
                    '--unit-phase=' + phase, '--unit-evidence=' + str(target),
-                   '--unit-shard=' + str(shard)]
+                   '--unit-shard=' + str(shard), '--unit-shards=' + str(shards)]
         command += ['--collect-only'] if phase == 'collect' else ['--junitxml=' + str(junit), '--durations=20']
         code = subprocess.run(command, cwd=root, env=env, check=False).returncode
         records[phase] = json.loads(target.read_text())
@@ -58,7 +60,9 @@ def node_list(value: object) -> list[str]:
     return value
 
 
-def validate(proof: dict, shard: int, xml: bytes, inputs: dict[str, str]) -> dict:
+def validate(proof: dict, shard: int, xml: bytes, inputs: dict[str, str], *, shards: int = 2) -> dict:
+    require(type(shards) is int and shards in (2, 4)
+            and type(shard) is int and 1 <= shard <= shards)
     require(type(proof.get('schema_version')) is int and proof['schema_version'] == 1
             and type(proof.get('shard')) is int and proof['shard'] == shard)
     collection, execution = proof['collect'], proof['execute']
@@ -79,7 +83,7 @@ def validate(proof: dict, shard: int, xml: bytes, inputs: dict[str, str]) -> dic
     for key in ('all', 'eligible', 'integration', 'inputs', 'policy', 'plugins', 'versions'):
         require(collection[key] == execution[key])
     eligible = collection['eligible']
-    expected = eligible[shard - 1::2]
+    expected = eligible[shard - 1::shards]
     require(collection['selected'] == eligible and collection['executed'] == [])
     require(execution['selected'] == expected and sorted(node_list(execution['executed'])) == expected)
     # Decode the producer's exact node ID property. Base64 preserves XML's
@@ -96,10 +100,15 @@ def validate(proof: dict, shard: int, xml: bytes, inputs: dict[str, str]) -> dic
     return {'shard': shard, 'all': collection['all'], 'eligible': eligible, 'executed': expected}
 
 
-def validate_union(records: list[dict]) -> None:
-    require(len(records) == 2)
-    first, second = sorted(records, key=lambda r: r['shard'])
-    require([first['shard'], second['shard']] == [1, 2])
-    require(first['all'] == second['all'] and first['eligible'] == second['eligible'])
-    require(not set(first['executed']) & set(second['executed']))
-    require(sorted(first['executed'] + second['executed']) == first['eligible'])
+def validate_union(records: list[dict], *, shards: int = 2) -> None:
+    require(type(shards) is int and shards in (2, 4) and len(records) == shards)
+    ordered = sorted(records, key=lambda record: record['shard'])
+    require(all(type(record['shard']) is int for record in ordered))
+    require([record['shard'] for record in ordered] == list(range(1, shards + 1)))
+    first = ordered[0]
+    executed = []
+    for record in ordered:
+        require(record['all'] == first['all'] and record['eligible'] == first['eligible'])
+        require(record['executed'] == first['eligible'][record['shard'] - 1::shards])
+        executed.extend(record['executed'])
+    require(len(executed) == len(set(executed)) and sorted(executed) == first['eligible'])
