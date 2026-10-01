@@ -200,9 +200,9 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
         source = api.blob(candidate['execution_sha'], '.github/workflows/' + workflow)
         workflow_digest = policy_inputs['.github/workflows/' + workflow]
         if workflow == 'ci.yml':
-            producers = tuple(p for p in producers if p.lane != 'unit_tests') + unit_producers(source, workflow_digest)
+            producers = tuple(producer for producer in producers if producer.lane != 'unit_tests') + unit_producers(source, workflow_digest)
         commit = api.get(api.prefix + 'commits/' + candidate['execution_sha'])
-        for producer in (p for p in producers if p.workflow == workflow):
+        for producer in (definition for definition in producers if definition.workflow == workflow):
             record: dict[str, Any] = {'lane': producer.lane, 'job': producer.job, 'status': 'missing'}
             try:
                 selected_jobs = [j for j in jobs if j['name'] == producer.job]
@@ -241,8 +241,8 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
                 record['status'] = 'unverified'
             native.append(record)
     statuses = {}
-    for lane in {p.lane for p in producers}:
-        required_jobs = [p for p in producers if p.lane == lane]
+    for lane in {producer.lane for producer in producers}:
+        required_jobs = [producer for producer in producers if producer.lane == lane]
         results = [r for r in native if r['lane'] == lane]
         values = {r['status'] for r in results}
         if values & {'failure', 'timed_out', 'unverified'}:
@@ -253,7 +253,7 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
             statuses[lane] = 'success'
             if lane == 'unit_tests':
                 try:
-                    validate_union([r['unit_coverage'] for r in results], shards=len(required_jobs))
+                    validate_union([record['unit_coverage'] for record in results], shards=len(required_jobs))
                 except (ValueError, KeyError, TypeError):
                     statuses[lane] = 'unverified'
         # An absent workflow, shard, or artifact stays missing in the existing

@@ -1629,7 +1629,7 @@ class TestCiUnitPartition(unittest.TestCase):
         from scripts.unit_evidence import input_hashes, run_shard, validate, validate_union
 
         source = ("import pytest\n"
-                  "@pytest.mark.parametrize('value', range(9), ids=[f'case {i}::λ' for i in range(9)])\n"
+                  "@pytest.mark.parametrize('value', range(9), ids=[f'case {index}::λ' for index in range(9)])\n"
                   "def test_case(value):\n    assert value >= 0\n"
                   "@pytest.mark.integration\ndef test_excluded():\n    assert False\n")
         with tempfile.TemporaryDirectory() as directory:
