@@ -135,9 +135,11 @@ for citations and filters.
   skip only at or before the limit — a mid-book same-named section is kept
   by design.
 - Outline build (issue #577): entries sorted by `(page, level)`, a stack popping
-  deeper-or-equal levels, `heading_path` joined with `" > "`, each section
-  running to the next entry of any level (else end of doc); empty ranges
-  dropped. Each page's text is therefore chunked once under the deepest
+  deeper-or-equal levels, `heading_path` joined with `" > "`, each kept section
+  running to the next kept entry of any level (else end of doc); empty ranges
+  dropped. Skipped headings (empty, always-skipped, front-matter) produce no
+  section and never bound a kept section, so a skipped child cannot cut its
+  parent. Each page's text is therefore chunked once under the deepest
   covering entry; ancestor text before the first child stays under the
   ancestor, while a same-page parent's intro moves into the child's section.
   Measured: deep-TOC manuals previously stored 31–64% byte-identical

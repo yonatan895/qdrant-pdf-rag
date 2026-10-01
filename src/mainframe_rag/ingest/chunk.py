@@ -214,15 +214,24 @@ def outline_sections(parsed: ParsedDoc) -> list[Section]:
     )
     entries = sorted(parsed.toc, key=lambda e: (e[2], e[0]))
 
-    sections: list[Section] = []
-    stack: list[tuple[int, str]] = []
-
-    for idx, (level, raw_title, page_1based) in enumerate(entries):
+    # Issue #577: skipped headings (empty, SKIP_ALWAYS, front matter) produce
+    # no section, so they must not bound a kept section either — otherwise a
+    # skipped child cuts off its parent and those pages are never chunked.
+    # Filter once with the same rules as the main loop, then bound each kept
+    # section at the next kept entry of any level.
+    kept: list[tuple[int, str, int]] = []
+    for level, raw_title, page_1based in entries:
         title = _clean_title(raw_title)
         if not title or SKIP_ALWAYS_RE.search(title):
             continue
         if FRONT_MATTER_RE.search(title) and page_1based <= front_matter_limit:
             continue
+        kept.append((level, title, page_1based))
+
+    sections: list[Section] = []
+    stack: list[tuple[int, str]] = []
+
+    for idx, (level, title, page_1based) in enumerate(kept):
 
         while stack and stack[-1][0] >= level:
             stack.pop()
@@ -231,7 +240,7 @@ def outline_sections(parsed: ParsedDoc) -> list[Section]:
 
         start = max(0, page_1based - 1)
         end = parsed.page_count
-        for _, _, nxt_page in entries[idx + 1 :]:
+        for _, _, nxt_page in kept[idx + 1 :]:
             end = max(start, nxt_page - 1)
             break
 

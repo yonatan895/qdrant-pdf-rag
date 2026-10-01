@@ -663,6 +663,74 @@ def test_same_page_parent_child_loses_no_text():
     assert len({c.text for c in chunks}) == len(chunks)
 
 
+def test_skipped_child_heading_does_not_cut_parent():
+    """Issue #577 review: skipped headings produce no section and must not
+    bound a kept section — otherwise the parent is cut and pages are lost."""
+    from mainframe_rag.ingest.chunk import make_chunks, outline_sections
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+
+    def _parsed(toc, page_count):
+        return ParsedDoc(
+            path=__import__("pathlib").Path("skipped.pdf"),
+            sha256="5" * 64,
+            doc_id="SA22-0000-00",
+            title="Skipped",
+            product="z/OS",
+            version="9.9",
+            vendor="IBM",
+            toc=toc,
+            page_count=page_count,
+        )
+
+    # 1. Titles ending in "index" match SKIP_ALWAYS_RE: the two skipped
+    # children must not end Ch 6; pages 82–87 stay covered under Ch 6.
+    p1 = _parsed(
+        [
+            [1, "Ch 6 Alternate indexes", 80],
+            [2, "Defining an Alternate Index", 82],
+            [2, "Building an Alternate Index", 85],
+            [2, "Maintaining data", 88],
+            [1, "Ch 7", 95],
+        ],
+        100,
+    )
+    s1 = outline_sections(p1)
+    assert [(s.heading_path, s.page_start, s.page_end) for s in s1] == [
+        ("Ch 6 Alternate indexes", 79, 87),
+        ("Ch 6 Alternate indexes > Maintaining data", 87, 94),
+        ("Ch 7", 94, 100),
+    ]
+    # Union matches the pre-#577 base ([79,94) + [94,100)): no pages lost.
+    assert sorted({i for s in s1 for i in range(s.page_start, s.page_end)}) == list(range(79, 100))
+    pages1 = [f"Marker page {i} unique." for i in range(100)]
+    joined1 = "\n".join(c.text for c in make_chunks(p1, pages1, [str(i) for i in range(100)]))
+    for i in (81, 82, 83, 84, 85, 86):
+        assert f"Marker page {i} unique." in joined1
+
+    # 2. Empty title after cleaning is skipped: Chapter 1 runs to Real child.
+    p2 = _parsed(
+        [[1, "Chapter 1", 10], [2, "   ", 12], [2, "Real child", 15], [1, "Chapter 2", 20]],
+        25,
+    )
+    s2 = outline_sections(p2)
+    assert [(s.heading_path, s.page_start, s.page_end) for s in s2] == [
+        ("Chapter 1", 9, 14),
+        ("Chapter 1 > Real child", 14, 19),
+        ("Chapter 2", 19, 25),
+    ]
+    assert sorted({i for s in s2 for i in range(s.page_start, s.page_end)}) == list(range(9, 25))
+
+    # 3. Front-matter child (Contents@2 within limit) is skipped: Preface
+    # runs to Chapter 1, not to the skipped Contents.
+    p3 = _parsed([[1, "Preface", 1], [1, "Contents", 2], [1, "Chapter 1", 6]], 20)
+    s3 = outline_sections(p3)
+    assert [(s.heading_path, s.page_start, s.page_end) for s in s3] == [
+        ("Preface", 0, 5),
+        ("Chapter 1", 5, 20),
+    ]
+    assert sorted({i for s in s3 for i in range(s.page_start, s.page_end)}) == list(range(20))
+
+
 def test_no_toc_pdf_chunks_without_collapse():
     """End to end: a TOC-less document yields several sections and stable
     ids, not one giant whole-doc chunk."""
