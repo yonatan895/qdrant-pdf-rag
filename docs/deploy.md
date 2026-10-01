@@ -633,8 +633,12 @@ name/data-key references, including dormant legs. Quote formatting is not
 an invariant: the rehearsal's local ingest resource patch can remove quotes
 without changing a reference. Missing/duplicate consumers, wrong precedence,
 wrong model aliases, optional or plaintext keys, and unresolved placeholders
-fail with an attributable nonsecret message. Its retained JSON projects only
-five consumer identities, sanitized endpoint locations, Secret reference
+fail with an attributable nonsecret message. The gate's required
+`--context-model` expectation compares both the operator source and ingest
+`CONTEXT_LLM_MODEL`, independently of the reasoning alias. The shared-gateway
+lane explicitly expects an empty dormant context alias; configured aliases
+must round-trip exactly, including delimiters and whitespace. Its retained JSON
+projects only five consumer identities, sanitized endpoint locations, Secret reference
 names/keys, and fixed errors; no Secret data or unrestricted env/YAML dump.
 Local decoding has a 30-second timeout; diagnostic reference/host strings are
 bounded to 253 characters, with credential/query/fragment and nonstandard path

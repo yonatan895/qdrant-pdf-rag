@@ -24,7 +24,7 @@ CONSUMERS = (
 )
 URL_KEYS = ("EMBED_BASE_URL", "LLM_BASE_URL", "RERANK_BASE_URL", "CONTEXT_LLM_BASE_URL")
 SOURCE_KEYS = (*URL_KEYS, "GATEWAY_BASE_URL", "GATEWAY_API_KEY_SECRET",
-               "GATEWAY_API_KEY_SECRET_KEY", "EMBED_MODEL", "LLM_MODEL_REASONING")
+               "GATEWAY_API_KEY_SECRET_KEY", "EMBED_MODEL", "LLM_MODEL_REASONING", "CONTEXT_LLM_MODEL")
 
 
 class RenderingInputError(ValueError):
@@ -99,7 +99,7 @@ def consumer_env_entry(entries: list[dict], name: str, identity: str, errors: li
 
 def check_consumers(documents: list[dict], expected_urls: dict[str, str],
                     secret_name: str, secret_key: str, embed_model: str,
-                    reasoning_model: str) -> tuple[list[str], list[dict]]:
+                    reasoning_model: str, context_model: str) -> tuple[list[str], list[dict]]:
     errors = []
     evidence = []
     for kind, resource_name, container_name, legs in CONSUMERS:
@@ -131,6 +131,8 @@ def check_consumers(documents: list[dict], expected_urls: dict[str, str],
         models = {"EMBED_MODEL": embed_model}
         if kind == "Deployment":
             models["LLM_MODEL_REASONING"] = reasoning_model
+        else:
+            models["CONTEXT_LLM_MODEL"] = context_model
         for name, value in models.items():
             entry = consumer_env_entry(entries, name, identity, errors)
             if entry.get("value") != value or "valueFrom" in entry:
@@ -148,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--secret-key", default="")
     parser.add_argument("--embed-model", required=True)
     parser.add_argument("--reasoning-model", required=True)
+    parser.add_argument("--context-model", required=True)
     parser.add_argument("--diagnostics", type=Path, required=True)
     for name in URL_KEYS:
         parser.add_argument("--" + name.lower().replace("_base_url", "-url").replace("_", "-"), default="")
@@ -156,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
         "GATEWAY_BASE_URL": args.shared_url, "GATEWAY_API_KEY_SECRET": args.secret_name,
         "GATEWAY_API_KEY_SECRET_KEY": args.secret_key,
         "EMBED_MODEL": args.embed_model, "LLM_MODEL_REASONING": args.reasoning_model,
+        "CONTEXT_LLM_MODEL": args.context_model,
         **{name: getattr(args, name.lower().replace("_base_url", "_url")) for name in URL_KEYS},
     }
     expected_urls = {name: expected_source[name] or args.shared_url for name in URL_KEYS}
@@ -169,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         documents = load_render(args.agent_render, "agent render")
         documents.extend(load_render(args.ingest_render, "ingest render"))
         failures, evidence = check_consumers(documents, expected_urls, args.secret_name, args.secret_key,
-                                            args.embed_model, args.reasoning_model)
+                                            args.embed_model, args.reasoning_model, args.context_model)
         errors.extend(failures)
     except RenderingInputError as exc:
         errors.append(str(exc))

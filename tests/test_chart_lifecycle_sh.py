@@ -389,7 +389,7 @@ def test_published_bundle_entry_uses_resolved_operator_values(tmp_path):
     for relative in ('scripts/ci', 'scripts/airgap'):
         (root / relative).mkdir(parents=True)
     for relative in ('scripts/ci/rehearse_chart.sh', 'scripts/airgap/common.sh',
-                     'scripts/airgap/map_values.py'):
+                     'scripts/airgap/map_values.py', 'scripts/airgap/model_config.py'):
         shutil.copyfile(ROOT / relative, root / relative)
     (root / 'airgap.env').write_text(
         'INTERNAL_REGISTRY=registry.test/team\nNAMESPACE=file-namespace\n'

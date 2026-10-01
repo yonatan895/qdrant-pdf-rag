@@ -1,6 +1,7 @@
 """CI gateway wiring: explicit model legs, authenticated routing, failure propagation."""
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,7 @@ def check_gateway_rendered(tree, *extra):
         "--ingest-render", str(tree / "dist/ingest-rendered.yaml"),
         "--shared-url", "https://test-gateway:4000/v1", "--secret-name", "test-gateway-keys",
         "--secret-key", "api-key", "--embed-model", "mock-embed", "--reasoning-model", "mock-reasoning",
+        "--context-model", "",
         "--diagnostics", str(tree / "diagnostics/gateway.json"), *extra,
     ], capture_output=True, text=True, check=False)
 
@@ -200,6 +202,68 @@ def test_gateway_check_requires_exact_consumer_identity(gateway_rendered, fault)
     assert "Deployment/rag-agent container agent" in result.stderr
 
 
+@pytest.mark.parametrize("fault", ["wrong", "missing", "duplicate", "valueFrom"])
+def test_gateway_check_requires_exact_context_model(gateway_rendered, fault):
+    def mutate(container):
+        entry = next(entry for entry in container["env"] if entry["name"] == "CONTEXT_LLM_MODEL")
+        if fault == "missing":
+            container["env"].remove(entry)
+        elif fault == "duplicate":
+            container["env"].append(entry.copy())
+        elif fault == "valueFrom":
+            entry.pop("value")
+            entry["valueFrom"] = {"secretKeyRef": {"name": "private-model-sentinel", "key": "alias"}}
+        else:
+            entry["value"] = "private-model-sentinel"
+    rewrite_gateway_consumer(gateway_rendered, "ingest", mutate)
+    result = check_gateway_rendered(gateway_rendered)
+    assert result.returncode == 1
+    assert "Job/ingest container ingest env CONTEXT_LLM_MODEL" in result.stderr
+    diagnostic = (gateway_rendered / "diagnostics/gateway.json").read_text()
+    assert "private-model-sentinel" not in diagnostic + result.stdout + result.stderr
+    assert json.loads(diagnostic)["passed"] is False
+
+
+def test_gateway_check_rejects_source_context_model_drift(gateway_rendered):
+    source = gateway_rendered / "airgap.env"
+    source.write_text(source.read_text() + "\nCONTEXT_LLM_MODEL=private-model-sentinel\n")
+    result = check_gateway_rendered(gateway_rendered)
+    assert result.returncode == 1
+    assert "operator configuration CONTEXT_LLM_MODEL: selected value differs" in result.stderr
+    diagnostic = (gateway_rendered / "diagnostics/gateway.json").read_text()
+    assert "private-model-sentinel" not in diagnostic + result.stdout + result.stderr
+    assert json.loads(diagnostic)["passed"] is False
+
+
+@pytest.mark.parametrize("context_model", ["", "context alias | :/v2"])
+def test_gateway_check_round_trips_context_model_and_rejects_drift(gateway_rendered, context_model):
+    source = gateway_rendered / "airgap.env"
+    source.write_text(source.read_text()
+                      + f"\nCONTEXT_LLM_MODEL={shlex.quote(context_model)}\n"
+                      + f"CONTEXTUAL_EMBED_ENABLED={'true' if context_model else 'false'}\n")
+    rendered = subprocess.run(["sh", "scripts/airgap/pipeline.sh", "--skip-load"], cwd=gateway_rendered,
+                              env={"PATH": f"{gateway_rendered / 'bin'}:/usr/bin:/bin", "AIRGAP_DRYRUN": "1"},
+                              capture_output=True, text=True, check=False)
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    job = yaml.safe_load((gateway_rendered / "dist/ingest-rendered.yaml").read_text())
+    container = next(entry for entry in job["spec"]["template"]["spec"]["containers"]
+                     if entry["name"] == "ingest")
+    entry = next(entry for entry in container["env"] if entry["name"] == "CONTEXT_LLM_MODEL")
+    assert entry["value"] == context_model
+    assert next(entry for entry in container["env"] if entry["name"] == "CONTEXTUAL_EMBED_ENABLED")["value"] == (
+        "true" if context_model else "false")
+    assert next(entry for entry in container["env"] if entry["name"] == "CONTEXT_LLM_BASE_URL")["value"] == (
+        "https://test-gateway:4000/v1")
+    result = check_gateway_rendered(gateway_rendered, "--context-model", context_model)
+    assert result.returncode == 0, result.stderr
+    def mutate(container):
+        next(entry for entry in container["env"] if entry["name"] == "CONTEXT_LLM_MODEL")["value"] = "wrong"
+    rewrite_gateway_consumer(gateway_rendered, "ingest", mutate)
+    result = check_gateway_rendered(gateway_rendered, "--context-model", context_model)
+    assert result.returncode == 1
+    assert "Job/ingest container ingest env CONTEXT_LLM_MODEL: model alias differs" in result.stderr
+
+
 def test_workflow_has_no_duplicate_mapping_keys():
     # safe_load silently keeps the last duplicate; GitHub rejects the entire
     # workflow before creating any job/check. Inspect the YAML nodes instead.
@@ -252,6 +316,7 @@ def test_shared_gateway_lane_proves_fallback_and_single_key():
                      if s.get('name', '').startswith('Assert shared-gateway rendering'))
     assert '--shared-url https://test-gateway:4000/v1' in assertion
     assert '--secret-name test-gateway-keys --secret-key api-key' in assertion
+    assert "--context-model ''" in assertion
     assert 'scripts/ci/check_gateway_rendering.py' in assertion
     assert 'dist/agent-rendered.yaml' in assertion
     assert 'dist/ingest-rendered.yaml' in assertion

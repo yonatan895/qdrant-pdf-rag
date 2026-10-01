@@ -734,6 +734,7 @@ jobs:
             --shared-url https://test-gateway:4000/v1 \
             --secret-name test-gateway-keys --secret-key api-key \
             --embed-model mock-embed --reasoning-model mock-reasoning \
+            --context-model '' \
             --diagnostics "$GITHUB_WORKSPACE/diagnostics/shared-gateway-rendering.json"
 
       - name: Require reasoning and complete streams from the application pod
