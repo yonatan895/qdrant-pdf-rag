@@ -70,7 +70,7 @@ qdrant_client.QdrantClient = Client
 embed.build_embedder = lambda settings: object()
 rerank.build_reranker = lambda settings: None
 
-def measured_answer(client, entry, *args):
+def measured_answer(client, entry, *args, **kwargs):
     event('answer', entry['id'])
     return dict(entry, path='llm', verdict='pass', answer='Original evidence [1]',
                 citations=['[1] Original p. 1'], request_id=entry['id'], failures=[], warns=[])

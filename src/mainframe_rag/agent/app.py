@@ -713,6 +713,10 @@ class AnswerRequest(BaseModel):
     version: str | None = None
     splunk_context: str | None = None
     stream: bool = False
+    # Optional per-request temperature override (issue #596): None keeps the
+    # configured Settings.llm_temperature (production default 0.2). The
+    # answer eval pins 0 for comparison stability; production callers omit it.
+    temperature: float | None = None
 
 
 class AnswerResponse(BaseModel):
@@ -1192,6 +1196,7 @@ async def _answer_response(req, response, is_stream, owner):
         version=req.version,
         splunk_context=req.splunk_context,
         stream=is_stream,
+        temperature=req.temperature,
         request_id=request_id,
         is_chat=False,
         hits=hits,

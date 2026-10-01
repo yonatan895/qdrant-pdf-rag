@@ -88,6 +88,7 @@ def write_run_manifest(
     settings: Settings,
     metrics: dict[str, Any],
     runs_dir: Path | None = None,
+    params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Builds and appends a run manifest line to evals/runs/{run_type}_runs.jsonl."""
     if runs_dir is None:
@@ -118,6 +119,10 @@ def write_run_manifest(
         "extraction_rules_version": extraction_rules_version(),
         "qdrant_version": qdrant_ver,
         "collection_snapshot_id": snapshot_id,
+        # Run parameters that change what the numbers mean (issue #596):
+        # e.g. the eval sampling temperature. Absent on callers that do not
+        # pass any — never fabricated.
+        "params": params,
         "metrics": metrics,
     }
 

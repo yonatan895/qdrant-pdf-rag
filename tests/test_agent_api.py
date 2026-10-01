@@ -1479,6 +1479,21 @@ def test_answer_dispatches_reasoning_effort_by_complexity(client, monkeypatch):
     assert fake.last_temperature == 0.2
 
 
+def test_answer_accepts_per_request_temperature_override(client, monkeypatch):
+    """Issue #596: /v1/answer accepts an optional temperature override for
+    deterministic eval sampling; omitting it keeps Settings.llm_temperature."""
+    fake = FakeLLM()
+    monkeypatch.setattr(app_mod, "llm", fake)
+
+    resp = client.post("/v1/answer", json={"query": "IEA500I", "temperature": 0.0})
+    assert resp.status_code == 200
+    assert fake.last_temperature == 0.0
+
+    resp_default = client.post("/v1/answer", json={"query": "IEA500I"})
+    assert resp_default.status_code == 200
+    assert fake.last_temperature == 0.2
+
+
 def test_httpx_llm_client_passes_reasoning_params(monkeypatch):
     from mainframe_rag.agent.answer import HttpxLLMClient
     from mainframe_rag.config import Settings
