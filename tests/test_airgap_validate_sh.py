@@ -266,7 +266,7 @@ def test_validate_optional_model_url_bad_scheme_refused(tree, var):
 
 def test_validate_missing_skopeo_fails(tree):
     os.remove(tree / "bin" / "skopeo")
-    symlink_tools(tree, ("sh", "dirname", "awk", "sed", "head", "ls"))
+    symlink_tools(tree, ("sh", "dirname", "awk", "sed", "head", "ls", "python3"))
     r = _run(tree, {"PATH": str(tree / "bin")})
     assert r.returncode != 0
     assert "skopeo is required" in r.stderr
@@ -626,3 +626,44 @@ def test_shared_gateway_invalid_url_refuses(tree):
     result = _run(tree, {"GATEWAY_BASE_URL": "sample-api/v1"})
     assert result.returncode != 0
     assert "GATEWAY_BASE_URL must begin with http:// or https://" in result.stderr
+
+
+def test_reasoning_without_resolved_url_fails_preflight(tree):
+    result = _run(tree, {"LLM_MODEL_REASONING": "code"})
+    assert result.returncode != 0
+    assert "LLM_BASE_URL is required when LLM_MODEL_REASONING is set" in result.stderr
+
+
+def test_model_validation_preserves_caller_over_file_precedence(tree):
+    path = tree / "selected.env"
+    path.write_text("LLM_BASE_URL=invalid-file-url\nLLM_MODEL_REASONING=code\nGATEWAY_BASE_URL=https://file-gateway/v1\n")
+    result = _run(tree, {"AIRGAP_ENV": str(path), "LLM_BASE_URL": "https://caller-reasoning/v1",
+                         "GATEWAY_BASE_URL": "https://caller-gateway/v1"})
+    assert result.returncode == 0, result.stderr
+    assert "EMBED_BASE_URL:    https://caller-gateway/v1" in result.stdout
+    result = _run(tree, {"AIRGAP_ENV": str(path), "LLM_BASE_URL": "private-invalid-url"})
+    assert result.returncode != 0
+    assert "LLM_BASE_URL must begin with http:// or https://" in result.stderr
+    assert "private-invalid-url" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("missing", ["CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL"])
+def test_contextual_model_pair_required_in_preflight(tree, missing):
+    config = {"CONTEXTUAL_EMBED_ENABLED": "true", "CONTEXT_LLM_BASE_URL": "https://context/v1",
+              "CONTEXT_LLM_MODEL": "context-model"}
+    config[missing] = ""
+    result = _run(tree, config)
+    assert result.returncode != 0
+    assert f"{missing} is required when CONTEXTUAL_EMBED_ENABLED is set" in result.stderr
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_shipped_example_model_mode_is_explicit(tree, shared):
+    path = tree / "shipped.env"
+    contents = (REPO / "airgap.env.example").read_text()
+    contents += "\nGATEWAY_BASE_URL=https://shared.example/v1\n" if shared else "\nLLM_MODEL_REASONING=\n"
+    path.write_text(contents)
+    result = _run(tree, {"AIRGAP_ENV": str(path)})
+    assert result.returncode == 0, result.stderr
+    expected = "https://shared.example/v1" if shared else "http://vllm:8000/v1"
+    assert f"EMBED_BASE_URL:    {expected}" in result.stdout

@@ -318,6 +318,8 @@ jobs:
             -e 's|^EMBED_MODEL_REVISION=.*|EMBED_MODEL_REVISION=acceptance-rev-1|' \
             -e 's|^DENSE_DIM=.*|DENSE_DIM=768|' \
             -e 's|^VLLM_BASE_URL=.*|VLLM_BASE_URL=http://vllm:8000|' \
+            -e 's|^GATEWAY_BASE_URL=.*|GATEWAY_BASE_URL=http://gateway:4000/v1|' \
+            -e 's|^LLM_MODEL_REASONING=.*|LLM_MODEL_REASONING=code|' \
             -e 's|^CORPUS_PVC=.*|CORPUS_PVC=corpus|' \
             airgap.env
           AIRGAP_DRYRUN=1 sh scripts/tools/run-task.sh airgap:validate
@@ -329,7 +331,8 @@ jobs:
             INTERNAL_REGISTRY=ghcr.io/acceptance-standin NAMESPACE=acceptance \
             STORAGE_CLASS=standard EMBED_MODEL=embed-from-airgap-env DENSE_DIM=768 \
             EMBED_MODEL_REVISION=acceptance-rev-1 \
-            VLLM_BASE_URL=http://vllm:8000 CORPUS_PVC=corpus \
+            VLLM_BASE_URL=http://vllm:8000 GATEWAY_BASE_URL=http://gateway:4000/v1 \
+            LLM_MODEL_REASONING=code CORPUS_PVC=corpus \
             sh scripts/airgap/pipeline.sh --dry-run
           test -f dist/agent-rendered.yaml
           test -f dist/ingest-rendered.yaml
@@ -338,8 +341,11 @@ jobs:
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml
           ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml
           # Second PULL_SECRET branch: a wired secret reaches the manifests.
-          sed -i 's|^PULL_SECRET=.*|PULL_SECRET=acceptance-pull|' airgap.env
-          AIRGAP_DRYRUN=1 sh scripts/tools/run-task.sh airgap:deploy
+          sed -i \
+            -e 's|^PULL_SECRET=.*|PULL_SECRET=acceptance-pull|' \
+            -e 's|^GATEWAY_BASE_URL=.*|GATEWAY_BASE_URL=|' \
+            -e 's|^LLM_MODEL_REASONING=.*|LLM_MODEL_REASONING=|' airgap.env
+          AIRGAP_DRYRUN=1 sh scripts/tools/run-task.sh airgap:pipeline
           grep -q "name: acceptance-pull" dist/agent-rendered.yaml
 
   # --------------------------------------- kind full-live handoff rehearsal
@@ -722,19 +728,14 @@ jobs:
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag
-          # airgap.env proves the fallback path was taken: shared base set,
-          # explicit per-operation URLs absent, one shared data-key selected.
-          grep -q "^GATEWAY_BASE_URL=https://test-gateway:4000/v1$" airgap.env
-          grep -q "^GATEWAY_API_KEY_SECRET_KEY=api-key$" airgap.env
-          test "$(grep -c "^EMBED_BASE_URL=" airgap.env || true)" = "0"
-          test "$(grep -c "^LLM_BASE_URL=" airgap.env || true)" = "0"
-          # Rendered values prove common.sh resolved both legs from the shared
-          # base; manifests prove every leg references the single shared key.
-          grep -q "https://test-gateway:4000/v1" dist/mainframe-rag-release-values.yaml
-          grep -q 'key: "api-key"' dist/agent-rendered.yaml
-          grep -q 'key: "api-key"' dist/ingest-rendered.yaml
-          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/agent-rendered.yaml
-          ! grep -Eq "__[A-Z][A-Z0-9_]*__" dist/ingest-rendered.yaml
+          python3 scripts/ci/check_gateway_rendering.py \
+            --env-file airgap.env --agent-render dist/agent-rendered.yaml \
+            --ingest-render dist/ingest-rendered.yaml \
+            --shared-url https://test-gateway:4000/v1 \
+            --secret-name test-gateway-keys --secret-key api-key \
+            --embed-model mock-embed --reasoning-model mock-reasoning \
+            --context-model '' \
+            --diagnostics "$GITHUB_WORKSPACE/diagnostics/shared-gateway-rendering.json"
 
       - name: Require reasoning and complete streams from the application pod
         run: |

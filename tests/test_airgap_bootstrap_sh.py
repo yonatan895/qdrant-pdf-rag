@@ -6,6 +6,7 @@ Tests bootstrap.sh against a mock sneakernet extraction directory:
 - Successful verification clones the bundle, populates dist/, and initializes airgap.env.
 """
 
+import os
 import shutil
 import subprocess
 
@@ -160,6 +161,66 @@ def test_bootstrap_success(bundle_dir):
         check=False,
     )
     assert verify.returncode == 0, verify.stdout + verify.stderr
+
+
+def test_signed_handoff_executes_workflow_with_shipped_model_modes(bundle_dir):
+    """Run the workflow body with synthetic signed images and relocated CI tools."""
+    import yaml
+
+    from tests.helpers_airgap import install_rendering_helm, write_stub
+
+    source = bundle_dir.parent / "src_repo"
+    for relative in ("scripts/airgap", "scripts/tools", "taskfiles", "charts"):
+        shutil.copytree(REPO / relative, source / relative, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+    for relative in ("Taskfile.yml", "airgap.env.example", "images.txt", "scripts/qdrant_pin.py"):
+        shutil.copy(REPO / relative, source / relative)
+    subprocess.run(["git", "add", "."], cwd=source, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Synthetic handoff source"], cwd=source,
+                   check=True, capture_output=True)
+    old_sha = (bundle_dir / "MANIFEST.txt").read_text().splitlines()[0].split()[1]
+    candidate_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    subprocess.run(["git", "bundle", "create", str(bundle_dir / "repo.bundle"), "HEAD", "--all"],
+                   cwd=source, check=True, capture_output=True)
+    for kind in ("agent", "ingest"):
+        (bundle_dir / f"app-{kind}-{old_sha}.tar").rename(bundle_dir / f"app-{kind}-{candidate_sha}.tar")
+    for name in ("MANIFEST.txt", "SHA256SUMS"):
+        path = bundle_dir / name
+        path.write_text(path.read_text().replace(old_sha, candidate_sha))
+    (bundle_dir / "sbom.json").write_text('{"images": [], "tools": [{"name": "go-task/task"}]}\n')
+    _resign(bundle_dir)
+    gapbox = bundle_dir.parent / "gapbox"
+    gapbox.mkdir()
+    archive = gapbox / f"qdrant-pdf-rag-{candidate_sha}.tar"
+    members = [path.name for path in bundle_dir.iterdir() if path.is_file() and path.name != "signing.key"]
+    subprocess.run(["tar", "cf", str(archive), *members], cwd=bundle_dir, check=True, capture_output=True)
+    (gapbox / f"{archive.name}.sha256").write_text(f"{_sha256(archive.read_bytes())}  {archive.name}\n")
+    tools = bundle_dir.parent / "tools"
+    (tools / "bin").mkdir(parents=True)
+    for name in ("skopeo", "kubectl", "oc"):
+        write_stub(tools / "bin" / name, "#!/bin/sh\nexit 0\n")
+    install_rendering_helm(tools)
+    workflow = yaml.safe_load((REPO / ".github/workflows/e2e.yml").read_text())
+    command = next(step["run"] for step in workflow["jobs"]["airgap-acceptance"]["steps"]
+                   if step.get("name", "").startswith("Black-box handoff"))
+    command = command.replace('export PATH="/usr/local/bin:$PATH"', 'export PATH="$HANDOFF_TOOLS:$PATH"')
+    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", command], cwd=bundle_dir.parent,
+                            env={"PATH": f"{tools / 'bin'}:" + os.environ["PATH"],
+                                 "HANDOFF_TOOLS": str(tools / "bin"),
+                                 "SHA": candidate_sha, "IMAGE_SHA": candidate_sha},
+                            capture_output=True, text=True, check=False)
+    (bundle_dir.parent / "handoff-workflow.log").write_text(result.stdout + result.stderr)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("PIPELINE DRY-RUN COMPLETE") == 2
+    assert "EMBED_BASE_URL:    http://gateway:4000/v1" in result.stdout
+    assert "EMBED_BASE_URL:    http://vllm:8000/v1" in result.stdout
+    checkout = gapbox / "qdrant-pdf-rag"
+    assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip() == candidate_sha
+    assert (checkout / "dist/MANIFEST.txt").read_text().startswith(f"sha: {candidate_sha}\n")
+    values = yaml.safe_load((checkout / "dist/mainframe-rag-release-values.yaml").read_text())
+    assert values["models"]["reasoning"]["model"] == ""
+    assert values["models"]["embedding"]["baseUrl"] == "http://vllm:8000/v1"
+    assert values["pullSecret"]["name"] == "acceptance-pull"
 
 
 def _offline_env(bundle_dir):
