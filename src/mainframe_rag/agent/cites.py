@@ -17,7 +17,10 @@ CITATION_LINE_RE = re.compile(
     r"(?P<heading>.+?),\s+p\.\s+(?P<page>.+?)\s*$"
 )
 
-CITATIONS_HEADER_RE = re.compile(r"^\s*#{0,6}\s*Citations?:\s*$", re.IGNORECASE | re.MULTILINE)
+CITATIONS_HEADER_RE = re.compile(
+    r"^\s*#{0,6}\s*[*_`]*(?:Citations?|Sources?|References?)[*_`]*:[*_`]*\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # List markers as a discrete prefix (bullet/space or number + [.)] + space),
 # never a greedy char-set lstrip: "- **cite**" must strip only "- " so the
@@ -73,7 +76,7 @@ _normalize_citation_line = normalize_citation_line
 
 
 def extract_body_and_citations(text: str) -> tuple[str, list[str]]:
-    """Separates answer body prose from citations following any Citations: header.
+    """Separate prose from citations after Citations:, Sources: or References:.
 
     A citations block begins at CITATIONS_HEADER_RE and consumes citation-shaped
     lines matching CITATION_LINE_RE or bulleted list markers. At the first non-citation/

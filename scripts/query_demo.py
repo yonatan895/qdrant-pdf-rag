@@ -729,12 +729,13 @@ def execute_answer(
         # Issue #365: the dev tool finalizes like answer_core — the state
         # needs the transport outcome parse_answer cannot see.
         parsed.verification_state = verification_state_for(
+            answer=parsed.answer,
             citations=parsed.citations,
             citations_inferred=parsed.citations_inferred,
             finish_reason=reply.finish_reason,
             abstained=parsed.abstained,
             empty_hits=False,
-            empty_content=not reply_content.strip(),
+            script_present=bool(parsed.script),
         )
         parsed.script_review_required = parsed.script is not None
         root_span.set_attributes({

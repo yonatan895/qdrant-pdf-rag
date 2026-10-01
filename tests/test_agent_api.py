@@ -3151,45 +3151,53 @@ def test_verification_state_for_matrix():
     from mainframe_rag.agent.answer import verification_state_for
 
     assert verification_state_for(
+        answer="Retry.",
         citations=[_ACCEPTED_CITE], citations_inferred=False,
         finish_reason="stop", abstained=False, empty_hits=False,
     ) == "accepted"
     assert verification_state_for(
+        answer="The supplied excerpts do not answer the question.",
         citations=[], citations_inferred=False,
         finish_reason="stop", abstained=True, empty_hits=False,
     ) == "insufficient_evidence"
     assert verification_state_for(
+        answer="No supporting manual excerpts were found for this question.",
         citations=[], citations_inferred=False,
         finish_reason="stop", abstained=False, empty_hits=True,
     ) == "insufficient_evidence"
     assert verification_state_for(
+        answer="Retry.",
         citations=[_ACCEPTED_CITE], citations_inferred=False,
         finish_reason="length", abstained=False, empty_hits=False,
     ) == "generation_incomplete"
     assert verification_state_for(
+        answer="Retry.",
         citations=[], citations_inferred=False,
         finish_reason="stop", abstained=False, empty_hits=False,
     ) == "unverified_draft"
     assert verification_state_for(
+        answer="Retry.",
         citations=[_ACCEPTED_CITE], citations_inferred=True,
         finish_reason="stop", abstained=False, empty_hits=False,
     ) == "unverified_draft"
     # Unfinished generation outranks citation outcome: cites present but cut.
     assert verification_state_for(
+        answer="Retry.",
         citations=[], citations_inferred=False,
         finish_reason="length", abstained=False, empty_hits=False,
     ) == "generation_incomplete"
     # Every explicitly classified non-stop finish stays incomplete; only a
     # real "stop" can reach accepted (issue #365).
     assert verification_state_for(
+        answer="Retry.",
         citations=[_ACCEPTED_CITE], citations_inferred=False,
         finish_reason="content_filter", abstained=False, empty_hits=False,
     ) == "generation_incomplete"
     # Empty model content is incomplete, not a draft: nothing to review.
     assert verification_state_for(
+        answer="",
         citations=[], citations_inferred=False,
         finish_reason="stop", abstained=False, empty_hits=False,
-        empty_content=True,
     ) == "generation_incomplete"
 
 

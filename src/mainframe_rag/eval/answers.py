@@ -142,7 +142,12 @@ class AnswerCapture(logging.Handler):
 # The trap branch keeps the marker test (any decline phrase = declined, even
 # a long one); the answer branch needs the shape floor so a grounded partial
 # answer's scope caveat is not scored as a refusal (#305).
-from mainframe_rag.agent.answer import VERIFICATION_STATES, is_abstention, is_refusal
+from mainframe_rag.agent.answer import (
+    VERIFICATION_STATES,
+    has_answer_body,
+    is_abstention,
+    is_refusal,
+)
 from mainframe_rag.config import load_settings
 from mainframe_rag.eval.datasets import (
     DatasetError,
@@ -200,7 +205,7 @@ def judge(
     grounded = bool(citations)
 
     if entry["expected_behavior"] == "answer":
-        if not body:
+        if not has_answer_body(body, citations):
             failures.append("empty answer body")
         elif abstained:
             failures.append("explicit refusal on an answer-tier query")
