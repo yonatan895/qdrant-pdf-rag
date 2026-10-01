@@ -231,10 +231,9 @@ def outline_sections(parsed: ParsedDoc) -> list[Section]:
 
         start = max(0, page_1based - 1)
         end = parsed.page_count
-        for nxt_level, _, nxt_page in entries[idx + 1 :]:
-            if nxt_level <= level:
-                end = max(start, nxt_page - 1)
-                break
+        for _, _, nxt_page in entries[idx + 1 :]:
+            end = max(start, nxt_page - 1)
+            break
 
         if end > start:
             sections.append(
