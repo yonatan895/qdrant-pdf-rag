@@ -2781,6 +2781,33 @@ def test_answer_rejects_overlong_query(client):
     assert resp.json() == {"code": "invalid_request", "message": "request body failed validation"}
 
 
+@pytest.mark.parametrize("temperature", [-1.0, 2.1, 1e308])
+def test_answer_rejects_out_of_range_temperature(client, temperature):
+    """Issue #596: the temperature override is bounded like
+    Settings.llm_temperature, so client input errors 422 before retrieval
+    instead of surfacing as upstream 502s."""
+    resp = client.post("/v1/answer", json={"query": "IEA500I", "temperature": temperature})
+    assert resp.status_code == 422
+    assert resp.json() == {"code": "invalid_request", "message": "request body failed validation"}
+
+
+@pytest.mark.parametrize("temperature", [float("nan"), float("inf"), float("-inf")])
+def test_answer_temperature_rejects_non_finite(temperature):
+    """Non-finite floats cannot cross the JSON wire (the client encoder
+    refuses them), so the allow_inf_nan=False bound is pinned at the model
+    layer instead."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        app_mod.AnswerRequest(query="IEA500I", temperature=temperature)
+
+
+@pytest.mark.parametrize("temperature", [0.0, 2.0])
+def test_answer_accepts_boundary_temperature(client, temperature):
+    resp = client.post("/v1/answer", json={"query": "IEA500I", "temperature": temperature})
+    assert resp.status_code == 200
+
+
 def test_build_messages_truncates_overlong_splunk_context():
     """Issue #87: unbounded caller-supplied telemetry truncates with the
     standard suffix instead of starving excerpts out of the window."""

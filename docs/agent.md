@@ -18,9 +18,13 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   version?, limit (default 8, 1–40)}` → `SearchResponse{request_id,
   query_kind, hits}`. No LLM involved.
 - `POST /v1/answer` — `AnswerRequest{query, product?, version?,
-  splunk_context?, stream (default false)}` → `AnswerResponse{request_id,
+  splunk_context?, stream (default false), temperature?}` → `AnswerResponse{request_id,
   answer, citations, citations_inferred, inferred_indices, script,
   script_lang, verification_state, script_review_required}`.
+  `temperature` (issue #596) is an optional per-request override of
+  `Settings.llm_temperature` (0.0–2.0, no inf/NaN; out-of-range 422s before
+  retrieval); omitted means the configured default. The chat routes accept
+  the same bounded override.
   Retrieval always runs
   with a hardcoded `limit=8` (tuning the search `limit` does not change
   answers); the JSON response deliberately omits `query_kind`, `hits`,

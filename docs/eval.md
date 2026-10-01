@@ -393,13 +393,15 @@ None of these empty runs establishes semantic acceptance.
 In-process `/v1/answer` grounding honesty: deterministic stratified
 round-robin sampling (sorted classes and ids, no RNG, small classes
 revisited first; default 24 queries, `--all` for full runs), then judge.
-Sampling temperature (issue #596): the eval sends `temperature=0` by
+Sampling temperature (issue #596): the answer eval sends `temperature=0` by
 default and records it per row, in the report `params`, and in the run
-manifest — production `llm_temperature` (0.2) is unchanged. Comparison
-rule: compare single runs at temperature 0, or repeat the changed rows
-N≥3 times at the production temperature (`--temperature 0.2`) and compare
-the distributions; vLLM at 0 is steadier, not bit-deterministic, so expect
-few verdict flips across repeats, not zero:
+manifest — production `llm_temperature` (0.2) is unchanged. L2/L4 stay on
+the server default (`temperature=None`): their thresholds were recorded
+under it, so moving them to 0 needs its own threshold re-record PR.
+Comparison rule: compare single runs at temperature 0, or repeat the
+changed rows N≥3 times at the production temperature (`--temperature 0.2`)
+and compare the distributions; vLLM at 0 is steadier, not
+bit-deterministic, so expect few verdict flips across repeats, not zero:
 
 - Answer behavior fails on empty or citation-scaffolding-only bodies (the shared
   body-presence predicate, #576, including empty `Answer` headings and citation

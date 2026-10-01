@@ -704,6 +704,34 @@ def test_chat_invalid_active_turn_has_no_model_or_retrieval(chat_client, message
     assert chat_client.fake_llm.chat_calls == chat_client.fake_llm.stream_calls == []
 
 
+@pytest.mark.parametrize("temperature", [-1.0, 2.1])
+@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
+def test_chat_rejects_out_of_range_temperature(chat_client, path, temperature):
+    """Issue #596: the chat temperature override carries the same bounds as
+    Settings.llm_temperature — client input errors 422 before any work."""
+    result = chat_client.post(path, json={
+        "messages": [{"role": "user", "content": "What does IEA500I mean?"}],
+        "temperature": temperature,
+    })
+    assert result.status_code == 422
+    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert chat_client.mock_search.calls == []
+    assert chat_client.fake_llm.chat_calls == chat_client.fake_llm.stream_calls == []
+
+
+@pytest.mark.parametrize("temperature", [float("nan"), float("inf")])
+def test_chat_temperature_rejects_non_finite(temperature):
+    """Non-finite floats cannot cross the JSON wire, so the allow_inf_nan
+    bound is pinned at the model layer."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        app_mod.ChatRequest(
+            messages=[{"role": "user", "content": "What does IEA500I mean?"}],
+            temperature=temperature,
+        )
+
+
 def test_chat_ignored_tail_still_counts_toward_body_limit(chat_client, monkeypatch):
     monkeypatch.setattr(app_mod.settings, "chat_max_body_chars", 64)
     result = chat_client.post("/v1/chat", json={"messages": [
