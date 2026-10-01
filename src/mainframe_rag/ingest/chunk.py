@@ -184,6 +184,10 @@ class Chunk:
     # character truncation still applies. Identity and the four-type
     # chunk_type vocabulary are untouched by this field.
     units: tuple[UnitSpan, ...] | None = None
+    # Last physical PDF page the chunk touches, 0-based and inclusive like
+    # page_start (issue #271). None only for chunks built outside
+    # make_chunks; readers treat it as page_start. Not part of identity.
+    page_end: int | None = None
 
 
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -671,13 +675,21 @@ def fallback_sections(page_texts: list[str], title: str) -> list[Section]:
 
 
 def _page_label_range(labels: list[str | None]) -> str:
+    """Printed-label range for a chunk's physical page span, or '' when the
+    printed labels cannot honestly locate the whole span (issue #271).
+
+    '' when any page in the span is unlabeled (a surviving label would
+    understate the span) or when a multi-page span starts and ends on the
+    same printed label (repeated folios, e.g. every page labeled 'A-'). The
+    citation then falls back to the physical PDF pages (page_start/page_end).
+    A printed label is never invented for an unlabeled page."""
     present = [lbl for lbl in labels if lbl]
-    if not present:
+    if not present or len(present) != len(labels):
         return ""
-    if len(present) == 1:
-        return present[0]
     first, last = present[0], present[-1]
-    return first if first == last else f"{first}\u2013{last}"
+    if len(present) == 1:
+        return first
+    return "" if first == last else f"{first}\u2013{last}"
 
 
 def make_chunks(
@@ -707,7 +719,11 @@ def make_chunks(
             # (revision|heading|page|ordinal) carries the source revision, so
             # same-form-number revisions never share point ids.
             chunk_id = make_chunk_id(revision, section.heading_path, page_start, ordinal)
-            span_labels = labels[page_start : page_end + 1] if page_start < len(labels) else []
+            # One entry per physical page in the span; a page past the end of
+            # the label list is unlabeled, never silently dropped (#271).
+            span_labels = [
+                labels[idx] if idx < len(labels) else None for idx in range(page_start, page_end + 1)
+            ]
             label = _page_label_range(span_labels)
             chunks.append(
                 Chunk(
@@ -722,6 +738,7 @@ def make_chunks(
                     members=find_members(text),
                     ordinal=ordinal,
                     units=_stored_spans(spans),
+                    page_end=page_end,
                 )
             )
 

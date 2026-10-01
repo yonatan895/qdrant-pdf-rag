@@ -58,18 +58,38 @@ RETRIEVE_PAYLOAD_FIELDS: tuple[str, ...] = (
     # Atomic-unit spans (issue #368): additive fetch, never filtered or
     # ranked on — ranking/filter behavior is byte-identical with or without.
     "units",
+    # Physical PDF page span, 0-based inclusive (issue #271): the citation
+    # fallback when printed labels cannot locate the chunk, and the
+    # diversification page key.
+    "page_start",
+    "page_end",
 )
 
 
-def format_citation(doc_id: str, title: str, heading_path: str, page_label: str) -> str:
+def format_citation(
+    doc_id: str,
+    title: str,
+    heading_path: str,
+    page_label: str,
+    page_start: int | None = None,
+    page_end: int | None = None,
+) -> str:
     """SA22-7592-05 z/OS MVS Init..., IEASYSxx > LFAREA, p. 1-17
 
     The citation shape contract; cites.CITATION_LINE_RE validates this shape
-    on LLM output."""
+    on LLM output. A printed label range wins when ingest stored one (every
+    page in the span labeled). Otherwise the physical PDF span is cited as
+    `p. PDF n` / `p. PDF n–m` (1-based, issue #271): a location an engineer
+    can open in the retained PDF, never a guessed printed folio. Legacy
+    points without a physical page keep the page-less form."""
     parts = [f"{doc_id} {title}".strip(), heading_path]
     cite = ", ".join(p for p in parts if p)
     if page_label:
         cite += f", p. {page_label}"
+    elif page_start is not None:
+        first = page_start + 1
+        last = (page_end if page_end is not None and page_end >= page_start else page_start) + 1
+        cite += f", p. PDF {first}" if first == last else f", p. PDF {first}\u2013{last}"
     return cite
 
 
@@ -94,6 +114,17 @@ class SearchHit(BaseModel):
     # pack stage redetects with the shared chunk detectors. () = known
     # prose: legacy character truncation applies.
     units: tuple[tuple[int, int, str], ...] | None = None
+    # Physical PDF page span, 0-based inclusive (issue #271). None = not
+    # projected (legacy point or a hit built outside _to_hit).
+    page_start: int | None = None
+    page_end: int | None = None
+
+
+def _payload_page(raw: object) -> int | None:
+    """Fail-closed page parse: only a non-negative int (never bool) counts."""
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        return None
+    return raw
 
 
 def _parse_unit_spans(raw: object) -> tuple[tuple[int, int, str], ...] | None:
@@ -128,10 +159,15 @@ def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:
     title = str(payload.get("title") or "")
     heading = str(payload.get("heading_path") or "")
     page_label = str(payload.get("page_label") or "")
+    page_start = _payload_page(payload.get("page_start"))
+    page_end = _payload_page(payload.get("page_end"))
+    if page_start is None or page_end is None or page_end < page_start:
+        # Legacy point (no page_end) or malformed span: single page.
+        page_end = page_start
     return SearchHit(
         chunk_id=str(point.id),
         score=score,
-        cite=format_citation(doc_id, title, heading, page_label),
+        cite=format_citation(doc_id, title, heading, page_label, page_start, page_end),
         heading=heading,
         text=str(payload.get("text") or ""),
         doc_id=doc_id,
@@ -142,6 +178,8 @@ def _to_hit(point: models.ScoredPoint, score: float) -> SearchHit:
         version=payload.get("version"),
         message_ids=tuple(payload.get("message_ids") or []),
         units=_parse_unit_spans(payload.get("units")),
+        page_start=page_start,
+        page_end=page_end,
     )
 
 
@@ -227,6 +265,18 @@ def max_split_hits(
     return [by_id[key].model_copy(update={"score": score}) for key, score in ranked]
 
 
+def _page_key(h: SearchHit) -> tuple[str, str]:
+    """Diversification page bucket (issue #271): the physical first page.
+
+    Printed labels collapse distinct pages (every unlabeled page is '',
+    repeated folios share one label), so the per-page cap degraded to
+    per-document there. Hits without a projected physical page (legacy
+    points, hand-built hits) keep the printed-label bucket."""
+    if h.page_start is not None:
+        return (h.doc_id, f"pdf:{h.page_start}")
+    return (h.doc_id, h.page_label)
+
+
 def diversify_hits(
     hits: list[SearchHit],
     limit: int = 8,
@@ -243,7 +293,7 @@ def diversify_hits(
 
     # Phase 1: select candidates respecting both per-page and per-doc caps
     for h in hits:
-        p_key = (h.doc_id, h.page_label)
+        p_key = _page_key(h)
         d_key = h.doc_id
         if seen_pages.get(p_key, 0) < max_per_page and seen_docs.get(d_key, 0) < max_per_doc:
             seen_pages[p_key] = seen_pages.get(p_key, 0) + 1
@@ -257,7 +307,7 @@ def diversify_hits(
     # Phase 2: backfill without violating max_per_page (relax per-doc cap first)
     still_remaining: list[SearchHit] = []
     for h in remaining:
-        p_key = (h.doc_id, h.page_label)
+        p_key = _page_key(h)
         if seen_pages.get(p_key, 0) < max_per_page:
             seen_pages[p_key] = seen_pages.get(p_key, 0) + 1
             selected.append(h)
@@ -268,12 +318,12 @@ def diversify_hits(
 
     still_remaining.sort(
         key=lambda h: (
-            seen_pages.get((h.doc_id, h.page_label), 0),
+            seen_pages.get(_page_key(h), 0),
             -(h.rerank_score if h.rerank_score is not None else h.score),
         )
     )
     for h in still_remaining:
-        p_key = (h.doc_id, h.page_label)
+        p_key = _page_key(h)
         seen_pages[p_key] = seen_pages.get(p_key, 0) + 1
         selected.append(h)
         if len(selected) >= limit:

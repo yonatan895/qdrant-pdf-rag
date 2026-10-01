@@ -2,6 +2,8 @@
 
 import re
 
+import pytest
+
 from mainframe_rag.ingest.chrome import strip_chrome
 from mainframe_rag.ingest.chunk import make_chunks, outline_sections
 from mainframe_rag.ingest.ibm_pdf import parse_pdf
@@ -758,3 +760,52 @@ def test_no_toc_pdf_chunks_without_collapse():
     assert len(chunks) > 1
     again = make_chunks(parsed, pages, ["1", "2", "3"])
     assert [c.chunk_id for c in chunks] == [c.chunk_id for c in again]
+
+
+@pytest.mark.parametrize(
+    ("labels", "expected_label"),
+    [
+        (["1-6", "1-7"], "1-6–1-7"),  # fully labeled: unchanged printed range
+        (["", ""], ""),  # no /PageLabels: PyMuPDF returns ''
+        ([None, "1"], ""),  # partial: the surviving label must not understate the span
+        (["7", None], ""),
+        (["A-", "A-"], ""),  # repeated folio across a 2-page span locates nothing
+        (["1-6"], ""),  # label list shorter than the span: missing page is unlabeled
+        (None, ""),  # no labels supplied at all
+    ],
+)
+def test_make_chunks_stores_physical_span_and_honest_label(labels, expected_label):
+    """Issue #271: every chunk carries its physical span (page_start/page_end,
+    0-based inclusive); page_label is the printed range only when printed
+    labels locate the whole span. Identity still pins page_start."""
+    from mainframe_rag.ingest.chunk import make_chunk_id, make_chunks
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+    from mainframe_rag.ingest.identity import source_rev_key
+
+    parsed = ParsedDoc(
+        path=__import__("pathlib").Path("span.pdf"),
+        sha256="1" * 64,
+        doc_id="SA22-0000-01",
+        title="Span",
+        product="z/OS",
+        version="9.9",
+        vendor="IBM",
+        toc=[[1, "Only chapter", 1]],
+        page_count=2,
+    )
+    chunks = make_chunks(parsed, ["Alpha paragraph here.", "Beta paragraph here."], labels)
+    assert len(chunks) == 1
+    (chunk,) = chunks
+    assert (chunk.page_start, chunk.page_end) == (0, 1)
+    assert chunk.page_label == expected_label
+    rev = source_rev_key("IBM", "z/OS", "9.9", "1" * 64)
+    assert chunk.chunk_id == make_chunk_id(rev, "Only chapter", 0, 0)
+
+
+def test_make_chunks_single_labeled_page_keeps_label():
+    """A single-page chunk keeps even a repeated folio: it locates that page."""
+    from mainframe_rag.ingest.chunk import _page_label_range
+
+    assert _page_label_range(["A-"]) == "A-"
+    assert _page_label_range([""]) == ""
+    assert _page_label_range([]) == ""

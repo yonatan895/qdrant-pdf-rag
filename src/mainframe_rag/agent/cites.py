@@ -2,7 +2,9 @@
 
 The agent must emit citations as:
     SA22-7592-05 z/OS MVS Initialization and Tuning Reference, IEASYSxx > LFAREA, p. 1-17
-(doc number, title, heading path, printed page label). LLM output is filtered
+(doc number, title, heading path, page). The page is the printed page label,
+or `PDF n` / `PDF n–m` physical pages when printed labels cannot locate the
+chunk (issue #271); both share the `, p. <page>` tail. LLM output is filtered
 to citations that match the format AND appear in the retrieved hit set.
 """
 
@@ -11,7 +13,7 @@ from __future__ import annotations
 import re
 from collections.abc import Set as AbstractSet
 
-# docno, title, heading path, printed page label
+# docno, title, heading path, page (printed label or `PDF n[–m]`, issue #271)
 CITATION_LINE_RE = re.compile(
     r"^\s*(?P<doc_id>[A-Z]{2,4}\d{2}-\d{4}(?:-\d{2})?)\s+(?P<title>.+?),\s+"
     r"(?P<heading>.+?),\s+p\.\s+(?P<page>.+?)\s*$"

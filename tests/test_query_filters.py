@@ -854,3 +854,117 @@ def test_search_pure_scope_filter_zero_matches_no_redundant_fallback(embedder):
     assert fake.batch_calls == 1  # No redundant retry
     assert hits == []
 
+
+
+# ---------------------------------------------------------------------------
+# Physical page fallback and per-physical-page diversification (issue #271)
+# ---------------------------------------------------------------------------
+
+
+def _page_point(pid: str, doc_id: str, page_label: str, page_start: int | None, page_end: object = "absent") -> models.ScoredPoint:
+    payload: dict = {
+        "doc_id": doc_id,
+        "title": "Widget Guide",
+        "heading_path": "Chapter 1. Widgets",
+        "page_label": page_label,
+        "chunk_type": "narrative",
+        "message_ids": [],
+        "text": f"widget text {pid}",
+    }
+    if page_start is not None:
+        payload["page_start"] = page_start
+    if page_end != "absent":
+        payload["page_end"] = page_end
+    return models.ScoredPoint(id=pid, version=1, score=1.0, payload=payload)
+
+
+@pytest.mark.parametrize(
+    ("page_label", "page_start", "page_end", "tail"),
+    [
+        ("1-17", 4, 9, ", p. 1-17"),  # printed label wins, unchanged shape
+        ("", 3, 3, ", p. PDF 4"),  # unlabeled single page: 1-based PDF page
+        ("", 0, 3, ", p. PDF 1–4"),  # unlabeled span: whole span cited
+        ("", 5, None, ", p. PDF 6"),  # legacy point without page_end
+        ("", 5, 2, ", p. PDF 6"),  # malformed end never shrinks the start
+        ("", None, None, ""),  # no physical page known: page-less legacy form
+    ],
+)
+def test_format_citation_physical_page_fallback(page_label, page_start, page_end, tail):
+    from mainframe_rag.agent.cites import CITATION_LINE_RE, valid_citations
+
+    cite = format_citation("WX10-0001-00", "Widget Guide", "Chapter 1. Widgets", page_label, page_start, page_end)
+    assert cite == "WX10-0001-00 Widget Guide, Chapter 1. Widgets" + tail
+    if tail:
+        # Producer/validator contract: the fallback keeps the `, p. <page>`
+        # tail, so model citations copying it stay validatable.
+        m = CITATION_LINE_RE.match(cite)
+        assert m is not None and m.group("page") == tail.removeprefix(", p. ")
+        assert valid_citations(f"Set it.\n\nCitations:\n- {cite}\n", {cite}) == [cite]
+
+
+def test_to_hit_projects_physical_page_span():
+    from mainframe_rag.retrieve.query import _to_hit
+
+    spanning = _to_hit(_page_point("a", "WX10-0001-00", "", 2, 4), 1.0)
+    assert (spanning.page_start, spanning.page_end) == (2, 4)
+    assert spanning.cite.endswith(", p. PDF 3–5")
+
+    legacy = _to_hit(_page_point("b", "WX10-0001-00", "", 7), 1.0)
+    assert (legacy.page_start, legacy.page_end) == (7, 7)
+    assert legacy.cite.endswith(", p. PDF 8")
+
+    labelled = _to_hit(_page_point("c", "SA22-0000-00", "1-6", 5, 5), 1.0)
+    assert labelled.cite.endswith(", p. 1-6")
+
+    for bad in (True, -1, "3", 2.0):
+        broken = _to_hit(_page_point("d", "WX10-0001-00", "", bad, bad), 1.0)  # type: ignore[arg-type]
+        assert broken.page_start is None and broken.page_end is None
+        assert broken.cite == "WX10-0001-00 Widget Guide, Chapter 1. Widgets"
+
+
+def test_diversify_buckets_by_physical_page_not_printed_label():
+    """Unlabeled pages ('') and repeated folios ('A-') used to share one
+    bucket per document, so max_per_page silently became max_per_doc and a
+    lower-ranked competing document took the slots. Physical pages keep
+    distinct pages distinct; hits without a physical page keep the label
+    bucket (legacy behavior)."""
+    from mainframe_rag.retrieve.query import _to_hit, diversify_hits
+
+    hits = [
+        _to_hit(_page_point("u0", "WX10-0001-00", "", 0, 0), 0.9),
+        _to_hit(_page_point("u1", "WX10-0001-00", "", 1, 1), 0.8),
+        _to_hit(_page_point("u2", "WX10-0001-00", "", 2, 2), 0.7),
+        _to_hit(_page_point("r0", "WX10-0003-00", "A-", 0, 0), 0.65),
+        _to_hit(_page_point("r1", "WX10-0003-00", "A-", 1, 1), 0.6),
+        _to_hit(_page_point("other", "WX10-0005-00", "9", 8, 8), 0.1),
+        _to_hit(_page_point("u0-dup", "WX10-0001-00", "", 0, 0), 0.05),
+    ]
+    picked = [h.chunk_id for h in diversify_hits(hits, limit=6, max_per_page=1, max_per_doc=3)]
+    assert picked == ["u0", "u1", "u2", "r0", "r1", "other"]
+
+    legacy = [h.model_copy(update={"page_start": None, "page_end": None}) for h in hits]
+    picked_legacy = [h.chunk_id for h in diversify_hits(legacy, limit=3, max_per_page=1, max_per_doc=3)]
+    assert picked_legacy == ["u0", "r0", "other"]
+
+
+def test_search_cites_physical_pages_for_unlabeled_manual():
+    """Actual query path: stored payload -> prefetch projection -> fused,
+    diversified hit -> citation, with a competing labeled manual."""
+    from mainframe_rag.retrieve.query import RETRIEVE_PAYLOAD_FIELDS
+
+    assert {"page_start", "page_end"} <= set(RETRIEVE_PAYLOAD_FIELDS)
+    points = [
+        _page_point("u0", "WX10-0001-00", "", 0, 1),
+        _page_point("u2", "WX10-0001-00", "", 2, 2),
+        _page_point("lab", "WX10-0005-00", "3", 2, 2),
+    ]
+    settings = Settings(embed_mode="hash", allow_hash_mode=True, _env_file=None)
+    hits, _kind, _ = search(
+        FakeQdrant(dense=points, sparse=points), FakeEmbedder(), "mainframe_manuals",
+        "widget configuration", limit=3, settings=settings,
+    )
+    by_id = {h.chunk_id: h.cite for h in hits}
+    assert set(by_id) == {"u0", "u2", "lab"}
+    assert by_id["u0"].endswith(", p. PDF 1–2")
+    assert by_id["u2"].endswith(", p. PDF 3")
+    assert by_id["lab"].endswith(", p. 3")

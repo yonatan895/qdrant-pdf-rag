@@ -1,5 +1,7 @@
 """Parser tests on the synthetic IBM-shaped fixture (generated at runtime)."""
 
+import pytest
+
 from mainframe_rag.ingest.ibm_pdf import parse_pdf
 from mainframe_rag.ingest.walk import detect_vendor, walk_pdfs
 
@@ -100,3 +102,28 @@ def test_walker_ignores_pdx_and_idx(tmp_path, synthetic_pdf):
     assert names == [dest.name]
     assert detect_vendor(dest) == "unknown"
     assert detect_vendor(tmp_path / "Broadcom" / "x.pdf") == "Broadcom"
+
+
+def test_extract_page_texts_label_tree_starting_after_page_zero(tmp_path):
+    """Issue #271: with a /PageLabels tree whose first rule starts at page 3,
+    PyMuPDF get_label() raises IndexError on pages 0-2. Real PyMuPDF, not a
+    stub: those labels are absent (None), later pages keep theirs, and the
+    document is not lost."""
+    import pymupdf
+
+    from mainframe_rag.ingest.run_ingest import _extract_page_texts
+
+    path = tmp_path / "WX10-0002-00.pdf"
+    doc = pymupdf.open()
+    for i in range(5):
+        doc.new_page().insert_text((72, 72), f"Widget page {i + 1}")
+    doc.set_page_labels([{"startpage": 3, "prefix": "", "style": "D", "firstpagenum": 1}])
+    doc.save(path)
+    doc.close()
+
+    with pymupdf.open(path) as reopened:
+        with pytest.raises(IndexError):
+            reopened[0].get_label()  # the library behavior this guards against
+        texts, labels = _extract_page_texts(reopened)
+    assert labels == [None, None, None, "1", "2"]
+    assert [t.strip() for t in texts] == [f"Widget page {i + 1}" for i in range(5)]

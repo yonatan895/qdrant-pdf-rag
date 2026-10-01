@@ -153,15 +153,30 @@ def _extract_page_texts(doc: pymupdf.Document) -> tuple[list[str], list[str | No
     stub document (no PyMuPDF needed): control/bidi/zero-width characters
     are dropped by sanitize_page_text (issue #87) before chrome detection
     sees the text, since those characters would also fracture chrome
-    line-matching. Labels pass through untouched.
+    line-matching. Labels pass through untouched, except that an unreadable
+    label is absent (see _page_label).
     """
     page_texts: list[str] = []
     page_labels: list[str | None] = []
     for i in range(doc.page_count):
         page = doc[i]
         page_texts.append(sanitize_page_text(page.get_text()))
-        page_labels.append(page.get_label())
+        page_labels.append(_page_label(page))
     return page_texts, page_labels
+
+
+def _page_label(page: pymupdf.Page) -> str | None:
+    """Printed label, or None when the page has none (issue #271).
+
+    A /PageLabels tree whose first rule starts after page 0 leaves the
+    earlier pages unlabeled, and PyMuPDF's get_label() raises IndexError on
+    them instead of returning ''. Treat that page's label as absent rather
+    than failing the whole document: chunking cites a physical-page
+    fallback for any span that is not fully labeled."""
+    try:
+        return page.get_label()
+    except IndexError:
+        return None
 
 
 def _parse_one(

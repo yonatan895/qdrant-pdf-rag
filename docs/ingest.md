@@ -185,11 +185,19 @@ for citations and filters.
   (no slicing; overlap restarts after them); oversize prose is char-sliced
   every 3500.
 - Paragraphs split on blank lines; empties dropped with page tracking. Each
-  block tracks its page span (min/max over composing items): the chunk
-  label cites the full span (`_page_label_range` over every touched page),
+  block tracks its page span (min/max over composing items) and stores it as
+  physical PDF pages `page_start`/`page_end` (0-based, inclusive; issue #271),
   while the UUID pins the span start — the `doc|heading|page|ordinal` key
-  contract is unchanged. Label ranges format as empty, single, or
-  `first–last` with an en-dash.
+  contract is unchanged. `page_label` is the printed-label range over every
+  touched page (`_page_label_range`): single, or `first–last` with an
+  en-dash, and **empty** whenever the printed labels cannot locate the whole
+  span — any page in the span unlabeled, or a multi-page span starting and
+  ending on the same printed label (repeated folios). A printed label is
+  never invented. Citations then fall back to the physical span (`p. PDF n` /
+  `p. PDF n–m`, see [retrieval §1](retrieval.md)). A `/PageLabels` tree whose
+  first rule starts after page 0 makes PyMuPDF's `get_label()` raise
+  `IndexError` on the earlier pages; extraction treats those labels as absent
+  (`run_ingest._page_label`) instead of failing the document.
 - Per chunk, `classify` (§5) plus message/member extraction run and land in
   the payload (§8).
 
@@ -299,9 +307,10 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   never to `m=0` (which drops existing HNSW). Default **off**, load-bearing
   on single-node: a measured 371-doc/246k-point bulk load ran 3× slower
   with unindexed segments. Do not enable for initial loads on small nodes.
-- Point payload (15 fields + optional `context`): `vendor, product, version,
-  doc_id, source_rev, title, heading_path, page_label, page_start, chunk_type,
-  message_ids, members, sha256, rules_v, text`; `context` only when present — never
+- Point payload (16 fields + optional `context`): `vendor, product, version,
+  doc_id, source_rev, title, heading_path, page_label, page_start, page_end,
+  chunk_type, message_ids, members, sha256, rules_v, text` (`page_end` since
+  issue #271; points written before it read as single-page); `context` only when present — never
   indexed, observability only. Structured chunks (code/table/SYSIN) add an
   optional `units` list of `[start, end, kind]` atomic/prose spans over the
   stripped text for prompt packing (issue #368) — additive and unindexed;
