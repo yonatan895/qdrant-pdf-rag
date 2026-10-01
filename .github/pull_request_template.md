@@ -4,6 +4,7 @@ and leave lifecycle decisions to the maintainer, even after CI passes. -->
 
 ## Scope
 Issue/acceptance item; base SHA; one-sentence outcome.
+Outcome metric: baseline → result (or the linked defect/maintainer request).
 
 ## Contract and impact
 Invariant changed or preserved; affected boundaries.
@@ -13,6 +14,8 @@ Defaults, API/schema, identities, operational requirements, and rollback impact.
 | Claim/counterexample | Test or command | Tested SHA | Result | Evidence |
 |---|---|---|---|---|
 
+Link the acceptance summary and CI receipts for lane results, counts and SHAs instead of
+restating them; prose states the claim, the counterexample considered and the limits.
 Distinguish observed results, static reasoning, proposed tests, and checks not run.
 For test consolidation: old case → retained behavior/new owner, or retirement reason.
 Group related evidence; no artifact is required for every trivial assertion.
@@ -43,12 +46,6 @@ do not rewrite an old failed attempt as a success. A new head requires current t
 - **Execution SHA / test-merge**: `<sha or not run>`
 - **Known limitations**: [not implemented vs not verified; owning issue]
 
-### Maintainer review
-Only the human maintainer `yonatan895` marks ready, formally requests changes,
-and merges. Use native GitHub controls; no JSON review comment is required.
-Agents leave this PR in draft and provide findings/evidence without submitting
-approval or requesting changes on the maintainer's behalf.
-
 ### Verification run links
 - **Check-context & lint/types**: [Link to run/log]
 - **Targeted suite / reproducer**: [Link to test execution]
@@ -56,5 +53,6 @@ approval or requesting changes on the maintainer's behalf.
 - [Verification minimums](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/live-stack.md#verification-minimums)
 
 ### Maintainer decision
-Link the maintainer's native review/discussion when available. Do not fill in
-another person's approval. Passing CI reports technical evidence only.
+Only `yonatan895` marks ready, formally requests changes, or merges, using native
+GitHub controls; agents leave the PR in draft. Link that review when available and
+never fill in another person's approval. Passing CI reports technical evidence only.

@@ -109,10 +109,16 @@ New product scope requires an issue decision, not a silent expansion.
 ## Task packet
 
 Use the [issue form](../.github/ISSUE_TEMPLATE/agent-task.md), or these same fields
-in a GitLab issue. Before implementation, authors record the compact 5-question
-author input packet. For a small fix, short answers and evidence links suffice (`N/A` needs a one-sentence reason):
+in a GitLab issue. Before implementation, authors record the compact 6-question
+author input packet. Value comes first: correctness rigor on the wrong change is
+still waste. For a small fix, short answers and evidence links suffice (`N/A` needs a one-sentence reason):
 
 ```text
+Outcome metric:
+The quality-tracker scoreboard number or robustness item this moves, its
+baseline and expected direction; otherwise the escaped defect or maintainer
+request that justifies the work.
+
 Outcome and supported domain:
 One observable change; identify the actual producer/contract of its inputs.
 
@@ -135,36 +141,24 @@ and required evidence not available. Record any compatibility decision separatel
 
 No mandatory checklist of every failure mode for a trivial change. One end-to-end invariant may need several files; a PR is not too broad merely because it updates the necessary consumer and documentation. Settled decisions link their existing owner; reopen only a specific demonstrated conflict. An agent must not independently choose deletion, retention, permission, or publication semantics while generating tests.
 
-### Worked planning example: representation/publication (#391)
+<a id="process-budget"></a>
+## Process budget
 
-**Planning/review only; synthetic inputs; no implementation prescribed.**
-At the task's recorded base, suppose physical `synthetic-A` contains a marked
-current document and an unmarked old point. A publisher walks only the current
-document. Required: every searchable point belongs to verified generation
-coverage; forbidden: calling the whole target current because no stale marker
-was found. Owner: [publication](ingest.md#publication-contract), with
-[metadata](ingest.md#metadata-contract) and [reader lifetime](agent.md#serving-contract).
+Agents optimize what the loop measures, so the loop measures value and caps its
+own overhead. The active quality tracker (currently #582) owns the scoreboard and
+budget figures; this section owns the mechanics:
 
-Trace `run_ingest` → completion/representation stores → final publication check
-→ alias → serving cache → query → answer and console. Inspect the unchanged
-consumers too. Five minimal counterexamples belong in the task packet:
-
-1. Unmarked old searchable point survives a walk that verifies every marked doc.
-2. Final manifest is missing/unreadable while per-document records look complete.
-3. An active reader queries during forced same-representation delete/upsert repair.
-4. A warm validation cache outlives a mutation to its physical target/metadata.
-5. Two publishers resolve the same alias, prepare, then verify/swap out of order,
-   including different progress paths and hosts.
-
-Proposed evidence: retain independent expected point membership; exercise existing
-completion/publication/gate suites with faithful projection/upsert/alias fakes;
-add a disposable server check where real client behavior matters. Select the
-union of affected minimums from [live-stack](live-stack.md#verification-minimums)
-and interaction checks. Inspect current #391 comments before deciding a design.
-No private corpus/live endpoint or automatic cleanup is part of this exercise.
-Counts, names, marker absence and a progress lock each prove only their own
-property. Required draining/immutability/serialization remain acceptance questions
-until the runtime owner supplies implementation and evidence.
+- Process work (agent instructions, CI/verifier/acceptance layers, workflow docs)
+  links an escaped defect, a measured cost or a maintainer request. Target: at
+  most 20% of merged PRs per two-week window are process-only; the window's
+  share is posted on the tracker.
+- Instruction changes are batched (at most weekly) and keep loop-critical wording
+  flat unless an incident requires more. Rules that no review or incident invoked
+  for 30 days are pruning candidates.
+- Extraction/ranking changes include the stored-content census required by
+  [verification minimums](live-stack.md#verification-minimums).
+- Lane results, counts and SHAs come from the acceptance summary and CI receipts;
+  PR prose states the claim, the counterexample considered and the limits.
 
 <a id="review-handoff"></a>
 ## Independent review and handoff
@@ -194,13 +188,15 @@ For each material changed boundary, inspect one discriminating case the submitte
 examples might miss. Check a real round-trip, the next operation after success,
 or equivalent transport/state paths when those distinctions apply.
 Exercise missing/corrupt data, interruption, retry, reader/writer overlap,
-rollback, scope/authorization, and configuration only where applicable.
+rollback, cached validation, scope/authorization, and configuration only where
+applicable. Do not invent findings or certify untested production behavior.
 Prefer the public operation or real boundary that can expose the failure;
 helper tests and generic health checks establish narrower facts.
 Distinguish executed results, static reasoning, and checks not run.
 
 For each material finding, record:
-ID | original counterexample | expected boundary result | exact evidence
+ID | location | preconditions and original counterexample | impact
+   | expected boundary result | exact evidence and minimal test
    | disposition | authorized decision link if scope/behavior is accepted instead.
 
 On re-review, preserve the original input/preconditions and expected outcome.
@@ -232,6 +228,10 @@ checks are not successes; report them without inventing a product defect.
 No findings is a valid outcome. Summarize high-impact findings first, but never
 hide a verified blocker to meet a quota. Group common-root-cause findings.
 Style preferences and unrelated improvements do not block a useful change.
+A finding blocks only when it is in scope and changes a user-visible outcome,
+data integrity or a security boundary. Record other findings in the parking-lot
+issue (#588); after two review rounds, remaining non-blocking items move there
+rather than holding the PR.
 If time/tool limits leave material review incomplete, report incomplete rather
 than approval by default.
 
@@ -572,45 +572,8 @@ proof this particular conversation was truncated.
 | Local Codex CLI 0.154.0 | fresh `codex debug prompt-input` from root and `src/mainframe_rag` | Complete root AGENTS, including its tail, present byte-for-byte in model-visible input | Config limit unset; documented default 32 KiB; complete 7,246-byte entry observed in both diagnostics | No global AGENTS/override or project config found; fallback key unset | Fresh semantic exercises recorded in the implementation PR | Diagnostic exit 0 in both directories; redacted metadata only retained. This proves local CLI loading, not hosted or CI loading |
 | GitHub OpenCode 1.18.25 (workflow pin) | `github run` in workflow checkout; no working-directory override | Root AGENTS expected from root/subdirectory under the pinned discovery code; actual runner input not captured | No byte cap in pinned instruction read/assembly; effective model/request limit unverified | No tracked OpenCode config; workflow sets no instruction override and caches only the binary; runtime global/remote inputs unverified | Review prompt names this guide; ordinary Markdown links are not automatically followed | Official docs and pinned source reviewed below; CI maintainer owns remaining fresh root/subdirectory runtime audit |
 
-### OpenCode documentation and pinned-source audit
-
-The [OpenCode rules guide](https://opencode.ai/docs/rules/) describes project
-`AGENTS.md`, global `~/.config/opencode/AGENTS.md`, Claude fallbacks and additional
-`instructions` paths/globs/URLs. Ordinary Markdown links do not automatically
-load their targets. Keep this repository's technical docs on demand.
-
-For the workflow's **1.18.25** pin, [instruction.ts](https://github.com/anomalyco/opencode/blob/v1.18.25/packages/opencode/src/session/instruction.ts)
-tries project names `AGENTS.md`, `CLAUDE.md` (unless disabled), then deprecated
-`CONTEXT.md`; it takes upward matches for the first matching name. Its
-[findUp helper](https://github.com/anomalyco/opencode/blob/v1.18.25/packages/core/src/fs-util.ts)
-collects matches from the invocation directory through the worktree root.
-Global rules prefer the OpenCode config directory over the Claude fallback.
-Additional configured instructions are combined; local read failures become
-empty content. The read/assembly code contains no instruction-byte truncation.
-This is not a claim of unlimited model input or proof that a runner loaded a file.
-`AGENTS.override.md` is a Codex convention, not an OpenCode override in this pin.
-The offline checker inventories the union of known first-party names for audit;
-it does not emulate each client's precedence or load global configuration.
-
-[OpenCode's GitHub integration](https://opencode.ai/docs/github/) runs in Actions.
-[GitHub documents fresh hosted runners](https://docs.github.com/en/actions/concepts/runners/github-hosted-runners);
-our [workflow](../.github/workflows/opencode.yml) uses `ubuntu-latest`, restores
-only the pinned binary directory and writes no instruction configuration.
-Together with the current file inventory, this supports the **inference** that
-root AGENTS is the project instruction from both audited directories.
-[OpenCode configuration](https://opencode.ai/docs/config/) can also merge remote,
-global and environment inputs; workflow text alone does not observe those inputs
-or the final model request. Keep the fresh runner audit open. Public documentation
-also cannot reveal this hosted Codex session's effective loader configuration;
-the verified local CLI evidence and documented Codex default remain separate.
-
-For each used entry point, record fresh root and representative-subdirectory
-invocations, tool version, exact tested SHA, loader diagnostics (or the specific
-missing capability), byte limit and discovered paths. Record redacted metadata
-only; never dump a client config, tokens, transcript or private paths. Do not
-change global config, `CODEX_HOME`, sandbox or approvals for an audit. Existing
-owner overrides remain in place. Unknown loading acceptance stays open under
-#397 while independent repository work proceeds.
+The OpenCode pinned-source loading audit is a dated record:
+[OpenCode instruction-loading audit](records/2026-10-01-opencode-instruction-loading-audit.md).
 
 ### Fresh-context exercises
 

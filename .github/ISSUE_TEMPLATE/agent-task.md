@@ -6,6 +6,10 @@ about: A bounded change with explicit authority, boundaries and evidence
 Use short answers; N/A needs a reason. Field guidance and examples:
 [agent workflow](https://github.com/yonatan895/qdrant-pdf-rag/blob/main/docs/agent-workflow.md#task-packet).
 
+## Outcome metric
+Quality-tracker scoreboard number or robustness item moved, its baseline and expected
+direction; otherwise the escaped defect or maintainer request that justifies the work.
+
 ## Outcome and supported domain
 User-visible goal; approved issue/ADR; acceptance owner.
 One observable change; identify the actual producer/contract of its inputs.
