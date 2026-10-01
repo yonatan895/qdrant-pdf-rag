@@ -13,11 +13,13 @@ from urllib.parse import quote
 from scripts.acceptance_evidence import (
     LIMIT,
     PRODUCERS,
+    NativeProducer,
     artifact_members,
     normalize_native,
     object_json,
     paginate,
     require,
+    unit_producers,
 )
 from scripts.unit_evidence import INPUTS as UNIT_INPUTS
 from scripts.unit_evidence import validate_union
@@ -189,6 +191,7 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
             latest[workflow] = max(matches, key=lambda r: r['id'])
     native = []
     snapshots = {}
+    producers: tuple[NativeProducer, ...] = PRODUCERS
     for workflow, run in latest.items():
         run = api.get(api.prefix + f"actions/runs/{run['id']}")
         jobs = paginate(api.get, api.prefix + f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", 'jobs')
@@ -196,8 +199,10 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
         snapshots[workflow] = {'run_id': run['id'], 'run_attempt': run['run_attempt'], 'status': run['status']}
         source = api.blob(candidate['execution_sha'], '.github/workflows/' + workflow)
         workflow_digest = policy_inputs['.github/workflows/' + workflow]
+        if workflow == 'ci.yml':
+            producers = tuple(producer for producer in producers if producer.lane != 'unit_tests') + unit_producers(source, workflow_digest)
         commit = api.get(api.prefix + 'commits/' + candidate['execution_sha'])
-        for producer in (p for p in PRODUCERS if p.workflow == workflow):
+        for producer in (definition for definition in producers if definition.workflow == workflow):
             record: dict[str, Any] = {'lane': producer.lane, 'job': producer.job, 'status': 'missing'}
             try:
                 selected_jobs = [j for j in jobs if j['name'] == producer.job]
@@ -236,8 +241,8 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
                 record['status'] = 'unverified'
             native.append(record)
     statuses = {}
-    for lane in {p.lane for p in PRODUCERS}:
-        required_jobs = [p for p in PRODUCERS if p.lane == lane]
+    for lane in {producer.lane for producer in producers}:
+        required_jobs = [producer for producer in producers if producer.lane == lane]
         results = [r for r in native if r['lane'] == lane]
         values = {r['status'] for r in results}
         if values & {'failure', 'timed_out', 'unverified'}:
@@ -248,7 +253,7 @@ def collect_native(api: GitHub, pr: dict[str, Any], approved_root: Path) -> dict
             statuses[lane] = 'success'
             if lane == 'unit_tests':
                 try:
-                    validate_union([r['unit_coverage'] for r in results])
+                    validate_union([record['unit_coverage'] for record in results], shards=len(required_jobs))
                 except (ValueError, KeyError, TypeError):
                     statuses[lane] = 'unverified'
         # An absent workflow, shard, or artifact stays missing in the existing

@@ -1623,6 +1623,69 @@ class TestCiUnitPartition(unittest.TestCase):
                                   cwd=root, env=env, capture_output=True, check=False, timeout=20)
             self.assertEqual(proc.returncode, 5)
 
+    def test_four_native_shards_preserve_exact_union_and_reject_partial_or_forged_coverage(self):
+        import copy
+
+        from scripts.unit_evidence import input_hashes, run_shard, validate, validate_union
+
+        source = ("import pytest\n"
+                  "@pytest.mark.parametrize('value', range(9), ids=[f'case {index}::λ' for index in range(9)])\n"
+                  "def test_case(value):\n    assert value >= 0\n"
+                  "@pytest.mark.integration\ndef test_excluded():\n    assert False\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            filename = "test_ \t\n four_λ.py"
+            self.coverage_tree(root, source, filename=filename)
+            records = []
+            for shard in range(1, 5):
+                out = root / f"out-{shard}"
+                out.mkdir()
+                xml = out / "result.xml"
+                code, proof = run_shard(root, sys.executable, shard, xml, out, shards=4)
+                self.assertEqual(code, 0)
+                record = validate(proof, shard, xml.read_bytes(), input_hashes(root), shards=4)
+                self.assertEqual(record['executed'],
+                                 [f"tests/{filename}::test_case[case {index}::\\u03bb]"
+                                  for index in range(shard - 1, 9, 4)])
+                records.append(record)
+                with self.assertRaises(ValueError):
+                    validate(proof, shard, xml.read_bytes(), input_hashes(root), shards=2)
+            validate_union(list(reversed(records)), shards=4)
+            for invalid in (records[:3], records[:2], records + records[:1],
+                            records[:3] + records[:1]):
+                with self.assertRaises(ValueError):
+                    validate_union(invalid, shards=4)
+            for field in ('all', 'eligible', 'executed'):
+                forged = copy.deepcopy(records)
+                forged[-1][field] = forged[-1][field][:-1]
+                with self.assertRaises(ValueError):
+                    validate_union(forged, shards=4)
+            with self.assertRaises(ValueError):
+                validate_union(records)
+
+    def test_four_ordinary_shards_partition_filtered_cases_and_keep_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'test_sample.py').write_text(
+                "import pytest\n@pytest.mark.parametrize('value', range(9))\n"
+                "def test_case(value):\n    assert value != 3\n")
+            env = {**os.environ, 'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1',
+                   'PYTHONPATH': str(pathlib.Path(__file__).resolve().parents[1])}
+            env.pop('PYTEST_ADDOPTS', None)
+            import xml.etree.ElementTree as ET
+            cases, results = [], []
+            for shard in range(1, 5):
+                xml = root / f'{shard}.xml'
+                result = subprocess.run([sys.executable, '-m', 'pytest', '-p', 'tests.ci_shard',
+                                         '--unit-shards=4', f'--unit-shard={shard}', '-k', 'not case[8]',
+                                         f'--junitxml={xml}', '-q'], cwd=root, env=env,
+                                        capture_output=True, check=False, timeout=20)
+                results.append(result.returncode)
+                cases.extend(case.attrib['name'] for case in ET.parse(xml).iter('testcase'))
+            self.assertEqual(sorted(results), [0, 0, 0, 1])
+            self.assertEqual(sorted(cases), [f'test_case[{index}]' for index in range(8)])
+            self.assertEqual(len(cases), len(set(cases)))
+
 
 class TestTaskCiConsumers(unittest.TestCase):
     """CI selection and shell guards; runner semantics live in Task contract tests."""
@@ -1925,6 +1988,71 @@ class TestNativeExecutionEvidence(unittest.TestCase):
                 self.assertFalse(json.loads((root / 'out/evidence.json').read_text())['passed'])
 
 class TestNativeEvidenceConsumer(unittest.TestCase):
+    def test_four_native_job_receipts_require_the_complete_raw_junit_union(self):
+        import base64
+        import copy
+        import hashlib
+
+        from scripts.acceptance_evidence import normalize_native, unit_producers
+        from scripts.ci_evidence import junit_bytes
+        from scripts.unit_evidence import validate_union
+
+        source = b'    name: unit (${{ matrix.shard }}/4)\n        shard: [1, 2, 3, 4]\n'
+        producers = unit_producers(source, hashlib.sha256(source).hexdigest())
+        eligible = [f'tests/test_exact \t\n λ.py::test_case[{index}:: a b]' for index in range(9)]
+        records = []
+        for shard, producer in enumerate(producers, 1):
+            args, receipt, _ = self.fixture()
+            args.update(producer=producer, workflow_source=source,
+                        workflow_digest=hashlib.sha256(source).hexdigest())
+            args['job'].update(name=producer.job, id=456 + shard)
+            args['artifact']['name'] = f'evidence-unit-{shard}-attempt-2'
+            selected = eligible[shard - 1::4]
+            xml = ('<testsuite>' + ''.join(
+                '<testcase><properties><property name="native_nodeid" value="' +
+                base64.b64encode(node.encode()).decode() + '"/></properties></testcase>'
+                for node in selected) + '</testsuite>').encode()
+            coverage = receipt['unit_coverage']
+            coverage['shard'] = shard
+            for phase in ('collect', 'execute'):
+                coverage[phase].update(all=eligible, eligible=eligible,
+                                       selected=eligible if phase == 'collect' else selected,
+                                       executed=[] if phase == 'collect' else selected)
+            receipt.update(job_name=producer.job, tests=junit_bytes(xml))
+            archive, digest = self.packed(receipt, xml)
+            args['artifact']['digest'] = digest
+            result = normalize_native(**args, archive=archive)
+            records.append(result['unit_coverage'])
+            receipt['unit_coverage']['execute']['executed'] = eligible[:1]
+            archive, args['artifact']['digest'] = self.packed(receipt, xml)
+            if selected != eligible[:1]:
+                with self.assertRaises(ValueError):
+                    normalize_native(**args, archive=archive)
+        validate_union(records, shards=4)
+        for invalid in (records[:3], records + records[:1], records[:3] + records[:1]):
+            with self.assertRaises(ValueError):
+                validate_union(copy.deepcopy(invalid), shards=4)
+
+    def test_unit_layout_comes_from_approved_workflow_not_receipts(self):
+        import hashlib
+
+        from scripts.acceptance_evidence import unit_producers
+
+        for shards in (2, 4):
+            source = (f'    name: unit (${{{{ matrix.shard }}}}/{shards})\n'
+                      '        shard: [' + ', '.join(map(str, range(1, shards + 1))) + ']\n').encode()
+            producers = unit_producers(source, hashlib.sha256(source).hexdigest())
+            self.assertEqual([producer.job for producer in producers],
+                             [f'unit ({shard}/{shards})' for shard in range(1, shards + 1)])
+            self.assertEqual([producer.artifact for producer in producers],
+                             [f'unit-{shard}' for shard in range(1, shards + 1)])
+            for invalid in (source + source, source.replace(b'shard: [1, 2', b'shard: [1, 1'),
+                            source.replace(b'/4)', b'/3)').replace(b'/2)', b'/3)'), b'unknown'):
+                with self.assertRaises(ValueError):
+                    unit_producers(invalid, hashlib.sha256(invalid).hexdigest())
+            with self.assertRaises(ValueError):
+                unit_producers(source, '0' * 64)
+
     def fixture(self):
         import hashlib
 
@@ -2086,7 +2214,9 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
             (root / "scripts/ci_evidence.py").write_bytes(b"approved producer")
             from scripts.acceptance_evidence import PRODUCERS
             for workflow in {p.workflow for p in PRODUCERS}:
-                (root / ".github/workflows" / workflow).write_bytes(b"approved workflow")
+                source = (b"    name: unit (${{ matrix.shard }}/2)\n        shard: [1, 2]\n"
+                          if workflow == 'ci.yml' else b"approved workflow")
+                (root / ".github/workflows" / workflow).write_bytes(source)
             for relative in (*VERIFICATION_INPUTS, "taskfiles/quality.yml"):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -2155,7 +2285,7 @@ class TestNativeEvidenceConsumer(unittest.TestCase):
                         return b"approved policy"
                     if path in VERIFICATION_INPUTS or path.startswith("taskfiles/"):
                         return b"candidate dispatch" if getattr(self, "changed_input", None) == path else (root / path).read_bytes()
-                    return b"approved workflow"
+                    return (root / path).read_bytes()
             api = API()
             api.live_base = "d" * 40
             with self.assertRaises(ValueError):
@@ -3308,7 +3438,8 @@ class TestVerifierUpdateDecision(unittest.TestCase):
             # must never execute them or use them to choose its obligations.
             api.sources['scripts/review_tooling.py'] = b'raise AssertionError("candidate policy executed")'
             api.sources['tests/ci_shard.py'] = b'changed collector'
-            api.sources['.github/workflows/ci.yml'] = b'changed native workflow'
+            api.sources['.github/workflows/ci.yml'] = (
+                b'    name: unit (${{ matrix.shard }}/2)\n        shard: [1, 2]\n')
             # Use actual producer output, not a separately hand-built positive record.
             api.record = record_decision(api, 3, 'approve', root, 900, 1)
             api.pack()
@@ -3573,7 +3704,9 @@ class TestEvalRetrievalProducer(unittest.TestCase):
             (root / "scripts/ci_evidence.py").write_bytes(b"approved producer")
             from scripts.acceptance_evidence import PRODUCERS
             for workflow in {p.workflow for p in PRODUCERS}:
-                (root / ".github/workflows" / workflow).write_bytes(b"approved workflow")
+                source = (b"    name: unit (${{ matrix.shard }}/2)\n        shard: [1, 2]\n"
+                          if workflow == 'ci.yml' else b"approved workflow")
+                (root / ".github/workflows" / workflow).write_bytes(source)
             for relative in (*VERIFICATION_INPUTS, "taskfiles/quality.yml"):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -3644,7 +3777,7 @@ class TestEvalRetrievalProducer(unittest.TestCase):
                         return b"approved policy"
                     if path in VERIFICATION_INPUTS or path.startswith("taskfiles/"):
                         return (root / path).read_bytes()
-                    return b"approved workflow"
+                    return (root / path).read_bytes()
             result = collect_native(API(), pr, root)
             self.assertEqual(result["lane_statuses"].get("gate_l1"), "success")
             self.assertEqual(result["lane_statuses"].get("eval_retrieval"), "success")

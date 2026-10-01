@@ -92,7 +92,8 @@ def main() -> int:
     parser.add_argument('--job-name', required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--junit', type=Path)
-    parser.add_argument('--unit-shard', type=int, choices=(1, 2))
+    parser.add_argument('--unit-shard', type=int, choices=(1, 2, 3, 4))
+    parser.add_argument('--unit-shards', type=int, choices=(2, 4), default=2)
     parser.add_argument('--identity-only', action='store_true')
     parser.add_argument('--result-json', type=Path)
     parser.add_argument('--unittest', nargs='+', dest='modules')
@@ -125,7 +126,7 @@ def main() -> int:
                 from scripts.unit_evidence import run_shard
                 with tempfile.TemporaryDirectory(prefix='native-unit-') as directory:
                     code, unit_coverage = run_shard(ROOT, sys.executable, args.unit_shard,
-                                                    args.junit.absolute(), Path(directory))
+                                                    args.junit.absolute(), Path(directory), shards=args.unit_shards)
             else:
                 code = subprocess.run(command, cwd=ROOT, check=False).returncode
             if args.junit:
@@ -140,7 +141,8 @@ def main() -> int:
                 counts.get(key) for key in ('failed', 'errors', 'skipped', 'invalid'))
         if valid and unit_coverage is not None:
             from scripts.unit_evidence import input_hashes, validate
-            validate(unit_coverage, args.unit_shard, args.junit.read_bytes(), input_hashes(ROOT))
+            validate(unit_coverage, args.unit_shard, args.junit.read_bytes(), input_hashes(ROOT),
+                     shards=args.unit_shards)
         report = {'schema_version': 1, **before, 'lane': args.lane, 'job_name': args.job_name,
                   'exit_code': code, 'passed': bool(valid), 'tests': counts,
                   'evidence_kind': 'identity' if args.identity_only else 'execution'}
