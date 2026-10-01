@@ -57,11 +57,12 @@ def test_page_label_and_start(synthetic_pdf):
     _, chunks = _chunks_for(synthetic_pdf)
     msg = next(c for c in chunks if "IEA500I" in c.text)
     assert msg.page_start == 5
-    # Multi-page span (issue #216): the IEA500I section runs from index
-    # page 5 into index page 6 (printed 1-6..1-7 — the next section starts
-    # at 1-based page 7), and the accumulated block touches both pages, so
-    # the label cites the range instead of the old single-page lookup.
-    assert msg.page_label == "1-6–1-7"
+    # Issue #577: deepest-section rule — the IEA500I page is chunked once
+    # under the deepest entry, not duplicated under its Chapter 2 ancestor.
+    # The section covers index page 5 only (printed 1-6; next section starts
+    # at 1-based page 7), so the label is single, not a range.
+    assert msg.heading_path == "Chapter 2 Operator messages > IEA500I"
+    assert msg.page_label == "1-6"
 
 
 def test_long_section_split_with_overlap():
@@ -576,6 +577,158 @@ def test_fallback_sections_split_no_toc_book():
         (2 * FALLBACK_MAX_PAGES, 25),
     ]
     assert fallback_sections(["Only one page."], "Guide")[0].heading_path == "Guide"
+
+
+def test_nested_outline_chunks_deepest_once_no_duplicates():
+    """Issue #577: nested outline entries must not re-chunk descendant pages.
+
+    L1 > L2 > L3 across pages: each page's text appears under exactly one
+    section (the deepest covering entry) with the full heading path, and no
+    two chunks share identical text outside the 400-char overlap.
+    """
+    from mainframe_rag.ingest.chunk import make_chunks, outline_sections
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+
+    parsed = ParsedDoc(
+        path=__import__("pathlib").Path("nested.pdf"),
+        sha256="3" * 64,
+        doc_id="SA22-0000-00",
+        title="Nested",
+        product="z/OS",
+        version="9.9",
+        vendor="IBM",
+        toc=[
+            [1, "Chapter 1", 1],
+            [2, "Section 1.1", 2],
+            [3, "Sub 1.1.1", 3],
+            [2, "Section 1.2", 4],
+            [1, "Chapter 2", 5],
+        ],
+        page_count=5,
+    )
+    sections = outline_sections(parsed)
+    assert [(s.heading_path, s.page_start, s.page_end) for s in sections] == [
+        ("Chapter 1", 0, 1),
+        ("Chapter 1 > Section 1.1", 1, 2),
+        ("Chapter 1 > Section 1.1 > Sub 1.1.1", 2, 3),
+        ("Chapter 1 > Section 1.2", 3, 4),
+        ("Chapter 2", 4, 5),
+    ]
+    # Every page covered exactly once (union unchanged, no overlap).
+    covered = [i for s in sections for i in range(s.page_start, s.page_end)]
+    assert sorted(covered) == [0, 1, 2, 3, 4]
+
+    pages = [f"Page {i} unique body text for nesting check." for i in range(5)]
+    chunks = make_chunks(parsed, pages, [str(i) for i in range(5)])
+    texts = [c.text for c in chunks]
+    assert len(texts) == len(set(texts))
+    assert any(c.heading_path.endswith("Sub 1.1.1") for c in chunks)
+
+
+def test_same_page_parent_child_loses_no_text():
+    """Issue #577 counterexample: parent and first child starting on the same
+    page — the parent's intro moves into the child's section, which is
+    acceptable, but no text may be dropped."""
+    from mainframe_rag.ingest.chunk import make_chunks, outline_sections
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+
+    parsed = ParsedDoc(
+        path=__import__("pathlib").Path("samepage.pdf"),
+        sha256="4" * 64,
+        doc_id="SA22-0000-00",
+        title="SamePage",
+        product="z/OS",
+        version="9.9",
+        vendor="IBM",
+        toc=[
+            [1, "Chapter 3", 3],
+            [2, "Section 1", 3],
+            [3, "Functions", 3],
+            [1, "Chapter 4", 6],
+        ],
+        page_count=6,
+    )
+    sections = outline_sections(parsed)
+    # Same-page ancestors are empty and dropped; the deepest entry carries
+    # the shared pages. Union of pre-change ranges [2,5) is unchanged.
+    assert [(s.heading_path, s.page_start, s.page_end) for s in sections] == [
+        ("Chapter 3 > Section 1 > Functions", 2, 5),
+        ("Chapter 4", 5, 6),
+    ]
+    pages = [f"Page {i} shared intro text." for i in range(6)]
+    chunks = make_chunks(parsed, pages, [str(i) for i in range(6)])
+    joined = "\n".join(c.text for c in chunks)
+    for i in (2, 3, 4):
+        assert f"Page {i} shared intro text." in joined
+    assert len({c.text for c in chunks}) == len(chunks)
+
+
+def test_skipped_child_heading_does_not_cut_parent():
+    """Issue #577 review: skipped headings produce no section and must not
+    bound a kept section — otherwise the parent is cut and pages are lost."""
+    from mainframe_rag.ingest.chunk import make_chunks, outline_sections
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+
+    def _parsed(toc, page_count):
+        return ParsedDoc(
+            path=__import__("pathlib").Path("skipped.pdf"),
+            sha256="5" * 64,
+            doc_id="SA22-0000-00",
+            title="Skipped",
+            product="z/OS",
+            version="9.9",
+            vendor="IBM",
+            toc=toc,
+            page_count=page_count,
+        )
+
+    # 1. Titles ending in "index" match SKIP_ALWAYS_RE: the two skipped
+    # children must not end Ch 6; pages 82–87 stay covered under Ch 6.
+    p1 = _parsed(
+        [
+            [1, "Ch 6 Alternate indexes", 80],
+            [2, "Defining an Alternate Index", 82],
+            [2, "Building an Alternate Index", 85],
+            [2, "Maintaining data", 88],
+            [1, "Ch 7", 95],
+        ],
+        100,
+    )
+    s1 = outline_sections(p1)
+    assert [(s.heading_path, s.page_start, s.page_end) for s in s1] == [
+        ("Ch 6 Alternate indexes", 79, 87),
+        ("Ch 6 Alternate indexes > Maintaining data", 87, 94),
+        ("Ch 7", 94, 100),
+    ]
+    # Union matches the pre-#577 base ([79,94) + [94,100)): no pages lost.
+    assert sorted({i for s in s1 for i in range(s.page_start, s.page_end)}) == list(range(79, 100))
+    pages1 = [f"Marker page {i} unique." for i in range(100)]
+    joined1 = "\n".join(c.text for c in make_chunks(p1, pages1, [str(i) for i in range(100)]))
+    for i in (81, 82, 83, 84, 85, 86):
+        assert f"Marker page {i} unique." in joined1
+
+    # 2. Empty title after cleaning is skipped: Chapter 1 runs to Real child.
+    p2 = _parsed(
+        [[1, "Chapter 1", 10], [2, "   ", 12], [2, "Real child", 15], [1, "Chapter 2", 20]],
+        25,
+    )
+    s2 = outline_sections(p2)
+    assert [(s.heading_path, s.page_start, s.page_end) for s in s2] == [
+        ("Chapter 1", 9, 14),
+        ("Chapter 1 > Real child", 14, 19),
+        ("Chapter 2", 19, 25),
+    ]
+    assert sorted({i for s in s2 for i in range(s.page_start, s.page_end)}) == list(range(9, 25))
+
+    # 3. Front-matter child (Contents@2 within limit) is skipped: Preface
+    # runs to Chapter 1, not to the skipped Contents.
+    p3 = _parsed([[1, "Preface", 1], [1, "Contents", 2], [1, "Chapter 1", 6]], 20)
+    s3 = outline_sections(p3)
+    assert [(s.heading_path, s.page_start, s.page_end) for s in s3] == [
+        ("Preface", 0, 5),
+        ("Chapter 1", 5, 20),
+    ]
+    assert sorted({i for s in s3 for i in range(s.page_start, s.page_end)}) == list(range(20))
 
 
 def test_no_toc_pdf_chunks_without_collapse():
