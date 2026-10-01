@@ -46,7 +46,7 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-      - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected
+      - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
       - name: Run lint and types with execution evidence
         run: |
           python scripts/ci_evidence.py --lane lint_and_types --job-name lint --output "$RUNNER_TEMP/evidence-lint" -- bash -e -c '
@@ -67,11 +67,11 @@ jobs:
   unit:
     needs: select
     if: contains(fromJSON(needs.select.outputs.lanes), 'unit_tests')
-    name: unit (${{ matrix.shard }}/2)
+    name: unit (${{ matrix.shard }}/4)
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     env:
       TASK_CONTRACTS_REQUIRE_RUNNER: "1"
     runs-on: ubuntu-latest
@@ -89,7 +89,7 @@ jobs:
             echo "PDFs/Adobe catalogs must not be in git" >&2
             exit 1
           fi
-      - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected
+      - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
       - name: Install pinned Task runner for required contract tests
         run: sh scripts/tools/install-task.sh
       - name: Install checksum-pinned Helm for deployment render tests
@@ -100,9 +100,9 @@ jobs:
         run: python scripts/agent_doctor.py --python "$(command -v python)"
       - name: Run unit shard
         run: >-
-          python scripts/ci_evidence.py --lane unit_tests --job-name 'unit (${{ matrix.shard }}/2)'
+          python scripts/ci_evidence.py --lane unit_tests --job-name 'unit (${{ matrix.shard }}/4)'
           --output "$RUNNER_TEMP/evidence-unit-${{ matrix.shard }}" --junit "$RUNNER_TEMP/unit-${{ matrix.shard }}.xml"
-          --unit-shard=${{ matrix.shard }}
+          --unit-shard=${{ matrix.shard }} --unit-shards=4
       - name: Retain native execution evidence
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
@@ -120,7 +120,7 @@ jobs:
     timeout-minutes: 2
     permissions: {}
     steps:
-      - name: Require both unit shards
+      - name: Require all four unit shards
         env:
           SELECT_RESULT: ${{ needs.select.result }}
           UNIT_REQUIRED: ${{ contains(fromJSON(needs.select.outputs.lanes || '[]'), 'unit_tests') }}
@@ -143,14 +143,14 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.14"
-      - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected
+      - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
       - run: sh scripts/tools/install-task.sh
       - run: sh scripts/tools/install-helm.sh
       - name: Execute critical historical mutations
         run: >-
           python scripts/ci_evidence.py --lane hazards --job-name hazards
           --output "$RUNNER_TEMP/evidence-hazards" --result-json "$RUNNER_TEMP/critical-hazards/report.json" --
-          sh scripts/tools/run-task.sh qa:hazards PY="$(command -v python)" OUT="$RUNNER_TEMP/critical-hazards"
+          sh scripts/tools/run-task.sh qa:hazards PY="$(command -v python)" OUT="$RUNNER_TEMP/critical-hazards" WORKERS=4
       - name: Retain native execution evidence
         if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
@@ -191,7 +191,7 @@ jobs:
           python-version: "3.14"
       - name: docker must be present (the tier skips without it — skip is failure here)
         run: docker version
-      - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected
+      - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
       - name: Prepare approved Qdrant image explicitly
         run: python scripts/qdrant_pin.py --prepare
       - run: sh scripts/tools/install-task.sh
@@ -245,7 +245,7 @@ jobs:
           python-version: "3.14"
       - name: docker must be present for qdrant_sim
         run: docker version
-      - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected
+      - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
       - name: Prepare approved Qdrant image explicitly
         run: python scripts/qdrant_pin.py --prepare
       - name: run L1 retrieval gate
@@ -308,7 +308,7 @@ jobs:
           python-version: "3.14"
       - name: docker must be present for qdrant_sim
         run: docker version
-      - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected
+      - run: python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
       - name: Prepare approved Qdrant image explicitly
         run: python scripts/qdrant_pin.py --prepare
       - name: run L1 retrieval eval with native evidence

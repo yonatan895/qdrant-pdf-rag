@@ -1729,14 +1729,15 @@ class TestTaskCiConsumers(unittest.TestCase):
         self.assertEqual(shlex.split(execution["run"])[-3:],
                          ["tests.test_agent_context", "tests.test_agent_doctor", "tests.test_taskfile_contracts"])
 
-    def test_two_unit_vms_preserve_a_fail_closed_test_status(self):
+    def test_four_unit_vms_preserve_a_fail_closed_test_status(self):
         import yaml
 
         jobs = yaml.safe_load((self.root / ".github/workflows/ci.yml").read_text())["jobs"]
-        self.assertEqual(jobs["unit"]["strategy"]["matrix"], {"shard": [1, 2]})
+        self.assertEqual(jobs["unit"]["strategy"]["matrix"], {"shard": [1, 2, 3, 4]})
         self.assertIs(jobs["unit"]["strategy"]["fail-fast"], False)
         command = next(s["run"] for s in jobs["unit"]["steps"] if s.get("name") == "Run unit shard")
         self.assertIn("--unit-shard=${{ matrix.shard }}", command)
+        self.assertIn("--unit-shards=4", command)
         self.assertIn("scripts/ci_evidence.py --lane unit_tests", command)
         self.assertNotIn("-- python -m pytest", command)
         gate = jobs["test"]

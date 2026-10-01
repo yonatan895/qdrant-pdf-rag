@@ -29,18 +29,18 @@ disabled on short docs on purpose.
 
 ## Unit tests are hermetic
 
-GitHub CI runs the unit suite on two separate runner VMs. The opt-in
+GitHub CI runs the unit suite on four separate runner VMs. The opt-in
 `tests.ci_shard` pytest plugin sorts the selected node IDs after ordinary
-`-m`/`-k` filtering and assigns alternating cases to shards 1 and 2. Their
+`-m`/`-k` filtering and assigns round-robin cases to shards 1 through 4. Their
 disjoint union is the original selected suite, including parametrized cases;
-new tests join automatically. Both shards must pass the aggregate `test`
+new tests join automatically. All four shards must pass the aggregate `test`
 status, and one failure does not cancel the other shard. Each runner prints
 its slowest 20 durations for checking balance. Equal test counts do not
-guarantee equal duration; measure the two jobs before claiming a speedup.
+guarantee equal duration; measure all four jobs before claiming a speedup.
 
-Reproduce either shard with
-`sh scripts/tools/run-task.sh qa:unit -- -p tests.ci_shard --unit-shard=1`
-(or `2`). Invalid shard numbers and empty selections fail through pytest.
+Reproduce a GitHub shard with
+`sh scripts/tools/run-task.sh qa:unit -- -p tests.ci_shard --unit-shards=4 --unit-shard=1`
+(or `2`, `3`, `4`). Invalid shard numbers and empty selections fail through pytest.
 Without the option, local and air-gapped GitLab runs retain the full suite.
 No extra pytest dependency or runtime model/service is needed.
 Request-counter assertions compare the scrape before and after each request:
@@ -526,7 +526,7 @@ to merge.
 <a id="unit-coverage"></a>
 ### Required unit collection and shard union (#482 R488-1)
 
-Native unit receipts use `ci_evidence.py --unit-shard=1` or `=2`, not an arbitrary
+Native unit receipts use `ci_evidence.py --unit-shards=4 --unit-shard=1` (through `4`), not an arbitrary
 pytest command. `unit_evidence.run_shard` starts an independent collect-only
 pytest process over `tests`, then a fresh execution process. Both explicitly
 load pinned pytest/AnyIO plus `tests.ci_shard`; ambient `PYTEST_ADDOPTS` and
@@ -543,17 +543,27 @@ complete two- or four-job matrices are supported; missing, duplicated, mixed
 or partial shards cannot qualify. Local opt-in sharding defaults to two;
 ordinary unsharded local/GitLab execution is unchanged.
 
+The critical-hazard runner keeps a baseline and its mutation sequential, but
+GitHub selects four independent processes for separate pairs (`qa:hazards
+WORKERS=4`). Each process owns pristine source copies, private temporary/cache
+paths and its Linux subreaper/process group; workers are not threads and are
+not reused across pairs. The ordinary default stays serial. The complete
+catalogue, intended behavioral-kill requirement and native receipt schema stay
+unchanged; failed baselines, surviving mutations, drift or leaked descendants
+still fail the lane. Results retain catalogue order regardless of completion
+order. Active workers finish before the parent releases scratch state.
+
 The trusted collection wrapper observes all parametrized node IDs before
 filtering, refuses hook-driven removal/duplication/marker changes, and derives
 the eligible set by excluding only `integration` markers. Execution takes the
-sorted eligible IDs at indexes `shard - 1::2`. The final collection and actual
+sorted eligible IDs at indexes `shard - 1::shards`. The final collection and actual
 call reports must agree with that selection. Passing subtests belong to their
 parent case; failure/skip/error checks still inspect the actual JUnit records.
 Each JUnit case carries one base64-encoded UTF-8 node ID property, preserving
 literal whitespace and delimiters without ambiguous name reconstruction.
 
 The data-only consumer compares each execution against its independently
-collected eligible set and raw JUnit, then checks that both shards report the
+collected eligible set and raw JUnit, then checks that all required shards report the
 same collection and have a disjoint, complete union. It does not hardcode a
 historical test count. Added tests join the collection automatically. It also
 reads actual candidate bytes for the selector, pytest configuration, root

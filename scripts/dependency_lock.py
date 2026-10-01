@@ -20,6 +20,7 @@ import sysconfig
 import tempfile
 import tomllib
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -187,14 +188,24 @@ def verify_wheelhouse(root: Path, profile: str, directory: Path) -> dict:
             "wheels": dict(sorted(expected.items()))}
 
 
-def acquire(root: Path, profile: str, directory: Path) -> dict:
+def download_workers(value: int) -> int:
+    if type(value) is not int or not 1 <= value <= 16:
+        raise LockError("download workers must be between 1 and 16")
+    return value
+
+
+def acquire(root: Path, profile: str, directory: Path, *, workers: int = 1) -> dict:
     """Explicit connected acquisition of approved wheels; never called by verification."""
     check_target()
+    download_workers(workers)
     _, packages = load(root, profile)
     expected = {entry["wheel"] for entry in packages.values()}
+    if len(expected) != len(packages):
+        raise LockError("duplicate wheel acquisition destinations")
     if {path.name for path in directory.glob("*.whl")} - expected:
         raise LockError("refusing to modify a wheelhouse containing unselected wheels")
     directory.mkdir(parents=True, exist_ok=True)
+    pending = []
     for entry in packages.values():
         destination = directory / entry["wheel"]
         if destination.is_symlink():
@@ -205,6 +216,10 @@ def acquire(root: Path, profile: str, directory: Path) -> dict:
         if (origin.scheme != "https" or origin.hostname != "files.pythonhosted.org"
                 or origin.username or origin.password or origin.query or origin.fragment):
             raise LockError("unapproved connected acquisition origin")
+        pending.append(entry)
+
+    def fetch(entry: dict) -> None:
+        destination = directory / entry["wheel"]
         fd, name = tempfile.mkstemp(prefix=".wheel-", dir=directory)
         temporary = Path(name)
         try:
@@ -213,8 +228,23 @@ def acquire(root: Path, profile: str, directory: Path) -> dict:
             if digest(temporary) != entry["sha256"]:
                 raise LockError("downloaded wheel checksum mismatch")
             temporary.replace(destination)
+            if workers > 1:
+                print("Verified wheel: " + entry["wheel"], file=sys.stderr, flush=True)
         finally:
             temporary.unlink(missing_ok=True)
+    if workers == 1:
+        for entry in pending:
+            fetch(entry)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(fetch, entry) for entry in pending]
+            try:
+                for future in as_completed(futures):
+                    future.result()
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
     return verify_wheelhouse(root, profile, directory)
 
 
@@ -233,7 +263,7 @@ def _preparation_destination(directory: Path, expected: set[str]) -> None:
                 raise LockError("refusing a wheelhouse containing unowned or symlink members")
 
 
-def prepare(root: Path, profile: str, directory: Path) -> dict:
+def prepare(root: Path, profile: str, directory: Path, *, workers: int = 1) -> dict:
     """Explicit preparation; stage acquisition before publishing selected members.
 
     Operators must keep readers off this destination during preparation. Member
@@ -241,6 +271,7 @@ def prepare(root: Path, profile: str, directory: Path) -> dict:
     Verification always checks actual wheel bytes independently of this marker.
     """
     target = check_target()
+    download_workers(workers)
     _, packages = load(root, profile)
     expected = {entry["wheel"] for entry in packages.values()}
     directory = Path(os.path.abspath(directory))
@@ -271,7 +302,8 @@ def prepare(root: Path, profile: str, directory: Path) -> dict:
                 source = directory / entry["wheel"]
                 if source.is_file() and digest(source) == entry["sha256"]:
                     shutil.copyfile(source, stage / entry["wheel"])
-            receipt = acquire(root, profile, stage)
+            receipt = (acquire(root, profile, stage) if workers == 1 else
+                       acquire(root, profile, stage, workers=workers))
             # The independent verifier checks the complete staged inventory.
             verify_wheelhouse(root, profile, stage)
             _preparation_destination(directory, expected)
@@ -348,6 +380,8 @@ def main(argv: list[str] | None = None) -> int:
         child.add_argument("--profile", choices=PROFILE_FILES, required=True)
         if command in ("wheelhouse", "acquire", "prepare"):
             child.add_argument("--directory", type=Path, required=True)
+        if command in ("acquire", "prepare"):
+            child.add_argument("--download-workers", type=int, default=1)
         if command == "installed":
             child.add_argument("--project", action="store_true")
             child.add_argument("--image", action="store_true")
@@ -365,9 +399,9 @@ def main(argv: list[str] | None = None) -> int:
             result = {"profile": args.profile, "packages": len(packages),
                       "lock_sha256": digest(args.root / MANIFEST)}
         elif args.command == "acquire":
-            result = acquire(args.root, args.profile, args.directory)
+            result = acquire(args.root, args.profile, args.directory, workers=args.download_workers)
         elif args.command == "prepare":
-            result = prepare(args.root, args.profile, args.directory)
+            result = prepare(args.root, args.profile, args.directory, workers=args.download_workers)
         elif args.command == "wheelhouse":
             result = verify_wheelhouse(args.root, args.profile, args.directory)
         else:

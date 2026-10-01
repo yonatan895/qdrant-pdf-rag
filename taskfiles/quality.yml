@@ -64,15 +64,19 @@ tasks:
       only the intended behavioral assertion counts as a detection.
       OUT must name a new evidence directory. PY defaults to .venv/bin/python;
       CI may select its explicitly prepared interpreter. No service or install.
+      WORKERS defaults to 1; GitHub explicitly selects 4 isolated worker
+      processes. Each pair keeps baseline before mutation and owns its cleanup.
     requires:
       vars: [OUT]
     vars:
       PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}.venv/bin/python{{end}}'
+      WORKERS: '{{if hasKey . "WORKERS"}}{{.WORKERS}}{{else}}1{{end}}'
     env:
       TASK_HAZARD_PY: '{{.PY}}'
       TASK_HAZARD_OUT: '{{.OUT}}'
+      TASK_HAZARD_WORKERS: '{{.WORKERS}}'
     cmds:
-      - '"$TASK_HAZARD_PY" scripts/check_hazard_sensitivity.py --python "$TASK_HAZARD_PY" --out "$TASK_HAZARD_OUT"'
+      - '"$TASK_HAZARD_PY" scripts/check_hazard_sensitivity.py --python "$TASK_HAZARD_PY" --out "$TASK_HAZARD_OUT" --workers "$TASK_HAZARD_WORKERS"'
 
   check:
     desc: Run lint, then typecheck, then unit tests, in that order

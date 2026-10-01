@@ -150,7 +150,7 @@ jobs:
           cache: pip
       - name: Preinstall dev tools for the reviewer
         run: |
-          python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected
+          python scripts/prepare_python.py --python "$(command -v python)" --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
           sh scripts/tools/install-task.sh
           echo "TASK_CONTRACTS_REQUIRE_RUNNER=1" >> "$GITHUB_ENV"
 

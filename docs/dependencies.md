@@ -62,6 +62,19 @@ contain mirror credentials. Neither mode has a public-index fallback. Internal
 mirror egress policy and trust/CA configuration remain platform responsibilities.
 Private mirror addresses and credentials never belong in git.
 
+Connected GitHub preparation explicitly selects `--download-workers 8`.
+`dependency_lock.py acquire/prepare` and `prepare_python.py --connected` support
+1–16 workers; the ordinary default remains one, and offline/internal-index dev
+preparation cannot opt into this public-origin acquisition path. Each worker
+owns a distinct temporary wheel and verifies its approved hash before atomic
+member replacement. Duplicate destinations, unapproved origins and symlinks are
+refused before downloads start. The complete inventory is verified before any
+installation or preparation completion record. On failure, queued downloads
+are cancelled and active workers finish before staging cleanup; staged
+preparation preserves the previous cache. Parallel acquisition prints verified
+wheel filenames to stderr, never URLs or credentials. Cache reuse still hashes
+the actual bytes and does not authorize concurrent readers during publication.
+
 Status stamps alone do not qualify caches. Local setup rechecks installed
 inventory/source identity; wheelhouse status rechecks every member against the
 approved manifest. Separate preparation processes must own separate directories.

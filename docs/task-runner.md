@@ -190,6 +190,16 @@ Other operator inputs remain owned by `common.sh`, `deploy.sh` and `ingest.sh`.
 <a id="freshness"></a>
 ## Artifact freshness
 
+`artifacts:image` builds one explicit `ROLE=ingest` or `ROLE=agent` from an
+already prepared `BUNDLE_DIR`. `IMAGE_NAME` and `IMAGE_TAG` are required, and
+`PY` selects the CPython 3.14 GIL interpreter (default `python3`). It verifies
+the target, every runtime wheel and the pinned BM25 snapshot before Docker;
+missing/corrupt inputs fail without repair or download. It needs no development
+venv. GitHub uses separate runner/daemon workspaces for the two roles, and
+transfers verified build-input artifacts bound to the same SHA and run attempt.
+`artifacts:images` retains its existing sequential preparation and local builds;
+neither task authorizes building in the air gap.
+
 `artifacts:wheelhouse` delegates to `dependency_lock.py prepare`. That owner
 checks the target, interpreter, platform, lock, requirements and preparation
 recipe identity, then verifies every approved wheel on every invocation.

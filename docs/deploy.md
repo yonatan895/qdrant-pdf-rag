@@ -549,10 +549,13 @@ live in `.github/workflows/e2e.yml`.
   contract. Neither the runner nor path classification authorizes new network
   access or cluster operations.
 - `ci.yml`: hygiene (refuse committed PDFs), pytest (integration
-  deselected, split across two runner VMs with an aggregate `test` status
-  requiring both shards), sim (docker Qdrant, fail-closed on skips/zero-pass), gate-l1
+  deselected, split across four runner VMs with an aggregate `test` status
+  requiring every shard), sim (docker Qdrant, fail-closed on skips/zero-pass), gate-l1
   with PR delta comment. Least-privilege permissions, timeouts, and
   concurrency groups on every job; third-party actions SHA-pinned.
+  Hazard pairs run in four isolated processes; baseline, mutation and cleanup
+  remain ordered within each pair. Connected Python acquisition explicitly
+  uses eight bounded download workers across GitHub workflows.
 - `load.yml`: path-allowlisted to agent/retrieve/ingest/mock/sim/loadtest
   surface and shared dependency/Task inputs — other paths run nothing. `ha.yml` is path-allowlisted to the
   collection-policy/placement surface and runs the three-peer fixture
@@ -560,14 +563,26 @@ live in `.github/workflows/e2e.yml`.
   do not pay for three containers.
 - `bench.yml`: push-to-main + nightly + dispatch (baseline update with
   repeats); never a PR gate.
+  Measurement passes and search/answer load phases stay sequential on their
+  dedicated runner: overlapping them would change contention and invalidate
+  the approved performance baseline. Signing/packaging likewise waits for
+  both complete images; fault and lifecycle transitions remain ordered inside
+  each isolated rehearsal case. No GPU work is added.
 - `e2e.yml build`: local images retagged to full-SHA GHCR refs; push only
   on `main`/dispatch (PRs build, never push — fork-safe).
+  Runtime wheels and BM25 weights prepare in two independent `build-inputs`
+  runners; runtime acquisition needs no full dev install. Verified bytes move
+  through SHA/run-attempt-bound artifacts into two independent `images` runners
+  (`ingest`, `agent`). `artifacts:image` re-verifies actual transferred wheels
+  and BM25 before each unchanged Containerfile build. The canonical `build`
+  job is an all-success join: failed, cancelled or skipped preparation/image
+  jobs cannot emit successful packaging identity or image-ref outputs.
   `airgap-package` (main/dispatch): pack + 90-day bundle artifact (PRs
   skip). `airgap-acceptance` (main/dispatch): black-box handoff in a fresh
   dir — digest verify, unpack, bootstrap, manifest/SHA assertions, dry-run
   pipeline with explicit shared-gateway reasoning and legacy embedding-only
   (reasoning explicitly disabled) configurations, both pull-secret branches.
-  `kind-live-rehearsal` (main/dispatch) is a four-lane matrix described below.
+  `kind-live-rehearsal` (main/dispatch) is an eleven-lane matrix described below.
   The lab OpenShift rehearsal remains secret-gated, and PRs never touch the lab cluster.
   `airgap-rehearsal` downloads and bootstraps the published bundle; it does not
   independently repack. It retains both outline-message and generic widget
@@ -602,8 +617,11 @@ include actual runner CPU, RAM and disk capacity; cleanup runs even after failur
 |---|---|
 | `airgap-acceptance` | Fresh bundle integrity/bootstrap, manifest SHA, explicit shared-reasoning and legacy embedding-only configurations, and both pull-secret render branches |
 | `kind-pipeline` | Authenticated registry, real product containers, real LiteLLM/PostgreSQL, synthetic ingest, search and application streams |
-| `kind-gateway-faults` | TLS/auth, both model legs, malformed/upstream/dimension/timeout/truncated-stream failures through LiteLLM, followed by healthy recovery |
-| `kind-lifecycle` | Three-worker Kind; synthetic snapshot recovery, PVC identity, Qdrant/agent/Jaeger replacement, old trace persistence and repeat pipeline |
+| `kind-gateway-chat-{upstream,malformed,truncated}` | Three isolated clusters, one reasoning fault each through real LiteLLM, application failure contracts and healthy recovery |
+| `kind-gateway-embed-{upstream,malformed,dimension}` | Three isolated clusters, one embedding fault each through real LiteLLM and healthy recovery |
+| `kind-gateway-auth` | Wrong/missing credentials, untrusted CA, hostname mismatch and reasoning deadline, followed by healthy gateway/application recovery |
+| `kind-lifecycle-chart` | Three-worker Kind; first-party chart fresh/repeat/update/failure/rollback/redeploy sequence with PVC guards, then the next ordinary pipeline |
+| `kind-lifecycle` | Independent three-worker Kind; synthetic snapshot recovery, PVC identity, Qdrant/agent/Jaeger replacement, old trace persistence and repeat pipeline |
 | `kind-shared-gateway` | Same live pipeline/probe/contracts/smoke but through the shared `GATEWAY_BASE_URL` fallback and the single `api-key` Secret data-key (issue #551); explicit per-operation URLs stay unset so fallback is exercised |
 | Manual Windows CRC | Actual SCC, Service CA, OAuth, Routes, node trust/pulls and runtime egress; record the fit outcome and fallback mode separately |
 
@@ -615,7 +633,7 @@ behavior, not answer quality. The mock, CI deployment helpers and gateway module
 are excluded from application images and production manifests.
 
 The rehearsal now configures **both** embedding and reasoning URLs through the
-real test gateway. The `pipeline`, `gateway-faults` and `lifecycle` lanes keep
+real test gateway. The `pipeline`, gateway fault and lifecycle lanes keep
 explicit per-operation URLs and per-leg Secret keys; the `shared-gateway` lane
 instead sets only `GATEWAY_BASE_URL` and `GATEWAY_API_KEY_SECRET_KEY=api-key`
 (one virtual key for both mock models) so `common.sh` fallback and the shared

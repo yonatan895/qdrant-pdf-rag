@@ -429,7 +429,7 @@ def test_published_bundle_entry_uses_resolved_operator_values(tmp_path):
     workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
     steps = workflow['jobs']['kind-live-rehearsal']['steps']
     step = next(step for step in steps if 'sh scripts/ci/rehearse_chart.sh' in step.get('run', ''))
-    assert step['if'] == "matrix.lane == 'lifecycle'"
+    assert step['if'] == "matrix.lane == 'lifecycle-chart'"
     assert 'cd gapbox/qdrant-pdf-rag' in step['run']
 
 
