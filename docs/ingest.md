@@ -26,7 +26,8 @@ sample.
 - Only `suffix.lower() == ".pdf"` is kept; `.pdx`/`.idx` catalogs are ignored
   by omission.
 - Any path component starting with `.`, plus `__MACOSX` and `lost+found` at
-  any depth, is skipped.
+  any depth **below `root`**, is skipped (issue #594). Dot-directories above
+  the corpus root never exclude the corpus itself.
 - `VENDOR_MARKERS` is a substring table checked **first-match in dict order**:
   `broadcom`, `ca-`, `/ca/` → Broadcom; `bmc` → BMC; `precisely`; `ibm`;
   `red-hat`, `redhat`. Order matters: a path containing both `ca-` and `ibm`
@@ -39,7 +40,7 @@ sample.
   the empty-string (not `None`) version.
 
 Contract tests: `tests/test_generic_pdf.py` (`detect_vendor`,
-`infer_from_path`).
+`infer_from_path`), `tests/test_parser_ibm_shape.py` (walker filtering).
 
 ## 2. Parsing and metadata (`ibm_pdf.py`)
 

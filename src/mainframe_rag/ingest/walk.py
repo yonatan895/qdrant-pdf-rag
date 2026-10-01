@@ -45,7 +45,14 @@ def walk_pdfs(root: Path) -> list[Path]:
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
-        if any(part.startswith(".") or part in _IGNORED_DIRS for part in path.parts):
+        # Issue #594: filter only parts below root. Checking absolute
+        # path.parts skips every file when the corpus root itself sits
+        # under a dot-directory (e.g. ~/.config/...).
+        try:
+            rel_parts = path.relative_to(root).parts
+        except ValueError:
+            continue
+        if any(part.startswith(".") or part in _IGNORED_DIRS for part in rel_parts):
             continue
         if path.suffix.lower() != ".pdf":
             continue
