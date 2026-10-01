@@ -242,20 +242,26 @@ VERIFICATION_STATES: frozenset[str] = frozenset(
 )
 
 
+_ANSWER_BODY_LABEL_RE = re.compile(
+    r"^\s*#{0,6}\s*[*_`]*(?:Answer|Citations?|Sources?|References?)[*_`]*"
+    r"(?:\s*:[*_`]*\s*|\s*$)",
+    re.IGNORECASE,
+)
+
+
 def has_answer_body(answer: str, citations: list[str]) -> bool:
     """Recognize parsed prose beyond citation scaffolding, without a length floor."""
     from mainframe_rag.agent.cites import (
         CITATION_LINE_RE,
-        CITATIONS_HEADER_RE,
         normalize_citation_line,
     )
 
     citation_lines = set(citations)
     for line in answer.splitlines():
         candidate = normalize_citation_line(line)
+        candidate = normalize_citation_line(_ANSWER_BODY_LABEL_RE.sub("", candidate, count=1))
         if (
             candidate in citation_lines
-            or CITATIONS_HEADER_RE.match(candidate)
             or CITATION_LINE_RE.match(candidate)
         ):
             continue

@@ -93,7 +93,20 @@ def model_server():
             if CITATION_ONLY_QUERY in json.dumps(request):
                 _body, separator, cites = _chat_content(request["messages"]).partition("Citations:\n")
                 assert separator and cites.strip()
-                content = "\n**Citations:**\n" + cites
+                prefix = ""
+                for variant, label in {
+                    "answer-label": "**Answer:**",
+                    "answer-heading": "## Answer",
+                    "sources-index": "Sources: [1]",
+                    "references-index": "References: [1]",
+                    "inline-cite": "Citations: <" + cites.strip().removeprefix("- ") + ">",
+                    "alias-bullets": "Set LFAREA.\n\nReferences:\n"
+                    "- Restart the system with CLPA\n- Check IEASYSxx",
+                }.items():
+                    if f"{CITATION_ONLY_QUERY} {variant}" in json.dumps(request):
+                        prefix = label
+                        break
+                content = prefix + "\n\n**Citations:**\n" + cites
                 if not request.get("stream"):
                     self._send(200, {"choices": [{"message": {"content": content},
                                                   "finish_reason": "stop"}]})
@@ -209,15 +222,28 @@ def test_live_agent_stream_final_matches_buffered(live_agent):
 
 @pytest.mark.parametrize("path", ["/v1/answer", "/v1/chat", "/v1/chat/completions"])
 @pytest.mark.parametrize("stream", [False, True])
-def test_live_citation_only_generation_is_not_accepted(live_agent, model_server, path, stream):
+@pytest.mark.parametrize("variant,answer,state", [
+    ("bare", "", "generation_incomplete"),
+    ("answer-label", "**Answer:**", "generation_incomplete"),
+    ("answer-heading", "## Answer", "generation_incomplete"),
+    ("sources-index", "Sources: [1]", "generation_incomplete"),
+    ("references-index", "References: [1]", "generation_incomplete"),
+    ("inline-cite", "Citations: <{cite}>", "generation_incomplete"),
+    ("alias-bullets", ("Set LFAREA.\n\nReferences:\n"
+                      "- Restart the system with CLPA\n- Check IEASYSxx"), "accepted"),
+])
+def test_live_citation_only_generation_is_not_accepted(
+    live_agent, model_server, path, stream, variant, answer, state,
+):
     before = len(model_server[3])
+    query = f"{CITATION_ONLY_QUERY} {variant}"
     with httpx2.Client(base_url=live_agent[0], timeout=30) as client:
         if path == "/v1/answer":
             response = client.post(path + ("?stream=true" if stream else ""),
-                                   json={"query": CITATION_ONLY_QUERY})
+                                   json={"query": query})
         else:
             response = client.post(path, json={
-                "messages": [{"role": "user", "content": CITATION_ONLY_QUERY}], "stream": stream,
+                "messages": [{"role": "user", "content": query}], "stream": stream,
             })
     assert response.status_code == 200
     if not stream:
@@ -235,8 +261,8 @@ def test_live_citation_only_generation_is_not_accepted(live_agent, model_server,
         data = terminals[0]
         assert data["finish_reason"] == "stop"
     if path == "/v1/answer":
-        assert data["answer"] == ""
-    assert data["verification_state"] == "generation_incomplete"
+        assert data["answer"] == answer.format(cite=data["citations"][0])
+    assert data["verification_state"] == state
     assert len(data["citations"]) == 1
     assert data["citations_inferred"] is False
     assert data["script"] is None

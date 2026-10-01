@@ -481,6 +481,9 @@ def _answer_payload(**overrides) -> dict:
 
 @pytest.mark.parametrize("answer", [
     "", "   ", "Sources:", "**References:**", "[1].", "___", "SA23-1380-70 ref, p. 1",
+    "**Answer:**", "## Answer", "Sources: [1]", "References: [1]",
+    "Citations: <SA23-1380-70 ref, p. 1>",
+    "### **Sources:** [1, 2]", "Answer: [1].",
 ])
 def test_run_query_forged_accepted_without_answer_body_fails(answer):
     row = run_query(

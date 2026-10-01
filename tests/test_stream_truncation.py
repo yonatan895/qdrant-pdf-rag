@@ -531,20 +531,32 @@ def _answer_sse_events(text: str) -> list[tuple[str, dict]]:
     ],
 )
 @pytest.mark.parametrize(
-    "content,state,script",
+    "content,answer,state,script",
     [
-        ("\n**Citations:**\n- {cite}", "generation_incomplete", None),
-        ("Sources:\n- {cite}", "generation_incomplete", None),
+        ("\n**Citations:**\n- {cite}", "", "generation_incomplete", None),
+        ("Sources:\n- {cite}", "", "generation_incomplete", None),
         ("```thinking\nWork out the answer.\n```\nReferences:\n{cite}",
-         "generation_incomplete", None),
+         "", "generation_incomplete", None),
         ("```jcl\n//JOB EXEC PGM=EXAMPLE\n```\nCitations:\n{cite}",
-         "unverified_draft", "//JOB EXEC PGM=EXAMPLE"),
-        ("Retry.\nCitations:\n{cite}", "accepted", None),
+         "", "unverified_draft", "//JOB EXEC PGM=EXAMPLE"),
+        ("Retry.\nCitations:\n{cite}", "Retry.", "accepted", None),
+        ("**Answer:**\n\nCitations:\n- {cite}", "**Answer:**", "generation_incomplete", None),
+        ("## Answer\n\nCitations:\n- {cite}", "## Answer", "generation_incomplete", None),
+        ("Sources: [1]\n\nCitations:\n- {cite}", "Sources: [1]", "generation_incomplete", None),
+        ("References: [1]\n\nCitations:\n- {cite}", "References: [1]",
+         "generation_incomplete", None),
+        ("Citations: <{cite}>\n\nCitations:\n- {cite}", "Citations: <{cite}>",
+         "generation_incomplete", None),
+        (("Set LFAREA.\n\nReferences:\n- Restart the system with CLPA\n- Check IEASYSxx\n"
+          "\nCitations:\n- {cite}"),
+         "Set LFAREA.\n\nReferences:\n- Restart the system with CLPA\n- Check IEASYSxx",
+         "accepted", None),
+        ("**Answer:** Retry.\nCitations:\n{cite}", "**Answer:** Retry.", "accepted", None),
     ],
 )
 def test_answer_body_state_real_client_all_surfaces(
     monkeypatch, synthetic_pdf, servable_representation_gate, path, stream, llm_stream,
-    content, state, script,
+    content, answer, state, script,
 ):
     search = _search_stub()
     cite = search.search()[0][0].cite
@@ -571,7 +583,7 @@ def test_answer_body_state_real_client_all_surfaces(
                 data = events[-1][1]
             else:
                 data = response.json()
-            assert data["answer"] == ("Retry." if state == "accepted" else "")
+            assert data["answer"] == answer.format(cite=cite)
         else:
             response = client.post(path, json={
                 "messages": [{"role": "user", "content": "IEA500I"}], "stream": stream,

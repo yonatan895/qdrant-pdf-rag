@@ -395,7 +395,9 @@ round-robin sampling (sorted classes and ids, no RNG, small classes
 revisited first; default 24 queries, `--all` for full runs), then judge:
 
 - Answer behavior fails on empty or citation-scaffolding-only bodies (the shared
-  body-presence predicate, #576, even when the server labels the row `accepted`),
+  body-presence predicate, #576, including empty `Answer` headings and citation
+  labels followed only by indices or a citation, even when the server labels the
+  row `accepted`; substantive text after labels still counts as prose),
   true abstentions (the shared
   marker + shape-floor predicate that also zeroes citations, #135/#305: a
   grounded partial answer whose scope caveat carries a refusal phrase is
