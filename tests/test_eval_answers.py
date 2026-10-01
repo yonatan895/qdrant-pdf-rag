@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import logging
 
+import pytest
+
 from mainframe_rag.agent.answer import is_abstention, is_refusal
 from mainframe_rag.eval.answers import (
     ZERO_HITS_ANSWER,
@@ -475,6 +477,22 @@ def _answer_payload(**overrides) -> dict:
     }
     base.update(overrides)
     return base
+
+
+@pytest.mark.parametrize("answer", [
+    "", "   ", "Sources:", "**References:**", "[1].", "___", "SA23-1380-70 ref, p. 1",
+    "**Answer:**", "## Answer", "Sources: [1]", "References: [1]",
+    "Citations: <SA23-1380-70 ref, p. 1>",
+    "### **Sources:** [1, 2]", "Answer: [1].",
+])
+def test_run_query_forged_accepted_without_answer_body_fails(answer):
+    row = run_query(
+        _StubClient(_answer_payload(answer=answer, verification_state="accepted")),
+        _entry(expected_verification_state="accepted"),
+    )
+    assert row["verification_state"] == "accepted"
+    assert row["verdict"] == "fail"
+    assert row["failures"] == ["empty answer body"]
 
 
 def test_run_query_joins_answer_signals() -> None:

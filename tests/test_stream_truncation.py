@@ -516,6 +516,101 @@ def _answer_sse_events(text: str) -> list[tuple[str, dict]]:
     return events
 
 
+@pytest.mark.parametrize(
+    "path,stream,llm_stream",
+    [
+        ("/v1/answer", False, False),
+        ("/v1/answer", False, True),
+        ("/v1/answer", True, True),
+        ("/v1/chat", False, False),
+        ("/v1/chat", False, True),
+        ("/v1/chat", True, True),
+        ("/v1/chat/completions", False, False),
+        ("/v1/chat/completions", False, True),
+        ("/v1/chat/completions", True, True),
+    ],
+)
+@pytest.mark.parametrize(
+    "content,answer,state,script",
+    [
+        ("\n**Citations:**\n- {cite}", "", "generation_incomplete", None),
+        ("Sources:\n- {cite}", "", "generation_incomplete", None),
+        ("```thinking\nWork out the answer.\n```\nReferences:\n{cite}",
+         "", "generation_incomplete", None),
+        ("```jcl\n//JOB EXEC PGM=EXAMPLE\n```\nCitations:\n{cite}",
+         "", "unverified_draft", "//JOB EXEC PGM=EXAMPLE"),
+        ("Retry.\nCitations:\n{cite}", "Retry.", "accepted", None),
+        ("**Answer:**\n\nCitations:\n- {cite}", "**Answer:**", "generation_incomplete", None),
+        ("## Answer\n\nCitations:\n- {cite}", "## Answer", "generation_incomplete", None),
+        ("Sources: [1]\n\nCitations:\n- {cite}", "Sources: [1]", "generation_incomplete", None),
+        ("References: [1]\n\nCitations:\n- {cite}", "References: [1]",
+         "generation_incomplete", None),
+        ("Citations: <{cite}>\n\nCitations:\n- {cite}", "Citations: <{cite}>",
+         "generation_incomplete", None),
+        (("Set LFAREA.\n\nReferences:\n- Restart the system with CLPA\n- Check IEASYSxx\n"
+          "\nCitations:\n- {cite}"),
+         "Set LFAREA.\n\nReferences:\n- Restart the system with CLPA\n- Check IEASYSxx",
+         "accepted", None),
+        ("**Answer:** Retry.\nCitations:\n{cite}", "**Answer:** Retry.", "accepted", None),
+    ],
+)
+def test_answer_body_state_real_client_all_surfaces(
+    monkeypatch, synthetic_pdf, servable_representation_gate, path, stream, llm_stream,
+    content, answer, state, script,
+):
+    search = _search_stub()
+    cite = search.search()[0][0].cite
+    content = content.format(cite=cite)
+    transport = HttpxStreamFake(
+        lines=[
+            "data: " + json.dumps({"choices": [{"delta": {"content": content}}]}),
+            _FINISH_LINE,
+            _DONE_LINE,
+        ],
+        payload={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]},
+    )
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=llm_stream)), client=transport)
+    monkeypatch.setattr(app_mod, "retrieve_search", search.search)
+    for client in _client(monkeypatch, synthetic_pdf, llm):
+        if path == "/v1/answer":
+            response = client.post(path + ("?stream=true" if stream else ""),
+                                   json={"query": "IEA500I"})
+            assert response.status_code == 200
+            if stream:
+                events = _answer_sse_events(response.text)
+                assert [kind for kind, _payload in events] == ["token", "final"]
+                assert events[0][1]["delta"] == content
+                data = events[-1][1]
+            else:
+                data = response.json()
+            assert data["answer"] == answer.format(cite=cite)
+        else:
+            response = client.post(path, json={
+                "messages": [{"role": "user", "content": "IEA500I"}], "stream": stream,
+            })
+            assert response.status_code == 200
+            if stream:
+                frames = [json.loads(line[6:]) for line in response.text.splitlines()
+                          if line.startswith("data: ") and line != _DONE_LINE]
+                terminals = [frame for frame in frames
+                             if frame["choices"][0].get("finish_reason")]
+                assert len(terminals) == 1
+                assert terminals[0]["choices"][0]["finish_reason"] == "stop"
+                assert frames[0]["choices"][0]["delta"]["content"] == content
+                assert response.text.splitlines().count(_DONE_LINE) == 1
+                data = terminals[0]["choices"][0]
+            else:
+                data = response.json()
+                assert data["choices"][0]["finish_reason"] == "stop"
+        assert data["verification_state"] == state
+        assert data["citations"] == [cite]
+        assert data["citations_inferred"] is False
+        assert data["script"] == script
+        assert data["script_review_required"] is (script is not None)
+        assert len(transport.stream_bodies) == int(stream or llm_stream)
+        assert len(transport.post_bodies) == int(not (stream or llm_stream))
+
+
 def test_v1_answer_stream_truncation_emits_error_without_final(trunc_client):
     """Contract pin: token deltas, then event: error, and NO event: final."""
     resp = trunc_client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})

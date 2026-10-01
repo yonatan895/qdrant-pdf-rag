@@ -333,9 +333,14 @@ via two passes plus a trailing sweep in `cites.py` / `parse_answer`. The
 allowlist is `PromptEvidence.allowed_citations` (issue #364) — retrieved
 hits omitted by budget packing, and the tail's example cite, are rejected:
 
-1. Explicit block: from a `Citations:` header (any `#` depth, any case),
-   consuming cite-shaped or bullet lines (after normalization) until the
-   first blank past seen cites — later prose is preserved as body.
+1. Explicit block: from a `Citations:`, `Sources:` or `References:` header
+   (any `#` depth, any case, optional bold/italic/code markup),
+   consuming cite-shaped or bullet lines (after normalization) for canonical
+   `Citations:` blocks. `Sources:`/`References:` blocks consume only cite-shaped
+   lines; headers followed by prose and instruction bullets stay in the answer.
+   The first non-citation line or blank past seen cites ends the block — later
+   prose is preserved as body. `citations_header_present` remains specific to
+   the canonical `Citations:` header, not its aliases.
 2. Trailing bare cites: a blank-tolerant tail scan for allowed cite lines
    without any header.
 3. Bracket fallback on the fence-processed content (only when the passes
@@ -563,10 +568,22 @@ from the finalized parse plus the transport outcome — one rule,
 
 | State | Meaning | Never means |
 |---|---|---|
-| `accepted` | Eligible citations present and generation finished (`stop`) | Semantic proof of any claim |
+| `accepted` | Nonempty substantive parsed prose, eligible non-inferred citations and generation finished (`stop`) | Semantic proof of any claim or certification of an extracted script |
 | `insufficient_evidence` | Abstention-shaped evidence/security refusal or empty-hits short-circuit | A failed request (still 200 + explicit text) |
-| `unverified_draft` | Fluent non-abstention answer with zero eligible citations (absent, rejected, or inferred-only) | An error (still 200 — the draft label is the signal) |
-| `generation_incomplete` | `length` finish, empty generation after fallbacks, absent/`null` terminal finish, upstream `error` frame, malformed frame, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
+| `unverified_draft` | Non-abstention prose with zero eligible citations (absent, rejected, or inferred-only), or a finished nonempty script with no prose | An error (still 200 — the draft label is the signal) |
+| `generation_incomplete` | Non-`stop` finish, neither substantive parsed prose nor a nonempty script after fallbacks, absent/`null` terminal finish, upstream `error` frame, malformed frame, or stream error/cancel/disconnect | An accepted answer (terminal wire shape may still be complete) |
+
+Body presence is shared with the answer eval (#576): empty `Answer` headings,
+citation labels (including inline labels followed only by bracket indices or
+a citation), citation headers, standalone citation-shaped or validated lines (including generic
+filename identities), bracket indices, whitespace and punctuation alone are
+not prose. Real text following a label and instruction bullets under alias
+headers remain prose. A short substantive answer remains eligible; there is no
+length floor. Thinking and script fences are handled before this check. A nonempty
+script without prose is `unverified_draft` with `script_review_required: true`;
+an empty script fence still requires review but cannot establish a body.
+No second reasoning call is added to repair citation-only content, and
+transport completion remains independent of content eligibility.
 
 The shared refusal predicate also recognizes complete, one-sentence first-person
 security refusals such as “I cannot provide the private key for your certificate.”

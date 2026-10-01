@@ -394,7 +394,11 @@ In-process `/v1/answer` grounding honesty: deterministic stratified
 round-robin sampling (sorted classes and ids, no RNG, small classes
 revisited first; default 24 queries, `--all` for full runs), then judge:
 
-- Answer behavior fails on empty bodies, true abstentions (the shared
+- Answer behavior fails on empty or citation-scaffolding-only bodies (the shared
+  body-presence predicate, #576, including empty `Answer` headings and citation
+  labels followed only by indices or a citation, even when the server labels the
+  row `accepted`; substantive text after labels still counts as prose),
+  true abstentions (the shared
   marker + shape-floor predicate that also zeroes citations, #135/#305: a
   grounded partial answer whose scope caveat carries a refusal phrase is
   not an abstention; a short marker-only body still fails), zero validated
@@ -419,7 +423,8 @@ revisited first; default 24 queries, `--all` for full runs), then judge:
   refusal/partial-answer track (excluded from `harness_l4` threshold gating).
 - Acceptance states (issue #365): every dev golden row opts into
   `expected_verification_state` via `build_golden_corpus.expected_state_for`
-  — answer-tier rows expect `accepted` (eligible supplied citations + `stop`),
+  — answer-tier rows expect `accepted` (substantive parsed prose + eligible
+  non-inferred supplied citations + `stop`),
   abstain-tier rows expect `insufficient_evidence`; adjudicated exceptions go
   in `EXPECTED_STATE_OVERRIDES` with a note. A mismatch is a row failure: the
   acceptance set states the product requirement, it is not a description of

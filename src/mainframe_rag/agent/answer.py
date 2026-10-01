@@ -242,28 +242,57 @@ VERIFICATION_STATES: frozenset[str] = frozenset(
 )
 
 
+_ANSWER_BODY_LABEL_RE = re.compile(
+    r"^\s*#{0,6}\s*[*_`]*(?:Answer|Citations?|Sources?|References?)[*_`]*"
+    r"(?:\s*:[*_`]*\s*|\s*$)",
+    re.IGNORECASE,
+)
+
+
+def has_answer_body(answer: str, citations: list[str]) -> bool:
+    """Recognize parsed prose beyond citation scaffolding, without a length floor."""
+    from mainframe_rag.agent.cites import (
+        CITATION_LINE_RE,
+        normalize_citation_line,
+    )
+
+    citation_lines = set(citations)
+    for line in answer.splitlines():
+        candidate = normalize_citation_line(line)
+        candidate = normalize_citation_line(_ANSWER_BODY_LABEL_RE.sub("", candidate, count=1))
+        if (
+            candidate in citation_lines
+            or CITATION_LINE_RE.match(candidate)
+        ):
+            continue
+        if re.search(r"[^\W_]", _INLINE_INDEX_RE.sub("", candidate)):
+            return True
+    return False
+
+
 def verification_state_for(
     *,
+    answer: str,
     citations: list[str],
     citations_inferred: bool,
     finish_reason: str,
     abstained: bool,
     empty_hits: bool,
-    empty_content: bool = False,
+    script_present: bool = False,
 ) -> VerificationState:
     """One rule mapping a finalized answer to its verification state (issue
-    #365). Order is load-bearing: refusal/empty first (nothing was even
-    attempted from evidence), then unfinished generation (whatever cites
-    exist may be cut off mid-thought), then citation outcome. Inferred-only
+    #365/#576). Order is load-bearing: refusal/empty hits first, then unfinished
+    generation, then parsed-body and citation outcome. Inferred-only
     provenance is a draft, not grounding — the eval never counts it, so the
-    client must not read it as accepted either. An empty model generation
-    is incomplete, not a draft: there is no content to review."""
+    client must not read it as accepted either. Without prose, a nonempty
+    extracted script is a human-review draft; otherwise generation is incomplete.
+    Citation scaffolding alone never establishes an answer body."""
     if empty_hits or abstained:
         return "insufficient_evidence"
-    if empty_content:
-        return "generation_incomplete"
     if finish_reason != "stop":
         return "generation_incomplete"
+    if not has_answer_body(answer, citations):
+        return "unverified_draft" if script_present else "generation_incomplete"
     if not citations or citations_inferred:
         return "unverified_draft"
     return "accepted"

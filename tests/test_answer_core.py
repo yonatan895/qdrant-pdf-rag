@@ -62,19 +62,21 @@ def _hit() -> SearchHit:
 
 
 class CoreFakeLLM:
-    def __init__(self, content: str | None = None, raise_exc: Exception | None = None):
+    def __init__(self, content: str | None = None, raise_exc: Exception | None = None,
+                 finish_reason: str = "stop"):
         self.content = content or (
             "Reissue the command.\n\nCitations:\n"
             "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\n"
         )
         self.raise_exc = raise_exc
+        self.finish_reason = finish_reason
         self.calls: list[dict] = []
 
     def chat(self, messages, reasoning_effort=None, temperature=None):
         self.calls.append({"messages": messages, "reasoning_effort": reasoning_effort})
         if self.raise_exc is not None:
             raise self.raise_exc
-        return ChatResult(content=self.content, finish_reason="stop", usage=TokenUsage())
+        return ChatResult(content=self.content, finish_reason=self.finish_reason, usage=TokenUsage())
 
 
 def _deps(settings: Settings, llm, retrieve) -> AnswerCoreDeps:
@@ -88,6 +90,109 @@ def _deps(settings: Settings, llm, retrieve) -> AnswerCoreDeps:
     return AnswerCoreDeps(settings=settings, llm=ModelAdapter(llm), retrieve=retrieve_adapter)
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+@pytest.mark.parametrize(
+    "content,answer,script,state,inferred",
+    [
+        ("{cite}", "", None, "generation_incomplete", False),
+        ("Citations:\n{cite}", "", None, "generation_incomplete", False),
+        ("\n**Citations:**\n- {cite}", "", None, "generation_incomplete", False),
+        ("Sources:\n- {cite}", "", None, "generation_incomplete", False),
+        ("### **References:**\n> {cite}", "", None, "generation_incomplete", False),
+        ("```thinking\nWork out the answer.\n```\nSources:\n{cite}", "", None,
+         "generation_incomplete", False),
+        ("{cite}\n\nCitations:\n{cite}", "{cite}", None, "generation_incomplete", False),
+        ("---\n[1].\nCitations:\n{cite}", "---\n[1].", None, "generation_incomplete", False),
+        ("[1]", "[1]", None, "generation_incomplete", True),
+        ("**Answer:**\n\nCitations:\n- {cite}", "**Answer:**", None,
+         "generation_incomplete", False),
+        ("## Answer\n\nCitations:\n- {cite}", "## Answer", None,
+         "generation_incomplete", False),
+        ("Sources: [1]\n\nCitations:\n- {cite}", "Sources: [1]", None,
+         "generation_incomplete", False),
+        ("References: [1]\n\nCitations:\n- {cite}", "References: [1]", None,
+         "generation_incomplete", False),
+        ("Citations: <{cite}>\n\nCitations:\n- {cite}", "Citations: <{cite}>", None,
+         "generation_incomplete", False),
+        ("```jcl\n//JOB EXEC PGM=EXAMPLE\n```\nCitations:\n{cite}", "",
+         "//JOB EXEC PGM=EXAMPLE", "unverified_draft", False),
+        ("```jcl\n\n```\nCitations:\n{cite}", "", "", "generation_incomplete", False),
+        ("Reissue the command.\nCitations:\n{cite}", "Reissue the command.", None,
+         "accepted", False),
+        ("Retry.\nReferences:\n{cite}", "Retry.", None, "accepted", False),
+        ("**Answer:** Retry.\nCitations:\n{cite}", "**Answer:** Retry.", None,
+         "accepted", False),
+        ("Sources: Retry.\nCitations:\n{cite}", "Sources: Retry.", None, "accepted", False),
+        ("重试。\nCitations:\n{cite}", "重试。", None, "accepted", False),
+        ("Reissue the command [1].", "Reissue the command [1].", None,
+         "unverified_draft", True),
+        ("Reissue the command.\n```jcl\n//JOB EXEC PGM=EXAMPLE\n```\nCitations:\n{cite}",
+         "Reissue the command.", "//JOB EXEC PGM=EXAMPLE", "accepted", False),
+    ],
+)
+async def test_core_requires_answer_body_after_parsing(content, answer, script, state,
+                                                      inferred, stream, finish_reason):
+    def retrieve(*_args, **_kwargs):
+        return [_hit()], "identifier", {}
+
+    llm = CoreFakeLLM(content=content.format(cite=_hit().cite), finish_reason=finish_reason)
+    deps = _deps(_settings(), llm, retrieve)
+    source = AnswerCoreInput(query="IEA500I")
+    if stream:
+        events = [event async for event in execute_answer_core_stream(source, deps)]
+        assert events[-1]["type"] == "final"
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    assert output.verification_state == (state if finish_reason == "stop" else "generation_incomplete")
+    assert output.answer == answer.format(cite=_hit().cite)
+    assert output.citations == [_hit().cite]
+    assert output.citations_inferred is inferred
+    assert output.script == script
+    assert output.script_review_required is (script is not None)
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("header", ["Sources:", "References:", "### **References:**"])
+async def test_core_preserves_instructions_under_citation_alias_headers(stream, header):
+    answer = f"Set LFAREA.\n\n{header}\n- Restart the system with CLPA\n- Check IEASYSxx"
+
+    def retrieve(*_args, **_kwargs):
+        return [_hit()], "identifier", {}
+
+    llm = CoreFakeLLM(content=f"{answer}\n\nCitations:\n- {_hit().cite}")
+    deps = _deps(_settings(), llm, retrieve)
+    source = AnswerCoreInput(query="IEA500I")
+    if stream:
+        events = [event async for event in execute_answer_core_stream(source, deps)]
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    assert output.answer == answer
+    assert output.citations == [_hit().cite]
+    assert output.verification_state == "accepted"
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.parametrize("header,canonical", [
+    ("Citations:", True), ("**Citations:**", True),
+    ("Sources:", False), ("References:", False), ("### **References:**", False),
+])
+def test_citation_header_telemetry_remains_canonical(header, canonical):
+    from mainframe_rag.agent.answer import build_messages, parse_answer
+
+    evidence = build_messages("IEA500I", [_hit()], _settings()).evidence
+    parsed = parse_answer(f"Retry.\n{header}\n- {_hit().cite}", evidence)
+    assert parsed.answer == "Retry."
+    assert parsed.citations == [_hit().cite]
+    assert parsed.citations_inferred is False
+    assert parsed.citations_header_present is canonical
+
+
 def test_chat_body_chars_counts_messages_and_context():
     messages = [
         ChatMessage(role="user", content="abc"),
@@ -96,6 +201,32 @@ def test_chat_body_chars_counts_messages_and_context():
     assert chat_body_chars(messages) == 5
     assert chat_body_chars(messages, "xyz") == 8
     assert chat_body_chars(messages, "") == 5
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("prefix", ["", "Sources: ", "Citations: "])
+async def test_core_generic_citation_is_not_answer_prose(stream, prefix):
+    hit = _hit().model_copy(update={
+        "doc_id": "original-guide",
+        "cite": "original-guide Synthetic Reference, Introduction, p. 1",
+    })
+
+    def retrieve(*_args, **_kwargs):
+        return [hit], "nl", {}
+
+    llm = CoreFakeLLM(content=f"{prefix}{hit.cite}\n\nCitations:\n- {hit.cite}")
+    deps = _deps(_settings(), llm, retrieve)
+    source = AnswerCoreInput(query="Explain the introduction.")
+    if stream:
+        events = [event async for event in execute_answer_core_stream(source, deps)]
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    assert output.answer == prefix + hit.cite
+    assert output.citations == [hit.cite]
+    assert output.verification_state == "generation_incomplete"
+    assert len(llm.calls) == 1
 
 
 @pytest.mark.anyio

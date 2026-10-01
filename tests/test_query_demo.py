@@ -36,6 +36,36 @@ def _sample_hit() -> SearchHit:
     )
 
 
+@pytest.mark.parametrize("script", [None, "//JOB EXEC PGM=EXAMPLE"])
+def test_execute_answer_citation_only_uses_parsed_body_state(script):
+    from scripts.query_demo import execute_answer
+
+    hit = _sample_hit()
+    content = f"Sources:\n{hit.cite}"
+    if script is not None:
+        content = f"```jcl\n{script}\n```\n{content}"
+    with (
+        patch("scripts.query_demo.execute_query", return_value=([hit], "identifier", {})),
+        patch("scripts.query_demo.build_tokenizer", return_value=None),
+        patch("mainframe_rag.agent.answer.HttpxLLMClient") as model_factory,
+    ):
+        model_factory.return_value.chat.return_value = ChatResult(
+            content=content, finish_reason="stop", usage=TokenUsage(),
+        )
+        parsed, _hits, _kind, _timings = execute_answer(
+            "IEA500I", settings=Settings(_env_file=None),
+        )
+    assert parsed.answer == ""
+    assert parsed.citations == [hit.cite]
+    assert parsed.verification_state == (
+        "generation_incomplete" if script is None else "unverified_draft"
+    )
+    assert parsed.script == script
+    assert parsed.script_review_required is (script is not None)
+    model_factory.return_value.chat.assert_called_once()
+    model_factory.return_value.close.assert_called_once()
+
+
 def test_format_text_hit():
     hit = _sample_hit()
     formatted = _format_text_hit(1, hit)
@@ -518,6 +548,5 @@ def test_execute_answer_emits_v1_answer_and_child_spans():
     assert "rag.query" not in root.attributes
     assert root.attributes["rag.hits"] == 1
     assert root.attributes["rag.citations"] == 1
-
 
 
