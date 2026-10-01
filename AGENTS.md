@@ -31,6 +31,14 @@ sh scripts/tools/run-task.sh <name> --summary. Taskfile.yml and taskfiles/
 own dispatch; docs/task-runner.md owns setup/inputs; docs/live-stack.md
 owns required verification.
 
+## Focus and process budget
+
+Start from value: name the quality-tracker metric (currently #582) or robustness
+item a task moves, with baseline and expected direction, or link an escaped
+defect or maintainer request. Process changes (agent instructions,
+CI/verifier/acceptance, workflow docs) need the same link and stay word-neutral
+unless an incident requires more: [process budget](docs/agent-workflow.md#process-budget).
+
 ## Hard boundaries
 
 - Never commit vendor PDFs/manual text, `.pdf`/`.pdx`/`.idx`, vectors,
@@ -119,21 +127,10 @@ changes; add a root rule only when it is genuinely repository-wide.
 ## Code Review Rules
 
 Reviews follow the canonical [review protocol](docs/agent-workflow.md#review-handoff).
-
-Review the implementation and relevant unchanged callers, not just the PR
-summary. Derive the supported domain and expected outcome from the contract
-and actual producer, not from comfortable sample fixtures. For each claimed
-guarantee ask: what state establishes it, who can change that state, for how
-long is it valid, and what forbids the counterexample?
-
-Examine applicable missing/corrupt data, interruption, retry, rollback,
-concurrent writer, active reader, cached validation, and configuration paths.
-A documented exception that weakens the promised guarantee needs an explicit
-design decision, not merely a reassuring comment.
-
-Report concrete preconditions, impact, location, and a minimal test for each
-finding. Distinguish defects from non-blocking improvements and evidence gaps.
-On re-review, carry forward the original counterexample: a narrower passing case
-does not close a broader finding. Do not invent findings or certify untested
-production behavior. Agents do not merge their own PRs or change repository
-access controls.
+For each claimed guarantee ask: what state establishes it, who can change that
+state, for how long is it valid, and what forbids the counterexample? A
+documented exception that weakens a promised guarantee needs an explicit design
+decision, not a reassuring comment. A finding blocks only when it is in scope
+and changes a user-visible outcome, data integrity or a security boundary;
+record other findings in the parking-lot issue (#588). Agents do not merge
+their own PRs or change repository access controls.
