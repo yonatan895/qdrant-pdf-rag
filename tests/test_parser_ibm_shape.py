@@ -63,6 +63,27 @@ def test_parse_pdf_sha256_override_and_fallback(synthetic_pdf):
     assert parse_pdf(synthetic_pdf).sha256 == sha256_file(synthetic_pdf)
 
 
+def test_walker_finds_pdfs_under_dot_parent_dir(tmp_path, synthetic_pdf):
+    """Issue #594: only parts below root are filtered — a corpus root under
+    a dot-directory (or ignored dir) must still be walked, while dot-dirs
+    and ignored dirs *inside* the corpus are still skipped."""
+    import shutil
+
+    for parent_name in (".parent", "__MACOSX", "lost+found"):
+        root = tmp_path / parent_name / "corpus"
+        root.mkdir(parents=True)
+        dest = root / synthetic_pdf.name
+        shutil.copy(synthetic_pdf, dest)
+        # Inside-corpus filters still apply.
+        (root / ".hidden").mkdir(exist_ok=True)
+        shutil.copy(synthetic_pdf, root / ".hidden" / "hidden.pdf")
+        (root / "__MACOSX").mkdir(exist_ok=True)
+        shutil.copy(synthetic_pdf, root / "__MACOSX" / "mac.pdf")
+
+        found = walk_pdfs(root)
+        assert [p.name for p in found] == [dest.name]
+
+
 def test_walker_ignores_pdx_and_idx(tmp_path, synthetic_pdf):
     import shutil
 
