@@ -51,11 +51,17 @@ def acquire_internal(root: Path, wheelhouse: Path) -> None:
 
 
 def prepare(root: Path, wheelhouse: Path, python: Path | None, venv: Path | None,
-            connected: bool) -> None:
+            connected: bool, *, download_workers: int = 1) -> None:
     locks.check_target()
+    locks.download_workers(download_workers)
+    if not connected and download_workers != 1:
+        raise locks.LockError("parallel acquisition requires explicit connected preparation")
     _, packages = locks.load(root, "dev")
     if connected:
-        locks.acquire(root, "dev", wheelhouse)
+        if download_workers == 1:
+            locks.acquire(root, "dev", wheelhouse)
+        else:
+            locks.acquire(root, "dev", wheelhouse, workers=download_workers)
     else:
         locks.verify_wheelhouse(root, "dev", wheelhouse)
     # Reject accidental shared-environment mutation. Prepared CI uses --python
@@ -94,11 +100,16 @@ def main(argv: list[str] | None = None) -> int:
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--connected", action="store_true", help="explicit acquisition from pinned public origins")
     source.add_argument("--internal-index", action="store_true", help="explicit acquisition using only PIP_INDEX_URL")
+    parser.add_argument("--download-workers", type=int, default=1)
     args = parser.parse_args(argv)
     try:
+        locks.download_workers(args.download_workers)
+        if not args.connected and args.download_workers != 1:
+            raise locks.LockError("parallel acquisition requires explicit connected preparation")
         if args.internal_index:
             acquire_internal(args.root, args.wheelhouse)
-        prepare(args.root, args.wheelhouse, args.python, args.venv, args.connected)
+        prepare(args.root, args.wheelhouse, args.python, args.venv, args.connected,
+                download_workers=args.download_workers)
         return 0
     except locks.LockError as exc:
         print(f"prepare-python: {exc}", file=sys.stderr)

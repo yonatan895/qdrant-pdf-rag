@@ -427,7 +427,7 @@ class TaskContractsTests(unittest.TestCase):
             # artifacts
             "artifacts:wheelhouse", "artifacts:bm25", "artifacts:chart-check",
             "artifacts:chart-fetch", "artifacts:helm-render", "artifacts:helm-lint",
-            "artifacts:images",
+            "artifacts:image", "artifacts:images",
             # evaluation
             "eval:retrieval", "eval:gate-l1", "eval:paraphrase", "eval:holdout",
             "eval:verify-golden", "eval:baseline", "eval:draft", "eval:capture-pool",
@@ -509,6 +509,7 @@ class TaskContractsTests(unittest.TestCase):
         self.assertEqual(self.calls()[0]["argv"], [
             "scripts/check_hazard_sensitivity.py", "--python", str(self.root / "python with spaces"),
             "--out", output,
+            "--workers", "1",
         ])
         self.assertFalse((self.root / "PWNED").exists())
 
@@ -680,6 +681,59 @@ class TaskContractsTests(unittest.TestCase):
         self.assertIn("mainframe-rag/agent:abc123", docker[1])
         for call in self.tool_calls("docker"):
             self.assertEqual(call["cwd"], str(self.root))
+
+    def test_single_image_reverifies_transferred_bytes_and_transports_literal_inputs(self):
+        import sys
+
+        self.make_artifact_fixtures()
+        self.make_recorder(self.root / 'bin/docker', tag='tool-docker')
+        literal = 'inputs space אב;$(touch SENTINEL)'
+        bundle = self.root / literal
+        wheelhouse = bundle / 'wheelhouse'
+        wheelhouse.mkdir(parents=True)
+        wheel = wheelhouse / 'fake_pkg-1.0.0-py3-none-any.whl'
+        wheel.write_bytes(b'fake-wheel-content\n')
+        model = bundle / 'bm25-weights/models--Qdrant--bm25'
+        snapshot = model / ('snapshots/' + 'a' * 40)
+        snapshot.mkdir(parents=True)
+        weights = snapshot / 'weights.bin'
+        weights.write_bytes(b'synthetic-weights-content\n')
+        (model / 'refs').mkdir()
+        (model / 'refs/main').write_text('a' * 40)
+        for role in ('ingest', 'agent'):
+            args = ('artifacts:image', f'ROLE={role}', f'IMAGE_NAME=test/{role}',
+                    'IMAGE_TAG=abc123', f'BUNDLE_DIR={literal}', f'PY={sys.executable}')
+            process = self.run_task(*args, extra_env=self.tool_env())
+            self.assertEqual(process.returncode, 0, process.stdout)
+            self.assertEqual(self.tool_calls('docker')[-1]['argv'], [
+                'build', '--build-context', f'wheelhouse={literal}/wheelhouse',
+                '--build-context', f'bm25={literal}/bm25-weights', '-f',
+                f'images/Containerfile.{role}', '-t', f'test/{role}:abc123', '.'])
+        self.assertFalse((self.root / 'SENTINEL').exists())
+        self.assertFalse((self.root / '.venv').exists())
+        count = len(self.tool_calls('docker'))
+        for member in (wheel, weights):
+            original = member.read_bytes()
+            member.write_bytes(b'corrupted transport bytes')
+            process = self.run_task(*args, extra_env=self.tool_env())
+            self.assertNotEqual(process.returncode, 0, process.stdout)
+            self.assertEqual(len(self.tool_calls('docker')), count)
+            self.assertEqual(member.read_bytes(), b'corrupted transport bytes')
+            member.write_bytes(original)
+            process = self.run_task(*args, extra_env=self.tool_env())
+            self.assertEqual(process.returncode, 0, process.stdout)
+            count += 1
+        process = self.run_task(*args, extra_env={**self.tool_env(), 'RECORDER_EXIT': '7'})
+        self.assertNotEqual(process.returncode, 0)
+
+    def test_single_image_refuses_unknown_or_missing_role_before_any_build(self):
+        self.make_recorder(self.root / 'bin/docker', tag='tool-docker')
+        for role in ('', 'other', '../agent', 'agent;$(touch SENTINEL)'):
+            process = self.run_task('artifacts:image', f'ROLE={role}', 'IMAGE_NAME=test/agent',
+                                    'IMAGE_TAG=abc123', extra_env=self.tool_env())
+            self.assertNotEqual(process.returncode, 0)
+        self.assertEqual(self.tool_calls('docker'), [])
+        self.assertFalse((self.root / 'SENTINEL').exists())
 
     def test_retrieval_transports_required_operation_and_literal_output(self):
         self.make_venv_fake()

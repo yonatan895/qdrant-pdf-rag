@@ -113,6 +113,32 @@ tasks:
     cmds:
       - helm template app charts/mainframe-rag --namespace mainframe-rag
 
+  image:
+    desc: Build one application image from already verified build inputs
+    summary: |
+      Builds exactly one ROLE (ingest or agent) in an isolated Docker workspace.
+      Requires prepared BUNDLE_DIR wheelhouse and BM25 bytes; re-verifies both
+      before Docker and never acquires or repairs them. Inputs: ROLE (required),
+      IMAGE_NAME (required), IMAGE_TAG (required), BUNDLE_DIR (default bundles),
+      PY (default python3). Connected build host only, never in the air gap.
+    requires:
+      vars: [ROLE, IMAGE_NAME, IMAGE_TAG]
+    vars:
+      BUNDLE_DIR: '{{if hasKey . "BUNDLE_DIR"}}{{.BUNDLE_DIR}}{{else}}bundles{{end}}'
+      PY: '{{if hasKey . "PY"}}{{.PY}}{{else}}python3{{end}}'
+    env:
+      TASK_IMAGE_ROLE: '{{.ROLE}}'
+      TASK_IMAGE_NAME: '{{.IMAGE_NAME}}'
+      TASK_IMAGE_TAG: '{{.IMAGE_TAG}}'
+      TASK_BUNDLE_DIR: '{{.BUNDLE_DIR}}'
+      TASK_IMAGE_PY: '{{.PY}}'
+    cmds:
+      - 'case "$TASK_IMAGE_ROLE" in ingest|agent) ;; *) echo "ROLE must be ingest or agent" >&2; exit 2 ;; esac'
+      - '"$TASK_IMAGE_PY" scripts/dependency_lock.py target'
+      - '"$TASK_IMAGE_PY" scripts/dependency_lock.py wheelhouse --profile runtime --directory "$TASK_BUNDLE_DIR/wheelhouse"'
+      - '"$TASK_IMAGE_PY" scripts/fetch_bm25_weights.py --out "$TASK_BUNDLE_DIR/bm25-weights" --verify-manifest bm25-weights.sha256 --verify-only'
+      - docker build --build-context wheelhouse="$TASK_BUNDLE_DIR/wheelhouse" --build-context bm25="$TASK_BUNDLE_DIR/bm25-weights" -f "images/Containerfile.$TASK_IMAGE_ROLE" -t "$TASK_IMAGE_NAME:$TASK_IMAGE_TAG" .
+
   images:
     desc: Build ingest and agent images with wheelhouse/bm25 contexts (connected)
     summary: |

@@ -124,6 +124,84 @@ def test_original():
     assert (tmp_path / 'irrelevant-mutation/first-run').read_text() == '2'
 
 
+@pytest.mark.parametrize('baseline_failure', [False, True])
+def test_parallel_pairs_overlap_in_isolated_processes_and_preserve_failed_baseline(tmp_path, monkeypatch, baseline_failure):
+    import os
+    import sys
+    import tarfile
+    from pathlib import Path
+
+    from scripts.check_hazard_sensitivity import run_pairs
+
+    gate = tmp_path / 'gate'
+    gate.mkdir()
+    monkeypatch.setenv('HAZARD_TEST_GATE', str(gate))
+    body = '''import os
+import time
+from pathlib import Path
+from value import VALUE
+
+def rendezvous(name, other):
+    gate = Path(os.environ['HAZARD_TEST_GATE'])
+    (gate / name).write_text(str(os.getppid()))
+    deadline = time.monotonic() + 5
+    while not (gate / other).exists():
+        if time.monotonic() > deadline:
+            raise RuntimeError('independent baseline did not overlap')
+        time.sleep(0.01)
+
+def test_first():
+    rendezvous('first', 'second')
+    received = VALUE
+    expected = FIRST_EXPECTED
+    assert received == expected
+
+def test_second():
+    rendezvous('second', 'first')
+    received = VALUE
+    expected = 1
+    assert received == expected
+'''.replace('FIRST_EXPECTED', '9' if baseline_failure else '1')
+    root = synthetic_tree(tmp_path, body)
+    archive = tmp_path / 'candidate.tar'
+    with tarfile.open(archive, 'w') as tar:
+        for path in root.iterdir():
+            tar.add(path, arcname=path.name)
+    output = tmp_path / 'output'
+    output.mkdir()
+    hazards = [{**HAZARD, 'id': name, 'test': f'tests/test_behavior.py::test_{name}',
+                'target': 'src/value.py', 'before': 'VALUE = 1', 'after': 'VALUE = 2', 'occurrences': 1}
+               for name in ('first', 'second')]
+    pairs = list(run_pairs(archive, tmp_path, Path(sys.executable), hazards, output, root, workers=2))
+    assert len(pairs) == 2
+    assert pairs[0][0]['status'] == ('baseline_failed' if baseline_failure else 'baseline_pass')
+    assert pairs[0][1]['status'] == ('not_run' if baseline_failure else 'killed_by_behavior')
+    assert pairs[1][0]['status'] == 'baseline_pass'
+    assert pairs[1][1]['status'] == 'killed_by_behavior'
+    parents = {int(path.read_text()) for path in gate.iterdir()}
+    assert len(parents) == 2
+    for parent in parents:
+        with pytest.raises(ProcessLookupError):
+            os.kill(parent, 0)
+    assert (root / 'src/value.py').read_text() == 'VALUE = 1\n'
+    for name in ('first', 'second'):
+        assert (tmp_path / f'{name}-baseline/src/value.py').read_text() == 'VALUE = 1\n'
+        expected = 1 if baseline_failure and name == 'first' else 2
+        assert (tmp_path / f'{name}-mutation/src/value.py').read_text() == f'VALUE = {expected}\n'
+
+
+@pytest.mark.parametrize('workers', [0, -1, 9, True])
+def test_parallel_pair_workers_are_bounded_before_spawning(tmp_path, workers):
+    import sys
+    from pathlib import Path
+
+    from scripts.check_hazard_sensitivity import run_pairs
+
+    with pytest.raises(HazardError, match='workers'):
+        list(run_pairs(tmp_path / 'missing.tar', tmp_path, Path(sys.executable), [], tmp_path,
+                       tmp_path, workers=workers))
+
+
 def test_passing_test_cannot_mutate_snapshot_source(tmp_path):
     import sys
     from pathlib import Path

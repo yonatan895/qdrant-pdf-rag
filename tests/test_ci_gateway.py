@@ -385,7 +385,10 @@ def test_rehearsal_lanes_share_published_bundle_and_bound_jobs():
     workflow = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())
     jobs = workflow['jobs']
     kind = jobs['kind-live-rehearsal']
-    assert kind['strategy']['matrix']['lane'] == ['pipeline', 'gateway-faults', 'lifecycle', 'shared-gateway']
+    assert kind['strategy']['matrix']['lane'] == [
+        'pipeline', 'gateway-chat-upstream', 'gateway-chat-malformed', 'gateway-chat-truncated',
+        'gateway-embed-upstream', 'gateway-embed-malformed', 'gateway-embed-dimension',
+        'gateway-auth', 'lifecycle-chart', 'lifecycle', 'shared-gateway']
     assert kind['strategy']['fail-fast'] is False
     lab = jobs['airgap-rehearsal']
     assert 'airgap-package' in lab['needs']
@@ -407,8 +410,10 @@ def test_acceptance_scripts_refuse_missing_namespace(script):
     assert result.returncode == 2
 
 
+@pytest.mark.parametrize('fault_case', ['all', 'chat-upstream', 'chat-malformed', 'chat-truncated',
+                                      'embed-upstream', 'embed-malformed', 'embed-dimension', 'auth'])
 @pytest.mark.parametrize('bad_probe', ['false-success', 'unrelated-failure', 'state-not-ready', 'expected-failure'])
-def test_fault_lane_requires_contract_failure_and_recovery(tmp_path, bad_probe):
+def test_fault_lane_requires_contract_failure_and_recovery(tmp_path, bad_probe, fault_case):
     log = tmp_path / 'calls'
     kc = tmp_path / 'kubectl'
     kc.write_text('''#!/usr/bin/env python3
@@ -436,14 +441,140 @@ if 'exec' in sys.argv:
     print('GATEWAY PROBE PASSED')
 ''')
     kc.chmod(0o755)
-    result = subprocess.run(['sh', str(ROOT / 'scripts/ci/gateway_faults.sh'), 'test'],
+    result = subprocess.run(['sh', str(ROOT / 'scripts/ci/gateway_faults.sh'), 'test', fault_case],
         env={**os.environ, 'PATH': str(tmp_path)+':'+os.environ['PATH'], 'FAKE_STATE': str(tmp_path), 'PROBE_MODE': bad_probe},
         capture_output=True, text=True, check=False)
     assert (result.returncode == 0) == (bad_probe == 'expected-failure'), result.stderr
     lines = log.read_text().splitlines()
     assert any('MOCK_CHAT_FAULT=healthy MOCK_EMBED_FAULT=healthy MOCK_TTFT_MS=0' in line for line in lines)
     if not result.returncode:
-        assert sum('exec deploy/rag-agent' in line for line in lines) >= 17
+        mutations = [line for line in lines if 'set env deploy/vllm-mock' in line
+                     and 'MOCK_CHAT_FAULT=healthy MOCK_EMBED_FAULT=healthy MOCK_TTFT_MS=0' not in line]
+        expected = {
+            'chat-upstream': 'MOCK_CHAT_FAULT=upstream MOCK_EMBED_FAULT=healthy MOCK_TTFT_MS=0',
+            'chat-malformed': 'MOCK_CHAT_FAULT=malformed MOCK_EMBED_FAULT=healthy MOCK_TTFT_MS=0',
+            'chat-truncated': 'MOCK_CHAT_FAULT=truncated MOCK_EMBED_FAULT=healthy MOCK_TTFT_MS=0',
+            'embed-upstream': 'MOCK_CHAT_FAULT=healthy MOCK_EMBED_FAULT=upstream MOCK_TTFT_MS=0',
+            'embed-malformed': 'MOCK_CHAT_FAULT=healthy MOCK_EMBED_FAULT=malformed MOCK_TTFT_MS=0',
+            'embed-dimension': 'MOCK_CHAT_FAULT=healthy MOCK_EMBED_FAULT=dimension MOCK_TTFT_MS=0',
+            'auth': 'MOCK_CHAT_FAULT=healthy MOCK_EMBED_FAULT=healthy MOCK_TTFT_MS=5000',
+        }
+        required = list(expected.values()) if fault_case == 'all' else [expected[fault_case]]
+        assert [line.split('deploy/vllm-mock ', 1)[1] for line in mutations] == required
+        credentials = [line for line in lines if 'exec deploy/rag-agent' in line and ' env ' in line]
+        assert len(credentials) == (4 if fault_case in ('all', 'auth') else 0)
+        assert 'GATEWAY PROBE PASSED' in result.stdout
+        assert 'APPLICATION CONTRACT PASSED' in result.stdout
+        assert lines[-1] == '-n test exec -i deploy/rag-agent -- python3 -'
+        if fault_case == 'all':
+            assert sum('exec deploy/rag-agent' in line for line in lines) >= 17
+
+
+def test_fault_case_refuses_unknown_selection_before_cluster_access(tmp_path):
+    tool = tmp_path / 'kubectl'
+    tool.write_text('#!/bin/sh\ntouch "$SENTINEL"\n')
+    tool.chmod(0o755)
+    result = subprocess.run(['sh', str(ROOT / 'scripts/ci/gateway_faults.sh'), 'test', 'unknown'],
+                            env={**os.environ, 'PATH': f'{tmp_path}:' + os.environ['PATH'],
+                                 'SENTINEL': str(tmp_path / 'touched')}, capture_output=True, check=False)
+    assert result.returncode == 2
+    assert not (tmp_path / 'touched').exists()
+
+
+def test_parallel_build_join_preserves_failure_and_sha_bound_inputs(tmp_path):
+    jobs = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())['jobs']
+    assert jobs['build-inputs']['needs'] == 'select'
+    assert jobs['build-inputs']['strategy']['matrix'] == {'artifact': ['wheelhouse', 'bm25-weights']}
+    assert jobs['images']['needs'] == ['select', 'build-inputs']
+    assert jobs['images']['strategy']['matrix'] == {'role': ['ingest', 'agent']}
+    for name in ('build-inputs', 'images'):
+        assert jobs[name]['strategy']['fail-fast'] is False
+        assert 'max-parallel' not in jobs[name]['strategy']
+    steps = jobs['images']['steps']
+    downloads = [step['with']['name'] for step in steps if 'download-artifact@' in step.get('uses', '')]
+    assert downloads == [f'build-{artifact}-${{{{ github.sha }}}}'
+                         for artifact in ('wheelhouse', 'bm25-weights')]
+    upload = next(step['with'] for step in jobs['build-inputs']['steps'] if 'upload-artifact@' in step.get('uses', ''))
+    assert upload['name'] == 'build-${{ matrix.artifact }}-${{ github.sha }}'
+    assert upload['overwrite'] is True
+    assert upload['include-hidden-files'] is True
+    assert all('run-id' not in step['with'] and 'repository' not in step['with']
+               for step in steps if 'download-artifact@' in step.get('uses', ''))
+    build = jobs['build']
+    assert build['needs'] == ['select', 'build-inputs', 'images']
+    assert build['if'].startswith('always() &&')
+    guard = build['steps'][0]
+    for field in ('SELECT_RESULT', 'INPUTS_RESULT', 'IMAGES_RESULT'):
+        for result in ('success', 'failure', 'cancelled', 'skipped', ''):
+            env = {key: 'success' for key in ('SELECT_RESULT', 'INPUTS_RESULT', 'IMAGES_RESULT')}
+            env[field] = result
+            process = subprocess.run(['sh', '-eu', '-c', guard['run']], env=env, check=False)
+            assert (process.returncode == 0) == (result == 'success')
+    push = next(step for step in steps if step.get('name') == 'Push to GHCR')
+    assert "github.event_name == 'workflow_dispatch'" in push['if']
+    assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in push['if']
+    assert 'pull_request' not in push['if']
+    refs = next(step['run'] for step in build['steps'] if step.get('id') == 'refs')
+    output = tmp_path / 'outputs'
+    subprocess.run(['sh', '-eu', '-c', refs],
+                   env={'GITHUB_OUTPUT': str(output), 'GITHUB_REPOSITORY_OWNER': 'MixedOwner',
+                        'GITHUB_SHA': 'a' * 40}, check=True)
+    assert output.read_text().splitlines() == [
+        'sha=' + 'a' * 40, 'ingest=ghcr.io/mixedowner/qdrant-pdf-rag-ingest:' + 'a' * 40,
+        'agent=ghcr.io/mixedowner/qdrant-pdf-rag-agent:' + 'a' * 40]
+
+
+@pytest.mark.parametrize('retried_inputs,original_complete', [
+    ((), True), (('wheelhouse',), False), (('bm25-weights',), False),
+    (('wheelhouse', 'bm25-weights'), True),
+])
+def test_build_input_handoff_survives_failed_image_and_producer_retries(retried_inputs, original_complete):
+    jobs = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())['jobs']
+    upload = next(step['with'] for step in jobs['build-inputs']['steps'] if 'upload-artifact@' in step.get('uses', ''))
+    downloads = [step['with'] for step in jobs['images']['steps'] if 'download-artifact@' in step.get('uses', '')]
+    source_sha = 'a' * 40
+    run_id = 123
+    artifacts = {}
+
+    def name(template, artifact, attempt):
+        return (template.replace('${{ matrix.artifact }}', artifact)
+                .replace('${{ github.sha }}', source_sha)
+                .replace('${{ github.run_attempt }}', str(attempt)))
+
+    expected = {artifact: ('verified-' + artifact).encode() for artifact in ('wheelhouse', 'bm25-weights')}
+    for artifact, content in expected.items():
+        artifact_name = name(upload['name'], artifact, 1)
+        artifacts[(run_id + 1, artifact_name)] = b'wrong-run'
+        if original_complete or artifact not in retried_inputs:
+            artifacts[(run_id, artifact_name)] = content
+    original_names = {artifact: name(upload['name'], artifact, 1) for artifact in expected}
+    for artifact in retried_inputs:
+        artifact_name = name(upload['name'], artifact, 2)
+        assert artifact_name == original_names[artifact]
+        if (run_id, artifact_name) in artifacts:
+            assert upload['overwrite'] is True
+        artifacts[(run_id, artifact_name)] = expected[artifact]
+    for download, artifact in zip(downloads, expected, strict=True):
+        requested = name(download['name'], artifact, 2)
+        assert requested == original_names[artifact]
+        assert artifacts[(run_id, requested)] == expected[artifact]
+        assert download['path'] == 'bundles/' + artifact
+    verify = next(step for step in jobs['images']['steps'] if step.get('name') == 'Verify transferred bytes and build one image')
+    assert 'sh scripts/tools/run-task.sh artifacts:image' in verify['run']
+
+
+def test_split_lifecycle_lanes_each_prove_next_ordinary_pipeline():
+    kind = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())['jobs']['kind-live-rehearsal']
+    chart = next(step for step in kind['steps'] if step.get('name', '').startswith('First-party Helm'))
+    state = next(step for step in kind['steps'] if step.get('name', '').startswith('Three-worker lifecycle'))
+    assert chart['if'] == "matrix.lane == 'lifecycle-chart'"
+    assert state['if'] == "matrix.lane == 'lifecycle'"
+    pipeline = next(step for step in kind['steps'] if step.get('env', {}).get('IMAGE_SHA') == '${{ env.SHA }}' and 'sh scripts/airgap/pipeline.sh --skip-load' in step.get('run', ''))
+    expected = {'QDRANT_STORAGE_SIZE': '1Gi', 'INGEST_WORK_SIZE': '2Gi', 'INGEST_TIMEOUT': '900'}
+    assert chart['env'] == state['env'] == expected
+    assert all(pipeline['env'][key] == value for key, value in expected.items())
+    assert chart['run'].index('sh scripts/ci/rehearse_chart.sh') < chart['run'].index('sh scripts/airgap/pipeline.sh --skip-load')
+    assert state['run'].index('sh scripts/ci/check_lifecycle.sh') < state['run'].index('sh scripts/airgap/pipeline.sh --skip-load')
 
 
 def test_installer_artifact_corruption_stops_before_installation(tmp_path):

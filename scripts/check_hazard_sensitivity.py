@@ -16,6 +16,9 @@ import tarfile
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
+from multiprocessing import get_context
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -220,7 +223,24 @@ def run_pair(archive: Path, scratch: Path, python: Path, hazard: dict,
     return baseline, mutation
 
 
-def run(root: Path, output: Path, python: Path, selected: list[str] | None = None) -> dict:
+def run_pairs(archive: Path, scratch: Path, python: Path, hazards: list[dict],
+              output: Path, tools_root: Path, *, workers: int = 1):
+    """Keep each pair and its subreaper ownership in an independent process."""
+    if type(workers) is not int or not 1 <= workers <= 8:
+        raise HazardError('hazard workers must be between 1 and 8')
+    pair = partial(run_pair, archive, scratch, python, output=output, tools_root=tools_root)
+    if workers == 1:
+        yield from map(pair, hazards)
+    else:
+        with ProcessPoolExecutor(max_workers=workers, mp_context=get_context('spawn'),
+                                 max_tasks_per_child=1) as pool:
+            yield from pool.map(pair, hazards)
+
+
+def run(root: Path, output: Path, python: Path, selected: list[str] | None = None,
+        *, workers: int = 1) -> dict:
+    if type(workers) is not int or not 1 <= workers <= 8:
+        raise HazardError('hazard workers must be between 1 and 8')
     root, output, python = root.absolute(), output.absolute(), python.absolute()
     catalogue_path = root / CATALOGUE
     catalogue = json.loads(catalogue_path.read_text())
@@ -258,13 +278,13 @@ def run(root: Path, output: Path, python: Path, selected: list[str] | None = Non
     scratch = Path(tempfile.mkdtemp(prefix='m0-hazard-'))
     archive = scratch / 'candidate.tar'
     subprocess.run(['git', 'archive', '--format=tar', '-o', str(archive), head], cwd=root, check=True)
-    for hazard in hazards:
+    pairs = run_pairs(archive, scratch, python, hazards, output, root, workers=workers)
+    for hazard, (baseline, mutation) in zip(hazards, pairs, strict=True):
         result = {'id': hazard['id'], 'contract': hazard['contract'], 'target': hazard['target'],
                   'expected_test': hazard['test'], 'expected_assertion': hazard['assertion'],
                   'replacement': {'before': hazard['before'], 'after': hazard['after'],
                                   'occurrences': hazard['occurrences'], 'target_role': hazard['target_role']}}
-        result['baseline'], result['mutation'] = run_pair(
-            archive, scratch, python, hazard, output, root)
+        result['baseline'], result['mutation'] = baseline, mutation
         report['results'].append(result)
         print(hazard['id'] + ': ' + result['mutation']['status'], flush=True)
         (output / 'report.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
@@ -283,9 +303,10 @@ def main() -> int:
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--python', type=Path, default=Path(sys.executable))
     parser.add_argument('--hazard', action='append')
+    parser.add_argument('--workers', type=int, default=1)
     args = parser.parse_args()
     try:
-        result = run(args.root, args.out, args.python, args.hazard)
+        result = run(args.root, args.out, args.python, args.hazard, workers=args.workers)
         return 0 if result['passed'] else 1
     except HazardError as exc:
         print(f'hazard sensitivity unavailable: {exc}', file=sys.stderr)

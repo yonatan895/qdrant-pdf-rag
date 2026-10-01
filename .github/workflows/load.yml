@@ -60,7 +60,7 @@ jobs:
         run: docker version
       # Explicit preparation (verification never installs): the tier runs
       # on the explicitly prepared .venv/bin/python.
-      - run: sh scripts/tools/run-task.sh dev:setup
+      - run: python scripts/prepare_python.py --venv .venv --wheelhouse .tools/python-wheels/dev --connected --download-workers 8
       - run: sh scripts/tools/install-helm.sh
       - run: echo "$GITHUB_WORKSPACE/.tools/bin" >> "$GITHUB_PATH"
       - name: Prepare approved Qdrant image explicitly

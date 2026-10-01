@@ -148,6 +148,100 @@ def test_connected_cache_hit_does_not_download_and_bad_fetch_cannot_replace(lock
     assert not list(wheels.glob(".wheel-*"))
 
 
+def test_parallel_acquisition_overlaps_and_verifies_each_download_before_reuse(locked, monkeypatch, capsys):
+    import io
+    import threading
+    from pathlib import Path
+    from urllib.parse import urlsplit
+
+    root, _, wheels = locked
+    contents = {path.name: path.read_bytes() for path in wheels.glob('*.whl')}
+    for path in wheels.glob('*.whl'):
+        path.unlink()
+    barrier = threading.Barrier(2)
+    calls = []
+    def fetch(url, *, timeout):
+        calls.append((url, timeout))
+        barrier.wait(timeout=5)
+        return io.BytesIO(contents[Path(urlsplit(url).path).name])
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', fetch)
+    result = locks.prepare(root, 'dev', wheels, workers=2)
+    assert len(calls) == 2 and all(timeout == 60 for _, timeout in calls)
+    assert {path.name: path.read_bytes() for path in wheels.glob('*.whl')} == contents
+    assert locks.verify_wheelhouse(root, 'dev', wheels) == result
+    assert not list(root.glob('.wheels.prepare-*'))
+    assert not list(wheels.glob('.wheel-*'))
+    assert 'Verified wheel:' in capsys.readouterr().err
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', lambda *arguments, **keywords: pytest.fail('cache hit downloaded'))
+    assert locks.prepare(root, 'dev', wheels, workers=2) == result
+
+
+@pytest.mark.parametrize('failure', ['checksum', 'transport'])
+def test_parallel_failure_drains_workers_preserves_cache_and_next_prepare_recovers(locked, monkeypatch, failure):
+    import io
+    import threading
+    from pathlib import Path
+    from urllib.parse import urlsplit
+
+    root, _, wheels = locked
+    contents = {path.name: path.read_bytes() for path in wheels.glob('*.whl')}
+    for path in wheels.glob('*.whl'):
+        path.write_bytes(b'retained previous bytes')
+    before = {path.name: path.read_bytes() for path in wheels.iterdir()}
+    barrier = threading.Barrier(2)
+    finished = threading.Event()
+    class Stream(io.BytesIO):
+        def close(self):
+            super().close()
+            finished.set()
+    def fetch(url, *, timeout):
+        name = Path(urlsplit(url).path).name
+        barrier.wait(timeout=5)
+        if name.startswith('example-'):
+            if failure == 'transport':
+                raise OSError('synthetic controlled transport failure')
+            return io.BytesIO(b'incorrect bytes')
+        return Stream(contents[name])
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', fetch)
+    with pytest.raises((locks.LockError, OSError)):
+        locks.prepare(root, 'dev', wheels, workers=2)
+    assert finished.is_set()
+    assert {path.name: path.read_bytes() for path in wheels.iterdir()} == before
+    assert not (wheels / '.task-complete').exists()
+    assert not list(root.glob('.wheels.prepare-*'))
+    monkeypatch.setattr(locks.urllib.request, 'urlopen',
+                        lambda url, **kw: io.BytesIO(contents[Path(urlsplit(url).path).name]))
+    locks.prepare(root, 'dev', wheels, workers=2)
+    assert {path.name: path.read_bytes() for path in wheels.glob('*.whl')} == contents
+    assert json.loads((wheels / '.task-complete').read_text())['profile'] == 'dev'
+    assert locks.verify_wheelhouse(root, 'dev', wheels)['profile'] == 'dev'
+
+
+@pytest.mark.parametrize('workers', [0, -1, 17, True, '4'])
+def test_invalid_download_parallelism_fails_before_acquisition_or_environment_mutation(locked, monkeypatch, workers):
+    root, _, wheels = locked
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', lambda *arguments, **keywords: pytest.fail('network used'))
+    monkeypatch.setattr(prepare_python.subprocess, 'run', lambda *arguments, **keywords: pytest.fail('process started'))
+    for operation in (locks.acquire, locks.prepare):
+        with pytest.raises(locks.LockError, match='workers'):
+            operation(root, 'dev', wheels, workers=workers)
+    with pytest.raises(locks.LockError, match='workers'):
+        prepare_python.prepare(root, wheels, None, root / 'new-env', True, download_workers=workers)
+    assert not (root / 'new-env').exists()
+
+
+def test_parallel_preparation_is_explicitly_connected_only(locked, monkeypatch):
+    root, _, wheels = locked
+    monkeypatch.setattr(locks.urllib.request, 'urlopen', lambda *arguments, **keywords: pytest.fail('network used'))
+    monkeypatch.setattr(prepare_python.subprocess, 'run', lambda *arguments, **keywords: pytest.fail('process started'))
+    with pytest.raises(locks.LockError, match='explicit connected'):
+        prepare_python.prepare(root, wheels, None, root / 'new-env', False, download_workers=2)
+    assert prepare_python.main(['--root', str(root), '--wheelhouse', str(wheels),
+                                '--venv', str(root / 'new-env'), '--internal-index',
+                                '--download-workers', '2']) == 2
+    assert not (root / 'new-env').exists()
+
+
 def test_internal_index_has_no_inherited_extra_index_or_public_fallback(locked, monkeypatch):
     root, _, wheels = locked
     monkeypatch.setattr(prepare_python.importlib.metadata, 'version', lambda _: '26.2.1')
