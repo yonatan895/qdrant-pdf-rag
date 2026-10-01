@@ -829,6 +829,10 @@ jobs:
 
       - name: First-party Helm chart lifecycle from the published bundle
         if: matrix.lane == 'lifecycle-chart'
+        env:
+          QDRANT_STORAGE_SIZE: 1Gi
+          INGEST_WORK_SIZE: 2Gi
+          INGEST_TIMEOUT: "900"
         run: |
           export PATH="/usr/local/bin:$PATH"
           cd gapbox/qdrant-pdf-rag

@@ -524,6 +524,10 @@ def test_split_lifecycle_lanes_each_prove_next_ordinary_pipeline():
     state = next(step for step in kind['steps'] if step.get('name', '').startswith('Three-worker lifecycle'))
     assert chart['if'] == "matrix.lane == 'lifecycle-chart'"
     assert state['if'] == "matrix.lane == 'lifecycle'"
+    pipeline = next(step for step in kind['steps'] if step.get('env', {}).get('IMAGE_SHA') == '${{ env.SHA }}' and 'sh scripts/airgap/pipeline.sh --skip-load' in step.get('run', ''))
+    expected = {'QDRANT_STORAGE_SIZE': '1Gi', 'INGEST_WORK_SIZE': '2Gi', 'INGEST_TIMEOUT': '900'}
+    assert chart['env'] == state['env'] == expected
+    assert all(pipeline['env'][key] == value for key, value in expected.items())
     assert chart['run'].index('sh scripts/ci/rehearse_chart.sh') < chart['run'].index('sh scripts/airgap/pipeline.sh --skip-load')
     assert state['run'].index('sh scripts/ci/check_lifecycle.sh') < state['run'].index('sh scripts/airgap/pipeline.sh --skip-load')
 
