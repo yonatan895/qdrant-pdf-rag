@@ -440,6 +440,10 @@ def upsert_chunks(
             "heading_path": chunk.heading_path,
             "page_label": chunk.page_label,
             "page_start": chunk.page_start,
+            # Physical span end, 0-based inclusive (issue #271): citations
+            # fall back to "p. PDF n–m" when printed labels cannot locate
+            # the whole span. Not indexed and not part of chunk identity.
+            "page_end": chunk.page_end if chunk.page_end is not None else chunk.page_start,
             "chunk_type": chunk.chunk_type,
             "message_ids": chunk.message_ids,
             "members": chunk.members,

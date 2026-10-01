@@ -57,13 +57,22 @@ value, or the rerank order key after rescoring), `cite` (built by
 `format_citation` as `"{doc_id} {title}, {heading}, p. {page}"`, skipping
 empties), `heading`, `text`, `doc_id`, `title`, `page_label`, `chunk_type`
 (defaulting to `"narrative"` when the payload lacks it), `message_ids`,
-optional `product`/`version`, and optional `rerank_score`.
+optional `product`/`version`, optional `rerank_score`, optional `units`, and
+the physical PDF span `page_start`/`page_end` (0-based, inclusive; issue
+#271). The `{page}` part is the printed `page_label` when ingest stored one;
+otherwise it is the physical span `PDF n` or `PDF n–m` (1-based), so every
+citation carries a location an engineer can open in the retained PDF. This
+is a PDF page number, not a printed folio. Points without a stored
+`page_start` keep the page-less form; points without `page_end` read as
+single-page. Both forms keep the `, p. <page>` tail that
+`cites.CITATION_LINE_RE` validates.
 
 ## 2. Prefetch and filters
 
 Filters go in prefetch, never after ANN. Both legs carry the same filter
-object and the same 9-field payload projection (`doc_id, title,
-heading_path, page_label, chunk_type, product, version, message_ids, text`),
+object and the same 12-field payload projection (`doc_id, title,
+heading_path, page_label, chunk_type, product, version, message_ids, text,
+units, page_start, page_end`),
 so lexical and semantic candidates are scoped identically before any fusion.
 
 - Prefetch depth is 40 per leg, rising to the rerank-candidate count
@@ -312,7 +321,11 @@ with per-query attribution on post-freeze pools.
 
 `diversify_hits` caps coverage at 1 chunk per page and 3 per document
 (`Settings`-overridable), because near-duplicate consecutive chunks would
-otherwise monopolize the prompt slots. Backfill runs in three phases:
+otherwise monopolize the prompt slots. "Page" is the physical first page
+`(doc_id, page_start)` (issue #271): printed labels collapsed every
+unlabeled page (and repeated folios) of a document into one bucket, so the
+per-page cap silently became per-document. Hits without a projected
+`page_start` (legacy or hand-built) keep the printed-label bucket. Backfill runs in three phases:
 
 1. Take candidates respecting **both** caps.
 2. Relax the per-doc cap first, still respecting per-page.

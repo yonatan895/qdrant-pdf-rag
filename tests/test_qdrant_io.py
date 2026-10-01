@@ -203,3 +203,42 @@ def test_upsert_chunks_payload_is_slimmed_without_embed_text():
     assert payload["heading_path"] == "Chapter 1 > Overview"
     assert "embed_text" not in payload, "embed_text must not be stored in point payload"
 
+
+
+def test_physical_page_span_round_trips_payload_to_citation():
+    """Issue #271 round trip: make_chunks -> upsert payload -> retrieval
+    projection -> citation -> validator. An unlabeled spanning chunk cites
+    its whole physical span; a labeled chunk keeps its printed range."""
+    from mainframe_rag.agent.cites import valid_citations
+    from mainframe_rag.ingest.chunk import make_chunks
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+    from mainframe_rag.ingest.qdrant_io import upsert_chunks
+    from mainframe_rag.retrieve.query import _to_hit
+
+    class UpsertRecordingClient(RecordingClient):
+        def __init__(self):
+            super().__init__()
+            self.upserted_points = []
+
+        def upsert(self, collection_name, *, points, wait=True):
+            self.upserted_points.extend(points)
+            return True
+
+    def cite_for(labels):
+        parsed = ParsedDoc(
+            path="WX10-0001-00.pdf", doc_id="WX10-0001-00", sha256="ab" * 32, vendor="unknown",
+            title="Widget Guide", toc=[[1, "Chapter 1. Widgets", 1]], page_count=3,
+        )
+        chunks = make_chunks(parsed, ["Alpha widget text.", "Beta widget text.", "Gamma widget text."], labels)
+        assert len(chunks) == 1
+        client = UpsertRecordingClient()
+        upsert_chunks(client, _settings(4), parsed, chunks, [([0.1] * 4, ([1], [1.0]))])
+        (point,) = client.upserted_points
+        assert (point.payload["page_start"], point.payload["page_end"]) == (0, 2)
+        hit = _to_hit(models.ScoredPoint(id=str(point.id), version=1, score=1.0, payload=point.payload), 1.0)
+        assert valid_citations(f"Answer.\n\nCitations:\n- {hit.cite}\n", {hit.cite}) == [hit.cite]
+        return hit.cite
+
+    assert cite_for(["", "", ""]) == "WX10-0001-00 Widget Guide, Chapter 1. Widgets, p. PDF 1–3"
+    assert cite_for([None, "1", "2"]) == "WX10-0001-00 Widget Guide, Chapter 1. Widgets, p. PDF 1–3"
+    assert cite_for(["7", "8", "9"]) == "WX10-0001-00 Widget Guide, Chapter 1. Widgets, p. 7–9"
