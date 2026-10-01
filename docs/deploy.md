@@ -572,9 +572,11 @@ live in `.github/workflows/e2e.yml`.
   on `main`/dispatch (PRs build, never push — fork-safe).
   Runtime wheels and BM25 weights prepare in two independent `build-inputs`
   runners; runtime acquisition needs no full dev install. Verified bytes move
-  through SHA/run-attempt-bound artifacts into two independent `images` runners
-  (`ingest`, `agent`). `artifacts:image` re-verifies actual transferred wheels
-  and BM25 before each unchanged Containerfile build. The canonical `build`
+  through full-SHA-named, workflow-run-scoped artifacts into two independent
+  `images` runners (`ingest`, `agent`). Input names stay stable across attempts:
+  failed-image retries reuse successful upstream artifacts, while producer
+  retries overwrite their own same-name artifacts. `artifacts:image` re-verifies
+  actual transferred wheels and BM25 before each unchanged Containerfile build. The canonical `build`
   job is an all-success join: failed, cancelled or skipped preparation/image
   jobs cannot emit successful packaging identity or image-ref outputs.
   `airgap-package` (main/dispatch): pack + 90-day bundle artifact (PRs

@@ -492,8 +492,14 @@ def test_parallel_build_join_preserves_failure_and_sha_bound_inputs(tmp_path):
         assert 'max-parallel' not in jobs[name]['strategy']
     steps = jobs['images']['steps']
     downloads = [step['with']['name'] for step in steps if 'download-artifact@' in step.get('uses', '')]
-    assert downloads == [f'build-{artifact}-${{{{ github.sha }}}}-attempt-${{{{ github.run_attempt }}}}'
+    assert downloads == [f'build-{artifact}-${{{{ github.sha }}}}'
                          for artifact in ('wheelhouse', 'bm25-weights')]
+    upload = next(step['with'] for step in jobs['build-inputs']['steps'] if 'upload-artifact@' in step.get('uses', ''))
+    assert upload['name'] == 'build-${{ matrix.artifact }}-${{ github.sha }}'
+    assert upload['overwrite'] is True
+    assert upload['include-hidden-files'] is True
+    assert all('run-id' not in step['with'] and 'repository' not in step['with']
+               for step in steps if 'download-artifact@' in step.get('uses', ''))
     build = jobs['build']
     assert build['needs'] == ['select', 'build-inputs', 'images']
     assert build['if'].startswith('always() &&')
@@ -516,6 +522,45 @@ def test_parallel_build_join_preserves_failure_and_sha_bound_inputs(tmp_path):
     assert output.read_text().splitlines() == [
         'sha=' + 'a' * 40, 'ingest=ghcr.io/mixedowner/qdrant-pdf-rag-ingest:' + 'a' * 40,
         'agent=ghcr.io/mixedowner/qdrant-pdf-rag-agent:' + 'a' * 40]
+
+
+@pytest.mark.parametrize('retried_inputs,original_complete', [
+    ((), True), (('wheelhouse',), False), (('bm25-weights',), False),
+    (('wheelhouse', 'bm25-weights'), True),
+])
+def test_build_input_handoff_survives_failed_image_and_producer_retries(retried_inputs, original_complete):
+    jobs = yaml.safe_load((ROOT / '.github/workflows/e2e.yml').read_text())['jobs']
+    upload = next(step['with'] for step in jobs['build-inputs']['steps'] if 'upload-artifact@' in step.get('uses', ''))
+    downloads = [step['with'] for step in jobs['images']['steps'] if 'download-artifact@' in step.get('uses', '')]
+    source_sha = 'a' * 40
+    run_id = 123
+    artifacts = {}
+
+    def name(template, artifact, attempt):
+        return (template.replace('${{ matrix.artifact }}', artifact)
+                .replace('${{ github.sha }}', source_sha)
+                .replace('${{ github.run_attempt }}', str(attempt)))
+
+    expected = {artifact: ('verified-' + artifact).encode() for artifact in ('wheelhouse', 'bm25-weights')}
+    for artifact, content in expected.items():
+        artifact_name = name(upload['name'], artifact, 1)
+        artifacts[(run_id + 1, artifact_name)] = b'wrong-run'
+        if original_complete or artifact not in retried_inputs:
+            artifacts[(run_id, artifact_name)] = content
+    original_names = {artifact: name(upload['name'], artifact, 1) for artifact in expected}
+    for artifact in retried_inputs:
+        artifact_name = name(upload['name'], artifact, 2)
+        assert artifact_name == original_names[artifact]
+        if (run_id, artifact_name) in artifacts:
+            assert upload['overwrite'] is True
+        artifacts[(run_id, artifact_name)] = expected[artifact]
+    for download, artifact in zip(downloads, expected, strict=True):
+        requested = name(download['name'], artifact, 2)
+        assert requested == original_names[artifact]
+        assert artifacts[(run_id, requested)] == expected[artifact]
+        assert download['path'] == 'bundles/' + artifact
+    verify = next(step for step in jobs['images']['steps'] if step.get('name') == 'Verify transferred bytes and build one image')
+    assert 'sh scripts/tools/run-task.sh artifacts:image' in verify['run']
 
 
 def test_split_lifecycle_lanes_each_prove_next_ordinary_pipeline():

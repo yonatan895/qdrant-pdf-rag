@@ -196,7 +196,10 @@ already prepared `BUNDLE_DIR`. `IMAGE_NAME` and `IMAGE_TAG` are required, and
 the target, every runtime wheel and the pinned BM25 snapshot before Docker;
 missing/corrupt inputs fail without repair or download. It needs no development
 venv. GitHub uses separate runner/daemon workspaces for the two roles, and
-transfers verified build-input artifacts bound to the same SHA and run attempt.
+transfers verified build-input artifacts scoped to the same workflow run and
+full SHA. Their names omit the attempt so a failed-image retry can reuse a
+successful producer's inputs; producer retries overwrite the same name. Every
+image invocation still verifies the transferred bytes, including on reruns.
 `artifacts:images` retains its existing sequential preparation and local builds;
 neither task authorizes building in the air gap.
 
