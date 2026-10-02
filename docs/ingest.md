@@ -205,9 +205,14 @@ for citations and filters.
   across paragraph and page breaks). Within it every entry start counts,
   including unlabelled sub-entries such as `0C4` inside the `0Cx` entry.
   Index pages, code-to-module tables, return-code tables and other manuals'
-  numeric cells store `[]`. The gate changes the payload only, never chunk
-  boundaries, ids, text or unit spans. A manual without the label stores no
-  codes, and those lookups take the NL path. The value is written to
+  numeric cells store `[]`. The same gate decides entry splitting: outside a
+  code section, code-shaped lines (a dump listing's `255`, a table value) do
+  not open atomic entries, so they chunk as ordinary prose or table rows. A
+  code entry longer than `SECTION_MAX_CHARS` is cut at line boundaries, with
+  the code line kept in the first piece: an entry is an explanation, not a
+  statement, and emitted whole a dump-listing "entry" overflowed the
+  4096-token embed window. A manual without the label stores no codes, and
+  those lookups take the NL path. The value is written to
   the point payload on every upsert — indexing the field without writing it
   leaves the index empty and every code query silently falling back.
 - SYSIN adjacency (issue #216): data paragraphs following a `DD *`/`DD DATA`
