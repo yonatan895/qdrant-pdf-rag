@@ -102,10 +102,16 @@ Frequency-based running header/footer removal, computed **once per document**
 - Matching is case- and whitespace-insensitive (whitespace collapsed,
   stripped, lowercased).
 - Page numbers are stripped even when infrequent, but only in the edge lines:
-  ASCII decimals (no inner dot, so `1.2` survives), strict roman numerals, or
-  an entry-range footer (`805 • 806`, two hex-like tokens around a bullet). A
+  ASCII decimals (no inner dot, so `1.2` survives) or strict roman numerals. A
   loose roman match once deleted words like `XML`, `civil`, `dim` — the strict
   form is a regression fix; `mix=1009`/`di=501` stay numerals by design.
+- An entry range (the page's first and last entry around a bullet) is stripped
+  at either edge, even above a footer folio: codes (`805 • 806`, `AC8 • AFB`),
+  families with a lowercase placeholder (`0BB • 0Cx`) and message IDs
+  (`ICH408I • ICH409I`, `U901 • U902`). Tokens are case-sensitive hex, or
+  letters then a digit, so `Yes • No` stays. In the footer it counts as the
+  page's folio. Message manuals print it as a header, which the one-folio
+  rule below used to keep on most pages.
 - A page has one folio: a number in the top edge is stripped only when the
   bottom edge carries no folio, so an entry code line that starts a page
   survives under a footer folio. Known limit: a manual with header folios
