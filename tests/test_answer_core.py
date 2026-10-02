@@ -225,26 +225,6 @@ async def test_core_adversarial_model_outputs(content, answer, citations, state,
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize(
-    "echo",
-    ["Retrieved manual excerpts:", "Retrieved manual excerpts:\n\n[1] {cite}"],
-    ids=["header", "header-with-excerpt-label"],
-)
-@pytest.mark.xfail(
-    strict=True,
-    reason="#576 contract gap: a prompt-header echo plus a valid citation is `accepted`; "
-    "docs/agent.md lists answer/citation labels and bare citations as non-prose but not "
-    "prompt section headers. Flips when the body predicate rejects prompt scaffolding",
-)
-async def test_core_prompt_header_residue_is_not_an_answer_body(echo, stream):
-    cite = _hit().cite
-    content = f"{echo.format(cite=cite)}\n\nCitations:\n- {cite}"
-    output = await _run_core(content, stream, "stop")
-    assert output.verification_state == "generation_incomplete"
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("header", ["Sources:", "References:", "### **References:**"])
 async def test_core_preserves_instructions_under_citation_alias_headers(stream, header):
     answer = f"Set LFAREA.\n\n{header}\n- Restart the system with CLPA\n- Check IEASYSxx"

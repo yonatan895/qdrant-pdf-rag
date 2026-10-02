@@ -939,17 +939,15 @@ def test_column_major_table_pdf_keeps_text_cells_and_location(tmp_path):
         assert name in text and meaning in text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#85: page.get_text() is geometry-free, so a column-major table loses its "
-    "row/value associations (and bare numeric cells are dropped as page numbers by "
-    "chrome.strip_page); flips when #85 preserves rows",
-)
-def test_column_major_table_pdf_keeps_row_value_associations(tmp_path):
+def test_known_gap_85_column_major_table_loses_row_value_associations(tmp_path):
+    """KNOWN GAP (#85), pinning current lossy behavior: page.get_text() is
+    geometry-free, so a column-major table's name and meaning cells never
+    share a line. When #85 preserves rows this test must be flipped to
+    assert every (name, default, meaning) triple on one line."""
     (chunk,) = _pipeline_chunks(_table_pdf(tmp_path / "WX10-0011-00_table.pdf"))
     lines = chunk.text.splitlines()
-    for name, default, meaning in _TABLE_ROWS:
-        assert any(name in ln and default in ln.split() and meaning in ln for ln in lines), name
+    for name, _default, meaning in _TABLE_ROWS:
+        assert not any(name in ln and meaning in ln for ln in lines), name
 
 
 def _change_bar_pdf(path):
@@ -981,11 +979,9 @@ def test_change_bar_pdf_keeps_prose_in_order(tmp_path):
     assert prose == [f"Revised sentence {i} about the widget limit." for i in range(6)]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#85 (status 2026-10-01): change-bar glyphs survive extraction as runs of bare "
-    "'|' lines inside chunk text; flips when the extraction concern strips them",
-)
-def test_change_bar_pdf_chunk_has_no_bare_bar_lines(tmp_path):
+def test_known_gap_85_change_bar_glyphs_survive_as_bare_bar_lines(tmp_path):
+    """KNOWN GAP (#85 status note), pinning current behavior: change-bar glyphs
+    survive extraction as bare '|' lines inside chunk text. When the extraction
+    concern strips them this test must be flipped to assert none remain."""
     (chunk,) = _pipeline_chunks(_change_bar_pdf(tmp_path / "WX10-0012-00_bars.pdf"))
-    assert [ln for ln in chunk.text.splitlines() if ln.strip() == "|"] == []
+    assert [ln for ln in chunk.text.splitlines() if ln.strip() == "|"]
