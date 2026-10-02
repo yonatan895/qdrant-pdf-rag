@@ -7,36 +7,36 @@ Each chunk UUID uses the unchanged UUID5 URL-namespace key `source_revision|Witn
 ## 1. Two independent atomic items
 
 ```json
-{"atomic_spans":[{"end":16,"start":0},{"end":34,"start":18}],"build_id":"00000000-0000-4000-8000-000000000001","chunk_id":"ca6ff27f-a5b6-5cfa-9768-a0e570bc5928","chunk_type":"code","locations":[{"end":16,"origin":"source","page":1,"printed_label":"i","start":0},{"end":18,"origin":"separator","page":null,"printed_label":null,"start":16},{"end":34,"origin":"source","page":1,"printed_label":"i","start":18}],"representation_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":1,"source_revision":"synthetic|guide|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"//A EXEC PGM=ONE\n\n//B EXEC PGM=TWO"}
+{"atomic_spans":[{"end":16,"start":0},{"end":34,"start":18}],"build_id":"00000000-0000-4000-8000-000000000001","chunk_id":"ca6ff27f-a5b6-5cfa-9768-a0e570bc5928","chunk_type":"narrative","locations":[{"end":16,"origin":"source","page":1,"printed_label":"i","start":0},{"end":18,"origin":"separator","page":null,"printed_label":null,"start":16},{"end":34,"origin":"source","page":1,"printed_label":"i","start":18}],"representation_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":1,"source_revision":"synthetic|guide|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"//A EXEC PGM=ONE\n\n//B EXEC PGM=TWO"}
 ```
 
-Envelope SHA-256: `7071c5f88e7c2bd01df79a43f228e4888952a84db2ee0939a18d34d2cd3670b6`.
+Envelope SHA-256: `3554adeb71857839f89dff819eee89c79220f2ded12083c79d748928eb68254c`.
 
-Exact reference: `e1.AAAAAAAAQACAAAAAAAAAAcpv8n-ltlz6l2ig5XC8WShwccX4jnwr0B33mkPyKOSIiVKoTbLuCTmhjTTSzTZwtg`.
+Exact reference: `e1.AAAAAAAAQACAAAAAAAAAAcpv8n-ltlz6l2ig5XC8WSg1VK3rcYV4Ofid_4Ge7onHkiDy3tEgg8eddIko62glTA`.
 
 Expected returned UTF-8 text hex: `2f2f4120455845432050474d3d4f4e450a0a2f2f4220455845432050474d3d54574f` (34 bytes).
 
 ## 2. Two physical pages, one unknown printed label
 
 ```json
-{"atomic_spans":[],"build_id":"00000000-0000-4000-8000-000000000001","chunk_id":"5755f0db-8cf2-5fb0-9396-38c04dff673d","chunk_type":"prose","locations":[{"end":14,"origin":"source","page":3,"printed_label":"iii","start":0},{"end":16,"origin":"separator","page":null,"printed_label":null,"start":14},{"end":28,"origin":"source","page":4,"printed_label":null,"start":16}],"representation_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":1,"source_revision":"synthetic|guide|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"First µ page.\n\nSecond page."}
+{"atomic_spans":[],"build_id":"00000000-0000-4000-8000-000000000001","chunk_id":"5755f0db-8cf2-5fb0-9396-38c04dff673d","chunk_type":"narrative","locations":[{"end":14,"origin":"source","page":3,"printed_label":"iii","start":0},{"end":16,"origin":"separator","page":null,"printed_label":null,"start":14},{"end":28,"origin":"source","page":4,"printed_label":null,"start":16}],"representation_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":1,"source_revision":"synthetic|guide|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"First µ page.\n\nSecond page."}
 ```
 
-Envelope SHA-256: `b15402c5428ba101afb7cee746eb15578f74b7c03b1134d55a7b57398241e56a`.
+Envelope SHA-256: `01acb2d386b27dd5618dbc5d9a7bd42dc1f8ced6d4acd2d6fd061d9c645428a1`.
 
-Exact reference: `e1.AAAAAAAAQACAAAAAAAAAAVdV8NuM8l-wk5Y4wE3_Zz2xVALFQouhAa-3zudG6xVXj3S3wDsRNNVae1c5gkHlag`.
+Exact reference: `e1.AAAAAAAAQACAAAAAAAAAAVdV8NuM8l-wk5Y4wE3_Zz0BrLLThrJ91WGNvF2ae9QtwfjO1tSs0tb9Bh2cZFQooQ`.
 
 Expected returned UTF-8 text hex: `466972737420c2b520706167652e0a0a5365636f6e6420706167652e` (28 bytes).
 
 ## 3. One atomic item across a page boundary
 
 ```json
-{"atomic_spans":[{"end":32,"start":0}],"build_id":"00000000-0000-4000-8000-000000000001","chunk_id":"0da50ae1-f944-5f89-9001-5e8fc27c609c","chunk_type":"code","locations":[{"end":20,"origin":"source","page":8,"printed_label":"8","start":0},{"end":21,"origin":"separator","page":null,"printed_label":null,"start":20},{"end":32,"origin":"source","page":9,"printed_label":null,"start":21}],"representation_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":1,"source_revision":"synthetic|guide|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"//STEP EXEC PGM=APP,\n// PARM=YES"}
+{"atomic_spans":[{"end":32,"start":0}],"build_id":"00000000-0000-4000-8000-000000000001","chunk_id":"0da50ae1-f944-5f89-9001-5e8fc27c609c","chunk_type":"narrative","locations":[{"end":20,"origin":"source","page":8,"printed_label":"8","start":0},{"end":21,"origin":"separator","page":null,"printed_label":null,"start":20},{"end":32,"origin":"source","page":9,"printed_label":null,"start":21}],"representation_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":1,"source_revision":"synthetic|guide|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"//STEP EXEC PGM=APP,\n// PARM=YES"}
 ```
 
-Envelope SHA-256: `4086c9a1085004af2f1627837cbfdc594cb4654a0756e753135604de5e8abba0`.
+Envelope SHA-256: `aeb5e0082043a22e91a5a5ab3f6714b00c6e67fd6413ec25f5c1f665568f3cf4`.
 
-Exact reference: `e1.AAAAAAAAQACAAAAAAAAAAQ2lCuH5RF-JkAFej8J8YJxAhsmhCFAEry8WJ4N8v9xZTLRlSgdW51MTVgTeXoq7oA`.
+Exact reference: `e1.AAAAAAAAQACAAAAAAAAAAQ2lCuH5RF-JkAFej8J8YJyuteAIIEOiLpGlpas_ZxSwDG5n_WQT7CX1wfZlVo889A`.
 
 Expected returned UTF-8 text hex: `2f2f5354455020455845432050474d3d4150502c0a2f2f205041524d3d594553` (32 bytes).
 

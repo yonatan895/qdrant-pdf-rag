@@ -51,7 +51,7 @@ rejection or its reopening gate.
 ## P0 — Foundation & highest ROI
 
 ### PR-01 (issue #75): Wire the eval gate into CI + close metric gaps
-> **Status: DONE — merged as PR #96.** `make gate-l1` is a required GitHub CI check;
+> **Status: DONE — merged as PR #96.** `sh scripts/tools/run-task.sh eval:gate-l1` is a required GitHub CI check;
 > do not re-implement.
 
 Current gate and CI contracts: [docs/eval.md](docs/eval.md) and
@@ -112,6 +112,13 @@ and [docs/live-stack.md](docs/live-stack.md).
 ## P1 — Quality & operability
 
 ### PR-07 (issue #81): Parent-child (small-to-big) retrieval
+> **Status: CLOSED (children-as-points default rejected).** The #81 spike on real
+> Db2 manuals did not meet the acceptance bar: it flipped the flagship `DSN9022I`
+> identifier query to the wrong chapter, at 4.4x points and 2.2x ingest wall time.
+> Nothing was merged; the spike branch `feat/81-parent-child` is kept. The
+> implementation below is historical, not a task to start. Verdict and measurements:
+> the closing comment on #81.
+
 - **Scope:** `ingest/chunk.py`, `ingest/qdrant_io.py`, `retrieve/query.py`
 - **Implementation:** Embed child chunks (~128–256 tokens); retrieve children, return
   parent (~512–1024 tokens) to the LLM; group via payload `parent_id`; dedupe multiple
@@ -143,7 +150,7 @@ Current acronym behavior and measured retry verdicts: [docs/retrieval.md](docs/r
 > **Status: DONE.** Owner moved to `src/mainframe_rag/tracing.py`; library default off,
 > air-gap deploy default ON — an unset endpoint resolves to the in-cluster Jaeger and the
 > `off` sentinel disables tracing and the deployment together. Fail-open bounded export +
-> Jaeger v2 all-in-one overlay (`deploy/kustomize/jaeger`).
+> Jaeger v2 all-in-one Helm templates (`charts/mainframe-rag/templates/jaeger-*.yaml`; the Kustomize overlay was retired).
 > Tests: `tests/test_tracing.py`, `tests/test_ingest_tracing.py`.
 
 Current tracing ownership and deployment contracts: [docs/architecture.md](docs/architecture.md)
@@ -187,11 +194,11 @@ Current L4 instrument and RC-only evaluation contract: [docs/eval.md](docs/eval.
 Decision evidence and reopening conditions: [docs/retrieval.md](docs/retrieval.md).
 
 ### PR-13 (issue #87): Prompt-injection & retrieved-content hygiene
-> **Status: PARTIAL.** Baseline regex injection screen shipped (`retrieve/screen.py`,
+> **Status: DONE (closed via PR #115).** Baseline regex injection screen shipped (`retrieve/screen.py`,
 > trap before identifiers), extract-time PDF sanitization shipped (`ibm_pdf.sanitize_page_text`),
 > and context bounding shipped (`max_context_chars`). Tests are distributed across
 > `tests/test_sanitize.py`, `tests/test_hygiene.py`, and `tests/test_screen.py`.
-> Advanced LLM-based hygiene / dual-LLM guards remain open.
+> Advanced LLM-based hygiene / dual-LLM guards were not built; no open issue tracks them.
 - **Scope:** `agent/answer.py`, `ingest/ibm_pdf.py` sanitization, `tests/test_sanitize.py`, `tests/test_screen.py`
 - **Implementation:** Anything not covered by #80: strip/neutralize control sequences in
   extracted PDF text at ingest; size-cap assembled context (respect
@@ -258,6 +265,11 @@ Decision evidence and reopening conditions: [docs/retrieval.md](docs/retrieval.m
 ## P3 — Optional / research (only on measured gaps)
 
 ### PR-18 (issue #92): Qdrant RAM reduction
+> **Status: CLOSED (already implemented; no further default change).** The dense
+> vector already uses INT8 `ScalarQuantization` (`quantile=0.99`, `always_ram`)
+> with `on_disk` vectors/payload in `ingest/qdrant_io.py` (`_dense_params`). No A/B
+> or product-quantization change was run or shipped. Representative RAM/latency
+> measurement moved to #374. The checklist below is historical.
 - Scalar/product quantization + on-disk payload on the dense collection; measure recall
   delta + RAM/latency improvement via harness. Prefer over Matryoshka unless #89 adopted
   an MRL model. Qdrant 1.19.0 — verify quantization API against that version.
@@ -311,7 +323,7 @@ issue first — this section records what exists so agents stop re-proposing it.
   browser-only `localStorage`, strict CSP, `UI_ENABLED` fail-closed); native
   `POST /v1/chat` + OpenAI-compatible `/v1/chat/completions` share the new
   `agent/answer_core.py` engine with `/v1/answer`; follow-up condensation is
-  default-off with its A/B recorded (`make eval-chat`); `AGENT_ROUTE=true`
+  default-off with its A/B recorded (`sh scripts/tools/run-task.sh eval:chat`); `AGENT_ROUTE=true`
   renders the `openshift-ui` oauth-proxy overlay + reencrypt Route; new runtime
   deps `jinja2` + `python-multipart`.
 
