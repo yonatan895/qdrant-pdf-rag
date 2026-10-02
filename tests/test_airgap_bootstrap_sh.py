@@ -394,3 +394,133 @@ def test_bootstrap_approved_upgrade_requires_explicit_checkout_preserves_operato
     probe = subprocess.run([str(workspace / ".tools/bin/task"), "probe"], cwd=workspace, env=_offline_env(bundle_dir), capture_output=True, text=True, check=False)
     assert probe.returncode == 0, probe.stderr
     assert probe.stdout == "offline-task-ok"
+
+
+# --- Issue #414: interrupted / failed artifact staging ---------------------------------------
+
+STAGING_DIRNAME = ".bootstrap-staging"
+
+_CP_SHIM = """#!/bin/sh
+# Test shim: behaves like cp except for one planned fault on the member named by
+# FAULT_MEMBER, fired once (FAULT_MODE: truncate | kill | corrupt).
+src=""
+for a in "$@"; do case "$a" in -*) ;; *) src=$a; break;; esac; done
+for a in "$@"; do last=$a; done
+if [ "${src##*/}" = "${FAULT_MEMBER:-}" ] && [ ! -e "$FAULT_MARK" ]; then
+    : > "$FAULT_MARK"
+    [ -d "$last" ] && out="$last/${src##*/}" || out="$last"
+    case "$FAULT_MODE" in
+        corrupt) printf 'silently-corrupted' > "$out"; exit 0 ;;
+        *) head -c 5 "$src" > "$out" ;;
+    esac
+    [ "$FAULT_MODE" = kill ] && kill -9 "$PPID"
+    exit 1
+fi
+exec "${REAL_CP:-/usr/bin/cp}" "$@"
+"""
+
+_MV_SHIM = """#!/bin/sh
+# Test shim: dies (like a power cut) just before moving FAULT_MEMBER, once.
+src=""
+for a in "$@"; do case "$a" in -*) ;; *) src=$a; break;; esac; done
+if [ "${src##*/}" = "${FAULT_MEMBER:-}" ] && [ ! -e "$FAULT_MARK" ]; then
+    : > "$FAULT_MARK"
+    kill -9 "$PPID"
+    exit 1
+fi
+exec "${REAL_MV:-/usr/bin/mv}" "$@"
+"""
+
+
+def _fault_env(bundle_dir, tool, member, mode="kill"):
+    env = _offline_env(bundle_dir)
+    shim = bundle_dir / "bin" / tool
+    real = shim.resolve()
+    shim.unlink()
+    shim.write_text(_CP_SHIM if tool == "cp" else _MV_SHIM)
+    shim.chmod(0o755)
+    env.update({
+        "FAULT_MEMBER": member, "FAULT_MODE": mode,
+        "FAULT_MARK": str(bundle_dir / f"fault-fired-{tool}"),
+        "REAL_CP" if tool == "cp" else "REAL_MV": str(real),
+    })
+    return env
+
+
+def _snapshot(workspace):
+    """sha256 of every accepted file in dist/ (not the refused staging leftover)
+    plus airgap.env: proves what did not change."""
+    snap = {}
+    for path in sorted((workspace / "dist").rglob("*")):
+        if path.is_file() and STAGING_DIRNAME not in path.parts:
+            snap[str(path.relative_to(workspace))] = _sha256(path.read_bytes())
+    env_file = workspace / "airgap.env"
+    snap["airgap.env"] = _sha256(env_file.read_bytes()) if env_file.exists() else None
+    return snap
+
+
+def _dist_matches_bundle(bundle_dir, workspace):
+    names = [line.split()[1] for line in (bundle_dir / "SHA256SUMS").read_text().splitlines()]
+    names += ["SHA256SUMS", "SHA256SUMS.sig"]
+    return all((workspace / "dist" / n).read_bytes() == (bundle_dir / n).read_bytes() for n in names)
+
+
+@pytest.mark.parametrize("mode", ["truncate", "kill", "corrupt"])
+def test_bootstrap_failed_copy_leaves_existing_dist_and_env_untouched(bundle_dir, mode):
+    """A failed, killed or silently corrupting artifact copy must not alter a
+    previously accepted dist/ or the operator's airgap.env (issue #414)."""
+    assert _bootstrap(bundle_dir).returncode == 0
+    workspace = bundle_dir / "operator workspace"
+    (workspace / "airgap.env").write_text("INTERNAL_REGISTRY=operator-kept\n")
+    (workspace / "dist/retained-evidence.txt").write_text("operator artifact")
+    before = _snapshot(workspace)
+    failed = _bootstrap(bundle_dir, _fault_env(bundle_dir, "cp", "sbom.json", mode))
+    assert failed.returncode != 0
+    assert "SUCCESS" not in failed.stdout
+    assert _snapshot(workspace) == before
+    leftover = workspace / "dist" / STAGING_DIRNAME
+    if mode == "kill":
+        # An unclean death cannot clean up: the leftover is refused, never accepted.
+        assert leftover.is_dir()
+        refused = _bootstrap(bundle_dir)
+        assert refused.returncode != 0
+        assert "interrupted bootstrap staging" in refused.stderr
+        assert "SUCCESS" not in refused.stdout
+        assert _snapshot(workspace) == before
+        shutil.rmtree(leftover)  # the documented operator action
+    else:
+        assert not leftover.exists()
+    again = _bootstrap(bundle_dir)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert _dist_matches_bundle(bundle_dir, workspace)
+    assert not leftover.exists()
+    assert (workspace / "airgap.env").read_text() == "INTERNAL_REGISTRY=operator-kept\n"
+    assert (workspace / "dist/retained-evidence.txt").read_text() == "operator artifact"
+
+
+@pytest.mark.parametrize("tool,member", [("cp", "sbom.json"), ("mv", "SHA256SUMS")], ids=["during-copy", "during-commit"])
+def test_bootstrap_killed_first_run_never_leaves_accepted_bundle(bundle_dir, tool, member):
+    """First run, process dies mid-staging or mid-commit: dist/ must not look
+    like an accepted bundle (no MANIFEST/checksum list), a rerun is refused with
+    a fixed message until the leftover is removed, then completes (issue #414)."""
+    killed = _bootstrap(bundle_dir, _fault_env(bundle_dir, tool, member, "kill"))
+    assert killed.returncode != 0
+    workspace = bundle_dir / "operator workspace"
+    assert not (workspace / "dist/MANIFEST.txt").exists()
+    assert not (workspace / "dist/SHA256SUMS").exists()
+    leftover = workspace / "dist" / STAGING_DIRNAME
+    if tool == "cp":
+        assert leftover.is_dir()
+        refused = _bootstrap(bundle_dir)
+        assert refused.returncode != 0
+        assert "interrupted bootstrap staging" in refused.stderr
+        assert not (workspace / "dist/MANIFEST.txt").exists()
+        shutil.rmtree(leftover)
+    else:
+        # Mid-commit: staged bytes are verified; the leftover is still refused.
+        assert leftover.is_dir()
+        assert _bootstrap(bundle_dir).returncode != 0
+        shutil.rmtree(leftover)
+    again = _bootstrap(bundle_dir)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert _dist_matches_bundle(bundle_dir, workspace)

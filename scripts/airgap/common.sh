@@ -324,23 +324,30 @@ check_manifest_sha() {
 # change against it (an edited script or chart at the matching HEAD would
 # otherwise run under the release claim). Untracked files (airgap.env,
 # dist/, generated output) are operator-owned and stay allowed. An explicitly
-# set IMAGE_SHA alone never establishes which code executes. Silent on
-# success. Dry-run (preview mutates nothing), no reachable MANIFEST
-# (connected development) and an unresolvable checkout keep working but say
-# so on stderr: the run is not release-verified. The refusal never prints
-# file names or contents.
+# set IMAGE_SHA alone never establishes which code executes, so a claimed
+# release fails closed when its identity cannot be established: a MANIFEST
+# with no sha, a checkout git cannot resolve (copied tree, no usable git), or
+# bundle evidence (dist/SHA256SUMS, as bootstrap leaves it) whose MANIFEST is
+# missing. Only these keep running with a "not release-verified" notice on
+# stderr: dry-run (preview mutates nothing) and connected development (no
+# MANIFEST and no bundle evidence). The refusals never print file names or
+# contents. Silent on success.
 check_checkout_sha() {
     if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
         echo "Notice: dry-run — checkout not release-verified" >&2; return 0
     fi
     if [ -z "${MANIFEST:-}" ] || [ ! -f "$MANIFEST" ]; then
+        if [ -f dist/SHA256SUMS ] || [ -f ../SHA256SUMS ]; then
+            die "bundle evidence (SHA256SUMS) is present but no packed MANIFEST.txt is readable — rerun bootstrap.sh from the signed bundle to restore dist/MANIFEST.txt; overriding IMAGE_SHA alone never establishes a release"
+        fi
         echo "Notice: no packed MANIFEST — checkout not release-verified" >&2; return 0
     fi
     packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
+    [ -n "$packed_sha" ] || \
+        die "packed MANIFEST ($MANIFEST) names no sha — cannot establish the release; use the signed bundle's MANIFEST.txt"
     checkout_sha=$(git rev-parse HEAD 2>/dev/null) || checkout_sha=""
-    if [ -z "$packed_sha" ] || [ -z "$checkout_sha" ]; then
-        echo "Notice: checkout identity unresolved — checkout not release-verified" >&2; return 0
-    fi
+    [ -n "$checkout_sha" ] || \
+        die "executing checkout identity cannot be resolved (no usable git checkout here) while a packed MANIFEST names sha $packed_sha — run from the approved bundle checkout (see $MANIFEST); overriding IMAGE_SHA alone never changes which code executes"
     [ "$checkout_sha" = "$packed_sha" ] || \
         die "executing checkout HEAD=$checkout_sha does not match the packed MANIFEST sha ($packed_sha) — run from the approved bundle checkout (see $MANIFEST); overriding IMAGE_SHA alone never changes which code executes"
     _diff_rc=0

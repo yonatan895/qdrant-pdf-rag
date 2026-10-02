@@ -21,6 +21,7 @@ from tests.helpers_airgap import (
     rendered_env,
     run_sh,
     set_oauth_proxy_pin,
+    write_git_identity_stub,
     sha256_bytes,
 )
 
@@ -185,6 +186,7 @@ def test_storage_size_knob_covers_persistence_and_snapshot(tree):
 def _manifest(tree, chart_sha=None, sha=IMAGE_SHA):
     dist = tree[0] / "dist"
     dist.mkdir(exist_ok=True)
+    write_git_identity_stub(tree[0], sha)  # a claimed release needs a resolvable checkout (#414)
     lines = [f"sha: {sha}"]
     if chart_sha is not None:
         lines.append(f"chart_sha256: {chart_sha}")

@@ -621,19 +621,61 @@ def test_checkout_guard_dryrun_skips_mismatch(tree):
 
 
 def test_checkout_guard_skips_without_manifest_or_checkout(tree):
-    """No reachable MANIFEST (connected development) or no git checkout
-    (unresolvable identity) keeps prior behavior: the guard judges only
-    positive mismatches (issue #414)."""
+    """No reachable MANIFEST (connected development) keeps the notice-only
+    behavior: the guard judges only a claimed release (issue #414)."""
     (tree / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tree / "scripts" / "airgap" / "common.sh")
     r = _guard_run(tree, "dist/MANIFEST.txt")
     assert r.returncode == 0
     assert "not release-verified" in r.stderr
+
+
+def test_checkout_guard_refuses_unresolved_checkout_when_manifest_is_packed(tree):
+    """A packed MANIFEST claims a release. A tree whose checkout identity
+    cannot be resolved (a copied tree without .git, or no usable git) must not
+    run live under that claim just because IMAGE_SHA was set to the packed
+    SHA (issue #414). Dry-run keeps its notice-only behavior."""
+    (tree / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tree / "scripts" / "airgap" / "common.sh")
     (tree / "dist").mkdir(exist_ok=True)
     (tree / "dist" / "MANIFEST.txt").write_text(f"sha: {IMAGE_SHA}\n")
     r = _guard_run(tree, "dist/MANIFEST.txt")
-    assert r.returncode == 0
-    assert "not release-verified" in r.stderr
+    assert r.returncode != 0
+    assert "cannot be resolved" in r.stderr
+    assert "overriding IMAGE_SHA alone" in r.stderr
+    dry = _guard_run(tree, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1"})
+    assert dry.returncode == 0
+    assert "not release-verified" in dry.stderr
+
+
+def test_validate_live_refuses_image_sha_override_in_copied_tree_without_git(tree):
+    """Standalone launch (not via bootstrap) in a tree with no git identity:
+    dist/MANIFEST.txt plus a matching IMAGE_SHA override must still refuse."""
+    (tree / "dist").mkdir(exist_ok=True)
+    (tree / "dist" / "MANIFEST.txt").write_text(f"sha: {IMAGE_SHA}\n")
+    r = _run(tree, {"AIRGAP_DRYRUN": "0"})
+    assert r.returncode != 0
+    assert "cannot be resolved" in r.stderr
+    assert "Verified matching MANIFEST" in r.stdout  # the override satisfied the SHA cross-check alone
+
+
+def test_checkout_guard_refuses_release_evidence_without_manifest(tree):
+    """dist/SHA256SUMS is bundle evidence from bootstrap. With it present, a
+    missing dist/MANIFEST.txt must not downgrade the run to the connected
+    development notice: removing one file plus overriding IMAGE_SHA would
+    bypass identity (issue #414). Without any bundle evidence the notice
+    path stays (approved connected development)."""
+    (tree / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tree / "scripts" / "airgap" / "common.sh")
+    (tree / "dist").mkdir(exist_ok=True)
+    dev = _guard_run(tree, "dist/MANIFEST.txt")
+    assert dev.returncode == 0 and "not release-verified" in dev.stderr
+    (tree / "dist" / "SHA256SUMS").write_text("")
+    r = _guard_run(tree, "dist/MANIFEST.txt")
+    assert r.returncode != 0
+    assert "bundle evidence" in r.stderr
+    dry = _guard_run(tree, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1"})
+    assert dry.returncode == 0
 
 
 def _git(cwd, *args):

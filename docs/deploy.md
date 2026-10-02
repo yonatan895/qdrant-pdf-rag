@@ -277,10 +277,16 @@ checksums **after**.
   edits. Untracked files (`airgap.env`, `dist/`, generated output) stay
   allowed, so site values belong in the untracked `airgap.env`. Nothing is
   reset or overwritten; after the edit is reverted the next run passes.
-  Dry-run, no reachable MANIFEST and an unresolvable checkout still run but
-  print "not release-verified" on stderr — never a release-verified result.
-  `bootstrap.sh` applies the same tracked-change refusal to an existing
-  workspace before copying artifacts into `dist/`.
+  A claimed release also fails closed when its identity cannot be
+  established: a MANIFEST without a `sha:`, a checkout git cannot resolve (a
+  copied tree without `.git`), or `dist/SHA256SUMS` (bundle evidence) present
+  with no readable `MANIFEST.txt` — so launching load/deploy/ingest/validate
+  directly, setting `IMAGE_SHA` to the packed SHA, or deleting `MANIFEST.txt`
+  never bypasses checkout identity; rerun `bootstrap.sh` to restore it.
+  Only dry-run and connected development (no MANIFEST and no bundle
+  evidence) still run, printing "not release-verified" on stderr — never a
+  release-verified result. `bootstrap.sh` applies the same tracked-change
+  refusal to an existing workspace before copying artifacts into `dist/`.
 - `bootstrap.sh` cannot source `common.sh` (no clone exists yet), so it
   carries an inline twin of the trust check (bundle signature honoring
   `SNEAKERNET_TRUSTED_PUB`, then `SHA256SUMS`). It clones into
@@ -288,6 +294,16 @@ checksums **after**.
   repo already exists, copies (not links) the archives into `dist/`, and
   seeds `airgap.env` from the example only when absent — never overwriting
   operator edits. Artifact discovery searches `dist/` then the parent dir.
+  Artifacts are staged in `dist/.bootstrap-staging`, verified there (signature
+  and every member checksum), and only then moved into `dist/`, with
+  `SHA256SUMS.sig`, `SHA256SUMS` and `MANIFEST.txt` last, so a failed copy or
+  a failed verification leaves `dist/` and `airgap.env` byte-identical and
+  an interruption never yields a mixed bundle that verifies. `dist/` is never
+  swapped wholesale: operator files and earlier releases' archives stay. If
+  the process was killed uncleanly the staging directory remains; the next run
+  refuses it with a fixed message (nothing from it was accepted) and the
+  operator removes it (`rm -rf <workspace>/dist/.bootstrap-staging`) before
+  rerunning. Bootstrap never deletes it on its own initiative after a crash.
   The copy list includes `oauth-proxy-image.tar` when the bundle contains it;
   no manual sidecar-image copy is needed before `airgap:load`.
 

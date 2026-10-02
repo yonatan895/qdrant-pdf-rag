@@ -603,7 +603,8 @@ The `bootstrap.sh` script automatically:
 - Populates `./dist` with image archives and manifests, including `oauth-proxy-image.tar` when the bundle contains it.
 - Verifies the bundled Task pin against the checkout, verifies installer integrity, then installs `.tools/bin/task` from the signed bundle archive without network access or preinstalled Make/Task/Go/application Python.
 - Initializes `airgap.env` from `airgap.env.example` only when absent; reruns preserve operator configuration and retained artifacts.
-- If bootstrap is interrupted during artifact staging, rerunning it converges: verification repeats from the bundle signature and `./dist` is re-copied file by file. A rerun never advances an existing workspace to the new release — check out the approved bundle SHA deliberately (or use a fresh `AIRGAP_WORKSPACE`) first.
+- Artifacts are staged in `dist/.bootstrap-staging`, verified there, then moved into `./dist` (signature, checksum list and `MANIFEST.txt` last), so a failed or corrupt copy leaves `./dist` and `airgap.env` unchanged. If bootstrap was killed, the leftover staging directory is refused on the next run with a fixed message: remove it (`rm -rf <workspace>/dist/.bootstrap-staging`) and rerun; verification repeats from the bundle signature. A rerun never advances an existing workspace to the new release — check out the approved bundle SHA deliberately (or use a fresh `AIRGAP_WORKSPACE`) first.
+- Load/deploy/ingest/validate launched directly, outside bootstrap, refuse to run a claimed release when the checkout's identity is unresolved or `dist/MANIFEST.txt` is missing next to `dist/SHA256SUMS`; setting `IMAGE_SHA` never bypasses this. Dry-run and connected development without a MANIFEST still run and print "not release-verified".
 
 After bootstrap use `sh scripts/tools/run-task.sh --list` for discovery.
 For rollback, use the previous approved bundle and its own bootstrap/command

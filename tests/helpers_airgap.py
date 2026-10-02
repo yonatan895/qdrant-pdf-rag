@@ -71,6 +71,24 @@ def symlink_tools(tmp_path: Path, tools: tuple[str, ...]) -> None:
             (tmp_path / "bin" / tool).symlink_to(src)
 
 
+def write_git_identity_stub(tree: Path, sha: str) -> None:
+    """Hermetic executing-checkout identity for fixtures that claim a packed
+    release (a MANIFEST present, not dry-run): common.sh::check_checkout_sha
+    fails closed on an unresolvable checkout (issue #414), so such fixtures say
+    which commit is checked out and that it is clean. Real-git cases live in
+    the checkout_guard tests; everything but those two reads is real git."""
+    import shlex
+
+    real = shutil.which("git")
+    write_stub(tree / "bin" / "git", f"""#!/bin/sh
+case "$1" in
+    rev-parse) [ "$2" = HEAD ] && {{ echo {shlex.quote(sha)}; exit 0; }} ;;
+    diff) exit 0 ;;
+esac
+exec {shlex.quote(real)} "$@"
+""")
+
+
 def run_sh(script: Path, env: dict, cwd: Path):
     return subprocess.run(
         ["sh", str(script)], capture_output=True, text=True, env=env, cwd=cwd, check=False
