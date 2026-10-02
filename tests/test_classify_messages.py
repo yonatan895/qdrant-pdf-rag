@@ -78,12 +78,20 @@ def test_strip_page_keeps_roman_letter_words():
         assert dropped not in out, dropped
 
 
-def test_strip_page_drops_bare_page_numbers_everywhere():
+def test_strip_page_drops_bare_page_numbers_at_page_edges():
     """Page-number stripping is per-line and does not depend on chrome detection.
     Roman footers take the same trailing punctuation as decimal ones — front
-    matter renders as "iv." as often as "iv" (one concept, one rule)."""
-    page = "body\n7\n1234\niv.\nxii.\nXIV-"
+    matter renders as "iv." as often as "iv" (one concept, one rule). Folios
+    are recognized only in the page's edge lines (issue #604): the same
+    numbers in the page body are content, and a header-edge number next to a
+    footer folio is content too (a page has one folio)."""
+    page = "body\n1234\niv.\nxii.\nXIV-"
     assert strip_page(page, set()) == "body"
+    interior = "intro\n7\ntext a\ntext b\ntext c\ntext d\ntext e"
+    assert strip_page(interior + "\nxii.", set()) == interior
+    body = "body a\nbody b\nbody c\nbody d"
+    assert strip_page(f"7\n{body}", set()) == body  # header folio, no footer folio
+    assert strip_page(f"7\n{body}\n8", set()) == f"7\n{body}"  # the footer folio wins
 
 
 def test_strip_page_keeps_whitespace_lines():

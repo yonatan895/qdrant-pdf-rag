@@ -243,3 +243,95 @@ def test_query_filter_targets_the_stored_field():
     assert flt is not None
     clause = next(c for c in flt.must if c.key == "system_codes")
     assert clause.match.any == ["0C4"]
+
+
+# --- chrome stripping must not eat code-entry lines (issue #604) ------------
+
+_ENTRY_CODES = ["001", "806", "064", "0C4"]
+
+
+def _entry_pages(n_pages: int = 12) -> list[str]:
+    """Generated multi-page code manual. Each page ends in a range footer, a
+    running chapter footer and a folio; entry code lines land at the page top
+    and the page middle, and the labels land at varying line offsets (a label
+    at the same edge position on most pages would be a real running header)."""
+    leads = [6, 0, 8, 3, 10, 5, 9, 7, 1, 12, 4, 11]
+    pages = []
+    for i in range(n_pages):
+        code = _ENTRY_CODES[i % len(_ENTRY_CODES)]
+        lead = [
+            f"Continued text of the previous entry, line {k}." for k in range(leads[i % len(leads)])
+        ]
+        body = [
+            code,
+            "Explanation:",
+            f"Generated explanation for entry {code} on page {i}.",
+            "System action:",
+            "The generated job step ends.",
+            "System programmer response:",
+            "Correct the generated input and run the job again.",
+        ]
+        footer = [
+            f"{code} \u2022 {_ENTRY_CODES[(i + 1) % 4]}",
+            "Chapter 2. Generated codes",
+            str(i + 1),
+        ]
+        pages.append("\n".join(lead + body + footer))
+    return pages
+
+
+def test_strip_chrome_keeps_code_lines_and_labels_on_every_page():
+    from mainframe_rag.ingest.chrome import strip_chrome
+
+    pages = _entry_pages()
+    stripped = strip_chrome(pages)
+    for page, code in zip(stripped, _ENTRY_CODES * 3):
+        lines = page.splitlines()
+        assert code in lines
+        assert lines[lines.index(code) + 1] == "Explanation:"
+        assert "System action:" in lines
+        assert "System programmer response:" in lines
+
+
+def test_strip_chrome_still_strips_footer_folio_and_footers():
+    from mainframe_rag.ingest.chrome import strip_chrome
+
+    for page in strip_chrome(_entry_pages()):
+        assert "Chapter 2. Generated codes" not in page
+        assert "\u2022" not in page  # the range footer
+        assert not any(ln.isdigit() and len(ln) <= 2 for ln in page.splitlines())  # folios
+
+
+def test_strip_chrome_strips_running_header_but_keeps_entry_labels():
+    from mainframe_rag.ingest.chrome import strip_chrome
+
+    pages = [f"Generated Codes Manual\n{p}" for p in _entry_pages()]
+    for page in strip_chrome(pages):
+        assert "Generated Codes Manual" not in page
+        assert "Explanation:" in page
+
+
+def test_make_chunks_after_strip_chrome_records_every_entry_code():
+    """Round trip through the ingest path (strip_chrome -> make_chunks): the
+    stored system_codes field contains 806 and 064, whose bare lines used to
+    be deleted as folios (issue #604)."""
+    from pathlib import Path
+
+    from mainframe_rag.ingest.chrome import strip_chrome
+    from mainframe_rag.ingest.chunk import make_chunks
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+
+    pages = _entry_pages()
+    parsed = ParsedDoc(
+        path=Path("synthetic.pdf"),
+        sha256="deadbeef",
+        doc_id="SA99-0000-00",
+        title="System completion codes",
+        toc=((1, "System completion codes", 1),),
+        page_count=len(pages),
+    )
+    chunks = make_chunks(parsed, strip_chrome(pages))
+    recorded = {code for c in chunks for code in c.system_codes}
+    assert {"001", "806", "0C4"} <= recorded
+    assert all("806" in c.system_codes for c in chunks if "\n806\n" in f"\n{c.text}\n")
+    assert any("\n806\n" in f"\n{c.text}\n" for c in chunks)

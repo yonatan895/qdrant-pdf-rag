@@ -86,7 +86,13 @@ Contract tests: `tests/test_parser_ibm_shape.py`,
 Frequency-based running header/footer removal, computed **once per document**
 (`strip_chrome`).
 
-- A line becomes chrome when it appears on at least
+- Chrome and folios live at page edges only. Only the first and last
+  `EDGE_LINES` (4) text lines of a page are considered; lines with no letter or
+  digit (change bars, rules) do not count. A bare number or a structural label
+  (`Explanation:`) in the page body is content, never chrome (issue #604: a
+  bare completion-code line such as `806` was deleted as a folio, and
+  repeating labels as running chrome).
+- A line becomes chrome when it appears in the edge lines of at least
   `max(3, int(0.35 * n_pages))` sampled pages. Documents under 8 pages skip
   chrome removal entirely — a minimum-1 threshold would wipe short PDFs.
 - Sampling: up to 64 pages → all pages; larger docs → uniform sampled
@@ -95,14 +101,19 @@ Frequency-based running header/footer removal, computed **once per document**
   line repeated 50× on one page counts once.
 - Matching is case- and whitespace-insensitive (whitespace collapsed,
   stripped, lowercased).
-- Page numbers are stripped even when infrequent: ASCII decimals (no inner
-  dot, so `1.2` survives) or strict roman numerals. A loose roman match once
-  deleted words like `XML`, `civil`, `dim` — the strict form is a regression
-  fix; `mix=1009`/`di=501` stay numerals by design.
-- `strip_page` keeps blank lines, drops chrome or page-number lines, and
+- Page numbers are stripped even when infrequent, but only in the edge lines:
+  ASCII decimals (no inner dot, so `1.2` survives), strict roman numerals, or
+  an entry-range footer (`805 • 806`, two hex-like tokens around a bullet). A
+  loose roman match once deleted words like `XML`, `civil`, `dim` — the strict
+  form is a regression fix; `mix=1009`/`di=501` stay numerals by design.
+- A page has one folio: a number in the top edge is stripped only when the
+  bottom edge carries no folio, so an entry code line that starts a page
+  survives under a footer folio. Known limit: a manual with header folios
+  only, and a code line at the bottom edge, still loses that line.
+- `strip_page` keeps blank lines, drops edge chrome or page-number lines, and
   strips newlines only (not spaces) from the joined result.
 
-Contract tests: `tests/test_classify_messages.py`; `testing.md` mandates a
+Contract tests: `tests/test_classify_messages.py`, `tests/test_code_entries.py`; `testing.md` mandates a
 ≥8-page chrome fixture.
 
 ## 4. Chunking (`chunk.py`)
