@@ -80,6 +80,12 @@ def find_members(text: str) -> list[str]:
 # S-prefix admits any S + three hex letters, which swallows ordinary operator
 # vocabulary — "safe" -> AFE, "seed" -> EED — and each of those flips the
 # query onto identifier ranking.
+#
+# All-letter codes (AFB, BFB, CFB, DFB, EFB: about 1% of a real system-codes
+# manual) are the one exception. Each is admitted only when it is written in
+# uppercase AND sits immediately after the code phrase ("abend AFB",
+# "abend SAFB", "completion code CFB"). "safe" and "seed" never sit there in
+# uppercase, and lowercase prose ("abended bad record") never qualifies.
 _SYSCODE_S_RE = re.compile(r"\bS([0-9A-F]{3})\b(?![\d-]*-\d{4})", re.IGNORECASE)
 _SYSCODE_HEX_RE = re.compile(r"\bX'([0-9A-F]{3})'(?![0-9A-F])", re.IGNORECASE)
 _USERCODE_RE = re.compile(r"\bU(\d{4})\b", re.IGNORECASE)
@@ -114,6 +120,12 @@ _SYSCODE_CONTEXT_AFTER_RE = re.compile(
 _SYSCODE_MODEL_RE = re.compile(r"\bS(?:370|390)\b", re.IGNORECASE)
 
 
+def _is_letter_code(m: re.Match[str], text: str) -> bool:
+    """An all-letter completion code: uppercase as written and immediately
+    after the code phrase (see the all-letter note above)."""
+    return m.group(0).isupper() and bool(_SYSCODE_CONTEXT_BEFORE_RE.search(text[: m.start()]))
+
+
 def find_system_codes(text: str) -> list[str]:
     """System/user/wait-state completion codes in canonical form (issue #591).
 
@@ -131,7 +143,7 @@ def find_system_codes(text: str) -> list[str]:
         # Same digit rule as the bare form: SB37/S80A/S0C4/S806 carry one,
         # SAFE/SEED/SACE do not. Without it the S-prefix swallows ordinary
         # operator words and flips them onto identifier ranking.
-        if any(ch.isdigit() for ch in token):
+        if any(ch.isdigit() for ch in token) or _is_letter_code(m, text):
             codes.add(token)
     for m in _SYSCODE_HEX_RE.finditer(text):
         codes.add(m.group(1).upper())
@@ -141,8 +153,11 @@ def find_system_codes(text: str) -> list[str]:
         codes.add(f"W{m.group(1).upper()}")
     for m in _SYSCODE_BARE_RE.finditer(text):
         token = m.group(1).upper()
-        # A code always carries a digit (806, 222, 0C4); ADD/FEE/BAD do not.
+        # A code carries a digit (806, 222, 0C4); ADD/FEE/BAD do not, unless
+        # written as an all-letter code right after the phrase.
         if not any(ch.isdigit() for ch in token):
+            if _is_letter_code(m, text):
+                codes.add(token)
             continue
         before = text[: m.start()]
         after = text[m.end() :]

@@ -373,7 +373,10 @@ these; widening changes both corpus extraction and query parsing at once.
   `U4038` (U + 4 digits), `wait state 064`→`W064`. Every form must carry at
   least one digit — real codes do (`SB37`, `S80A`, `S0C4`, `S806`, `806`),
   English words do not, which is what keeps `safe`→AFE and `seed`→EED out of
-  the identifier path. Bare 3-hex (`0C4`, `806`, `222`) carries no meaning
+  the identifier path. The one exception is all-letter codes (`AFB`, `CFB`,
+  about 1% of a system-codes manual): accepted only in uppercase **and**
+  directly after the code phrase (`abend AFB`, `abend SAFB`), so `abend afb`
+  and `AFB abend` stay on the NL path. Bare 3-hex (`0C4`, `806`, `222`) carries no meaning
   alone, so it is accepted only **adjacent** to a code phrase (`abend`,
   `completion code`, `system code`) with at most one *code-ish* connector word
   between them — mere presence of a phrase is not enough, and neither is three
