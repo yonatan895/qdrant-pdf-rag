@@ -37,10 +37,14 @@ _ROMAN_NUMERAL_RE = re.compile(
     re.IGNORECASE,
 )
 _DECIMAL_PAGE_RE = re.compile(r"[0-9]+(?:-[0-9]+)?[-.]?")
-# A header/footer that names the first and last entry on the page ("805 • 806"):
-# a folio range, not content. Case-sensitive hex-like tokens keep ordinary
-# words out ("Yes • No").
-_ENTRY_RANGE_RE = re.compile(r"[0-9A-F]{2,8} \u2022 [0-9A-F]{2,8}")
+# A header/footer that names the first and last entry on the page: a folio
+# range, not content. Entries are completion codes ("805 • 806"), message IDs
+# ("ICH408I • ICH409I", "U901 • U902") or a family with a lowercase
+# placeholder ("0BB • 0Cx", "EC7 • FFx"). A token is either hex (an x
+# placeholder may follow) or letters then a digit; case-sensitive, which keeps
+# ordinary words out ("Yes • No", "TSO • ISPF").
+_ENTRY_TOKEN = r"(?:[0-9A-F][0-9A-Fx]{1,7}|[A-Z]{1,8}[0-9][0-9A-Zx]{0,10})"
+_ENTRY_RANGE_RE = re.compile(rf"{_ENTRY_TOKEN} \u2022 {_ENTRY_TOKEN}")
 
 
 def _normalize(line: str) -> str:
@@ -52,10 +56,12 @@ def _is_page_number(line: str) -> bool:
     # numeral character (decimal via [0-9]+, roman via the lookahead), and
     # strip_page never routes an empty normalized line here.
     return bool(
-        _DECIMAL_PAGE_RE.fullmatch(line.strip())
-        or _ROMAN_NUMERAL_RE.fullmatch(line.strip())
-        or _ENTRY_RANGE_RE.fullmatch(_WHITESPACE_RE.sub(" ", line.strip()))
+        _DECIMAL_PAGE_RE.fullmatch(line.strip()) or _ROMAN_NUMERAL_RE.fullmatch(line.strip())
     )
+
+
+def _is_entry_range(line: str) -> bool:
+    return bool(_ENTRY_RANGE_RE.fullmatch(_WHITESPACE_RE.sub(" ", line.strip())))
 
 
 def _edges(lines: list[str]) -> tuple[set[int], set[int]]:
@@ -94,7 +100,7 @@ def strip_page(text: str, chrome: set[str]) -> str:
     top, bottom = _edges(lines)
     # A page has one folio. A footer folio means the top edge carries none, so
     # a bare number there is content (an entry's code line starting the page).
-    footer_folio = any(_is_page_number(lines[i]) for i in bottom)
+    footer_folio = any(_is_page_number(lines[i]) or _is_entry_range(lines[i]) for i in bottom)
     for i, line in enumerate(lines):
         norm = _normalize(line)
         if not norm:
@@ -103,6 +109,11 @@ def strip_page(text: str, chrome: set[str]) -> str:
         if (i in top or i in bottom) and norm in chrome:
             continue
         if _is_page_number(line) and (i in bottom or (i in top and not footer_folio)):
+            continue
+        # An entry range is never body text, so unlike a bare number it goes
+        # at either edge: message manuals put it in the header above a footer
+        # folio, where the one-folio rule kept it.
+        if (i in top or i in bottom) and _is_entry_range(line):
             continue
         kept.append(line)
     return "\n".join(kept).strip("\n")
