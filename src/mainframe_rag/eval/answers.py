@@ -418,17 +418,26 @@ def run_query(
     entry: dict[str, Any],
     answer_signals: dict[str, dict[str, Any]] | None = None,
     hits: list[dict[str, Any]] | None = None,
+    temperature: float | None = 0.0,
 ) -> dict[str, Any]:
     """One live /v1/answer call + verdict. Records everything the report and
     the manifest need, including the failure detail (the answer body is the
     model's own output — kept in the JSON report for debugging, never
-    logged)."""
+    logged).
+
+    Temperature pins deterministic sampling (issue #596): 0.0 by default so
+    comparisons are stable; pass the production setting explicitly to measure
+    it, or None for the server default. No retries — a failed request is an
+    error row, never retried (deliberate non-feature)."""
     t0 = time.monotonic()
     row: dict[str, Any] = {
         "id": entry["id"],
         "query": entry["query"],
         "query_class": entry["query_class"],
         "expected_behavior": entry["expected_behavior"],
+        # The sampling temperature this row ran under (issue #596): report
+        # and manifest readers need it to interpret before/after deltas.
+        "temperature": temperature,
         # Opt-in acceptance state (issue #365): None on pre-state entries, so
         # the report can count mismatches without guessing from failures.
         "expected_verification_state": entry.get("expected_verification_state"),
@@ -436,7 +445,7 @@ def run_query(
         "domain": entry.get("domain"),
     }
     try:
-        resp = client.post("/v1/answer", json={"query": entry["query"]})
+        resp = client.post("/v1/answer", json={"query": entry["query"], "temperature": temperature})
     except Exception as exc:  # noqa: BLE001 — one bad request must not kill the run
         row.update(verdict="error", failures=[f"request error: {type(exc).__name__}"], elapsed_ms=int((time.monotonic() - t0) * 1000))
         return row
@@ -711,6 +720,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all", action="store_true", help="run every golden entry (slow: one reasoning call each)")
     parser.add_argument("--out", type=Path, default=None, help="JSON report path")
     parser.add_argument("--summary", type=Path, default=None, help="markdown summary path")
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="sampling temperature sent per request (default 0 for stable "
+                             "comparisons, issue #596; pass the production setting explicitly "
+                             "to measure it)")
     args = parser.parse_args(argv)
 
     try:
@@ -747,7 +760,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with TestClient(app_mod.app) as client:
             for i, entry in enumerate(sample, 1):
-                row = run_query(client, entry, capture.signals)
+                row = run_query(client, entry, capture.signals, temperature=args.temperature)
                 results.append(row)
                 marker = row.get("verdict", "?").upper()
                 print(
@@ -761,7 +774,8 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger("agent").removeHandler(capture)
 
     metrics = summarize(results)
-    report = {"metrics": metrics, "results": results}
+    params = {"temperature": args.temperature}
+    report = {"metrics": metrics, "results": results, "params": params}
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
@@ -774,7 +788,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from mainframe_rag.manifest import write_run_manifest
 
-        manifest = write_run_manifest("eval_answers", load_settings(), metrics)
+        manifest = write_run_manifest("eval_answers", load_settings(), metrics, params=params)
         print(f"run manifest appended ({manifest['git_sha'][:8]})", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 — manifest is observability, never the gate
         print(f"warn: failed to append run manifest: {exc}", file=sys.stderr)

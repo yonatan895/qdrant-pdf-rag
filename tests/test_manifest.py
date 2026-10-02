@@ -95,3 +95,22 @@ def test_write_run_manifest_appends_valid_json(tmp_path, monkeypatch):
     record = json.loads(lines[0])
     assert record["run_type"] == "eval"
     assert record["metrics"]["recall@1"] == 0.833
+
+
+def test_write_run_manifest_records_optional_params(tmp_path, monkeypatch):
+    """Issue #596: run parameters (e.g. eval sampling temperature) ride the
+    manifest when supplied, and read None when the caller passes none."""
+
+    def not_found(url, timeout=3.0):
+        return SimpleNamespace(status_code=404, json=dict)
+
+    monkeypatch.setattr(httpx2, "get", not_found)
+    settings = Settings(_env_file=None)
+
+    manifest = write_run_manifest(
+        "eval_answers", settings, {}, runs_dir=tmp_path, params={"temperature": 0.0}
+    )
+    assert manifest["params"] == {"temperature": 0.0}
+
+    plain = write_run_manifest("eval", settings, {}, runs_dir=tmp_path)
+    assert plain["params"] is None

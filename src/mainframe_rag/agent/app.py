@@ -713,6 +713,12 @@ class AnswerRequest(BaseModel):
     version: str | None = None
     splunk_context: str | None = None
     stream: bool = False
+    # Optional per-request temperature override (issue #596): None keeps the
+    # configured Settings.llm_temperature (production default 0.2). The
+    # answer eval pins 0 for comparison stability; production callers omit it.
+    # Bounded like Settings.llm_temperature so client input errors 422 before
+    # retrieval instead of surfacing as upstream 502s.
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0, allow_inf_nan=False)
 
 
 class AnswerResponse(BaseModel):
@@ -750,7 +756,7 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1)
     model: str | None = None
     stream: bool = False
-    temperature: float | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0, allow_inf_nan=False)
     max_tokens: int | None = Field(
         default=None,
         description="OpenAI-compat parameter; token limits are managed server-side by the reasoning profile.",
@@ -1192,6 +1198,7 @@ async def _answer_response(req, response, is_stream, owner):
         version=req.version,
         splunk_context=req.splunk_context,
         stream=is_stream,
+        temperature=req.temperature,
         request_id=request_id,
         is_chat=False,
         hits=hits,

@@ -539,7 +539,10 @@ def run_l2(
                 # measurements below use travels with the row, so
                 # retriever blame (gold never pooled) splits from reader
                 # blame (gold pooled, uncited) without rejoining gold.
-                row = run_query(client, entry, answers.signals, hits)
+                # Sampling temperature (issue #596): L2/L4 stay on the server
+                # default (None) — their thresholds were recorded under it,
+                # so moving them to 0 needs its own threshold re-record PR.
+                row = run_query(client, entry, answers.signals, hits, temperature=None)
                 apply_l2_measurements(row, entry, hits, capture.alerts)
 
                 # Faithfulness judge: grounded, non-refused model text.

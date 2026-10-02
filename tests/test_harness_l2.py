@@ -99,6 +99,70 @@ def test_parse_judge_label_fenced_with_prose():
     assert parse_judge_label(reply) == "contradiction"
 
 
+def test_run_l2_stays_on_server_default_temperature(monkeypatch):
+    """Issue #596: run_l2 must send temperature=None (server default) — its
+    thresholds were recorded under that sampling, so silently inheriting the
+    answer eval's temp-0 default would compare temp-0 means against temp-0.2
+    references. Moving L2/L4 to 0 needs its own threshold re-record PR."""
+    import fastapi.testclient
+
+    from mainframe_rag.eval import answer_tier
+
+    sent: list[object] = []
+
+    def fake_run_query(client, entry, *args, **kwargs):
+        sent.append(kwargs.get("temperature", "MISSING"))
+        return {
+            "id": entry["id"],
+            "query": entry["query"],
+            "query_class": entry["query_class"],
+            "expected_behavior": entry["expected_behavior"],
+            "verdict": "pass",
+            "failures": [],
+            "warns": [],
+            "answer": "LFAREA is set in IEASYSxx.",
+            "citations": [],
+            "citations_inferred": False,
+            "request_id": "r1",
+            "path": "llm",
+        }
+
+    class _SearchClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, path, json=None):
+            assert path == "/v1/search"
+
+            class _Resp:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {"hits": []}
+
+            return _Resp()
+
+    monkeypatch.setattr(answer_tier, "run_query", fake_run_query)
+    monkeypatch.setattr(fastapi.testclient, "TestClient", _SearchClient)
+    entry = {
+        "id": "CMP-01",
+        "query": "What does IEA500I mean?",
+        "query_class": "message_id",
+        "expected_behavior": "answer",
+        "expected_doc_ids": [],
+    }
+    results, _ = answer_tier.run_l2([entry], 1, judge_enabled=False)
+    assert [r["verdict"] for r in results] == ["pass"]
+    assert sent == [None]
+
+
 def test_parse_judge_label_unknown_label_fails_closed():
     with pytest.raises(JudgeError):
         parse_judge_label('{"label": "mostly_true"}')

@@ -457,6 +457,32 @@ class _StubClient:
         return _StubResponse(self.payload)
 
 
+class _RecordingClient(_StubClient):
+    def __init__(self, payload: dict):
+        super().__init__(payload)
+        self.posts: list[dict] = []
+
+    def post(self, *args, **kwargs):
+        self.posts.append(kwargs.get("json", {}))
+        return super().post(*args, **kwargs)
+
+
+def test_run_query_pins_temperature_zero_by_default() -> None:
+    """Issue #596: the answer eval sends temperature=0 unless told otherwise,
+    and records it on the row so reports stay interpretable."""
+    client = _RecordingClient(_answer_payload())
+    row = run_query(client, _entry())
+    assert client.posts == [{"query": _entry()["query"], "temperature": 0.0}]
+    assert row["temperature"] == 0.0
+
+
+def test_run_query_temperature_override_is_sent_and_recorded() -> None:
+    client = _RecordingClient(_answer_payload())
+    row = run_query(client, _entry(), temperature=0.2)
+    assert client.posts == [{"query": _entry()["query"], "temperature": 0.2}]
+    assert row["temperature"] == 0.2
+
+
 class _StubResponse:
     def __init__(self, payload: dict):
         self.payload = payload
