@@ -53,7 +53,12 @@ from mainframe_rag.agent.answer_core import (
     execute_answer_core_stream,
     resolve_search_query,
 )
-from mainframe_rag.agent.chat_turn import InvalidChatTurn, PreparedChatTurn, prepare_chat_turn
+from mainframe_rag.agent.chat_turn import (
+    InvalidChatTurn,
+    PreparedChatTurn,
+    is_unsearchable_query,
+    prepare_chat_turn,
+)
 from mainframe_rag.agent.core_ports import RetrievalResult
 from mainframe_rag.agent.metrics import endpoint_for_path, record_request, setup_metrics
 from mainframe_rag.agent.model_adapter import ModelAdapter
@@ -265,11 +270,16 @@ class AppError(Exception):
 
 
 def _require_query_length(request_id: str, query: str) -> None:
-    """Fail closed on overlong queries (issue #87) before any embed or
-    retrieval work: one helper serves both endpoints so the same fault maps
-    to the same code on each. Code and message deliberately match the
-    pydantic body-validation failure — an overlong query IS a validation
-    failure, and no new client-visible shape is introduced."""
+    """Fail closed on overlong (issue #87), blank or control-character
+    (issue #579) queries before any embed or retrieval work: one helper
+    serves both endpoints so the same fault maps to the same code on each.
+    Code and message deliberately match the pydantic body-validation failure
+    — such a query IS a validation failure, and no new client-visible shape
+    is introduced. The query is only inspected, never normalised, and never
+    logged."""
+    if is_unsearchable_query(query):
+        log.warning(json_log(request_id, "query_unsearchable", chars=len(query)))
+        raise AppError(422, "invalid_request", "request body failed validation")
     if len(query) > settings.query_max_chars:
         log.warning(json_log(request_id, "query_too_long", chars=len(query)))
         raise AppError(422, "invalid_request", "request body failed validation")

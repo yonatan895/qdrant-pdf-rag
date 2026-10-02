@@ -14,7 +14,7 @@ Every request gets a 12-hex-char
 `request_id` from middleware, shared by all logs, the unhandled-error
 handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
 
-- `POST /v1/search` — `SearchRequest{query (min 1 char), product?,
+- `POST /v1/search` — `SearchRequest{query (min 1 char, not blank or control-character, #579), product?,
   version?, limit (default 8, 1–40)}` → `SearchResponse{request_id,
   query_kind, hits}`. No LLM involved.
 - `POST /v1/answer` — `AnswerRequest{query, product?, version?,
@@ -80,7 +80,11 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
    #314). `agent/chat_turn.prepare_chat_turn` owns active-turn normalization
   for API, console, core execution, condensation and prompt assembly (#415).
   The latest user message is stripped, must remain nonempty, and is guarded
-  by `query_max_chars`. Earlier user/assistant messages remain history; caller
+  by `query_max_chars` and, like `/v1/search` and `/v1/answer` queries, refused
+  when it contains NUL or C0 control characters other than `\t\n\r` (#579; DEL
+  and C1 are not rejected). `/v1/search` and `/v1/answer` inspect the query with
+  the same predicate (`chat_turn.is_unsearchable_query`) but search it unmodified,
+  so padding around real text is kept. Earlier user/assistant messages remain history; caller
   system messages and entries after the latest user are excluded from model
   input. Trailing assistant/system entries remain accepted request syntax and
   never become a question or history for that user turn. The **entire supplied
@@ -188,7 +192,7 @@ status (`/ui` failures render HTML banners instead, §1):
 | `not_configured` / `reasoning model…` | 503 | `/v1/answer` or `/v1/chat` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
 | `representation_unavailable` / `the retrieval generation is not available` | 503 | Serving gate: resolved generation is `empty` or not validated compatible (drift/legacy/pending/unknown); `/ui/chat` renders its banner while `/ui/chat/stream` returns this envelope |
-| `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query-length guard, and `/v1/chat` with no `user`-role message (one message, every 422 path) |
+| `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
 | `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
