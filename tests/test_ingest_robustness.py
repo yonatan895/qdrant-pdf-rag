@@ -52,7 +52,7 @@ def test_inventory_error_record_is_typed(tmp_path):
     assert load_inventory(progress)["bad.pdf"].error_type == "RuntimeError"
 
 
-def test_batch_size_stays_in_qdrant_skill_band():
+def test_batch_size_stays_in_bounds():
     with pytest.raises(ValidationError):
         Settings(batch_size=8, _env_file=None)
     with pytest.raises(ValidationError):

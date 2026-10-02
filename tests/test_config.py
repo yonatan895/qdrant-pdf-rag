@@ -139,7 +139,7 @@ def test_hash_mode_requires_explicit_allow():
 
 def test_ingest_tuning_defaults():
     """Ingest pipeline knobs: bounded defaults, no magic numbers at call sites
-    (AGENTS rule 5). batch_size default 128 (Qdrant skill 64-256 band)."""
+    (AGENTS rule 5). batch_size default 128 (bounds 16-256 per docs/ingest.md)."""
     s = Settings(_env_file=None)
     assert s.batch_size == 128
     assert s.ingest_upsert_streams == 4

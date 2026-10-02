@@ -819,7 +819,8 @@ def _run_impl(
                 client, settings, completion_collection_name(settings), rules_v
             )
         if bulk:
-            # Qdrant skill: HNSW builds must not compete with a bulk load.
+            # Bulk load: HNSW builds must not compete with the upserts
+            # (ingest_bulk_load, default off; see qdrant_io.set_bulk_indexing).
             set_bulk_indexing(client, settings.qdrant_collection, bulk=True)
             bulk_active = True
     try:
@@ -1014,8 +1015,8 @@ def _run_impl(
         window = max(2, workers * 2)
         task_iter = iter(tasks)
         locks = _DocLocks()
-        # Stage 2: dedicated upsert streams (Qdrant skill: 2-4 parallel
-        # upload streams). Embedding is done in stage-1 workers; these
+        # Stage 2: dedicated upsert streams (ingest_upsert_streams, bounded
+        # in Settings). Embedding is done in stage-1 workers; these
         # threads are I/O-bound against Qdrant. Skipped during dry runs.
         parse_pending: dict[concurrent.futures.Future, str] = {}
         # Upsert futures carry their inventory record plus the precomputed

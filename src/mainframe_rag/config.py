@@ -258,16 +258,17 @@ class Settings(BaseSettings):
     # and runtime defaults for pipeline verification.
     metrics_enabled: bool = False
 
-    # Ingest. batch_size follows the Qdrant skill's 64-256 upsert band
-    # (.agents/skills/qdrant-performance-optimization) — bounds enforced here
-    # so no call site can grow a magic number outside it.
+    # Ingest. batch_size bounds (16-256, default 128) are project policy,
+    # owned by docs/ingest.md and enforced here so no call site can grow a
+    # magic number outside them.
     ingest_workers: int = Field(
         default_factory=lambda: max(1, (multiprocessing.cpu_count() or 2) - 1)
     )
     batch_size: int = Field(default=128, ge=16, le=256)
     # Embed+upsert ran serially in the parent process (274s of a 281s corpus
     # run while 23 parse workers idled). Parse workers now embed; this many
-    # parallel streams drive the Qdrant upserts (Qdrant skill: 2-4 streams).
+    # parallel streams drive the Qdrant upserts (default and bounds owned by
+    # the ingest-only settings row in docs/agent.md).
     ingest_upsert_streams: int = Field(default=4, ge=1, le=8)
     # Paginated observer scans (issue #361): revision / marker / stray-sha
     # listings page through scroll with this page size. Throughput knob
@@ -275,7 +276,8 @@ class Settings(BaseSettings):
     # the size, so no call site may cap a listing at a fixed count.
     ingest_scan_page_size: int = Field(default=1000, ge=100, le=10000)
     # Bulk-load mode: disable HNSW builds during the initial corpus load and
-    # restore after (Qdrant skill guidance) — never for incremental prod runs.
+    # restore after (see set_bulk_indexing in ingest/qdrant_io.py for the
+    # measured caveat) — never for incremental prod runs.
     ingest_bulk_load: bool = False
     # Alias publication (issue #359): ingest converges a versioned staging
     # collection (snapshot-cloned from live) and atomically swaps the

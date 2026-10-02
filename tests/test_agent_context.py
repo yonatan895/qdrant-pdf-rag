@@ -6,6 +6,9 @@ from unittest.mock import patch
 
 from scripts.check_agent_context import CHAIN_BUDGET, REQUIRED, check
 
+REAL_ROOT = Path(__file__).resolve().parents[1]
+SHA = "a"*40
+
 
 class ContextCheckTests(TestCase):
     def setUp(self):
@@ -148,7 +151,9 @@ class ContextCheckTests(TestCase):
         vendor = self.root/".agents/skills/example"
         vendor.mkdir(parents=True)
         (vendor/"AGENTS.md").write_text('third-party '*10000)
-        errors = check(self.root)[0]
+        # Skills allowlist errors are covered by VendoredSkillsTests; this test
+        # owns the instruction-walk exclusion of vendored trees.
+        errors = [e for e in check(self.root)[0] if 'instruction file' in e]
         self.assertEqual(len(errors), 1)
         self.assertIn('src/AGENTS.md', errors[0])
 
@@ -174,3 +179,57 @@ class ContextCheckTests(TestCase):
             errors, _ = check(self.root)
             self.assertTrue(any("escapes repository" in e for e in errors))
             self.assertFalse(any("private instruction text" in e for e in errors))
+
+
+class VendoredSkillsTests(TestCase):
+    """The curated skills tree is an allowlisted, pinned subset (issue #458)."""
+
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        for name in REQUIRED:
+            path = self.root/name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("content\n", encoding="utf-8")
+        (self.root/"docs/agent-workflow.md").write_text(
+            "<!-- context-map:start -->\n| C | O | B | E |\n|---|---|---|---|\n"
+            "| x | [O](o.md) | [B](o.md) | [E](o.md) |\n<!-- context-map:end -->\n"
+            "<!-- instruction-chains:start -->\n| D | C |\n|---|---|\n"
+            "| `.` | [R](../AGENTS.md) |\n<!-- instruction-chains:end -->\n")
+        (self.root/"docs/o.md").write_text("owner\n")
+        skills = self.root/".agents/skills"
+        (skills/"qdrant-sizing").mkdir(parents=True)
+        (skills/"qdrant-sizing/SKILL.md").write_text("vendor\n")
+        (skills/"index.md").write_text("[sizing](qdrant-sizing/SKILL.md)\n")
+        (self.root/".agents/qdrant-skills-provenance.md").write_text(
+            f"pin `{SHA}`\n<!-- skills-allowlist:start -->\n- qdrant-sizing\n<!-- skills-allowlist:end -->\n")
+        (self.root/"NOTICE.qdrant-skills").write_text(f"commit {SHA}\n")
+        (self.root/"LICENSE.qdrant-skills").write_text("Apache-2.0\n")
+
+    def test_curated_tree_is_valid(self):
+        self.assertEqual(check(self.root)[0], [])
+
+    def test_excluded_skill_cannot_be_reintroduced_by_pin_refresh(self):
+        for name in ("qdrant-model-migration", "qdrant-search-quality", "qdrant-edge"):
+            with self.subTest(name=name):
+                (self.root/".agents/skills"/name).mkdir()
+                errors = check(self.root)[0]
+                self.assertTrue(any(name in e and "allowlist" in e for e in errors), errors)
+                (self.root/".agents/skills"/name).rmdir()
+
+    def test_allowlisted_skill_must_exist_and_index_links_must_resolve(self):
+        (self.root/".agents/skills/qdrant-sizing/SKILL.md").unlink()
+        (self.root/".agents/skills/qdrant-sizing").rmdir()
+        errors = check(self.root)[0]
+        self.assertTrue(any("allowlisted skill qdrant-sizing missing" in e for e in errors))
+        self.assertTrue(any("broken local reference" in e for e in errors))
+
+    def test_pin_notice_and_license_must_agree(self):
+        (self.root/"NOTICE.qdrant-skills").write_text("commit "+"b"*40+"\n")
+        self.assertTrue(any("same pinned SHA" in e for e in check(self.root)[0]))
+        (self.root/"LICENSE.qdrant-skills").unlink()
+        self.assertTrue(any("LICENSE.qdrant-skills" in e for e in check(self.root)[0]))
+
+    def test_repository_skills_tree_matches_its_allowlist(self):
+        self.assertEqual([e for e in check(REAL_ROOT)[0] if "skill" in e.lower()], [])
