@@ -210,7 +210,7 @@ The hardened 5-stage deployment pipeline (`airgap:pack` -> `airgap:load` -> `air
    CORPUS_PVC=<pvc> sh scripts/tools/run-task.sh airgap:pipeline
 
    # Option B: Or execute step-by-step:
-   sh scripts/tools/run-task.sh airgap:load                   # Push the 4 base image archives (+ oauth-proxy once bundled) to the internal registry
+   sh scripts/tools/run-task.sh airgap:load                   # Push the 4 base image archives (+ the oauth-proxy sidecar archive) to the internal registry
    sh scripts/tools/run-task.sh airgap:deploy                 # Deploy Qdrant StatefulSet + Agent + Jaeger (tracing on by default)
    # Prove the gateway from inside the cluster, apply its leg-order recommendation:
    kubectl -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py

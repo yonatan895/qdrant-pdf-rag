@@ -338,7 +338,7 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   an on-disk index; on-disk payloads.
 - Payload indexes are created **before** load — including on pre-existing
   collections: keywords `vendor, product, version, doc_id, chunk_type,
-  message_ids, members, system_codes, sha256` plus integer `page_start`. An unindexed
+  message_ids, members, system_codes, sha256, source_rev` plus integer `page_start`. An unindexed
   filter becomes a scan.
 - `ensure_collection` verifies the stored dim against settings on both the
   named-vector and single-vector schemas, raising `DimMismatchError`.
