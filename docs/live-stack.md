@@ -225,7 +225,8 @@ and failure/skip checks. Semantic evaluation still needs an approved venue.
 # a. readiness + liveness
 curl -s -w ' [%{http_code}]\n' http://127.0.0.1:8087/healthz
 curl -s http://127.0.0.1:8087/livez
-# expect: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible"} [200]
+# expect: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible","rerank":true} [200]
+# (rerank is null when RERANK_ENABLED=false; false = 503 with the reranker down)
 # and {"status":"alive"} from /livez. representation is empty pre-ingest
 # (still 200 — bootstrap), record_only_drift on query-prefix drift;
 # reembed_required/legacy/pending/unknown degrade AND return HTTP 503

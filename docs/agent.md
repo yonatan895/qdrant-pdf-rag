@@ -39,7 +39,7 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   packing/trimming omitted, and the prompt's worked example cite, are never
   accepted as grounding.
 - `GET /healthz` (readiness) — `HealthzResponse{status, qdrant, embed?,
-  representation}`. Qdrant is checked by GET-ting the pooled client's
+  representation, rerank?}`. Qdrant is checked by GET-ting the pooled client's
   `{base}/readyz` and requiring exactly `200` plus the body `all shards are
   ready` (case/space normalized); the upstream body goes to the log, never
   the client. `embed` is tri-state: `None` when no embedder is configured,
@@ -48,9 +48,22 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   `resolve_serving_generation` outcome (issues #391 F3/F4): the configured
   alias resolved to its physical generation and that generation's OWN
   `<physical>__completions` contract compared against the wanted one.
-  `status` is `ok` only when Qdrant is ok, embed is not `False`, and
-  `representation` is `compatible`, `record_only_drift`, or `empty`;
-  anything else is `degraded` **and HTTP 503** (Kubernetes probes judge
+  `rerank` is tri-state (issue #578): `None` when `RERANK_ENABLED` is off
+  (readiness unchanged), else whether the configured endpoint(s) answer the
+  1x1 score probe (`probe_reranker`: the serving endpoint order and
+  alternate-route fallback, so a working alternate keeps the leg up). The
+  probe runs off the event loop, is bounded by `health_rerank_timeout_s`,
+  and its outcome (up or down) is cached for `health_rerank_ttl_s`, so
+  kubelet ticks do not become GPU requests; a timeout or any exception is
+  `false`, logging only the error type. Recovery shows on the first probe
+  after the TTL. Rerank exhaustion fails non-identifier search closed, so
+  an enabled-but-down leg makes the pod unready even though identifier
+  lookups (which bypass rerank) would still serve: degraded means
+  unready by design. The reasoning leg is not probed: search never calls
+  an LLM, so it must not gate readiness.
+  `status` is `ok` only when Qdrant is ok, embed is not `False`,
+  `representation` is `compatible`, `record_only_drift`, or `empty`, and
+  `rerank` is not `False`; anything else is `degraded` **and HTTP 503** (Kubernetes probes judge
   only the status code, so the JSON label alone never made a pod unready).
   `empty` stays ready on purpose: the deploy -> ingest sequence waits for
   the agent before data exists (bootstrap must not deadlock); requests are
@@ -438,6 +451,7 @@ readers:
 | `llm_stream` | `false` | server-side reasoning SSE |
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
+| `health_rerank_timeout_s` / `health_rerank_ttl_s` | 5.0 / 15.0 (ttl 0 = probe every scrape) | healthz rerank probe bound and outcome cache; only when `rerank_enabled` |
 | `representation_cache_ttl_s` | 5.0 (0 = validate every request) | serving generation gate: alias resolution + contract validation cache |
 | `allow_hash_mode` / `log_level` | `false` / INFO | lifespan hash gate / logging |
 | `otel_exporter_otlp_endpoint` / `otel_sample_ratio` / `otel_export_queue_size` / `otel_export_timeout_ms` | unset = tracing off / 1.0 / 2048 / 5000 | tracing setup |
