@@ -166,3 +166,199 @@ exit 23
     assert '8000/v1/models' in calls and '8001/v1/models' in calls
     assert '8002' not in calls
     assert 'probe-rerank=false' in calls
+
+
+# --- Local ingest host-RAM budget (issue #580) -------------------------------
+
+_INGEST_VARS = (
+    "INGEST_WORKERS",
+    "LOCAL_INGEST_WORKER_MB",
+    "HOST_MEM_HEADROOM_MB",
+    "HOST_PSI_MAX",
+    "HOST_MEMINFO",
+    "HOST_PSI_DIR",
+    "HOST_CPUS",
+    "FORCE_START",
+)
+
+
+def _host(tmp_path: Path, avail_mb: int = 64000, psi: float = 0.0) -> dict[str, str]:
+    """Stub host state (meminfo + PSI) and CPU count; tests never read the real host."""
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(f"MemTotal: 99999999 kB\nMemAvailable: {avail_mb * 1024} kB\n")
+    psi_dir = tmp_path / "pressure"
+    psi_dir.mkdir(exist_ok=True)
+    line = f"some avg10={psi:.2f} avg60=0.00 avg300=0.00 total=0\n"
+    for resource in ("memory", "io"):
+        (psi_dir / resource).write_text(line + line.replace("some", "full"))
+    return {"HOST_MEMINFO": str(meminfo), "HOST_PSI_DIR": str(psi_dir), "HOST_CPUS": "8"}
+
+
+def _plan_workers(tmp_path: Path, host: dict[str, str]) -> tuple[subprocess.CompletedProcess, str]:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir(exist_ok=True)
+    clean = {k: v for k, v in os.environ.items() if k not in _INGEST_VARS}
+    r = subprocess.run(
+        ["sh", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**clean, "LOCAL_STACK_DRYRUN": "1", "CORPUS_DIR": str(corpus), **host},
+    )
+    ingest = next((ln for ln in r.stdout.splitlines() if "ingest" in ln), "")
+    return r, ingest
+
+
+@pytest.mark.parametrize(
+    ("avail_mb", "workers"),
+    [
+        (64000, 7),  # plenty of RAM: the CPU-1 cap (8 CPUs) applies
+        (6144, 4),  # (6144-2048)/1024
+        (4608, 2),  # a few GB free sizes down
+        (3072, 1),  # exactly one worker + headroom
+    ],
+)
+def test_ingest_workers_follow_available_ram(tmp_path, avail_mb, workers):
+    r, ingest = _plan_workers(tmp_path, _host(tmp_path, avail_mb=avail_mb))
+    assert r.returncode == 0, r.stderr
+    assert f"--workers {workers} " in ingest
+    assert "REFUSED" not in ingest and "REFUSED" not in r.stderr
+
+
+def test_ingest_workers_floor_at_one_cpu(tmp_path):
+    r, ingest = _plan_workers(tmp_path, {**_host(tmp_path), "HOST_CPUS": "1"})
+    assert r.returncode == 0, r.stderr
+    assert "--workers 1 " in ingest
+
+
+def test_per_worker_estimate_and_headroom_envs_are_respected(tmp_path):
+    host = {**_host(tmp_path, avail_mb=6144), "LOCAL_INGEST_WORKER_MB": "2048", "HOST_MEM_HEADROOM_MB": "0"}
+    _, ingest = _plan_workers(tmp_path, host)
+    assert "--workers 3 " in ingest
+
+
+def test_ingest_workers_env_overrides_sizing(tmp_path):
+    r, ingest = _plan_workers(tmp_path, {**_host(tmp_path, avail_mb=64000), "INGEST_WORKERS": "2"})
+    assert r.returncode == 0, r.stderr
+    assert "--workers 2 " in ingest
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "lots", "2.5", "03"])
+def test_invalid_ingest_workers_fails_closed(tmp_path, bad):
+    r, _ = _plan_workers(tmp_path, {**_host(tmp_path), "INGEST_WORKERS": bad})
+    assert r.returncode != 0
+    assert "INGEST_WORKERS must be a positive integer" in r.stderr
+
+
+def test_dryrun_flags_ingest_that_would_be_refused(tmp_path):
+    # One worker + headroom = 3072 MiB; 3071 available cannot take any ingest.
+    r, ingest = _plan_workers(tmp_path, _host(tmp_path, avail_mb=3071))
+    assert r.returncode == 0, r.stderr
+    assert "--workers 1 " in ingest and "would be REFUSED" in ingest
+    assert "REFUSED: host RAM too low" in r.stderr
+
+
+def _live(tmp_path: Path, host: dict[str, str], extra: dict[str, str] | None = None):
+    """Run the live path with stub gateway/curl/docker/python up to the ingest."""
+    scripts = tmp_path / "checkout" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / SCRIPT.name).write_text(SCRIPT.read_text())
+    (scripts / "run_local_gateway.sh").write_text(
+        "#!/bin/sh\nprintf 'export RERANK_ENABLED=true\\n' > \"$GATEWAY_ENV_FILE\"\n"
+    )
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = tmp_path / "calls"
+    (bindir / "curl").write_text("#!/bin/sh\nprintf '200'\n")
+    (bindir / "docker").write_text("#!/bin/sh\nexit 99\n")
+    py = bindir / "python"
+    # Every python call is recorded; the agent health check then sees a 200
+    # and the script stops, so the run ends right after the ingest.
+    py.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n")
+    for file in bindir.iterdir():
+        file.chmod(0o755)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    clean = {k: v for k, v in os.environ.items() if k not in _INGEST_VARS}
+    result = subprocess.run(
+        ["sh", str(scripts / SCRIPT.name)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **clean,
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "CALLS": str(calls),
+            "PY": str(py),
+            "CORPUS_DIR": str(corpus),
+            "GATEWAY_ENV_FILE": str(tmp_path / "gateway.env"),
+            "LOCAL_STACK_LOG_DIR": str(tmp_path),
+            **host,
+            **(extra or {}),
+        },
+    )
+    return result, (calls.read_text().splitlines() if calls.exists() else [])
+
+
+def _ingest_calls(calls: list[str]) -> list[str]:
+    return [c for c in calls if "mainframe_rag.ingest.run_ingest" in c]
+
+
+def test_live_ingest_is_launched_with_the_sized_worker_count(tmp_path):
+    r, calls = _live(tmp_path, _host(tmp_path, avail_mb=6144))
+    ingest = _ingest_calls(calls)
+    assert len(ingest) == 1, (r.stderr, calls)
+    assert "--workers 4 " in ingest[0]
+
+
+def test_live_low_ram_refuses_before_any_model_or_ingest_call(tmp_path):
+    r, calls = _live(tmp_path, _host(tmp_path, avail_mb=3071))
+    assert r.returncode == 75
+    assert calls == [], "nothing may run (probe, ingest) on refusal"
+    assert "REFUSED: host RAM too low" in r.stderr and "FORCE_START=1" in r.stderr
+
+
+@pytest.mark.parametrize("resource", ["memory", "io"])
+def test_live_pressure_refuses(tmp_path, resource):
+    host = _host(tmp_path)
+    (Path(host["HOST_PSI_DIR"]) / resource).write_text(
+        "some avg10=10.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+    )
+    r, calls = _live(tmp_path, host)
+    assert r.returncode == 75 and calls == []
+    assert f"REFUSED: host {resource} pressure is high" in r.stderr
+
+
+def test_live_pressure_just_below_threshold_is_admitted(tmp_path):
+    r, calls = _live(tmp_path, _host(tmp_path, psi=9.99))
+    assert _ingest_calls(calls), r.stderr
+
+
+def test_live_explicit_workers_are_still_admission_checked(tmp_path):
+    # 7 workers x 1024 + 2048 = 9216 MiB needed.
+    low = tmp_path / "low"
+    low.mkdir()
+    r, calls = _live(low, _host(low, avail_mb=9215), {"INGEST_WORKERS": "7"})
+    assert r.returncode == 75 and calls == []
+    ok = tmp_path / "ok"
+    ok.mkdir()
+    r, calls = _live(ok, _host(ok, avail_mb=9216), {"INGEST_WORKERS": "7"})
+    ingest = _ingest_calls(calls)
+    assert ingest and "--workers 7 " in ingest[0]
+
+
+def test_live_force_start_skips_refusal_but_still_sizes_workers(tmp_path):
+    host = _host(tmp_path, avail_mb=100, psi=80.0)
+    r, calls = _live(tmp_path, host, {"FORCE_START": "1"})
+    ingest = _ingest_calls(calls)
+    assert ingest and "--workers 1 " in ingest[0], r.stderr
+    assert "FORCE_START=1" in r.stderr
+
+
+def test_missing_host_files_skip_checks_with_notice(tmp_path):
+    host = {"HOST_MEMINFO": str(tmp_path / "none"), "HOST_PSI_DIR": str(tmp_path / "nodir"), "HOST_CPUS": "4"}
+    r, ingest = _plan_workers(tmp_path, host)
+    assert r.returncode == 0, r.stderr
+    assert "--workers 3 " in ingest  # falls back to the CPU-1 default
+    assert "skipping the RAM admission check" in r.stderr
+    assert "skipping the memory pressure check" in r.stderr
