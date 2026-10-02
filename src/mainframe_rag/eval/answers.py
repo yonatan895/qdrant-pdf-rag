@@ -31,9 +31,15 @@ Judging contract (structural first)
                          WARN (hedged abstention), recorded for diagnosis.
     Gold substrings (gold_must_contain / gold_must_not_contain) are applied
     as case-folded literal checks on the answer body for BOTH behaviors:
-    the seed author's per-entry intent governs (some abstains REQUIRE the
-    literal phrase "excerpts do not answer", others FORBID it), so no
-    normalization magic happens here. must_cite_identifier requires the
+    the seed author's per-entry intent governs, so no normalization magic
+    happens here. Dev-golden refusal rows no longer pin refusal wording
+    (issue #596, option a): they carry expected_verification_state
+    insufficient_evidence, which the agent serves only when its own refusal
+    predicate (or the zero-hits path) recognizes the decline, so any
+    recognized phrasing passes and an uncited non-refusal still fails on the
+    state check. Answer rows may still FORBID "excerpts do not answer"; the
+    frozen holdout's refusal rows keep the literal until a dedicated holdout
+    decision. must_cite_identifier requires the
     identifier to appear in the body or in a validated citation string.
     Gold checks judge MODEL phrasing, so they are suppressed on the agent's
     zero-hits path (a canned message has no model text); the structural

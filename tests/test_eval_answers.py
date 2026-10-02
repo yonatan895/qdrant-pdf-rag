@@ -869,3 +869,45 @@ def test_answer_entry_points_preserve_help_and_holdout_refusal(tmp_path):
                                  env=env, capture_output=True, text=True, check=False)
         assert refused.returncode == 2
         assert "requires VENUE=rc" in refused.stderr
+
+
+@pytest.mark.parametrize("row_id", ["NEG-02", "NEG-03", "NEG-04", "NEG-07"])
+def test_dev_refusal_rows_judge_refusal_structurally_not_by_wording(row_id: str) -> None:
+    """Issue #596 option (a): the dev-golden refusal rows no longer pin the
+    literal "excerpts do not answer". Any phrasing the agent's own refusal
+    predicate recognizes passes; the served state is derived exactly as the
+    agent derives it (is_abstention -> verification_state_for), so the
+    expected_verification_state check is the structural refusal check. An
+    uncited non-refusal and a cited non-refusal (trap answered) still fail."""
+    from pathlib import Path
+
+    from mainframe_rag.agent.answer import verification_state_for
+
+    golden = Path(__file__).resolve().parents[1] / "evals" / "golden.jsonl"
+    entry = next(json.loads(line) for line in golden.read_text().splitlines() if line.strip() and json.loads(line)["id"] == row_id)
+    assert entry["expected_behavior"] == "abstain"
+    assert entry["expected_verification_state"] == "insufficient_evidence"
+    assert "excerpts do not answer" not in [s.lower() for s in entry.get("gold_must_contain") or []]
+
+    def served(body: str, cites: list[str]) -> tuple[str, list[str]]:
+        state = verification_state_for(
+            answer=body, citations=cites, citations_inferred=False, finish_reason="stop",
+            abstained=is_abstention(body), empty_hits=False,
+        )
+        verdict, fails, _ = judge(entry, body, cites, verification_state=state)
+        return verdict, fails
+
+    # Rows may carry unrelated gold (NEG-03 must name IEASYSxx); keep it satisfied.
+    subject = entry.get("must_cite_identifier") or "that LPAR"
+    for refusal in (
+        f"The excerpts do not answer this question about {subject}.",
+        f"The excerpts do not contain the information you asked about {subject}.",
+        f"The supplied manual excerpts provide no information regarding {subject}.",
+    ):
+        assert served(refusal, []) == ("pass", []), refusal
+
+    verdict, fails = served("Set CPU limits with this YAML: kind: HorizontalPodAutoscaler ...", [])
+    assert verdict == "fail" and any("insufficient_evidence" in f for f in fails)
+
+    verdict, fails = served("PROD1 logged IEA500I at 02:14.", ["SA22-0000-00 Manual, Messages, p. 1"])
+    assert verdict == "fail" and any("trap answered" in f for f in fails)
