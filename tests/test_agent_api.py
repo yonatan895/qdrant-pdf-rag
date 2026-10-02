@@ -487,7 +487,8 @@ def test_healthz_degraded_paths_leak_no_upstream_text(client, monkeypatch):
     body = resp.json()
     assert body["qdrant"] is False and body["embed"] is False
     assert "secret bits" not in resp.text and "token=abc" not in resp.text
-    assert set(body) == {"status", "qdrant", "embed", "representation"}
+    assert set(body) == {"status", "qdrant", "embed", "representation", "rerank"}
+    assert body["rerank"] is None
 
 
 def test_http_exception_handler_shape(client):
@@ -970,8 +971,183 @@ def test_healthz_embed_probe_forwards_gateway_key(client, monkeypatch):
     monkeypatch.setattr(app_mod.settings, "embed_api_key", "sk-test-embed")
     resp = client.get("/healthz")
     assert resp.status_code == 200
-    assert resp.json()["embed"] is True
+    # Exact body shape the simulation tier pins (test_integration_sim.py),
+    # rerank off: no extra or missing keys.
+    assert resp.json() == {
+        "status": "ok",
+        "qdrant": True,
+        "embed": True,
+        "representation": "compatible",
+        "rerank": None,
+    }
     assert posts[0]["headers"] == {"Authorization": "Bearer sk-test-embed"}
+
+
+class _RerankUpstream:
+    """Scripted reranker endpoint behind a real HttpReranker: `score_ok` /
+    `rerank_ok` flip the /v1/score and /v1/rerank legs independently, so
+    primary/alternate fallback is the production code path. Failures carry
+    text that must never reach a body or log."""
+
+    def __init__(self):
+        self.score_ok = True
+        self.rerank_ok = True
+        self.delay_s = 0.0
+        self.calls = 0
+
+    def handler(self, request):
+        import httpx2
+
+        self.calls += 1
+        if self.delay_s:
+            time.sleep(self.delay_s)
+        payload = json.loads(request.content)
+        n = len(payload.get("text_2") or payload.get("documents") or [])
+        if request.url.path.endswith("/v1/score"):
+            if not self.score_ok:
+                return httpx2.Response(404, text="vllm secret-upstream-text")
+            return httpx2.Response(200, json={"data": [{"index": i, "score": 0.5} for i in range(n)]})
+        if not self.rerank_ok:
+            return httpx2.Response(503, text="vllm secret-upstream-text")
+        return httpx2.Response(
+            200, json={"results": [{"index": i, "relevance_score": 0.5} for i in range(n)]}
+        )
+
+
+class _Clock:
+    """Stand-in for app_mod.time whose monotonic() the test advances."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+@pytest.fixture
+def rerank_leg(client, monkeypatch):
+    """Rerank enabled behind a scripted upstream; /healthz's other legs are
+    ready and the clock is controlled so TTL expiry is deterministic."""
+    import httpx2
+
+    from mainframe_rag.retrieve.rerank import HttpReranker
+
+    class Ready:
+        status_code = 200
+        text = "all shards are ready"
+
+    class ReadyPool:
+        async def get(self, *a, **k):
+            return Ready()
+
+    upstream = _RerankUpstream()
+    monkeypatch.setattr(app_mod, "http", ReadyPool())
+    monkeypatch.setattr(app_mod.settings, "rerank_enabled", True)
+    monkeypatch.setattr(app_mod.settings, "rerank_base_url", "http://rerank.internal/v1")
+    monkeypatch.setattr(app_mod.settings, "health_rerank_timeout_s", 0.2)
+    monkeypatch.setattr(app_mod.settings, "health_rerank_ttl_s", 15.0)
+    sync = httpx2.Client(transport=httpx2.MockTransport(upstream.handler))
+    monkeypatch.setattr(app_mod, "reranker", HttpReranker(app_mod.settings, sync))
+    monkeypatch.setattr(app_mod, "rerank_health", None)
+    clock = _Clock()
+    monkeypatch.setattr(app_mod, "time", clock)
+    return upstream, clock
+
+
+def test_healthz_rerank_up_is_ready(client, rerank_leg):
+    upstream, _ = rerank_leg
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json()["rerank"] is True
+    assert upstream.calls == 1
+
+
+def test_healthz_rerank_alternate_route_up_is_ready(client, rerank_leg):
+    """Primary (score) 404s but the alternate (rerank) leg answers: the
+    leg is up, exactly as search would serve it."""
+    upstream, _ = rerank_leg
+    upstream.score_ok = False
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json()["rerank"] is True
+
+
+def test_healthz_rerank_all_routes_down_is_unready_without_upstream_text(
+    client, rerank_leg, caplog
+):
+    upstream, _ = rerank_leg
+    upstream.score_ok = upstream.rerank_ok = False
+    resp = client.get("/healthz")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "degraded" and body["rerank"] is False
+    assert body["qdrant"] is True
+    assert "secret-upstream-text" not in resp.text
+    assert "rerank_error" in caplog.text and "secret-upstream-text" not in caplog.text
+    # liveness never depends on the rerank leg
+    assert client.get("/livez").status_code == 200
+
+
+def test_healthz_rerank_disabled_is_null_and_unaffected(client, rerank_leg, monkeypatch):
+    upstream, _ = rerank_leg
+    monkeypatch.setattr(app_mod.settings, "rerank_enabled", False)
+    upstream.score_ok = upstream.rerank_ok = False
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json()["rerank"] is None
+    assert upstream.calls == 0
+
+
+def test_healthz_rerank_probe_timeout_is_unready(client, rerank_leg):
+    upstream, _ = rerank_leg
+    upstream.delay_s = 0.6
+    resp = client.get("/healthz")
+    assert resp.status_code == 503
+    assert resp.json()["rerank"] is False
+
+
+def test_healthz_rerank_probe_is_ttl_cached(client, rerank_leg):
+    """Kubelet ticks inside the TTL reuse one upstream probe (no GPU request
+    per tick); a failure is cached too, and expiry re-probes."""
+    upstream, clock = rerank_leg
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/healthz").status_code == 200
+    assert upstream.calls == 1
+    upstream.score_ok = upstream.rerank_ok = False
+    assert client.get("/healthz").status_code == 200  # still inside the TTL
+    assert upstream.calls == 1
+    clock.now += 16.0
+    assert client.get("/healthz").status_code == 503
+    calls_after_failure = upstream.calls
+    assert calls_after_failure > 1
+    assert client.get("/healthz").status_code == 503
+    assert upstream.calls == calls_after_failure
+
+
+def test_rerank_recovery_restores_readiness_and_next_search(client, rerank_leg, monkeypatch):
+    """Next ordinary operation after recovery: once the reranker is back and
+    the TTL passes, /healthz is ready and /v1/search succeeds. Search is a
+    double that scores through the app's reranker, so it fails closed (502)
+    exactly while the leg is down."""
+    upstream, clock = rerank_leg
+
+    def search(qdrant, embedder, collection, query, *args, reranker=None, **kwargs):
+        reranker.score(query, ["passage"])
+        return [_hit()], "hybrid", {"embed_ms": 1, "qdrant_ms": 2}
+
+    monkeypatch.setattr(app_mod, "retrieve_search", search)
+    upstream.score_ok = upstream.rerank_ok = False
+    assert client.get("/healthz").status_code == 503
+    assert client.post("/v1/search", json={"query": "how to allocate"}).status_code == 502
+
+    upstream.score_ok = upstream.rerank_ok = True
+    clock.now += 16.0
+    resp = client.get("/healthz")
+    assert resp.status_code == 200 and resp.json()["rerank"] is True
+    assert client.post("/v1/search", json={"query": "how to allocate"}).status_code == 200
 
 
 def test_error_shape_is_structured(client, monkeypatch):
@@ -992,6 +1168,41 @@ def test_error_shape_is_structured(client, monkeypatch):
     body = resp.json()
     assert body["code"] == "invalid_request"
     assert set(body) == {"code", "message"}
+
+
+UNSEARCHABLE_QUERIES = ["   ", "\t\n", "\x00x", "a\x1bb"]
+
+
+@pytest.mark.parametrize("query", UNSEARCHABLE_QUERIES)
+@pytest.mark.parametrize(
+    ("path", "extra"),
+    [("/v1/search", {}), ("/v1/answer", {}), ("/v1/answer", {"stream": True})],
+    ids=["search", "answer", "answer-sse"],
+)
+def test_blank_or_control_query_refused_before_any_work(client, monkeypatch, query, path, extra):
+    """Issue #579: whitespace-only and NUL/C0-control queries get the fixed
+    422 envelope with zero retrieval (embed/Qdrant) and zero LLM calls."""
+    search = MagicMockSearch()
+    llm = FakeLLM()
+    monkeypatch.setattr(app_mod, "retrieve_search", search.search)
+    monkeypatch.setattr(app_mod, "llm", llm)
+    resp = client.post(path, json={"query": query, **extra})
+    assert resp.status_code == 422
+    assert resp.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert query.strip() not in resp.text or not query.strip()
+    assert search.calls == []
+    assert llm.calls == 0
+
+
+@pytest.mark.parametrize("path", ["/v1/search", "/v1/answer"])
+def test_padded_real_query_is_searched_unmodified(client, monkeypatch, path):
+    """Leading/trailing whitespace around real text stays legitimate and the
+    searched text is not normalised (identifier semantics live in retrieve)."""
+    search = MagicMockSearch()
+    monkeypatch.setattr(app_mod, "retrieve_search", search.search)
+    resp = client.post(path, json={"query": "  IEFBR14  "})
+    assert resp.status_code == 200
+    assert [c["query"] for c in search.calls] == ["  IEFBR14  "]
 
 
 def test_answer_retrieval_failure_reads_retrieval_failed(client, monkeypatch):
@@ -2874,6 +3085,34 @@ def test_lifespan_reranker_unreachable_warns_but_still_listens(monkeypatch, caps
     # configure_logging replaces root handlers, so pytest's caplog stays
     # empty — assert on the real stderr stream instead.
     assert "reranker_unreachable" in capsys.readouterr().err
+
+
+def test_lifespan_zowe_probe_warning_leaks_no_exception_text(monkeypatch, capsys):
+    """The startup warning for a failed Zowe bridge probe carries the error
+    type only; a sentinel in the exception message never reaches stderr."""
+    from mainframe_rag.agent.zowe_mcp import HttpZoweMCP
+
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "vllm")
+    monkeypatch.setenv("EMBED_BASE_URL", "http://embed.internal/v1")
+    monkeypatch.setenv("EMBED_MODEL", "test-embed-model")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "test-rev")
+    monkeypatch.setenv("DENSE_DIM", "64")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    monkeypatch.setenv("ZOWE_MCP_ENABLED", "true")
+    monkeypatch.setenv("ZOWE_MCP_BASE_URL", "http://bridge.internal:8081")
+
+    def leaky(self) -> list[str]:
+        raise RuntimeError("SECRET-XYZ upstream body")
+
+    monkeypatch.setattr(HttpZoweMCP, "list_tools", leaky)
+    with TestClient(app_mod.app) as c:
+        c.get("/metrics")
+    err = capsys.readouterr().err
+    assert "zowe_mcp_unreachable" in err
+    assert "RuntimeError" in err
+    assert "SECRET-XYZ" not in err
 
 
 def test_prompt_build_runs_off_the_event_loop(client, monkeypatch):

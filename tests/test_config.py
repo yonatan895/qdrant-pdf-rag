@@ -396,6 +396,8 @@ PINNED_SETTING_DEFAULTS: dict[str, object] = {
     "http_max_keepalive_connections": 100,
     "health_qdrant_timeout_s": 5.0,
     "health_embed_timeout_s": 10.0,
+    "health_rerank_timeout_s": 5.0,
+    "health_rerank_ttl_s": 15.0,
     "representation_cache_ttl_s": 5.0,
     "allow_hash_mode": False,
     "log_level": "INFO",

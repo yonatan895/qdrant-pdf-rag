@@ -584,12 +584,50 @@ def _jaeger_keys(docs):
 
 
 def test_jaeger_decoupled_from_export():
-    """OBS-2 item 3: external export without the bundled backend. The
-    endpoint stays wired while every Jaeger object disappears."""
-    new = run_new_template({"tracing": {"jaeger": {"enabled": False}}})
+    """OBS-2 item 3 / #568: external export without the bundled backend. The
+    explicitly named collector stays wired (the former bundled hostname is
+    allowed when chosen) while every Jaeger object disappears."""
+    for endpoint in ("http://jaeger:4318", "http://collector.platform:4318"):
+        new = run_new_template({"tracing": {"endpoint": endpoint, "jaeger": {"enabled": False}}})
+        assert _jaeger_keys(new) == set()
+        env = env_map(new["Deployment", "rag-agent"])
+        assert env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == endpoint
+
+
+def test_jaeger_disabled_without_destination_fails():
+    """#568: the empty endpoint means the bundled Jaeger; with that backend
+    disabled the render fails closed instead of exporting to a Service
+    nothing deploys."""
+    values = base_values()
+    values["tracing"]["endpoint"] = ""
+    values["tracing"]["jaeger"] = {"enabled": False}
+    raw = _helm_template_with_values(values)
+    assert raw.returncode != 0
+    assert "tracing.jaeger.enabled=false needs an intentional trace destination" in raw.stderr
+
+
+def test_jaeger_disabled_with_tracing_off_is_intentional():
+    new = run_new_template({"tracing": {"enabled": False, "endpoint": "", "jaeger": {"enabled": False}}})
     assert _jaeger_keys(new) == set()
-    env = env_map(new["Deployment", "rag-agent"])
-    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://jaeger:4318"
+    assert env_map(new["Deployment", "rag-agent"])["OTEL_EXPORTER_OTLP_ENDPOINT"].get("value") in (None, "")
+
+
+def test_empty_endpoint_default_keeps_bundled_export():
+    """#568: the chart default (empty endpoint, bundled Jaeger) still exports
+    to the in-cluster Jaeger, for the agent and the ingest Job."""
+    new = run_new_template({"tracing": {"endpoint": ""},
+                            "ingest": {"enabled": True, "corpusPVC": "manuals"}})
+    assert ("Deployment", "jaeger") in new
+    assert env_map(new["Deployment", "rag-agent"])["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://jaeger:4318"
+    assert ingest_env_map(new["Job", "ingest"])["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://jaeger:4318"
+
+
+def test_nonurl_endpoint_rejected_by_schema():
+    values = base_values()
+    values["tracing"]["endpoint"] = "jaeger:4318"
+    raw = _helm_template_with_values(values)
+    assert raw.returncode != 0
+    assert "tracing/endpoint" in raw.stderr
 
 
 def test_jaeger_explicit_true_with_tracing_on():
@@ -645,3 +683,75 @@ def test_omitted_subflags_preserve_historical_coupling():
     off = run_new_template({"tracing": {"enabled": False, "endpoint": ""}})
     assert _jaeger_keys(off) == set()
     assert off["Deployment", "rag-agent"] is not None
+
+
+def _hardening_violations(pod_spec: dict) -> list[str]:
+    """Pod/container hardening that must not depend on restricted-v2 alone (#585).
+
+    Fixed identities stay forbidden: OpenShift assigns UID/GID/fsGroup.
+    """
+    problems = []
+    pod_sc = pod_spec.get("securityContext") or {}
+    if pod_sc.get("runAsNonRoot") is not True:
+        problems.append("pod runAsNonRoot")
+    if (pod_sc.get("seccompProfile") or {}).get("type") != "RuntimeDefault":
+        problems.append("pod seccompProfile")
+    for key in ("runAsUser", "runAsGroup", "fsGroup"):
+        if key in pod_sc:
+            problems.append(f"pod {key} set")
+    for c in pod_spec.get("initContainers", []) + pod_spec["containers"]:
+        sc = c.get("securityContext") or {}
+        if sc.get("allowPrivilegeEscalation") is not False:
+            problems.append(f"{c['name']} allowPrivilegeEscalation")
+        if (sc.get("capabilities") or {}).get("drop") != ["ALL"]:
+            problems.append(f"{c['name']} capabilities.drop")
+        for key in ("runAsUser", "runAsGroup"):
+            if key in sc:
+                problems.append(f"{c['name']} {key} set")
+    return problems
+
+
+def test_every_rendered_pod_is_hardened_without_fixed_identities():
+    docs = run_new_template(
+        {
+            "route": {"enabled": True, "destinationCA": FAKE_CA},
+            "ingest": {"enabled": True, "corpusPVC": "corpus-pvc"},
+        }
+    )
+    pods = {
+        key: doc["spec"]["template"]["spec"]
+        for key, doc in docs.items()
+        if key[0] in ("Deployment", "Job")
+    }
+    assert set(pods) == {
+        ("Deployment", "rag-agent"),
+        ("Deployment", "jaeger"),
+        ("Job", "ingest"),
+    }
+    assert {c["name"] for c in pods["Deployment", "rag-agent"]["containers"]} == {
+        "agent",
+        "oauth-proxy",
+    }
+    for key, pod in pods.items():
+        assert _hardening_violations(pod) == [], key
+
+
+def test_hardening_check_rejects_unhardened_and_fixed_identity_containers():
+    """Negative control: the check above must fail when a container lacks the fields."""
+    hardened = {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
+    pod = {
+        "securityContext": {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}},
+        "containers": [{"name": "ok", "securityContext": hardened}],
+    }
+    assert _hardening_violations(pod) == []
+    pod["containers"].append({"name": "bare"})
+    assert _hardening_violations(pod) == ["bare allowPrivilegeEscalation", "bare capabilities.drop"]
+    pod["containers"][1] = {"name": "pinned", "securityContext": {**hardened, "runAsUser": 1000}}
+    assert _hardening_violations(pod) == ["pinned runAsUser set"]
+    pod["securityContext"] = {"fsGroup": 1000}
+    assert _hardening_violations(pod) == [
+        "pod runAsNonRoot",
+        "pod seccompProfile",
+        "pod fsGroup set",
+        "pinned runAsUser set",
+    ]

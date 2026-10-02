@@ -50,6 +50,7 @@ def test_resolve_embed_assignments():
         "BUDGET_CHUNKED_PREFILL": "",
         "BUDGET_LANGUAGE_MODEL_ONLY": "0",
         "BUDGET_MM_PROCESSOR_CACHE_GB": "",
+        "BUDGET_HOST_MEM_MB": "2600",
     }
 
 
@@ -67,6 +68,7 @@ def test_resolve_reasoning_assignments():
         "BUDGET_CHUNKED_PREFILL": "",
         "BUDGET_LANGUAGE_MODEL_ONLY": "0",
         "BUDGET_MM_PROCESSOR_CACHE_GB": "",
+        "BUDGET_HOST_MEM_MB": "6400",
     }
 
 
@@ -86,6 +88,7 @@ def test_cli_matches_library_for_every_profile_server():
             assert parsed["BUDGET_BATCHED_TOKENS"] == str(server.max_num_batched_tokens or "")
             assert parsed["BUDGET_EAGER"] == ("1" if server.enforce_eager else "0")
             assert parsed["BUDGET_SEQS"] == str(server.max_num_seqs)
+            assert parsed["BUDGET_HOST_MEM_MB"] == str(server.host_mem_mb or "")
 
 
 def test_unknown_profile_fails_closed():
