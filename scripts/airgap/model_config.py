@@ -12,6 +12,31 @@ MODEL_CONFIG_KEYS = (
     "CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL", "CONTEXTUAL_EMBED_ENABLED",
 )
 
+# Operator booleans that fail closed on any non-boolean spelling. One parser
+# for preflight and the values mapper (map_values.strict_bool wraps it).
+OPERATOR_BOOL_KEYS = (
+    "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
+    "INGEST_REINGEST", "CHAT_CONDENSE_ENABLED",
+)
+
+
+def parse_strict_bool(name: str, raw: str, default: bool) -> bool:
+    """Unset/empty keeps the default; true/1/yes and false/0/no (any case)
+    are accepted. The diagnostic names the key, never the value."""
+    if raw == "":
+        return default
+    low = raw.lower()
+    if low in ("true", "1", "yes"):
+        return True
+    if low in ("false", "0", "no"):
+        return False
+    raise ValueError(f"{name} must be true/false")
+
+
+def validate_operator_booleans(values: Mapping[str, str]) -> None:
+    for name in OPERATOR_BOOL_KEYS:
+        parse_strict_bool(name, values.get(name, ""), False)
+
 
 def validate_model_config(values: Mapping[str, str]) -> None:
     for name in MODEL_CONFIG_KEYS:
@@ -24,7 +49,7 @@ def validate_model_config(values: Mapping[str, str]) -> None:
             raise ValueError(f"{name} is required for deploy/ingest (see airgap.env.example)")
     if values.get("LLM_MODEL_REASONING") and not values.get("LLM_BASE_URL"):
         raise ValueError("LLM_BASE_URL is required when LLM_MODEL_REASONING is set")
-    if values.get("CONTEXTUAL_EMBED_ENABLED", "").lower() in ("true", "1", "yes"):
+    if parse_strict_bool("CONTEXTUAL_EMBED_ENABLED", values.get("CONTEXTUAL_EMBED_ENABLED", ""), False):
         for name in ("CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL"):
             if not values.get(name):
                 raise ValueError(f"{name} is required when CONTEXTUAL_EMBED_ENABLED is set")
@@ -32,6 +57,7 @@ def validate_model_config(values: Mapping[str, str]) -> None:
 
 def main() -> int:
     try:
+        validate_operator_booleans(os.environ)
         validate_model_config(os.environ)
     except ValueError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

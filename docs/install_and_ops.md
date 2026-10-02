@@ -713,7 +713,7 @@ separate. Test correct CA, wrong CA and hostname mismatch from actual pods.
 
 #### Pre-Flight Validation (`sh scripts/tools/run-task.sh airgap:validate`)
 
-Before modifying any cluster state, run the pre-flight validation check to verify tools, required variables, storage class compliance (refusing NFS), and required keys — it prints OpenShift SCC guidance but does not verify SCC permissions:
+Before modifying any cluster state, run the pre-flight validation check to verify tools, required variables, storage class compliance (refusing NFS for the data and snapshot classes), strict operator booleans, and required keys. A denied (Forbidden) cluster read is reported as unverified, never as absent or as a non-OpenShift cluster. It prints OpenShift SCC guidance but does not verify SCC permissions:
 
 ```bash
 sh scripts/tools/run-task.sh airgap:validate

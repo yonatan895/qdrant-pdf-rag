@@ -129,43 +129,90 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     exit 0
 fi
 
+# Read-only probe classified by the client's error class, never by exit
+# status alone: sets PROBE to ok|notfound|forbidden|error. The client's text
+# is not echoed (it can carry identities/upstream detail).
+probe() {
+    if _probe_err=$("$@" 2>&1 >/dev/null); then
+        PROBE=ok
+    else
+        case "$_probe_err" in
+            *Forbidden*|*forbidden*) PROBE=forbidden ;;
+            *NotFound*|*"not found"*|*"doesn't have a resource type"*) PROBE=notfound ;;
+            *) PROBE=error ;;
+        esac
+    fi
+    unset _probe_err
+}
+
 echo "==> 4. Validating cluster context & StorageClass"
 if ! $KC cluster-info >/dev/null 2>&1; then
     die "cannot connect to Kubernetes/OpenShift API server using $KC"
 fi
 
-if ! $KC get storageclass "$STORAGE_CLASS" >/dev/null 2>&1; then
-    echo "    WARNING: StorageClass '$STORAGE_CLASS' not found in cluster. Available classes:"
-    $KC get storageclass --no-headers 2>/dev/null | awk '{print "      - " $1}' || true
-    die "StorageClass '$STORAGE_CLASS' must exist before deployment"
-fi
-echo "    StorageClass '$STORAGE_CLASS' verified in cluster"
+probe $KC get storageclass "$STORAGE_CLASS"
+case "$PROBE" in
+    ok) echo "    StorageClass '$STORAGE_CLASS' verified in cluster" ;;
+    notfound)
+        echo "    WARNING: StorageClass '$STORAGE_CLASS' not found in cluster. Available classes:"
+        $KC get storageclass --no-headers 2>/dev/null | awk '{print "      - " $1}' || true
+        die "StorageClass '$STORAGE_CLASS' must exist before deployment"
+        ;;
+    forbidden)
+        echo "    Notice: this identity may not read StorageClass '$STORAGE_CLASS' (Forbidden); existence is NOT verified — confirm it with the platform owner"
+        ;;
+    *) die "cannot read StorageClass '$STORAGE_CLASS' (unexpected client error)" ;;
+esac
 
 if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
-    if $KC get namespace "$NAMESPACE" >/dev/null 2>&1; then
-        $KC -n "$NAMESPACE" get secret "$GATEWAY_API_KEY_SECRET" >/dev/null 2>&1 || \
-            die "Secret '$GATEWAY_API_KEY_SECRET' not found in namespace '$NAMESPACE' — create it before deploying (see airgap.env.example)"
-        echo "    Gateway key Secret '$GATEWAY_API_KEY_SECRET' verified in namespace '$NAMESPACE'"
-    else
-        echo "    Notice: namespace '$NAMESPACE' does not exist yet — create Secret '$GATEWAY_API_KEY_SECRET' there before 'sh scripts/tools/run-task.sh airgap:deploy'"
-    fi
+    probe $KC get namespace "$NAMESPACE"
+    case "$PROBE" in
+        notfound)
+            echo "    Notice: namespace '$NAMESPACE' does not exist yet — create Secret '$GATEWAY_API_KEY_SECRET' there before 'sh scripts/tools/run-task.sh airgap:deploy'"
+            ;;
+        ok|forbidden)
+            # A namespace-scoped deployer cannot read the cluster-scoped
+            # Namespace object (Forbidden); that is not absence, so check the
+            # Secret in its own namespace instead of skipping the check.
+            probe $KC -n "$NAMESPACE" get secret "$GATEWAY_API_KEY_SECRET"
+            case "$PROBE" in
+                ok) echo "    Gateway key Secret '$GATEWAY_API_KEY_SECRET' verified in namespace '$NAMESPACE'" ;;
+                notfound) die "Secret '$GATEWAY_API_KEY_SECRET' not found in namespace '$NAMESPACE' — create it before deploying (see airgap.env.example)" ;;
+                forbidden) die "this identity may not read Secret '$GATEWAY_API_KEY_SECRET' in namespace '$NAMESPACE' (Forbidden); grant namespace-scoped get on secrets, not cluster-admin" ;;
+                *) die "cannot read Secret '$GATEWAY_API_KEY_SECRET' in namespace '$NAMESPACE' (unexpected client error)" ;;
+            esac
+            ;;
+        *) die "cannot read namespace '$NAMESPACE' (unexpected client error)" ;;
+    esac
 fi
 
 check_gateway_ca
 
 echo "==> 5. Checking OpenShift Security Context Constraints (SCC)"
-if command -v oc >/dev/null 2>&1 && oc get scc >/dev/null 2>&1; then
-    # OpenShift cluster detected
-    if [ -n "${QDRANT_EXTRA_VALUES:-}" ] && [ -f "$QDRANT_EXTRA_VALUES" ]; then
-        echo "    QDRANT_EXTRA_VALUES provided ($QDRANT_EXTRA_VALUES); overriding default UID settings."
-    else
-        echo "    OpenShift cluster detected. Qdrant unprivileged image runs as UID 1000."
-        echo "    If namespace '$NAMESPACE' enforces MustRunAsRange UID allocation,"
-        echo "    keep restricted-v2 admission; use the documented unprivileged Qdrant values."
-    fi
-else
-    echo "    Standard Kubernetes cluster detected (non-OpenShift SCC)."
-fi
+# A failed `get scc` is evidence of a non-OpenShift cluster only when the API
+# server lacks the resource type; a denied or failed read proves nothing.
+probe $KC get scc
+case "$PROBE" in
+    ok)
+        if [ -n "${QDRANT_EXTRA_VALUES:-}" ] && [ -f "$QDRANT_EXTRA_VALUES" ]; then
+            echo "    QDRANT_EXTRA_VALUES provided ($QDRANT_EXTRA_VALUES); overriding default UID settings."
+        else
+            echo "    OpenShift cluster detected. Qdrant unprivileged image runs as UID 1000."
+            echo "    If namespace '$NAMESPACE' enforces MustRunAsRange UID allocation,"
+            echo "    keep restricted-v2 admission; use the documented unprivileged Qdrant values."
+        fi
+        ;;
+    notfound)
+        echo "    Standard Kubernetes cluster detected (non-OpenShift SCC)."
+        ;;
+    forbidden)
+        echo "    Notice: this identity may not list SCCs (Forbidden); the cluster type is NOT determined."
+        echo "    On OpenShift keep restricted-v2 admission for namespace '$NAMESPACE' and the documented unprivileged Qdrant values; never grant anyuid/cluster-admin."
+        ;;
+    *)
+        echo "    Notice: SCC discovery failed (unexpected client error); the cluster type is NOT determined."
+        ;;
+esac
 
 echo ""
 echo "SUCCESS: Pre-flight validation passed cleanly."
