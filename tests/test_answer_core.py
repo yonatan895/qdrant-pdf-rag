@@ -155,6 +155,94 @@ async def test_core_requires_answer_body_after_parsing(content, answer, script, 
     assert len(llm.calls) == 1
 
 
+_FABRICATED = "SA22-9999-99 Not Retrieved, Made Up > Path, p. 9-9"
+_CUT_CITE = "SA22-0000-00 Synthetic Reference, Chapter 2 > IEA5"
+
+
+async def _run_core(content: str, stream: bool, finish_reason: str):
+    def retrieve(*_args, **_kwargs):
+        return [_hit()], "identifier", {}
+
+    llm = CoreFakeLLM(finish_reason=finish_reason)
+    llm.content = content  # CoreFakeLLM substitutes its default for ""
+    deps = _deps(_settings(), llm, retrieve)
+    source = AnswerCoreInput(query="IEA500I")
+    if stream:
+        events = [event async for event in execute_answer_core_stream(source, deps)]
+        assert events[-1]["type"] == "final"
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    assert len(llm.calls) == 1
+    return output
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+@pytest.mark.parametrize(
+    "content,answer,citations,state,inferred",
+    [
+        # Thinking-only / empty content channel: no body, nothing to cite.
+        ("```thinking\nWork out the answer.\n```", "", [], "generation_incomplete", False),
+        ("```thought\nWork out the answer.\n```\n", "", [], "generation_incomplete", False),
+        ("", "", [], "generation_incomplete", False),
+        ("  \n\n", "", [], "generation_incomplete", False),
+        # Fabricated citation lines are dropped from body and citations alike;
+        # a draft stays a draft, a valid cite alongside it is still honored.
+        (f"Reissue the command.\nCitations:\n- {_FABRICATED}", "Reissue the command.", [],
+         "unverified_draft", False),
+        (f"Reissue the command.\n\n{_FABRICATED}\n\nCitations:\n- {{cite}}",
+         "Reissue the command.", ["{cite}"], "accepted", False),
+        (f"Reissue the command.\nCitations:\n- {_FABRICATED}\n- {{cite}}",
+         "Reissue the command.", ["{cite}"], "accepted", False),
+        # Bracket markers: an unmapped index grounds nothing; a mapped one is inferred.
+        ("Reissue the command [7].", "Reissue the command [7].", [], "unverified_draft", False),
+        ("Reissue the command [1][9].", "Reissue the command [1][9].", ["{cite}"],
+         "unverified_draft", True),
+        # Output cut mid-citation / mid-marker: the fragment is never a citation
+        # and never leaks into the kept body.
+        (f"Reissue the command.\nCitations:\n- {_CUT_CITE}", "Reissue the command.", [],
+         "unverified_draft", False),
+        ("Reissue the command [", "Reissue the command [", [], "unverified_draft", False),
+    ],
+)
+async def test_core_adversarial_model_outputs(content, answer, citations, state, inferred,
+                                              stream, finish_reason):
+    """Issue #597: outcome table for hostile model output (verification state,
+    body kept or dropped, citations accepted or rejected). Non-`stop` finishes
+    are incomplete whatever the content; the parsed body/citations are the same."""
+    cite = _hit().cite
+    output = await _run_core(content.format(cite=cite), stream, finish_reason)
+    assert output.verification_state == (state if finish_reason == "stop" else "generation_incomplete")
+    assert output.answer == answer
+    assert output.citations == [c.format(cite=cite) for c in citations]
+    assert output.citations_inferred is inferred
+    for leaked in (_FABRICATED, _CUT_CITE):
+        assert leaked not in output.answer
+        assert leaked not in output.citations
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "echo",
+    ["Retrieved manual excerpts:", "Retrieved manual excerpts:\n\n[1] {cite}"],
+    ids=["header", "header-with-excerpt-label"],
+)
+@pytest.mark.xfail(
+    strict=True,
+    reason="#576 contract gap: a prompt-header echo plus a valid citation is `accepted`; "
+    "docs/agent.md lists answer/citation labels and bare citations as non-prose but not "
+    "prompt section headers. Flips when the body predicate rejects prompt scaffolding",
+)
+async def test_core_prompt_header_residue_is_not_an_answer_body(echo, stream):
+    cite = _hit().cite
+    content = f"{echo.format(cite=cite)}\n\nCitations:\n- {cite}"
+    output = await _run_core(content, stream, "stop")
+    assert output.verification_state == "generation_incomplete"
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("header", ["Sources:", "References:", "### **References:**"])
