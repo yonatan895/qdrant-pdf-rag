@@ -170,6 +170,20 @@ for citations and filters.
   cards expand to atomic statements while prose runs stay blobs — but only
   with ≥2 statement-starts, so one `//see`-style mention passes through
   byte-identical.
+- Code-entry detection (issue #591): a line that is exactly a completion code
+  (`0C4`, or `U4038` with its U prefix), followed within two lines by
+  description text rather than another bare code, opens a new atomic block.
+  This excludes index runs (consecutive bare codes). A block usually holds
+  several entries, so the payload records **every** entry the block carries,
+  not just the one it opens with — reading only the first line captured 16% of
+  the codes in a real system-codes manual and missed `0C4` entirely. A bare 3-hex
+  entry is a completion code, except in a section whose heading names wait
+  states, where it takes the `W`-prefix the query parser emits for it. The
+  operator spelling (`S0C4`) is deliberately **not** added to `text`: it would
+  shift every unit span (#368) and put a line in the cited text that the
+  manual does not contain. `system_codes` plus the prefilter carry the lookup. The value is written to
+  the point payload on every upsert — indexing the field without writing it
+  leaves the index empty and every code query silently falling back.
 - SYSIN adjacency (issue #216): data paragraphs following a `DD *`/`DD DATA`
   card keep splitting between records across page/paragraph boundaries
   (line-atomic units). The chain ends at sentence punctuation (data records
@@ -299,7 +313,7 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   an on-disk index; on-disk payloads.
 - Payload indexes are created **before** load — including on pre-existing
   collections: keywords `vendor, product, version, doc_id, chunk_type,
-  message_ids, members, sha256` plus integer `page_start`. An unindexed
+  message_ids, members, system_codes, sha256` plus integer `page_start`. An unindexed
   filter becomes a scan.
 - `ensure_collection` verifies the stored dim against settings on both the
   named-vector and single-vector schemas, raising `DimMismatchError`.
@@ -307,9 +321,9 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   never to `m=0` (which drops existing HNSW). Default **off**, load-bearing
   on single-node: a measured 371-doc/246k-point bulk load ran 3× slower
   with unindexed segments. Do not enable for initial loads on small nodes.
-- Point payload (16 fields + optional `context`): `vendor, product, version,
+- Point payload (17 fields + optional `context`): `vendor, product, version,
   doc_id, source_rev, title, heading_path, page_label, page_start, page_end,
-  chunk_type, message_ids, members, sha256, rules_v, text` (`page_end` since
+  chunk_type, message_ids, members, system_codes, sha256, rules_v, text` (`page_end` since
   issue #271; points written before it read as single-page); `context` only when present — never
   indexed, observability only. Structured chunks (code/table/SYSIN) add an
   optional `units` list of `[start, end, kind]` atomic/prose spans over the

@@ -78,10 +78,10 @@ def test_ensure_collection_creates_all_payload_indexes_before_load():
     ensure_collection(client, _settings(768))
     by_name = dict(client.indexes)
     for kw in ("vendor", "product", "version", "doc_id", "chunk_type",
-               "message_ids", "members", "sha256", "source_rev"):
+               "message_ids", "members", "system_codes", "sha256", "source_rev"):
         assert by_name[kw] == models.PayloadSchemaType.KEYWORD, kw
     assert by_name["page_start"] == models.PayloadSchemaType.INTEGER
-    assert len(client.indexes) == 10
+    assert len(client.indexes) == 11
 
 
 def test_ensure_collection_fails_fast_on_dim_mismatch():
@@ -242,3 +242,86 @@ def test_physical_page_span_round_trips_payload_to_citation():
     assert cite_for(["", "", ""]) == "WX10-0001-00 Widget Guide, Chapter 1. Widgets, p. PDF 1–3"
     assert cite_for([None, "1", "2"]) == "WX10-0001-00 Widget Guide, Chapter 1. Widgets, p. PDF 1–3"
     assert cite_for(["7", "8", "9"]) == "WX10-0001-00 Widget Guide, Chapter 1. Widgets, p. 7–9"
+
+
+def test_completion_code_round_trips_ingest_to_query_filter():
+    """Issue #591 round trip: make_chunks -> upsert payload -> query filter.
+
+    The first two revisions passed every unit test while the feature was
+    dead: `system_codes` was added to `_KEYWORD_INDEXES` but never written
+    into the point payload, so on a real collection the keyword index read
+    `points: 0` and every code query's must-filter matched nothing and fell
+    back. Only this hop — chunk to stored payload to filter value — proves
+    the identifier is transported, so it is asserted as one round trip.
+    """
+    from mainframe_rag.ingest.chunk import make_chunks
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+    from mainframe_rag.ingest.qdrant_io import upsert_chunks
+    from mainframe_rag.retrieve.filters import build_filter, parse_query, query_kind
+
+    class UpsertRecordingClient(RecordingClient):
+        def __init__(self):
+            super().__init__()
+            self.upserted_points = []
+
+        def upsert(self, collection_name, *, points, wait=True):
+            self.upserted_points.extend(points)
+            return True
+
+    text = (
+        "System completion codes\n\n"
+        "0C4\nA protection exception occurred during the operation.\n\n"
+        "0C7\nA data exception occurred.\n"
+    )
+    parsed = ParsedDoc(
+        path="SA99-0000-00.pdf", doc_id="SA99-0000-00", sha256="cd" * 32,
+        vendor="unknown", title="Synthetic Code Manual",
+        toc=((1, "System completion codes", 1),), page_count=1,
+    )
+    chunks = make_chunks(parsed, [text])
+    client = UpsertRecordingClient()
+    upsert_chunks(
+        client, _settings(4), parsed, chunks, [([0.1] * 4, ([1], [1.0]))] * len(chunks)
+    )
+
+    # Stored: every entry the chunk carries, not just the first line.
+    stored = {code for p in client.upserted_points for code in p.payload["system_codes"]}
+    assert {"0C4", "0C7"} <= stored
+
+    # The filter a code query builds must select exactly those stored values.
+    for query in ("What does abend S0C4 mean?", "abend 0C4", "abend 0C7"):
+        ids = parse_query(query)
+        assert query_kind(ids) == "identifier"
+        clause = next(c for c in build_filter(ids).must if c.key == "system_codes")
+        assert set(clause.match.any) & stored, f"{query!r} filter cannot match stored codes"
+
+
+def test_completion_codes_key_present_even_without_codes():
+    """The key is written unconditionally, so the indexed field exists on
+    every point instead of only on code-bearing chunks."""
+    from mainframe_rag.ingest.chunk import Chunk
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+    from mainframe_rag.ingest.qdrant_io import upsert_chunks
+
+    class UpsertRecordingClient(RecordingClient):
+        def __init__(self):
+            super().__init__()
+            self.upserted_points = []
+
+        def upsert(self, collection_name, *, points, wait=True):
+            self.upserted_points.extend(points)
+            return True
+
+    parsed = ParsedDoc(
+        path="manual.pdf", doc_id="SC14-7315-70", sha256="abc123", vendor="IBM",
+        product="z/OS", version="3.2", title="Sample Manual", page_count=10,
+    )
+    chunk = Chunk(
+        chunk_id="00000000-0000-0000-0000-000000000001", doc_id="SC14-7315-70",
+        heading_path="Chapter 1 > Overview", page_start=1, page_label="1-1",
+        chunk_type="narrative", text="No codes on this page.", message_ids=[],
+        members=[], ordinal=0,
+    )
+    client = UpsertRecordingClient()
+    upsert_chunks(client, _settings(4), parsed, [chunk], [([0.1] * 4, ([1], [1.0]))])
+    assert client.upserted_points[0].payload["system_codes"] == []

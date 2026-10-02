@@ -79,7 +79,8 @@ so lexical and semantic candidates are scoped identically before any fusion.
   (default 50) when the rerank leg is active.
 - `build_filter` ANDs its clauses: exact `product`, exact `version`, and
   `MatchAny` within each identifier field (`doc_id`, `message_ids`,
-  `members`). Empty input yields no filter rather than a match-nothing.
+  `members`, `system_codes`). Empty input yields no filter rather than a
+  match-nothing.
 - Doc-number filters are edition-aware (issue #270): a full edition
   (`SC23-6858-01`) filters exactly; a suffix-less stem (`SC23-6858`), a
   wildcard (`-xx`), or a partial edition (`-0`, narrowed to `-00..-09`)
@@ -109,9 +110,9 @@ pinned edition expand to their edition family (§2, issue #270). Member
 extraction stays case-sensitive: the lowercase `xx` convention
 (`IEASYSxx`) matches payload case, and uppercasing would break it.
 
-`query_kind` is `identifier` when any of the three lists is non-empty (a
-lone member code flips it too), else `nl`. The kind drives RRF weights and
-the rerank bypass — but never the filter shape.
+`query_kind` is `identifier` when any of the four lists is non-empty (a
+lone member or completion code flips it too), else `nl`. The kind drives RRF
+weights and the rerank bypass — but never the filter shape.
 
 ## 3b. Multi-path splitting
 
@@ -364,6 +365,22 @@ these; widening changes both corpus extraction and query parsing at once.
   `extraction_rules_version` are untouched (a corpus scan over 435k
   points showed zero member case variance: no ingest normalization and
   no re-ingest needed).
+- **System/user/wait-state codes** (issue #591): the identifier family for
+  abend lookup. Self-contexting: `S0C4`→`0C4`, `SB37`→`B37`, `X'0C4'`→`0C4`,
+  `U4038` (U + 4 digits), `wait state 064`→`W064`. Every form must carry at
+  least one digit — real codes do (`SB37`, `S80A`, `S0C4`, `S806`, `806`),
+  English words do not, which is what keeps `safe`→AFE and `seed`→EED out of
+  the identifier path. Bare 3-hex (`0C4`, `806`, `222`) carries no meaning
+  alone, so it is accepted only **adjacent** to a code phrase (`abend`,
+  `completion code`, `system code`) with at most one *code-ish* connector word
+  between them — mere presence of a phrase is not enough, and neither is three
+  words of slack. `reason code` is deliberately **not** a phrase here: reason
+  codes are a different family, and admitting it routed DYNALLOC's into the
+  system-codes filter. Model numbers sharing the S+3-hex shape (`S370`, `S390`)
+  are excluded by name; form numbers by a lookahead for the `-dddd` tail, since
+  admitting letter-prefixed codes (`SB37`) otherwise lets `SC23-6862` through.
+  Ingest records the canonical form per entry in `system_codes`; a bare entry
+  takes the `W`-prefix only inside a wait-state section, so both sides agree.
 - **Front/back-matter titles** `SKIP_ALWAYS_RE`: notices, trademarks,
   reader comments, bibliography, copyright, index — matched at title end
   because IBM titles carry prefixes ("Appendix A. Notices").

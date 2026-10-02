@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mainframe_rag.ingest.classify import classify, is_table_block
@@ -77,6 +77,32 @@ _SENTENCE_END_RE = re.compile(r"[.?!:]\s*$")
 # paragraph; two cards are an example, not a mention.
 _MIXED_JCL_MIN_STARTS = 2
 
+# Code-entry detection (issue #591): a line that is exactly a completion code,
+# followed within two lines by description text rather than another bare code.
+# A user completion code keeps its U prefix on its own line (U4038); system and
+# wait-state entries are both bare 3-hex, and which one a bare entry is comes
+# from the section heading, not from the line (see _canonical_code).
+_CODE_ENTRY_RE = re.compile(r"^(?:[0-9A-F]{3}|U\d{4})$")
+# A section whose heading names wait states makes its bare 3-hex entries wait
+# states. The heading is plain English any code manual uses, so this stays a
+# generic-parsing signal rather than a vendor gate; a manual that never says
+# "wait state" simply yields completion codes only.
+_WAITSTATE_HEADING_RE = re.compile(r"\bwait\s+states?\b", re.IGNORECASE)
+
+
+def _canonical_code(raw: str, wait_state: bool) -> str:
+    """Canonical stored form of one entry-start code (issue #591).
+
+    User codes keep the U (`U4038`). A bare 3-hex entry is a completion code
+    (`0C4`) unless its section heading names wait states, in which case the
+    canonical form is the W-prefix the query parser emits for it (`W064`) —
+    the two sides must agree or the filter can never match.
+    """
+    upper = raw.upper()
+    if upper.startswith("U"):
+        return upper
+    return f"W{upper}" if wait_state else upper
+
 
 def _nonblank_lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.strip()]
@@ -132,6 +158,70 @@ def detect_table_region(text: str) -> bool:
     return is_table_block(text)
 
 
+def _is_code_entry_start(lines: list[str], idx: int) -> bool:
+    """Check if lines[idx] is a code entry start (issue #591).
+
+    A line that is exactly a 3-hex code, followed within two lines by
+    description text rather than another bare code. This excludes index runs.
+    """
+    if idx >= len(lines):
+        return False
+    if not _CODE_ENTRY_RE.match(lines[idx].strip()):
+        return False
+    for j in range(idx + 1, min(idx + 3, len(lines))):
+        line = lines[j].strip()
+        if not line:
+            continue
+        return not _CODE_ENTRY_RE.match(line)
+    return False
+
+
+def _code_entries(text: str) -> list[tuple[str, bool]] | None:
+    """Split a paragraph into code entries (issue #591).
+
+    Returns None if the paragraph doesn't contain code entries. Each code
+    entry is atomic; text before the first entry is prose.
+    """
+    lines = text.splitlines()
+    starts = []
+    for i, line in enumerate(lines):
+        if _CODE_ENTRY_RE.match(line.strip()) and _is_code_entry_start(lines, i):
+            starts.append(i)
+    if not starts:
+        return None
+    items: list[tuple[str, bool]] = []
+    if starts[0] > 0:
+        prefix = "\n".join(lines[: starts[0]]).strip()
+        if prefix:
+            items.append((prefix, False))
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(lines)
+        entry = "\n".join(lines[start:end]).strip()
+        if entry:
+            items.append((entry, True))
+    return items or None
+
+
+def _extract_system_codes(text: str, wait_state: bool = False) -> list[str]:
+    """Every code-entry start in a finished chunk (issue #591).
+
+    A block can hold several entries, so this scans the whole chunk rather
+    than reading only the first line: reading line 0 recorded 16% of the
+    codes in a real system-codes manual, including missing the issue's own
+    0C4 whenever its chunk opened with a neighbouring entry. Detection is
+    the same rule the splitter used, so the payload lists exactly the
+    entries this chunk contains.
+    """
+    lines = text.splitlines()
+    codes: list[str] = []
+    for i, line in enumerate(lines):
+        if _CODE_ENTRY_RE.match(line.strip()) and _is_code_entry_start(lines, i):
+            code = _canonical_code(line.strip(), wait_state)
+            if code not in codes:
+                codes.append(code)
+    return codes
+
+
 @dataclass(frozen=True, slots=True)
 class Section:
     heading_path: str
@@ -175,6 +265,9 @@ class Chunk:
     message_ids: list[str]
     members: list[str]
     ordinal: int
+    # System/user/wait-state completion codes (issue #591). Empty for
+    # non-code chunks. Not part of identity.
+    system_codes: list[str] = field(default_factory=list)
     # Atomic-unit spans for prompt packing (issue #368): ordered ranges
     # over the stripped chunk text. Spans always tile whole items, so every
     # retained prefix is a whole number of units and a table chunk's header
@@ -555,6 +648,9 @@ def _build_blocks(
         if statements:
             items.extend((page_idx, statement, True) for statement in statements)
             dd_data_open = _is_dd_data_para(para)
+        elif (code_items := _code_entries(para)) is not None:
+            items.extend((page_idx, text, atomic) for text, atomic in code_items)
+            dd_data_open = False
         elif detect_table_region(para):
             # Table rows are atomic like code statements: overflow splits
             # at row boundaries and the overlap backs off to whole rows.
@@ -705,6 +801,9 @@ def make_chunks(
     sections = outline_sections(parsed) if parsed.toc else fallback_sections(page_texts, parsed.title)
     for section in sections:
         body_pages = page_texts[section.page_start : section.page_end]
+        # Issue #591: a wait-state section's bare 3-hex entries canonicalize
+        # to the W-form the query parser emits for them, so both sides agree.
+        wait_state = bool(_WAITSTATE_HEADING_RE.search(section.heading_path))
 
         paras: list[tuple[int, str]] = []
         for offset, page_text in enumerate(body_pages):
@@ -725,6 +824,11 @@ def make_chunks(
                 labels[idx] if idx < len(labels) else None for idx in range(page_start, page_end + 1)
             ]
             label = _page_label_range(span_labels)
+            # Issue #591: every code entry this block carries, canonicalized
+            # for its section. The alias spelling stays out of `text` on
+            # purpose (see _extract_system_codes) so unit spans stay aligned
+            # and the stored text is the manual's own words.
+            system_codes = _extract_system_codes(text, wait_state)
             chunks.append(
                 Chunk(
                     chunk_id=chunk_id,
@@ -736,6 +840,7 @@ def make_chunks(
                     text=text,
                     message_ids=find_message_ids(text),
                     members=find_members(text),
+                    system_codes=system_codes,
                     ordinal=ordinal,
                     units=_stored_spans(spans),
                     page_end=page_end,

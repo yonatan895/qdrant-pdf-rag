@@ -44,3 +44,110 @@ def find_message_ids(text: str) -> list[str]:
 
 def find_members(text: str) -> list[str]:
     return sorted(set(MEMBER_RE.findall(text)))
+
+
+# System/user/wait-state completion codes (issue #591).
+#
+# Shape alone cannot carry these: 3 hex characters is far too common an
+# English word fragment ("add", "fee", "bad") and an S-prefix collides with
+# model numbers (S390) and form numbers (SC23-6862). So the family is
+# context-gated, and each family is normalised to the form the manual's
+# entry line uses, which is what ingest stores and the filter matches.
+#
+# Self-contexting (the token shape carries the meaning):
+#   S0C4    -> 0C4    system completion code
+#   SB37    -> B37    subsystem abend (S + hex letter is a real family)
+#   X'0C4'  -> 0C4    hex literal spelling of the same
+#   U4038   -> U4038  user completion code (U + 4 digits is unambiguous)
+# Wait states are gated on the phrase, never on a bare W-token: `wait state
+# 064` -> W064, while "wait state 064" in prose stays a phrase.
+#
+# Bare 3-hex (0C4, 806, 222) carries no meaning on its own and is the case
+# measured as noisy in issue #591: a run of bare codes is an index, and a
+# 3-letter word is a word. It is accepted only ADJACENT to a code phrase
+# ("abend 0C4", "completion code 222", "system code 0C4") and must carry a
+# digit.
+#
+# Adjacency, not mere presence, is what keeps prose out of the identifier
+# path. The window is deliberately tight — the code, optionally preceded by
+# ONE connector word, immediately after the phrase — because a wider window
+# re-admits the false positives a bare scan produced: with three words of
+# slack, "my job abended after it read 100 records …" yielded 100.
+#
+# The digit requirement is the family's precision rule, applied to BOTH the
+# bare form and the S-prefixed one: every real completion code carries a digit
+# (SB37, S80A, S0C4, S806, 0C4, 806) and no English word does. Without it the
+# S-prefix admits any S + three hex letters, which swallows ordinary operator
+# vocabulary — "safe" -> AFE, "seed" -> EED — and each of those flips the
+# query onto identifier ranking.
+_SYSCODE_S_RE = re.compile(r"\bS([0-9A-F]{3})\b(?![\d-]*-\d{4})", re.IGNORECASE)
+_SYSCODE_HEX_RE = re.compile(r"\bX'([0-9A-F]{3})'(?![0-9A-F])", re.IGNORECASE)
+_USERCODE_RE = re.compile(r"\bU(\d{4})\b", re.IGNORECASE)
+_WAITSTATE_RE = re.compile(
+    r"\bwait\s+state\s+([0-9A-F]{3})\b", re.IGNORECASE
+)
+_SYSCODE_BARE_RE = re.compile(r"\b([0-9A-F]{3})\b", re.IGNORECASE)
+# Code phrase that licenses an adjacent bare code: "abend", "abended",
+# "completion code", "system code", "reason code". At most ONE connector
+# word may sit between phrase and code, and it must be a code-ish word:
+# "abend code 0C4" qualifies, "abend after 300 seconds" does not. Allowing
+# any single word made the window structurally identical to the false
+# positives it was meant to exclude.
+_SYSCODE_CONNECTOR = r"(?:(?:codes?|error|status|value|hex)\s+)?"
+# "reason code" is deliberately absent. Reason codes (DYNALLOC's and the
+# rest) are a different family, and admitting the phrase routes unrelated
+# reason codes into the completion-code filter: "reason code 004 from
+# DYNALLOC" selected the system-codes book. An operator asking for a reason
+# code now takes the NL path rather than a filter pointed at the wrong book.
+_SYSCODE_PHRASE = r"(?:abend\w*|(?:completion|system)\s+codes?)"
+_SYSCODE_CONTEXT_BEFORE_RE = re.compile(
+    _SYSCODE_PHRASE + r"\s+" + _SYSCODE_CONNECTOR + r"$",
+    re.IGNORECASE,
+)
+_SYSCODE_CONTEXT_AFTER_RE = re.compile(
+    r"^\s*" + _SYSCODE_CONNECTOR + _SYSCODE_PHRASE + r"\b",
+    re.IGNORECASE,
+)
+# Model numbers that share the S+3-hex shape. Listed, not pattern-guessed:
+# every exclusion is a reviewed token, so a new architecture number is a
+# deliberate addition rather than an accident.
+_SYSCODE_MODEL_RE = re.compile(r"\bS(?:370|390)\b", re.IGNORECASE)
+
+
+def find_system_codes(text: str) -> list[str]:
+    """System/user/wait-state completion codes in canonical form (issue #591).
+
+    `0C4` for system codes, `U4038` for user codes, `W064` for wait states.
+    Callers must not feed this a whole document: bare 3-hex needs a code
+    phrase adjacent to it, so prose that merely discusses hex values yields
+    nothing. Returns a sorted, de-duplicated list.
+    """
+    codes: set[str] = set()
+    # Model numbers are codes-shaped but never completion codes; blanking
+    # them keeps S390 from yielding both 390 and a spurious match.
+    text = _SYSCODE_MODEL_RE.sub(" ", text)
+    for m in _SYSCODE_S_RE.finditer(text):
+        token = m.group(1).upper()
+        # Same digit rule as the bare form: SB37/S80A/S0C4/S806 carry one,
+        # SAFE/SEED/SACE do not. Without it the S-prefix swallows ordinary
+        # operator words and flips them onto identifier ranking.
+        if any(ch.isdigit() for ch in token):
+            codes.add(token)
+    for m in _SYSCODE_HEX_RE.finditer(text):
+        codes.add(m.group(1).upper())
+    for m in _USERCODE_RE.finditer(text):
+        codes.add(f"U{m.group(1)}")
+    for m in _WAITSTATE_RE.finditer(text):
+        codes.add(f"W{m.group(1).upper()}")
+    for m in _SYSCODE_BARE_RE.finditer(text):
+        token = m.group(1).upper()
+        # A code always carries a digit (806, 222, 0C4); ADD/FEE/BAD do not.
+        if not any(ch.isdigit() for ch in token):
+            continue
+        before = text[: m.start()]
+        after = text[m.end() :]
+        if _SYSCODE_CONTEXT_BEFORE_RE.search(before) or (
+            _SYSCODE_CONTEXT_AFTER_RE.search(after)
+        ):
+            codes.add(token)
+    return sorted(codes)
