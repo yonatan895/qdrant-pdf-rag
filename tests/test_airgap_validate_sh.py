@@ -35,6 +35,20 @@ def tree(tmp_path):
     return tmp_path
 
 
+NOT_FOUND = 'Error from server (NotFound): objects "x" not found'
+FORBIDDEN = "Error from server (Forbidden): the object is forbidden: User cannot get resource"
+
+
+def _kubectl_stub(resource, stderr_text, rc=1):
+    """kubectl stub: any invocation naming `resource` fails with the given
+    client error text; everything else succeeds."""
+    return (
+        "#!/bin/sh\nfor arg in \"$@\"; do\n"
+        f"  if [ \"$arg\" = \"{resource}\" ]; then cat >&2 <<'EOT'\n{stderr_text}\nEOT\n    exit {rc}; fi\n"
+        "done\nexit 0\n"
+    )
+
+
 def _run(tree, extra_env=None):
     env = {
         "PATH": f"{tree / 'bin'}:/usr/bin:/bin",
@@ -488,7 +502,7 @@ def test_validate_live_verifies_gateway_secret(tree):
 def test_validate_live_missing_gateway_secret_fails(tree):
     write_stub(
         tree / "bin" / "kubectl",
-        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"secret\" ]; then exit 1; fi\ndone\nexit 0\n",
+        _kubectl_stub("secret", NOT_FOUND),
     )
     r = _run(tree, {"AIRGAP_DRYRUN": "0", "GATEWAY_API_KEY_SECRET": "gateway-api-keys"})
     assert r.returncode != 0
@@ -498,7 +512,7 @@ def test_validate_live_missing_gateway_secret_fails(tree):
 def test_validate_live_missing_namespace_notices_secret(tree):
     write_stub(
         tree / "bin" / "kubectl",
-        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"namespace\" ]; then exit 1; fi\ndone\nexit 0\n",
+        _kubectl_stub("namespace", NOT_FOUND),
     )
     r = _run(tree, {"AIRGAP_DRYRUN": "0", "GATEWAY_API_KEY_SECRET": "gateway-api-keys"})
     assert r.returncode == 0, r.stderr
@@ -788,3 +802,152 @@ def test_shipped_example_model_mode_is_explicit(tree, shared):
     assert result.returncode == 0, result.stderr
     expected = "https://shared.example/v1" if shared else "http://vllm:8000/v1"
     assert f"EMBED_BASE_URL:    {expected}" in result.stdout
+
+
+# ---------------------------------------------- strict operator booleans (#272)
+
+BOOL_KEYS = [
+    "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
+    "INGEST_REINGEST", "CHAT_CONDENSE_ENABLED",
+]
+
+
+@pytest.mark.parametrize("key", BOOL_KEYS)
+def test_validate_invalid_operator_boolean_refused(tree, key):
+    r = _run(tree, {key: "maybe-secretish"})
+    assert r.returncode != 0
+    assert f"{key} must be true/false" in r.stderr
+    assert "maybe-secretish" not in r.stderr + r.stdout
+
+
+@pytest.mark.parametrize("key", BOOL_KEYS)
+@pytest.mark.parametrize("value", ["true", "False", "1", "no", "YES"])
+def test_validate_valid_operator_boolean_accepted(tree, key, value):
+    env = {key: value}
+    if key == "CONTEXTUAL_EMBED_ENABLED":
+        env |= {"CONTEXT_LLM_BASE_URL": "http://llm:8000/v1", "CONTEXT_LLM_MODEL": "m"}
+    r = _run(tree, env)
+    assert r.returncode == 0, r.stderr
+
+
+def test_validate_invalid_boolean_from_env_file_then_corrected(tree):
+    """Next ordinary run: the same file corrected by the operator passes."""
+    bad = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, "CONTEXTUAL_EMBED_ENABLED=on\n")})
+    assert bad.returncode != 0
+    assert "CONTEXTUAL_EMBED_ENABLED must be true/false" in bad.stderr
+    good = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, "CONTEXTUAL_EMBED_ENABLED=false\n")})
+    assert good.returncode == 0, good.stderr
+
+
+# -------------------------------------------- snapshot class on NFS (#272)
+
+
+def test_validate_nfs_snapshot_storage_refused_then_corrected(tree):
+    r = _run(tree, {"SNAPSHOT_STORAGE_CLASS": "nfs-client"})
+    assert r.returncode != 0
+    assert "SNAPSHOT_STORAGE_CLASS='nfs-client' looks like NFS" in r.stderr
+    ok = _run(tree, {"SNAPSHOT_STORAGE_CLASS": "gp3-block"})
+    assert ok.returncode == 0, ok.stderr
+
+
+# ------------------------------------- Forbidden vs NotFound vs SCC (#272/#373)
+
+
+def _live(tree, **extra):
+    return _run(tree, {"AIRGAP_DRYRUN": "0", **extra})
+
+
+def test_validate_live_storageclass_notfound_fails(tree):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", NOT_FOUND))
+    r = _live(tree)
+    assert r.returncode != 0
+    assert "must exist before deployment" in r.stderr
+
+
+def test_validate_live_storageclass_forbidden_is_not_reported_absent(tree):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", FORBIDDEN))
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "not found" not in r.stdout
+    assert "Forbidden" in r.stdout and "NOT verified" in r.stdout
+
+
+def test_validate_live_notfound_name_containing_forbidden_still_fails(tree):
+    """The reason token decides, not free text: a missing StorageClass whose
+    name contains 'forbidden' must not be classified as a Forbidden read."""
+    text = 'Error from server (NotFound): storageclasses.storage.k8s.io "ceph-forbidden-tier" not found'
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", text))
+    r = _live(tree)
+    assert r.returncode != 0
+    assert "must exist before deployment" in r.stderr
+
+
+def test_validate_live_forbidden_message_with_not_found_text_is_forbidden(tree):
+    text = 'Error from server (Forbidden): storageclasses "not found-class" is forbidden: User cannot get resource'
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", text))
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "NOT verified" in r.stdout
+
+
+def test_validate_live_storageclass_other_error_fails(tree):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", "dial tcp: connection refused"))
+    r = _live(tree)
+    assert r.returncode != 0
+    assert "unexpected client error" in r.stderr
+
+
+def test_validate_live_forbidden_namespace_still_checks_secret(tree):
+    """A namespace-scoped deployer cannot get the Namespace object; the
+    Secret check must still run (found -> verified), not be skipped."""
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("namespace", FORBIDDEN))
+    r = _live(tree, GATEWAY_API_KEY_SECRET="gateway-api-keys")
+    assert r.returncode == 0, r.stderr
+    assert "does not exist yet" not in r.stdout
+    assert "Gateway key Secret 'gateway-api-keys' verified" in r.stdout
+
+
+def test_validate_live_forbidden_namespace_missing_secret_fails(tree):
+    write_stub(
+        tree / "bin" / "kubectl",
+        "#!/bin/sh\nfor arg in \"$@\"; do\n"
+        f"  if [ \"$arg\" = namespace ]; then echo '{FORBIDDEN}' >&2; exit 1; fi\n"
+        f"  if [ \"$arg\" = secret ]; then echo '{NOT_FOUND}' >&2; exit 1; fi\n"
+        "done\nexit 0\n",
+    )
+    r = _live(tree, GATEWAY_API_KEY_SECRET="gateway-api-keys")
+    assert r.returncode != 0
+    assert "Secret 'gateway-api-keys' not found" in r.stderr
+
+
+def test_validate_live_forbidden_secret_fails_not_absent(tree):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("secret", FORBIDDEN))
+    r = _live(tree, GATEWAY_API_KEY_SECRET="gateway-api-keys")
+    assert r.returncode != 0
+    assert "Forbidden" in r.stderr
+    assert "not found" not in r.stderr
+
+
+def test_validate_live_scc_readable_reports_openshift(tree):
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "OpenShift cluster detected" in r.stdout
+
+
+def test_validate_live_scc_missing_type_reports_standard_kubernetes(tree):
+    write_stub(
+        tree / "bin" / "kubectl",
+        _kubectl_stub("scc", "error: the server doesn't have a resource type \"scc\""),
+    )
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Standard Kubernetes cluster detected" in r.stdout
+
+
+@pytest.mark.parametrize("text", [FORBIDDEN, "dial tcp: i/o timeout"])
+def test_validate_live_scc_failure_is_not_standard_kubernetes(tree, text):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("scc", text))
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Standard Kubernetes" not in r.stdout
+    assert "cluster type is NOT determined" in r.stdout

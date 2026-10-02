@@ -267,15 +267,21 @@ resolve_aliases() {
 
 validate_model_config() {
     command -v python3 >/dev/null 2>&1 || die "python3 is required for model configuration validation"
-    export GATEWAY_BASE_URL VLLM_BASE_URL EMBED_BASE_URL EMBED_MODEL LLM_BASE_URL LLM_MODEL_REASONING RERANK_BASE_URL CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CONTEXTUAL_EMBED_ENABLED
+    export GATEWAY_BASE_URL VLLM_BASE_URL EMBED_BASE_URL EMBED_MODEL LLM_BASE_URL LLM_MODEL_REASONING RERANK_BASE_URL CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CONTEXTUAL_EMBED_ENABLED UI_ENABLED INGEST_ALIAS_PUBLISH INGEST_REINGEST CHAT_CONDENSE_ENABLED
     python3 scripts/airgap/model_config.py
 }
 
-# Qdrant data scratch and snapshots live on block storage; NFS is refused.
+# Qdrant data scratch and snapshots live on block storage; NFS is refused for
+# both the data class and the snapshot class (the latter defaults to the former).
 refuse_nfs_storage() {
     case "${STORAGE_CLASS:-}" in
         *[Nn][Ff][Ss]*)
             die "STORAGE_CLASS='${STORAGE_CLASS}' looks like NFS — Qdrant-adjacent volumes require RWO block storage"
+            ;;
+    esac
+    case "${SNAPSHOT_STORAGE_CLASS:-}" in
+        *[Nn][Ff][Ss]*)
+            die "SNAPSHOT_STORAGE_CLASS='${SNAPSHOT_STORAGE_CLASS}' looks like NFS — Qdrant snapshot volumes require RWO block storage"
             ;;
     esac
 }

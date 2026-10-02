@@ -64,8 +64,22 @@ restores the snapshot over whatever the file assigned; empty stays unset
   required key on every air-gap launch path (vllm mode refuses a blank
   attestation); `validate.sh` additionally rejects whitespace-only values.
 - Product rules: `EMBED_MODE=hash` dies (case-sensitive match on that exact
-  string); storage classes containing `nfs` (any case) die — but only
-  `STORAGE_CLASS` is checked, not snapshot/corpus classes.
+  string); storage classes containing `nfs` (any case) die — both
+  `STORAGE_CLASS` and `SNAPSHOT_STORAGE_CLASS` are checked (the latter
+  defaults to the former); the corpus PVC is not.
+- Operator booleans `UI_ENABLED`, `CONTEXTUAL_EMBED_ENABLED`,
+  `INGEST_ALIAS_PUBLISH`, `INGEST_REINGEST` and `CHAT_CONDENSE_ENABLED`
+  accept only `true/1/yes` or `false/0/no` (any case; unset keeps the
+  default). `validate.sh` rejects any other value before the pipeline pushes
+  images; the diagnostic names the key, never the value. One parser
+  (`model_config.parse_strict_bool`) serves preflight and `map_values.py`.
+- Live cluster probes in `validate.sh` classify the client error: a
+  `Forbidden` StorageClass read is a notice (existence unverified, not
+  "absent"); a `Forbidden` Namespace read falls through to the Secret check
+  in the namespace; a `Forbidden` Secret read fails; only `NotFound` means
+  absent. `get scc` succeeding means OpenShift, a missing resource type means
+  standard Kubernetes, and a denied or failed read leaves the cluster type
+  undetermined (never reported as non-OpenShift).
 - `scripts/airgap/model_config.py` owns pure validation of the resolved model
   inputs for both preflight and the values mapper. A reasoning alias requires
   a resolved reasoning/shared URL; enabled contextual embedding requires its
