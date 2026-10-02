@@ -226,6 +226,11 @@ class Settings(BaseSettings):
     # cold vLLM can legitimately take ~10s to answer the embed ping.
     health_qdrant_timeout_s: float = 5.0
     health_embed_timeout_s: float = 10.0
+    # Rerank readiness (issue #578): the probe is a real 1x1 score request
+    # against a GPU endpoint, so its outcome (up or down) is cached for the
+    # TTL instead of firing on every kubelet tick; 0 = probe every scrape.
+    health_rerank_timeout_s: float = Field(default=5.0, gt=0.0, le=60.0)
+    health_rerank_ttl_s: float = Field(default=15.0, ge=0.0, le=300.0)
 
     # Serving-generation gate (issues #391 F3/F4): the agent resolves the
     # configured alias to its physical generation and validates that

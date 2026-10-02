@@ -108,6 +108,9 @@ embedder: Embedder
 llm: LLMClient
 tokenizer: Tokenizer
 reranker: Reranker | None = None
+# Last rerank readiness outcome as (monotonic timestamp, up) — issue #578.
+# Reset at lifespan startup so one lifespan's verdict never leaks into the next.
+rerank_health: tuple[float, bool] | None = None
 zowe_mcp: ZoweMCP | None = None
 # Serving-generation gate (issues #391 F3/F4): created in lifespan from
 # Settings, or injected by tests before startup (never overwritten then).
@@ -532,6 +535,7 @@ def _record_stream_abort(
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker, zowe_mcp
+    global rerank_health
     global serving_gate
     settings = load_settings()
     configure_logging(settings.log_level)
@@ -578,6 +582,7 @@ async def lifespan(_app: FastAPI):
     embedder = build_embedder(settings, http_sync)
     tokenizer = build_tokenizer(settings, http_sync)
     reranker = build_reranker(settings, http_sync)
+    rerank_health = None
     if reranker is not None:
         # Best-effort reachability ping (warn-only): a mispointed
         # RERANK_BASE_URL should surface as one loud startup line, not as
@@ -813,6 +818,10 @@ class HealthzResponse(BaseModel):
     # refuses the hard cases at startup; this is the live per-scrape
     # signal for stores that change under a running agent.
     representation: str | None = None
+    # Rerank-leg readiness (issue #578): `None` when rerank is disabled,
+    # else whether the configured endpoint(s) answered a 1x1 score probe
+    # within the TTL cache window. `false` degrades readiness.
+    rerank: bool | None = None
 
 
 class ErrorEnvelope(BaseModel):
@@ -970,6 +979,34 @@ async def metrics() -> Response:
     return Response(content=body, media_type=CONTENT_TYPE_LATEST)
 
 
+async def probe_rerank_health() -> bool:
+    """Rerank-leg readiness (issue #578). The probe is the startup 1x1 score
+    ping (`probe_reranker`, so endpoint order and fallback are the serving
+    ones), run off the event loop and bounded by `health_rerank_timeout_s`.
+    Both outcomes are cached for `health_rerank_ttl_s`: a kubelet tick must
+    not become a GPU request, and one slow answer is cached as down only for
+    that window. Only the error type is logged, never upstream text."""
+    global rerank_health
+    now = time.monotonic()
+    cached = rerank_health
+    if cached is not None and now - cached[0] < settings.health_rerank_ttl_s:
+        return cached[1]
+    assert reranker is not None
+    try:
+        error = await asyncio.wait_for(
+            asyncio.to_thread(probe_reranker, reranker), settings.health_rerank_timeout_s
+        )
+    except Exception as exc:  # noqa: BLE001 — TimeoutError included
+        error = type(exc).__name__
+        log.warning(json_log("healthz", "health", rerank_error=error))
+    else:
+        if error is not None:
+            # probe_reranker returns "<ExcType>: <text>"; the text is upstream.
+            log.warning(json_log("healthz", "health", rerank_error=error.split(":", 1)[0][:60]))
+    rerank_health = (time.monotonic(), error is None)
+    return error is None
+
+
 async def evaluate_healthz() -> tuple[HealthzResponse, int]:
     """Readiness evaluation shared by GET /healthz and the console badge:
     returns (body, HTTP status). A degraded body is an HTTP failure (issue
@@ -1022,11 +1059,26 @@ async def evaluate_healthz() -> tuple[HealthzResponse, int]:
     except Exception as exc:  # noqa: BLE001 — exotic doubles report unknown
         log.warning(json_log("healthz", "health", representation_error=type(exc).__name__))
 
+    # Rerank fails search closed on exhaustion, so an enabled-but-down leg
+    # makes the pod unready even though identifier lookups (which bypass
+    # rerank) would still serve; disabled leaves readiness untouched.
+    rerank_ok: bool | None = None
+    if settings.rerank_enabled and reranker is not None:
+        rerank_ok = await probe_rerank_health()
+
     representation_ok = representation in ("compatible", "record_only_drift", "empty")
-    status = "ok" if qdrant_ok and embed_ok is not False and representation_ok else "degraded"
+    status = (
+        "ok"
+        if qdrant_ok and embed_ok is not False and representation_ok and rerank_ok is not False
+        else "degraded"
+    )
     return (
         HealthzResponse(
-            status=status, qdrant=qdrant_ok, embed=embed_ok, representation=representation
+            status=status,
+            qdrant=qdrant_ok,
+            embed=embed_ok,
+            representation=representation,
+            rerank=rerank_ok,
         ),
         200 if status == "ok" else 503,
     )
