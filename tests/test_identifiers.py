@@ -160,3 +160,42 @@ def test_bare_code_needs_adjacency_not_just_context() -> None:
     assert find_system_codes("abend 806") == ["806"]
     assert find_system_codes("completion code 222") == ["222"]
     assert find_system_codes("abend code 0C4") == ["0C4"]
+
+
+def test_adjacency_window_is_one_code_ish_connector() -> None:
+    """One arbitrary word of slack re-admitted the false positives the window
+    exists to exclude (review #603): "abend after 300 seconds" is
+    structurally identical to "abend code 0C4" unless the connector is
+    constrained to a code-ish word."""
+    assert find_system_codes("My job abended after it read 100 records from the ADD file") == []
+    assert find_system_codes("abend after 300 seconds") == []
+    assert find_system_codes("abend for 100 records") == []
+    # The same shape with a code connector still resolves.
+    assert find_system_codes("abend code 0C4") == ["0C4"]
+    assert find_system_codes("abend error 0C4") == ["0C4"]
+    assert find_system_codes("reason code 878") == ["878"]
+
+
+def test_subsystem_abends_with_letter_prefix_are_recognised() -> None:
+    """SB37/SD37/SE37 are among the most common abends; requiring a digit
+    after S to spare doc numbers dropped them (review #603)."""
+    assert find_system_codes("What causes abend SB37?") == ["B37"]
+    assert find_system_codes("abend SD37") == ["D37"]
+    assert find_system_codes("abend SE37") == ["E37"]
+    assert find_system_codes("abend S80A") == ["80A"]
+    assert find_system_codes("abend S0C4") == ["0C4"]
+
+
+def test_doc_numbers_never_match_the_s_prefix_family() -> None:
+    """The S-family is admitted by shape now, so the doc-number exclusion is
+    load-bearing: a form number is letter + 2 digits + `-` + 4 digits."""
+    for query in (
+        "Identify SC23-6862",
+        "SA23-1380",
+        "What manual is SC23-6846-02",
+        "SC34-2662-05",
+        "GC35-0033-41",
+        "SA38-0665-03",
+    ):
+        assert find_system_codes(query) == [], query
+        assert parse_query(query).has_identifiers  # doc_ids, not codes

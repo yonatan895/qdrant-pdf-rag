@@ -181,7 +181,9 @@ for citations and filters.
   states, where it takes the `W`-prefix the query parser emits for it. The
   operator spelling (`S0C4`) is deliberately **not** added to `text`: it would
   shift every unit span (#368) and put a line in the cited text that the
-  manual does not contain. `system_codes` plus the prefilter carry the lookup.
+  manual does not contain. `system_codes` plus the prefilter carry the lookup. The value is written to
+  the point payload on every upsert — indexing the field without writing it
+  leaves the index empty and every code query silently falling back.
 - SYSIN adjacency (issue #216): data paragraphs following a `DD *`/`DD DATA`
   card keep splitting between records across page/paragraph boundaries
   (line-atomic units). The chain ends at sentence punctuation (data records

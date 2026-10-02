@@ -447,6 +447,10 @@ def upsert_chunks(
             "chunk_type": chunk.chunk_type,
             "message_ids": chunk.message_ids,
             "members": chunk.members,
+            # Completion-code entries (issue #591). Without this key the
+            # keyword index exists but stays empty and every code query's
+            # must-filter matches nothing, so the family would be inert.
+            "system_codes": chunk.system_codes,
             "sha256": parsed.sha256,
             "rules_v": rules_v,
             "text": chunk.text,

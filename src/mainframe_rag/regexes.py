@@ -56,6 +56,7 @@ def find_members(text: str) -> list[str]:
 #
 # Self-contexting (the token shape carries the meaning):
 #   S0C4    -> 0C4    system completion code
+#   SB37    -> B37    subsystem abend (S + hex letter is a real family)
 #   X'0C4'  -> 0C4    hex literal spelling of the same
 #   U4038   -> U4038  user completion code (U + 4 digits is unambiguous)
 # Wait states are gated on the phrase, never on a bare W-token: `wait state
@@ -65,10 +66,14 @@ def find_members(text: str) -> list[str]:
 # measured as noisy in issue #591: a run of bare codes is an index, and a
 # 3-letter word is a word. It is accepted only ADJACENT to a code phrase
 # ("abend 0C4", "completion code 222", "system code 0C4") and must carry a
-# digit. Adjacency, not mere presence, is what keeps "…read 100 records
-# from the ADD file …" out of the identifier path: the word abend appears
-# once in the sentence, far from the number.
-_SYSCODE_S_RE = re.compile(r"\bS([0-9][0-9A-F]{2})\b", re.IGNORECASE)
+# digit.
+#
+# Adjacency, not mere presence, is what keeps prose out of the identifier
+# path. The window is deliberately tight — the code, optionally preceded by
+# ONE connector word, immediately after the phrase — because a wider window
+# re-admits the false positives a bare scan produced: with three words of
+# slack, "my job abended after it read 100 records …" yielded 100.
+_SYSCODE_S_RE = re.compile(r"\bS([0-9A-F]{3})\b(?![\d-]*-\d{4})", re.IGNORECASE)
 _SYSCODE_HEX_RE = re.compile(r"\bX'([0-9A-F]{3})'(?![0-9A-F])", re.IGNORECASE)
 _USERCODE_RE = re.compile(r"\bU(\d{4})\b", re.IGNORECASE)
 _WAITSTATE_RE = re.compile(
@@ -76,14 +81,19 @@ _WAITSTATE_RE = re.compile(
 )
 _SYSCODE_BARE_RE = re.compile(r"\b([0-9A-F]{3})\b", re.IGNORECASE)
 # Code phrase that licenses an adjacent bare code: "abend", "abended",
-# "completion code", "system code". Matched with its trailing connector
-# words so the bare code can sit one or two words away ("abend code 0C4").
+# "completion code", "system code", "reason code". At most ONE connector
+# word may sit between phrase and code, and it must be a code-ish word:
+# "abend code 0C4" qualifies, "abend after 300 seconds" does not. Allowing
+# any single word made the window structurally identical to the false
+# positives it was meant to exclude.
+_SYSCODE_CONNECTOR = r"(?:(?:codes?|error|status|value|hex)\s+)?"
+_SYSCODE_PHRASE = r"(?:abend\w*|(?:completion|system|reason)\s+codes?)"
 _SYSCODE_CONTEXT_BEFORE_RE = re.compile(
-    r"(?:abend\w*|(?:completion|system)\s+code(?:s)?)(?:\s+\w+){0,2}\s*\w*\s*$",
+    _SYSCODE_PHRASE + r"\s+" + _SYSCODE_CONNECTOR + r"$",
     re.IGNORECASE,
 )
 _SYSCODE_CONTEXT_AFTER_RE = re.compile(
-    r"^\s*\w*(?:\s+\w+){0,2}\s*(?:abend\w*|(?:completion|system)\s+code(?:s)?)\b",
+    r"^\s*" + _SYSCODE_CONNECTOR + _SYSCODE_PHRASE + r"\b",
     re.IGNORECASE,
 )
 # Model numbers that share the S+3-hex shape. Listed, not pattern-guessed:
