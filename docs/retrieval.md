@@ -106,9 +106,12 @@ so lexical and semantic candidates are scoped identically before any fusion.
 doc numbers and message ids — operators type lowercase, payloads are
 canonical-uppercase, and uppercasing only adds word-char matches, so
 pure-uppercase queries behave exactly as before. Form numbers without a
-pinned edition expand to their edition family (§2, issue #270). Member
-extraction stays case-sensitive: the lowercase `xx` convention
-(`IEASYSxx`) matches payload case, and uppercasing would break it.
+pinned edition expand to their edition family (§2, issue #270). Members
+differ by side: ingest extraction (`MEMBER_RE`) stays case-sensitive, so
+payloads hold the canonical `IEASYSxx` / `EYUPLX01` forms. Query-side
+extraction is case-insensitive (`MEMBER_QUERY_RE`, issue #133) and folds each
+match to that payload-canonical case (uppercase, with a lowercase `xx`
+suffix), so `ieasysxx` and `IEASYSXX` both filter on `IEASYSxx` (see §10).
 
 `query_kind` is `identifier` when any of the four lists is non-empty (a
 lone member or completion code flips it too), else `nl`. The kind drives RRF
