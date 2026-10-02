@@ -971,7 +971,15 @@ def test_healthz_embed_probe_forwards_gateway_key(client, monkeypatch):
     monkeypatch.setattr(app_mod.settings, "embed_api_key", "sk-test-embed")
     resp = client.get("/healthz")
     assert resp.status_code == 200
-    assert resp.json()["embed"] is True
+    # Exact body shape the simulation tier pins (test_integration_sim.py),
+    # rerank off: no extra or missing keys.
+    assert resp.json() == {
+        "status": "ok",
+        "qdrant": True,
+        "embed": True,
+        "representation": "compatible",
+        "rerank": None,
+    }
     assert posts[0]["headers"] == {"Authorization": "Bearer sk-test-embed"}
 
 

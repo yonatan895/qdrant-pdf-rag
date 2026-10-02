@@ -904,6 +904,8 @@ def test_vllm_shaped_embed_variant(qdrant_url, mock_url, corpus, tmp_path, monke
             "qdrant": True,
             "embed": True,
             "representation": "compatible",
+            # The sim agent leaves RERANK_ENABLED at its default (off).
+            "rerank": None,
         }
 
 

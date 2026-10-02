@@ -1104,7 +1104,9 @@ curl -s http://rag-agent.mainframe-rag.svc:8080/healthz
 {
   "status": "ok",
   "qdrant": true,
-  "embed": true
+  "embed": true,
+  "representation": "compatible",
+  "rerank": null
 }
 ```
 
