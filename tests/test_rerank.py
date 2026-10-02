@@ -893,5 +893,20 @@ def test_probe_reranker_dead_endpoint_returns_message():
     assert isinstance(err, str) and err
 
 
+def test_probe_reranker_failure_reports_error_type_only():
+    """The probe string is logged at startup: class name only, never the
+    exception message (AGENTS.md: logs contain no secrets/upstream text)."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("SECRET-XYZ upstream body")
+
+    reranker = HttpReranker(
+        _probe_settings(), client=httpx2.Client(transport=httpx2.MockTransport(handler))
+    )
+    err = probe_reranker(reranker)
+    assert err is not None and "SECRET-XYZ" not in err
+    assert "ConnectError" in err
+
+
 def test_probe_reranker_hash_always_passes():
     assert probe_reranker(HashReranker()) is None

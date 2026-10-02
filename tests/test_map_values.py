@@ -215,6 +215,15 @@ def test_ui_enabled_rejects_garbage(monkeypatch, mapper_env):
     r, _ = mapper_env()
     assert r.returncode != 0
     assert "UI_ENABLED must be true/false" in r.stderr
+    assert "maybe" not in r.stderr  # the key is named, the value is not echoed
+
+
+def test_contextual_embed_invalid_value_is_refused_not_false(monkeypatch, mapper_env):
+    """Issue #272: model_config used to read an invalid value as false."""
+    monkeypatch.setenv("CONTEXTUAL_EMBED_ENABLED", "on")
+    r, _ = mapper_env()
+    assert r.returncode != 0
+    assert "CONTEXTUAL_EMBED_ENABLED must be true/false" in r.stderr
 
 
 def test_ingest_enabled_block_and_tricky_retire(monkeypatch, mapper_env):
