@@ -103,6 +103,11 @@ class ModelSpec(BaseModel):
     # A measured operating limit, not a resident-memory measurement. Resolve
     # refuses limits below its footprint estimate; live headroom still gates fit.
     gpu_memory_utilization: float | None = Field(default=None, gt=0.0, le=MAX_UTIL)
+    # Host-RAM cap (MiB) for the LOCAL launcher's container (`--memory`), not
+    # a GPU number and not used by resolve's fit arithmetic. Measured steady
+    # RSS + startup peak + 15% (issue #580); None means no declared cap
+    # (platform-owned profiles), so the launcher then requires HOST_MEM_MB.
+    host_mem_mb: int | None = Field(default=None, gt=0)
 
 
 class HostSpec(BaseModel):
@@ -135,6 +140,7 @@ class ServerPlan(BaseModel):
     language_model_only: bool = False
     mm_processor_cache_gb: float | None = Field(default=None, ge=0.0)
     footprint_mib: float = Field(gt=0.0)
+    host_mem_mb: int | None = Field(default=None, gt=0)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -316,6 +322,7 @@ def resolve(profile: ProfileBundle) -> DeploymentPlan:
                 language_model_only=spec.language_model_only,
                 mm_processor_cache_gb=spec.mm_processor_cache_gb,
                 footprint_mib=footprint,
+                host_mem_mb=spec.host_mem_mb,
                 notes=notes,
             )
         )

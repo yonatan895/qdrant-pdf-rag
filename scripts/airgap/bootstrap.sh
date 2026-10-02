@@ -82,6 +82,11 @@ for tool_file in task-artifact.sh install-task.sh task-pin.txt; do
         echo "FAIL: workspace tool scripts differ from the approved commit." >&2; exit 1;
     }
 done
+# Equal HEAD is not enough: any tracked staged/unstaged edit (scripts, charts,
+# Taskfile) would run under the release claim. Untracked operator files stay.
+git -C "$DEST_DIR" diff --quiet HEAD -- >/dev/null 2>&1 || {
+    echo "FAIL: workspace has tracked changes against the approved commit; restore them (operator settings belong in the untracked airgap.env)." >&2; exit 1;
+}
 cmp -s task-pin.txt "$DEST_DIR/scripts/tools/task-pin.txt" || {
     echo "FAIL: bundled Task pin does not match the approved workspace." >&2; exit 1;
 }

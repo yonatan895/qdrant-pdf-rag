@@ -30,9 +30,13 @@ import typing
 from pathlib import Path
 
 try:
-    from scripts.airgap.model_config import MODEL_CONFIG_KEYS, validate_model_config
+    from scripts.airgap.model_config import (
+        MODEL_CONFIG_KEYS,
+        parse_strict_bool,
+        validate_model_config,
+    )
 except ModuleNotFoundError:
-    from model_config import MODEL_CONFIG_KEYS, validate_model_config
+    from model_config import MODEL_CONFIG_KEYS, parse_strict_bool, validate_model_config
 
 DEFAULT_OUT = "dist/mainframe-rag-release-values.yaml"
 
@@ -61,14 +65,10 @@ def positive_int(name: str, raw: str) -> int:
 
 def strict_bool(name: str, raw: str, default: bool) -> bool:
     """Mirror bool_flag in common.sh: unset keeps default, else strict."""
-    if raw == "":
-        return default
-    low = raw.lower()
-    if low in ("true", "1", "yes"):
-        return True
-    if low in ("false", "0", "no"):
-        return False
-    die(f"{name} must be true/false (got {raw!r})")
+    try:
+        return parse_strict_bool(name, raw, default)
+    except ValueError as exc:
+        die(str(exc))
 
 
 def optional_bool(name: str, raw: str) -> bool | None:

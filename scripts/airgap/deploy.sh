@@ -30,6 +30,26 @@ check_manifest_sha
 # The executing checkout itself must resolve to the packed SHA (issue #414):
 # an explicitly set IMAGE_SHA alone never changes which code executes.
 check_checkout_sha
+# Exactly one vendored Qdrant chart (issue #272): never pick one of several.
+CHART=""
+_chart_count=0
+for _c in charts/qdrant-*.tgz; do
+    [ -f "$_c" ] || continue
+    CHART=$_c
+    _chart_count=$((_chart_count + 1))
+done
+[ "$_chart_count" -eq 1 ] || die "exactly one vendored Qdrant chart is required (charts/qdrant-*.tgz); found $_chart_count"
+# A packed MANIFEST binds the chart bytes: the same release gate as the SHA
+# checks above (skipped in dry-run, which mutates nothing).
+if [ -n "$MANIFEST" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
+    _chart_packed=$(awk '/^chart_sha256: /{print $2}' "$MANIFEST")
+    [ -n "$_chart_packed" ] || die "packed MANIFEST ($MANIFEST) has no chart_sha256 — cannot verify the vendored Qdrant chart"
+    _chart_actual=$(sha256sum "$CHART" | awk '{print $1}')
+    [ "$_chart_actual" = "$_chart_packed" ] || die "vendored Qdrant chart $CHART does not match the packed MANIFEST chart_sha256 — wrong or altered chart for this sneakernet bundle"
+    echo "==> Qdrant chart $CHART verified against packed MANIFEST"
+else
+    echo "==> Notice: Qdrant chart $CHART is not release-verified (dry-run or no packed MANIFEST)"
+fi
 require_kc
 command -v helm >/dev/null 2>&1 || die "helm is required on the air-gap bastion"
 
@@ -117,9 +137,6 @@ if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     python3 scripts/airgap/check_app_ownership.py "$NAMESPACE" --disabled \
         < dist/app-disabled-existing.json > dist/app-disabled-cleanup.json
 fi
-
-CHART=$(ls charts/qdrant-*.tgz | head -1)
-[ -n "$CHART" ] || die "vendored chart missing (charts/qdrant-*.tgz)"
 
 # CI-rehearsal knobs (never set in the air gap): shrink PVCs / resources for
 # the lab run WITHOUT touching the prod values in git. Empty = git values.

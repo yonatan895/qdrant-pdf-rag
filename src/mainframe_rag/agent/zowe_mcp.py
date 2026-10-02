@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 import httpx2
 from opentelemetry import propagate
 
+from mainframe_rag.logs import error_type
+
 if TYPE_CHECKING:
     from mainframe_rag.config import Settings
 
@@ -143,7 +145,7 @@ def probe_zowe_mcp(zowe_mcp: HttpZoweMCP) -> str | None:
     try:
         names = zowe_mcp.list_tools()
     except Exception as exc:  # noqa: BLE001
-        return f"{type(exc).__name__}: {exc}"[:200]
+        return error_type(exc)
     extras = [n for n in names if n not in ALLOWLIST]
     if extras:
         return f"bridge registers non-allowlisted tools: {sorted(extras)}"

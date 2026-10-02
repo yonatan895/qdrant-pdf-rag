@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import httpx2
 
 from mainframe_rag.config import bearer_auth_headers
+from mainframe_rag.logs import error_type
 
 if TYPE_CHECKING:
     from mainframe_rag.config import Settings
@@ -258,7 +259,7 @@ def probe_reranker(reranker: Reranker) -> str | None:
     try:
         scores = reranker.score("probe", ["probe"])
     except Exception as exc:  # noqa: BLE001
-        return f"{type(exc).__name__}: {exc}"[:200]
+        return error_type(exc)
     if len(scores) != 1:
         return f"expected 1 score, got {len(scores)}"
     return None

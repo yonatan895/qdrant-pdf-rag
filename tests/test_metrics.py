@@ -369,3 +369,20 @@ def test_answer_not_configured_records_once(client, monkeypatch):
         assert resp.status_code == 503
         body = client.get("/metrics").text
         assert _series(body, "rag_requests_total", **labels) == before + 1.0
+
+
+def test_record_request_failure_log_leaks_no_exception_text(monkeypatch, caplog):
+    """A metrics fault is swallowed (fail-open) and its debug log carries the
+    error type only, never the exception message."""
+    import logging
+    import types
+
+    class _Boom:
+        def add(self, *args, **kwargs):
+            raise RuntimeError("SECRET-XYZ")
+
+    monkeypatch.setattr(metrics_mod, "_instruments", types.SimpleNamespace(requests=_Boom()))
+    with caplog.at_level(logging.DEBUG, logger="otel.metrics"):
+        metrics_mod.record_request("search", "ok", query_class="nl", elapsed_s=0.1)
+    assert "SECRET-XYZ" not in caplog.text
+    assert "RuntimeError" in caplog.text

@@ -21,6 +21,7 @@ from tests.helpers_airgap import (
     rendered_env,
     run_sh,
     set_oauth_proxy_pin,
+    sha256_bytes,
 )
 
 IMAGE_SHA = "a" * 40  # full-sha shaped; deploy.sh only rejects "" / "HEAD"
@@ -179,6 +180,85 @@ def test_storage_size_knob_covers_persistence_and_snapshot(tree):
     log = _helm_log(tree)
     assert "persistence.size=1Gi" in log
     assert "snapshotPersistence.size=1Gi" in log
+
+
+def _manifest(tree, chart_sha=None, sha=IMAGE_SHA):
+    dist = tree[0] / "dist"
+    dist.mkdir(exist_ok=True)
+    lines = [f"sha: {sha}"]
+    if chart_sha is not None:
+        lines.append(f"chart_sha256: {chart_sha}")
+    (dist / "MANIFEST.txt").write_text("\n".join(lines) + "\n")
+
+
+def _chart(tree):
+    return next((tree[0] / "charts").glob("qdrant-*.tgz"))
+
+
+def test_two_qdrant_charts_refuse_before_any_command(tree):
+    shutil.copy(_chart(tree), tree[0] / "charts" / "qdrant-9.9.9.tgz")
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "exactly one vendored Qdrant chart is required" in result.stderr
+    assert "found 2" in result.stderr
+    assert not tree[1].exists() or "upgrade" not in _helm_log(tree)
+
+
+def test_no_qdrant_chart_refuses(tree):
+    _chart(tree).unlink()
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "exactly one vendored Qdrant chart is required" in result.stderr
+    assert "found 0" in result.stderr
+
+
+def test_manifest_chart_sha_mismatch_refuses_before_mutation(tree):
+    _manifest(tree, "0" * 64)
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "does not match the packed MANIFEST chart_sha256" in result.stderr
+    assert not tree[1].exists() or "upgrade" not in _helm_log(tree)
+
+
+def test_manifest_without_chart_sha_refuses(tree):
+    _manifest(tree)
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "has no chart_sha256" in result.stderr
+
+
+def test_manifest_chart_sha_match_deploys_that_chart(tree):
+    _manifest(tree, sha256_bytes(_chart(tree).read_bytes()))
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    assert "verified against packed MANIFEST" in result.stdout
+    assert str(_chart(tree).relative_to(tree[0])) in _helm_log(tree)
+
+
+def test_chart_identity_failure_then_fix_passes_on_next_run(tree):
+    extra = tree[0] / "charts" / "qdrant-9.9.9.tgz"
+    shutil.copy(_chart(tree), extra)
+    assert _run(tree).returncode != 0
+    extra.unlink()
+    _manifest(tree, "0" * 64)
+    assert _run(tree).returncode != 0
+    _manifest(tree, sha256_bytes(_chart(tree).read_bytes()))
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+def test_dry_run_with_manifest_is_noticed_not_verified(tree):
+    _manifest(tree, "0" * 64)
+    result = _run(tree, ("AIRGAP_DRYRUN", "1"))
+    assert result.returncode == 0, result.stderr
+    assert "not release-verified" in result.stdout
+
+
+def test_no_manifest_is_noticed_not_verified(tree):
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    assert "not release-verified" in result.stdout
 
 
 def test_missing_production_values_fails_before_mutation(tree):
