@@ -90,6 +90,7 @@ def _assignments(plan_server: ServerPlan) -> list[str]:
         _emit("BUDGET_MM_PROCESSOR_CACHE_GB", "" if plan_server.mm_processor_cache_gb is None
               else str(plan_server.mm_processor_cache_gb)),
         _emit("BUDGET_SEQS", str(plan_server.max_num_seqs)),
+        _emit("BUDGET_HOST_MEM_MB", str(plan_server.host_mem_mb or "")),
     ]
 
 

@@ -267,15 +267,21 @@ resolve_aliases() {
 
 validate_model_config() {
     command -v python3 >/dev/null 2>&1 || die "python3 is required for model configuration validation"
-    export GATEWAY_BASE_URL VLLM_BASE_URL EMBED_BASE_URL EMBED_MODEL LLM_BASE_URL LLM_MODEL_REASONING RERANK_BASE_URL CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CONTEXTUAL_EMBED_ENABLED
+    export GATEWAY_BASE_URL VLLM_BASE_URL EMBED_BASE_URL EMBED_MODEL LLM_BASE_URL LLM_MODEL_REASONING RERANK_BASE_URL CONTEXT_LLM_BASE_URL CONTEXT_LLM_MODEL CONTEXTUAL_EMBED_ENABLED UI_ENABLED INGEST_ALIAS_PUBLISH INGEST_REINGEST CHAT_CONDENSE_ENABLED
     python3 scripts/airgap/model_config.py
 }
 
-# Qdrant data scratch and snapshots live on block storage; NFS is refused.
+# Qdrant data scratch and snapshots live on block storage; NFS is refused for
+# both the data class and the snapshot class (the latter defaults to the former).
 refuse_nfs_storage() {
     case "${STORAGE_CLASS:-}" in
         *[Nn][Ff][Ss]*)
             die "STORAGE_CLASS='${STORAGE_CLASS}' looks like NFS — Qdrant-adjacent volumes require RWO block storage"
+            ;;
+    esac
+    case "${SNAPSHOT_STORAGE_CLASS:-}" in
+        *[Nn][Ff][Ss]*)
+            die "SNAPSHOT_STORAGE_CLASS='${SNAPSHOT_STORAGE_CLASS}' looks like NFS — Qdrant snapshot volumes require RWO block storage"
             ;;
     esac
 }
@@ -307,20 +313,33 @@ check_manifest_sha() {
 
 # Executing-checkout identity for deploy/ingest/validate/load (issue #414):
 # when a packed MANIFEST is reachable, the git checkout these scripts run
-# from must resolve to the packed SHA. An explicitly set IMAGE_SHA alone
-# never establishes which code executes. Silent on success; skipped in
-# dry-run (preview mutates nothing) and when no MANIFEST is reachable
-# (connected development modes) or no git checkout exists (identity
-# unresolvable — the IMAGE_SHA/manifest cross-check still applies).
+# from must resolve to the packed SHA AND carry no tracked staged/unstaged
+# change against it (an edited script or chart at the matching HEAD would
+# otherwise run under the release claim). Untracked files (airgap.env,
+# dist/, generated output) are operator-owned and stay allowed. An explicitly
+# set IMAGE_SHA alone never establishes which code executes. Silent on
+# success. Dry-run (preview mutates nothing), no reachable MANIFEST
+# (connected development) and an unresolvable checkout keep working but say
+# so on stderr: the run is not release-verified. The refusal never prints
+# file names or contents.
 check_checkout_sha() {
-    if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then return 0; fi
-    if [ -z "${MANIFEST:-}" ]; then return 0; fi
-    if [ ! -f "$MANIFEST" ]; then return 0; fi
+    if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
+        echo "Notice: dry-run — checkout not release-verified" >&2; return 0
+    fi
+    if [ -z "${MANIFEST:-}" ] || [ ! -f "$MANIFEST" ]; then
+        echo "Notice: no packed MANIFEST — checkout not release-verified" >&2; return 0
+    fi
     packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
-    [ -n "$packed_sha" ] || return 0
-    checkout_sha=$(git rev-parse HEAD 2>/dev/null) || return 0
+    checkout_sha=$(git rev-parse HEAD 2>/dev/null) || checkout_sha=""
+    if [ -z "$packed_sha" ] || [ -z "$checkout_sha" ]; then
+        echo "Notice: checkout identity unresolved — checkout not release-verified" >&2; return 0
+    fi
     [ "$checkout_sha" = "$packed_sha" ] || \
         die "executing checkout HEAD=$checkout_sha does not match the packed MANIFEST sha ($packed_sha) — run from the approved bundle checkout (see $MANIFEST); overriding IMAGE_SHA alone never changes which code executes"
+    _diff_rc=0
+    git diff --quiet HEAD -- >/dev/null 2>&1 || _diff_rc=$?
+    [ "$_diff_rc" -eq 0 ] || \
+        die "executing checkout has tracked changes against the packed MANIFEST sha ($packed_sha) — restore them (git diff HEAD lists them; operator settings belong in the untracked airgap.env) before running a release"
 }
 
 # oc/kubectl must exist unless previewing (deploy/ingest only; validate and
