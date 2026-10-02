@@ -136,6 +136,22 @@ GPU pack before starting component servers; the default pair uses
 A third backend requires the matching pack. Backend curls above are component
 probes, not application consumer configuration.
 
+With `CORPUS_DIR` set, the supervisor's ingest is sized to the host's RAM
+(issue #580; the 2026-10-01 incident was a 3-worker ingest started beside
+loaded model servers on the 16 GB reference host). It passes
+`--workers min(CPU-1, (MemAvailable - HOST_MEM_HEADROOM_MB) / LOCAL_INGEST_WORKER_MB)`
+(at least 1) and logs the plan. Defaults: headroom 2048 MiB and a conservative
+1024 MiB per-worker estimate (`LOCAL_INGEST_WORKER_MB`; one 138-page document
+peaked near 250 MiB, large PDFs run higher; it is an estimate, not a measured
+sizing). `INGEST_WORKERS=<n>` overrides the count. Before any model probe the
+supervisor refuses (exit 75, fixed message, nothing started) when `MemAvailable`
+cannot hold the chosen workers plus headroom, or when memory or IO PSI
+`some avg10` is at least `HOST_PSI_MAX` (default 10). `FORCE_START=1` skips only
+that refusal. `HOST_MEMINFO`/`HOST_PSI_DIR`/`HOST_CPUS` point at the `/proc`
+files and CPU count (tests stub them); an unreadable file skips its check with a
+notice. This is local tooling only: the ingest CLI default (CPU-1), production
+Jobs and the air-gap `INGEST_WORKERS` are unchanged.
+
 The supervisor sources the private `GATEWAY_ENV_FILE`, owns the gateway it starts,
 and reuses reachable Jaeger without claiming ownership. Component lifecycle stays
 in `run_local_gateway.sh` (gateway/Postgres), `run_local_jaeger.sh`,

@@ -20,6 +20,11 @@
 # `task local:qdrant:up`) when unreachable.
 # Ctrl-C stops the agent, gateway, and an owned Jaeger; Qdrant is left for
 # `task local:qdrant:down`.
+# Local ingest is host-RAM budgeted (issue #580): the worker count is sized from
+# MemAvailable (INGEST_WORKERS overrides; LOCAL_INGEST_WORKER_MB is the per-worker
+# estimate) and the ingest is refused (exit 75) when RAM or memory/IO pressure
+# cannot take it; FORCE_START=1 skips only that refusal. This sizing is local
+# only: the ingest CLI default, production Jobs and airgap workers are untouched.
 # LOCAL_STACK_DRYRUN=1 prints the ordered plan and validates inputs only.
 # Never a product path; never in CI or the air gap.
 
@@ -72,6 +77,17 @@ REASONING_GW_URL="${GATEWAY_REASONING_URL:-http://host.docker.internal:8000/v1}"
 EMBED_GW_URL="${GATEWAY_EMBED_URL:-http://host.docker.internal:8001/v1}"
 RERANK_GW_URL="${GATEWAY_RERANK_URL:-http://host.docker.internal:8002/v1}"
 CORPUS_DIR="${CORPUS_DIR:-}"
+# Host-RAM budget for the local ingest (issue #580). The per-worker figure is a
+# conservative estimate (one 138-page document peaked near 250 MiB in a guarded
+# single-worker run; large PDFs and the embed client buffers run higher), not a
+# production sizing. /proc paths are overridable so tests can stub them.
+INGEST_WORKERS="${INGEST_WORKERS:-}"
+LOCAL_INGEST_WORKER_MB="${LOCAL_INGEST_WORKER_MB:-1024}"
+HOST_MEM_HEADROOM_MB="${HOST_MEM_HEADROOM_MB:-2048}"
+HOST_PSI_MAX="${HOST_PSI_MAX:-10}"
+HOST_MEMINFO="${HOST_MEMINFO:-/proc/meminfo}"
+HOST_PSI_DIR="${HOST_PSI_DIR:-/proc/pressure}"
+HOST_CPUS="${HOST_CPUS:-$(nproc 2>/dev/null || echo 2)}"
 LOG_DIR="${LOCAL_STACK_LOG_DIR:-${TMPDIR:-/tmp}}"
 DRYRUN="${LOCAL_STACK_DRYRUN:-0}"
 PY="${PY:-$REPO_ROOT/.venv/bin/python}"
@@ -81,7 +97,8 @@ step() { echo "==> $1"; }
 
 # Input validation first: a bad value must die before any docker call.
 for _pair in "GATEWAY_PORT:$GATEWAY_PORT" "LOCAL_AGENT_PORT:$LOCAL_AGENT_PORT" "DENSE_DIM:$DENSE_DIM" \
-    "JAEGER_PORT:$JAEGER_PORT" "JAEGER_OTLP_PORT:$JAEGER_OTLP_PORT" "OTEL_TRACE_TIMEOUT:$OTEL_TRACE_TIMEOUT"; do
+    "JAEGER_PORT:$JAEGER_PORT" "JAEGER_OTLP_PORT:$JAEGER_OTLP_PORT" "OTEL_TRACE_TIMEOUT:$OTEL_TRACE_TIMEOUT" \
+    "LOCAL_INGEST_WORKER_MB:$LOCAL_INGEST_WORKER_MB" "HOST_CPUS:$HOST_CPUS"; do
     _name="${_pair%%:*}"; _val="${_pair#*:}"
     case "$_val" in
         ''|*[!0-9]*) die "$_name must be a positive integer, got '$_val'" ;;
@@ -89,6 +106,10 @@ for _pair in "GATEWAY_PORT:$GATEWAY_PORT" "LOCAL_AGENT_PORT:$LOCAL_AGENT_PORT" "
     esac
 done
 unset _pair _name _val
+case "$INGEST_WORKERS" in
+    '') ;;
+    *[!0-9]*|0*) die "INGEST_WORKERS must be a positive integer, got '$INGEST_WORKERS'" ;;
+esac
 for _pair in "QDRANT_URL:$QDRANT_URL" "GATEWAY_REASONING_URL:$REASONING_CHECK_URL" \
     "GATEWAY_EMBED_URL:$EMBED_CHECK_URL" "GATEWAY_RERANK_URL:$RERANK_CHECK_URL"; do
     _name="${_pair%%:*}"; _val="${_pair#*:}"
@@ -105,6 +126,51 @@ if [ -n "$CORPUS_DIR" ] && [ ! -d "$CORPUS_DIR" ]; then
     die "CORPUS_DIR is not a directory: $CORPUS_DIR"
 fi
 
+# Size the local ingest and decide admission (issue #580). Sets
+# INGEST_WORKERS_CHOSEN; returns 1 (fixed message) when the host cannot take it.
+# Unset INGEST_WORKERS: min(CPU-1, (MemAvailable - headroom) / per-worker MiB),
+# at least 1. Set INGEST_WORKERS: used as given, but still admission-checked.
+plan_ingest_workers() {
+    _avail_mb="$(awk '/^MemAvailable:/ { print int($2 / 1024) }' "$HOST_MEMINFO" 2>/dev/null || true)"
+    _cpu_cap=$((HOST_CPUS > 1 ? HOST_CPUS - 1 : 1))
+    if [ -n "$INGEST_WORKERS" ]; then
+        INGEST_WORKERS_CHOSEN="$INGEST_WORKERS"
+    elif [ -n "$_avail_mb" ]; then
+        INGEST_WORKERS_CHOSEN=$(((_avail_mb - HOST_MEM_HEADROOM_MB) / LOCAL_INGEST_WORKER_MB))
+        [ "$INGEST_WORKERS_CHOSEN" -le "$_cpu_cap" ] || INGEST_WORKERS_CHOSEN="$_cpu_cap"
+        [ "$INGEST_WORKERS_CHOSEN" -ge 1 ] || INGEST_WORKERS_CHOSEN=1
+    else
+        INGEST_WORKERS_CHOSEN="$_cpu_cap"
+    fi
+    if [ -z "$_avail_mb" ]; then
+        echo "NOTICE: host memory not readable at $HOST_MEMINFO; skipping the RAM admission check." >&2
+    elif [ "$_avail_mb" -lt $((INGEST_WORKERS_CHOSEN * LOCAL_INGEST_WORKER_MB + HOST_MEM_HEADROOM_MB)) ]; then
+        echo "REFUSED: host RAM too low for the local ingest ($INGEST_WORKERS_CHOSEN worker(s) x $LOCAL_INGEST_WORKER_MB MiB + $HOST_MEM_HEADROOM_MB MiB headroom needed, $_avail_mb MiB available). Free memory or stop other servers; set FORCE_START=1 to override." >&2
+        return 1
+    fi
+    for _resource in memory io; do
+        _psi_file="$HOST_PSI_DIR/$_resource"
+        if [ ! -r "$_psi_file" ]; then
+            echo "NOTICE: $_psi_file not readable; skipping the $_resource pressure check." >&2
+            continue
+        fi
+        if awk -v max="$HOST_PSI_MAX" '/^some/ { split($2, a, "="); if (a[2] + 0 >= max + 0) found = 1 } END { exit !found }' "$_psi_file"; then
+            echo "REFUSED: host $_resource pressure is high (some avg10 >= $HOST_PSI_MAX%). Wait for it to settle; set FORCE_START=1 to override." >&2
+            return 1
+        fi
+    done
+}
+INGEST_PLAN_NOTE=""
+if [ -n "$CORPUS_DIR" ] && ! plan_ingest_workers; then
+    if [ "${FORCE_START:-0}" = "1" ]; then
+        echo "NOTICE: FORCE_START=1; ingesting despite the host RAM/pressure refusal." >&2
+    elif [ "$DRYRUN" = "1" ]; then
+        INGEST_PLAN_NOTE=" [would be REFUSED on this host: see stderr; FORCE_START=1 overrides]"
+    else
+        exit 75
+    fi
+fi
+
 # The same backend list drives the dry run and actual readiness checks.
 set -- "reasoning:$REASONING_CHECK_URL" "embed:$EMBED_CHECK_URL"
 if [ "$LOCAL_RERANK_ENABLED" = "true" ]; then
@@ -117,7 +183,7 @@ if [ "$DRYRUN" = "1" ]; then
     echo "[plan] 4. gateway: GATEWAY_ENV_FILE=$GATEWAY_ENV_FILE sh scripts/run_local_gateway.sh"
     echo "[plan] 5. probe:   $PY scripts/probe_gateway.py --stream"
     if [ -n "$CORPUS_DIR" ]; then
-        echo "[plan] 6. ingest:  OTEL_SERVICE_NAME=$INGEST_SERVICE_NAME $PY -m mainframe_rag.ingest.run_ingest --src $CORPUS_DIR (collection $QDRANT_COLLECTION)"
+        echo "[plan] 6. ingest:  OTEL_SERVICE_NAME=$INGEST_SERVICE_NAME $PY -m mainframe_rag.ingest.run_ingest --src $CORPUS_DIR --workers $INGEST_WORKERS_CHOSEN (collection $QDRANT_COLLECTION)$INGEST_PLAN_NOTE"
     else
         echo "[plan] 6. ingest:  skipped (CORPUS_DIR unset)"
     fi
@@ -257,7 +323,7 @@ step "Probing every model leg through the gateway"
 if [ -n "$CORPUS_DIR" ]; then
     step "Ingesting $CORPUS_DIR through the gateway (collection $QDRANT_COLLECTION)"
     OTEL_SERVICE_NAME="$INGEST_SERVICE_NAME" "$PY" -m mainframe_rag.ingest.run_ingest --src "$CORPUS_DIR" \
-        --progress "$LOG_DIR/local-stack-ingest-progress.jsonl"
+        --workers "$INGEST_WORKERS_CHOSEN" --progress "$LOG_DIR/local-stack-ingest-progress.jsonl"
 fi
 
 _health_code="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$LOCAL_AGENT_PORT/healthz" 2>/dev/null || true)"
