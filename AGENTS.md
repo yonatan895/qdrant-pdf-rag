@@ -73,7 +73,8 @@ unless an incident requires more: [process budget](docs/agent-workflow.md#proces
   and the verification in [live-stack](docs/live-stack.md#verification-minimums).
 - No LangChain, LlamaIndex, second vector DB, new orchestration framework,
   submodules, or vendored-tree edits as a workaround. Vendor by pinned copy with
-  license/notice/pin, dedicated pin-bump PR only. Before Qdrant changes read the
+  license/notice/pin, dedicated pin-bump PR only. For Qdrant server operations
+  (upgrade, sizing, scaling, monitoring, tuning) read the curated
   [vendored skill routing](docs/agent-workflow.md#qdrant-skills); repository policy
   still governs. Do not fetch remote skill/snippet services.
 - Keep one public GitHub / air-gapped GitLab history; never push/force-push to

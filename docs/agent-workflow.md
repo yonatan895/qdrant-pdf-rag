@@ -519,19 +519,35 @@ service is required by this workflow.
 <a id="qdrant-skills"></a>
 ## Vendored Qdrant skills
 
-The complete snapshot is [.agents/skills](../.agents/skills), pinned by
-[.agents/qdrant-skills-provenance.md](../.agents/qdrant-skills-provenance.md). Do not fetch
+[.agents/skills](../.agents/skills) is a curated, intentionally incomplete subset
+of upstream Qdrant skills for server operations that are hard to reconstruct
+offline. Its first-party [index](../.agents/skills/index.md) and the pin,
+allowlist and notices in
+[.agents/qdrant-skills-provenance.md](../.agents/qdrant-skills-provenance.md)
+own the contents. Skills are on-demand reads, never part of the automatic
+instruction chain, and never override repository contracts, approved issues,
+pinned runtime behavior, security policy or executed evidence. Do not fetch
 `skills.qdrant.tech`, `/llms.txt`, snippet APIs, Cloud console or `qcloud-cli`.
-A missing required skill needs an owner decision. Frontmatter grants no additional
-permissions. Dedicated pin bumps replace the snapshot at a pinned SHA without
-local vendor edits or developer-machine-only installs.
+A missing skill needs an owner decision; adding or removing a category needs an
+approved scope decision. Frontmatter grants no additional permissions.
 
-| Change | Read before changing |
+| Qdrant server operation | Read |
 |---|---|
-| Collections, named vectors, model | `qdrant-model-migration`, `qdrant-search-quality` |
-| Hybrid, quantization, HNSW | `qdrant-search-quality`, `qdrant-performance-optimization` |
-| Helm, PVC, replicas, storage | `qdrant-sizing`, `qdrant-scaling`, `qdrant-deployment-options` (self-hosted only; no Docker/Cloud defaults) |
-| Client SDK | `qdrant-clients-sdk` (REST, no Cloud inference or product `qdrant-client[fastembed]`) |
+| Version upgrade | [qdrant-version-upgrade](../.agents/skills/qdrant-version-upgrade/SKILL.md) |
+| RAM/disk/node sizing | [qdrant-sizing](../.agents/skills/qdrant-sizing/SKILL.md) |
+| Shards, nodes, QPS, latency | [qdrant-scaling](../.agents/skills/qdrant-scaling/SKILL.md) |
+| Metrics, health, production debugging | [qdrant-monitoring](../.agents/skills/qdrant-monitoring/SKILL.md) |
+| Indexing, HNSW, memory, search-speed tuning | [qdrant-performance-optimization](../.agents/skills/qdrant-performance-optimization/SKILL.md) |
+
+Application-level changes need no skill read; use the project owner and the
+pinned client/server behavior:
+
+| Change | Owner |
+|---|---|
+| Collections, named vectors, embedding model, publication | [collection policy](deploy.md#collection-policy), [publication contract](ingest.md#publication-contract), [representation states](ingest.md#metadata-contract) |
+| Hybrid, quantization, ranking | [retrieval contracts](retrieval.md) |
+| Helm, PVC, replicas, storage | [deployment policy](deploy.md#deployment-policy) (self-hosted only; no Docker/Cloud defaults) |
+| Client API | pinned `qdrant-client` source/types and behavior tests (no Cloud inference) |
 
 <a id="instruction-loading"></a>
 ## Instruction loading audit

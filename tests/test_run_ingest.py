@@ -425,8 +425,8 @@ def test_worker_embed_batches_by_batch_size(synthetic_pdf, monkeypatch):
 
 def test_bulk_load_disables_and_restores_indexing(tmp_path, synthetic_pdf, monkeypatch):
     """INGEST_BULK_LOAD raises the indexing threshold before the first upsert
-    and restores the server default after the last one (Qdrant skill:
-    HNSW builds must not compete with a bulk load). Default off."""
+    and restores the server default after the last one (HNSW builds must not
+    compete with a bulk load). Default off."""
     from mainframe_rag.ingest import run_ingest
     from mainframe_rag.ingest.qdrant_io import (
         BULK_INDEXING_THRESHOLD_KB,

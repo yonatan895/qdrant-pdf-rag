@@ -22,8 +22,9 @@ from mainframe_rag.ports import QdrantPoints, SparseVector
 
 HNSW_M = 16
 HNSW_EF_CONSTRUCT = 128
-# Bulk-load guidance (Qdrant skill): raise indexing_threshold so HNSW builds
-# do not compete with upserts, restore to the server default afterwards.
+# Bulk-load mode (project policy; defaults in docs/agent.md): raise
+# indexing_threshold so HNSW builds do not compete with upserts, restore to
+# the server default afterwards.
 # Never m=0 — that drops existing HNSW on an existing collection.
 BULK_INDEXING_THRESHOLD_KB = 1 << 30
 DEFAULT_INDEXING_THRESHOLD_KB = 20000
@@ -113,7 +114,7 @@ def set_bulk_indexing(client: QdrantPoints, collection: str, *, bulk: bool) -> N
     node): bulk=True made the load ~3x SLOWER wall-clock — with indexing
     disabled, upsert time grew superlinearly as unindexed segments grew
     (0.01s -> 30s/doc), while indexed loads stayed flat (~0.7s/doc). The
-    skill's bulk-load guidance pays off on multi-shard/remote targets, not
+    generic bulk-load guidance pays off on multi-shard/remote targets, not
     on a single-shard local node. Default is OFF; keep it off unless your
     target actually parallelizes writes."""
     client.update_collection(
@@ -403,8 +404,8 @@ def upsert_chunks(
     vectors: list[tuple[list[float], SparseVector]],
     contexts: dict[str, str] | None = None,
 ) -> int:
-    """Upsert chunk points in settings.batch_size batches (Qdrant skill
-    64-256 band, bounded in Settings). Returns point count.
+    """Upsert chunk points in settings.batch_size batches (bounds owned by
+    Settings and docs/ingest.md). Returns point count.
 
     Upserts are idempotent by construction — point ids are UUID5 of the chunk
     key — so a connection-level retry/replay of a batch is safe. There is no
