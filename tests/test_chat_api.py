@@ -647,6 +647,23 @@ def test_chat_blank_active_user_refuses_before_any_work(chat_client, stream):
     assert chat_client.fake_llm.stream_calls == []
 
 
+@pytest.mark.parametrize("content", ["   ", "\t\n", "\x00x", "a\x1bb"])
+@pytest.mark.parametrize("path", ["/v1/chat", "/v1/chat/completions"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_unsearchable_active_user_refuses_before_any_work(chat_client, content, path, stream):
+    """Issue #579: blank or NUL/C0-control active turns share the fixed 422."""
+    result = chat_client.post(path, json={"messages": [
+        {"role": "user", "content": "Earlier question"},
+        {"role": "assistant", "content": "Earlier answer"},
+        {"role": "user", "content": content},
+    ], "stream": stream})
+    assert result.status_code == 422
+    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert chat_client.mock_search.calls == []
+    assert chat_client.fake_llm.chat_calls == []
+    assert chat_client.fake_llm.stream_calls == []
+
+
 @pytest.mark.parametrize("mode", ["off", "on", "failure", "unstructured"])
 @pytest.mark.parametrize("stream", [False, True])
 def test_chat_condensation_uses_only_history_before_normalized_user(
