@@ -1176,6 +1176,28 @@ def test_ui_stream_invalid_active_user_refuses_before_work(ui_client, message):
     assert app_mod.llm.calls == app_mod.llm.stream_calls == []
 
 
+@pytest.mark.parametrize("message", ["   ", "\t\n", "\x00x", "a\x1bb"])
+def test_ui_stream_unsearchable_active_user_refuses_before_work(ui_client, message):
+    """Issue #579: control characters and blank turns, fixed 422, no work."""
+    result = ui_client.post("/ui/chat/stream", json={"messages": [{"role": "user", "content": message}]})
+    assert result.status_code == 422
+    assert result.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert ui_client.mock_search.calls == []
+    assert app_mod.llm.calls == app_mod.llm.stream_calls == []
+
+
+@pytest.mark.parametrize("htmx", [False, True])
+@pytest.mark.parametrize("message", ["   ", "\t\n", "\x00x", "a\x1bb"])
+def test_ui_form_unsearchable_message_refuses_before_work(ui_client, message, htmx):
+    """Issue #579: the console form shows its fixed banner and does no work."""
+    result = ui_client.post("/ui/chat", headers={"HX-Request": "true"} if htmx else {}, data={
+        "message": message, "messages": "",
+    })
+    assert "could not complete this request" in result.text
+    assert ui_client.mock_search.calls == []
+    assert app_mod.llm.calls == app_mod.llm.stream_calls == []
+
+
 @pytest.mark.parametrize("htmx", [False, True])
 def test_ui_form_normalizes_current_message_with_real_history(ui_client, htmx):
     result = ui_client.post("/ui/chat", headers={"HX-Request": "true"} if htmx else {}, data={

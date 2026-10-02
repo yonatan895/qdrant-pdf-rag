@@ -822,3 +822,28 @@ def test_empty_target_migration_commits_when_nothing_is_searchable(tmp_path, mon
     assert main(_migration_args(corpus, progress, "--reingest")) == 0
     record = read_manifest_record(fake, f"{collection}__completions")
     assert record is not None and record.state == STATE_COMMITTED
+
+
+def test_upsert_failure_log_carries_error_type_not_exception_text(
+    tmp_path, synthetic_pdf, capsys, monkeypatch
+):
+    """AGENTS.md: logs never carry exception text. A failing upsert logs the
+    class name only; the sentinel in the exception message must not reach
+    stderr (the inventory record keeps its own bounded error field)."""
+    from mainframe_rag.ingest import run_ingest
+
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: _FakeQdrant())
+
+    def boom(*args, **kwargs):
+        raise ConnectionError("SECRET-XYZ upstream body")
+
+    monkeypatch.setattr(run_ingest, "_upsert_one", boom)
+    progress = tmp_path / "inventory.jsonl"
+    assert main(["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"]) != 0
+    err = capsys.readouterr().err
+    assert "SECRET-XYZ" not in err
+    events = [json.loads(l) for l in err.splitlines() if l.startswith("{")]
+    errors = [e for e in events if e.get("action") == "error"]
+    assert errors and errors[0]["error_type"] == "ConnectionError"

@@ -228,7 +228,8 @@ and failure/skip checks. Semantic evaluation still needs an approved venue.
 # a. readiness + liveness
 curl -s -w ' [%{http_code}]\n' http://127.0.0.1:8087/healthz
 curl -s http://127.0.0.1:8087/livez
-# expect: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible"} [200]
+# expect: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible","rerank":true} [200]
+# (rerank is null when RERANK_ENABLED=false; false = 503 with the reranker down)
 # and {"status":"alive"} from /livez. representation is empty pre-ingest
 # (still 200 — bootstrap), record_only_drift on query-prefix drift;
 # reembed_required/legacy/pending/unknown degrade AND return HTTP 503
@@ -249,6 +250,9 @@ python3 -c "print('{\"query\":\"' + 'x'*2001 + '\"}')" > "$SCRATCH_DIR/long-quer
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8087/v1/search \
   -H 'Content-Type: application/json' -d @"$SCRATCH_DIR/long-query.json"
 # expect: 422 with {"code":"invalid_request","message":"request body failed validation"}
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8087/v1/search \
+  -H 'Content-Type: application/json' -d '{"query":"   "}'
+# expect: the same 422 (whitespace-only or NUL/C0 control query, issue #579), no retrieval
 
 # e. multi-turn chat + console (when UI_ENABLED / the console is in scope)
 curl -s -X POST http://127.0.0.1:8087/v1/chat -H 'Content-Type: application/json' \

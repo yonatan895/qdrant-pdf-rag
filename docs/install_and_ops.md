@@ -1093,7 +1093,8 @@ The agent exposes `/healthz` for the OpenShift readiness probe and
 `503 qdrant_unready`, upstream bodies stay server-side). `/healthz` is a
 real readiness failure (HTTP 503) whenever the served generation is not
 validated compatible — including `reembed_required`, `legacy`, a `pending`
-migration, or unreadable metadata; `empty` stays ready so the
+migration, or unreadable metadata, or when `RERANK_ENABLED` is on and the
+rerank endpoint(s) fail the cached probe (`rerank: false`); `empty` stays ready so the
 deploy -> ingest bootstrap can complete. `/livez` is process-only.
 
 ```bash
@@ -1104,7 +1105,9 @@ curl -s http://rag-agent.mainframe-rag.svc:8080/healthz
 {
   "status": "ok",
   "qdrant": true,
-  "embed": true
+  "embed": true,
+  "representation": "compatible",
+  "rerank": null
 }
 ```
 
