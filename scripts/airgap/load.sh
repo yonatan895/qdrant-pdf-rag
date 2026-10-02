@@ -16,6 +16,7 @@ enforce_product_rules
 resolve_aliases
 require_env INTERNAL_REGISTRY IMAGE_SHA
 command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the air-gap bastion"
+command -v python3 >/dev/null 2>&1 || die "python3 is required on the air-gap bastion"
 
 # Packed artifacts: unpacked in the current directory or the parent (the docs
 # flow unpacks next to the clone), or specified by AIRGAP_BUNDLE_DIR.
@@ -60,6 +61,7 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     if [ -n "$OAUTH_TAR" ]; then
         echo "[dryrun] skopeo copy docker-archive:$ARTDIR/$OAUTH_TAR docker://$INTERNAL_REGISTRY/openshift4/ose-oauth-proxy:v4.14"
     fi
+    echo "Notice: registry image identity not release-verified (dry-run pushes nothing and reads no registry)"
     echo ""
     echo "Loaded $LOADED_COUNT images into $INTERNAL_REGISTRY (dry-run)."
     next_step "sh scripts/tools/run-task.sh airgap:deploy"
@@ -114,9 +116,93 @@ if [ -n "$OAUTH_TAR" ]; then
     check_image_digest "$OAUTH_TAR" oauth_proxy_digest
 fi
 
+# `skopeo inspect` takes fewer options than `skopeo copy`. Reuse only the
+# registry-access options from SKOPEO_ARGS (authfile, creds, cert-dir,
+# tls-verify; a --dest- prefix is dropped) so the read-back below reaches the
+# registry the same way the push did. Copy-only options are never forwarded.
+inspect_args() {
+    _ia=""
+    _ia_take=0
+    # shellcheck disable=SC2086
+    for _t in ${SKOPEO_ARGS:-}; do
+        if [ "$_ia_take" = 1 ]; then _ia="$_ia $_t"; _ia_take=0; continue; fi
+        _n=${_t#--}
+        _n=${_n#dest-}
+        case "$_t" in
+            --*) ;;
+            *) continue ;;
+        esac
+        case "$_n" in
+            authfile=*|creds=*|cert-dir=*|tls-verify=*|registry-token=*|no-creds) _ia="$_ia --$_n" ;;
+            authfile|creds|cert-dir|registry-token) _ia="$_ia --$_n"; _ia_take=1 ;;
+        esac
+    done
+    if [ "${INSECURE_REGISTRY:-false}" = "true" ]; then
+        _ia="$_ia --tls-verify=false"
+    fi
+    printf '%s' "$_ia"
+}
+
+# Post-load identity (issue #272): `skopeo copy` exiting 0 does not prove what
+# the tag now resolves to. Read the tag back and require that the registry
+# serves the packed image, by image config digest (which pins the rootfs
+# diffIDs). Archive and registry MANIFEST digests legitimately differ: a docker
+# archive holds uncompressed layers, a registry stores compressed ones. The
+# verified registry manifest digest is printed as the immutable pin for
+# `repo@digest` references; a tag alone is never accepted as identity.
+VERIFY_TMP=$(mktemp -d)
+trap 'rm -rf "$VERIFY_TMP"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+verify_registry_image() {
+    _vtar=$1
+    _vdst=$2
+    _vkey=$3
+    _vexpected=$(awk -F': ' -v k="$_vkey" '$1 == k {print $2}' "$ARTDIR/MANIFEST.txt")
+    skopeo inspect --raw "docker-archive:$ARTDIR/$_vtar" > "$VERIFY_TMP/archive.raw" || \
+        die "cannot read the packed archive manifest for $_vdst"
+    # shellcheck disable=SC2046
+    skopeo inspect --raw $(inspect_args) "docker://$_vdst" > "$VERIFY_TMP/registry.raw" || \
+        die "cannot read back registry image $_vdst after the push — it is not verified; fix registry access and rerun"
+    _vrc=0
+    _vdigest=$(python3 - "$VERIFY_TMP/archive.raw" "$VERIFY_TMP/registry.raw" "$_vexpected" <<'PYEOF'
+import hashlib
+import json
+import sys
+
+archive_raw = open(sys.argv[1], "rb").read()
+registry_raw = open(sys.argv[2], "rb").read()
+expected = sys.argv[3]
+if "sha256:" + hashlib.sha256(archive_raw).hexdigest() != expected:
+    sys.exit(3)
+try:
+    archive = json.loads(archive_raw)
+    registry = json.loads(registry_raw)
+    archive_config = archive["config"]["digest"]
+    registry_config = registry["config"]["digest"]
+    archive_layers = len(archive["layers"])
+    registry_layers = len(registry["layers"])
+except (ValueError, KeyError, TypeError):
+    sys.exit(4)
+if registry_config != archive_config or registry_layers != archive_layers:
+    sys.exit(5)
+print("sha256:" + hashlib.sha256(registry_raw).hexdigest())
+PYEOF
+    ) || _vrc=$?
+    case "$_vrc" in
+        0) ;;
+        3) die "archive for $_vdst no longer matches its MANIFEST digest — do not trust this bundle" ;;
+        4) die "registry image $_vdst is not a single-image manifest — a tag must resolve to exactly the packed image" ;;
+        *) die "registry image $_vdst is not the packed image (config digest differs from the archive) — the tag was swapped or not overwritten; do not deploy it" ;;
+    esac
+    echo "==> verified $_vdst@$_vdigest"
+}
+
 load() {
     src=$1
     dst=$2
+    key=$3
     extra_args="${SKOPEO_ARGS:-}"
     if [ "${INSECURE_REGISTRY:-false}" = "true" ]; then
         extra_args="$extra_args --dest-tls-verify=false"
@@ -124,16 +210,17 @@ load() {
     echo "==> $src -> $dst"
     # shellcheck disable=SC2086
     run skopeo copy $extra_args "docker-archive:$ARTDIR/$src" "docker://$dst"
+    verify_registry_image "$src" "$dst" "$key"
 }
 
-load qdrant-image.tar "$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged"
+load qdrant-image.tar "$INTERNAL_REGISTRY/qdrant/qdrant:v1.19.0-unprivileged" qdrant_digest
 # Upstream source tag is 2.20.0 in images.txt; retagged to v2.20.0 to match the first-party Jaeger template
-load jaeger-image.tar "$INTERNAL_REGISTRY/jaegertracing/jaeger:v2.20.0"
-load "app-ingest-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA"
-load "app-agent-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-agent:$IMAGE_SHA"
+load jaeger-image.tar "$INTERNAL_REGISTRY/jaegertracing/jaeger:v2.20.0" jaeger_digest
+load "app-ingest-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-ingest:$IMAGE_SHA" ingest_digest
+load "app-agent-$IMAGE_SHA.tar" "$INTERNAL_REGISTRY/qdrant-pdf-rag-agent:$IMAGE_SHA" agent_digest
 if [ -n "$OAUTH_TAR" ]; then
     # ADR-0004 console Route: same tag the production chart renders for the sidecar.
-    load "$OAUTH_TAR" "$INTERNAL_REGISTRY/openshift4/ose-oauth-proxy:v4.14"
+    load "$OAUTH_TAR" "$INTERNAL_REGISTRY/openshift4/ose-oauth-proxy:v4.14" oauth_proxy_digest
 fi
 
 echo ""

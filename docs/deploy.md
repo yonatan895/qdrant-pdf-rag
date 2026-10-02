@@ -269,6 +269,20 @@ checksums **after**.
   `latest` or short SHAs. `INSECURE_REGISTRY=true` disables TLS
   verify on the pack-pull side *or* the load-push side depending on which
   script reads it.
+- Load then reads every pushed tag back from the registry (`skopeo inspect
+  --raw`, reusing the registry-access options of `SKOPEO_ARGS`/`INSECURE_REGISTRY`)
+  and refuses unless the stored manifest is a single image whose config digest
+  and layer count equal the packed archive's, whose own manifest hashes to the
+  MANIFEST `*_digest`. A tag that resolves to anything else (swapped, mirrored,
+  not overwritten, unreadable) fails closed with a fixed message and no
+  `Loaded N images` line. Each verified image prints
+  `==> verified <ref>@<registry manifest digest>`; that digest is the immutable
+  pin, and it differs from the MANIFEST archive digest by design (see
+  [image identity](#image-identity-across-archive-and-registry-formats)).
+  Dry-run reads no registry and says so ("not release-verified").
+  Not yet covered (#272 item 3): `pipeline.sh --skip-load` and `deploy.sh`
+  still render images by mutable tag and do not re-read the registry, so a tag
+  changed after load is not detected at deploy.
 - Executing-checkout guard (`common.sh::check_checkout_sha`, run by load,
   deploy, ingest and validate): with a packed MANIFEST reachable, HEAD must
   equal the packed SHA and no tracked file may differ from it, staged or
@@ -739,6 +753,9 @@ its manifest against the bundle first, then verify identical image config/rootfs
 diffIDs across the load, and the running digest against the loaded registry.
 Do not compare an archive digest blindly to a registry digest or accept a tag
 alone. Capture all five images, including every OAuth sidecar.
+`load.sh` implements the archive-to-registry step (config digest and layer
+count compared after each push; the registry manifest digest is reported);
+the pod `imageID` comparison and digest-pinned rendering remain open.
 
 <a id="deployment-policy"></a>
 ## Deployment maintenance policy
