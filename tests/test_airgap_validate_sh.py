@@ -35,7 +35,7 @@ def tree(tmp_path):
     return tmp_path
 
 
-NOT_FOUND = "Error from server (NotFound): the object was not found"
+NOT_FOUND = 'Error from server (NotFound): objects "x" not found'
 FORBIDDEN = "Error from server (Forbidden): the object is forbidden: User cannot get resource"
 
 
@@ -749,6 +749,24 @@ def test_validate_live_storageclass_forbidden_is_not_reported_absent(tree):
     assert r.returncode == 0, r.stderr
     assert "not found" not in r.stdout
     assert "Forbidden" in r.stdout and "NOT verified" in r.stdout
+
+
+def test_validate_live_notfound_name_containing_forbidden_still_fails(tree):
+    """The reason token decides, not free text: a missing StorageClass whose
+    name contains 'forbidden' must not be classified as a Forbidden read."""
+    text = 'Error from server (NotFound): storageclasses.storage.k8s.io "ceph-forbidden-tier" not found'
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", text))
+    r = _live(tree)
+    assert r.returncode != 0
+    assert "must exist before deployment" in r.stderr
+
+
+def test_validate_live_forbidden_message_with_not_found_text_is_forbidden(tree):
+    text = 'Error from server (Forbidden): storageclasses "not found-class" is forbidden: User cannot get resource'
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", text))
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "NOT verified" in r.stdout
 
 
 def test_validate_live_storageclass_other_error_fails(tree):

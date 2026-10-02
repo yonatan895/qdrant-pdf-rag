@@ -129,7 +129,8 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     exit 0
 fi
 
-# Read-only probe classified by the client's error class, never by exit
+# Read-only probe classified by the client's error reason token, "(Forbidden)"
+# or "(NotFound)" (never free text such as a resource name), not by exit
 # status alone: sets PROBE to ok|notfound|forbidden|error. The client's text
 # is not echoed (it can carry identities/upstream detail).
 probe() {
@@ -137,8 +138,8 @@ probe() {
         PROBE=ok
     else
         case "$_probe_err" in
-            *Forbidden*|*forbidden*) PROBE=forbidden ;;
-            *NotFound*|*"not found"*|*"doesn't have a resource type"*) PROBE=notfound ;;
+            *"(Forbidden)"*) PROBE=forbidden ;;
+            *"(NotFound)"*|*"doesn't have a resource type"*) PROBE=notfound ;;
             *) PROBE=error ;;
         esac
     fi
