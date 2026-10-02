@@ -250,7 +250,7 @@ See **[docs/install_and_ops.md](docs/install_and_ops.md#47-local-cluster-testing
 The agent listens on port 8080 (ClusterIP `rag-agent:8080` in-cluster; the external console Route is `AGENT_ROUTE=true`). Local ports: Qdrant 6333, reasoning 8000, embed 8001, rerank 8002, LiteLLM gateway 4000 (`sh scripts/tools/run-task.sh local:stack`), Jaeger 16686.
 
 ```bash
-# Readiness: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible"} (degraded = HTTP 503)
+# Readiness: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible","rerank":null} (degraded = HTTP 503; rerank is true/false when RERANK_ENABLED=true)
 curl -s http://localhost:8080/healthz
 # Liveness (process only): {"status":"alive"}
 curl -s http://localhost:8080/livez

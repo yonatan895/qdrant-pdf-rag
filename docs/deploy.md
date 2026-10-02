@@ -25,8 +25,9 @@ no rollback:
   `READY (Awaiting Corpus Ingest)` when it did not.
 
 Standalone `sh scripts/tools/run-task.sh airgap:deploy` only waits for workload readiness. The agent
-`/healthz` check covers Qdrant and embedding connectivity **and** the served
-generation's representation contract (HTTP 503 for any non-servable state);
+`/healthz` check covers Qdrant and embedding connectivity, the served
+generation's representation contract, **and** the rerank leg when
+`RERANK_ENABLED=true` (HTTP 503 for any non-servable state);
 `/livez` is the process-only liveness probe. It does not prove that reasoning
 works. Run the gateway probe before ingesting when using the
 modular commands. `sh scripts/tools/run-task.sh airgap:smoke` checks retrieval and tracing; use the
@@ -260,6 +261,18 @@ checksums **after**.
   `latest` or short SHAs. `INSECURE_REGISTRY=true` disables TLS
   verify on the pack-pull side *or* the load-push side depending on which
   script reads it.
+- Executing-checkout guard (`common.sh::check_checkout_sha`, run by load,
+  deploy, ingest and validate): with a packed MANIFEST reachable, HEAD must
+  equal the packed SHA and no tracked file may differ from it, staged or
+  unstaged (scripts, charts, Taskfile — the whole tracked tree). Refusal is a
+  fixed message naming neither files nor contents; `git diff HEAD` lists the
+  edits. Untracked files (`airgap.env`, `dist/`, generated output) stay
+  allowed, so site values belong in the untracked `airgap.env`. Nothing is
+  reset or overwritten; after the edit is reverted the next run passes.
+  Dry-run, no reachable MANIFEST and an unresolvable checkout still run but
+  print "not release-verified" on stderr — never a release-verified result.
+  `bootstrap.sh` applies the same tracked-change refusal to an existing
+  workspace before copying artifacts into `dist/`.
 - `bootstrap.sh` cannot source `common.sh` (no clone exists yet), so it
   carries an inline twin of the trust check (bundle signature honoring
   `SNEAKERNET_TRUSTED_PUB`, then `SHA256SUMS`). It clones into
