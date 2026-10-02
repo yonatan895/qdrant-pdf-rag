@@ -242,9 +242,29 @@ VERIFICATION_STATES: frozenset[str] = frozenset(
 )
 
 
+# Prompt scaffolding the model may echo back (issue #576). One definition
+# shared with the prompt builder, so the body predicate cannot drift from the
+# strings actually sent: the section header and the question label are never
+# prose when echoed.
+EXCERPTS_HEADER = "Retrieved manual excerpts:"
+QUESTION_LABEL = "Question:"
+SYSPLEX_LABEL = "Sysplex context:"
+SPLUNK_HEADER = "Splunk context (live system observation; join key is the message ID):"
+
 _ANSWER_BODY_LABEL_RE = re.compile(
-    r"^\s*#{0,6}\s*[*_`]*(?:Answer|Citations?|Sources?|References?)[*_`]*"
-    r"(?:\s*:[*_`]*\s*|\s*$)",
+    r"^\s*#{0,6}\s*[*_`]*(?:Answer|Citations?|Sources?|References?|"
+    + re.escape(EXCERPTS_HEADER.rstrip(":"))
+    + r"|"
+    + re.escape(SPLUNK_HEADER.rstrip(":"))
+    + r")[*_`]*(?:\s*:[*_`]*\s*|\s*$)",
+    re.IGNORECASE,
+)
+# Echoed context/question lines: the label and the text echoed after it are
+# the caller's own words, not an answer.
+_PROMPT_ECHO_LINE_RE = re.compile(
+    r"^\s*#{0,6}\s*[*_`]*(?:"
+    + "|".join(re.escape(label.rstrip(":")) for label in (QUESTION_LABEL, SYSPLEX_LABEL))
+    + r")[*_`]*\s*:",
     re.IGNORECASE,
 )
 
@@ -258,6 +278,8 @@ def has_answer_body(answer: str, citations: list[str]) -> bool:
 
     citation_lines = set(citations)
     for line in answer.splitlines():
+        if _PROMPT_ECHO_LINE_RE.match(line):
+            continue
         candidate = normalize_citation_line(line)
         candidate = normalize_citation_line(_ANSWER_BODY_LABEL_RE.sub("", candidate, count=1))
         if (
@@ -718,10 +740,10 @@ def _assemble_blocks(
     rendered = [p.render() for p in packed]
     if rendered:
         header, body = rendered[0]
-        blocks.append(("excerpt", f"Retrieved manual excerpts:\n{header}\n{body}"))
+        blocks.append(("excerpt", f"{EXCERPTS_HEADER}\n{header}\n{body}"))
         blocks.extend(("excerpt", f"{header}\n{body}") for header, body in rendered[1:])
     else:
-        blocks.append(("excerpts", "Retrieved manual excerpts:\n"))
+        blocks.append(("excerpts", f"{EXCERPTS_HEADER}\n"))
     blocks.append(("tail", tail_part))
     return blocks
 
@@ -752,7 +774,7 @@ def build_messages(
     if version:
         context_bits.append(f"version: {version}")
     if context_bits:
-        context_entries.append("Sysplex context: " + ", ".join(context_bits))
+        context_entries.append(f"{SYSPLEX_LABEL} " + ", ".join(context_bits))
     if splunk_context:
         splunk_text = splunk_context.strip()
         # Caller-supplied telemetry is unbounded by nature; cap it like
@@ -760,11 +782,8 @@ def build_messages(
         # the excerpts out of the window. The suffix marks the cut.
         if len(splunk_text) > splunk_context_max_chars:
             splunk_text = splunk_text[:splunk_context_max_chars].rstrip() + _TRUNCATED_SUFFIX
-        context_entries.append(
-            "Splunk context (live system observation; join key is the message ID):\n"
-            + splunk_text
-        )
-    question_text = "Question: " + query
+        context_entries.append(f"{SPLUNK_HEADER}\n" + splunk_text)
+    question_text = f"{QUESTION_LABEL} " + query
     # Pre-excerpt user parts, exactly as before: the estimator below counts
     # this shape, so it stays character-identical.
     parts = [*context_entries, question_text]
@@ -1697,8 +1716,8 @@ def build_chat_messages(
     raw_history = turn.history[-max_turns:]
     for m in raw_history:
         text = m.content.strip()
-        if m.role == "assistant" and "Retrieved manual excerpts:" in text:
-            parts = text.split("Retrieved manual excerpts:")
+        if m.role == "assistant" and EXCERPTS_HEADER in text:
+            parts = text.split(EXCERPTS_HEADER)
             text = parts[0].strip()
         if len(text) > max_prior_chars:
             text = text[:max_prior_chars] + " ... [history truncated]"
@@ -1711,16 +1730,13 @@ def build_chat_messages(
     if version:
         context_bits.append(f"version: {version}")
     if context_bits:
-        context_entries.append("Sysplex context: " + ", ".join(context_bits))
+        context_entries.append(f"{SYSPLEX_LABEL} " + ", ".join(context_bits))
     if splunk_context:
         splunk_text = splunk_context.strip()
         if len(splunk_text) > splunk_context_max_chars:
             splunk_text = splunk_text[:splunk_context_max_chars].rstrip() + _TRUNCATED_SUFFIX
-        context_entries.append(
-            "Splunk context (live system observation; join key is the message ID):\n"
-            + splunk_text
-        )
-    question_text = "Question: " + active_query
+        context_entries.append(f"{SPLUNK_HEADER}\n" + splunk_text)
+    question_text = f"{QUESTION_LABEL} " + active_query
     example_cite = (
         hits[0].cite
         if hits

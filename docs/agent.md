@@ -599,8 +599,11 @@ Body presence is shared with the answer eval (#576): empty `Answer` headings,
 citation labels (including inline labels followed only by bracket indices or
 a citation), citation headers, standalone citation-shaped or validated lines (including generic
 filename identities), bracket indices, whitespace and punctuation alone are
-not prose. Real text following a label and instruction bullets under alias
-headers remain prose. A short substantive answer remains eligible; there is no
+not prose. Echoed prompt scaffolding is not prose either: the `Retrieved manual
+excerpts:` and Splunk context section headers, and whole `Question:` /
+`Sysplex context:` lines (the constants the prompt builder sends, so the two
+cannot drift). Real text following a label or header and instruction bullets
+under alias headers remain prose. A short substantive answer remains eligible; there is no
 length floor. Thinking and script fences are handled before this check. A nonempty
 script without prose is `unverified_draft` with `script_review_required: true`;
 an empty script fence still requires review but cannot establish a body.
