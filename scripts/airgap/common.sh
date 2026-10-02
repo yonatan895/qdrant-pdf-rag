@@ -179,11 +179,18 @@ check_secret_name() {
 # off sentinel disables; an http(s) URL is a custom collector; anything else
 # fails closed before a manifest is rendered. Sets OTEL_ENDPOINT_RESOLVED
 # (empty = disabled) and OTEL_TRACING_ENABLED (1/0). One helper so the four
-# call sites can never disagree on what "active" means.
+# call sites can never disagree on what "active" means. The in-cluster default
+# belongs to the bundled Jaeger (issue #568): an explicit JAEGER_ENABLED=false
+# with no endpoint would keep exporting to a Service nothing deploys, so it
+# must name a collector (any http(s) URL, including the former hostname) or
+# off. Mirrored in map_values.py.
 resolve_otel_endpoint() {
     _raw="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
     case "$_raw" in
         "")
+            _jaeger=$(resolve_bundle_flag "${JAEGER_ENABLED:-}" 1 JAEGER_ENABLED)
+            [ "$_jaeger" = "1" ] ||
+                die "JAEGER_ENABLED=false needs an intentional trace destination: set OTEL_EXPORTER_OTLP_ENDPOINT to the external collector's http(s) URL, or to off to disable tracing"
             OTEL_ENDPOINT_RESOLVED="http://jaeger:4318"
             OTEL_TRACING_ENABLED=1
             ;;
@@ -199,7 +206,7 @@ resolve_otel_endpoint() {
             die "OTEL_EXPORTER_OTLP_ENDPOINT must be http(s) or off/none/false/0, got '$_raw'"
             ;;
     esac
-    unset _raw
+    unset _raw _jaeger
     export OTEL_ENDPOINT_RESOLVED OTEL_TRACING_ENABLED
 }
 

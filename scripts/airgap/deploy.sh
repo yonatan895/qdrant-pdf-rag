@@ -170,7 +170,9 @@ run helm upgrade --install mainframe-rag charts/mainframe-rag \
 JAEGER_UI_HINT=""
 [ "${METRICS_ENABLED:-false}" = "true" ] || echo "==> Metrics off: ServiceMonitor not deployed"
 [ "$OTEL_TRACING_ENABLED" = "1" ] || echo "==> Tracing off: Jaeger not deployed"
-if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+[ "$OTEL_TRACING_ENABLED" != "1" ] || [ "$JAEGER_DEPLOY" = "1" ] ||
+    echo "==> Bundled Jaeger off: exporting to the configured external collector; trace arrival there is not verified by this repo"
+if [ "$JAEGER_DEPLOY" = "1" ]; then
     JAEGER_UI_HINT="   |   traces UI: $KC -n $NAMESPACE port-forward svc/jaeger 16686:16686"
 fi
 
@@ -196,7 +198,7 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
 else
     wait_rollout "statefulset/$QDRANT_RELEASE" 600
     wait_rollout "deploy/rag-agent" 300
-    if [ "$OTEL_TRACING_ENABLED" = "1" ]; then
+    if [ "$JAEGER_DEPLOY" = "1" ]; then
         wait_rollout "deploy/jaeger" 120
     fi
     # Reconcile disabled legacy resources only after the selected workloads

@@ -36,10 +36,21 @@ http://{{ required "qdrantRelease is required" .Values.qdrantRelease }}:6333
 {{ required "qdrantRelease is required" .Values.qdrantRelease }}-apikey
 {{- end -}}
 
+{{/*
+Export destination (issue #568). An empty endpoint selects the bundled
+Jaeger Service and is valid only while that backend renders; with the
+bundled backend disabled the operator must name a collector (any http(s)
+URL, the former hostname included) or turn tracing off.
+*/}}
 {{- define "mainframe-rag.otelEndpoint" -}}
 {{- if .Values.tracing.enabled -}}
-{{ required "tracing.endpoint is required when tracing.enabled is true" .Values.tracing.endpoint }}
+{{- if .Values.tracing.endpoint -}}
+{{ .Values.tracing.endpoint }}
+{{- else if include "mainframe-rag.jaegerEnabled" . -}}
+http://jaeger:4318
 {{- else -}}
+{{- fail "tracing.jaeger.enabled=false needs an intentional trace destination: set tracing.endpoint to the external collector's http(s) URL, or tracing.enabled=false" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

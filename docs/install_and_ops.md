@@ -832,7 +832,11 @@ the endpoint into the agent and the ingest Job. To disable tracing — and skip
 the Jaeger deployment entirely — set `OTEL_EXPORTER_OTLP_ENDPOINT=off` (also
 `none`, `false`, or `0`) in `airgap.env`. A custom `http(s)` OTLP/HTTP
 collector origin is accepted in place of the in-cluster Jaeger; anything else
-fails closed before a manifest is rendered. `sh scripts/tools/run-task.sh airgap:validate` prints the
+fails closed before a manifest is rendered. To keep exporting while skipping the
+bundled backend (`JAEGER_ENABLED=false`), also set `OTEL_EXPORTER_OTLP_ENDPOINT`
+to the external collector (the former `http://jaeger:4318` is fine when a
+platform-owned service really lives there) or to `off`; the unset default is
+refused in preflight, the values mapper and the chart (`tracing.endpoint`). `sh scripts/tools/run-task.sh airgap:validate` prints the
 resolved mode.
 
 This traces **this repo's components only** (agent, retrieval, ingest); the
@@ -847,7 +851,8 @@ pack; the oauth-proxy pin is skipped while `sha256:PENDING`), so the
 default-on path works in a disconnected install. The endpoint may be given
 with or without the `/v1/traces` path — the agent accepts both.
 `sh scripts/tools/run-task.sh airgap:smoke` proves a `v1.search` span landed before reporting
-acceptance (empty-collection runs report tracing as skipped); it polls the
+acceptance (empty-collection runs and a disabled bundled Jaeger report tracing
+as skipped, trace arrival NOT VERIFIED); it polls the
 Jaeger query API at `JAEGER_QUERY_URL` (default `http://jaeger:16686`) —
 change that only when a custom collector exposes a Jaeger-compatible query
 API.

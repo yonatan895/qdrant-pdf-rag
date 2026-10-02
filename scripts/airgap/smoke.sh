@@ -20,7 +20,7 @@ if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
     if [ "$OTEL_TRACING_ENABLED" = "1" ] && [ "$JAEGER_DEPLOY" = "1" ]; then
         echo "[dryrun] $KC -n $NAMESPACE exec -i deploy/rag-agent -- python3 - '... poll $JAEGER_QUERY_URL for a v1.search trace ...'"
     elif [ "$OTEL_TRACING_ENABLED" = "1" ]; then
-        echo "[dryrun] tracing check skipped (external collector — no bundled Jaeger query path)"
+        echo "[dryrun] tracing check skipped (bundled Jaeger off — trace arrival NOT VERIFIED)"
     else
         echo "[dryrun] tracing check skipped (OTEL_EXPORTER_OTLP_ENDPOINT=off)"
     fi
@@ -67,7 +67,7 @@ if [ "$status" -eq 3 ]; then
     if [ "$OTEL_TRACING_ENABLED" = "1" ] && [ "$JAEGER_DEPLOY" = "1" ]; then
         TRACING_LINE="Tracing:       SKIPPED (nothing ingested — no request traced yet)"
     elif [ "$OTEL_TRACING_ENABLED" = "1" ]; then
-        TRACING_LINE="Tracing:       SKIPPED (external collector — no bundled Jaeger query path)"
+        TRACING_LINE="Tracing:       SKIPPED (bundled Jaeger off — trace arrival NOT VERIFIED; qualify the external collector separately)"
     else
         TRACING_LINE="Tracing:       OFF (disabled)"
     fi
@@ -91,13 +91,13 @@ fi
 # /healthz alone renders green with a broken endpoint/URL. Polls from the
 # agent pod (same net as the OTLP exporter); the export batch interval means
 # spans arrive seconds after the request. Only an explicit off sentinel or
-# an external collector without the bundled backend skips the check (the
-# SigNoz-equivalent queryable-evidence check belongs to backend
-# qualification, not this smoke).
+# a disabled bundled backend skips the check. That skip proves nothing about
+# the configured collector (issue #568): trace arrival stays NOT VERIFIED
+# until its own backend check runs (qualification, not this smoke).
 if [ "$OTEL_TRACING_ENABLED" != "1" ]; then
     TRACING_LINE="Tracing:       OFF (disabled)"
 elif [ "$JAEGER_DEPLOY" != "1" ]; then
-    TRACING_LINE="Tracing:       SKIPPED (external collector — no bundled Jaeger query path)"
+    TRACING_LINE="Tracing:       SKIPPED (bundled Jaeger off — trace arrival NOT VERIFIED; qualify the external collector separately)"
 elif $KC -n "$NAMESPACE" exec -i deploy/rag-agent -- python3 - "$TRACE_TIMEOUT" "$JAEGER_QUERY_URL" <<'PYEOF'
 import httpx2
 import sys

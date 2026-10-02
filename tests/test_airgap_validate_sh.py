@@ -180,6 +180,16 @@ def test_validate_tracing_off_sentinel(tree):
     assert "Tracing:           OFF" in r.stdout
 
 
+def test_validate_jaeger_false_requires_intentional_destination(tree):
+    # Issue #568: disabling the bundled backend alone is not a destination.
+    r = _run(tree, {"JAEGER_ENABLED": "false"})
+    assert r.returncode != 0
+    assert "intentional trace destination" in r.stderr
+    ok = _run(tree, {"JAEGER_ENABLED": "false", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.platform:4318"})
+    assert ok.returncode == 0, ok.stderr
+    assert "Tracing:           ON (http://collector.platform:4318)" in ok.stdout
+
+
 def test_validate_tracing_bad_endpoint_fails_closed(tree):
     r = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "jaeger:4318"})
     assert r.returncode != 0

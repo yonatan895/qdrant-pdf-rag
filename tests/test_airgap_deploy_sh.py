@@ -747,12 +747,67 @@ def test_invalid_shared_gateway_key_refuses_before_commands(tree, key, secret):
 # --------------------------------- Decoupled backends (issue #529 OBS-2)
 
 
-def test_jaeger_explicit_false_skips_backend_but_keeps_export(tree):
+def test_jaeger_false_without_destination_fails_before_mutation(tree):
+    # Issue #568: the defaulted http://jaeger:4318 belongs to the bundled
+    # backend. Disabling it without naming a collector (or turning tracing
+    # off) must fail in preflight, before any render or cluster command.
     r = _run(tree, ("JAEGER_ENABLED", "false"))
+    assert r.returncode != 0
+    assert "JAEGER_ENABLED=false needs an intentional trace destination" in r.stderr
+    assert not tree[1].exists()
+    assert not (tree[0] / "dist").exists()
+
+
+@pytest.mark.parametrize("endpoint", ["http://collector.platform:4318", "http://jaeger:4318"])
+def test_jaeger_false_with_explicit_collector_exports_to_it(tree, endpoint):
+    # The former hostname stays possible when it is chosen intentionally.
+    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint))
     assert r.returncode == 0, r.stderr
     assert not (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://jaeger:4318"
+    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == endpoint
+    assert "kind: Deployment\nmetadata:\n  name: jaeger" not in rendered
+    assert "deploy/jaeger" not in _helm_log(tree)  # no rollout wait for a backend not deployed
+
+
+def test_jaeger_false_with_tracing_off_is_an_intentional_choice(tree):
+    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"))
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
+
+
+def test_jaeger_false_rejection_then_corrected_run_succeeds(tree):
+    # Next ordinary run after correcting the config: the refusal left
+    # nothing behind that blocks the corrected deploy.
+    assert _run(tree, ("JAEGER_ENABLED", "false")).returncode != 0
+    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
+    assert r.returncode == 0, r.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+def test_upgrade_from_bundled_jaeger_selects_destination_before_removal(tree):
+    # Existing bundled Jaeger objects are removed only after the release is
+    # upgraded with the explicit destination and the workloads rolled out; the
+    # retained Jaeger PVC is never part of the cleanup inventory.
+    import json
+
+    path = tree[0] / "disabled.json"
+    path.write_text(json.dumps({"kind": "List", "items": [
+        {"apiVersion": "apps/v1", "kind": "Deployment",
+         "metadata": {"name": "jaeger", "namespace": "ns"}},
+    ]}))
+    r = _run(tree, ("JAEGER_ENABLED", "false"),
+             ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"),
+             ("DISABLED_FILE", str(path)))
+    assert r.returncode == 0, r.stderr
+    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    assert 'endpoint: "http://collector.platform:4318"' in values
+    cleanup = json.loads((tree[0] / "dist/app-disabled-cleanup.json").read_text())
+    assert [i["kind"] for i in cleanup["items"]] == ["Deployment"]
+    log = _helm_log(tree)
+    assert log.index("delete") > log.index("rollout") > log.index("upgrade")
+    assert "jaeger-badger" not in log
 
 
 def test_jaeger_explicit_true_with_tracing_on(tree):

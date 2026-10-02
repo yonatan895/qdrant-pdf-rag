@@ -97,6 +97,12 @@ def lenient_bool(raw: str) -> bool:
 def resolve_otel() -> tuple[bool, str]:
     """Mirror resolve_otel_endpoint in common.sh exactly."""
     raw = env("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if raw == "" and optional_bool("JAEGER_ENABLED", env("JAEGER_ENABLED")) is False:
+        die(
+            "JAEGER_ENABLED=false needs an intentional trace destination: set "
+            "OTEL_EXPORTER_OTLP_ENDPOINT to the external collector's http(s) URL, "
+            "or to off to disable tracing"
+        )
     # Prefer values already resolved by the calling shell stage.
     if env("OTEL_TRACING_ENABLED") in ("0", "1") and "OTEL_ENDPOINT_RESOLVED" in os.environ:
         return env("OTEL_TRACING_ENABLED") == "1", env("OTEL_ENDPOINT_RESOLVED")

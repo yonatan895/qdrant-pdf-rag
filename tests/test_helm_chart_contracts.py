@@ -584,12 +584,50 @@ def _jaeger_keys(docs):
 
 
 def test_jaeger_decoupled_from_export():
-    """OBS-2 item 3: external export without the bundled backend. The
-    endpoint stays wired while every Jaeger object disappears."""
-    new = run_new_template({"tracing": {"jaeger": {"enabled": False}}})
+    """OBS-2 item 3 / #568: external export without the bundled backend. The
+    explicitly named collector stays wired (the former bundled hostname is
+    allowed when chosen) while every Jaeger object disappears."""
+    for endpoint in ("http://jaeger:4318", "http://collector.platform:4318"):
+        new = run_new_template({"tracing": {"endpoint": endpoint, "jaeger": {"enabled": False}}})
+        assert _jaeger_keys(new) == set()
+        env = env_map(new["Deployment", "rag-agent"])
+        assert env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == endpoint
+
+
+def test_jaeger_disabled_without_destination_fails():
+    """#568: the empty endpoint means the bundled Jaeger; with that backend
+    disabled the render fails closed instead of exporting to a Service
+    nothing deploys."""
+    values = base_values()
+    values["tracing"]["endpoint"] = ""
+    values["tracing"]["jaeger"] = {"enabled": False}
+    raw = _helm_template_with_values(values)
+    assert raw.returncode != 0
+    assert "tracing.jaeger.enabled=false needs an intentional trace destination" in raw.stderr
+
+
+def test_jaeger_disabled_with_tracing_off_is_intentional():
+    new = run_new_template({"tracing": {"enabled": False, "endpoint": "", "jaeger": {"enabled": False}}})
     assert _jaeger_keys(new) == set()
-    env = env_map(new["Deployment", "rag-agent"])
-    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://jaeger:4318"
+    assert env_map(new["Deployment", "rag-agent"])["OTEL_EXPORTER_OTLP_ENDPOINT"].get("value") in (None, "")
+
+
+def test_empty_endpoint_default_keeps_bundled_export():
+    """#568: the chart default (empty endpoint, bundled Jaeger) still exports
+    to the in-cluster Jaeger, for the agent and the ingest Job."""
+    new = run_new_template({"tracing": {"endpoint": ""},
+                            "ingest": {"enabled": True, "corpusPVC": "manuals"}})
+    assert ("Deployment", "jaeger") in new
+    assert env_map(new["Deployment", "rag-agent"])["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://jaeger:4318"
+    assert ingest_env_map(new["Job", "ingest"])["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://jaeger:4318"
+
+
+def test_nonurl_endpoint_rejected_by_schema():
+    values = base_values()
+    values["tracing"]["endpoint"] = "jaeger:4318"
+    raw = _helm_template_with_values(values)
+    assert raw.returncode != 0
+    assert "tracing/endpoint" in raw.stderr
 
 
 def test_jaeger_explicit_true_with_tracing_on():
