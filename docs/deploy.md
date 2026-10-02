@@ -287,6 +287,15 @@ cannot schedule on one node — proven).
   (Jobs are immutable); completion waits up to `INGEST_TIMEOUT` (default
   1h) while a background tailer streams pod logs, dumping logs and events
   on timeout.
+- First-party pods (agent, the oauth-proxy sidecar, the ingest Job, Jaeger)
+  declare their own hardening so it does not depend on `restricted-v2`
+  alone (issue #585): pod `runAsNonRoot: true` and
+  `seccompProfile: RuntimeDefault`; every container
+  `allowPrivilegeEscalation: false` and `capabilities.drop: [ALL]`. The chart
+  never sets `runAsUser`, `runAsGroup` or `fsGroup`; OpenShift assigns them.
+  The agent and ingest images declare numeric `USER 1000`.
+  `readOnlyRootFilesystem` with `/tmp` emptyDirs is not yet set: it needs a
+  Kind run proving nothing else writes to the root filesystem.
 - Jaeger is on by default (unset `OTEL_EXPORTER_OTLP_ENDPOINT` resolves to
   `http://jaeger:4318`; the off sentinel disables both tracing and this
   deployment): 1 replica,
