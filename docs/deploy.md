@@ -108,6 +108,12 @@ Qdrant deploys as its separate release from `charts/qdrant-1.19.0.tgz`;
 checkout. Use the checksum-pinned Helm 4.3.0 client from
 [the workflow](../.github/workflows/e2e.yml). Neither chart needs a remote
 chart repository in the air gap.
+Deploy requires exactly one `charts/qdrant-*.tgz` (none or several is refused
+before any release command). When a packed `MANIFEST.txt` is reachable and the
+run is not a dry-run, that archive's sha256 must equal the MANIFEST
+`chart_sha256`; a mismatch or missing field fails closed. Dry-run and
+no-MANIFEST runs print a "not release-verified" notice instead. Pack refuses
+a checkout with zero or several chart archives, so the MANIFEST binds one.
 `airgap.env` remains the only operator configuration owner. After `common.sh`
 resolves precedence and validates inputs, `map_app_values` exports the declared
 non-secret inputs to the deterministic serializer in `map_values.py`.
