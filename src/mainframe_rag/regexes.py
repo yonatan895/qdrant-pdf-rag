@@ -73,6 +73,13 @@ def find_members(text: str) -> list[str]:
 # ONE connector word, immediately after the phrase — because a wider window
 # re-admits the false positives a bare scan produced: with three words of
 # slack, "my job abended after it read 100 records …" yielded 100.
+#
+# The digit requirement is the family's precision rule, applied to BOTH the
+# bare form and the S-prefixed one: every real completion code carries a digit
+# (SB37, S80A, S0C4, S806, 0C4, 806) and no English word does. Without it the
+# S-prefix admits any S + three hex letters, which swallows ordinary operator
+# vocabulary — "safe" -> AFE, "seed" -> EED — and each of those flips the
+# query onto identifier ranking.
 _SYSCODE_S_RE = re.compile(r"\bS([0-9A-F]{3})\b(?![\d-]*-\d{4})", re.IGNORECASE)
 _SYSCODE_HEX_RE = re.compile(r"\bX'([0-9A-F]{3})'(?![0-9A-F])", re.IGNORECASE)
 _USERCODE_RE = re.compile(r"\bU(\d{4})\b", re.IGNORECASE)
@@ -87,7 +94,12 @@ _SYSCODE_BARE_RE = re.compile(r"\b([0-9A-F]{3})\b", re.IGNORECASE)
 # any single word made the window structurally identical to the false
 # positives it was meant to exclude.
 _SYSCODE_CONNECTOR = r"(?:(?:codes?|error|status|value|hex)\s+)?"
-_SYSCODE_PHRASE = r"(?:abend\w*|(?:completion|system|reason)\s+codes?)"
+# "reason code" is deliberately absent. Reason codes (DYNALLOC's and the
+# rest) are a different family, and admitting the phrase routes unrelated
+# reason codes into the completion-code filter: "reason code 004 from
+# DYNALLOC" selected the system-codes book. An operator asking for a reason
+# code now takes the NL path rather than a filter pointed at the wrong book.
+_SYSCODE_PHRASE = r"(?:abend\w*|(?:completion|system)\s+codes?)"
 _SYSCODE_CONTEXT_BEFORE_RE = re.compile(
     _SYSCODE_PHRASE + r"\s+" + _SYSCODE_CONNECTOR + r"$",
     re.IGNORECASE,
@@ -115,7 +127,12 @@ def find_system_codes(text: str) -> list[str]:
     # them keeps S390 from yielding both 390 and a spurious match.
     text = _SYSCODE_MODEL_RE.sub(" ", text)
     for m in _SYSCODE_S_RE.finditer(text):
-        codes.add(m.group(1).upper())
+        token = m.group(1).upper()
+        # Same digit rule as the bare form: SB37/S80A/S0C4/S806 carry one,
+        # SAFE/SEED/SACE do not. Without it the S-prefix swallows ordinary
+        # operator words and flips them onto identifier ranking.
+        if any(ch.isdigit() for ch in token):
+            codes.add(token)
     for m in _SYSCODE_HEX_RE.finditer(text):
         codes.add(m.group(1).upper())
     for m in _USERCODE_RE.finditer(text):

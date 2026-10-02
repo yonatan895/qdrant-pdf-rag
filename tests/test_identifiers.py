@@ -173,7 +173,29 @@ def test_adjacency_window_is_one_code_ish_connector() -> None:
     # The same shape with a code connector still resolves.
     assert find_system_codes("abend code 0C4") == ["0C4"]
     assert find_system_codes("abend error 0C4") == ["0C4"]
-    assert find_system_codes("reason code 878") == ["878"]
+
+
+def test_s_prefixed_words_need_a_digit() -> None:
+    """Every real completion code carries a digit; no English word does.
+    Without the rule the S-prefix admits S + three hex letters and swallows
+    ordinary operator vocabulary, flipping those queries onto identifier
+    ranking (review #603)."""
+    assert find_system_codes("Is it safe to delete the dataset?") == []
+    assert find_system_codes("Is it SAFE to IPL now?") == []
+    assert find_system_codes("How do I seed the random generator in REXX?") == []
+    assert parse_query("Is it safe to delete the dataset?").has_identifiers is False
+    assert parse_query("How do I seed the random generator in REXX?").has_identifiers is False
+    # Codes with a digit in any position still resolve.
+    assert find_system_codes("abend S80A") == ["80A"]
+    assert find_system_codes("abend S806") == ["806"]
+    assert find_system_codes("abend SB37") == ["B37"]
+
+
+def test_reason_codes_are_a_different_family() -> None:
+    """"reason code" is not a completion-code phrase: admitting it routed
+    DYNALLOC's reason codes into the system-codes filter (review #603)."""
+    assert find_system_codes("reason code 004 from DYNALLOC") == []
+    assert find_system_codes("reason code 878") == []
 
 
 def test_subsystem_abends_with_letter_prefix_are_recognised() -> None:

@@ -367,19 +367,20 @@ these; widening changes both corpus extraction and query parsing at once.
   no re-ingest needed).
 - **System/user/wait-state codes** (issue #591): the identifier family for
   abend lookup. Self-contexting: `S0C4`→`0C4`, `SB37`→`B37`, `X'0C4'`→`0C4`,
-  `U4038` (U + 4 digits), `wait state 064`→`W064`. Bare 3-hex (`0C4`, `806`,
-  `222`) carries no meaning alone, so it is accepted only **adjacent** to a
-  code phrase (`abend`, `completion code`, `system code`, `reason code`) with
-  at most one *code-ish* connector word between them, and only when it holds a
-  digit — the digit requirement drops `ADD`/`FEE`/`BAD`, and constraining the
-  connector is what drops "abend after 300 seconds" while keeping
-  "abend code 0C4". Mere presence of a phrase is not enough, and neither is
-  three words of slack. Model numbers sharing the S+3-hex shape (`S370`,
-  `S390`) are excluded by name; form numbers are excluded by a lookahead for
-  the `-dddd` tail, since admitting letter-prefixed codes (`SB37`) otherwise
-  lets `SC23-6862` through. Ingest records the canonical form per entry in
-  `system_codes`; a bare entry takes the `W`-prefix only inside a wait-state
-  section, so both sides agree.
+  `U4038` (U + 4 digits), `wait state 064`→`W064`. Every form must carry at
+  least one digit — real codes do (`SB37`, `S80A`, `S0C4`, `S806`, `806`),
+  English words do not, which is what keeps `safe`→AFE and `seed`→EED out of
+  the identifier path. Bare 3-hex (`0C4`, `806`, `222`) carries no meaning
+  alone, so it is accepted only **adjacent** to a code phrase (`abend`,
+  `completion code`, `system code`) with at most one *code-ish* connector word
+  between them — mere presence of a phrase is not enough, and neither is three
+  words of slack. `reason code` is deliberately **not** a phrase here: reason
+  codes are a different family, and admitting it routed DYNALLOC's into the
+  system-codes filter. Model numbers sharing the S+3-hex shape (`S370`, `S390`)
+  are excluded by name; form numbers by a lookahead for the `-dddd` tail, since
+  admitting letter-prefixed codes (`SB37`) otherwise lets `SC23-6862` through.
+  Ingest records the canonical form per entry in `system_codes`; a bare entry
+  takes the `W`-prefix only inside a wait-state section, so both sides agree.
 - **Front/back-matter titles** `SKIP_ALWAYS_RE`: notices, trademarks,
   reader comments, bibliography, copyright, index — matched at title end
   because IBM titles carry prefixes ("Appendix A. Notices").
