@@ -170,11 +170,18 @@ for citations and filters.
   cards expand to atomic statements while prose runs stay blobs — but only
   with ≥2 statement-starts, so one `//see`-style mention passes through
   byte-identical.
-- Code-entry detection (issue #591): a line that is exactly a 3-hex code,
-  followed within two lines by description text rather than another bare code,
-  opens a new atomic block. This excludes index runs (consecutive bare codes).
-  Each code entry records `system_codes: ["0C4"]` in the payload and prepends
-  the operator alias (`S0C4`) to the chunk text for BM25/dense matching.
+- Code-entry detection (issue #591): a line that is exactly a completion code
+  (`0C4`, or `U4038` with its U prefix), followed within two lines by
+  description text rather than another bare code, opens a new atomic block.
+  This excludes index runs (consecutive bare codes). A block usually holds
+  several entries, so the payload records **every** entry the block carries,
+  not just the one it opens with — reading only the first line captured 16% of
+  the codes in a real system-codes manual and missed `0C4` entirely. A bare 3-hex
+  entry is a completion code, except in a section whose heading names wait
+  states, where it takes the `W`-prefix the query parser emits for it. The
+  operator spelling (`S0C4`) is deliberately **not** added to `text`: it would
+  shift every unit span (#368) and put a line in the cited text that the
+  manual does not contain. `system_codes` plus the prefilter carry the lookup.
 - SYSIN adjacency (issue #216): data paragraphs following a `DD *`/`DD DATA`
   card keep splitting between records across page/paragraph boundaries
   (line-atomic units). The chain ends at sentence punctuation (data records

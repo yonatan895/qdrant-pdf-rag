@@ -79,7 +79,8 @@ so lexical and semantic candidates are scoped identically before any fusion.
   (default 50) when the rerank leg is active.
 - `build_filter` ANDs its clauses: exact `product`, exact `version`, and
   `MatchAny` within each identifier field (`doc_id`, `message_ids`,
-  `members`). Empty input yields no filter rather than a match-nothing.
+  `members`, `system_codes`). Empty input yields no filter rather than a
+  match-nothing.
 - Doc-number filters are edition-aware (issue #270): a full edition
   (`SC23-6858-01`) filters exactly; a suffix-less stem (`SC23-6858`), a
   wildcard (`-xx`), or a partial edition (`-0`, narrowed to `-00..-09`)
@@ -109,9 +110,9 @@ pinned edition expand to their edition family (§2, issue #270). Member
 extraction stays case-sensitive: the lowercase `xx` convention
 (`IEASYSxx`) matches payload case, and uppercasing would break it.
 
-`query_kind` is `identifier` when any of the three lists is non-empty (a
-lone member code flips it too), else `nl`. The kind drives RRF weights and
-the rerank bypass — but never the filter shape.
+`query_kind` is `identifier` when any of the four lists is non-empty (a
+lone member or completion code flips it too), else `nl`. The kind drives RRF
+weights and the rerank bypass — but never the filter shape.
 
 ## 3b. Multi-path splitting
 
@@ -364,14 +365,17 @@ these; widening changes both corpus extraction and query parsing at once.
   `extraction_rules_version` are untouched (a corpus scan over 435k
   points showed zero member case variance: no ingest normalization and
   no re-ingest needed).
-- **System/user/wait-state codes** (issue #591): `S`-prefixed 3-hex
-  (`S0C4` → `0C4`), hex literals (`X'0C4'` → `0C4`), and wait states
-  (`wait state 064` → `W064`) are self-contexting. Bare 3-hex (`0C4`) and
-  user codes (`U4038`) require abend/completion-code/system-code context
-  to avoid false identifier routing for ordinary hex-looking words in
-  prose. Ingest detects code-entry starts (a line that is exactly a
-  3-hex code followed within two lines by description text, excluding
-  index runs) and records `system_codes` in the payload.
+- **System/user/wait-state codes** (issue #591): the identifier family for
+  abend lookup. Self-contexting: `S0C4`→`0C4`, `X'0C4'`→`0C4`, `U4038`
+  (U + 4 digits), `wait state 064`→`W064`. Bare 3-hex (`0C4`, `806`, `222`)
+  carries no meaning alone, so it is accepted only **adjacent** to a code
+  phrase (`abend`, `completion code`, `system code`) and only when it holds a
+  digit — presence of the phrase anywhere in the sentence is not enough, and
+  the digit requirement drops `ADD`/`FEE`/`BAD`. Model numbers sharing the
+  S+3-hex shape (`S370`, `S390`) are excluded by name. Form numbers are safe:
+  `SC23-6862` cannot match because the character after `S` must be a digit.
+  Ingest records the canonical form per entry in `system_codes`; a bare entry
+  takes the `W`-prefix only inside a wait-state section, so both sides agree.
 - **Front/back-matter titles** `SKIP_ALWAYS_RE`: notices, trademarks,
   reader comments, bibliography, copyright, index — matched at title end
   because IBM titles carry prefixes ("Appendix A. Notices").

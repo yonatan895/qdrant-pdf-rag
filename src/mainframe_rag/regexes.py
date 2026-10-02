@@ -47,41 +47,80 @@ def find_members(text: str) -> list[str]:
 
 
 # System/user/wait-state completion codes (issue #591).
-# S-prefix is self-contexting: S0C4 → 0C4. The first char after S must be
-# a digit to avoid matching doc numbers like SC23-6862 (S + C23).
+#
+# Shape alone cannot carry these: 3 hex characters is far too common an
+# English word fragment ("add", "fee", "bad") and an S-prefix collides with
+# model numbers (S390) and form numbers (SC23-6862). So the family is
+# context-gated, and each family is normalised to the form the manual's
+# entry line uses, which is what ingest stores and the filter matches.
+#
+# Self-contexting (the token shape carries the meaning):
+#   S0C4    -> 0C4    system completion code
+#   X'0C4'  -> 0C4    hex literal spelling of the same
+#   U4038   -> U4038  user completion code (U + 4 digits is unambiguous)
+# Wait states are gated on the phrase, never on a bare W-token: `wait state
+# 064` -> W064, while "wait state 064" in prose stays a phrase.
+#
+# Bare 3-hex (0C4, 806, 222) carries no meaning on its own and is the case
+# measured as noisy in issue #591: a run of bare codes is an index, and a
+# 3-letter word is a word. It is accepted only ADJACENT to a code phrase
+# ("abend 0C4", "completion code 222", "system code 0C4") and must carry a
+# digit. Adjacency, not mere presence, is what keeps "…read 100 records
+# from the ADD file …" out of the identifier path: the word abend appears
+# once in the sentence, far from the number.
 _SYSCODE_S_RE = re.compile(r"\bS([0-9][0-9A-F]{2})\b", re.IGNORECASE)
-# Hex literal is self-contexting: X'0C4' → 0C4.
-_SYSCODE_HEX_RE = re.compile(r"X'([0-9A-F]{3})'(?![0-9A-F])", re.IGNORECASE)
-# Bare 3-hex needs context: 0C4 → 0C4 only with abend/completion code/system code.
+_SYSCODE_HEX_RE = re.compile(r"\bX'([0-9A-F]{3})'(?![0-9A-F])", re.IGNORECASE)
+_USERCODE_RE = re.compile(r"\bU(\d{4})\b", re.IGNORECASE)
+_WAITSTATE_RE = re.compile(
+    r"\bwait\s+state\s+([0-9A-F]{3})\b", re.IGNORECASE
+)
 _SYSCODE_BARE_RE = re.compile(r"\b([0-9A-F]{3})\b", re.IGNORECASE)
-# User completion code: U4038 → U4038, needs abend context.
-_USERCODE_RE = re.compile(r"\b(U\d{4})\b", re.IGNORECASE)
-# Wait state: wait state 064 → W064.
-_WAITSTATE_RE = re.compile(r"\bwait\s+state\s+([0-9A-F]{3})\b", re.IGNORECASE)
-# Context words that gate bare code extraction.
-_SYSCODE_CONTEXT_RE = re.compile(
-    r"(?:abend|completion\s+code|system\s+code)",
+# Code phrase that licenses an adjacent bare code: "abend", "abended",
+# "completion code", "system code". Matched with its trailing connector
+# words so the bare code can sit one or two words away ("abend code 0C4").
+_SYSCODE_CONTEXT_BEFORE_RE = re.compile(
+    r"(?:abend\w*|(?:completion|system)\s+code(?:s)?)(?:\s+\w+){0,2}\s*\w*\s*$",
     re.IGNORECASE,
 )
+_SYSCODE_CONTEXT_AFTER_RE = re.compile(
+    r"^\s*\w*(?:\s+\w+){0,2}\s*(?:abend\w*|(?:completion|system)\s+code(?:s)?)\b",
+    re.IGNORECASE,
+)
+# Model numbers that share the S+3-hex shape. Listed, not pattern-guessed:
+# every exclusion is a reviewed token, so a new architecture number is a
+# deliberate addition rather than an accident.
+_SYSCODE_MODEL_RE = re.compile(r"\bS(?:370|390)\b", re.IGNORECASE)
 
 
 def find_system_codes(text: str) -> list[str]:
-    """Extract system/user/wait-state completion codes (issue #591).
+    """System/user/wait-state completion codes in canonical form (issue #591).
 
-    Returns canonical forms: 0C4 (system), U4038 (user), W064 (wait).
-    Context-gated: bare 3-hex and user codes require abend/completion-code/
-    system-code context. S-prefix, X'...', and wait-state are self-contexting.
+    `0C4` for system codes, `U4038` for user codes, `W064` for wait states.
+    Callers must not feed this a whole document: bare 3-hex needs a code
+    phrase adjacent to it, so prose that merely discusses hex values yields
+    nothing. Returns a sorted, de-duplicated list.
     """
     codes: set[str] = set()
+    # Model numbers are codes-shaped but never completion codes; blanking
+    # them keeps S390 from yielding both 390 and a spurious match.
+    text = _SYSCODE_MODEL_RE.sub(" ", text)
     for m in _SYSCODE_S_RE.finditer(text):
         codes.add(m.group(1).upper())
     for m in _SYSCODE_HEX_RE.finditer(text):
         codes.add(m.group(1).upper())
+    for m in _USERCODE_RE.finditer(text):
+        codes.add(f"U{m.group(1)}")
     for m in _WAITSTATE_RE.finditer(text):
         codes.add(f"W{m.group(1).upper()}")
-    if _SYSCODE_CONTEXT_RE.search(text):
-        for m in _SYSCODE_BARE_RE.finditer(text):
-            codes.add(m.group(1).upper())
-        for m in _USERCODE_RE.finditer(text):
-            codes.add(m.group(1).upper())
+    for m in _SYSCODE_BARE_RE.finditer(text):
+        token = m.group(1).upper()
+        # A code always carries a digit (806, 222, 0C4); ADD/FEE/BAD do not.
+        if not any(ch.isdigit() for ch in token):
+            continue
+        before = text[: m.start()]
+        after = text[m.end() :]
+        if _SYSCODE_CONTEXT_BEFORE_RE.search(before) or (
+            _SYSCODE_CONTEXT_AFTER_RE.search(after)
+        ):
+            codes.add(token)
     return sorted(codes)

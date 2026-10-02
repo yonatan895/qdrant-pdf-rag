@@ -82,7 +82,7 @@ def test_golden_sweep_flips_are_real_codes() -> None:
         new = find_message_ids(query)
         if new != old:
             assert expected.get(query[:95]) == new, f"{name}: {query[:95]} -> {new}"
-    assert total == 220
+    assert total == 215
     assert len(expected) == 7
 
 
@@ -111,9 +111,12 @@ def test_syscode_bare_needs_context() -> None:
     assert find_system_codes("The value is 0C4 in hex") == []
 
 
-def test_usercode_needs_abend_context() -> None:
+def test_usercode_is_self_contexting() -> None:
+    # U + 4 digits is unambiguous on its own (review #603): unlike a bare
+    # 3-hex token it needs no code phrase beside it.
+    assert find_system_codes("U4038") == ["U4038"]
     assert find_system_codes("abend U4038") == ["U4038"]
-    assert find_system_codes("U4038") == []
+    assert find_system_codes("user completion code U4038") == ["U4038"]
 
 
 def test_waitstate_self_contexting() -> None:
@@ -137,3 +140,23 @@ def test_system_codes_normalized() -> None:
     assert find_system_codes("wait state 064") == ["W064"]
     # User code keeps U prefix
     assert find_system_codes("abend U4038") == ["U4038"]
+
+
+def test_model_numbers_are_not_codes() -> None:
+    """S390/S370 share the S+3-hex shape but are never completion codes
+    (review #603). A model number must not flip query_kind either."""
+    assert find_system_codes("Explain S390 channel subsystem architecture") == []
+    assert find_system_codes("How do S370 and S390 addressing differ?") == []
+    assert parse_query("Explain S390 channel subsystem architecture").has_identifiers is False
+
+
+def test_bare_code_needs_adjacency_not_just_context() -> None:
+    """A code phrase somewhere in the sentence does not license every hex
+    token in it (review #603): only codes adjacent to the phrase count."""
+    assert find_system_codes("The job abended; read 100 records from the ADD file") == []
+    assert find_system_codes("abend in the FEE calculation step") == []
+    assert find_system_codes("abend with a BAD return?") == []
+    # Adjacent codes still resolve, including all-digit ones.
+    assert find_system_codes("abend 806") == ["806"]
+    assert find_system_codes("completion code 222") == ["222"]
+    assert find_system_codes("abend code 0C4") == ["0C4"]

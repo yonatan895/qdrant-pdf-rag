@@ -77,9 +77,31 @@ _SENTENCE_END_RE = re.compile(r"[.?!:]\s*$")
 # paragraph; two cards are an example, not a mention.
 _MIXED_JCL_MIN_STARTS = 2
 
-# Code-entry detection (issue #591): a line that is exactly a 3-hex code,
+# Code-entry detection (issue #591): a line that is exactly a completion code,
 # followed within two lines by description text rather than another bare code.
-_CODE_ENTRY_RE = re.compile(r"^([0-9A-F]{3})$")
+# A user completion code keeps its U prefix on its own line (U4038); system and
+# wait-state entries are both bare 3-hex, and which one a bare entry is comes
+# from the section heading, not from the line (see _canonical_code).
+_CODE_ENTRY_RE = re.compile(r"^(?:[0-9A-F]{3}|U\d{4})$")
+# A section whose heading names wait states makes its bare 3-hex entries wait
+# states. The heading is plain English any code manual uses, so this stays a
+# generic-parsing signal rather than a vendor gate; a manual that never says
+# "wait state" simply yields completion codes only.
+_WAITSTATE_HEADING_RE = re.compile(r"\bwait\s+states?\b", re.IGNORECASE)
+
+
+def _canonical_code(raw: str, wait_state: bool) -> str:
+    """Canonical stored form of one entry-start code (issue #591).
+
+    User codes keep the U (`U4038`). A bare 3-hex entry is a completion code
+    (`0C4`) unless its section heading names wait states, in which case the
+    canonical form is the W-prefix the query parser emits for it (`W064`) —
+    the two sides must agree or the filter can never match.
+    """
+    upper = raw.upper()
+    if upper.startswith("U"):
+        return upper
+    return f"W{upper}" if wait_state else upper
 
 
 def _nonblank_lines(text: str) -> list[str]:
@@ -150,9 +172,7 @@ def _is_code_entry_start(lines: list[str], idx: int) -> bool:
         line = lines[j].strip()
         if not line:
             continue
-        if _CODE_ENTRY_RE.match(line):
-            return False
-        return True
+        return not _CODE_ENTRY_RE.match(line)
     return False
 
 
@@ -180,6 +200,26 @@ def _code_entries(text: str) -> list[tuple[str, bool]] | None:
         if entry:
             items.append((entry, True))
     return items or None
+
+
+def _extract_system_codes(text: str, wait_state: bool = False) -> list[str]:
+    """Every code-entry start in a finished chunk (issue #591).
+
+    A block can hold several entries, so this scans the whole chunk rather
+    than reading only the first line: reading line 0 recorded 16% of the
+    codes in a real system-codes manual, including missing the issue's own
+    0C4 whenever its chunk opened with a neighbouring entry. Detection is
+    the same rule the splitter used, so the payload lists exactly the
+    entries this chunk contains.
+    """
+    lines = text.splitlines()
+    codes: list[str] = []
+    for i, line in enumerate(lines):
+        if _CODE_ENTRY_RE.match(line.strip()) and _is_code_entry_start(lines, i):
+            code = _canonical_code(line.strip(), wait_state)
+            if code not in codes:
+                codes.append(code)
+    return codes
 
 
 @dataclass(frozen=True, slots=True)
@@ -608,8 +648,7 @@ def _build_blocks(
         if statements:
             items.extend((page_idx, statement, True) for statement in statements)
             dd_data_open = _is_dd_data_para(para)
-        elif _code_entries(para) is not None:
-            code_items = _code_entries(para)
+        elif (code_items := _code_entries(para)) is not None:
             items.extend((page_idx, text, atomic) for text, atomic in code_items)
             dd_data_open = False
         elif detect_table_region(para):
@@ -762,6 +801,9 @@ def make_chunks(
     sections = outline_sections(parsed) if parsed.toc else fallback_sections(page_texts, parsed.title)
     for section in sections:
         body_pages = page_texts[section.page_start : section.page_end]
+        # Issue #591: a wait-state section's bare 3-hex entries canonicalize
+        # to the W-form the query parser emits for them, so both sides agree.
+        wait_state = bool(_WAITSTATE_HEADING_RE.search(section.heading_path))
 
         paras: list[tuple[int, str]] = []
         for offset, page_text in enumerate(body_pages):
@@ -782,14 +824,11 @@ def make_chunks(
                 labels[idx] if idx < len(labels) else None for idx in range(page_start, page_end + 1)
             ]
             label = _page_label_range(span_labels)
-            # Issue #591: extract system code and prepend alias for BM25/dense matching
-            system_codes: list[str] = []
-            lines = text.splitlines()
-            if lines and _CODE_ENTRY_RE.match(lines[0].strip()):
-                code = lines[0].strip()
-                system_codes = [code]
-                alias = f"S{code}"
-                text = f"{alias}\n{text}"
+            # Issue #591: every code entry this block carries, canonicalized
+            # for its section. The alias spelling stays out of `text` on
+            # purpose (see _extract_system_codes) so unit spans stay aligned
+            # and the stored text is the manual's own words.
+            system_codes = _extract_system_codes(text, wait_state)
             chunks.append(
                 Chunk(
                     chunk_id=chunk_id,
