@@ -225,6 +225,60 @@ async def test_core_adversarial_model_outputs(content, answer, citations, state,
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "echo",
+    [
+        "Retrieved manual excerpts:",
+        "Retrieved manual excerpts:\n\n[1] {cite}",
+        "**Retrieved manual excerpts:**\n[1] {cite}",
+        "Question: IEA500I",
+        "Retrieved manual excerpts:\n\nQuestion: IEA500I",
+    ],
+    ids=["header", "header-with-excerpt-label", "bold-header", "question-echo", "header-and-question"],
+)
+async def test_core_prompt_header_residue_is_not_an_answer_body(echo, stream):
+    """#576: prompt scaffolding (section header, excerpt label, question echo)
+    plus a valid citation is not an answer body."""
+    cite = _hit().cite
+    content = f"{echo.format(cite=cite)}\n\nCitations:\n- {cite}"
+    output = await _run_core(content, stream, "stop")
+    assert output.verification_state == "generation_incomplete"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "lead",
+    ["Retrieved manual excerpts:", "Question: IEA500I", "Retrieved manual excerpts: Restart with CLPA."],
+    ids=["header", "question", "same-line-prose"],
+)
+async def test_core_prompt_header_with_real_prose_is_still_accepted(lead, stream):
+    cite = _hit().cite
+    content = f"{lead}\nRestart the system with CLPA after editing IEASYSxx.\n\nCitations:\n- {cite}"
+    output = await _run_core(content, stream, "stop")
+    assert output.verification_state == "accepted"
+    assert "Restart the system with CLPA" in output.answer
+
+
+def test_prompt_scaffolding_constants_match_the_built_prompt():
+    """The body predicate reads the same constants the prompt builder sends."""
+    from mainframe_rag.agent.answer import (
+        EXCERPTS_HEADER,
+        QUESTION_LABEL,
+        SPLUNK_HEADER,
+        SYSPLEX_LABEL,
+        build_messages,
+    )
+
+    user = build_messages(
+        "IEA500I", [_hit()], product="z/OS", version="3.1", splunk_context="ev", settings=_settings()
+    ).messages[-1].content
+    for label in (EXCERPTS_HEADER, QUESTION_LABEL, SYSPLEX_LABEL, SPLUNK_HEADER):
+        assert label in user
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("header", ["Sources:", "References:", "### **References:**"])
 async def test_core_preserves_instructions_under_citation_alias_headers(stream, header):
     answer = f"Set LFAREA.\n\n{header}\n- Restart the system with CLPA\n- Check IEASYSxx"
