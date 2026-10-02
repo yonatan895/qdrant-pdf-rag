@@ -14,7 +14,7 @@ Every request gets a 12-hex-char
 `request_id` from middleware, shared by all logs, the unhandled-error
 handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
 
-- `POST /v1/search` — `SearchRequest{query (min 1 char), product?,
+- `POST /v1/search` — `SearchRequest{query (min 1 char, not blank or control-character, #579), product?,
   version?, limit (default 8, 1–40)}` → `SearchResponse{request_id,
   query_kind, hits}`. No LLM involved.
 - `POST /v1/answer` — `AnswerRequest{query, product?, version?,
@@ -39,7 +39,7 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   packing/trimming omitted, and the prompt's worked example cite, are never
   accepted as grounding.
 - `GET /healthz` (readiness) — `HealthzResponse{status, qdrant, embed?,
-  representation}`. Qdrant is checked by GET-ting the pooled client's
+  representation, rerank?}`. Qdrant is checked by GET-ting the pooled client's
   `{base}/readyz` and requiring exactly `200` plus the body `all shards are
   ready` (case/space normalized); the upstream body goes to the log, never
   the client. `embed` is tri-state: `None` when no embedder is configured,
@@ -48,9 +48,22 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
   `resolve_serving_generation` outcome (issues #391 F3/F4): the configured
   alias resolved to its physical generation and that generation's OWN
   `<physical>__completions` contract compared against the wanted one.
-  `status` is `ok` only when Qdrant is ok, embed is not `False`, and
-  `representation` is `compatible`, `record_only_drift`, or `empty`;
-  anything else is `degraded` **and HTTP 503** (Kubernetes probes judge
+  `rerank` is tri-state (issue #578): `None` when `RERANK_ENABLED` is off
+  (readiness unchanged), else whether the configured endpoint(s) answer the
+  1x1 score probe (`probe_reranker`: the serving endpoint order and
+  alternate-route fallback, so a working alternate keeps the leg up). The
+  probe runs off the event loop, is bounded by `health_rerank_timeout_s`,
+  and its outcome (up or down) is cached for `health_rerank_ttl_s`, so
+  kubelet ticks do not become GPU requests; a timeout or any exception is
+  `false`, logging only the error type. Recovery shows on the first probe
+  after the TTL. Rerank exhaustion fails non-identifier search closed, so
+  an enabled-but-down leg makes the pod unready even though identifier
+  lookups (which bypass rerank) would still serve: degraded means
+  unready by design. The reasoning leg is not probed: search never calls
+  an LLM, so it must not gate readiness.
+  `status` is `ok` only when Qdrant is ok, embed is not `False`,
+  `representation` is `compatible`, `record_only_drift`, or `empty`, and
+  `rerank` is not `False`; anything else is `degraded` **and HTTP 503** (Kubernetes probes judge
   only the status code, so the JSON label alone never made a pod unready).
   `empty` stays ready on purpose: the deploy -> ingest sequence waits for
   the agent before data exists (bootstrap must not deadlock); requests are
@@ -80,7 +93,11 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
    #314). `agent/chat_turn.prepare_chat_turn` owns active-turn normalization
   for API, console, core execution, condensation and prompt assembly (#415).
   The latest user message is stripped, must remain nonempty, and is guarded
-  by `query_max_chars`. Earlier user/assistant messages remain history; caller
+  by `query_max_chars` and, like `/v1/search` and `/v1/answer` queries, refused
+  when it contains NUL or C0 control characters other than `\t\n\r` (#579; DEL
+  and C1 are not rejected). `/v1/search` and `/v1/answer` inspect the query with
+  the same predicate (`chat_turn.is_unsearchable_query`) but search it unmodified,
+  so padding around real text is kept. Earlier user/assistant messages remain history; caller
   system messages and entries after the latest user are excluded from model
   input. Trailing assistant/system entries remain accepted request syntax and
   never become a question or history for that user turn. The **entire supplied
@@ -188,7 +205,7 @@ status (`/ui` failures render HTML banners instead, §1):
 | `not_configured` / `reasoning model…` | 503 | `/v1/answer` or `/v1/chat` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
 | `representation_unavailable` / `the retrieval generation is not available` | 503 | Serving gate: resolved generation is `empty` or not validated compatible (drift/legacy/pending/unknown); `/ui/chat` renders its banner while `/ui/chat/stream` returns this envelope |
-| `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query-length guard, and `/v1/chat` with no `user`-role message (one message, every 422 path) |
+| `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
 | `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
@@ -434,6 +451,7 @@ readers:
 | `llm_stream` | `false` | server-side reasoning SSE |
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
+| `health_rerank_timeout_s` / `health_rerank_ttl_s` | 5.0 / 15.0 (ttl 0 = probe every scrape) | healthz rerank probe bound and outcome cache; only when `rerank_enabled` |
 | `representation_cache_ttl_s` | 5.0 (0 = validate every request) | serving generation gate: alias resolution + contract validation cache |
 | `allow_hash_mode` / `log_level` | `false` / INFO | lifespan hash gate / logging |
 | `otel_exporter_otlp_endpoint` / `otel_sample_ratio` / `otel_export_queue_size` / `otel_export_timeout_ms` | unset = tracing off / 1.0 / 2048 / 5000 | tracing setup |
@@ -581,8 +599,11 @@ Body presence is shared with the answer eval (#576): empty `Answer` headings,
 citation labels (including inline labels followed only by bracket indices or
 a citation), citation headers, standalone citation-shaped or validated lines (including generic
 filename identities), bracket indices, whitespace and punctuation alone are
-not prose. Real text following a label and instruction bullets under alias
-headers remain prose. A short substantive answer remains eligible; there is no
+not prose. Echoed prompt scaffolding is not prose either: the `Retrieved manual
+excerpts:` and Splunk context section headers, and whole `Question:` /
+`Sysplex context:` lines (the constants the prompt builder sends, so the two
+cannot drift). Real text following a label or header and instruction bullets
+under alias headers remain prose. A short substantive answer remains eligible; there is no
 length floor. Thinking and script fences are handled before this check. A nonempty
 script without prose is `unverified_draft` with `script_review_required: true`;
 an empty script fence still requires review but cannot establish a body.

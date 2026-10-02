@@ -21,6 +21,7 @@ from tests.helpers_airgap import (
     rendered_env,
     run_sh,
     set_oauth_proxy_pin,
+    sha256_bytes,
 )
 
 IMAGE_SHA = "a" * 40  # full-sha shaped; deploy.sh only rejects "" / "HEAD"
@@ -179,6 +180,85 @@ def test_storage_size_knob_covers_persistence_and_snapshot(tree):
     log = _helm_log(tree)
     assert "persistence.size=1Gi" in log
     assert "snapshotPersistence.size=1Gi" in log
+
+
+def _manifest(tree, chart_sha=None, sha=IMAGE_SHA):
+    dist = tree[0] / "dist"
+    dist.mkdir(exist_ok=True)
+    lines = [f"sha: {sha}"]
+    if chart_sha is not None:
+        lines.append(f"chart_sha256: {chart_sha}")
+    (dist / "MANIFEST.txt").write_text("\n".join(lines) + "\n")
+
+
+def _chart(tree):
+    return next((tree[0] / "charts").glob("qdrant-*.tgz"))
+
+
+def test_two_qdrant_charts_refuse_before_any_command(tree):
+    shutil.copy(_chart(tree), tree[0] / "charts" / "qdrant-9.9.9.tgz")
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "exactly one vendored Qdrant chart is required" in result.stderr
+    assert "found 2" in result.stderr
+    assert not tree[1].exists() or "upgrade" not in _helm_log(tree)
+
+
+def test_no_qdrant_chart_refuses(tree):
+    _chart(tree).unlink()
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "exactly one vendored Qdrant chart is required" in result.stderr
+    assert "found 0" in result.stderr
+
+
+def test_manifest_chart_sha_mismatch_refuses_before_mutation(tree):
+    _manifest(tree, "0" * 64)
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "does not match the packed MANIFEST chart_sha256" in result.stderr
+    assert not tree[1].exists() or "upgrade" not in _helm_log(tree)
+
+
+def test_manifest_without_chart_sha_refuses(tree):
+    _manifest(tree)
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "has no chart_sha256" in result.stderr
+
+
+def test_manifest_chart_sha_match_deploys_that_chart(tree):
+    _manifest(tree, sha256_bytes(_chart(tree).read_bytes()))
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    assert "verified against packed MANIFEST" in result.stdout
+    assert str(_chart(tree).relative_to(tree[0])) in _helm_log(tree)
+
+
+def test_chart_identity_failure_then_fix_passes_on_next_run(tree):
+    extra = tree[0] / "charts" / "qdrant-9.9.9.tgz"
+    shutil.copy(_chart(tree), extra)
+    assert _run(tree).returncode != 0
+    extra.unlink()
+    _manifest(tree, "0" * 64)
+    assert _run(tree).returncode != 0
+    _manifest(tree, sha256_bytes(_chart(tree).read_bytes()))
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+def test_dry_run_with_manifest_is_noticed_not_verified(tree):
+    _manifest(tree, "0" * 64)
+    result = _run(tree, ("AIRGAP_DRYRUN", "1"))
+    assert result.returncode == 0, result.stderr
+    assert "not release-verified" in result.stdout
+
+
+def test_no_manifest_is_noticed_not_verified(tree):
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    assert "not release-verified" in result.stdout
 
 
 def test_missing_production_values_fails_before_mutation(tree):
@@ -747,12 +827,67 @@ def test_invalid_shared_gateway_key_refuses_before_commands(tree, key, secret):
 # --------------------------------- Decoupled backends (issue #529 OBS-2)
 
 
-def test_jaeger_explicit_false_skips_backend_but_keeps_export(tree):
+def test_jaeger_false_without_destination_fails_before_mutation(tree):
+    # Issue #568: the defaulted http://jaeger:4318 belongs to the bundled
+    # backend. Disabling it without naming a collector (or turning tracing
+    # off) must fail in preflight, before any render or cluster command.
     r = _run(tree, ("JAEGER_ENABLED", "false"))
+    assert r.returncode != 0
+    assert "JAEGER_ENABLED=false needs an intentional trace destination" in r.stderr
+    assert not tree[1].exists()
+    assert not (tree[0] / "dist").exists()
+
+
+@pytest.mark.parametrize("endpoint", ["http://collector.platform:4318", "http://jaeger:4318"])
+def test_jaeger_false_with_explicit_collector_exports_to_it(tree, endpoint):
+    # The former hostname stays possible when it is chosen intentionally.
+    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint))
     assert r.returncode == 0, r.stderr
     assert not (tree[0] / "dist" / "jaeger-rendered.yaml").exists()
     rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
-    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://jaeger:4318"
+    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == endpoint
+    assert "kind: Deployment\nmetadata:\n  name: jaeger" not in rendered
+    assert "deploy/jaeger" not in _helm_log(tree)  # no rollout wait for a backend not deployed
+
+
+def test_jaeger_false_with_tracing_off_is_an_intentional_choice(tree):
+    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", "off"))
+    assert r.returncode == 0, r.stderr
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert rendered_env(rendered, "agent")["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
+
+
+def test_jaeger_false_rejection_then_corrected_run_succeeds(tree):
+    # Next ordinary run after correcting the config: the refusal left
+    # nothing behind that blocks the corrected deploy.
+    assert _run(tree, ("JAEGER_ENABLED", "false")).returncode != 0
+    r = _run(tree, ("JAEGER_ENABLED", "false"), ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
+    assert r.returncode == 0, r.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+def test_upgrade_from_bundled_jaeger_selects_destination_before_removal(tree):
+    # Existing bundled Jaeger objects are removed only after the release is
+    # upgraded with the explicit destination and the workloads rolled out; the
+    # retained Jaeger PVC is never part of the cleanup inventory.
+    import json
+
+    path = tree[0] / "disabled.json"
+    path.write_text(json.dumps({"kind": "List", "items": [
+        {"apiVersion": "apps/v1", "kind": "Deployment",
+         "metadata": {"name": "jaeger", "namespace": "ns"}},
+    ]}))
+    r = _run(tree, ("JAEGER_ENABLED", "false"),
+             ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"),
+             ("DISABLED_FILE", str(path)))
+    assert r.returncode == 0, r.stderr
+    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    assert 'endpoint: "http://collector.platform:4318"' in values
+    cleanup = json.loads((tree[0] / "dist/app-disabled-cleanup.json").read_text())
+    assert [i["kind"] for i in cleanup["items"]] == ["Deployment"]
+    log = _helm_log(tree)
+    assert log.index("delete") > log.index("rollout") > log.index("upgrade")
+    assert "jaeger-badger" not in log
 
 
 def test_jaeger_explicit_true_with_tracing_on(tree):

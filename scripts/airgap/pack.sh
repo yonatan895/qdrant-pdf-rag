@@ -24,6 +24,13 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "run from a git clone
 [ "$IMAGE_SHA" = "$(git rev-parse HEAD)" ] || \
     die "IMAGE_SHA=$IMAGE_SHA is not the checked-out commit ($(git rev-parse HEAD)). Pack at the SHA whose GHCR tags exist; the bundle is always of HEAD. Usual cause: a stale IMAGE_SHA in ./airgap.env — explicit env beats the file, or update the file."
 
+# The MANIFEST binds exactly one vendored Qdrant chart (issue #272).
+_chart_count=0
+for _c in charts/qdrant-*.tgz; do
+    if [ -f "$_c" ]; then _chart_count=$((_chart_count + 1)); fi
+done
+[ "$_chart_count" -eq 1 ] || die "exactly one vendored Qdrant chart is required (charts/qdrant-*.tgz); found $_chart_count"
+
 GHCR_OWNER=${GHCR_OWNER:-}
 APP_REGISTRY=${AIRGAP_APP_REGISTRY:-}
 if [ -z "$APP_REGISTRY" ]; then

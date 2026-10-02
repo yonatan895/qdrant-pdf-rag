@@ -147,6 +147,20 @@ def test_probe_allowlist_gates() -> None:
     assert probe_zowe_mcp(HttpZoweMCP(_settings(), client=httpx2.Client(transport=_transport(dead)))) is not None
 
 
+def test_probe_failure_reports_error_type_only(monkeypatch) -> None:
+    """The probe string is logged at startup: it carries the exception class,
+    never its message (AGENTS.md: logs contain no secrets/upstream text)."""
+
+    def leaky(self) -> list[str]:
+        raise RuntimeError("SECRET-XYZ upstream body")
+
+    monkeypatch.setattr(HttpZoweMCP, "list_tools", leaky)
+    err = probe_zowe_mcp(HttpZoweMCP(_settings()))
+    assert err is not None
+    assert "SECRET-XYZ" not in err
+    assert "RuntimeError" in err
+
+
 # ------------------------------------------------------------------ routing
 
 

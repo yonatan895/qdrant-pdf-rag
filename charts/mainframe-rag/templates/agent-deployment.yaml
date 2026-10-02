@@ -20,6 +20,10 @@ spec:
       labels:
         {{- include "mainframe-rag.selectorLabels" . | nindent 8 }}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       {{- if .Values.route.enabled }}
       serviceAccountName: rag-agent
       {{- end }}
@@ -33,6 +37,10 @@ spec:
         - name: agent
           image: {{ include "mainframe-rag.agentImage" . }}
           imagePullPolicy: {{ .Values.images.agent.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
           ports:
             - containerPort: 8080
               name: http
@@ -126,6 +134,10 @@ spec:
         - name: oauth-proxy
           image: {{ include "mainframe-rag.oauthProxyImage" . }}
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
           args:
             - --provider=openshift
             - --https-address=:8443

@@ -329,6 +329,35 @@ def test_bootstrap_refuses_modified_installer(bundle_dir):
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("stage", [False, True], ids=["unstaged", "staged"])
+def test_bootstrap_refuses_tracked_edit_then_rerun_passes_after_revert(bundle_dir, stage):
+    """Equal HEAD with any tracked edit (here a non-installer file) is not
+    the signed release: refuse before copying artifacts, never touch the
+    operator's work, and pass again once the edit is reverted (issue #414)."""
+    assert _bootstrap(bundle_dir).returncode == 0
+    workspace = bundle_dir / "operator workspace"
+    (workspace / "airgap.env").write_text("INTERNAL_REGISTRY=untracked-operator-file\n")
+    (workspace / "dist/retained-evidence.txt").write_text("original")
+    (workspace / "dist/MANIFEST.txt").unlink()
+    (workspace / "README.md").write_text("locally edited chart/script stand-in\n")
+    if stage:
+        subprocess.run(["git", "add", "README.md"], cwd=workspace, check=True)
+    refused = _bootstrap(bundle_dir)
+    assert refused.returncode != 0
+    assert "tracked changes against the approved commit" in refused.stderr
+    assert "locally edited" not in refused.stdout + refused.stderr
+    assert "SUCCESS" not in refused.stdout
+    assert not (workspace / "dist/MANIFEST.txt").exists()
+    assert (workspace / "README.md").read_text() == "locally edited chart/script stand-in\n"
+    subprocess.run(["git", "reset", "-q", "HEAD", "--", "README.md"], cwd=workspace, check=True)
+    subprocess.run(["git", "checkout", "--", "README.md"], cwd=workspace, check=True)
+    again = _bootstrap(bundle_dir)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert (workspace / "dist/MANIFEST.txt").exists()
+    assert (workspace / "airgap.env").read_text() == "INTERNAL_REGISTRY=untracked-operator-file\n"
+    assert (workspace / "dist/retained-evidence.txt").read_text() == "original"
+
+
 def test_bootstrap_approved_upgrade_requires_explicit_checkout_preserves_operator_state(bundle_dir):
     assert _bootstrap(bundle_dir).returncode == 0
     workspace = bundle_dir / "operator workspace"

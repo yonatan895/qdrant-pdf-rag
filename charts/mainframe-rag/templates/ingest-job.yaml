@@ -28,6 +28,10 @@ spec:
         app: ingest
     spec:
       restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       {{- if .Values.pullSecret.name }}
       imagePullSecrets:
         - name: {{ .Values.pullSecret.name }}
@@ -38,6 +42,10 @@ spec:
         - name: ingest
           image: {{ include "mainframe-rag.ingestImage" . }}
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
           args:
             - --src
             - /corpus

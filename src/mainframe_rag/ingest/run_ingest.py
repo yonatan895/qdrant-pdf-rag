@@ -1177,7 +1177,6 @@ def _run_impl(
                                         "doc_id": record.doc_id,
                                         "action": "error",
                                         "error_type": record.error_type,
-                                        "error": record.error,
                                     }
                                 )
                             )
