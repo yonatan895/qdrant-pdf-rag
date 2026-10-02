@@ -7,12 +7,12 @@ Each chunk UUID uses the unchanged UUID5 URL-namespace key `source_revision|Witn
 ## 1. Two independent atomic items
 
 ```json
-{"atomic_spans":[{"end":16,"start":0},{"end":34,"start":18}],"build_id":"00000000-0000-4000-8000-000000000001","chunk_id":"ca6ff27f-a5b6-5cfa-9768-a0e570bc5928","chunk_type":"syntax","locations":[{"end":16,"origin":"source","page":1,"printed_label":"i","start":0},{"end":18,"origin":"separator","page":null,"printed_label":null,"start":16},{"end":34,"origin":"source","page":1,"printed_label":"i","start":18}],"representation_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":1,"source_revision":"synthetic|guide|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"//A EXEC PGM=ONE\n\n//B EXEC PGM=TWO"}
+{"atomic_spans":[{"end":16,"start":0},{"end":34,"start":18}],"build_id":"00000000-0000-4000-8000-000000000001","chunk_id":"ca6ff27f-a5b6-5cfa-9768-a0e570bc5928","chunk_type":"narrative","locations":[{"end":16,"origin":"source","page":1,"printed_label":"i","start":0},{"end":18,"origin":"separator","page":null,"printed_label":null,"start":16},{"end":34,"origin":"source","page":1,"printed_label":"i","start":18}],"representation_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":1,"source_revision":"synthetic|guide|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"//A EXEC PGM=ONE\n\n//B EXEC PGM=TWO"}
 ```
 
-Envelope SHA-256: `24d776dc965e9a0c6f9f4d50a8959edb20b7a881a1aa932e7853a3e13e75eaba`.
+Envelope SHA-256: `3554adeb71857839f89dff819eee89c79220f2ded12083c79d748928eb68254c`.
 
-Exact reference: `e1.AAAAAAAAQACAAAAAAAAAAcpv8n-ltlz6l2ig5XC8WSgk13bcll6aDG-fTVColZ7bILeogaGqky54U6PhPnXqug`.
+Exact reference: `e1.AAAAAAAAQACAAAAAAAAAAcpv8n-ltlz6l2ig5XC8WSg1VK3rcYV4Ofid_4Ge7onHkiDy3tEgg8eddIko62glTA`.
 
 Expected returned UTF-8 text hex: `2f2f4120455845432050474d3d4f4e450a0a2f2f4220455845432050474d3d54574f` (34 bytes).
 
@@ -31,12 +31,12 @@ Expected returned UTF-8 text hex: `466972737420c2b520706167652e0a0a5365636f6e642
 ## 3. One atomic item across a page boundary
 
 ```json
-{"atomic_spans":[{"end":32,"start":0}],"build_id":"00000000-0000-4000-8000-000000000001","chunk_id":"0da50ae1-f944-5f89-9001-5e8fc27c609c","chunk_type":"syntax","locations":[{"end":20,"origin":"source","page":8,"printed_label":"8","start":0},{"end":21,"origin":"separator","page":null,"printed_label":null,"start":20},{"end":32,"origin":"source","page":9,"printed_label":null,"start":21}],"representation_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":1,"source_revision":"synthetic|guide|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"//STEP EXEC PGM=APP,\n// PARM=YES"}
+{"atomic_spans":[{"end":32,"start":0}],"build_id":"00000000-0000-4000-8000-000000000001","chunk_id":"0da50ae1-f944-5f89-9001-5e8fc27c609c","chunk_type":"narrative","locations":[{"end":20,"origin":"source","page":8,"printed_label":"8","start":0},{"end":21,"origin":"separator","page":null,"printed_label":null,"start":20},{"end":32,"origin":"source","page":9,"printed_label":null,"start":21}],"representation_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":1,"source_revision":"synthetic|guide|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"//STEP EXEC PGM=APP,\n// PARM=YES"}
 ```
 
-Envelope SHA-256: `d06a2c2408b6b917856af3f812f13153906573a843954c5b0a050b0eef3de1ec`.
+Envelope SHA-256: `aeb5e0082043a22e91a5a5ab3f6714b00c6e67fd6413ec25f5c1f665568f3cf4`.
 
-Exact reference: `e1.AAAAAAAAQACAAAAAAAAAAQ2lCuH5RF-JkAFej8J8YJzQaiwkCLa5F4Vq8_gS8TFTkGVzqEOVTFsKBQsO7z3h7A`.
+Exact reference: `e1.AAAAAAAAQACAAAAAAAAAAQ2lCuH5RF-JkAFej8J8YJyuteAIIEOiLpGlpas_ZxSwDG5n_WQT7CX1wfZlVo889A`.
 
 Expected returned UTF-8 text hex: `2f2f5354455020455845432050474d3d4150502c0a2f2f205041524d3d594553` (32 bytes).
 
