@@ -54,7 +54,13 @@ GATEWAY_LLM_KEY="${GATEWAY_LLM_KEY:-}"
 GATEWAY_EMBED_KEY="${GATEWAY_EMBED_KEY:-}"
 GATEWAY_RERANK_KEY="${GATEWAY_RERANK_KEY:-}"
 GATEWAY_DRYRUN="${GATEWAY_DRYRUN:-0}"
+# LiteLLM --detailed_debug logs full request bodies (prompts with manual
+# excerpts, embedding inputs): local short diagnosis only, never default
+# (issue #590). Strictly 1/true to enable; unset, empty, 0 or false keep it off.
 GATEWAY_DEBUG="${GATEWAY_DEBUG:-0}"
+# Container log on disk, not /tmp: /tmp is tmpfs on the reference WSL host, so
+# a long run's log is RAM (issue #590). The previous run's log rotates to .1.
+GATEWAY_LOG="${GATEWAY_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/mainframe-rag/${GATEWAY_NAME}.log}"
 # Optional machine handoff for orchestrators (sh scripts/tools/run-task.sh local:stack): when set,
 # the leg env (URLs, model ids, per-leg keys) is written there mode 600.
 # Contains ephemeral keys — never a repo path, never committed.
@@ -70,6 +76,11 @@ GATEWAY_OTEL_SERVICE_NAME="${GATEWAY_OTEL_SERVICE_NAME:-litellm-local}"
 BASE="http://localhost:${GATEWAY_PORT}"
 
 die() { echo "ERROR: $1" >&2; exit 1; }
+case "$GATEWAY_DEBUG" in
+    1|true) GATEWAY_DEBUG_ARGS="--detailed_debug" ;;
+    0|false|'') GATEWAY_DEBUG_ARGS="" ;;
+    *) die "GATEWAY_DEBUG must be 1/true or 0/false/empty, got '$GATEWAY_DEBUG'" ;;
+esac
 # Stops both containers by name (never kills PIDs: killing the attached
 # `docker run` client detaches and orphans the container, as a first failed
 # launch proved). Safe before anything started (names simply miss). The
@@ -222,6 +233,9 @@ EOF
     echo "==> Leg env written to $GATEWAY_ENV_FILE (mode 600)"
 }
 
+# Rendered gateway arguments, for the hermetic tests and for diagnosis.
+printf '%s\n' "--config /app/gateway/config.yaml${GATEWAY_DEBUG_ARGS:+ $GATEWAY_DEBUG_ARGS}" "log $GATEWAY_LOG" \
+    > "$CFG_DIR/gateway.args"
 if [ "$GATEWAY_DRYRUN" = "1" ]; then
     write_gateway_env_file
     echo "$CFG_DIR"
@@ -263,7 +277,11 @@ if [ "$_OK" != "1" ]; then
     die "postgres did not answer within 60s"
 fi
 
-echo "==> Starting local LiteLLM gateway ($GATEWAY_NAME on :$GATEWAY_PORT)"
+echo "==> Starting local LiteLLM gateway ($GATEWAY_NAME on :$GATEWAY_PORT, log $GATEWAY_LOG)"
+[ -n "$GATEWAY_DEBUG_ARGS" ] && echo "==> WARNING: GATEWAY_DEBUG on: the log records full request bodies (manual text); local diagnosis only"
+mkdir -p "$(dirname "$GATEWAY_LOG")" || die "cannot create log directory for $GATEWAY_LOG"
+[ -f "$GATEWAY_LOG" ] && mv -f "$GATEWAY_LOG" "$GATEWAY_LOG.1"
+( umask 077 && : > "$GATEWAY_LOG" ) || die "cannot write gateway log $GATEWAY_LOG"
 # OTel env only when a local Jaeger was found: container reaches the host
 # collector via the host.docker.internal mapping added above.
 OTEL_RUN_ARGS=""
@@ -279,8 +297,8 @@ docker run --rm --name "$GATEWAY_NAME" --network "$PG_NET" \
     -e "DATABASE_URL=postgresql://litellm:${PG_PASSWORD}@${PG_NAME}:5432/litellm" \
     ${OTEL_RUN_ARGS} \
     "$LITELLM_IMAGE" \
-    --config /app/gateway/config.yaml ${GATEWAY_DEBUG:+--detailed_debug} \
-    >/tmp/"$GATEWAY_NAME".log 2>&1 &
+    --config /app/gateway/config.yaml ${GATEWAY_DEBUG_ARGS} \
+    >>"$GATEWAY_LOG" 2>&1 &
 DOCKER_PID=$!
 # Ctrl-C stops both containers by name (the attached client alone would
 # detach); --rm removes them, the named volume keeps the minted keys.
@@ -301,7 +319,7 @@ while [ "$i" -lt 90 ]; do
 done
 if [ "$_OK" != "1" ]; then
     stop_gateway
-    die "gateway did not answer within 90s — see /tmp/${GATEWAY_NAME}.log"
+    die "gateway did not answer within 90s — see $GATEWAY_LOG"
 fi
 
 mint_key() {
@@ -327,7 +345,7 @@ mint_key() {
     fi
     if [ "$_code" != "200" ]; then
         stop_gateway
-        die "key $3 unusable (models HTTP $_code — see /tmp/${GATEWAY_NAME}.log)"
+        die "key $3 unusable (models HTTP $_code — see $GATEWAY_LOG)"
     fi
 }
 mint_key "$GATEWAY_LLM_KEY" "$GATEWAY_REASONING_MODEL" "local-llm"
@@ -342,7 +360,7 @@ for _leg in "llm:${GATEWAY_LLM_KEY}" "embed:${GATEWAY_EMBED_KEY}" "rerank:${GATE
         -H "Authorization: Bearer ${_k}" \
         "${BASE}/v1/models" | grep -qx '200'; then
         stop_gateway
-        die "self-check failed for ${_leg%%:*} leg (see /tmp/${GATEWAY_NAME}.log)"
+        die "self-check failed for ${_leg%%:*} leg (see $GATEWAY_LOG)"
     fi
 done
 unset _leg _k
@@ -351,13 +369,13 @@ if curl -s -m 5 -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer sk-local-wrong" \
     "${BASE}/v1/models" | grep -qx '200'; then
     stop_gateway
-    die "self-check failed: wrong key was accepted (see /tmp/${GATEWAY_NAME}.log)"
+    die "self-check failed: wrong key was accepted (see $GATEWAY_LOG)"
 fi
 
 write_gateway_env_file
 
 cat <<EOF
-==> Gateway ready: ${BASE} (container ${GATEWAY_NAME}, log /tmp/${GATEWAY_NAME}.log)
+==> Gateway ready: ${BASE} (container ${GATEWAY_NAME}, log $GATEWAY_LOG)
     Keys are stored in volume ${PG_VOLUME} (GATEWAY_RESET_KEYS=1 wipes it);
     never written to git. Point every leg at the gateway, then run
     scripts/probe_gateway.py to confirm and get the RERANK_ENDPOINT_ORDER
