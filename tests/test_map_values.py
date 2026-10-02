@@ -449,6 +449,8 @@ def test_decoupled_backend_flags_omitted_by_default(mapper_env):
 ])
 def test_jaeger_enabled_selection(monkeypatch, mapper_env, raw, expected):
     monkeypatch.setenv("JAEGER_ENABLED", raw)
+    if not expected:  # #568: disabling the bundled backend names a collector
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318")
     r, out = mapper_env()
     assert r.returncode == 0, r.stderr
     assert load_values(out)["tracing"]["jaeger"] == {"enabled": expected}
@@ -486,9 +488,33 @@ def test_monitor_for_disabled_metrics_fails_closed(monkeypatch, mapper_env):
     assert "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true" in r.stderr
 
 
+def test_jaeger_false_without_destination_fails_closed(monkeypatch, mapper_env):
+    """Issue #568: no bundled backend and no named collector must not map to
+    the defaulted bundled hostname."""
+    monkeypatch.setenv("JAEGER_ENABLED", "false")
+    r, out = mapper_env()
+    assert r.returncode != 0
+    assert "JAEGER_ENABLED=false needs an intentional trace destination" in r.stderr
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("endpoint,enabled", [
+    ("http://collector.platform:4318", True), ("http://jaeger:4318", True), ("off", False),
+])
+def test_jaeger_false_with_intentional_destination(monkeypatch, mapper_env, endpoint, enabled):
+    monkeypatch.setenv("JAEGER_ENABLED", "false")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    t = load_values(out)["tracing"]
+    assert t["enabled"] is enabled and t["jaeger"] == {"enabled": False}
+    assert t["endpoint"] == (endpoint if enabled else "")
+
+
 def test_mapper_to_helm_round_trip_decoupled(mapper_env, tmp_path):
     """Producer-to-consumer: decoupled flags survive env -> values -> helm."""
     os.environ["JAEGER_ENABLED"] = "false"
+    os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://collector.platform:4318"
     os.environ["METRICS_ENABLED"] = "true"
     os.environ["SERVICEMONITOR_ENABLED"] = "false"
     try:
@@ -514,8 +540,8 @@ def test_mapper_to_helm_round_trip_decoupled(mapper_env, tmp_path):
                      and (d["kind"], d["metadata"]["name"]) == ("Deployment", "rag-agent"))
         env = {e["name"]: e["value"] for e in agent["spec"]["template"]["spec"]["containers"][0]["env"]
                if "value" in e}
-        assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://jaeger:4318"
+        assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://collector.platform:4318"
         assert env["METRICS_ENABLED"] == "true"
     finally:
-        for k in ("JAEGER_ENABLED", "METRICS_ENABLED", "SERVICEMONITOR_ENABLED"):
+        for k in ("JAEGER_ENABLED", "OTEL_EXPORTER_OTLP_ENDPOINT", "METRICS_ENABLED", "SERVICEMONITOR_ENABLED"):
             os.environ.pop(k, None)

@@ -254,9 +254,8 @@
           },
           "then": {
             "properties": {
-              "endpoint": { "pattern": "^https?://\\S+$" }
-            },
-            "required": ["endpoint"]
+              "endpoint": { "pattern": "^(https?://\\S+)?$" }
+            }
           }
         }
       ]

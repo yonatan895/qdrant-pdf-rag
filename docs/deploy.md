@@ -159,7 +159,9 @@ Compatibility and lifecycle decisions under #448:
 - Disabled optional workloads, Routes and monitors are removed on upgrades of
   the Helm release. The Jaeger PVC has `helm.sh/resource-policy: keep`: disabling
   tracing or removing the app release retains its data. Re-enabling tracing
-  reuses that claim; neither application rollback nor uninstall rolls back data.
+  reuses that claim; moving to an external collector sets the destination in
+  the same release that removes the backend, and the backend objects are
+  deleted only after the rollout; neither application rollback nor uninstall rolls back data.
 - `PULL_SECRET` and `GATEWAY_API_KEY_SECRET` remain DNS-subdomain names and
   Secret references. An absent pull Secret renders `imagePullSecrets: []` for
   first-party pods and `imagePullSecrets=null` for Qdrant. An absent gateway
@@ -331,7 +333,9 @@ cannot schedule on one node — proven).
   Kind run proving nothing else writes to the root filesystem.
 - Jaeger is on by default (unset `OTEL_EXPORTER_OTLP_ENDPOINT` resolves to
   `http://jaeger:4318`; the off sentinel disables both tracing and this
-  deployment): 1 replica,
+  deployment; `JAEGER_ENABLED=false` skips only the deployment and is
+  refused unless `OTEL_EXPORTER_OTLP_ENDPOINT` names a collector or `off`,
+  in preflight, mapper and chart alike): 1 replica,
   project-assigned UID and volume group from `restricted-v2` for Badger, 10Gi volume with 14-day span TTL, OTLP/HTTP 4318 only (the configured exporter uses HTTP;
   the Qdrant client independently brings a transitive `grpcio` wheel), UI on
   port-forward only, no archive store (debug data, not records).
@@ -358,7 +362,9 @@ cannot schedule on one node — proven).
   than failure, and never touches `/v1/answer` (needs a reasoning model).
   With tracing on (the default) it also fails closed unless a `v1.search`
   span lands in `JAEGER_QUERY_URL` within `TRACE_TIMEOUT`; the `off`
-  sentinel skips that assertion.
+  sentinel skips that assertion. With the bundled Jaeger disabled the query is
+  skipped and the report says trace arrival is NOT VERIFIED: configuring a
+  collector is not proof that spans reach it.
 
 <a id="collection-policy"></a>
 ### Collection distribution and placement (issue #360)
@@ -851,7 +857,11 @@ precedence and otherwise permits file/default resolution; required attestation
 rejects whitespace. Runtime bearer auth intentionally omits a header for an
 absent/empty/whitespace key. These are different owners/meanings: do not globally
 normalize blanks without tracing both consumers. `resolve_otel_endpoint` owns the
-separate unset=local-Jaeger and off/none/false/0=disabled policy across stages.
+separate unset=local-Jaeger and off/none/false/0=disabled policy across stages;
+an unset endpoint with `JAEGER_ENABLED=false` fails closed (`map_values.py` and
+the chart's empty `tracing.endpoint` mirror it), since the default names the
+service just disabled. Any explicit `http(s)` URL, the former hostname
+included, is an intentional platform-owned collector.
 
 **Preconditions/failures/lifetime:** platform-supplied model/dimension/revision and
 per-leg credentials must match the deployment. Gateway aliases are mutable and
