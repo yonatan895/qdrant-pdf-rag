@@ -281,8 +281,26 @@ Opt-in via `CONTEXTUAL_EMBED_ENABLED` (default off).
   dedicated timeout (`CONTEXT_LLM_TIMEOUT_S`, 30.0s) distinct from the 300s
   answer timeout. `CONTEXT_LLM_API_KEY` (unset = keyless) rides the gist
   calls as a Bearer virtual key behind a gateway.
-- Cache key `v2:sha:chunk_id` under `CONTEXT_PROMPT_VERSION = "v2"` (v1
-  duplicated the header and echoed instructions).
+- Prompt template `CONTEXT_PROMPT_VERSION = "v2"` (v1 duplicated the header
+  and echoed instructions).
+- Cache identity (issue #416): `ContextBinding` in `context.py` is the one
+  owner of the sidecar key and record. A cached gist is reused only when ALL
+  of these match: prompt version, doc sha256, chunk id, the contextual model
+  name (`CONTEXT_LLM_MODEL`), the `CONTEXT_MAX_CHARS` cap, and a sha256 of the
+  exact messages sent to the model (system prompt, header, section path, body).
+  Any change is a miss that calls the model; the same exact input is a hit
+  with zero calls. Entries for other models/caps stay valid under their own
+  identity, so switching back hits again. Not bound: the endpoint behind a
+  model name and any revision the operator does not put in the name — use a
+  revision-qualified `CONTEXT_LLM_MODEL` or a fresh `CONTEXT_CACHE_PATH`.
+  Records are `schema: 2` JSON lines (`v`, `doc_sha256`, `chunk_id`, `model`,
+  `max_chars`, `input_sha256`, `context`); the loader recomputes the key from
+  those fields and rejects wrong types or a context longer than its own cap.
+  Pre-#416 records (no `schema`) and malformed lines are misses (the first
+  logs `context_cache_legacy_records_ignored` with a count, the second
+  `context_cache_skip_line`); the file is append-only and is never rewritten or
+  required to be deleted. A hit that is not already whitespace-collapsed and
+  within the cap is regenerated.
 - Model budget 256 completion tokens; deterministic `CONTEXT_MAX_CHARS`
   (500) cap with collapse-and-rstrip normalization; empty gists raise
   (never stored silent-empty).
