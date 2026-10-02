@@ -9,6 +9,7 @@ dependencies = [
     "qdrant-client",
     "fastembed",
     "httpx2",
+    "urllib3==2.8.0",
     "fastapi",
     "jinja2",
     "python-multipart",
