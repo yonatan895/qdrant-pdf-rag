@@ -141,7 +141,14 @@ and reuses reachable Jaeger without claiming ownership. Component lifecycle stay
 in `run_local_gateway.sh` (gateway/Postgres), `run_local_jaeger.sh`,
 `run_local_vllm.sh`, and `qdrant_sim.py`/`qdrant_pin.py`; do not fork these owners.
 An existing gateway container makes the supervisor fail closed; resolve ownership
-before stopping it. `/ui` is enabled and smoke-checked unless `UI_ENABLED=false`.
+before stopping it. The gateway's container log is
+`${XDG_STATE_HOME:-~/.local/state}/mainframe-rag/<name>.log` (mode 600; the
+previous run rotates to `.1`; `GATEWAY_LOG` overrides). It is never in `/tmp`,
+which is RAM-backed tmpfs on the reference WSL host (issue #590). LiteLLM
+`--detailed_debug` logs full request bodies (prompts with manual excerpts,
+embedding inputs), so it is off unless `GATEWAY_DEBUG=1`/`true` is set
+explicitly. Use it only for short local diagnosis; any other value fails
+before a container starts. `/ui` is enabled and smoke-checked unless `UI_ENABLED=false`.
 `sh scripts/tools/run-task.sh local:agent` honors UI_ENABLED without a default. Detailed installation and
 component-debug procedures remain in [install and operations](install_and_ops.md).
 

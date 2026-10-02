@@ -167,3 +167,61 @@ def test_bare_hostname_url_fails_closed(var):
     proc = _render({var: "gpu-box:8002"})
     assert proc.returncode != 0
     assert "must begin with http:// or https://" in proc.stderr
+
+
+def _gateway_args(proc: subprocess.CompletedProcess) -> list[str]:
+    assert proc.returncode == 0, proc.stderr
+    cfg_dir = Path(proc.stdout.strip().splitlines()[-1])
+    try:
+        return (cfg_dir / "gateway.args").read_text().splitlines()
+    finally:
+        shutil.rmtree(cfg_dir, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    ("value", "debug_on"),
+    [(None, False), ("", False), ("0", False), ("false", False), ("1", True), ("true", True)],
+)
+def test_detailed_debug_only_when_explicitly_enabled(value, debug_on):
+    """Issue #590: the old ${GATEWAY_DEBUG:+...} expansion turned
+    --detailed_debug on for the default "0" (and for any non-empty value),
+    logging full request bodies (manual text). Off unless 1/true."""
+    env = {} if value is None else {"GATEWAY_DEBUG": value}
+    if value is None:
+        env_base = {k: v for k, v in os.environ.items() if k != "GATEWAY_DEBUG"}
+        proc = subprocess.run(
+            ["sh", str(SCRIPT)], capture_output=True, text=True, check=False,
+            env={**env_base, "GATEWAY_DRYRUN": "1", **DUMMY_KEYS},
+        )
+    else:
+        proc = _render(env)
+    args = _gateway_args(proc)[0]
+    assert args.startswith("--config /app/gateway/config.yaml")
+    assert ("--detailed_debug" in args) is debug_on
+
+
+@pytest.mark.parametrize("value", ["yes", "2", "on", "debug"])
+def test_invalid_debug_value_fails_before_any_container(tmp_path, value):
+    """A typo must not silently pick a mode: it fails before docker is called."""
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    marker = tmp_path / "docker-called"
+    docker = stub_bin / "docker"
+    docker.write_text(f"#!/bin/sh\necho \"$@\" >> {marker}\nexit 0\n")
+    docker.chmod(0o755)
+    env = {**os.environ, **DUMMY_KEYS, "GATEWAY_DEBUG": value,
+           "PATH": f"{stub_bin}:{os.environ['PATH']}", "TMPDIR": str(tmp_path)}
+    proc = subprocess.run(["sh", str(SCRIPT)], capture_output=True, text=True, env=env, check=False, timeout=60)
+    assert proc.returncode != 0
+    assert "GATEWAY_DEBUG must be 1/true or 0/false/empty" in proc.stderr
+    assert not marker.exists()
+
+
+def test_gateway_log_defaults_off_tmpfs_and_honors_override(tmp_path):
+    """Issue #590: the container log no longer goes to /tmp (tmpfs: RAM on the
+    reference host); default is the XDG state dir, GATEWAY_LOG overrides."""
+    state = tmp_path / "state"
+    default_log = _gateway_args(_render({"XDG_STATE_HOME": str(state)}))[1]
+    assert default_log == f"log {state}/mainframe-rag/local-litellm-gateway.log"
+    custom = tmp_path / "gw.log"
+    assert _gateway_args(_render({"GATEWAY_LOG": str(custom)}))[1] == f"log {custom}"
