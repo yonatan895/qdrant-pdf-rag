@@ -14,7 +14,7 @@ identifier routing for ordinary hex-looking words in prose.
 import re
 
 from mainframe_rag.regexes import find_message_ids, find_system_codes
-from mainframe_rag.retrieve.filters import parse_query
+from mainframe_rag.retrieve.filters import parse_query, query_kind
 from tests.fakes import iter_golden_queries
 
 CLASSIC = re.compile(r"\b([A-Z]{3}\d{2,5}[A-Z])\b")
@@ -221,3 +221,25 @@ def test_doc_numbers_never_match_the_s_prefix_family() -> None:
     ):
         assert find_system_codes(query) == [], query
         assert parse_query(query).has_identifiers  # doc_ids, not codes
+
+
+def test_all_letter_codes_need_uppercase_and_adjacency() -> None:
+    """AFB/BFB/CFB/DFB/EFB are real completion codes with no digit (about 1%
+    of a real system-codes manual). They are reachable only in uppercase
+    right after the code phrase, so the digit rule keeps excluding
+    "safe"/"seed" and lowercase prose (follow-up to review #603)."""
+    assert find_system_codes("abend AFB") == ["AFB"]
+    assert find_system_codes("abend SAFB") == ["AFB"]
+    assert find_system_codes("abend code DFB") == ["DFB"]
+    assert find_system_codes("What does system completion code EFB mean?") == ["EFB"]
+    assert query_kind(parse_query("abend SCFB")) == "identifier"
+    for query in (
+        "Is it SAFE to IPL now?",
+        "my job abended bad record",
+        "abended add",
+        "abend afb",  # lowercase: the uppercase rule is the precision guard
+        "AFB abend",  # before the phrase, not after it
+        "abend after FEE",  # non-code connector
+        "reason code AFB",
+    ):
+        assert find_system_codes(query) == [], query

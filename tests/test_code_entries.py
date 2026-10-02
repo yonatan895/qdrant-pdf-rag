@@ -223,6 +223,7 @@ def test_query_and_payload_agree_on_every_code_family():
         "abend S80A what should I check": "80A",
         "user completion code U4038": "U4038",
         "abend 806": "806",
+        "abend SAFB": "AFB",
     }
     for query, code in cases.items():
         assert parse_query(query).system_codes == [code]
