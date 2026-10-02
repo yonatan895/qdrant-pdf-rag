@@ -32,6 +32,8 @@ QWEN3_EMBED_06B = ModelSpec(
     kv_bytes_per_token=0.0,
     context_need=4096,
     max_num_seqs=1,
+    # Host RSS: 2.0 GB measured steady (issue #580) + startup peak + 15%.
+    host_mem_mb=2600,
 )
 
 # gemma-4-E4B-it-qat-mobile-ct: 4B-class QAT weights (~2.7 GiB resident upper
@@ -51,6 +53,10 @@ GEMMA4_E4B_QAT = ModelSpec(
     context_need=4096,
     max_num_seqs=1,
     prefix_cache=True,
+    # UNMEASURED estimate for the 4B QAT model: the 0.5B server measured
+    # 3.8 GB host RSS (issue #580); add the ~1.7 GB weight difference and
+    # 15%. Issue #580 asks for a re-measure; replace this with the result.
+    host_mem_mb=6400,
 )
 
 # Local 8GB card (nvidia-smi reports 8151 MiB). Order is allocation order:
@@ -105,6 +111,9 @@ QWEN2_5_05B = ModelSpec(
     context_need=4096,
     max_num_seqs=4,
     compiled_margin_mib=500.0,
+    # Host RSS: 3.8 GB measured, OOM-killed under a 3 GB cap (issue #580);
+    # +15% for the startup peak.
+    host_mem_mb=4500,
 )
 
 # Illustrative 31B-class reasoning server (bf16 ~= 59 GiB resident upper
@@ -149,6 +158,11 @@ BGE_RERANKER_V2_M3 = ModelSpec(
     max_num_seqs=32,
 )
 
+# Local launcher copy: carries the host-RAM cap without touching the
+# OPENSHIFT_PROD sizing. Host RSS: 4.1 GB steady, startup peak above 3.5 GB
+# (OOM-killed under a 3.5 GB cap; issue #580); +15% over the steady figure.
+BGE_RERANKER_LOCAL = BGE_RERANKER_V2_M3.model_copy(update={"host_mem_mb": 4700})
+
 OPENSHIFT_PROD = ProfileBundle(
     name="OPENSHIFT_PROD",
     host=HostSpec(total_vram_mib=81920.0, reserve_mib=1024.0),
@@ -163,7 +177,7 @@ OPENSHIFT_PROD = ProfileBundle(
 TRIPLE_8GB = ProfileBundle(
     name="TRIPLE_8GB",
     host=HostSpec(total_vram_mib=8151.0),
-    servers=[QWEN2_5_05B, QWEN3_EMBED_06B, BGE_RERANKER_V2_M3],
+    servers=[QWEN2_5_05B, QWEN3_EMBED_06B, BGE_RERANKER_LOCAL],
 )
 
 # Retrieval-only pack: embed first (allocation order — rerank scores the
@@ -175,7 +189,7 @@ TRIPLE_8GB = ProfileBundle(
 RANK_EMBED_8GB = ProfileBundle(
     name="RANK_EMBED_8GB",
     host=HostSpec(total_vram_mib=8151.0),
-    servers=[QWEN3_EMBED_06B, BGE_RERANKER_V2_M3],
+    servers=[QWEN3_EMBED_06B, BGE_RERANKER_LOCAL],
 )
 
 PROFILES: dict[str, ProfileBundle] = {

@@ -75,7 +75,10 @@ Conventions below: `$SNAPSHOT_DIR` is persistent disk outside the repo
 (e.g. `export SNAPSHOT_DIR=$HOME/qdrant-snapshots`); `$CORPUS_ROOT` is
 where vendor PDFs live on your machine (read in place, never copied
 into the repo); `$SCRATCH_DIR` is scratch space outside the repo
-(e.g. `/tmp/opencode/`, on persistent local disk, never git).
+(e.g. `$HOME/.cache/agent-tmp/`, never git). Put it on real disk: `/tmp` is
+tmpfs (RAM) on some hosts, including the WSL2 reference host, where evidence
+and `--basetemp` trees there consumed gigabytes of RAM (check with
+`df --output=fstype /tmp`).
 
 ## 1. Bring-up order
 

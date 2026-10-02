@@ -3,7 +3,9 @@
 # Launch flags (GPU memory, context window, runner/eager shape) resolve from
 # `mainframe_rag.serve` Budget profiles (default LOCAL_RT_8GB, tuned for
 # consumer 8GB cards); explicit GPU_MEM / MAX_LEN / SEQS / ROLE in the
-# environment always win. Run via `sh scripts/tools/run-task.sh local:llm`, `local:embed` or `local:rerank` so BUDGET_PYTHON points
+# environment always win. The container also runs under a host-RAM cap
+# (HOST_MEM_MB, default from the Budget profile) and refuses to start when the
+# host cannot fit it (issue #580). Run via `sh scripts/tools/run-task.sh local:llm`, `local:embed` or `local:rerank` so BUDGET_PYTHON points
 # at the project venv.
 
 set -eu
@@ -91,6 +93,48 @@ if [ "${GPU_MEM_SET}" -eq 0 ]; then GPU_MEM="${BUDGET_GPU_MEM}"; fi
 if [ "${MAX_LEN_SET}" -eq 0 ]; then MAX_LEN="${BUDGET_MAX_LEN}"; fi
 if [ "${SEQS_SET}" -eq 0 ]; then SEQS="${BUDGET_SEQS}"; fi
 
+# Host-RAM budget (issue #580): the container gets a hard memory cap with no
+# swap, and the launch is refused up front when the host cannot fit the cap
+# plus headroom or is already under memory/IO pressure. HOST_MEM_MB overrides
+# the Budget per-role value; FORCE_START=1 skips the admission check only (the
+# cap still applies). /proc paths are overridable so tests can stub them.
+HOST_MEM_MB="${HOST_MEM_MB:-${BUDGET_HOST_MEM_MB:-}}"
+case "${HOST_MEM_MB}" in
+    ""|*[!0-9]*|0)
+        echo "ERROR: no valid host memory cap for profile '${BUDGET_PROFILE}' role '${ROLE}'; set HOST_MEM_MB to a positive integer (MiB)." >&2
+        exit 1
+        ;;
+esac
+HOST_MEM_HEADROOM_MB="${HOST_MEM_HEADROOM_MB:-2048}"
+HOST_PSI_MAX="${HOST_PSI_MAX:-10}"
+HOST_MEMINFO="${HOST_MEMINFO:-/proc/meminfo}"
+HOST_PSI_DIR="${HOST_PSI_DIR:-/proc/pressure}"
+admission_check() {
+    avail_mb="$(awk '/^MemAvailable:/ { print int($2 / 1024) }' "${HOST_MEMINFO}" 2>/dev/null || true)"
+    if [ -z "${avail_mb}" ]; then
+        echo "NOTICE: host memory not readable at ${HOST_MEMINFO}; skipping the RAM admission check." >&2
+    elif [ "${avail_mb}" -lt $((HOST_MEM_MB + HOST_MEM_HEADROOM_MB)) ]; then
+        echo "REFUSED: host RAM too low for the ${ROLE} server (${HOST_MEM_MB} MiB cap + ${HOST_MEM_HEADROOM_MB} MiB headroom needed, ${avail_mb} MiB available). Free memory or stop other servers; set FORCE_START=1 to override." >&2
+        return 1
+    fi
+    for resource in memory io; do
+        psi_file="${HOST_PSI_DIR}/${resource}"
+        if [ ! -r "${psi_file}" ]; then
+            echo "NOTICE: ${psi_file} not readable; skipping the ${resource} pressure check." >&2
+            continue
+        fi
+        if awk -v max="${HOST_PSI_MAX}" '/^some/ { split($2, a, "="); if (a[2] + 0 >= max + 0) found = 1 } END { exit !found }' "${psi_file}"; then
+            echo "REFUSED: host ${resource} pressure is high (some avg10 >= ${HOST_PSI_MAX}%). Wait for it to settle; set FORCE_START=1 to override." >&2
+            return 1
+        fi
+    done
+}
+if [ "${FORCE_START:-0}" = "1" ]; then
+    echo "NOTICE: FORCE_START=1; skipping the host RAM/pressure admission check." >&2
+else
+    admission_check || exit 75
+fi
+
 echo "============================================================"
 echo " Starting local vLLM server"
 echo "============================================================"
@@ -99,6 +143,7 @@ echo " Port:              ${PORT}"
 echo " Budget profile:    ${BUDGET_PROFILE} role ${ROLE}"
 echo " GPU Memory Util:   ${GPU_MEM}"
 echo " Max Context Len:   ${MAX_LEN}"
+echo " Host RAM cap:      ${HOST_MEM_MB} MiB (no swap)"
 echo " Container Image:   ${IMAGE}"
 echo "============================================================"
 
@@ -171,6 +216,7 @@ esac
 # Prepend runtime arguments as an argv vector; local paths may contain spaces.
 set -- --gpus all -p "${PORT}:${PORT}" \
     -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
+    --memory="${HOST_MEM_MB}m" --memory-swap="${HOST_MEM_MB}m" \
     -e VLLM_WSL2_ENABLE_PIN_MEMORY=1 --ipc=host "${IMAGE}" "$@"
 if [ -n "${ABS_MODEL_DIR}" ]; then
     set -- -v "${ABS_MODEL_DIR}:/model:ro" "$@"
