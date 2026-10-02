@@ -645,3 +645,75 @@ def test_omitted_subflags_preserve_historical_coupling():
     off = run_new_template({"tracing": {"enabled": False, "endpoint": ""}})
     assert _jaeger_keys(off) == set()
     assert off["Deployment", "rag-agent"] is not None
+
+
+def _hardening_violations(pod_spec: dict) -> list[str]:
+    """Pod/container hardening that must not depend on restricted-v2 alone (#585).
+
+    Fixed identities stay forbidden: OpenShift assigns UID/GID/fsGroup.
+    """
+    problems = []
+    pod_sc = pod_spec.get("securityContext") or {}
+    if pod_sc.get("runAsNonRoot") is not True:
+        problems.append("pod runAsNonRoot")
+    if (pod_sc.get("seccompProfile") or {}).get("type") != "RuntimeDefault":
+        problems.append("pod seccompProfile")
+    for key in ("runAsUser", "runAsGroup", "fsGroup"):
+        if key in pod_sc:
+            problems.append(f"pod {key} set")
+    for c in pod_spec.get("initContainers", []) + pod_spec["containers"]:
+        sc = c.get("securityContext") or {}
+        if sc.get("allowPrivilegeEscalation") is not False:
+            problems.append(f"{c['name']} allowPrivilegeEscalation")
+        if (sc.get("capabilities") or {}).get("drop") != ["ALL"]:
+            problems.append(f"{c['name']} capabilities.drop")
+        for key in ("runAsUser", "runAsGroup"):
+            if key in sc:
+                problems.append(f"{c['name']} {key} set")
+    return problems
+
+
+def test_every_rendered_pod_is_hardened_without_fixed_identities():
+    docs = run_new_template(
+        {
+            "route": {"enabled": True, "destinationCA": FAKE_CA},
+            "ingest": {"enabled": True, "corpusPVC": "corpus-pvc"},
+        }
+    )
+    pods = {
+        key: doc["spec"]["template"]["spec"]
+        for key, doc in docs.items()
+        if key[0] in ("Deployment", "Job")
+    }
+    assert set(pods) == {
+        ("Deployment", "rag-agent"),
+        ("Deployment", "jaeger"),
+        ("Job", "ingest"),
+    }
+    assert {c["name"] for c in pods["Deployment", "rag-agent"]["containers"]} == {
+        "agent",
+        "oauth-proxy",
+    }
+    for key, pod in pods.items():
+        assert _hardening_violations(pod) == [], key
+
+
+def test_hardening_check_rejects_unhardened_and_fixed_identity_containers():
+    """Negative control: the check above must fail when a container lacks the fields."""
+    hardened = {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
+    pod = {
+        "securityContext": {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}},
+        "containers": [{"name": "ok", "securityContext": hardened}],
+    }
+    assert _hardening_violations(pod) == []
+    pod["containers"].append({"name": "bare"})
+    assert _hardening_violations(pod) == ["bare allowPrivilegeEscalation", "bare capabilities.drop"]
+    pod["containers"][1] = {"name": "pinned", "securityContext": {**hardened, "runAsUser": 1000}}
+    assert _hardening_violations(pod) == ["pinned runAsUser set"]
+    pod["securityContext"] = {"fsGroup": 1000}
+    assert _hardening_violations(pod) == [
+        "pod runAsNonRoot",
+        "pod seccompProfile",
+        "pod fsGroup set",
+        "pinned runAsUser set",
+    ]
