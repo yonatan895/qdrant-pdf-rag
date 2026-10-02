@@ -994,6 +994,41 @@ def test_error_shape_is_structured(client, monkeypatch):
     assert set(body) == {"code", "message"}
 
 
+UNSEARCHABLE_QUERIES = ["   ", "\t\n", "\x00x", "a\x1bb"]
+
+
+@pytest.mark.parametrize("query", UNSEARCHABLE_QUERIES)
+@pytest.mark.parametrize(
+    ("path", "extra"),
+    [("/v1/search", {}), ("/v1/answer", {}), ("/v1/answer", {"stream": True})],
+    ids=["search", "answer", "answer-sse"],
+)
+def test_blank_or_control_query_refused_before_any_work(client, monkeypatch, query, path, extra):
+    """Issue #579: whitespace-only and NUL/C0-control queries get the fixed
+    422 envelope with zero retrieval (embed/Qdrant) and zero LLM calls."""
+    search = MagicMockSearch()
+    llm = FakeLLM()
+    monkeypatch.setattr(app_mod, "retrieve_search", search.search)
+    monkeypatch.setattr(app_mod, "llm", llm)
+    resp = client.post(path, json={"query": query, **extra})
+    assert resp.status_code == 422
+    assert resp.json() == {"code": "invalid_request", "message": "request body failed validation"}
+    assert query.strip() not in resp.text or not query.strip()
+    assert search.calls == []
+    assert llm.calls == 0
+
+
+@pytest.mark.parametrize("path", ["/v1/search", "/v1/answer"])
+def test_padded_real_query_is_searched_unmodified(client, monkeypatch, path):
+    """Leading/trailing whitespace around real text stays legitimate and the
+    searched text is not normalised (identifier semantics live in retrieve)."""
+    search = MagicMockSearch()
+    monkeypatch.setattr(app_mod, "retrieve_search", search.search)
+    resp = client.post(path, json={"query": "  IEFBR14  "})
+    assert resp.status_code == 200
+    assert [c["query"] for c in search.calls] == ["  IEFBR14  "]
+
+
 def test_answer_retrieval_failure_reads_retrieval_failed(client, monkeypatch):
     """Same fault, same code+message on every endpoint: a retrieval failure on
     /v1/answer reads exactly like one on /v1/search."""
