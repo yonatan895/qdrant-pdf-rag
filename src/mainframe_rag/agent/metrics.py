@@ -182,7 +182,7 @@ def record_request(
         if ttft_ms is not None and llm_model is not None:
             instruments.ttft.record(max(ttft_ms, 0), {"model": llm_model})
     except Exception as exc:  # noqa: BLE001
-        log.debug("otel record_request dropped: %s", exc)
+        log.debug("otel record_request dropped: %s", error_type(exc))
 
 
 def setup_metrics(enabled: bool) -> MeterProvider | None:

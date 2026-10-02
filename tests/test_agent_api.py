@@ -2876,6 +2876,34 @@ def test_lifespan_reranker_unreachable_warns_but_still_listens(monkeypatch, caps
     assert "reranker_unreachable" in capsys.readouterr().err
 
 
+def test_lifespan_zowe_probe_warning_leaks_no_exception_text(monkeypatch, capsys):
+    """The startup warning for a failed Zowe bridge probe carries the error
+    type only; a sentinel in the exception message never reaches stderr."""
+    from mainframe_rag.agent.zowe_mcp import HttpZoweMCP
+
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("EMBED_MODE", "vllm")
+    monkeypatch.setenv("EMBED_BASE_URL", "http://embed.internal/v1")
+    monkeypatch.setenv("EMBED_MODEL", "test-embed-model")
+    monkeypatch.setenv("EMBED_MODEL_REVISION", "test-rev")
+    monkeypatch.setenv("DENSE_DIM", "64")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.internal/v1")
+    monkeypatch.setenv("LLM_MODEL_REASONING", "test-reasoning-model")
+    monkeypatch.setenv("ZOWE_MCP_ENABLED", "true")
+    monkeypatch.setenv("ZOWE_MCP_BASE_URL", "http://bridge.internal:8081")
+
+    def leaky(self) -> list[str]:
+        raise RuntimeError("SECRET-XYZ upstream body")
+
+    monkeypatch.setattr(HttpZoweMCP, "list_tools", leaky)
+    with TestClient(app_mod.app) as c:
+        c.get("/metrics")
+    err = capsys.readouterr().err
+    assert "zowe_mcp_unreachable" in err
+    assert "RuntimeError" in err
+    assert "SECRET-XYZ" not in err
+
+
 def test_prompt_build_runs_off_the_event_loop(client, monkeypatch):
     """The tokenizer's /tokenize verify is a sync RPC; prompt construction must
     run on a worker thread so it cannot stall every in-flight request. The
