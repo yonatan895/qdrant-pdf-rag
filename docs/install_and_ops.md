@@ -280,6 +280,7 @@ The repository provides a hardened launcher script ([`scripts/run_local_vllm.sh`
 * **Gemma-4 Support**: Automatically configures `--tool-call-parser gemma4`, `--reasoning-parser gemma4`, and `--chat-template /vllm-workspace/examples/tool_chat_template_gemma4.jinja`.
 * **Task launch contract**: `local:llm`, `local:embed` and `local:rerank` pass the role and repository venv `BUDGET_PYTHON` per invocation; a missing `.venv` fails with an explicit setup instruction. Re-run the tokenizer sweep before changing chunk constants or the embed-text header.
 * **Embedding Model Detection**: Model names matching `*embed*`/`*Embed*` (e.g. `Qwen/Qwen3-Embedding-0.6B`) derive `ROLE=embed` (overridable; `sh scripts/tools/run-task.sh local:llm` (or `local:embed` / `local:rerank`) passes `ROLE` explicitly) and get the Budget pooling-runner serving shape automatically.
+* **Host-RAM cap and admission check** (issue #580): every container runs with `--memory=<N>m --memory-swap=<N>m` (equal values: no swap), so a runaway is OOM-killed inside its own cgroup instead of thrashing the host. `<N>` is the Budget per-role `host_mem_mb` (`BUDGET_HOST_MEM_MB`: embed 2600, reasoning 6400 for the 4B model (an unmeasured estimate) or 4500 for the 0.5B stand-in, rerank 4700); `HOST_MEM_MB=<MiB>` overrides it and is required for a profile that declares none. Before `docker run` the launcher refuses (exit 75, fixed message, nothing started) when `MemAvailable` < cap + `HOST_MEM_HEADROOM_MB` (default 2048) or when memory or IO PSI `some avg10` is >= `HOST_PSI_MAX` (default 10). `FORCE_START=1` skips only that admission check (the cap still applies). The `/proc/meminfo` and `/proc/pressure` paths are `HOST_MEMINFO` and `HOST_PSI_DIR` (tests stub them); a missing PSI file skips that check with a notice. The GPU `GPU_MEM` fractions are unchanged and are a ceiling on total device use including co-tenant servers. Local profiles still take the compiled reasoning path unless the profile sets eager; changing that alters GPU sizing and needs the budget owner's measurements.
 * **WSL2 Compatibility**: Exports `VLLM_WSL2_ENABLE_PIN_MEMORY=1` for host memory stability.
 * **Safe Secrets**: Passes `HF_TOKEN` via `-e HF_TOKEN` without exposing secret tokens on command-line argument lists.
 
@@ -713,7 +714,7 @@ separate. Test correct CA, wrong CA and hostname mismatch from actual pods.
 
 #### Pre-Flight Validation (`sh scripts/tools/run-task.sh airgap:validate`)
 
-Before modifying any cluster state, run the pre-flight validation check to verify tools, required variables, storage class compliance (refusing NFS), and required keys — it prints OpenShift SCC guidance but does not verify SCC permissions:
+Before modifying any cluster state, run the pre-flight validation check to verify tools, required variables, storage class compliance (refusing NFS for the data and snapshot classes), strict operator booleans, and required keys. A denied (Forbidden) cluster read is reported as unverified, never as absent or as a non-OpenShift cluster. It prints OpenShift SCC guidance but does not verify SCC permissions:
 
 ```bash
 sh scripts/tools/run-task.sh airgap:validate
@@ -832,7 +833,11 @@ the endpoint into the agent and the ingest Job. To disable tracing — and skip
 the Jaeger deployment entirely — set `OTEL_EXPORTER_OTLP_ENDPOINT=off` (also
 `none`, `false`, or `0`) in `airgap.env`. A custom `http(s)` OTLP/HTTP
 collector origin is accepted in place of the in-cluster Jaeger; anything else
-fails closed before a manifest is rendered. `sh scripts/tools/run-task.sh airgap:validate` prints the
+fails closed before a manifest is rendered. To keep exporting while skipping the
+bundled backend (`JAEGER_ENABLED=false`), also set `OTEL_EXPORTER_OTLP_ENDPOINT`
+to the external collector (the former `http://jaeger:4318` is fine when a
+platform-owned service really lives there) or to `off`; the unset default is
+refused in preflight, the values mapper and the chart (`tracing.endpoint`). `sh scripts/tools/run-task.sh airgap:validate` prints the
 resolved mode.
 
 This traces **this repo's components only** (agent, retrieval, ingest); the
@@ -847,7 +852,8 @@ pack; the oauth-proxy pin is skipped while `sha256:PENDING`), so the
 default-on path works in a disconnected install. The endpoint may be given
 with or without the `/v1/traces` path — the agent accepts both.
 `sh scripts/tools/run-task.sh airgap:smoke` proves a `v1.search` span landed before reporting
-acceptance (empty-collection runs report tracing as skipped); it polls the
+acceptance (empty-collection runs and a disabled bundled Jaeger report tracing
+as skipped, trace arrival NOT VERIFIED); it polls the
 Jaeger query API at `JAEGER_QUERY_URL` (default `http://jaeger:16686`) —
 change that only when a custom collector exposes a Jaeger-compatible query
 API.
@@ -1092,7 +1098,8 @@ The agent exposes `/healthz` for the OpenShift readiness probe and
 `503 qdrant_unready`, upstream bodies stay server-side). `/healthz` is a
 real readiness failure (HTTP 503) whenever the served generation is not
 validated compatible — including `reembed_required`, `legacy`, a `pending`
-migration, or unreadable metadata; `empty` stays ready so the
+migration, or unreadable metadata, or when `RERANK_ENABLED` is on and the
+rerank endpoint(s) fail the cached probe (`rerank: false`); `empty` stays ready so the
 deploy -> ingest bootstrap can complete. `/livez` is process-only.
 
 ```bash
@@ -1103,7 +1110,9 @@ curl -s http://rag-agent.mainframe-rag.svc:8080/healthz
 {
   "status": "ok",
   "qdrant": true,
-  "embed": true
+  "embed": true,
+  "representation": "compatible",
+  "rerank": null
 }
 ```
 

@@ -681,6 +681,19 @@ def test_ingest_otel_off_sentinel(ingest_tree):
     assert rendered_env(rendered, "ingest")["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
 
 
+def test_ingest_jaeger_false_requires_intentional_destination(ingest_tree):
+    # Issue #568: the Job must not inherit the defaulted bundled hostname
+    # when the bundled backend is disabled.
+    r = _run_ingest(ingest_tree, ("JAEGER_ENABLED", "false"))
+    assert r.returncode != 0
+    assert "intentional trace destination" in r.stderr
+    r = _run_ingest(ingest_tree, ("JAEGER_ENABLED", "false"),
+                    ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert rendered_env(rendered, "ingest")["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://collector.platform:4318"
+
+
 def test_ingest_otel_endpoint_and_environment_wired(ingest_tree):
     r = _run_ingest(
         ingest_tree,

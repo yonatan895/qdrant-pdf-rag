@@ -23,6 +23,7 @@ from tests.helpers_airgap import (
     make_bin_tree,
     run_sh,
     set_oauth_proxy_pin,
+    sha256_bytes,
     skopeo_stub,
     symlink_tools,
 )
@@ -139,6 +140,31 @@ def test_pack_sha_mismatch_fails_closed(pack_tree):
     assert r.returncode != 0
     assert "is not the checked-out commit" in r.stderr
     assert "airgap.env" in r.stderr
+
+
+def test_pack_refuses_several_chart_archives_then_passes_after_fix(pack_tree):
+    tmp_path, _skopeo_log, _head, _key = pack_tree
+    chart = next((tmp_path / "charts").glob("qdrant-*.tgz"))
+    extra = tmp_path / "charts" / "qdrant-9.9.9.tgz"
+    shutil.copy(chart, extra)
+    r, _ = _run_pack(pack_tree)
+    assert r.returncode != 0
+    assert "exactly one vendored Qdrant chart is required" in r.stderr
+    assert not (tmp_path / "dist" / "MANIFEST.txt").exists()
+    extra.unlink()
+    r, _ = _run_pack(pack_tree)
+    assert r.returncode == 0, r.stderr
+    manifest = (tmp_path / "dist" / "MANIFEST.txt").read_text()
+    assert manifest.count("chart_sha256: ") == 1
+    assert f"chart_sha256: {sha256_bytes(chart.read_bytes())}\n" in manifest
+
+
+def test_pack_refuses_missing_chart_archive(pack_tree):
+    tmp_path, *_ = pack_tree
+    next((tmp_path / "charts").glob("qdrant-*.tgz")).unlink()
+    r, _ = _run_pack(pack_tree)
+    assert r.returncode != 0
+    assert "exactly one vendored Qdrant chart is required" in r.stderr
 
 
 def test_pack_missing_skopeo_fails_closed(pack_tree):
