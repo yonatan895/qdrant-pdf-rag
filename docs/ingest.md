@@ -62,8 +62,9 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   with equal counts). Never "clean up" the sort.
 - Product/version and title scan the first pages only (4 for product/version,
   first 10 lines for title); `z/OS` normalizes via `lower().replace("/","")`;
-  a generic version returns `(None, "X.Y")`; title falls back to `doc_id`
-  then `"Untitled"`.
+  a generic version returns `(None, "X.Y")`; title prefers the PDF metadata
+  title, then the first non-identifier line of the first 10 lines, then
+  `doc_id`, then `"Untitled"`.
 - Final precedence for vendor/product/version/title:
   CLI > path layout (when not `unknown`/`""`) > text detection >
   `unknown`/`None`; empty version becomes `None`, empty vendor becomes
@@ -338,7 +339,7 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   an on-disk index; on-disk payloads.
 - Payload indexes are created **before** load — including on pre-existing
   collections: keywords `vendor, product, version, doc_id, chunk_type,
-  message_ids, members, system_codes, sha256` plus integer `page_start`. An unindexed
+  message_ids, members, system_codes, sha256, source_rev` plus integer `page_start`. An unindexed
   filter becomes a scan.
 - `ensure_collection` verifies the stored dim against settings on both the
   named-vector and single-vector schemas, raising `DimMismatchError`.
