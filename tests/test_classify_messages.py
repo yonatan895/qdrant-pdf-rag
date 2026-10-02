@@ -94,6 +94,28 @@ def test_strip_page_drops_bare_page_numbers_at_page_edges():
     assert strip_page(f"7\n{body}\n8", set()) == f"7\n{body}"  # the footer folio wins
 
 
+def test_strip_page_drops_entry_range_headers_above_a_footer_folio():
+    """Message manuals print the page's first and last entry as a header
+    ("ICH408I • ICH409I") above a footer folio. The one-folio rule kept it as
+    content on 723 pages of two local message manuals; a range is never body
+    text, so it goes at either edge."""
+    body = "\n".join(f"Generated entry text line {i}." for i in range(8))
+    for header in ("ICH408I \u2022 ICH409I", "IRRA001I \u2022 IRRA009I", "U901 \u2022 U902"):
+        assert strip_page(f"{header}\n{body}\n17", set()) == body
+    # Code families with a lowercase placeholder and all-letter hex codes.
+    for footer in ("0BB \u2022 0Cx", "EC7 \u2022 FFx", "AC8 \u2022 AFB", "805 \u2022 806"):
+        assert strip_page(f"{body}\n{footer}\n17", set()) == body
+
+
+def test_strip_page_keeps_bullet_pairs_that_are_not_entry_ranges():
+    body = "\n".join(f"Generated entry text line {i}." for i in range(8))
+    for line in ("Yes \u2022 No", "TSO \u2022 ISPF", "Return Code=4 \u2022 Return Code=8"):
+        assert strip_page(f"{line}\n{body}\n17", set()) == f"{line}\n{body}"
+    # An entry range in the page body is left alone, like a bare number.
+    page = "a.\nb.\nc.\nd.\nICH408I \u2022 ICH409I\ne.\nf.\ng.\nh."
+    assert "ICH408I \u2022 ICH409I" in strip_page(page, set())
+
+
 def test_strip_page_keeps_whitespace_lines():
     """Empty/whitespace-only lines are never page numbers — the regexes reject
     empty input structurally, and strip_page keeps blank lines as-is."""
