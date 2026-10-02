@@ -203,3 +203,22 @@ def test_smoke_tracing_skipped_on_empty_collection(smoke_tree):
     r = _run_smoke(smoke_tree, ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4318"))
     assert r.returncode == 0, r.stderr
     assert "Tracing:       SKIPPED (nothing ingested — no request traced yet)" in r.stdout
+
+
+def test_smoke_external_collector_never_claims_trace_arrival(smoke_tree):
+    # Issue #568: a disabled bundled Jaeger skips the query; the report must
+    # say arrival is NOT VERIFIED and must not claim a collector was checked.
+    _setup_stub(smoke_tree, health_exit=0, search_exit=0, trace_exit=1)
+    r = _run_smoke(smoke_tree, ("JAEGER_ENABLED", "false"),
+                   ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.platform:4318"))
+    assert r.returncode == 0, r.stderr
+    assert "trace arrival NOT VERIFIED" in r.stdout
+    assert "Tracing:       OK" not in r.stdout
+    assert "external collector —" not in r.stdout
+
+
+def test_smoke_jaeger_false_without_destination_fails_closed(smoke_tree):
+    _setup_stub(smoke_tree, health_exit=0, search_exit=0)
+    r = _run_smoke(smoke_tree, ("JAEGER_ENABLED", "false"))
+    assert r.returncode != 0
+    assert "intentional trace destination" in r.stderr

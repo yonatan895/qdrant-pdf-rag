@@ -80,13 +80,17 @@ gateway:
 tracing:
   # Unset-equivalent default: enabled with the in-cluster Jaeger endpoint.
   # Disabled renders an empty OTEL_EXPORTER_OTLP_ENDPOINT and skips the
-  # Jaeger resources. Custom collectors set a full http(s) URL.
+  # Jaeger resources. Custom collectors set a full http(s) URL. An empty
+  # endpoint means "the bundled Jaeger" (http://jaeger:4318) and is only
+  # valid while the bundled Jaeger renders (issue #568).
   enabled: true
-  endpoint: http://jaeger:4318
+  endpoint: ""
   jaeger:
     # Bundled Jaeger all-in-one backend (issue #529 OBS-2). Null (default)
     # follows tracing.enabled, preserving the historical coupling. Set false
-    # to export to an external collector without the bundled backend;
+    # to export to an external collector without the bundled backend; that
+    # requires an explicit tracing.endpoint (any http(s) URL, the former
+    # hostname included) or tracing.enabled=false, never the empty default;
     # setting true while tracing.enabled is false is rejected (a backend
     # nothing exports to). Explicit values must be booleans, not truthy
     # strings (enforced by values.schema.json).

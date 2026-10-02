@@ -75,7 +75,10 @@ Conventions below: `$SNAPSHOT_DIR` is persistent disk outside the repo
 (e.g. `export SNAPSHOT_DIR=$HOME/qdrant-snapshots`); `$CORPUS_ROOT` is
 where vendor PDFs live on your machine (read in place, never copied
 into the repo); `$SCRATCH_DIR` is scratch space outside the repo
-(e.g. `/tmp/opencode/`, on persistent local disk, never git).
+(e.g. `$HOME/.cache/agent-tmp/`, never git). Put it on real disk: `/tmp` is
+tmpfs (RAM) on some hosts, including the WSL2 reference host, where evidence
+and `--basetemp` trees there consumed gigabytes of RAM (check with
+`df --output=fstype /tmp`).
 
 ## 1. Bring-up order
 
@@ -241,7 +244,8 @@ and failure/skip checks. Semantic evaluation still needs an approved venue.
 # a. readiness + liveness
 curl -s -w ' [%{http_code}]\n' http://127.0.0.1:8087/healthz
 curl -s http://127.0.0.1:8087/livez
-# expect: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible"} [200]
+# expect: {"status":"ok","qdrant":true,"embed":true,"representation":"compatible","rerank":true} [200]
+# (rerank is null when RERANK_ENABLED=false; false = 503 with the reranker down)
 # and {"status":"alive"} from /livez. representation is empty pre-ingest
 # (still 200 — bootstrap), record_only_drift on query-prefix drift;
 # reembed_required/legacy/pending/unknown degrade AND return HTTP 503
@@ -262,6 +266,9 @@ python3 -c "print('{\"query\":\"' + 'x'*2001 + '\"}')" > "$SCRATCH_DIR/long-quer
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8087/v1/search \
   -H 'Content-Type: application/json' -d @"$SCRATCH_DIR/long-query.json"
 # expect: 422 with {"code":"invalid_request","message":"request body failed validation"}
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8087/v1/search \
+  -H 'Content-Type: application/json' -d '{"query":"   "}'
+# expect: the same 422 (whitespace-only or NUL/C0 control query, issue #579), no retrieval
 
 # e. multi-turn chat + console (when UI_ENABLED / the console is in scope)
 curl -s -X POST http://127.0.0.1:8087/v1/chat -H 'Content-Type: application/json' \

@@ -35,6 +35,20 @@ def tree(tmp_path):
     return tmp_path
 
 
+NOT_FOUND = 'Error from server (NotFound): objects "x" not found'
+FORBIDDEN = "Error from server (Forbidden): the object is forbidden: User cannot get resource"
+
+
+def _kubectl_stub(resource, stderr_text, rc=1):
+    """kubectl stub: any invocation naming `resource` fails with the given
+    client error text; everything else succeeds."""
+    return (
+        "#!/bin/sh\nfor arg in \"$@\"; do\n"
+        f"  if [ \"$arg\" = \"{resource}\" ]; then cat >&2 <<'EOT'\n{stderr_text}\nEOT\n    exit {rc}; fi\n"
+        "done\nexit 0\n"
+    )
+
+
 def _run(tree, extra_env=None):
     env = {
         "PATH": f"{tree / 'bin'}:/usr/bin:/bin",
@@ -178,6 +192,16 @@ def test_validate_tracing_off_sentinel(tree):
     r = _run(tree, {"OTEL_EXPORTER_OTLP_ENDPOINT": "off"})
     assert r.returncode == 0, r.stderr
     assert "Tracing:           OFF" in r.stdout
+
+
+def test_validate_jaeger_false_requires_intentional_destination(tree):
+    # Issue #568: disabling the bundled backend alone is not a destination.
+    r = _run(tree, {"JAEGER_ENABLED": "false"})
+    assert r.returncode != 0
+    assert "intentional trace destination" in r.stderr
+    ok = _run(tree, {"JAEGER_ENABLED": "false", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.platform:4318"})
+    assert ok.returncode == 0, ok.stderr
+    assert "Tracing:           ON (http://collector.platform:4318)" in ok.stdout
 
 
 def test_validate_tracing_bad_endpoint_fails_closed(tree):
@@ -488,7 +512,7 @@ def test_validate_live_verifies_gateway_secret(tree):
 def test_validate_live_missing_gateway_secret_fails(tree):
     write_stub(
         tree / "bin" / "kubectl",
-        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"secret\" ]; then exit 1; fi\ndone\nexit 0\n",
+        _kubectl_stub("secret", NOT_FOUND),
     )
     r = _run(tree, {"AIRGAP_DRYRUN": "0", "GATEWAY_API_KEY_SECRET": "gateway-api-keys"})
     assert r.returncode != 0
@@ -498,7 +522,7 @@ def test_validate_live_missing_gateway_secret_fails(tree):
 def test_validate_live_missing_namespace_notices_secret(tree):
     write_stub(
         tree / "bin" / "kubectl",
-        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"namespace\" ]; then exit 1; fi\ndone\nexit 0\n",
+        _kubectl_stub("namespace", NOT_FOUND),
     )
     r = _run(tree, {"AIRGAP_DRYRUN": "0", "GATEWAY_API_KEY_SECRET": "gateway-api-keys"})
     assert r.returncode == 0, r.stderr
@@ -593,6 +617,7 @@ def test_checkout_guard_dryrun_skips_mismatch(tree):
     (tree / "dist" / "MANIFEST.txt").write_text(f"sha: {IMAGE_SHA}\n")
     r = _guard_run(tree, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1"})
     assert r.returncode == 0, r.stderr
+    assert "not release-verified" in r.stderr
 
 
 def test_checkout_guard_skips_without_manifest_or_checkout(tree):
@@ -601,10 +626,130 @@ def test_checkout_guard_skips_without_manifest_or_checkout(tree):
     positive mismatches (issue #414)."""
     (tree / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tree / "scripts" / "airgap" / "common.sh")
-    assert _guard_run(tree, "dist/MANIFEST.txt").returncode == 0
+    r = _guard_run(tree, "dist/MANIFEST.txt")
+    assert r.returncode == 0
+    assert "not release-verified" in r.stderr
     (tree / "dist").mkdir(exist_ok=True)
     (tree / "dist" / "MANIFEST.txt").write_text(f"sha: {IMAGE_SHA}\n")
-    assert _guard_run(tree, "dist/MANIFEST.txt").returncode == 0
+    r = _guard_run(tree, "dist/MANIFEST.txt")
+    assert r.returncode == 0
+    assert "not release-verified" in r.stderr
+
+
+def _git(cwd, *args):
+    import subprocess
+
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+@pytest.fixture
+def approved(tmp_path):
+    """A real git checkout whose HEAD equals the packed MANIFEST sha, with
+    tracked executable and chart content (issue #414)."""
+    (tmp_path / "scripts" / "airgap").mkdir(parents=True)
+    shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tmp_path / "scripts" / "airgap" / "common.sh")
+    (tmp_path / "charts").mkdir()
+    (tmp_path / "charts" / "values.yaml").write_text("replicas: 1\n")
+    (tmp_path / "Taskfile.yml").write_text("version: '3'\n")
+    _git(tmp_path, "init", "-b", "main")
+    _git(tmp_path, "config", "user.name", "Test")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "approved release")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "MANIFEST.txt").write_text(f"sha: {_git(tmp_path, 'rev-parse', 'HEAD')}\n")
+    return tmp_path
+
+
+def _approved_run(tree):
+    return _guard_run(tree, "dist/MANIFEST.txt")
+
+
+def test_checkout_guard_clean_matching_checkout_passes_silently(approved):
+    r = _approved_run(approved)
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == "" and r.stdout == ""
+
+
+def test_checkout_guard_allows_untracked_operator_files(approved):
+    (approved / "airgap.env").write_text("INTERNAL_REGISTRY=site.internal\n")
+    (approved / "dist" / "retained-evidence.txt").write_text("x")
+    (approved / "scratch-output.yaml").write_text("rendered: true\n")
+    r = _approved_run(approved)
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("stage", [False, True], ids=["unstaged", "staged"])
+@pytest.mark.parametrize("path", ["scripts/airgap/common.sh", "charts/values.yaml", "Taskfile.yml"])
+def test_checkout_guard_refuses_tracked_edit_at_matching_head(approved, path, stage):
+    """Equal HEAD is not enough: an edited tracked script/chart/Taskfile
+    must not run under the release claim. The refusal names no file and
+    echoes no content."""
+    with (approved / path).open("a") as fh:
+        fh.write("\n# SECRET-EDIT-MARKER\n")
+    if stage:
+        _git(approved, "add", path)
+    r = _approved_run(approved)
+    assert r.returncode != 0
+    assert "tracked changes against the packed MANIFEST sha" in r.stderr
+    assert "SECRET-EDIT-MARKER" not in r.stdout + r.stderr
+    assert path not in r.stderr
+
+
+@pytest.mark.parametrize("change", ["delete", "stage_new_file"])
+def test_checkout_guard_refuses_other_tracked_changes(approved, change):
+    if change == "delete":
+        (approved / "charts" / "values.yaml").unlink()
+    elif change == "stage_new_file":
+        (approved / "scripts" / "extra.sh").write_text("echo hi\n")
+        _git(approved, "add", "scripts/extra.sh")
+    r = _approved_run(approved)
+    assert r.returncode != 0
+    assert "tracked changes" in r.stderr
+
+
+def test_checkout_guard_wrong_head_message_wins_over_edit(approved):
+    (approved / "dist" / "MANIFEST.txt").write_text(f"sha: {'c' * 40}\n")
+    (approved / "Taskfile.yml").write_text("version: '4'\n")
+    r = _approved_run(approved)
+    assert r.returncode != 0
+    assert "does not match the packed MANIFEST sha" in r.stderr
+
+
+def test_checkout_guard_next_run_passes_after_reverting_edit(approved):
+    """Lifecycle: refusal is not sticky and nothing was reset for the
+    operator; once the edit is reverted the next ordinary run passes."""
+    path = approved / "scripts" / "airgap" / "common.sh"
+    original = path.read_text()
+    path.write_text(original + "\n# local edit\n")
+    _git(approved, "add", "scripts/airgap/common.sh")
+    refused = _approved_run(approved)
+    assert refused.returncode != 0
+    # The guard did not touch the operator's staged edit.
+    assert "# local edit" in path.read_text()
+    assert _git(approved, "diff", "--cached", "--name-only") == "scripts/airgap/common.sh"
+    _git(approved, "reset", "-q", "HEAD", "--", "scripts/airgap/common.sh")
+    _git(approved, "checkout", "--", "scripts/airgap/common.sh")
+    again = _approved_run(approved)
+    assert again.returncode == 0, again.stderr
+    assert again.stderr == ""
+
+
+def test_checkout_guard_works_in_git_file_worktree(approved):
+    """A linked worktree has a `.git` file, not a directory; the guard must
+    judge it the same way (clean passes, tracked edit refuses)."""
+    wt = approved.parent / "linked-wt"
+    _git(approved, "worktree", "add", "--detach", str(wt))
+    assert (wt / ".git").is_file()
+    (wt / "dist").mkdir()
+    (wt / "dist" / "MANIFEST.txt").write_text((approved / "dist" / "MANIFEST.txt").read_text())
+    assert _approved_run(wt).returncode == 0
+    (wt / "charts" / "values.yaml").write_text("replicas: 9\n")
+    r = _approved_run(wt)
+    assert r.returncode != 0
+    assert "tracked changes" in r.stderr
+    _git(wt, "checkout", "--", "charts/values.yaml")
+    assert _approved_run(wt).returncode == 0
 
 
 def test_checkout_guard_wired_into_all_launch_paths():
@@ -667,3 +812,152 @@ def test_shipped_example_model_mode_is_explicit(tree, shared):
     assert result.returncode == 0, result.stderr
     expected = "https://shared.example/v1" if shared else "http://vllm:8000/v1"
     assert f"EMBED_BASE_URL:    {expected}" in result.stdout
+
+
+# ---------------------------------------------- strict operator booleans (#272)
+
+BOOL_KEYS = [
+    "UI_ENABLED", "CONTEXTUAL_EMBED_ENABLED", "INGEST_ALIAS_PUBLISH",
+    "INGEST_REINGEST", "CHAT_CONDENSE_ENABLED",
+]
+
+
+@pytest.mark.parametrize("key", BOOL_KEYS)
+def test_validate_invalid_operator_boolean_refused(tree, key):
+    r = _run(tree, {key: "maybe-secretish"})
+    assert r.returncode != 0
+    assert f"{key} must be true/false" in r.stderr
+    assert "maybe-secretish" not in r.stderr + r.stdout
+
+
+@pytest.mark.parametrize("key", BOOL_KEYS)
+@pytest.mark.parametrize("value", ["true", "False", "1", "no", "YES"])
+def test_validate_valid_operator_boolean_accepted(tree, key, value):
+    env = {key: value}
+    if key == "CONTEXTUAL_EMBED_ENABLED":
+        env |= {"CONTEXT_LLM_BASE_URL": "http://llm:8000/v1", "CONTEXT_LLM_MODEL": "m"}
+    r = _run(tree, env)
+    assert r.returncode == 0, r.stderr
+
+
+def test_validate_invalid_boolean_from_env_file_then_corrected(tree):
+    """Next ordinary run: the same file corrected by the operator passes."""
+    bad = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, "CONTEXTUAL_EMBED_ENABLED=on\n")})
+    assert bad.returncode != 0
+    assert "CONTEXTUAL_EMBED_ENABLED must be true/false" in bad.stderr
+    good = _run(tree, {"AIRGAP_ENV": _write_env_file(tree, "CONTEXTUAL_EMBED_ENABLED=false\n")})
+    assert good.returncode == 0, good.stderr
+
+
+# -------------------------------------------- snapshot class on NFS (#272)
+
+
+def test_validate_nfs_snapshot_storage_refused_then_corrected(tree):
+    r = _run(tree, {"SNAPSHOT_STORAGE_CLASS": "nfs-client"})
+    assert r.returncode != 0
+    assert "SNAPSHOT_STORAGE_CLASS='nfs-client' looks like NFS" in r.stderr
+    ok = _run(tree, {"SNAPSHOT_STORAGE_CLASS": "gp3-block"})
+    assert ok.returncode == 0, ok.stderr
+
+
+# ------------------------------------- Forbidden vs NotFound vs SCC (#272/#373)
+
+
+def _live(tree, **extra):
+    return _run(tree, {"AIRGAP_DRYRUN": "0", **extra})
+
+
+def test_validate_live_storageclass_notfound_fails(tree):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", NOT_FOUND))
+    r = _live(tree)
+    assert r.returncode != 0
+    assert "must exist before deployment" in r.stderr
+
+
+def test_validate_live_storageclass_forbidden_is_not_reported_absent(tree):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", FORBIDDEN))
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "not found" not in r.stdout
+    assert "Forbidden" in r.stdout and "NOT verified" in r.stdout
+
+
+def test_validate_live_notfound_name_containing_forbidden_still_fails(tree):
+    """The reason token decides, not free text: a missing StorageClass whose
+    name contains 'forbidden' must not be classified as a Forbidden read."""
+    text = 'Error from server (NotFound): storageclasses.storage.k8s.io "ceph-forbidden-tier" not found'
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", text))
+    r = _live(tree)
+    assert r.returncode != 0
+    assert "must exist before deployment" in r.stderr
+
+
+def test_validate_live_forbidden_message_with_not_found_text_is_forbidden(tree):
+    text = 'Error from server (Forbidden): storageclasses "not found-class" is forbidden: User cannot get resource'
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", text))
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "NOT verified" in r.stdout
+
+
+def test_validate_live_storageclass_other_error_fails(tree):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("storageclass", "dial tcp: connection refused"))
+    r = _live(tree)
+    assert r.returncode != 0
+    assert "unexpected client error" in r.stderr
+
+
+def test_validate_live_forbidden_namespace_still_checks_secret(tree):
+    """A namespace-scoped deployer cannot get the Namespace object; the
+    Secret check must still run (found -> verified), not be skipped."""
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("namespace", FORBIDDEN))
+    r = _live(tree, GATEWAY_API_KEY_SECRET="gateway-api-keys")
+    assert r.returncode == 0, r.stderr
+    assert "does not exist yet" not in r.stdout
+    assert "Gateway key Secret 'gateway-api-keys' verified" in r.stdout
+
+
+def test_validate_live_forbidden_namespace_missing_secret_fails(tree):
+    write_stub(
+        tree / "bin" / "kubectl",
+        "#!/bin/sh\nfor arg in \"$@\"; do\n"
+        f"  if [ \"$arg\" = namespace ]; then echo '{FORBIDDEN}' >&2; exit 1; fi\n"
+        f"  if [ \"$arg\" = secret ]; then echo '{NOT_FOUND}' >&2; exit 1; fi\n"
+        "done\nexit 0\n",
+    )
+    r = _live(tree, GATEWAY_API_KEY_SECRET="gateway-api-keys")
+    assert r.returncode != 0
+    assert "Secret 'gateway-api-keys' not found" in r.stderr
+
+
+def test_validate_live_forbidden_secret_fails_not_absent(tree):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("secret", FORBIDDEN))
+    r = _live(tree, GATEWAY_API_KEY_SECRET="gateway-api-keys")
+    assert r.returncode != 0
+    assert "Forbidden" in r.stderr
+    assert "not found" not in r.stderr
+
+
+def test_validate_live_scc_readable_reports_openshift(tree):
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "OpenShift cluster detected" in r.stdout
+
+
+def test_validate_live_scc_missing_type_reports_standard_kubernetes(tree):
+    write_stub(
+        tree / "bin" / "kubectl",
+        _kubectl_stub("scc", "error: the server doesn't have a resource type \"scc\""),
+    )
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Standard Kubernetes cluster detected" in r.stdout
+
+
+@pytest.mark.parametrize("text", [FORBIDDEN, "dial tcp: i/o timeout"])
+def test_validate_live_scc_failure_is_not_standard_kubernetes(tree, text):
+    write_stub(tree / "bin" / "kubectl", _kubectl_stub("scc", text))
+    r = _live(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Standard Kubernetes" not in r.stdout
+    assert "cluster type is NOT determined" in r.stdout
