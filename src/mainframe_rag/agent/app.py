@@ -22,7 +22,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
@@ -48,6 +48,7 @@ from mainframe_rag.agent.answer import (
 from mainframe_rag.agent.answer_core import (
     AnswerCoreDeps,
     AnswerCoreInput,
+    AnswerCoreOutput,
     LLMChatError,
     execute_answer_core,
     execute_answer_core_stream,
@@ -1118,6 +1119,290 @@ async def _search_response(req, response, owner):
     )
 
 
+# Orchestration shared by /v1/answer and /v1/chat (issue #583). Each helper
+# owns one step both routes perform identically; the endpoint label and the
+# log action names are the only per-route parameters, so a gate, terminal
+# frame or observation cannot be fixed on one route and forgotten on the
+# other. Step order inside the routes is unchanged.
+
+
+def _require_reasoning_model(request_id: str, action: str) -> None:
+    """Fail fast before any retrieval: the reasoning model (and its endpoint)
+    must be configured; nothing else is callable. Config errors get a fixed
+    client message; the exception text stays in the log. The error handler
+    records the single terminal observation."""
+    try:
+        assert_reasoning_model(settings)
+    except RuntimeError as exc:
+        log.warning(json_log(request_id, action, error=error_type(exc)))
+        raise AppError(503, "not_configured", "reasoning model is not configured") from exc
+
+
+def _retrieval_failed(owner: _RequestSpan, endpoint: str, action: str, exc: Exception) -> AppError:
+    """Terminal observation for a failed retrieval leg: the same fault maps to
+    the same code+message on every endpoint ("retrieval failed", as on
+    /v1/search). The caller raises the returned error from `exc`."""
+    _span_error(owner.span, exc)
+    _record_endpoint(owner.request, endpoint, "upstream_error", owner.started)
+    log.error(json_log(owner.request.state.request_id, action, error=error_type(exc)))
+    return AppError(502, "upstream_error", "retrieval failed")
+
+
+def _set_server_timing(headers, timings: dict, **llm_legs: int | None) -> None:
+    """Server-Timing on a response or SSE header mapping, when any leg ran."""
+    parts = _timing_parts(timings, **llm_legs)
+    if parts:
+        headers["Server-Timing"] = ", ".join(parts)
+
+
+async def _execute_core_or_raise(
+    core_input: AnswerCoreInput,
+    deps: AnswerCoreDeps,
+    owner: _RequestSpan,
+    endpoint: str,
+    action: str,
+    kind: str,
+    hit_count: int,
+):
+    """Run the shared core for a JSON response. A model failure maps to
+    "answer failed" (never a retrieval code); an irreducible prompt-budget
+    overflow maps to the explicit 422 budget contract (issue #368) — never
+    silent, never a model call; a prompt-build failure stays an internal 500."""
+    root_span = owner.span
+    request_id = owner.request.state.request_id
+    try:
+        return await execute_answer_core(core_input, deps, parent_span=root_span)
+    except PromptBudgetExceeded as exc:
+        _span_error(root_span, exc)
+        with use_span(root_span, end_on_exit=False):
+            log.warning(json_log(request_id, action, error=error_type(exc)))
+        _record_endpoint(
+            owner.request,
+            endpoint,
+            "prompt_budget_exceeded",
+            owner.started,
+            query_class=kind,
+            hits=hit_count,
+        )
+        raise AppError(
+            422, "prompt_budget_exceeded", "prompt exceeds the model token budget"
+        ) from exc
+    except LLMChatError as exc:
+        _span_error(root_span, exc.original)
+        with use_span(root_span, end_on_exit=False):
+            log.error(json_log(request_id, action, error=error_type(exc)))
+        _record_endpoint(
+            owner.request,
+            endpoint,
+            "upstream_error",
+            owner.started,
+            query_class=kind,
+            hits=hit_count,
+        )
+        raise AppError(502, "upstream_error", "answer failed") from exc
+
+
+def _output_log_fields(
+    output: AnswerCoreOutput, kind: str, timings: dict, started: float, *, stream: bool
+) -> dict:
+    """Answer-leg log fields of a finalized core output: one shape for the
+    JSON and SSE finals of both routes."""
+    return _answer_log_fields(
+        kind,
+        output.complexity,
+        output.hits,
+        timings,
+        len(output.citations),
+        output.script is not None,
+        output.finish_reason,
+        output.usage,
+        output.llm_ms,
+        output.ttft_ms,
+        started,
+        stream=stream,
+        evidence=output.evidence.supplied_count,
+        inline_bracket_present=output.parsed.inline_bracket_present,
+        citations_header_present=output.parsed.citations_header_present,
+        cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
+        cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
+        verification_state=output.verification_state,
+        budget_verified=output.budget_verified,
+        units_omitted=output.evidence.units_omitted,
+    )
+
+
+def _record_no_hits(
+    owner: _RequestSpan, endpoint: str, kind: str, output: AnswerCoreOutput
+) -> None:
+    """RED record of the no-evidence terminal (nothing was retrieved)."""
+    _record_endpoint(
+        owner.request,
+        endpoint,
+        "ok",
+        owner.started,
+        query_class=kind,
+        hits=0,
+        verification_state=output.verification_state,
+    )
+
+
+def _record_answered(
+    owner: _RequestSpan, endpoint: str, kind: str, output: AnswerCoreOutput, llm_model: str
+) -> None:
+    """RED record of a successfully finalized answer."""
+    _record_endpoint(
+        owner.request,
+        endpoint,
+        "ok",
+        owner.started,
+        query_class=kind,
+        hits=len(output.hits),
+        ttft_ms=output.ttft_ms,
+        llm_model=llm_model,
+        verification_state=output.verification_state,
+    )
+
+
+def _record_stream_failure(
+    owner: _RequestSpan, endpoint: str, action: str, kind: str, hit_count: int, exc: Exception
+) -> None:
+    """Terminal observation of a stream that failed after headers were sent.
+    The wire frame is the caller's (it is the only per-route part): the
+    fault is labeled budget for a pre-token prompt-budget overflow, else
+    upstream. Truncation observability: the partial prefix already went out
+    as token events, so the answer_alert carries the fixed reason label
+    only — never response text or the exception body."""
+    request_id = owner.request.state.request_id
+    _span_error(owner.span, exc)
+    budget = isinstance(exc, PromptBudgetExceeded)
+    if isinstance(exc, TruncatedStreamError):
+        log.warning(
+            json_log(
+                request_id,
+                "answer_alert",
+                alert="stream_truncated",
+                detail=truncation_alert_detail(exc),
+            )
+        )
+    _record_endpoint(
+        owner.request,
+        endpoint,
+        "prompt_budget_exceeded" if budget else "upstream_error",
+        owner.started,
+        query_class=kind,
+        hits=hit_count,
+        verification_state="generation_incomplete",
+    )
+    (log.warning if budget else log.error)(json_log(request_id, action, error=error_type(exc)))
+
+
+async def _stream_answer_core(
+    core_input: AnswerCoreInput,
+    deps: AnswerCoreDeps,
+    owner: _RequestSpan,
+    *,
+    endpoint: str,
+    action: str,
+    kind: str,
+    hit_count: int,
+    token_frame: Callable[[str], str],
+    final_frames: Callable[[AnswerCoreOutput], Iterator[str]],
+    error_frames: Callable[[], Iterable[str]],
+) -> AsyncIterator[str]:
+    """The one SSE generator behind /v1/answer and /v1/chat. The route
+    supplies only the wire mapping (token frame, the final frames with their
+    side effects, the terminal error frames); the core loop, the terminal
+    failure observation and the core close are shared.
+
+    A final or error frame is terminal. If the generator is closed before
+    one is produced, the client saw only provisional tokens: the root-span
+    owner records the abort as generation_incomplete (issue #365). A handled
+    error counts as terminal — its frame already carries the incomplete
+    state."""
+    core_events = execute_answer_core_stream(core_input, deps, parent_span=owner.span)
+    try:
+        async for item in core_events:
+            if item["type"] == "token":
+                delta = item["delta"]
+                if delta:
+                    yield token_frame(delta)
+            elif item["type"] == "final":
+                for frame in final_frames(item["output"]):
+                    yield frame
+    except Exception as exc:  # noqa: BLE001 — streaming SSE generator traps upstream error
+        _record_stream_failure(owner, endpoint, action, kind, hit_count, exc)
+        for frame in error_frames():
+            yield frame
+    finally:
+        await core_events.aclose()
+
+
+def _answer_final_frames(
+    owner: _RequestSpan, kind: str, timings: dict, llm_model: str, output: AnswerCoreOutput
+) -> Iterator[str]:
+    """The `final` frame of an answer stream, with its terminal side effects
+    (log, span attributes, RED record) performed in their fixed order."""
+    root_span = owner.span
+    request_id = owner.request.state.request_id
+    if not output.hits:
+        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
+        _record_no_hits(owner, "answer", kind, output)
+        log.info(
+            json_log(
+                request_id, "answer", query_kind=kind, hits=0, rerank_ms=timings.get("rerank_ms")
+            )
+        )
+        yield format_sse_event(
+            "final",
+            empty_final_payload(
+                request_id,
+                output.answer,
+                kind,
+                verification_state=output.verification_state,
+                script_review_required=output.script_review_required,
+            ),
+        )
+        return
+
+    _alert_finish_reason_non_stop(request_id, output.finish_reason)
+
+    log.info(
+        json_log(
+            request_id,
+            "answer",
+            **_output_log_fields(output, kind, timings, owner.started, stream=True),
+        )
+    )
+
+    final = final_payload(
+        request_id,
+        output.answer,
+        output.citations,
+        output.citations_inferred,
+        output.script,
+        kind,
+        output.hits,
+        output.finish_reason,
+        output.ttft_ms,
+        output.usage,
+        inferred_indices=output.inferred_indices,
+        script_lang=output.script_lang,
+        verification_state=output.verification_state,
+        script_review_required=output.script_review_required,
+    )
+    root_span.set_attributes(
+        _answer_span_attrs(
+            kind,
+            output.hits,
+            len(output.citations),
+            output.script is not None,
+            evidence=output.evidence.supplied_count,
+        )
+    )
+    _record_answered(owner, "answer", kind, output, llm_model)
+    yield format_sse_event("final", final)
+
+
 @app.post("/v1/answer", response_model=None)
 async def v1_answer(
     request: Request,
@@ -1150,16 +1435,7 @@ async def _answer_response(req, response, is_stream, owner):
     request_id = request.state.request_id
     started = owner.started
     _require_query_length(request_id, req.query)
-    # Fail fast before any retrieval: the reasoning model (and its endpoint)
-    # must be configured; nothing else is callable. Config errors get a fixed
-    # client message — the exception text stays in the log. The error
-    # handler records the single terminal observation (same series the
-    # explicit record produced: endpoint answer, not_configured, unknown).
-    try:
-        assert_reasoning_model(settings)
-    except RuntimeError as exc:
-        log.warning(json_log(request_id, "answer", error=error_type(exc)))
-        raise AppError(503, "not_configured", "reasoning model is not configured") from exc
+    _require_reasoning_model(request_id, "answer")
     # Serving gate before retrieval and before the root stream opens (issue
     # #391 F3/F4): the request binds to the validated physical generation.
     bound = await serving_settings()
@@ -1187,10 +1463,7 @@ async def _answer_response(req, response, is_stream, owner):
             )
             hits, kind, timings = await _await_retrieval(res)
     except Exception as exc:
-        _span_error(root_span, exc)
-        _record_endpoint(request, "answer", "upstream_error", started)
-        log.error(json_log(request_id, "answer", error=error_type(exc)))
-        raise AppError(502, "upstream_error", "retrieval failed") from exc
+        raise _retrieval_failed(owner, "answer", "answer", exc) from exc
 
     core_input = AnswerCoreInput(
         query=req.query,
@@ -1208,57 +1481,15 @@ async def _answer_response(req, response, is_stream, owner):
     deps = replace(core_deps(), settings=bound)
 
     if not is_stream:
-        # The shared core owns prompt planning/verification, LLM inference,
-        # and parse. A model failure maps to "answer failed" (never a
-        # retrieval code); an irreducible prompt-budget overflow maps to the
-        # explicit 422 budget contract (issue #368) — never silent, never a
-        # model call; a prompt-build failure stays an internal 500.
-        try:
-            output = await execute_answer_core(core_input, deps, parent_span=root_span)
-        except PromptBudgetExceeded as exc:
-            _span_error(root_span, exc)
-            with use_span(root_span, end_on_exit=False):
-                log.warning(json_log(request_id, "answer", error=error_type(exc)))
-            _record_endpoint(
-                request,
-                "answer",
-                "prompt_budget_exceeded",
-                started,
-                query_class=kind,
-                hits=len(hits),
-            )
-            raise AppError(
-                422, "prompt_budget_exceeded", "prompt exceeds the model token budget"
-            ) from exc
-        except LLMChatError as exc:
-            _span_error(root_span, exc.original)
-            with use_span(root_span, end_on_exit=False):
-                log.error(json_log(request_id, "answer", error=error_type(exc)))
-            _record_endpoint(
-                request,
-                "answer",
-                "upstream_error",
-                started,
-                query_class=kind,
-                hits=len(hits),
-            )
-            raise AppError(502, "upstream_error", "answer failed") from exc
+        output = await _execute_core_or_raise(
+            core_input, deps, owner, "answer", "answer", kind, len(hits)
+        )
 
         _alert_finish_reason_non_stop(request_id, output.finish_reason)
 
         if not output.hits:
-            _record_endpoint(
-                request,
-                "answer",
-                "ok",
-                started,
-                query_class=kind,
-                hits=0,
-                verification_state=output.verification_state,
-            )
-            timing_parts = _timing_parts(timings)
-            if timing_parts:
-                response.headers["Server-Timing"] = ", ".join(timing_parts)
+            _record_no_hits(owner, "answer", kind, output)
+            _set_server_timing(response.headers, timings)
             with use_span(root_span, end_on_exit=False):
                 root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
                 log.info(
@@ -1282,36 +1513,14 @@ async def _answer_response(req, response, is_stream, owner):
                 script_review_required=output.script_review_required,
             )
 
-        timing_parts = _timing_parts(timings, llm_ms=output.llm_ms, ttft_ms=output.ttft_ms)
-        if timing_parts:
-            response.headers["Server-Timing"] = ", ".join(timing_parts)
+        _set_server_timing(response.headers, timings, llm_ms=output.llm_ms, ttft_ms=output.ttft_ms)
 
         with use_span(root_span, end_on_exit=False):
             log.info(
                 json_log(
                     request_id,
                     "answer",
-                    **_answer_log_fields(
-                        kind,
-                        output.complexity,
-                        output.hits,
-                        timings,
-                        len(output.citations),
-                        output.script is not None,
-                        output.finish_reason,
-                        output.usage,
-                        output.llm_ms,
-                        output.ttft_ms,
-                        started,
-                        evidence=output.evidence.supplied_count,
-                        inline_bracket_present=output.parsed.inline_bracket_present,
-                        citations_header_present=output.parsed.citations_header_present,
-                        cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
-                        cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
-                        verification_state=output.verification_state,
-                        budget_verified=output.budget_verified,
-                        units_omitted=output.evidence.units_omitted,
-                    ),
+                    **_output_log_fields(output, kind, timings, started, stream=False),
                 )
             )
             root_span.set_attributes(
@@ -1323,17 +1532,7 @@ async def _answer_response(req, response, is_stream, owner):
                     evidence=output.evidence.supplied_count,
                 )
             )
-        _record_endpoint(
-            request,
-            "answer",
-            "ok",
-            started,
-            query_class=kind,
-            hits=len(output.hits),
-            ttft_ms=output.ttft_ms,
-            llm_model=llm_model,
-            verification_state=output.verification_state,
-        )
+        _record_answered(owner, "answer", kind, output, llm_model)
         return AnswerResponse(
             request_id=request_id,
             answer=output.answer,
@@ -1347,191 +1546,28 @@ async def _answer_response(req, response, is_stream, owner):
         )
 
     # SSE streaming path
-    timing_parts = _timing_parts(timings)
     headers = {
         "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no",
     }
-    if timing_parts:
-        headers["Server-Timing"] = ", ".join(timing_parts)
-
-    # `terminal` marks a frame that ends the stream's meaning (final or
-    # error). If the generator is closed before one is produced, the client
-    # saw only provisional tokens: the outer generator records the abort as
-    # generation_incomplete (issue #365). A handled error counts as terminal
-    # — its frame already carries the incomplete state.
-
-    async def _sse_events() -> AsyncIterator[str]:
-        core_events = execute_answer_core_stream(core_input, deps, parent_span=root_span)
-        try:
-            async for item in core_events:
-                if item["type"] == "token":
-                    delta = item["delta"]
-                    if delta:
-                        yield format_sse_event(
-                            "token", {"type": "token", "delta": delta, "token": delta}
-                        )
-                elif item["type"] == "final":
-                    output = item["output"]
-                    if not output.hits:
-                        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
-                        _record_endpoint(
-                            request,
-                            "answer",
-                            "ok",
-                            started,
-                            query_class=kind,
-                            hits=0,
-                            verification_state=output.verification_state,
-                        )
-                        log.info(
-                            json_log(
-                                request_id,
-                                "answer",
-                                query_kind=kind,
-                                hits=0,
-                                rerank_ms=timings.get("rerank_ms"),
-                            )
-                        )
-                        yield format_sse_event(
-                            "final",
-                            empty_final_payload(
-                                request_id,
-                                output.answer,
-                                kind,
-                                verification_state=output.verification_state,
-                                script_review_required=output.script_review_required,
-                            ),
-                        )
-                        continue
-
-                    _alert_finish_reason_non_stop(request_id, output.finish_reason)
-
-                    log.info(
-                        json_log(
-                            request_id,
-                            "answer",
-                            **_answer_log_fields(
-                                kind,
-                                output.complexity,
-                                output.hits,
-                                timings,
-                                len(output.citations),
-                                output.script is not None,
-                                output.finish_reason,
-                                output.usage,
-                                output.llm_ms,
-                                output.ttft_ms,
-                                started,
-                                stream=True,
-                                evidence=output.evidence.supplied_count,
-                                inline_bracket_present=output.parsed.inline_bracket_present,
-                                citations_header_present=output.parsed.citations_header_present,
-                                cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
-                                cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
-                                verification_state=output.verification_state,
-                                budget_verified=output.budget_verified,
-                                units_omitted=output.evidence.units_omitted,
-                            ),
-                        )
-                    )
-
-                    final = final_payload(
-                        request_id,
-                        output.answer,
-                        output.citations,
-                        output.citations_inferred,
-                        output.script,
-                        kind,
-                        output.hits,
-                        output.finish_reason,
-                        output.ttft_ms,
-                        output.usage,
-                        inferred_indices=output.inferred_indices,
-                        script_lang=output.script_lang,
-                        verification_state=output.verification_state,
-                        script_review_required=output.script_review_required,
-                    )
-                    root_span.set_attributes(
-                        _answer_span_attrs(
-                            kind,
-                            output.hits,
-                            len(output.citations),
-                            output.script is not None,
-                            evidence=output.evidence.supplied_count,
-                        )
-                    )
-                    _record_endpoint(
-                        request,
-                        "answer",
-                        "ok",
-                        started,
-                        query_class=kind,
-                        hits=len(output.hits),
-                        ttft_ms=output.ttft_ms,
-                        llm_model=llm_model,
-                        verification_state=output.verification_state,
-                    )
-                    yield format_sse_event("final", final)
-        except PromptBudgetExceeded as exc:
-            # Raised before the first token (headers already sent): the wire
-            # shape stays the error event, but the fault is labeled budget,
-            # never upstream.
-            _span_error(root_span, exc)
-            _record_endpoint(
-                request,
-                "answer",
-                "prompt_budget_exceeded",
-                started,
-                query_class=kind,
-                hits=len(hits),
-                verification_state="generation_incomplete",
-            )
-            log.warning(json_log(request_id, "answer_stream", error=error_type(exc)))
-            yield format_sse_event("error", error_payload())
-        except TruncatedStreamError as exc:
-            # Truncation observability: the partial prefix already went out
-            # as token events, so the answer_alert carries the fixed reason
-            # label only — never response text or the exception body.
-            _span_error(root_span, exc)
-            log.warning(
-                json_log(
-                    request_id,
-                    "answer_alert",
-                    alert="stream_truncated",
-                    detail=truncation_alert_detail(exc),
-                )
-            )
-            _record_endpoint(
-                request,
-                "answer",
-                "upstream_error",
-                started,
-                query_class=kind,
-                hits=len(hits),
-                verification_state="generation_incomplete",
-            )
-            log.error(json_log(request_id, "answer_stream", error=error_type(exc)))
-            yield format_sse_event("error", error_payload())
-        except Exception as exc:  # noqa: BLE001
-            _span_error(root_span, exc)
-            _record_endpoint(
-                request,
-                "answer",
-                "upstream_error",
-                started,
-                query_class=kind,
-                hits=len(hits),
-                verification_state="generation_incomplete",
-            )
-            log.error(json_log(request_id, "answer_stream", error=error_type(exc)))
-            yield format_sse_event("error", error_payload())
-        finally:
-            await core_events.aclose()
-
-
+    _set_server_timing(headers, timings)
     return owner.stream(
-        _sse_events(),
+        _stream_answer_core(
+            core_input,
+            deps,
+            owner,
+            endpoint="answer",
+            action="answer_stream",
+            kind=kind,
+            hit_count=len(hits),
+            token_frame=lambda delta: format_sse_event(
+                "token", {"type": "token", "delta": delta, "token": delta}
+            ),
+            final_frames=lambda output: _answer_final_frames(
+                owner, kind, timings, llm_model, output
+            ),
+            error_frames=lambda: (format_sse_event("error", error_payload()),),
+        ),
         query_class=kind,
         hits=len(hits),
         media_type="text/event-stream",
@@ -1567,17 +1603,73 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         return await _chat_response(req, response, owner)
 
 
+def _chat_final_frames(
+    owner: _RequestSpan,
+    chat_id: str,
+    kind: str,
+    timings: dict,
+    llm_model: str,
+    output: AnswerCoreOutput,
+) -> Iterator[str]:
+    """The terminal OpenAI chunks of a chat stream (citations delta, the
+    finish chunk carrying the answer metadata, then [DONE]), with their
+    terminal side effects performed in their fixed order."""
+    root_span = owner.span
+    request_id = owner.request.state.request_id
+    if not output.hits:
+        yield format_openai_chunk(chat_id, llm_model, delta_content=output.answer)
+        extra_meta = {
+            "citations": [],
+            "citations_inferred": False,
+            "inferred_indices": [],
+            "hits": [],
+            "verification_state": output.verification_state,
+            "script": None,
+            "script_lang": None,
+            "script_review_required": output.script_review_required,
+        }
+        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
+        _record_no_hits(owner, "chat", kind, output)
+        log.info(json_log(request_id, "chat", query_kind=kind, hits=0, stream=True))
+        yield format_openai_chunk(chat_id, llm_model, finish_reason="stop", extra=extra_meta)
+        yield format_openai_done()
+        return
+
+    if output.citations:
+        cites_delta = "\n\n**Citations:**\n" + "\n".join(f"- {c}" for c in output.citations)
+        yield format_openai_chunk(chat_id, llm_model, delta_content=cites_delta)
+
+    extra_meta = {
+        "citations": output.citations,
+        "citations_inferred": output.citations_inferred,
+        "inferred_indices": output.inferred_indices,
+        "hits": [h.model_dump() for h in output.hits],
+        "verification_state": output.verification_state,
+        "script": output.script,
+        "script_lang": output.script_lang,
+        "script_review_required": output.script_review_required,
+    }
+    _record_answered(owner, "chat", kind, output, llm_model)
+    log.info(
+        json_log(
+            request_id,
+            "chat",
+            **_output_log_fields(output, kind, timings, owner.started, stream=True),
+        )
+    )
+    yield format_openai_chunk(
+        chat_id, llm_model, finish_reason=output.finish_reason, extra=extra_meta
+    )
+    yield format_openai_done()
+
+
 async def _chat_response(req, response, owner):
     request = owner.request
     root_span = owner.span
     request_id = request.state.request_id
     started = owner.started
     turn = prepare_chat_request(request_id, req.messages, req.splunk_context)
-    try:
-        assert_reasoning_model(settings)
-    except RuntimeError as exc:
-        log.warning(json_log(request_id, "chat", error=error_type(exc)))
-        raise AppError(503, "not_configured", "reasoning model is not configured") from exc
+    _require_reasoning_model(request_id, "chat")
     # The response `model` reports what actually ran: inference is always
     # the reasoning model (issue #313), so the caller-supplied OpenAI-compat
     # field stays accepted-and-ignored, exactly like `max_tokens`.
@@ -1618,49 +1710,21 @@ async def _chat_response(req, response, owner):
             )
             hits, kind, timings = await _await_retrieval(retrieval_coro)
     except Exception as exc:
-        _span_error(root_span, exc)
-        _record_endpoint(request, "chat", "upstream_error", started)
-        log.error(json_log(request_id, "chat_retrieval", error=error_type(exc)))
-        raise AppError(502, "upstream_error", "retrieval failed") from exc
+        raise _retrieval_failed(owner, "chat", "chat_retrieval", exc) from exc
 
     core_input.hits = hits
     core_input.query_kind = kind
     core_input.timings = timings
 
     if not is_stream:
-        try:
-            output = await execute_answer_core(core_input, deps, parent_span=root_span)
-        except PromptBudgetExceeded as exc:
-            _span_error(root_span, exc)
-            with use_span(root_span, end_on_exit=False):
-                log.warning(json_log(request_id, "chat_answer", error=error_type(exc)))
-            _record_endpoint(
-                request, "chat", "prompt_budget_exceeded", started, query_class=kind, hits=len(hits)
-            )
-            raise AppError(
-                422, "prompt_budget_exceeded", "prompt exceeds the model token budget"
-            ) from exc
-        except LLMChatError as exc:
-            _span_error(root_span, exc.original)
-            with use_span(root_span, end_on_exit=False):
-                log.error(json_log(request_id, "chat_answer", error=error_type(exc)))
-            _record_endpoint(
-                request, "chat", "upstream_error", started, query_class=kind, hits=len(hits)
-            )
-            raise AppError(502, "upstream_error", "answer failed") from exc
+        output = await _execute_core_or_raise(
+            core_input, deps, owner, "chat", "chat_answer", kind, len(hits)
+        )
 
         _alert_finish_reason_non_stop(request_id, output.finish_reason)
 
         if not output.hits:
-            _record_endpoint(
-                request,
-                "chat",
-                "ok",
-                started,
-                query_class=kind,
-                hits=0,
-                verification_state=output.verification_state,
-            )
+            _record_no_hits(owner, "chat", kind, output)
             with use_span(root_span, end_on_exit=False):
                 root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
                 log.info(json_log(request_id, "chat", query_kind=kind, hits=0))
@@ -1695,40 +1759,10 @@ async def _chat_response(req, response, owner):
                 json_log(
                     request_id,
                     "chat",
-                    **_answer_log_fields(
-                        kind,
-                        output.complexity,
-                        output.hits,
-                        timings,
-                        len(output.citations),
-                        output.script is not None,
-                        output.finish_reason,
-                        output.usage,
-                        output.llm_ms,
-                        output.ttft_ms,
-                        started,
-                        evidence=output.evidence.supplied_count,
-                        inline_bracket_present=output.parsed.inline_bracket_present,
-                        citations_header_present=output.parsed.citations_header_present,
-                        cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
-                        cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
-                        verification_state=output.verification_state,
-                        budget_verified=output.budget_verified,
-                        units_omitted=output.evidence.units_omitted,
-                    ),
+                    **_output_log_fields(output, kind, timings, started, stream=False),
                 )
             )
-        _record_endpoint(
-            request,
-            "chat",
-            "ok",
-            started,
-            query_class=kind,
-            hits=len(output.hits),
-            ttft_ms=output.ttft_ms,
-            llm_model=llm_model,
-            verification_state=output.verification_state,
-        )
+        _record_answered(owner, "chat", kind, output, llm_model)
 
         return ChatCompletionsResponse(
             id=f"chatcmpl-{request_id}",
@@ -1753,169 +1787,24 @@ async def _chat_response(req, response, owner):
         )
 
     chat_id = f"chatcmpl-{request_id}"
-
-    async def _chat_sse_events() -> AsyncIterator[str]:
-        core_events = execute_answer_core_stream(core_input, deps, parent_span=root_span)
-        try:
-            async for item in core_events:
-                if item["type"] == "token":
-                    delta = item["delta"]
-                    if delta:
-                        yield format_openai_chunk(chat_id, llm_model, delta_content=delta)
-                elif item["type"] == "final":
-                    output = item["output"]
-                    if not output.hits:
-                        yield format_openai_chunk(chat_id, llm_model, delta_content=output.answer)
-                        extra_meta = {
-                            "citations": [],
-                            "citations_inferred": False,
-                            "inferred_indices": [],
-                            "hits": [],
-                            "verification_state": output.verification_state,
-                            "script": None,
-                            "script_lang": None,
-                            "script_review_required": output.script_review_required,
-                        }
-                        root_span.set_attributes({"rag.query_kind": kind, "rag.hits": 0})
-                        _record_endpoint(
-                            request,
-                            "chat",
-                            "ok",
-                            started,
-                            query_class=kind,
-                            hits=0,
-                            verification_state=output.verification_state,
-                        )
-                        log.info(
-                            json_log(
-                                request_id,
-                                "chat",
-                                query_kind=kind,
-                                hits=0,
-                                stream=True,
-                            )
-                        )
-                        yield format_openai_chunk(
-                            chat_id, llm_model, finish_reason="stop", extra=extra_meta
-                        )
-                        yield format_openai_done()
-                        continue
-
-                    if output.citations:
-                        cites_delta = "\n\n**Citations:**\n" + "\n".join(
-                            f"- {c}" for c in output.citations
-                        )
-                        yield format_openai_chunk(chat_id, llm_model, delta_content=cites_delta)
-
-                    extra_meta = {
-                        "citations": output.citations,
-                        "citations_inferred": output.citations_inferred,
-                        "inferred_indices": output.inferred_indices,
-                        "hits": [h.model_dump() for h in output.hits],
-                        "verification_state": output.verification_state,
-                        "script": output.script,
-                        "script_lang": output.script_lang,
-                        "script_review_required": output.script_review_required,
-                    }
-                    _record_endpoint(
-                        request,
-                        "chat",
-                        "ok",
-                        started,
-                        query_class=kind,
-                        hits=len(output.hits),
-                        ttft_ms=output.ttft_ms,
-                        llm_model=llm_model,
-                        verification_state=output.verification_state,
-                    )
-                    log.info(
-                        json_log(
-                            request_id,
-                            "chat",
-                            **_answer_log_fields(
-                                kind,
-                                output.complexity,
-                                output.hits,
-                                timings,
-                                len(output.citations),
-                                output.script is not None,
-                                output.finish_reason,
-                                output.usage,
-                                output.llm_ms,
-                                output.ttft_ms,
-                                started,
-                                stream=True,
-                                evidence=output.evidence.supplied_count,
-                                inline_bracket_present=output.parsed.inline_bracket_present,
-                                citations_header_present=output.parsed.citations_header_present,
-                                cites_rejected_shape_bad=output.parsed.cites_rejected_shape_bad,
-                                cites_rejected_unmapped=output.parsed.cites_rejected_unmapped,
-                                verification_state=output.verification_state,
-                                budget_verified=output.budget_verified,
-                                units_omitted=output.evidence.units_omitted,
-                            ),
-                        )
-                    )
-                    yield format_openai_chunk(
-                        chat_id, llm_model, finish_reason=output.finish_reason, extra=extra_meta
-                    )
-                    yield format_openai_done()
-        except TruncatedStreamError as exc:
-            _span_error(root_span, exc)
-            log.warning(
-                json_log(
-                    request_id,
-                    "answer_alert",
-                    alert="stream_truncated",
-                    detail=truncation_alert_detail(exc),
-                )
-            )
-            _record_endpoint(
-                request,
-                "chat",
-                "upstream_error",
-                started,
-                query_class=kind,
-                hits=len(hits),
-                verification_state="generation_incomplete",
-            )
-            log.error(json_log(request_id, "chat_stream", error=error_type(exc)))
-            yield format_openai_error()
-            yield format_openai_done()
-        except PromptBudgetExceeded as exc:
-            _span_error(root_span, exc)
-            _record_endpoint(
-                request,
-                "chat",
-                "prompt_budget_exceeded",
-                started,
-                query_class=kind,
-                hits=len(hits),
-                verification_state="generation_incomplete",
-            )
-            log.warning(json_log(request_id, "chat_stream", error=error_type(exc)))
-            yield format_openai_error()
-            yield format_openai_done()
-        except Exception as exc:  # noqa: BLE001 — streaming SSE generator traps upstream error
-            _span_error(root_span, exc)
-            _record_endpoint(
-                request,
-                "chat",
-                "upstream_error",
-                started,
-                query_class=kind,
-                hits=len(hits),
-                verification_state="generation_incomplete",
-            )
-            log.error(json_log(request_id, "chat_stream", error=error_type(exc)))
-            yield format_openai_error()
-            yield format_openai_done()
-        finally:
-            await core_events.aclose()
-
-
     return owner.stream(
-        _chat_sse_events(), query_class=kind, hits=len(hits), media_type="text/event-stream"
+        _stream_answer_core(
+            core_input,
+            deps,
+            owner,
+            endpoint="chat",
+            action="chat_stream",
+            kind=kind,
+            hit_count=len(hits),
+            token_frame=lambda delta: format_openai_chunk(chat_id, llm_model, delta_content=delta),
+            final_frames=lambda output: _chat_final_frames(
+                owner, chat_id, kind, timings, llm_model, output
+            ),
+            error_frames=lambda: (format_openai_error(), format_openai_done()),
+        ),
+        query_class=kind,
+        hits=len(hits),
+        media_type="text/event-stream",
     )
 
 
