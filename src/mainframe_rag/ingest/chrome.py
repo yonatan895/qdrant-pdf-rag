@@ -1,6 +1,9 @@
 """Running header/footer stripping by line frequency.
 
-A line that appears (normalized) on >= 35% of sampled pages is page chrome.
+A line that appears (normalized) on >= 35% of sampled pages, within the first
+or last EDGE_LINES text lines of those pages, is page chrome. Folios and
+folio ranges are likewise only recognized at the page edges: a bare number in
+the page body is content (a completion code, a table value), never a folio.
 Short documents must not use a threshold of 1 (that would delete every line).
 """
 
@@ -13,6 +16,10 @@ FREQUENCY_THRESHOLD = 0.35
 SAMPLE_TARGET = 64
 MIN_PAGES_FOR_CHROME = 8
 MIN_HITS = 3
+# Running headers/footers sit at the page edges. Counting only the first/last
+# EDGE_LINES text lines keeps structural labels that repeat in the body
+# ("Explanation:") and bare code lines ("806") from being read as chrome.
+EDGE_LINES = 4
 
 _WHITESPACE_RE = re.compile(r"\s+")
 # Bare page-number lines: decimal ("12", "1234", "12-34", "12.") or a strict
@@ -30,6 +37,10 @@ _ROMAN_NUMERAL_RE = re.compile(
     re.IGNORECASE,
 )
 _DECIMAL_PAGE_RE = re.compile(r"[0-9]+(?:-[0-9]+)?[-.]?")
+# A header/footer that names the first and last entry on the page ("805 • 806"):
+# a folio range, not content. Case-sensitive hex-like tokens keep ordinary
+# words out ("Yes • No").
+_ENTRY_RANGE_RE = re.compile(r"[0-9A-F]{2,8} \u2022 [0-9A-F]{2,8}")
 
 
 def _normalize(line: str) -> str:
@@ -41,8 +52,18 @@ def _is_page_number(line: str) -> bool:
     # numeral character (decimal via [0-9]+, roman via the lookahead), and
     # strip_page never routes an empty normalized line here.
     return bool(
-        _DECIMAL_PAGE_RE.fullmatch(line.strip()) or _ROMAN_NUMERAL_RE.fullmatch(line.strip())
+        _DECIMAL_PAGE_RE.fullmatch(line.strip())
+        or _ROMAN_NUMERAL_RE.fullmatch(line.strip())
+        or _ENTRY_RANGE_RE.fullmatch(_WHITESPACE_RE.sub(" ", line.strip()))
     )
+
+
+def _edges(lines: list[str]) -> tuple[set[int], set[int]]:
+    """Indices of the first/last EDGE_LINES text lines of a page. Lines with no
+    letter or digit (revision/change bars, rules) are not text and do not
+    push a footer out of the edge window."""
+    text = [i for i, ln in enumerate(lines) if any(ch.isalnum() for ch in ln)]
+    return set(text[:EDGE_LINES]), set(text[-EDGE_LINES:])
 
 
 def _sample_indices(page_count: int) -> list[int]:
@@ -53,27 +74,35 @@ def _sample_indices(page_count: int) -> list[int]:
 
 
 def chrome_lines(page_texts: list[str]) -> set[str]:
-    """Normalized lines that appear on >= 35% of sampled pages."""
+    """Normalized page-edge lines that appear on >= 35% of sampled pages."""
     pages = [page_texts[i] for i in _sample_indices(len(page_texts))]
     if len(pages) < MIN_PAGES_FOR_CHROME:
         return set()
     counts: Counter[str] = Counter()
     for text in pages:
-        lines = {ln for ln in (_normalize(l) for l in text.splitlines()) if ln}
-        counts.update(lines)
+        raw = text.splitlines()
+        top, bottom = _edges(raw)
+        counts.update({ln for i in top | bottom if (ln := _normalize(raw[i]))})
     threshold = max(MIN_HITS, int(FREQUENCY_THRESHOLD * len(pages)))
     return {line for line, n in counts.items() if n >= threshold}
 
 
 def strip_page(text: str, chrome: set[str]) -> str:
-    """Drop chrome lines and bare page-number lines from one page's text."""
+    """Drop page-edge chrome and page-number lines from one page's text."""
     kept = []
-    for line in text.splitlines():
+    lines = text.splitlines()
+    top, bottom = _edges(lines)
+    # A page has one folio. A footer folio means the top edge carries none, so
+    # a bare number there is content (an entry's code line starting the page).
+    footer_folio = any(_is_page_number(lines[i]) for i in bottom)
+    for i, line in enumerate(lines):
         norm = _normalize(line)
         if not norm:
             kept.append(line)
             continue
-        if norm in chrome or _is_page_number(line):
+        if (i in top or i in bottom) and norm in chrome:
+            continue
+        if _is_page_number(line) and (i in bottom or (i in top and not footer_folio)):
             continue
         kept.append(line)
     return "\n".join(kept).strip("\n")
