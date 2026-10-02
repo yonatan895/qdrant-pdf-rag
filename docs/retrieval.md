@@ -382,7 +382,7 @@ these; widening changes both corpus extraction and query parsing at once.
   system-codes filter. Model numbers sharing the S+3-hex shape (`S370`, `S390`)
   are excluded by name; form numbers by a lookahead for the `-dddd` tail, since
   admitting letter-prefixed codes (`SB37`) otherwise lets `SC23-6862` through.
-  Ingest records the canonical form per entry in `system_codes`; a bare entry
+  Ingest records the canonical form per entry of a code section (`docs/ingest.md`) in `system_codes`; a bare entry
   takes the `W`-prefix only inside a wait-state section, so both sides agree.
 - **Front/back-matter titles** `SKIP_ALWAYS_RE`: notices, trademarks,
   reader comments, bibliography, copyright, index — matched at title end

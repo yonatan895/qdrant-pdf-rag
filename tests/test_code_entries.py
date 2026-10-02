@@ -158,11 +158,13 @@ def _make_chunks(text: str, heading: str):
     return make_chunks(parsed, [text])
 
 
+# Real code sections label every entry (#621: 812 of 812 in a system-codes
+# manual); the label is what marks the section as a code section.
 CODE_MANUAL = (
     "System completion codes\n\n"
-    "0C4\nA protection exception occurred during the operation.\n\n"
-    "0C5\nOperator intervention is required before retrying.\n\n"
-    "0C7\nA data exception occurred.\n"
+    "0C4\nExplanation:\nA protection exception occurred during the operation.\n\n"
+    "0C5\nExplanation:\nOperator intervention is required before retrying.\n\n"
+    "0C7\nExplanation:\nA data exception occurred.\n"
 )
 
 
@@ -204,7 +206,7 @@ def test_make_chunks_unit_spans_stay_aligned_with_text():
 
 
 def test_make_chunks_records_wait_state_codes_in_wait_state_section():
-    wait = "Wait states\n\n064\nThe system is waiting on an address that is protected.\n"
+    wait = "Wait states\n\n064\nExplanation:\nThe system is waiting on an address that is protected.\n"
     chunks = _make_chunks(wait, "Wait states")
     assert [c.system_codes for c in chunks if c.system_codes] == [["W064"]]
 
@@ -335,3 +337,95 @@ def test_make_chunks_after_strip_chrome_records_every_entry_code():
     assert {"001", "806", "0C4"} <= recorded
     assert all("806" in c.system_codes for c in chunks if "\n806\n" in f"\n{c.text}\n")
     assert any("\n806\n" in f"\n{c.text}\n" for c in chunks)
+
+
+# --- system_codes only from code sections (issue #621) ----------------------
+
+
+def _parsed(toc: tuple, n_pages: int):
+    from pathlib import Path
+
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+
+    return ParsedDoc(
+        path=Path("synthetic.pdf"),
+        sha256="deadbeef",
+        doc_id="SA99-0000-00",
+        title="Generated Codes Manual",
+        toc=toc,
+        page_count=n_pages,
+    )
+
+
+# Generated three-chapter code manual: labelled entries (one of them a family
+# entry whose sub-codes carry a description but no label of their own), a
+# code-to-module table, and back-of-book index pages.
+_CODES_CHAPTER = (
+    "0C1\nExplanation:\nA program interruption occurred. The code identifies its kind:\n"
+    "0C4\nA protection exception occurred.\n"
+    "0C7\nA data exception occurred.\n\n"
+    "806\nExplanation:\nThe requested load module was not found.\n"
+)
+_MODULE_TABLE = "101\nGENMOD01\n\n122\nGENMOD02\n\n806\nGENMOD03\n"
+_INDEX = "abend codes\n101\nsee completion codes\n\n122\nsystem action\n"
+
+
+def _three_chapter_chunks():
+    from mainframe_rag.ingest.chunk import make_chunks
+
+    toc = (
+        (1, "Chapter 2. Completion codes", 1),
+        (1, "Chapter 3. Completion code to module table", 2),
+        (1, "Chapter 4. Code lookup", 3),
+    )
+    return make_chunks(_parsed(toc, 3), [_CODES_CHAPTER, _MODULE_TABLE, _INDEX])
+
+
+def test_code_section_records_labelled_entries_and_their_sub_entries():
+    """0C4 and 0C7 sit inside the 0C1 family entry with no label of their
+    own (the real manual's shape); a per-entry label rule dropped them, which
+    is why the gate is per section."""
+    chunks = _three_chapter_chunks()
+    codes = {c for ch in chunks if ch.heading_path.startswith("Chapter 2") for c in ch.system_codes}
+    assert codes == {"0C1", "0C4", "0C7", "806"}
+
+
+def test_unlabelled_sections_record_no_codes():
+    """A module table and index pages carry code-shaped lines followed by
+    text; without a labelled entry they are not code sections, so their
+    chunks cannot pass the SYSCODE prefilter (issue #621)."""
+    chunks = _three_chapter_chunks()
+    others = [ch for ch in chunks if not ch.heading_path.startswith("Chapter 2")]
+    assert {ch.heading_path for ch in others} == {
+        "Chapter 3. Completion code to module table",
+        "Chapter 4. Code lookup",
+    }
+    assert all(ch.system_codes == [] for ch in others)
+    # The same text the gate rejects is still code-shaped to the extractor:
+    # the empty payload comes from the section gate, not from the text.
+    assert any(_extract_system_codes(ch.text) for ch in others)
+
+
+def test_label_opening_the_next_page_confirms_the_section():
+    from mainframe_rag.ingest.chunk import make_chunks
+
+    pages = ["Overview of the generated codes.\n\n0C4", "Explanation:\nA protection exception."]
+    chunks = make_chunks(_parsed(((1, "Completion codes", 1),), 2), pages)
+    assert "0C4" in {c for ch in chunks for c in ch.system_codes}
+
+
+def test_section_gate_changes_only_the_payload(monkeypatch):
+    """The gate must not move chunk boundaries, ids, text or unit spans:
+    only system_codes differs, which is what makes a same-collection A/B
+    valid and keeps re-ingest a payload-only change."""
+    from mainframe_rag.ingest import chunk as chunk_mod
+
+    gated = _three_chapter_chunks()
+    monkeypatch.setattr(chunk_mod, "_is_code_section", lambda paras: True)
+    ungated = _three_chapter_chunks()
+
+    def shape(chs):
+        return [(c.chunk_id, c.page_start, c.page_end, c.text, c.units, c.chunk_type) for c in chs]
+
+    assert shape(gated) == shape(ungated)
+    assert any(c.system_codes for c in ungated if c.heading_path.startswith("Chapter 3"))

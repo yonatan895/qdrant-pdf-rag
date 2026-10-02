@@ -192,7 +192,15 @@ for citations and filters.
   states, where it takes the `W`-prefix the query parser emits for it. The
   operator spelling (`S0C4`) is deliberately **not** added to `text`: it would
   shift every unit span (#368) and put a line in the cited text that the
-  manual does not contain. `system_codes` plus the prefilter carry the lookup. The value is written to
+  manual does not contain. `system_codes` plus the prefilter carry the lookup.
+  Only a **code section** records codes (issue #621): an outline section in
+  which some code line is directly followed by its `Explanation` label (read
+  across paragraph and page breaks). Within it every entry start counts,
+  including unlabelled sub-entries such as `0C4` inside the `0Cx` entry.
+  Index pages, code-to-module tables, return-code tables and other manuals'
+  numeric cells store `[]`. The gate changes the payload only, never chunk
+  boundaries, ids, text or unit spans. A manual without the label stores no
+  codes, and those lookups take the NL path. The value is written to
   the point payload on every upsert — indexing the field without writing it
   leaves the index empty and every code query silently falling back.
 - SYSIN adjacency (issue #216): data paragraphs following a `DD *`/`DD DATA`
