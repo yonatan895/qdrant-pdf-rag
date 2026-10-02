@@ -201,3 +201,46 @@ def test_verify_entry_needs_no_network():
     assert fails == []
     assert len(warns) == 3
     assert any("query_class" in w and "message_id" in w for w in warns)
+
+
+def _code_facts() -> CorpusFacts:
+    return CorpusFacts(
+        docs={
+            "SA99-0665-00": DocFacts(
+                pages={"154", "401–402", "500"},
+                headings=["chapter 2. system completion codes"],
+                code_pages={"0C4": {"154"}, "B37": {"401–402"}},
+                title="Codes",
+            ),
+            "SA99-0001-00": DocFacts(pages={"12"}, headings=["chapter 1"], title="Prose guide"),
+        },
+        points=4,
+    )
+
+
+def test_verify_entry_system_code_binds_doc_and_page():
+    """Issue #591: a code lookup is bound to the system_codes payload the
+    prefilter reads, and its page to a chunk carrying that code."""
+    ok = GoldenEntry(id="SYS-01", query="What does abend SB37 mean?", query_class="message_id",
+                     expected_doc_ids=["SA99-0665-00"], expected_page="401–402", source="s")
+    assert verify_entry(ok, _code_facts()) == ([], [])
+
+    # Page exists in the doc, but no chunk on it carries the code.
+    wrong_page = GoldenEntry(id="SYS-02", query="What does abend SB37 mean?", query_class="message_id",
+                             expected_doc_ids=["SA99-0665-00"], expected_page="500", source="s")
+    fails, _ = verify_entry(wrong_page, _code_facts())
+    assert any("not a page of a chunk carrying 'B37'" in f for f in fails)
+
+    # Code not stored in the expected doc at all.
+    wrong_doc = GoldenEntry(id="SYS-03", query="What does abend S0C4 mean?", query_class="message_id",
+                            expected_doc_ids=["SA99-0001-00"], source="s")
+    fails, _ = verify_entry(wrong_doc, _code_facts())
+    assert any("'0C4' from query not in expected docs' system_codes" in f for f in fails)
+
+
+def test_verify_entry_code_mention_outside_lookup_rows_is_not_bound():
+    """A diagnostic question can mention a code while its answer lives in a
+    book that discusses it in prose; only lookup rows are bound."""
+    entry = GoldenEntry(id="DIA-1", query="A program abended S0C4 in the dump: which guide covers it?",
+                        query_class="diagnostic", expected_doc_ids=["SA99-0001-00"], source="s")
+    assert verify_entry(entry, _code_facts()) == ([], [])

@@ -286,6 +286,30 @@ e("MSG-38", "TSS9134A appeared after a CA Top Secret signon. What does the messa
      ["tss-messages", "messages-for-ca-top-secret-for-z-os"])
 e("MSG-39", "What does DFHAC2006 indicate for a CICS TS 3.1 transaction?", "message_id", ["GC34-6442-07"])
 
+# --- abend / system-completion-code lookups (issue #591; 2026-10-03 re-freeze) ----
+# Code-shaped identifiers ride the message_id class (no new QUERY_CLASSES
+# entry). Each page is the exact printed page_label of the chunk holding the
+# entry in the b5c1756 representation, verified against stored payload by
+# verify-golden (the query's system code must be in the expected doc's
+# system_codes). 0C4/0C7 are unlabelled sub-entries of the 0Cx family entry.
+CODES = "SA38-0665-03"  # z/OS MVS System Codes
+e("SYS-01", "What does abend S0C4 mean and what are its common causes?", "message_id", [CODES], page="154")
+e("SYS-02", "A batch step ended with system completion code 0C7. What does the codes manual say happened?",
+  "message_id", [CODES], page="156")
+e("SYS-03", "What does abend S806 mean and how is it resolved?", "message_id", [CODES], page="360")
+e("SYS-04", "My job failed with abend SB37 while writing an output data set. What does the manual document?",
+  "message_id", [CODES], page="401\u2013402")
+e("SYS-05", "What does completion code D37 indicate and what should the programmer do?", "message_id", [CODES],
+  page="420")
+e("SYS-06", "What does abend S80A indicate?", "message_id", [CODES], page="361")
+e("SYS-07", "What does abend SAFB mean?", "message_id", [CODES], page="398\u2013399",
+  note="all-letter completion code: reachable only uppercase and adjacent to the code phrase")
+e("SYS-08", "What does wait state 064 mean?", "message_id", [CODES], page="497\u2013498")
+e("SYS-09", "The system entered wait state 0A2. What does the codes manual say about it?", "message_id", [CODES],
+  page="517\u2013518")
+e("SYS-10", "DFSMSrmm ended with user abend U0661. What does the diagnosis guide document?", "message_id",
+  ["SC23-6876-01"], page="90\u201391")
+
 e("DIA-33", "A CICS TS 3.1 transaction abended and DFHAC2006 is in the message log. What does the message tell the operator to collect before calling support?", "diagnostic",
      ["GC34-6442-07"],
      # p.66 in the printed GC34-6442-07; carried as a note (not a page

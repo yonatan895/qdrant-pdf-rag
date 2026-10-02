@@ -442,7 +442,7 @@ def test_repo_golden_rows_opt_into_acceptance_states():
     """Every committed golden and holdout row carries the issue #365
     acceptance state, consistent with its expected behavior: the holdout
     opts in through the adjudicated re-freeze."""
-    for path, expected_n in (("evals/golden.jsonl", 121), ("evals/holdout.jsonl", 72)):
+    for path, expected_n in (("evals/golden.jsonl", 127), ("evals/holdout.jsonl", 76)):
         rows = [
             json.loads(line)
             for line in Path(path).read_text(encoding="utf-8").splitlines()
