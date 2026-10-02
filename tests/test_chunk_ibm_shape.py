@@ -809,3 +809,179 @@ def test_make_chunks_single_labeled_page_keeps_label():
     assert _page_label_range(["A-"]) == "A-"
     assert _page_label_range([""]) == ""
     assert _page_label_range([]) == ""
+
+
+# Issue #597: realistic-shape generated PDFs through the real parse path
+# (parse_pdf -> _extract_page_texts -> strip_chrome -> make_chunks). Original
+# text only, built with PyMuPDF at test time; nothing is committed.
+
+
+def _pipeline_chunks(path):
+    import pymupdf
+
+    from mainframe_rag.ingest.run_ingest import _extract_page_texts
+
+    parsed = parse_pdf(path)
+    with pymupdf.open(path) as doc:
+        texts, labels = _extract_page_texts(doc)
+    return make_chunks(parsed, strip_chrome(texts), labels)
+
+
+# 1-based outline page -> (level, title). "Contents" is front matter inside the
+# limit; "Step Index" / "Section Index" match SKIP_ALWAYS_RE; "" is empty.
+_DEEP_TOC = [
+    (1, "Contents", 1),
+    (1, "Chapter 1 Overview", 2),
+    (2, "Section 1.1 Setup", 3),
+    (3, "Part 1.1.1 Install", 4),
+    (4, "Step 1.1.1.1 Unpack", 5),
+    (4, "Step Index", 6),
+    (4, "", 7),
+    (3, "Part 1.1.2 Verify", 8),
+    (2, "Section Index", 9),
+    (2, "Section 1.2 Tuning", 10),
+    (1, "Chapter 2 Reference", 11),
+    (1, "Chapter 3 Limits", 12),
+]
+
+
+def _deep_outline_pdf(path, label_rules=None):
+    import pymupdf
+
+    doc = pymupdf.open()
+    for i in range(1, 13):
+        doc.new_page().insert_text((72, 72), f"Widget marker PG{i:02d} original fixture text.")
+    doc.set_toc([[level, title, page] for level, title, page in _DEEP_TOC])
+    if label_rules:
+        doc.set_page_labels(label_rules)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+@pytest.mark.parametrize(
+    "label_rules",
+    [None, [{"startpage": 4, "prefix": "", "style": "D", "firstpagenum": 1}]],
+    ids=["no-pagelabels", "labels-start-after-page-0"],
+)
+def test_deep_outline_pdf_chunks_each_page_once_under_deepest_kept_section(tmp_path, label_rules):
+    """Issue #577 shape: 4 levels deep with skipped headings at depths 2, 3
+    and 4 (SKIP_ALWAYS match, empty title) plus front matter. Every body page
+    is chunked exactly once, skipped entries neither cut a parent nor
+    duplicate pages, and unlabeled/partially labeled pages never fail the
+    document or invent a label (issue #271 shapes)."""
+    chunks = _pipeline_chunks(_deep_outline_pdf(tmp_path / "WX10-0010-00_deep.pdf", label_rules))
+    paths = {c.heading_path for c in chunks}
+    deepest = "Chapter 1 Overview > Section 1.1 Setup > Part 1.1.1 Install > Step 1.1.1.1 Unpack"
+    assert deepest in paths
+    owner = {}
+    for page in range(2, 13):  # outline pages 2..12 carry body text; page 1 is front matter
+        marker = f"PG{page:02d}"
+        holders = [c.heading_path for c in chunks if marker in c.text]
+        assert len(holders) == 1, f"{marker} chunked {len(holders)} times"
+        owner[page] = holders[0]
+    assert "PG01" not in "".join(c.text for c in chunks)
+    # Skipped entries' pages stay with the kept section that precedes them.
+    assert owner[6] == owner[7] == deepest
+    assert owner[9] == "Chapter 1 Overview > Section 1.1 Setup > Part 1.1.2 Verify"
+    assert owner[10] == "Chapter 1 Overview > Section 1.2 Tuning"
+    assert owner[12] == "Chapter 3 Limits"
+    by_start = {c.page_start: c for c in chunks}
+    if label_rules is None:
+        assert {c.page_label for c in chunks} == {""}
+    else:
+        # Pages 0-3 precede the first label rule: no label, never a guess.
+        assert all(c.page_label == "" for c in chunks if c.page_start < 4)
+        assert by_start[10].page_label == "7" and by_start[11].page_label == "8"
+
+
+def _table_pdf(path):
+    """Column-major table (#85 shape): each column is drawn whole, so plain
+    extraction yields column lists, not rows."""
+    import pymupdf
+
+    columns = [
+        ("Parameter", ["MAXJOBS", "MAXUSERS", "MAXWAIT", "MAXQ"]),
+        ("Default", ["200", "50", "30", "10"]),
+        ("Meaning", ["Maximum queued jobs", "Maximum signed on users",
+                     "Seconds before timeout", "Queue depth"]),
+    ]
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 60), "Chapter 1 Limits", fontsize=12)
+    x = 72
+    for head, cells in columns:
+        page.insert_text((x, 100), head, fontsize=10)
+        for row, cell in enumerate(cells, start=1):
+            page.insert_text((x, 100 + 14 * row), cell, fontsize=10)
+        x += 140
+    doc.set_toc([[1, "Chapter 1 Limits", 1]])
+    doc.save(path)
+    doc.close()
+    return path
+
+
+_TABLE_ROWS = [
+    ("MAXJOBS", "200", "Maximum queued jobs"),
+    ("MAXUSERS", "50", "Maximum signed on users"),
+    ("MAXWAIT", "30", "Seconds before timeout"),
+    ("MAXQ", "10", "Queue depth"),
+]
+
+
+def test_column_major_table_pdf_keeps_text_cells_and_location(tmp_path):
+    chunks = _pipeline_chunks(_table_pdf(tmp_path / "WX10-0011-00_table.pdf"))
+    assert [(c.heading_path, c.page_start) for c in chunks] == [("Chapter 1 Limits", 0)]
+    text = chunks[0].text
+    for head in ("Parameter", "Default", "Meaning"):
+        assert head in text
+    for name, _default, meaning in _TABLE_ROWS:
+        assert name in text and meaning in text
+
+
+def test_known_gap_85_column_major_table_loses_row_value_associations(tmp_path):
+    """KNOWN GAP (#85), pinning current lossy behavior: page.get_text() is
+    geometry-free, so a column-major table's name and meaning cells never
+    share a line. When #85 preserves rows this test must be flipped to
+    assert every (name, default, meaning) triple on one line."""
+    (chunk,) = _pipeline_chunks(_table_pdf(tmp_path / "WX10-0011-00_table.pdf"))
+    lines = chunk.text.splitlines()
+    for name, _default, meaning in _TABLE_ROWS:
+        assert not any(name in ln and meaning in ln for ln in lines), name
+
+
+def _change_bar_pdf(path):
+    """IBM revision bars: a margin run of bare `|` glyphs beside prose and
+    after it. Prose lines are drawn in the body column, bars at x=50."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 60), "Chapter 1 Limits", fontsize=12)
+    y = 100
+    for i in range(6):
+        page.insert_text((50, y), "|", fontsize=10)
+        page.insert_text((72, y), f"Revised sentence {i} about the widget limit.", fontsize=10)
+        y += 14
+    for _ in range(8):
+        page.insert_text((50, y), "|", fontsize=10)
+        y += 12
+    doc.set_toc([[1, "Chapter 1 Limits", 1]])
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_change_bar_pdf_keeps_prose_in_order(tmp_path):
+    (chunk,) = _pipeline_chunks(_change_bar_pdf(tmp_path / "WX10-0012-00_bars.pdf"))
+    assert chunk.heading_path == "Chapter 1 Limits"
+    prose = [ln for ln in chunk.text.splitlines() if ln.startswith("Revised sentence")]
+    assert prose == [f"Revised sentence {i} about the widget limit." for i in range(6)]
+
+
+def test_known_gap_85_change_bar_glyphs_survive_as_bare_bar_lines(tmp_path):
+    """KNOWN GAP (#85 status note), pinning current behavior: change-bar glyphs
+    survive extraction as bare '|' lines inside chunk text. When the extraction
+    concern strips them this test must be flipped to assert none remain."""
+    (chunk,) = _pipeline_chunks(_change_bar_pdf(tmp_path / "WX10-0012-00_bars.pdf"))
+    assert [ln for ln in chunk.text.splitlines() if ln.strip() == "|"]

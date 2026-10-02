@@ -611,6 +611,125 @@ def test_answer_body_state_real_client_all_surfaces(
         assert len(transport.post_bodies) == int(not (stream or llm_stream))
 
 
+# Issue #597: adversarial model outputs through the real HttpxLLMClient and
+# every answer/chat surface. Outcomes only: state, kept body, citations.
+_ADVERSARIAL_SURFACES = [
+    ("/v1/answer", False, False),
+    ("/v1/answer", True, True),
+    ("/v1/chat", False, False),
+    ("/v1/chat", True, True),
+]
+
+
+def _drive_surface(client, path, stream):
+    """POST one surface; return (final, error). `final` is the normalized
+    terminal outcome (answer is None where the wire carries it only as token
+    deltas) and `error` the fixed error payload, exactly one of them set."""
+    if path == "/v1/answer":
+        response = client.post(path + ("?stream=true" if stream else ""),
+                               json={"query": "IEA500I"})
+        assert response.status_code == 200
+        if not stream:
+            data = response.json()
+            return {"answer": data["answer"], "state": data["verification_state"],
+                    "citations": data["citations"], "finish": None}, None
+        events = dict(_answer_sse_events(response.text))
+        assert ("final" in events) != ("error" in events)
+        if "error" in events:
+            return None, events["error"]
+        data = events["final"]
+        return {"answer": data["answer"], "state": data["verification_state"],
+                "citations": data["citations"], "finish": None}, None
+    response = client.post(path, json={
+        "messages": [{"role": "user", "content": "IEA500I"}], "stream": stream,
+    })
+    assert response.status_code == 200
+    if not stream:
+        data = response.json()
+        choice = data["choices"][0]
+        return {"answer": choice["message"]["content"], "state": data["verification_state"],
+                "citations": data["citations"], "finish": choice["finish_reason"]}, None
+    assert response.text.splitlines().count(_DONE_LINE) == 1
+    frames = [json.loads(line[6:]) for line in response.text.splitlines()
+              if line.startswith("data: ") and line != _DONE_LINE]
+    errors = [frame for frame in frames if "error" in frame]
+    terminals = [frame["choices"][0] for frame in frames
+                 if frame.get("choices") and frame["choices"][0].get("finish_reason")]
+    assert len(errors) + len(terminals) == 1
+    if errors:
+        return None, errors[0]
+    return {"answer": None, "state": terminals[0]["verification_state"],
+            "citations": terminals[0]["citations"],
+            "finish": terminals[0]["finish_reason"]}, None
+
+
+def _adversarial_llm(monkeypatch, synthetic_pdf, lines, payload, llm_stream):
+    transport = HttpxStreamFake(lines=lines, payload=payload)
+    llm = HttpxLLMClient(Settings(**_settings_kwargs(llm_stream=llm_stream)), client=transport)
+    monkeypatch.setattr(app_mod, "retrieve_search", _search_stub().search)
+    return transport, _client(monkeypatch, synthetic_pdf, llm)
+
+
+@pytest.mark.parametrize("path,stream,llm_stream", _ADVERSARIAL_SURFACES)
+def test_reasoning_only_empty_content_never_reads_as_an_answer(
+    monkeypatch, synthetic_pdf, servable_representation_gate, path, stream, llm_stream,
+):
+    """Reasoning channel only, empty content channel, finish `stop`. Buffered
+    surfaces report an empty incomplete answer (200); streaming surfaces take the
+    one empty-content recovery POST, then fail with the fixed error and no
+    success terminal. Nothing accepted, nothing cited."""
+    lines = [
+        "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": "Thinking it over"}}]}),
+        _FINISH_LINE,
+        _DONE_LINE,
+    ]
+    payload = {"choices": [{"message": {"content": "", "reasoning_content": "Thinking it over"},
+                            "finish_reason": "stop"}]}
+    transport, clients = _adversarial_llm(monkeypatch, synthetic_pdf, lines, payload, llm_stream)
+    for client in clients:
+        final, error = _drive_surface(client, path, stream)
+    assert len(transport.post_bodies) == 1
+    assert len(transport.stream_bodies) == int(llm_stream)
+    if stream:
+        assert final is None
+        assert error["verification_state"] == "generation_incomplete"
+        assert "Thinking it over" not in json.dumps(error)
+    else:
+        assert error is None
+        assert final["answer"] == ""
+        assert final["citations"] == []
+        assert final["state"] == "generation_incomplete"
+
+
+@pytest.mark.parametrize("path,stream,llm_stream", _ADVERSARIAL_SURFACES)
+def test_length_finish_mid_citation_keeps_body_drops_fragment(
+    monkeypatch, synthetic_pdf, servable_representation_gate, path, stream, llm_stream,
+):
+    """`finish_reason=length` while the model was writing its Citations block:
+    the prose survives, the cut fragment is neither kept in the body nor
+    accepted as a citation, and the state is incomplete (never accepted)."""
+    cut = ("Reissue the command.\n\nCitations:\n"
+           "- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA5")
+    lines = [
+        "data: " + json.dumps({"choices": [{"delta": {"content": cut}}]}),
+        'data: {"choices": [{"delta": {}, "finish_reason": "length"}]}',
+        _DONE_LINE,
+    ]
+    payload = {"choices": [{"message": {"content": cut}, "finish_reason": "length"}]}
+    transport, clients = _adversarial_llm(monkeypatch, synthetic_pdf, lines, payload, llm_stream)
+    for client in clients:
+        final, error = _drive_surface(client, path, stream)
+    assert error is None
+    assert len(transport.stream_bodies) == int(llm_stream)
+    assert len(transport.post_bodies) == int(not llm_stream)
+    assert final["state"] == "generation_incomplete"
+    assert final["citations"] == []
+    if final["answer"] is not None:
+        assert final["answer"] == "Reissue the command."
+    if path == "/v1/chat":
+        assert final["finish"] == "length"
+
+
 def test_v1_answer_stream_truncation_emits_error_without_final(trunc_client):
     """Contract pin: token deltas, then event: error, and NO event: final."""
     resp = trunc_client.post("/v1/answer?stream=true", json={"query": "IEA500I command"})
