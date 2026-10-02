@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.version import Version
 from scripts import dependency_lock as locks
 from scripts import prepare_python
 
@@ -63,6 +67,19 @@ def test_lockfile_and_manifest_must_agree(locked):
     requirement.write_text(requirement.read_text().replace("example==1.0", "example==2.0"))
     with pytest.raises(locks.LockError, match="disagree"):
         locks.load(root, "dev")
+
+
+def test_urllib3_security_pin_covers_project_and_runtime_profiles():
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+    requirements = [Requirement(value) for value in project["dependencies"]]
+    urllib3 = next(requirement for requirement in requirements if requirement.name == "urllib3")
+    for profile in ("runtime", "dev"):
+        _, packages = locks.load(root, profile)
+        version = packages["urllib3"]["version"]
+        assert Version(version) >= Version("2.8.0")
+        assert str(urllib3.specifier) == f"=={version}"
+        assert packages["urllib3"]["wheel"] == f"urllib3-{version}-py3-none-any.whl"
 
 
 def test_wheelhouse_rejects_missing_extra_tampered_and_symlink(locked):

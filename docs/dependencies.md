@@ -10,6 +10,8 @@ The owning inputs are `locks/cp314-linux-x86_64.json` and its three complete,
 hash-pinned requirements files. The manifest records each selected wheel,
 version, SHA-256 and public origin. Existing direct versions remain unchanged;
 transitive versions were taken from the qualified development environment.
+The `urllib3` security pin is also explicit in `pyproject.toml`; its runtime/dev
+lock entries and wheel identity must agree with that project dependency.
 
 | Profile | File | Consumers |
 |---|---|---|

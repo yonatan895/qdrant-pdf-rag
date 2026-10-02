@@ -439,10 +439,10 @@
       "wheel": "typing_inspection-0.4.4-py3-none-any.whl"
     },
     "urllib3": {
-      "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897",
-      "url": "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl",
-      "version": "2.7.0",
-      "wheel": "urllib3-2.7.0-py3-none-any.whl"
+      "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+      "url": "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl",
+      "version": "2.8.0",
+      "wheel": "urllib3-2.8.0-py3-none-any.whl"
     },
     "uvicorn": {
       "sha256": "f86e41a149d7d05a9969337e3946a9c171c06a5d42680896daaba624aeac8da1",
@@ -547,7 +547,7 @@
         "wheel"
       ],
       "requirements": "requirements.dev.lock.txt",
-      "sha256": "d852c1ffac217be6ce5df4c5ddb6b7bfc7666fe21329c544fe41aab2b897f3e2"
+      "sha256": "9d73c58963643cebc06a4fa410d7e9f4eda80d2bd12dafbea8ac7e446fb78592"
     },
     "runtime": {
       "packages": [
@@ -613,7 +613,7 @@
         "uvicorn"
       ],
       "requirements": "requirements.lock.txt",
-      "sha256": "6bfebf6886f32269681e683b2535f7f365f48dd8de1089f27d8f7fd9ffa23858"
+      "sha256": "8cdddadb98de5b63aa423909a1ef35525dbd97b89851bda7e0bc0039d026acb4"
     }
   },
   "resolver": {
