@@ -44,3 +44,44 @@ def find_message_ids(text: str) -> list[str]:
 
 def find_members(text: str) -> list[str]:
     return sorted(set(MEMBER_RE.findall(text)))
+
+
+# System/user/wait-state completion codes (issue #591).
+# S-prefix is self-contexting: S0C4 → 0C4. The first char after S must be
+# a digit to avoid matching doc numbers like SC23-6862 (S + C23).
+_SYSCODE_S_RE = re.compile(r"\bS([0-9][0-9A-F]{2})\b", re.IGNORECASE)
+# Hex literal is self-contexting: X'0C4' → 0C4.
+_SYSCODE_HEX_RE = re.compile(r"X'([0-9A-F]{3})'(?![0-9A-F])", re.IGNORECASE)
+# Bare 3-hex needs context: 0C4 → 0C4 only with abend/completion code/system code.
+_SYSCODE_BARE_RE = re.compile(r"\b([0-9A-F]{3})\b", re.IGNORECASE)
+# User completion code: U4038 → U4038, needs abend context.
+_USERCODE_RE = re.compile(r"\b(U\d{4})\b", re.IGNORECASE)
+# Wait state: wait state 064 → W064.
+_WAITSTATE_RE = re.compile(r"\bwait\s+state\s+([0-9A-F]{3})\b", re.IGNORECASE)
+# Context words that gate bare code extraction.
+_SYSCODE_CONTEXT_RE = re.compile(
+    r"(?:abend|completion\s+code|system\s+code)",
+    re.IGNORECASE,
+)
+
+
+def find_system_codes(text: str) -> list[str]:
+    """Extract system/user/wait-state completion codes (issue #591).
+
+    Returns canonical forms: 0C4 (system), U4038 (user), W064 (wait).
+    Context-gated: bare 3-hex and user codes require abend/completion-code/
+    system-code context. S-prefix, X'...', and wait-state are self-contexting.
+    """
+    codes: set[str] = set()
+    for m in _SYSCODE_S_RE.finditer(text):
+        codes.add(m.group(1).upper())
+    for m in _SYSCODE_HEX_RE.finditer(text):
+        codes.add(m.group(1).upper())
+    for m in _WAITSTATE_RE.finditer(text):
+        codes.add(f"W{m.group(1).upper()}")
+    if _SYSCODE_CONTEXT_RE.search(text):
+        for m in _SYSCODE_BARE_RE.finditer(text):
+            codes.add(m.group(1).upper())
+        for m in _USERCODE_RE.finditer(text):
+            codes.add(m.group(1).upper())
+    return sorted(codes)

@@ -364,6 +364,14 @@ these; widening changes both corpus extraction and query parsing at once.
   `extraction_rules_version` are untouched (a corpus scan over 435k
   points showed zero member case variance: no ingest normalization and
   no re-ingest needed).
+- **System/user/wait-state codes** (issue #591): `S`-prefixed 3-hex
+  (`S0C4` → `0C4`), hex literals (`X'0C4'` → `0C4`), and wait states
+  (`wait state 064` → `W064`) are self-contexting. Bare 3-hex (`0C4`) and
+  user codes (`U4038`) require abend/completion-code/system-code context
+  to avoid false identifier routing for ordinary hex-looking words in
+  prose. Ingest detects code-entry starts (a line that is exactly a
+  3-hex code followed within two lines by description text, excluding
+  index runs) and records `system_codes` in the payload.
 - **Front/back-matter titles** `SKIP_ALWAYS_RE`: notices, trademarks,
   reader comments, bibliography, copyright, index — matched at title end
   because IBM titles carry prefixes ("Appendix A. Notices").

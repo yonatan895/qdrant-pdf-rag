@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mainframe_rag.ingest.classify import classify, is_table_block
@@ -77,6 +77,10 @@ _SENTENCE_END_RE = re.compile(r"[.?!:]\s*$")
 # paragraph; two cards are an example, not a mention.
 _MIXED_JCL_MIN_STARTS = 2
 
+# Code-entry detection (issue #591): a line that is exactly a 3-hex code,
+# followed within two lines by description text rather than another bare code.
+_CODE_ENTRY_RE = re.compile(r"^([0-9A-F]{3})$")
+
 
 def _nonblank_lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.strip()]
@@ -132,6 +136,52 @@ def detect_table_region(text: str) -> bool:
     return is_table_block(text)
 
 
+def _is_code_entry_start(lines: list[str], idx: int) -> bool:
+    """Check if lines[idx] is a code entry start (issue #591).
+
+    A line that is exactly a 3-hex code, followed within two lines by
+    description text rather than another bare code. This excludes index runs.
+    """
+    if idx >= len(lines):
+        return False
+    if not _CODE_ENTRY_RE.match(lines[idx].strip()):
+        return False
+    for j in range(idx + 1, min(idx + 3, len(lines))):
+        line = lines[j].strip()
+        if not line:
+            continue
+        if _CODE_ENTRY_RE.match(line):
+            return False
+        return True
+    return False
+
+
+def _code_entries(text: str) -> list[tuple[str, bool]] | None:
+    """Split a paragraph into code entries (issue #591).
+
+    Returns None if the paragraph doesn't contain code entries. Each code
+    entry is atomic; text before the first entry is prose.
+    """
+    lines = text.splitlines()
+    starts = []
+    for i, line in enumerate(lines):
+        if _CODE_ENTRY_RE.match(line.strip()) and _is_code_entry_start(lines, i):
+            starts.append(i)
+    if not starts:
+        return None
+    items: list[tuple[str, bool]] = []
+    if starts[0] > 0:
+        prefix = "\n".join(lines[: starts[0]]).strip()
+        if prefix:
+            items.append((prefix, False))
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(lines)
+        entry = "\n".join(lines[start:end]).strip()
+        if entry:
+            items.append((entry, True))
+    return items or None
+
+
 @dataclass(frozen=True, slots=True)
 class Section:
     heading_path: str
@@ -175,6 +225,9 @@ class Chunk:
     message_ids: list[str]
     members: list[str]
     ordinal: int
+    # System/user/wait-state completion codes (issue #591). Empty for
+    # non-code chunks. Not part of identity.
+    system_codes: list[str] = field(default_factory=list)
     # Atomic-unit spans for prompt packing (issue #368): ordered ranges
     # over the stripped chunk text. Spans always tile whole items, so every
     # retained prefix is a whole number of units and a table chunk's header
@@ -555,6 +608,10 @@ def _build_blocks(
         if statements:
             items.extend((page_idx, statement, True) for statement in statements)
             dd_data_open = _is_dd_data_para(para)
+        elif _code_entries(para) is not None:
+            code_items = _code_entries(para)
+            items.extend((page_idx, text, atomic) for text, atomic in code_items)
+            dd_data_open = False
         elif detect_table_region(para):
             # Table rows are atomic like code statements: overflow splits
             # at row boundaries and the overlap backs off to whole rows.
@@ -725,6 +782,14 @@ def make_chunks(
                 labels[idx] if idx < len(labels) else None for idx in range(page_start, page_end + 1)
             ]
             label = _page_label_range(span_labels)
+            # Issue #591: extract system code and prepend alias for BM25/dense matching
+            system_codes: list[str] = []
+            lines = text.splitlines()
+            if lines and _CODE_ENTRY_RE.match(lines[0].strip()):
+                code = lines[0].strip()
+                system_codes = [code]
+                alias = f"S{code}"
+                text = f"{alias}\n{text}"
             chunks.append(
                 Chunk(
                     chunk_id=chunk_id,
@@ -736,6 +801,7 @@ def make_chunks(
                     text=text,
                     message_ids=find_message_ids(text),
                     members=find_members(text),
+                    system_codes=system_codes,
                     ordinal=ordinal,
                     units=_stored_spans(spans),
                     page_end=page_end,

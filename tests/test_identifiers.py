@@ -1,15 +1,19 @@
-"""Identifier-shape tests (issue #120).
+"""Identifier-shape tests (issues #120, #591).
 
 The classic 3-letter form (IEA500I) missed whole vendor families on real
 corpora: CICS DFH cards without trailing severity (DFHAC2006), bare IMS
 DFS codes (DFS058), and 4-letter-prefix codes (DSNA670I, TSSC001E).
 One shared regex serves ingest payloads and query parsing, so these pins
 hold on both sides by construction.
+
+Issue #591 adds system/user/wait-state completion codes: S0C4, 0C4,
+X'0C4', U4038, wait state 064 — with context gating to avoid false
+identifier routing for ordinary hex-looking words in prose.
 """
 
 import re
 
-from mainframe_rag.regexes import find_message_ids
+from mainframe_rag.regexes import find_message_ids, find_system_codes
 from mainframe_rag.retrieve.filters import parse_query
 from tests.fakes import iter_golden_queries
 
@@ -78,5 +82,58 @@ def test_golden_sweep_flips_are_real_codes() -> None:
         new = find_message_ids(query)
         if new != old:
             assert expected.get(query[:95]) == new, f"{name}: {query[:95]} -> {new}"
-    assert total == 215
+    assert total == 220
     assert len(expected) == 7
+
+
+# Issue #591: system/user/wait-state completion codes
+
+
+def test_syscode_s_prefix_self_contexting() -> None:
+    assert find_system_codes("What does abend S0C4 mean?") == ["0C4"]
+    assert find_system_codes("S0C4") == ["0C4"]
+    assert find_system_codes("s0c4") == ["0C4"]
+
+
+def test_syscode_hex_literal_self_contexting() -> None:
+    assert find_system_codes("X'0C4'") == ["0C4"]
+    assert find_system_codes("x'0c4'") == ["0C4"]
+    # 5-hex-digit literal is not a 3-hex code
+    assert find_system_codes("X'0C4AB'") == []
+
+
+def test_syscode_bare_needs_context() -> None:
+    assert find_system_codes("abend 0C4") == ["0C4"]
+    assert find_system_codes("completion code 0C4") == ["0C4"]
+    assert find_system_codes("system code 0C4") == ["0C4"]
+    # No context — bare 3-hex is not an identifier
+    assert find_system_codes("0C4") == []
+    assert find_system_codes("The value is 0C4 in hex") == []
+
+
+def test_usercode_needs_abend_context() -> None:
+    assert find_system_codes("abend U4038") == ["U4038"]
+    assert find_system_codes("U4038") == []
+
+
+def test_waitstate_self_contexting() -> None:
+    assert find_system_codes("wait state 064") == ["W064"]
+    assert find_system_codes("W064") == []
+
+
+def test_query_kind_flips_for_system_codes() -> None:
+    assert parse_query("What does abend S0C4 mean?").has_identifiers
+    assert parse_query("abend 0C4").has_identifiers
+    assert parse_query("wait state 064").has_identifiers
+    assert parse_query("The value is 0C4 in hex").has_identifiers is False
+
+
+def test_system_codes_normalized() -> None:
+    # S-prefix stripped to canonical 0C4
+    assert find_system_codes("S0C4") == ["0C4"]
+    # X'...' stripped to canonical 0C4
+    assert find_system_codes("X'0C4'") == ["0C4"]
+    # Wait state gets W prefix
+    assert find_system_codes("wait state 064") == ["W064"]
+    # User code keeps U prefix
+    assert find_system_codes("abend U4038") == ["U4038"]

@@ -12,7 +12,7 @@ import re
 from pydantic import BaseModel, Field
 from qdrant_client import models
 
-from mainframe_rag.regexes import DOCNO_RE, find_members, find_message_ids
+from mainframe_rag.regexes import DOCNO_RE, find_members, find_message_ids, find_system_codes
 
 # Query-side member pattern (issue #133): case-insensitive twin of the
 # shared MEMBER_RE, defined HERE — not in regexes.py — so ingest
@@ -28,10 +28,13 @@ class QueryIdentifiers(BaseModel):
     doc_ids: list[str] = Field(default_factory=list)
     message_ids: list[str] = Field(default_factory=list)
     members: list[str] = Field(default_factory=list)
+    system_codes: list[str] = Field(default_factory=list)
 
     @property
     def has_identifiers(self) -> bool:
-        return bool(self.doc_ids or self.message_ids or self.members)
+        return bool(
+            self.doc_ids or self.message_ids or self.members or self.system_codes
+        )
 
 
 # Edition space of a form number (issue #270). IBM doc ids carry a
@@ -122,6 +125,7 @@ def parse_query(query: str) -> QueryIdentifiers:
         doc_ids=sorted(_find_doc_filter_ids(query) | _find_doc_filter_ids(upper)),
         message_ids=sorted(set(find_message_ids(query)) | set(find_message_ids(upper))),
         members=find_members_folded(query),
+        system_codes=find_system_codes(query),
     )
 
 
@@ -152,6 +156,12 @@ def build_filter(
     if identifiers.members:
         must.append(
             models.FieldCondition(key="members", match=models.MatchAny(any=identifiers.members))
+        )
+    if identifiers.system_codes:
+        must.append(
+            models.FieldCondition(
+                key="system_codes", match=models.MatchAny(any=identifiers.system_codes)
+            )
         )
     return models.Filter(must=must) if must else None
 
