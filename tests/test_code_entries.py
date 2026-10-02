@@ -415,18 +415,75 @@ def test_label_opening_the_next_page_confirms_the_section():
     assert "0C4" in {c for ch in chunks for c in ch.system_codes}
 
 
-def test_section_gate_changes_only_the_payload(monkeypatch):
-    """The gate must not move chunk boundaries, ids, text or unit spans:
-    only system_codes differs, which is what makes a same-collection A/B
-    valid and keeps re-ingest a payload-only change."""
+def test_section_gate_leaves_code_sections_unchanged(monkeypatch):
+    """Inside a code section the gate is a no-op: chunk ids, text, spans and
+    codes are what the #591 splitter produced before it existed. Outside one
+    it now also stops entry splitting (see the dump-listing test below)."""
     from mainframe_rag.ingest import chunk as chunk_mod
 
-    gated = _three_chapter_chunks()
+    gated = [c for c in _three_chapter_chunks() if c.heading_path.startswith("Chapter 2")]
     monkeypatch.setattr(chunk_mod, "_is_code_section", lambda paras: True)
-    ungated = _three_chapter_chunks()
+    ungated = [c for c in _three_chapter_chunks() if c.heading_path.startswith("Chapter 2")]
 
     def shape(chs):
-        return [(c.chunk_id, c.page_start, c.page_end, c.text, c.units, c.chunk_type) for c in chs]
+        return [(c.chunk_id, c.page_start, c.text, c.units, c.system_codes) for c in chs]
 
     assert shape(gated) == shape(ungated)
-    assert any(c.system_codes for c in ungated if c.heading_path.startswith("Chapter 3"))
+
+
+def test_non_code_section_does_not_split_on_code_shaped_lines():
+    """A module table or index outside a code section is not split into
+    atomic code entries: its code-shaped lines are ordinary content."""
+    for chunk in _three_chapter_chunks():
+        if chunk.heading_path.startswith("Chapter 2"):
+            continue
+        for span in chunk.units:
+            unit = chunk.text[span.start : span.end]
+            assert not (span.kind == "atomic" and unit.splitlines()[0] in {"101", "122", "806"})
+
+
+# A dump listing shaped like an LE/C dump report: a bare decimal value line,
+# a field path, a type. Before #612 the bare numbers were stripped as folios;
+# after it they opened one code "entry" that ran to the end of the paragraph
+# (5,813 chars, 4,081 tokens on a real manual) and overflowed the embed window.
+# One 3-digit value opens the "entry"; the values after it are 1-2 digits,
+# which are not code-shaped, so nothing closes it until the paragraph ends.
+_DUMP_LINES = ["255"]
+for _i in range(240):
+    _DUMP_LINES += [f"*.*.C(SAMPLE{_i:03d}):>field_{_i}", "signed int", str(_i % 90)]
+_DUMP = "\n".join(_DUMP_LINES)
+
+
+def test_dump_listing_outside_a_code_section_stays_within_the_cap():
+    from mainframe_rag.ingest.chunk import SECTION_MAX_CHARS, SPLIT_OVERLAP_CHARS, make_chunks
+
+    chunks = make_chunks(_parsed(((1, "Diagnosing dump output", 1),), 1), [_DUMP])
+    assert len(_DUMP) > 2 * SECTION_MAX_CHARS
+    assert max(len(c.text) for c in chunks) <= SECTION_MAX_CHARS + SPLIT_OVERLAP_CHARS
+    assert all(c.system_codes == [] for c in chunks)
+
+
+def test_oversize_entry_in_a_code_section_is_cut_at_line_boundaries():
+    """A real code section can hold a very long entry: it is cut at line
+    boundaries so no chunk overflows the embed window, the code stays
+    recorded, and no line is lost or sliced."""
+    from mainframe_rag.ingest.chunk import (
+        SECTION_MAX_CHARS,
+        SPLIT_OVERLAP_CHARS,
+        _cap_entry,
+        make_chunks,
+    )
+
+    body = "\n".join(
+        f"Generated reason-code explanation line {i} for this entry." for i in range(200)
+    )
+    entry = f"0C4\nExplanation:\n{body}"
+    pieces = _cap_entry(entry)
+    assert len(pieces) > 1
+    assert pieces[0].startswith("0C4\nExplanation:")
+    assert all(len(p) <= SECTION_MAX_CHARS for p in pieces)
+    assert "\n".join(pieces).splitlines() == entry.splitlines()
+
+    chunks = make_chunks(_parsed(((1, "Completion codes", 1),), 1), [entry])
+    assert max(len(c.text) for c in chunks) <= SECTION_MAX_CHARS + SPLIT_OVERLAP_CHARS
+    assert "0C4" in {code for c in chunks for code in c.system_codes}
