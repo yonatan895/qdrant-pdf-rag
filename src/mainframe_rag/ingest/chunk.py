@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import TYPE_CHECKING
 
 from mainframe_rag.ingest.classify import classify, is_table_block
@@ -88,6 +89,12 @@ _CODE_ENTRY_RE = re.compile(r"^(?:[0-9A-F]{3}|U\d{4})$")
 # generic-parsing signal rather than a vendor gate; a manual that never says
 # "wait state" simply yields completion codes only.
 _WAITSTATE_HEADING_RE = re.compile(r"\bwait\s+states?\b", re.IGNORECASE)
+# A code entry's own description label (issue #621). A code line directly
+# followed by it is a confirmed entry; a section with none is not a code
+# section, so its code-shaped lines (index pages, table cells, module tables,
+# return codes) record no system_codes. Plain English, so a manual without the
+# label simply stores no codes: optional payload, never an ingest gate.
+_ENTRY_LABEL_RE = re.compile(r"^Explanation\s*(?::|$)", re.IGNORECASE)
 
 
 def _canonical_code(raw: str, wait_state: bool) -> str:
@@ -220,6 +227,21 @@ def _extract_system_codes(text: str, wait_state: bool = False) -> list[str]:
             if code not in codes:
                 codes.append(code)
     return codes
+
+
+def _is_code_section(paras: list[tuple[int, str]]) -> bool:
+    """True when the section holds a labelled code entry (issue #621).
+
+    Gates `system_codes` per section rather than per entry: a sub-entry
+    such as `0C4` inside the `0Cx` entry carries a description but no label
+    of its own, and is still a real code. Lines are read across paragraph
+    and page breaks so a label that opens the next page still confirms the
+    code that closed the previous one.
+    """
+    lines = [line.strip() for _, para in paras for line in para.splitlines() if line.strip()]
+    return any(
+        _CODE_ENTRY_RE.match(line) and _ENTRY_LABEL_RE.match(nxt) for line, nxt in pairwise(lines)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -812,6 +834,7 @@ def make_chunks(
                     paras.append((section.page_start + offset, para.strip()))
         if not paras:
             continue
+        code_section = _is_code_section(paras)
 
         for ordinal, (page_start, page_end, text, spans) in enumerate(_build_blocks(paras)):
             # UUID pins the span start: the deterministic chunk key contract
@@ -827,8 +850,9 @@ def make_chunks(
             # Issue #591: every code entry this block carries, canonicalized
             # for its section. The alias spelling stays out of `text` on
             # purpose (see _extract_system_codes) so unit spans stay aligned
-            # and the stored text is the manual's own words.
-            system_codes = _extract_system_codes(text, wait_state)
+            # and the stored text is the manual's own words. Only a code
+            # section records them (#621); chunk boundaries do not change.
+            system_codes = _extract_system_codes(text, wait_state) if code_section else []
             chunks.append(
                 Chunk(
                     chunk_id=chunk_id,

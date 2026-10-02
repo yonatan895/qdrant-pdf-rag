@@ -270,7 +270,7 @@ def test_completion_code_round_trips_ingest_to_query_filter():
 
     text = (
         "System completion codes\n\n"
-        "0C4\nA protection exception occurred during the operation.\n\n"
+        "0C4\nExplanation:\nA protection exception occurred during the operation.\n\n"
         "0C7\nA data exception occurred.\n"
     )
     parsed = ParsedDoc(
@@ -294,6 +294,22 @@ def test_completion_code_round_trips_ingest_to_query_filter():
         assert query_kind(ids) == "identifier"
         clause = next(c for c in build_filter(ids).must if c.key == "system_codes")
         assert set(clause.match.any) & stored, f"{query!r} filter cannot match stored codes"
+
+    # Issue #621: the same code-shaped lines in an unlabelled section (an
+    # index page, a return-code table) reach the payload as nothing, so the
+    # prefilter cannot admit them.
+    unlabelled = ParsedDoc(
+        path="SA99-0001-00.pdf", doc_id="SA99-0001-00", sha256="ef" * 32,
+        vendor="unknown", title="Synthetic Guide",
+        toc=((1, "Return codes", 1),), page_count=1,
+    )
+    other = make_chunks(unlabelled, [text.replace("Explanation:\n", "")])
+    client = UpsertRecordingClient()
+    upsert_chunks(
+        client, _settings(4), unlabelled, other, [([0.1] * 4, ([1], [1.0]))] * len(other)
+    )
+    assert client.upserted_points
+    assert all(p.payload["system_codes"] == [] for p in client.upserted_points)
 
 
 def test_completion_codes_key_present_even_without_codes():
