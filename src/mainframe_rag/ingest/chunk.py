@@ -205,8 +205,34 @@ def _code_entries(text: str) -> list[tuple[str, bool]] | None:
         end = starts[i + 1] if i + 1 < len(starts) else len(lines)
         entry = "\n".join(lines[start:end]).strip()
         if entry:
-            items.append((entry, True))
+            items.extend((piece, True) for piece in _cap_entry(entry))
     return items or None
+
+
+def _cap_entry(entry: str) -> list[str]:
+    """Cut a code entry longer than SECTION_MAX_CHARS at line boundaries.
+
+    A code entry is an explanation, not a statement: unlike a JCL card it
+    has no internal syntax a line cut would break, and nothing else bounds
+    it. Emitted whole, a dump-listing "entry" reached 5,813 chars / 4,081
+    tokens and overflowed the 4096-token embed window. The first piece
+    keeps the code line with the lines after it, so the entry is still
+    detected there; a single line over the cap stays whole.
+    """
+    if len(entry) <= SECTION_MAX_CHARS:
+        return [entry]
+    pieces: list[str] = []
+    current: list[str] = []
+    size = 0
+    for line in entry.splitlines():
+        if current and size + 1 + len(line) > SECTION_MAX_CHARS:
+            pieces.append("\n".join(current))
+            current, size = [], 0
+        current.append(line)
+        size += len(line) + (1 if size else 0)
+    if current:
+        pieces.append("\n".join(current))
+    return [piece for piece in (p.strip() for p in pieces) if piece]
 
 
 def _extract_system_codes(text: str, wait_state: bool = False) -> list[str]:
@@ -652,6 +678,7 @@ def units_for_text(text: str) -> tuple[UnitSpan, ...]:
 
 def _build_blocks(
     paras: list[tuple[int, str]],
+    code_section: bool = True,
 ) -> list[tuple[int, int, str, tuple[UnitSpan, ...]]]:
     """Split paragraphs into capped blocks with page spans AND unit spans.
 
@@ -659,6 +686,8 @@ def _build_blocks(
     page the block's items touch (issue #216); spans tile the block's items
     in join order (issue #368). Oversize prose slices carry () — their
     interior was char-cut at ingest, so no whole-unit claim is possible.
+    Code entries split only in a code section (see _is_code_section): bare
+    numbers in a dump listing or a table are not entries.
     """
     blocks: list[tuple[int, int, str, tuple[UnitSpan, ...]]] = []
     # Expand structured paragraphs into atomic items; prose passes through
@@ -670,7 +699,7 @@ def _build_blocks(
         if statements:
             items.extend((page_idx, statement, True) for statement in statements)
             dd_data_open = _is_dd_data_para(para)
-        elif (code_items := _code_entries(para)) is not None:
+        elif code_section and (code_items := _code_entries(para)) is not None:
             items.extend((page_idx, text, atomic) for text, atomic in code_items)
             dd_data_open = False
         elif detect_table_region(para):
@@ -836,7 +865,8 @@ def make_chunks(
             continue
         code_section = _is_code_section(paras)
 
-        for ordinal, (page_start, page_end, text, spans) in enumerate(_build_blocks(paras)):
+        blocks = _build_blocks(paras, code_section)
+        for ordinal, (page_start, page_end, text, spans) in enumerate(blocks):
             # UUID pins the span start: the deterministic chunk key contract
             # (revision|heading|page|ordinal) carries the source revision, so
             # same-form-number revisions never share point ids.
@@ -851,7 +881,7 @@ def make_chunks(
             # for its section. The alias spelling stays out of `text` on
             # purpose (see _extract_system_codes) so unit spans stay aligned
             # and the stored text is the manual's own words. Only a code
-            # section records them (#621); chunk boundaries do not change.
+            # section records them (#621) or splits on them.
             system_codes = _extract_system_codes(text, wait_state) if code_section else []
             chunks.append(
                 Chunk(

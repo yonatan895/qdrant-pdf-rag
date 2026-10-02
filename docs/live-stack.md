@@ -10,7 +10,7 @@ owns context, conflicts, task/review and handoff formats.
 | Actual change | Required merge evidence | Resource boundary |
 |---|---|---|
 | **prose-only** (prose/navigation only) | `sh scripts/tools/run-task.sh qa:context`, cited-path and semantic review of claims; generated config or executable examples select their affected row too | Strictly offline/CPU: NO GPU, NO Qdrant, NO model gateway (LiteLLM/vLLM), NO Jaeger, and NO live source |
-| **test/tool-only** (test/tool/workflow only) | Relevant tool checks, lint/types for affected Python, focused test/selector checks (`pytest tests/test_agent_context.py tests/test_agent_doctor.py`), CI workflow YAML validation; changes to a shared fixture select dependent suites | Hermetic local/CI: pure checks by default; forbid heavy services (GPU, Qdrant, LiteLLM/vLLM gateways, Jaeger) unless the specific integration tier is under test |
+| **test/tool-only** (test/tool/workflow only) | Relevant tool checks, lint/types for affected Python, focused test/selector checks (`pytest tests/test_agent_context.py tests/test_agent_doctor.py`, plus `tests/test_taskfile_contracts.py` where the agent-context lane runs it), CI workflow YAML validation; changes to a shared fixture select dependent suites | Hermetic local/CI: pure checks by default; forbid heavy services (GPU, Qdrant, LiteLLM/vLLM gateways, Jaeger) unless the specific integration tier is under test |
 | **publication/retirement lifecycle** (publication, retirement, completion, locks, restore ordering) | Common code checks (`sh scripts/tools/run-task.sh qa:check` with `test_ingest_publish` / `test_ingest_completion`); focused transition/fault tests; real non-dry control path against faithful fakes; read-only residue audit; retirement inventory validation; writer concurrency/locking (`publish-<alias>.lock`) and recheck verification; disposable Qdrant boundary exercise; existing inexpensive L1 plumbing gate (`sh scripts/tools/run-task.sh eval:gate-l1`) while applicable | Real storage/protocol semantics and deterministic embeddings; CPU / disposable Qdrant simulation or faithful fakes; NO GPU; NO live platform model pool; generic search success is not publication acceptance |
 | **multi-peer HA** (collection distribution policy, placement, peer loss/rejoin, migration) | Common checks (`sh scripts/tools/run-task.sh qa:check`); policy propagation/precedence tests (`test_config`, `test_airgap_ingest_sh`, `test_airgap_validate_sh`, `test_openshift_identities`); strict fake/observed-topology suite (`test_placement`); `sh scripts/tools/run-task.sh qa:ha` three-peer pinned-image fixture (real 6/3/2 placement, false-HA refusal, degraded reads and healthy rejoin; fails on missing docker/image or skips); `sh scripts/tools/run-task.sh airgap:dryrun` when render/preset paths change; recorded production node-loss/site qualification stays separate | Disposable pinned three-peer Qdrant on CPU (docker); no GPU/model gateway; three containers prove distributed software behavior only, never independent-worker or site tolerance |
 | **extraction/ranking** (extraction, chunking, identifiers, filters, ranking, embedding representation) | Common checks (`sh scripts/tools/run-task.sh qa:check`); source-fidelity/retrieval tests; private stored-content census on real manuals (duplicate-text rate, page-label coverage, chunk type/length distribution, top hits for fixed real queries; counts and outcomes only); relevant L1 (`sh scripts/tools/run-task.sh eval:gate-l1`) / fresh-corpus regression (`sh scripts/tools/run-task.sh eval:paraphrase`); intended-mode semantic evaluation (`sh scripts/tools/run-task.sh eval:retrieval EMBED_MODE=vllm`) and before/after per-class attribution where retrieval behavior changes (full ladder rungs 1–7); chat/condensation requires `sh scripts/tools/run-task.sh eval:chat` | Real model/corpus evidence where semantics are claimed; synthetic/hash runs are not semantic acceptance; disposable simulation / mock vLLM for plumbing, GPU or live gateway for semantic evaluation |
@@ -226,7 +226,7 @@ with the failure and next action when validation is blocked.
 ### Native transport and lifecycle probes
 
 `agent-probes.yml` explicitly prepares pinned Qdrant and Jaeger images before
-running the four tests in `tests/live_agent_probes.py`. With the approved dev
+running the five tests in `tests/live_agent_probes.py`. With the approved dev
 wheelhouse, Task/Helm tools and those images already prepared, the local entry is
 `ALLOW_HASH_MODE=1 sh scripts/tools/run-task.sh qa:unit -- -m integration tests/live_agent_probes.py -v`.
 Verification uses `--pull=never`, original synthetic PDFs, actual agent HTTP and
@@ -235,7 +235,7 @@ this proves application transport, citation labeling and cleanup, not semantic
 model quality. A waiting upstream must observe the actual downstream disconnect,
 and the next ordinary answer must succeed. The dedicated filename avoids adding
 these service prerequisites to ordinary unit/simulation collection. Native
-acceptance validates the four named test records in addition to normal provenance
+acceptance validates the five named test records in addition to normal provenance
 and failure/skip checks. Semantic evaluation still needs an approved venue.
 
 ### Rung 6 probes (exact)

@@ -54,8 +54,9 @@
 - **Migration:** caller-supplied `splunk_context` unchanged; live MCP
   context is a sibling block, never a replacement.
 - **Consequences:** new `src/mainframe_rag/mcp/` bridge package (stdlib-only: no wheelhouse
-  pin, no Node tarball, no new image — sidecar runs the agent image with
-  an `--mcp-serve` entrypoint), fake-`ftplib` hermetic tests plus mock
+  pin, no Node tarball, no new image — sidecar runs the agent image via
+  `python -m mainframe_rag.mcp` (environment-only config, no password flag;
+  `--mock DIR` serves a deterministic fixture tree, test-only), fake-`ftplib` hermetic tests plus mock
   mode for sim/CI, golden entries with live-state expectations.
   Per-tool degradation when the site's FTP JES interface is limited.
   Supersedes ADR-0001 only for agent-fetched Zowe state; everything
