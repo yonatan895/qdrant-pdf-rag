@@ -282,7 +282,7 @@ src/mainframe_rag/
     templates/        # Jinja2 shell + message pair (server-rendered, no external assets)
     static/           # Local CSS/JS + vendored htmx/sse with SHA256SUMS pin
   serve/              # Local vLLM VRAM budget profiles (LOCAL_RT_8GB) + resolve CLI
-  eval/               # Evaluation measurement core: datasets, retrieval scoring, answers, judging, performance/quality gates, promotion verdicts, reports, statistics, load
+  eval/               # Evaluation measurement core: datasets, retrieval scoring, answers/answer-tier, judging, chat A/B, performance/quality gates, promotion verdicts, reports, statistics, load
   mcp/
     server.py         # MCP framing: JSON-RPC dispatch, tool schemas, transports
     bridge.py         # FTP transport for the read-only Zowe MCP bridge (ADR-0003)

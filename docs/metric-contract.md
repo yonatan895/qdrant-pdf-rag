@@ -29,7 +29,7 @@ Label vocabularies (bounded by construction; anything else never becomes a label
 - `query_class`: classifier output (`nl` observed); `unknown` when unclassified.
 - `outcome`: `ok` plus the fixed client/server outcome vocabulary (`invalid_request` observed).
 - `verification_state`: member of `VERIFICATION_STATES` when known, else the
-  key is still emitted with an empty value (`verification_state=""`) — match
+  key is dropped to the unlabeled series (never emitted empty) — match
   on `= "accepted"`, never on label presence.
 - `model`: the deployed reasoning-model id (e.g. `Qwen/Qwen2.5-0.5B-Instruct`).
 - `hits`/`ttft` are recorded only when the leg measured them (missing means
@@ -47,10 +47,10 @@ doc ids, keys, or tokens appear in any series.
 
 ## Trace contract (Jaeger service `mainframe-rag-agent`)
 
-Operations and Kinds (12, matching the OBS-1B tree):
+Operations and Kinds (13, matching the OBS-1B tree plus `chat.condense`):
 
 - SERVER roots: `v1.search`, `v1.answer`, `v1.chat`, `ui.chat`
-- CLIENT legs: `retrieve.embed`, `retrieve.prefetch`, `retrieve.rerank`, `llm.chat`
+- CLIENT legs: `retrieve.embed`, `retrieve.prefetch`, `retrieve.rerank`, `llm.chat`, `chat.condense`
 - INTERNAL stages: `retrieve.search`, `retrieve.rrf`, `retrieve.diversify`, `prompt.build`
 
 Root-span tags by endpoint (all carry `http.request_id` except framework
@@ -58,7 +58,7 @@ rejections, which leave no trace — see below):
 
 - `v1.search`: `rag.query_kind`, `rag.hits`, `rag.limit`
 - `v1.answer`: plus `rag.stream`, `rag.evidence`, `rag.citations`, `rag.has_script`
-- `v1.chat`, `ui.chat`: `rag.stream` (no query-kind/hit tags on the root)
+- `v1.chat`, `ui.chat`: `rag.stream` (empty-hit runs also set `rag.query_kind`/`rag.hits: 0` on the root)
 
 Stage tags used by the queries: `retrieve.search` (`rag.query_kind`,
 `rag.split_mode`, `rag.hits`, `rag.rerank_active`), `llm.chat`

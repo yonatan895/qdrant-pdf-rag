@@ -54,7 +54,8 @@ improvement criteria and reason strings retain their existing behavior.
 
 Multi-turn condensation A/B measurement is owned by `mainframe_rag.eval.chat`,
 using the shared dataset and retrieval scorers. `scripts/eval_chat.py` delegates
-to the same CLI operation and retains same-object helper exports. Both literal
+to the same CLI operation and retains same-object helper exports (`python -m
+mainframe_rag.eval.chat` runs the same `main`). Both literal
 and condensed arms, templates, scoring, call accounting and report fields are
 unchanged. Outside a workspace, supply explicit golden/output paths; the default
 `evals/golden.jsonl` stays relative to the working directory. Importing the
@@ -91,7 +92,7 @@ Python. Gate runs never record baselines; recording remains explicit.
 Rendering and comparison of recorded retrieval/benchmark JSON are owned by
 `mainframe_rag.eval.reports`. The L1 gate imports this renderer directly;
 `scripts/render_report.py` delegates to its CLI and retains same-object helper
-exports. Text, Markdown, HTML, escaping, comparison rules and exit codes are
+exports (`python -m mainframe_rag.eval.reports` runs the same `main`). Text, Markdown, HTML, escaping, comparison rules and exit codes are
 unchanged. The renderer consumes supplied files and never reruns evaluation.
 Explicit report/baseline/output paths remain authoritative. The opt-in
 `--bundle-dir DIR` selects the existing Task defaults: `DIR/eval-report.json`
@@ -129,7 +130,7 @@ mix (see `testing.md` harness invariants):
 | Retrieval eval | `eval_retrieval.py` | How accurate is retrieval on real data? | Live Qdrant, golden or holdout |
 | Paraphrase | `eval_retrieval.py --golden evals/paraphrase.jsonl` | Do semantic changes move non-verbatim queries? | Dedicated collection, manual runbook |
 | Answer eval | `eval_answers.py` | Are answers grounded and abstentions honest? | Live GPU stack, in-process client |
-| Layered harness | `harness.py` + `harness_l1/l2/l3.py` | Promote to release candidacy? | Snapshot-pinned live index (RC only) |
+| Layered harness | `harness.py` + `harness_l1/l2/l3/l4.py` (`src/mainframe_rag/eval/quality.py` owns the L4 tier) | Promote to release candidacy? | Snapshot-pinned live index (RC only) |
 | Bench | `benchmark.py` | Do resources/latencies regress? | CI runner env, mock LLM |
 | Load | `loadtest.py` / `test_load_tier.py` | Do absolute contracts hold under concurrency? | Sim composition + real uvicorn agent |
 | Corpus hygiene | `verify_golden.py` / `build_golden_corpus.py` | Is the golden set sound? | Live collection facts |
