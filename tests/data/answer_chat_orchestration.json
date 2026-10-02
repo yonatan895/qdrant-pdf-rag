@@ -1,0 +1,788 @@
+{
+ "answer/close/hang": {
+  "frames": [
+   "event: token\ndata: {\"type\": \"token\", \"delta\": \"Reissue the command.\\n\\n\", \"token\": \"Reissue the command.\\n\\n\"}\n\n"
+  ],
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "disconnect-test",
+     "rag.stream": true,
+     "rag.stream_aborted": true
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "timeline": [
+   "LOG WARNING {\"request_id\": \"disconnect-test\", \"action\": \"answer_alert\", \"alert\": \"client_disconnect\", \"endpoint\": \"answer\", \"verification_state\": \"generation_incomplete\"}",
+   "RED answer client_disconnect {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"generation_incomplete\"}"
+  ]
+ },
+ "answer/close/ok": {
+  "frames": [
+   "event: token\ndata: {\"type\": \"token\", \"delta\": \"Reissue the command.\\n\\n\", \"token\": \"Reissue the command.\\n\\n\"}\n\n",
+   "event: token\ndata: {\"type\": \"token\", \"delta\": \"```jcl\\n// example only\\nIOSCMDS LIST\\n```\\n\\nCitations:\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\\n\", \"token\": \"```jcl\\n// example only\\nIOSCMDS LIST\\n```\\n\\nCitations:\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\\n\"}\n\n",
+   "event: final\ndata: {\"type\": \"final\", \"request_id\": \"disconnect-test\", \"answer\": \"Reissue the command.\", \"citations\": [\"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"], \"citations_inferred\": false, \"inferred_indices\": [], \"verification_state\": \"accepted\", \"script\": \"// example only\\nIOSCMDS LIST\", \"script_lang\": \"jcl\", \"script_review_required\": true, \"query_kind\": \"identifier\", \"hits\": [{\"chunk_id\": \"abc123\", \"score\": 0.42, \"cite\": \"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\", \"heading\": \"Chapter 2 > IEA500I\", \"text\": \"IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy\", \"doc_id\": \"SA22-0000-00\", \"title\": \"Synthetic Reference\", \"page_label\": \"1-6\", \"chunk_type\": \"message\", \"message_ids\": [\"IEA500I\"], \"product\": \"z/OS\", \"version\": \"9.9\", \"rerank_score\": null, \"units\": null, \"page_start\": null, \"page_end\": null}], \"finish_reason\": \"stop\", \"ttft_ms\": 12, \"usage\": {\"prompt_tokens\": 10, \"completion_tokens\": 25, \"reasoning_tokens\": 5, \"total_tokens\": 40}}\n\n"
+  ],
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "disconnect-test",
+     "rag.citations": 1,
+     "rag.evidence": 1,
+     "rag.has_script": true,
+     "rag.hits": 1,
+     "rag.query_kind": "identifier",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "timeline": [
+   "LOG INFO {\"request_id\": \"disconnect-test\", \"action\": \"answer\", \"query_kind\": \"identifier\", \"query_complexity\": \"simple\", \"hits\": 1, \"evidence\": 1, \"embed_ms\": 1, \"qdrant_ms\": 2, \"rerank_ms\": null, \"llm_ms\": N, \"citations\": 1, \"has_script\": true, \"finish_reason\": \"stop\", \"verification_state\": \"accepted\", \"budget_verified\": false, \"units_omitted\": 0, \"prompt_tokens\": 10, \"completion_tokens\": 25, \"reasoning_tokens\": 5, \"total_tokens\": 40, \"inline_bracket_present\": false, \"citations_header_present\": true, \"cites_rejected_shape_bad\": 0, \"cites_rejected_unmapped\": 0, \"elapsed_ms\": N, \"stream\": true, \"ttft_ms\": 12}",
+   "RED answer ok {\"hits\": 1, \"llm_model\": \"test-reasoning-model\", \"query_class\": \"identifier\", \"ttft_ms\": 12, \"verification_state\": \"accepted\"}"
+  ]
+ },
+ "answer/close/truncated": {
+  "frames": [
+   "event: token\ndata: {\"type\": \"token\", \"delta\": \"Reissue the command.\\n\\n\", \"token\": \"Reissue the command.\\n\\n\"}\n\n",
+   "event: error\ndata: {\"type\": \"error\", \"code\": \"upstream_error\", \"message\": \"stream failed\", \"verification_state\": \"generation_incomplete\"}\n\n"
+  ],
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "disconnect-test",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [
+     [
+      "exception",
+      {
+       "exception.type": "TruncatedStreamError"
+      }
+     ]
+    ],
+    "status": "ERROR",
+    "status_description": "TruncatedStreamError"
+   }
+  ],
+  "timeline": [
+   "LOG WARNING {\"request_id\": \"disconnect-test\", \"action\": \"answer_alert\", \"alert\": \"stream_truncated\", \"detail\": \"missing [DONE] (TruncatedStreamError)\"}",
+   "RED answer upstream_error {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"generation_incomplete\"}",
+   "LOG ERROR {\"request_id\": \"disconnect-test\", \"action\": \"answer_stream\", \"error\": \"TruncatedStreamError\"}"
+  ]
+ },
+ "answer/json/budget_json": {
+  "body": "{\"code\":\"prompt_budget_exceeded\",\"message\":\"prompt exceeds the model token budget\"}",
+  "headers": {
+   "content-type": "application/json"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": false
+    },
+    "ended": true,
+    "events": [
+     [
+      "exception",
+      {
+       "exception.type": "PromptBudgetExceeded"
+      }
+     ]
+    ],
+    "status": "ERROR",
+    "status_description": "PromptBudgetExceeded"
+   }
+  ],
+  "status": 422,
+  "timeline": [
+   "LOG WARNING {\"request_id\": \"feedfacecafe\", \"action\": \"answer\", \"error\": \"PromptBudgetExceeded\"}",
+   "RED answer prompt_budget_exceeded {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": null}"
+  ]
+ },
+ "answer/json/length": {
+  "body": "{\"request_id\":\"feedfacecafe\",\"answer\":\"Reissue the command.\",\"citations\":[\"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"],\"citations_inferred\":false,\"inferred_indices\":[],\"script\":\"// example only\\nIOSCMDS LIST\",\"script_lang\":\"jcl\",\"verification_state\":\"generation_incomplete\",\"script_review_required\":true}",
+  "headers": {
+   "content-type": "application/json",
+   "server-timing": "embed;dur=1, qdrant;dur=2, llm;dur=N, ttft;dur=7"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.citations": 1,
+     "rag.evidence": 1,
+     "rag.has_script": true,
+     "rag.hits": 1,
+     "rag.query_kind": "identifier",
+     "rag.stream": false
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "LOG WARNING {\"request_id\": \"feedfacecafe\", \"action\": \"answer_alert\", \"alert\": \"finish_reason_non_stop\", \"finish_reason\": \"length\"}",
+   "LOG INFO {\"request_id\": \"feedfacecafe\", \"action\": \"answer\", \"query_kind\": \"identifier\", \"query_complexity\": \"simple\", \"hits\": 1, \"evidence\": 1, \"embed_ms\": 1, \"qdrant_ms\": 2, \"rerank_ms\": null, \"llm_ms\": N, \"citations\": 1, \"has_script\": true, \"finish_reason\": \"length\", \"verification_state\": \"generation_incomplete\", \"budget_verified\": false, \"units_omitted\": 0, \"prompt_tokens\": 10, \"completion_tokens\": 25, \"reasoning_tokens\": 5, \"total_tokens\": 40, \"inline_bracket_present\": false, \"citations_header_present\": true, \"cites_rejected_shape_bad\": 0, \"cites_rejected_unmapped\": 0, \"elapsed_ms\": N, \"ttft_ms\": 7}",
+   "RED answer ok {\"hits\": 1, \"llm_model\": \"test-reasoning-model\", \"query_class\": \"identifier\", \"ttft_ms\": 7, \"verification_state\": \"generation_incomplete\"}"
+  ]
+ },
+ "answer/json/llm_error": {
+  "body": "{\"code\":\"upstream_error\",\"message\":\"answer failed\"}",
+  "headers": {
+   "content-type": "application/json"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": false
+    },
+    "ended": true,
+    "events": [
+     [
+      "exception",
+      {
+       "exception.type": "RuntimeError"
+      }
+     ]
+    ],
+    "status": "ERROR",
+    "status_description": "RuntimeError"
+   }
+  ],
+  "status": 502,
+  "timeline": [
+   "LOG ERROR {\"request_id\": \"feedfacecafe\", \"action\": \"answer\", \"error\": \"LLMChatError\"}",
+   "RED answer upstream_error {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": null}"
+  ]
+ },
+ "answer/json/no_hits": {
+  "body": "{\"request_id\":\"feedfacecafe\",\"answer\":\"No manual excerpts carry IEA500I.\",\"citations\":[],\"citations_inferred\":false,\"inferred_indices\":[],\"script\":null,\"script_lang\":null,\"verification_state\":\"insufficient_evidence\",\"script_review_required\":false}",
+  "headers": {
+   "content-type": "application/json",
+   "server-timing": "embed;dur=1, qdrant;dur=2"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.hits": 0,
+     "rag.query_kind": "identifier",
+     "rag.stream": false
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "RED answer ok {\"hits\": 0, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"insufficient_evidence\"}",
+   "LOG INFO {\"request_id\": \"feedfacecafe\", \"action\": \"answer\", \"query_kind\": \"identifier\", \"hits\": 0, \"rerank_ms\": null}"
+  ]
+ },
+ "answer/json/ok": {
+  "body": "{\"request_id\":\"feedfacecafe\",\"answer\":\"Reissue the command.\",\"citations\":[\"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"],\"citations_inferred\":false,\"inferred_indices\":[],\"script\":\"// example only\\nIOSCMDS LIST\",\"script_lang\":\"jcl\",\"verification_state\":\"accepted\",\"script_review_required\":true}",
+  "headers": {
+   "content-type": "application/json",
+   "server-timing": "embed;dur=1, qdrant;dur=2, llm;dur=N, ttft;dur=7"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.citations": 1,
+     "rag.evidence": 1,
+     "rag.has_script": true,
+     "rag.hits": 1,
+     "rag.query_kind": "identifier",
+     "rag.stream": false
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "LOG INFO {\"request_id\": \"feedfacecafe\", \"action\": \"answer\", \"query_kind\": \"identifier\", \"query_complexity\": \"simple\", \"hits\": 1, \"evidence\": 1, \"embed_ms\": 1, \"qdrant_ms\": 2, \"rerank_ms\": null, \"llm_ms\": N, \"citations\": 1, \"has_script\": true, \"finish_reason\": \"stop\", \"verification_state\": \"accepted\", \"budget_verified\": false, \"units_omitted\": 0, \"prompt_tokens\": 10, \"completion_tokens\": 25, \"reasoning_tokens\": 5, \"total_tokens\": 40, \"inline_bracket_present\": false, \"citations_header_present\": true, \"cites_rejected_shape_bad\": 0, \"cites_rejected_unmapped\": 0, \"elapsed_ms\": N, \"ttft_ms\": 7}",
+   "RED answer ok {\"hits\": 1, \"llm_model\": \"test-reasoning-model\", \"query_class\": \"identifier\", \"ttft_ms\": 7, \"verification_state\": \"accepted\"}"
+  ]
+ },
+ "answer/stream/budget_stream": {
+  "body": "event: error\ndata: {\"type\": \"error\", \"code\": \"upstream_error\", \"message\": \"stream failed\", \"verification_state\": \"generation_incomplete\"}\n\n",
+  "headers": {
+   "cache-control": "no-cache",
+   "content-type": "text/event-stream; charset=utf-8",
+   "server-timing": "embed;dur=1, qdrant;dur=2",
+   "x-accel-buffering": "no"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [
+     [
+      "exception",
+      {
+       "exception.type": "PromptBudgetExceeded"
+      }
+     ]
+    ],
+    "status": "ERROR",
+    "status_description": "PromptBudgetExceeded"
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "RED answer prompt_budget_exceeded {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"generation_incomplete\"}",
+   "LOG WARNING {\"request_id\": \"feedfacecafe\", \"action\": \"answer_stream\", \"error\": \"PromptBudgetExceeded\"}"
+  ]
+ },
+ "answer/stream/length": {
+  "body": "event: token\ndata: {\"type\": \"token\", \"delta\": \"Reissue the command.\\n\\n\", \"token\": \"Reissue the command.\\n\\n\"}\n\nevent: token\ndata: {\"type\": \"token\", \"delta\": \"```jcl\\n// example only\\nIOSCMDS LIST\\n```\\n\\nCitations:\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\\n\", \"token\": \"```jcl\\n// example only\\nIOSCMDS LIST\\n```\\n\\nCitations:\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\\n\"}\n\nevent: final\ndata: {\"type\": \"final\", \"request_id\": \"feedfacecafe\", \"answer\": \"Reissue the command.\", \"citations\": [\"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"], \"citations_inferred\": false, \"inferred_indices\": [], \"verification_state\": \"generation_incomplete\", \"script\": \"// example only\\nIOSCMDS LIST\", \"script_lang\": \"jcl\", \"script_review_required\": true, \"query_kind\": \"identifier\", \"hits\": [{\"chunk_id\": \"abc123\", \"score\": 0.42, \"cite\": \"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\", \"heading\": \"Chapter 2 > IEA500I\", \"text\": \"IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy\", \"doc_id\": \"SA22-0000-00\", \"title\": \"Synthetic Reference\", \"page_label\": \"1-6\", \"chunk_type\": \"message\", \"message_ids\": [\"IEA500I\"], \"product\": \"z/OS\", \"version\": \"9.9\", \"rerank_score\": null, \"units\": null, \"page_start\": null, \"page_end\": null}], \"finish_reason\": \"length\", \"ttft_ms\": 12, \"usage\": {\"prompt_tokens\": 10, \"completion_tokens\": 25, \"reasoning_tokens\": 5, \"total_tokens\": 40}}\n\n",
+  "headers": {
+   "cache-control": "no-cache",
+   "content-type": "text/event-stream; charset=utf-8",
+   "server-timing": "embed;dur=1, qdrant;dur=2",
+   "x-accel-buffering": "no"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.citations": 1,
+     "rag.evidence": 1,
+     "rag.has_script": true,
+     "rag.hits": 1,
+     "rag.query_kind": "identifier",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "LOG WARNING {\"request_id\": \"feedfacecafe\", \"action\": \"answer_alert\", \"alert\": \"finish_reason_non_stop\", \"finish_reason\": \"length\"}",
+   "LOG INFO {\"request_id\": \"feedfacecafe\", \"action\": \"answer\", \"query_kind\": \"identifier\", \"query_complexity\": \"simple\", \"hits\": 1, \"evidence\": 1, \"embed_ms\": 1, \"qdrant_ms\": 2, \"rerank_ms\": null, \"llm_ms\": N, \"citations\": 1, \"has_script\": true, \"finish_reason\": \"length\", \"verification_state\": \"generation_incomplete\", \"budget_verified\": false, \"units_omitted\": 0, \"prompt_tokens\": 10, \"completion_tokens\": 25, \"reasoning_tokens\": 5, \"total_tokens\": 40, \"inline_bracket_present\": false, \"citations_header_present\": true, \"cites_rejected_shape_bad\": 0, \"cites_rejected_unmapped\": 0, \"elapsed_ms\": N, \"stream\": true, \"ttft_ms\": 12}",
+   "RED answer ok {\"hits\": 1, \"llm_model\": \"test-reasoning-model\", \"query_class\": \"identifier\", \"ttft_ms\": 12, \"verification_state\": \"generation_incomplete\"}"
+  ]
+ },
+ "answer/stream/no_hits": {
+  "body": "event: final\ndata: {\"type\": \"final\", \"request_id\": \"feedfacecafe\", \"answer\": \"No manual excerpts carry IEA500I.\", \"citations\": [], \"citations_inferred\": false, \"inferred_indices\": [], \"verification_state\": \"insufficient_evidence\", \"script\": null, \"script_lang\": null, \"script_review_required\": false, \"query_kind\": \"identifier\", \"hits\": [], \"finish_reason\": \"stop\", \"ttft_ms\": null, \"usage\": {\"prompt_tokens\": 0, \"completion_tokens\": 0, \"reasoning_tokens\": 0, \"total_tokens\": 0}}\n\n",
+  "headers": {
+   "cache-control": "no-cache",
+   "content-type": "text/event-stream; charset=utf-8",
+   "server-timing": "embed;dur=1, qdrant;dur=2",
+   "x-accel-buffering": "no"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.hits": 0,
+     "rag.query_kind": "identifier",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "RED answer ok {\"hits\": 0, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"insufficient_evidence\"}",
+   "LOG INFO {\"request_id\": \"feedfacecafe\", \"action\": \"answer\", \"query_kind\": \"identifier\", \"hits\": 0, \"rerank_ms\": null}"
+  ]
+ },
+ "answer/stream/ok": {
+  "body": "event: token\ndata: {\"type\": \"token\", \"delta\": \"Reissue the command.\\n\\n\", \"token\": \"Reissue the command.\\n\\n\"}\n\nevent: token\ndata: {\"type\": \"token\", \"delta\": \"```jcl\\n// example only\\nIOSCMDS LIST\\n```\\n\\nCitations:\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\\n\", \"token\": \"```jcl\\n// example only\\nIOSCMDS LIST\\n```\\n\\nCitations:\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\\n\"}\n\nevent: final\ndata: {\"type\": \"final\", \"request_id\": \"feedfacecafe\", \"answer\": \"Reissue the command.\", \"citations\": [\"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"], \"citations_inferred\": false, \"inferred_indices\": [], \"verification_state\": \"accepted\", \"script\": \"// example only\\nIOSCMDS LIST\", \"script_lang\": \"jcl\", \"script_review_required\": true, \"query_kind\": \"identifier\", \"hits\": [{\"chunk_id\": \"abc123\", \"score\": 0.42, \"cite\": \"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\", \"heading\": \"Chapter 2 > IEA500I\", \"text\": \"IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy\", \"doc_id\": \"SA22-0000-00\", \"title\": \"Synthetic Reference\", \"page_label\": \"1-6\", \"chunk_type\": \"message\", \"message_ids\": [\"IEA500I\"], \"product\": \"z/OS\", \"version\": \"9.9\", \"rerank_score\": null, \"units\": null, \"page_start\": null, \"page_end\": null}], \"finish_reason\": \"stop\", \"ttft_ms\": 12, \"usage\": {\"prompt_tokens\": 10, \"completion_tokens\": 25, \"reasoning_tokens\": 5, \"total_tokens\": 40}}\n\n",
+  "headers": {
+   "cache-control": "no-cache",
+   "content-type": "text/event-stream; charset=utf-8",
+   "server-timing": "embed;dur=1, qdrant;dur=2",
+   "x-accel-buffering": "no"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.citations": 1,
+     "rag.evidence": 1,
+     "rag.has_script": true,
+     "rag.hits": 1,
+     "rag.query_kind": "identifier",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "LOG INFO {\"request_id\": \"feedfacecafe\", \"action\": \"answer\", \"query_kind\": \"identifier\", \"query_complexity\": \"simple\", \"hits\": 1, \"evidence\": 1, \"embed_ms\": 1, \"qdrant_ms\": 2, \"rerank_ms\": null, \"llm_ms\": N, \"citations\": 1, \"has_script\": true, \"finish_reason\": \"stop\", \"verification_state\": \"accepted\", \"budget_verified\": false, \"units_omitted\": 0, \"prompt_tokens\": 10, \"completion_tokens\": 25, \"reasoning_tokens\": 5, \"total_tokens\": 40, \"inline_bracket_present\": false, \"citations_header_present\": true, \"cites_rejected_shape_bad\": 0, \"cites_rejected_unmapped\": 0, \"elapsed_ms\": N, \"stream\": true, \"ttft_ms\": 12}",
+   "RED answer ok {\"hits\": 1, \"llm_model\": \"test-reasoning-model\", \"query_class\": \"identifier\", \"ttft_ms\": 12, \"verification_state\": \"accepted\"}"
+  ]
+ },
+ "answer/stream/runtime_error": {
+  "body": "event: token\ndata: {\"type\": \"token\", \"delta\": \"Reissue the command.\\n\\n\", \"token\": \"Reissue the command.\\n\\n\"}\n\nevent: error\ndata: {\"type\": \"error\", \"code\": \"upstream_error\", \"message\": \"stream failed\", \"verification_state\": \"generation_incomplete\"}\n\n",
+  "headers": {
+   "cache-control": "no-cache",
+   "content-type": "text/event-stream; charset=utf-8",
+   "server-timing": "embed;dur=1, qdrant;dur=2",
+   "x-accel-buffering": "no"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [
+     [
+      "exception",
+      {
+       "exception.type": "RuntimeError"
+      }
+     ]
+    ],
+    "status": "ERROR",
+    "status_description": "RuntimeError"
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "RED answer upstream_error {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"generation_incomplete\"}",
+   "LOG ERROR {\"request_id\": \"feedfacecafe\", \"action\": \"answer_stream\", \"error\": \"RuntimeError\"}"
+  ]
+ },
+ "answer/stream/truncated": {
+  "body": "event: token\ndata: {\"type\": \"token\", \"delta\": \"Reissue the command.\\n\\n\", \"token\": \"Reissue the command.\\n\\n\"}\n\nevent: error\ndata: {\"type\": \"error\", \"code\": \"upstream_error\", \"message\": \"stream failed\", \"verification_state\": \"generation_incomplete\"}\n\n",
+  "headers": {
+   "cache-control": "no-cache",
+   "content-type": "text/event-stream; charset=utf-8",
+   "server-timing": "embed;dur=1, qdrant;dur=2",
+   "x-accel-buffering": "no"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [
+     [
+      "exception",
+      {
+       "exception.type": "TruncatedStreamError"
+      }
+     ]
+    ],
+    "status": "ERROR",
+    "status_description": "TruncatedStreamError"
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "LOG WARNING {\"request_id\": \"feedfacecafe\", \"action\": \"answer_alert\", \"alert\": \"stream_truncated\", \"detail\": \"missing [DONE] (TruncatedStreamError)\"}",
+   "RED answer upstream_error {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"generation_incomplete\"}",
+   "LOG ERROR {\"request_id\": \"feedfacecafe\", \"action\": \"answer_stream\", \"error\": \"TruncatedStreamError\"}"
+  ]
+ },
+ "chat/close/hang": {
+  "frames": [
+   "data: {\"id\": \"chatcmpl-disconnect-test\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Reissue the command.\\n\\n\"}, \"finish_reason\": null}]}\n\n"
+  ],
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "disconnect-test",
+     "rag.stream": true,
+     "rag.stream_aborted": true
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "timeline": [
+   "LOG WARNING {\"request_id\": \"disconnect-test\", \"action\": \"answer_alert\", \"alert\": \"client_disconnect\", \"endpoint\": \"chat\", \"verification_state\": \"generation_incomplete\"}",
+   "RED chat client_disconnect {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"generation_incomplete\"}"
+  ]
+ },
+ "chat/close/ok": {
+  "frames": [
+   "data: {\"id\": \"chatcmpl-disconnect-test\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Reissue the command.\\n\\n\"}, \"finish_reason\": null}]}\n\n",
+   "data: {\"id\": \"chatcmpl-disconnect-test\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"```jcl\\n// example only\\nIOSCMDS LIST\\n```\\n\\nCitations:\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\\n\"}, \"finish_reason\": null}]}\n\n",
+   "data: {\"id\": \"chatcmpl-disconnect-test\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"\\n\\n**Citations:**\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"}, \"finish_reason\": null}]}\n\n"
+  ],
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "disconnect-test",
+     "rag.stream": true,
+     "rag.stream_aborted": true
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "timeline": [
+   "LOG WARNING {\"request_id\": \"disconnect-test\", \"action\": \"answer_alert\", \"alert\": \"client_disconnect\", \"endpoint\": \"chat\", \"verification_state\": \"generation_incomplete\"}",
+   "RED chat client_disconnect {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"generation_incomplete\"}"
+  ]
+ },
+ "chat/close/truncated": {
+  "frames": [
+   "data: {\"id\": \"chatcmpl-disconnect-test\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Reissue the command.\\n\\n\"}, \"finish_reason\": null}]}\n\n",
+   "data: {\"error\": {\"code\": \"upstream_error\", \"message\": \"stream failed\"}, \"verification_state\": \"generation_incomplete\"}\n\n"
+  ],
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "disconnect-test",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [
+     [
+      "exception",
+      {
+       "exception.type": "TruncatedStreamError"
+      }
+     ]
+    ],
+    "status": "ERROR",
+    "status_description": "TruncatedStreamError"
+   }
+  ],
+  "timeline": [
+   "LOG WARNING {\"request_id\": \"disconnect-test\", \"action\": \"answer_alert\", \"alert\": \"stream_truncated\", \"detail\": \"missing [DONE] (TruncatedStreamError)\"}",
+   "RED chat upstream_error {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"generation_incomplete\"}",
+   "LOG ERROR {\"request_id\": \"disconnect-test\", \"action\": \"chat_stream\", \"error\": \"TruncatedStreamError\"}"
+  ]
+ },
+ "chat/json/budget_json": {
+  "body": "{\"code\":\"prompt_budget_exceeded\",\"message\":\"prompt exceeds the model token budget\"}",
+  "headers": {
+   "content-type": "application/json"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": false
+    },
+    "ended": true,
+    "events": [
+     [
+      "exception",
+      {
+       "exception.type": "PromptBudgetExceeded"
+      }
+     ]
+    ],
+    "status": "ERROR",
+    "status_description": "PromptBudgetExceeded"
+   }
+  ],
+  "status": 422,
+  "timeline": [
+   "LOG WARNING {\"request_id\": \"feedfacecafe\", \"action\": \"chat_answer\", \"error\": \"PromptBudgetExceeded\"}",
+   "RED chat prompt_budget_exceeded {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": null}"
+  ]
+ },
+ "chat/json/length": {
+  "body": "{\"id\":\"chatcmpl-feedfacecafe\",\"object\":\"chat.completion\",\"created\": N,\"model\":\"test-reasoning-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Reissue the command.\\n\\n**Citations:**\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":25,\"reasoning_tokens\":5,\"total_tokens\":40},\"citations\":[\"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"],\"citations_inferred\":false,\"inferred_indices\":[],\"hits\":[{\"chunk_id\":\"abc123\",\"score\":0.42,\"cite\":\"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\",\"heading\":\"Chapter 2 > IEA500I\",\"text\":\"IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy\",\"doc_id\":\"SA22-0000-00\",\"title\":\"Synthetic Reference\",\"page_label\":\"1-6\",\"chunk_type\":\"message\",\"message_ids\":[\"IEA500I\"],\"product\":\"z/OS\",\"version\":\"9.9\",\"rerank_score\":null,\"units\":null,\"page_start\":null,\"page_end\":null}],\"verification_state\":\"generation_incomplete\",\"script\":\"// example only\\nIOSCMDS LIST\",\"script_lang\":\"jcl\",\"script_review_required\":true}",
+  "headers": {
+   "content-type": "application/json"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": false
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "LOG WARNING {\"request_id\": \"feedfacecafe\", \"action\": \"answer_alert\", \"alert\": \"finish_reason_non_stop\", \"finish_reason\": \"length\"}",
+   "LOG INFO {\"request_id\": \"feedfacecafe\", \"action\": \"chat\", \"query_kind\": \"identifier\", \"query_complexity\": \"simple\", \"hits\": 1, \"evidence\": 1, \"embed_ms\": 1, \"qdrant_ms\": 2, \"rerank_ms\": null, \"llm_ms\": N, \"citations\": 1, \"has_script\": true, \"finish_reason\": \"length\", \"verification_state\": \"generation_incomplete\", \"budget_verified\": false, \"units_omitted\": 0, \"prompt_tokens\": 10, \"completion_tokens\": 25, \"reasoning_tokens\": 5, \"total_tokens\": 40, \"inline_bracket_present\": false, \"citations_header_present\": true, \"cites_rejected_shape_bad\": 0, \"cites_rejected_unmapped\": 0, \"elapsed_ms\": N, \"ttft_ms\": 7}",
+   "RED chat ok {\"hits\": 1, \"llm_model\": \"test-reasoning-model\", \"query_class\": \"identifier\", \"ttft_ms\": 7, \"verification_state\": \"generation_incomplete\"}"
+  ]
+ },
+ "chat/json/llm_error": {
+  "body": "{\"code\":\"upstream_error\",\"message\":\"answer failed\"}",
+  "headers": {
+   "content-type": "application/json"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": false
+    },
+    "ended": true,
+    "events": [
+     [
+      "exception",
+      {
+       "exception.type": "RuntimeError"
+      }
+     ]
+    ],
+    "status": "ERROR",
+    "status_description": "RuntimeError"
+   }
+  ],
+  "status": 502,
+  "timeline": [
+   "LOG ERROR {\"request_id\": \"feedfacecafe\", \"action\": \"chat_answer\", \"error\": \"LLMChatError\"}",
+   "RED chat upstream_error {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": null}"
+  ]
+ },
+ "chat/json/no_hits": {
+  "body": "{\"id\":\"chatcmpl-feedfacecafe\",\"object\":\"chat.completion\",\"created\": N,\"model\":\"test-reasoning-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"No manual excerpts carry IEA500I.\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"reasoning_tokens\":0,\"total_tokens\":0},\"citations\":[],\"citations_inferred\":false,\"inferred_indices\":[],\"hits\":[],\"verification_state\":\"insufficient_evidence\",\"script\":null,\"script_lang\":null,\"script_review_required\":false}",
+  "headers": {
+   "content-type": "application/json"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.hits": 0,
+     "rag.query_kind": "identifier",
+     "rag.stream": false
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "RED chat ok {\"hits\": 0, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"insufficient_evidence\"}",
+   "LOG INFO {\"request_id\": \"feedfacecafe\", \"action\": \"chat\", \"query_kind\": \"identifier\", \"hits\": 0}"
+  ]
+ },
+ "chat/json/ok": {
+  "body": "{\"id\":\"chatcmpl-feedfacecafe\",\"object\":\"chat.completion\",\"created\": N,\"model\":\"test-reasoning-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Reissue the command.\\n\\n**Citations:**\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":25,\"reasoning_tokens\":5,\"total_tokens\":40},\"citations\":[\"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"],\"citations_inferred\":false,\"inferred_indices\":[],\"hits\":[{\"chunk_id\":\"abc123\",\"score\":0.42,\"cite\":\"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\",\"heading\":\"Chapter 2 > IEA500I\",\"text\":\"IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy\",\"doc_id\":\"SA22-0000-00\",\"title\":\"Synthetic Reference\",\"page_label\":\"1-6\",\"chunk_type\":\"message\",\"message_ids\":[\"IEA500I\"],\"product\":\"z/OS\",\"version\":\"9.9\",\"rerank_score\":null,\"units\":null,\"page_start\":null,\"page_end\":null}],\"verification_state\":\"accepted\",\"script\":\"// example only\\nIOSCMDS LIST\",\"script_lang\":\"jcl\",\"script_review_required\":true}",
+  "headers": {
+   "content-type": "application/json"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": false
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "LOG INFO {\"request_id\": \"feedfacecafe\", \"action\": \"chat\", \"query_kind\": \"identifier\", \"query_complexity\": \"simple\", \"hits\": 1, \"evidence\": 1, \"embed_ms\": 1, \"qdrant_ms\": 2, \"rerank_ms\": null, \"llm_ms\": N, \"citations\": 1, \"has_script\": true, \"finish_reason\": \"stop\", \"verification_state\": \"accepted\", \"budget_verified\": false, \"units_omitted\": 0, \"prompt_tokens\": 10, \"completion_tokens\": 25, \"reasoning_tokens\": 5, \"total_tokens\": 40, \"inline_bracket_present\": false, \"citations_header_present\": true, \"cites_rejected_shape_bad\": 0, \"cites_rejected_unmapped\": 0, \"elapsed_ms\": N, \"ttft_ms\": 7}",
+   "RED chat ok {\"hits\": 1, \"llm_model\": \"test-reasoning-model\", \"query_class\": \"identifier\", \"ttft_ms\": 7, \"verification_state\": \"accepted\"}"
+  ]
+ },
+ "chat/stream/budget_stream": {
+  "body": "data: {\"error\": {\"code\": \"upstream_error\", \"message\": \"stream failed\"}, \"verification_state\": \"generation_incomplete\"}\n\ndata: [DONE]\n\n",
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [
+     [
+      "exception",
+      {
+       "exception.type": "PromptBudgetExceeded"
+      }
+     ]
+    ],
+    "status": "ERROR",
+    "status_description": "PromptBudgetExceeded"
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "RED chat prompt_budget_exceeded {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"generation_incomplete\"}",
+   "LOG WARNING {\"request_id\": \"feedfacecafe\", \"action\": \"chat_stream\", \"error\": \"PromptBudgetExceeded\"}"
+  ]
+ },
+ "chat/stream/length": {
+  "body": "data: {\"id\": \"chatcmpl-feedfacecafe\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Reissue the command.\\n\\n\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-feedfacecafe\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"```jcl\\n// example only\\nIOSCMDS LIST\\n```\\n\\nCitations:\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\\n\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-feedfacecafe\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"\\n\\n**Citations:**\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-feedfacecafe\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"length\", \"citations\": [\"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"], \"citations_inferred\": false, \"inferred_indices\": [], \"hits\": [{\"chunk_id\": \"abc123\", \"score\": 0.42, \"cite\": \"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\", \"heading\": \"Chapter 2 > IEA500I\", \"text\": \"IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy\", \"doc_id\": \"SA22-0000-00\", \"title\": \"Synthetic Reference\", \"page_label\": \"1-6\", \"chunk_type\": \"message\", \"message_ids\": [\"IEA500I\"], \"product\": \"z/OS\", \"version\": \"9.9\", \"rerank_score\": null, \"units\": null, \"page_start\": null, \"page_end\": null}], \"verification_state\": \"generation_incomplete\", \"script\": \"// example only\\nIOSCMDS LIST\", \"script_lang\": \"jcl\", \"script_review_required\": true}]}\n\ndata: [DONE]\n\n",
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "RED chat ok {\"hits\": 1, \"llm_model\": \"test-reasoning-model\", \"query_class\": \"identifier\", \"ttft_ms\": 12, \"verification_state\": \"generation_incomplete\"}",
+   "LOG INFO {\"request_id\": \"feedfacecafe\", \"action\": \"chat\", \"query_kind\": \"identifier\", \"query_complexity\": \"simple\", \"hits\": 1, \"evidence\": 1, \"embed_ms\": 1, \"qdrant_ms\": 2, \"rerank_ms\": null, \"llm_ms\": N, \"citations\": 1, \"has_script\": true, \"finish_reason\": \"length\", \"verification_state\": \"generation_incomplete\", \"budget_verified\": false, \"units_omitted\": 0, \"prompt_tokens\": 10, \"completion_tokens\": 25, \"reasoning_tokens\": 5, \"total_tokens\": 40, \"inline_bracket_present\": false, \"citations_header_present\": true, \"cites_rejected_shape_bad\": 0, \"cites_rejected_unmapped\": 0, \"elapsed_ms\": N, \"stream\": true, \"ttft_ms\": 12}"
+  ]
+ },
+ "chat/stream/no_hits": {
+  "body": "data: {\"id\": \"chatcmpl-feedfacecafe\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"No manual excerpts carry IEA500I.\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-feedfacecafe\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\", \"citations\": [], \"citations_inferred\": false, \"inferred_indices\": [], \"hits\": [], \"verification_state\": \"insufficient_evidence\", \"script\": null, \"script_lang\": null, \"script_review_required\": false}]}\n\ndata: [DONE]\n\n",
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.hits": 0,
+     "rag.query_kind": "identifier",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "RED chat ok {\"hits\": 0, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"insufficient_evidence\"}",
+   "LOG INFO {\"request_id\": \"feedfacecafe\", \"action\": \"chat\", \"query_kind\": \"identifier\", \"hits\": 0, \"stream\": true}"
+  ]
+ },
+ "chat/stream/ok": {
+  "body": "data: {\"id\": \"chatcmpl-feedfacecafe\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Reissue the command.\\n\\n\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-feedfacecafe\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"```jcl\\n// example only\\nIOSCMDS LIST\\n```\\n\\nCitations:\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\\n\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-feedfacecafe\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"\\n\\n**Citations:**\\n- SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-feedfacecafe\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\", \"citations\": [\"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\"], \"citations_inferred\": false, \"inferred_indices\": [], \"hits\": [{\"chunk_id\": \"abc123\", \"score\": 0.42, \"cite\": \"SA22-0000-00 Synthetic Reference, Chapter 2 > IEA500I, p. 1-6\", \"heading\": \"Chapter 2 > IEA500I\", \"text\": \"IEA500I BEFORE IOS IOSCMDS COMMAND REJECTED, REASON=yy\", \"doc_id\": \"SA22-0000-00\", \"title\": \"Synthetic Reference\", \"page_label\": \"1-6\", \"chunk_type\": \"message\", \"message_ids\": [\"IEA500I\"], \"product\": \"z/OS\", \"version\": \"9.9\", \"rerank_score\": null, \"units\": null, \"page_start\": null, \"page_end\": null}], \"verification_state\": \"accepted\", \"script\": \"// example only\\nIOSCMDS LIST\", \"script_lang\": \"jcl\", \"script_review_required\": true}]}\n\ndata: [DONE]\n\n",
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [],
+    "status": "UNSET",
+    "status_description": null
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "RED chat ok {\"hits\": 1, \"llm_model\": \"test-reasoning-model\", \"query_class\": \"identifier\", \"ttft_ms\": 12, \"verification_state\": \"accepted\"}",
+   "LOG INFO {\"request_id\": \"feedfacecafe\", \"action\": \"chat\", \"query_kind\": \"identifier\", \"query_complexity\": \"simple\", \"hits\": 1, \"evidence\": 1, \"embed_ms\": 1, \"qdrant_ms\": 2, \"rerank_ms\": null, \"llm_ms\": N, \"citations\": 1, \"has_script\": true, \"finish_reason\": \"stop\", \"verification_state\": \"accepted\", \"budget_verified\": false, \"units_omitted\": 0, \"prompt_tokens\": 10, \"completion_tokens\": 25, \"reasoning_tokens\": 5, \"total_tokens\": 40, \"inline_bracket_present\": false, \"citations_header_present\": true, \"cites_rejected_shape_bad\": 0, \"cites_rejected_unmapped\": 0, \"elapsed_ms\": N, \"stream\": true, \"ttft_ms\": 12}"
+  ]
+ },
+ "chat/stream/runtime_error": {
+  "body": "data: {\"id\": \"chatcmpl-feedfacecafe\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Reissue the command.\\n\\n\"}, \"finish_reason\": null}]}\n\ndata: {\"error\": {\"code\": \"upstream_error\", \"message\": \"stream failed\"}, \"verification_state\": \"generation_incomplete\"}\n\ndata: [DONE]\n\n",
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [
+     [
+      "exception",
+      {
+       "exception.type": "RuntimeError"
+      }
+     ]
+    ],
+    "status": "ERROR",
+    "status_description": "RuntimeError"
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "RED chat upstream_error {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"generation_incomplete\"}",
+   "LOG ERROR {\"request_id\": \"feedfacecafe\", \"action\": \"chat_stream\", \"error\": \"RuntimeError\"}"
+  ]
+ },
+ "chat/stream/truncated": {
+  "body": "data: {\"id\": \"chatcmpl-feedfacecafe\", \"object\": \"chat.completion.chunk\", \"created\": N, \"model\": \"test-reasoning-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"Reissue the command.\\n\\n\"}, \"finish_reason\": null}]}\n\ndata: {\"error\": {\"code\": \"upstream_error\", \"message\": \"stream failed\"}, \"verification_state\": \"generation_incomplete\"}\n\ndata: [DONE]\n\n",
+  "headers": {
+   "content-type": "text/event-stream; charset=utf-8"
+  },
+  "root_spans": [
+   {
+    "attributes": {
+     "http.request_id": "feedfacecafe",
+     "rag.stream": true
+    },
+    "ended": true,
+    "events": [
+     [
+      "exception",
+      {
+       "exception.type": "TruncatedStreamError"
+      }
+     ]
+    ],
+    "status": "ERROR",
+    "status_description": "TruncatedStreamError"
+   }
+  ],
+  "status": 200,
+  "timeline": [
+   "LOG WARNING {\"request_id\": \"feedfacecafe\", \"action\": \"answer_alert\", \"alert\": \"stream_truncated\", \"detail\": \"missing [DONE] (TruncatedStreamError)\"}",
+   "RED chat upstream_error {\"hits\": 1, \"llm_model\": null, \"query_class\": \"identifier\", \"ttft_ms\": null, \"verification_state\": \"generation_incomplete\"}",
+   "LOG ERROR {\"request_id\": \"feedfacecafe\", \"action\": \"chat_stream\", \"error\": \"TruncatedStreamError\"}"
+  ]
+ }
+}

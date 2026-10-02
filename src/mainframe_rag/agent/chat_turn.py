@@ -2,10 +2,25 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from mainframe_rag.config import Settings
 from mainframe_rag.ports import ChatMessage
+
+# NUL and C0 controls except \t \n \r (issue #579). DEL and C1 are not
+# rejected: they are not C0, and \x85 already counts as whitespace below.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def is_unsearchable_query(text: str) -> bool:
+    """True for text with no content after strip() or with NUL/C0 controls.
+
+    A predicate only: callers keep searching the text unmodified, so leading
+    and trailing whitespace around real text stays legitimate. Shared by the
+    search/answer length guard and the chat active-turn boundary.
+    """
+    return not text.strip() or _CONTROL_CHARS.search(text) is not None
 
 
 class InvalidChatTurn(ValueError):
@@ -43,9 +58,9 @@ def prepare_chat_turn(
     active = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"), None)
     if active is None:
         raise InvalidChatTurn("a user message is required")
+    if is_unsearchable_query(messages[active].content):
+        raise InvalidChatTurn("the active user message is blank or has control characters")
     query = messages[active].content.strip()
-    if not query:
-        raise InvalidChatTurn("the active user message is blank")
     if settings is not None and len(query) > settings.query_max_chars:
         raise InvalidChatTurn("the active user message exceeds the character limit")
     return PreparedChatTurn(

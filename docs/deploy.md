@@ -25,8 +25,9 @@ no rollback:
   `READY (Awaiting Corpus Ingest)` when it did not.
 
 Standalone `sh scripts/tools/run-task.sh airgap:deploy` only waits for workload readiness. The agent
-`/healthz` check covers Qdrant and embedding connectivity **and** the served
-generation's representation contract (HTTP 503 for any non-servable state);
+`/healthz` check covers Qdrant and embedding connectivity, the served
+generation's representation contract, **and** the rerank leg when
+`RERANK_ENABLED=true` (HTTP 503 for any non-servable state);
 `/livez` is the process-only liveness probe. It does not prove that reasoning
 works. Run the gateway probe before ingesting when using the
 modular commands. `sh scripts/tools/run-task.sh airgap:smoke` checks retrieval and tracing; use the
