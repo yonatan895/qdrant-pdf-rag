@@ -932,6 +932,13 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   1/1/1 profile judges its single copy through its one endpoint. Moving
   replicas to repair an under-replicated candidate remains the
   snapshot-gated migration slice, never automatic.
+  The snapshot clone used to prepare an update staging generation (and the
+  legacy-layout migration) is the single-node recipe: a source with more
+  than one shard or replica, a selected multi-shard/replica policy, or an
+  unreadable topology is refused before any snapshot/recover/delete
+  (`qdrant_io.require_single_node_recovery`; collection snapshots are
+  node-local, [deploy](deploy.md#distributed-recovery)). A distributed
+  generation is rebuilt fresh from the originals.
   Supply the comma-separated non-secret URLs via the operator env file or
   caller environment/Task variable (caller takes precedence). The launcher
   maps this to chart `ingest.peerUrls` and the ingest Job environment;
