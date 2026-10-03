@@ -222,15 +222,20 @@ for citations and filters.
   title line — the first line, after the previous cut, that equals the
   bookmark title or starts with it followed by a space (whitespace-collapsed,
   case-insensitive) — so each entry gets its own sub-page section, heading
-  path and citation. The first piece starts at the page top. A piece folds
+  path and citation. Only a bookmark whose title occurs once in the outline
+  cuts: message, command and macro names are entries, while recurring
+  subsection titles ("Restrictions", "Syntax", "Examples") stay with the
+  entry before them (cutting on them made tiny, byte-identical chunks). The
+  first piece starts at the page top. A piece folds
   into the next entry when that entry is deeper (the #577 parent-intro
   rule above), when it holds only its own title line, or never splits at
   all when any later title line is missing or out of order, or when two
   pieces would share a heading path (one chunk key). Without page text
   (`outline_sections(parsed)`), sections stay page-granular. Every byte of
-  the shared page lands in exactly one piece. Measured before the change:
-  83% of real message chunks defined more than one message under one
-  message's heading.
+  the shared page lands in exactly one piece. Measured on all 452 corpus
+  PDFs (#649): message chunks titled by the single message they define
+  10/976 → 3,919/5,027, duplicate-text excess 276 → 274, chunks +19%, no
+  content lines lost, no chunk-key collisions.
 - Code regions (`detect_code_region`): JCL-dominant at 0.6 on left-stripped
   lines (PDFs left-pad code), a `DD DATA/*` single-card override, REXX via a
   `/* rexx` header, unbalanced `/*` vs `*/`, or (issue #216) a keyword
