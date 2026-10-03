@@ -1784,6 +1784,29 @@ def test_parse_answer_trailing_citations_without_header():
     assert "ca-ops-14-0" not in parsed.answer
 
 
+@pytest.mark.parametrize("header", ["", "Citations:\n", "Sources:\n"])
+@pytest.mark.parametrize("doc_id", ["widget-messages", "SA22-0000-00"])
+def test_parse_answer_bibliography_keeps_exact_cites_before_unmapped_tail(header, doc_id):
+    first = f"{doc_id} Widget Messages, Recovery > WID001I, p. PDF 12–13"
+    second = f"{doc_id} Widget Messages, Recovery > WID002I, p. 2-4"
+    fabricated = f"{doc_id} Widget Messages, Recovery > WID002I, p. 99"
+    omitted = f"{doc_id} Widget Messages, Recovery > WID003I, p. 3-4"
+    evidence = _stem_evidence([(doc_id, first), (doc_id, second)])
+    content = (
+        "Remove the suspension using WIDGET REMOVE.\n\n" + header
+        + f"- **{first}**\n\n> {second}\n[3]: {first}\n"
+        + f"{omitted}\n{fabricated}\n{fabricated}\n\n"
+    )
+    parsed = parse_answer(content, evidence)
+    assert parsed.answer == "Remove the suspension using WIDGET REMOVE."
+    assert parsed.citations == [first, second]
+    assert parsed.citations_inferred is False
+    assert parsed.inferred_indices == []
+    assert parsed.cites_rejected_unmapped == 2
+    assert parsed.cites_rejected_shape_bad == 0
+    assert parsed.citations_header_present is (header == "Citations:\n")
+
+
 def _stem_evidence(cites_by_doc: list[tuple[str, str]]):
     """make_evidence with real filename-stem doc ids (ingest's fallback
     identity when a PDF carries no IBM doc number)."""
