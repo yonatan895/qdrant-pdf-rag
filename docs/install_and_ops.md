@@ -1275,6 +1275,140 @@ on three distinct peers again.
   (`ingest.md`), and treat a missing sidecar as explicit operator recovery,
   never as permission to publish unknown staging.
 
+<a id="upgrade-and-recovery-runbook-issue-272"></a>
+#### Upgrade and recovery runbook (issue #272)
+
+Scope: the selected POC/production envelope of #447 — repeat a candidate,
+refuse wrong/missing artifacts without mutation, keep a compatible prior
+software/configuration set, and either restore data or deliberately rebuild
+from protected originals. Live migration/retirement and uninterrupted-HA
+restore are not promised here (#360, #391). `$KC` is `oc`/`kubectl`,
+`$NS` the owned namespace; run from the checkout of the bundle being operated.
+Qdrant snapshots are **node-local**: a collection snapshot taken on one peer
+holds only the shards that peer stores. Admin calls use the writer key from the
+`<release>-apikey` Secret (`api-key`), never the serving key; do not print it.
+
+**0. Preconditions (read-only).**
+
+```sh
+sh scripts/tools/run-task.sh airgap:validate          # access, Secrets keys, storage class
+python3 scripts/verify_placement.py --production \
+  --peer-url http://qdrant-0.qdrant-headless:6333 \
+  --peer-url http://qdrant-1.qdrant-headless:6333 \
+  --peer-url http://qdrant-2.qdrant-headless:6333   # run from the cluster network
+```
+
+Stop on any not-ACTIVE shard. Check snapshot headroom first
+(`deploy.md` capacity arithmetic: `retained * S` must fit the 500Gi claim) and
+that no ingest Job is running (`$KC -n "$NS" get job ingest`): the writer is
+quiescent before any snapshot.
+
+**1. Snapshot every peer and make a verified off-cluster copy.** Per physical
+data collection and its `<physical>__completions` pair (alias mapping recorded
+first: `GET /aliases`), on each peer `qdrant-N`:
+
+```sh
+KEY=$($KC -n "$NS" get secret qdrant-apikey -o jsonpath='{.data.api-key}' | base64 -d)
+for peer in 0 1 2; do
+  $KC -n "$NS" port-forward "pod/qdrant-$peer" 6333:6333 >/dev/null & pf=$!
+  sleep 3
+  name=$(curl -fsS -X POST -H "api-key: $KEY" http://127.0.0.1:6333/collections/<physical>/snapshots \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["name"])')
+  curl -fsS -H "api-key: $KEY" -o "<physical>-peer$peer.snapshot" \
+    "http://127.0.0.1:6333/collections/<physical>/snapshots/$name"
+  kill "$pf"
+done
+sha256sum <physical>-peer*.snapshot > SNAPSHOTS.sha256   # keep with the bundle SHA and aliases
+```
+
+The off-cluster copy is the point of the exercise: snapshot PVCs share the
+cluster's failure domain. The artifacts contain manual text: store them like the
+corpus, never in git. Unverified copies (`sha256sum -c SNAPSHOTS.sha256` fails)
+are not backups.
+
+**2. Isolated restore proof (never over the source).** Before relying on a
+snapshot, restore one peer's file into a *new* collection name on a scratch
+Qdrant, compare `points_count` and exact-query results with the source, then
+delete only the scratch collection. `scripts/ci/check_snapshot.py` is this
+check for the synthetic lifecycle lane (restore under `ci-restore-<uuid>`, exact
+query equivalence, source untouched). A source collection is never deleted or
+reset to "reingest": completion markers, representation and inventory move with
+publication (`ingest.md`), so recovery is by alias re-pointing or by the
+publication contract, not by deleting live data.
+
+**3. Application upgrade (candidate bundle B over A).** In a fresh workspace for
+B (`bootstrap.sh`, never advance A's workspace), then:
+
+```sh
+sh scripts/tools/run-task.sh airgap:validate
+sh scripts/tools/run-task.sh airgap:pipeline          # or: sh scripts/airgap/pipeline.sh --skip-load
+```
+
+Deploy refuses before any cluster change when the chart or any registry image is
+not the packed one (`deploy.md` image identity), then checks the running
+`imageID`s. The agent's startup refuses an incompatible or pending existing
+representation by design; that is a staged recovery (step 5), not a rerun.
+Repeating the same candidate is supported and must leave identical digests.
+
+**4. Rollback (compatible software/config only).** Run the previous approved
+bundle A from its own workspace and its own `airgap.env`
+(`airgap:deploy`, same namespace). Application rollback never rolls data back
+and never edits PVCs (`deploy.md` lifecycle notes). Rollback is valid only if
+the data representation A expects is the one the target holds; otherwise use
+step 5. Never combine A's assets with B's checkout.
+
+**5. Data recovery or rebuild (explicit, downtime recorded).**
+
+- Alias-published generation intact: re-point the serving alias to the
+  retained previous generation (`ingest.md` publication contract); verify with
+  exact queries and the agent `/healthz`. Retired generations and safety
+  snapshots stay until the operator accepts.
+- Lost/corrupt storage on one peer: no improvised stop/wipe/start (see above).
+  The supported path today is a fresh rebuild from protected originals with
+  accepted downtime: provision clean claims, `airgap:pipeline` with
+  `CORPUS_PVC`, then step 0 verifier and step 6 acceptance. Peer replacement and
+  distributed snapshot restore stay open under #360.
+
+**6. Acceptance after any of the above.**
+
+```sh
+python3 scripts/verify_placement.py --production --peer-url ...   # 6/3/2, three peers
+sh scripts/tools/run-task.sh airgap:smoke
+```
+
+Then exact reads on every peer (not only the verifier verdict), the documented
+user-experience checks, and record downtime, the bundle SHA, registry
+digests (`==> registry image verified` lines) and snapshot checksums in the
+approved venue.
+
+**Qdrant version upgrade.** Follow
+[qdrant-version-upgrade](../.agents/skills/qdrant-version-upgrade/SKILL.md):
+storage compatibility holds for one minor version, so step one minor at a time
+(latest patch of each), SDK first, snapshot first (step 1), at most one peer
+unavailable at a time (RF3 permits a rolling upgrade; wait for full shard
+recovery between peers), and confirm every peer reports the target version.
+There is no supported downgrade of data written by a newer minor: rollback of
+the Qdrant image alone is not a recovery plan; restore the pre-upgrade snapshot
+into a clean cluster instead. The vendored chart/image pin changes only in a
+dedicated pin-bump PR.
+
+**PVC expansion.** Preconditions: the StorageClass sets
+`allowVolumeExpansion: true` and the backing storage has the capacity. Patch
+each claim (`$KC -n "$NS" patch pvc qdrant-storage-qdrant-N -p '{"spec":{"resources":{"requests":{"storage":"<new>"}}}}'`
+and `qdrant-snapshots-qdrant-N` likewise), wait for `FileSystemResizePending` to clear
+(a pod restart may be needed), then align `persistence.size` /
+`snapshotPersistence.size` for the next upgrade. The StatefulSet
+`volumeClaimTemplates` are immutable, so the template change needs
+`$KC -n "$NS" delete statefulset qdrant --cascade=orphan` before the next
+`helm upgrade` (pods and claims are kept). Claims are never shrunk.
+
+**Not exercised by this repository.** Everything above is documented procedure
+plus the hermetic checks named in it; no OpenShift/CRC or site run of the
+snapshot, off-cluster copy, restore, rollback, Qdrant minor upgrade or PVC
+expansion has been recorded for it. Each needs a live rehearsal in the
+approved venue (CRC gate / site) before the corresponding operation is enabled;
+this is tracked on #272.
+
 #### Ownership and linkage
 
 Qdrant topology/placement acceptance stays under #360. Publication and

@@ -11,6 +11,7 @@
 # No tokens in git, ever.
 
 . "$(dirname -- "$0")/common.sh"
+. "$(dirname -- "$0")/image_identity.sh"
 
 enforce_product_rules
 resolve_aliases
@@ -107,6 +108,13 @@ check_image_digest() {
     [ -n "$_expected" ] || die "MANIFEST.txt has no $_key entry"
     [ "$_actual" = "$_expected" ] || \
         die "$_tar digest $_actual does not match MANIFEST $_key ($_expected) — wrong image bytes"
+    # The config digest is what deploy/ingest later verify the registry against
+    # (issue #272): it must be present and be this archive's image config.
+    _cfgkey="${_key%_digest}_config_digest"
+    _cfg=$(awk -F': ' -v k="$_cfgkey" '$1 == k {print $2}' "$ARTDIR/MANIFEST.txt")
+    [ -n "$_cfg" ] || die "MANIFEST.txt has no $_cfgkey entry — repack the bundle with this release's pack.sh"
+    [ "$(archive_config_digest "$ARTDIR/$_tar")" = "$_cfg" ] || \
+        die "$_tar image config does not match MANIFEST $_cfgkey — wrong image bytes"
 }
 check_image_digest qdrant-image.tar qdrant_digest
 check_image_digest jaeger-image.tar jaeger_digest
@@ -115,33 +123,6 @@ check_image_digest "app-agent-$IMAGE_SHA.tar" agent_digest
 if [ -n "$OAUTH_TAR" ]; then
     check_image_digest "$OAUTH_TAR" oauth_proxy_digest
 fi
-
-# `skopeo inspect` takes fewer options than `skopeo copy`. Reuse only the
-# registry-access options from SKOPEO_ARGS (authfile, creds, cert-dir,
-# tls-verify; a --dest- prefix is dropped) so the read-back below reaches the
-# registry the same way the push did. Copy-only options are never forwarded.
-inspect_args() {
-    _ia=""
-    _ia_take=0
-    # shellcheck disable=SC2086
-    for _t in ${SKOPEO_ARGS:-}; do
-        if [ "$_ia_take" = 1 ]; then _ia="$_ia $_t"; _ia_take=0; continue; fi
-        _n=${_t#--}
-        _n=${_n#dest-}
-        case "$_t" in
-            --*) ;;
-            *) continue ;;
-        esac
-        case "$_n" in
-            authfile=*|creds=*|cert-dir=*|tls-verify=*|registry-token=*|no-creds) _ia="$_ia --$_n" ;;
-            authfile|creds|cert-dir|registry-token) _ia="$_ia --$_n"; _ia_take=1 ;;
-        esac
-    done
-    if [ "${INSECURE_REGISTRY:-false}" = "true" ]; then
-        _ia="$_ia --tls-verify=false"
-    fi
-    printf '%s' "$_ia"
-}
 
 # Post-load identity (issue #272): `skopeo copy` exiting 0 does not prove what
 # the tag now resolves to. Read the tag back and require that the registry

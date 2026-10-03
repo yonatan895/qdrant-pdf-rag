@@ -145,13 +145,17 @@ def _make_artifacts(artdir: Path, sha: str = IMAGE_SHA, corrupt: bool = False, o
             f"jaeger_digest: {digests['jaeger']}\n"
             f"ingest_digest: {digests['ingest']}\n"
             f"agent_digest: {digests['agent']}\n"
+            + "".join(f"{k}_config_digest: {_config_of(k)}\n" for k in ("qdrant", "jaeger", "ingest", "agent"))
             + task_manifest()
         ).encode(),
         "sbom.json": b'{"images": []}\n',
     }
     if oauth:
         files["oauth-proxy-image.tar"] = b"oauth-tar\n"
-        files["MANIFEST.txt"] += f"oauth_proxy_digest: {digests['oauth_proxy']}\n".encode()
+        files["MANIFEST.txt"] += (
+            f"oauth_proxy_digest: {digests['oauth_proxy']}\n"
+            f"oauth_proxy_config_digest: {_config_of('oauth_proxy')}\n"
+        ).encode()
     sums = []
     for name, content in files.items():
         p = artdir / name
@@ -239,7 +243,7 @@ def test_load_success_with_parent_dir(load_tree):
     subdir.mkdir()
     copy_task_tools(subdir)
     (subdir / "scripts" / "airgap").mkdir(parents=True)
-    for f in ("common.sh", "load.sh"):
+    for f in ("common.sh", "load.sh", "image_identity.sh"):
         shutil.copy(REPO / "scripts" / "airgap" / f, subdir / "scripts" / "airgap" / f)
     env = {
         "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
@@ -316,6 +320,43 @@ def test_load_image_digest_mismatch_fails_closed(load_tree):
     r = _run_load(load_tree)
     assert r.returncode == 1
     assert "does not match MANIFEST" in r.stderr
+
+
+def _edit_manifest_and_resign(artdir: Path, edit) -> None:
+    manifest = artdir / "MANIFEST.txt"
+    manifest.write_text(edit(manifest.read_text()))
+    sums = []
+    for line in (artdir / "SHA256SUMS").read_text().splitlines():
+        name = line.split("  ", 1)[1]
+        sums.append(f"{_sha256((artdir / name).read_bytes())}  {name}\n")
+    (artdir / "SHA256SUMS").write_text("".join(sums))
+    sign_sums(artdir)
+
+
+def test_load_refuses_manifest_without_config_digest_before_any_push(load_tree):
+    tmp_path, skopeo_log = load_tree
+    artdir = tmp_path / "dist"
+    _make_artifacts(artdir, sha=IMAGE_SHA)
+    _edit_manifest_and_resign(
+        artdir, lambda t: "".join(ln + "\n" for ln in t.splitlines() if not ln.startswith("agent_config_digest:"))
+    )
+    r = _run_load(load_tree)
+    assert r.returncode == 1
+    assert "no agent_config_digest entry" in r.stderr
+    assert "copy" not in skopeo_log.read_text().split()
+
+
+def test_load_refuses_manifest_config_digest_that_is_not_the_archives(load_tree):
+    tmp_path, skopeo_log = load_tree
+    artdir = tmp_path / "dist"
+    _make_artifacts(artdir, sha=IMAGE_SHA)
+    _edit_manifest_and_resign(
+        artdir, lambda t: t.replace(_config_of("qdrant"), "sha256:" + "d" * 64, 1)
+    )
+    r = _run_load(load_tree)
+    assert r.returncode == 1
+    assert "image config does not match MANIFEST qdrant_config_digest" in r.stderr
+    assert "copy" not in skopeo_log.read_text().split()
 
 
 def test_load_trusted_pub_mismatch_refuses(load_tree):
@@ -485,7 +526,7 @@ def test_load_refuses_archive_changed_after_digest_binding(load_tree):
     manifest_digest = _digest_of_archive(artdir, TAR["agent"])
     (artdir / ".skopeo-stub/format-digest" / TAR["agent"]).write_text(manifest_digest + "\n")
     (artdir / ".skopeo-stub/archive" / f"{TAR['agent']}.raw").write_bytes(
-        _manifest(_config_of("tampered"), _digest(b"layer-tampered"))
+        _manifest(_config_of("agent"), _digest(b"layer-tampered"))
     )
     r = _run_load(load_tree)
     assert r.returncode == 1

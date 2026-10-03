@@ -109,6 +109,9 @@ Qdrant deploys as its separate release from `charts/qdrant-1.19.0.tgz`;
 checkout. Use the checksum-pinned Helm 4.3.0 client from
 [the workflow](../.github/workflows/e2e.yml). Neither chart needs a remote
 chart repository in the air gap.
+Deploy also reads back every deployed image from the registry before any
+cluster change, so `pipeline.sh --skip-load` and standalone `airgap:deploy`
+are verified exactly like a fresh load (see [image identity](#image-identity-across-archive-and-registry-formats)).
 Deploy requires exactly one `charts/qdrant-*.tgz` (none or several is refused
 before any release command). When a packed `MANIFEST.txt` is reachable and the
 run is not a dry-run, that archive's sha256 must equal the MANIFEST
@@ -281,9 +284,9 @@ checksums **after**.
   pin, and it differs from the MANIFEST archive digest by design (see
   [image identity](#image-identity-across-archive-and-registry-formats)).
   Dry-run reads no registry and says so ("not release-verified").
-  Not yet covered (#272 item 3): `pipeline.sh --skip-load` and `deploy.sh`
-  still render images by mutable tag and do not re-read the registry, so a tag
-  changed after load is not detected at deploy.
+  Load also requires each `<image>_config_digest` in the MANIFEST to equal its
+  archive's image config before any push. Deploy and ingest repeat the registry
+  read-back and render by digest (see the image identity section below).
 - Executing-checkout guard (`common.sh::check_checkout_sha`, run by load,
   deploy, ingest and validate): with a packed MANIFEST reachable, HEAD must
   equal the packed SHA and no tracked file may differ from it, staged or
@@ -382,6 +385,43 @@ cannot schedule on one node — proven).
   collector is not proof that spans reach it.
 
 <a id="collection-policy"></a>
+### Capacity arithmetic (issue #272)
+
+Provisioned claims by default (`charts/qdrant-openshift.values.yaml`, chart
+values; the three Qdrant peers each get their own claims):
+
+| Claim | Per unit | Units | Total |
+|---|---|---|---|
+| Qdrant data (RWO block) | 500Gi | 3 peers | 1500Gi |
+| Qdrant snapshots (RWO block, node-local) | 500Gi | 3 peers | 1500Gi |
+| Ingest scratch `ingest-work` (`INGEST_WORK_SIZE`) | 100Gi | 1 | 100Gi |
+| Jaeger Badger (when enabled) | 10Gi | 1 | 10Gi |
+| **Provisioned PVC capacity** | | | **3110Gi = 3.04TiB** |
+
+Qdrant alone is `3 * (500Gi + 500Gi) = 3000Gi = 2.93TiB`, not 500Gi. The
+read-only corpus PVC is caller-owned and not counted. This is provisioned
+capacity, not usable logical capacity:
+
+- With 6 shards, replication factor 3 on 3 peers, every peer stores one copy of
+  every shard. The logical corpus (corpus plus `__completions` collection) is
+  therefore bounded by **one** peer's data claim (500Gi), not by 1500Gi.
+  Let `S` be one generation's on-disk size on a single peer.
+- Alias publication keeps the retired generation until the operator removes it,
+  so a refresh peaks at `S_old + S_new` plus WAL and optimizer scratch on the
+  same claim: the data claim must hold at least `2 * S` with headroom, i.e. `S`
+  stays well below 250Gi at the default size.
+- Each node-local snapshot of a generation is about `S` on that peer's snapshot
+  claim: the retained snapshots (pre-change, pre-upgrade, safety) satisfy
+  `retained * S` below 500Gi. Off-cluster copies do not free the claim until the
+  snapshot is deleted.
+- Sizing math, not measurement: measured per-point footprint, headroom, RPO/RTO
+  and replica policy belong to #374 and #360. Do not provision at exactly the
+  estimate (`.agents/skills/qdrant-sizing`).
+- Claim expansion needs a StorageClass with `allowVolumeExpansion: true`. The
+  StatefulSet's `volumeClaimTemplates` are immutable, so a larger value in the
+  chart does not resize existing claims; the procedure is in the
+  [upgrade and recovery runbook](install_and_ops.md#upgrade-and-recovery-runbook-issue-272).
+
 ### Collection distribution and placement (issue #360)
 
 **Production default (checked in, non-secret):** 6 logical shards,
@@ -756,9 +796,40 @@ its manifest against the bundle first, then verify identical image config/rootfs
 diffIDs across the load, and the running digest against the loaded registry.
 Do not compare an archive digest blindly to a registry digest or accept a tag
 alone. Capture all five images, including every OAuth sidecar.
-`load.sh` implements the archive-to-registry step (config digest and layer
-count compared after each push; the registry manifest digest is reported);
-the pod `imageID` comparison and digest-pinned rendering remain open.
+Implemented (issue #272), as one chain bound to the signed MANIFEST:
+
+1. `pack.sh` records `<image>_config_digest` for all five images next to the
+   archive `<image>_digest`. `load.sh` refuses an archive whose config differs
+   from it (before any push), then reads each pushed tag back and requires the
+   packed config digest and layer count; it prints `ref@registry-manifest-digest`.
+2. `deploy.sh` (every entry path: after `load`, `pipeline.sh --skip-load`,
+   standalone `airgap:deploy`) and `ingest.sh` read the registry tag back
+   **before any cluster change** and require a single-image manifest with the
+   packed config digest. Missing tag, swapped tag, manifest list, or a MANIFEST
+   without `<image>_config_digest` (older bundle: repack) stop with a fixed
+   message and no mutation. The check shares `load.sh`'s read-back options
+   (`SKOPEO_ARGS` access options, `INSECURE_REGISTRY`) and needs `skopeo` and
+   `python3`.
+3. The first-party images (agent, ingest, Jaeger, oauth-proxy) are then rendered
+   as `repository@sha256:<registry manifest digest>` (`IMAGE_DIGEST_<ROLE>` →
+   `map_values.py` → `images.<name>.digest`; the chart keeps the SHA tag only as
+   the informational release identity). The digest only ever comes from this
+   verification, never from the caller's environment.
+4. The vendored Qdrant chart cannot render a digest (it appends
+   `-unprivileged` to the tag and semver-compares the tag), and vendored-tree
+   edits are not allowed. It stays tag-referenced; its verified digest is
+   compared with the running pods instead. After rollout, every running
+   container of a verified repository must report that digest as `imageID`
+   (`check_pod_images.py`); a mismatch or a missing pod fails the deploy
+   before the legacy-resource cleanup. Residual: between the read-back and the
+   Qdrant pod pull, a tag could still move; the post-rollout check detects it
+   after pods started, it cannot prevent it.
+5. Dry-run and runs without a reachable packed MANIFEST (connected
+   development) keep tag-only references and print a notice; they are not
+   release-verified.
+
+Not covered: signature/provenance of images beyond the signed MANIFEST, and any
+registry-side tag immutability (a platform control).
 
 <a id="deployment-policy"></a>
 ## Deployment maintenance policy

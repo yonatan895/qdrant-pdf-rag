@@ -51,6 +51,10 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
         scripts = [*scripts, "check_app_ownership.py"]
     if "common.sh" in scripts:
         scripts = [*scripts, "model_config.py"]
+    if any(name in scripts for name in ("pack.sh", "load.sh", "deploy.sh", "ingest.sh")):
+        scripts = [*scripts, "image_identity.sh"]
+    if any(name in scripts for name in ("deploy.sh", "ingest.sh")):
+        scripts = [*scripts, "check_pod_images.py"]
     for f in scripts:
         shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
     return tmp_path
