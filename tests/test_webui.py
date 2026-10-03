@@ -523,6 +523,14 @@ _MD_CASES = [
     ("* one\n* two", ["<ul>", "<li>one</li>", "<li>two</li>", "</ul>"], []),
     ("- **x:** y", ["<li><strong>x:</strong> y</li>"], []),
     ("1. first\n2. second", ["<ol>", "<li>first</li>", "</ol>"], []),
+    # Lazy continuation: a plain line under an item stays in that item, never
+    # a paragraph emitted ahead of the list (escaped console defect).
+    (
+        "1. **A:**\nbody a\n2. **B:**\n  body b",
+        ["<li><strong>A:</strong> body a</li>", "<li><strong>B:</strong> body b</li>"],
+        ["<p>"],
+    ),
+    ("- one\n\nafter", ["<li>one</li>\n</ul>\n<p>after</p>"], []),
     (
         "```jcl\n//STEP1 EXEC PGM=IEFBR14\n```",
         [

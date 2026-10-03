@@ -135,7 +135,9 @@ def _assistant_content(answer: str, citations: list[str]) -> str:
 # the backstop, escaping is the guarantee). Subset, deliberately small:
 # ATX headings (#–####, space required), **bold**, *italic*, `code`,
 # fenced code blocks (``` + optional language, unclosed closes at EOF),
-# unordered (-/*) and ordered (1./1)) lists. No links, images, tables, or
+# unordered (-/*) and ordered (1./1)) lists. A plain line directly under a
+# list item continues that item (CommonMark lazy continuation) instead of
+# becoming a paragraph out of order. No links, images, tables, or
 # raw HTML — anything outside the subset renders as inert text.
 # console.js implements the same subset for the streaming path; the fixture
 # battery in tests/test_webui.py pins both the rendering and the refusal
@@ -386,14 +388,21 @@ def render_markdown_subset(text: str) -> str:
     out: list[str] = []
     para: list[str] = []
     in_list: str | None = None  # "ul" | "ol" | None
+    item: list[str] = []  # escaped lines of the open list item
 
     def flush_para() -> None:
         if para:
             out.append(f"<p>{_md_inline(' '.join(para))}</p>")
             para.clear()
 
+    def flush_item() -> None:
+        if item:
+            out.append(f"<li>{_md_inline(' '.join(item))}</li>")
+            item.clear()
+
     def close_list() -> None:
         nonlocal in_list
+        flush_item()
         if in_list is not None:
             out.append(f"</{in_list}>")
             in_list = None
@@ -449,8 +458,8 @@ def render_markdown_subset(text: str) -> str:
                 close_list()
                 out.append(f"<{kind}>")
                 in_list = kind
-            escaped_item = html.escape(match.group(1), quote=False)
-            out.append(f"<li>{_md_inline(escaped_item)}</li>")
+            flush_item()
+            item.append(html.escape(match.group(1), quote=False))
             idx += 1
             continue
         if not line.strip():
@@ -458,7 +467,7 @@ def render_markdown_subset(text: str) -> str:
             close_list()
             idx += 1
             continue
-        para.append(html.escape(line.strip(), quote=False))
+        (item if item else para).append(html.escape(line.strip(), quote=False))
         idx += 1
     flush_para()
     close_list()

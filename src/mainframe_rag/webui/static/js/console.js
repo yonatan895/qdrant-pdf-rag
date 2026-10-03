@@ -9,7 +9,8 @@
  *
  * Assistant turns render the same safe markdown subset as the server
  * (routes.render_markdown_subset): headings, bold/italic, code spans,
- * fenced blocks, unordered/ordered lists — built as DOM nodes via
+ * fenced blocks, unordered/ordered lists (a plain line under an item
+ * continues it) — built as DOM nodes via
  * textContent, never innerHTML, so hostile markup stays inert.
  *
  * No inline handlers or eval: the strict CSP (`script-src 'self'`) applies.
@@ -379,6 +380,7 @@
     const frag = document.createDocumentFragment();
     let para = [];
     let list = null;
+    let item = null; // raw lines of the open list item
 
     function flushPara() {
       if (para.length) {
@@ -388,7 +390,16 @@
         para = [];
       }
     }
+    function flushItem() {
+      if (item) {
+        const li = el("li");
+        mdInline(item.join(" "), li);
+        list.appendChild(li);
+        item = null;
+      }
+    }
     function closeList() {
+      flushItem();
       if (list) {
         frag.appendChild(list);
         list = null;
@@ -447,9 +458,8 @@
           closeList();
           list = el(kind);
         }
-        const li = el("li");
-        mdInline((ul || ol)[1], li);
-        list.appendChild(li);
+        flushItem();
+        item = [(ul || ol)[1]];
         i += 1;
         continue;
       }
@@ -459,7 +469,9 @@
         i += 1;
         continue;
       }
-      para.push(line.trim());
+      // A plain line under a list item continues it (lazy continuation),
+      // never a paragraph emitted ahead of the still-open list.
+      (item || para).push(line.trim());
       i += 1;
     }
     flushPara();
