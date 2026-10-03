@@ -22,7 +22,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
 
@@ -65,7 +65,6 @@ from mainframe_rag.agent.chat_turn import (
     is_unsearchable_query,
     prepare_chat_turn,
 )
-from mainframe_rag.agent.core_ports import RetrievalResult
 from mainframe_rag.agent.evidence import (
     PUBLIC_FAILURES,
     EvidenceAccess,
@@ -81,7 +80,6 @@ from mainframe_rag.agent.metrics import (
     record_request,
     setup_metrics,
 )
-from mainframe_rag.agent.model_adapter import ModelAdapter
 from mainframe_rag.agent.resources import AgentResources
 from mainframe_rag.agent.resources import await_retrieval as _await_retrieval  # noqa: F401
 from mainframe_rag.agent.serving import ServingGate, ServingGeneration
@@ -453,7 +451,7 @@ async def _within_deadline(owner: _RequestSpan, work: Awaitable):
         raise
 
 
-async def _deadline_iter(owner: _RequestSpan, events: AsyncIterator) -> AsyncIterator:
+async def _deadline_iter(owner: _RequestSpan, events: AsyncIterator) -> AsyncGenerator:
     """Yield `events` items, each awaited within the remaining deadline; on
     expiry raise RequestDeadlineExceeded (the caller's mid-stream failure
     path emits the terminal error frame). The timeout scope never spans a
