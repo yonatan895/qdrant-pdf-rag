@@ -181,8 +181,8 @@ def build_scope_filter(
 
 def build_fallback_filter(
     identifiers: QueryIdentifiers,
-    product: str | None = None,
-    version: str | None = None,
+    *,
+    scope: models.Filter | None = None,
 ) -> models.Filter | None:
     """Relax missing anchors without admitting annotated wrong-code siblings.
 
@@ -190,7 +190,6 @@ def build_fallback_filter(
     code within a field. Doc/member predicates relax as before; caller scope
     and message/system-code compatibility stay in both prefetch legs.
     """
-    scope = build_scope_filter(product=product, version=version)
     if not (identifiers.message_ids or identifiers.system_codes):
         return scope
     must: list[models.Condition] = [scope] if scope else []

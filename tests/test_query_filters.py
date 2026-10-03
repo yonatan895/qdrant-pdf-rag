@@ -664,11 +664,11 @@ def test_empty_code_lookup_excludes_annotated_sibling_before_prefetch(
 def test_code_fallback_retains_matching_and_multi_code_context(query, field, wanted, sibling):
     from qdrant_client.local.payload_filters import check_filter
 
-    from mainframe_rag.retrieve.filters import build_fallback_filter
+    from mainframe_rag.retrieve.filters import build_fallback_filter, build_scope_filter
 
     ids = parse_query(f"{query} in SA00-9999-99")
     primary = build_filter(ids, product="z/OS", version="3.1")
-    fallback = build_fallback_filter(ids, product="z/OS", version="3.1")
+    fallback = build_fallback_filter(ids, scope=build_scope_filter(product="z/OS", version="3.1"))
     for values in ([wanted], [wanted, sibling]):
         payload = {field: values, "doc_id": "another", "product": "z/OS", "version": "3.1"}
         assert not check_filter(primary, payload, "p", {})
