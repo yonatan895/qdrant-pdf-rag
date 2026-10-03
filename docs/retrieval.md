@@ -92,9 +92,14 @@ so lexical and semantic candidates are scoped identically before any fusion.
  - Empty-filtered recovery: when a filter was applied and both prefetch legs
   return zero points (multi-identifier AND with no co-carrying chunk, or a
   filter with no match in this corpus), the retrieval path retries once
-  at the same prefetch depth with the filter relaxed to the caller scope
-  (`fallback_flt`, product/version only — never the identifier predicates)
-  and fuses that pool. Non-empty
+  at the same prefetch depth with doc/member predicates relaxed. Caller
+  product/version scope remains exact. For each requested message/system-code
+  field, the fallback admits missing/null/empty metadata or any matching code;
+  chunks annotated solely with different codes are excluded in both prefetch
+  legs before fusion. This preserves generic unannotated context without
+  admitting a known wrong-code sibling after an empty exact lookup. Matching
+  chunks may carry additional codes; metadata is not proof of answer relevance.
+  Non-empty
   filtered results never pay the second call. The retry lands on the trace
   as boolean `rag.filter_fallback` (bounded, never free text).
 - The legs are named `dense` and `bm25`, dense first. Batched calls pass

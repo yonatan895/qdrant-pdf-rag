@@ -23,7 +23,12 @@ if TYPE_CHECKING:
     from mainframe_rag.config import Settings
 
 from mainframe_rag.ports import AsyncQdrantPoints, Embedder, QdrantPoints, Reranker
-from mainframe_rag.retrieve.filters import build_filter, build_scope_filter, parse_query, query_kind
+from mainframe_rag.retrieve.filters import (
+    build_fallback_filter,
+    build_filter,
+    parse_query,
+    query_kind,
+)
 from mainframe_rag.retrieve.rewrite import expand_query, should_rewrite
 from mainframe_rag.retrieve.screen import screen_query
 from mainframe_rag.retrieve.split import split_query
@@ -656,7 +661,7 @@ async def async_search(
     When reranking is enabled, fused candidates (top-50) are scored by the cross-encoder."""
     identifiers = parse_query(query)
     flt = build_filter(identifiers, product=product, version=version)
-    fallback_flt = build_scope_filter(product=product, version=version)
+    fallback_flt = build_fallback_filter(identifiers, product=product, version=version)
 
     active_reranker, rerank_active, bypass_reason = _resolve_active_reranker(
         settings, reranker, query, identifiers.has_identifiers
@@ -831,4 +836,3 @@ async def async_search(
         )
 
     return hits, query_kind(identifiers), timings
-

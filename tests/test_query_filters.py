@@ -595,6 +595,104 @@ def test_async_search_filter_fallback_matches_sync(embedder):
     assert fake_sync.batch_calls == fake_async.batch_calls == 2
 
 
+@pytest.mark.parametrize("async_entry", [False, True])
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize(
+    "query,field,wanted,sibling",
+    [
+        ("What does IEC072I report?", "message_ids", "IEC072I", "IEC070I"),
+        ("Explain S0C4", "system_codes", "0C4", "0C7"),
+    ],
+)
+def test_empty_code_lookup_excludes_annotated_sibling_before_prefetch(
+    embedder, async_entry, batch, query, field, wanted, sibling,
+):
+    """Actual pinned-client filter semantics drive both transport shapes.
+
+    The exact lookup is empty; a known wrong code must not enter either
+    fallback leg. Generic metadata states and explicit scope stay usable.
+    """
+    from qdrant_client.local.payload_filters import check_filter
+
+    from mainframe_rag.retrieve.query import async_search
+
+    points = []
+    for pid, metadata in (
+        ("missing", {}), ("null", {field: None}), ("empty", {field: []}),
+        ("wrong", {field: [sibling]}),
+        ("outside", {}),
+    ):
+        point = _point(pid)
+        point.payload.update(product="z/OS", version="3.1", doc_id=f"sample-{pid}", page_label=pid)
+        point.payload.pop(field, None)
+        point.payload.update(metadata)
+        if pid == "outside":
+            point.payload["product"] = "other"
+        points.append(point)
+
+    class FilterClient:
+        def __init__(self):
+            self.calls = []
+
+        def query_points(self, collection, query, using, limit, query_filter, **kwargs):
+            eligible = [p for p in points if check_filter(query_filter, p.payload, p.id, {})]
+            self.calls.append((using, query_filter, [p.id for p in eligible]))
+            return SimpleNamespace(points=eligible[:limit])
+
+    class BatchClient(FilterClient):
+        async def query_batch_points(self, collection, requests, **kwargs):
+            return [self.query_points(collection, r.query, r.using, r.limit, r.filter)
+                    for r in requests]
+
+    client = BatchClient() if batch else FilterClient()
+    kwargs = {"product": "z/OS", "version": "3.1", "limit": 8}
+    if async_entry:
+        hits, kind, _ = asyncio.run(async_search(client, embedder, "scratch", query, **kwargs))
+    else:
+        hits, kind, _ = search(client, embedder, "scratch", query, **kwargs)
+    assert kind == "identifier"
+    assert {h.chunk_id for h in hits} == {"missing", "null", "empty"}
+    assert len(client.calls) == 4
+    assert [ids for _, _, ids in client.calls[:2]] == [[], []]
+    assert all(set(ids) == {"missing", "null", "empty"} for _, _, ids in client.calls[2:])
+
+
+@pytest.mark.parametrize("query,field,wanted,sibling", [
+    ("IEC072I", "message_ids", "IEC072I", "IEC070I"),
+    ("S0C4", "system_codes", "0C4", "0C7"),
+])
+def test_code_fallback_retains_matching_and_multi_code_context(query, field, wanted, sibling):
+    from qdrant_client.local.payload_filters import check_filter
+
+    from mainframe_rag.retrieve.filters import build_fallback_filter
+
+    ids = parse_query(f"{query} in SA00-9999-99")
+    primary = build_filter(ids, product="z/OS", version="3.1")
+    fallback = build_fallback_filter(ids, product="z/OS", version="3.1")
+    for values in ([wanted], [wanted, sibling]):
+        payload = {field: values, "doc_id": "another", "product": "z/OS", "version": "3.1"}
+        assert not check_filter(primary, payload, "p", {})
+        assert check_filter(fallback, payload, "p", {})
+    payload[field] = [sibling]
+    assert not check_filter(fallback, payload, "p", {})
+
+
+@pytest.mark.parametrize("messages,codes,eligible", [
+    ([], [], True),
+    (["IEC072I"], ["0C4"], True),
+    (["IEC070I"], ["0C4"], False),
+    (["IEC072I"], ["0C7"], False),
+])
+def test_code_fallback_requires_compatibility_in_each_requested_field(messages, codes, eligible):
+    from qdrant_client.local.payload_filters import check_filter
+
+    from mainframe_rag.retrieve.filters import build_fallback_filter
+
+    fallback = build_fallback_filter(parse_query("IEC072I and S0C4"))
+    payload = {"message_ids": messages, "system_codes": codes}
+    assert check_filter(fallback, payload, "p", {}) is eligible
+
+
 @pytest.mark.parametrize(
     "wrapped",
     [

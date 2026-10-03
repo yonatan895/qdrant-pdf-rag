@@ -178,3 +178,29 @@ def build_scope_filter(
     """
     return build_filter(QueryIdentifiers(), product=product, version=version)
 
+
+def build_fallback_filter(
+    identifiers: QueryIdentifiers,
+    product: str | None = None,
+    version: str | None = None,
+) -> models.Filter | None:
+    """Relax missing anchors without admitting annotated wrong-code siblings.
+
+    Unannotated context remains eligible, as do chunks carrying any requested
+    code within a field. Doc/member predicates relax as before; caller scope
+    and message/system-code compatibility stay in both prefetch legs.
+    """
+    scope = build_scope_filter(product=product, version=version)
+    if not (identifiers.message_ids or identifiers.system_codes):
+        return scope
+    must: list[models.Condition] = [scope] if scope else []
+    for field, values in (
+        ("message_ids", identifiers.message_ids),
+        ("system_codes", identifiers.system_codes),
+    ):
+        if values:
+            must.append(models.Filter(should=[
+                models.IsEmptyCondition(is_empty=models.PayloadField(key=field)),
+                models.FieldCondition(key=field, match=models.MatchAny(any=values)),
+            ]))
+    return models.Filter(must=must) if must else None
