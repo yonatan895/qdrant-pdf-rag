@@ -61,6 +61,14 @@ from mainframe_rag.agent.chat_turn import (
     prepare_chat_turn,
 )
 from mainframe_rag.agent.core_ports import RetrievalResult
+from mainframe_rag.agent.evidence import (
+    PUBLIC_FAILURES,
+    EvidenceAccess,
+    EvidenceFailure,
+    EvidenceService,
+    SharedCorpusAccess,
+    TrustedCaller,
+)
 from mainframe_rag.agent.metrics import endpoint_for_path, record_request, setup_metrics
 from mainframe_rag.agent.model_adapter import ModelAdapter
 from mainframe_rag.agent.serving import ServingGate, ServingGeneration
@@ -121,6 +129,10 @@ zowe_mcp: ZoweMCP | None = None
 # Serving-generation gate (issues #391 F3/F4): created in lifespan from
 # Settings, or injected by tests before startup (never overwritten then).
 serving_gate: ServingGate | None = None
+# Exact-evidence entitlement authority (issue #405). SharedCorpusAccess is the
+# explicit shared-corpus mode of today's deployment; per-source entitlement
+# (#373) replaces this object. Tests inject restrictive/unavailable doubles.
+evidence_access: EvidenceAccess = SharedCorpusAccess()
 # Tracer starts as the API proxy (no-op until a real provider is installed).
 # Lifespan reassigns it when tracing is enabled (issue #83); tests swap it
 # directly with a tracer backed by InMemorySpanExporter.
@@ -717,10 +729,55 @@ class SearchRequest(BaseModel):
     limit: int = Field(default=8, ge=1, le=40)
 
 
+class EvidenceSearchHit(SearchHit):
+    """A search hit plus the opaque exact-evidence reference (issue #405).
+    `reference` is null when no exact read can be promised for that hit (the
+    serving generation has no build binding, or the stored payload cannot form
+    a complete envelope); it is never a placeholder."""
+
+    reference: str | None = None
+
+
 class SearchResponse(BaseModel):
     request_id: str
     query_kind: str
-    hits: list[SearchHit]
+    hits: list[EvidenceSearchHit]
+
+
+class EvidenceLocation(BaseModel):
+    """Stored chunk page span: one-based physical pages, inclusive. Not a
+    byte-to-page map (the ingest path does not retain one)."""
+
+    physical_page_start: int
+    physical_page_end: int | None
+    printed_label: str | None
+
+
+class AtomicSpan(BaseModel):
+    start: int
+    end: int
+
+
+class EvidenceResponse(BaseModel):
+    request_id: str
+    reference: str
+    digest: str
+    completeness: str
+    build_id: str
+    chunk_id: str
+    generation_fingerprint: str
+    source_revision: str
+    source_sha256: str
+    doc_id: str
+    title: str
+    product: str | None
+    version: str | None
+    heading: str
+    chunk_type: str
+    text: str
+    text_bytes: int
+    atomic_spans: list[AtomicSpan] | None
+    location: EvidenceLocation
 
 
 class AnswerRequest(BaseModel):
@@ -1173,11 +1230,95 @@ async def _search_response(req, response, owner):
     timing_parts = _timing_parts(timings)
     if timing_parts:
         response.headers["Server-Timing"] = ", ".join(timing_parts)
+    references = await _mint_references(request_id, bound.qdrant_collection, hits)
     _record_endpoint(request, "search", "ok", started, query_class=kind, hits=len(hits))
     return SearchResponse(
         request_id=request_id,
         query_kind=kind,
-        hits=hits,
+        hits=[
+            EvidenceSearchHit(**hit.model_dump(), reference=references.get(hit.chunk_id))
+            for hit in hits
+        ],
+    )
+
+
+def evidence_service() -> EvidenceService:
+    """The shared exact-evidence service over the module's read-only client,
+    built at call time so tests and the lifespan swap seams the same way as
+    core_deps()."""
+    return EvidenceService(qdrant, settings, evidence_access)
+
+
+async def _mint_references(
+    request_id: str, physical: str, hits: list[SearchHit]
+) -> dict[str, str]:
+    """Best-effort exact-read references for the hits just served. A fault
+    here costs the references, never the search: the response then carries
+    `reference: null` and the log the error type only."""
+    try:
+        return await evidence_service().mint_references(physical, [h.chunk_id for h in hits])
+    except Exception as exc:  # noqa: BLE001
+        log.warning(json_log(request_id, "evidence_mint", error=error_type(exc)))
+        return {}
+
+
+@app.get("/v1/evidence/{reference}", response_model=EvidenceResponse)
+async def v1_evidence(
+    request: Request,
+    reference: str,
+    max_bytes: int | None = Query(default=None, ge=1, le=1048576),
+    product: str | None = None,
+    version: str | None = None,
+) -> EvidenceResponse:
+    """Exact stored evidence for one cited chunk: no model, embed, rerank or
+    search call; read-only storage access (docs/evidence-contract.md)."""
+    request_id = request.state.request_id
+    started = time.monotonic()
+    root_span = start_span(
+        tracer,
+        "v1.evidence",
+        context=parent_context(request.headers),
+        kind=SpanKind.SERVER,
+        attributes={"http.request_id": request_id},
+    )
+    with _request_span(request, root_span, "evidence", started):
+        try:
+            evidence = await evidence_service().read_evidence(
+                TrustedCaller(), reference, max_bytes=max_bytes, product=product, version=version,
+            )
+        except EvidenceFailure as exc:
+            status, code, message = PUBLIC_FAILURES[exc.kind]
+            log.warning(json_log(request_id, "evidence", outcome=code, reason=exc.reason))
+            _record_endpoint(request, "evidence", code, started)
+            raise AppError(status, code, message) from exc
+        log.info(json_log(request_id, "evidence", outcome="ok", text_bytes=evidence.text_bytes))
+        _record_endpoint(request, "evidence", "ok", started)
+    return EvidenceResponse(
+        request_id=request_id,
+        reference=evidence.reference,
+        digest=evidence.digest,
+        completeness="complete",
+        build_id=evidence.build_id,
+        chunk_id=evidence.chunk_id,
+        generation_fingerprint=evidence.generation_fingerprint,
+        source_revision=evidence.source_revision,
+        source_sha256=evidence.source_sha256,
+        doc_id=evidence.doc_id,
+        title=evidence.title,
+        product=evidence.product,
+        version=evidence.version,
+        heading=evidence.heading_path,
+        chunk_type=evidence.chunk_type,
+        text=evidence.text,
+        text_bytes=evidence.text_bytes,
+        atomic_spans=None
+        if evidence.atomic_spans is None
+        else [AtomicSpan(start=a, end=b) for a, b in evidence.atomic_spans],
+        location=EvidenceLocation(
+            physical_page_start=evidence.physical_page_start,
+            physical_page_end=evidence.physical_page_end,
+            printed_label=evidence.printed_label,
+        ),
     )
 
 

@@ -18,7 +18,26 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
 
 - `POST /v1/search` — `SearchRequest{query (min 1 char, not blank or control-character, #579), product?,
   version?, limit (default 8, 1–40)}` → `SearchResponse{request_id,
-  query_kind, hits}`. No LLM involved.
+  query_kind, hits}`. No LLM involved. Each hit additionally carries
+  `reference` (issue #405): the opaque `ep1.` exact-evidence reference, or
+  `null` when no exact read can be promised for it (generation without a build
+  binding, or a stored payload that cannot form a complete envelope). Minting
+  is best-effort and read-only; a fault there yields nulls, never a failed
+  search.
+- `GET /v1/evidence/{reference}?max_bytes&product&version` — exact stored
+  evidence for one cited chunk (issue #405): `EvidenceResponse{request_id,
+  reference, digest, completeness ("complete"), build_id, chunk_id,
+  generation_fingerprint, source_revision, source_sha256, doc_id, title,
+  product, version, heading, chunk_type, text, text_bytes, atomic_spans
+  (UTF-8 byte ranges, null = not recorded), location{physical_page_start,
+  physical_page_end, printed_label}}`. No LLM, embedding, rerank or search;
+  read-only storage calls only; the build is pinned through its immutable
+  per-build aliases, so alias movement cannot redirect it, and it does not go
+  through the serving gate (an old retained build stays readable). A whole
+  chunk or an explicit refusal, never a prefix. Contract, outcome mapping and
+  limits: [stored-payload profile](evidence-contract.md#stored-payload-profile).
+  The downstream MCP consumer is `python -m mainframe_rag.mcp.knowledge`
+  (tools `knowledge_search`, `evidence_read`) over this HTTP surface.
 - `POST /v1/answer` — `AnswerRequest{query, product?, version?,
   splunk_context?, stream (default false), temperature?}` → `AnswerResponse{request_id,
   answer, citations, citations_inferred, inferred_indices, script,
@@ -207,6 +226,13 @@ status (`/ui` failures render HTML banners instead, §1):
 | `not_configured` / `reasoning model…` | 503 | `/v1/answer` or `/v1/chat` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
 | `representation_unavailable` / `the retrieval generation is not available` | 503 | Serving gate: resolved generation is `empty` or not validated compatible (drift/legacy/pending/unknown); `/ui/chat` renders its banner while `/ui/chat/stream` returns this envelope |
+| `invalid_evidence_reference` / `the evidence reference is not valid` | 400 | `GET /v1/evidence/{reference}`: malformed, non-canonical or unsupported-version reference (no storage contact) |
+| `authentication_required` / `authentication is required` | 401 | Evidence read: the access authority reports no usable identity (unreachable with the default shared-corpus access) |
+| `evidence_unavailable` / `the requested evidence is not available` | 404 / 503 | 404: denied, unknown build, or product/version assertion mismatch (one envelope, no disclosure); 503: retained controls or point missing/redirected, stored data changed under the pinned build, or malformed stored fields |
+| `access_unavailable` / `access policy is not available` | 503 | Evidence read: the access authority cannot decide (fail closed) |
+| `evidence_budget_exceeded` / `the evidence exceeds the requested size budget` | 413 | Whole chunk larger than `max_bytes` or `EVIDENCE_MAX_BYTES` |
+| `evidence_timeout` / `the evidence read timed out` | 504 | Evidence read exceeded `EVIDENCE_TIMEOUT_S` |
+| `upstream_error` / `evidence read failed` | 502 | Storage fault during an evidence read (type logged only) |
 | `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
 | `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
@@ -456,6 +482,7 @@ readers:
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
 | `health_rerank_timeout_s` / `health_rerank_ttl_s` | 5.0 / 15.0 (ttl 0 = probe every scrape) | healthz rerank probe bound and outcome cache; only when `rerank_enabled` |
+| `evidence_max_bytes` / `evidence_timeout_s` | 65536 (1024–1048576) / 10.0 | exact-evidence read: server cap on one whole chunk, total read deadline |
 | `representation_cache_ttl_s` | 5.0 (0 = validate every request) | serving generation gate: alias resolution + contract validation cache |
 | `allow_hash_mode` / `log_level` | `false` / INFO | lifespan hash gate / logging |
 | `otel_exporter_otlp_endpoint` / `otel_sample_ratio` / `otel_export_queue_size` / `otel_export_timeout_ms` | unset = tracing off / 1.0 / 2048 / 5000 | tracing setup |
@@ -554,7 +581,8 @@ must not be described as atomic. Preserve old physical data plus metadata for
 rollback and keep settings compatible; do not GC targets still in use. The
 [exact-evidence design](evidence-contract.md#evidence-contract) specifies future
 retained-reference, authorization and retirement obligations; this TTL gate
-does not implement them.
+does not implement them; the [stored-payload profile](evidence-contract.md#stored-payload-profile)
+implements the build-pinned read without using the gate.
 
 **Evidence:** `tests/test_serving_gate.py::test_resolve_binds_physical_and_reads_its_own_metadata`,
 `test_resolve_refuses_physical_drift_even_when_alias_metadata_is_compatible`,
