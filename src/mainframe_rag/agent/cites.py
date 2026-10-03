@@ -178,6 +178,30 @@ def extract_citation_lines(
     return lines
 
 
+def extract_trailing_citations(
+    text: str, allowed: AbstractSet[str], doc_ids: AbstractSet[str] = frozenset()
+) -> tuple[str, list[str]]:
+    """Separate a standalone bibliography tail, including unmapped attempts.
+
+    A changed page/heading must not hide eligible entries before it. Collect
+    attempts in emitted order; the caller still validates each against the
+    final supplied set. Blank lines and supported wrappers are tolerated,
+    while an ordinary prose line ends the scan.
+    """
+    lines = text.splitlines()
+    attempts: list[str] = []
+    while lines:
+        if not lines[-1].strip():
+            lines.pop()
+            continue
+        candidate = normalize_citation_line(lines[-1])
+        if candidate not in allowed and not is_citation_shaped(candidate, doc_ids):
+            break
+        attempts.append(candidate)
+        lines.pop()
+    return "\n".join(lines), list(reversed(attempts))
+
+
 def valid_citations(
     text: str, allowed: AbstractSet[str], doc_ids: AbstractSet[str] = frozenset()
 ) -> list[str]:
@@ -231,6 +255,7 @@ __all__ = [
     "CITATION_LINE_RE",
     "extract_body_and_citations",
     "extract_citation_lines",
+    "extract_trailing_citations",
     "is_citation_shaped",
     "normalize_citation_line",
     "split_unauthorized_citations",

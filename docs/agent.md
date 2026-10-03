@@ -447,7 +447,7 @@ select `complex`. Default is `simple`.
 ## 5. Citation validation
 
 Only cite strings actually supplied in the final prompt reach the client,
-via two passes plus a trailing sweep in `cites.py` / `parse_answer`. The
+via bibliography extraction and validation in `cites.py` / `parse_answer`. The
 allowlist is `PromptEvidence.allowed_citations` (issue #364) — retrieved
 hits omitted by budget packing, and the tail's example cite, are rejected:
 
@@ -459,8 +459,11 @@ hits omitted by budget packing, and the tail's example cite, are rejected:
    The first non-citation line or blank past seen cites ends the block — later
    prose is preserved as body. `citations_header_present` remains specific to
    the canonical `Citations:` header, not its aliases.
-2. Trailing bare cites: a blank-tolerant tail scan for allowed cite lines
-   without any header.
+2. Trailing bibliography: before header parsing, a blank-tolerant tail scan
+   collects exact supplied cites and citation-shaped attempts, with or without
+   a header. Each attempt is validated separately: an altered final heading/page
+   cannot hide earlier eligible entries. Duplicates keep first-emitted order;
+   an ordinary prose line ends the scan and stays in the body.
 3. Bracket fallback on the fence-processed content (only when the passes
    above found no citation): `[n]` / `[n, m]` only, resolved through the
    manifest's prompt labels (not retrieval rank), deduped, flagged

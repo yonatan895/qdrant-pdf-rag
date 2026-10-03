@@ -1489,6 +1489,7 @@ def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
     from mainframe_rag.agent.cites import (
         CITATIONS_HEADER_RE,
         extract_body_and_citations,
+        extract_trailing_citations,
         is_citation_shaped,
         split_unauthorized_citations,
     )
@@ -1517,7 +1518,12 @@ def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
     script_lang = scripts[0][0] if scripts else None
 
     # 2. Extract citations & body prose
-    body, raw_cite_lines = extract_body_and_citations(text_processed, doc_ids, allowed_citations)
+    # Scan the original tail before parsing headers: a blank-separated list
+    # remains one bibliography, and an unmapped final entry cannot hide exact
+    # supplied citations before it. Both paths share validation and counters.
+    prefix, trailing_cites = extract_trailing_citations(text_processed, allowed_citations, doc_ids)
+    body, raw_cite_lines = extract_body_and_citations(prefix, doc_ids, allowed_citations)
+    raw_cite_lines.extend(trailing_cites)
 
     citations: list[str] = []
     rejected_seen: set[str] = set()
@@ -1536,30 +1542,6 @@ def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
 
     citations_inferred = False
     inferred_indices: list[int] = []
-
-    if not citations:
-        # Check if model ended the response with citation lines matching allowed_citations
-        # even if the literal 'Citations:' header was omitted.
-        from mainframe_rag.agent.cites import normalize_citation_line
-
-        body_lines = body.splitlines()
-        trailing_cites: list[str] = []
-        while body_lines:
-            candidate = body_lines[-1].strip()
-            if not candidate:
-                body_lines.pop()
-                continue
-            norm = normalize_citation_line(candidate)
-            if norm in allowed_citations:
-                if norm not in trailing_cites:
-                    trailing_cites.append(norm)
-                body_lines.pop()
-            else:
-                break
-        if trailing_cites:
-            trailing_cites.reverse()
-            citations = trailing_cites
-            body = "\n".join(body_lines)
 
     inline_bracket_present = bool(_INLINE_INDEX_RE.search(text_processed))
     citations_header_present = bool(CITATIONS_HEADER_RE.search(text_processed))

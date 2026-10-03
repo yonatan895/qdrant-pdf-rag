@@ -93,6 +93,37 @@ def _deps(settings: Settings, llm, retrieve) -> AnswerCoreDeps:
 @pytest.mark.anyio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("finish_reason", ["stop", "length"])
+@pytest.mark.parametrize("body", ["Remove the suspension using WIDGET REMOVE.", ""])
+@pytest.mark.parametrize("eligible", [False, True])
+async def test_core_headerless_bibliography_preserves_verification_rules(
+    stream, finish_reason, body, eligible
+):
+    cite = "widget-messages Widget Messages, Recovery > WID001I, p. PDF 12–13"
+    fabricated = "widget-messages Widget Messages, Recovery > WID001I, p. 99"
+    hit = _hit().model_copy(update={"cite": cite, "doc_id": "widget-messages"})
+    content = body + "\n\n" + (cite + "\n\n" if eligible else "") + fabricated
+    llm = CoreFakeLLM(content=content, finish_reason=finish_reason)
+    deps = _deps(_settings(), llm, lambda *_a, **_kw: ([hit], "semantic", {}))
+    source = AnswerCoreInput(query="How do I remove the suspension?")
+    if stream:
+        events = [event async for event in execute_answer_core_stream(source, deps)]
+        assert events[-1]["type"] == "final"
+        output = events[-1]["output"]
+    else:
+        output = await execute_answer_core(source, deps)
+    assert output.answer == body
+    assert output.citations == ([cite] if eligible else [])
+    assert output.citations_inferred is False
+    assert output.parsed.cites_rejected_unmapped == 1
+    state = "accepted" if eligible else "unverified_draft"
+    if finish_reason != "stop" or not body:
+        state = "generation_incomplete"
+    assert output.verification_state == state
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
 @pytest.mark.parametrize(
     "content,answer,script,state,inferred",
     [

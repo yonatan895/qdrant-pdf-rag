@@ -141,6 +141,62 @@ def test_send_shows_provisional_then_verified_final(console, page):
     assert session["turns"][1]["verification_state"] == "accepted"
 
 
+@pytest.mark.parametrize("header", ["", "Citations:\n"])
+def test_filename_bibliography_renders_separately_and_survives_reload_export_copy(
+    console, page, monkeypatch, header
+):
+    from mainframe_rag.agent import app as app_mod
+    from tests.test_webui import _hit
+
+    first = "widget-messages Widget Messages, Recovery > WID001I, p. PDF 12–13"
+    second = "widget-guide Widget Guide, Accounts > Suspension, p. 2-4"
+    fabricated = "widget-guide Widget Guide, Accounts > Suspension, p. 99"
+    hits = [
+        _hit().model_copy(update={"cite": first, "doc_id": "widget-messages"}),
+        _hit().model_copy(update={"chunk_id": "second", "cite": second, "doc_id": "widget-guide"}),
+    ]
+    monkeypatch.setattr(app_mod, "retrieve_search", lambda *_a, **_kw: (hits, "semantic", {}))
+    answer = "Remove the suspension using WIDGET REMOVE."
+    console.llm.queue(
+        ("token", answer + "\n\n" + header + first + "\n\n" + second + "\n" + fabricated),
+        ("done",),
+    )
+    send(page, "How do I remove the suspension?")
+    wait_state(page, "complete")
+
+    def assert_citations():
+        assert text(page, ".turn-assistant .turn-content") == answer
+        assert text(page, ".citations-title") == "Verified manual citations (2)"
+        assert page.eval(
+            "return Array.from(document.querySelectorAll('.citations li > span')).map(e=>e.textContent)"
+        ) == [first, second]
+        assert page.eval("return document.querySelectorAll('.state-unverified_draft').length") == 0
+        (session,) = store(page)["sessions"].values()
+        turn = session["turns"][1]
+        assert turn["content"] == answer
+        assert turn["citations"] == [first, second]
+        assert turn["verification_state"] == "accepted"
+        assert turn["meta"]["citations"] == 2
+
+    assert_citations()
+    capture_exports(page)
+    page.reload()
+    page.wait("return document.querySelectorAll('.citations li').length==2", what="restored citations")
+    assert_citations()
+    page.eval(
+        "Object.defineProperty(navigator,'clipboard',{value:{"
+        "writeText:t=>{window.__copied=t;return Promise.resolve();}}});"
+    )
+    page.click(".citations li:first-child .copy-cite")
+    page.wait("return window.__copied===arguments[0]", first, what="exact citation copied")
+    page.click("#export-btn")
+    page.wait("return window.__exports && window.__exports.length==1", what="citation export")
+    report = page.eval("return window.__exports[0]")
+    assert first in report and second in report
+    assert fabricated not in report
+    assert report.count(first) == report.count(second) == 1
+
+
 def test_midstream_failure_stays_incomplete_across_reload_export_and_reuse(console, page):
     capture_exports(page)
     console.llm.queue(("token", "Partial answer "), ("fail",))
