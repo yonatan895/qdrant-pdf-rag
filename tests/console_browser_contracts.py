@@ -393,6 +393,38 @@ def test_cross_tab_writes_are_reconciled_not_overwritten(console, page):
 # -- inert markup, assets ----------------------------------------------------------
 
 
+def test_list_item_continuation_lines_render_inside_their_item(console, page):
+    """Escaped defect: a plain line under a list item was emitted as a
+    paragraph ahead of the still-open list, so items showed as empty headings
+    below their own bodies. Streamed and reloaded renders keep source order."""
+    answer = (
+        "Depends on the reason.\n\n"
+        "1. **If revoked:**\nRemove the suspension.\n"
+        "2. **If inactive:**\nReplace the password.\n\n"
+        "Then retry the logon.\n"
+    )
+    console.llm.queue(("token", answer), ("done",))
+    send(page, "How do I reset it?")
+    wait_state(page, "complete")
+    shape = (
+        "return Array.from(document.querySelectorAll('.turn-assistant .md > *'))"
+        ".map(e => e.tagName + ':' + e.textContent.replace(/\\s+/g, ' ').trim())"
+    )
+    expected = [
+        "P:Depends on the reason.",
+        "OL:If revoked: Remove the suspension.If inactive: Replace the password.",
+        "P:Then retry the logon.",
+    ]
+    assert page.eval(shape) == expected
+    assert page.eval("return Array.from(document.querySelectorAll('.turn-assistant .md li')).map(e => e.textContent)") == [
+        "If revoked: Remove the suspension.",
+        "If inactive: Replace the password.",
+    ]
+    page.reload()
+    wait_state(page, "complete")
+    assert page.eval(shape) == expected
+
+
 def test_hostile_markup_is_inert_everywhere(console, page):
     hostile = (
         '<img src=x onerror="window.__pwn=1"> <script>window.__pwn=2</script> '
