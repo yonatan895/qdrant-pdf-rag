@@ -510,6 +510,51 @@ def test_clipboard_and_export_failures_are_reported_not_swallowed(console, page)
     assert len(store(page)["sessions"]) == 1
 
 
+INSECURE_HOST = "console.test"
+
+
+@pytest.fixture
+def insecure_page(console):
+    """The console served over plain http from a non-localhost name: not a
+    secure context, so the async Clipboard API does not exist (the shape of
+    a console reached at http://<host>:8080 instead of the OAuth Route)."""
+    console.llm.reset()
+    assert RUNTIME is not None
+    b = Browser(*RUNTIME, extra_args=(f"--host-resolver-rules=MAP {INSECURE_HOST} 127.0.0.1",))
+    b.get(f"http://{INSECURE_HOST}:{console.port}/ui")
+    b.wait("return !!document.querySelector('#messages .empty-state')", what="console boot")
+    yield b
+    console.llm.release_all()
+    b.close()
+
+
+def read_clipboard(b: Browser) -> str:
+    """What a real paste yields: Ctrl+V into the emptied composer."""
+    b.eval("document.getElementById('message').value = ''")
+    b.type("#message", "\ue009v\ue000")  # WebDriver CONTROL down, v, release all
+    return b.eval("return document.getElementById('message').value")
+
+
+def test_copy_works_on_a_plain_http_origin(console, insecure_page):
+    assert insecure_page.eval("return [window.isSecureContext, typeof navigator.clipboard]") == [False, "undefined"]
+    console.llm.queue(("token", "Reissue the command after initialization."), ("done",))
+    send(insecure_page, "What is IEA500I?")
+    wait_state(insecure_page, "complete")
+    insecure_page.click(".turn-assistant .copy-turn")
+    insecure_page.wait("return document.querySelector('.turn-assistant .copy-turn').textContent=='Copied'")
+    assert read_clipboard(insecure_page).strip() == "Reissue the command after initialization."
+
+
+def test_copy_refused_on_a_plain_http_origin_is_reported(console, insecure_page):
+    console.llm.queue(("token", "Answer."), ("done",))
+    send(insecure_page, "What is IEA500I?")
+    wait_state(insecure_page, "complete")
+    insecure_page.eval("document.execCommand = () => false;")
+    insecure_page.click(".turn-assistant .copy-turn")
+    insecure_page.wait("return document.querySelector('.turn-assistant .copy-turn').textContent=='Copy failed'")
+    wait_status(insecure_page, "Copy failed.")
+
+
 # -- retention -----------------------------------------------------------------------
 
 
