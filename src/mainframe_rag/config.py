@@ -215,6 +215,43 @@ class Settings(BaseSettings):
     chat_max_prior_turn_chars: int = Field(default=1000, ge=200, le=5000)
     ui_enabled: bool = False
 
+    # Request admission and total deadline (issue #374). EVERY value defaults
+    # to the pre-#374 behaviour (0 = no limit / no deadline): selecting a
+    # numeric envelope needs measurements on the real site, so no default
+    # changes here. When request_max_concurrent > 0, product requests
+    # (/v1/search, /v1/answer, /v1/chat*, /ui/chat*) take an admission slot
+    # held until the response body finishes (SSE: until the stream closes);
+    # up to request_queue_max more may wait at most request_queue_wait_s for
+    # a slot, then (or when the queue is full) are refused with the stable
+    # 503 `overloaded`. request_deadline_s bounds the whole request from
+    # arrival (queue wait included) across condense/embed/search/rerank/
+    # tokenize/model legs; expiry is the stable 504 `deadline_exceeded` (a
+    # terminal SSE error frame once a stream has started). Probes
+    # (/livez, /healthz, /metrics) are never admitted or limited.
+    request_max_concurrent: int = Field(default=0, ge=0, le=1000)
+    request_queue_max: int = Field(default=0, ge=0, le=1000)
+    request_queue_wait_s: float = Field(default=5.0, ge=0.0, le=300.0)
+    request_deadline_s: float = Field(default=0.0, ge=0.0, le=3600.0)
+    # Embed-input size bound (issue #374), in characters of the exact text
+    # sent to the dense embedding endpoint (query path: prefix + effective
+    # query; ingest: header + heading path + context + chunk body). 0 = no
+    # bound (pre-#374 behaviour: a 43,301-char JCL statement was embedded
+    # whole). When set, an over-bound input is refused BEFORE any embed call
+    # with a fixed error — never silently truncated: the query path answers
+    # 422 invalid_request, and ingest records the whole document as an error
+    # (no upsert, no completion). The embedding model's own window owns the
+    # supported value; it is not an extraction rule.
+    embed_max_input_chars: int = Field(default=0, ge=0, le=1_000_000)
+
+    # Per-document ingest bounds (issue #374), checked in the parse worker
+    # before the stage they bound; 0 = unbounded (pre-#374 behaviour). An
+    # over-bound document is recorded as an explicit error (`DocumentTooLarge`)
+    # and is never partially ingested or marked complete. These are NOT
+    # extraction rules and do not enter the representation manifest.
+    ingest_max_pdf_bytes: int = Field(default=0, ge=0)
+    ingest_max_doc_pages: int = Field(default=0, ge=0)
+    ingest_max_doc_chunks: int = Field(default=0, ge=0)
+
     # Bounded httpx2 connection-establishment retries (0-5). These fire only
     # when the request was never sent (DNS/refused), so they are safe for any
     # method. There is deliberately no request-level retry anywhere.
@@ -334,6 +371,13 @@ class Settings(BaseSettings):
     zowe_mcp_timeout_s: float = Field(default=15.0, gt=0.0, le=120.0)
     zowe_mcp_max_bytes: int = Field(default=262144, ge=1000, le=1000000)
     zowe_mcp_dry_run: bool = False
+
+    # Exact-evidence reads (issue #405): one whole retained chunk per call,
+    # never a prefix, so a chunk larger than the cap is an explicit 413. The
+    # deadline bounds the whole read (alias, control and point lookups); each
+    # Qdrant call is additionally bounded by qdrant_timeout_s.
+    evidence_max_bytes: int = Field(default=65536, ge=1024, le=1048576)
+    evidence_timeout_s: float = Field(default=10.0, gt=0.0, le=60.0)
 
     # Contextual retrieval (issue #78): an LLM-generated 1-2 sentence
     # situating prefix per chunk, embedded with the chunk. Default off —

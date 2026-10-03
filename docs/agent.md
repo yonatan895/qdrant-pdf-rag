@@ -18,7 +18,26 @@ as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
 
 - `POST /v1/search` — `SearchRequest{query (min 1 char, not blank or control-character, #579), product?,
   version?, limit (default 8, 1–40)}` → `SearchResponse{request_id,
-  query_kind, hits}`. No LLM involved.
+  query_kind, hits}`. No LLM involved. Each hit additionally carries
+  `reference` (issue #405): the opaque `ep1.` exact-evidence reference, or
+  `null` when no exact read can be promised for it (generation without a build
+  binding, or a stored payload that cannot form a complete envelope). Minting
+  is best-effort and read-only; a fault there yields nulls, never a failed
+  search.
+- `GET /v1/evidence/{reference}?max_bytes&product&version` — exact stored
+  evidence for one cited chunk (issue #405): `EvidenceResponse{request_id,
+  reference, digest, completeness ("complete"), build_id, chunk_id,
+  generation_fingerprint, source_revision, source_sha256, doc_id, title,
+  product, version, heading, chunk_type, text, text_bytes, atomic_spans
+  (UTF-8 byte ranges, null = not recorded), location{physical_page_start,
+  physical_page_end, printed_label}}`. No LLM, embedding, rerank or search;
+  read-only storage calls only; the build is pinned through its immutable
+  per-build aliases, so alias movement cannot redirect it, and it does not go
+  through the serving gate (an old retained build stays readable). A whole
+  chunk or an explicit refusal, never a prefix. Contract, outcome mapping and
+  limits: [stored-payload profile](evidence-contract.md#stored-payload-profile).
+  The downstream MCP consumer is `python -m mainframe_rag.mcp.knowledge`
+  (tools `knowledge_search`, `evidence_read`) over this HTTP surface.
 - `POST /v1/answer` — `AnswerRequest{query, product?, version?,
   splunk_context?, stream (default false), temperature?}` → `AnswerResponse{request_id,
   answer, citations, citations_inferred, inferred_indices, script,
@@ -177,9 +196,10 @@ the follow-up search query through `resolve_search_query` first so the
 condense gate cannot be honored on one path only. The SSE generators hold
 the request root for each iterator operation. A single lifetime owner starts
 before admission and ends buffered work in `finally`; a streaming response
-transfers that ownership to the actual body iterator. Exhaustion, explicit
-close, cancelled dependency I/O, and failed ASGI delivery (even before the
-iterator starts) close owned iterators and end the root exactly once. Terminal
+transfers that ownership to the response. Exhaustion followed by the closing
+ASGI body send, explicit close, cancelled dependency I/O, and failed ASGI
+delivery (even before the iterator starts) close owned iterators and end the
+root exactly once. Terminal
 logs, including admission/retrieval/condense failures, generation alerts and
 console errors, attach to that recording root before it ends. Concurrent turns
 retain independent roots; disabled or non-recording spans add no correlation
@@ -192,6 +212,69 @@ Both use the existing one-outcome guard. `tests/test_tracing.py` exercises
 real-SDK lifecycle, correlation and overlapping requests; the native
 `tests/live_agent_probes.py` verifies socket disconnect, upstream closure,
 finished Jaeger roots, exact JSON log joins and the next ordinary request.
+
+### Console browser contract: retention and accessibility (#372)
+
+The console's conversation state is browser-owned (ADR-0004); this section is
+the contract owner for what that state is, how long it lives and how it is
+cleared. Executed by `tests/console_browser_contracts.py` (real Chrome, shipped
+`console.js`, scripted gateway-shaped LLM; `pytest -m browser`, skips without
+an offline Chrome for Testing + matching chromedriver via
+`CONSOLE_BROWSER_CHROME`/`CONSOLE_BROWSER_CHROMEDRIVER` or the selenium-manager
+cache; nothing is downloaded). Hermetic structure pins live in
+`tests/test_webui.py`.
+
+Retention policy as shipped (no default changed by #372):
+
+- **Where:** only `localStorage` key `mainframe_rag_sessions` (plus the
+  cosmetic theme/reasoning keys). Turns include operator text, attached incident
+  context (JES spool/SYSLOG) and assistant answers quoting manual excerpts. Never
+  in cookies, `sessionStorage`, IndexedDB, or server logs (server logs carry
+  request id, query kind, counts, error type only; both pinned by tests).
+- **How long:** until the operator clears it, capped at 30 incidents (oldest
+  idle incident evicted first; the incidents open in this tab are protected).
+  There is no time-based expiry, no logout/user-switch clearing and no account
+  isolation: the key is global per browser origin profile. A cache-control
+  header does not change that.
+- **How cleared:** per incident (delete) or all incidents (`Clear all saved
+  incidents`, two-step confirm; other tabs follow through the `storage` event;
+  an in-flight answer for an erased incident is discarded, never resurrected).
+  Browser "clear site data" also clears everything.
+- **Storage unavailable/full or shared writes unsupported:** the console keeps
+  the conversation in memory for the tab and shows a persistent notice that it
+  is lost on reload. Shared persistence requires Web Locks in a secure browser
+  context (HTTPS or loopback); no unlocked localStorage write fallback is used.
+- **Export:** operator-initiated Markdown download of the open incident; it
+  leaves browser control and carries a handling banner. Incomplete turns export
+  with their non-accepted verification state.
+- **Open decisions (site owner, with #373):** time-based expiry, clearing on
+  logout/user switch, and per-user keys require an authenticated identity the
+  console does not have and a dedicated approved concern; they are not
+  implemented here.
+
+State contract: one origin-wide Web Lock encloses each persisted read/modify/write,
+including rename, delete, new incident and clear-all. Reads used to render do
+not write shared state. A separate incident lock is held from saving the user
+turn through saving its assistant result. A second tab sending to that incident
+gets a visible refusal and keeps its unsent question; it can send after the
+first turn finishes. Other incidents remain usable. Completion reads the latest
+store under the write lock, preserves renames and discards deleted incidents.
+Barrier-controlled browser tests exercise both contenders observing the same
+version before mutation and prove their locked writes serialize. A
+streaming turn is labelled provisional until the final frame; failed, stopped or
+EOF-without-final output is stored and restored as `generation_incomplete`, is
+qualified when reused as model context, and an unanswered question is shown as
+such after reload.
+
+Accessibility behavior (executed, not a compliance claim): landmarks and
+accessible names for every control (checked on Chrome's accessibility tree),
+Tab reachability of every control with a visible focus ring, keyboard
+send/Stop/rename with focus return, a polite status region announcing
+generating/complete/incomplete/stopped/copy and export failure (the message list
+is deliberately not a live region), WCAG AA text contrast in both themes, and no
+horizontal scroll at 1280/640/375/320 CSS px (stand-ins for 100/200/400% zoom).
+Not covered: other browsers, real screen readers, forced-colors/OS high
+contrast, native browser zoom.
 
 ## 2. Error contract
 
@@ -207,7 +290,16 @@ status (`/ui` failures render HTML banners instead, §1):
 | `not_configured` / `reasoning model…` | 503 | `/v1/answer` or `/v1/chat` without `LLM_BASE_URL` + reasoning model (pre-retrieval) |
 | `qdrant_unready` / `qdrant…` | 503 | `/healthz` Qdrant exception |
 | `representation_unavailable` / `the retrieval generation is not available` | 503 | Serving gate: resolved generation is `empty` or not validated compatible (drift/legacy/pending/unknown); `/ui/chat` renders its banner while `/ui/chat/stream` returns this envelope |
-| `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
+| `invalid_evidence_reference` / `the evidence reference is not valid` | 400 | `GET /v1/evidence/{reference}`: malformed, non-canonical or unsupported-version reference (no storage contact) |
+| `authentication_required` / `authentication is required` | 401 | Evidence read: the access authority reports no usable identity (unreachable with the default shared-corpus access) |
+| `evidence_unavailable` / `the requested evidence is not available` | 404 / 503 | 404: denied, unknown build, or product/version assertion mismatch (one envelope, no disclosure); 503: retained controls or point missing/redirected, stored data changed under the pinned build, or malformed stored fields |
+| `access_unavailable` / `access policy is not available` | 503 | Evidence read: the access authority cannot decide (fail closed) |
+| `evidence_budget_exceeded` / `the evidence exceeds the requested size budget` | 413 | Whole chunk larger than `max_bytes` or `EVIDENCE_MAX_BYTES` |
+| `evidence_timeout` / `the evidence read timed out` | 504 | Evidence read exceeded `EVIDENCE_TIMEOUT_S` |
+| `upstream_error` / `evidence read failed` | 502 | Storage fault during an evidence read (type logged only) |
+| `invalid_request` / `request body failed validation` | 422 | Pydantic failure, the shared query guard (overlong, empty after `str.strip()`, or containing NUL/C0 controls other than `\t\n\r`, issue #579; or, when `embed_max_input_chars` is set, a query whose dense text — prefix plus query — exceeds it, issue #374: refused before any model call, never truncated; an effective query that only grows past the bound after expansion/condensation is refused by the embedder with the same envelope), and a chat/console active `user` turn that is missing, blank, control-character or overlong (one message, every 422 path) |
+| `overloaded` / `the service is at capacity; retry later` | 503 + `Retry-After: 1` | Request admission refused (issue #374): all `request_max_concurrent` slots busy and the bounded wait queue full or its wait expired. Raised first, before validation, the serving gate and any retrieval/model work; only when a limit is selected. `/ui/chat` renders its fixed banner; `/ui/chat/stream` returns this envelope |
+| `deadline_exceeded` / `request deadline exceeded` | 504 | Total request deadline (`request_deadline_s`, issue #374) expired before the response began; on an already-open stream it is an `error` event (no `final`, `generation_incomplete`) instead. Only when a deadline is selected |
 | `prompt_budget_exceeded` / `prompt exceeds the model token budget` | 422 | Irreducible token-budget overflow (issue #368): fixed content alone exceeds the window with nothing left to trim; raised before any model call on JSON/chat, as an `error` event (no `final`) on already-open streams; `/ui/chat` renders its fixed banner |
 | `metrics_unavailable` / `metrics are not available` | 503 | `/metrics` scrape failure while enabled |
 | `not_found` / `not found` | 404 | Unknown route |
@@ -315,9 +407,11 @@ select `complex`. Default is `simple`.
 - Tokenizer path (when a tokenizer is configured): plans with the
   in-process estimator (`≈3.5` chars/token, 350-token narrative cap), then
   verifies the packed prompt against the whole-message count per trim round
-  and trims up to 4 rounds (64-char overcut, drop under 80 chars, else
-  suffix). Chat packing (`build_chat_messages`) uses the same discipline but
-  trims in two tiers for up to `4*2 + len(prior turns)` rounds: excerpt
+  and trims up to `4 + 2*len(packed excerpts)` rounds (64-char overcut, drop
+  under 80 chars, else suffix; the bound scales with the trimmable evidence
+  so `prompt_budget_exceeded` means nothing was left to trim, #307).
+  Chat packing (`build_chat_messages`) uses the same discipline but
+  trims in two tiers for up to `4*2 + 2*len(packed) + len(prior turns)` rounds: excerpt
   bodies first, then it pops the oldest history turn. Never per-chunk
   tokenize RPCs.
 - Planning and verification both charge reserved output, the selected complexity's
@@ -408,11 +502,23 @@ the query timeout.
   hash-without-`ALLOW_HASH_MODE`; in vLLM mode require dim + endpoint. The
   LLM is deliberately **not** validated at startup — missing reasoning
   config fails per-request at `/v1/answer` (503, pre-retrieval).
-- Shutdown closes the `llm_client` local, not the `llm` global (tests swap
-  the global after startup); embedder/tokenizer/reranker have no close
-  (shared pool closed once); `close()` never nulls a pool, so post-shutdown
-  calls raise instead of silently rebuilding. Qdrant close is awaited only
-  if awaitable (sync doubles keep working).
+- Ownership (issue #369): lifespan registers every client it creates (both
+  pools, `HttpxLLMClient`, Qdrant, the Zowe client, tracing shutdown) on one
+  `AsyncExitStack` at creation. Startup refusal, normal shutdown and
+  cancellation/exception at the yield close exactly those objects, once each,
+  in reverse order; one failing close never skips the others (the first error
+  is reported afterwards). The created instances are closed, never the module
+  names tests swap after startup. `HttpxLLMClient` closes only pools it built;
+  a client injected via `client=` is borrowed. Embedder/tokenizer/reranker have
+  no close (shared pool closed once); `close()` never nulls a pool, so
+  post-shutdown calls raise instead of silently rebuilding. Qdrant close is
+  awaited only if awaitable (sync doubles keep working).
+- Request resources: lifespan publishes the clients as module names (the seam
+  tests replace); each request takes one `app.resources()` snapshot
+  (`agent/resources.py::AgentResources`) and passes it to retrieval and
+  `core_deps(resources)`; the serving gate stays the `serving_settings()` seam. A request keeps the resources it
+  captured if the names are replaced mid-flight; the view never closes anything
+  and `agent/resources.py` imports no transport or application module.
 - No sync fallback on the event loop: healthz and retrieval use the pooled
   clients only; a missing pool is a startup bug.
 - The reasoning client never retries at the transport (sync and async,
@@ -424,6 +530,85 @@ the query timeout.
   strings are rejected (`TypeError`), never normalized.
 - Health timeouts are split from traffic timeouts (5s Qdrant, 10s embed);
   the tokenizer RPC gets 5s.
+
+## 6a. Request admission, total deadline and embed-input bound (issue #374)
+
+**Status:** implemented with hermetic tests (`tests/test_request_bounds.py`,
+`tests/test_hash_embed.py`, `tests/test_run_ingest.py`); **every limit defaults
+off** (0), so behaviour is unchanged until an operator selects values. No
+numeric limit is approved or measured for production: choosing them needs the
+site procedure at the end of this section. **Decision owners:** `agent/admission.py`
+(`AdmissionController`), `app._admit` / `_within_deadline` / `_deadline_iter`,
+`ingest/bounds.py`.
+
+- **Admission** (`request_max_concurrent` > 0): `/v1/search`, `/v1/evidence/*`,
+  `/v1/answer`, `/v1/chat*` and `/ui/chat*` share one pool and take one slot as
+  the first step of the handler. Buffered responses release on handler return;
+  SSE releases when its response closes, including disconnect and error. Up to `request_queue_max`
+  more wait FIFO for at most `request_queue_wait_s` (and never beyond the
+  remaining deadline); beyond that, or on expiry, the request gets the stable
+  `503 overloaded` and starts no work. Release is exactly once. `/livez`,
+  `/healthz` and `/metrics` are never admitted, so saturation cannot cause a
+  liveness restart storm. Uvicorn is deliberately launched without
+  `--limit-concurrency` (a connection-level limit cannot choose the client
+  semantics and would also drop probes).
+- **Deadline** (`request_deadline_s` > 0): one budget from handler entry
+  (queue wait included; body decoding/framework validation precedes it) across condense/embed/search/rerank/tokenize/model
+  legs, exact storage reads and any permitted fallback. For SSE it also
+  covers actual ASGI response sends, including receiver backpressure; the
+  request-identity middleware is direct ASGI, with no intervening body queue.
+  Buffered-response serialization and network delivery are outside this handler
+  budget. Per-leg timeouts still apply inside it. Expiry cancels the
+  awaiting task: async legs (Qdrant, reasoning model, open SSE upstream) stop
+  and release their connections. **Known gap:** sync legs already running via
+  `asyncio.to_thread` (embed POST, BM25, rerank, prompt build/tokenize RPC)
+  cannot be interrupted; they finish within their own per-leg timeouts
+  (`embed_timeout_s`, `rerank_timeout_s`, `llm_tokenize_timeout_s`) while the
+  slot is already free, so briefly more worker threads than admitted
+  requests can exist. Thread-pool saturation under sustained expiry is not
+  measured here. After a producer deadline, terminal error delivery gets one
+  absolute 1-second grace period shared by all remaining frames and the closing
+  body; it cannot renew per send. A stalled send ends the response without
+  promising a delivered error. Source cleanup is shielded for at most one
+  further second, then span/ticket ownership ends exactly once (at most two
+  seconds beyond producer expiry, apart from event-loop scheduling). Cleanup
+  remains bounded on shutdown/disconnect with the deadline disabled; it never
+  starts another generation or closes a shared client.
+- **Embed-input bound** (`embed_max_input_chars` > 0, characters of the exact
+  dense text): the query path checks prefix + query before any model call;
+  `VllmEmbedder.dense` re-checks every remote batch, so ingest batches,
+  expanded/split/condensed queries and any future caller are covered.
+  Refusal is a fixed error carrying counts only (`EmbedInputTooLarge`), never
+  truncation. The chunker's whole-statement preservation is unchanged.
+- **Observability:** `rag.requests.total` outcomes `overloaded` /
+  `deadline_exceeded` (bounded labels), `rag.admission.inflight`,
+  `rag.admission.wait` (queued requests only), `rag.admission.rejected`
+  (`queue_full` | `queue_timeout`); structured logs carry active/queued
+  counts, never prompts.
+- **Propagation:** these are `Settings` fields read from the environment
+  (`REQUEST_MAX_CONCURRENT`, `REQUEST_QUEUE_MAX`, `REQUEST_QUEUE_WAIT_S`,
+  `REQUEST_DEADLINE_S`, `EMBED_MAX_INPUT_CHARS`, `INGEST_MAX_PDF_BYTES`,
+  `INGEST_MAX_DOC_PAGES`, `INGEST_MAX_DOC_CHUNKS`). The operator-file ->
+  Task/shell -> Helm handoff is **not** added in this change; until a
+  reviewed handoff exists, setting them is a local/CI experiment, not a
+  deployment change (same rule as `LLM_THINKING_RESERVE_TOKENS_SIMPLE`).
+
+**Local evidence (labelled by scope):** full re-ingest on 2026-10-02 —
+452 documents / 209,501 pages / 190,440 chunks in 98 minutes at 4 workers,
+about 2.1 GB peak worker RSS (one host, local models; not a production
+result). Admission/deadline behaviour is proven with fakes only; no load
+figure is claimed.
+
+**External qualification still required (not provable on a dev host):**
+on the exact site image/models/gateway/storage, (1) serialized baseline then
+stepped concurrency (1, 2, 4, ...) of mixed search/answer/chat, cold and
+warm, recording p50/p95/p99, TTFT, queue wait, admitted/rejected counts,
+peak RSS/CPU, restarts, thread count after forced expirations; (2) pick
+`request_max_concurrent`, queue size/wait and deadline from the measured
+knee with headroom and write the stop/rollback criteria; (3) largest
+included PDF through the whole ingest process tree (peak RSS, IPC bytes) to
+choose `ingest_max_*` and `embed_max_input_chars` (the embedding model's own
+window owns the latter); (4) the Helm/operator handoff for the chosen values.
 
 ## 7. Settings catalog
 
@@ -453,9 +638,12 @@ readers:
 | `llm_max_model_len` / `llm_reserved_output_tokens` / `llm_thinking_reserve_tokens_complex` / `llm_token_safety_margin` / `llm_max_chunk_tokens_narrative` / `llm_tokenize_timeout_s` | 4096 / 1536 / 1000 / 128 / 350 / 5.0 | tokenizer-path budgeting (complex prompt budget prices high-effort thinking, issue #298) |
 | `llm_thinking_reserve_tokens_simple` | 0 | extra low-effort reasoning headroom in single-turn and chat prompt budgets; environment input `LLM_THINKING_RESERVE_TOKENS_SIMPLE` |
 | `llm_stream` | `false` | server-side reasoning SSE |
+| `request_max_concurrent` / `request_queue_max` / `request_queue_wait_s` / `request_deadline_s` | 0 (unlimited) / 0 / 5.0 (used only with a queue) / 0.0 (no deadline) | request admission and total deadline (§6a); issue #374, **no numeric envelope approved** — values come from site measurement |
+| `embed_max_input_chars` | 0 (unbounded) | refuse an over-bound dense embed input before the call, query path and ingest (§6a, `docs/ingest.md` §7) |
 | `http_connect_retries` / `http_max_connections` / `http_max_keepalive_connections` | 2 (connect-only) / 200 / 100 | both pools, embed/context clients |
 | `health_qdrant_timeout_s` / `health_embed_timeout_s` | 5.0 / 10.0 | healthz only |
 | `health_rerank_timeout_s` / `health_rerank_ttl_s` | 5.0 / 15.0 (ttl 0 = probe every scrape) | healthz rerank probe bound and outcome cache; only when `rerank_enabled` |
+| `evidence_max_bytes` / `evidence_timeout_s` | 65536 (1024–1048576) / 10.0 | exact-evidence read: server cap on one whole chunk, total read deadline |
 | `representation_cache_ttl_s` | 5.0 (0 = validate every request) | serving generation gate: alias resolution + contract validation cache |
 | `allow_hash_mode` / `log_level` | `false` / INFO | lifespan hash gate / logging |
 | `otel_exporter_otlp_endpoint` / `otel_sample_ratio` / `otel_export_queue_size` / `otel_export_timeout_ms` | unset = tracing off / 1.0 / 2048 / 5000 | tracing setup |
@@ -464,8 +652,9 @@ readers:
 | `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_fusion_alpha` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / `BAAI/bge-reranker-v2-m3` / gateway URL (no embed fallback; unset when no gateway) / unset (keyless) / `score_first` (see install §4.4 `probe_gateway.py`: `rerank_first` only when the score leg is unavailable) / 1.0 / 50 / 32 / 5.0 | rerank dispatch → retrieve (see `retrieval.md` §6) |
 | `rrf_k` / `rrf_weight_*` / `rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` / `retrieve_max_chunks_per_page|doc` | 2 / 1.0,1.0 – 1.0,3.0 / 1.0 / 1.0 / 1, 3 | retrieve fusion + diversification |
 | `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | `false` / `true` / `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |
+| `ingest_max_pdf_bytes` / `ingest_max_doc_pages` / `ingest_max_doc_chunks` | 0 / 0 / 0 (unbounded) | per-document ingest refusal (`docs/ingest.md` §9, issue #374) |
 | ingest-only (`ingest_workers` = CPU-1, `batch_size` 128, `ingest_upsert_streams` 4, `ingest_bulk_load` false, `bm25_model`, `bm25_cache_dir` unset, `contextual_*` incl. `context_llm_timeout_s` 30.0 / `context_max_chars` 500 / `context_cache_path` unset) | — | ingest; see `docs/ingest.md` §§6–9 |
-| `zowe_mcp_enabled` / `zowe_mcp_base_url` / `zowe_mcp_timeout_s` / `zowe_mcp_max_bytes` / `zowe_mcp_dry_run` | `false` (client not constructed unless enabled) / unset / 15.0 / 262144 / `false` | live-state client (default off; prompt/deployment integration remains incomplete; see `architecture.md`) |
+| `zowe_mcp_enabled` / `zowe_mcp_base_url` / `zowe_mcp_timeout_s` / `zowe_mcp_max_bytes` / `zowe_mcp_dry_run` | `false` (client not constructed unless enabled) / unset / 15.0 / 262144 / `false` | live-state client (default off; unwired from every endpoint; contract: [source observations](#source-observations)) |
 
 ## 8. Log and trace contract
 
@@ -508,6 +697,89 @@ a request), and setup must register the tracer provider — otherwise
 import-time proxy tracers silently no-op. Non-`stop` finish reasons raise
 an `answer_alert` log (no counters — multi-worker unsafe) that the L2
 harness joins by `request_id`.
+
+<a id="ops-cli"></a>
+## Operations CLI (`mainframe-rag-ops`)
+
+**Status:** implemented with evidence (issue #172). **Authority:** the issue's
+24 September packet, [ADR-0003](adr/0003-zowe-mcp-read.md) (the operator HTTP
+client is a separate consumer of health/search/answer and never exposes live
+tools). **Decision owner:** `mainframe_rag.ops.cli`
+(`mainframe-rag-ops`, or `python -m mainframe_rag.ops`); stdlib `argparse` plus
+the repository's `httpx2` client and `config.bearer_auth_headers`, no new
+dependency. `scripts/query_demo.py` stays an internal demo and is not this
+contract.
+
+**Surface:** `health` (`GET /healthz`), `search` (`POST /v1/search`) and
+`answer` (`POST /v1/answer`, `--stream` for the SSE route). Nothing else is
+reachable: no chat, `/livez`, `/metrics`, `/ui`, MCP/Zowe bridge, Qdrant, local
+embedder or model fallback, and the agent gains no endpoint for it. Search
+never calls an LLM. Filters are `--product`/`--version`; `--limit` (1-40),
+`--temperature` (0-2) mirror the request models.
+
+**Connection and secrets:** the base URL is explicit (`--base-url` or
+`MAINFRAME_RAG_URL`, no default; userinfo, query and fragment are refused).
+TLS verification cannot be disabled: `--ca-file` supplies a complete PEM bundle
+(it replaces the default roots, like `SSL_CERT_FILE`), otherwise the client
+default applies, including `SSL_CERT_FILE` (the gateway-CA convention in
+[deploy](deploy.md#deployment-policy)). The optional bearer key comes only from
+`MAINFRAME_RAG_API_KEY` or `--api-key-file` (there is no key argument, so it
+never reaches shell history), must be printable ASCII without whitespace, is
+sent only over https or to a loopback host, and is never printed or logged.
+The server does not authenticate `/v1/*` itself today (identity is #373); the
+key is for an authenticating proxy or the OAuth route. No retries, no
+redirects. Each request has `--timeout` (1-600 s; defaults health 10, search
+60, answer 180) applied to connect, idle reads and, between chunks, total
+wall-clock; responses are capped at 8 MiB.
+
+**Output** (`--format json|text`, default `text`): JSON is one object on stdout,
+`{"ok", "command", "exit_code", "data"}` or `{"ok": false, ..., "error":
+{"code", "message", "status"?, "server_code"?}, "data"?}`. `data` carries the
+validated server fields: search hits with `cite`, `doc_id`, `title`,
+`heading`, `page_label`, `page_start`/`page_end` (0-based inclusive; text mode
+prints 1-based `pdf_pages`), `chunk_type`, `message_ids`, `product`/`version`,
+scores, full `text` and the optional exact-evidence `reference` verbatim;
+absent/null references from older servers normalize to null. A present non-null
+reference must be a string. Answer `script` and `script_lang` are required
+nullable fields; omitted fields or non-string verification states are the fixed
+`malformed_response` error, not a traceback. Answers keep `verification_state`,
+`citations_inferred`, `inferred_indices`, `script`, `script_lang` and
+`script_review_required` (text mode labels scripts "REVIEW REQUIRED, NOT
+VALIDATED" and inferred citations "not grounding"); streamed finals add
+`finish_reason`, `query_kind`, `hits`, `ttft_ms`, `usage`. Text mode escapes
+terminal control characters in server text. Error messages are fixed per code;
+server/upstream/exception text and request text are never echoed, and
+`server_code` is echoed only when it is one of the documented section 2 codes.
+
+| Exit | Meaning (`error.code`) |
+|---|---|
+| 0 | success: health `ok`; search (empty hits included); answer with `verification_state: accepted`, nonblank text and, on SSE, `finish_reason: stop` |
+| 2 | usage or configuration (`usage`): bad URL/flags/key/CA file, key over cleartext non-loopback |
+| 3 | `answer_not_accepted`: 200 but `insufficient_evidence`, `unverified_draft`, `generation_incomplete` (or non-`stop` finish); the labelled answer is still printed |
+| 4 | `unauthorized`: 401/403 |
+| 5 | `not_ready` (503 degraded `/healthz`, body shown), `unavailable` (503, connect failure), `server_error` (other 5xx), `timeout` |
+| 6 | `malformed_response`, `unexpected_response` (3xx/other), `empty_answer` (accepted with blank text, #576), `stream_incomplete` (EOF without `final`, truncated frame), `stream_failed` (SSE `error` event) |
+| 7 | `request_rejected`: other 4xx (422 invalid request, 404 wrong base URL) |
+| 8 | `tls_error`: certificate verification failed |
+| 130 | `cancelled`: Ctrl-C |
+
+`/v1/answer` JSON carries no `finish_reason`; use `--stream` when the finish
+reason matters. In stream mode tokens are provisional and never printed:
+only a validated terminal `final` is output, so EOF, an `error` event, a
+malformed frame, data after `final` or cancellation never print a completed
+answer (exit 6/130, `verification_state: generation_incomplete` in the
+envelope).
+
+**Evidence:** `tests/test_ops_cli.py` drives the real `httpx2` client against a
+loopback HTTP(S) server using payloads built from the agent's own
+`HealthzResponse`/`SearchResponse`/`AnswerResponse` and `sse` builders:
+healthy, empty, scoped, degraded, unauthorized, unavailable, timeout,
+malformed, truncated, oversize, redirect, stalled, SSE EOF/error/truncated/
+late-frame/cancelled cases (each followed by a healthy request), the exact set
+of routes reached, credential non-disclosure, cleartext-key refusal and a real
+self-signed TLS verify/`--ca-file` round trip. Not covered: a live agent, a
+live model, real OpenShift Route/OAuth credentials (#373) and expert review of
+presented evidence.
 
 <a id="serving-contract"></a>
 ## Serving generation and reader lifetime
@@ -554,7 +826,8 @@ must not be described as atomic. Preserve old physical data plus metadata for
 rollback and keep settings compatible; do not GC targets still in use. The
 [exact-evidence design](evidence-contract.md#evidence-contract) specifies future
 retained-reference, authorization and retirement obligations; this TTL gate
-does not implement them.
+does not implement them; the [stored-payload profile](evidence-contract.md#stored-payload-profile)
+implements the build-pinned read without using the gate.
 
 **Evidence:** `tests/test_serving_gate.py::test_resolve_binds_physical_and_reads_its_own_metadata`,
 `test_resolve_refuses_physical_drift_even_when_alias_metadata_is_compatible`,
@@ -692,7 +965,8 @@ browser completion behavior. #372 retains those gaps (#365 closed 2026-10-02);
 no model run is claimed by this documentation audit.
 
 The shared core consumes typed operations from `core_ports`. Application
-composition captures request dependencies and passes the validated physical
+composition captures one `AgentResources` view per request (see the lifespan
+section) and passes the validated physical
 collection through the retrieval operation's settings. The model adapter owns
 sync/async calling compatibility and validates stream token/terminal fields.
 Both buffered and fallback-stream completions require `ChatResult`; bare strings
@@ -721,6 +995,7 @@ are above. **Authority:** ADR-0001/0004, #363 and existing transport contracts;
 | Embed/context/health pools | Bounded Settings connect-only retries, no generic POST replay policy |
 | Rerank | Configured score/rerank endpoint order plus alternate endpoint fallback; exhaustion fails closed; [retrieval](retrieval.md) owns dispatch |
 | Condensation | Optional reasoning call; failure returns the raw latest query, not a fabricated condensed result |
+| Admission / total deadline (issue #374) | Opt-in (`request_*`, default off): refusal is `503 overloaded` before any work; expiry cancels async legs and is `504 deadline_exceeded` / a terminal SSE `error` event; sync worker-thread legs are bounded by their own timeouts, not interrupted (§6a). No retry or fallback is added |
 | Tracing export | Separately bounded fail-open export; outages drop/log and must not fail request/shutdown |
 
 This policy describes current operations, not permission to add retries. A new
@@ -778,3 +1053,31 @@ Wire metadata remains the HTTP model client's responsibility before it emits
 these normalized events. Existing buffered sync/async/string fallback,
 pre-emission retry and post-emission no-replay policy are unchanged. Cleanup
 closes the operation, never the shared model client.
+
+<a id="source-observations"></a>
+## Source observations (live z/OS state)
+
+Decision owner: [ADR-0003](adr/0003-zowe-mcp-read.md). Status: contract
+accepted, **capability off and unwired**. No endpoint calls
+`live_state.fetch_live`, `zowe_mcp_enabled=false` is the default, and the
+manual-only POC makes zero source calls. Search never calls an LLM; routing is
+deterministic and trap queries stay on the manuals path.
+
+- **Surface:** the agent HTTP API is read-only query traffic (no PUT/PATCH/
+  DELETE; POST only on search/answer/chat and console chat). The source port is
+  separate from manual evidence and is not a query/command proxy.
+- **Approved operation:** `job_status` for one exact job id. The other three
+  bridge tools (`dataset_read`, `uss_read`, `jes_spool_read`) are allowlisted in
+  code but not approved for use; a new tool is a new ADR.
+- **Observation shape (contract for #91, not yet implemented):** exact `target`,
+  `acquired_at` (agent clock), `observed_at` (source time or null), `outcome`
+  in `complete | truncated | partial | not_found | unavailable | no_target |
+  dry_run | denied`, plus `truncated`. Limits: 2 calls, `zowe_mcp_max_bytes`,
+  `zowe_mcp_timeout_s` per call, no polling, no cross-request cache.
+- **Today in code:** `fetch_live` returns `degraded` codes
+  (`dry_run`, `not_configured`, `no_target`, `timeout`, `tool_error`,
+  `upstream_error`); `job_status` is planned only with an exact job id.
+  Failures are fixed codes; logs and spans carry ids, tool names and byte
+  counts, never source text.
+- **Gate:** enabling needs a named investigation manuals cannot answer plus
+  source-owner and site-security approval (ADR-0003 reactivation gate).

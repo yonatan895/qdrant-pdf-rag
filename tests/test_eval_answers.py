@@ -911,3 +911,81 @@ def test_dev_refusal_rows_judge_refusal_structurally_not_by_wording(row_id: str)
 
     verdict, fails = served("PROD1 logged IEA500I at 02:14.", ["SA22-0000-00 Manual, Messages, p. 1"])
     assert verdict == "fail" and any("trap answered" in f for f in fails)
+
+
+class _ErrResponse:
+    def __init__(self, status: int, body):
+        self.status_code = status
+        self._body = body
+
+    def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+class _ErrClient:
+    def __init__(self, status: int, body):
+        self.resp = _ErrResponse(status, body)
+
+    def post(self, *args, **kwargs):
+        return self.resp
+
+
+@pytest.mark.parametrize("body,code", [
+    ({"code": "prompt_budget_exceeded", "message": "prompt exceeds the model token budget"},
+     "prompt_budget_exceeded"),
+    ({"error": {"code": "legacy_nested"}}, "legacy_nested"),
+    ({"message": "no code"}, "?"),
+    (["not", "a", "dict"], "?"),
+    (ValueError("not json"), "?"),
+])
+def test_run_query_non_200_records_envelope_code(body, code) -> None:
+    """Issue #307: the agent's envelope is top-level {code, message}; the eval
+    used to read a nested error.code and report every non-200 as '?'. Only the
+    code reaches the row, never the message."""
+    row = run_query(_ErrClient(422, body), _entry())
+    assert row["verdict"] == "error"
+    assert row["failures"] == [f"HTTP 422 ({code})"]
+    assert "exceeds" not in json.dumps(row)
+
+
+def test_apply_pool_join_makes_completeness_computable() -> None:
+    """Issue #307: the answer eval joins the sibling /v1/search pool so
+    answer_completeness is a number, not None. Complete = cites cover every
+    expected doc; a refusal over retrieved gold is incomplete."""
+    from mainframe_rag.eval.answers import apply_pool_join
+
+    entry = _entry(expected_doc_ids=["SA1-0000-00", "SA2-0000-00"])
+    pool = [
+        {"doc_id": "SA1-0000-00", "cite": "SA1-0000-00 A, p. 1"},
+        {"doc_id": "SA2-0000-00", "cite": "SA2-0000-00 B, p. 2"},
+    ]
+    full = {"id": "A", "verdict": "pass", "expected_behavior": "answer", "query_class": "comparative",
+            "citations": ["SA1-0000-00 A, p. 1", "SA2-0000-00 B, p. 2"], "gold_retrieved": True}
+    partial = {"id": "B", "verdict": "fail", "expected_behavior": "answer", "query_class": "comparative",
+               "citations": ["SA1-0000-00 A, p. 1"], "gold_retrieved": True}
+    refusal = {"id": "C", "verdict": "fail", "expected_behavior": "answer", "query_class": "comparative",
+               "citations": [], "gold_retrieved": True}
+    unjoined = {"id": "D", "verdict": "fail", "expected_behavior": "answer", "query_class": "comparative", "citations": []}
+    for row in (full, partial, refusal):
+        apply_pool_join(row, entry, pool)
+    assert (full["citation_recall"], partial["citation_recall"], refusal["citation_recall"]) == (1.0, 0.5, 0.0)
+    assert summarize([full, partial, refusal, unjoined])["answer_completeness"] == round(1 / 3, 4)
+    assert summarize([unjoined])["answer_completeness"] is None
+
+
+def test_apply_pool_join_never_fails_or_touches_other_rows() -> None:
+    from mainframe_rag.eval.answers import apply_pool_join
+
+    abstain = {"verdict": "pass", "expected_behavior": "abstain", "citations": []}
+    errored = {"verdict": "error", "expected_behavior": "answer"}
+    unmapped = {"verdict": "pass", "expected_behavior": "answer", "citations": ["X not in pool"]}
+    apply_pool_join(abstain, _entry(expected_behavior="abstain", expected_doc_ids=["SA1-0000-00"]), [])
+    apply_pool_join(errored, _entry(expected_doc_ids=["SA1-0000-00"]), [])
+    for row in (abstain, errored):
+        assert "citation_recall" not in row
+    apply_pool_join(unmapped, _entry(expected_doc_ids=["SA1-0000-00"]), [])
+    assert unmapped["verdict"] == "pass"
+    assert unmapped["unmatched_citations"] == ["X not in pool"]
+    assert unmapped["citation_recall"] == 0.0

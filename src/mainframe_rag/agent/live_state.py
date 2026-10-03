@@ -120,11 +120,10 @@ def _plan_calls(query: str) -> list[tuple[str, dict[str, str]]]:
     lowered = query.lower()
     wants_spool = "spool" in lowered or bool(job_match)
 
-    if job_match or "jes" in lowered:
-        args: dict[str, str] = {}
-        if job_match:
-            args["job_id"] = job_match.group(0).upper()
-        plan.append(("job_status", args))
+    # ADR-0003: job_status needs an exact job id. A bare "JES" mention must
+    # never plan an unscoped listing of every job (empty filters mean "*").
+    if job_match:
+        plan.append(("job_status", {"job_id": job_match.group(0).upper()}))
     if wants_spool and len(plan) < MAX_TOOL_CALLS:
         spool_match = _SPOOL_ID_RE.search(query)
         spool_id = spool_match.group(1) or spool_match.group(2) if spool_match else None
@@ -161,12 +160,18 @@ def fetch_live(
 ) -> LiveResult:
     """Execute the fetch plan for a live/hybrid query. Every exit path —
     success, dry-run, tool error, transport error, misconfiguration —
-    returns a LiveResult and audit-logs it; nothing here raises."""
+    returns a LiveResult and audit-logs it; nothing here raises. A plan with
+    no exact target degrades as "no_target" without any source call."""
     if route == "manual":
         _audit(request_id, route, [], 0, None)
         return LiveResult(route=route)
     plan = _plan_calls(query)
     planned_names = [name for name, _ in plan]
+    if not plan:
+        # No exact target extracted: say so rather than return an empty
+        # "success" that reads as a live observation (ADR-0003 outcomes).
+        _audit(request_id, route, [], 0, "no_target")
+        return LiveResult(route=route, degraded="no_target")
     if settings.zowe_mcp_dry_run:
         _audit(request_id, route, planned_names, 0, "dry_run")
         return LiveResult(route=route, degraded="dry_run", tools_used=tuple(planned_names))

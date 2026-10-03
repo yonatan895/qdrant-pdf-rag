@@ -149,3 +149,74 @@ def test_vllm_embedder_omits_auth_when_key_unset():
     embedder, seen = _header_capturing_embedder(None)
     embedder.dense(["hi"])
     assert seen["headers"] == {}
+
+
+def _counting_vllm_embedder(**overrides):
+    """VllmEmbedder over a fake HTTP client that counts /embeddings POSTs."""
+    from types import SimpleNamespace
+
+    from mainframe_rag.ingest.embed import VllmEmbedder
+
+    posts: list[list[str]] = []
+
+    class FakeHttp:
+        def post(self, url, json, **kwargs):
+            posts.append(list(json["input"]))
+            return SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {
+                    "data": [{"index": i, "embedding": [0.1] * 8} for i in range(len(json["input"]))]
+                },
+            )
+
+    settings = Settings(
+        embed_mode="vllm",
+        embed_base_url="http://mock:8000/v1",
+        embed_model="mock-model",
+        dense_dim=8,
+        dense_query_prefix="Q: ",
+        _env_file=None,
+        **overrides,
+    )
+    return VllmEmbedder(settings, client=FakeHttp()), posts
+
+
+def test_embed_bound_refuses_before_the_post_and_never_truncates():
+    """Issue #374: an over-bound input is refused with counts only — the
+    endpoint is never called for the batch (not even for its in-bound
+    members) and nothing is truncated."""
+    import pytest
+
+    from mainframe_rag.ingest.bounds import EmbedInputTooLarge
+
+    embedder, posts = _counting_vllm_embedder(embed_max_input_chars=50)
+    with pytest.raises(EmbedInputTooLarge) as caught:
+        embedder.dense(["short", "x" * 51, "y" * 60])
+    assert posts == []
+    assert (caught.value.limit, caught.value.largest, caught.value.count) == (50, 60, 2)
+    assert "xxxx" not in str(caught.value), "message carries counts only, never input text"
+
+    # At the bound is accepted and sent byte-identically.
+    embedder.dense(["z" * 50])
+    assert posts == [["z" * 50]]
+
+
+def test_embed_bound_counts_the_query_prefix():
+    import pytest
+
+    from mainframe_rag.ingest.bounds import EmbedInputTooLarge
+
+    embedder, posts = _counting_vllm_embedder(embed_max_input_chars=10)
+    embedder.dense_query(["1234567"])  # "Q: " + 7 chars == 10
+    assert posts == [["Q: 1234567"]]
+    with pytest.raises(EmbedInputTooLarge):
+        embedder.dense_query(["12345678"])
+    assert len(posts) == 1
+
+
+def test_embed_bound_default_is_unbounded_legacy_behaviour():
+    """The 43k-character JCL statement of issue #374 is still embedded whole
+    when no bound is selected (no silent default change)."""
+    embedder, posts = _counting_vllm_embedder()
+    embedder.dense(["J" * 43301])
+    assert posts == [["J" * 43301]]

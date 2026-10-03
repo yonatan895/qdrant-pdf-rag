@@ -22,6 +22,9 @@ dependencies = [
     "opentelemetry-exporter-prometheus",
 ]
 
+[project.scripts]
+mainframe-rag-ops = "mainframe_rag.ops.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "mypy", "ruff"]
 
@@ -36,6 +39,7 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "-q -m 'not integration'"
 markers = [
+    "browser: executed real-browser console contracts (issue #372); needs an offline Chrome for Testing + chromedriver and skips without one; run `pytest -m browser tests/console_browser_contracts.py`",
     "integration: end-to-end tiers against a docker Qdrant server + loopback mocks (correctness via `sh scripts/tools/run-task.sh qa:sim`, load tier via `sh scripts/tools/run-task.sh qa:load`)",
 ]
 

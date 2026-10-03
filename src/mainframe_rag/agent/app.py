@@ -22,8 +22,8 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
 
 import anyio
@@ -33,8 +33,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from mainframe_rag.agent.admission import (
+    AdmissionController,
+    AdmissionRejected,
+    AdmissionTicket,
+)
 from mainframe_rag.agent.answer import (
     HttpxLLMClient,
     PromptBudgetExceeded,
@@ -60,9 +65,23 @@ from mainframe_rag.agent.chat_turn import (
     is_unsearchable_query,
     prepare_chat_turn,
 )
-from mainframe_rag.agent.core_ports import RetrievalResult
-from mainframe_rag.agent.metrics import endpoint_for_path, record_request, setup_metrics
-from mainframe_rag.agent.model_adapter import ModelAdapter
+from mainframe_rag.agent.evidence import (
+    PUBLIC_FAILURES,
+    EvidenceAccess,
+    EvidenceFailure,
+    EvidenceService,
+    SharedCorpusAccess,
+    TrustedCaller,
+)
+from mainframe_rag.agent.metrics import (
+    endpoint_for_path,
+    record_admission,
+    record_admission_rejected,
+    record_request,
+    setup_metrics,
+)
+from mainframe_rag.agent.resources import AgentResources
+from mainframe_rag.agent.resources import await_retrieval as _await_retrieval  # noqa: F401
 from mainframe_rag.agent.serving import ServingGate, ServingGeneration
 from mainframe_rag.agent.sse import (
     empty_final_payload,
@@ -76,6 +95,7 @@ from mainframe_rag.agent.sse import (
 from mainframe_rag.agent.tokenizer import build_tokenizer
 from mainframe_rag.agent.zowe_mcp import build_zowe_mcp, probe_zowe_mcp
 from mainframe_rag.config import Settings, bearer_auth_headers, load_settings
+from mainframe_rag.ingest.bounds import EmbedInputTooLarge
 from mainframe_rag.ingest.embed import build_embedder
 from mainframe_rag.ingest.representation import require_attested_revision
 from mainframe_rag.ingest.rules_version import extraction_rules_version
@@ -121,6 +141,14 @@ zowe_mcp: ZoweMCP | None = None
 # Serving-generation gate (issues #391 F3/F4): created in lifespan from
 # Settings, or injected by tests before startup (never overwritten then).
 serving_gate: ServingGate | None = None
+# Request admission (issue #374): rebuilt from Settings in lifespan; the
+# import-time instance is unlimited (pre-#374 behaviour) so anything that
+# runs without a lifespan is unchanged. Tests inject a controller directly.
+admission: AdmissionController = AdmissionController()
+# Exact-evidence entitlement authority (issue #405). SharedCorpusAccess is the
+# explicit shared-corpus mode of today's deployment; per-source entitlement
+# (#373) replaces this object. Tests inject restrictive/unavailable doubles.
+evidence_access: EvidenceAccess = SharedCorpusAccess()
 # Tracer starts as the API proxy (no-op until a real provider is installed).
 # Lifespan reassigns it when tracing is enabled (issue #83); tests swap it
 # directly with a tracer backed by InMemorySpanExporter.
@@ -150,11 +178,38 @@ class _RequestSpan:
         self.ended = False
         self.query_class = "unknown"
         self.hits = None
+        # Admission slot and total deadline (issue #374), set by _admit.
+        self.ticket: AdmissionTicket | None = None
+        self.deadline_s: float | None = None
+        self.deadline_terminal = False
+        self.terminal_delivery_until: float | None = None
+
+    def remaining(self) -> float | None:
+        """Seconds left of the total request deadline (None = no deadline;
+        may be <= 0 when it has already passed)."""
+        if self.deadline_s is None:
+            return None
+        return self.deadline_s - (time.monotonic() - self.started)
+
+    def deadline_failed(self):
+        self.deadline_terminal = True
+        if self.terminal_delivery_until is None:
+            self.terminal_delivery_until = time.monotonic() + 1.0
 
     def end(self):
         if not self.ended:
             self.ended = True
-            self.span.end()
+            # Exactly-once slot release on every terminal path (normal
+            # completion, error, deadline, disconnect, stream close).
+            ticket, self.ticket = self.ticket, None
+            try:
+                if ticket is not None:
+                    held = ticket.held
+                    ticket.release()
+                    if held:
+                        record_admission(self.endpoint, delta=-1)
+            finally:
+                self.span.end()
 
     def abort(self):
         if getattr(self.request.state, "red_recorded", False):
@@ -184,7 +239,7 @@ class _RequestSpan:
 
 
 class _SpanStream:
-    """Finalize the root and owned iterator on exhaustion, cancellation or close."""
+    """Own the source until response completion, cancellation or close."""
 
     def __init__(self, source, owner):
         self.source = source
@@ -200,6 +255,11 @@ class _SpanStream:
         with use_span(self.owner.span, end_on_exit=False):
             try:
                 return await self.source.__anext__()
+            except StopAsyncIteration:
+                # The response still owns its closing ASGI body send.
+                # Its finally closes the source/span/ticket after delivery,
+                # timeout or cancellation of that final send.
+                raise
             except BaseException:
                 await self.aclose()
                 raise
@@ -209,7 +269,7 @@ class _SpanStream:
             return
         self.closed = True
         with use_span(self.owner.span, end_on_exit=False):
-            with anyio.CancelScope(shield=True):
+            with anyio.move_on_after(1.0, shield=True):
                 try:
                     await self.source.aclose()
                 finally:
@@ -221,8 +281,35 @@ class _SpanStream:
 
 class _RequestStreamingResponse(StreamingResponse):
     async def stream_response(self, send):
+        owner = self.body_iterator.owner
+
+        async def bounded_send(message):
+            budget = owner.remaining()
+            if budget is None:
+                return await send(message)
+            # A producer deadline may already have made a terminal error.
+            # Give that frame a bounded delivery opportunity; a stalled
+            # receiver cannot hold admission beyond it.
+            if owner.deadline_terminal:
+                assert owner.terminal_delivery_until is not None
+                budget = owner.terminal_delivery_until - time.monotonic()
+            try:
+                async with asyncio.timeout(budget) as timeout:
+                    await send(message)
+            except TimeoutError as exc:
+                if timeout.expired():
+                    raise RequestDeadlineExceeded from exc
+                raise
+
         try:
-            await super().stream_response(send)
+            await super().stream_response(bounded_send)
+        except RequestDeadlineExceeded as exc:
+            if not getattr(owner.request.state, "red_recorded", False):
+                with use_span(owner.span, end_on_exit=False):
+                    _record_stream_failure(
+                        owner, owner.endpoint, "stream_delivery", owner.query_class,
+                        owner.hits or 0, exc,
+                    )
         finally:
             await self.body_iterator.aclose()
 
@@ -266,11 +353,14 @@ def _request_span(request, span, endpoint, started):
 class AppError(Exception):
     """Operator-facing API error: stable code + message, no internals."""
 
-    def __init__(self, status: int, code: str, message: str) -> None:
+    def __init__(
+        self, status: int, code: str, message: str, headers: dict[str, str] | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.headers = headers
 
 
 def _require_query_length(request_id: str, query: str) -> None:
@@ -287,6 +377,25 @@ def _require_query_length(request_id: str, query: str) -> None:
     if len(query) > settings.query_max_chars:
         log.warning(json_log(request_id, "query_too_long", chars=len(query)))
         raise AppError(422, "invalid_request", "request body failed validation")
+    _require_embed_input(request_id, query)
+
+
+def _require_embed_input(request_id: str, query: str) -> None:
+    """Embed-input bound on the query path (issue #374), checked before any
+    model call (condensation, embedding, rerank): the exact dense text is the
+    query prefix plus the query. 0 = unbounded (legacy). A refusal is the
+    same fixed 422 as every other request-body failure, never a truncation.
+    The effective query (acronym expansion, split legs, condensation output)
+    can still exceed this; the embedder re-checks each text it would send."""
+    limit = settings.embed_max_input_chars
+    if limit <= 0:
+        return
+    size = len(settings.dense_query_prefix) + len(query)
+    if size > limit:
+        log.warning(
+            json_log(request_id, "embed_input_too_large", chars=size, limit=limit)
+        )
+        raise AppError(422, "invalid_request", "request body failed validation")
 
 
 def prepare_chat_request(
@@ -294,45 +403,135 @@ def prepare_chat_request(
 ) -> PreparedChatTurn:
     """Map the common chat-input validation to the API/console error contract."""
     try:
-        return prepare_chat_turn(messages, settings, splunk_context)
+        turn = prepare_chat_turn(messages, settings, splunk_context)
     except InvalidChatTurn as exc:
         log.warning(json_log(request_id, "invalid_chat_turn", reason=error_type(exc)))
         raise AppError(422, "invalid_request", "request body failed validation") from exc
+    _require_embed_input(request_id, turn.query)
+    return turn
 
 
-async def _await_retrieval(
-    res: tuple[list[SearchHit], str, dict[str, int]]
-    | Awaitable[tuple[list[SearchHit], str, dict[str, int]]],
-) -> tuple[list[SearchHit], str, dict[str, int]]:
-    """Sync/async retrieval-leg shim: the pooled async client awaits while
-    sync test doubles resolve inline — one helper serves both endpoints so
-    the twin call sites cannot diverge (review S2)."""
-    if inspect.isawaitable(res):
-        return await res
-    return res
+# Fixed client text for the two lifecycle refusals (issue #374): stable code,
+# fixed message, never upstream/exception text.
+_OVERLOADED = "the service is at capacity; retry later"
+_DEADLINE_EXCEEDED = "request deadline exceeded"
 
 
-def core_deps() -> AnswerCoreDeps:
-    """Build the shared-engine dependency bag from the module globals at call
-    time, so tests that monkeypatch app_mod (llm, retrieve_search,
-    build_messages) drive the core through the same seam as production, and
-    the operator console reuses the identical retrieval/LLM wiring."""
-    client, embedding, ranking, retrieve_fn = qdrant, embedder, reranker, retrieve_search
+class RequestDeadlineExceeded(Exception):
+    """The total request deadline expired mid-stream (headers already sent):
+    the SSE route turns it into its terminal error frame."""
 
-    async def retrieve(
-        query: str, *, product: str | None, version: str | None, settings: Settings
-    ) -> RetrievalResult:
-        hits, kind, timings = await _await_retrieval(retrieve_fn(
-            client, embedding, settings.qdrant_collection, query,
-            product=product, version=version, limit=8, settings=settings, reranker=ranking,
-        ))
-        return RetrievalResult(hits, kind, timings)
 
-    return AnswerCoreDeps(
-        settings=settings,
-        llm=ModelAdapter(llm),
-        retrieve=retrieve,
-        tokenizer=tokenizer,
+async def _admit(owner: _RequestSpan) -> None:
+    """Admission + deadline start for one product request (issue #374):
+    the first await of every product handler, before any validation, serving
+    gate or model work. Takes a slot (queueing within the bounded queue and
+    never beyond the remaining deadline) or refuses with the stable 503
+    `overloaded` + Retry-After. The slot is released exactly once by
+    `owner.end()` — when the handler returns for buffered responses, when
+    the response closes for SSE. With no limit selected this admits immediately."""
+    request_id = owner.request.state.request_id
+    owner.deadline_s = settings.request_deadline_s or None
+    try:
+        ticket = await admission.acquire(owner.remaining())
+    except AdmissionRejected as exc:
+        record_admission_rejected(owner.endpoint, exc.reason)
+        log.warning(
+            json_log(
+                request_id,
+                owner.endpoint,
+                outcome="overloaded",
+                reason=exc.reason,
+                active=admission.active,
+                queued=admission.queued,
+            )
+        )
+        raise AppError(
+            503, "overloaded", _OVERLOADED, headers={"Retry-After": "1"}
+        ) from exc
+    owner.ticket = ticket
+    if ticket.held:
+        record_admission(
+            owner.endpoint, delta=1, wait_s=ticket.waited_s if ticket.waited_s > 0 else None
+        )
+
+
+def _deadline_error(owner: _RequestSpan) -> AppError:
+    """The stable 504 for a request whose total deadline expired before its
+    response began; the error handler records the single RED observation."""
+    log.warning(
+        json_log(
+            owner.request.state.request_id,
+            owner.endpoint,
+            outcome="deadline_exceeded",
+            deadline_s=owner.deadline_s,
+        )
+    )
+    return AppError(504, "deadline_exceeded", _DEADLINE_EXCEEDED)
+
+
+async def _within_deadline(owner: _RequestSpan, work: Awaitable):
+    """Await `work` inside what is left of the request deadline. On expiry
+    the awaiting task is cancelled (async legs — Qdrant, reasoning model —
+    stop and release their connections); sync legs already running in a
+    worker thread (embed, BM25, rerank, prompt build) cannot be interrupted
+    and finish within their own per-leg timeouts, but nothing waits for them
+    and the slot is released. Only expiry of THIS deadline becomes the 504;
+    any other TimeoutError is not ours to reinterpret."""
+    budget = owner.remaining()
+    if budget is None:
+        return await work
+    try:
+        async with asyncio.timeout(budget) as scope:
+            return await work
+    except TimeoutError as exc:
+        if scope.expired():
+            raise _deadline_error(owner) from exc
+        raise
+
+
+async def _deadline_iter(owner: _RequestSpan, events: AsyncIterator) -> AsyncGenerator:
+    """Yield `events` items, each awaited within the remaining deadline; on
+    expiry raise RequestDeadlineExceeded (the caller's mid-stream failure
+    path emits the terminal error frame). The timeout scope never spans a
+    yield, so it is always entered and left within one task step."""
+    iterator = events.__aiter__()
+    while True:
+        budget = owner.remaining()
+        try:
+            if budget is None:
+                item = await anext(iterator)
+            else:
+                async with asyncio.timeout(budget) as scope:
+                    item = await anext(iterator)
+        except StopAsyncIteration:
+            return
+        except TimeoutError as exc:
+            if budget is not None and scope.expired():
+                raise RequestDeadlineExceeded from exc
+            raise
+        yield item
+
+
+def resources() -> AgentResources:
+    """Snapshot what the lifespan published, once per request. Handlers pass
+    this view explicitly; a request that captured it keeps those clients even
+    if the module names are replaced mid-flight (tests swap them), and nothing
+    here ever closes a client — the lifespan is the only owner."""
+    return AgentResources(
+        settings=settings, qdrant=qdrant, embedder=embedder, reranker=reranker,
+        llm=llm, tokenizer=tokenizer, search=retrieve_search,
+    )
+
+
+def core_deps(res: AgentResources | None = None) -> AnswerCoreDeps:
+    """Shared-engine dependency bag over an explicit resource view (default:
+    the current snapshot). The prompt builders are read from this module at
+    call time so tests that monkeypatch app_mod (build_messages, ...) drive
+    the core through the same seam as production, and the operator console
+    reuses the identical retrieval/LLM wiring."""
+    return replace(
+        (res or resources()).core_deps(),
         build_messages_fn=build_messages,
         build_chat_messages_fn=build_chat_messages,
         classify_query_complexity_fn=classify_query_complexity,
@@ -374,10 +573,11 @@ async def serving_settings() -> Settings:
     return settings.model_copy(update={"qdrant_collection": generation.physical})
 
 
-async def serving_deps() -> AnswerCoreDeps:
+async def serving_deps(rsc: AgentResources | None = None) -> AnswerCoreDeps:
     """Shared answer-core deps bound to the validated physical generation —
     the one gate for /v1/answer, /v1/chat*, and the operator console."""
-    return replace(core_deps(), settings=await serving_settings())
+    rsc = rsc or resources()
+    return replace(core_deps(rsc), settings=await serving_settings())
 
 
 def _timing_parts(
@@ -543,11 +743,23 @@ def _record_stream_abort(
     )
 
 
+async def _close_client(client: object) -> None:
+    """Close one lifespan-created client: `aclose`, else `close`; awaited when
+    the result is awaitable (sync doubles keep working). `close()` never nulls
+    a pool, so a post-shutdown call raises instead of silently rebuilding."""
+    closer = getattr(client, "aclose", None) or getattr(client, "close", None)
+    if closer is None:
+        return
+    result = closer()
+    if inspect.isawaitable(result):
+        await result
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global settings, http, http_sync, qdrant, embedder, llm, tokenizer, reranker, zowe_mcp
     global rerank_health
-    global serving_gate
+    global serving_gate, admission
     settings = load_settings()
     configure_logging(settings.log_level)
     # Startup fail-fast (issue #20 PR D): the agent refuses to listen on a
@@ -566,142 +778,138 @@ async def lifespan(_app: FastAPI):
         # is not a model identity. Fail fast here (config error, before any
         # client is built) like every other embed-path misconfiguration.
         require_attested_revision(settings)
-    http_limits = httpx2.Limits(
-        max_keepalive_connections=settings.http_max_keepalive_connections,
-        max_connections=settings.http_max_connections,
-    )
-    http_client = httpx2.AsyncClient(
-        timeout=settings.embed_timeout_s,
-        transport=httpx2.AsyncHTTPTransport(retries=settings.http_connect_retries),
-        limits=http_limits,
-    )
-    http = http_client
-    # Sync pool for the retrieval leg (embedder / tokenizer / reranker): the
-    # Embedder/Reranker/Tokenizer protocols are sync, so their calls run
-    # inside asyncio.to_thread off the event loop. Bounded limits like the
-    # async pool; closed on shutdown. One pool on purpose — same shape as the
-    # pre-async stack (review S4).
-    http_sync_client = httpx2.Client(
-        timeout=settings.embed_timeout_s,
-        transport=httpx2.HTTPTransport(retries=settings.http_connect_retries),
-        limits=http_limits,
-    )
-    http_sync = http_sync_client
-    # One dispatch point for embed_mode; the reasoning-model client owns its
-    # own connection pool with its own (long) timeout. LLM env stays
-    # request-time fail-fast (assert_reasoning_model in /v1/answer).
-    embedder = build_embedder(settings, http_sync)
-    tokenizer = build_tokenizer(settings, http_sync)
-    reranker = build_reranker(settings, http_sync)
-    rerank_health = None
-    if reranker is not None:
-        # Best-effort reachability ping (warn-only): a mispointed
-        # RERANK_BASE_URL should surface as one loud startup line, not as
-        # per-request failures. Never fail-closed here — rerank is opt-in
-        # and must not keep the agent from listening at startup.
-        # Off the event loop like every other sync leg.
-        probe_error = await asyncio.to_thread(probe_reranker, reranker)
-        if probe_error is not None:
-            log.warning(json_log("lifespan", "reranker_unreachable", error=probe_error[:200]))
-    # Live z/OS state (ADR-0003, phase 2): default-off client, built only
-    # when enabled. Same warn-only probe discipline as the reranker — a
-    # dead bridge or a surprising tool registration must not keep the
-    # agent from listening. No endpoint calls it yet (phase 3 wiring).
-    zowe_mcp = build_zowe_mcp(settings)
-    if zowe_mcp is not None:
-        probe_error = await asyncio.to_thread(probe_zowe_mcp, zowe_mcp)
-        if probe_error is not None:
-            log.warning(json_log("lifespan", "zowe_mcp_unreachable", error=probe_error[:200]))
-    # Two names on purpose: tests swap the `llm` global after startup; shutdown
-    # must close the pool THIS lifespan created, never a test double.
-    llm_client = HttpxLLMClient(settings)
-    llm = llm_client
-
-    # The agent is async end to end: production always gets AsyncQdrantClient.
-    # No runtime sniffing of the module attribute — a swapped class (vendored
-    # shim, test double) is used as-is and sync doubles keep working through
-    # the isawaitable shims below (review S2).
-    import qdrant_client
-
-    qdrant_client_inst = qdrant_client.AsyncQdrantClient(
-        url=settings.qdrant_url,
-        api_key=settings.qdrant_api_key,
-        timeout=settings.qdrant_timeout_s,
-        limits=http_limits,
-    )
-    qdrant = qdrant_client_inst
-    # Serving-generation gate (issues #391 F3/F4): one instance per process,
-    # created from Settings unless a test injected its own (never overwritten
-    # then). The cache is invalidated at every startup so a validation from a
-    # previous lifespan can never leak into this one.
-    if serving_gate is None:
-        serving_gate = ServingGate(settings.representation_cache_ttl_s)
-    else:
-        serving_gate.invalidate()
-    # Startup gate: refuse to listen when the RESOLVED physical generation is
-    # known-incompatible (drift, legacy, or a pending migration — issue #391
-    # F2). An unreachable store reports unknown and the process starts; every
-    # request still passes the same gate, so an unverifiable state is refused
-    # (503) rather than served (F3). /healthz re-evaluates per scrape.
-    try:
-        generation = await serving_gate.generation(
-            qdrant, settings, extraction_rules_version(), fresh=True
+    async with AsyncExitStack() as owned:
+        http_limits = httpx2.Limits(
+            max_keepalive_connections=settings.http_max_keepalive_connections,
+            max_connections=settings.http_max_connections,
         )
-    except Exception as exc:  # noqa: BLE001 — exotic transports report unknown
-        generation = ServingGeneration(None, "unknown", (type(exc).__name__,))
-    if generation.outcome in ("reembed_required", "legacy", "pending"):
-        raise RuntimeError(
-            f"agent refuses a {generation.outcome} collection "
-            f"{settings.qdrant_collection!r} "
-            f"({', '.join(generation.details) or 'no contract'}): "
-            "re-run ingest with --reingest under these settings to re-embed, then restart "
-            "(never serve queries against incompatible vectors)."
+        http_client = httpx2.AsyncClient(
+            timeout=settings.embed_timeout_s,
+            transport=httpx2.AsyncHTTPTransport(retries=settings.http_connect_retries),
+            limits=http_limits,
         )
-    if generation.outcome in ("record_only_drift", "unknown"):
-        log.warning(
-            json_log(
-                "lifespan",
-                "representation_not_proven",
-                outcome=generation.outcome,
-                details=",".join(generation.details),
+        owned.push_async_callback(_close_client, http_client)
+        http = http_client
+        # Sync pool for the retrieval leg (embedder / tokenizer / reranker): the
+        # Embedder/Reranker/Tokenizer protocols are sync, so their calls run
+        # inside asyncio.to_thread off the event loop. Bounded limits like the
+        # async pool; closed on shutdown. One pool on purpose — same shape as the
+        # pre-async stack (review S4).
+        http_sync_client = httpx2.Client(
+            timeout=settings.embed_timeout_s,
+            transport=httpx2.HTTPTransport(retries=settings.http_connect_retries),
+            limits=http_limits,
+        )
+        owned.push_async_callback(_close_client, http_sync_client)
+        http_sync = http_sync_client
+        # One dispatch point for embed_mode; the reasoning-model client owns its
+        # own connection pool with its own (long) timeout. LLM env stays
+        # request-time fail-fast (assert_reasoning_model in /v1/answer).
+        embedder = build_embedder(settings, http_sync)
+        tokenizer = build_tokenizer(settings, http_sync)
+        reranker = build_reranker(settings, http_sync)
+        rerank_health = None
+        if reranker is not None:
+            # Best-effort reachability ping (warn-only): a mispointed
+            # RERANK_BASE_URL should surface as one loud startup line, not as
+            # per-request failures. Never fail-closed here — rerank is opt-in
+            # and must not keep the agent from listening at startup.
+            # Off the event loop like every other sync leg.
+            probe_error = await asyncio.to_thread(probe_reranker, reranker)
+            if probe_error is not None:
+                log.warning(json_log("lifespan", "reranker_unreachable", error=probe_error[:200]))
+        # Live z/OS state (ADR-0003, phase 2): default-off client, built only
+        # when enabled. Same warn-only probe discipline as the reranker — a
+        # dead bridge or a surprising tool registration must not keep the
+        # agent from listening. No endpoint calls it yet (phase 3 wiring).
+        zowe_mcp = build_zowe_mcp(settings)
+        if zowe_mcp is not None:
+            owned.push_async_callback(_close_client, zowe_mcp)
+            probe_error = await asyncio.to_thread(probe_zowe_mcp, zowe_mcp)
+            if probe_error is not None:
+                log.warning(json_log("lifespan", "zowe_mcp_unreachable", error=probe_error[:200]))
+        # Ownership: `owned` closes exactly the objects THIS lifespan created —
+        # on startup failure, shutdown and cancellation, once each — never a test
+        # double that later replaced a published name.
+        llm_client = HttpxLLMClient(settings)
+        owned.push_async_callback(_close_client, llm_client)
+        llm = llm_client
+
+        # The agent is async end to end: production always gets AsyncQdrantClient.
+        # No runtime sniffing of the module attribute — a swapped class (vendored
+        # shim, test double) is used as-is and sync doubles keep working through
+        # the isawaitable shims below (review S2).
+        import qdrant_client
+
+        qdrant_client_inst = qdrant_client.AsyncQdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key,
+            timeout=settings.qdrant_timeout_s,
+            limits=http_limits,
+        )
+        owned.push_async_callback(_close_client, qdrant_client_inst)
+        qdrant = qdrant_client_inst
+        # Admission controller (issue #374): fresh per lifespan so no slot or
+        # waiter from a previous lifespan can leak into this one. All limits
+        # default to 0 = unlimited (pre-#374 behaviour).
+        admission = AdmissionController(
+            settings.request_max_concurrent,
+            settings.request_queue_max,
+            settings.request_queue_wait_s,
+        )
+        # Serving-generation gate (issues #391 F3/F4): one instance per process,
+        # created from Settings unless a test injected its own (never overwritten
+        # then). The cache is invalidated at every startup so a validation from a
+        # previous lifespan can never leak into this one.
+        if serving_gate is None:
+            serving_gate = ServingGate(settings.representation_cache_ttl_s)
+        else:
+            serving_gate.invalidate()
+        # Startup gate: refuse to listen when the RESOLVED physical generation is
+        # known-incompatible (drift, legacy, or a pending migration — issue #391
+        # F2). An unreachable store reports unknown and the process starts; every
+        # request still passes the same gate, so an unverifiable state is refused
+        # (503) rather than served (F3). /healthz re-evaluates per scrape.
+        try:
+            generation = await serving_gate.generation(
+                qdrant, settings, extraction_rules_version(), fresh=True
             )
+        except Exception as exc:  # noqa: BLE001 — exotic transports report unknown
+            generation = ServingGeneration(None, "unknown", (type(exc).__name__,))
+        if generation.outcome in ("reembed_required", "legacy", "pending"):
+            raise RuntimeError(
+                f"agent refuses a {generation.outcome} collection "
+                f"{settings.qdrant_collection!r} "
+                f"({', '.join(generation.details) or 'no contract'}): "
+                "re-run ingest with --reingest under these settings to re-embed, then restart "
+                "(never serve queries against incompatible vectors)."
+            )
+        if generation.outcome in ("record_only_drift", "unknown"):
+            log.warning(
+                json_log(
+                    "lifespan",
+                    "representation_not_proven",
+                    outcome=generation.outcome,
+                    details=",".join(generation.details),
+                )
+            )
+        # OTel tracing (issue #83): OFF unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
+        # The provider/exporter live for the process; flush + shutdown at lifespan
+        # exit so in-flight spans land even on graceful shutdown. Every bounded
+        # knob comes from Settings — no magic numbers here.
+        global tracer
+        tracer = setup_tracing(
+            settings.otel_exporter_otlp_endpoint,
+            sample_ratio=settings.otel_sample_ratio,
+            export_queue_size=settings.otel_export_queue_size,
+            export_timeout_ms=settings.otel_export_timeout_ms,
         )
-    # OTel tracing (issue #83): OFF unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
-    # The provider/exporter live for the process; flush + shutdown at lifespan
-    # exit so in-flight spans land even on graceful shutdown. Every bounded
-    # knob comes from Settings — no magic numbers here.
-    global tracer
-    tracer = setup_tracing(
-        settings.otel_exporter_otlp_endpoint,
-        sample_ratio=settings.otel_sample_ratio,
-        export_queue_size=settings.otel_export_queue_size,
-        export_timeout_ms=settings.otel_export_timeout_ms,
-    )
-    # Prometheus metrics (issue #187): process-global provider + reader for
-    # UWM scrapes of GET /metrics. Pull model — nothing to flush, so no
-    # shutdown step; idempotent across lifespan re-entry.
-    setup_metrics(settings.metrics_enabled)
-    yield
-    shutdown_tracing()
-    if hasattr(http_client, "aclose"):
-        await http_client.aclose()
-    elif hasattr(http_client, "close"):
-        http_client.close()
-
-    http_sync_client.close()
-
-    if hasattr(llm_client, "aclose"):
-        await llm_client.aclose()
-    elif hasattr(llm_client, "close"):
-        llm_client.close()
-
-    if hasattr(qdrant_client_inst, "close"):
-        close_res = qdrant_client_inst.close()
-        if inspect.isawaitable(close_res):
-            await close_res
-
-    if zowe_mcp is not None and hasattr(zowe_mcp, "close"):
-        zowe_mcp.close()
+        owned.callback(shutdown_tracing)
+        # Prometheus metrics (issue #187): process-global provider + reader for
+        # UWM scrapes of GET /metrics. Pull model — nothing to flush, so no
+        # shutdown step; idempotent across lifespan re-entry.
+        setup_metrics(settings.metrics_enabled)
+        yield
 
 
 app = FastAPI(title="mainframe-rag agent", version="0.1.0", lifespan=lifespan)
@@ -717,10 +925,64 @@ class SearchRequest(BaseModel):
     limit: int = Field(default=8, ge=1, le=40)
 
 
+class EvidenceSearchHit(SearchHit):
+    """A search hit plus the opaque exact-evidence reference (issue #405).
+    `reference` is null when no exact read can be promised for that hit (the
+    serving generation has no build binding, or the stored payload cannot form
+    a complete envelope); it is never a placeholder."""
+
+    reference: str | None = None
+
+
 class SearchResponse(BaseModel):
     request_id: str
     query_kind: str
-    hits: list[SearchHit]
+    hits: list[EvidenceSearchHit]
+
+    @field_validator("hits", mode="before")
+    @classmethod
+    def accept_search_hits(cls, hits):
+        """Existing callers can supply the retrieval owner's SearchHit.
+        Preserve additive evidence fields when already present."""
+        if isinstance(hits, (list, tuple)):
+            return [hit.model_dump() if isinstance(hit, SearchHit) else hit for hit in hits]
+        return hits
+
+
+class EvidenceLocation(BaseModel):
+    """Stored chunk page span: one-based physical pages, inclusive. Not a
+    byte-to-page map (the ingest path does not retain one)."""
+
+    physical_page_start: int
+    physical_page_end: int | None
+    printed_label: str | None
+
+
+class AtomicSpan(BaseModel):
+    start: int
+    end: int
+
+
+class EvidenceResponse(BaseModel):
+    request_id: str
+    reference: str
+    digest: str
+    completeness: str
+    build_id: str
+    chunk_id: str
+    generation_fingerprint: str
+    source_revision: str
+    source_sha256: str
+    doc_id: str
+    title: str
+    product: str | None
+    version: str | None
+    heading: str
+    chunk_type: str
+    text: str
+    text_bytes: int
+    atomic_spans: list[AtomicSpan] | None
+    location: EvidenceLocation
 
 
 class AnswerRequest(BaseModel):
@@ -840,15 +1102,23 @@ class ErrorEnvelope(BaseModel):
     message: str
 
 
-@app.middleware("http")
-async def attach_request_id(request: Request, call_next):
-    """One request id per request, shared by every log line including the
-    unhandled-error handler (round-7 review). Also stamps the arrival time so
-    error handlers (which have no endpoint-local `started`) can still record
-    RED durations."""
-    request.state.request_id = uuid.uuid4().hex[:12]
-    request.state.started = time.monotonic()
-    return await call_next(request)
+class RequestIdentityMiddleware:
+    """Attach correlation state without interposing a response-body queue.
+    The stream lifetime owner must await the actual ASGI send for its deadline
+    and cleanup to include receiver backpressure."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            state = scope.setdefault("state", {})
+            state["request_id"] = uuid.uuid4().hex[:12]
+            state["started"] = time.monotonic()
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(RequestIdentityMiddleware)
 
 
 def _record_handler_error(request: Request, code: str) -> None:
@@ -910,6 +1180,7 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status,
         content=ErrorEnvelope(code=exc.code, message=exc.message).model_dump(),
+        headers=exc.headers,
     )
 
 
@@ -1126,7 +1397,8 @@ async def v1_search(request: Request, req: SearchRequest, response: Response) ->
         attributes={"http.request_id": request_id, "rag.limit": req.limit},
     )
     with _request_span(request, root_span, "search", started) as owner:
-        return await _search_response(req, response, owner)
+        await _admit(owner)
+        return await _within_deadline(owner, _search_response(req, response, owner))
 
 
 async def _search_response(req, response, owner):
@@ -1137,22 +1409,19 @@ async def _search_response(req, response, owner):
     _require_query_length(request_id, req.query)
     # Gate before any retrieval work (issue #391 F3/F4): 503 when the
     # resolved generation is not validated; otherwise bind to its physical.
+    rsc = resources()
     bound = await serving_settings()
     with use_span(root_span, end_on_exit=False):
         try:
-            res = retrieve_search(
-                qdrant,
-                embedder,
-                bound.qdrant_collection,
-                req.query,
-                product=req.product,
-                version=req.version,
-                limit=req.limit,
-                settings=bound,
-                reranker=reranker,
+            found = await rsc.retrieve(
+                req.query, product=req.product, version=req.version,
+                settings=bound, limit=req.limit,
             )
-            hits, kind, timings = await _await_retrieval(res)
+            hits, kind, timings = found.hits, found.kind, found.timings
         except Exception as exc:
+            refused = _embed_input_refusal(owner, "search", exc)
+            if refused is not None:
+                raise refused from exc
             _span_error(root_span, exc)
             _record_endpoint(request, "search", "upstream_error", started)
             log.error(json_log(request_id, "search", error=error_type(exc)))
@@ -1173,13 +1442,105 @@ async def _search_response(req, response, owner):
     timing_parts = _timing_parts(timings)
     if timing_parts:
         response.headers["Server-Timing"] = ", ".join(timing_parts)
+    references = await _mint_references(request_id, bound.qdrant_collection, hits)
     _record_endpoint(request, "search", "ok", started, query_class=kind, hits=len(hits))
     return SearchResponse(
         request_id=request_id,
         query_kind=kind,
-        hits=hits,
+        hits=[
+            EvidenceSearchHit(**hit.model_dump(), reference=references.get(hit.chunk_id))
+            for hit in hits
+        ],
     )
 
+
+def evidence_service() -> EvidenceService:
+    """The shared exact-evidence service over the module's read-only client,
+    built at call time so tests and the lifespan swap seams the same way as
+    core_deps()."""
+    return EvidenceService(qdrant, settings, evidence_access)
+
+
+async def _mint_references(
+    request_id: str, physical: str, hits: list[SearchHit]
+) -> dict[str, str]:
+    """Best-effort exact-read references for the hits just served. A fault
+    here costs the references, never the search: the response then carries
+    `reference: null` and the log the error type only."""
+    try:
+        return await evidence_service().mint_references(physical, [h.chunk_id for h in hits])
+    except Exception as exc:  # noqa: BLE001
+        log.warning(json_log(request_id, "evidence_mint", error=error_type(exc)))
+        return {}
+
+
+@app.get("/v1/evidence/{reference}", response_model=EvidenceResponse)
+async def v1_evidence(
+    request: Request,
+    reference: str,
+    max_bytes: int | None = Query(default=None, ge=1, le=1048576),
+    product: str | None = None,
+    version: str | None = None,
+) -> EvidenceResponse:
+    """Exact stored evidence for one cited chunk: no model, embed, rerank or
+    search call; read-only storage access (docs/evidence-contract.md)."""
+    request_id = request.state.request_id
+    started = time.monotonic()
+    root_span = start_span(
+        tracer,
+        "v1.evidence",
+        context=parent_context(request.headers),
+        kind=SpanKind.SERVER,
+        attributes={"http.request_id": request_id},
+    )
+    with _request_span(request, root_span, "evidence", started) as owner:
+        await _admit(owner)
+        return await _within_deadline(
+            owner, _evidence_response(owner, reference, max_bytes, product, version)
+        )
+
+
+async def _evidence_response(owner, reference, max_bytes, product, version):
+    request = owner.request
+    request_id, started = owner.request.state.request_id, owner.started
+    try:
+        evidence = await evidence_service().read_evidence(
+            TrustedCaller(), reference, max_bytes=max_bytes, product=product, version=version,
+        )
+    except EvidenceFailure as exc:
+        status, code, message = PUBLIC_FAILURES[exc.kind]
+        log.warning(json_log(request_id, "evidence", outcome=code, reason=exc.reason))
+        _record_endpoint(request, "evidence", code, started)
+        raise AppError(status, code, message) from exc
+    log.info(json_log(request_id, "evidence", outcome="ok", text_bytes=evidence.text_bytes))
+    _record_endpoint(request, "evidence", "ok", started)
+    return EvidenceResponse(
+        request_id=request_id,
+        reference=evidence.reference,
+        digest=evidence.digest,
+        completeness="complete",
+        build_id=evidence.build_id,
+        chunk_id=evidence.chunk_id,
+        generation_fingerprint=evidence.generation_fingerprint,
+        source_revision=evidence.source_revision,
+        source_sha256=evidence.source_sha256,
+        doc_id=evidence.doc_id,
+        title=evidence.title,
+        product=evidence.product,
+        version=evidence.version,
+        heading=evidence.heading_path,
+        chunk_type=evidence.chunk_type,
+        text=evidence.text,
+        text_bytes=evidence.text_bytes,
+        atomic_spans=None
+        if evidence.atomic_spans is None
+        else [AtomicSpan(start=a, end=b) for a, b in evidence.atomic_spans],
+        location=EvidenceLocation(
+            physical_page_start=evidence.physical_page_start,
+            physical_page_end=evidence.physical_page_end,
+            printed_label=evidence.printed_label,
+        ),
+    )
 
 # Orchestration shared by /v1/answer and /v1/chat (issue #583). Each helper
 # owns one step both routes perform identically; the endpoint label and the
@@ -1200,10 +1561,32 @@ def _require_reasoning_model(request_id: str, action: str) -> None:
         raise AppError(503, "not_configured", "reasoning model is not configured") from exc
 
 
+def _embed_input_refusal(owner: _RequestSpan, endpoint: str, exc: Exception) -> AppError | None:
+    """The embedder refused an over-bound input before calling the model
+    (issue #374): a request-body fault, not an upstream one — the same fixed
+    422 as the early query-path check. None for any other exception."""
+    if not isinstance(exc, EmbedInputTooLarge):
+        return None
+    _record_endpoint(owner.request, endpoint, "invalid_request", owner.started)
+    log.warning(
+        json_log(
+            owner.request.state.request_id,
+            endpoint,
+            error=error_type(exc),
+            limit=exc.limit,
+            largest=exc.largest,
+        )
+    )
+    return AppError(422, "invalid_request", "request body failed validation")
+
+
 def _retrieval_failed(owner: _RequestSpan, endpoint: str, action: str, exc: Exception) -> AppError:
     """Terminal observation for a failed retrieval leg: the same fault maps to
     the same code+message on every endpoint ("retrieval failed", as on
     /v1/search). The caller raises the returned error from `exc`."""
+    refused = _embed_input_refusal(owner, endpoint, exc)
+    if refused is not None:
+        return refused
     _span_error(owner.span, exc)
     _record_endpoint(owner.request, endpoint, "upstream_error", owner.started)
     log.error(json_log(owner.request.state.request_id, action, error=error_type(exc)))
@@ -1337,6 +1720,9 @@ def _record_stream_failure(
     request_id = owner.request.state.request_id
     _span_error(owner.span, exc)
     budget = isinstance(exc, PromptBudgetExceeded)
+    expired = isinstance(exc, RequestDeadlineExceeded)
+    if expired:
+        owner.deadline_failed()
     if isinstance(exc, TruncatedStreamError):
         log.warning(
             json_log(
@@ -1349,13 +1735,19 @@ def _record_stream_failure(
     _record_endpoint(
         owner.request,
         endpoint,
-        "prompt_budget_exceeded" if budget else "upstream_error",
+        "prompt_budget_exceeded"
+        if budget
+        else "deadline_exceeded"
+        if expired
+        else "upstream_error",
         owner.started,
         query_class=kind,
         hits=hit_count,
         verification_state="generation_incomplete",
     )
-    (log.warning if budget else log.error)(json_log(request_id, action, error=error_type(exc)))
+    (log.warning if budget or expired else log.error)(
+        json_log(request_id, action, error=error_type(exc))
+    )
 
 
 async def _stream_answer_core(
@@ -1382,8 +1774,9 @@ async def _stream_answer_core(
     error counts as terminal — its frame already carries the incomplete
     state."""
     core_events = execute_answer_core_stream(core_input, deps, parent_span=owner.span)
+    bounded = _deadline_iter(owner, core_events)
     try:
-        async for item in core_events:
+        async for item in bounded:
             if item["type"] == "token":
                 delta = item["delta"]
                 if delta:
@@ -1396,6 +1789,7 @@ async def _stream_answer_core(
         for frame in error_frames():
             yield frame
     finally:
+        await bounded.aclose()
         await core_events.aclose()
 
 
@@ -1488,7 +1882,8 @@ async def v1_answer(
         attributes={"http.request_id": request_id, "rag.stream": is_stream},
     )
     with _request_span(request, root_span, "answer", started) as owner:
-        return await _answer_response(req, response, is_stream, owner)
+        await _admit(owner)
+        return await _within_deadline(owner, _answer_response(req, response, is_stream, owner))
 
 
 async def _answer_response(req, response, is_stream, owner):
@@ -1500,6 +1895,7 @@ async def _answer_response(req, response, is_stream, owner):
     _require_reasoning_model(request_id, "answer")
     # Serving gate before retrieval and before the root stream opens (issue
     # #391 F3/F4): the request binds to the validated physical generation.
+    rsc = resources()
     bound = await serving_settings()
     llm_model = settings.require_reasoning_model()
 
@@ -1512,18 +1908,10 @@ async def _answer_response(req, response, is_stream, owner):
         # root is made current for the retrieval leg (the root span itself is
         # not created "as current" — the SSE generator outlives this block).
         with use_span(root_span, end_on_exit=False):
-            res = retrieve_search(
-                qdrant,
-                embedder,
-                bound.qdrant_collection,
-                req.query,
-                product=req.product,
-                version=req.version,
-                limit=8,
-                settings=bound,
-                reranker=reranker,
+            found = await rsc.retrieve(
+                req.query, product=req.product, version=req.version, settings=bound
             )
-            hits, kind, timings = await _await_retrieval(res)
+            hits, kind, timings = found.hits, found.kind, found.timings
     except Exception as exc:
         raise _retrieval_failed(owner, "answer", "answer", exc) from exc
 
@@ -1540,7 +1928,7 @@ async def _answer_response(req, response, is_stream, owner):
         query_kind=kind,
         timings=timings,
     )
-    deps = replace(core_deps(), settings=bound)
+    deps = replace(core_deps(rsc), settings=bound)
 
     if not is_stream:
         output = await _execute_core_or_raise(
@@ -1662,7 +2050,8 @@ async def chat_completions(req: ChatRequest, request: Request, response: Respons
         attributes={"http.request_id": request_id, "rag.stream": req.stream},
     )
     with _request_span(request, root_span, "chat", started) as owner:
-        return await _chat_response(req, response, owner)
+        await _admit(owner)
+        return await _within_deadline(owner, _chat_response(req, response, owner))
 
 
 def _chat_final_frames(
@@ -1742,7 +2131,8 @@ async def _chat_response(req, response, owner):
     # request to the validated physical generation or refuse with the
     # stable 503. The error handler records the single terminal
     # observation (same series the explicit record produced).
-    deps = await serving_deps()
+    rsc = resources()
+    deps = await serving_deps(rsc)
 
     core_input = AnswerCoreInput(
         query=turn.query,
@@ -1759,18 +2149,11 @@ async def _chat_response(req, response, owner):
     try:
         with use_span(root_span, end_on_exit=False):
             search_query = await resolve_search_query(core_input, deps, parent_span=root_span)
-            retrieval_coro = retrieve_search(
-                qdrant,
-                embedder,
-                deps.settings.qdrant_collection,
-                search_query,
-                product=req.product,
-                version=req.version,
-                limit=8,
+            found = await rsc.retrieve(
+                search_query, product=req.product, version=req.version,
                 settings=deps.settings,
-                reranker=reranker,
             )
-            hits, kind, timings = await _await_retrieval(retrieval_coro)
+            hits, kind, timings = found.hits, found.kind, found.timings
     except Exception as exc:
         raise _retrieval_failed(owner, "chat", "chat_retrieval", exc) from exc
 

@@ -15,7 +15,7 @@ Build a **citation-first expert mainframe agent** that answers operational quest
 | Layer | System | Job |
 |---|---|---|
 | Live state (caller-supplied) | Splunk (existing) | Events, jobs, messages *now* (context in, not crawl — ADR-0001) |
-| Live state (agent-fetched) | Zowe MCP server, read-only (ADR-0003) | Datasets, JES spool, USS, job status — bounded, audited, default-off |
+| Live state (agent-fetched) | Zowe MCP server, read-only (ADR-0003) | Authorized typed read-only observations; only exact-target `job_status` is approved, other tools unapproved; bounded, audited, default-off, unwired (see [agent.md](agent.md#source-observations)) |
 | Knowledge | Qdrant (self-hosted) | Manuals, precedent, "what does this mean / how is this supposed to work" |
 | Reasoning | Internal vLLM / LiteLLM (platform team) | Thinking model for citation + solution / script generation |
 | Embeddings | Internal vLLM stack | Dense vectors only; OpenAI-compatible endpoint |
@@ -92,7 +92,7 @@ complete its answer-context integration; see the workload status table below.
 | `qdrant` | StatefulSet (vendored chart) | 3 | Cluster mode, P2P 6335 (TLS off), HTTP 6333, gRPC 6334, `restricted-v2` SCC |
 | `rag-agent` | Deployment | 2 | FastAPI, unprivileged, no GPU |
 | `ingest` | One-Shot Job | 1 | High CPU, worker pool, RWO scratch |
-| `zowe-mcp` | Proposed sidecar (ADR-0003); absent from the current Helm chart | Not deployed | Bridge/client code exists; answer-context integration and deployment wiring remain incomplete. Default-off; requires separate site credentials and acceptance |
+| `zowe-mcp` | Proposed sidecar (ADR-0003); absent from the current Helm chart | Not deployed | Bridge/client code exists; answer-context integration and deployment wiring remain incomplete. Default-off; enabling requires the ADR-0003 reactivation gate, separate site credentials and written site acceptance |
 | `jaeger` | Deployment (default on; `off` sentinel disables; disabling only the backend needs an explicit collector endpoint or `off`) | 1 | Jaeger v2 all-in-one, Badger RWO block PVC, tracing backend |
 | `bm25-weights` | Baked in images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 
@@ -156,7 +156,9 @@ mappings. Bare strings are rejected; finish/usage metadata is never invented. Er
 propagate as exceptions, including the existing typed `TruncatedStreamError`.
 `CoreToken`/`CoreFinal` discriminate the internal stream; transport wire schemas
 remain unchanged. The adapter closes per-operation generators, never shared
-clients. The application lifespan retains client ownership.
+clients. The application lifespan retains client ownership and closes only what
+it created (`AsyncExitStack`: startup failure, shutdown, cancellation); requests
+use an `AgentResources` view that never closes anything.
 
 Retrieval SDK dispatch and its existing low-level ports remain unchanged. The
 core's `Retriever` operation is the read boundary: a storage/admin client cannot
@@ -277,6 +279,7 @@ src/mainframe_rag/
     chat_turn.py      # One active-user boundary for chat routes, retrieval and prompts
     core_ports.py     # Typed operations supplied to the answer use case
     model_adapter.py  # Normalizes legacy chat/stream seams; never owns the shared client
+    resources.py      # Per-request read-only view of lifespan-owned clients; retrieval wiring + core deps
   webui/
     routes.py         # Operator console routes (/ui): fail-closed gate, HTMX form/SSE, CSP
     templates/        # Jinja2 shell + message pair (server-rendered, no external assets)

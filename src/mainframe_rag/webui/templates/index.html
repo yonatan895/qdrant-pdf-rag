@@ -19,11 +19,11 @@
   </header>
 
   <main class="layout">
-    <aside class="sidebar">
+    <aside class="sidebar" aria-label="Incidents">
       <button type="button" id="new-session-btn">&#10133; New incident</button>
       <label class="visually-hidden" for="session-filter">Filter incidents</label>
       <input id="session-filter" type="search" placeholder="Filter incidents…" autocomplete="off">
-      <ul id="session-list" class="session-list"></ul>
+      <ul id="session-list" class="session-list" aria-label="Saved incidents"></ul>
       <div class="sidebar-tools">
         <label for="theme-select">Theme</label>
         <select id="theme-select">
@@ -31,11 +31,13 @@
           <option value="theme-dark">Modern Dark</option>
         </select>
         <button type="button" id="export-btn">Export incident (MD)</button>
+        <button type="button" id="clear-history-btn" class="danger">Clear all saved incidents</button>
       </div>
-      <p class="sidebar-note">Sessions live in this browser only. Export before closing a shift.</p>
+      <p class="sidebar-note" id="retention-note">Sessions live in this browser only (localStorage), up to 30 incidents, until you clear them. They include incident context and manual excerpts: on a shared workstation, clear them before you leave. Exports leave this browser; handle per site data policy.</p>
+      <p class="storage-notice" id="storage-notice" role="status" hidden>Browser storage is unavailable: this conversation is kept in memory for this tab only and is lost on reload or close. Export before closing.</p>
     </aside>
 
-    <section class="console">
+    <section class="console" aria-label="Conversation console">
       <details class="drawer">
         <summary>Incident context &amp; subsystem filters</summary>
         <label for="splunk-context">JES spool / SYSLOG / abend dump</label>
@@ -51,13 +53,16 @@
         </div>
       </details>
 
-      <div id="messages" class="messages" aria-live="polite">
+      <div id="messages" class="messages" role="region" aria-label="Conversation" tabindex="-1">
         {% for turn in turns %}{% include "_message_pair.html" %}{% endfor %}
       </div>
+
+      <div id="console-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
 
       {% if error %}<div class="error-banner" role="alert">{{ error }}</div>{% endif %}
 
       <div class="composer-wrap">
+        <div id="composer-notice" class="error-banner" hidden></div>
         <div class="composer-toolbar">
           <div class="reasoning-control">
             <label class="control-label" for="reasoning-slider">Reasoning:</label>
@@ -70,6 +75,7 @@
                 step="1"
                 value="{% if reasoning_effort == 'high' %}2{% elif reasoning_effort == 'medium' %}1{% else %}0{% endif %}"
                 aria-label="Reasoning effort"
+                aria-valuetext="{% if reasoning_effort == 'high' %}High{% elif reasoning_effort == 'medium' %}Medium{% else %}Low{% endif %}"
               >
               <div class="slider-ticks" aria-hidden="true">
                 <span class="tick{% if not reasoning_effort or reasoning_effort == 'low' %} active{% endif %}" data-val="0">Low</span>

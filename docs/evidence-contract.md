@@ -12,11 +12,14 @@ owned by [ingest](ingest.md#publication-contract),
 and [deployment](deploy.md#deployment-policy). No runtime behavior changes here.
 
 Current main has shared answer preparation/finalization, scoped retrieval,
-revision-separated chunk identity, alias publication/repair and a TTL-cached
-physical serving binding. It does **not** implement a public exact-evidence
-service, durable reference/build schema, current caller-entitlement service,
-admitted-reader leases or automatic safe GC. Required mechanisms below are
-implementation obligations for #405/#391/#373/#360, not claims of shipped safety.
+revision-separated chunk identity, alias publication/repair, a TTL-cached
+physical serving binding, and (#405 E1/MCP1) the
+[stored-payload exact-evidence profile](#stored-payload-profile) below with its
+HTTP route and read-only knowledge MCP adapter. It does **not** implement the
+full `e1.` profile (byte-to-page location map), retirement tombstones,
+a per-source caller-entitlement service, admitted-reader leases or automatic
+safe GC. The remaining mechanisms are implementation obligations for
+#405/#391/#373/#360, not claims of shipped safety.
 M1/A1 implements only the existing core's typed dependency boundaries.
 
 ## Identity and retained evidence
@@ -229,7 +232,8 @@ with trusted caller context supplied separately from user arguments. Typed
 outcomes preserve complete/partial/stale/failed/denied distinctions internally.
 HTTP/console/chat and a future MCP consumer validate wire input and map results;
 they never implement another entitlement, reference or citation rule. Source
-observations remain a separate bounded port, not a generic query/command proxy.
+observations remain a separate bounded port, not a generic query/command proxy
+([ADR-0003](adr/0003-zowe-mcp-read.md)).
 
 Example of the proposed additive exact-read contract (not an implemented route):
 
@@ -255,6 +259,97 @@ extra fields. E1's schema rollout must make unknown mandatory versions fail clos
 at **all** serving/publication readers before v1 can be enabled. No indefinite
 historical compatibility, archive import, schema mutation or default flip is
 approved by this document.
+
+<a id="stored-payload-profile"></a>
+## Stored-payload profile (implemented, #405 E1/MCP1)
+
+**Status:** implemented with evidence for builds that carry a build binding
+(#515/#516); `e1.` stays reserved and unimplemented. **Decision owner:**
+`agent.evidence` (`EvidenceService`, `build_evidence`, `PUBLIC_FAILURES`).
+**Why a profile:** the `e1.` envelope needs a per-byte page map that the ingest
+path does not retain, and adding one means changing stored payloads and the
+extraction-rule modules (forced re-ingest, protected format). This profile
+therefore uses only what a point already stores, with a distinct `ep1.` prefix,
+so no `ep1.` reference can be mistaken for an `e1.` one and no payload,
+UUID5 chunk key or `chunk_type` changes. Decoders reject every other prefix.
+
+| Aspect | Decision |
+|---|---|
+| Reference | `ep1.` + unpadded URL-safe base64 of build UUID (16 bytes), existing chunk UUID (16), SHA-256 of the canonical envelope (32): 90 ASCII characters. Canonical-only decode; wrong length/prefix/padding/non-zero trailing bits/zero build UUID are `invalid_evidence_reference` before any storage contact. A reference is a locator, never a grant. |
+| Envelope | UTF-8 JSON, sorted keys, compact separators, `ensure_ascii=False`, no NaN. Keys: `schema` (1), `profile` (`stored-payload`), `build_id`, `chunk_id`, `generation_fingerprint` (the verified control's `gen_fp`; not an identity), `source_revision` (`source_rev`), `source_sha256` (`sha256`), `doc_id`, `title`, `product`, `version`, `heading_path`, `chunk_type` (the four-type vocabulary only), `text`, `atomic_spans`, `physical_page_start`/`physical_page_end` (one-based; stored indexes are zero-based), `printed_label`. |
+| Atomic spans | Stored `units` are character offsets; the envelope carries the `atomic` ones as UTF-8 **byte** ranges `[start,end)`. The key is `null` when `units` is absent: the writer omits it both for known prose and for capped span lists, so "not recorded" is never presented as "no atomic items". Malformed spans refuse. |
+| Location | The stored chunk page span only (`physical_page_end` is null for points lacking it; `printed_label` is the stored display string, possibly a range, null if empty). There is **no** byte-to-page map and the response does not imply one. |
+| Issuance | Search mints a reference only for hits served from a generation whose control record decodes to a build binding for the configured logical corpus and whose phase is published/retained. Legacy/in-place/unbound generations, sealed-unpublished builds and payloads that cannot form a complete envelope get `reference: null`; nothing is invented and search never fails because minting failed. |
+| Read | Parse; resolve the build only through its immutable per-build data/control aliases (never the ordinary serving alias, never a name from the request); require the paired control alias, the control record's build UUID/physical/logical corpus to match; retrieve the one point; derive scope; **authorize**; apply optional narrowing `product`/`version`; rebuild the envelope and compare digests; enforce the budget; re-ask the authority's policy version before returning. No content or authorization cache exists. Only `get_aliases`, `collection_exists` and `retrieve` are called, so the read-only serving credential suffices; no model, embed, rerank or approximate search runs. |
+| Bounds | `max_bytes` (query, 1..1 MiB) is clamped by `EVIDENCE_MAX_BYTES` (default 65536); a whole chunk over the budget is `413`, never a prefix or single span. `EVIDENCE_TIMEOUT_S` (default 10) bounds the read; HTTP exact reads also share the agent's configured admission pool and request deadline with search/answer/chat/UI. Every storage wait is a real async await, so cancellation propagates to the in-flight call; no transport adds another queue. |
+| Access | `EvidenceAccess` is the port (`authorize`, `current_version`). The deployed object is `SharedCorpusAccess`, the explicit shared-corpus mode that matches today's search exposure; #373 replaces it. The trusted caller is built by the transport, never from request fields. A denied caller always gets the unavailable outcome, decided before digest/size/corruption outcomes can be observed. |
+
+Public outcomes (the mapping table above, as implemented). Implemented:
+400 `invalid_evidence_reference`, 401 `authentication_required` and 503
+`access_unavailable` (reachable only through a non-default access object), 404
+`evidence_unavailable` (denied, unknown build, product/version mismatch), 503
+`evidence_unavailable` (missing/redirected controls, missing or changed stored
+point, malformed stored fields), 413 `evidence_budget_exceeded`. Added:
+504 `evidence_timeout` and 502 `upstream_error` / `evidence read failed` for a
+storage fault (fixed text; the exception type is logged only).
+**Not implemented:** 410 `evidence_retired`. No tombstone writer exists (#391),
+so a retired or removed build is indistinguishable from an unknown one and reads
+as 404; it is never answered with successor text.
+
+Example (synthetic; the literals are asserted independently in
+`tests/test_evidence_service.py`). A build `00000000-0000-4000-8000-00000000000a`
+holds chunk `ab6cacd2-9c9e-5072-a508-16896576a84d` with the 32-byte text
+`//A EXEC PGM=ONE\n\n//B µ PGM=TWO`:
+
+```text
+POST /v1/search {"query":"step"}
+  -> hits[0].reference = ep1.AAAAAAAAQACAAAAAAAAACqtsrNKcnlBypQgWiWV2qE01x8NlDrvJUGFAamE2sviehLFI2sHOEVJsCJ9y1jl4Vw
+GET /v1/evidence/<reference>[?max_bytes=..&product=..&version=..]
+  -> 200 {"completeness":"complete","text":"...","text_bytes":32,
+          "digest":"35c7c3650ebbc95061406a6136b2f89e84b148dac1ce11526c089f72d6397857",
+          "atomic_spans":[{"start":0,"end":16},{"start":18,"end":32}],
+          "location":{"physical_page_start":3,"physical_page_end":4,"printed_label":"iii-iv"},
+          "build_id":..., "chunk_id":..., "source_revision":..., "doc_id":..., ...}
+  -> 404 {"code":"evidence_unavailable","message":"the requested evidence is not available"}
+```
+
+The downstream consumer is `mcp/knowledge.py` (tools `knowledge_search`,
+`evidence_read`): an adapter over this HTTP surface with no Qdrant, model,
+entitlement or reference code, no forwarded incoming credentials and no SDK
+dependency (hand-rolled JSON-RPC like the FTP bridge). It speaks as its own
+deployment identity to `KNOWLEDGE_API_BASE_URL`; approving that trusted-caller
+boundary and hosting it (Helm/sidecar) are rollout decisions, not made here.
+
+MCP cancellation is initiated by `notifications/cancelled` and looks up only
+active tool calls in the same stdio connection or initialized HTTP session.
+Unknown/completed IDs are ignored; initialization cannot be cancelled. HTTP
+initialization returns an opaque `Mcp-Session-Id`; send it on subsequent POSTs
+and DELETE `/mcp` to close that session. Distinct sessions may reuse request IDs.
+Legacy unary POSTs without initialization still work, with no cross-request
+cancellation. Accepted notifications and cancelled HTTP calls return empty 202
+responses, with no JSON-RPC result for cancelled work. HTTP connection loss
+alone leaves session work running until its service timeout, explicit
+cancellation, session deletion or app shutdown; there is no response resumption.
+This follows the distinction in the
+[MCP transport specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
+and the optional
+[cancellation protocol](https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/cancellation).
+Stdio EOF/app shutdown cancel remaining tasks and close the adapter-created
+HTTP client once; injected HTTP clients remain borrowed.
+
+**Evidence:** `tests/test_evidence_service.py` (literal envelope/reference
+bytes, every-field sensitivity, malformed references, alias swap/repair with
+same recipe and changed corpus, removed build, redirected/missing controls,
+changed stored data, malformed payloads, budget, revocation between reads and
+between admission and response, policy outage, deadline, cancellation, HTTP
+envelopes) and `tests/test_mcp_knowledge.py` (HTTP/MCP parity for success,
+unknown, malformed, budget, scope, denied, policy-down, unauthenticated and
+corrupt outcomes against the real app; cancellation; no-bypass import check).
+A disposable-Qdrant exercise of the same read path ran on 6333 with a `wt405_`
+prefix and was deleted (see the PR record). Known gaps: `e1.` location map,
+tombstones/410 and retention (#391), per-source entitlement and revocation
+timing approval (#373), restore/rollback (#360), hosting of the MCP adapter,
+and `list_sources` (not delivered: no bounded source index exists yet).
 
 <a id="four-design-walks-and-implementation-witnesses"></a>
 ## Four design walks and implementation witnesses

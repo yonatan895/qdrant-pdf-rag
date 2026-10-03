@@ -405,6 +405,15 @@ One `Embedder` (`dense`, `dense_query`, `sparse`) built once by
   input}`, results resorted by `index`.
 - `dense_query` prepends `Settings.dense_query_prefix` when set — query
   vectors only, never document chunks.
+- **Input bound** (issue #374): `embed_max_input_chars` (default 0 =
+  unbounded, the legacy behaviour — a 43k-character JCL statement is embedded
+  whole). When set, `VllmEmbedder.dense` refuses a batch containing any
+  over-bound text *before* the POST (`EmbedInputTooLarge`, counts only, no
+  truncation), and `_parse_one` pre-checks the whole document before any
+  context-LLM or embed call (allowing `context_max_chars` for a contextual
+  prefix), so the refusal is the explicit per-document error of §9, never a
+  partial or falsely complete ingest. Not an extraction rule; outside
+  `rules_version` and the manifest.
 - The sparse BM25 model is a process-wide single (one-entry cache) loaded
   from `BM25_MODEL` (`Qdrant/bm25`); `BM25_CACHE_DIR` overrides the weight
   location (images set it to the baked `/opt/bm25`, unset = library
@@ -491,6 +500,18 @@ embed (hash embedding is GIL-bound — a thread pool would serialize it), so
 parsing runs in a `spawn` process pool while check-delete-upsert runs in a
 thread pool.
 
+- **Per-document bounds** (issue #374; `ingest_max_pdf_bytes`,
+  `ingest_max_doc_pages`, `ingest_max_doc_chunks`, default 0 = unbounded):
+  `_parse_one` refuses an over-bound document with a typed
+  `DocumentTooLarge` inventory error (counts only) before the stage the bound
+  protects (file size before parse, pages before text extraction, chunks
+  before embedding). The document writes no points and no completion marker,
+  the run exits non-zero, and — as for any failed document — the collection's
+  representation contract stays pending, so the documented recovery after
+  lifting the bound is a forced re-run (`--reingest`). The existing
+  combined parse+upsert future window (`max(2, workers*2)`) is unchanged;
+  a count of futures is not a byte ceiling, and per-document RSS/IPC
+  amplification remains to be measured on the site (`docs/agent.md` §6a).
 - **Bound two-level skip with verified completion** (issues #124 + #359,
   independent — understand all three): parent
   `inventory.should_skip(rec, sha, rules_version=extraction_rules_version())`

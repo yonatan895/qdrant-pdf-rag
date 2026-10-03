@@ -23,6 +23,7 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 | `src/mainframe_rag/agent/` | Async FastAPI `/healthz` + `/livez`, `/v1/search`, `/v1/answer`, multi-turn `/v1/chat` + `/v1/chat/completions` (shared `answer_core`, optional SSE streaming), opt-in `GET /metrics` |
 | `src/mainframe_rag/webui/` | Operator console served at `/ui` (ADR-0004): Jinja2 + vendored HTMX/SSE, browser-only state, strict CSP, `UI_ENABLED` fail-closed |
 | `src/mainframe_rag/mcp/` | Read-only Zowe live-state bridge (default off; mock backend for sim; serve via `python -m mainframe_rag.mcp`) |
+| `src/mainframe_rag/ops/` | Read-only operations CLI (`mainframe-rag-ops health, search, answer`; HTTP consumer of `/healthz`, `/v1/search`, `/v1/answer` only; contract: `docs/agent.md` Operations CLI) |
 | `src/mainframe_rag/serve/` | Local vLLM VRAM budget profiles (`LOCAL_RT_8GB`, …) + `resolve` CLI (`python -m mainframe_rag.serve resolve …`) |
 | `scripts/` | Benchmark suite, golden set eval, report renderer, query demo, gateway readiness probe (`probe_gateway.py`), air-gap ops |
 | `images/` | UBI Containerfiles (non-root, wheelhouse + BM25 weights baked in) |
@@ -73,7 +74,7 @@ three-model pack; do not add it beside the default reasoning/embedding pair.
 ## Live State (Optional, Default Off)
 
 - **Splunk (system of record):** caller-supplied context — pass `splunk_context` with `/v1/answer`, `/v1/chat`, or a console request; the agent never crawls Splunk itself.
-- **Zowe MCP (agent-fetched):** bridge/client code for read-only datasets / JES spool / USS / job status (`zowe_mcp_enabled=false` default; mock backend in sim). Answer-context and Helm sidecar integration remain incomplete. See [docs/architecture.md](docs/architecture.md).
+- **Zowe MCP (agent-fetched):** bridge/client code for read-only observations (`zowe_mcp_enabled=false` default, unwired from endpoints; only exact-target job status is approved by ADR-0003; mock backend in sim). Answer-context and Helm sidecar integration remain incomplete. See [docs/architecture.md](docs/architecture.md).
 
 ---
 

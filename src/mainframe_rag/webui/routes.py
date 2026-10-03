@@ -39,6 +39,7 @@ from mainframe_rag.agent.answer_core import (
     execute_answer_core_stream,
 )
 from mainframe_rag.agent.sse import error_payload, final_payload, format_sse_event
+from mainframe_rag.ingest.bounds import EmbedInputTooLarge
 from mainframe_rag.ingest.chunk import detect_code_region
 from mainframe_rag.logs import error_type
 from mainframe_rag.ports import ChatMessage
@@ -632,7 +633,7 @@ async def ui_chat(
         kind=SpanKind.SERVER,
         attributes={"http.request_id": request_id, "rag.stream": False},
     )
-    with app_mod._request_span(request, root_span, "console", started):
+    with app_mod._request_span(request, root_span, "console", started) as owner:
         history = _parse_history(messages)
         context = splunk_context.strip() if splunk_context and splunk_context.strip() else None
         user_turn = _turn("user", message.strip(), splunk_context=context)
@@ -653,7 +654,11 @@ async def ui_chat(
                 version=(version or None),
                 reasoning_effort=reasoning_effort,
             )
-            output = await _run_turn(request, req, root_span)
+            # Same admission slot and total deadline as the API routes
+            # (issue #374); a refusal renders the fixed banner like any
+            # other console failure, with the stable code in RED.
+            await app_mod._admit(owner)
+            output = await app_mod._within_deadline(owner, _run_turn(request, req, root_span))
         except Exception as exc:  # noqa: BLE001 — fixed banner to the operator, detail to logs
             from mainframe_rag.agent.answer import PromptBudgetExceeded
 
@@ -672,7 +677,7 @@ async def ui_chat(
                 else exc.code
                 if isinstance(exc, app_mod.AppError)
                 else "invalid_request"
-                if isinstance(exc, ValidationError)
+                if isinstance(exc, ValidationError | EmbedInputTooLarge)
                 else "upstream_error"
             )
             app_mod._record_endpoint(request, "console", outcome, started)
@@ -734,7 +739,8 @@ async def ui_chat_stream(request: Request, req: UiChatRequest) -> Response:
         attributes={"http.request_id": request_id, "rag.stream": True},
     )
     with app_mod._request_span(request, root_span, "console", started) as owner:
-        return await _console_stream_response(req, owner)
+        await app_mod._admit(owner)
+        return await app_mod._within_deadline(owner, _console_stream_response(req, owner))
 
 
 async def _console_stream_response(req, owner):
@@ -763,8 +769,9 @@ async def _console_stream_response(req, owner):
 
     async def events():
         core_events = execute_answer_core_stream(core_input, deps, parent_span=root_span)
+        bounded = app_mod._deadline_iter(owner, core_events)
         try:
-            async for item in core_events:
+            async for item in bounded:
                 if item["type"] == "token":
                     delta = item["delta"]
                     if delta:
@@ -816,6 +823,8 @@ async def _console_stream_response(req, owner):
         except Exception as exc:  # noqa: BLE001 — mid-stream: error event, no final
             from mainframe_rag.agent.answer import PromptBudgetExceeded
 
+            if isinstance(exc, app_mod.RequestDeadlineExceeded):
+                owner.deadline_failed()
             app_mod._span_error(root_span, exc)
             if isinstance(exc, PromptBudgetExceeded):
                 log.warning(
@@ -830,6 +839,8 @@ async def _console_stream_response(req, owner):
                 "console",
                 "prompt_budget_exceeded"
                 if isinstance(exc, PromptBudgetExceeded)
+                else "deadline_exceeded"
+                if isinstance(exc, app_mod.RequestDeadlineExceeded)
                 else "upstream_error",
                 started,
                 verification_state="generation_incomplete",
@@ -837,6 +848,7 @@ async def _console_stream_response(req, owner):
             yield format_sse_event("error", error_payload())
 
         finally:
+            await bounded.aclose()
             await core_events.aclose()
 
     headers = {**_SECURITY_HEADERS}

@@ -476,3 +476,45 @@ def test_sample_ratio_from_env_clamps_and_falls_back(monkeypatch) -> None:
     assert sample_ratio_from_env() == 1.0
     monkeypatch.delenv("OTEL_SAMPLE_RATIO", raising=False)
     assert sample_ratio_from_env() == 1.0
+
+
+def test_all_tools_issue_only_read_ftp_verbs() -> None:
+    """ADR-0003 read-only boundary at the wire: whatever a tool is asked, the
+    bridge only ever sends read verbs (RETR/LIST/NLST/TYPE A) and JES query
+    filters — never STOR/DELE/RNFR/MKD/RMD/APPE or a SITE that submits."""
+    FakeFTP.files = {"'SYS1.PARMLIB'": b"X\n", "/etc/motd": b"hi\n", "JOB00123.2": b"log\n"}
+    FakeFTP.listings = {}
+    FakeFTP.jes_lines = list(JES_FIXTURE)
+    FakeFTP.site_fails = False
+    sessions: list[FakeFTP] = []
+
+    def connect(_cfg) -> FakeFTP:
+        fake = FakeFTP()
+        sessions.append(fake)
+        return fake
+
+    calls = [
+        ("dataset_read", {"dataset": "SYS1.PARMLIB"}),
+        ("uss_read", {"path": "/etc/motd"}),
+        ("job_status", {"job_id": "JOB00123"}),
+        ("jes_spool_read", {"job_id": "JOB00123", "spool_id": "2"}),
+    ]
+    try:
+        for i, (name, args) in enumerate(calls):
+            reply = server.handle_request(
+                {"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": name, "arguments": args}},
+                _config(),
+                connect,
+            )
+            assert reply["result"]["isError"] is False, name
+    finally:
+        FakeFTP.files = FakeFTP.listings = FakeFTP.jes_lines = None
+    sent = [cmd for fake in sessions for cmd in fake.commands]
+    verbs = {cmd.split(" ", 1)[0] for cmd in sent}
+    assert verbs <= {"CONNECT", "TYPE", "SITE", "RETR", "LIST", "NLST", "QUIT"}, verbs
+    assert {cmd for cmd in sent if cmd.startswith("SITE")} <= {
+        "SITE FILETYPE=JES",
+        "SITE JESOWNER=*",
+        "SITE JESJOBNAME=*",
+        "SITE JESSTATUS=ALL",
+    }

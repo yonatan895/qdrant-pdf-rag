@@ -34,6 +34,7 @@ from opentelemetry.trace import Status, StatusCode
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 from mainframe_rag.config import Settings, load_settings
+from mainframe_rag.ingest.bounds import require_document_within, require_embed_inputs_within
 from mainframe_rag.ingest.build import (
     BuildBinding,
     build_phase,
@@ -66,7 +67,7 @@ from mainframe_rag.ingest.context import (
     load_context_cache,
     resolve_cache_path,
 )
-from mainframe_rag.ingest.embed import build_embedder, embed_batch
+from mainframe_rag.ingest.embed import build_embedder, chunk_embed_text, embed_batch
 from mainframe_rag.ingest.ibm_pdf import (
     ParsedDoc,
     _extract_page_texts,
@@ -168,6 +169,11 @@ def _parse_one(
     parsed: ParsedDoc | None = None
     try:
         path = Path(path_str)
+        settings = _load_worker_settings()
+        # Per-document bounds (issue #374): each refusal is an explicit
+        # error record before the stage it bounds — no partial ingest, no
+        # completion. 0 = unbounded (legacy).
+        require_document_within("pdf_bytes", path.stat().st_size, settings.ingest_max_pdf_bytes)
         parsed = parse_pdf(
             path,
             vendor=vendor,
@@ -176,6 +182,7 @@ def _parse_one(
             corpus_root=Path(corpus_root) if corpus_root else None,
             sha256=sha,
         )
+        require_document_within("pages", parsed.page_count, settings.ingest_max_doc_pages)
         doc = pymupdf.open(path)
         try:
             page_texts, page_labels = _extract_page_texts(doc)
@@ -183,7 +190,18 @@ def _parse_one(
             doc.close()
         stripped = strip_chrome(page_texts)
         chunks = make_chunks(parsed, stripped, page_labels)
-        settings = _load_worker_settings()
+        require_document_within("chunks", len(chunks), settings.ingest_max_doc_chunks)
+        # Embed-input bound for the WHOLE document before any embed or
+        # context-LLM call (the VllmEmbedder re-checks each remote batch).
+        # The contextual prefix is not generated yet: allow its fixed cap.
+        require_embed_inputs_within(
+            (
+                chunk_embed_text(c, parsed.product, parsed.version, parsed.title)
+                for c in chunks
+            ),
+            settings.embed_max_input_chars,
+            extra=settings.context_max_chars + 1 if settings.contextual_embed_enabled else 0,
+        )
         batch = settings.batch_size
         embedder = _get_embedder(settings) if embed else None
         vectors: list[tuple[list[float], SparseVector]] = []

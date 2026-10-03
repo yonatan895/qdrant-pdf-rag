@@ -152,7 +152,7 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
 .session-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
 .session-list .row { display: flex; gap: 0.3rem; }
 .session-list .row button { flex: 1; text-align: left; text-transform: none; letter-spacing: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-list .row .del { flex: 0 0 2rem; text-align: center; }
+.session-list .row .del, .session-list .row .ren { flex: 0 0 2rem; text-align: center; padding-left: 0; padding-right: 0; }
 .session-list .row.active button.open { border-color: var(--accent); background: var(--bg); }
 /* Sidebar tool section: theme + export live here so they stay reachable
    while the conversation scrolls (issue #332). */
@@ -319,7 +319,7 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
   border: 0; padding: 0; margin: 0; cursor: pointer;
 }
 .reasoning-slider-wrap input[type="range"]:focus-visible {
-  outline: none;
+  outline: 2px solid var(--accent); outline-offset: 4px;
 }
 .reasoning-slider-wrap input[type="range"]::-webkit-slider-runnable-track {
   height: 4px; background: var(--panel-border); border-radius: 2px;
@@ -384,7 +384,7 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
   background: var(--panel); min-height: 3rem;
   box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.45);
 }
-.composer textarea::placeholder { color: var(--muted); opacity: 0.85; }
+input::placeholder, .composer textarea::placeholder { color: var(--muted); opacity: 1; }
 .composer textarea:focus { border-color: var(--accent); outline: none; }
 .composer button { flex-shrink: 0; padding: 0.6rem 1.1rem; border-radius: 8px; }
 #send-btn:not(.stop) { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: bold; }
@@ -428,6 +428,29 @@ button:hover { background: var(--accent); color: var(--accent-text); border-colo
     position: static; height: auto; overflow-y: visible;
   }
 }
+/* Provisional / retention / status states (issue #372). Provisional text is
+   visibly unlike a finished answer: dashed rail plus an explicit label. */
+.turn-provisional { border-left-style: dashed; }
+.state-provisional {
+  margin-top: 0.5rem; color: var(--muted); font-size: 0.78rem;
+  border: 1px dashed var(--panel-border); border-radius: 6px; padding: 0.25rem 0.5rem;
+}
+.orphan-note {
+  color: var(--muted); font-size: 0.78rem; font-style: italic;
+  border: 1px dashed var(--panel-border); border-radius: 6px; padding: 0.3rem 0.6rem;
+}
+.storage-notice {
+  margin: 0.5rem 0 0; padding: 0.4rem 0.6rem; font-size: 0.75rem;
+  border: 1px solid var(--error); color: var(--error); border-radius: 6px;
+}
+.storage-notice[hidden] { display: none; }
+.sidebar-tools .danger.armed { background: var(--error); border-color: var(--error); color: var(--bg); }
+/* Keyboard focus must stay visible on every control, including inside the
+   scanline overlay and on form fields whose base rule removes the outline. */
+.composer textarea:focus-visible, .rename:focus-visible, #session-filter:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
 /* Motion overrides live last: same-specificity cascade means they must
    follow the base rules they cancel (review on #335). */
 @media (prefers-reduced-motion: reduce) {

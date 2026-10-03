@@ -5,6 +5,8 @@ No Qdrant, no embeddings (air-gap Job does that; CI uses --dry-run).
 
 import json
 
+import pytest
+
 from mainframe_rag.ingest.run_ingest import main
 
 
@@ -847,3 +849,98 @@ def test_upsert_failure_log_carries_error_type_not_exception_text(
     events = [json.loads(l) for l in err.splitlines() if l.startswith("{")]
     errors = [e for e in events if e.get("action") == "error"]
     assert errors and errors[0]["error_type"] == "ConnectionError"
+
+
+# ---------------------------------------------------------- bounds (issue #374)
+
+
+def _bounded_task(pdf):
+    return (str(pdf), None, None, None, str(pdf.parent), "dummy_sha", True, None)
+
+
+def _spy_embed(monkeypatch):
+    from mainframe_rag.ingest import run_ingest
+
+    calls: list[int] = []
+    real = run_ingest.embed_batch
+
+    def spy(chunks, *a, **k):
+        calls.append(len(chunks))
+        return real(chunks, *a, **k)
+
+    monkeypatch.setattr(run_ingest, "embed_batch", spy)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("override", "dimension"),
+    [
+        ({"ingest_max_pdf_bytes": 100}, "pdf_bytes"),
+        ({"ingest_max_doc_pages": 3}, "pages"),
+        ({"ingest_max_doc_chunks": 2}, "chunks"),
+        ({"embed_max_input_chars": 40}, None),
+    ],
+)
+def test_document_bounds_refuse_before_embedding_with_an_error_record(
+    synthetic_pdf, monkeypatch, override, dimension
+):
+    """Issue #374: an over-bound document is an explicit typed error record
+    (counts only), embeds nothing and returns no chunks/vectors to upsert."""
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+
+    monkeypatch.setattr(
+        run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None, **override)
+    )
+    embed_calls = _spy_embed(monkeypatch)
+    record, _parsed, chunks, vectors, contexts = run_ingest._parse_one(_bounded_task(synthetic_pdf))
+    assert record.status == "error"
+    assert record.error_type == ("EmbedInputTooLarge" if dimension is None else "DocumentTooLarge")
+    if dimension:
+        assert dimension in record.error
+    assert (chunks, vectors, contexts) == ([], [], {})
+    assert embed_calls == [], "no embed call for a refused document"
+
+
+def test_document_bounds_default_off_changes_nothing(synthetic_pdf, monkeypatch):
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest import run_ingest
+
+    monkeypatch.setattr(
+        run_ingest, "_load_worker_settings", lambda: Settings(embed_mode="hash", _env_file=None)
+    )
+    record, _parsed, chunks, vectors, _ctx = run_ingest._parse_one(_bounded_task(synthetic_pdf))
+    assert record.status != "error" and chunks and len(vectors) == len(chunks)
+
+
+def test_oversize_document_is_never_upserted_or_completed_and_next_run_succeeds(
+    tmp_path, synthetic_pdf, monkeypatch
+):
+    """End to end through run(): the refused document writes no points and no
+    completion, the run reports failure, and once the bound is lifted the
+    the forced re-run ingests the same file."""
+    from mainframe_rag.ingest import run_ingest
+
+    fake = _FakeQdrant()
+    monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+    monkeypatch.setenv("EMBED_MODE", "hash")
+    monkeypatch.delenv("DENSE_DIM", raising=False)
+    monkeypatch.setenv("INGEST_MAX_DOC_CHUNKS", "1")
+    progress = tmp_path / "inventory.jsonl"
+    args = ["--src", str(synthetic_pdf.parent), "--progress", str(progress), "--workers", "1"]
+    assert main(args) == 1
+    # Only the representation-manifest point (1 point) may be written; the
+    # refused document leaves no chunk points and no completion marker.
+    assert fake.upsert_calls == [(fake.upsert_calls[0][0], 1)], fake.upsert_calls
+    manifest_collection = fake.upsert_calls[0][0]
+    assert manifest_collection.endswith("_completions"), manifest_collection
+    records = [json.loads(l) for l in progress.read_text().splitlines() if l.strip()]
+    assert [r["status"] for r in records] == ["error"]
+    assert records[0]["error_type"] == "DocumentTooLarge"
+
+    # The failed run left the collection's representation contract pending
+    # (existing behaviour for any failed document): the documented recovery
+    # is a forced re-run once the cause is lifted.
+    monkeypatch.delenv("INGEST_MAX_DOC_CHUNKS")
+    assert main([*args, "--reingest"]) == 0
+    assert sum(fake.upserts) > 0
