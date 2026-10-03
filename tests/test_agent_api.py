@@ -1784,6 +1784,80 @@ def test_parse_answer_trailing_citations_without_header():
     assert "ca-ops-14-0" not in parsed.answer
 
 
+def _stem_evidence(cites_by_doc: list[tuple[str, str]]):
+    """make_evidence with real filename-stem doc ids (ingest's fallback
+    identity when a PDF carries no IBM doc number)."""
+    from dataclasses import replace
+
+    evidence = make_evidence([cite for _, cite in cites_by_doc])
+    return replace(
+        evidence,
+        entries=tuple(
+            replace(entry, doc_id=doc_id) for entry, (doc_id, _) in zip(evidence.entries, cites_by_doc, strict=True)
+        ),
+    )
+
+
+def test_parse_answer_filename_stem_citation_block():
+    """Escaped defect (console, TSS question): unbulleted filename-stem cites
+    under `Citations:` were not cite-shaped, so the block ended at its first
+    line, the header was dropped, every cite line leaked into the body, the
+    one supplied cite was lost (the trailing sweep stopped at a fabricated
+    last line) and no rejection was counted."""
+    supplied = "widget-messages Widget Messages, Widget Messages > WID7100E to WID7199A > WID7143E, p. 234"
+    other = "widget-guide-for-z-os Widget Guide for z/OS, Widget Messages > WID7145E, p. 424"
+    evidence = _stem_evidence([("widget-messages", supplied), ("widget-guide-for-z-os", other)])
+    fabricated = [
+        "widget-messages Widget Messages, Widget Messages > WID7100E to WID7199A > WID7141E, p. 234",
+        "widget-messages Widget Messages, Widget Messages > WID7143E, p. 424",
+    ]
+    content = (
+        "Remove the suspension with the WIDGET REMOVE function.\n\n"
+        "Citations:\n" + "\n".join([fabricated[0], supplied, fabricated[1]])
+    )
+    parsed = parse_answer(content, evidence)
+    assert parsed.citations == [supplied]
+    assert parsed.answer == "Remove the suspension with the WIDGET REMOVE function."
+    assert parsed.cites_rejected_unmapped == 2
+    assert parsed.cites_rejected_shape_bad == 0
+    assert parsed.citations_header_present is True
+
+
+def test_parse_answer_filename_stem_body_citation_hygiene():
+    """Body-level fabricated filename-stem cites and pasted heading-path
+    fragments are stripped and counted exactly like doc-number ones; prose,
+    and a stem that is not a supplied doc id, are untouched."""
+    supplied = "widget-messages Widget Messages, Widget Messages > WID7143E, p. 234"
+    evidence = _stem_evidence([("widget-messages", supplied)])
+    content = (
+        "First step.\n"
+        "widget-messages Widget Messages, Widget Messages > WID7141E, p. 234\n"
+        "widget-messages Widget Messages > WID7100E to WID7199A\n"
+        "unknown-manual Some Title, Some > Path, p. 3\n"
+        "widget-messages lists every code.\n"
+        "Second step.\n\n"
+        f"Citations:\n- {supplied}\n"
+    )
+    parsed = parse_answer(content, evidence)
+    assert parsed.citations == [supplied]
+    assert parsed.answer.splitlines() == [
+        "First step.",
+        "unknown-manual Some Title, Some > Path, p. 3",
+        "widget-messages lists every code.",
+        "Second step.",
+    ]
+    assert parsed.cites_rejected_unmapped == 1
+
+
+def test_valid_citations_filename_stem_without_bullets():
+    supplied = "widget-messages Widget Messages, Chapter 1 > WID001I, p. PDF 12"
+    text = f"Answer.\n\nCitations:\n{supplied}\n"
+    assert valid_citations(text, {supplied}) == [supplied]
+    # Shape alone (no allowlist) needs the supplied doc id.
+    assert extract_citation_lines(text) == []
+    assert extract_citation_lines(text, frozenset({"widget-messages"})) == [supplied]
+
+
 def test_parse_answer_does_not_strip_non_citation_trailing_lines():
     from mainframe_rag.agent.answer import parse_answer
 

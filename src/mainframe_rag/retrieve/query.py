@@ -82,7 +82,7 @@ def format_citation(
 ) -> str:
     """SA22-7592-05 z/OS MVS Init..., IEASYSxx > LFAREA, p. 1-17
 
-    The citation shape contract; cites.CITATION_LINE_RE validates this shape
+    The citation shape contract; cites.is_citation_shaped validates this shape
     on LLM output. A printed label range wins when ingest stored one (every
     page in the span labeled). Otherwise the physical PDF span is cited as
     `p. PDF n` / `p. PDF n–m` (1-based, issue #271): a location an engineer

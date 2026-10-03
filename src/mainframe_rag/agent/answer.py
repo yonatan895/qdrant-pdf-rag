@@ -1487,13 +1487,16 @@ def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
     fences unwrapped), so markers that occur only in discarded thinking/code
     can never be promoted into provenance (issue #364)."""
     from mainframe_rag.agent.cites import (
-        CITATION_LINE_RE,
         CITATIONS_HEADER_RE,
         extract_body_and_citations,
+        is_citation_shaped,
         split_unauthorized_citations,
     )
 
     allowed_citations = evidence.allowed_citations
+    # Filename-stem doc ids have no fixed shape: the supplied ones extend
+    # citation-shape recognition so their cites validate like doc numbers.
+    doc_ids = frozenset(e.doc_id for e in evidence.entries if e.doc_id)
 
     # 1. Process code fences: extract scripts, drop thinking blocks, unwrap prose fences
     scripts: list[tuple[str, str]] = []
@@ -1514,7 +1517,7 @@ def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
     script_lang = scripts[0][0] if scripts else None
 
     # 2. Extract citations & body prose
-    body, raw_cite_lines = extract_body_and_citations(text_processed)
+    body, raw_cite_lines = extract_body_and_citations(text_processed, doc_ids, allowed_citations)
 
     citations: list[str] = []
     rejected_seen: set[str] = set()
@@ -1526,7 +1529,7 @@ def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
                 citations.append(c)
         elif c not in rejected_seen:
             rejected_seen.add(c)
-            if CITATION_LINE_RE.match(c):
+            if is_citation_shaped(c, doc_ids):
                 cites_rejected_unmapped += 1
             else:
                 cites_rejected_shape_bad += 1
@@ -1576,11 +1579,11 @@ def parse_answer(content: str, evidence: PromptEvidence) -> ParsedAnswer:
                     citations_inferred = True
 
     # 3. Clean up unauthorized citations in body
-    body, body_rejected = split_unauthorized_citations(body, allowed_citations)
+    body, body_rejected = split_unauthorized_citations(body, allowed_citations, doc_ids)
     for c in body_rejected:
         # Docno-led pasted fragments are noise, not citation attempts; only
         # shape-valid lines count as fabricated-unmapped (issue #299).
-        if c in rejected_seen or not CITATION_LINE_RE.match(c):
+        if c in rejected_seen or not is_citation_shaped(c, doc_ids):
             continue
         rejected_seen.add(c)
         cites_rejected_unmapped += 1
