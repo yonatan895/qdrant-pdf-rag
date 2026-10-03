@@ -21,6 +21,8 @@ from tests.helpers_airgap import (
     rendered_container,
     rendered_env,
     run_sh,
+    write_git_identity_stub,
+    write_signed_manifest,
     write_stub,
 )
 
@@ -889,10 +891,9 @@ def _release_ingest(tree, config=INGEST_CONFIG):
 
     tmp_path, _ = tree
     write_stub(tmp_path / "bin" / "skopeo", INGEST_STUB_SKOPEO)
-    (tmp_path / "dist").mkdir(exist_ok=True)
-    (tmp_path / "dist" / "MANIFEST.txt").write_text(
-        f"sha: {IMAGE_SHA}\ningest_config_digest: {INGEST_CONFIG}\n"
-    )
+    # A claimed release (#414): signed MANIFEST chain and a resolvable checkout.
+    write_signed_manifest(tmp_path / "dist", f"sha: {IMAGE_SHA}\ningest_config_digest: {INGEST_CONFIG}\n")
+    write_git_identity_stub(tmp_path, IMAGE_SHA)
     raw = json.dumps({"config": {"digest": config}, "layers": [{"digest": "sha256:" + "e" * 64}]}).encode() + b"\n"
     reg = tmp_path / "registry"
     reg.mkdir(exist_ok=True)
