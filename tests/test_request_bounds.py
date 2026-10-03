@@ -188,6 +188,43 @@ def test_controller_unlimited_admits_everything_and_counts_nothing():
     _run(main)
 
 
+@pytest.mark.parametrize("deadline", ["0", "0.2"])
+def test_stalled_source_cleanup_is_bounded_and_releases_admission_even_without_deadline(env, deadline):
+    from fastapi import Request
+
+    env.setenv("REQUEST_MAX_CONCURRENT", "1")
+    env.setenv("REQUEST_DEADLINE_S", deadline)
+
+    async def main():
+        cm = await _serve(env, InstantSearch())
+        closed = asyncio.Event()
+
+        class Source:
+            async def aclose(self):
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    closed.set()
+
+        request = Request({"type": "http", "state": {"request_id": "cleanup-probe"}})
+        started = app_mod.time.monotonic()
+        span = app_mod.trace.get_tracer(__name__).start_span("cleanup-probe")
+        owner = app_mod._RequestSpan(request, span, "answer", started)
+        try:
+            await app_mod._admit(owner)
+            stream = app_mod._SpanStream(Source(), owner)
+            assert app_mod.admission.active == 1
+            await asyncio.wait_for(stream.aclose(), 2)
+            assert app_mod.time.monotonic() - started < 1.35
+            assert closed.is_set() and owner.ended and app_mod.admission.active == 0
+            await stream.aclose()
+            assert (await _Call(*SEARCH).start().done()).status == 200
+        finally:
+            await cm.__aexit__(None, None, None)
+
+    _run(main)
+
+
 def test_controller_never_exceeds_active_or_queue_and_is_fifo():
     async def main():
         ctl = AdmissionController(max_active=2, max_queue=2, queue_wait_s=5)
@@ -730,3 +767,218 @@ def test_admission_metrics_are_bounded_and_fail_open(monkeypatch):
         "reason": "queue_full",
     }
     assert len(points["rag.admission.inflight"]) == 1
+
+
+@pytest.mark.parametrize("termination", ["success", "refusal", "deadline", "disconnect"])
+def test_exact_storage_read_shares_admission_and_releases_for_next_request(env, termination):
+    from tests.test_evidence_service import (
+        BUILD_A,
+        LOGICAL,
+        TEXT,
+        _expected_envelope,
+        _expected_ref,
+        _world,
+    )
+
+    env.setenv("QDRANT_COLLECTION", LOGICAL)
+    env.setenv("REQUEST_MAX_CONCURRENT", "1")
+    if termination == "deadline":
+        env.setenv("REQUEST_DEADLINE_S", "0.2")
+
+    async def main():
+        entered, gate, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        qd = _world(serving=True)
+
+        async def storage_wait(name, ids):
+            entered.set()
+            try:
+                await gate.wait()
+            finally:
+                closed.set()
+
+        qd.before_retrieve = storage_wait
+        search = InstantSearch()
+        cm = await _serve(env, search)
+        env.setattr(app_mod, "qdrant", qd)
+        ref = _expected_ref(BUILD_A, _expected_envelope())
+        try:
+            holder = _Call(f"/v1/evidence/{ref}", {}, "max_bytes=4" if termination == "refusal" else "", method="GET").start()
+            await asyncio.wait_for(entered.wait(), 2)
+            refused = await _Call(f"/v1/evidence/{ref}", {}, method="GET").start().done()
+            ordinary = await _Call(*SEARCH).start().done()
+            assert (refused.status, refused.json()) == (503, OVERLOADED)
+            assert (ordinary.status, ordinary.json()) == (503, OVERLOADED)
+            assert search.calls == 0 and qd.calls.count("retrieve") == 1
+            assert app_mod.admission.active == 1
+            assert (await _Call("/livez", {}, method="GET").start().done()).status == 200
+            if termination == "disconnect":
+                assert holder.task is not None
+                holder.task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await holder.task
+            else:
+                if termination != "deadline":
+                    gate.set()
+                await holder.done()
+                expected = {"success": 200, "refusal": 413, "deadline": 504}[termination]
+                assert holder.status == expected
+                if termination == "deadline":
+                    assert holder.json() == DEADLINE
+            assert closed.is_set() and app_mod.admission.active == 0
+            gate.set()
+            next_read = await _Call(f"/v1/evidence/{ref}", {}, method="GET").start().done()
+            assert next_read.status == 200 and next_read.json()["text"] == TEXT
+            assert (await _Call(*SEARCH).start().done()).status == 200
+            assert app_mod.admission.active == 0
+        finally:
+            gate.set()
+            await cm.__aexit__(None, None, None)
+
+    _run(main)
+
+
+@pytest.mark.parametrize("endpoint", ["answer", "chat", "console"])
+def test_stream_deadline_closes_stalled_asgi_send_and_admits_next_queued_request(env, endpoint):
+    env.setenv("REQUEST_MAX_CONCURRENT", "1")
+    env.setenv("REQUEST_QUEUE_MAX", "1")
+    env.setenv("REQUEST_DEADLINE_S", "0.4")
+    env.setenv("UI_ENABLED", "true")
+
+    async def main():
+        llm = ParkedStreamLLM()
+        cm = await _serve(env, InstantSearch(), llm)
+        send_entered, send_closed = asyncio.Event(), asyncio.Event()
+        released = []
+        release = admission_mod.AdmissionTicket.release
+
+        def record_release(ticket):
+            if ticket.held:
+                released.append(ticket)
+            return release(ticket)
+
+        env.setattr(admission_mod.AdmissionTicket, "release", record_release)
+        path = "/ui/chat/stream" if endpoint == "console" else f"/v1/{endpoint}"
+        body = {"query": "IEA500I", "stream": True} if endpoint == "answer" else {
+            "messages": [{"role": "user", "content": "IEA500I"}], "stream": True,
+        }
+        if endpoint == "console":
+            body.pop("stream")
+        call = _Call(path, body)
+        actual_send = call._send
+
+        async def blocked_send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                send_entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    send_closed.set()
+            await actual_send(message)
+
+        call._send = blocked_send
+        try:
+            call.start()
+            await asyncio.wait_for(send_entered.wait(), 3)
+            await asyncio.sleep(0.06)
+            next_call = _Call(*SEARCH).start()
+            await _until(lambda: app_mod.admission.queued == 1, "ordinary request queued")
+            await call.done()
+            assert send_closed.is_set() and llm.closed.is_set()
+            assert llm.calls <= 1 and b"event: final" not in call.body
+            await next_call.done()
+            assert next_call.status == 200
+            assert app_mod.admission.active == app_mod.admission.queued == 0
+            assert len(released) == 2 and released[0] is not released[1]
+            assert (await _Call(*SEARCH).start().done()).status == 200
+        finally:
+            await cm.__aexit__(None, None, None)
+
+    _run(main)
+
+
+@pytest.mark.parametrize("endpoint", ["answer", "chat", "console"])
+def test_producer_deadline_terminal_frames_share_one_absolute_delivery_grace(env, endpoint):
+    env.setenv("REQUEST_MAX_CONCURRENT", "1")
+    env.setenv("REQUEST_DEADLINE_S", "0.2")
+    env.setenv("UI_ENABLED", "true")
+
+    async def main():
+        llm = ParkedStreamLLM()
+        cm = await _serve(env, InstantSearch(), llm)
+        path = "/ui/chat/stream" if endpoint == "console" else f"/v1/{endpoint}"
+        body = {"query": "IEA500I", "stream": True} if endpoint == "answer" else {
+            "messages": [{"role": "user", "content": "IEA500I"}],
+        }
+        if endpoint == "chat":
+            body["stream"] = True
+        call = _Call(path, body)
+        actual_send = call._send
+        grace_started = None
+        sends = 0
+
+        async def slow_terminal_send(message):
+            nonlocal grace_started, sends
+            wire = message.get("body", b"")
+            if message["type"] == "http.response.body" and (
+                grace_started is not None or b"event: error" in wire or b'"error"' in wire
+            ):
+                if grace_started is None:
+                    grace_started = asyncio.get_running_loop().time()
+                sends += 1
+                await asyncio.sleep(0.65)
+            await actual_send(message)
+
+        call._send = slow_terminal_send
+        try:
+            await call.start().done()
+            assert grace_started is not None and sends >= 2
+            assert asyncio.get_running_loop().time() - grace_started < 1.35
+            assert llm.closed.is_set() and app_mod.admission.active == 0
+            assert b"event: final" not in call.body
+            assert (await _Call(*SEARCH).start().done()).status == 200
+        finally:
+            await cm.__aexit__(None, None, None)
+
+    _run(main)
+
+
+@pytest.mark.parametrize("endpoint", ["answer", "chat", "console"])
+def test_deadline_and_admission_include_the_closing_asgi_body_send(env, endpoint):
+    env.setenv("REQUEST_MAX_CONCURRENT", "1")
+    env.setenv("REQUEST_QUEUE_MAX", "1")
+    env.setenv("REQUEST_DEADLINE_S", "0.4")
+    env.setenv("UI_ENABLED", "true")
+
+    async def main():
+        cm = await _serve(env, InstantSearch())
+        closing = asyncio.Event()
+        path = "/ui/chat/stream" if endpoint == "console" else f"/v1/{endpoint}"
+        body = {"query": "IEA500I", "stream": True} if endpoint == "answer" else {
+            "messages": [{"role": "user", "content": "IEA500I"}],
+        }
+        if endpoint == "chat":
+            body["stream"] = True
+        call = _Call(path, body)
+        actual_send = call._send
+
+        async def block_closing_body(message):
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                closing.set()
+                await asyncio.Event().wait()
+            await actual_send(message)
+
+        call._send = block_closing_body
+        try:
+            call.start()
+            await asyncio.wait_for(closing.wait(), 3)
+            assert app_mod.admission.active == 1
+            await asyncio.sleep(0.06)
+            next_call = _Call(*SEARCH).start()
+            await _until(lambda: app_mod.admission.queued == 1, "next request queued")
+            await call.done()
+            await next_call.done()
+            assert next_call.status == 200 and app_mod.admission.active == 0
+        finally:
+            await cm.__aexit__(None, None, None)
+
+    _run(main)

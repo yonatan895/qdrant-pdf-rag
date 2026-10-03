@@ -21,11 +21,13 @@
   const THEME_KEY = "mainframe_rag_theme";
   const REASONING_KEY = "mainframe_rag_reasoning_effort";
   const MAX_SAVED_SESSIONS = 30;
+  const STORE_LOCK = "mainframe-rag-store";
+  const sharedLocks = navigator.locks && window.isSecureContext;
   const PROVISIONAL_LABEL = "Provisional — still generating, not verified";
   const ERROR_TEXT = "The reasoning agent could not complete this request. Check the agent logs and retry.";
 
   const memory = { sessions: {}, active: null };
-  let storageOk = true;
+  let storageOk = !!sharedLocks;
   // This tab's own current incident. `store.active` only records the last
   // incident used anywhere; two tabs must not fight over it.
   let currentId = null;
@@ -96,20 +98,18 @@
     return id;
   }
 
-  /* Every mutation re-reads the persisted store, applies one change keyed
-   * by session id, and writes it back. Long-lived store objects captured by
-   * a render or a stream would overwrite another tab's (or another
-   * action's) newer data on save: new-session, delete, rename and
-   * cross-tab writes all race that way (issue #372). */
-  function mutate(fn) {
-    const store = loadStore();
-    const before = JSON.stringify(store);
-    const result = fn(store);
-    // Write only real changes: a no-op write would still wake every other
-    // tab's storage listener, and two tabs re-asserting their own active
-    // incident would ping-pong forever.
-    if (JSON.stringify(store) !== before) saveStore(store);
-    return result;
+  /* The origin-wide Web Lock encloses both the fresh read and the write.
+   * A tab without Web Locks uses its own memory store, so it cannot race a
+   * shared read-modify-write. Every incident mutation uses this owner. */
+  async function mutate(fn) {
+    const apply = () => {
+      const store = loadStore();
+      const before = JSON.stringify(store);
+      const result = fn(store);
+      if (JSON.stringify(store) !== before) saveStore(store);
+      return result;
+    };
+    return sharedLocks ? navigator.locks.request(STORE_LOCK, apply) : apply();
   }
 
   /* Resolve this tab's current incident id inside `store`. `claim` also
@@ -131,10 +131,9 @@
   }
 
   function currentSession() {
-    return mutate((store) => {
-      const id = resolveSession(store);
-      return { id: id, session: store.sessions[id] };
-    });
+    const store = loadStore();
+    const id = resolveSession(store);
+    return { id: id, session: store.sessions[id] };
   }
 
   const INCOMPLETE_HISTORY_NOTE =
@@ -588,6 +587,7 @@
   /* Streaming UX state (P3): at most one in-flight turn. The Send button
    * doubles as Stop while streaming; aborts keep partial content. */
   let streamAbort = null;
+  let submitting = false;
   let sessionFilter = "";
 
   function updateSendBtn() {
@@ -691,13 +691,18 @@
     input.focus();
     input.select();
     let done = false;
-    const commit = (save, refocus) => {
+    const commit = async (save, refocus) => {
       if (done) return;
       done = true;
       renaming = false;
+      // Finish the editor immediately while persistence waits for the
+      // shared lock; keyboard users keep a visible focus target.
+      if (save && input.value.trim()) openBtn.textContent = input.value.trim().slice(0, 60);
+      if (input.parentNode === row) row.replaceChild(openBtn, input);
+      if (refocus) openBtn.focus();
       if (save && input.value.trim()) {
         const title = input.value.trim().slice(0, 60);
-        mutate((store) => {
+        await mutate((store) => {
           const live = store.sessions[id];
           if (!live) return;
           live.title = title;
@@ -719,10 +724,10 @@
     if (row) row.focus();
   }
 
-  function deleteSession(id) {
+  async function deleteSession(id) {
     if (inflight && inflight.sid === id && streamAbort) streamAbort.abort();
     if (currentId === id) currentId = null;
-    mutate((store) => {
+    await mutate((store) => {
       delete store.sessions[id];
       if (store.active === id) store.active = null;
       // Record the surviving (or fresh) incident as active; resolving alone
@@ -737,9 +742,9 @@
     announce("Incident deleted.");
   }
 
-  function openSession(id) {
+  async function openSession(id) {
     currentId = id;
-    mutate((store) => {
+    await mutate((store) => {
       if (store.sessions[id]) store.active = id;
     });
     renderMessages();
@@ -1019,7 +1024,7 @@
     // may have created, renamed, deleted or switched incidents (here or in
     // another tab) while this turn streamed. A deleted incident stays
     // deleted: the finished turn is dropped, never resurrected.
-    const kept = mutate((store) => {
+    const kept = await mutate((store) => {
       const live = store.sessions[sid];
       if (!live) return false;
       live.turns.push(assistantTurn);
@@ -1035,6 +1040,10 @@
       "data-state",
       assistantTurn.verification_state === "generation_incomplete" ? "incomplete" : "complete"
     );
+    // An asynchronous open/rename/storage refresh may have re-rendered the
+    // messages while completion waited for persistence. Render the committed
+    // store so the final is visible even if its provisional node was detached.
+    renderMessages();
     renderSessions();
     announce(completionAnnouncement(assistantTurn));
   }
@@ -1049,6 +1058,15 @@
     return "Answer complete. State: " + String(turn.verification_state).replace(/_/g, " ") + ".";
   }
 
+  function composerNotice(text) {
+    const notice = document.getElementById("composer-notice");
+    if (notice) {
+      notice.textContent = text;
+      notice.hidden = !text;
+    }
+    if (text) announce(text);
+  }
+
   async function onSubmit(event) {
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -1057,36 +1075,53 @@
       streamAbort.abort();
       return;
     }
+    if (submitting) return;
     const text = promptEl.value.trim();
     if (!text) return;
+    composerNotice("");
+    submitting = true;
     const userTurn = {
       role: "user",
       content: text,
       splunk_context: splunkEl.value.trim() || null,
       ts: Date.now(),
     };
-    const saved = mutate((store) => {
-      const id = resolveSession(store, true);
-      const session = store.sessions[id];
-      session.turns.push(userTurn);
-      if (session.title === "New Incident") {
-        session.title = text.split("\n")[0].slice(0, 45);
-      }
-      session.updated_at = Date.now();
-      return { sid: id, history: historyMessages(session) };
-    });
-    // A fresh question re-engages the follow; renderMessages resets stick.
-    const empty = messagesEl.querySelector(".empty-state");
-    if (empty) empty.remove();
-    const note = messagesEl.querySelector(".orphan-note");
-    if (note) note.remove();
-    messagesEl.appendChild(renderTurn(userTurn));
-    promptEl.value = "";
-    updateSendBtn();
-    stick = true;
-    stickScroll();
-    renderSessions();
-    await streamTurn(saved.sid, saved.history, userTurn);
+    try {
+      const selected = await mutate((store) => resolveSession(store, true));
+      const submit = async (lock) => {
+        if (sharedLocks && !lock) {
+          composerNotice("This incident is already generating an answer in another tab. Try again when it finishes.");
+          return;
+        }
+        const saved = await mutate((store) => {
+          const session = store.sessions[selected];
+          if (!session) return null;
+          session.turns.push(userTurn);
+          if (session.title === "New Incident") session.title = text.split("\n")[0].slice(0, 45);
+          session.updated_at = Date.now();
+          return { sid: selected, history: historyMessages(session) };
+        });
+        if (!saved) {
+          composerNotice("The incident was deleted before the question was sent.");
+          return;
+        }
+        renderMessages();
+        promptEl.value = "";
+        updateSendBtn();
+        stick = true;
+        stickScroll();
+        renderSessions();
+        await streamTurn(saved.sid, saved.history, userTurn);
+      };
+      // Hold the incident lock through completion persistence, so a second
+      // tab cannot insert a user turn before this turn's assistant response.
+      if (sharedLocks) await navigator.locks.request(
+        "mainframe-rag-turn:" + selected, { ifAvailable: true }, submit
+      );
+      else await submit(null);
+    } finally {
+      submitting = false;
+    }
   }
 
   /* Copy buttons read from the adjacent rendered node — no payload ever
@@ -1158,15 +1193,19 @@
    * browser (issue #372 retention policy). Two-step so a stray click or
    * keypress cannot destroy a shift's record; no native dialog, so it is
    * equally operable by keyboard and by assistive tech. */
-  function clearAllSaved() {
+  async function clearAllSaved() {
     if (streamAbort) streamAbort.abort();
-    try {
-      window.localStorage.removeItem(STORAGE_KEY);
-    } catch (err) {
-      /* storage unavailable: memory fallback is cleared below */
-    }
-    memory.sessions = {};
-    memory.active = null;
+    await mutate((store) => {
+      // A quota failure may have selected memory while an older persisted
+      // record still exists. Explicit erase must reach that record too.
+      try {
+        window.localStorage.removeItem(STORAGE_KEY);
+      } catch (err) {
+        /* unavailable storage: still erase this tab's memory below */
+      }
+      store.sessions = {};
+      store.active = null;
+    });
     currentId = null;
     renderMessages();
     renderSessions();
@@ -1200,7 +1239,16 @@
     btn.addEventListener("blur", disarm);
   }
 
-  function boot() {
+  async function boot() {
+    // Disable the HTML fallback before the first asynchronous lock wait.
+    // HTMX must not bind its form submit while browser boot is suspended.
+    if (formEl && window.fetch && window.ReadableStream) {
+      formEl.removeAttribute("hx-post");
+      formEl.removeAttribute("hx-target");
+      formEl.removeAttribute("hx-swap");
+      formEl.addEventListener("submit", onSubmit);
+    }
+    await mutate((store) => resolveSession(store, true));
     syncStorageNotice();
     renderMessages();
     renderSessions();
@@ -1210,9 +1258,10 @@
     // Another tab wrote the store: re-read it rather than keep showing (and
     // later overwriting) a stale copy. The streaming tab keeps its live
     // article; an open rename input is never torn down.
-    window.addEventListener("storage", (event) => {
+    window.addEventListener("storage", async (event) => {
       if (event.key !== null && event.key !== STORAGE_KEY) return;
       if (renaming) return;
+      await mutate((store) => resolveSession(store));
       renderMessages();
       renderSessions();
     });
@@ -1291,22 +1340,13 @@
     }
 
     if (newBtn) {
-      newBtn.addEventListener("click", () => {
-        mutate(createSession);
+      newBtn.addEventListener("click", async () => {
+        await mutate(createSession);
         renderMessages();
         renderSessions();
         promptEl.focus();
         announce("New incident started.");
       });
-    }
-
-    if (formEl) {
-      if (window.fetch && window.ReadableStream) {
-        formEl.removeAttribute("hx-post");
-        formEl.removeAttribute("hx-target");
-        formEl.removeAttribute("hx-swap");
-        formEl.addEventListener("submit", onSubmit);
-      }
     }
 
     if (promptEl) {

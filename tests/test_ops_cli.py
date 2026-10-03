@@ -884,7 +884,7 @@ def test_entry_point_is_declared_and_module_runs():
         text=True,
         timeout=120,
         check=False,
-        env={**__import__("os").environ, "PYTHONPATH": str(REPO / "src")},
+        env={**__import__("os").environ, "PYTHONPATH": str(Path(cli.__file__).resolve().parents[2])},
     )
     assert proc.returncode == 0 and "Exit codes" in proc.stdout
 
@@ -911,3 +911,63 @@ def test_no_new_runtime_dependency():
         "httpx2",
         "mainframe_rag",
     }
+
+
+@pytest.mark.parametrize("field,value", [
+    ("script", "missing"), ("script_lang", "missing"),
+    ("verification_state", []), ("verification_state", {"secret": "upstream"}),
+])
+@pytest.mark.parametrize("stream", [False, True])
+def test_cli_process_malformed_nullable_and_enum_fields_have_fixed_error(agent, field, value, stream):
+    body = answer_json()
+    if value == "missing":
+        body.pop(field)
+    else:
+        body[field] = value
+    if stream:
+        # Real SSE final shape, altered only in the field under test.
+        final = json.loads(final_event().split("data: ", 1)[1].strip())
+        if value == "missing":
+            final.pop(field)
+        else:
+            final[field] = value
+        agent.on("POST", "/v1/answer", Reply(ctype="text/event-stream", chunks=[sse.format_sse_event("final", final).encode()]))
+    else:
+        agent.on("POST", "/v1/answer", Reply(body=body))
+    proc = subprocess.run(
+        [sys.executable, "-m", "mainframe_rag.ops", "answer", "q", "--base-url", agent.url,
+         "--format", "json", *(["--stream"] if stream else [])],
+        capture_output=True, text=True, timeout=30, check=False,
+        env={**__import__("os").environ, "PYTHONPATH": str(Path(cli.__file__).resolve().parents[2])},
+    )
+    assert proc.returncode == cli.EXIT_BAD_RESPONSE
+    assert json.loads(proc.stdout)["error"]["code"] == "malformed_response"
+    assert "Traceback" not in proc.stderr and "upstream" not in proc.stdout
+    agent.on("POST", "/v1/answer", Reply(body=answer_json()))
+    assert jrun(agent, "answer", "q")[0] == 0
+
+
+@pytest.mark.parametrize("reference", ["ep1.exact:/ whitespace\tµ", None, "absent"])
+def test_search_cli_process_preserves_optional_exact_reference(agent, reference):
+    body = SearchResponse(request_id="request", query_kind="identifier", hits=[hit().model_dump()]).model_dump()
+    if reference == "absent":
+        body["hits"][0].pop("reference")
+    else:
+        body["hits"][0]["reference"] = reference
+    agent.on("POST", "/v1/search", Reply(body=body))
+    proc = subprocess.run(
+        [sys.executable, "-m", "mainframe_rag.ops", "search", "q", "--base-url", agent.url, "--format", "json"],
+        capture_output=True, text=True, timeout=30, check=False,
+        env={**__import__("os").environ, "PYTHONPATH": str(Path(cli.__file__).resolve().parents[2])},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["data"]["hits"][0]["reference"] == (None if reference == "absent" else reference)
+    assert json.loads(proc.stdout)["data"]["hits"][0]["text"] == hit().text
+
+
+def test_cli_rejects_non_scalar_reference(agent):
+    body = SearchResponse(request_id="request", query_kind="identifier", hits=[hit().model_dump()]).model_dump()
+    body["hits"][0]["reference"] = ["invalid"]
+    agent.on("POST", "/v1/search", Reply(body=body))
+    code, doc, _ = jrun(agent, "search", "q")
+    assert code == cli.EXIT_BAD_RESPONSE and doc["error"]["code"] == "malformed_response"

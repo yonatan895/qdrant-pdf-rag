@@ -196,9 +196,10 @@ the follow-up search query through `resolve_search_query` first so the
 condense gate cannot be honored on one path only. The SSE generators hold
 the request root for each iterator operation. A single lifetime owner starts
 before admission and ends buffered work in `finally`; a streaming response
-transfers that ownership to the actual body iterator. Exhaustion, explicit
-close, cancelled dependency I/O, and failed ASGI delivery (even before the
-iterator starts) close owned iterators and end the root exactly once. Terminal
+transfers that ownership to the response. Exhaustion followed by the closing
+ASGI body send, explicit close, cancelled dependency I/O, and failed ASGI
+delivery (even before the iterator starts) close owned iterators and end the
+root exactly once. Terminal
 logs, including admission/retrieval/condense failures, generation alerts and
 console errors, attach to that recording root before it ends. Concurrent turns
 retain independent roots; disabled or non-recording spans add no correlation
@@ -239,8 +240,10 @@ Retention policy as shipped (no default changed by #372):
   incidents`, two-step confirm; other tabs follow through the `storage` event;
   an in-flight answer for an erased incident is discarded, never resurrected).
   Browser "clear site data" also clears everything.
-- **Storage unavailable/full:** the console keeps the conversation in memory for
-  the tab and shows a persistent notice that it is lost on reload.
+- **Storage unavailable/full or shared writes unsupported:** the console keeps
+  the conversation in memory for the tab and shows a persistent notice that it
+  is lost on reload. Shared persistence requires Web Locks in a secure browser
+  context (HTTPS or loopback); no unlocked localStorage write fallback is used.
 - **Export:** operator-initiated Markdown download of the open incident; it
   leaves browser control and carries a handling banner. Incomplete turns export
   with their non-accepted verification state.
@@ -249,9 +252,15 @@ Retention policy as shipped (no default changed by #372):
   console does not have and a dedicated approved concern; they are not
   implemented here.
 
-State contract: every mutation re-reads the persisted store and applies one
-change by incident id (no long-lived store copies), so new-incident, delete,
-rename and cross-tab writes during a stream never overwrite or misroute data. A
+State contract: one origin-wide Web Lock encloses each persisted read/modify/write,
+including rename, delete, new incident and clear-all. Reads used to render do
+not write shared state. A separate incident lock is held from saving the user
+turn through saving its assistant result. A second tab sending to that incident
+gets a visible refusal and keeps its unsent question; it can send after the
+first turn finishes. Other incidents remain usable. Completion reads the latest
+store under the write lock, preserves renames and discards deleted incidents.
+Barrier-controlled browser tests exercise both contenders observing the same
+version before mutation and prove their locked writes serialize. A
 streaming turn is labelled provisional until the final frame; failed, stopped or
 EOF-without-final output is stored and restored as `generation_incomplete`, is
 qualified when reused as model context, and an unanswered question is shown as
@@ -532,10 +541,10 @@ site procedure at the end of this section. **Decision owners:** `agent/admission
 (`AdmissionController`), `app._admit` / `_within_deadline` / `_deadline_iter`,
 `ingest/bounds.py`.
 
-- **Admission** (`request_max_concurrent` > 0): `/v1/search`, `/v1/answer`,
-  `/v1/chat*` and `/ui/chat*` take one slot as the first step of the handler,
-  held until the response body ends (JSON: on return; SSE: when the stream
-  closes, including client disconnect and error). Up to `request_queue_max`
+- **Admission** (`request_max_concurrent` > 0): `/v1/search`, `/v1/evidence/*`,
+  `/v1/answer`, `/v1/chat*` and `/ui/chat*` share one pool and take one slot as
+  the first step of the handler. Buffered responses release on handler return;
+  SSE releases when its response closes, including disconnect and error. Up to `request_queue_max`
   more wait FIFO for at most `request_queue_wait_s` (and never beyond the
   remaining deadline); beyond that, or on expiry, the request gets the stable
   `503 overloaded` and starts no work. Release is exactly once. `/livez`,
@@ -543,10 +552,13 @@ site procedure at the end of this section. **Decision owners:** `agent/admission
   liveness restart storm. Uvicorn is deliberately launched without
   `--limit-concurrency` (a connection-level limit cannot choose the client
   semantics and would also drop probes).
-- **Deadline** (`request_deadline_s` > 0): one budget from request arrival
-  (queue wait included) across condense/embed/search/rerank/tokenize/model
-  legs and any permitted fallback; per-leg timeouts still apply inside it, so
-  the user-visible maximum is the smaller of the two. Expiry cancels the
+- **Deadline** (`request_deadline_s` > 0): one budget from handler entry
+  (queue wait included; body decoding/framework validation precedes it) across condense/embed/search/rerank/tokenize/model
+  legs, exact storage reads and any permitted fallback. For SSE it also
+  covers actual ASGI response sends, including receiver backpressure; the
+  request-identity middleware is direct ASGI, with no intervening body queue.
+  Buffered-response serialization and network delivery are outside this handler
+  budget. Per-leg timeouts still apply inside it. Expiry cancels the
   awaiting task: async legs (Qdrant, reasoning model, open SSE upstream) stop
   and release their connections. **Known gap:** sync legs already running via
   `asyncio.to_thread` (embed POST, BM25, rerank, prompt build/tokenize RPC)
@@ -554,7 +566,14 @@ site procedure at the end of this section. **Decision owners:** `agent/admission
   (`embed_timeout_s`, `rerank_timeout_s`, `llm_tokenize_timeout_s`) while the
   slot is already free, so briefly more worker threads than admitted
   requests can exist. Thread-pool saturation under sustained expiry is not
-  measured here.
+  measured here. After a producer deadline, terminal error delivery gets one
+  absolute 1-second grace period shared by all remaining frames and the closing
+  body; it cannot renew per send. A stalled send ends the response without
+  promising a delivered error. Source cleanup is shielded for at most one
+  further second, then span/ticket ownership ends exactly once (at most two
+  seconds beyond producer expiry, apart from event-loop scheduling). Cleanup
+  remains bounded on shutdown/disconnect with the deadline disabled; it never
+  starts another generation or closes a shared client.
 - **Embed-input bound** (`embed_max_input_chars` > 0, characters of the exact
   dense text): the query path checks prefix + query before any model call;
   `VllmEmbedder.dense` re-checks every remote batch, so ingest batches,
@@ -719,7 +738,11 @@ wall-clock; responses are capped at 8 MiB.
 validated server fields: search hits with `cite`, `doc_id`, `title`,
 `heading`, `page_label`, `page_start`/`page_end` (0-based inclusive; text mode
 prints 1-based `pdf_pages`), `chunk_type`, `message_ids`, `product`/`version`,
-scores and full `text`; answers keep `verification_state`,
+scores, full `text` and the optional exact-evidence `reference` verbatim;
+absent/null references from older servers normalize to null. A present non-null
+reference must be a string. Answer `script` and `script_lang` are required
+nullable fields; omitted fields or non-string verification states are the fixed
+`malformed_response` error, not a traceback. Answers keep `verification_state`,
 `citations_inferred`, `inferred_indices`, `script`, `script_lang` and
 `script_review_required` (text mode labels scripts "REVIEW REQUIRED, NOT
 VALIDATED" and inferred citations "not grounding"); streamed finals add

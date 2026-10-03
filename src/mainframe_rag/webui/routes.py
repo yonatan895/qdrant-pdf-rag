@@ -823,6 +823,8 @@ async def _console_stream_response(req, owner):
         except Exception as exc:  # noqa: BLE001 — mid-stream: error event, no final
             from mainframe_rag.agent.answer import PromptBudgetExceeded
 
+            if isinstance(exc, app_mod.RequestDeadlineExceeded):
+                owner.deadline_failed()
             app_mod._span_error(root_span, exc)
             if isinstance(exc, PromptBudgetExceeded):
                 log.warning(

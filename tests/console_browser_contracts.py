@@ -743,3 +743,153 @@ def test_text_contrast_meets_wcag_aa_in_both_themes(console, page, theme):
         """
     )
     assert failures == [], failures
+
+
+_STORE_BARRIER = """
+window.__storeAttempts = [];
+window.__holdStore = arguments[0];
+const original = navigator.locks.request.bind(navigator.locks);
+navigator.locks.request = (name, ...args) => {
+  if (name !== 'mainframe-rag-store') return original(name, ...args);
+  // Both contenders observe the same version before either mutation saves.
+  const attempt = {before: localStorage.getItem('mainframe_rag_sessions'), acquired: false};
+  window.__storeAttempts.push(attempt);
+  const callback = args.pop();
+  return original(name, ...args, async lock => {
+    attempt.acquired = true;
+    if (window.__holdStore) {
+      window.__holdStore = false;
+      await new Promise(resolve => { window.__releaseStore = resolve; });
+    }
+    return callback(lock);
+  });
+};
+"""
+
+
+@pytest.mark.parametrize("action", ["rename", "delete"])
+def test_barrier_serializes_cross_tab_mutation_against_stream_completion(console, page, action):
+    tab_a = page.handle()
+    console.llm.queue(("token", "Concurrent answer. "), ("gate", "store-race"), ("done",))
+    send(page, "Concurrent incident")
+    page.wait("return !!document.querySelector('[data-state=streaming] .md p')")
+    tab_b = page.new_tab()
+    page.switch(tab_b)
+    page.get(console.url)
+    page.wait("return document.querySelectorAll('.turn-user').length==1")
+    snapshot = page.eval("return localStorage.getItem(arguments[0])", STORE_KEY)
+    page.eval(_STORE_BARRIER, True)
+    if action == "rename":
+        page.eval("document.querySelector('.row .ren').click()")
+        page.wait("return !!document.querySelector('input.rename')")
+        page.eval("document.querySelector('input.rename').value='Renamed under barrier'")
+        page.keys("ENTER")
+    else:
+        page.eval("document.querySelector('.row .del').click()")
+    page.wait("return window.__storeAttempts.some(a=>a.acquired) && !!window.__releaseStore")
+    assert page.eval("return localStorage.getItem(arguments[0])", STORE_KEY) == snapshot
+
+    page.switch(tab_a)
+    page.eval(_STORE_BARRIER, False)
+    console.llm.release("store-race")
+    page.wait("return window.__storeAttempts.length>0")
+    attempts = page.eval("return window.__storeAttempts")
+    assert attempts[0]["before"] == snapshot and attempts[0]["acquired"] is False
+    assert page.eval("return localStorage.getItem(arguments[0])", STORE_KEY) == snapshot
+    page.switch(tab_b)
+    page.eval("window.__releaseStore()")
+    page.switch(tab_a)
+    if action == "rename":
+        wait_state(page, "complete")
+        (session,) = store(page)["sessions"].values()
+        assert session["title"] == "Renamed under barrier"
+        assert [turn["role"] for turn in session["turns"]] == ["user", "assistant"]
+        assert "Concurrent answer" in session["turns"][1]["content"]
+    else:
+        page.wait("return document.getElementById('console-status').textContent.includes('discarded')")
+        assert "Concurrent incident" not in json.dumps(store(page))
+        assert "Concurrent answer" not in json.dumps(store(page))
+    send(page, "Next ordinary question")
+    wait_state(page, "complete", 2 if action == "rename" else 1)
+
+
+def test_overlapping_cross_tab_sends_are_refused_until_first_turn_is_persisted(console, page):
+    tab_a = page.handle()
+    send(page, "Initial turn")
+    wait_state(page, "complete")
+    tab_b = page.new_tab()
+    page.switch(tab_b)
+    page.get(console.url)
+    page.wait("return document.querySelectorAll('.turn').length==2")
+    page.switch(tab_a)
+    console.llm.queue(("token", "First overlapping answer. "), ("gate", "turn-race"), ("done",))
+    send(page, "First overlapping question")
+    page.wait("return !!document.querySelector('[data-state=streaming] .md p')")
+    before = len(console.llm.requests)
+    page.switch(tab_b)
+    send(page, "Second overlapping question")
+    wait_status(page, "already generating an answer in another tab")
+    assert page.eval("var n=document.getElementById('composer-notice');return !n.hidden && n.getBoundingClientRect().height>0 && n.innerText.includes('already generating an answer in another tab')")
+    assert len(console.llm.requests) == before
+    (session,) = store(page)["sessions"].values()
+    assert [turn["content"] for turn in session["turns"] if turn["role"] == "user"] == [
+        "Initial turn", "First overlapping question",
+    ]
+    assert page.eval("return document.getElementById('message').value") == "Second overlapping question"
+    console.llm.release("turn-race")
+    page.wait("return document.querySelectorAll('.turn-assistant[data-state=complete]').length==2")
+    page.click("#send-btn")
+    wait_state(page, "complete", 3)
+    assert page.eval("return document.getElementById('composer-notice').hidden")
+    (session,) = store(page)["sessions"].values()
+    assert [turn["role"] for turn in session["turns"]] == ["user", "assistant"] * 3
+    assert [turn["content"] for turn in session["turns"] if turn["role"] == "user"] == [
+        "Initial turn", "First overlapping question", "Second overlapping question",
+    ]
+    assert "First overlapping answer" in session["turns"][3]["content"]
+    assert len(console.llm.requests) == before + 1
+
+
+def test_missing_web_locks_uses_visible_tab_memory_fallback(console, browser):
+    browser.init_script("Object.defineProperty(navigator, 'locks', {value: undefined});")
+    browser.get(console.url)
+    browser.wait("return !!document.querySelector('#messages .empty-state')")
+    assert browser.eval("return !document.getElementById('storage-notice').hidden")
+    send(browser, "Only this tab owns it")
+    wait_state(browser, "complete")
+    assert "Only this tab owns it" not in json.dumps(store(browser))
+    browser.get(console.url)
+    browser.wait("return !!document.querySelector('#messages .empty-state')")
+
+
+@pytest.mark.parametrize("fallback", ["quota", "missing_locks"])
+def test_clear_all_erases_previous_persisted_data_after_memory_fallback(console, page, fallback):
+    send(page, "Persisted before fallback")
+    wait_state(page, "complete")
+    assert "Persisted before fallback" in json.dumps(store(page))
+    if fallback == "quota":
+        page.eval("""
+        const write = Storage.prototype.setItem;
+        Storage.prototype.setItem = function(key, value) {
+          if (key === 'mainframe_rag_sessions') throw new DOMException('Quota', 'QuotaExceededError');
+          return write.call(this, key, value);
+        };
+        """)
+        send(page, "Memory after quota failure")
+        wait_state(page, "complete", 2)
+    else:
+        page.init_script("Object.defineProperty(navigator, 'locks', {value: undefined});")
+        page.get(console.url)
+        page.wait("return !!document.querySelector('#messages .empty-state')")
+    assert page.eval("return !document.getElementById('storage-notice').hidden")
+    page.click("#clear-history-btn")
+    page.click("#clear-history-btn")
+    wait_status(page, "All saved incidents were erased")
+    persisted = page.eval("return localStorage.getItem(arguments[0])", STORE_KEY)
+    assert "Persisted before fallback" not in (persisted or "")
+    assert "Memory after quota failure" not in (persisted or "")
+    page.get(console.url)
+    page.wait("return !!document.querySelector('#messages .empty-state')")
+    assert "Persisted before fallback" not in page.eval("return document.body.innerText")
+    send(page, "Next after erase")
+    wait_state(page, "complete")

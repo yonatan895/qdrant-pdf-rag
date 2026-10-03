@@ -438,6 +438,10 @@ def validate_hit(raw: Any) -> dict[str, Any]:
         hit[key] = (
             value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
         )
+    reference = raw.get("reference")
+    if reference is not None and not isinstance(reference, str):
+        raise CliError("malformed_response")
+    hit["reference"] = reference
     return hit
 
 
@@ -487,9 +491,12 @@ def validate_answer(raw: Any, *, final: bool) -> dict[str, Any]:
         and isinstance(raw.get("citations_inferred"), bool)
         and isinstance(inferred_indices, list)
         and all(_is_int(i) for i in inferred_indices)
+        and "script" in raw
+        and "script_lang" in raw
         and (raw.get("script") is None or isinstance(raw.get("script"), str))
         and (raw.get("script_lang") is None or isinstance(raw.get("script_lang"), str))
-        and raw.get("verification_state") in VERIFICATION_STATES
+        and isinstance(raw.get("verification_state"), str)
+        and raw["verification_state"] in VERIFICATION_STATES
         and isinstance(raw.get("script_review_required"), bool)
     )
     if not ok:

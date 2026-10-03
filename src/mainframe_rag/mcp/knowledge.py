@@ -18,9 +18,11 @@ whose approval is a rollout input, #373).
 
 Protocol: hand-rolled JSON-RPC 2.0 framing, like the FTP bridge in server.py;
 there is no third-party MCP SDK, hence no new dependency to pin. Methods:
-initialize, notifications/initialized, ping, tools/list, tools/call.
-Everything awaits real I/O (httpx2.AsyncClient), so a cancelled tool call
-cancels the in-flight upstream request; nothing runs in a worker thread.
+initialize, notifications/initialized, notifications/cancelled, ping,
+tools/list, tools/call. Each stdio connection or initialized HTTP session owns
+its active request IDs. Explicit cancellation reaches real upstream async I/O;
+HTTP disconnection alone is not a protocol cancellation. Shutdown closes only
+adapter-created HTTP clients; injected clients are borrowed.
 Failures surface as MCP `isError` results carrying only the service's fixed
 {code, message} envelope or a fixed adapter code, never upstream bodies.
 """
@@ -31,13 +33,15 @@ import argparse
 import asyncio
 import json
 import os
+import secrets
 import sys
+from contextlib import asynccontextmanager
 from typing import Any, Protocol
 from urllib.parse import quote
 
 import httpx2
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 PROTOCOL_VERSION = "2025-03-26"
 SUPPORTED_PROTOCOLS = ("2024-11-05", "2025-03-26", "2025-06-18")
@@ -68,7 +72,11 @@ class HttpKnowledgeBackend:
     injectable so tests can drive the real ASGI app without a socket."""
 
     def __init__(self, base_url: str, timeout_s: float = 15.0, client: Any = None) -> None:
-        self._client = client or httpx2.AsyncClient(base_url=base_url, timeout=timeout_s)
+        self._owns_client = client is None
+        self._closed = False
+        self._client = client if client is not None else httpx2.AsyncClient(
+            base_url=base_url, timeout=timeout_s
+        )
 
     async def _json(self, response: Any) -> tuple[int, dict]:
         if len(response.content) > MAX_RESPONSE_BYTES:
@@ -95,7 +103,9 @@ class HttpKnowledgeBackend:
         return await self._json(await self._client.get(url, params=params))
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        if self._owns_client and not self._closed:
+            self._closed = True
+            await self._client.aclose()
 
 
 TOOL_SCHEMAS: dict[str, dict] = {
@@ -204,7 +214,7 @@ async def handle_request(message: Any, backend: KnowledgeBackend) -> dict | None
         return _error(msg_id, INVALID_REQUEST, "missing method")
     if not isinstance(params, dict):
         return _error(msg_id, INVALID_PARAMS, "params must be an object")
-    if method == "notifications/initialized":
+    if method in ("notifications/initialized", "notifications/cancelled"):
         return None
     if method == "initialize":
         requested = params.get("protocolVersion", PROTOCOL_VERSION)
@@ -229,12 +239,69 @@ async def handle_request(message: Any, backend: KnowledgeBackend) -> dict | None
     return _error(msg_id, METHOD_NOT_FOUND, f"unsupported method: {method}")
 
 
+class RequestDispatcher:
+    """Active cancellable requests for exactly one connection/session.
+
+    Completion callbacks remove only their own task, including ID reuse races.
+    HTTP callers await shielded work: losing an HTTP connection is not an MCP
+    cancellation notification. Shutdown and explicit cancellation own cleanup.
+    """
+
+    def __init__(self, backend: KnowledgeBackend) -> None:
+        self.backend = backend
+        self.tasks: dict[str | int, asyncio.Task] = {}
+
+    async def dispatch(self, message: Any) -> dict | None:
+        if isinstance(message, dict) and message.get("method") == "notifications/cancelled":
+            params = message.get("params")
+            request_id = params.get("requestId") if isinstance(params, dict) else None
+            if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
+                task = self.tasks.get(request_id)
+                if task is not None:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            return None
+        if not isinstance(message, dict) or message.get("method") != "tools/call":
+            return await handle_request(message, self.backend)
+        request_id = message.get("id")
+        if not isinstance(request_id, (str, int)) or isinstance(request_id, bool):
+            return _error(None, INVALID_REQUEST, "request id must be a string or integer")
+        if request_id in self.tasks:
+            return _error(request_id, INVALID_REQUEST, "request id is already active")
+        task = asyncio.create_task(handle_request(message, self.backend))
+        self.tasks[request_id] = task
+
+        def discard(completed):
+            if self.tasks.get(request_id) is completed:
+                self.tasks.pop(request_id)
+            # Detached HTTP work still has an exception owner.
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(discard)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            return None  # explicit notification: no response for cancelled work
+
+    async def aclose(self) -> None:
+        tasks = list(self.tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def serve_stdio(backend: KnowledgeBackend) -> None:
     """Newline-delimited JSON-RPC; stdout carries replies only. Each message is
     handled as its own task so a slow read never blocks ping/other calls, and
     stdin EOF cancels whatever is still in flight."""
     loop = asyncio.get_running_loop()
+    stdin, stdout = sys.stdin, sys.stdout
     tasks: set[asyncio.Task] = set()
+    dispatcher = RequestDispatcher(backend)
 
     async def one(raw: str) -> None:
         try:
@@ -243,18 +310,18 @@ async def serve_stdio(backend: KnowledgeBackend) -> None:
             reply: dict | None = _error(None, PARSE_ERROR, "invalid JSON")
         else:
             try:
-                reply = await handle_request(message, backend)
+                reply = await dispatcher.dispatch(message)
             except Exception as exc:  # noqa: BLE001 — framing must never die
                 print(f"mcp knowledge error: {type(exc).__name__}", file=sys.stderr)
                 reply = _error(message.get("id") if isinstance(message, dict) else None,
                                -32000, "internal error")
         if reply is not None:
-            sys.stdout.write(json.dumps(reply) + "\n")
-            sys.stdout.flush()
+            stdout.write(json.dumps(reply) + "\n")
+            stdout.flush()
 
     try:
         while True:
-            line = await loop.run_in_executor(None, sys.stdin.readline)
+            line = await loop.run_in_executor(None, stdin.readline)
             if not line:
                 break
             if line.strip():
@@ -265,25 +332,74 @@ async def serve_stdio(backend: KnowledgeBackend) -> None:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await dispatcher.aclose()
+        if isinstance(backend, HttpKnowledgeBackend):
+            await backend.aclose()
 
 
 def create_app(backend: KnowledgeBackend) -> FastAPI:
-    """Unary JSON-RPC POSTs at /mcp. A client disconnect cancels the handler
-    task and with it the in-flight upstream request."""
-    app = FastAPI(title="mainframe-knowledge", version=SERVER_INFO["version"])
+    """Unary JSON-RPC POSTs. Initialization issues a session ID for explicit
+    cancellation; legacy stateless POSTs have no cross-request cancellation.
+    Disconnect alone does not cancel upstream work. No resumption is offered.
+    """
+    sessions: dict[str, RequestDispatcher] = {}
+    stateless: set[RequestDispatcher] = set()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        try:
+            yield
+        finally:
+            for dispatcher in [*sessions.values(), *stateless]:
+                await dispatcher.aclose()
+            sessions.clear()
+            stateless.clear()
+            if isinstance(backend, HttpKnowledgeBackend):
+                await backend.aclose()
+
+    app = FastAPI(title="mainframe-knowledge", version=SERVER_INFO["version"], lifespan=lifespan)
 
     @app.post("/mcp")
-    async def mcp_endpoint(request: Request) -> JSONResponse:
+    async def mcp_endpoint(request: Request) -> Response:
         try:
             message = await request.json()
         except ValueError:
             return JSONResponse(_error(None, PARSE_ERROR, "invalid JSON"), status_code=400)
+        session_id = request.headers.get("mcp-session-id")
+        initialize = isinstance(message, dict) and message.get("method") == "initialize"
+        if session_id is not None and session_id not in sessions:
+            return Response(status_code=404)
+        dispatcher = sessions[session_id] if session_id else RequestDispatcher(backend)
+        if session_id is None:
+            stateless.add(dispatcher)
         try:
-            reply = await handle_request(message, backend)
+            reply = await dispatcher.dispatch(message)
         except Exception:  # noqa: BLE001
             reply = _error(message.get("id") if isinstance(message, dict) else None,
                            -32000, "internal error")
-        return JSONResponse({}, status_code=202) if reply is None else JSONResponse(reply)
+        finally:
+            if session_id is None and not dispatcher.tasks:
+                stateless.discard(dispatcher)
+            elif session_id is None:
+                def discard_stateless(_):
+                    stateless.discard(dispatcher)
+
+                for task in dispatcher.tasks.values():
+                    task.add_done_callback(discard_stateless)
+        if initialize and session_id is None and reply is not None and "result" in reply:
+            session_id = secrets.token_urlsafe(32)
+            sessions[session_id] = dispatcher
+        headers = {"Mcp-Session-Id": session_id} if initialize and session_id else None
+        return Response(status_code=202) if reply is None else JSONResponse(reply, headers=headers)
+
+    @app.delete("/mcp")
+    async def end_session(request: Request) -> Response:
+        session_id = request.headers.get("mcp-session-id")
+        dispatcher = sessions.pop(session_id, None) if session_id else None
+        if dispatcher is None:
+            return Response(status_code=404)
+        await dispatcher.aclose()
+        return Response(status_code=204)
 
     return app
 

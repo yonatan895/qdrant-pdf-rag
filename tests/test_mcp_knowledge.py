@@ -235,3 +235,178 @@ def test_adapter_has_no_storage_model_or_service_internals_to_bypass_with():
                  "mainframe_rag.retrieve", "mainframe_rag.config", "mainframe_rag.ports")
     assert not [m for m in imported if m.startswith(forbidden)], imported
     assert {t for t in knowledge.TOOL_SCHEMAS} == {"knowledge_search", "evidence_read"}
+
+
+def _tool_message(request_id=7, reference="a"):
+    return {"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": {
+        "name": "evidence_read", "arguments": {"reference": reference},
+    }}
+
+
+def _cancel_message(request_id=7):
+    return {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {
+        "requestId": request_id,
+    }}
+
+
+class _CancellableClient:
+    def __init__(self):
+        self.entered = {key: asyncio.Event() for key in ("a", "b")}
+        self.released = {key: asyncio.Event() for key in ("a", "b")}
+        self.gates = {key: asyncio.Event() for key in ("a", "b")}
+        self.calls = {key: 0 for key in ("a", "b")}
+        self.closes = 0
+
+    async def get(self, url, **kw):
+        key = url.rsplit("/", 1)[1]
+        self.calls[key] += 1
+        if self.calls[key] == 1:
+            self.entered[key].set()
+            try:
+                await self.gates[key].wait()
+            finally:
+                self.released[key].set()
+        return SimpleNamespace(status_code=200, content=b'{"ok":true}', json=lambda: {"ok": True})
+
+    async def aclose(self):
+        self.closes += 1
+
+
+@pytest.mark.anyio
+async def test_http_notification_cancels_only_its_session_and_next_call_succeeds():
+    upstream = _CancellableClient()
+    backend = HttpKnowledgeBackend("http://agent", client=upstream)
+    app = knowledge.create_app(backend)
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://mcp") as client,
+    ):
+        async def initialize():
+            reply = await client.post("/mcp", json={"id": 1, "method": "initialize"})
+            return {"Mcp-Session-Id": reply.headers["mcp-session-id"]}
+
+        a, b = await initialize(), await initialize()
+        assert a != b
+        first = asyncio.create_task(client.post("/mcp", headers=a, json=_tool_message(reference="a")))
+        second = asyncio.create_task(client.post("/mcp", headers=b, json=_tool_message(reference="b")))
+        await asyncio.wait_for(upstream.entered["a"].wait(), 2)
+        await asyncio.wait_for(upstream.entered["b"].wait(), 2)
+        unknown = await client.post("/mcp", headers=a, json=_cancel_message("unknown"))
+        assert unknown.status_code == 202 and unknown.content == b""
+        assert not first.done() and not second.done()
+        cancel = await client.post("/mcp", headers=a, json=_cancel_message())
+        assert cancel.status_code == 202 and cancel.content == b""
+        assert upstream.released["a"].is_set() and not upstream.released["b"].is_set()
+        cancelled = await first
+        assert cancelled.status_code == 202 and cancelled.content == b""
+        assert not second.done()
+        # A completed ID and an unknown ID are harmless; ID reuse works.
+        assert (await client.post("/mcp", headers=a, json=_cancel_message())).status_code == 202
+        recovered = await client.post("/mcp", headers=a, json=_tool_message(reference="a"))
+        assert recovered.status_code == 200 and _payload_of(recovered.json()) == (False, {"ok": True})
+        upstream.gates["b"].set()
+        assert (await second).status_code == 200
+        assert (await client.delete("/mcp", headers=a)).status_code == 204
+        assert (await client.post("/mcp", headers=a, json=_tool_message())).status_code == 404
+    assert upstream.closes == 0, "the HTTP client was borrowed"
+
+
+@pytest.mark.anyio
+async def test_http_waiter_cancellation_is_not_a_protocol_cancellation():
+    upstream = _CancellableClient()
+    app = knowledge.create_app(HttpKnowledgeBackend("http://agent", client=upstream))
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://mcp") as client,
+    ):
+        init = await client.post("/mcp", json={"id": 1, "method": "initialize"})
+        headers = {"Mcp-Session-Id": init.headers["mcp-session-id"]}
+        call = asyncio.create_task(client.post("/mcp", headers=headers, json=_tool_message()))
+        await asyncio.wait_for(upstream.entered["a"].wait(), 2)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        assert not upstream.released["a"].is_set()
+        await client.post("/mcp", headers=headers, json=_cancel_message())
+        assert upstream.released["a"].is_set()
+        assert (await client.post("/mcp", headers=headers, json=_tool_message())).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_stdio_notification_dispatch_and_eof_close_owned_client(monkeypatch):
+    import io
+    import queue
+
+    upstream = _CancellableClient()
+    monkeypatch.setattr(knowledge.httpx2, "AsyncClient", lambda **kw: upstream)
+    backend = HttpKnowledgeBackend("http://agent")
+    lines = queue.Queue()
+    output = io.StringIO()
+
+    class Input:
+        def readline(self):
+            return lines.get(timeout=5)
+
+    def send(message):
+        lines.put(json.dumps(message) + "\n")
+
+    monkeypatch.setattr(knowledge.sys, "stdin", Input())
+    monkeypatch.setattr(knowledge.sys, "stdout", output)
+    owner = asyncio.create_task(knowledge.serve_stdio(backend))
+    try:
+        send(_tool_message())
+        await asyncio.wait_for(upstream.entered["a"].wait(), 2)
+        send(_cancel_message("unknown"))
+        send(_cancel_message())
+        await asyncio.wait_for(upstream.released["a"].wait(), 2)
+        send(_cancel_message())  # completed/unknown IDs produce no reply
+        send(_tool_message())
+        async with asyncio.timeout(2):
+            while not output.getvalue():
+                await asyncio.sleep(0.005)
+        replies = [json.loads(line) for line in output.getvalue().splitlines()]
+        assert len(replies) == 1 and replies[0]["id"] == 7
+        assert _payload_of(replies[0]) == (False, {"ok": True})
+        send(_tool_message(8, "b"))
+        await asyncio.wait_for(upstream.entered["b"].wait(), 2)
+    finally:
+        lines.put("")
+        await asyncio.wait_for(owner, 3)
+    assert upstream.released["b"].is_set() and upstream.closes == 1
+    await backend.aclose()
+    assert upstream.closes == 1
+
+
+def test_http_shutdown_closes_created_client_once_and_leaves_borrowed_client_open(monkeypatch):
+    upstream = _RecordingClient()
+    upstream.closes = 0
+
+    async def close():
+        upstream.closes += 1
+
+    upstream.aclose = close
+    monkeypatch.setattr(knowledge.httpx2, "AsyncClient", lambda **kw: upstream)
+    with TestClient(knowledge.create_app(HttpKnowledgeBackend("http://agent"))):
+        pass
+    assert upstream.closes == 1
+    with TestClient(knowledge.create_app(HttpKnowledgeBackend("http://agent", client=upstream))):
+        pass
+    assert upstream.closes == 1
+
+
+@pytest.mark.anyio
+async def test_http_shutdown_cancels_pending_work_before_closing_owned_client(monkeypatch):
+    client_type = httpx2.AsyncClient
+    upstream = _CancellableClient()
+    monkeypatch.setattr(knowledge.httpx2, "AsyncClient", lambda **kw: upstream)
+    app = knowledge.create_app(HttpKnowledgeBackend("http://agent"))
+    client = client_type(transport=httpx2.ASGITransport(app=app), base_url="http://mcp")
+    async with app.router.lifespan_context(app):
+        init = await client.post("/mcp", json={"id": 1, "method": "initialize"})
+        pending = asyncio.create_task(client.post(
+            "/mcp", headers={"Mcp-Session-Id": init.headers["mcp-session-id"]}, json=_tool_message(),
+        ))
+        await asyncio.wait_for(upstream.entered["a"].wait(), 2)
+    assert upstream.released["a"].is_set() and upstream.closes == 1
+    assert (await pending).status_code == 202
+    await client.aclose()

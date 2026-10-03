@@ -33,7 +33,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mainframe_rag.agent.admission import (
     AdmissionController,
@@ -181,6 +181,8 @@ class _RequestSpan:
         # Admission slot and total deadline (issue #374), set by _admit.
         self.ticket: AdmissionTicket | None = None
         self.deadline_s: float | None = None
+        self.deadline_terminal = False
+        self.terminal_delivery_until: float | None = None
 
     def remaining(self) -> float | None:
         """Seconds left of the total request deadline (None = no deadline;
@@ -188,6 +190,11 @@ class _RequestSpan:
         if self.deadline_s is None:
             return None
         return self.deadline_s - (time.monotonic() - self.started)
+
+    def deadline_failed(self):
+        self.deadline_terminal = True
+        if self.terminal_delivery_until is None:
+            self.terminal_delivery_until = time.monotonic() + 1.0
 
     def end(self):
         if not self.ended:
@@ -232,7 +239,7 @@ class _RequestSpan:
 
 
 class _SpanStream:
-    """Finalize the root and owned iterator on exhaustion, cancellation or close."""
+    """Own the source until response completion, cancellation or close."""
 
     def __init__(self, source, owner):
         self.source = source
@@ -248,6 +255,11 @@ class _SpanStream:
         with use_span(self.owner.span, end_on_exit=False):
             try:
                 return await self.source.__anext__()
+            except StopAsyncIteration:
+                # The response still owns its closing ASGI body send.
+                # Its finally closes the source/span/ticket after delivery,
+                # timeout or cancellation of that final send.
+                raise
             except BaseException:
                 await self.aclose()
                 raise
@@ -257,7 +269,7 @@ class _SpanStream:
             return
         self.closed = True
         with use_span(self.owner.span, end_on_exit=False):
-            with anyio.CancelScope(shield=True):
+            with anyio.move_on_after(1.0, shield=True):
                 try:
                     await self.source.aclose()
                 finally:
@@ -269,8 +281,35 @@ class _SpanStream:
 
 class _RequestStreamingResponse(StreamingResponse):
     async def stream_response(self, send):
+        owner = self.body_iterator.owner
+
+        async def bounded_send(message):
+            budget = owner.remaining()
+            if budget is None:
+                return await send(message)
+            # A producer deadline may already have made a terminal error.
+            # Give that frame a bounded delivery opportunity; a stalled
+            # receiver cannot hold admission beyond it.
+            if owner.deadline_terminal:
+                assert owner.terminal_delivery_until is not None
+                budget = owner.terminal_delivery_until - time.monotonic()
+            try:
+                async with asyncio.timeout(budget) as timeout:
+                    await send(message)
+            except TimeoutError as exc:
+                if timeout.expired():
+                    raise RequestDeadlineExceeded from exc
+                raise
+
         try:
-            await super().stream_response(send)
+            await super().stream_response(bounded_send)
+        except RequestDeadlineExceeded as exc:
+            if not getattr(owner.request.state, "red_recorded", False):
+                with use_span(owner.span, end_on_exit=False):
+                    _record_stream_failure(
+                        owner, owner.endpoint, "stream_delivery", owner.query_class,
+                        owner.hits or 0, exc,
+                    )
         finally:
             await self.body_iterator.aclose()
 
@@ -389,8 +428,8 @@ async def _admit(owner: _RequestSpan) -> None:
     gate or model work. Takes a slot (queueing within the bounded queue and
     never beyond the remaining deadline) or refuses with the stable 503
     `overloaded` + Retry-After. The slot is released exactly once by
-    `owner.end()` — after the response body for JSON, when the stream closes
-    for SSE. With no limit selected this admits immediately."""
+    `owner.end()` — when the handler returns for buffered responses, when
+    the response closes for SSE. With no limit selected this admits immediately."""
     request_id = owner.request.state.request_id
     owner.deadline_s = settings.request_deadline_s or None
     try:
@@ -900,6 +939,15 @@ class SearchResponse(BaseModel):
     query_kind: str
     hits: list[EvidenceSearchHit]
 
+    @field_validator("hits", mode="before")
+    @classmethod
+    def accept_search_hits(cls, hits):
+        """Existing callers can supply the retrieval owner's SearchHit.
+        Preserve additive evidence fields when already present."""
+        if isinstance(hits, (list, tuple)):
+            return [hit.model_dump() if isinstance(hit, SearchHit) else hit for hit in hits]
+        return hits
+
 
 class EvidenceLocation(BaseModel):
     """Stored chunk page span: one-based physical pages, inclusive. Not a
@@ -1054,15 +1102,23 @@ class ErrorEnvelope(BaseModel):
     message: str
 
 
-@app.middleware("http")
-async def attach_request_id(request: Request, call_next):
-    """One request id per request, shared by every log line including the
-    unhandled-error handler (round-7 review). Also stamps the arrival time so
-    error handlers (which have no endpoint-local `started`) can still record
-    RED durations."""
-    request.state.request_id = uuid.uuid4().hex[:12]
-    request.state.started = time.monotonic()
-    return await call_next(request)
+class RequestIdentityMiddleware:
+    """Attach correlation state without interposing a response-body queue.
+    The stream lifetime owner must await the actual ASGI send for its deadline
+    and cleanup to include receiver backpressure."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            state = scope.setdefault("state", {})
+            state["request_id"] = uuid.uuid4().hex[:12]
+            state["started"] = time.monotonic()
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(RequestIdentityMiddleware)
 
 
 def _record_handler_error(request: Request, code: str) -> None:
@@ -1437,18 +1493,27 @@ async def v1_evidence(
         kind=SpanKind.SERVER,
         attributes={"http.request_id": request_id},
     )
-    with _request_span(request, root_span, "evidence", started):
-        try:
-            evidence = await evidence_service().read_evidence(
-                TrustedCaller(), reference, max_bytes=max_bytes, product=product, version=version,
-            )
-        except EvidenceFailure as exc:
-            status, code, message = PUBLIC_FAILURES[exc.kind]
-            log.warning(json_log(request_id, "evidence", outcome=code, reason=exc.reason))
-            _record_endpoint(request, "evidence", code, started)
-            raise AppError(status, code, message) from exc
-        log.info(json_log(request_id, "evidence", outcome="ok", text_bytes=evidence.text_bytes))
-        _record_endpoint(request, "evidence", "ok", started)
+    with _request_span(request, root_span, "evidence", started) as owner:
+        await _admit(owner)
+        return await _within_deadline(
+            owner, _evidence_response(owner, reference, max_bytes, product, version)
+        )
+
+
+async def _evidence_response(owner, reference, max_bytes, product, version):
+    request = owner.request
+    request_id, started = owner.request.state.request_id, owner.started
+    try:
+        evidence = await evidence_service().read_evidence(
+            TrustedCaller(), reference, max_bytes=max_bytes, product=product, version=version,
+        )
+    except EvidenceFailure as exc:
+        status, code, message = PUBLIC_FAILURES[exc.kind]
+        log.warning(json_log(request_id, "evidence", outcome=code, reason=exc.reason))
+        _record_endpoint(request, "evidence", code, started)
+        raise AppError(status, code, message) from exc
+    log.info(json_log(request_id, "evidence", outcome="ok", text_bytes=evidence.text_bytes))
+    _record_endpoint(request, "evidence", "ok", started)
     return EvidenceResponse(
         request_id=request_id,
         reference=evidence.reference,
@@ -1476,7 +1541,6 @@ async def v1_evidence(
             printed_label=evidence.printed_label,
         ),
     )
-
 
 # Orchestration shared by /v1/answer and /v1/chat (issue #583). Each helper
 # owns one step both routes perform identically; the endpoint label and the
@@ -1657,6 +1721,8 @@ def _record_stream_failure(
     _span_error(owner.span, exc)
     budget = isinstance(exc, PromptBudgetExceeded)
     expired = isinstance(exc, RequestDeadlineExceeded)
+    if expired:
+        owner.deadline_failed()
     if isinstance(exc, TruncatedStreamError):
         log.warning(
             json_log(

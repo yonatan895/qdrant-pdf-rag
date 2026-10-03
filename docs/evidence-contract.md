@@ -281,7 +281,7 @@ UUID5 chunk key or `chunk_type` changes. Decoders reject every other prefix.
 | Location | The stored chunk page span only (`physical_page_end` is null for points lacking it; `printed_label` is the stored display string, possibly a range, null if empty). There is **no** byte-to-page map and the response does not imply one. |
 | Issuance | Search mints a reference only for hits served from a generation whose control record decodes to a build binding for the configured logical corpus and whose phase is published/retained. Legacy/in-place/unbound generations, sealed-unpublished builds and payloads that cannot form a complete envelope get `reference: null`; nothing is invented and search never fails because minting failed. |
 | Read | Parse; resolve the build only through its immutable per-build data/control aliases (never the ordinary serving alias, never a name from the request); require the paired control alias, the control record's build UUID/physical/logical corpus to match; retrieve the one point; derive scope; **authorize**; apply optional narrowing `product`/`version`; rebuild the envelope and compare digests; enforce the budget; re-ask the authority's policy version before returning. No content or authorization cache exists. Only `get_aliases`, `collection_exists` and `retrieve` are called, so the read-only serving credential suffices; no model, embed, rerank or approximate search runs. |
-| Bounds | `max_bytes` (query, 1..1 MiB) is clamped by `EVIDENCE_MAX_BYTES` (default 65536); a whole chunk over the budget is `413`, never a prefix or single span. `EVIDENCE_TIMEOUT_S` (default 10) bounds the read; every wait is a real async storage await, so cancellation propagates to the in-flight call. |
+| Bounds | `max_bytes` (query, 1..1 MiB) is clamped by `EVIDENCE_MAX_BYTES` (default 65536); a whole chunk over the budget is `413`, never a prefix or single span. `EVIDENCE_TIMEOUT_S` (default 10) bounds the read; HTTP exact reads also share the agent's configured admission pool and request deadline with search/answer/chat/UI. Every storage wait is a real async await, so cancellation propagates to the in-flight call; no transport adds another queue. |
 | Access | `EvidenceAccess` is the port (`authorize`, `current_version`). The deployed object is `SharedCorpusAccess`, the explicit shared-corpus mode that matches today's search exposure; #373 replaces it. The trusted caller is built by the transport, never from request fields. A denied caller always gets the unavailable outcome, decided before digest/size/corruption outcomes can be observed. |
 
 Public outcomes (the mapping table above, as implemented). Implemented:
@@ -319,6 +319,23 @@ entitlement or reference code, no forwarded incoming credentials and no SDK
 dependency (hand-rolled JSON-RPC like the FTP bridge). It speaks as its own
 deployment identity to `KNOWLEDGE_API_BASE_URL`; approving that trusted-caller
 boundary and hosting it (Helm/sidecar) are rollout decisions, not made here.
+
+MCP cancellation is initiated by `notifications/cancelled` and looks up only
+active tool calls in the same stdio connection or initialized HTTP session.
+Unknown/completed IDs are ignored; initialization cannot be cancelled. HTTP
+initialization returns an opaque `Mcp-Session-Id`; send it on subsequent POSTs
+and DELETE `/mcp` to close that session. Distinct sessions may reuse request IDs.
+Legacy unary POSTs without initialization still work, with no cross-request
+cancellation. Accepted notifications and cancelled HTTP calls return empty 202
+responses, with no JSON-RPC result for cancelled work. HTTP connection loss
+alone leaves session work running until its service timeout, explicit
+cancellation, session deletion or app shutdown; there is no response resumption.
+This follows the distinction in the
+[MCP transport specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
+and the optional
+[cancellation protocol](https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/cancellation).
+Stdio EOF/app shutdown cancel remaining tasks and close the adapter-created
+HTTP client once; injected HTTP clients remain borrowed.
 
 **Evidence:** `tests/test_evidence_service.py` (literal envelope/reference
 bytes, every-field sensitivity, malformed references, alias swap/repair with
