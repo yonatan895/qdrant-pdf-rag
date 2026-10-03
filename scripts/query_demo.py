@@ -354,6 +354,24 @@ def answer_export_payload(
     }
 
 
+def _select_served_model(payload: dict[str, Any], requested: str | None, default: str | None) -> str | None:
+    available = [
+        model["id"]
+        for model in payload.get("data", [])
+        if isinstance(model, dict) and model.get("id")
+    ]
+    current = requested or default
+    if current and current in available:
+        return current
+    if current:
+        for model in available:
+            if model.endswith(current) or current.endswith(model) or model.split("/")[-1] == current.split("/")[-1]:
+                return model
+        if requested:
+            return requested
+    return available[0] if len(available) == 1 else None
+
+
 def resolve_runtime_settings(
     collection: str | None = None,
     embed_url: str | None = None,
@@ -400,28 +418,7 @@ def resolve_runtime_settings(
                 headers=bearer_auth_headers(settings.embed_api_key),
             )
             if m_resp.status_code == 200:
-                raw_json = m_resp.json()
-                avail = [
-                    m.get("id")
-                    for m in raw_json.get("data", [])
-                    if isinstance(m, dict) and m.get("id")
-                ]
-                cur = embed_model or settings.embed_model
-                chosen_embed_model = None
-                if cur and cur in avail:
-                    chosen_embed_model = cur
-                elif cur:
-                    for m in avail:
-                        if m.endswith(cur) or cur.endswith(m) or m.split("/")[-1] == cur.split("/")[-1]:
-                            chosen_embed_model = m
-                            break
-                    else:
-                        if embed_model:
-                            chosen_embed_model = embed_model
-                        elif len(avail) == 1:
-                            chosen_embed_model = avail[0]
-                elif len(avail) == 1:
-                    chosen_embed_model = avail[0]
+                chosen_embed_model = _select_served_model(m_resp.json(), embed_model, settings.embed_model)
 
                 resolved_dim = dense_dim or settings.dense_dim
                 server_dim: int | None = None
@@ -508,28 +505,7 @@ def resolve_runtime_settings(
             headers=bearer_auth_headers(settings.llm_api_key),
         )
         if m_resp.status_code == 200:
-            raw_json = m_resp.json()
-            avail = [
-                m.get("id")
-                for m in raw_json.get("data", [])
-                if isinstance(m, dict) and m.get("id")
-            ]
-            cur = model or settings.llm_model_reasoning
-            chosen_llm_model = None
-            if cur and cur in avail:
-                chosen_llm_model = cur
-            elif cur:
-                for m in avail:
-                    if m.endswith(cur) or cur.endswith(m) or m.split("/")[-1] == cur.split("/")[-1]:
-                        chosen_llm_model = m
-                        break
-                else:
-                    if model:
-                        chosen_llm_model = model
-                    elif len(avail) == 1:
-                        chosen_llm_model = avail[0]
-            elif len(avail) == 1:
-                chosen_llm_model = avail[0]
+            chosen_llm_model = _select_served_model(m_resp.json(), model, settings.llm_model_reasoning)
 
             updates["llm_base_url"] = target_llm_url
             if chosen_llm_model:
