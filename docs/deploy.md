@@ -140,6 +140,29 @@ remain unchanged. Route configuration is not needed to render an ingest Job.
 
 Compatibility and lifecycle decisions under #448:
 
+- Console Route reconciliation (issue #373). `AGENT_ROUTE` is a strict boolean
+  (`AGENT_ROUTE must be true/false`). `validate.sh` and `deploy.sh` share one
+  preflight (`common.sh`, `check_route_exposure.py`): with `AGENT_ROUTE=true` the
+  `images.txt` oauth-proxy pin must be recorded, match the chart's
+  `images.oauthProxy` repository/tag and, when a packed MANIFEST is reachable,
+  equal its `oauth_proxy` member; `rag-agent-oauth-cookie` must carry a nonempty
+  `cookie-secret` key (its byte length is enforced by oauth-proxy at start; the
+  rollout wait surfaces a rejected value) and the namespace service CA must be a
+  PEM bundle. Every Route in the namespace is listed before mutation (a deployer
+  that cannot list Routes fails closed): any Route other than the owned
+  `rag-agent` Route whose backend or `alternateBackends` is the agent or a
+  Qdrant Service is refused in both Route-on and Route-off, and the owned Route
+  with `alternateBackends` is refused when Route-on. After the application
+  release, deploy re-reads the live Route and requires Service `rag-agent`,
+  `targetPort: oauth`, `reencrypt`, `insecureEdgeTerminationPolicy: Redirect`,
+  the generated destination CA and no alternates; otherwise it deletes the
+  Route (never leaving an unauthenticated console) and fails. With Route-off an
+  existing owned Route is deleted before the first release mutation, not after
+  the rollout wait. Not covered here (site evidence, see the issue): the OAuth
+  login itself, who is authorized (`--email-domain=*` admits any authenticated
+  cluster user; deploy prints a notice) and the unauthenticated 8080 Service
+  port.
+
 - `check_app_ownership.py` accepts only the fixed first-party resource inventory
   in the selected namespace. Existing unmanaged Kustomize resources can be
   adopted with Helm's `--take-ownership`; another release, namespace, deployment

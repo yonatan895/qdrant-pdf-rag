@@ -32,6 +32,7 @@ check_secret_name "${PULL_SECRET:-}" PULL_SECRET
 check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
 resolve_otel_endpoint
 resolve_bundle_choices
+resolve_agent_route
 
 case "${RERANK_ENDPOINT_ORDER:-score_first}" in
     score_first|rerank_first) ;;
@@ -69,6 +70,11 @@ fi
 if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
     echo "    GATEWAY_API_KEY_SECRET: $GATEWAY_API_KEY_SECRET"
 fi
+if [ "$AGENT_ROUTE" = "true" ]; then
+    echo "    Console Route:     OAuth reencrypt (AGENT_ROUTE=true)"
+else
+    echo "    Console Route:     off (ClusterIP only)"
+fi
 
 echo "==> 2. Validating required CLI tools"
 command -v skopeo >/dev/null 2>&1 || die "skopeo is required on the air-gap bastion"
@@ -94,6 +100,15 @@ fi
 # reachable (issue #414): overriding IMAGE_SHA alone never changes which
 # code executes. No MANIFEST means connected-development notice path above.
 check_checkout_sha
+
+# Issue #373: the console Route is only ever offered behind the oauth-proxy
+# sidecar. Its pin must be recorded, consistent with the chart and with the
+# packed bundle before the Route can be selected. Static: runs in dry-run.
+if [ "$AGENT_ROUTE" = "true" ]; then
+    require_oauth_pin
+    echo "    oauth-proxy pin recorded; matches the chart${MANIFEST:+ and the packed bundle}"
+    echo "    Notice: the console Route authenticates any OpenShift user (oauth-proxy --email-domain=*, no SAR); the cohort restriction is a site decision (issue #373)"
+fi
 
 CHART=$(ls charts/qdrant-*.tgz 2>/dev/null | head -1 || true)
 [ -n "$CHART" ] || die "vendored chart missing (charts/qdrant-*.tgz)"
@@ -188,6 +203,26 @@ if [ -n "${GATEWAY_API_KEY_SECRET:-}" ]; then
 fi
 
 check_gateway_ca
+
+echo "==> 4b. Console Route prerequisites and exposure"
+if [ "$AGENT_ROUTE" = "true" ]; then
+    probe $KC -n "$NAMESPACE" get secret rag-agent-oauth-cookie
+    case "$PROBE" in
+        ok) require_oauth_cookie_secret
+            echo "    Cookie Secret 'rag-agent-oauth-cookie' has a nonempty cookie-secret key" ;;
+        notfound) die "Secret 'rag-agent-oauth-cookie' not found in namespace '$NAMESPACE' — create it before AGENT_ROUTE=true (docs/install_and_ops.md 4.4.2)" ;;
+        forbidden) die "this identity may not read Secret 'rag-agent-oauth-cookie' in namespace '$NAMESPACE' (Forbidden); grant namespace-scoped get on secrets, not cluster-admin" ;;
+        *) die "cannot read Secret 'rag-agent-oauth-cookie' in namespace '$NAMESPACE' (unexpected client error)" ;;
+    esac
+    _ca_tmp=$(mktemp)
+    trap 'rm -f "$_ca_tmp"' EXIT
+    fetch_route_destination_ca "$_ca_tmp"
+    echo "    Namespace service CA readable (PEM bundle)"
+    check_route_exposure enabled
+else
+    check_route_exposure disabled
+fi
+echo "    No Route other than the OAuth-protected rag-agent Route reaches the agent or Qdrant Services"
 
 echo "==> 5. Checking OpenShift Security Context Constraints (SCC)"
 # A failed `get scc` is evidence of a non-OpenShift cluster only when the API

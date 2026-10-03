@@ -926,8 +926,12 @@ OAuth-protected; enable it with `AGENT_ROUTE=true`:
    probes. In-cluster tools keep using the ClusterIP 8080 port (unauthenticated
    by design, no Route).
 
-`sh scripts/tools/run-task.sh airgap:validate` checks none of these prerequisites — a missing digest or
-Secret fails at deploy time.
+`sh scripts/tools/run-task.sh airgap:validate` with `AGENT_ROUTE=true` checks the
+recorded and chart/bundle-consistent oauth-proxy pin (static, also in dry-run),
+the cookie Secret key, the namespace service CA and that no other Route exposes
+the agent or Qdrant Services (live). `deploy.sh` repeats these checks, verifies
+the live Route after the release and deletes it if it is not the OAuth reencrypt
+contract (details: `docs/deploy.md`).
 
 > **Connected-host follow-up before an air-gap cut:** a `requirements.lock.txt`
 > bump (e.g. the `jinja2` + `python-multipart` pins the console needs) requires

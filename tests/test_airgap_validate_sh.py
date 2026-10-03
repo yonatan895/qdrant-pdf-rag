@@ -1164,3 +1164,193 @@ def test_validate_live_scc_failure_is_not_standard_kubernetes(tree, text):
     assert r.returncode == 0, r.stderr
     assert "Standard Kubernetes" not in r.stdout
     assert "cluster type is NOT determined" in r.stdout
+
+
+# ----------------------------------------------------- console Route (#373)
+
+GOOD_PIN = "sha256:" + "b" * 64
+OAUTH_REF = f"registry.redhat.io/openshift4/ose-oauth-proxy@{GOOD_PIN}"
+SERVICE_CA = "-----BEGIN CERTIFICATE-----\nU0VSVklDRS1DQQ==\n-----END CERTIFICATE-----"
+
+ROUTE_KUBECTL = """#!/bin/sh
+case "$*" in
+  'api-resources -o name') [ "${NO_ROUTE_API:-}" = 1 ] || echo routes.route.openshift.io ;;
+  *'get routes.route.openshift.io '*)
+    [ "${ROUTES_READ_FAIL:-}" != 1 ] || { echo 'Error from server (Forbidden): routes forbidden' >&2; exit 1; }
+    if [ -n "${ROUTES_FILE:-}" ]; then cat "$ROUTES_FILE"; else echo '{"kind":"List","items":[]}'; fi ;;
+  *'get secret rag-agent-oauth-cookie'*'go-template='*)
+    [ "${MISSING_COOKIE_KEY:-}" = 1 ] || echo present ;;
+  *'get secret rag-agent-oauth-cookie'*)
+    case "${COOKIE_SECRET:-ok}" in
+      notfound) echo 'Error from server (NotFound): secrets "rag-agent-oauth-cookie" not found' >&2; exit 1 ;;
+      forbidden) echo 'Error from server (Forbidden): secrets is forbidden' >&2; exit 1 ;;
+    esac ;;
+  *'get configmap openshift-service-ca.crt'*) printf '%s\\n' "${SERVICE_CA:-}" ;;
+esac
+exit 0
+"""
+
+
+def _route_tree(tree, pin=GOOD_PIN):
+    import re
+
+    images = (tree / "images.txt")
+    images.write_text((REPO / "images.txt").read_text())
+    images.write_text(re.sub(
+        r"^(registry\.redhat\.io/openshift4/ose-oauth-proxy:\S+)[ \t]+\S+$",
+        lambda m: f"{m[1]} {pin}", images.read_text(), flags=re.MULTILINE))
+    write_stub(tree / "bin" / "kubectl", ROUTE_KUBECTL)
+    return tree
+
+
+def _manifest(tree, *lines):
+    dist = tree / "dist"
+    dist.mkdir(exist_ok=True)
+    (dist / "MANIFEST.txt").write_text("\n".join([f"sha: {IMAGE_SHA}", *lines]) + "\n")
+
+
+def _route_run(tree, live=True, **env):
+    values = {"AGENT_ROUTE": "true", "SERVICE_CA": SERVICE_CA}
+    if live:
+        values["AIRGAP_DRYRUN"] = "0"
+    values.update(env)
+    return _run(tree, values)
+
+
+def _routes_file(tree, *backends):
+    import json
+
+    items = [{"apiVersion": "route.openshift.io/v1", "kind": "Route",
+              "metadata": {"name": name, "namespace": "mainframe-rag"},
+              "spec": {"to": {"kind": "Service", "name": to}}} for name, to in backends]
+    path = tree / "routes.json"
+    path.write_text(json.dumps({"kind": "List", "items": items}))
+    return str(path)
+
+
+def test_validate_route_dryrun_accepts_recorded_consistent_pin(tree):
+    _route_tree(tree)
+    r = _route_run(tree, live=False)
+    assert r.returncode == 0, r.stderr
+    assert "oauth-proxy pin recorded; matches the chart" in r.stdout
+    assert "--email-domain=*" in r.stdout
+
+
+def test_validate_route_dryrun_pending_pin_refused(tree):
+    _route_tree(tree, pin="sha256:PENDING")
+    r = _route_run(tree, live=False)
+    assert r.returncode != 0
+    assert "oauth-proxy digest recorded" in r.stderr
+
+
+def test_validate_route_off_ignores_the_oauth_pin(tree):
+    _route_tree(tree, pin="sha256:PENDING")
+    r = _run(tree, {"AGENT_ROUTE": "false"})
+    assert r.returncode == 0, r.stderr
+
+
+def test_validate_route_pin_tag_must_match_chart(tree):
+    _route_tree(tree)
+    images = tree / "images.txt"
+    images.write_text(images.read_text().replace("ose-oauth-proxy:v4.14", "ose-oauth-proxy:v4.99"))
+    r = _route_run(tree, live=False)
+    assert r.returncode != 0
+    assert "does not match the chart" in r.stderr
+
+
+def test_validate_route_invalid_boolean_refused_even_in_dryrun(tree):
+    r = _run(tree, {"AGENT_ROUTE": "maybe"})
+    assert r.returncode != 0
+    assert "AGENT_ROUTE must be true/false" in r.stderr
+
+
+def test_validate_route_manifest_without_oauth_member_refused(tree):
+    _route_tree(tree)
+    _manifest(tree)
+    r = _route_run(tree, live=False)
+    assert r.returncode != 0
+    assert "packed without the oauth-proxy image" in r.stderr
+
+
+def test_validate_route_manifest_with_other_pin_refused(tree):
+    _route_tree(tree)
+    _manifest(tree, "oauth_proxy: registry.redhat.io/openshift4/ose-oauth-proxy@sha256:" + "c" * 64)
+    r = _route_run(tree, live=False)
+    assert r.returncode != 0
+    assert "differs from images.txt" in r.stderr
+
+
+def test_validate_route_manifest_with_matching_pin_passes(tree):
+    _route_tree(tree)
+    _manifest(tree, f"oauth_proxy: {OAUTH_REF}")
+    r = _route_run(tree, live=False)
+    assert r.returncode == 0, r.stderr
+    assert "and the packed bundle" in r.stdout
+
+
+def test_validate_route_live_success(tree):
+    _route_tree(tree)
+    r = _route_run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "has a nonempty cookie-secret key" in r.stdout
+    assert "Namespace service CA readable" in r.stdout
+
+
+@pytest.mark.parametrize("state,message", [
+    ("notfound", "'rag-agent-oauth-cookie' not found"),
+    ("forbidden", "may not read Secret 'rag-agent-oauth-cookie'"),
+])
+def test_validate_route_live_cookie_secret_failures(tree, state, message):
+    _route_tree(tree)
+    r = _route_run(tree, COOKIE_SECRET=state)
+    assert r.returncode != 0
+    assert message in r.stderr
+
+
+def test_validate_route_live_cookie_key_missing(tree):
+    _route_tree(tree)
+    r = _route_run(tree, MISSING_COOKIE_KEY="1")
+    assert r.returncode != 0
+    assert "missing or empty: cookie-secret" in r.stderr
+
+
+@pytest.mark.parametrize("ca", ["", "garbage"])
+def test_validate_route_live_service_ca_must_be_pem(tree, ca):
+    _route_tree(tree)
+    r = _route_run(tree, SERVICE_CA=ca)
+    assert r.returncode != 0
+    assert "not a PEM certificate bundle" in r.stderr
+
+
+def test_validate_route_live_requires_route_api(tree):
+    _route_tree(tree)
+    r = _route_run(tree, NO_ROUTE_API="1")
+    assert r.returncode != 0
+    assert "does not serve routes.route.openshift.io" in r.stderr
+
+
+@pytest.mark.parametrize("route_on", [True, False])
+@pytest.mark.parametrize("backend", ["rag-agent", "qdrant", "qdrant-headless"])
+def test_validate_live_refuses_foreign_route_to_protected_service(tree, route_on, backend):
+    _route_tree(tree)
+    env = {"ROUTES_FILE": _routes_file(tree, ("public-console", backend))}
+    if route_on:
+        r = _route_run(tree, **env)
+    else:
+        write_stub(tree / "bin" / "kubectl", ROUTE_KUBECTL)
+        r = _run(tree, {"AIRGAP_DRYRUN": "0", **env})
+    assert r.returncode != 0
+    assert "Route public-console exposes a protected Service" in r.stderr
+
+
+def test_validate_live_unlistable_routes_fail_closed(tree):
+    _route_tree(tree)
+    r = _route_run(tree, ROUTES_READ_FAIL="1")
+    assert r.returncode != 0
+    assert "cannot list Routes" in r.stderr
+
+
+def test_validate_live_unrelated_route_and_owned_route_pass(tree):
+    _route_tree(tree)
+    r = _route_run(tree, ROUTES_FILE=_routes_file(tree, ("docs", "docs-site"), ("rag-agent", "rag-agent")))
+    assert r.returncode == 0, r.stderr
