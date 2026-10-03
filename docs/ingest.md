@@ -62,8 +62,9 @@ PyMuPDF is the only parser. `parse_pdf` returns a frozen, slots `ParsedDoc`.
   with equal counts). Never "clean up" the sort.
 - Product/version and title scan the first pages only (4 for product/version,
   first 10 lines for title); `z/OS` normalizes via `lower().replace("/","")`;
-  a generic version returns `(None, "X.Y")`; title falls back to `doc_id`
-  then `"Untitled"`.
+  a generic version returns `(None, "X.Y")`; title prefers the PDF metadata
+  title, then the first non-identifier line of the first 10 lines, then
+  `doc_id`, then `"Untitled"`.
 - Final precedence for vendor/product/version/title:
   CLI > path layout (when not `unknown`/`""`) > text detection >
   `unknown`/`None`; empty version becomes `None`, empty vendor becomes
@@ -204,9 +205,14 @@ for citations and filters.
   across paragraph and page breaks). Within it every entry start counts,
   including unlabelled sub-entries such as `0C4` inside the `0Cx` entry.
   Index pages, code-to-module tables, return-code tables and other manuals'
-  numeric cells store `[]`. The gate changes the payload only, never chunk
-  boundaries, ids, text or unit spans. A manual without the label stores no
-  codes, and those lookups take the NL path. The value is written to
+  numeric cells store `[]`. The same gate decides entry splitting: outside a
+  code section, code-shaped lines (a dump listing's `255`, a table value) do
+  not open atomic entries, so they chunk as ordinary prose or table rows. A
+  code entry longer than `SECTION_MAX_CHARS` is cut at line boundaries, with
+  the code line kept in the first piece: an entry is an explanation, not a
+  statement, and emitted whole a dump-listing "entry" overflowed the
+  4096-token embed window. A manual without the label stores no codes, and
+  those lookups take the NL path. The value is written to
   the point payload on every upsert — indexing the field without writing it
   leaves the index empty and every code query silently falling back.
 - SYSIN adjacency (issue #216): data paragraphs following a `DD *`/`DD DATA`
@@ -275,8 +281,26 @@ Opt-in via `CONTEXTUAL_EMBED_ENABLED` (default off).
   dedicated timeout (`CONTEXT_LLM_TIMEOUT_S`, 30.0s) distinct from the 300s
   answer timeout. `CONTEXT_LLM_API_KEY` (unset = keyless) rides the gist
   calls as a Bearer virtual key behind a gateway.
-- Cache key `v2:sha:chunk_id` under `CONTEXT_PROMPT_VERSION = "v2"` (v1
-  duplicated the header and echoed instructions).
+- Prompt template `CONTEXT_PROMPT_VERSION = "v2"` (v1 duplicated the header
+  and echoed instructions).
+- Cache identity (issue #416): `ContextBinding` in `context.py` is the one
+  owner of the sidecar key and record. A cached gist is reused only when ALL
+  of these match: prompt version, doc sha256, chunk id, the contextual model
+  name (`CONTEXT_LLM_MODEL`), the `CONTEXT_MAX_CHARS` cap, and a sha256 of the
+  exact messages sent to the model (system prompt, header, section path, body).
+  Any change is a miss that calls the model; the same exact input is a hit
+  with zero calls. Entries for other models/caps stay valid under their own
+  identity, so switching back hits again. Not bound: the endpoint behind a
+  model name and any revision the operator does not put in the name — use a
+  revision-qualified `CONTEXT_LLM_MODEL` or a fresh `CONTEXT_CACHE_PATH`.
+  Records are `schema: 2` JSON lines (`v`, `doc_sha256`, `chunk_id`, `model`,
+  `max_chars`, `input_sha256`, `context`); the loader recomputes the key from
+  those fields and rejects wrong types or a context longer than its own cap.
+  Pre-#416 records (no `schema`) and malformed lines are misses (the first
+  logs `context_cache_legacy_records_ignored` with a count, the second
+  `context_cache_skip_line`); the file is append-only and is never rewritten or
+  required to be deleted. A hit that is not already whitespace-collapsed and
+  within the cap is regenerated.
 - Model budget 256 completion tokens; deterministic `CONTEXT_MAX_CHARS`
   (500) cap with collapse-and-rstrip normalization; empty gists raise
   (never stored silent-empty).
@@ -338,7 +362,7 @@ Collection + indexes-before-load + batched idempotent upsert, behind the
   an on-disk index; on-disk payloads.
 - Payload indexes are created **before** load — including on pre-existing
   collections: keywords `vendor, product, version, doc_id, chunk_type,
-  message_ids, members, system_codes, sha256` plus integer `page_start`. An unindexed
+  message_ids, members, system_codes, sha256, source_rev` plus integer `page_start`. An unindexed
   filter becomes a scan.
 - `ensure_collection` verifies the stored dim against settings on both the
   named-vector and single-vector schemas, raising `DimMismatchError`.

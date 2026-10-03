@@ -63,6 +63,7 @@ from mainframe_rag.ingest.completion import (
     write_completion,
 )
 from mainframe_rag.ingest.context import (
+    ContextBinding,
     ContextLLMClient,
     append_context_entries,
     generate_contexts,
@@ -1127,7 +1128,18 @@ def _run_impl(
                             # imply cache_path was resolved (workers only
                             # generate when the parent validated + passed it).
                             assert cache_path is not None
-                            append_context_entries(cache_path, parsed.sha256, contexts)
+                            append_context_entries(
+                                cache_path,
+                                ContextBinding.from_settings(
+                                    settings,
+                                    doc_sha256=parsed.sha256,
+                                    product=parsed.product,
+                                    version=parsed.version,
+                                    title=parsed.title,
+                                ),
+                                chunks,
+                                contexts,
+                            )
                         if len(chunks) == 0:
                             binding: tuple[str | None, str | None, str | None] = (None, None, None)
                         else:

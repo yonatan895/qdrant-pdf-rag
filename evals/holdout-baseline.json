@@ -1,51 +1,51 @@
 {
   "_meta": {
-    "note": "Re-baseline via `sh scripts/tools/run-task.sh eval:baseline`; dedicated PR (AGENTS.md). Tolerances in scripts/eval_retrieval.py.",
-    "n": 72,
-    "collection": "real_manuals",
+    "note": "Re-baseline via `sh scripts/tools/run-task.sh eval:baseline`; dedicated PR (AGENTS.md). Tolerances in mainframe_rag.eval.retrieval.",
+    "n": 76,
+    "collection": "manuals_b5c1756",
     "embed_mode": "vllm",
-    "updated": "2026-09-12"
+    "updated": "2026-10-03"
   },
-  "recall@1": 0.631,
-  "recall@3": 0.8,
-  "recall@5": 0.892,
-  "recall@8": 0.908,
-  "mrr": 0.726,
-  "ndcg@8": 0.758,
+  "recall@1": 0.667,
+  "recall@3": 0.826,
+  "recall@5": 0.928,
+  "recall@8": 0.928,
+  "mrr": 0.763,
+  "ndcg@8": 0.773,
   "identifier": {
-    "recall@1": 0.744,
-    "recall@5": 0.974,
+    "recall@1": 0.767,
+    "recall@5": 1.0,
     "recall@8": 1.0,
-    "mrr": 0.818,
-    "ndcg@8": 0.866
+    "mrr": 0.852,
+    "ndcg@8": 0.868
   },
   "nl": {
-    "recall@1": 0.462,
-    "recall@5": 0.769,
-    "recall@8": 0.769,
-    "mrr": 0.587,
-    "ndcg@8": 0.595
+    "recall@1": 0.5,
+    "recall@5": 0.808,
+    "recall@8": 0.808,
+    "mrr": 0.617,
+    "ndcg@8": 0.617
   },
   "classes": {
     "comparative": {
       "n": 7,
       "scored": 7,
-      "recall@1": 0.429,
-      "recall@3": 0.571,
+      "recall@1": 0.571,
+      "recall@3": 0.714,
       "recall@5": 0.714,
       "recall@8": 0.714,
-      "mrr": 0.536,
-      "ndcg@8": 0.55
+      "mrr": 0.619,
+      "ndcg@8": 0.598
     },
     "diagnostic": {
       "n": 14,
       "scored": 14,
-      "recall@1": 0.571,
+      "recall@1": 0.5,
       "recall@3": 0.714,
-      "recall@5": 0.786,
+      "recall@5": 0.857,
       "recall@8": 0.857,
-      "mrr": 0.655,
-      "ndcg@8": 0.643
+      "mrr": 0.639,
+      "ndcg@8": 0.605
     },
     "doc_number": {
       "n": 6,
@@ -58,14 +58,14 @@
       "ndcg@8": 1.0
     },
     "message_id": {
-      "n": 15,
-      "scored": 15,
-      "recall@1": 0.8,
-      "recall@3": 0.867,
+      "n": 19,
+      "scored": 19,
+      "recall@1": 0.789,
+      "recall@3": 0.947,
       "recall@5": 1.0,
       "recall@8": 1.0,
-      "mrr": 0.852,
-      "ndcg@8": 0.89
+      "mrr": 0.873,
+      "ndcg@8": 0.87
     },
     "negative": {
       "n": 6,
@@ -80,12 +80,12 @@
     "syntax": {
       "n": 16,
       "scored": 15,
-      "recall@1": 0.667,
+      "recall@1": 0.8,
       "recall@3": 0.933,
       "recall@5": 1.0,
       "recall@8": 1.0,
-      "mrr": 0.802,
-      "ndcg@8": 0.868
+      "mrr": 0.883,
+      "ndcg@8": 0.917
     },
     "table": {
       "n": 2,
@@ -101,20 +101,20 @@
       "n": 6,
       "scored": 6,
       "recall@1": 0.333,
-      "recall@3": 0.667,
-      "recall@5": 0.667,
-      "recall@8": 0.667,
-      "mrr": 0.472,
-      "ndcg@8": 0.503
+      "recall@3": 0.5,
+      "recall@5": 0.833,
+      "recall@8": 0.833,
+      "mrr": 0.492,
+      "ndcg@8": 0.567
     }
   },
   "abstain": {
     "n": 7,
-    "top_score_mean": 0.75,
-    "top_score_max": 1.25
+    "top_score_mean": 0.7469,
+    "top_score_max": 1.2
   },
   "page": {
-    "checked": 0,
-    "hit@5": null
+    "checked": 4,
+    "hit@5": 1.0
   }
 }

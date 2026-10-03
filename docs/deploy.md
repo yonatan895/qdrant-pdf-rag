@@ -21,8 +21,9 @@ no rollback:
   agent pod before ingestion. Embeddings are required; reasoning and rerank
   are checked when configured. A failed leg stops the pipeline. This uses
   the pod's actual endpoints and Secret-backed keys, not bastion connectivity.
-- The final banner differs: `OPERATIONAL & ACCEPTED` when ingestion ran,
-  `READY (Awaiting Corpus Ingest)` when it did not.
+- The final banner differs: `PIPELINE STAGES COMPLETE: deployment, ingest and smoke passed`
+  when ingestion ran, `PIPELINE STAGES COMPLETE: deployment and smoke passed; ingest NOT RUN`
+  when it did not.
 
 Standalone `sh scripts/tools/run-task.sh airgap:deploy` only waits for workload readiness. The agent
 `/healthz` check covers Qdrant and embedding connectivity, the served
@@ -377,7 +378,7 @@ cannot schedule on one node — proven).
   search results as SKIP (infrastructure ready, corpus not ingested) rather
   than failure, and never touches `/v1/answer` (needs a reasoning model).
   With tracing on (the default) it also fails closed unless a `v1.search`
-  span lands in `JAEGER_QUERY_URL` within `TRACE_TIMEOUT`; the `off`
+  span lands in `JAEGER_QUERY_URL` within `TRACE_TIMEOUT` (default 60s); the `off`
   sentinel skips that assertion. With the bundled Jaeger disabled the query is
   skipped and the report says trace arrival is NOT VERIFIED: configuring a
   collector is not proof that spans reach it.
@@ -588,10 +589,12 @@ and the dry-run gate; air-gap GitLab runs hygiene + pytest + gate-l1 only
 file). Job meaning stays aligned across the two files; only e2e-scale jobs
 live in `.github/workflows/e2e.yml`.
 
-- GitHub product `ci.yml`/`e2e.yml` ignore markdown-only changes. The narrow
-  `agent-context.yml` checks relevant instructions/docs/templates and its own tools,
-  including root-only AGENTS changes, without model/image/deployment work.
-  Vendored-only changes do not enter that context lane. Mixed changes retain
+- GitHub product `ci.yml`/`e2e.yml` run on every PR/push with no markdown-only
+  ignore (only `bench.yml` carries a `paths-ignore` for docs). The
+  `agent-context.yml` lane likewise runs on every PR/push with no `paths:`
+  filter: it always runs `qa:context` plus the dependency-free context
+  unit tests, including for root-only AGENTS changes, without model/image/deployment work.
+  It also runs for vendored-only changes (no path exclusions). Mixed changes retain
   existing product CI/E2E behavior. GitLab hygiene runs the same offline checker.
 - GitHub unit/context/review lanes explicitly install the pinned host Task into
   `.tools/bin` and dispatch through `sh scripts/tools/run-task.sh`. Runner
@@ -616,7 +619,7 @@ live in `.github/workflows/e2e.yml`.
   deselected, split across four runner VMs with an aggregate `test` status
   requiring every shard), sim (docker Qdrant, fail-closed on skips/zero-pass), gate-l1
   with PR delta comment. Least-privilege permissions, timeouts, and
-  concurrency groups on every job; third-party actions SHA-pinned.
+  a top-level concurrency group (cancel-in-progress on PRs); third-party actions SHA-pinned.
   Hazard pairs run in four isolated processes; baseline, mutation and cleanup
   remain ordered within each pair. Connected Python acquisition explicitly
   uses eight bounded download workers across GitHub workflows.

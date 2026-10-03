@@ -145,7 +145,8 @@ No mandatory checklist of every failure mode for a trivial change. One end-to-en
 ## Process budget
 
 Agents optimize what the loop measures, so the loop measures value and caps its
-own overhead. The active quality tracker (currently #582) owns the scoreboard and
+own overhead. The active quality tracker (#582 completed 2026-10-01; name the
+successor when one is designated) owns the scoreboard and
 budget figures; this section owns the mechanics:
 
 - Process work (agent instructions, CI/verifier/acceptance layers, workflow docs)
