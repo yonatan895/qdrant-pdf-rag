@@ -373,4 +373,3 @@ class Browser:
         except subprocess.TimeoutExpired:
             self._proc.kill()
         shutil.rmtree(self._tmp, ignore_errors=True)
-
