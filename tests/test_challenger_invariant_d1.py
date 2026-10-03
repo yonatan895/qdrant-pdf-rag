@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from qdrant_client import QdrantClient, models
+from qdrant_client.local.payload_filters import check_filter
 
 from mainframe_rag.config import Settings
 from mainframe_rag.retrieve.filters import (
@@ -36,19 +37,7 @@ from tests.fakes import EmbedderFake, PromotingRerankerFake
 def _matches_filter(point: models.ScoredPoint, flt: models.Filter | None) -> bool:
     if flt is None:
         return True
-    payload = point.payload or {}
-    for cond in flt.must or []:
-        val = payload.get(cond.key)
-        if isinstance(cond.match, models.MatchValue):
-            if val != cond.match.value:
-                return False
-        elif isinstance(cond.match, models.MatchAny):
-            if isinstance(val, (list, tuple)):
-                if not any(v in val for v in cond.match.any):
-                    return False
-            elif val not in cond.match.any:
-                return False
-    return True
+    return check_filter(flt, point.payload or {}, point.id, {})
 
 
 class AdversarialScopeQdrant:
