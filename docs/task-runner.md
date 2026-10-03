@@ -113,6 +113,7 @@ image is pulled by a verification task or a simulation fixture.
 cache never falls back. The cache must contain one Qdrant/bm25 snapshot selected
 by `refs/main`, with exactly the approved files and hashes. Prepare it separately
 with `artifacts:bm25`; the integration test forces FastEmbed's offline mode.
+Offline GitLab names that cache with `CI_BM25_CACHE_DIR` and only verifies it.
 `load` and `ha` use explicit dev hash fixtures and need no BM25 cache. An explicit
 `QDRANT_SIM_URL` retains the external-server load mode; its image identity is
 reported as unattested. The full sim tier still needs the local approved image

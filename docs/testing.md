@@ -470,6 +470,13 @@ instead of weakening the catalogue. An interrupted/incomplete report is not a
 pass. This narrow catalogue establishes sensitivity to the named historical
 counterexamples, not immunity to all faults or a global coverage percentage.
 
+Offline GitLab runs the complete unit suite in one job (the union of GitHub's
+four shards) and the sim tier against the mirrored Qdrant service
+(`CI_BM25_CACHE_DIR` supplies the verified BM25 cache). Both reject skipped and
+xfailed tests through their JUnit report, and sim omits only
+`tests/test_qdrant_auth.py`, which needs a local Docker daemon. GitLab has no
+lane selection: every lane runs on every pipeline.
+
 The GitHub `hazards` job and offline GitLab `hazards` job run the full catalogue
 and retain its synthetic evidence. This producer is not yet an always-scheduled,
 trusted acceptance consumer; #411 owns that gate and maintainer enforcement.
