@@ -42,7 +42,7 @@ openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SH
 PACKED_SHA=$(sed -n 's/^sha: *//p' MANIFEST.txt)
 [ "${#PACKED_SHA}" -eq 40 ] || { echo "FAIL: MANIFEST must name a full commit SHA." >&2; exit 1; }
 case "$PACKED_SHA" in *[!0-9a-f]*) echo "FAIL: invalid MANIFEST SHA." >&2; exit 1;; esac
-MEMBERS="bootstrap.sh repo.bundle task_linux_amd64.tar.gz task-pin.txt task-LICENSE qdrant-image.tar jaeger-image.tar app-ingest-$PACKED_SHA.tar app-agent-$PACKED_SHA.tar MANIFEST.txt PACKING_RECORD.txt sbom.json sneakernet-signing.pub"
+MEMBERS="bootstrap.sh repo.bundle task_linux_amd64.tar.gz task-pin.txt task-LICENSE qdrant-image.tar jaeger-image.tar app-ingest-$PACKED_SHA.tar app-agent-$PACKED_SHA.tar MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub"
 [ ! -f oauth-proxy-image.tar ] || MEMBERS="$MEMBERS oauth-proxy-image.tar"
 awk -v members="$MEMBERS" '
     BEGIN { n=split(members, names, " "); for (i=1; i<=n; i++) wanted[names[i]]=1 }
