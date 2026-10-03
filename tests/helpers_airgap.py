@@ -49,6 +49,8 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
         shutil.copytree(REPO / "charts/mainframe-rag", tmp_path / "charts/mainframe-rag", dirs_exist_ok=True)
     if "deploy.sh" in scripts:
         scripts = [*scripts, "check_app_ownership.py"]
+    if "deploy.sh" in scripts or "validate.sh" in scripts:
+        scripts = [*scripts, "check_route_exposure.py"]
     if "common.sh" in scripts:
         scripts = [*scripts, "model_config.py"]
     for f in scripts:

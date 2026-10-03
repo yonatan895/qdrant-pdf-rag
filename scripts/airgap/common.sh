@@ -526,3 +526,85 @@ require_gateway_secret_keys() {
         require_secret_keys "${GATEWAY_API_KEY_SECRET:-}" "$@"
     fi
 }
+
+# ---- Optional console Route (ADR-0004, issue #373) --------------------------
+# The Route is the only external ingress and must always be OAuth-protected.
+# validate.sh and deploy.sh share these checks so preflight and deploy cannot
+# disagree. Nothing here prints Secret or certificate material.
+
+# Strict AGENT_ROUTE: an invalid spelling fails before mutation instead of
+# silently selecting Route-off (which would retire an existing Route).
+resolve_agent_route() {
+    AGENT_ROUTE=$(bool_flag AGENT_ROUTE false)
+    export AGENT_ROUTE
+}
+
+# oauth-proxy supply-chain pin: a recorded digest, the same ref/tag the chart
+# renders, and (when a packed MANIFEST is reachable) a bundle that carries
+# exactly that pin. Static: needs no cluster. $MANIFEST is set by the caller.
+require_oauth_pin() {
+    pin_recorded oauth-proxy || die "AGENT_ROUTE=true needs the oauth-proxy digest recorded in images.txt (currently sha256:PENDING); record it on the connected host and repack"
+    _oauth_src=$(awk '$1 !~ /^#/ && $1 ~ /oauth-proxy/ {print $1; exit}' images.txt)
+    _chart_values=charts/mainframe-rag/values.yaml
+    _chart_repo=$(awk '/^[[:space:]]*oauthProxy:/{f=1;next} f&&/^[[:space:]]*repository:/{print $2;exit} f&&/^[^[:space:]]/{exit}' "$_chart_values" | tr -d "\"'")
+    _chart_tag=$(awk '/^[[:space:]]*oauthProxy:/{f=1;next} f&&/^[[:space:]]*tag:/{print $2;exit} f&&/^[^[:space:]]/{exit}' "$_chart_values" | tr -d "\"'")
+    case "$_oauth_src" in
+        *"/$_chart_repo:$_chart_tag") ;;
+        *) die "images.txt oauth-proxy pin ($_oauth_src) does not match the chart's images.oauthProxy repository/tag ($_chart_repo:$_chart_tag); change both together" ;;
+    esac
+    if [ -n "${MANIFEST:-}" ]; then
+        _packed_ref=$(awk -F': ' '$1 == "oauth_proxy" {print $2}' "$MANIFEST")
+        [ -n "$_packed_ref" ] || die "packed MANIFEST has no oauth_proxy entry: the bundle was packed without the oauth-proxy image; record the pin and repack before AGENT_ROUTE=true"
+        [ "$_packed_ref" = "$(pin_from_images_txt oauth-proxy)" ] || die "packed MANIFEST oauth_proxy pin differs from images.txt: wrong bundle for this checkout"
+    fi
+    unset _oauth_src _chart_values _chart_repo _chart_tag _packed_ref
+}
+
+# Operator-created cookie Secret: the data key must exist and be nonempty.
+# (Its byte length is enforced by the oauth-proxy container itself at start;
+# the rollout wait surfaces a rejected value without this script reading it.)
+require_oauth_cookie_secret() {
+    require_secret_keys rag-agent-oauth-cookie cookie-secret
+}
+
+# Namespace service CA (public) as the Route destinationCACertificate.
+# $1 = output file. Empty or non-PEM content fails closed.
+fetch_route_destination_ca() {
+    $KC -n "$NAMESPACE" get configmap openshift-service-ca.crt \
+        -o 'jsonpath={.data.service-ca\.crt}' > "$1" || die "cannot read namespace service CA (ConfigMap openshift-service-ca.crt)"
+    grep -q -- '-----BEGIN CERTIFICATE-----' "$1" || die "namespace service CA (ConfigMap openshift-service-ca.crt key service-ca.crt) is empty or not a PEM certificate bundle"
+}
+
+# Pre-mutation Route inventory. $1 = enabled|disabled. Lists every Route in
+# the namespace (read-only) and refuses a Route other than the chart-owned
+# rag-agent one that backs the agent or Qdrant Services. Sets
+# OWNED_ROUTE_PRESENT=1 when the owned Route already exists. A deployer that
+# cannot list Routes cannot prove the absence of a public path: fail closed.
+check_route_exposure() {
+    OWNED_ROUTE_PRESENT=0
+    [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
+    _route_apis=$($KC api-resources -o name) || die "cannot discover the Route API"
+    if ! printf '%s\n' "$_route_apis" | grep -qx 'routes.route.openshift.io'; then
+        [ "$1" != enabled ] || die "AGENT_ROUTE=true but this cluster does not serve routes.route.openshift.io (OpenShift required)"
+        return 0
+    fi
+    _route_json=$($KC -n "$NAMESPACE" get routes.route.openshift.io -o json) || die "cannot list Routes in namespace '$NAMESPACE'; without it the absence of an unauthenticated public path cannot be proven (grant namespace-scoped list on routes, not cluster-admin)"
+    _route_out=$(printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py inventory "$NAMESPACE" "$1" "$QDRANT_RELEASE" "${QDRANT_RELEASE}-headless") || exit 1
+    [ "$_route_out" != owned-route-present ] || OWNED_ROUTE_PRESENT=1
+    unset _route_apis _route_json _route_out
+}
+
+# After the release: the live Route must equal the OAuth contract. Any
+# difference removes the Route (so no unauthenticated console stays exposed)
+# and fails. $1 = file holding the generated destination CA.
+verify_agent_route() {
+    [ "${AIRGAP_DRYRUN:-0}" != "1" ] || return 0
+    _route_json=$($KC -n "$NAMESPACE" get route.route.openshift.io/rag-agent -o json) || die "Route rag-agent cannot be read after the release; console exposure is NOT verified"
+    if ! printf '%s' "$_route_json" | python3 scripts/airgap/check_route_exposure.py verify "$NAMESPACE" "$1"; then
+        $KC -n "$NAMESPACE" delete route.route.openshift.io/rag-agent --ignore-not-found >/dev/null 2>&1 ||
+            die "Route rag-agent is not the OAuth contract AND could not be deleted: run '$KC -n $NAMESPACE delete route rag-agent' now"
+        die "Route rag-agent did not converge to the OAuth reencrypt contract; it was deleted so no unauthenticated console stays exposed. Fix the cause and re-run airgap:deploy"
+    fi
+    unset _route_json
+    echo "==> Route rag-agent verified: Service rag-agent port oauth, reencrypt, HTTP redirected, destination CA matches"
+}

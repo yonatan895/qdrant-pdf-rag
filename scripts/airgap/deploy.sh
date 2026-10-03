@@ -21,6 +21,7 @@ check_secret_name "${PULL_SECRET:-}" PULL_SECRET
 check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
 resolve_otel_endpoint
 resolve_bundle_choices
+resolve_agent_route
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -53,12 +54,12 @@ fi
 require_kc
 command -v helm >/dev/null 2>&1 || die "helm is required on the air-gap bastion"
 
-# Operator console Route (ADR-0004): rendering the OAuth sidecar and
-# the reencrypt Route needs the oauth-proxy image pin to be recorded, not the
-# sha256:PENDING placeholder.
-AGENT_ROUTE=${AGENT_ROUTE:-false}
+# Operator console Route (ADR-0004, issue #373): rendering the OAuth sidecar
+# and the reencrypt Route needs a recorded oauth-proxy pin (not the
+# sha256:PENDING placeholder) that matches the chart and the packed bundle.
 if [ "$AGENT_ROUTE" = "true" ]; then
-    pin_recorded oauth-proxy || die "AGENT_ROUTE=true needs the oauth-proxy digest recorded in images.txt (currently sha256:PENDING); record it on the connected host and repack"
+    require_oauth_pin
+    echo "==> Notice: the console Route authenticates any OpenShift user (oauth-proxy --email-domain=*, no SAR); restrict the cohort with the site's approved mechanism (issue #373)"
 fi
 
 refuse_nfs_storage
@@ -75,10 +76,9 @@ mkdir -p dist
 
 # Public namespace service CA becomes a generated value, never a YAML patch.
 if [ "$AGENT_ROUTE" = "true" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
-    require_secret_keys rag-agent-oauth-cookie cookie-secret
+    require_oauth_cookie_secret
     ROUTE_DESTINATION_CA_FILE=dist/namespace-service-ca.crt
-    $KC -n "$NAMESPACE" get configmap openshift-service-ca.crt \
-        -o 'jsonpath={.data.service-ca\.crt}' > "$ROUTE_DESTINATION_CA_FILE" || die "cannot read namespace service CA"
+    fetch_route_destination_ca "$ROUTE_DESTINATION_CA_FILE"
 fi
 map_app_values --out dist/mainframe-rag-release-values.yaml --without-ingest-job
 helm lint charts/mainframe-rag -f dist/mainframe-rag-release-values.yaml
@@ -136,6 +136,15 @@ if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     fi
     python3 scripts/airgap/check_app_ownership.py "$NAMESPACE" --disabled \
         < dist/app-disabled-existing.json > dist/app-disabled-cleanup.json
+
+    # Issue #373: no Route other than the OAuth-protected rag-agent Route may
+    # reach the unauthenticated agent HTTP port or Qdrant, whatever the
+    # AGENT_ROUTE selection. Refused here, before any mutation.
+    if [ "$AGENT_ROUTE" = "true" ]; then
+        check_route_exposure enabled
+    else
+        check_route_exposure disabled
+    fi
 fi
 
 # CI-rehearsal knobs (never set in the air gap): shrink PVCs / resources for
@@ -155,6 +164,16 @@ if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
             $KC create namespace "$NAMESPACE"
         fi
     fi
+fi
+
+# Console Route off: an existing owned Route may still point at the
+# unauthenticated HTTP port. Removing exposure never needs a ready workload,
+# so it is retired before the first release mutation rather than after the
+# rollout wait (the later inventory cleanup then finds it already gone).
+if [ "${OWNED_ROUTE_PRESENT:-0}" = "1" ] && [ "$AGENT_ROUTE" != "true" ]; then
+    echo "==> Console Route disabled: removing existing Route rag-agent before the release"
+    $KC -n "$NAMESPACE" delete route.route.openshift.io/rag-agent --ignore-not-found ||
+        die "cannot remove existing Route rag-agent while AGENT_ROUTE is off"
 fi
 
 echo "==> Helm: Qdrant from the vendored chart with PROD values"
@@ -184,6 +203,11 @@ run "$@"
 echo "==> Helm: mainframe-rag application release"
 run helm upgrade --install mainframe-rag charts/mainframe-rag \
     --namespace "$NAMESPACE" -f dist/mainframe-rag-release-values.yaml --take-ownership --server-side=false
+if [ "$AGENT_ROUTE" = "true" ]; then
+    # Converge-or-fail-closed (issue #373): an adopted or pre-existing Route
+    # must now equal the OAuth reencrypt contract, else it is removed.
+    verify_agent_route "${ROUTE_DESTINATION_CA_FILE:-}"
+fi
 JAEGER_UI_HINT=""
 [ "${METRICS_ENABLED:-false}" = "true" ] || echo "==> Metrics off: ServiceMonitor not deployed"
 [ "$OTEL_TRACING_ENABLED" = "1" ] || echo "==> Tracing off: Jaeger not deployed"

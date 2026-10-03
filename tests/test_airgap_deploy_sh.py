@@ -34,6 +34,17 @@ case "$*" in
   'api-resources -o name')
     [ "${{DISCOVERY_FAIL:-}}" != 1 ] || exit 1
     printf '%s\\n' routes.route.openshift.io servicemonitors.monitoring.coreos.com ;;
+  *'delete route.route.openshift.io/rag-agent'*)
+    [ "${{DELETE_FAIL:-}}" != 1 ] || exit 1 ;;
+  *'get routes.route.openshift.io '*)
+    [ "${{ROUTES_READ_FAIL:-}}" != 1 ] || exit 1
+    if [ -n "${{ROUTES_FILE:-}}" ]; then cat "$ROUTES_FILE";
+    else printf '%s\\n' '{{"apiVersion":"v1","kind":"List","items":[]}}'; fi ;;
+  *'get route.route.openshift.io/rag-agent '*'-o json'*)
+    [ "${{ROUTE_LIVE_FILE:-}}" != "" ] || exit 1
+    cat "$ROUTE_LIVE_FILE" ;;
+  *'get configmap openshift-service-ca.crt'*)
+    printf '%s\\n' "${{SERVICE_CA:-}}" ;;
   *'get deployment.apps/jaeger '*|*'get serviceaccount/rag-agent '*|*'get servicemonitor.monitoring.coreos.com/rag-agent '*)
     [ "${{DISABLED_READ_FAIL:-}}" != 1 ] || exit 1
     if [ -n "${{DISABLED_FILE:-}}" ]; then cat "$DISABLED_FILE";
@@ -89,7 +100,8 @@ def _run(tree, *extra_env):
 
 
 def _helm_log(tree):
-    return (tree[1]).read_text()
+    # A refusal before any client call leaves no log at all.
+    return tree[1].read_text() if tree[1].exists() else ""
 
 
 def test_no_pull_secret_never_renders_placeholder_name(tree):
@@ -920,3 +932,225 @@ def test_monitor_true_with_metrics_off_fails_closed(tree):
     r = _run(tree, ("SERVICEMONITOR_ENABLED", "true"))
     assert r.returncode != 0
     assert "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true" in r.stderr
+
+
+# ----------------------------------------------------- console Route (#373)
+
+SERVICE_CA = "-----BEGIN CERTIFICATE-----\nU0VSVklDRS1DQQ==\n-----END CERTIFICATE-----"
+GOOD_PIN = "sha256:" + "b" * 64
+
+
+def _route(name="rag-agent", *, to="rag-agent", port="oauth", termination="reencrypt",
+           insecure="Redirect", ca=SERVICE_CA, alternates=()):
+    spec = {
+        "to": {"kind": "Service", "name": to},
+        "port": {"targetPort": port},
+        "tls": {"termination": termination, "insecureEdgeTerminationPolicy": insecure,
+                "destinationCACertificate": ca + "\n"},
+    }
+    if alternates:
+        spec["alternateBackends"] = [{"kind": "Service", "name": n} for n in alternates]
+    return {"apiVersion": "route.openshift.io/v1", "kind": "Route",
+            "metadata": {"name": name, "namespace": "ns"}, "spec": spec}
+
+
+def _write_json(tree, name, document):
+    import json
+
+    path = tree[0] / name
+    path.write_text(json.dumps(document))
+    return str(path)
+
+
+def _route_list(tree, *routes):
+    return _write_json(tree, "routes.json", {"apiVersion": "v1", "kind": "List", "items": list(routes)})
+
+
+def _live(tree, route=None):
+    return _write_json(tree, "live-route.json", route or _route())
+
+
+def _route_on(tree, *extra, live=None):
+    """Live (non-dry-run) Route-on deploy against stubs."""
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    return _run(tree, ("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA),
+                ("ROUTE_LIVE_FILE", live or _live(tree)), *extra)
+
+
+def test_route_on_live_deploy_verifies_the_actual_route_and_renders_the_cluster_ca(tree):
+    r = _route_on(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Route rag-agent verified" in r.stdout
+    log = _helm_log(tree)
+    assert "delete" not in log
+    # Stored content, not metadata: the rendered Route carries the CA read
+    # from the namespace ConfigMap.
+    route = (tree[0] / "dist/agent-route.yaml").read_text()
+    assert "U0VSVklDRS1DQQ==" in route
+    assert "targetPort: oauth" in route and "termination: reencrypt" in route
+
+
+@pytest.mark.parametrize("drift", [
+    {"port": "http"},
+    {"termination": "edge"},
+    {"insecure": "Allow"},
+    {"ca": "-----BEGIN CERTIFICATE-----\nT0xELUNB\n-----END CERTIFICATE-----"},
+    {"to": "qdrant"},
+    {"alternates": ("qdrant",)},
+], ids=["http-port", "edge", "http-allowed", "stale-ca", "wrong-backend", "alternate-backend"])
+def test_route_not_converged_after_release_is_deleted_and_fails(tree, drift):
+    # Whatever the adopted Route still looks like after the release, it is
+    # removed rather than left as a public unauthenticated console.
+    r = _route_on(tree, live=_live(tree, _route(**drift)))
+    assert r.returncode != 0
+    assert "did not converge" in r.stderr
+    log = _helm_log(tree)
+    assert log.index("delete\nroute.route.openshift.io/rag-agent") > log.index("upgrade")
+    assert "rollout" not in log  # fails before any readiness wait
+
+
+def test_unconverged_route_that_cannot_be_deleted_says_so_loudly(tree):
+    r = _route_on(tree, ("DELETE_FAIL", "1"), live=_live(tree, _route(port="http")))
+    assert r.returncode != 0
+    assert "could not be deleted" in r.stderr and "delete route rag-agent" in r.stderr
+
+
+def test_route_unreadable_after_release_is_not_a_pass(tree):
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    r = _run(tree, ("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA))
+    assert r.returncode != 0
+    assert "exposure is NOT verified" in r.stderr
+
+
+def test_route_refusal_then_corrected_run_succeeds(tree):
+    # Next ordinary run: the refused/removed state leaves nothing behind.
+    assert _route_on(tree, live=_live(tree, _route(port="http"))).returncode != 0
+    assert _route_on(tree).returncode == 0
+
+
+@pytest.mark.parametrize("backend", ["rag-agent", "qdrant", "qdrant-headless"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_other_routes_to_agent_or_qdrant_refuse_before_any_mutation(tree, backend, enabled):
+    routes = _route_list(tree, _route("public-console", to=backend))
+    extra = (("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA)) if enabled else ()
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    r = _run(tree, ("ROUTES_FILE", routes), ("ROUTE_LIVE_FILE", _live(tree)), *extra)
+    assert r.returncode != 0
+    assert "Route public-console exposes a protected Service" in r.stderr
+    log = _helm_log(tree)
+    assert "upgrade" not in log and "delete" not in log and "create" not in log
+
+
+def test_other_route_alternate_backend_to_qdrant_refuses(tree):
+    routes = _route_list(tree, _route("docs", to="docs-site", alternates=("qdrant",)))
+    r = _run(tree, ("ROUTES_FILE", routes))
+    assert r.returncode != 0
+    assert "Route docs exposes" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_unrelated_routes_do_not_block_the_deploy(tree):
+    routes = _route_list(tree, _route("docs", to="docs-site"))
+    r = _run(tree, ("ROUTES_FILE", routes))
+    assert r.returncode == 0, r.stderr
+    assert "delete" not in _helm_log(tree)
+
+
+def test_owned_route_with_unowned_alternate_backend_refuses_before_mutation(tree):
+    routes = _route_list(tree, _route(alternates=("qdrant",)))
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    r = _run(tree, ("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA),
+             ("ROUTES_FILE", routes), ("ROUTE_LIVE_FILE", _live(tree)))
+    assert r.returncode != 0
+    assert "alternateBackends" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_route_off_retires_existing_public_route_before_the_first_mutation(tree):
+    # Upgrade from a release with a Route to Route-off: the Route (pointing
+    # at the unauthenticated HTTP port) goes first, not after the rollout.
+    routes = _route_list(tree, _route(port="http", termination="edge"))
+    r = _run(tree, ("ROUTES_FILE", routes))
+    assert r.returncode == 0, r.stderr
+    log = _helm_log(tree)
+    assert log.index("delete\nroute.route.openshift.io/rag-agent") < log.index("upgrade")
+    # Next ordinary run: nothing left to retire, no stray delete.
+    tree[1].write_text("")
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "delete" not in _helm_log(tree)
+
+
+def test_route_off_removal_failure_blocks_the_release(tree):
+    routes = _route_list(tree, _route(port="http"))
+    r = _run(tree, ("ROUTES_FILE", routes), ("DELETE_FAIL", "1"))
+    assert r.returncode != 0
+    assert "cannot remove existing Route" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("failure", ["ROUTES_READ_FAIL", "DISCOVERY_FAIL"])
+def test_unlistable_routes_fail_closed_before_mutation(tree, failure):
+    r = _run(tree, (failure, "1"))
+    assert r.returncode != 0
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("payload", ["", "not-json", '{"kind":"List","items":[{"kind":"Deployment"}]}'])
+def test_corrupt_route_inventory_blocks_mutation(tree, payload):
+    path = tree[0] / "bad-routes.json"
+    path.write_text(payload)
+    r = _run(tree, ("ROUTES_FILE", str(path)))
+    assert r.returncode != 0
+    assert "Route exposure preflight refused" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_route_inventory_failure_never_echoes_route_data(tree):
+    secret = "PRIVATE-KEY-MATERIAL-DO-NOT-ECHO"
+    bad = _route("custom", to="rag-agent")
+    bad["spec"]["tls"]["key"] = secret
+    r = _run(tree, ("ROUTES_FILE", _route_list(tree, bad)))
+    assert r.returncode != 0
+    assert secret not in r.stdout + r.stderr + (tree[0] / "helm-args.log").read_text()
+
+
+def test_invalid_agent_route_value_fails_before_mutation(tree):
+    r = _run(tree, ("AGENT_ROUTE", "maybe"))
+    assert r.returncode != 0
+    assert "AGENT_ROUTE must be true/false" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_agent_route_boolean_spellings_select_the_route(tree):
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    r = _run(tree, ("AGENT_ROUTE", "True"), ("SERVICE_CA", SERVICE_CA), ("ROUTE_LIVE_FILE", _live(tree)))
+    assert r.returncode == 0, r.stderr
+    assert "ose-oauth-proxy" in (tree[0] / "dist/agent-rendered.yaml").read_text()
+
+
+def test_missing_cookie_secret_key_blocks_route_before_mutation(tree):
+    r = _route_on(tree, ("MISSING_KEY", "cookie-secret"))
+    assert r.returncode != 0
+    assert "required Secret key is missing or empty: cookie-secret" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("ca", ["", "not a certificate"])
+def test_unusable_service_ca_blocks_route_before_mutation(tree, ca):
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    r = _run(tree, ("AGENT_ROUTE", "true"), ("SERVICE_CA", ca), ("ROUTE_LIVE_FILE", _live(tree)))
+    assert r.returncode != 0
+    assert "not a PEM certificate bundle" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_route_pin_must_match_the_chart_tag(tree):
+    # images.txt and the chart tag move together (docs/deploy.md pin note).
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    images = tree[0] / "images.txt"
+    images.write_text(images.read_text().replace("ose-oauth-proxy:v4.14", "ose-oauth-proxy:v4.15"))
+    r = _run(tree, ("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA), ("ROUTE_LIVE_FILE", _live(tree)))
+    assert r.returncode != 0
+    assert "does not match the chart" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
