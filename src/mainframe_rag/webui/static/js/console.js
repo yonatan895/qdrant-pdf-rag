@@ -228,17 +228,45 @@
     return "Citations (" + n + ") — " + state;
   }
 
+  /* Warnings read before the answer they qualify: badges go directly above
+   * the turn content, in the same order the server fragment renders them. */
   function stateBadges(article, turn) {
+    const anchor = article.querySelector(".turn-content");
+    const put = (node) => article.insertBefore(node, anchor);
     if (turn.role === "assistant" && turn.verification_state && turn.verification_state !== "accepted") {
-      article.appendChild(
-        el("div", "state-badge state-" + turn.verification_state, STATE_LABELS[turn.verification_state] || turn.verification_state)
-      );
+      put(el("div", "state-badge state-" + turn.verification_state, STATE_LABELS[turn.verification_state] || turn.verification_state));
     }
     if (turn.script_review_required) {
-      article.appendChild(
-        el("div", "state-badge state-review", "Human review required — draft script, not certified executable")
-      );
+      put(el("div", "state-badge state-review", "Human review required — draft script, not certified executable"));
     }
+  }
+
+  /* Header chip for an accepted, citation-backed answer (mirrors the server
+   * fragment). Inferred or unverified citations never earn it. */
+  function stateChip(article, turn) {
+    if (turn.role !== "assistant" || turn.verification_state !== "accepted") return;
+    if (!turn.citations || !turn.citations.length || turn.citations_inferred) return;
+    const n = turn.citations.length;
+    const chip = el("span", "state-chip state-chip-ok", "Verified \u00b7 " + n + (n === 1 ? " citation" : " citations"));
+    const role = article.querySelector(".turn-head .turn-role");
+    if (role) role.after(chip);
+  }
+
+  function citationsBox(turn) {
+    if (!turn.citations || !turn.citations.length) return null;
+    const box = el("div", "citations");
+    box.appendChild(el("div", "citations-title", citationsTitle(turn)));
+    const list = el("ul");
+    turn.citations.forEach((cite) => {
+      const li = el("li");
+      li.appendChild(el("span", null, cite));
+      const copy = el("button", "copy-btn copy-cite", "Copy");
+      copy.type = "button";
+      li.appendChild(copy);
+      list.appendChild(li);
+    });
+    box.appendChild(list);
+    return box;
   }
 
   /* Safe markdown subset, mirroring routes.render_markdown_subset. Every
@@ -507,7 +535,7 @@
       return foot;
     }
     const parts = [];
-    if (typeof meta.ttft_ms === "number") parts.push("TTFT " + (meta.ttft_ms / 1000).toFixed(1) + "s");
+    if (typeof meta.ttft_ms === "number") parts.push("First token " + (meta.ttft_ms / 1000).toFixed(1) + " s");
     if (typeof meta.citations === "number") {
       parts.push(meta.citations + (meta.citations === 1 ? " citation" : " citations"));
     }
@@ -557,21 +585,9 @@
     } else {
       article.appendChild(el("pre", "turn-content", turn.content));
     }
-    if (turn.citations && turn.citations.length) {
-      const box = el("div", "citations");
-      box.appendChild(el("div", "citations-title", citationsTitle(turn)));
-      const list = el("ul");
-      turn.citations.forEach((cite) => {
-        const li = el("li");
-        li.appendChild(el("span", null, cite));
-        const copy = el("button", "copy-btn copy-cite", "Copy");
-        copy.type = "button";
-        li.appendChild(copy);
-        list.appendChild(li);
-      });
-      box.appendChild(list);
-      article.appendChild(box);
-    }
+    const cites = citationsBox(turn);
+    if (cites) article.appendChild(cites);
+    stateChip(article, turn);
     stateBadges(article, turn);
     const meta = renderMeta(turn);
     if (meta) article.appendChild(meta);
@@ -822,38 +838,47 @@
   }
 
   function applyTheme(theme) {
-    const next = theme === "theme-dark" ? "theme-dark" : "theme-3270";
+    const next = theme === "theme-3270" ? "theme-3270" : "theme-dark";
     document.body.classList.remove("theme-dark", "theme-3270");
     document.body.classList.add(next);
     if (themeSelect) themeSelect.value = next;
   }
 
   const EFFORT_LEVELS = ["low", "medium", "high"];
-  const EFFORT_LABELS = { low: "Low", medium: "Med", high: "High" };
 
+  /* Reasoning effort: one pressed toggle in the .segmented group; the
+   * hidden form field carries the value for both the JS and no-JS paths. */
   function getReasoningEffort() {
     const hidden = document.getElementById("reasoning-effort-input");
-    if (hidden && hidden.value) return hidden.value;
-    const slider = document.getElementById("reasoning-slider");
-    if (slider) return EFFORT_LEVELS[Number(slider.value)] || "low";
-    return "low";
+    if (hidden && EFFORT_LEVELS.includes(hidden.value)) return hidden.value;
+    const pressed = document.querySelector('.segmented .seg[aria-pressed="true"]');
+    return pressed ? pressed.getAttribute("data-effort") : "low";
   }
 
   function setReasoningEffort(effort) {
     const target = EFFORT_LEVELS.includes(effort) ? effort : "low";
-    const idx = EFFORT_LEVELS.indexOf(target);
-    const slider = document.getElementById("reasoning-slider");
-    const badge = document.getElementById("reasoning-badge");
     const hidden = document.getElementById("reasoning-effort-input");
-    if (slider) {
-      slider.value = idx;
-      slider.setAttribute("aria-valuetext", { low: "Low", medium: "Medium", high: "High" }[target]);
-    }
-    if (badge) badge.textContent = EFFORT_LABELS[target] || "Low";
     if (hidden) hidden.value = target;
-    document.querySelectorAll(".slider-ticks .tick").forEach((tick) => {
-      tick.classList.toggle("active", tick.getAttribute("data-val") === String(idx));
+    document.querySelectorAll(".segmented .seg").forEach((seg) => {
+      seg.setAttribute("aria-pressed", seg.getAttribute("data-effort") === target ? "true" : "false");
     });
+  }
+
+  /* Incident-context summary chips: what the next question will carry,
+   * visible while the drawer is closed. Text only (textContent). */
+  function updateContextChips() {
+    const chips = document.getElementById("context-chips");
+    if (!chips) return;
+    chips.replaceChildren();
+    const product = productEl ? productEl.value.trim() : "";
+    const version = versionEl ? versionEl.value.trim() : "";
+    const context = splunkEl ? splunkEl.value.trim() : "";
+    const label = [product, version].filter(Boolean).join(" ");
+    if (label) chips.appendChild(el("span", "chip", label.slice(0, 40)));
+    if (context) {
+      const lines = context.split("\n").length;
+      chips.appendChild(el("span", "chip", "Context \u00b7 " + lines + (lines === 1 ? " line" : " lines")));
+    }
   }
 
   function parseFrames(frame) {
@@ -874,7 +899,7 @@
     article.classList.add("turn-provisional");
     article.setAttribute("data-state", "streaming");
     const provisional = el("div", "state-badge state-provisional", PROVISIONAL_LABEL);
-    article.appendChild(provisional);
+    article.insertBefore(provisional, article.querySelector(".turn-content"));
     inflight = { sid: sid, article: article };
     messagesEl.appendChild(article);
     messagesEl.setAttribute("aria-busy", "true");
@@ -1013,21 +1038,9 @@
     }
     assistantTurn.ts = Date.now();
     contentEl.replaceChildren(renderMarkdown(assistantTurn.content));
-    if (assistantTurn.citations.length) {
-      const box = el("div", "citations");
-      box.appendChild(el("div", "citations-title", citationsTitle(assistantTurn)));
-      const list = el("ul");
-      assistantTurn.citations.forEach((cite) => {
-        const li = el("li");
-        li.appendChild(el("span", null, cite));
-        const copy = el("button", "copy-btn copy-cite", "Copy");
-        copy.type = "button";
-        li.appendChild(copy);
-        list.appendChild(li);
-      });
-      box.appendChild(list);
-      article.appendChild(box);
-    }
+    const cites = citationsBox(assistantTurn);
+    if (cites) article.appendChild(cites);
+    stateChip(article, assistantTurn);
     stateBadges(article, assistantTurn);
     const meta = renderMeta(assistantTurn);
     if (meta) article.appendChild(meta);
@@ -1324,9 +1337,9 @@
 
     const theme = (function () {
       try {
-        return window.localStorage.getItem(THEME_KEY) || "theme-3270";
+        return window.localStorage.getItem(THEME_KEY) || "theme-dark";
       } catch (err) {
-        return "theme-3270";
+        return "theme-dark";
       }
     })();
     applyTheme(theme);
@@ -1341,10 +1354,9 @@
       });
     }
 
-    const slider = document.getElementById("reasoning-slider");
-    if (slider) {
-      slider.addEventListener("input", () => {
-        const effort = EFFORT_LEVELS[Number(slider.value)] || "low";
+    document.querySelectorAll(".segmented .seg").forEach((seg) => {
+      seg.addEventListener("click", () => {
+        const effort = seg.getAttribute("data-effort");
         setReasoningEffort(effort);
         try {
           window.localStorage.setItem(REASONING_KEY, effort);
@@ -1352,22 +1364,12 @@
           /* storage loss is not an error */
         }
       });
-    }
-
-    document.querySelectorAll(".slider-ticks .tick").forEach((tick) => {
-      tick.addEventListener("click", () => {
-        const val = tick.getAttribute("data-val");
-        if (val !== null) {
-          const effort = EFFORT_LEVELS[Number(val)] || "low";
-          setReasoningEffort(effort);
-          try {
-            window.localStorage.setItem(REASONING_KEY, effort);
-          } catch (err) {
-            /* storage loss is not an error */
-          }
-        }
-      });
     });
+
+    [productEl, versionEl, splunkEl].forEach((field) => {
+      if (field) field.addEventListener("input", updateContextChips);
+    });
+    updateContextChips();
 
     try {
       const savedEffort = window.localStorage.getItem(REASONING_KEY);

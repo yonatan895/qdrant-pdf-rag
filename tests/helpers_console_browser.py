@@ -92,6 +92,7 @@ class ScriptedLLM:
     def __init__(self) -> None:
         self.scripts: deque[list[tuple[Any, ...]]] = deque()
         self.requests: list[list[dict]] = []
+        self.efforts: list[str | None] = []
         self._gates: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
 
@@ -113,6 +114,7 @@ class ScriptedLLM:
             self._gates = {}
         self.scripts.clear()
         self.requests.clear()
+        self.efforts.clear()
 
     def queue(self, *steps: tuple[Any, ...]) -> None:
         self.scripts.append(list(steps))
@@ -121,6 +123,7 @@ class ScriptedLLM:
         from mainframe_rag.ports import TokenUsage
 
         self.requests.append([dict(m) for m in messages])
+        self.efforts.append(reasoning_effort)
         script = self.scripts.popleft() if self.scripts else DEFAULT_SCRIPT
         first = True
         for step in script:
