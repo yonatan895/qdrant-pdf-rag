@@ -1221,18 +1221,14 @@ class HttpxLLMClient:
             cleanup.push_async_exit(close)
             yield response
 
+    # Ownership (issue #369): pools this object built itself (the cached
+    # sync/async clients) are closed here; a client injected via `client=` is
+    # BORROWED and stays open — its creator closes it.
     def close(self) -> None:
-        if self._client is not None and hasattr(self._client, "close"):
-            self._client.close()
         if self._cached_sync_client is not None:
             self._cached_sync_client.close()
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            if hasattr(self._client, "aclose"):
-                await self._client.aclose()
-            elif hasattr(self._client, "close"):
-                self._client.close()
         if self._cached_async_client is not None:
             await self._cached_async_client.aclose()
 

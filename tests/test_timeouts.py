@@ -66,6 +66,31 @@ def test_chat_after_close_fails_loudly(monkeypatch):
         llm.chat([ChatMessage(role="user", content="q")])
 
 
+@pytest.mark.anyio
+async def test_llm_client_closes_its_own_pools_but_never_a_borrowed_one():
+    """Issue #369: pools HttpxLLMClient built are closed by it; a client
+    injected via `client=` is borrowed and stays open for its creator."""
+    class Borrowed:
+        closes = 0
+
+        def close(self):
+            Borrowed.closes += 1
+
+        async def aclose(self):
+            Borrowed.closes += 1
+
+    borrowed = HttpxLLMClient(_settings(), client=Borrowed())  # type: ignore[arg-type]
+    borrowed.close()
+    await borrowed.aclose()
+    assert Borrowed.closes == 0
+
+    owned = HttpxLLMClient(_settings())
+    sync_pool, async_pool = owned._sync_http(), owned._async_http()
+    owned.close()
+    await owned.aclose()
+    assert sync_pool.is_closed and async_pool.is_closed
+
+
 def test_answer_chat_retries_nothing_on_connect_error():
     s = _settings()
 
