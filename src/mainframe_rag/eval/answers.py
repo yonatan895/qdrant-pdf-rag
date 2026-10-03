@@ -419,6 +419,64 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     return metrics
 
 
+def error_code(resp: Any) -> str:
+    """Stable error code of a non-200 /v1/answer response (issue #307).
+
+    The agent's fixed envelope is ``{"code", "message"}`` at the top level
+    (``ErrorEnvelope``); the eval used to read a nested ``error.code`` that
+    never exists, so every non-200 row recorded the code as ``?`` and a
+    ``prompt_budget_exceeded`` packing loss was indistinguishable from a
+    validation error. The nested shape stays accepted for old servers. Only
+    the code is read: bodies and messages never reach the report."""
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001
+        return "?"
+    if not isinstance(body, dict):
+        return "?"
+    code = body.get("code")
+    if not isinstance(code, str):
+        nested = body.get("error")
+        code = nested.get("code") if isinstance(nested, dict) else None
+    return code if isinstance(code, str) and code else "?"
+
+
+def apply_pool_join(
+    row: dict[str, Any], entry: dict[str, Any], hits: list[dict[str, Any]]
+) -> None:
+    """Attach the doc-level citation recall to an answer row from the sibling
+    /v1/search pool (issue #307), so `answer_completeness` is computed by the
+    answer eval and not only by harness L2. Observational only: unlike L2 an
+    unmapped citation never fails the row here (the verdict stays the
+    structural judge's) and no gate reads these fields. Rows without gold or
+    a judged verdict are left untouched; a missing pool never fabricates a
+    miss (the field stays absent and the row stays out of the denominator)."""
+    from mainframe_rag.eval.judging import cited_doc_ids, precision_recall
+
+    gold = {str(d) for d in (entry.get("expected_doc_ids") or [])}
+    if row.get("verdict") not in ("pass", "fail") or entry.get("expected_behavior") != "answer" or not gold:
+        return
+    cited, unmatched = cited_doc_ids(row.get("citations") or [], hits)
+    precision, recall = precision_recall(cited, gold)
+    row["cited_doc_ids"] = sorted(cited)
+    row["unmatched_citations"] = unmatched
+    row["citation_precision"] = precision
+    row["citation_recall"] = recall
+
+
+def _fetch_pool(client: Any, query: str) -> list[dict[str, Any]] | None:
+    """Sibling /v1/search pool (limit 8, same call the answer retrieval
+    makes). None on any failure: a missing pool is a missing signal, not an
+    empty pool."""
+    try:
+        resp = client.post("/v1/search", json={"query": query, "limit": 8})
+        if resp.status_code != 200:
+            return None
+        return list(resp.json().get("hits", []))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def run_query(
     client: Any,
     entry: dict[str, Any],
@@ -459,10 +517,7 @@ def run_query(
     if resp.status_code != 200:
         # The error envelope is the agent's fixed client contract; str(exc)
         # and upstream bodies never reach the client, so do not expect them.
-        try:
-            code = resp.json().get("error", {}).get("code", "?")
-        except Exception:  # noqa: BLE001
-            code = "?"
+        code = error_code(resp)
         row.update(verdict="error", failures=[f"HTTP {resp.status_code} ({code})"], elapsed_ms=elapsed_ms)
         return row
     data = resp.json()
@@ -766,7 +821,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with TestClient(app_mod.app) as client:
             for i, entry in enumerate(sample, 1):
-                row = run_query(client, entry, capture.signals, temperature=args.temperature)
+                pool = _fetch_pool(client, entry["query"])
+                row = run_query(
+                    client, entry, capture.signals, pool, temperature=args.temperature
+                )
+                if pool is not None:
+                    apply_pool_join(row, entry, pool)
                 results.append(row)
                 marker = row.get("verdict", "?").upper()
                 print(

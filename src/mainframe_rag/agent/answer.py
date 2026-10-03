@@ -56,6 +56,19 @@ _TRIM_OVERCUT_CHARS = 64
 _MIN_TAIL_CHARS = 80
 
 
+def _trim_round_limit(excerpts: int, history: int = 0, base: int = _MAX_TRIM_ROUNDS) -> int:
+    """Verification rounds allowed before a prompt is declared irreducible.
+
+    Each round trims or drops only the LAST excerpt, so a fixed round count
+    cannot reach "nothing left to trim" when the estimator under-counts a
+    dense (table-like) pool: with 8 supplied excerpts and 4 rounds the loop
+    refused with `PromptBudgetExceeded` while 4+ droppable excerpts
+    remained (issue #307, TBL-02 on the 2026-10-03 run). Scale the bound
+    with what can actually be trimmed; it stays finite because every round
+    shortens or pops an excerpt, and each round is one tokenizer call."""
+    return base + 2 * excerpts + history
+
+
 class ParsedAnswer(BaseModel):
     answer: str
     citations: list[str] = Field(default_factory=list)
@@ -846,7 +859,7 @@ def build_messages(
         # rounds; a prompt that still does not fit refuses before inference.
         verify_limit = model_len - reserved - thinking_reserve - margin
         verified_clean = False
-        for _ in range(_MAX_TRIM_ROUNDS):
+        for _ in range(_trim_round_limit(len(packed))):
             if not packed:
                 break
             messages = [
@@ -1787,7 +1800,9 @@ def build_chat_messages(
         )
 
         verify_limit = model_len - reserved - thinking_reserve - margin
-        max_rounds = _MAX_TRIM_ROUNDS * 2 + len(prior_messages)
+        max_rounds = _trim_round_limit(
+            len(packed), len(prior_messages), base=_MAX_TRIM_ROUNDS * 2
+        )
         verified_clean = False
         for _ in range(max_rounds):
             candidate = [

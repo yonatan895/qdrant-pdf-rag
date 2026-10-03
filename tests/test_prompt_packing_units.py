@@ -599,3 +599,44 @@ def test_hit_spans_fails_closed_on_corrupt_payload_spans():
     spans_overlap = _hit_spans(hit_overlap, JCL_TEXT)
     assert len(spans_overlap) == 3
 
+
+
+class _DenseTokenizer:
+    """Remote-style counter that sees ~1 token per char: far denser than
+    the word-count estimator, as for numeric/table-heavy excerpts."""
+
+    remote_confirmed = True
+
+    def count_messages(self, messages) -> int:
+        return sum(len(m.content) for m in messages)
+
+
+def test_estimator_drift_trims_past_four_rounds_instead_of_refusing():
+    """Issue #307 (TBL-02, 2026-10-03): eight dense excerpts planned by the
+    estimator overshoot the real window by far more than four last-excerpt
+    trims can remove. The prompt must keep shrinking while evidence remains
+    droppable, so PromptBudgetExceeded means 'nothing left to trim', never
+    'ran out of rounds'; the surviving manifest still fits and is non-empty."""
+    settings = _tokenizer_settings(
+        llm_max_model_len=4096,
+        llm_reserved_output_tokens=800,
+        llm_token_safety_margin=64,
+    )
+    body = "\n".join(f"R{i:02d}  {i * 4096:08X}  {i * 77:06d}" for i in range(40))
+    hits = [_hit(body, chunk_type="table", index=f"c{n}", page=str(n)) for n in range(1, 9)]
+    prepared = build_messages(
+        "which table", hits, tokenizer=_DenseTokenizer(), settings=settings,
+        complexity="simple",
+    )
+    assert prepared.budget_verified is True
+    assert 1 <= len(prepared.evidence.entries) < 8
+    limit = 4096 - 800 - settings.llm_thinking_reserve_tokens_simple - 64
+    assert _DenseTokenizer().count_messages(prepared.messages) <= limit
+
+
+def test_trim_round_limit_scales_with_trimmable_content():
+    from mainframe_rag.agent.answer import _MAX_TRIM_ROUNDS, _trim_round_limit
+
+    assert _trim_round_limit(0) == _MAX_TRIM_ROUNDS
+    assert _trim_round_limit(8) > _trim_round_limit(2) > _MAX_TRIM_ROUNDS
+    assert _trim_round_limit(3, 2, base=_MAX_TRIM_ROUNDS * 2) == _MAX_TRIM_ROUNDS * 2 + 6 + 2
