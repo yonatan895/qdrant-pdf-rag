@@ -44,8 +44,10 @@ class _StubPage:
         self._text = text
         self._label = label
 
-    def get_text(self) -> str:
-        return self._text
+    def get_text(self, option: str = "text") -> str | list:
+        # Plain text only; the geometry options see an empty page, so the
+        # table-row reassembly (#85) falls through to plain extraction.
+        return self._text if option == "text" else []
 
     def get_label(self) -> str | None:
         return self._label

@@ -1,0 +1,277 @@
+{
+  "schema": 1,
+  "criteria_id": "acceptance-2026-10-proposed-1",
+  "status": "proposed",
+  "registered_by": null,
+  "registered_at": null,
+  "certifying_profiles": [
+    "production"
+  ],
+  "note": "PROPOSED for maintainer/SME sign-off (#367). Thresholds are policy proposals, not measured production performance; the 2026-09-16 stand-in numbers must not be extrapolated. Registering means setting status=registered, registered_by and registered_at in a dedicated PR BEFORE any scored run; a later change needs a new criteria_id and a new release-set manifest binding.",
+  "stages": {
+    "pilot": {
+      "repeats": 1,
+      "statistical_claim": false,
+      "confidence": 0.95,
+      "criteria": [
+        {
+          "id": "P1",
+          "metric": "answer_pass",
+          "scope": "answer",
+          "op": ">=",
+          "threshold": 0.8333,
+          "statistic": "point",
+          "min_n": 24,
+          "rationale": "#447 G2 proposed bar: 20 of 24 useful, supported, source-traceable answers over ALL requests (length/transport failures and false refusals count against it)"
+        },
+        {
+          "id": "P2",
+          "metric": "abstain_pass",
+          "scope": "abstain",
+          "op": ">=",
+          "threshold": 1.0,
+          "statistic": "point",
+          "min_n": 6,
+          "rationale": "all six insufficient-evidence/wrong-premise cases handled without fabrication"
+        },
+        {
+          "id": "P3",
+          "metric": "fabrication_count",
+          "scope": "abstain",
+          "op": "<=",
+          "threshold": 0,
+          "statistic": "point",
+          "min_n": 1,
+          "rationale": "no fabricated operational instruction on any abstain case"
+        },
+        {
+          "id": "P4",
+          "metric": "critical_failures",
+          "scope": "all",
+          "op": "<=",
+          "threshold": 0,
+          "statistic": "point",
+          "min_n": 1,
+          "rationale": "zero critical scope/release/protocol/access/false-completion/provenance failures"
+        },
+        {
+          "id": "P5",
+          "metric": "false_refusal_rate",
+          "scope": "answer",
+          "op": "<=",
+          "threshold": 0.1,
+          "statistic": "point",
+          "min_n": 1,
+          "rationale": "a refusal of an answerable question is a usefulness miss; bounded separately so it cannot hide in P1"
+        },
+        {
+          "id": "P-COV-message_id",
+          "metric": "case_count",
+          "scope": "answer:message_id",
+          "op": ">=",
+          "threshold": 3,
+          "statistic": "point",
+          "min_n": 1,
+          "rationale": "pilot must span identifiers, releases, conditions/procedures, tables/code and diagnostics (#447)"
+        },
+        {
+          "id": "P-COV-version",
+          "metric": "case_count",
+          "scope": "answer:version",
+          "op": ">=",
+          "threshold": 3,
+          "statistic": "point",
+          "min_n": 1,
+          "rationale": "pilot must span identifiers, releases, conditions/procedures, tables/code and diagnostics (#447)"
+        },
+        {
+          "id": "P-COV-syntax",
+          "metric": "case_count",
+          "scope": "answer:syntax",
+          "op": ">=",
+          "threshold": 3,
+          "statistic": "point",
+          "min_n": 1,
+          "rationale": "pilot must span identifiers, releases, conditions/procedures, tables/code and diagnostics (#447)"
+        },
+        {
+          "id": "P-COV-table",
+          "metric": "case_count",
+          "scope": "answer:table",
+          "op": ">=",
+          "threshold": 3,
+          "statistic": "point",
+          "min_n": 1,
+          "rationale": "pilot must span identifiers, releases, conditions/procedures, tables/code and diagnostics (#447)"
+        },
+        {
+          "id": "P-COV-diagnostic",
+          "metric": "case_count",
+          "scope": "answer:diagnostic",
+          "op": ">=",
+          "threshold": 3,
+          "statistic": "point",
+          "min_n": 1,
+          "rationale": "pilot must span identifiers, releases, conditions/procedures, tables/code and diagnostics (#447)"
+        }
+      ]
+    },
+    "release": {
+      "repeats": 3,
+      "statistical_claim": true,
+      "confidence": 0.95,
+      "criteria": [
+        {
+          "id": "R1",
+          "metric": "answer_pass",
+          "scope": "answer",
+          "op": ">=",
+          "threshold": 0.8,
+          "statistic": "wilson_lower",
+          "min_n": 100,
+          "rationale": "true all-request useful+supported+traceable rate >= 0.80 at 95% one-sided confidence; needs 87 of 100 observed"
+        },
+        {
+          "id": "R2",
+          "metric": "abstain_pass",
+          "scope": "abstain",
+          "op": ">=",
+          "threshold": 0.85,
+          "statistic": "wilson_lower",
+          "min_n": 30,
+          "rationale": "correct, non-fabricating abstention or premise correction; needs 29 of 30 observed"
+        },
+        {
+          "id": "R3",
+          "metric": "fabrication_count",
+          "scope": "abstain",
+          "op": "<=",
+          "threshold": 0,
+          "statistic": "point",
+          "min_n": 1,
+          "rationale": "zero fabricated operational instructions in any repeat"
+        },
+        {
+          "id": "R4",
+          "metric": "critical_failures",
+          "scope": "all",
+          "op": "<=",
+          "threshold": 0,
+          "statistic": "point",
+          "min_n": 1,
+          "rationale": "zero critical failures in any repeat; not a rate, no tolerance"
+        },
+        {
+          "id": "R5",
+          "metric": "completion_rate",
+          "scope": "all",
+          "op": ">=",
+          "threshold": 0.95,
+          "statistic": "point",
+          "min_n": 100,
+          "rationale": "all-request completion (length, transport and protocol failures included); reported beside quality-given-completion"
+        },
+        {
+          "id": "R6",
+          "metric": "false_refusal_rate",
+          "scope": "answer",
+          "op": "<=",
+          "threshold": 0.1,
+          "statistic": "wilson_upper",
+          "min_n": 100,
+          "rationale": "false refusals bounded at 95% one-sided confidence"
+        },
+        {
+          "id": "R7",
+          "metric": "evidence_supplied_rate",
+          "scope": "answer",
+          "op": ">=",
+          "threshold": 0.9,
+          "statistic": "point",
+          "min_n": 100,
+          "rationale": "the adjudicated passage was retrieved and supplied intact; separates retrieval/context failures from model behavior"
+        },
+        {
+          "id": "R8",
+          "metric": "flip_rate",
+          "scope": "all",
+          "op": "<=",
+          "threshold": 0.1,
+          "statistic": "point",
+          "min_n": 100,
+          "rationale": "repeat stability at production temperature: at most 10% of cases may flip between pass and fail across the 3 repeats"
+        },
+        {
+          "id": "R-CLS-message_id",
+          "metric": "answer_pass",
+          "scope": "answer:message_id",
+          "op": ">=",
+          "threshold": 0.9,
+          "statistic": "point",
+          "min_n": 10,
+          "rationale": "per-class floor (point estimate); fewer than 10 cases is insufficient, never a pass"
+        },
+        {
+          "id": "R-CLS-doc_number",
+          "metric": "answer_pass",
+          "scope": "answer:doc_number",
+          "op": ">=",
+          "threshold": 0.9,
+          "statistic": "point",
+          "min_n": 10,
+          "rationale": "per-class floor (point estimate); fewer than 10 cases is insufficient, never a pass"
+        },
+        {
+          "id": "R-CLS-syntax",
+          "metric": "answer_pass",
+          "scope": "answer:syntax",
+          "op": ">=",
+          "threshold": 0.75,
+          "statistic": "point",
+          "min_n": 10,
+          "rationale": "per-class floor (point estimate); fewer than 10 cases is insufficient, never a pass"
+        },
+        {
+          "id": "R-CLS-diagnostic",
+          "metric": "answer_pass",
+          "scope": "answer:diagnostic",
+          "op": ">=",
+          "threshold": 0.75,
+          "statistic": "point",
+          "min_n": 10,
+          "rationale": "per-class floor (point estimate); fewer than 10 cases is insufficient, never a pass"
+        },
+        {
+          "id": "R-CLS-version",
+          "metric": "answer_pass",
+          "scope": "answer:version",
+          "op": ">=",
+          "threshold": 0.75,
+          "statistic": "point",
+          "min_n": 10,
+          "rationale": "per-class floor (point estimate); fewer than 10 cases is insufficient, never a pass"
+        },
+        {
+          "id": "R-CLS-table",
+          "metric": "answer_pass",
+          "scope": "answer:table",
+          "op": ">=",
+          "threshold": 0.75,
+          "statistic": "point",
+          "min_n": 10,
+          "rationale": "per-class floor (point estimate); fewer than 10 cases is insufficient, never a pass"
+        },
+        {
+          "id": "R-CLS-comparative",
+          "metric": "answer_pass",
+          "scope": "answer:comparative",
+          "op": ">=",
+          "threshold": 0.75,
+          "statistic": "point",
+          "min_n": 10,
+          "rationale": "per-class floor (point estimate); fewer than 10 cases is insufficient, never a pass"
+        }
+      ]
+    }
+  }
+}

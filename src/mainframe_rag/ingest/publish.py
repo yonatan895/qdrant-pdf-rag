@@ -914,8 +914,16 @@ def verify_staging_distribution(
             elif live != want:
                 problems.append(
                     f"{collection}: configured {attr}={live} != selected {want} "
-                    "(snapshot-gated replica/rebuild migration, issue #360) — "
-                    "never lower the production policy to hide it"
+                    "(snapshot-gated replica/rebuild migration, issue #360; "
+                    + (
+                        "shard-layout change: only a distinct rebuilt "
+                        "generation with preserved source identities"
+                        if attr == "shard_number"
+                        else "same shard layout: only an explicit "
+                        "snapshot-gated replication plan that waits for "
+                        "ACTIVE copies"
+                    )
+                    + ") — never lower the production policy to hide it"
                 )
     return problems
 
