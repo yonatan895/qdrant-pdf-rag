@@ -183,3 +183,187 @@ def parse_pdf(
         )
     finally:
         doc.close()
+
+
+# --- Page text extraction (issues #85, #87, #271) ---------------------------
+# Lives here, not in run_ingest.py, because this module is hashed into
+# extraction_rules_version: a payload-changing extraction rule outside the
+# hashed modules would let resumed ingests silently keep stale payloads.
+
+# A block is "cell-like" (a table column, not prose) when its lines are
+# short: at most this many words on average and per line. Two-column prose
+# runs 8+ words per line, so it never qualifies and keeps stream order.
+_CELL_MEAN_WORDS = 5.0
+_CELL_MAX_WORDS = 8
+# A column set is only reassembled into rows when at least this many
+# baselines carry two or more cells: header/footer pairs and
+# a lone "title ... page" line stay untouched.
+_MIN_TABLE_ROWS = 3
+# Consecutive cell-like blocks join one column set while each lies within this
+# many line heights of the set's vertical extent (MuPDF splits a column into
+# several blocks wherever a wrapped row opens a larger gap).
+_MAX_GAP_LINES = 1.5
+_CHANGE_BAR_LINE = "|"
+
+
+def _strip_change_bars(text: str) -> str:
+    """Drop lines that are only an IBM change-bar glyph. Bars are margin
+    marks, never content; a lone ``|`` line only pollutes chunk text and
+    embeddings. A ``|`` inside a longer line is untouched."""
+    if _CHANGE_BAR_LINE not in text:
+        return text
+    kept = [ln for ln in text.split("\n") if ln.strip() != _CHANGE_BAR_LINE]
+    return "\n".join(kept)
+
+
+def _is_cell_block(text: str) -> bool:
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    if not lines:
+        return False
+    counts = [len(ln.split()) for ln in lines]
+    return max(counts) <= _CELL_MAX_WORDS and sum(counts) / len(counts) <= _CELL_MEAN_WORDS
+
+
+def _same_row(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    ca, cb = (a[0] + a[1]) / 2, (b[0] + b[1]) / 2
+    return a[0] <= cb <= a[1] and b[0] <= ca <= b[1]
+
+
+def _table_rows(
+    group: list[tuple[int, str]],
+    line_boxes: dict[tuple[int, int], tuple[float, float, float, float]],
+) -> list[str] | None:
+    """Rebuild row lines from a set of column blocks, or None when the
+    geometry does not describe a table (then the caller keeps stream
+    order). group: (block_no, block text) in stream order."""
+    cells: list[tuple[float, float, float, int, str]] = []  # y0, y1, x0, block, text
+    for block_no, text in group:
+        for line_no, ln in enumerate(text.split("\n")):
+            if not ln.strip():
+                continue
+            box = line_boxes.get((block_no, line_no))
+            if box is None:
+                return None
+            cells.append((box[1], box[3], box[0], block_no, ln.strip()))
+    cells.sort(key=lambda c: (c[0], c[2]))
+    rows: list[list[tuple[float, float, float, int, str]]] = []
+    for cell in cells:
+        if rows and _same_row((rows[-1][0][0], rows[-1][0][1]), (cell[0], cell[1])):
+            rows[-1].append(cell)
+        else:
+            rows.append([cell])
+    multi = sum(1 for r in rows if len(r) >= 2)
+    if multi < _MIN_TABLE_ROWS:
+        return None
+    return [" ".join(c[4] for c in sorted(r, key=lambda c: c[2])) for r in rows]
+
+
+def extract_page_text(page: pymupdf.Page) -> str:
+    """Page text, with column-major drawn tables reassembled into rows.
+
+    Plain ``get_text()`` follows content-stream order. A table drawn column
+    by column therefore extracts as one list per column and the row/value
+    association (``MAXJOBS 200 Maximum queued jobs``) is lost before
+    chunking (issue #85). ``get_text(sort=True)`` is not the fix: in current
+    PyMuPDF it simulates layout (padding, blank lines, cross-column lines)
+    and interleaves multi-column prose line by line.
+
+    The correction is therefore narrow. Consecutive text blocks that are
+    vertically adjacent or overlapping and *cell-like* (short lines, see
+    _is_cell_block) form a column set; only when at least
+    _MIN_TABLE_ROWS baselines carry two or more cells is the set
+    emitted as one line per baseline (cells joined by a single space). Prose,
+    including multi-column prose, never qualifies and stays byte-identical
+    to plain extraction, as does any page where the rebuilt text would not
+    reproduce plain extraction (checked, not assumed). Bare change-bar lines
+    are dropped (see _strip_change_bars).
+    """
+    plain = page.get_text()
+    blocks = [b for b in page.get_text("blocks") if len(b) >= 7 and b[6] == 0]
+    if not blocks or "".join(b[4] for b in blocks) != plain:
+        return _strip_change_bars(plain)
+
+    # (block_no, bbox, text without change bars, original text); blocks that
+    # were nothing but change bars vanish here.
+    entries = [
+        (b[5], (b[0], b[1], b[2], b[3]), stripped, b[4])
+        for b in blocks
+        if (stripped := _strip_change_bars(b[4])).strip()
+    ]
+    groups: list[tuple[int, int]] = []  # [start, end) indexes into entries
+    i = 0
+    while i < len(entries):
+        if not _is_cell_block(entries[i][2]):
+            i += 1
+            continue
+        j = i + 1
+        y0, y1 = entries[i][1][1], entries[i][1][3]
+        while j < len(entries) and _is_cell_block(entries[j][2]):
+            _, by0, _, by1 = entries[j][1]
+            lines = max(1, sum(1 for ln in entries[j][2].split("\n") if ln.strip()))
+            gap = max(by0 - y1, y0 - by1)  # negative when the ranges overlap
+            if gap > _MAX_GAP_LINES * (by1 - by0) / lines:
+                break
+            y0, y1 = min(y0, by0), max(y1, by1)
+            j += 1
+        groups.append((i, j))
+        i = max(j, i + 1)
+    if not groups:
+        return _strip_change_bars(plain)
+
+    line_boxes: dict[tuple[int, int], tuple[float, float, float, float]] = {}
+    for w in page.get_text("words"):
+        key = (w[5], w[6])
+        x0, y0, x1, y1 = line_boxes.get(key, (w[0], w[1], w[2], w[3]))
+        line_boxes[key] = (min(x0, w[0]), min(y0, w[1]), max(x1, w[2]), max(y1, w[3]))
+
+    out: list[str] = []
+    cursor = 0
+    for start, end in groups:
+        out.extend(e[2] for e in entries[cursor:start])
+        # Word-based line indexes only line up with unmodified block text, so
+        # a block that also carried change-bar lines keeps stream order.
+        rows = None
+        if all(e[2] == e[3] for e in entries[start:end]):
+            rows = _table_rows([(e[0], e[2]) for e in entries[start:end]], line_boxes)
+        if rows is None:
+            out.extend(e[2] for e in entries[start:end])
+        else:
+            out.append("\n".join(rows) + "\n")
+        cursor = end
+    out.extend(e[2] for e in entries[cursor:])
+    return "".join(out)
+
+
+def _page_label(page: pymupdf.Page) -> str | None:
+    """Printed label, or None when the page has none (issue #271).
+
+    A /PageLabels tree whose first rule starts after page 0 leaves the
+    earlier pages unlabeled, and PyMuPDF's get_label() raises IndexError on
+    them instead of returning ''. Treat that page's label as absent rather
+    than failing the whole document: chunking cites a physical-page
+    fallback for any span that is not fully labeled."""
+    try:
+        return page.get_label()
+    except IndexError:
+        return None
+
+
+def _extract_page_texts(doc: pymupdf.Document) -> tuple[list[str], list[str | None]]:
+    """Page texts sanitized at extraction plus page labels, in page order.
+
+    Lives beside the other payload rules (hashed into extraction_rules_version)
+    and is unit-testable with a stub document: control/bidi/zero-width
+    characters are dropped by sanitize_page_text (issue #87) before chrome
+    detection sees the text, since those characters would also fracture
+    chrome line-matching. Table rows are rebuilt by extract_page_text
+    (issue #85). Labels pass through untouched, except that an unreadable
+    label is absent (see _page_label).
+    """
+    page_texts: list[str] = []
+    page_labels: list[str | None] = []
+    for i in range(doc.page_count):
+        page = doc[i]
+        page_texts.append(sanitize_page_text(extract_page_text(page)))
+        page_labels.append(_page_label(page))
+    return page_texts, page_labels

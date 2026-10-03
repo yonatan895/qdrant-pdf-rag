@@ -27,15 +27,11 @@ import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from qdrant_client.http.exceptions import UnexpectedResponse
-
-if TYPE_CHECKING:
-    import pymupdf
 
 from mainframe_rag.config import Settings, load_settings
 from mainframe_rag.ingest.build import (
@@ -71,7 +67,12 @@ from mainframe_rag.ingest.context import (
     resolve_cache_path,
 )
 from mainframe_rag.ingest.embed import build_embedder, embed_batch
-from mainframe_rag.ingest.ibm_pdf import ParsedDoc, parse_pdf, sanitize_page_text, sha256_file
+from mainframe_rag.ingest.ibm_pdf import (
+    ParsedDoc,
+    _extract_page_texts,
+    parse_pdf,
+    sha256_file,
+)
 from mainframe_rag.ingest.identity import (
     RevisionCollisionError,
     find_collisions,
@@ -146,39 +147,6 @@ _worker_settings: Settings | None = None
 _worker_context_client: ContextLLMClient | None = None
 _worker_context_cache: dict[str, str] | None = None
 _worker_context_cache_path: str | None = None
-
-
-def _extract_page_texts(doc: pymupdf.Document) -> tuple[list[str], list[str | None]]:
-    """Page texts sanitized at extraction plus page labels, in page order.
-
-    Split out of _parse_one so the sanitize wiring is unit-testable with a
-    stub document (no PyMuPDF needed): control/bidi/zero-width characters
-    are dropped by sanitize_page_text (issue #87) before chrome detection
-    sees the text, since those characters would also fracture chrome
-    line-matching. Labels pass through untouched, except that an unreadable
-    label is absent (see _page_label).
-    """
-    page_texts: list[str] = []
-    page_labels: list[str | None] = []
-    for i in range(doc.page_count):
-        page = doc[i]
-        page_texts.append(sanitize_page_text(page.get_text()))
-        page_labels.append(_page_label(page))
-    return page_texts, page_labels
-
-
-def _page_label(page: pymupdf.Page) -> str | None:
-    """Printed label, or None when the page has none (issue #271).
-
-    A /PageLabels tree whose first rule starts after page 0 leaves the
-    earlier pages unlabeled, and PyMuPDF's get_label() raises IndexError on
-    them instead of returning ''. Treat that page's label as absent rather
-    than failing the whole document: chunking cites a physical-page
-    fallback for any span that is not fully labeled."""
-    try:
-        return page.get_label()
-    except IndexError:
-        return None
 
 
 def _parse_one(

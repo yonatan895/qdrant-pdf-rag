@@ -939,15 +939,16 @@ def test_column_major_table_pdf_keeps_text_cells_and_location(tmp_path):
         assert name in text and meaning in text
 
 
-def test_known_gap_85_column_major_table_loses_row_value_associations(tmp_path):
-    """KNOWN GAP (#85), pinning current lossy behavior: page.get_text() is
-    geometry-free, so a column-major table's name and meaning cells never
-    share a line. When #85 preserves rows this test must be flipped to
-    assert every (name, default, meaning) triple on one line."""
+def test_column_major_table_keeps_row_value_associations(tmp_path):
+    """#85: every independently specified (name, default, meaning) triple is
+    on one line, in row order, and no column list survives."""
     (chunk,) = _pipeline_chunks(_table_pdf(tmp_path / "WX10-0011-00_table.pdf"))
     lines = chunk.text.splitlines()
-    for name, _default, meaning in _TABLE_ROWS:
-        assert not any(name in ln and meaning in ln for ln in lines), name
+    for name, default, meaning in _TABLE_ROWS:
+        assert f"{name} {default} {meaning}" in lines
+    assert "Parameter Default Meaning" in lines
+    order = [lines.index(f"{n} {d} {m}") for n, d, m in _TABLE_ROWS]
+    assert order == sorted(order)
 
 
 def _change_bar_pdf(path):
@@ -979,9 +980,169 @@ def test_change_bar_pdf_keeps_prose_in_order(tmp_path):
     assert prose == [f"Revised sentence {i} about the widget limit." for i in range(6)]
 
 
-def test_known_gap_85_change_bar_glyphs_survive_as_bare_bar_lines(tmp_path):
-    """KNOWN GAP (#85 status note), pinning current behavior: change-bar glyphs
-    survive extraction as bare '|' lines inside chunk text. When the extraction
-    concern strips them this test must be flipped to assert none remain."""
+def test_change_bar_glyph_lines_are_dropped_and_prose_kept(tmp_path):
+    """#85: bare '|' margin lines are not content; prose lines are untouched."""
     (chunk,) = _pipeline_chunks(_change_bar_pdf(tmp_path / "WX10-0012-00_bars.pdf"))
-    assert [ln for ln in chunk.text.splitlines() if ln.strip() == "|"]
+    assert not [ln for ln in chunk.text.splitlines() if ln.strip() == "|"]
+    assert sum(ln.startswith("Revised sentence") for ln in chunk.text.splitlines()) == 6
+
+
+def _draw_columns(page, columns, x0=72, y0=100, step=140, leading=14, wrapped=()):
+    """Column-major draw: each column whole, one text object per line. A '|'
+    inside a cell starts a continuation line; rows listed in `wrapped`
+    (0-based) reserve one extra line of height in every column."""
+    for c, (head, cells) in enumerate(columns):
+        x = x0 + step * c
+        page.insert_text((x, y0), head, fontsize=10)
+        for row, cell in enumerate(cells):
+            top = y0 + leading * (row + 1 + sum(1 for w in wrapped if w < row))
+            for k, piece in enumerate(cell.split("|")):
+                page.insert_text((x, top + leading * k), piece, fontsize=10)
+
+
+def _one_page_pdf(path, draw):
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 60), "Chapter 1 Limits", fontsize=12)
+    draw(page)
+    doc.set_toc([[1, "Chapter 1 Limits", 1]])
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_column_major_wrapped_rows_and_repeated_headers(tmp_path):
+    """Row 2's meaning wraps onto a second line ('|' splits the cell); the
+    header row repeats mid-table. Triples are specified independently of the
+    drawing code."""
+    cols = [
+        ("Name", ["ALPHA", "BETA", "Name", "GAMMA", "DELTA"]),
+        ("Value", ["11", "22", "Value", "33", "44"]),
+        ("Note", ["first note", "second note|continues here", "Note", "third note", "fourth note"]),
+    ]
+    path = _one_page_pdf(
+        tmp_path / "WX10-0013-00_wrap.pdf",
+        lambda page: _draw_columns(page, cols, wrapped=(1,)),
+    )
+    (chunk,) = _pipeline_chunks(path)
+    lines = chunk.text.splitlines()
+    for row in ("ALPHA 11 first note", "BETA 22 second note", "GAMMA 33 third note",
+                "DELTA 44 fourth note"):
+        assert row in lines, row
+    assert lines.count("Name Value Note") == 2  # header + repeat, both whole rows
+    assert "continues here" in lines  # wrapped tail kept, directly after its row
+    assert lines.index("continues here") == lines.index("BETA 22 second note") + 1
+
+
+def test_prose_beside_table_is_not_merged_into_rows(tmp_path):
+    """A long-line prose paragraph to the right of the table, vertically
+    overlapping it, stays prose; the table still becomes rows."""
+    cols = [
+        ("Key", ["K1", "K2", "K3"]),
+        ("Val", ["7", "8", "9"]),
+    ]
+
+    def draw(page):
+        import pymupdf
+
+        _draw_columns(page, cols, step=60)
+        page.insert_textbox(
+            pymupdf.Rect(260, 90, 540, 200),
+            "This sidebar paragraph explains in ordinary running prose how the "
+            "listed keys are chosen and why their values matter to operators.",
+            fontsize=10,
+        )
+
+    (chunk,) = _pipeline_chunks(_one_page_pdf(tmp_path / "WX10-0014-00_side.pdf", draw))
+    lines = chunk.text.splitlines()
+    for row in ("K1 7", "K2 8", "K3 9"):
+        assert row in lines
+    prose = " ".join(ln for ln in lines if ln not in {"Key Val", "K1 7", "K2 8", "K3 9"})
+    assert "This sidebar paragraph explains in ordinary running prose how the" in prose
+
+
+def _plain_vs_extracted(path):
+    import pymupdf
+
+    from mainframe_rag.ingest.ibm_pdf import extract_page_text
+
+    with pymupdf.open(path) as doc:
+        return [(p.get_text(), extract_page_text(p)) for p in doc]
+
+
+def test_multicolumn_prose_extraction_is_byte_identical_to_plain(tmp_path):
+    """#85 A/B: the table correction must not touch multi-column prose, drawn
+    as paragraph boxes or line by line, nor single-column prose."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    boxed = doc.new_page()
+    for rect, text in (
+        (pymupdf.Rect(50, 50, 280, 200), "Left column paragraph one. " * 12),
+        (pymupdf.Rect(310, 50, 540, 200), "Right column paragraph one. " * 12),
+        (pymupdf.Rect(50, 230, 280, 400), "Left column paragraph two. " * 12),
+        (pymupdf.Rect(310, 230, 540, 400), "Right column paragraph two. " * 12),
+    ):
+        boxed.insert_textbox(rect, text, fontsize=10)
+    lined = doc.new_page()
+    for col, x in (("Left", 50), ("Right", 310)):
+        for i in range(10):
+            lined.insert_text((x, 100 + 12 * i), f"{col} line {i} of the {col} column text here", fontsize=10)
+    single = doc.new_page()
+    for i in range(10):
+        single.insert_text((72, 100 + 14 * i), f"Single column sentence number {i} runs the full width.", fontsize=10)
+    path = tmp_path / "WX10-0015-00_prose.pdf"
+    doc.save(path)
+    doc.close()
+    pairs = _plain_vs_extracted(path)
+    assert len(pairs) == 3
+    for plain, extracted in pairs:
+        assert extracted == plain
+
+
+def test_row_major_drawn_table_cells_share_a_line(tmp_path):
+    """Row-major draw order: plain extraction puts every cell on its own
+    line; the rows must come out whole too."""
+    rows = [("Name", "Value", "Note"), ("A1", "1", "one"), ("B2", "2", "two"), ("C3", "3", "three")]
+
+    def draw(page):
+        for r, cells in enumerate(rows):
+            for c, cell in enumerate(cells):
+                page.insert_text((72 + 140 * c, 100 + 14 * r), cell, fontsize=10)
+
+    (chunk,) = _pipeline_chunks(_one_page_pdf(tmp_path / "WX10-0016-00_rowmajor.pdf", draw))
+    lines = chunk.text.splitlines()
+    for r in rows:
+        assert " ".join(r) in lines
+
+
+def test_table_reassembly_only_reorders_words(tmp_path):
+    """No word is added or lost by the row rebuild (change bars aside)."""
+    import collections
+
+    cols = [
+        ("Name", ["ALPHA", "BETA", "Name", "GAMMA"]),
+        ("Value", ["11", "22", "Value", "33"]),
+        ("Note", ["first note", "second note|continues here", "Note", "third note"]),
+    ]
+    path = _one_page_pdf(
+        tmp_path / "WX10-0017-00_words.pdf",
+        lambda page: _draw_columns(page, cols, wrapped=(1,)),
+    )
+    ((plain, extracted),) = _plain_vs_extracted(path)
+    assert extracted != plain
+    assert collections.Counter(extracted.split()) == collections.Counter(plain.split())
+
+
+def test_lone_header_pair_on_one_baseline_is_not_merged(tmp_path):
+    """Running header/footer pairs (one baseline) are not tables."""
+
+    def draw(page):
+        page.insert_text((72, 780), "Widget Guide", fontsize=9)
+        page.insert_text((480, 780), "Page 3", fontsize=9)
+        page.insert_text((72, 100), "Plain body sentence one.", fontsize=10)
+
+    ((plain, extracted),) = _plain_vs_extracted(_one_page_pdf(tmp_path / "WX10-0018-00_hdr.pdf", draw))
+    assert extracted == plain
