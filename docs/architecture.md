@@ -15,7 +15,7 @@ Build a **citation-first expert mainframe agent** that answers operational quest
 | Layer | System | Job |
 |---|---|---|
 | Live state (caller-supplied) | Splunk (existing) | Events, jobs, messages *now* (context in, not crawl — ADR-0001) |
-| Live state (agent-fetched) | Zowe MCP server, read-only (ADR-0003) | Datasets, JES spool, USS, job status — bounded, audited, default-off |
+| Live state (agent-fetched) | Zowe MCP server, read-only (ADR-0003) | Authorized typed read-only observations; only exact-target `job_status` is approved, other tools unapproved; bounded, audited, default-off, unwired (see [agent.md](agent.md#source-observations)) |
 | Knowledge | Qdrant (self-hosted) | Manuals, precedent, "what does this mean / how is this supposed to work" |
 | Reasoning | Internal vLLM / LiteLLM (platform team) | Thinking model for citation + solution / script generation |
 | Embeddings | Internal vLLM stack | Dense vectors only; OpenAI-compatible endpoint |
@@ -92,7 +92,7 @@ complete its answer-context integration; see the workload status table below.
 | `qdrant` | StatefulSet (vendored chart) | 3 | Cluster mode, P2P 6335 (TLS off), HTTP 6333, gRPC 6334, `restricted-v2` SCC |
 | `rag-agent` | Deployment | 2 | FastAPI, unprivileged, no GPU |
 | `ingest` | One-Shot Job | 1 | High CPU, worker pool, RWO scratch |
-| `zowe-mcp` | Proposed sidecar (ADR-0003); absent from the current Helm chart | Not deployed | Bridge/client code exists; answer-context integration and deployment wiring remain incomplete. Default-off; requires separate site credentials and acceptance |
+| `zowe-mcp` | Proposed sidecar (ADR-0003); absent from the current Helm chart | Not deployed | Bridge/client code exists; answer-context integration and deployment wiring remain incomplete. Default-off; enabling requires the ADR-0003 reactivation gate, separate site credentials and written site acceptance |
 | `jaeger` | Deployment (default on; `off` sentinel disables; disabling only the backend needs an explicit collector endpoint or `off`) | 1 | Jaeger v2 all-in-one, Badger RWO block PVC, tracing backend |
 | `bm25-weights` | Baked in images | — | FastEmbed `Qdrant/bm25`; no runtime download |
 

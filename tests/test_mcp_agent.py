@@ -293,3 +293,78 @@ def test_fetch_emits_bounded_live_span(monkeypatch) -> None:
     assert "hunter2" not in haystack and "abc" not in haystack
 
 
+
+
+# ------------------------------------------------- ADR-0003 observation boundary
+
+
+def test_plan_requires_exact_job_id_never_an_unscoped_listing() -> None:
+    """ADR-0003: empty job_status filters mean "every job of every owner", so
+    a bare JES mention (or any query without a job id) plans no job_status."""
+    plan = live_state._plan_calls("What is JES doing right now?")
+    assert plan == []
+    assert live_state._plan_calls("Why did JOB00023 fail?")[0] == ("job_status", {"job_id": "JOB00023"})
+    for query in ("jes status please", "show the spool", "last night's abend"):
+        assert all(name != "job_status" for name, _ in live_state._plan_calls(query))
+
+
+def test_fetch_without_exact_target_degrades_with_no_source_call() -> None:
+    fake = FakeZoweMCP()
+    out = fetch_live(_fetch_settings(), fake, "req-1", "What is JES doing right now?", "live")
+    assert out.degraded == "no_target"
+    assert out.texts == () and out.tools_used == ()
+    assert fake.calls == []
+
+
+def test_allowlist_is_the_bridge_registry_and_read_only() -> None:
+    """Client allowlist, bridge registry and the read-only vocabulary move
+    together: adding or renaming a tool is a new ADR, never a flag flip."""
+    import re
+
+    from mainframe_rag.agent.zowe_mcp import ALLOWLIST
+    from mainframe_rag.mcp.server import TOOL_SCHEMAS
+
+    assert tuple(sorted(ALLOWLIST)) == tuple(sorted(TOOL_SCHEMAS))
+    assert all(re.fullmatch(r"[a-z_]+_(read|status)", name) for name in ALLOWLIST)
+    forbidden = re.compile(r"submit|write|put|delete|cancel|purge|hold|release|console|tso|command|issue|exec|spl|search")
+    assert not [name for name in ALLOWLIST if forbidden.search(name)]
+
+
+def test_agent_http_surface_exposes_no_mutating_operation_or_live_call() -> None:
+    """The agent HTTP surface is read-only query traffic: no PUT/PATCH/DELETE
+    anywhere, the POST set is exactly the query routes, and no endpoint module
+    reaches the live-observation fetch (default-off, unwired by decision —
+    wiring it needs the ADR-0003 observation contract and its own concern)."""
+    from pathlib import Path
+
+    from mainframe_rag.agent import app as app_mod
+
+    # OpenAPI covers included routers on every FastAPI version; add the
+    # directly mounted routes so a schema-hidden route cannot slip past.
+    methods_by_path: dict[str, set[str]] = {}
+    for path, operations in app_mod.app.openapi()["paths"].items():
+        methods_by_path.setdefault(path, set()).update(m.upper() for m in operations)
+    for route in [*app_mod.app.routes, *app_mod.webui_router.routes]:
+        if hasattr(route, "path"):
+            methods_by_path.setdefault(route.path, set()).update(getattr(route, "methods", None) or ())
+    all_methods = set().union(*methods_by_path.values())
+    assert all_methods <= {"GET", "HEAD", "POST", "OPTIONS"}
+    posts = {path for path, methods in methods_by_path.items() if "POST" in methods}
+    assert posts == {
+        "/v1/search",
+        "/v1/answer",
+        "/v1/chat",
+        "/v1/chat/completions",
+        "/ui/chat",
+        "/ui/chat/stream",
+    }
+
+    src = Path(live_state.__file__).resolve().parents[1]
+    referencing = sorted(
+        str(path.relative_to(src))
+        for path in src.rglob("*.py")
+        if "fetch_live" in path.read_text(encoding="utf-8")
+    )
+    assert referencing == ["agent/live_state.py"]
+    app_source = Path(app_mod.__file__).read_text(encoding="utf-8")
+    assert "call_tool" not in app_source and "live_state" not in app_source

@@ -229,7 +229,8 @@ with trusted caller context supplied separately from user arguments. Typed
 outcomes preserve complete/partial/stale/failed/denied distinctions internally.
 HTTP/console/chat and a future MCP consumer validate wire input and map results;
 they never implement another entitlement, reference or citation rule. Source
-observations remain a separate bounded port, not a generic query/command proxy.
+observations remain a separate bounded port, not a generic query/command proxy
+([ADR-0003](adr/0003-zowe-mcp-read.md)).
 
 Example of the proposed additive exact-read contract (not an implemented route):
 

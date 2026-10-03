@@ -465,7 +465,7 @@ readers:
 | `rrf_k` / `rrf_weight_*` / `rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` / `retrieve_max_chunks_per_page|doc` | 2 / 1.0,1.0 – 1.0,3.0 / 1.0 / 1.0 / 1, 3 | retrieve fusion + diversification |
 | `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | `false` / `true` / `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |
 | ingest-only (`ingest_workers` = CPU-1, `batch_size` 128, `ingest_upsert_streams` 4, `ingest_bulk_load` false, `bm25_model`, `bm25_cache_dir` unset, `contextual_*` incl. `context_llm_timeout_s` 30.0 / `context_max_chars` 500 / `context_cache_path` unset) | — | ingest; see `docs/ingest.md` §§6–9 |
-| `zowe_mcp_enabled` / `zowe_mcp_base_url` / `zowe_mcp_timeout_s` / `zowe_mcp_max_bytes` / `zowe_mcp_dry_run` | `false` (client not constructed unless enabled) / unset / 15.0 / 262144 / `false` | live-state client (default off; prompt/deployment integration remains incomplete; see `architecture.md`) |
+| `zowe_mcp_enabled` / `zowe_mcp_base_url` / `zowe_mcp_timeout_s` / `zowe_mcp_max_bytes` / `zowe_mcp_dry_run` | `false` (client not constructed unless enabled) / unset / 15.0 / 262144 / `false` | live-state client (default off; unwired from every endpoint; contract: [source observations](#source-observations)) |
 
 ## 8. Log and trace contract
 
@@ -778,3 +778,31 @@ Wire metadata remains the HTTP model client's responsibility before it emits
 these normalized events. Existing buffered sync/async/string fallback,
 pre-emission retry and post-emission no-replay policy are unchanged. Cleanup
 closes the operation, never the shared model client.
+
+<a id="source-observations"></a>
+## Source observations (live z/OS state)
+
+Decision owner: [ADR-0003](adr/0003-zowe-mcp-read.md). Status: contract
+accepted, **capability off and unwired**. No endpoint calls
+`live_state.fetch_live`, `zowe_mcp_enabled=false` is the default, and the
+manual-only POC makes zero source calls. Search never calls an LLM; routing is
+deterministic and trap queries stay on the manuals path.
+
+- **Surface:** the agent HTTP API is read-only query traffic (no PUT/PATCH/
+  DELETE; POST only on search/answer/chat and console chat). The source port is
+  separate from manual evidence and is not a query/command proxy.
+- **Approved operation:** `job_status` for one exact job id. The other three
+  bridge tools (`dataset_read`, `uss_read`, `jes_spool_read`) are allowlisted in
+  code but not approved for use; a new tool is a new ADR.
+- **Observation shape (contract for #91, not yet implemented):** exact `target`,
+  `acquired_at` (agent clock), `observed_at` (source time or null), `outcome`
+  in `complete | truncated | partial | not_found | unavailable | no_target |
+  dry_run | denied`, plus `truncated`. Limits: 2 calls, `zowe_mcp_max_bytes`,
+  `zowe_mcp_timeout_s` per call, no polling, no cross-request cache.
+- **Today in code:** `fetch_live` returns `degraded` codes
+  (`dry_run`, `not_configured`, `no_target`, `timeout`, `tool_error`,
+  `upstream_error`); `job_status` is planned only with an exact job id.
+  Failures are fixed codes; logs and spans carry ids, tool names and byte
+  counts, never source text.
+- **Gate:** enabling needs a named investigation manuals cannot answer plus
+  source-owner and site-security approval (ADR-0003 reactivation gate).
