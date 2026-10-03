@@ -9,6 +9,9 @@ against the actual Qdrant payload before any human semantic pass:
     - expected_heading not found in any chunk of the expected docs
     - expected_page not among the expected doc's page labels
     - message-ID queries whose parsed ID is not in the expected docs' payloads
+    - system-code lookups (message_id class) whose parsed code is not in the
+      expected docs' system_codes, or whose expected_page is not a page of a
+      chunk carrying it
     - must_not_retrieve docs that do not exist (typos)
     - must_not_message_ids that ARE present in an expected doc (broken trap:
       the sibling lives inside the doc you claim answers the query)
@@ -47,6 +50,7 @@ class DocFacts:
     pages: set[str] = field(default_factory=set)
     headings: list[str] = field(default_factory=list)
     message_ids: set[str] = field(default_factory=set)
+    code_pages: dict[str, set[str]] = field(default_factory=dict)  # system code -> page labels
     title: str = ""
 
 
@@ -67,7 +71,7 @@ def build_corpus_facts(client, collection: str) -> CorpusFacts:
             collection,
             limit=PAGE_SIZE,
             offset=offset,
-            with_payload=["doc_id", "title", "heading_path", "page_label", "message_ids"],
+            with_payload=["doc_id", "title", "heading_path", "page_label", "message_ids", "system_codes"],
             with_vectors=False,
         )
         for point in points:
@@ -77,7 +81,10 @@ def build_corpus_facts(client, collection: str) -> CorpusFacts:
                 continue
             doc = facts.docs.setdefault(doc_id, DocFacts())
             doc.title = doc.title or str(payload.get("title") or "")
-            doc.pages.add(str(payload.get("page_label") or ""))
+            page = str(payload.get("page_label") or "")
+            doc.pages.add(page)
+            for code in payload.get("system_codes") or []:
+                doc.code_pages.setdefault(str(code), set()).add(page)
             heading = str(payload.get("heading_path") or "")
             if heading:
                 doc.headings.append(heading.lower())
@@ -118,6 +125,21 @@ def verify_entry(entry: GoldenEntry, facts: CorpusFacts) -> tuple[list[str], lis
         for msg in parse_query(entry.query).message_ids:
             if expected_docs and not any(msg in doc.message_ids for doc in expected_docs):
                 fails.append(f"message id {msg!r} from query not present in expected docs' payloads")
+
+    # Issue #591: a code lookup is bound to the stored payload the prefilter
+    # reads, and its page to a chunk that actually carries the code. Lookup
+    # rows only, as for message ids: a diagnostic question may mention a code
+    # while its answer lives in a book that discusses it in prose.
+    codes = parse_query(entry.query).system_codes if entry.query_class == "message_id" else []
+    for code in codes:
+        if not expected_docs:
+            continue
+        if not any(code in doc.code_pages for doc in expected_docs):
+            fails.append(f"system code {code!r} from query not in expected docs' system_codes")
+        elif entry.expected_page and not any(
+            entry.expected_page in doc.code_pages.get(code, set()) for doc in expected_docs
+        ):
+            fails.append(f"page {entry.expected_page!r} is not a page of a chunk carrying {code!r}")
 
     for msg in entry.must_not_message_ids:
         hit_docs = facts.msg_docs.get(msg, set())

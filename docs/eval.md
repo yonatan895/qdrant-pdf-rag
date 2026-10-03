@@ -277,9 +277,9 @@ verdict.
   name-and-count match. Re-adoption creates a new snapshot and prunes
   strays. Restore verifies the post-restore point count.
 - **Mode-keyed venues:** `benchmarks/harness-vllm.json` (vllm venue: golden
-  + holdout, 193 entries, over the snapshot-pinned **real** corpus
-  `real_manuals` — 435057 pts, `VENUE=rc` + `QDRANT_COLLECTION=real_manuals`,
-  re-recorded 2026-09-12 on the re-frozen set) and `benchmarks/harness.json`
+  + holdout, 203 entries, over the snapshot-pinned **real** corpus
+  `manuals_b5c1756` — 190440 pts, `VENUE=rc` + `QDRANT_COLLECTION=manuals_b5c1756`,
+  re-recorded 2026-10-03 on the re-frozen set) and `benchmarks/harness.json`
   (hash venue: **dev golden set only**, `evals/golden.jsonl`, over the
   snapshot-pinned synthetic hash corpus). Python now selects both the
   mode baseline and this dataset default for Task and direct invocations
@@ -553,7 +553,7 @@ committed (the real-corpus venue guard refuses `real_manuals` without
 
 ## 7. Golden corpus discipline
 
-`golden.jsonl` (121 dev) and `holdout.jsonl` (72, sha256-pinned, verified
+`golden.jsonl` (127 dev) and `holdout.jsonl` (76, sha256-pinned, verified
 by the Python dataset owner before protected parsing/scoring) are built from
 `expert_golden_seed.jsonl` plus payload mining by `build_golden_corpus.py`:
 manual bindings for out-of-pattern families, authored corrections,
@@ -562,7 +562,9 @@ split (LEG entries always dev).
 
 - `verify_golden` scrolls live payload and FAILs on missing
   expected/`must_not` docs, absent headings/pages, unbound message-id
-  queries, `must_not`-inside-expected without the query id, and duplicate
+  queries, code lookups (`message_id` class) whose parsed system code is not
+  in the expected docs' `system_codes` or whose page carries no chunk with
+  that code (#591), `must_not`-inside-expected without the query id, and duplicate
   queries (case-folded); rarity, stratification, and hygiene WARN unless
   `--strict` (which also demands size and class coverage — and the default
   `sh scripts/tools/run-task.sh eval:verify-golden` does not pass `--strict`, so weak traps ship on 0
@@ -711,6 +713,7 @@ committed row is the pointer, the manifest is the detail.
 | 2026-09-16 | 080385c | `real_manuals_v2` (rebuilt) | RC corpus rebuild under current extraction rules + committed representation contract (`--reingest` into a clean target; the legacy `real_manuals` and its alias are retained unchanged) + `verify-golden` + `eval-holdout` | 452 docs / 431233 pts (was 435057); `verify-golden` 0 FAIL/0 WARN; frozen-holdout retrieval green vs baseline: r@1 0.631 (flat), r@5 0.892→0.908, MRR 0.726→0.733, nDCG@8 0.758→0.767; identifier r@1 0.744→0.718, nl r@1 0.462→0.50; 0 failures, 0 must_not violations. Triggered by the #365 acceptance prerequisite (the legacy collection predates the #362/#391 contract); a corpus-lifecycle record for the swap/GC decision is owned by the data-integrity track |
 | 2026-09-16 | 080385c | `real_manuals_v2` + LOCAL_CRC_32GB (8GB stand-in) | `eval-answers` N=24 (VENUE=rc, gateway-routed E4B + Qwen3-Embedding-0.6B, rerank off) — #365 acceptance set | 12/24 pass, 0 errors; answer-tier 10/21, abstain 2/3; `false_refusal_rate` 0.0952 (2/21: CMP-02, DOC-03), `unsafe_answer_rate` 0.3333 (1/3: MSG-01 length-truncated before the required identifier); `by_verification_state` accepted 10 / generation_incomplete 10 / insufficient_evidence 4; `state_mismatches` 12; **every** incomplete row is `finish_reason=length` at the stand-in's 4096 window (prompt ~3.1k + completion ~1k) — a stand-in window limit, not a contract defect; `units_omitted_total` 137; `budget_verified` 0 (the gateway exposes no `/tokenize`); `answer_completeness` not computed by this instrument (no pool join — the `harness-l2` row below carries it). DOC-03 is measured as a zero-cite refusal against the adjudicated premise-correction expectation (#307/#365); experimental reference only, not a production-model result |
 | 2026-09-16 | 17d388c | `real_manuals_v2` + LOCAL_CRC_32GB (8GB stand-in) | `harness-l2` N=12 (VENUE=rc, gateway) — #365 claim-support / completeness slice | 0 errors, 5 structural fails; grounded 0.5455, truncation 0.3636 (stand-in window), citation P/R 0.583/0.273, `answer_completeness` 0.1818 (2/11 gold-retrieved); `by_verification_state` accepted 6 / generation_incomplete 4 / insufficient_evidence 2; `state_mismatches` 5; faithfulness judged 6: entailed 0.50, neutral 0.33, contradiction 0.17; `faithfulness_by_class`: comparative 1.0 entailed (n=2), table 1.0 (n=1), diagnostic 0 entailed / 0.5 contradiction (n=2), doc_number neutral 1.0 (n=1); syntax/version/message classes produced no eligible-cite rows to judge in this sample. Experimental reference; judge-assisted, never an entailment proof |
+| 2026-10-03 | (this PR) | `manuals_b5c1756` (full re-ingest at b5c1756, 452 docs, 190440 pts) + synthetic L1 venue | golden/holdout re-freeze: 10 code-lookup rows `SYS-01..10` (#591; `message_id` class, exact page labels) + re-records of `baseline.json` (hash L1), `holdout-baseline.json` (VENUE=rc) and `harness-vllm.json` (VENUE=rc) | 203 entries (127 dev / 76 holdout); existing rows byte-identical; `verify-golden` 0 FAIL/0 WARN on both; L1 hash 127 queries r@1 1.0, gate PASSED; holdout (vllm, rerank off) r@1 0.667, r@5 0.928, MRR 0.763, page hit@5 1.0 (n=4); harness vllm overall r@5 0.934, MRR 0.782. L4 thresholds unchanged (24-row sample identical). `baseline-vllm.json` unchanged: its dev synthetic vllm venue is not reproducible locally |
 
 ### Protected holdout acquisition (#508 C3)
 
