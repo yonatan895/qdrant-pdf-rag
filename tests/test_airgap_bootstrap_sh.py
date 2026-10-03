@@ -70,6 +70,7 @@ def bundle_dir(tmp_path):
         **task_members(),
         "PACKING_RECORD.txt": b"record\n",
         "sbom.json": b'{"images": []}\n',
+        "THIRD-PARTY-NOTICES.txt": b"notices\n",
         "sneakernet-signing.pub": (extract_dir / "sneakernet-signing.pub").read_bytes(),
     }
     sums = []
@@ -103,6 +104,17 @@ def test_bootstrap_tampered_sums_fails_signature(bundle_dir):
     r = subprocess.run(["sh", "bootstrap.sh"], cwd=bundle_dir, capture_output=True, text=True, check=False)
     assert r.returncode != 0
     assert "signature verification failed" in r.stderr
+
+
+def test_bootstrap_refuses_signed_bundle_without_third_party_notices(bundle_dir):
+    """A validly signed bundle that omits the notice member is not accepted (#376)."""
+    sums = (bundle_dir / "SHA256SUMS").read_text().splitlines(keepends=True)
+    (bundle_dir / "SHA256SUMS").write_text("".join(x for x in sums if not x.endswith("  THIRD-PARTY-NOTICES.txt\n")))
+    sign_sums(bundle_dir)
+    r = subprocess.run(["sh", "bootstrap.sh"], cwd=bundle_dir, capture_output=True, text=True, check=False)
+    assert r.returncode != 0
+    assert "exactly the required bundle members" in r.stderr
+    assert not (bundle_dir / "qdrant-pdf-rag").exists()
 
 
 def test_bootstrap_trusted_pub_mismatch_refuses(bundle_dir):
@@ -148,6 +160,7 @@ def test_bootstrap_success(bundle_dir):
     assert (dist_dir / "MANIFEST.txt").is_file()
     assert (dist_dir / "PACKING_RECORD.txt").is_file()
     assert (dist_dir / "sbom.json").is_file()
+    assert (dist_dir / "THIRD-PARTY-NOTICES.txt").read_bytes() == b"notices\n"
     assert (dist_dir / "sneakernet-signing.pub").is_file()
     assert (dist_dir / "SHA256SUMS.sig").is_file()
 
@@ -358,6 +371,60 @@ def test_bootstrap_refuses_tracked_edit_then_rerun_passes_after_revert(bundle_di
     assert (workspace / "dist/retained-evidence.txt").read_text() == "original"
 
 
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_bootstrap_refuses_index_flags_that_hide_edits_then_rerun_passes(bundle_dir, flag):
+    """An edit under assume-unchanged/skip-worktree is invisible to
+    `git diff`; the flag is refused before dist/ changes and the next run
+    passes once cleared (issue #414)."""
+    assert _bootstrap(bundle_dir).returncode == 0
+    workspace = bundle_dir / "operator workspace"
+    subprocess.run(["git", "update-index", flag, "README.md"], cwd=workspace, check=True)
+    (workspace / "README.md").write_text("hidden edit\n")
+    (workspace / "dist/MANIFEST.txt").unlink()
+    refused = _bootstrap(bundle_dir)
+    assert refused.returncode != 0
+    assert "hides tracked files from change detection" in refused.stderr
+    assert "hidden edit" not in refused.stdout + refused.stderr
+    assert "SUCCESS" not in refused.stdout
+    assert not (workspace / "dist/MANIFEST.txt").exists()
+    assert (workspace / "README.md").read_text() == "hidden edit\n"
+    subprocess.run(["git", "update-index", flag.replace("--", "--no-"), "README.md"], cwd=workspace, check=True)
+    subprocess.run(["git", "checkout", "--", "README.md"], cwd=workspace, check=True)
+    again = _bootstrap(bundle_dir)
+    assert again.returncode == 0, again.stdout + again.stderr
+
+
+def test_bootstrapped_workspace_passes_then_refuses_in_the_real_guard(bundle_dir):
+    """The dist/ chain bootstrap leaves is exactly what the downstream guard
+    verifies (real signature, real clone): pass when clean, refuse once the
+    committed MANIFEST is altered or a tracked edit hides behind an index
+    flag (issue #414)."""
+    assert _bootstrap(bundle_dir).returncode == 0
+    workspace = bundle_dir / "operator workspace"
+
+    def guard():
+        return subprocess.run(
+            ["sh", "-c", f'. "{REPO}/scripts/airgap/common.sh"; cd "$1" || exit 9; MANIFEST=dist/MANIFEST.txt; check_checkout_sha',
+             "guard", str(workspace)],
+            cwd=workspace, capture_output=True, text=True, check=False,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(bundle_dir)},
+        )
+
+    ok = guard()
+    assert ok.returncode == 0, ok.stderr
+    assert ok.stderr == ""  # verified silently, not the "not release-verified" notice
+    manifest = workspace / "dist/MANIFEST.txt"
+    original = manifest.read_text()
+    manifest.write_text(original + "extra: line\n")
+    bad = guard()
+    assert bad.returncode != 0 and "signed checksum entry" in bad.stderr
+    manifest.write_text(original)
+    subprocess.run(["git", "update-index", "--assume-unchanged", "README.md"], cwd=workspace, check=True)
+    (workspace / "README.md").write_text("hidden\n")
+    hidden = guard()
+    assert hidden.returncode != 0 and "hides tracked files" in hidden.stderr
+
+
 def test_bootstrap_approved_upgrade_requires_explicit_checkout_preserves_operator_state(bundle_dir):
     assert _bootstrap(bundle_dir).returncode == 0
     workspace = bundle_dir / "operator workspace"
@@ -394,3 +461,173 @@ def test_bootstrap_approved_upgrade_requires_explicit_checkout_preserves_operato
     probe = subprocess.run([str(workspace / ".tools/bin/task"), "probe"], cwd=workspace, env=_offline_env(bundle_dir), capture_output=True, text=True, check=False)
     assert probe.returncode == 0, probe.stderr
     assert probe.stdout == "offline-task-ok"
+
+
+# --- Issue #414: interrupted / failed artifact staging ---------------------------------------
+
+STAGING_DIRNAME = ".bootstrap-staging"
+
+_CP_SHIM = """#!/bin/sh
+# Test shim: behaves like cp except for one planned fault on the member named by
+# FAULT_MEMBER, fired once (FAULT_MODE: truncate | kill | corrupt).
+src=""
+for a in "$@"; do case "$a" in -*) ;; *) src=$a; break;; esac; done
+for a in "$@"; do last=$a; done
+if [ "${src##*/}" = "${FAULT_MEMBER:-}" ] && [ ! -e "$FAULT_MARK" ]; then
+    : > "$FAULT_MARK"
+    [ -d "$last" ] && out="$last/${src##*/}" || out="$last"
+    case "$FAULT_MODE" in
+        corrupt) printf 'silently-corrupted' > "$out"; exit 0 ;;
+        *) head -c 5 "$src" > "$out" ;;
+    esac
+    [ "$FAULT_MODE" = kill ] && kill -9 "$PPID"
+    exit 1
+fi
+exec "${REAL_CP:-/usr/bin/cp}" "$@"
+"""
+
+_MV_SHIM = """#!/bin/sh
+# Test shim: dies (like a power cut) just before moving FAULT_MEMBER, once.
+src=""
+for a in "$@"; do case "$a" in -*) ;; *) src=$a; break;; esac; done
+if [ "${src##*/}" = "${FAULT_MEMBER:-}" ] && [ ! -e "$FAULT_MARK" ]; then
+    : > "$FAULT_MARK"
+    kill -9 "$PPID"
+    exit 1
+fi
+exec "${REAL_MV:-/usr/bin/mv}" "$@"
+"""
+
+
+def _fault_env(bundle_dir, tool, member, mode="kill"):
+    env = _offline_env(bundle_dir)
+    shim = bundle_dir / "bin" / tool
+    real = shim.resolve()
+    shim.unlink()
+    shim.write_text(_CP_SHIM if tool == "cp" else _MV_SHIM)
+    shim.chmod(0o755)
+    env.update({
+        "FAULT_MEMBER": member, "FAULT_MODE": mode,
+        "FAULT_MARK": str(bundle_dir / f"fault-fired-{tool}"),
+        "REAL_CP" if tool == "cp" else "REAL_MV": str(real),
+    })
+    return env
+
+
+def _snapshot(workspace):
+    """sha256 of every accepted file in dist/ (not the refused staging leftover)
+    plus airgap.env: proves what did not change."""
+    snap = {}
+    for path in sorted((workspace / "dist").rglob("*")):
+        if path.is_file() and STAGING_DIRNAME not in path.parts:
+            snap[str(path.relative_to(workspace))] = _sha256(path.read_bytes())
+    env_file = workspace / "airgap.env"
+    snap["airgap.env"] = _sha256(env_file.read_bytes()) if env_file.exists() else None
+    return snap
+
+
+def _dist_matches_bundle(bundle_dir, workspace):
+    names = [line.split()[1] for line in (bundle_dir / "SHA256SUMS").read_text().splitlines()]
+    names += ["SHA256SUMS", "SHA256SUMS.sig"]
+    return all((workspace / "dist" / n).read_bytes() == (bundle_dir / n).read_bytes() for n in names)
+
+
+@pytest.mark.parametrize("mode", ["truncate", "kill", "corrupt"])
+def test_bootstrap_failed_copy_leaves_existing_dist_and_env_untouched(bundle_dir, mode):
+    """A failed, killed or silently corrupting artifact copy must not alter a
+    previously accepted dist/ or the operator's airgap.env (issue #414)."""
+    assert _bootstrap(bundle_dir).returncode == 0
+    workspace = bundle_dir / "operator workspace"
+    (workspace / "airgap.env").write_text("INTERNAL_REGISTRY=operator-kept\n")
+    (workspace / "dist/retained-evidence.txt").write_text("operator artifact")
+    before = _snapshot(workspace)
+    failed = _bootstrap(bundle_dir, _fault_env(bundle_dir, "cp", "sbom.json", mode))
+    assert failed.returncode != 0
+    assert "SUCCESS" not in failed.stdout
+    assert _snapshot(workspace) == before
+    leftover = workspace / "dist" / STAGING_DIRNAME
+    if mode == "kill":
+        # An unclean death cannot clean up: the leftover is refused, never accepted.
+        assert leftover.is_dir()
+        refused = _bootstrap(bundle_dir)
+        assert refused.returncode != 0
+        assert "interrupted bootstrap staging" in refused.stderr
+        assert "SUCCESS" not in refused.stdout
+        assert _snapshot(workspace) == before
+        shutil.rmtree(leftover)  # the documented operator action
+    else:
+        assert not leftover.exists()
+    again = _bootstrap(bundle_dir)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert _dist_matches_bundle(bundle_dir, workspace)
+    assert not leftover.exists()
+    assert (workspace / "airgap.env").read_text() == "INTERNAL_REGISTRY=operator-kept\n"
+    assert (workspace / "dist/retained-evidence.txt").read_text() == "operator artifact"
+
+
+@pytest.mark.parametrize("tool,member", [("cp", "sbom.json"), ("mv", "SHA256SUMS")], ids=["during-copy", "during-commit"])
+def test_bootstrap_killed_first_run_never_leaves_accepted_bundle(bundle_dir, tool, member):
+    """First run, process dies mid-staging or mid-commit: dist/ must not look
+    like an accepted bundle (no MANIFEST/checksum list), a rerun is refused with
+    a fixed message until the leftover is removed, then completes (issue #414)."""
+    killed = _bootstrap(bundle_dir, _fault_env(bundle_dir, tool, member, "kill"))
+    assert killed.returncode != 0
+    workspace = bundle_dir / "operator workspace"
+    assert not (workspace / "dist/MANIFEST.txt").exists()
+    assert not (workspace / "dist/SHA256SUMS").exists()
+    leftover = workspace / "dist" / STAGING_DIRNAME
+    if tool == "cp":
+        assert leftover.is_dir()
+        refused = _bootstrap(bundle_dir)
+        assert refused.returncode != 0
+        assert "interrupted bootstrap staging" in refused.stderr
+        assert not (workspace / "dist/MANIFEST.txt").exists()
+        shutil.rmtree(leftover)
+    else:
+        # Mid-commit: staged bytes are verified; the leftover is still refused.
+        assert leftover.is_dir()
+        assert _bootstrap(bundle_dir).returncode != 0
+        shutil.rmtree(leftover)
+    again = _bootstrap(bundle_dir)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert _dist_matches_bundle(bundle_dir, workspace)
+
+
+def test_interrupted_promotion_warns_of_partial_dist_then_recovers_complete_bundle(bundle_dir):
+    assert _bootstrap(bundle_dir).returncode == 0
+    workspace = bundle_dir / "operator workspace"
+    retained = workspace / "dist/operator-evidence.txt"
+    retained.write_text("retain operator evidence")
+    (workspace / "airgap.env").write_text("INTERNAL_REGISTRY=operator-kept\n")
+    old_sums = (workspace / "dist/SHA256SUMS").read_bytes()
+    # Same approved source can be repacked. Change two authentic bundle
+    # members, then interrupt after promotion begins but before metadata moves.
+    (bundle_dir / "qdrant-image.tar").write_bytes(b"new-authentic-qdrant")
+    (bundle_dir / "sbom.json").write_bytes(b'{"images": ["new"]}\n')
+    _resign(bundle_dir)
+    interrupted = _bootstrap(bundle_dir, _fault_env(bundle_dir, "mv", "SHA256SUMS", "kill"))
+    assert interrupted.returncode != 0
+    assert (workspace / "dist/qdrant-image.tar").read_bytes() == b"new-authentic-qdrant"
+    assert (workspace / "dist/SHA256SUMS").read_bytes() == old_sums
+    stage = workspace / "dist" / STAGING_DIRNAME
+    assert stage.is_dir()
+    refused = _bootstrap(bundle_dir)
+    assert refused.returncode != 0
+    assert "may contain partially promoted members" in refused.stderr
+    assert "dist/ was not modified" not in refused.stderr
+    assert "Do not use it" in refused.stderr
+    # This is the actual signed member-verification consumer used before load,
+    # not an attribution marker or the mere presence of acceptance metadata.
+    def verify_members():
+        return subprocess.run(
+            ["sh", "-c", "openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null && sha256sum -c SHA256SUMS"],
+            cwd=workspace / "dist", capture_output=True, text=True, check=False)
+    assert verify_members().returncode != 0
+    shutil.rmtree(stage)  # documented operator action, only the stage
+    recovered = _bootstrap(bundle_dir)
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    assert verify_members().returncode == 0
+    assert _dist_matches_bundle(bundle_dir, workspace)
+    assert retained.read_text() == "retain operator evidence"
+    assert (workspace / "airgap.env").read_text() == "INTERNAL_REGISTRY=operator-kept\n"
+    assert _bootstrap(bundle_dir).returncode == 0

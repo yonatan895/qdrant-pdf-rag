@@ -432,6 +432,8 @@ def test_schema_rejects_invalid_selected_configuration():
         ({"models": {"embedding": {"revision": "   "}}}, "revision"),
         ({"images": {"agent": {"tag": "HEAD"}}}, "tag"),
         ({"images": {"ingest": {"tag": "latest"}}}, "ingest"),
+        ({"images": {"agent": {"digest": "sha256:abc"}}}, "digest"),
+        ({"images": {"jaeger": {"digest": "v2.20.0"}}}, "digest"),
         ({"gateway": {"apiKeySecretName": "Bad_Name!"}}, "apiKeySecretName"),
         ({"models": {"rerank": {"endpointOrder": "nope"}}}, "endpointOrder"),
         ({"metrics": {"enabled": "false"}}, "metrics"),
@@ -755,3 +757,17 @@ def test_hardening_check_rejects_unhardened_and_fixed_identity_containers():
         "pod fsGroup set",
         "pinned runAsUser set",
     ]
+
+
+def test_verified_digest_renders_images_by_digest_keeping_tag_env():
+    """Issue #272: a digest makes the pod image repository@digest; the SHA tag
+    stays only the informational release identity (GIT_SHA-style env)."""
+    digests = {k: "sha256:" + c * 64 for k, c in (("agent", "a"), ("jaeger", "b"), ("oauthProxy", "c"))}
+    extra = {"images": {k: {"digest": v} for k, v in digests.items()}, "route": {"enabled": True, "destinationCA": FAKE_CA}}
+    docs = run_new_template(extra)
+    text = json.dumps(list(docs.values()), default=str)
+    assert f"reg.internal/qdrant-pdf-rag-agent@{digests['agent']}" in text
+    assert f"reg.internal/jaegertracing/jaeger@{digests['jaeger']}" in text
+    assert f"reg.internal/openshift4/ose-oauth-proxy@{digests['oauthProxy']}" in text
+    assert f"qdrant-pdf-rag-agent:{IMAGE_SHA}" not in text
+    assert env_map(docs[("Deployment", "rag-agent")])["IMAGE_SHA"]["value"] == IMAGE_SHA  # informational tag stays

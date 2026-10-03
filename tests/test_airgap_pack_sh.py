@@ -8,6 +8,7 @@ offline signature + member checksums + tarball digest, with the bundle
 clone-traversable (the airgap-package CI check, hermetically).
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -19,6 +20,7 @@ import pytest
 from tests.helpers_airgap import (
     REPO,
     copy_chart,
+    copy_license_inputs,
     gen_sign_keypair,
     make_bin_tree,
     run_sh,
@@ -43,6 +45,23 @@ STUB_SKOPEO = skopeo_stub("a", materialize=True).replace(
     "printf 'stub-image-tar\\n' > \"$dest\"", 'cp "$PACK_TEST_IMAGE" "$dest"')
 
 STUB_DIGEST = "sha256:" + "a" * 64
+# `inspect --raw` answers a single-image manifest whose config digest is derived
+# from the archive path, so each image has a distinct, checkable config digest.
+_RAW_ARM = r"""if [ "$1" = "inspect" ]; then
+  case " $* " in *" --raw "*)
+    for a in "$@"; do case "$a" in docker-archive:*) n=$(basename "${a#docker-archive:}" .tar) ;; esac; done
+    printf '{"config":{"digest":"sha256:%s"},"layers":[]}\n' "$(printf '%s' "$n" | sha256sum | cut -d' ' -f1)"
+    printf '%s\n' "$@" >> "$SKOPEO_LOG"
+    exit 0 ;;
+  esac
+"""
+STUB_SKOPEO = STUB_SKOPEO.replace('if [ "$1" = "inspect" ]; then\n', _RAW_ARM, 1)
+assert "--raw" in STUB_SKOPEO
+
+
+def config_digest_of(archive_stem: str) -> str:
+    return "sha256:" + hashlib.sha256(archive_stem.encode()).hexdigest()
+
 
 # Hermetic tool PATH: every external pack.sh needs, symlinked from the host.
 # skopeo is intentionally absent unless the stub below adds it — CI runners
@@ -86,6 +105,8 @@ def pack_tree(tmp_path):
     set_oauth_proxy_pin(tmp_path, "sha256:PENDING")
     shutil.copy(REPO / "requirements.lock.txt", tmp_path / "requirements.lock.txt")
     shutil.copytree(REPO / "locks", tmp_path / "locks")
+    copy_license_inputs(tmp_path)
+    set_oauth_proxy_pin(tmp_path, "sha256:PENDING")
     for script in ("dependency_lock.py", "image_inventory.py"):
         shutil.copy(REPO / "scripts" / script, tmp_path / "scripts" / script)
     (tmp_path / "charts").mkdir(exist_ok=True)
@@ -218,6 +239,7 @@ def test_pack_success_builds_verified_tarball(pack_tree):
         "MANIFEST.txt",
         "PACKING_RECORD.txt",
         "sbom.json",
+        "THIRD-PARTY-NOTICES.txt",
         "sneakernet-signing.pub",
         "SHA256SUMS",
         "SHA256SUMS.sig",
@@ -254,7 +276,14 @@ def test_pack_success_builds_verified_tarball(pack_tree):
     assert f"task_binary_sha256: {TASK_BINARY_SHA256}" in manifest
     log = skopeo_log.read_text()
     assert log.splitlines().count("copy") == 4
-    assert log.count("inspect") == 4
+    assert log.count("inspect") == 8  # digest + raw config read per image
+    for role, stem in (
+        ("qdrant", "qdrant-image"),
+        ("jaeger", "jaeger-image"),
+        ("ingest", f"app-ingest-{head}"),
+        ("agent", f"app-agent-{head}"),
+    ):
+        assert f"{role}_config_digest: {config_digest_of(stem)}" in manifest
     # Digest-only refs: tag+digest combined is not a valid reference.
     assert "docker.io/qdrant/qdrant@sha256:" in log
     assert "@sha256:" in log
@@ -273,9 +302,17 @@ def test_pack_success_builds_verified_tarball(pack_tree):
         assert set(archive.getnames()) == {
             "bootstrap.sh", "repo.bundle", TASK_ASSET, "task-pin.txt", "task-LICENSE",
             "qdrant-image.tar", "jaeger-image.tar", f"app-ingest-{head}.tar", f"app-agent-{head}.tar",
-            "MANIFEST.txt", "PACKING_RECORD.txt", "sbom.json", "sneakernet-signing.pub",
-            "SHA256SUMS", "SHA256SUMS.sig",
+            "MANIFEST.txt", "PACKING_RECORD.txt", "sbom.json", "THIRD-PARTY-NOTICES.txt",
+            "sneakernet-signing.pub", "SHA256SUMS", "SHA256SUMS.sig",
         }
+        notices = archive.extractfile("THIRD-PARTY-NOTICES.txt").read().decode()
+    # Signed, readable offline, complete: actual notice texts and the open decisions.
+    assert "THIRD-PARTY-NOTICES.txt" in (dist / "SHA256SUMS").read_text()
+    assert "Apache License" in notices and "Zero-Clause BSD" in notices and "MIT License" in notices
+    assert "Components awaiting owner decision:" in notices
+    assert "pymupdf==" in notices.split("COMPONENTS")[0]
+    assert "Owner approval of this inventory: absent" in notices
+    assert "Third-party notices: THIRD-PARTY-NOTICES.txt" in (dist / "PACKING_RECORD.txt").read_text()
 
 
 def test_pack_skips_pending_oauth_proxy_pin(pack_tree):
@@ -322,6 +359,7 @@ fi
     manifest = (dist / "MANIFEST.txt").read_text()
     assert "oauth_proxy: registry.redhat.io/openshift4/ose-oauth-proxy@sha256:" + "b" * 64 in manifest
     assert f"oauth_proxy_digest: {STUB_DIGEST}" in manifest
+    assert f"oauth_proxy_config_digest: {config_digest_of('oauth-proxy-image')}" in manifest
     assert "oauth-proxy-image.tar" in (dist / "SHA256SUMS").read_text()
     with tarfile.open(dist / f"qdrant-pdf-rag-{head}.tar") as tf:
         assert "oauth-proxy-image.tar" in tf.getnames()
@@ -405,3 +443,42 @@ def test_pack_rejects_actual_inventory_drift_before_signing(pack_tree, corruptio
     assert result.returncode != 0
     assert "SBOM reconciliation failed" in result.stderr
     assert not list((root / "dist").glob("SHA256SUMS.sig"))
+
+
+def _break_license_record(tree, mutate):
+    record = tree[0] / "licenses" / "inventory.json"
+    inventory = json.loads(record.read_text())
+    mutate(inventory)
+    record.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
+
+
+@pytest.mark.parametrize("change", ["missing-notice", "image-digest", "unrecorded-dependency", "license-text-change"])
+def test_pack_refuses_unreviewed_license_change_before_any_image_call(pack_tree, change):
+    """A synthetic missing notice or unreviewed dependency/image change blocks the
+    transfer bundle, then the next ordinary pack passes once it is reverted (#376)."""
+    root, skopeo_log, _head, _key = pack_tree
+    saved = {}
+    if change == "missing-notice":
+        saved["NOTICE.qdrant-skills"] = (root / "NOTICE.qdrant-skills").read_bytes()
+        (root / "NOTICE.qdrant-skills").unlink()
+    elif change == "license-text-change":
+        saved["LICENSE.qdrant-skills"] = (root / "LICENSE.qdrant-skills").read_bytes()
+        (root / "LICENSE.qdrant-skills").write_bytes(saved["LICENSE.qdrant-skills"] + b"\nchanged\n")
+    elif change == "image-digest":
+        saved["images.txt"] = (root / "images.txt").read_bytes()
+        (root / "images.txt").write_text(
+            (root / "images.txt").read_text().replace("sha256:a0e04fe6", "sha256:b0e04fe6"))
+    else:
+        saved["licenses/inventory.json"] = (root / "licenses/inventory.json").read_bytes()
+        _break_license_record(pack_tree, lambda inv: inv["python"].pop(0))
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode != 0
+    assert "license inventory check failed" in result.stderr
+    assert "license-inventory: FAIL" in result.stderr
+    assert not skopeo_log.exists()
+    assert not (root / "dist" / "SHA256SUMS.sig").exists()
+    for name, data in saved.items():
+        (root / name).write_bytes(data)
+    result, _ = _run_pack(pack_tree)
+    assert result.returncode == 0, result.stderr
+    assert (root / "dist" / "THIRD-PARTY-NOTICES.txt").is_file()

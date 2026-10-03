@@ -8,6 +8,7 @@ mechanical tree/run/sign/stub plumbing lives here.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -29,6 +30,13 @@ def set_oauth_proxy_pin(tree: Path, digest: str) -> None:
     )
     assert count == 1
     path.write_text(updated)
+    record = tree / "licenses" / "inventory.json"
+    if record.is_file():  # keep the license record bound to the explicit pin state
+        inventory = json.loads(record.read_text())
+        for component in inventory["components"]:
+            if component["id"] == "image:oauth-proxy":
+                component["bind"]["digest"] = digest
+        record.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -47,10 +55,14 @@ def make_bin_tree(tmp_path: Path, scripts: list[str]) -> Path:
     (tmp_path / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
     if any(name in scripts for name in ("deploy.sh", "ingest.sh", "validate.sh")):
         shutil.copytree(REPO / "charts/mainframe-rag", tmp_path / "charts/mainframe-rag", dirs_exist_ok=True)
-    if "deploy.sh" in scripts:
-        scripts = [*scripts, "check_app_ownership.py"]
+    if "deploy.sh" in scripts or "validate.sh" in scripts:
+        scripts = [*scripts, "check_app_ownership.py", "check_route_exposure.py"]
     if "common.sh" in scripts:
         scripts = [*scripts, "model_config.py"]
+    if any(name in scripts for name in ("pack.sh", "load.sh", "deploy.sh", "ingest.sh")):
+        scripts = [*scripts, "image_identity.sh", "image_manifest.py"]
+    if any(name in scripts for name in ("deploy.sh", "ingest.sh")):
+        scripts = [*scripts, "check_pod_images.py"]
     for f in scripts:
         shutil.copy(REPO / "scripts" / "airgap" / f, tmp_path / "scripts" / "airgap" / f)
     return tmp_path
@@ -64,11 +76,63 @@ def copy_chart(tmp_path: Path) -> Path:
     return dest
 
 
+def copy_license_inputs(tmp_path: Path) -> None:
+    """Everything scripts/license_inventory.py reads for a pack tree (#376)."""
+    for relative in ("licenses/inventory.json", "scripts/license_inventory.py", "pyproject.toml", "LICENSE",
+                     "LICENSE.qdrant-skills", "NOTICE.qdrant-skills", "bm25-weights.sha256",
+                     "src/mainframe_rag/webui/static/vendor/htmx.min.js",
+                     "src/mainframe_rag/webui/static/vendor/LICENSE.htmx",
+                     "src/mainframe_rag/webui/static/vendor/SHA256SUMS"):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO / relative, target)
+
+
 def symlink_tools(tmp_path: Path, tools: tuple[str, ...]) -> None:
     for tool in tools:
         src = shutil.which(tool)
         if src and not (tmp_path / "bin" / tool).exists():
             (tmp_path / "bin" / tool).symlink_to(src)
+
+
+def write_git_identity_stub(tree: Path, sha: str) -> None:
+    """Hermetic executing-checkout identity for fixtures that claim a packed
+    release (a MANIFEST present, not dry-run): common.sh::check_checkout_sha
+    fails closed on an unresolvable checkout (issue #414), so such fixtures say
+    which commit is checked out and that it is clean. Real-git cases live in
+    the checkout_guard tests; everything but those reads (HEAD, diff, the
+    index-flag listing) is real git."""
+    import shlex
+
+    real = shutil.which("git")
+    write_stub(tree / "bin" / "git", f"""#!/bin/sh
+case "$1" in
+    rev-parse) [ "$2" = HEAD ] && {{ echo {shlex.quote(sha)}; exit 0; }} ;;
+    diff) exit 0 ;;
+    ls-files) exit 0 ;;
+esac
+exec {shlex.quote(real)} "$@"
+""")
+
+
+_MANIFEST_KEY: Path | None = None
+
+
+def write_signed_manifest(dist: Path, content: str) -> None:
+    """Write dist/MANIFEST.txt plus a real signature chain for it: SHA256SUMS
+    listing exactly MANIFEST.txt, SHA256SUMS.sig and sneakernet-signing.pub
+    (throwaway RSA key, reused per process). The guard verifies this chain
+    before trusting the MANIFEST (issue #414)."""
+    global _MANIFEST_KEY
+    if _MANIFEST_KEY is None:
+        import tempfile
+
+        _MANIFEST_KEY = gen_sign_keypair(Path(tempfile.mkdtemp(prefix="manifest-key-")))
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / "MANIFEST.txt").write_text(content)
+    (dist / "SHA256SUMS").write_text(f"{sha256_bytes(content.encode())}  MANIFEST.txt\n")
+    (dist / "sneakernet-signing.pub").unlink(missing_ok=True)
+    sign_sums(dist, _MANIFEST_KEY)
 
 
 def run_sh(script: Path, env: dict, cwd: Path):

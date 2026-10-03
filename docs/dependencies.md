@@ -104,8 +104,9 @@ transport; an inventory receipt does not replace those checks.
 
 This Python inventory distinguishes the inherited base, chart and host tools.
 It is not a complete OS vulnerability report or a rights decision for vendored
-JS, charts, skills or model/knowledge assets. Their inventory/notices and
-qualified distribution decisions retain their existing owners under #376.
+JS, charts, skills or model/knowledge assets. Their license inventory, bundled
+notices and open owner decisions are owned by [licensing](licensing.md) (#376);
+`scripts/license_inventory.py check` reconciles that record with these locks.
 
 ## Reproduce, refresh and roll back
 

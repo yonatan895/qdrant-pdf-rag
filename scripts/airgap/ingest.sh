@@ -8,6 +8,7 @@
 # no EMBED_MODE=hash — prod embeds via the in-cluster vLLM endpoint.
 
 . "$(dirname -- "$0")/common.sh"
+. "$(dirname -- "$0")/image_identity.sh"
 
 enforce_product_rules
 resolve_aliases
@@ -30,6 +31,9 @@ require_kc
 refuse_nfs_storage
 KC=${KC:-$(kc)}
 check_gateway_ca
+# The Job image must be the packed one (issue #272); it is then rendered as
+# repository@digest. Verified before any cluster change.
+verify_registry_images ingest
 
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 INGEST_TIMEOUT=${INGEST_TIMEOUT:-3600}
