@@ -301,6 +301,17 @@ Opt-in via `CONTEXTUAL_EMBED_ENABLED` (default off).
   `context_cache_skip_line`); the file is append-only and is never rewritten or
   required to be deleted. A hit that is not already whitespace-collapsed and
   within the cap is regenerated.
+  An append that finds a torn last line (parent killed mid-write) starts on a
+  fresh line, so the partial fragment is a skipped line and the new record
+  still loads. A worker that fails partway through a document returns an error
+  record and nothing from that document reaches the sidecar; a restarted worker
+  regenerates it, while a live worker retrying the same document reuses the
+  gists it already completed (identity unchanged).
+- Preflight (`model_config.validate_model_config`, run by `validate.sh` and the
+  values mapper): `CONTEXTUAL_EMBED_ENABLED` is a strict boolean, and
+  `true` requires both `CONTEXT_LLM_BASE_URL` and `CONTEXT_LLM_MODEL`; the
+  ingest parent and each worker re-check (`require_context_llm`). Enabling the
+  flag is supported with the identity above; it stays default-off.
 - Model budget 256 completion tokens; deterministic `CONTEXT_MAX_CHARS`
   (500) cap with collapse-and-rstrip normalization; empty gists raise
   (never stored silent-empty).
