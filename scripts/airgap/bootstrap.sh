@@ -42,7 +42,7 @@ openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SH
 PACKED_SHA=$(sed -n 's/^sha: *//p' MANIFEST.txt)
 [ "${#PACKED_SHA}" -eq 40 ] || { echo "FAIL: MANIFEST must name a full commit SHA." >&2; exit 1; }
 case "$PACKED_SHA" in *[!0-9a-f]*) echo "FAIL: invalid MANIFEST SHA." >&2; exit 1;; esac
-MEMBERS="bootstrap.sh repo.bundle task_linux_amd64.tar.gz task-pin.txt task-LICENSE qdrant-image.tar jaeger-image.tar app-ingest-$PACKED_SHA.tar app-agent-$PACKED_SHA.tar MANIFEST.txt PACKING_RECORD.txt sbom.json sneakernet-signing.pub"
+MEMBERS="bootstrap.sh repo.bundle task_linux_amd64.tar.gz task-pin.txt task-LICENSE qdrant-image.tar jaeger-image.tar app-ingest-$PACKED_SHA.tar app-agent-$PACKED_SHA.tar MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub"
 [ ! -f oauth-proxy-image.tar ] || MEMBERS="$MEMBERS oauth-proxy-image.tar"
 awk -v members="$MEMBERS" '
     BEGIN { n=split(members, names, " "); for (i=1; i<=n; i++) wanted[names[i]]=1 }
@@ -87,9 +87,25 @@ done
 git -C "$DEST_DIR" diff --quiet HEAD -- >/dev/null 2>&1 || {
     echo "FAIL: workspace has tracked changes against the approved commit; restore them (operator settings belong in the untracked airgap.env)." >&2; exit 1;
 }
+# `git diff` trusts the index: assume-unchanged and skip-worktree (incl. sparse
+# checkout) files are never compared, so the flags themselves are refused.
+# ls-files tags: H = normal, lowercase = assume-unchanged, S/s = skip-worktree.
+WS_FLAGS=$(git -C "$DEST_DIR" ls-files -v -- ':/' 2>/dev/null) || {
+    echo "FAIL: workspace index cannot be read; cannot prove no tracked file is hidden from the change check." >&2; exit 1;
+}
+printf '%s\n' "$WS_FLAGS" | awk 'NF && substr($0, 1, 2) != "H " { bad=1 } END { exit bad }' || {
+    echo "FAIL: workspace hides tracked files from change detection (assume-unchanged, skip-worktree or sparse checkout); clear the flags (git update-index --no-assume-unchanged / --no-skip-worktree) and rerun." >&2; exit 1;
+}
 cmp -s task-pin.txt "$DEST_DIR/scripts/tools/task-pin.txt" || {
     echo "FAIL: bundled Task pin does not match the approved workspace." >&2; exit 1;
 }
+# A staging directory left by an interrupted run is never accepted and never
+# silently deleted: promotion may be partial, and the operator decides cleanup.
+STAGE="$DEST_DIR/dist/.bootstrap-staging"
+if [ -e "$STAGE" ] || [ -L "$STAGE" ]; then
+    echo "FAIL: interrupted bootstrap staging found at $STAGE; dist/ may contain partially promoted members. Do not use it until the complete bundle is reinstalled and verified. Remove only the staging directory (rm -rf '$STAGE') and rerun bootstrap.sh from the verified bundle." >&2
+    exit 1
+fi
 
 echo "==> 3. Installing verified workspace-local Task (offline)"
 BUNDLE_DIR=$(pwd)
@@ -99,11 +115,37 @@ task_check_manifest MANIFEST.txt
 printf '%s  %s\n' "$TASK_LICENSE_SHA256" task-LICENSE | sha256sum -c - >/dev/null || task_fail "bundled Task license checksum mismatch"
 sh "$DEST_DIR/scripts/tools/install-task.sh" --archive "$BUNDLE_DIR/task_linux_amd64.tar.gz"
 
-echo "==> 4. Copying sneakernet artifacts to ./$DEST_DIR/dist"
+echo "==> 4. Staging, verifying and committing sneakernet artifacts to ./$DEST_DIR/dist"
+# Copy into a staging directory inside dist/ (same filesystem), verify the
+# staged bytes against the signed checksum list there, and only then move
+# members into place. dist/ keeps operator files and earlier releases, so it is
+# never swapped wholesale; instead SHA256SUMS.sig, SHA256SUMS and MANIFEST.txt
+# move LAST and in that order, so any interruption leaves an old or incomplete
+# bundle that signed member-verification consumers refuse, never a mixed one
+# that verifies. An uncleanly killed run leaves the staging directory, which
+# the next run refuses (see above) instead of trusting.
 mkdir -p "$DEST_DIR/dist"
+mkdir "$STAGE"
+trap 'rm -rf "$STAGE"' EXIT
+trap 'exit 1' HUP INT TERM
 for item in $MEMBERS SHA256SUMS SHA256SUMS.sig; do
-    cp "$item" "$DEST_DIR/dist/"
+    cp "$item" "$STAGE/"
 done
+for item in SHA256SUMS SHA256SUMS.sig; do
+    cmp -s "$item" "$STAGE/$item" || { echo "FAIL: staged $item differs from the bundle; dist/ was not modified." >&2; exit 1; }
+done
+(cd "$STAGE" && openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null && sha256sum -c SHA256SUMS >/dev/null) \
+    || { echo "FAIL: staged artifacts failed verification (interrupted or corrupt copy); dist/ was not modified." >&2; exit 1; }
+for item in $MEMBERS; do
+    [ "$item" = MANIFEST.txt ] || mv -f "$STAGE/$item" "$DEST_DIR/dist/$item"
+done
+mv -f "$STAGE/SHA256SUMS.sig" "$DEST_DIR/dist/SHA256SUMS.sig"
+mv -f "$STAGE/SHA256SUMS" "$DEST_DIR/dist/SHA256SUMS"
+mv -f "$STAGE/MANIFEST.txt" "$DEST_DIR/dist/MANIFEST.txt"
+rm -rf "$STAGE"
+trap - EXIT HUP INT TERM
+(cd "$DEST_DIR/dist" && sha256sum -c SHA256SUMS >/dev/null) \
+    || { echo "FAIL: committed dist/ does not verify against SHA256SUMS; rerun bootstrap.sh." >&2; exit 1; }
 
 echo "==> 5. Checking airgap.env"
 if [ ! -f "$DEST_DIR/airgap.env" ]; then

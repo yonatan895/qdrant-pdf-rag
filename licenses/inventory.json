@@ -1,0 +1,1666 @@
+{
+  "components": [
+    {
+      "approval_ref": null,
+      "bind": {
+        "files": [
+          {
+            "notice": true,
+            "path": "LICENSE",
+            "sha256": "4a7fe72d4cf9881da7e2f067cac70371df5c867e3daea118e4d9a7ade0b49a4b"
+          }
+        ],
+        "project_license_text": "Apache-2.0"
+      },
+      "class": "permissive",
+      "distributed_by_repo": true,
+      "id": "project:mainframe-rag",
+      "kind": "project",
+      "license_declared": "Apache-2.0 (pyproject.toml)",
+      "license_spdx": "Apache-2.0",
+      "name": "mainframe-rag (this repository)",
+      "note": "The repository LICENSE is not copied into the application images (only src/ and scripts/ are); it travels in repo.bundle and in THIRD-PARTY-NOTICES.txt.",
+      "ships_in": [
+        "repo.bundle"
+      ],
+      "spdx_basis": "declared-expression",
+      "status": "declared"
+    },
+    {
+      "approval_ref": null,
+      "bind": {
+        "digest": "sha256:a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e",
+        "images_txt": "docker.io/qdrant/qdrant:v1.19.0-unprivileged"
+      },
+      "class": "permissive",
+      "distributed_by_repo": true,
+      "id": "image:qdrant",
+      "kind": "image",
+      "license_declared": "Apache-2.0 upstream project; the image carries no license label",
+      "license_spdx": "Apache-2.0",
+      "name": "Qdrant server (unprivileged)",
+      "obligation": "Image-level license inventory is not extracted: the upstream project license is recorded, but base-OS and bundled third-party layer licenses inside the image are not enumerated.",
+      "ships_in": [
+        "qdrant-image.tar"
+      ],
+      "spdx_basis": "upstream-project-license",
+      "status": "pending-owner-decision"
+    },
+    {
+      "approval_ref": null,
+      "bind": {
+        "digest": "sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8",
+        "images_txt": "cr.jaegertracing.io/jaegertracing/jaeger:2.20.0"
+      },
+      "class": "permissive",
+      "distributed_by_repo": true,
+      "id": "image:jaeger",
+      "kind": "image",
+      "license_declared": "Apache-2.0 upstream project; the image carries no license label",
+      "license_spdx": "Apache-2.0",
+      "name": "Jaeger v2",
+      "obligation": "Image-level license inventory is not extracted: the upstream project license is recorded, but bundled Go module and base layer licenses inside the image are not enumerated.",
+      "ships_in": [
+        "jaeger-image.tar"
+      ],
+      "spdx_basis": "upstream-project-license",
+      "status": "pending-owner-decision"
+    },
+    {
+      "approval_ref": null,
+      "bind": {
+        "digest": "sha256:1e4b43488508216fee35b87e6b5425f4ef475eacf9c113f5b901e27af3844fba",
+        "images_txt": "registry.access.redhat.com/ubi9/python-314-minimal:9.8"
+      },
+      "class": "proprietary",
+      "distributed_by_repo": true,
+      "id": "image:ubi9-python-314-minimal",
+      "kind": "image",
+      "license_declared": "Red Hat Universal Base Image EULA plus the license of each packaged component",
+      "license_spdx": "LicenseRef-Red-Hat-UBI-EULA",
+      "name": "Red Hat UBI 9 python-314-minimal (base of both application images)",
+      "obligation": "Redistribution terms of the UBI EULA and the license of every RPM in the base layers (including GPL/LGPL packages and any source-offer duties) are an owner decision; the RPM inventory is not yet extracted from the actual archive.",
+      "ships_in": [
+        "app-agent image",
+        "app-ingest image"
+      ],
+      "spdx_basis": "upstream-project-license",
+      "status": "pending-owner-decision"
+    },
+    {
+      "approval_ref": null,
+      "bind": {
+        "digest": "sha256:b86cefe58f2f74904a71d0c1a064beb7a2a94caa979f4c472e6b936eec79850d",
+        "images_txt": "registry.redhat.io/openshift4/ose-oauth-proxy:v4.14"
+      },
+      "class": "proprietary",
+      "distributed_by_repo": true,
+      "id": "image:oauth-proxy",
+      "kind": "image",
+      "license_declared": "Apache-2.0 upstream project, pulled from registry.redhat.io under Red Hat registry terms",
+      "license_spdx": "Apache-2.0 AND LicenseRef-Red-Hat-Registry-Terms",
+      "name": "OpenShift oauth-proxy sidecar",
+      "obligation": "Whether Red Hat registry/subscription terms permit transferring this image into the air gap is an owner decision; image layer licenses are not enumerated.",
+      "ships_in": [
+        "oauth-proxy-image.tar (when bundled)"
+      ],
+      "spdx_basis": "upstream-project-license",
+      "status": "pending-owner-decision"
+    },
+    {
+      "approval_ref": null,
+      "bind": {},
+      "class": "permissive",
+      "distributed_by_repo": true,
+      "id": "python:pip-inherited",
+      "kind": "inherited-python",
+      "license_declared": "MIT upstream project; not a locked wheel",
+      "license_spdx": "MIT",
+      "name": "pip 24.2 (inherited from the UBI base image)",
+      "ships_in": [
+        "app-agent image",
+        "app-ingest image"
+      ],
+      "spdx_basis": "upstream-project-license",
+      "status": "declared"
+    },
+    {
+      "approval_ref": null,
+      "bind": {
+        "files": [
+          {
+            "path": "charts/qdrant-1.19.0.tgz",
+            "sha256": "131236b52d7959ee600f86ba43e48e88ff715b12a26451871fe57c2ba5809f0b"
+          }
+        ],
+        "tar_members": [
+          {
+            "archive": "charts/qdrant-1.19.0.tgz",
+            "member": "qdrant/LICENSE",
+            "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
+          }
+        ]
+      },
+      "class": "permissive",
+      "distributed_by_repo": true,
+      "id": "chart:qdrant-1.19.0",
+      "kind": "chart",
+      "license_declared": "Apache-2.0 (LICENSE inside the chart archive)",
+      "license_spdx": "Apache-2.0",
+      "name": "Vendored Qdrant Helm chart 1.19.0",
+      "ships_in": [
+        "repo.bundle"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "declared"
+    },
+    {
+      "approval_ref": null,
+      "bind": {
+        "files": [
+          {
+            "path": "src/mainframe_rag/webui/static/vendor/htmx.min.js",
+            "sha256": "449317ade7881e949510db614991e195c3a099c4c791c24dacec55f9f4a2a452"
+          },
+          {
+            "notice": true,
+            "path": "src/mainframe_rag/webui/static/vendor/LICENSE.htmx",
+            "sha256": "d3d2456f76414f2456104660ebd65aff1c04cd7966b942bdabd63f3cdb316a38"
+          },
+          {
+            "path": "src/mainframe_rag/webui/static/vendor/SHA256SUMS",
+            "sha256": "884dfbe6165fab32aa75d966fd199b0583c86717171115f25cee76c8e544272e"
+          }
+        ]
+      },
+      "class": "permissive",
+      "distributed_by_repo": true,
+      "id": "asset:htmx",
+      "kind": "vendored-js",
+      "license_declared": "Zero-Clause BSD (vendored LICENSE.htmx)",
+      "license_spdx": "0BSD",
+      "name": "htmx (console JavaScript)",
+      "ships_in": [
+        "app-agent image",
+        "app-ingest image",
+        "repo.bundle"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "declared"
+    },
+    {
+      "approval_ref": null,
+      "bind": {
+        "bundle_member": {
+          "name": "task-LICENSE",
+          "sha256": "ae22882adc54d4c2cec2bb1ce5e0b252c7f3344efd55c72144738e8fcc89509b"
+        },
+        "files": [
+          {
+            "path": "scripts/tools/task-pin.txt",
+            "sha256": "2fdb6a6965931cf12316335a982011825d86e97e5040ef35d59bf711cda2429c"
+          }
+        ],
+        "pin_license_sha256": "ae22882adc54d4c2cec2bb1ce5e0b252c7f3344efd55c72144738e8fcc89509b"
+      },
+      "class": "permissive",
+      "distributed_by_repo": true,
+      "id": "tool:task",
+      "kind": "host-tool",
+      "license_declared": "MIT (task-LICENSE, digest pinned in task-pin.txt)",
+      "license_spdx": "MIT",
+      "name": "go-task/task v3.53.1 (bundled linux-amd64 binary)",
+      "ships_in": [
+        "task_linux_amd64.tar.gz",
+        "task-LICENSE"
+      ],
+      "spdx_basis": "upstream-project-license",
+      "status": "declared"
+    },
+    {
+      "approval_ref": null,
+      "bind": {
+        "files": [
+          {
+            "notice": true,
+            "path": "LICENSE.qdrant-skills",
+            "sha256": "210b508429e913d9de5301f90508bc2cbf5b2281de5b45e607c04d58f0f3bd8f"
+          },
+          {
+            "notice": true,
+            "path": "NOTICE.qdrant-skills",
+            "sha256": "9a9bbdfeadd8038436514dd6e7428a1b062523c5198bfc3ac8595e3a324ba9d8"
+          }
+        ]
+      },
+      "class": "permissive",
+      "distributed_by_repo": true,
+      "id": "skills:qdrant",
+      "kind": "vendored-docs",
+      "license_declared": "Apache-2.0 (LICENSE.qdrant-skills, attribution in NOTICE.qdrant-skills)",
+      "license_spdx": "Apache-2.0",
+      "name": "Vendored Qdrant skills (.agents/skills subset)",
+      "ships_in": [
+        "repo.bundle"
+      ],
+      "spdx_basis": "license-file-text",
+      "status": "declared"
+    },
+    {
+      "approval_ref": null,
+      "bind": {
+        "files": [
+          {
+            "path": "bm25-weights.sha256",
+            "sha256": "4318c7ca21881d3c8afa8bfc5b9ee23bf3e2ba439e1f71e8b0eaad1e526ff006"
+          }
+        ]
+      },
+      "class": "unknown",
+      "distributed_by_repo": true,
+      "id": "model:bm25-sparse-weights",
+      "kind": "model-asset",
+      "license_declared": "No license file in the snapshot; the Hugging Face model-card license was not captured",
+      "license_spdx": "NOASSERTION",
+      "name": "FastEmbed Qdrant/bm25 sparse weights (revision 22b8d2af71a7)",
+      "obligation": "The license of these weights is unverified from the shipped bytes. Confirm the upstream model-card license on a connected host and record it before release.",
+      "ships_in": [
+        "app-agent image",
+        "app-ingest image"
+      ],
+      "spdx_basis": "not-verified",
+      "status": "pending-owner-decision"
+    },
+    {
+      "approval_ref": null,
+      "bind": {},
+      "class": "unknown",
+      "distributed_by_repo": false,
+      "id": "model-service:platform-models",
+      "kind": "model-service",
+      "license_declared": "Consumed over HTTP; weights are not distributed by this repository",
+      "license_spdx": "NOASSERTION",
+      "name": "Production reasoning, dense embedding and rerank models (platform gateway)",
+      "obligation": "None for this repository; the platform team owns weight licenses and the consumption agreement.",
+      "ships_in": [
+        "none"
+      ],
+      "spdx_basis": "not-verified",
+      "status": "excluded"
+    },
+    {
+      "approval_ref": null,
+      "bind": {},
+      "class": "unknown",
+      "distributed_by_repo": false,
+      "id": "model:local-simulation",
+      "kind": "local-model",
+      "license_declared": "Downloaded by the developer on a connected host; not in images, chart or bundle",
+      "license_spdx": "NOASSERTION",
+      "name": "Local simulation models (reasoning gateway, dense/sparse embed)",
+      "obligation": "Each developer or CI owner accepts the upstream model license for the weights they download; none ship in a release.",
+      "ships_in": [
+        "none"
+      ],
+      "spdx_basis": "not-verified",
+      "status": "excluded"
+    },
+    {
+      "approval_ref": null,
+      "bind": {},
+      "class": "unknown",
+      "distributed_by_repo": false,
+      "id": "corpus:vendor-manuals",
+      "kind": "corpus",
+      "license_declared": "Never committed or bundled; stays outside git",
+      "license_spdx": "NOASSERTION",
+      "name": "Vendor manuals and runbooks (runtime corpus)",
+      "obligation": "Rights to hold and process the manuals are a separate corpus-governance decision in protected records.",
+      "ships_in": [
+        "none"
+      ],
+      "spdx_basis": "not-verified",
+      "status": "excluded"
+    }
+  ],
+  "python": [
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "fff170779a6acbf65abdb405c087f1cee1786691e4a96a4034517e4a504a0cdf"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "annotated-doc",
+      "sha256": "117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "0.0.5",
+      "wheel": "annotated_doc-0.0.5-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "fe1049884b1a0d9342901e88e07f32925d24b3121d9972b6a6805fb9824b095d"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "annotated-types",
+      "sha256": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "0.8.0",
+      "wheel": "annotated_types-0.8.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "5361ac9dc58f2ef5fd2e9b09c68297c17f04950909bbc8023bdb82eacf22c2b0"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "anyio",
+      "sha256": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "4.15.1",
+      "wheel": "anyio-4.15.1-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "weak-copyleft",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "MPL-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "e93716da6b9c0d5a4a1df60fe695b370f0695603d21f6f83f053e42cfc10caf7"
+        }
+      ],
+      "license_spdx": "MPL-2.0",
+      "name": "certifi",
+      "obligation": "MPL-2.0 file-level copyleft: keep the license text with distributions; source of MPL files must stay available if they are modified. Not modified in this repository.",
+      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "2026.7.22",
+      "wheel": "certifi-2026.7.22-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "6d0d41bfe170ac6c7dc248c9a63e254d0fb45a60d50a8257d0af92c6e249b887"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "charset-normalizer",
+      "sha256": "15f024313246a4ed976c60f440bb8d257815513a681d212ff74fd46f7d715a90",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "3.5.1",
+      "wheel": "charset_normalizer-3.5.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.txt",
+          "sha256": "9a8ad106a394e853bfe21f42f4e72d592819a22805d991b5f3275029292b658d"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "click",
+      "sha256": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "8.5.0",
+      "wheel": "click-8.5.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "4ec89ffc81485b97fec584b2d4a961032eeffe834453894fd9c1274906cc744e"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "fastapi",
+      "sha256": "bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "0.141.1",
+      "wheel": "fastapi-0.141.1-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache License",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "name": "licenses/NOTICE",
+          "sha256": "7117ae14816746dba56898eacf0b9fc2dff47d0ba45f6f80efaf0bca1e332157"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "fastembed",
+      "sha256": "40bee672657574a1009e35ec50030a55f2b426842cb011845379817641bbbbd0",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "0.8.0",
+      "wheel": "fastembed-0.8.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "608c89d5060ae9921adccf3236695bc654a9946e12323ef6c021dfa04e294d48"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "filelock",
+      "sha256": "3f16ecd0117feae0dfc147e8c62eb5daeccd8bd800378c3ddf416de9b4feb6b1",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "3.32.6",
+      "wheel": "filelock-3.32.6-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache 2.0",
+      "license_files": [],
+      "license_spdx": "Apache-2.0",
+      "name": "flatbuffers",
+      "obligation": "The wheel ships no license text under dist-info, so the image does not carry the license/notice text this license class expects to accompany copies. Supply the upstream text into the notices on a connected host, or record why it is not required.",
+      "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4",
+      "spdx_basis": "normalized-license-field",
+      "status": "pending-owner-decision",
+      "version": "25.12.19",
+      "wheel": "flatbuffers-25.12.19-py2.py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "2dc35496ce53a7307915c008a844aad53e772b49b34cdd00445067691407ec94"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "fsspec",
+      "sha256": "b57ddbafedfaef7018c1ecab32aa200a9d7ca26b77965f64e48b70061249d279",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "2026.7.0",
+      "wheel": "fsspec-2026.7.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "googleapis-common-protos",
+      "sha256": "a018d2bf098ca9fb6faa08d5bb780e2a2c2f73c566f069761331386c9596d3f2",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "1.75.3",
+      "wheel": "googleapis_common_protos-1.75.3-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "58c86a3f2b5cca0ebdf9ed3e7f4e6dc38e3b38796d8c3dc92064c62a4e39d0dd"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "grpcio",
+      "sha256": "abce7d43ec29cd39230fa8339de1a07643b55adc412a454850fbd875349950ff",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "1.83.1",
+      "wheel": "grpcio-1.83.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.txt",
+          "sha256": "37db5bb85926db28a427a25867f10b1232003aea1be69ccb851138adb8e6f361"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "h11",
+      "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "0.16.0",
+      "wheel": "h11-0.16.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "7a65a5af0cbabf1c16251c7c6b2b7cb46d16a7222e79975b9b61fcd66a2e3f28"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "h2",
+      "sha256": "0e25f1462b23c9cb82d9eb02e28bc706dac2a68cb457c6a0d74d63c8a2a5d0e6",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "4.4.1",
+      "wheel": "h2-4.4.1-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "hf-xet",
+      "sha256": "d62671bb130879cef0ee4c9ebe47a14af6c66ec53e6d84dc15936e5ffdfac82f",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "1.6.0",
+      "wheel": "hf_xet-1.6.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "763a9342a04df62046c9dc748a5287934eb0a5331c6863b3ca0aee20e18cb4ed"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "hpack",
+      "sha256": "858ac0b02280fa582b5080d68db0899c62a80375e0e5413a74970c5e518b6986",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "4.2.0",
+      "wheel": "hpack-4.2.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.md",
+          "sha256": "fdcb59154c74cbaba16a11242f7740bea9f23d6feb5547917d8c5f94a80392a5"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "httpcore",
+      "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "1.0.9",
+      "wheel": "httpcore-1.0.9-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.md",
+          "sha256": "c4df125c807b0613501e943a5c92496dd11d2c16604ce396097a8dde396304d9"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "httpcore2",
+      "sha256": "7e04258ce01013d7d615e5b910a3b27fac937d7a95038227e79652b4ba3b4ceb",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "2.12.0",
+      "wheel": "httpcore2-2.12.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.md",
+          "sha256": "4ec59d544f12b5f539a3a716fd321ac58ccd8030b465221f2c880200cdf28d8d"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "httpx",
+      "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "0.28.1",
+      "wheel": "httpx-0.28.1-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.md",
+          "sha256": "7e7d6dbaf7fe160d39fd6e84fd02c33cab96bcbea34d36998d545bceb4a19c30"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "httpx2",
+      "sha256": "cc8b6eecb8661c146b8f89a60e97456ee086e91a784ed31ac450c3a9e613dd36",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "2.12.0",
+      "wheel": "httpx2-2.12.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "huggingface-hub",
+      "sha256": "9dbb6a503cbe2494ea666695207e7262d410659e09134059deb83e5480864667",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "1.31.0",
+      "wheel": "huggingface_hub-1.31.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "The MIT License (MIT)",
+      "license_files": [
+        {
+          "name": "LICENSE",
+          "sha256": "763a9342a04df62046c9dc748a5287934eb0a5331c6863b3ca0aee20e18cb4ed"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "hyperframe",
+      "sha256": "b03380493a519fce58ea5af42e4a42317bf9bd425596f7a0835ffce80f1a42e5",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "6.1.0",
+      "wheel": "hyperframe-6.1.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.md",
+          "sha256": "1a9a4f0e3d479a27240ddd59a9137a66ab4a0f9dfdc8ca6188cc0bfd85187f04"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "idna",
+      "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "3.19",
+      "wheel": "idna-3.19-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "Classifier",
+      "evidence": "wheel-bytes",
+      "license_declared": "License :: OSI Approved :: BSD License",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.txt",
+          "sha256": "3b49dcee4105eb37bac10faf1be260408fe85d252b8e9df2e0979fc1e094437b"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "jinja2",
+      "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+      "spdx_basis": "normalized-classifier",
+      "status": "declared",
+      "version": "3.1.6",
+      "wheel": "jinja2-3.1.6-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "Classifier",
+      "evidence": "wheel-bytes",
+      "license_declared": "License :: OSI Approved :: MIT License",
+      "license_files": [],
+      "license_spdx": "MIT",
+      "name": "loguru",
+      "obligation": "The wheel ships no license text under dist-info, so the image does not carry the license/notice text this license class expects to accompany copies. Supply the upstream text into the notices on a connected host, or record why it is not required.",
+      "sha256": "31a33c10c8e1e10422bfd431aeb5d351c7cf7fa671e3c4df004162264b28220c",
+      "spdx_basis": "normalized-classifier",
+      "status": "pending-owner-decision",
+      "version": "0.7.3",
+      "wheel": "loguru-0.7.3-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.txt",
+          "sha256": "489a8e1108509ed98a37bb983e11e0f7e1d31f0bd8f99a79c8448e7ff37d07ea"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "markupsafe",
+      "sha256": "457a69a9577064c05a97c41f4e65148652db078a3a509039e64d3467b9e7ef97",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "3.0.3",
+      "wheel": "markupsafe-3.0.3-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT License",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "bf3469397307c3081d44d89c1dd72191348d93837ec6f6bd354d6d4ecdcae8e4"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "mmh3",
+      "sha256": "0a301b316198758aabbfa3ee565e221b757645d9f94b8a9d2889bfefabbb77dd",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "5.3.0",
+      "wheel": "mmh3-5.3.0-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.txt",
+          "sha256": "4860083caa0de2ac3292ca98bd074bd8f45d8b32624e37b1e70a240bff61e488"
+        },
+        {
+          "name": "licenses/numpy/_core/include/numpy/libdivide/LICENSE.txt",
+          "sha256": "fbc539f47d0cf83bc61378080fb873d5c14630126cacbfe754035c3926daa5ec"
+        },
+        {
+          "name": "licenses/numpy/_core/src/common/pythoncapi-compat/COPYING",
+          "sha256": "3f2c1ffa76383a55ae0aac01c9737cd70050dff63e1f026694fbe9d662573c98"
+        },
+        {
+          "name": "licenses/numpy/_core/src/highway/LICENSE",
+          "sha256": "e340270d4f64384569a91d546acb5b094d69ce47f0c015db77abb74dc6f815af"
+        },
+        {
+          "name": "licenses/numpy/_core/src/multiarray/dragon4_LICENSE.txt",
+          "sha256": "f7b14309e5f54e5022b26448eefd419988ada2aec01d3c1162d84a0ea8f21f2c"
+        },
+        {
+          "name": "licenses/numpy/_core/src/npysort/x86-simd-sort/LICENSE.md",
+          "sha256": "211e7d737d6179a08f791ebb0a99897ce7cd2457410c542876d125576edfe910"
+        },
+        {
+          "name": "licenses/numpy/_core/src/umath/svml/LICENSE",
+          "sha256": "c17011467b4fe6e20fbfbeda4df09e58c2bca5480a063e55735a4000a379aad9"
+        },
+        {
+          "name": "licenses/numpy/fft/pocketfft/LICENSE.md",
+          "sha256": "a85ca13fdf90160b64a0698215868c13b74d835ad0a4e2ba44713b8c5058a056"
+        },
+        {
+          "name": "licenses/numpy/linalg/lapack_lite/LICENSE.txt",
+          "sha256": "a14cc25e10d40a3aa705b7de2fb764a6535d8ee9b2db4e1724900585457dfd55"
+        },
+        {
+          "name": "licenses/numpy/ma/LICENSE",
+          "sha256": "05f3b88351988ecfad10abe92c0c50e5875c6452d5009a0084cc291551ffcca6"
+        },
+        {
+          "name": "licenses/numpy/random/LICENSE.md",
+          "sha256": "103166b62b80443afb9eb3488e052ea06be0cff566b908f199e561fde49af19f"
+        },
+        {
+          "name": "licenses/numpy/random/src/distributions/LICENSE.md",
+          "sha256": "469778be8f33d54e1bcaab28c281cc472916d2d273f835e55bc487d30503face"
+        },
+        {
+          "name": "licenses/numpy/random/src/mt19937/LICENSE.md",
+          "sha256": "0e111337b25494a773106695f0e799f642b8567aaacca4f116a74a8177179156"
+        },
+        {
+          "name": "licenses/numpy/random/src/pcg64/LICENSE.md",
+          "sha256": "e7d4f4fb20358f314210a892ae17351e04993813646f697ec387385ca2a36918"
+        },
+        {
+          "name": "licenses/numpy/random/src/philox/LICENSE.md",
+          "sha256": "6f5828a57223d4cc7f8ea505a2623e7b978b242752c1515e355f46ba2cec1800"
+        },
+        {
+          "name": "licenses/numpy/random/src/sfc64/LICENSE.md",
+          "sha256": "9d4098846018319cd68e228ee6220361787f73bccbf00237a85e4fc9621b998f"
+        },
+        {
+          "name": "licenses/numpy/random/src/splitmix64/LICENSE.md",
+          "sha256": "268b0ca06759d31ea3ca68dd35f20e877916e927b1c2a835e4592a3c4354b1f9"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "name": "numpy",
+      "sha256": "b0521d0f4aebb6e06189451025fa17a913287b13c03d5fe05c017333b654ea5b",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "2.5.3",
+      "wheel": "numpy-2.5.3-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT License",
+      "license_files": [],
+      "license_spdx": "MIT",
+      "name": "onnxruntime",
+      "obligation": "The wheel ships no license text under dist-info, so the image does not carry the license/notice text this license class expects to accompany copies. Supply the upstream text into the notices on a connected host, or record why it is not required.",
+      "sha256": "8b611d24db2954545ce6bd9acd4670183cb368e4642450de7a9ab6474eb374ec",
+      "spdx_basis": "normalized-license-field",
+      "status": "pending-owner-decision",
+      "version": "1.30.0",
+      "wheel": "onnxruntime-1.30.0-cp314-cp314-manylinux_2_28_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "opentelemetry-api",
+      "sha256": "94b98c893a91b88657eaac1e3ba89618cdb85be6918196705354f34728b2cdef",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "1.44.0",
+      "wheel": "opentelemetry_api-1.44.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "opentelemetry-exporter-otlp-proto-common",
+      "sha256": "9a9fe61bba73d802904bc989f1d6b4a7b1ee40f06c40e98d6f85af65aaebb694",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "1.44.0",
+      "wheel": "opentelemetry_exporter_otlp_proto_common-1.44.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "opentelemetry-exporter-otlp-proto-http",
+      "sha256": "838592fce774c1c8bb7b9a0a7facbfa82e17be5a8a4e94cef10cb84ae026bae3",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "1.44.0",
+      "wheel": "opentelemetry_exporter_otlp_proto_http-1.44.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "opentelemetry-exporter-prometheus",
+      "sha256": "3b3d24b586d0ad9712c7b52b7d19c8a9dfbb318b9b284121b5f95e90ed019367",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "0.65b0",
+      "wheel": "opentelemetry_exporter_prometheus-0.65b0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "opentelemetry-proto",
+      "sha256": "898b155a0e1557afd867478fb6158e8122a46329ca0bb8dc53cc55e98f017f56",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "1.44.0",
+      "wheel": "opentelemetry_proto-1.44.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "opentelemetry-sdk",
+      "sha256": "df081c4c6bcfdb1211e3e86140376792643128a25f8d72d1d27675936e7e96ad",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "1.44.0",
+      "wheel": "opentelemetry_sdk-1.44.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "opentelemetry-semantic-conventions",
+      "sha256": "1cacde7b0ad306f84c5ef08c3dbe1bbaf20165bba6f8bff43b670e555a086bcb",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "0.65b0",
+      "wheel": "opentelemetry_semantic_conventions-0.65b0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0 OR BSD-2-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "cad1ef5bd340d73e074ba614d26f7deaca5c7940c3d8c34852e65c4909686c48"
+        },
+        {
+          "name": "licenses/LICENSE.APACHE",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        },
+        {
+          "name": "licenses/LICENSE.BSD",
+          "sha256": "b70e7e9b742f1cc6f948b34c16aa39ffece94196364bc88ff0d2180f0028fac5"
+        }
+      ],
+      "license_spdx": "Apache-2.0 OR BSD-2-Clause",
+      "name": "packaging",
+      "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "26.3",
+      "wheel": "packaging-26.3-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT-CMU",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "dda12a98c1979cf3d94df1cff45d27a4cb3f04a60c76f76902ac54cac03ec0ce"
+        }
+      ],
+      "license_spdx": "MIT-CMU",
+      "name": "pillow",
+      "sha256": "251bf95b67017e27b13d82f5b326234ca62d70f9cf4c2b9032de2358a3b12c7b",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "12.3.0",
+      "wheel": "pillow-12.3.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "a50570fa3b3102a42d7babb0569238b0b3c0aedce0063c8e4d65060dfd3f7293"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "portalocker",
+      "sha256": "3cdc5f565312224bc570c49337bd21428bba0ef363bbcf58b9ef4a9f11779968",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "3.2.0",
+      "wheel": "portalocker-3.2.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0 AND BSD-2-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "name": "licenses/NOTICE",
+          "sha256": "4efa1874aeaa60f365f5797e617f1ff933e15e508eaf751e9848ed4413d7a7ae"
+        }
+      ],
+      "license_spdx": "Apache-2.0 AND BSD-2-Clause",
+      "name": "prometheus-client",
+      "sha256": "fa93d06737aa02bacd05794768508bb97d2fbee28cb3bca04eaae92f0ca953d6",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "0.26.0",
+      "wheel": "prometheus_client-0.26.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "3-Clause BSD License",
+      "license_files": [
+        {
+          "name": "LICENSE",
+          "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "protobuf",
+      "sha256": "97198b77e369a0abd8e262b8f6c7266c55ddb796a3a12c76d7b8881188ed83aa",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "7.36.1",
+      "wheel": "protobuf-7.36.1-cp310-abi3-manylinux2014_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "none",
+      "evidence": "wheel-bytes",
+      "license_declared": "",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "f79ad92c0936186de30f349d55f5e4162845793661e5f8b4d07e8734a92fed6a"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "py-rust-stemmers",
+      "note": "METADATA declares no license; MIT identified from the bundled license file text.",
+      "sha256": "451ee1c02a3f5cf1e161b46ba9032cdda4ba10a8b03ff9ee61c1d34d42a0bc81",
+      "spdx_basis": "license-file-text",
+      "status": "declared",
+      "version": "0.1.8",
+      "wheel": "py_rust_stemmers-0.1.8-cp314-cp314-manylinux_2_28_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "a9e186f3ca16b5eef84318e7a701721351a00cb7b8ae3a4394b67b49e3529ef3"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "pydantic",
+      "sha256": "45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "2.13.4",
+      "wheel": "pydantic-2.13.4-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "2afdd30d54b4d62b6f488a6bcc1546e84ec5061f13f4209c03d012348783795a"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "pydantic-core",
+      "sha256": "7a5f930472650a82629163023e630d160863fce524c616f4e5186e5de9d9a49b",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "2.46.4",
+      "wheel": "pydantic_core-2.46.4-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "eb355a753e020346d33d83bf9769135b89fc610568ac531a01c295bcee7fd998"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "pydantic-settings",
+      "sha256": "0ba092c291c94baceb5eff768aa0d56400a457585bc0175925a5a5510303da42",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "2.15.0",
+      "wheel": "pydantic_settings-2.15.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "election-required",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial License",
+      "license_files": [
+        {
+          "name": "COPYING",
+          "sha256": "40e60697600535eabfb5ae05f72829d88cfe8d02dd4792f5a754f6f51dabe55b"
+        }
+      ],
+      "license_spdx": "AGPL-3.0-only OR LicenseRef-Artifex-Commercial",
+      "name": "pymupdf",
+      "note": "METADATA does not state AGPL only versus or-later; recorded as only (the conservative reading). Imported by the ingest path only; the serving agent is designed not to import it (see ingest/chunk.py comment) although the wheel is installed in both images.",
+      "obligation": "Dual license (AGPL-3.0 or Artifex commercial). Which license governs this distribution, and any AGPL source/network-use duties or commercial-grant coverage, is an owner decision (docs/licensing.md, PyMuPDF decision record). The wheel carries only a one-line declaration, not license text.",
+      "sha256": "397d6715c1f0df7548a92d0afd8ce370fc48fa47aeefac16be2bc04a16a8227f",
+      "spdx_basis": "normalized-license-field",
+      "status": "pending-owner-decision",
+      "version": "1.28.2",
+      "wheel": "pymupdf-1.28.2-cp310-abi3-manylinux_2_28_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "80619b7049f08c81683ad0e01f08f257a840652dd71ee83146d36658c7d2c2b9"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "python-dotenv",
+      "sha256": "904552145e8bfed22162c09dab1c2b9b54fefa7b23ba780f4f26ca0316b0f0d9",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "1.2.3",
+      "wheel": "python_dotenv-1.2.3-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.txt",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "python-multipart",
+      "sha256": "ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "0.0.32",
+      "wheel": "python_multipart-0.0.32-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "8d3928f9dc4490fd635707cb88eb26bd764102a7282954307d3e5167a577e8a4"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "pyyaml",
+      "sha256": "c458b6d084f9b935061bc36216e8a69a7e293a2f1e68bf956dcd9e6cbcd143f5",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "6.0.3",
+      "wheel": "pyyaml-6.0.3-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "qdrant-client",
+      "sha256": "13602a2b3478a95ecdf42f97b93d7f703b63a3361cd912a04495a33a5ac14121",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "1.19.0",
+      "wheel": "qdrant_client-1.19.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "Apache-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b"
+        },
+        {
+          "name": "licenses/NOTICE",
+          "sha256": "f5110972dedad2b4e9d314518daf3b7d72d6e02e499acd802181de6f74571dcc"
+        }
+      ],
+      "license_spdx": "Apache-2.0",
+      "name": "requests",
+      "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "2.34.2",
+      "wheel": "requests-2.34.2-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.md",
+          "sha256": "dcb95677a02240243187e964f941847d19b17821cf99e5afae684fab328c19bf"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "starlette",
+      "sha256": "a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "1.6.0",
+      "wheel": "starlette-1.6.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": true,
+      "class": "permissive",
+      "declared_source": "Classifier",
+      "evidence": "wheel-bytes",
+      "license_declared": "License :: OSI Approved :: Apache Software License",
+      "license_files": [],
+      "license_spdx": "Apache-2.0",
+      "name": "tokenizers",
+      "obligation": "The wheel ships no license text under dist-info, so the image does not carry the license/notice text this license class expects to accompany copies. Supply the upstream text into the notices on a connected host, or record why it is not required.",
+      "sha256": "41c2f84d172449b4dadb9cdc508e3e364076613c35b16e76ecfe47a60d1e3305",
+      "spdx_basis": "normalized-classifier",
+      "status": "pending-owner-decision",
+      "version": "0.23.2",
+      "wheel": "tokenizers-0.23.2-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "weak-copyleft",
+      "declared_source": "License",
+      "evidence": "wheel-bytes",
+      "license_declared": "MPL-2.0 AND MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENCE",
+          "sha256": "fcff87c3a47ce8028a8512aa182d4fcf0ad1c90544ee75cf9b343684cac194de"
+        }
+      ],
+      "license_spdx": "MPL-2.0 AND MIT",
+      "name": "tqdm",
+      "obligation": "MPL-2.0 file-level copyleft on the MPL-covered files: keep the license text with distributions; source of those files must stay available if modified. Not modified in this repository.",
+      "sha256": "c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73",
+      "spdx_basis": "normalized-license-field",
+      "status": "declared",
+      "version": "4.70.1",
+      "wheel": "tqdm-4.70.1-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "33be7b7e8fa4fd19b1760e1a8ed8a668bdab852c91b692dd41424bcb725a9fca"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "truststore",
+      "sha256": "adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "0.10.4",
+      "wheel": "truststore-0.10.4-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "PSF-2.0",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf"
+        }
+      ],
+      "license_spdx": "PSF-2.0",
+      "name": "typing-extensions",
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "4.16.0",
+      "wheel": "typing_extensions-4.16.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "804b59b25f2c31bd278f9202a19ae49a3945aa2664387e2d0a128c7cacc61ec3"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "typing-inspection",
+      "sha256": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "0.4.4",
+      "wheel": "typing_inspection-0.4.4-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "installed-dist-info",
+      "license_declared": "MIT",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.txt",
+          "sha256": "130e3a64d5fdd5d096a752694634a7d9df284469de86e5732100268041e3d686"
+        }
+      ],
+      "license_spdx": "MIT",
+      "name": "urllib3",
+      "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "2.8.0",
+      "wheel": "urllib3-2.8.0-py3-none-any.whl"
+    },
+    {
+      "approval_ref": null,
+      "binary_wheel": false,
+      "class": "permissive",
+      "declared_source": "License-Expression",
+      "evidence": "wheel-bytes",
+      "license_declared": "BSD-3-Clause",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE.md",
+          "sha256": "efe1acf3e62fb99c288b0ec73e5a773b7268ef4320fe757ea994214e4b63c371"
+        }
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "name": "uvicorn",
+      "sha256": "f86e41a149d7d05a9969337e3946a9c171c06a5d42680896daaba624aeac8da1",
+      "spdx_basis": "declared-expression",
+      "status": "declared",
+      "version": "0.52.4",
+      "wheel": "uvicorn-0.52.4-py3-none-any.whl"
+    }
+  ],
+  "release_approval": {
+    "approval_ref": null,
+    "approved_digest": null
+  },
+  "schema_version": 1
+}

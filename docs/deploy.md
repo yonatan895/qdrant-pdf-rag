@@ -109,6 +109,9 @@ Qdrant deploys as its separate release from `charts/qdrant-1.19.0.tgz`;
 checkout. Use the checksum-pinned Helm 4.3.0 client from
 [the workflow](../.github/workflows/e2e.yml). Neither chart needs a remote
 chart repository in the air gap.
+Deploy also reads back every deployed image from the registry before any
+cluster change, so `pipeline.sh --skip-load` and standalone `airgap:deploy`
+are verified exactly like a fresh load (see [image identity](#image-identity-across-archive-and-registry-formats)).
 Deploy requires exactly one `charts/qdrant-*.tgz` (none or several is refused
 before any release command). When a packed `MANIFEST.txt` is reachable and the
 run is not a dry-run, that archive's sha256 must equal the MANIFEST
@@ -139,6 +142,34 @@ publication, retirement validation and `/work/inventory.jsonl` lock semantics
 remain unchanged. Route configuration is not needed to render an ingest Job.
 
 Compatibility and lifecycle decisions under #448:
+
+- Console Route reconciliation (issue #373). `AGENT_ROUTE` is a strict boolean
+  (`AGENT_ROUTE must be true/false`). `validate.sh` and `deploy.sh` share one
+  preflight (`common.sh`, `check_route_exposure.py`): with `AGENT_ROUTE=true` the
+  `images.txt` oauth-proxy pin must be recorded, match the chart's
+  `images.oauthProxy` repository/tag and, when a packed MANIFEST is reachable,
+  equal its `oauth_proxy` member; `rag-agent-oauth-cookie` must carry a nonempty
+  `cookie-secret` key (its byte length is enforced by oauth-proxy at start; the
+  rollout wait surfaces a rejected value) and the namespace service CA must be a
+  PEM bundle. Every Route in the namespace is listed before mutation (a deployer
+  that cannot list Routes fails closed): any Route other than the owned
+  `rag-agent` Route whose backend or `alternateBackends` is the agent or a
+  Qdrant Service is refused in both Route-on and Route-off, and the owned Route
+  with `alternateBackends` is refused when Route-on. Before release work,
+  deploy classifies the owned Route against the generated OAuth contract and
+  deletes a confirmed incompatible Route; a valid Route and its operator
+  host/certificate fields stay. Foreign ownership is refused. After the application
+  release, deploy re-reads the live Route and requires Service `rag-agent`,
+  `targetPort: oauth`, `reencrypt`, `insecureEdgeTerminationPolicy: Redirect`,
+  the generated destination CA and no alternates; a readable owned mismatch
+  is deleted and fails. An unreadable Route or changed ownership fails with an
+  unknown/unverified exposure diagnostic; this does not prove absent exposure
+  and does not authorize deleting an operator object. With Route-off an
+  existing owned Route is deleted before the first release mutation, not after
+  the rollout wait. Not covered here (site evidence, see the issue): the OAuth
+  login itself, who is authorized (`--email-domain=*` admits any authenticated
+  cluster user; deploy prints a notice) and the unauthenticated 8080 Service
+  port.
 
 - `check_app_ownership.py` accepts only the fixed first-party resource inventory
   in the selected namespace. Existing unmanaged Kustomize resources can be
@@ -239,7 +270,9 @@ they do not authorize production promotion.
 The connected host packs one tarball: git bundle, Qdrant + Jaeger + ingest
 + agent image archives (plus the oauth-proxy sidecar image once its
 `images.txt` digest is recorded), vendored chart, bootstrap script,
-`MANIFEST.txt`, `PACKING_RECORD.txt`, digest enumeration, offline signature,
+`MANIFEST.txt`, `PACKING_RECORD.txt`, digest enumeration, `THIRD-PARTY-NOTICES.txt`
+([licensing](licensing.md); pack fails closed on an unrecorded dependency, image
+digest or notice change, and bootstrap requires the member), offline signature,
 and member checksums. Verify the tarball digest **before** unpacking, member
 checksums **after**.
 
@@ -270,18 +303,60 @@ checksums **after**.
   `latest` or short SHAs. `INSECURE_REGISTRY=true` disables TLS
   verify on the pack-pull side *or* the load-push side depending on which
   script reads it.
+- Load then reads every pushed tag back from the registry (`skopeo inspect
+  --raw`, reusing the registry-access options of `SKOPEO_ARGS`/`INSECURE_REGISTRY`)
+  and refuses unless the stored manifest is a single image whose config digest
+  and layer count equal the packed archive's, whose own manifest hashes to the
+  MANIFEST `*_digest`. A tag that resolves to anything else (swapped, mirrored,
+  not overwritten, unreadable) fails closed with a fixed message and no
+  `Loaded N images` line. Each verified image prints
+  `==> verified <ref>@<registry manifest digest>`; that digest is the immutable
+  pin, and it differs from the MANIFEST archive digest by design (see
+  [image identity](#image-identity-across-archive-and-registry-formats)).
+  Dry-run reads no registry and says so ("not release-verified").
+  Load also requires each `<image>_config_digest` in the MANIFEST to equal its
+  archive's image config before any push. Deploy and ingest repeat the registry
+  read-back and render by digest (see the image identity section below).
 - Executing-checkout guard (`common.sh::check_checkout_sha`, run by load,
-  deploy, ingest and validate): with a packed MANIFEST reachable, HEAD must
-  equal the packed SHA and no tracked file may differ from it, staged or
-  unstaged (scripts, charts, Taskfile — the whole tracked tree). Refusal is a
-  fixed message naming neither files nor contents; `git diff HEAD` lists the
-  edits. Untracked files (`airgap.env`, `dist/`, generated output) stay
-  allowed, so site values belong in the untracked `airgap.env`. Nothing is
-  reset or overwritten; after the edit is reverted the next run passes.
-  Dry-run, no reachable MANIFEST and an unresolvable checkout still run but
-  print "not release-verified" on stderr — never a release-verified result.
-  `bootstrap.sh` applies the same tracked-change refusal to an existing
-  workspace before copying artifacts into `dist/`.
+  deploy, ingest and validate). With a packed MANIFEST reachable:
+  1. *MANIFEST authenticity.* The guard never reads a bare file. `SHA256SUMS`,
+     `SHA256SUMS.sig` and `sneakernet-signing.pub` must sit next to it, the
+     signature over `SHA256SUMS` must verify (`SNEAKERNET_TRUSTED_PUB` pins
+     the key when set; otherwise TOFU, as in load), and `SHA256SUMS` must list
+     `MANIFEST.txt` exactly once with the file's real sha256. Image archives
+     stay load.sh's `sha256sum -c`; only this MANIFEST link is rechecked.
+  2. *Identity.* HEAD must equal the packed SHA and no tracked file may differ
+     from it, staged or unstaged (scripts, charts, Taskfile — the whole
+     tracked tree).
+  3. *No hidden edits.* `git diff` trusts the index, so any tracked file
+     flagged assume-unchanged or skip-worktree (`git ls-files -v` tag other
+     than `H`; sparse checkout sets skip-worktree) is refused, with or
+     without an edit. An unreadable index is refused. Clear the flags with
+     `git update-index --no-assume-unchanged/--no-skip-worktree`.
+  Refusals are fixed messages naming neither files nor contents; `git diff
+  HEAD` lists edits. Untracked files (`airgap.env`, `dist/`, generated
+  output) stay allowed, so site values belong in the untracked `airgap.env`.
+  Nothing is reset or overwritten; after the cause is fixed the next run
+  passes. A claimed release also fails closed when its identity cannot be
+  established: an unverifiable MANIFEST or one without a `sha:`, a checkout
+  git cannot resolve (a copied tree without `.git`), or bundle evidence with
+  no readable `MANIFEST.txt` — so launching load/deploy/ingest/validate
+  directly, setting `IMAGE_SHA` to the packed SHA, or deleting/forging
+  `MANIFEST.txt` never bypasses checkout identity; rerun `bootstrap.sh` to
+  restore it. *Bundle evidence* is `dist/SHA256SUMS`, or a `../SHA256SUMS`
+  that names `MANIFEST.txt` (the documented unpack-next-to-the-clone layout
+  that `find_manifest` and load.sh search; every packed bundle's list names
+  it). An unrelated `../SHA256SUMS` that does not name `MANIFEST.txt` is not
+  evidence, so connected development in a directory beside such a file is not
+  refused. Counting evidence can only make the guard refuse, never pass.
+  Only dry-run and connected development (no MANIFEST and no bundle evidence)
+  still run, printing "not release-verified" on stderr — never a
+  release-verified result. `bootstrap.sh` applies the same tracked-change and
+  index-flag refusals to an existing workspace before copying artifacts into
+  `dist/`. Not covered: the guard is not tamper-proofing against an actor who
+  can rewrite the whole bundle directory *and* its pubkey while
+  `SNEAKERNET_TRUSTED_PUB` is unset (TOFU), nor against edits to files the
+  checkout does not track (`airgap.env` is operator config by design).
 - `bootstrap.sh` cannot source `common.sh` (no clone exists yet), so it
   carries an inline twin of the trust check (bundle signature honoring
   `SNEAKERNET_TRUSTED_PUB`, then `SHA256SUMS`). It clones into
@@ -289,6 +364,19 @@ checksums **after**.
   repo already exists, copies (not links) the archives into `dist/`, and
   seeds `airgap.env` from the example only when absent — never overwriting
   operator edits. Artifact discovery searches `dist/` then the parent dir.
+  Artifacts are staged in `dist/.bootstrap-staging`, verified there (signature
+  and every member checksum), and only then moved into `dist/`, with
+  `SHA256SUMS.sig`, `SHA256SUMS` and `MANIFEST.txt` last, so a failed copy or
+  a failed verification leaves `dist/` and `airgap.env` byte-identical and
+  an interruption never yields a mixed bundle that verifies. `dist/` is never
+  swapped wholesale: operator files and earlier releases' archives stay. If
+  the process was killed uncleanly the staging directory remains. A failure
+  before promotion preserves existing `dist/` bytes; interrupted promotion
+  may have replaced members before the acceptance metadata moved. The next run
+  refuses the stage and warns that `dist/` may be partial. Do not use it: remove
+  only `dist/.bootstrap-staging`, rerun the complete verified bundle and require
+  signature/member verification before load. Bootstrap never deletes a leftover
+  stage on its own initiative; operator files remain through recovery.
   The copy list includes `oauth-proxy-image.tar` when the bundle contains it;
   no manual sidecar-image copy is needed before `airgap:load`.
 
@@ -368,6 +456,43 @@ cannot schedule on one node — proven).
   collector is not proof that spans reach it.
 
 <a id="collection-policy"></a>
+### Capacity arithmetic (issue #272)
+
+Provisioned claims by default (`charts/qdrant-openshift.values.yaml`, chart
+values; the three Qdrant peers each get their own claims):
+
+| Claim | Per unit | Units | Total |
+|---|---|---|---|
+| Qdrant data (RWO block) | 500Gi | 3 peers | 1500Gi |
+| Qdrant snapshots (RWO block, node-local) | 500Gi | 3 peers | 1500Gi |
+| Ingest scratch `ingest-work` (`INGEST_WORK_SIZE`) | 100Gi | 1 | 100Gi |
+| Jaeger Badger (when enabled) | 10Gi | 1 | 10Gi |
+| **Provisioned PVC capacity** | | | **3110Gi = 3.04TiB** |
+
+Qdrant alone is `3 * (500Gi + 500Gi) = 3000Gi = 2.93TiB`, not 500Gi. The
+read-only corpus PVC is caller-owned and not counted. This is provisioned
+capacity, not usable logical capacity:
+
+- With 6 shards, replication factor 3 on 3 peers, every peer stores one copy of
+  every shard. The logical corpus (corpus plus `__completions` collection) is
+  therefore bounded by **one** peer's data claim (500Gi), not by 1500Gi.
+  Let `S` be one generation's on-disk size on a single peer.
+- Alias publication keeps the retired generation until the operator removes it,
+  so a refresh peaks at `S_old + S_new` plus WAL and optimizer scratch on the
+  same claim: the data claim must hold at least `2 * S` with headroom, i.e. `S`
+  stays well below 250Gi at the default size.
+- Each node-local snapshot of a generation is about `S` on that peer's snapshot
+  claim: the retained snapshots (pre-change, pre-upgrade, safety) satisfy
+  `retained * S` below 500Gi. Off-cluster copies do not free the claim until the
+  snapshot is deleted.
+- Sizing math, not measurement: measured per-point footprint, headroom, RPO/RTO
+  and replica policy belong to #374 and #360. Do not provision at exactly the
+  estimate (`.agents/skills/qdrant-sizing`).
+- Claim expansion needs a StorageClass with `allowVolumeExpansion: true`. The
+  StatefulSet's `volumeClaimTemplates` are immutable, so a larger value in the
+  chart does not resize existing claims; the procedure is in the
+  [upgrade and recovery runbook](install_and_ops.md#upgrade-and-recovery-runbook-issue-272).
+
 ### Collection distribution and placement (issue #360)
 
 **Production default (checked in, non-secret):** 6 logical shards,
@@ -664,9 +789,11 @@ per-leg data keys. The API key value never enters Helm values or `airgap.env`.
 
 GitHub runs unit, sim, gates, bench, load, the path-filtered multi-peer HA
 lane (issue #360: three-peer placement/peer-loss fixture), connected E2E,
-and the dry-run gate; air-gap GitLab runs hygiene + pytest + gate-l1 only
-(no e2e, load, deploy, multi-peer docker, GHCR, or PDFs/tokens/hostnames in
-file). Job meaning stays aligned across the two files; only e2e-scale jobs
+and the dry-run gate; air-gap GitLab runs hygiene, lint/types, the full
+pytest suite, hazards, the sim tier and gate-l1 only (no e2e, load, deploy,
+multi-peer docker, GHCR, or PDFs/tokens/hostnames in file). GitLab unit/sim
+reports reject any skipped or xfailed test (`scripts/check_junit_clean.py`);
+`tests/test_ci_gitlab_parity.py` pins the correspondence and failure propagation. Job meaning stays aligned across the two files; only e2e-scale jobs
 live in `.github/workflows/e2e.yml`.
 
 - GitHub product `ci.yml`/`e2e.yml` run on every PR/push with no markdown-only
@@ -838,6 +965,48 @@ its manifest against the bundle first, then verify identical image config/rootfs
 diffIDs across the load, and the running digest against the loaded registry.
 Do not compare an archive digest blindly to a registry digest or accept a tag
 alone. Capture all five images, including every OAuth sidecar.
+Implemented (issue #272), as one chain bound to the signed MANIFEST:
+
+1. `pack.sh` records `<image>_config_digest` for all five images next to the
+   archive `<image>_digest`. `load.sh` refuses an archive whose config differs
+   from it (before any push), then reads each pushed tag back and requires the
+   packed config digest and layer count; it prints `ref@registry-manifest-digest`.
+2. `deploy.sh` (every entry path: after `load`, `pipeline.sh --skip-load`,
+   standalone `airgap:deploy`) and `ingest.sh` read the registry tag back
+   **before any cluster change** and require a single-image manifest with the
+   packed config digest. Missing tag, swapped tag, manifest list, or a MANIFEST
+   without `<image>_config_digest` (older bundle: repack) stop with a fixed
+   message and no mutation. The check shares `load.sh`'s read-back options
+   (`SKOPEO_ARGS` access options, `INSECURE_REGISTRY`) and needs `skopeo` and
+   `python3`. `image_manifest.py` owns config-digest and layer structure parsing
+   for pack/load/deploy/ingest; load additionally binds the archive manifest
+   checksum and compares layer counts across serialization.
+3. The first-party images (agent, ingest, Jaeger, oauth-proxy) are then rendered
+   as `repository@sha256:<registry manifest digest>` (`IMAGE_DIGEST_<ROLE>` →
+   `map_values.py` → `images.<name>.digest`; the chart keeps the SHA tag only as
+   the informational release identity). The digest only ever comes from this
+   verification, never from the caller's environment.
+4. The vendored Qdrant chart cannot render a digest (it appends
+   `-unprivileged` to the tag and semver-compares the tag), and vendored-tree
+   edits are not allowed. It stays tag-referenced; its verified digest is
+   compared with the running pods instead. After rollout, `check_pod_images.py`
+   binds each role to the named release Deployment/StatefulSet and container,
+   using controller UIDs, selectors, the current Deployment ReplicaSet revision
+   or StatefulSet update revision. It requires every desired replica's regular
+   and applicable init-container repository and `imageID`, including completed
+   init containers; unrelated Jobs and terminating old Pods cannot supply or
+   invalidate this evidence. The deployer needs namespace-scoped list access to
+   Deployments, StatefulSets, ReplicaSets and Pods. Missing workload/controller/status, a wrong
+   repository, digest or replica count fails the deploy
+   before the legacy-resource cleanup. Residual: between the read-back and the
+   Qdrant pod pull, a tag could still move; the post-rollout check detects it
+   after pods started, it cannot prevent it.
+5. Dry-run and runs without a reachable packed MANIFEST (connected
+   development) keep tag-only references and print a notice; they are not
+   release-verified.
+
+Not covered: signature/provenance of images beyond the signed MANIFEST, and any
+registry-side tag immutability (a platform control).
 
 <a id="deployment-policy"></a>
 ## Deployment maintenance policy
@@ -985,7 +1154,8 @@ changes together. GitLab uses mirrored CI_PYTHON_IMAGE/CI_RUNNER_TAG and interna
 PIP_INDEX_URL or PIP_FIND_LINKS, failing closed without a package source. No
 public network, GHCR, deploy/pack/image-build or opencode reviewer in GitLab.
 Issue #397 authorizes the offline context check in hygiene and a small GitHub
-context workflow; general lint/type/coverage/ruleset changes remain #370.
+context workflow; #370 owns GitLab/GitHub gate parity, #584 the lint ruleset.
+Coverage ratchets and a real internal-runner pipeline run (#446) are not part of it.
 
 Third-party actions use full SHA pins; document runtime downloads outside that
 pin. Runtime artifacts need pinned versions and in-repo SHA256 verification;

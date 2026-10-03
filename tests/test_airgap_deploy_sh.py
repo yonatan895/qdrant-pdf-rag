@@ -6,6 +6,7 @@ regression the rehearsal build surfaced: values.yaml's placeholder pull-secret
 name must never reach a cluster.
 """
 
+import json
 import re
 import shutil
 
@@ -22,6 +23,9 @@ from tests.helpers_airgap import (
     run_sh,
     set_oauth_proxy_pin,
     sha256_bytes,
+    write_git_identity_stub,
+    write_signed_manifest,
+    write_stub,
 )
 
 IMAGE_SHA = "a" * 40  # full-sha shaped; deploy.sh only rejects "" / "HEAD"
@@ -34,6 +38,17 @@ case "$*" in
   'api-resources -o name')
     [ "${{DISCOVERY_FAIL:-}}" != 1 ] || exit 1
     printf '%s\\n' routes.route.openshift.io servicemonitors.monitoring.coreos.com ;;
+  *'delete route.route.openshift.io/rag-agent'*)
+    [ "${{DELETE_FAIL:-}}" != 1 ] || exit 1 ;;
+  *'get routes.route.openshift.io '*)
+    [ "${{ROUTES_READ_FAIL:-}}" != 1 ] || exit 1
+    if [ -n "${{ROUTES_FILE:-}}" ]; then cat "$ROUTES_FILE";
+    else printf '%s\\n' '{{"apiVersion":"v1","kind":"List","items":[]}}'; fi ;;
+  *'get route.route.openshift.io/rag-agent '*'-o json'*)
+    [ "${{ROUTE_LIVE_FILE:-}}" != "" ] || exit 1
+    cat "$ROUTE_LIVE_FILE" ;;
+  *'get configmap openshift-service-ca.crt'*)
+    printf '%s\\n' "${{SERVICE_CA:-}}" ;;
   *'get deployment.apps/jaeger '*|*'get serviceaccount/rag-agent '*|*'get servicemonitor.monitoring.coreos.com/rag-agent '*)
     [ "${{DISABLED_READ_FAIL:-}}" != 1 ] || exit 1
     if [ -n "${{DISABLED_FILE:-}}" ]; then cat "$DISABLED_FILE";
@@ -43,6 +58,8 @@ case "$*" in
     if [ -n "${{OWNERSHIP_FILE:-}}" ]; then cat "$OWNERSHIP_FILE";
     else :; fi ;;
 
+  *'get deployments,statefulsets,replicasets,pods -o json'*)
+    [ -z "${{PODS_FILE:-}}" ] || cat "$PODS_FILE" ;;
   *'get secret '*'go-template='*)
     if [ -n "${{MISSING_KEY:-}}" ]; then
       case "$*" in *"$MISSING_KEY"*) exit 0 ;; esac
@@ -51,6 +68,18 @@ case "$*" in
 
 esac
 exit 0
+"""
+
+
+# Registry stub: `skopeo inspect --raw docker://REF` serves
+# $SKOPEO_REGISTRY/<REF with / : @ replaced by _>.raw, else "manifest unknown".
+STUB_SKOPEO = r"""#!/bin/sh
+printf 'skopeo %s\n' "$*" >> "$HELM_LOG"
+[ "$1" = inspect ] || exit 0
+for a in "$@"; do case "$a" in docker://*) ref="${a#docker://}" ;; esac; done
+f="$SKOPEO_REGISTRY/$(printf '%s' "$ref" | tr '/:@' '___').raw"
+[ -f "$f" ] || { echo "manifest unknown" >&2; exit 1; }
+cat "$f"
 """
 
 
@@ -66,6 +95,7 @@ def tree(tmp_path):
         p.write_text(STUB_BIN.format())
         p.chmod(0o755)
     install_rendering_helm(tmp_path)
+    write_stub(tmp_path / "bin" / "skopeo", STUB_SKOPEO)
     return tmp_path, helm_log
 
 
@@ -82,6 +112,8 @@ def _run(tree, *extra_env):
         "DENSE_DIM": "64",
         "EMBED_MODEL_REVISION": "rev-1",
         "VLLM_BASE_URL": "http://vllm:8000",
+        "SKOPEO_REGISTRY": str(tmp_path / "registry"),
+        "PODS_FILE": str(tmp_path / "pods.json"),
     }
     for k, v in extra_env:
         env[k] = v
@@ -89,7 +121,8 @@ def _run(tree, *extra_env):
 
 
 def _helm_log(tree):
-    return (tree[1]).read_text()
+    # A refusal before any client call leaves no log at all.
+    return tree[1].read_text() if tree[1].exists() else ""
 
 
 def test_no_pull_secret_never_renders_placeholder_name(tree):
@@ -182,13 +215,101 @@ def test_storage_size_knob_covers_persistence_and_snapshot(tree):
     assert "snapshotPersistence.size=1Gi" in log
 
 
-def _manifest(tree, chart_sha=None, sha=IMAGE_SHA):
+ROLE_REFS = {
+    "qdrant": "reg.internal/qdrant/qdrant:v1.19.0-unprivileged",
+    "agent": f"reg.internal/qdrant-pdf-rag-agent:{IMAGE_SHA}",
+    "jaeger": "reg.internal/jaegertracing/jaeger:v2.20.0",
+}
+ROLE_REPOS = {
+    "qdrant": "reg.internal/qdrant/qdrant",
+    "agent": "reg.internal/qdrant-pdf-rag-agent",
+    "jaeger": "reg.internal/jaegertracing/jaeger",
+}
+
+
+def _digest_of(raw: bytes) -> str:
+    return "sha256:" + sha256_bytes(raw)
+
+
+def _config_of(role: str) -> str:
+    return _digest_of(f"config-{role}".encode())
+
+
+def _image_manifest(role: str, config: str | None = None, **extra) -> bytes:
+    body = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "config": {"digest": config or _config_of(role), "size": 7},
+        "layers": [{"digest": _digest_of(f"layer-{role}-gz".encode()), "size": 9}],
+        **extra,
+    }
+    return json.dumps(body, separators=(",", ":")).encode() + b"\n"
+
+
+def _put_registry(tree, role: str, raw: bytes | None) -> str:
+    """Stub registry content for a role's tag; None removes the tag."""
+    reg = tree[0] / "registry"
+    reg.mkdir(exist_ok=True)
+    f = reg / (ROLE_REFS[role].replace("/", "_").replace(":", "_").replace("@", "_") + ".raw")
+    if raw is None:
+        f.unlink(missing_ok=True)
+        return ""
+    f.write_bytes(raw)
+    return _digest_of(raw)
+
+
+def _load_all(tree) -> dict[str, str]:
+    """What a successful airgap:load leaves in the registry: role -> manifest digest."""
+    return {role: _put_registry(tree, role, _image_manifest(role)) for role in ROLE_REFS}
+
+
+def _write_pods(tree, digests: dict[str, str], **override) -> None:
+    items = []
+    for role, repo in ROLE_REPOS.items():
+        kind = "StatefulSet" if role == "qdrant" else "Deployment"
+        name = "rag-agent" if role == "agent" else role
+        replicas = 3 if role == "qdrant" else 1
+        uid = f"{role}-workload"
+        spec = {"containers": [{"name": role, "image": f"{repo}:tag"}]}
+        items.append({
+            "kind": kind, "metadata": {"name": name, "namespace": "ns", "uid": uid,
+                "annotations": {"deployment.kubernetes.io/revision": "2"}},
+            "spec": {"replicas": replicas, "selector": {"matchLabels": {"app": name}},
+                     "template": {"spec": spec}}, "status": {"updateRevision": "qdrant-current"},
+        })
+        owner_kind = kind
+        if kind == "Deployment":
+            owner_kind, uid = "ReplicaSet", f"{role}-rs"
+            items.append({"kind": "ReplicaSet", "metadata": {
+                "name": uid, "namespace": "ns", "uid": uid,
+                "annotations": {"deployment.kubernetes.io/revision": "2"},
+                "ownerReferences": [{"kind": kind, "uid": f"{role}-workload", "controller": True}],
+            }})
+        if role in override and override[role] is None:
+            continue
+        digest = override.get(role, digests[role])
+        for n in range(replicas):
+            items.append({
+                "kind": "Pod", "metadata": {"name": f"{role}-{n}", "namespace": "ns",
+                    "labels": {"app": name, "controller-revision-hash": "qdrant-current"},
+                    "ownerReferences": [{"kind": owner_kind, "uid": uid, "controller": True}]},
+                "spec": spec,
+                "status": {"phase": "Running", "containerStatuses": [
+                    {"name": role, "imageID": f"{repo}@{digest}"}]},
+            })
+    (tree[0] / "pods.json").write_text(json.dumps({"items": items}))
+
+
+def _manifest(tree, chart_sha=None, sha=IMAGE_SHA, config_digests=True):
     dist = tree[0] / "dist"
     dist.mkdir(exist_ok=True)
+    write_git_identity_stub(tree[0], sha)  # a claimed release needs a resolvable checkout (#414)
     lines = [f"sha: {sha}"]
     if chart_sha is not None:
         lines.append(f"chart_sha256: {chart_sha}")
-    (dist / "MANIFEST.txt").write_text("\n".join(lines) + "\n")
+    if config_digests:
+        lines += [f"{role}_config_digest: {_config_of(role)}" for role in ROLE_REFS]
+    write_signed_manifest(dist, "\n".join(lines) + "\n")
 
 
 def _chart(tree):
@@ -229,6 +350,7 @@ def test_manifest_without_chart_sha_refuses(tree):
 
 def test_manifest_chart_sha_match_deploys_that_chart(tree):
     _manifest(tree, sha256_bytes(_chart(tree).read_bytes()))
+    _write_pods(tree, _load_all(tree))
     result = _run(tree)
     assert result.returncode == 0, result.stderr
     assert "verified against packed MANIFEST" in result.stdout
@@ -243,6 +365,7 @@ def test_chart_identity_failure_then_fix_passes_on_next_run(tree):
     _manifest(tree, "0" * 64)
     assert _run(tree).returncode != 0
     _manifest(tree, sha256_bytes(_chart(tree).read_bytes()))
+    _write_pods(tree, _load_all(tree))
     result = _run(tree)
     assert result.returncode == 0, result.stderr
     assert "upgrade" in _helm_log(tree)
@@ -920,3 +1043,502 @@ def test_monitor_true_with_metrics_off_fails_closed(tree):
     r = _run(tree, ("SERVICEMONITOR_ENABLED", "true"))
     assert r.returncode != 0
     assert "SERVICEMONITOR_ENABLED=true requires METRICS_ENABLED=true" in r.stderr
+
+
+# ----------------------------------------------------- console Route (#373)
+
+SERVICE_CA = "-----BEGIN CERTIFICATE-----\nU0VSVklDRS1DQQ==\n-----END CERTIFICATE-----"
+GOOD_PIN = "sha256:" + "b" * 64
+
+
+def _route(name="rag-agent", *, to="rag-agent", port="oauth", termination="reencrypt",
+           insecure="Redirect", ca=SERVICE_CA, alternates=()):
+    spec = {
+        "to": {"kind": "Service", "name": to},
+        "port": {"targetPort": port},
+        "tls": {"termination": termination, "insecureEdgeTerminationPolicy": insecure,
+                "destinationCACertificate": ca + "\n"},
+    }
+    if alternates:
+        spec["alternateBackends"] = [{"kind": "Service", "name": n} for n in alternates]
+    return {"apiVersion": "route.openshift.io/v1", "kind": "Route",
+            "metadata": {"name": name, "namespace": "ns"}, "spec": spec}
+
+
+def _write_json(tree, name, document):
+    import json
+
+    path = tree[0] / name
+    path.write_text(json.dumps(document))
+    return str(path)
+
+
+def _route_list(tree, *routes):
+    return _write_json(tree, "routes.json", {"apiVersion": "v1", "kind": "List", "items": list(routes)})
+
+
+def _live(tree, route=None):
+    return _write_json(tree, "live-route.json", route or _route())
+
+
+def _route_on(tree, *extra, live=None):
+    """Live (non-dry-run) Route-on deploy against stubs."""
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    return _run(tree, ("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA),
+                ("ROUTE_LIVE_FILE", live or _live(tree)), *extra)
+
+
+def test_route_on_live_deploy_verifies_the_actual_route_and_renders_the_cluster_ca(tree):
+    r = _route_on(tree)
+    assert r.returncode == 0, r.stderr
+    assert "Route rag-agent verified" in r.stdout
+    log = _helm_log(tree)
+    assert "delete" not in log
+    # Stored content, not metadata: the rendered Route carries the CA read
+    # from the namespace ConfigMap.
+    route = (tree[0] / "dist/agent-route.yaml").read_text()
+    assert "U0VSVklDRS1DQQ==" in route
+    assert "targetPort: oauth" in route and "termination: reencrypt" in route
+
+
+@pytest.mark.parametrize("drift", [
+    {"port": "http"},
+    {"termination": "edge"},
+    {"insecure": "Allow"},
+    {"ca": "-----BEGIN CERTIFICATE-----\nT0xELUNB\n-----END CERTIFICATE-----"},
+    {"to": "qdrant"},
+    {"alternates": ("qdrant",)},
+], ids=["http-port", "edge", "http-allowed", "stale-ca", "wrong-backend", "alternate-backend"])
+def test_route_not_converged_after_release_is_deleted_and_fails(tree, drift):
+    # Whatever the adopted Route still looks like after the release, it is
+    # removed rather than left as a public unauthenticated console.
+    r = _route_on(tree, live=_live(tree, _route(**drift)))
+    assert r.returncode != 0
+    assert "did not converge" in r.stderr
+    log = _helm_log(tree)
+    assert log.index("delete\nroute.route.openshift.io/rag-agent") > log.index("upgrade")
+    assert "rollout" not in log  # fails before any readiness wait
+
+
+def test_unconverged_route_that_cannot_be_deleted_says_so_loudly(tree):
+    r = _route_on(tree, ("DELETE_FAIL", "1"), live=_live(tree, _route(port="http")))
+    assert r.returncode != 0
+    assert "could not be deleted" in r.stderr and "delete route rag-agent" in r.stderr
+
+
+def test_route_unreadable_after_release_is_not_a_pass(tree):
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    r = _run(tree, ("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA))
+    assert r.returncode != 0
+    assert "exposure is NOT verified" in r.stderr
+
+
+def test_route_refusal_then_corrected_run_succeeds(tree):
+    # Next ordinary run: the refused/removed state leaves nothing behind.
+    assert _route_on(tree, live=_live(tree, _route(port="http"))).returncode != 0
+    assert _route_on(tree).returncode == 0
+
+
+@pytest.mark.parametrize("backend", ["rag-agent", "qdrant", "qdrant-headless"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_other_routes_to_agent_or_qdrant_refuse_before_any_mutation(tree, backend, enabled):
+    routes = _route_list(tree, _route("public-console", to=backend))
+    extra = (("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA)) if enabled else ()
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    r = _run(tree, ("ROUTES_FILE", routes), ("ROUTE_LIVE_FILE", _live(tree)), *extra)
+    assert r.returncode != 0
+    assert "Route public-console exposes a protected Service" in r.stderr
+    log = _helm_log(tree)
+    assert "upgrade" not in log and "delete" not in log and "create" not in log
+
+
+def test_other_route_alternate_backend_to_qdrant_refuses(tree):
+    routes = _route_list(tree, _route("docs", to="docs-site", alternates=("qdrant",)))
+    r = _run(tree, ("ROUTES_FILE", routes))
+    assert r.returncode != 0
+    assert "Route docs exposes" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_unrelated_routes_do_not_block_the_deploy(tree):
+    routes = _route_list(tree, _route("docs", to="docs-site"))
+    r = _run(tree, ("ROUTES_FILE", routes))
+    assert r.returncode == 0, r.stderr
+    assert "delete" not in _helm_log(tree)
+
+
+def test_owned_route_with_unowned_alternate_backend_refuses_before_mutation(tree):
+    routes = _route_list(tree, _route(alternates=("qdrant",)))
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    r = _run(tree, ("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA),
+             ("ROUTES_FILE", routes), ("ROUTE_LIVE_FILE", _live(tree)))
+    assert r.returncode != 0
+    assert "alternateBackends" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_route_off_retires_existing_public_route_before_the_first_mutation(tree):
+    # Upgrade from a release with a Route to Route-off: the Route (pointing
+    # at the unauthenticated HTTP port) goes first, not after the rollout.
+    routes = _route_list(tree, _route(port="http", termination="edge"))
+    r = _run(tree, ("ROUTES_FILE", routes))
+    assert r.returncode == 0, r.stderr
+    log = _helm_log(tree)
+    assert log.index("delete\nroute.route.openshift.io/rag-agent") < log.index("upgrade")
+    # Next ordinary run: nothing left to retire, no stray delete.
+    tree[1].write_text("")
+    r = _run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "delete" not in _helm_log(tree)
+
+
+def test_route_off_removal_failure_blocks_the_release(tree):
+    routes = _route_list(tree, _route(port="http"))
+    r = _run(tree, ("ROUTES_FILE", routes), ("DELETE_FAIL", "1"))
+    assert r.returncode != 0
+    assert "cannot remove disabled or incompatible owned Route" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("failure", ["ROUTES_READ_FAIL", "DISCOVERY_FAIL"])
+def test_unlistable_routes_fail_closed_before_mutation(tree, failure):
+    r = _run(tree, (failure, "1"))
+    assert r.returncode != 0
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("payload", ["", "not-json", '{"kind":"List","items":[{"kind":"Deployment"}]}'])
+def test_corrupt_route_inventory_blocks_mutation(tree, payload):
+    path = tree[0] / "bad-routes.json"
+    path.write_text(payload)
+    r = _run(tree, ("ROUTES_FILE", str(path)))
+    assert r.returncode != 0
+    assert "Route exposure preflight refused" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_route_inventory_failure_never_echoes_route_data(tree):
+    secret = "PRIVATE-KEY-MATERIAL-DO-NOT-ECHO"
+    bad = _route("custom", to="rag-agent")
+    bad["spec"]["tls"]["key"] = secret
+    r = _run(tree, ("ROUTES_FILE", _route_list(tree, bad)))
+    assert r.returncode != 0
+    assert secret not in r.stdout + r.stderr + (tree[0] / "helm-args.log").read_text()
+
+
+def test_invalid_agent_route_value_fails_before_mutation(tree):
+    r = _run(tree, ("AGENT_ROUTE", "maybe"))
+    assert r.returncode != 0
+    assert "AGENT_ROUTE must be true/false" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_agent_route_boolean_spellings_select_the_route(tree):
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    r = _run(tree, ("AGENT_ROUTE", "True"), ("SERVICE_CA", SERVICE_CA), ("ROUTE_LIVE_FILE", _live(tree)))
+    assert r.returncode == 0, r.stderr
+    assert "ose-oauth-proxy" in (tree[0] / "dist/agent-rendered.yaml").read_text()
+
+
+def test_missing_cookie_secret_key_blocks_route_before_mutation(tree):
+    r = _route_on(tree, ("MISSING_KEY", "cookie-secret"))
+    assert r.returncode != 0
+    assert "required Secret key is missing or empty: cookie-secret" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("ca", ["", "not a certificate"])
+def test_unusable_service_ca_blocks_route_before_mutation(tree, ca):
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    r = _run(tree, ("AGENT_ROUTE", "true"), ("SERVICE_CA", ca), ("ROUTE_LIVE_FILE", _live(tree)))
+    assert r.returncode != 0
+    assert "not a PEM certificate bundle" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+def test_route_pin_must_match_the_chart_tag(tree):
+    # images.txt and the chart tag move together (docs/deploy.md pin note).
+    set_oauth_proxy_pin(tree[0], GOOD_PIN)
+    images = tree[0] / "images.txt"
+    images.write_text(images.read_text().replace("ose-oauth-proxy:v4.14", "ose-oauth-proxy:v4.15"))
+    r = _run(tree, ("AGENT_ROUTE", "true"), ("SERVICE_CA", SERVICE_CA), ("ROUTE_LIVE_FILE", _live(tree)))
+    assert r.returncode != 0
+    assert "does not match the chart" in r.stderr
+    assert "upgrade" not in _helm_log(tree)
+
+
+# ------------------------------------------------- registry image identity (#272)
+
+def _release(tree):
+    """A release-path deploy: packed MANIFEST, loaded registry, running pods."""
+    _manifest(tree, sha256_bytes(_chart(tree).read_bytes()))
+    digests = _load_all(tree)
+    _write_pods(tree, digests)
+    return digests
+
+
+def _mutations(tree):
+    log = _helm_log(tree) if tree[1].exists() else ""
+    return [w for w in ("upgrade", "create", "apply", "delete") if w in log.split()]
+
+
+def test_release_renders_first_party_images_by_verified_digest(tree):
+    digests = _release(tree)
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    assert f'digest: "{digests["agent"]}"' in values
+    assert f'digest: "{digests["jaeger"]}"' in values
+    rendered = (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+    assert f"image: reg.internal/qdrant-pdf-rag-agent@{digests['agent']}" in rendered
+    assert f"reg.internal/qdrant-pdf-rag-agent:{IMAGE_SHA}" not in rendered
+    jaeger = (tree[0] / "dist" / "jaeger-rendered.yaml").read_text()
+    assert f"image: reg.internal/jaegertracing/jaeger@{digests['jaeger']}" in jaeger
+    assert "running images match the verified registry digests" in result.stdout
+    # The vendored Qdrant chart cannot render a digest: its tag stays, the pods are compared.
+    assert "image.tag=v1.19.0" in _helm_log(tree)
+
+
+def test_tag_swapped_after_load_refuses_before_any_mutation(tree):
+    _release(tree)
+    _put_registry(tree, "agent", _image_manifest("agent", config=_config_of("someone-else")))
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "is not the packed image" in result.stderr
+    assert "nothing was deployed" in result.stderr
+    assert _mutations(tree) == []
+
+
+@pytest.mark.parametrize("role", ["qdrant", "agent", "jaeger"])
+def test_missing_registry_image_refuses_before_any_mutation(tree, role):
+    """pipeline --skip-load / standalone deploy against an empty or partial registry."""
+    _release(tree)
+    _put_registry(tree, role, None)
+    result = _run(tree)
+    assert result.returncode != 0
+    assert f"cannot read back registry image {ROLE_REFS[role]}" in result.stderr
+    assert _mutations(tree) == []
+
+
+def test_manifest_list_tag_refuses_before_any_mutation(tree):
+    _release(tree)
+    index = json.dumps({"schemaVersion": 2, "manifests": [{"digest": _config_of("qdrant")}]}).encode()
+    _put_registry(tree, "qdrant", index)
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "not a single-image manifest" in result.stderr
+    assert _mutations(tree) == []
+
+
+def test_manifest_without_config_digests_refuses_before_any_mutation(tree):
+    _manifest(tree, sha256_bytes(_chart(tree).read_bytes()), config_digests=False)
+    _write_pods(tree, _load_all(tree))
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "has no qdrant_config_digest" in result.stderr
+    assert _mutations(tree) == []
+
+
+def test_swapped_tag_refusal_then_reload_passes_next_run(tree):
+    digests = _release(tree)
+    _put_registry(tree, "agent", _image_manifest("agent", config=_config_of("someone-else")))
+    assert _run(tree).returncode != 0
+    # A reload overwrites the tag with the packed image; the next ordinary run deploys it.
+    _load_all(tree)
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    assert f"@{digests['agent']}" in (tree[0] / "dist" / "agent-rendered.yaml").read_text()
+
+
+def test_registry_digest_is_read_from_the_registry_not_the_archive(tree):
+    """The rendered digest is the registry manifest digest (compressed layers),
+    which differs from anything derivable from the archive."""
+    digests = _release(tree)
+    assert digests["agent"] != _config_of("agent")
+    _run(tree)
+    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    assert digests["agent"] in values
+    assert _config_of("agent") not in values
+
+
+def test_running_pod_with_different_digest_fails_after_rollout(tree):
+    digests = _release(tree)
+    _write_pods(tree, digests, qdrant="sha256:" + "9" * 64)
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "pod qdrant-0 container qdrant runs sha256:" + "9" * 64 in result.stderr
+    assert "running pods do not use the verified registry images" in result.stderr
+    assert "upgrade" in _helm_log(tree)
+
+
+def test_missing_running_pod_for_verified_image_fails(tree):
+    digests = _release(tree)
+    _write_pods(tree, digests, agent=None)
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "Deployment rag-agent has 0 current pods, expected 1" in result.stderr
+
+
+def test_dry_run_is_tag_only_and_reads_no_registry(tree):
+    _release(tree)
+    result = _run(tree, ("AIRGAP_DRYRUN", "1"))
+    assert result.returncode == 0, result.stderr
+    assert "not release-verified" in result.stderr
+    assert "skopeo" not in _helm_log(tree)
+    values = (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+    assert "digest" not in values
+
+
+def test_digest_from_caller_environment_is_never_rendered(tree):
+    result = _run(tree, ("AIRGAP_DRYRUN", "1"), ("IMAGE_DIGEST_AGENT", "sha256:" + "1" * 64))
+    assert result.returncode == 0, result.stderr
+    assert "digest" not in (tree[0] / "dist" / "mainframe-rag-release-values.yaml").read_text()
+
+
+@pytest.mark.parametrize("phase", ["Succeeded", "Failed", "Running"])
+def test_release_identity_ignores_unrelated_retained_jobs(tree, phase):
+    digests = _release(tree)
+    path = tree[0] / "pods.json"
+    document = json.loads(path.read_text())
+    extra = next(item for item in document["items"] if item.get("kind") == "Pod" and item["metadata"]["name"] == "agent-0")
+    extra = json.loads(json.dumps(extra))
+    extra["metadata"].update(name="diagnostic-history", ownerReferences=[
+        {"kind": "Job", "uid": "diagnostic-job", "controller": True}])
+    extra["status"].update(phase=phase)
+    extra["status"]["containerStatuses"][0]["imageID"] = ROLE_REPOS["agent"] + "@sha256:" + "9" * 64
+    document["items"].append(extra)
+    path.write_text(json.dumps(document))
+    result = _run(tree)
+    assert result.returncode == 0, result.stderr
+    assert digests["agent"] in result.stdout
+
+
+def test_release_identity_wrong_target_repository_cannot_use_diagnostic_pod(tree):
+    _release(tree)
+    path = tree[0] / "pods.json"
+    document = json.loads(path.read_text())
+    target = next(item for item in document["items"] if item.get("kind") == "Pod" and item["metadata"]["name"] == "agent-0")
+    extra = json.loads(json.dumps(target))
+    extra["metadata"].update(name="diagnostic", ownerReferences=[
+        {"kind": "Job", "uid": "diagnostic-job", "controller": True}])
+    document["items"].append(extra)
+    target["spec"] = {"containers": [{"name": "agent", "image": "reg.internal/other:tag"}]}
+    path.write_text(json.dumps(document))
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "pod agent-0 container agent has an unexpected repository" in result.stderr
+
+
+def test_release_identity_requires_status_on_each_target_replica(tree):
+    _release(tree)
+    path = tree[0] / "pods.json"
+    document = json.loads(path.read_text())
+    target = next(item for item in document["items"] if item.get("kind") == "Pod" and item["metadata"]["name"] == "qdrant-2")
+    target["status"]["containerStatuses"] = []
+    path.write_text(json.dumps(document))
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "pod qdrant-2 container qdrant runs an unknown digest" in result.stderr
+
+
+@pytest.mark.parametrize("failure", ["QDRANT_HELM_FAIL", "ROLLOUT_FAIL", "APP_HELM_FAIL", "ROUTE_READ_FAIL"])
+@pytest.mark.parametrize("compatible", [False, True], ids=["direct-access", "valid-oauth"])
+def test_existing_owned_route_failure_paths_preserve_only_compatible_exposure(tree, failure, compatible):
+    existing = _route() if compatible else _route(port="http", termination="edge")
+    existing["spec"].update(host="operator.example", wildcardPolicy="None")
+    owned_state = tree[0] / "owned-route-state.json"
+    owned_state.write_text(json.dumps(existing))
+    # Give the process-boundary fake an actual named Route state, separate
+    # from the historical inventory snapshot and unrelated operator files.
+    kubectl = tree[0] / "bin/kubectl"
+    script = kubectl.read_text().replace(
+        '[ "${DELETE_FAIL:-}" != 1 ] || exit 1 ;;',
+        '[ "${DELETE_FAIL:-}" != 1 ] || exit 1\n'
+        '    [ -z "${OWNED_ROUTE_STATE:-}" ] || rm -f "$OWNED_ROUTE_STATE" ;;')
+    script = script.replace('[ "${ROUTE_LIVE_FILE:-}" != "" ] || exit 1',
+                            '[ "${ROUTE_READ_FAIL:-}" != 1 ] || exit 1\n'
+                            '    [ "${ROUTE_LIVE_FILE:-}" != "" ] || exit 1')
+    kubectl.write_text(script)
+    helm = tree[0] / "bin/helm"
+    helm.write_text(helm.read_text().replace('upgrade) exit 0 ;;', '''upgrade)
+        case "$*" in
+          *'--install mainframe-rag '*)
+            [ "${APP_HELM_FAIL:-}" != 1 ] || exit 1
+            [ -z "${OWNED_ROUTE_STATE:-}" ] || cp "$ROUTE_LIVE_FILE" "$OWNED_ROUTE_STATE" ;;
+          *) [ "${QDRANT_HELM_FAIL:-}" != 1 ] || exit 1 ;;
+        esac
+        exit 0 ;;'''))
+    live = _live(tree, existing if compatible else _route())
+    routes = _route_list(tree, existing, _route("operator-docs", to="docs-site"))
+    operator_state = tree[0] / "operator-docs-state.json"
+    operator_state.write_text(json.dumps(_route("operator-docs", to="docs-site")))
+    operator_before = operator_state.read_bytes()
+    result = _route_on(tree, ("ROUTES_FILE", routes), ("OWNED_ROUTE_STATE", str(owned_state)),
+                       (failure, "1"), live=live)
+    assert result.returncode != 0
+    log = _helm_log(tree)
+    delete = "delete\nroute.route.openshift.io/rag-agent"
+    if compatible:
+        assert delete not in log
+        assert json.loads(owned_state.read_text()) == existing
+    else:
+        assert log.index(delete) < log.index("upgrade")
+        if owned_state.exists():
+            assert json.loads(owned_state.read_text())["spec"]["port"]["targetPort"] == "oauth"
+        if failure in ("QDRANT_HELM_FAIL", "APP_HELM_FAIL"):
+            assert not owned_state.exists()
+    assert operator_state.read_bytes() == operator_before
+    assert "Route rag-agent -> svc port oauth" not in result.stdout
+    if failure == "ROUTE_READ_FAIL":
+        assert "exposure is NOT verified" in result.stderr
+        assert "Route rag-agent verified:" not in result.stdout
+    # The next ordinary operation recovers; no diagnostic history is deleted.
+    tree[1].write_text("")
+    recovered = _route_on(tree, ("ROUTES_FILE", _route_list(tree, _route())),
+                          ("OWNED_ROUTE_STATE", str(owned_state)), live=_live(tree))
+    assert recovered.returncode == 0, recovered.stderr
+    assert json.loads(owned_state.read_text())["spec"]["port"]["targetPort"] == "oauth"
+    assert operator_state.read_bytes() == operator_before
+
+
+@pytest.mark.parametrize("ownership", ["release", "controller", "manager"])
+def test_named_operator_owned_route_is_not_retired_or_adopted(tree, ownership):
+    route = _route(port="http", termination="edge")
+    if ownership == "release":
+        route["metadata"]["annotations"] = {"meta.helm.sh/release-name": "operator-release"}
+    elif ownership == "controller":
+        route["metadata"]["ownerReferences"] = [{"kind": "Operator", "name": "console"}]
+    else:
+        route["metadata"]["labels"] = {"app.kubernetes.io/managed-by": "operator"}
+    result = _route_on(tree, ("ROUTES_FILE", _route_list(tree, route)))
+    assert result.returncode != 0
+    assert "delete" not in _helm_log(tree) and "upgrade" not in _helm_log(tree)
+
+
+@pytest.mark.parametrize("malformed", ["layers-object", "config-type", "layer-digest", "index"])
+def test_deploy_registry_structure_is_validated_before_mutation(tree, malformed):
+    _release(tree)
+    manifest = json.loads(_image_manifest("agent"))
+    if malformed == "layers-object":
+        manifest["layers"] = {"digest": "sha256:" + "a" * 64}
+    elif malformed == "config-type":
+        manifest["config"]["digest"] = 42
+    elif malformed == "layer-digest":
+        manifest["layers"][0]["digest"] = "not-a-digest"
+    else:
+        manifest["manifests"] = []
+    _put_registry(tree, "agent", json.dumps(manifest).encode())
+    result = _run(tree)
+    assert result.returncode != 0
+    assert "not a single-image manifest" in result.stderr
+    assert _mutations(tree) == []
+
+
+def test_post_release_operator_ownership_is_not_deleted_on_route_drift(tree):
+    foreign = _route(port="http")
+    foreign["metadata"]["annotations"] = {"meta.helm.sh/release-name": "operator-release"}
+    result = _route_on(tree, live=_live(tree, foreign))
+    assert result.returncode != 0
+    assert "ownership is not established" in result.stderr
+    assert "exposure is NOT verified" in result.stderr
+    assert "delete" not in _helm_log(tree)

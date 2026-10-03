@@ -28,7 +28,7 @@ allowlist. Read relevant [roadmap decisions](../ROADMAP.md) and
 | http-model | [Transport and lifecycle](agent.md#http-model-contract) | [Model client](../src/mainframe_rag/agent/answer.py), [tokenizer](../src/mainframe_rag/agent/tokenizer.py), [gateway probe](../scripts/probe_gateway.py), [rerank](../src/mainframe_rag/retrieve/rerank.py) | [Transport tests](../tests/test_agent_api.py), [gateway tests](../tests/test_probe_gateway.py) |
 | retrieval | [Retrieval contracts](retrieval.md) | [Query](../src/mainframe_rag/retrieve/query.py), [screen](../src/mainframe_rag/retrieve/screen.py), [embed](../src/mainframe_rag/ingest/embed.py), [answer core](../src/mainframe_rag/agent/answer_core.py) | [Evaluation](eval.md), [query tests](../tests/test_query_filters.py) |
 | configuration | [Configuration propagation](deploy.md#configuration-contract) | [Example](../airgap.env.example), [overrides and validation](../scripts/airgap/common.sh), [preflight](../scripts/airgap/validate.sh), [agent render](../scripts/airgap/deploy.sh), [ingest render](../scripts/airgap/ingest.sh), [Task wrapper](../taskfiles/airgap.yml), [CI](../.github/workflows/e2e.yml), [bundle/bootstrap](install_and_ops.md), [runtime settings](../src/mainframe_rag/config.py), [gateway handoff](../scripts/run_local_gateway.sh) | [Air-gap tests](../tests/test_airgap_validate_sh.py), [settings tests](../tests/test_config.py) |
-| deployment | [Deployment policy](deploy.md#deployment-policy) | [Install/bootstrap](install_and_ops.md), [real-corpus recovery](local-real-corpus.md), [CRC release](crc-release-verification.md), [pins](../images.txt) | [Release record](crc-release-record.md), [CI inventory](deploy.md#ci-policy) |
+| deployment | [Deployment policy](deploy.md#deployment-policy) | [Install/bootstrap](install_and_ops.md), [real-corpus recovery](local-real-corpus.md), [CRC release](crc-release-verification.md), [pins](../images.txt), [licensing](licensing.md) | [Release record](crc-release-record.md), [CI inventory](deploy.md#ci-policy) |
 | verification | [Required minimums](live-stack.md#verification-minimums) | [Operating modes](live-stack.md#operating-modes), [Task entry](../Taskfile.yml), [quality tasks](../taskfiles/quality.yml), [task policy](task-runner.md#scope), [test design](testing.md#evidence-design) | [Evidence rules](testing.md#evidence-design) |
 <!-- context-map:end -->
 
@@ -259,8 +259,8 @@ visible for the maintainer to assess; CI does not parse comment history as votes
 ### Native evidence and consumer rollout (#411)
 
 `scripts/ci_evidence.py` records the actual native job invocation and its PR
-head, base and execution identity. Test lanes retain counts from actual test
-records, reject zero tests and skips, and refuse pre-existing reports. Receipts
+head, base and execution identity. Test lanes count actual test
+records, reject zero tests, skips and xfails, and refuse pre-existing reports. Receipts
 use attempt-specific artifacts. Packaging receipts identify the checkout only;
 the native packaging job must finish successfully before they can contribute
 acceptance. A receipt is never a code review or permission to merge.

@@ -10,6 +10,7 @@
 # connected main is the only image factory.
 
 . "$(dirname -- "$0")/common.sh"
+. "$(dirname -- "$0")/image_identity.sh"
 
 enforce_product_rules
 resolve_aliases
@@ -30,6 +31,17 @@ for _c in charts/qdrant-*.tgz; do
     if [ -f "$_c" ]; then _chart_count=$((_chart_count + 1)); fi
 done
 [ "$_chart_count" -eq 1 ] || die "exactly one vendored Qdrant chart is required (charts/qdrant-*.tgz); found $_chart_count"
+
+# Third-party license record (issue #376): fail closed on an unrecorded or changed
+# dependency, image pin, vendored asset or notice file, before any image is pulled.
+# Unresolved owner decisions are reported, not hidden; they do not block packing.
+command -v python3 >/dev/null 2>&1 || die "python3 is required for the license inventory check"
+LICENSE_SUMMARY=$(python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" check) || {
+    printf '%s\n' "$LICENSE_SUMMARY" >&2
+    die "license inventory check failed: record the dependency/notice change in licenses/inventory.json (docs/licensing.md)"
+}
+printf '%s\n' "$LICENSE_SUMMARY" | sed -n '$p'
+LICENSE_STATUS=$(printf '%s\n' "$LICENSE_SUMMARY" | sed -n '$p' | sed 's/^license-inventory: //')
 
 GHCR_OWNER=${GHCR_OWNER:-}
 APP_REGISTRY=${AIRGAP_APP_REGISTRY:-}
@@ -88,7 +100,7 @@ task_extract_verified "$TASK_SOURCE" "$TASK_TMP"
 cp "$TASK_PIN" "$DIST/task-pin.txt"
 cp "$TASK_TMP/LICENSE" "$DIST/task-LICENSE"
 rm -f "$DIST"/repo.bundle "$DIST"/qdrant-image.tar "$DIST"/jaeger-image.tar "$DIST"/app-*.tar \
-      "$DIST"/MANIFEST.txt "$DIST"/SHA256SUMS "$OUT_TARBALL" "$OUT_TARBALL.sha256"
+      "$DIST"/MANIFEST.txt "$DIST"/THIRD-PARTY-NOTICES.txt "$DIST"/SHA256SUMS "$OUT_TARBALL" "$OUT_TARBALL.sha256"
 # shellcheck disable=SC2086
 rm -f $OAUTH_TAR
 
@@ -134,6 +146,17 @@ OAUTH_DIGEST=""
 if [ -n "$OAUTH_TAR" ]; then
     OAUTH_DIGEST=$(skopeo inspect "docker-archive:$DIST/$OAUTH_TAR" --format '{{.Digest}}')
 fi
+# Image config digests (issue #272): pin the rootfs identity independently of
+# archive vs registry layer compression; deploy/ingest verify the registry
+# against these before any cluster change.
+INGEST_CONFIG_DIGEST=$(archive_config_digest "$DIST/app-ingest-$IMAGE_SHA.tar")
+AGENT_CONFIG_DIGEST=$(archive_config_digest "$DIST/app-agent-$IMAGE_SHA.tar")
+QDRANT_CONFIG_DIGEST=$(archive_config_digest "$DIST/qdrant-image.tar")
+JAEGER_CONFIG_DIGEST=$(archive_config_digest "$DIST/jaeger-image.tar")
+OAUTH_CONFIG_DIGEST=""
+if [ -n "$OAUTH_TAR" ]; then
+    OAUTH_CONFIG_DIGEST=$(archive_config_digest "$DIST/$OAUTH_TAR")
+fi
 UBI_REF=$(pin_from_images_txt python-314-minimal)
 UBI_DIGEST=${UBI_REF##*@}
 
@@ -151,18 +174,23 @@ CHART_SHA256=$(sha256sum charts/qdrant-*.tgz | awk '{print $1}')
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "qdrant: $QDRANT_REF"
     echo "qdrant_digest: $QDRANT_DIGEST"
+    echo "qdrant_config_digest: $QDRANT_CONFIG_DIGEST"
     echo "jaeger: $JAEGER_REF"
     echo "jaeger_digest: $JAEGER_DIGEST"
+    echo "jaeger_config_digest: $JAEGER_CONFIG_DIGEST"
     if [ -n "$OAUTH_TAR" ]; then
         echo "oauth_proxy: $OAUTH_PROXY_REF"
         echo "oauth_proxy_digest: $OAUTH_DIGEST"
+        echo "oauth_proxy_config_digest: $OAUTH_CONFIG_DIGEST"
     fi
     echo "chart: $CHART_VERSION"
     echo "chart_sha256: $CHART_SHA256"
     echo "ingest: $INGEST_IMAGE"
     echo "ingest_digest: $INGEST_DIGEST"
+    echo "ingest_config_digest: $INGEST_CONFIG_DIGEST"
     echo "agent: $AGENT_IMAGE"
     echo "agent_digest: $AGENT_DIGEST"
+    echo "agent_config_digest: $AGENT_CONFIG_DIGEST"
     echo "app_registry: $APP_REGISTRY"
     # Honesty label, not a trust root: "true" only when the caller asserts
     # SNEAKERNET_KEY_TRUSTED=true for a production-custody key; throwaway
@@ -241,6 +269,10 @@ except (LockError, OSError, ValueError, KeyError):
     raise SystemExit("SBOM reconciliation failed: serialized inventory differs from shipped bytes")
 PYEOF
 
+echo "==> Third-party notices (license record + notice texts, readable offline)"
+python3 "$REPO_ROOT/scripts/license_inventory.py" --root "$REPO_ROOT" notices --bundle-dir "$DIST" --output "$DIST/THIRD-PARTY-NOTICES.txt" \
+    || die "third-party notices could not be generated: a required notice material is missing or differs from licenses/inventory.json"
+
 echo "==> Bootstrap helper & Packing Record"
 cp "$REPO_ROOT/scripts/airgap/bootstrap.sh" "$DIST/bootstrap.sh"
 chmod +x "$DIST/bootstrap.sh"
@@ -266,6 +298,8 @@ chmod +x "$DIST/bootstrap.sh"
     echo "  - Agent Image:         $AGENT_IMAGE"
     echo "  - Helm Chart:          $CHART_VERSION"
     echo "  - Sparse Weights:      FastEmbed Qdrant/bm25 (baked in images)"
+    echo "  - Third-party notices: THIRD-PARTY-NOTICES.txt ($LICENSE_STATUS)"
+    echo "                           Declared licenses only; not a legal approval. Unresolved owner decisions are listed in that file."
     echo "  - Bundle signature:    SHA256SUMS.sig (openssl dgst; pubkey sneakernet-signing.pub)"
     echo "  - Signing key (pub):   $(openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -pubout | openssl sha256)"
     echo "  - Digest binding:      MANIFEST *_digest lines are post-copy tar manifest digests;"
@@ -288,7 +322,7 @@ openssl pkey -in "$SNEAKERNET_SIGNING_KEY" -pubout -out "$DIST/sneakernet-signin
     # shellcheck disable=SC2086
     sha256sum bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar jaeger-image.tar \
               app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR \
-              MANIFEST.txt PACKING_RECORD.txt sbom.json sneakernet-signing.pub > SHA256SUMS
+              MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub > SHA256SUMS
 )
 
 echo "==> Offline signature (openssl; verified by bootstrap.sh and load.sh)"
@@ -300,7 +334,7 @@ openssl dgst -sha256 -sign "$SNEAKERNET_SIGNING_KEY" \
 echo "==> Tarball + tarball digest"
 # shellcheck disable=SC2086
 tar -C "$DIST" -cf "$OUT_TARBALL" bootstrap.sh repo.bundle "$TASK_ASSET" task-pin.txt task-LICENSE qdrant-image.tar jaeger-image.tar \
-    app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR MANIFEST.txt PACKING_RECORD.txt sbom.json sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig
+    app-ingest-"$IMAGE_SHA".tar app-agent-"$IMAGE_SHA".tar $OAUTH_TAR MANIFEST.txt PACKING_RECORD.txt sbom.json THIRD-PARTY-NOTICES.txt sneakernet-signing.pub SHA256SUMS SHA256SUMS.sig
 # shellcheck disable=SC2016
 ( cd "$DIST" && sha256sum "$(basename "$OUT_TARBALL")" ) > "$OUT_TARBALL.sha256"
 

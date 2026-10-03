@@ -4,8 +4,16 @@
 # This file is committed to the public GitHub mirror and imported AS-IS into the
 # enterprise air-gapped GitLab (git bundle / sneaker-net), so a clone can run
 # pipelines with no rewrite. Job meaning mirrors .github/workflows/ci.yml:
-# refuse committed binaries, then pytest. If you change one CI, change the
-# other in the same PR (AGENTS.md).
+# hygiene, lint/types, the unit suite, hazards, the simulation tier and the L1
+# gate (issue #370). Every job fails the pipeline on a non-zero exit: no
+# allow_failure, no masked status, and unit/sim reports must contain no skipped
+# or xfailed test (scripts/check_junit_clean.py). If you change one CI, change
+# the other in the same PR (AGENTS.md); tests/test_ci_gitlab_parity.py pins the
+# correspondence and the failure propagation. Intentional differences: GitLab
+# runs the complete unit suite in one job (GitHub partitions it into four
+# shards), runs every lane on every pipeline (no review_tooling lane
+# selection), and runs the simulation tier against the mirrored Qdrant service
+# without tests/test_qdrant_auth.py, which drives a local Docker daemon.
 #
 # GitHub product CI ignores markdown-only changes; agent-context.yml checks
 # relevant docs/instructions separately. GitLab keeps local hygiene/context checks
@@ -23,6 +31,9 @@
 #                                   offline (see scripts/tools/task-pin.txt).
 #   CI_HELM_ARCHIVE (required for test) transferred checksum-pinned Helm archive
 #                                   (scripts/tools/helm-pin.txt); no download fallback.
+#   CI_BM25_CACHE_DIR (required for sim) offline-prepared Qdrant/bm25 cache on the
+#                                   runner, verified against bm25-weights.sha256
+#                                   (artifacts:bm25 output); no download fallback.
 #   CI_RUNNER_TAG   (optional)      runner tag, default "airgap"
 #   PIP_FIND_LINKS  (recommended)   path to a wheelhouse directory on the runner
 #                                   (e.g. /wheelhouse) built from requirements.dev.lock.txt
@@ -110,11 +121,20 @@ test:
     - sh scripts/tools/install-helm.sh --archive "$CI_HELM_ARCHIVE"
     - export PATH="$CI_PROJECT_DIR/.tools/bin:$PATH"
     - python scripts/agent_doctor.py --python "$(command -v python)"
-    - pytest -q
-  # GitHub partitions the same eligible suite across two VMs. This offline
-  # job keeps the complete suite; no internal runner-capacity change is needed.
-  # Tests generate synthetic PDFs at runtime; no artifacts are cached or
-  # uploaded anywhere (deliberately no artifacts: section).
+    - rm -f unit-junit.xml
+    - pytest -q --junitxml=unit-junit.xml
+    # pytest's exit status alone lets skipped/xfailed tests pass; GitHub rejects
+    # them per shard, so this job rejects them for the complete suite.
+    - python scripts/check_junit_clean.py unit-junit.xml
+  # GitHub partitions the same eligible suite across four VMs. This offline
+  # job keeps the complete suite (the union of those shards); no internal
+  # runner-capacity change is needed. Tests generate synthetic PDFs at runtime;
+  # the only artifact is the JUnit report (test ids and outcomes, no corpus).
+  artifacts:
+    when: always
+    paths: [unit-junit.xml]
+    reports:
+      junit: unit-junit.xml
 
 hazards:
   extends: .py-base
@@ -129,6 +149,39 @@ hazards:
     when: always
     paths: [dist/critical-hazards/]
 
+# Simulation tier (issue #370): real ingest into a real Qdrant. GitHub starts the
+# approved image with local Docker; offline GitLab reuses the same digest as a
+# mirrored service (as gate-l1 does). tests/test_qdrant_auth.py is excluded
+# because it drives a local Docker daemon, which this runner does not provide.
+# Fail-closed like GitHub: any skipped/xfailed test, zero executed tests or a
+# missing BM25 cache fails the job.
+sim:
+  extends: .py-base
+  stage: test
+  services:
+    - name: ${CI_REGISTRY}/qdrant/qdrant@sha256:a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e
+      alias: qdrant
+  variables:
+    QDRANT_SIM_URL: "http://qdrant:6333"
+    TASK_CONTRACTS_REQUIRE_RUNNER: "1"
+  script:
+    - ': "${CI_TASK_ARCHIVE:?mount the approved pinned Task archive on the runner}"'
+    - sh scripts/tools/install-task.sh --archive "$CI_TASK_ARCHIVE"
+    - ': "${CI_HELM_ARCHIVE:?mount the approved pinned Helm archive on the runner}"'
+    - sh scripts/tools/install-helm.sh --archive "$CI_HELM_ARCHIVE"
+    - export PATH="$CI_PROJECT_DIR/.tools/bin:$PATH"
+    - ': "${CI_BM25_CACHE_DIR:?mount the offline-prepared BM25 cache on the runner}"'
+    - export SIM_BM25_CACHE_DIR="$CI_BM25_CACHE_DIR"
+    - python scripts/fetch_bm25_weights.py --out "$SIM_BM25_CACHE_DIR" --verify-manifest bm25-weights.sha256 --verify-only
+    - python scripts/agent_doctor.py --python "$(command -v python)"
+    - rm -f sim-junit.xml
+    - pytest -m integration --ignore=tests/test_load_tier.py --ignore=tests/test_ha_cluster.py --ignore=tests/test_qdrant_auth.py -v -rs --junitxml=sim-junit.xml
+    - python scripts/check_junit_clean.py sim-junit.xml
+  artifacts:
+    when: always
+    paths: [sim-junit.xml]
+    reports:
+      junit: sim-junit.xml
 
 gate-l1:
   extends: .py-base
@@ -165,11 +218,13 @@ gate-l1:
       - eval-summary.md
       - eval-delta.md
 
-# Deterministic lint and typechecking gate (issues #370, #413): runs in hygiene stage
-# ensuring code hygiene, formatting, and typing parity with GitHub CI.
+# Deterministic lint and typechecking gate (issues #370, #413): the same three
+# commands, in the same order, as the GitHub `lint` job (pinned by
+# tests/test_ci_gitlab_parity.py). The ruleset itself is not changed here.
 lint:
   extends: .py-base
   stage: hygiene
   script:
-    - ruff check src tests
+    - ruff check src tests scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py
     - mypy src
+    - mypy --follow-imports=silent scripts/eval_retrieval.py scripts/review_tooling.py scripts/ci_evidence.py scripts/acceptance_evidence.py

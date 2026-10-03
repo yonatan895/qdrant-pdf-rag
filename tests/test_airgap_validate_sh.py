@@ -20,6 +20,7 @@ from tests.helpers_airgap import (
     make_bin_tree,
     run_sh,
     symlink_tools,
+    write_signed_manifest,
     write_stub,
 )
 
@@ -544,7 +545,7 @@ def _git_checkout(tree, manifest_sha):
     assert head != manifest_sha
     dist = tree / "dist"
     dist.mkdir(exist_ok=True)
-    (dist / "MANIFEST.txt").write_text(f"sha: {manifest_sha}\n")
+    write_signed_manifest(dist, f"sha: {manifest_sha}\n")
     return head
 
 
@@ -572,7 +573,7 @@ def test_validate_live_matching_checkout_passes_manifest_section(tree):
     subprocess.run(["git", "add", "."], cwd=tree, check=True)
     subprocess.run(["git", "commit", "-m", "approved checkout"], cwd=tree, check=True, capture_output=True)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tree, text=True).strip()
-    (dist / "MANIFEST.txt").write_text(f"sha: {head}\n")
+    write_signed_manifest(dist, f"sha: {head}\n")
     r = _run(tree, {"AIRGAP_DRYRUN": "0", "IMAGE_SHA": head})
     assert r.returncode == 0, r.stderr
     assert "Verified matching MANIFEST" in r.stdout
@@ -614,26 +615,68 @@ def test_checkout_guard_dryrun_skips_mismatch(tree):
     subprocess.run(["git", "add", "."], cwd=tree, check=True)
     subprocess.run(["git", "commit", "-m", "stale"], cwd=tree, check=True, capture_output=True)
     (tree / "dist").mkdir(exist_ok=True)
-    (tree / "dist" / "MANIFEST.txt").write_text(f"sha: {IMAGE_SHA}\n")
+    write_signed_manifest(tree / "dist", f"sha: {IMAGE_SHA}\n")
     r = _guard_run(tree, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1"})
     assert r.returncode == 0, r.stderr
     assert "not release-verified" in r.stderr
 
 
 def test_checkout_guard_skips_without_manifest_or_checkout(tree):
-    """No reachable MANIFEST (connected development) or no git checkout
-    (unresolvable identity) keeps prior behavior: the guard judges only
-    positive mismatches (issue #414)."""
+    """No reachable MANIFEST (connected development) keeps the notice-only
+    behavior: the guard judges only a claimed release (issue #414)."""
     (tree / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tree / "scripts" / "airgap" / "common.sh")
     r = _guard_run(tree, "dist/MANIFEST.txt")
     assert r.returncode == 0
     assert "not release-verified" in r.stderr
+
+
+def test_checkout_guard_refuses_unresolved_checkout_when_manifest_is_packed(tree):
+    """A packed MANIFEST claims a release. A tree whose checkout identity
+    cannot be resolved (a copied tree without .git, or no usable git) must not
+    run live under that claim just because IMAGE_SHA was set to the packed
+    SHA (issue #414). Dry-run keeps its notice-only behavior."""
+    (tree / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tree / "scripts" / "airgap" / "common.sh")
     (tree / "dist").mkdir(exist_ok=True)
-    (tree / "dist" / "MANIFEST.txt").write_text(f"sha: {IMAGE_SHA}\n")
+    write_signed_manifest(tree / "dist", f"sha: {IMAGE_SHA}\n")
     r = _guard_run(tree, "dist/MANIFEST.txt")
-    assert r.returncode == 0
-    assert "not release-verified" in r.stderr
+    assert r.returncode != 0
+    assert "cannot be resolved" in r.stderr
+    assert "overriding IMAGE_SHA alone" in r.stderr
+    dry = _guard_run(tree, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1"})
+    assert dry.returncode == 0
+    assert "not release-verified" in dry.stderr
+
+
+def test_validate_live_refuses_image_sha_override_in_copied_tree_without_git(tree):
+    """Standalone launch (not via bootstrap) in a tree with no git identity:
+    dist/MANIFEST.txt plus a matching IMAGE_SHA override must still refuse."""
+    (tree / "dist").mkdir(exist_ok=True)
+    write_signed_manifest(tree / "dist", f"sha: {IMAGE_SHA}\n")
+    r = _run(tree, {"AIRGAP_DRYRUN": "0"})
+    assert r.returncode != 0
+    assert "cannot be resolved" in r.stderr
+    assert "Verified matching MANIFEST" in r.stdout  # the override satisfied the SHA cross-check alone
+
+
+def test_checkout_guard_refuses_release_evidence_without_manifest(tree):
+    """dist/SHA256SUMS is bundle evidence from bootstrap. With it present, a
+    missing dist/MANIFEST.txt must not downgrade the run to the connected
+    development notice: removing one file plus overriding IMAGE_SHA would
+    bypass identity (issue #414). Without any bundle evidence the notice
+    path stays (approved connected development)."""
+    (tree / "scripts" / "airgap").mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tree / "scripts" / "airgap" / "common.sh")
+    (tree / "dist").mkdir(exist_ok=True)
+    dev = _guard_run(tree, "dist/MANIFEST.txt")
+    assert dev.returncode == 0 and "not release-verified" in dev.stderr
+    (tree / "dist" / "SHA256SUMS").write_text("")
+    r = _guard_run(tree, "dist/MANIFEST.txt")
+    assert r.returncode != 0
+    assert "bundle evidence" in r.stderr
+    dry = _guard_run(tree, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1"})
+    assert dry.returncode == 0
 
 
 def _git(cwd, *args):
@@ -642,23 +685,27 @@ def _git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
+def _make_approved(root):
+    """A real git checkout whose HEAD equals the packed MANIFEST sha, with
+    tracked executable and chart content and a signed MANIFEST in dist/
+    (issue #414)."""
+    (root / "scripts" / "airgap").mkdir(parents=True)
+    shutil.copy(REPO / "scripts" / "airgap" / "common.sh", root / "scripts" / "airgap" / "common.sh")
+    (root / "charts").mkdir()
+    (root / "charts" / "values.yaml").write_text("replicas: 1\n")
+    (root / "Taskfile.yml").write_text("version: '3'\n")
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "approved release")
+    write_signed_manifest(root / "dist", f"sha: {_git(root, 'rev-parse', 'HEAD')}\n")
+    return root
+
+
 @pytest.fixture
 def approved(tmp_path):
-    """A real git checkout whose HEAD equals the packed MANIFEST sha, with
-    tracked executable and chart content (issue #414)."""
-    (tmp_path / "scripts" / "airgap").mkdir(parents=True)
-    shutil.copy(REPO / "scripts" / "airgap" / "common.sh", tmp_path / "scripts" / "airgap" / "common.sh")
-    (tmp_path / "charts").mkdir()
-    (tmp_path / "charts" / "values.yaml").write_text("replicas: 1\n")
-    (tmp_path / "Taskfile.yml").write_text("version: '3'\n")
-    _git(tmp_path, "init", "-b", "main")
-    _git(tmp_path, "config", "user.name", "Test")
-    _git(tmp_path, "config", "user.email", "test@example.com")
-    _git(tmp_path, "add", ".")
-    _git(tmp_path, "commit", "-m", "approved release")
-    (tmp_path / "dist").mkdir()
-    (tmp_path / "dist" / "MANIFEST.txt").write_text(f"sha: {_git(tmp_path, 'rev-parse', 'HEAD')}\n")
-    return tmp_path
+    return _make_approved(tmp_path)
 
 
 def _approved_run(tree):
@@ -709,7 +756,7 @@ def test_checkout_guard_refuses_other_tracked_changes(approved, change):
 
 
 def test_checkout_guard_wrong_head_message_wins_over_edit(approved):
-    (approved / "dist" / "MANIFEST.txt").write_text(f"sha: {'c' * 40}\n")
+    write_signed_manifest(approved / "dist", f"sha: {'c' * 40}\n")
     (approved / "Taskfile.yml").write_text("version: '4'\n")
     r = _approved_run(approved)
     assert r.returncode != 0
@@ -741,8 +788,7 @@ def test_checkout_guard_works_in_git_file_worktree(approved):
     wt = approved.parent / "linked-wt"
     _git(approved, "worktree", "add", "--detach", str(wt))
     assert (wt / ".git").is_file()
-    (wt / "dist").mkdir()
-    (wt / "dist" / "MANIFEST.txt").write_text((approved / "dist" / "MANIFEST.txt").read_text())
+    shutil.copytree(approved / "dist", wt / "dist")
     assert _approved_run(wt).returncode == 0
     (wt / "charts" / "values.yaml").write_text("replicas: 9\n")
     r = _approved_run(wt)
@@ -750,6 +796,163 @@ def test_checkout_guard_works_in_git_file_worktree(approved):
     assert "tracked changes" in r.stderr
     _git(wt, "checkout", "--", "charts/values.yaml")
     assert _approved_run(wt).returncode == 0
+
+
+def test_checkout_guard_refuses_manifest_without_signed_bundle(approved):
+    """The guard may not read a bare dist/MANIFEST.txt (issue #414): each of
+    the three chain members is required next to it."""
+    ok = _approved_run(approved)
+    assert ok.returncode == 0, ok.stderr
+    for member in ("SHA256SUMS.sig", "sneakernet-signing.pub", "SHA256SUMS"):
+        saved = (approved / "dist" / member).read_bytes()
+        (approved / "dist" / member).unlink()
+        r = _approved_run(approved)
+        assert r.returncode != 0, member
+        assert "not backed by a signed bundle" in r.stderr, member
+        (approved / "dist" / member).write_bytes(saved)
+    assert _approved_run(approved).returncode == 0
+
+
+def test_checkout_guard_refuses_manifest_edited_after_signing(approved):
+    """A MANIFEST whose sha still equals HEAD but whose bytes changed after
+    signing (here: an added digest line) no longer matches its signed entry."""
+    manifest = approved / "dist" / "MANIFEST.txt"
+    manifest.write_text(manifest.read_text() + "chart_sha256: " + "0" * 64 + "\n")
+    r = _approved_run(approved)
+    assert r.returncode != 0
+    assert "does not match its signed checksum entry" in r.stderr
+    assert "chart_sha256" not in r.stdout + r.stderr
+
+
+def test_checkout_guard_refuses_forged_manifest_and_sums(approved):
+    """Rewriting MANIFEST and SHA256SUMS consistently but without the signing
+    key leaves a signature that no longer verifies."""
+    from tests.helpers_airgap import sha256_bytes
+
+    manifest = approved / "dist" / "MANIFEST.txt"
+    manifest.write_text(manifest.read_text() + "note: forged\n")
+    (approved / "dist" / "SHA256SUMS").write_text(f"{sha256_bytes(manifest.read_bytes())}  MANIFEST.txt\n")
+    r = _approved_run(approved)
+    assert r.returncode != 0
+    assert "signature verification failed" in r.stderr
+
+
+def test_checkout_guard_refuses_signature_by_a_different_key(approved):
+    from tests.helpers_airgap import gen_sign_keypair, sign_sums
+
+    other = approved / "other-key"
+    other.mkdir()
+    sign_sums(approved / "dist", gen_sign_keypair(other))  # sig by key B, pub still A
+    r = _approved_run(approved)
+    assert r.returncode != 0
+    assert "signature verification failed" in r.stderr
+
+
+@pytest.mark.parametrize("listing", ["unlisted", "duplicate"])
+def test_checkout_guard_requires_manifest_listed_exactly_once(approved, listing):
+    from tests.helpers_airgap import sha256_bytes, sign_sums
+
+    dist = approved / "dist"
+    digest = sha256_bytes((dist / "MANIFEST.txt").read_bytes())
+    lines = {"unlisted": f"{'0' * 64}  other.tar\n", "duplicate": f"{digest}  MANIFEST.txt\n" * 2}[listing]
+    (dist / "SHA256SUMS").write_text(lines)
+    sign_sums(dist, _signing_key())  # validly signed, wrong inventory
+    r = _approved_run(approved)
+    assert r.returncode != 0
+    assert "does not match its signed checksum entry" in r.stderr
+
+
+def _signing_key():
+    from tests import helpers_airgap
+
+    return helpers_airgap._MANIFEST_KEY
+
+
+def test_checkout_guard_trusted_pub_pins_the_key(approved):
+    from tests.helpers_airgap import gen_other_pub
+
+    pinned = _guard_run(approved, "dist/MANIFEST.txt", {"SNEAKERNET_TRUSTED_PUB": str(approved / "dist" / "sneakernet-signing.pub")})
+    assert pinned.returncode == 0, pinned.stderr
+    other = gen_other_pub(approved.parent, "guard-other")
+    r = _guard_run(approved, "dist/MANIFEST.txt", {"SNEAKERNET_TRUSTED_PUB": str(other)})
+    assert r.returncode != 0
+    assert "does not match SNEAKERNET_TRUSTED_PUB" in r.stderr
+
+
+def test_checkout_guard_dryrun_keeps_notice_for_unsigned_manifest(approved):
+    (approved / "dist" / "SHA256SUMS.sig").unlink()
+    dry = _guard_run(approved, "dist/MANIFEST.txt", {"AIRGAP_DRYRUN": "1"})
+    assert dry.returncode == 0
+    assert "not release-verified" in dry.stderr
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_checkout_guard_refuses_index_flags_that_hide_edits(approved, flag):
+    """`git diff` trusts the index: an edit under assume-unchanged or
+    skip-worktree is invisible to it. The flag itself is refused, with the
+    edit present or not, and the next run passes once it is cleared."""
+    path = "scripts/airgap/common.sh"
+    target = approved / path
+    original = target.read_text()
+    _git(approved, "update-index", flag, path)
+    target.write_text(original + "\n# SECRET-HIDDEN-EDIT\n")
+    assert _git(approved, "diff", "HEAD", "--name-only") == ""  # the evasion is real
+    r = _approved_run(approved)
+    assert r.returncode != 0
+    assert "hides tracked files from change detection" in r.stderr
+    assert "SECRET-HIDDEN-EDIT" not in r.stdout + r.stderr
+    assert path not in r.stderr
+    # The flag alone (no edit) is refused too: nothing can prove it is clean.
+    target.write_text(original)
+    assert _approved_run(approved).returncode != 0
+    _git(approved, "update-index", flag.replace("--", "--no-"), path)
+    again = _approved_run(approved)
+    assert again.returncode == 0, again.stderr
+    assert again.stderr == ""
+
+
+def test_checkout_guard_refuses_sparse_checkout(approved):
+    """Sparse checkout marks excluded files skip-worktree: part of the
+    release tree is not on disk, so the run is refused, not assumed clean."""
+    _git(approved, "sparse-checkout", "set", "--no-cone", "/scripts/")
+    r = _approved_run(approved)
+    assert r.returncode != 0
+    assert "hides tracked files" in r.stderr
+
+
+def test_checkout_guard_parent_bundle_layout_is_verified(tmp_path):
+    """The documented unpack-next-to-the-clone layout: ../MANIFEST.txt is
+    trusted only through ../SHA256SUMS(.sig) like dist/ is."""
+    (tmp_path / "ws").mkdir()
+    ws = _make_approved(tmp_path / "ws")
+    bundle = tmp_path
+    for f in list((ws / "dist").iterdir()):
+        shutil.move(f, bundle / f.name)
+    (ws / "dist").rmdir()
+    ok = _guard_run(ws, "../MANIFEST.txt")
+    assert ok.returncode == 0, ok.stderr
+    (bundle / "MANIFEST.txt").write_text((bundle / "MANIFEST.txt").read_text() + "x: y\n")
+    bad = _guard_run(ws, "../MANIFEST.txt")
+    assert bad.returncode != 0
+    assert "does not match its signed checksum entry" in bad.stderr
+
+
+def test_checkout_guard_parent_sums_count_only_when_bundle_shaped(tmp_path):
+    """A ../SHA256SUMS that names MANIFEST.txt (every packed bundle's list
+    does) is bundle evidence even with MANIFEST.txt removed; an unrelated
+    SHA256SUMS in the parent (e.g. a downloads folder) is not, so connected
+    development there keeps the notice (issue #414 limit 3)."""
+    (tmp_path / "ws").mkdir()
+    ws = _make_approved(tmp_path / "ws")
+    shutil.rmtree(ws / "dist")
+    (tmp_path / "SHA256SUMS").write_text(f"{'0' * 64}  some-iso.img\n")
+    stray = _guard_run(ws, "dist/MANIFEST.txt")
+    assert stray.returncode == 0, stray.stderr
+    assert "not release-verified" in stray.stderr
+    (tmp_path / "SHA256SUMS").write_text(f"{'0' * 64}  MANIFEST.txt\n")
+    r = _guard_run(ws, "dist/MANIFEST.txt")
+    assert r.returncode != 0
+    assert "bundle evidence" in r.stderr
 
 
 def test_checkout_guard_wired_into_all_launch_paths():
@@ -961,3 +1164,193 @@ def test_validate_live_scc_failure_is_not_standard_kubernetes(tree, text):
     assert r.returncode == 0, r.stderr
     assert "Standard Kubernetes" not in r.stdout
     assert "cluster type is NOT determined" in r.stdout
+
+
+# ----------------------------------------------------- console Route (#373)
+
+GOOD_PIN = "sha256:" + "b" * 64
+OAUTH_REF = f"registry.redhat.io/openshift4/ose-oauth-proxy@{GOOD_PIN}"
+SERVICE_CA = "-----BEGIN CERTIFICATE-----\nU0VSVklDRS1DQQ==\n-----END CERTIFICATE-----"
+
+ROUTE_KUBECTL = """#!/bin/sh
+case "$*" in
+  'api-resources -o name') [ "${NO_ROUTE_API:-}" = 1 ] || echo routes.route.openshift.io ;;
+  *'get routes.route.openshift.io '*)
+    [ "${ROUTES_READ_FAIL:-}" != 1 ] || { echo 'Error from server (Forbidden): routes forbidden' >&2; exit 1; }
+    if [ -n "${ROUTES_FILE:-}" ]; then cat "$ROUTES_FILE"; else echo '{"kind":"List","items":[]}'; fi ;;
+  *'get secret rag-agent-oauth-cookie'*'go-template='*)
+    [ "${MISSING_COOKIE_KEY:-}" = 1 ] || echo present ;;
+  *'get secret rag-agent-oauth-cookie'*)
+    case "${COOKIE_SECRET:-ok}" in
+      notfound) echo 'Error from server (NotFound): secrets "rag-agent-oauth-cookie" not found' >&2; exit 1 ;;
+      forbidden) echo 'Error from server (Forbidden): secrets is forbidden' >&2; exit 1 ;;
+    esac ;;
+  *'get configmap openshift-service-ca.crt'*) printf '%s\\n' "${SERVICE_CA:-}" ;;
+esac
+exit 0
+"""
+
+
+def _route_tree(tree, pin=GOOD_PIN):
+    import re
+
+    images = (tree / "images.txt")
+    images.write_text((REPO / "images.txt").read_text())
+    images.write_text(re.sub(
+        r"^(registry\.redhat\.io/openshift4/ose-oauth-proxy:\S+)[ \t]+\S+$",
+        lambda m: f"{m[1]} {pin}", images.read_text(), flags=re.MULTILINE))
+    write_stub(tree / "bin" / "kubectl", ROUTE_KUBECTL)
+    return tree
+
+
+def _manifest(tree, *lines):
+    dist = tree / "dist"
+    dist.mkdir(exist_ok=True)
+    (dist / "MANIFEST.txt").write_text("\n".join([f"sha: {IMAGE_SHA}", *lines]) + "\n")
+
+
+def _route_run(tree, live=True, **env):
+    values = {"AGENT_ROUTE": "true", "SERVICE_CA": SERVICE_CA}
+    if live:
+        values["AIRGAP_DRYRUN"] = "0"
+    values.update(env)
+    return _run(tree, values)
+
+
+def _routes_file(tree, *backends):
+    import json
+
+    items = [{"apiVersion": "route.openshift.io/v1", "kind": "Route",
+              "metadata": {"name": name, "namespace": "mainframe-rag"},
+              "spec": {"to": {"kind": "Service", "name": to}}} for name, to in backends]
+    path = tree / "routes.json"
+    path.write_text(json.dumps({"kind": "List", "items": items}))
+    return str(path)
+
+
+def test_validate_route_dryrun_accepts_recorded_consistent_pin(tree):
+    _route_tree(tree)
+    r = _route_run(tree, live=False)
+    assert r.returncode == 0, r.stderr
+    assert "oauth-proxy pin recorded; matches the chart" in r.stdout
+    assert "--email-domain=*" in r.stdout
+
+
+def test_validate_route_dryrun_pending_pin_refused(tree):
+    _route_tree(tree, pin="sha256:PENDING")
+    r = _route_run(tree, live=False)
+    assert r.returncode != 0
+    assert "oauth-proxy digest recorded" in r.stderr
+
+
+def test_validate_route_off_ignores_the_oauth_pin(tree):
+    _route_tree(tree, pin="sha256:PENDING")
+    r = _run(tree, {"AGENT_ROUTE": "false"})
+    assert r.returncode == 0, r.stderr
+
+
+def test_validate_route_pin_tag_must_match_chart(tree):
+    _route_tree(tree)
+    images = tree / "images.txt"
+    images.write_text(images.read_text().replace("ose-oauth-proxy:v4.14", "ose-oauth-proxy:v4.99"))
+    r = _route_run(tree, live=False)
+    assert r.returncode != 0
+    assert "does not match the chart" in r.stderr
+
+
+def test_validate_route_invalid_boolean_refused_even_in_dryrun(tree):
+    r = _run(tree, {"AGENT_ROUTE": "maybe"})
+    assert r.returncode != 0
+    assert "AGENT_ROUTE must be true/false" in r.stderr
+
+
+def test_validate_route_manifest_without_oauth_member_refused(tree):
+    _route_tree(tree)
+    _manifest(tree)
+    r = _route_run(tree, live=False)
+    assert r.returncode != 0
+    assert "packed without the oauth-proxy image" in r.stderr
+
+
+def test_validate_route_manifest_with_other_pin_refused(tree):
+    _route_tree(tree)
+    _manifest(tree, "oauth_proxy: registry.redhat.io/openshift4/ose-oauth-proxy@sha256:" + "c" * 64)
+    r = _route_run(tree, live=False)
+    assert r.returncode != 0
+    assert "differs from images.txt" in r.stderr
+
+
+def test_validate_route_manifest_with_matching_pin_passes(tree):
+    _route_tree(tree)
+    _manifest(tree, f"oauth_proxy: {OAUTH_REF}")
+    r = _route_run(tree, live=False)
+    assert r.returncode == 0, r.stderr
+    assert "and the packed bundle" in r.stdout
+
+
+def test_validate_route_live_success(tree):
+    _route_tree(tree)
+    r = _route_run(tree)
+    assert r.returncode == 0, r.stderr
+    assert "has a nonempty cookie-secret key" in r.stdout
+    assert "Namespace service CA readable" in r.stdout
+
+
+@pytest.mark.parametrize("state,message", [
+    ("notfound", "'rag-agent-oauth-cookie' not found"),
+    ("forbidden", "may not read Secret 'rag-agent-oauth-cookie'"),
+])
+def test_validate_route_live_cookie_secret_failures(tree, state, message):
+    _route_tree(tree)
+    r = _route_run(tree, COOKIE_SECRET=state)
+    assert r.returncode != 0
+    assert message in r.stderr
+
+
+def test_validate_route_live_cookie_key_missing(tree):
+    _route_tree(tree)
+    r = _route_run(tree, MISSING_COOKIE_KEY="1")
+    assert r.returncode != 0
+    assert "missing or empty: cookie-secret" in r.stderr
+
+
+@pytest.mark.parametrize("ca", ["", "garbage"])
+def test_validate_route_live_service_ca_must_be_pem(tree, ca):
+    _route_tree(tree)
+    r = _route_run(tree, SERVICE_CA=ca)
+    assert r.returncode != 0
+    assert "not a PEM certificate bundle" in r.stderr
+
+
+def test_validate_route_live_requires_route_api(tree):
+    _route_tree(tree)
+    r = _route_run(tree, NO_ROUTE_API="1")
+    assert r.returncode != 0
+    assert "does not serve routes.route.openshift.io" in r.stderr
+
+
+@pytest.mark.parametrize("route_on", [True, False])
+@pytest.mark.parametrize("backend", ["rag-agent", "qdrant", "qdrant-headless"])
+def test_validate_live_refuses_foreign_route_to_protected_service(tree, route_on, backend):
+    _route_tree(tree)
+    env = {"ROUTES_FILE": _routes_file(tree, ("public-console", backend))}
+    if route_on:
+        r = _route_run(tree, **env)
+    else:
+        write_stub(tree / "bin" / "kubectl", ROUTE_KUBECTL)
+        r = _run(tree, {"AIRGAP_DRYRUN": "0", **env})
+    assert r.returncode != 0
+    assert "Route public-console exposes a protected Service" in r.stderr
+
+
+def test_validate_live_unlistable_routes_fail_closed(tree):
+    _route_tree(tree)
+    r = _route_run(tree, ROUTES_READ_FAIL="1")
+    assert r.returncode != 0
+    assert "cannot list Routes" in r.stderr
+
+
+def test_validate_live_unrelated_route_and_owned_route_pass(tree):
+    _route_tree(tree)
+    r = _route_run(tree, ROUTES_FILE=_routes_file(tree, ("docs", "docs-site"), ("rag-agent", "rag-agent")))
+    assert r.returncode == 0, r.stderr

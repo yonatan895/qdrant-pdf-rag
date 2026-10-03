@@ -21,6 +21,8 @@ from tests.helpers_airgap import (
     rendered_container,
     rendered_env,
     run_sh,
+    write_git_identity_stub,
+    write_signed_manifest,
     write_stub,
 )
 
@@ -867,3 +869,68 @@ def test_shared_gateway_ingest_and_context_refs(ingest_tree, via_task):
     entries = {entry["name"]: entry for entry in rendered_container(rendered, "ingest")["env"]}
     for key in ("EMBED_API_KEY", "CONTEXT_LLM_API_KEY"):
         assert entries[key]["valueFrom"]["secretKeyRef"] == {"name": "shared", "key": "api-key"}
+
+
+# ------------------------------------------------- registry image identity (#272)
+
+INGEST_REF = f"reg.internal:5000/qdrant-pdf-rag-ingest:{IMAGE_SHA}"
+INGEST_CONFIG = "sha256:" + "c" * 64
+INGEST_STUB_SKOPEO = r"""#!/bin/sh
+printf 'skopeo %s\n' "$*" >> "$KC_LOG"
+for a in "$@"; do case "$a" in docker://*) ref="${a#docker://}" ;; esac; done
+f="$SKOPEO_REGISTRY/$(printf '%s' "$ref" | tr '/:@' '___').raw"
+[ -f "$f" ] || { echo "manifest unknown" >&2; exit 1; }
+cat "$f"
+"""
+
+
+def _release_ingest(tree, config=INGEST_CONFIG):
+    """Packed MANIFEST + loaded registry; returns the registry manifest digest."""
+    import hashlib
+    import json
+
+    tmp_path, _ = tree
+    write_stub(tmp_path / "bin" / "skopeo", INGEST_STUB_SKOPEO)
+    # A claimed release (#414): signed MANIFEST chain and a resolvable checkout.
+    write_signed_manifest(tmp_path / "dist", f"sha: {IMAGE_SHA}\ningest_config_digest: {INGEST_CONFIG}\n")
+    write_git_identity_stub(tmp_path, IMAGE_SHA)
+    raw = json.dumps({"config": {"digest": config}, "layers": [{"digest": "sha256:" + "e" * 64}]}).encode() + b"\n"
+    reg = tmp_path / "registry"
+    reg.mkdir(exist_ok=True)
+    (reg / (INGEST_REF.replace("/", "_").replace(":", "_") + ".raw")).write_bytes(raw)
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _run_release_ingest(tree):
+    return _run_ingest(
+        tree, ("AIRGAP_DRYRUN", "0"), ("SKOPEO_REGISTRY", str(tree[0] / "registry"))
+    )
+
+
+def test_ingest_release_renders_job_image_by_verified_digest(ingest_tree):
+    digest = _release_ingest(ingest_tree)
+    r = _run_release_ingest(ingest_tree)
+    assert r.returncode == 0, r.stderr
+    rendered = (ingest_tree[0] / "dist" / "ingest-rendered.yaml").read_text()
+    assert f"image: reg.internal:5000/qdrant-pdf-rag-ingest@{digest}" in rendered
+    assert f"qdrant-pdf-rag-ingest:{IMAGE_SHA}" not in rendered.replace("value:", "")
+
+
+def test_ingest_swapped_registry_tag_refuses_before_any_cluster_call_then_next_run_passes(ingest_tree):
+    _release_ingest(ingest_tree, config="sha256:" + "f" * 64)
+    r = _run_release_ingest(ingest_tree)
+    assert r.returncode != 0
+    assert "is not the packed image" in r.stderr
+    kc_log = ingest_tree[1]
+    assert not kc_log.exists() or "apply" not in kc_log.read_text().split()
+    _release_ingest(ingest_tree)  # the tag is reloaded with the packed image
+    assert _run_release_ingest(ingest_tree).returncode == 0
+
+
+def test_ingest_missing_registry_image_refuses_before_any_cluster_call(ingest_tree):
+    _release_ingest(ingest_tree)
+    (ingest_tree[0] / "registry" / (INGEST_REF.replace("/", "_").replace(":", "_") + ".raw")).unlink()
+    r = _run_release_ingest(ingest_tree)
+    assert r.returncode != 0
+    assert f"cannot read back registry image {INGEST_REF}" in r.stderr
+    assert not ingest_tree[1].exists() or "apply" not in ingest_tree[1].read_text().split()

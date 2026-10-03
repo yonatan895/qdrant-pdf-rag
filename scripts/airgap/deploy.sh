@@ -8,6 +8,7 @@
 # Route (charts/qdrant-openshift.values.yaml is never shrunk). No NFS. No Cloud.
 
 . "$(dirname -- "$0")/common.sh"
+. "$(dirname -- "$0")/image_identity.sh"
 
 [ -f charts/qdrant-openshift.values.yaml ] && [ -r charts/qdrant-openshift.values.yaml ] ||
     die "required Qdrant values file is missing or unreadable: charts/qdrant-openshift.values.yaml"
@@ -21,6 +22,7 @@ check_secret_name "${PULL_SECRET:-}" PULL_SECRET
 check_secret_name "${GATEWAY_CA_CONFIGMAP:-}" GATEWAY_CA_CONFIGMAP
 resolve_otel_endpoint
 resolve_bundle_choices
+resolve_agent_route
 case "$IMAGE_SHA" in
     ""|HEAD) die "IMAGE_SHA must be the packed git SHA (see dist/MANIFEST.txt)" ;;
 esac
@@ -53,12 +55,12 @@ fi
 require_kc
 command -v helm >/dev/null 2>&1 || die "helm is required on the air-gap bastion"
 
-# Operator console Route (ADR-0004): rendering the OAuth sidecar and
-# the reencrypt Route needs the oauth-proxy image pin to be recorded, not the
-# sha256:PENDING placeholder.
-AGENT_ROUTE=${AGENT_ROUTE:-false}
+# Operator console Route (ADR-0004, issue #373): rendering the OAuth sidecar
+# and the reencrypt Route needs a recorded oauth-proxy pin (not the
+# sha256:PENDING placeholder) that matches the chart and the packed bundle.
 if [ "$AGENT_ROUTE" = "true" ]; then
-    pin_recorded oauth-proxy || die "AGENT_ROUTE=true needs the oauth-proxy digest recorded in images.txt (currently sha256:PENDING); record it on the connected host and repack"
+    require_oauth_pin
+    echo "==> Notice: the console Route authenticates any OpenShift user (oauth-proxy --email-domain=*, no SAR); restrict the cohort with the site's approved mechanism (issue #373)"
 fi
 
 refuse_nfs_storage
@@ -69,16 +71,25 @@ SNAPSHOT_STORAGE_CLASS=${SNAPSHOT_STORAGE_CLASS:-$STORAGE_CLASS}
 QDRANT_TAG=${QDRANT_TAG:-$(echo "${QDRANT_IMAGE:-docker.io/qdrant/qdrant:v1.19.0-unprivileged}" | sed "s/.*://; s/-unprivileged\$//")}
 QDRANT_URL="http://${QDRANT_RELEASE}:6333"
 
+# Registry image identity (issue #272), before any cluster change and for every
+# entry path (load -> deploy, pipeline --skip-load, standalone deploy): each
+# deployed image must be the packed one. First-party images are then rendered
+# as repository@digest; the Qdrant digest is checked against the pods below.
+DEPLOY_IMAGES="qdrant agent"
+[ "$JAEGER_DEPLOY" != "1" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES jaeger"
+[ "$AGENT_ROUTE" != "true" ] || DEPLOY_IMAGES="$DEPLOY_IMAGES oauth_proxy"
+# shellcheck disable=SC2086
+verify_registry_images $DEPLOY_IMAGES
+
 KC=${KC:-$(kc)}
 check_gateway_ca
 mkdir -p dist
 
 # Public namespace service CA becomes a generated value, never a YAML patch.
 if [ "$AGENT_ROUTE" = "true" ] && [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
-    require_secret_keys rag-agent-oauth-cookie cookie-secret
+    require_oauth_cookie_secret
     ROUTE_DESTINATION_CA_FILE=dist/namespace-service-ca.crt
-    $KC -n "$NAMESPACE" get configmap openshift-service-ca.crt \
-        -o 'jsonpath={.data.service-ca\.crt}' > "$ROUTE_DESTINATION_CA_FILE" || die "cannot read namespace service CA"
+    fetch_route_destination_ca "$ROUTE_DESTINATION_CA_FILE"
 fi
 map_app_values --out dist/mainframe-rag-release-values.yaml --without-ingest-job
 helm lint charts/mainframe-rag -f dist/mainframe-rag-release-values.yaml
@@ -136,6 +147,15 @@ if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
     fi
     python3 scripts/airgap/check_app_ownership.py "$NAMESPACE" --disabled \
         < dist/app-disabled-existing.json > dist/app-disabled-cleanup.json
+
+    # Issue #373: no Route other than the OAuth-protected rag-agent Route may
+    # reach the unauthenticated agent HTTP port or Qdrant, whatever the
+    # AGENT_ROUTE selection. Refused here, before any mutation.
+    if [ "$AGENT_ROUTE" = "true" ]; then
+        check_route_exposure enabled "$ROUTE_DESTINATION_CA_FILE"
+    else
+        check_route_exposure disabled
+    fi
 fi
 
 # CI-rehearsal knobs (never set in the air gap): shrink PVCs / resources for
@@ -155,6 +175,15 @@ if [ "${AIRGAP_DRYRUN:-0}" != "1" ]; then
             $KC create namespace "$NAMESPACE"
         fi
     fi
+fi
+
+# Retire a disabled or confirmed incompatible owned Route before release work.
+# Early Helm/rollout failure must not preserve known direct access. A valid
+# existing OAuth Route, including operator host/certificate choices, stays.
+if [ "${OWNED_ROUTE_PRESENT:-0}" = "1" ] && { [ "$AGENT_ROUTE" != "true" ] || [ "${OWNED_ROUTE_INCOMPATIBLE:-0}" = "1" ]; }; then
+    echo "==> Removing disabled or incompatible owned Route rag-agent before the release"
+    $KC -n "$NAMESPACE" delete route.route.openshift.io/rag-agent --ignore-not-found ||
+        die "cannot remove disabled or incompatible owned Route rag-agent before the release"
 fi
 
 echo "==> Helm: Qdrant from the vendored chart with PROD values"
@@ -184,6 +213,11 @@ run "$@"
 echo "==> Helm: mainframe-rag application release"
 run helm upgrade --install mainframe-rag charts/mainframe-rag \
     --namespace "$NAMESPACE" -f dist/mainframe-rag-release-values.yaml --take-ownership --server-side=false
+if [ "$AGENT_ROUTE" = "true" ]; then
+    # Require the live OAuth contract, remove a readable owned mismatch,
+    # and refuse unknown/unreadable exposure without claiming verification.
+    verify_agent_route "${ROUTE_DESTINATION_CA_FILE:-}"
+fi
 JAEGER_UI_HINT=""
 [ "${METRICS_ENABLED:-false}" = "true" ] || echo "==> Metrics off: ServiceMonitor not deployed"
 [ "$OTEL_TRACING_ENABLED" = "1" ] || echo "==> Tracing off: Jaeger not deployed"
@@ -218,6 +252,10 @@ else
     if [ "$JAEGER_DEPLOY" = "1" ]; then
         wait_rollout "deploy/jaeger" 120
     fi
+    # Tags can move after the registry read-back: the running pods must report
+    # the verified digests (fail closed; legacy cleanup below is skipped).
+    # shellcheck disable=SC2086
+    verify_running_images $DEPLOY_IMAGES
     # Reconcile disabled legacy resources only after the selected workloads
     # are ready. PVCs are never members of this validated cleanup inventory.
     if [ -s dist/app-disabled-cleanup.json ]; then

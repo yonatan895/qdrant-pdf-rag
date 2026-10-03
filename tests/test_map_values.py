@@ -37,6 +37,7 @@ MAPPER_KEYS = [
     "OTEL_DEPLOYMENT_ENVIRONMENT", "OTEL_SERVICE_NAME", "JAEGER_ENABLED",
     "METRICS_ENABLED", "SERVICEMONITOR_ENABLED", "AGENT_ROUTE", "ROUTE_DESTINATION_CA_FILE",
     "UI_ENABLED",
+    "IMAGE_DIGEST_AGENT", "IMAGE_DIGEST_INGEST", "IMAGE_DIGEST_JAEGER", "IMAGE_DIGEST_OAUTH_PROXY",
     "STORAGE_CLASS", "CORPUS_PVC", "INGEST_WORKERS", "INGEST_WORK_SIZE",
     "INGEST_ALIAS_PUBLISH", "INGEST_REINGEST", "INGEST_RETIRE_DOCS",
     "CONTEXTUAL_EMBED_ENABLED", "CONTEXT_LLM_BASE_URL", "CONTEXT_LLM_MODEL",
@@ -545,3 +546,33 @@ def test_mapper_to_helm_round_trip_decoupled(mapper_env, tmp_path):
     finally:
         for k in ("JAEGER_ENABLED", "OTEL_EXPORTER_OTLP_ENDPOINT", "METRICS_ENABLED", "SERVICEMONITOR_ENABLED"):
             os.environ.pop(k, None)
+
+
+
+# ------------------------------------------------- verified image digests (#272)
+
+def test_image_digest_env_renders_digest_per_image(monkeypatch, mapper_env):
+    monkeypatch.setenv("IMAGE_DIGEST_AGENT", "sha256:" + "a" * 64)
+    monkeypatch.setenv("IMAGE_DIGEST_OAUTH_PROXY", "sha256:" + "b" * 64)
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    images = load_values(out)["images"]
+    assert images["agent"]["digest"] == "sha256:" + "a" * 64
+    assert images["oauthProxy"]["digest"] == "sha256:" + "b" * 64
+    assert "digest" not in images["ingest"]
+    assert images["agent"]["tag"] == IMAGE_SHA  # the tag stays informational
+
+
+def test_image_digest_unset_keeps_tag_only_images(mapper_env):
+    r, out = mapper_env()
+    assert r.returncode == 0, r.stderr
+    assert all("digest" not in image for image in load_values(out)["images"].values())
+
+
+@pytest.mark.parametrize("bad", ["latest", "sha256:abc", "sha256:" + "G" * 64, "sha1:" + "a" * 40])
+def test_malformed_image_digest_fails_closed(monkeypatch, mapper_env, bad):
+    monkeypatch.setenv("IMAGE_DIGEST_INGEST", bad)
+    r, out = mapper_env()
+    assert r.returncode == 1
+    assert "IMAGE_DIGEST_INGEST must be a sha256 manifest digest" in r.stderr
+    assert not out.exists()
