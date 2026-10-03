@@ -23,6 +23,7 @@ unaffected.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -82,6 +83,11 @@ def parse_golden_text(text: str) -> list[GoldenEntry]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
+        if _is_release_set_record(line):
+            raise SystemExit(
+                "release-set records are not golden entries; the independent "
+                "release set is scored only by the acceptance entry point"
+            )
         try:
             entry = GoldenEntry.model_validate_json(line)
         except (ValidationError, ValueError) as exc:
@@ -114,6 +120,7 @@ def default_baseline_path(embed_mode: str) -> Path:
 DEV_GOLDEN_PATH = Path("evals/golden.jsonl")
 HOLDOUT_PATH = Path("evals/holdout.jsonl")
 HOLDOUT_FILENAME = "holdout.jsonl"
+RELEASE_SET_FILENAME = "release_set.jsonl"
 
 RC_ONLY_COLLECTIONS = frozenset({"real_manuals"})
 
@@ -166,6 +173,31 @@ def _is_holdout(path: Path | str) -> bool:
         return False
 
 
+def _is_release_set(path: Path | str) -> bool:
+    """Filename identity (literal or resolved) of the independent release set."""
+    try:
+        candidate = Path(path)
+    except (TypeError, ValueError):
+        return False
+    if candidate.name == RELEASE_SET_FILENAME:
+        return True
+    try:
+        return candidate.resolve().name == RELEASE_SET_FILENAME
+    except OSError:
+        return False
+
+
+def _is_release_set_record(line: str) -> bool:
+    """Content guard: a renamed release-set copy still carries typed records."""
+    if '"record"' not in line:
+        return False
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return False
+    return isinstance(obj, dict) and obj.get("record") in ("manifest", "case")
+
+
 def require_rc_for_golden(paths: Sequence[Path | str], venue: str | None = None) -> None:
     """Refuse the frozen holdout unless the venue is declared RC."""
     if (venue or resolve_venue()) == RC:
@@ -175,6 +207,11 @@ def require_rc_for_golden(paths: Sequence[Path | str], venue: str | None = None)
             raise VenueError(
                 f"frozen holdout {HOLDOUT_FILENAME} requires {VENUE_ENV}={RC}; "
                 "dev runs tune against evals/golden.jsonl only"
+            )
+        if _is_release_set(path):
+            raise VenueError(
+                f"independent release set {RELEASE_SET_FILENAME} requires "
+                f"{VENUE_ENV}={RC}; it is never a tuning dataset"
             )
 
 
@@ -238,6 +275,11 @@ def read_golden_text(path: Path | str) -> str:
         target = path.resolve()
     except (OSError, RuntimeError, ValueError) as exc:
         raise DatasetPinError("dataset path cannot be resolved") from exc
+    if _is_release_set(path):
+        raise DatasetError(
+            "the independent release set is not a golden/tuning dataset; "
+            "it is read only by the acceptance entry point"
+        )
     protected = path.name == HOLDOUT_FILENAME or target.name == HOLDOUT_FILENAME
     require_rc_for_golden([HOLDOUT_PATH if protected else target])
     if not protected:
@@ -254,3 +296,34 @@ def read_golden_text(path: Path | str) -> str:
         return data.decode("utf-8")
     except (OSError, UnicodeError, ValueError) as exc:
         raise DatasetPinError("frozen holdout or its sha256 pin is unavailable or invalid") from exc
+
+
+def read_release_set_text(path: Path | str) -> tuple[str, str]:
+    """Read the independent release set: RC venue + adjacent sha256 pin.
+
+    Same protection as the frozen holdout (VENUE rule, one pin record naming
+    the dataset basename, hash and decode of one byte buffer), but this is the
+    only reader that may open a release set: the golden readers refuse it.
+    Returns ``(text, sha256_hex)``; the hash identifies the scored set.
+    """
+    path = Path(path)
+    if resolve_venue() != RC:
+        raise VenueError(
+            f"independent release set requires {VENUE_ENV}={RC}; it is never a tuning dataset"
+        )
+    try:
+        target = path.resolve()
+        pin = target.with_name(target.name + ".sha256")
+        record = pin.read_text(encoding="utf-8")
+        match = re.fullmatch(r"([0-9a-fA-F]{64}) [ *]([^\r\n]+)\n?", record)
+        if match is None or match[2] != target.name:
+            raise DatasetPinError("release set requires one valid sha256 record naming its dataset")
+        data = target.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != match[1].lower():
+            raise DatasetPinError("release set sha256 mismatch")
+        return data.decode("utf-8"), digest
+    except DatasetPinError:
+        raise
+    except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+        raise DatasetPinError("release set or its sha256 pin is unavailable or invalid") from exc

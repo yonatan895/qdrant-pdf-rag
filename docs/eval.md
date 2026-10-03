@@ -133,6 +133,7 @@ mix (see `testing.md` harness invariants):
 | Layered harness | `harness.py` + `harness_l1/l2/l3/l4.py` (`src/mainframe_rag/eval/quality.py` owns the L4 tier) | Promote to release candidacy? | Snapshot-pinned live index (RC only) |
 | Bench | `benchmark.py` | Do resources/latencies regress? | CI runner env, mock LLM |
 | Load | `loadtest.py` / `test_load_tier.py` | Do absolute contracts hold under concurrency? | Sim composition + real uvicorn agent |
+| Release acceptance (#367) | `eval_acceptance.py` | Does the production profile meet the pre-registered absolute criteria on the independent SME set? | `VENUE=rc`, sha-pinned `release_set.jsonl`, adjudicated outcomes; stand-in or proposed criteria never certify (§11) |
 | Corpus hygiene | `verify_golden.py` / `build_golden_corpus.py` | Is the golden set sound? | Live collection facts |
 
 Supporting cast: `render_report.py` (text/md/HTML renders and comparators),
@@ -741,3 +742,114 @@ dev-golden pin check remains separate. No release baseline or scoring rule
 changes. Tests live in `test_venue.py` and `test_eval_gate.py`; the latter
 executes actual Task and the actual retrieval CLI with runtime effects
 instrumented, including corruption, recovery, precedence and literal paths.
+
+## 11. Release acceptance: independent set and pre-registered criteria (#367)
+
+**Status: PROPOSED.** The criteria in `evals/acceptance-criteria.json` are
+proposals awaiting maintainer/SME sign-off. They are policy choices, not
+measured production performance; the 2026-09-16 stand-in rows in §10 are not
+evidence for or against them. Until `status` is `registered` (with
+`registered_by`/`registered_at`, in a dedicated PR before any scored run),
+every result is non-certifying. A later change needs a new `criteria_id` and a
+new set binding; never edit criteria after seeing scores.
+
+**What this repository provides.** The schema, validator, venue protection and
+scorer in `mainframe_rag.eval.acceptance` (`python scripts/eval_acceptance.py`,
+`python -m mainframe_rag.eval.acceptance`). **What it cannot provide:** SME
+authoring, independent adjudication, and the production-profile run (see
+"External work"). The code refuses to certify without them.
+
+### Independent set format (`release_set.jsonl`)
+
+Typed JSONL records, first a `manifest`, then `case` records. The set lives
+outside git (ignored like the corpora) with an adjacent `release_set.jsonl.sha256`
+pin (one record naming the basename). Passages are referenced, never quoted:
+`evidence[].excerpt_sha256` may hash the adjudicated passage.
+
+- `manifest`: `set_id`, `version`, `stage` (`pilot` or `release`, selects the
+  criteria stage), `criteria_sha256` (the criteria file the SMEs authored
+  against), `corpus_revision`, declared `authors` and `adjudicators`, and an
+  `independence` attestation (`authored_outside_tuning_loop: true`,
+  `saw_system_outputs: false`, statement).
+- `case`: `id`, `query`, `query_class` (the golden vocabulary), `expected_behavior`
+  (`answer`/`abstain`), `provenance` (`author`, `authored_at`, `source`,
+  `release`), `adjudication` (`adjudicator`, `adjudicated_at`, `verdict:
+  accepted`), optional `critical_probe` (`scope`, `release`, `protocol`,
+  `access`, `false_completion`, `provenance`).
+  Answer cases add `evidence[]` (`doc_id`, `release`, physical `physical_page`
+  >= 1, `locator`), `expected_doc_ids` equal to the evidence docs,
+  `required_facts`, `required_conditions`. Abstain cases add `abstain_reason`
+  (`insufficient_evidence`/`wrong_premise`) and `must_not_assert`, and carry no
+  docs/evidence.
+- The validator rejects unknown fields, author equal to adjudicator, authors or
+  adjudicators absent from the manifest, duplicate ids or case/whitespace-folded
+  queries, malformed dates/hashes, and any unadjudicated case. The CLI also
+  refuses a set whose queries overlap `golden.jsonl`, `paraphrase.jsonl` or (under
+  RC) `holdout.jsonl`.
+- **Never a tuning set.** `datasets.read_release_set_text` requires `VENUE=rc`
+  and the adjacent pin (hash and decode one buffer; mismatch, malformed or
+  missing pin refuse with exit 2; the next ordinary run succeeds after repair).
+  Every golden reader (`read_golden_text`, hence retrieval, answers, chat, L1/L2/L4,
+  capture, replay) refuses a file named or resolving to `release_set.jsonl` even
+  under RC, and `parse_golden_text` refuses release-set records in a renamed
+  copy. Never tune against it; a defect found with it is fixed against the dev
+  golden and the set is re-adjudicated or retired, not retuned.
+
+### Outcomes and scoring
+
+The reviewer records one adjudicated `outcome` per case and repeat after running
+the exact candidate through the approved gateway, behind a `run` record that
+carries the `set_sha256`, `criteria_sha256`, `repeats` and the profile identity
+(`kind` `production`/`standin`; production must name reasoning, embed and rerank
+model (`none` when disabled), corpus collection/revision, image, git SHA and
+temperature). Outcome fields: `status` (`scored`/`skipped`/`error`),
+`completed`, `refused`, SME `useful`/`supported`/`traceable`,
+`evidence_supplied`, abstain `appropriate_abstention`/`fabricated_instruction`,
+`critical_failures` and `failure_stage` (extraction, retrieval,
+evidence_omitted, context_exhaustion, protocol, unsupported_answer,
+infrastructure). A pass requires `status=scored`, `completed`, no critical
+failure and, for answers, not refused and useful, supported and traceable.
+Everything is over **all requests**: `length`, transport failures, skips,
+missing outcomes and false refusals are failures, never exclusions. The report's
+diagnostics give all-request pass rate, completion rate and quality given
+completion with separate denominators, plus failure attribution and per-class
+rates. Duplicate/unknown outcomes, hash or criteria binding mismatch, wrong
+repeat count, missing adjudication fields and NaN refuse with exit 2; missing
+outcomes make `outcomes_complete` insufficient (verdict `incomplete`).
+
+### Proposed criteria
+
+Profile: only `production` (the actual platform reasoning/embed/rerank models and
+the selected frozen corpus) can certify. A local stand-in run (for example the
+8 GB gemma/Qwen3-Embedding profile) exercises the mechanics and reports
+per-criterion results but is `non-certifying`.
+
+| Stage | Statistic | Criteria (all must pass) |
+|---|---|---|
+| `pilot` (30 cases: 24 answerable, 6 abstain; 1 repeat; **no statistical claim**, a small screen per #447 G2) | point estimate | P1 useful+supported+traceable >= 20/24; P2 abstain pass 6/6; P3 zero fabricated instructions; P4 zero critical failures; P5 false refusals <= 10%; coverage >= 3 answer cases in each of `message_id`, `version`, `syntax`, `table`, `diagnostic` |
+| `release` (n >= 100 answerable, >= 30 abstain; 3 repeats at production temperature) | one-sided 95% Wilson bound | R1 answer pass lower bound >= 0.80 (87/100 observed); R2 abstain pass lower bound >= 0.85 (29/30); R3 zero fabrications and R4 zero critical failures in any repeat; R5 completion >= 0.95; R6 false-refusal upper bound <= 0.10; R7 evidence supplied intact >= 0.90; R8 repeat flip rate <= 0.10; per-class answer floors with >= 10 cases (`message_id`, `doc_number` 0.90; `syntax`, `diagnostic`, `version`, `table`, `comparative` 0.75) |
+
+Repeats do not add independent cases: the Wilson bound uses the case count as
+`n` and the mean pass fraction across repeats as the rate.
+
+### Decision procedure
+
+1. Maintainer/SME review and register the criteria (before authoring or scoring).
+2. SMEs author and independently adjudicate the set against the registered
+   criteria' sha; `eval_acceptance.py --validate-only` checks it.
+3. Freeze corpus/revision and effective model/context/tokenizer configuration;
+   run the exact candidate image through the approved gateway, `VENUE=rc`, at the
+   registered repeat count; the reviewer adjudicates each served answer.
+4. Score. `accepted` (exit 0) needs registered criteria, a `production` profile,
+   a matching manifest binding and every criterion passing. Any failing criterion
+   is `rejected` and any insufficient criterion `incomplete` (exit 1). Proposed
+   criteria or a stand-in profile exit 2: reported, never a pass.
+5. Record the dated result row in §10 and the failed cases with their
+   attributed stage. Failures are fixed on the dev golden, never against the set.
+
+### External work (not done by this repository)
+
+SME authoring and independent adjudication of the set; maintainer/SME
+registration of the criteria; the production-profile run and per-answer
+adjudication; the corpus/model freeze record. Tests use synthetic fixtures only
+(`tests/test_acceptance.py`).
