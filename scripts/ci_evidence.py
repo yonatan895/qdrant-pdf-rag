@@ -80,8 +80,9 @@ def run_unittest(modules: list[str]) -> tuple[int, dict]:
     sys.path.insert(0, str(ROOT))
     suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
+    # An expected failure is a non-pass, the unittest counterpart of pytest's xfail.
     counts = {'executed': result.testsRun, 'failed': len(result.failures),
-              'errors': len(result.errors), 'skipped': len(result.skipped)}
+              'errors': len(result.errors), 'skipped': len(result.skipped) + len(result.expectedFailures)}
     valid = result.wasSuccessful() and counts['executed'] > 0 and counts['skipped'] == 0
     return (0 if valid else 1), counts
 
