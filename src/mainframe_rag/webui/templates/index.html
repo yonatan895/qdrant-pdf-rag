@@ -9,9 +9,15 @@
   <script src="/ui/static/vendor/htmx.min.js" defer></script>
   <script src="/ui/static/js/console.js" defer></script>
 </head>
-<body class="theme-3270">
+<body class="theme-dark">
   <header class="topbar">
-    <h1>Mainframe Operations Copilot</h1>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">&#8250;_</span>
+      <div class="brand-text">
+        <h1>Mainframe Operations Copilot</h1>
+        <p class="brand-sub">Grounded answers from your manuals</p>
+      </div>
+    </div>
     <div class="topbar-controls">
       <span id="health-badge" class="health" hx-get="/ui/healthz" hx-trigger="load, every 30s" hx-swap="innerHTML">
         <span class="badge badge-unknown">&#9679; &#8230;</span>
@@ -21,15 +27,16 @@
 
   <main class="layout">
     <aside class="sidebar" aria-label="Incidents">
-      <button type="button" id="new-session-btn">&#10133; New incident</button>
+      <button type="button" id="new-session-btn"><span aria-hidden="true">+</span> New incident</button>
       <label class="visually-hidden" for="session-filter">Filter incidents</label>
       <input id="session-filter" type="search" placeholder="Filter incidents…" autocomplete="off">
-      <ul id="session-list" class="session-list" aria-label="Saved incidents"></ul>
+      <h2 class="sidebar-heading" id="incidents-heading">Incidents</h2>
+      <ul id="session-list" class="session-list" aria-labelledby="incidents-heading"></ul>
       <div class="sidebar-tools">
         <label for="theme-select">Theme</label>
         <select id="theme-select">
+          <option value="theme-dark">Plex Ops</option>
           <option value="theme-3270">IBM 3270 Phosphor</option>
-          <option value="theme-dark">Modern Dark</option>
         </select>
         <button type="button" id="export-btn">Export incident (MD)</button>
         <button type="button" id="clear-history-btn" class="danger">Clear all saved incidents</button>
@@ -40,7 +47,7 @@
 
     <section class="console" aria-label="Conversation console">
       <details class="drawer">
-        <summary>Incident context &amp; subsystem filters</summary>
+        <summary><span class="drawer-title">Incident context &amp; filters</span><span id="context-chips" class="context-chips"></span></summary>
         <label for="splunk-context">JES spool / SYSLOG / abend dump</label>
         <textarea id="splunk-context" form="chat-form" name="splunk_context" rows="6"
           placeholder="//STEP1 EXEC PGM=IEFBR14&#10;IEF450I JOB12345 STEP1 - ABEND=S0C4">{{ splunk_context }}</textarea>
@@ -64,30 +71,6 @@
 
       <div class="composer-wrap">
         <div id="composer-notice" class="error-banner" hidden></div>
-        <div class="composer-toolbar">
-          <div class="reasoning-control">
-            <label class="control-label" for="reasoning-slider">Reasoning:</label>
-            <div class="reasoning-slider-wrap">
-              <input
-                type="range"
-                id="reasoning-slider"
-                min="0"
-                max="2"
-                step="1"
-                value="{% if reasoning_effort == 'high' %}2{% elif reasoning_effort == 'medium' %}1{% else %}0{% endif %}"
-                aria-label="Reasoning effort"
-                aria-valuetext="{% if reasoning_effort == 'high' %}High{% elif reasoning_effort == 'medium' %}Medium{% else %}Low{% endif %}"
-              >
-              <div class="slider-ticks" aria-hidden="true">
-                <span class="tick{% if not reasoning_effort or reasoning_effort == 'low' %} active{% endif %}" data-val="0">Low</span>
-                <span class="tick{% if reasoning_effort == 'medium' %} active{% endif %}" data-val="1">Med</span>
-                <span class="tick{% if reasoning_effort == 'high' %} active{% endif %}" data-val="2">High</span>
-              </div>
-            </div>
-            <span class="effort-badge" id="reasoning-badge">{% if reasoning_effort == 'high' %}High{% elif reasoning_effort == 'medium' %}Med{% else %}Low{% endif %}</span>
-          </div>
-        </div>
-
         <form id="chat-form" class="composer" method="post" action="/ui/chat"
               hx-post="/ui/chat" hx-target="#messages" hx-swap="beforeend">
           <input type="hidden" name="messages" id="history-json" value="{{ history_json }}">
@@ -97,6 +80,17 @@
             placeholder="Ask about a message code, abend, syntax, or procedure&#8230;"></textarea>
           <button type="submit" id="send-btn" aria-label="Send">&#9650;</button>
         </form>
+        <div class="composer-toolbar">
+          <div class="reasoning-control" role="group" aria-labelledby="reasoning-label">
+            <span class="control-label" id="reasoning-label">Reasoning</span>
+            <div class="segmented">
+              <button type="button" class="seg" data-effort="low" aria-pressed="{{ 'true' if not reasoning_effort or reasoning_effort == 'low' else 'false' }}">Low</button>
+              <button type="button" class="seg" data-effort="medium" aria-pressed="{{ 'true' if reasoning_effort == 'medium' else 'false' }}">Medium</button>
+              <button type="button" class="seg" data-effort="high" aria-pressed="{{ 'true' if reasoning_effort == 'high' else 'false' }}">High</button>
+            </div>
+          </div>
+          <span class="composer-hint">Ctrl+Enter to send</span>
+        </div>
       </div>
     </section>
   </main>

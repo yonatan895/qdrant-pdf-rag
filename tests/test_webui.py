@@ -500,7 +500,9 @@ def test_console_css_chrome_pass():
         Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
     ).read_text(encoding="utf-8")
     assert ".sidebar-tools {" in css
-    assert "border-radius: 50%" in _css_rule(css, "\n#send-btn {")
+    # The circular Send shape (#332) was retired by the Plex Ops redesign;
+    # its reachability at every width is executed by the browser layout
+    # contract (test_layout_has_no_horizontal_scroll_and_composer_stays_reachable).
     assert ".composer textarea::placeholder" in css
     assert ".composer textarea:focus" in css
 
@@ -706,6 +708,8 @@ def test_ui_chat_fragment_message_design(ui_client, monkeypatch):
     )
     assert "Verified manual citations (1)" in body
     assert '<button class="copy-btn copy-cite" type="button">Copy</button>' in body
+    # Plex Ops header chip mirrors console.js stateChip (accepted + cited).
+    assert '<span class="state-chip state-chip-ok">Verified &middot; 1 citation</span>' in body
 
 
 def test_ui_shell_has_session_filter(ui_client):
@@ -1035,17 +1039,16 @@ def test_ui_chat_form_invalid_reasoning_effort_rejected(ui_client):
 
 
 def test_ui_index_renders_reasoning_effort_toggle(ui_client):
-    """GET /ui renders the reasoning effort slider control toolbar."""
+    """GET /ui renders the reasoning effort toggle group (one pressed
+    option, matching the hidden form value the no-JS POST carries)."""
     resp = ui_client.get("/ui")
     assert resp.status_code == 200
     body = resp.text
     assert "composer-toolbar" in body
-    assert "reasoning-control" in body
-    assert "reasoning-slider" in body
-    assert "slider-ticks" in body
-    assert "reasoning-badge" in body
-    assert 'name="reasoning_effort"' in body
-    assert 'value="low"' in body
+    assert 'class="reasoning-control" role="group" aria-labelledby="reasoning-label"' in body
+    assert '<button type="button" class="seg" data-effort="low" aria-pressed="true">Low</button>' in body
+    assert body.count('aria-pressed="true"') == 1
+    assert 'name="reasoning_effort" id="reasoning-effort-input" value="low"' in body
 
 
 def test_console_js_reasoning_effort_parity():
@@ -1059,23 +1062,23 @@ def test_console_js_reasoning_effort_parity():
         "getReasoningEffort",
         "setReasoningEffort",
         "reasoning_effort",
-        "reasoning-slider",
-        "reasoning-badge",
+        ".segmented .seg",
+        "aria-pressed",
         "updateSendBtn",
     ):
         assert token in js, token
 
 
 def test_console_css_reasoning_control():
-    """console.css defines styles for composer-toolbar and reasoning slider control."""
+    """console.css styles the composer toolbar and the reasoning toggle group
+    (the range-slider pins retired with the slider in the Plex Ops redesign)."""
     css = (
         Path(app_mod.__file__).parents[1] / "webui" / "static" / "css" / "console.css"
     ).read_text(encoding="utf-8")
     assert ".composer-toolbar" in css
     assert ".reasoning-control" in css
-    assert ".reasoning-slider-wrap" in css
-    assert ".slider-ticks" in css
-    assert ".effort-badge" in css
+    assert ".segmented .seg" in css
+    assert '.segmented .seg[aria-pressed="true"]' in css
 
 
 def test_console_send_button_visibility():

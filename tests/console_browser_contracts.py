@@ -746,14 +746,52 @@ def test_accessibility_tree_names_roles_and_announcements(console, page):
     assert page.eval("return document.documentElement.lang") == "en"
     assert page.eval("return document.getElementById('messages').hasAttribute('aria-live')") is False
     assert page.eval("return document.getElementById('console-status').getAttribute('role')") == "status"
-    assert page.eval("return document.getElementById('reasoning-slider').getAttribute('aria-valuetext')") == "Low"
-    page.eval("var s=document.getElementById('reasoning-slider');s.value=2;s.dispatchEvent(new Event('input'))")
-    assert page.eval("return document.getElementById('reasoning-slider').getAttribute('aria-valuetext')") == "High"
+    pressed = "return Array.from(document.querySelectorAll('.segmented .seg')).map(b => b.getAttribute('aria-pressed'))"
+    assert page.eval(pressed) == ["true", "false", "false"]
+    assert page.eval("return document.querySelector('.reasoning-control').getAttribute('role')") == "group"
+    page.click('.segmented .seg[data-effort="high"]')
+    assert page.eval(pressed) == ["false", "false", "true"]
 
     console.llm.queue(("token", "Partial "), ("fail",))
     send(page, "What is IEA500I?")
     wait_state(page, "incomplete")
     wait_status(page, "Answer incomplete: the stream failed.")
+
+
+def test_reasoning_effort_choice_reaches_the_model_and_survives_reload(console, page):
+    page.click('.segmented .seg[data-effort="high"]')
+    send(page, "What is IEA500I?")
+    wait_state(page, "complete")
+    assert console.llm.efforts[-1] == "high"
+    page.reload()
+    page.wait("return document.querySelectorAll('#messages .turn').length==2")
+    assert page.eval("return document.querySelector('.segmented .seg[aria-pressed=\"true\"]').dataset.effort") == "high"
+    page.click('.segmented .seg[data-effort="low"]')
+    send(page, "Again")
+    wait_state(page, "complete", 2)
+    assert console.llm.efforts[-1] == "low"
+
+
+def test_answer_status_reads_before_the_answer_it_qualifies(console, page):
+    """Verified answers carry a header chip; an unverified answer's warning
+    sits above its text, both when streamed and after reload."""
+    send(page, "What is IEA500I?")
+    wait_state(page, "complete")
+    console.llm.queue(("token", "Reissue the command after initialization completes."), ("done",))
+    send(page, "And then?")
+    wait_state(page, "complete", 2)
+    order = (
+        "return Array.from(document.querySelectorAll('.turn-assistant')).map(a =>"
+        " Array.from(a.children).map(c => c.className.split(' ')[0]))"
+    )
+    chips = "return Array.from(document.querySelectorAll('.turn-assistant .turn-head .state-chip')).map(c => c.textContent)"
+    for _ in range(2):
+        verified, draft = page.eval(order)
+        assert verified[:2] == ["turn-head", "turn-content"] and "citations" in verified
+        assert draft[:3] == ["turn-head", "state-badge", "turn-content"]
+        assert page.eval(chips) == ["Verified \u00b7 1 citation"]
+        page.reload()
+        page.wait("return document.querySelectorAll('#messages .turn-assistant').length==2")
 
 
 @pytest.mark.parametrize("width", [1280, 640, 375, 320])
@@ -810,8 +848,9 @@ def test_text_contrast_meets_wcag_aa_in_both_themes(console, page, theme):
         const sels = ['body', '.turn-assistant .turn-content', '.turn-user .turn-content', '.turn-role', '.turn-time',
           '.turn-meta', '.state-badge', '.citations-title', '.citations li span', '.sidebar-note', '.storage-notice',
           '.session-list .open', '.row.active .open', '#new-session-btn', '#export-btn', '#clear-history-btn',
-          '.drawer summary', '.drawer label', '.sidebar-tools label', '.copy-btn', '#reasoning-badge', '.control-label',
-          '.slider-ticks .tick', '.topbar h1', '.avatar', '.turn-content code', '.example'];
+          '.drawer summary', '.drawer label', '.sidebar-tools label', '.copy-btn', '.control-label',
+          '.segmented .seg', '.segmented .seg[aria-pressed="true"]', '.topbar h1', '.brand-sub', '.avatar',
+          '.turn-content code', '.example', '.state-chip', '.chip', '.sidebar-heading', '.composer-hint', '#health-badge .badge'];
         const out = [];
         for (const sel of sels) {
           document.querySelectorAll(sel).forEach((e, i) => {

@@ -50,8 +50,8 @@
   traffic over loopback to FastAPI on `http://127.0.0.1:8080`.
   
   Enforce strict air-gap compliance: zero external CDN, font, or script calls;
-  pure web-safe system monospace font stacks for authentic IBM 3270 Green Phosphor
-  and Modern Dark CSS themes; vendored HTMX 1.9.12 with SHA256 checksum verification
+  locally served fonts with system fallbacks for the Plex Ops (default) and IBM 3270
+  Green Phosphor CSS themes; vendored HTMX 1.9.12 with SHA256 checksum verification
   and 0BSD license; and strict Content-Security-Policy headers restricted to `'self'`.
 
 - **Explicit Non-Goals:**
@@ -154,13 +154,16 @@
   - **Air-gap isolation invariant:** Disconnected enterprise clusters have no access
     to the public internet. All styling, scripts, and fonts resolve locally from
     `/ui/static/`.
-  - **System monospace font stacks:**
+  - **Font stacks:**
     - *IBM 3270 Green Phosphor Theme:*
       `'Courier New', Courier, 'Lucida Console', Monaco, 'Liberation Mono', monospace`
       styled with pure CSS procedural scanlines, glow, and CRT curvature.
-    - *Modern Dark Theme:*
-      `ui-monospace, 'Cascadia Code', 'Source Code Pro', Consolas, 'Liberation Mono', monospace`
-      and `-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`.
+    - *Plex Ops Theme (default, body class `theme-dark`):* `"IBM Plex Sans", system-ui,
+      -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif` for text and
+      `"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+      monospace` for code. Plex resolves only when the vendored faces are present;
+      otherwise the system stacks render. Both themes set the same CSS tokens in
+      `console.css`, so every component renders in either theme.
   - **Vendored fonts (amendment):** IBM Plex Sans (400, italic 400, 500, 600) and
     IBM Plex Mono (400, 500) are vendored as unmodified Latin-1 split `woff2` files
     from npm `@ibm/plex-sans` 1.1.0 / `@ibm/plex-mono` 2.5.0 under

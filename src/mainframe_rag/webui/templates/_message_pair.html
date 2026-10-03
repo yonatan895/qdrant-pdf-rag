@@ -8,11 +8,24 @@
   <div class="turn-head">
     <span class="avatar" aria-hidden="true">{% if turn.role == "user" %}O{% else %}C{% endif %}</span>
     <span class="turn-role">{% if turn.role == "user" %}Operator{% else %}Copilot{% endif %}</span>
+    {% if turn.role == "assistant" and turn.verification_state == "accepted" and turn.citations and not turn.citations_inferred %}
+    <span class="state-chip state-chip-ok">Verified &middot; {{ turn.citations | length }} citation{{ "" if turn.citations | length == 1 else "s" }}</span>
+    {% endif %}
     {% if turn.created_at %}
     <time class="turn-time" data-ts="{{ turn.created_at }}">{{ turn.created_at[11:16] }} UTC</time>
     {% endif %}
     <button class="copy-btn copy-turn" type="button">Copy</button>
   </div>
+  {% if turn.verification_state and turn.role == "assistant" and turn.verification_state != "accepted" %}
+  <div class="state-badge state-{{ turn.verification_state }}">
+    {%- if turn.verification_state == "insufficient_evidence" %}Insufficient evidence — not operational guidance
+    {%- elif turn.verification_state == "unverified_draft" %}Unverified draft — no eligible citation
+    {%- elif turn.verification_state == "generation_incomplete" %}Incomplete generation — output was cut off
+    {%- else %}{{ turn.verification_state }}{% endif %}</div>
+  {% endif %}
+  {% if turn.script_review_required %}
+  <div class="state-badge state-review">Human review required — draft script, not certified executable</div>
+  {% endif %}
   {% if turn.content_html %}
   <div class="turn-content md">{{ turn.content_html | safe }}</div>
   {% else %}
@@ -31,15 +44,5 @@
       {% for cite in turn.citations %}<li><span>{{ cite }}</span><button class="copy-btn copy-cite" type="button">Copy</button></li>{% endfor %}
     </ul>
   </div>
-  {% endif %}
-  {% if turn.verification_state and turn.role == "assistant" and turn.verification_state != "accepted" %}
-  <div class="state-badge state-{{ turn.verification_state }}">
-    {%- if turn.verification_state == "insufficient_evidence" %}Insufficient evidence — not operational guidance
-    {%- elif turn.verification_state == "unverified_draft" %}Unverified draft — no eligible citation
-    {%- elif turn.verification_state == "generation_incomplete" %}Incomplete generation — output was cut off
-    {%- else %}{{ turn.verification_state }}{% endif %}</div>
-  {% endif %}
-  {% if turn.script_review_required %}
-  <div class="state-badge state-review">Human review required — draft script, not certified executable</div>
   {% endif %}
 </article>
