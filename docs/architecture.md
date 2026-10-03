@@ -250,6 +250,11 @@ src/mainframe_rag/
     embed.py          # vLLM dense & FastEmbed BM25 embedder; embed-text builder
     qdrant_io.py      # Collection creation & upsert batching
     run_ingest.py     # Ingest CLI worker orchestration
+    build.py          # Versioned immutable build binding
+    placement.py      # Replica-placement evaluation for HA acceptance
+    repair.py         # Explicit removal of duplicate legacy points from unfinished builds
+    rules_version.py  # Extraction-rules version (issue #124)
+    seal.py           # Stored-content certificate for immutable builds
   retrieve/
     query.py          # Batched prefetch, weighted RRF fusion, diversification (sync + async)
     filters.py        # Query classification & Qdrant filter building
@@ -269,11 +274,19 @@ src/mainframe_rag/
     metrics.py        # Prometheus counters/gauges (opt-in /metrics)
     live_state.py     # Zowe live-state routing/fetch layer (ADR-0003, default-off)
     zowe_mcp.py       # Zowe MCP client (read-only tools; mock backend for sim)
+    chat_turn.py      # One active-user boundary for chat routes, retrieval and prompts
+    core_ports.py     # Typed operations supplied to the answer use case
+    model_adapter.py  # Normalizes legacy chat/stream seams; never owns the shared client
   webui/
     routes.py         # Operator console routes (/ui): fail-closed gate, HTMX form/SSE, CSP
     templates/        # Jinja2 shell + message pair (server-rendered, no external assets)
     static/           # Local CSS/JS + vendored htmx/sse with SHA256SUMS pin
   serve/              # Local vLLM VRAM budget profiles (LOCAL_RT_8GB) + resolve CLI
+  eval/               # Evaluation measurement core: datasets, retrieval scoring, answers/answer-tier, judging, chat A/B, performance/quality gates, promotion verdicts, reports, statistics, load
+  mcp/
+    server.py         # MCP framing: JSON-RPC dispatch, tool schemas, transports
+    bridge.py         # FTP transport for the read-only Zowe MCP bridge (ADR-0003)
+    mock.py           # Filesystem-backed mock z/OS backend (test-only)
   config.py           # Pydantic Settings & environment validation
   logs.py             # One-JSON-object-per-line logging
   manifest.py         # Run manifests (unreachable Qdrant version is unknown, never the pin)
@@ -281,7 +294,7 @@ src/mainframe_rag/
   tracing.py          # OTel export: agent + ingest; library default off, deploy default on
 ```
 
-**Allowed Dependencies:** Python 3.14 GIL, `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`, `jinja2` (operator console templates), `python-multipart` (console form parsing), `uvicorn`, `pydantic`, `pydantic-settings`, `opentelemetry-api`/`-sdk` plus the OTLP-HTTP and Prometheus exporters.
+**Allowed Dependencies:** Python 3.14 GIL, `pymupdf`, `qdrant-client`, `fastembed` (sparse only), `httpx2`, `fastapi`, `jinja2` (operator console templates), `python-multipart` (console form parsing), `uvicorn`, `pydantic`, `pydantic-settings`, `opentelemetry-api`/`-sdk` plus the OTLP-HTTP and Prometheus exporters, `urllib3`.
 
 ### Per-area reference docs
 

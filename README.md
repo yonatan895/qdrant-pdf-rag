@@ -22,8 +22,8 @@ Models (reasoning, dense embed, reranker) are served by the **platform team's in
 | `src/mainframe_rag/retrieve/` | Hybrid search (dense + BM25 prefetch, batched query, weighted RRF), query-class screen, optional cross-encoder rerank (`RERANK_ENDPOINT_ORDER`), diversification, filters |
 | `src/mainframe_rag/agent/` | Async FastAPI `/healthz` + `/livez`, `/v1/search`, `/v1/answer`, multi-turn `/v1/chat` + `/v1/chat/completions` (shared `answer_core`, optional SSE streaming), opt-in `GET /metrics` |
 | `src/mainframe_rag/webui/` | Operator console served at `/ui` (ADR-0004): Jinja2 + vendored HTMX/SSE, browser-only state, strict CSP, `UI_ENABLED` fail-closed |
-| `src/mainframe_rag/mcp/` | Read-only Zowe live-state bridge (default off; mock backend for sim) |
-| `src/mainframe_rag/serve/` | Local vLLM VRAM budget profiles (`LOCAL_RT_8GB`, …) + `resolve` CLI |
+| `src/mainframe_rag/mcp/` | Read-only Zowe live-state bridge (default off; mock backend for sim; serve via `python -m mainframe_rag.mcp`) |
+| `src/mainframe_rag/serve/` | Local vLLM VRAM budget profiles (`LOCAL_RT_8GB`, …) + `resolve` CLI (`python -m mainframe_rag.serve resolve …`) |
 | `scripts/` | Benchmark suite, golden set eval, report renderer, query demo, gateway readiness probe (`probe_gateway.py`), air-gap ops |
 | `images/` | UBI Containerfiles (non-root, wheelhouse + BM25 weights baked in) |
 | `tests/` | Unit, hygiene, regression gates, and Docker simulation integration tests |
@@ -48,7 +48,7 @@ Keys live only in one operator-created Secret (`GATEWAY_API_KEY_SECRET`, rendere
 
 ```bash
 kubectl -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py
-# recommendation: RERANK_ENDPOINT_ORDER=rerank_first  (gateways; score_first for raw vLLM)
+# recommendation: RERANK_ENDPOINT_ORDER=score_first whenever the score leg answers (rerank_first only when the score leg is unavailable) — probe_gateway.py decides
 ```
 
 Local full-stack simulation (Qdrant + gateway + agent + probe; optional ingest).
@@ -180,7 +180,7 @@ QDRANT_URL=http://127.0.0.1:6333 QDRANT_COLLECTION=dev-corpus \
 
 ## Standard Deployment Architecture (Air-Gap & Local Cluster)
 
-The hardened 5-stage deployment pipeline (`airgap:pack` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts and Helm charts, with adapted sizing and SCC for local test clusters).
+The hardened 5-stage deployment pipeline (`airgap:validate` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`; `airgap:pack` is the connected-host pre-step) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts and Helm charts, with adapted sizing and SCC for local test clusters).
 
 **The air-gap never builds images.** Connected `main` is the only image factory.
 
@@ -210,7 +210,7 @@ The hardened 5-stage deployment pipeline (`airgap:pack` -> `airgap:load` -> `air
    CORPUS_PVC=<pvc> sh scripts/tools/run-task.sh airgap:pipeline
 
    # Option B: Or execute step-by-step:
-   sh scripts/tools/run-task.sh airgap:load                   # Push the 4 base image archives (+ oauth-proxy once bundled) to the internal registry
+   sh scripts/tools/run-task.sh airgap:load                   # Push the 4 base image archives (+ the oauth-proxy sidecar archive) to the internal registry
    sh scripts/tools/run-task.sh airgap:deploy                 # Deploy Qdrant StatefulSet + Agent + Jaeger (tracing on by default)
    # Prove the gateway from inside the cluster, apply its leg-order recommendation:
    kubectl -n mainframe-rag exec deploy/rag-agent -- python3 /app/scripts/probe_gateway.py
@@ -224,7 +224,7 @@ To test the deployment scripts and Kubernetes manifests locally with adapted siz
 
 1. **Bootstrap Kind & Local Registry:**
    ```bash
-   docker run -d --restart=always -p 5000:5000 --name airgap-registry registry:2
+   docker run -d --restart=always -p 5000:5000 --name airgap-registry registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
    kind create cluster --name airgap
    docker network connect "kind" airgap-registry || true
    ```

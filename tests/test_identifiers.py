@@ -62,7 +62,7 @@ def test_query_kind_flips_only_for_real_codes() -> None:
 
 
 def test_golden_sweep_flips_are_real_codes() -> None:
-    """All 215 golden queries (193 golden+holdout after the #270 re-freeze,
+    """All 225 golden queries (203 golden+holdout after the #591 re-freeze,
     plus 22 paraphrase): the only queries gaining message_ids vs the classic
     shape are the 7 reviewed real codes below. Any other flip is a precision
     regression."""
@@ -82,7 +82,7 @@ def test_golden_sweep_flips_are_real_codes() -> None:
         new = find_message_ids(query)
         if new != old:
             assert expected.get(query[:95]) == new, f"{name}: {query[:95]} -> {new}"
-    assert total == 215
+    assert total == 225
     assert len(expected) == 7
 
 

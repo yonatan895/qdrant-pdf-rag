@@ -165,15 +165,18 @@ and [docs/deploy.md](docs/deploy.md).
 
 Current L4 instrument and RC-only evaluation contract: [docs/eval.md](docs/eval.md).
 
-### PR-11 (issue #85): Layout-aware parsing pilot (Marker)
-- **Why:** PyMuPDF text extraction mangles IBM manual tables/diagrams (real concern) —
-  but "fatal" is unproven. Measure, then decide.
-- **Scope:** new `ingest/layout.py` (alternative front-end feeding `chunk.py`), vendored
-  Marker models, `deploy/` GPU notes
-- **Implementation:** Marker → structured Markdown (tables preserved) → existing
-  section-outline chunking. Build a golden subset of table/diagram-heavy questions
-  (process in `scripts/build_golden_corpus.py`). A/B: PyMuPDF vs Marker. Flag-gated;
-  adopt only if the delta justifies ingest cost.
+### PR-11 (issue #85): Preserve table row/value associations before adopting a layout parser
+- **Why:** PyMuPDF text extraction drops row/value associations on real table shapes
+  (column-order drawing, wrapped rows, repeated headers — concrete fidelity headroom,
+  prevalence in protected manuals unproven). Measure first, then decide on a parser.
+- **Scope:** generated PDFs with independent expected row/value/caption associations,
+  executed against the current extraction path; a read-only layout census/report in an
+  authorized source venue distinguishing absent tables from extraction failures.
+  PyMuPDF-first; Marker only with justified gaps plus an approved ADR — do not
+  default to vendoring Marker models or GPU deployment.
+- **Implementation:** census/report first (reusing the existing TBL golden cases in
+  `evals/golden.jsonl`); a layout-parser A/B only if the census justifies it.
+  Flag-gated; adopt only if the delta justifies ingest cost.
 - **Acceptance:** A/B report in PR; adopt/reject ADR recorded in `docs/adr/`.
 - **Depends on:** #75, #79.
 
@@ -212,6 +215,7 @@ Decision evidence and reopening conditions: [docs/retrieval.md](docs/retrieval.m
 ## P2 — Expansion
 
 ### PR-14 (issue #88): SPLADE sparse leg (measured)
+> **Status: CLOSED (not planned).** No SPLADE leg was built or measured.
 - **Scope:** `ingest/embed.py`, `retrieve/query.py`, vendored SPLADE model
 - **Implementation:** Add SPLADE sparse vectors as a THIRD prefetch leg alongside
   FastEmbed BM25; compare BM25 vs SPLADE vs both under the existing weighted RRF.
@@ -220,6 +224,7 @@ Decision evidence and reopening conditions: [docs/retrieval.md](docs/retrieval.m
 - **Depends on:** #75, #76.
 
 ### PR-15 (issue #89): Embedding improvement track
+> **Status: CLOSED (not planned).** Representation/versioning shipped separately; hard-negative training closed as unbounded without a candidate.
 - **Scope:** `evals/expert_golden_seed.jsonl` → training pairs; `ingest/embed.py`,
   `manifest.py`
 - **Implementation:** Hard-negative mining from failed harness runs; fine-tune or evaluate
@@ -249,9 +254,8 @@ Decision evidence and reopening conditions: [docs/retrieval.md](docs/retrieval.m
 - **Depends on:** none (document only).
 
 ### PR-17 (issue #91): Read-only ops tool-calling
-> **Status: OPEN — transport exists** (read-only Zowe bridge + mock backend
-> from #228–#231, default-off); allowlisted function-calling, audit logging,
-> and tool-result prompt wiring are still to do.
+> **Status: CLOSED (completed via #616 — see the merged PR for the
+> acceptance record).**
 - **Scope:** new `agent/tools/`, feature-flagged, allowlisted tools only
 - **Implementation:** Function-calling against the #90 connector interface; every call
   audit-logged with request id; disabled by default; tool results wrapped as untrusted
@@ -276,11 +280,13 @@ Decision evidence and reopening conditions: [docs/retrieval.md](docs/retrieval.m
 - **Depends on:** #75.
 
 ### PR-19 (issue #93): ColBERT late-interaction pilot
+> **Status: CLOSED (not planned).** No ColBERT pilot was built or measured.
 - ONLY if exact-code retrieval still fails after #76 + #88. Qdrant multivector + MaxSim
   (verify 1.19.0 support); expect ~10x vector RAM — quantify against #92 first.
 - **Depends on:** #76, #88, #92.
 
 ### PR-20 (issue #94): Cross-reference graph ("GraphRAG-lite")
+> **Status: CLOSED (not planned).** No graph approach was built or evaluated.
 - ONLY if multi-hop questions still fail after #82 + #86. Extract entity/see-also/syntax
   cross-references at ingest (deterministic, no LLM community summaries); 1-hop expansion
   at retrieval. Full GraphRAG out of scope unless this proves the direction.

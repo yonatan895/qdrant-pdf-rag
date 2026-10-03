@@ -12,7 +12,9 @@ operations: `docs/install_and_ops.md` §5. Retrieval contracts:
 Async routes in `agent/app.py` (search/answer/chat plus the operator console).
 Every request gets a 12-hex-char
 `request_id` from middleware, shared by all logs, the unhandled-error
-handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
+handler, and the product-route responses (`/v1/*`, `/ui`; chat surfaces it
+as `chatcmpl-<request_id>`). The ops endpoints carry none: `/healthz`,
+`/livez`, and `/metrics` responses have no `request_id`.
 
 - `POST /v1/search` — `SearchRequest{query (min 1 char, not blank or control-character, #579), product?,
   version?, limit (default 8, 1–40)}` → `SearchResponse{request_id,
@@ -41,8 +43,8 @@ handler, and the response (chat surfaces it as `chatcmpl-<request_id>`).
 - `GET /healthz` (readiness) — `HealthzResponse{status, qdrant, embed?,
   representation, rerank?}`. Qdrant is checked by GET-ting the pooled client's
   `{base}/readyz` and requiring exactly `200` plus the body `all shards are
-  ready` (case/space normalized); the upstream body goes to the log, never
-  the client. `embed` is tri-state: `None` when no embedder is configured,
+  ready` (case/space normalized); the upstream body stays out of both logs
+  and client bodies, never the client. `embed` is tri-state: `None` when no embedder is configured,
   `false` on any exception or non-200 from a `["ping"]` embeddings probe,
   else the boolean result. `representation` is the live, uncached
   `resolve_serving_generation` outcome (issues #391 F3/F4): the configured
@@ -227,7 +229,7 @@ list, the `verification_state` label, optional script plus its review flag,
 retrieval hits, query kind, `ttft_ms`, and token usage. A mid-stream failure
 emits `event: error` and ends **without** a `final` — clients must treat
 stream-end-without-final as a failed request. `/ui/chat/stream` consumes the
-same token→final contract with a UI-specific terminal event name.
+same token→final contract with the identical `final` terminal event.
 
 `/v1/chat` + `/v1/chat/completions` with `stream=true` instead stream OpenAI
 `chat.completion.chunk` frames (`data: {...}` content deltas), then one
@@ -248,9 +250,10 @@ strict stream-end rule above is the upstream reasoning wire and the
   any model call: JSON/chat answer it with `422 prompt_budget_exceeded`,
   while an already-open stream carries `event: error` and ends without
   a `final`.
-- `Server-Timing` on SSE responses carries the retrieval legs only;
-  `llm`/`ttft` timings ride the `final` event (JSON responses carry all of
-  them as headers).
+- `Server-Timing` on `/v1/answer` SSE responses carries the retrieval legs only
+  (chat SSE sends no `Server-Timing`); `ttft` rides the `final` event
+  (`ttft_ms` only — `llm_ms` lives in `Server-Timing`/logs/spans, never in
+  `final`). JSON responses carry all of them as headers.
 - A stream is complete only with `[DONE]` **and** an explicit non-null
   terminal `finish_reason`: `[DONE]` alone, an upstream `error` frame
   (even when followed by `[DONE]`), and a malformed frame are all
@@ -416,8 +419,9 @@ the query timeout.
   `retries=0`) — answers are non-idempotent; a retry would re-think. The
   permitted second asks are the per-operation streaming fallbacks documented
   in the HTTP/model contract below; buffered and emitted content differ. Dispatch picks async
-  client → running loop → sync, so injected async clients and bare test
-  doubles (even plain `str` returns, normalized to chat results) all work.
+  client → running loop → sync, so injected async clients work; both
+  buffered and fallback-stream completions require `ChatResult` — bare
+  strings are rejected (`TypeError`), never normalized.
 - Health timeouts are split from traffic timeouts (5s Qdrant, 10s embed);
   the tokenizer RPC gets 5s.
 
@@ -457,7 +461,7 @@ readers:
 | `otel_exporter_otlp_endpoint` / `otel_sample_ratio` / `otel_export_queue_size` / `otel_export_timeout_ms` | unset = tracing off / 1.0 / 2048 / 5000 | tracing setup |
 | `metrics_enabled` | `false` = /metrics 404s | Prometheus exposition for UWM scrapes |
 | `ui_enabled` | `false` (fail-closed 404) | webui router gate (`/ui*`); the production chart sets it true |
-| `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_fusion_alpha` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / bge-reranker-v2-m3 / embed URL / unset (keyless) / `score_first` (`rerank_first` for gateways) / 1.0 / 50 / 32 / 5.0 | rerank dispatch → retrieve (see `retrieval.md` §6) |
+| `rerank_enabled` / `rerank_model` / `rerank_base_url` / `rerank_api_key` / `rerank_endpoint_order` / `rerank_fusion_alpha` / `rerank_candidates` / `rerank_batch_size` / `rerank_timeout_s` | false / `BAAI/bge-reranker-v2-m3` / gateway URL (no embed fallback; unset when no gateway) / unset (keyless) / `score_first` (see install §4.4 `probe_gateway.py`: `rerank_first` only when the score leg is unavailable) / 1.0 / 50 / 32 / 5.0 | rerank dispatch → retrieve (see `retrieval.md` §6) |
 | `rrf_k` / `rrf_weight_*` / `rrf_sparse_boost_syntax` / `rrf_sparse_boost_table` / `retrieve_max_chunks_per_page|doc` | 2 / 1.0,1.0 – 1.0,3.0 / 1.0 / 1.0 / 1, 3 | retrieve fusion + diversification |
 | `acronym_expansion_enabled` / `comparative_split_enabled` / `diagnostic_dualpath_enabled` | `false` / `true` / `false` | rewrite + multipath (see `retrieval.md` §§3b,7) |
 | ingest-only (`ingest_workers` = CPU-1, `batch_size` 128, `ingest_upsert_streams` 4, `ingest_bulk_load` false, `bm25_model`, `bm25_cache_dir` unset, `contextual_*` incl. `context_llm_timeout_s` 30.0 / `context_max_chars` 500 / `context_cache_path` unset) | — | ingest; see `docs/ingest.md` §§6–9 |
@@ -564,9 +568,9 @@ counterexamples; [publication](ingest.md#publication-contract) owns writer order
 ## Supplied evidence and answer states
 
 **Status: partially implemented.** **Authority:** #364 (supplied-evidence eligibility),
-#365 (answer verification and provisional/incomplete states), #368 (prompt evidence
-preservation and token-budget enforcement), #372 (browser execution, persistence,
-and presentation of those states). These have separate acceptance
+#365 (CLOSED 2026-10-02: answer verification and provisional/incomplete states),
+#368 (prompt evidence preservation and token-budget enforcement), #372 (OPEN:
+browser execution, persistence, and presentation of those states). These have separate acceptance
 owners; completing one does not close the others. **Decision owners:**
 `answer.build_messages` / `build_chat_messages` / `parse_answer`, `answer_core`,
 `sse`, `webui.routes` and `webui/static/js/console.js`.
@@ -684,8 +688,8 @@ cover all routes. **Evidence:** `tests/test_prompt_order.py`,
 `tests/test_stream_truncation.py`, `tests/test_webui.py`,
 `tests/test_prompt_packing_units.py`, `tests/test_evidence_manifest.py`. Inspect their actual
 assertions: eligibility and transport tests do not prove semantic support or all
-browser completion behavior. #365/#372 retain those gaps; no model run is claimed
-by this documentation audit.
+browser completion behavior. #372 retains those gaps (#365 closed 2026-10-02);
+no model run is claimed by this documentation audit.
 
 The shared core consumes typed operations from `core_ports`. Application
 composition captures request dependencies and passes the validated physical

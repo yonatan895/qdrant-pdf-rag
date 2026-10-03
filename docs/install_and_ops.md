@@ -31,7 +31,7 @@ Mainframe RAG is a citation-first retrieval-augmented generation engine designed
 
 ### Key Operational Rules
 - **Air-Gap Image Factory:** The air-gap environment never builds images. Connected `main` builds container images with baked wheelhouses and BM25 weights, tagging them with the full 40-character Git SHA.
-- **Data Storage:** Qdrant persistent volumes **must** use RWO block storage (NFS-looking `STORAGE_CLASS` values are refused; the snapshot storage class falls back to it and is not checked separately).
+- **Data Storage:** Qdrant persistent volumes **must** use RWO block storage (NFS-looking `STORAGE_CLASS` values are refused; the snapshot storage class falls back to it but is refused separately when NFS-looking).
 - **Inference Separation:** The platform team owns the model servers and gateway. Agent and ingest consume its authenticated HTTP endpoints; this product does not deploy that tier.
 
 ---
@@ -522,7 +522,7 @@ sh scripts/tools/run-task.sh local:agent
 
 ## 4. Standard Deployment Architecture (Air-Gap Production & Local Cluster Testing)
 
-The hardened 5-stage deployment pipeline (`airgap:pack` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts and Helm charts, with adapted sizing and SCC for local test clusters).
+The hardened 5-stage deployment pipeline (`airgap:validate` -> `airgap:load` -> `airgap:deploy` -> `airgap:ingest` -> `airgap:smoke`; `airgap:pack` is the connected-host pre-step that builds the sneakernet bundle) is the **canonical deployment standard across the entire project**. Both production air-gapped OpenShift and local testing environments adhere to this pipeline (using the same scripts and Helm charts, with adapted sizing and SCC for local test clusters).
 
 ### 4.1 Packaging on the Connected Host (Image Factory)
 
@@ -682,8 +682,8 @@ legacy Secret layouts.
 | Role | URL key | Model key | Notes |
 |---|---|---|---|
 | Reasoning (answer, chat and console) | `LLM_BASE_URL` | `LLM_MODEL_REASONING` | Empty model = answers stay disabled. Raise `LLM_MAX_MODEL_LEN` past the 4096 default to the served context (tokenizer uses the server `/tokenize`, estimator fallback otherwise). Auth: `llm-api-key` from the `GATEWAY_API_KEY_SECRET` Secret (unset = keyless). |
-| Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (defaults to `VLLM_BASE_URL`) | `EMBED_MODEL` + `DENSE_DIM` + `EMBED_MODEL_REVISION` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. `EMBED_MODEL_REVISION` is the operator-declared immutable model/config revision (a gateway alias is mutable and a dimension is not an identity): blank/whitespace-only values fail pre-flight and refuse agent/ingest startup, and a revision change requires a deliberate `--reingest` migration. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
-| Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `EMBED_BASE_URL`) | `RERANK_MODEL` | Served via a vLLM pooling server (`--runner pooling`, `/v1/score`; TEI `/v1/rerank` fallback). Use the platform gateway rerank leg and its model ID; do not configure a direct-backend consumer shortcut. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: `RERANK_ENDPOINT_ORDER=rerank_first` for gateways (run `probe_gateway.py` below to decide). |
+| Embed (`/v1/search`, ingest) | `EMBED_BASE_URL` (gateway first, then `VLLM_BASE_URL` + `/v1`) | `EMBED_MODEL` + `DENSE_DIM` + `EMBED_MODEL_REVISION` | `DENSE_DIM` is required and fail-closed: it must equal the served native dim (4096 for Qwen3-Embedding-8B). Collections are created at that width; a mismatch against an existing collection refuses with `DimMismatchError`. `EMBED_MODEL_REVISION` is the operator-declared immutable model/config revision (a gateway alias is mutable and a dimension is not an identity): blank/whitespace-only values fail pre-flight and refuse agent/ingest startup, and a revision change requires a deliberate `--reingest` migration. Auth: `embed-api-key` from the same Secret; the ingest Job reads it too. |
+| Rerank (optional, default off) | `RERANK_BASE_URL` (defaults to `GATEWAY_BASE_URL`, no embed fallback) | `RERANK_MODEL` | Served via a vLLM pooling server (`--runner pooling`, `/v1/score`; TEI `/v1/rerank` fallback). Use the platform gateway rerank leg and its model ID; do not configure a direct-backend consumer shortcut. Lifespan logs a loud warning (never a refusal) when the endpoint is unreachable at startup. Auth: `rerank-api-key` from the same Secret. Leg order: run `probe_gateway.py` below to decide — `score_first` whenever the score leg answers (even on a gateway exposing both legs), `rerank_first` only when the score leg is unavailable. |
 
 Set the namespace to the same value chosen in `airgap.env` and create it if the
 site has not already provisioned it. Do not source a local-development handoff in

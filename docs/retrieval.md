@@ -89,16 +89,19 @@ so lexical and semantic candidates are scoped identically before any fusion.
   empty-filtered retry. Over-long compound tails (`SA22-7592-05-03`) stay
   dropped — they map to no `doc_id`. `DOCNO_RE` is untouched, so
   `rules_version` and ingest are unaffected.
-- Empty-filtered recovery: when a filter was applied and both prefetch legs
+ - Empty-filtered recovery: when a filter was applied and both prefetch legs
   return zero points (multi-identifier AND with no co-carrying chunk, or a
   filter with no match in this corpus), the retrieval path retries once
-  unfiltered at the same prefetch depth and fuses that pool. Non-empty
+  at the same prefetch depth with the filter relaxed to the caller scope
+  (`fallback_flt`, product/version only — never the identifier predicates)
+  and fuses that pool. Non-empty
   filtered results never pay the second call. The retry lands on the trace
   as boolean `rag.filter_fallback` (bounded, never free text).
 - The legs are named `dense` and `bm25`, dense first. Batched calls pass
   `requests=[QueryRequest(filter=flt, ...)]` into `query_batch_points`,
   while the sequential fallback calls `query_points(..., query_filter=flt)`
-  per Qdrant Client 1.19+ conventions (`query.py:544`).
+  per Qdrant Client 1.19+ conventions (builders at `query.py:471`, batch
+  calls at `query.py:723,743`, sequential at `query.py:629`).
 
 ## 3. Identifiers and query kind
 
@@ -152,7 +155,7 @@ MRR 0.655→0.643, overall r@5 0.873→0.857, overall MRR 0.700→0.697
 
 Fusion is local, not server-side: Qdrant's RRF exposes no per-leg weights,
 and this pipeline needs them. Each leg contributes `weight / (k + rank + 1)`
-with 0-based ranks — rank 1 with `k=2` is worth `1/3`, rank 2 `1/4`, so the
+with 0-based ranks — rank 0 with `k=2` is worth `1/3`, rank 1 `1/4`, so the
 top is extremely heavy compared to the industry-default `k=60`.
 
 - Identifier queries fuse with weights `(dense 1.0, sparse 3.0)`; NL
@@ -207,7 +210,7 @@ to vendor. Normalization lowercases, replaces formatting noise
 space (never deletes, so `ignore_the_excerpts` still separates into words),
 and collapses whitespace.
 
-The trap catalog targets ten override shapes with bounded gaps (enough for
+The trap catalog targets thirteen override shapes with bounded gaps (enough for
 one adjective — "the supplied excerpts" — without letting the verb drift
 onto unrelated nouns pages away): ignoring the excerpts, ignoring /
 disregarding / overriding previous-or-system instructions, `you are now`,
@@ -305,11 +308,12 @@ can dilute the exact-code path; ambiguous tokens (`DSN`, `PDF`, `AIX`,
 `CA`, `MAP`, `MQ`, …) are excluded from the glossary rather than guessed —
 exclusion beats wrong expansion.
 
-Known gap (tracked as a code issue): the code comment claims trap queries
-never reach rewriting because the screen runs first, but the trap check is
-not enforced on this path — an identifier-free trap query containing an
-acronym is still expanded for the embed legs. This section documents actual
-behavior.
+Enforced invariant: the screen runs ahead of rewriting at the
+current call sites, and `should_rewrite` additionally returns `False` for
+screen-class trap queries with `expand_query` enforcing it internally, so a
+trap query containing an acronym is NOT expanded for the embed legs —
+identifier-heavy queries bypass rewriting entirely via the same gate.
+This section documents actual behavior.
 
 Measured verdict (issue #86, live `real_manuals` A/B, 121 golden answer
 queries): acronym expansion as a retry variant fixes 2 recall@1 misses
@@ -351,9 +355,10 @@ these; widening changes both corpus extraction and query parsing at once.
   parse time is deliberately separate (see `docs/ingest.md` §2) so pattern
   changes cannot churn point ids. Query-side only (`filters.parse_query`):
   a match immediately followed by `-` is a truncated edition suffix —
-  wildcard (`SC23-6858-xx`), partial (`SC23-6858-0`) — and is dropped from
-  the exact `doc_id` filter (it can only fail into the fallback under
-  identifier weights); the raw text still feeds BM25/dense.
+  wildcard (`SC23-6858-xx`) and partial (`SC23-6858-0`) tails expand to the
+  matching slice of the edition family via `_doc_family` (the stem plus
+  `-00..-99` / `-00..-09`); only an over-long tail (`SA22-7592-05-03`,
+  mapping to no `doc_id`) stays dropped. The raw text still feeds BM25/dense.
 - **Message ids** `MSG_RE`: classic 3-letter form (`IEA500I`) plus the
   families it misses, added from real-corpus measurement — CICS `DFH` cards
   with 0–2 middle letters and no trailing severity (`DFHAC2006`,
