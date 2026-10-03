@@ -19,6 +19,7 @@ from tests.helpers_airgap import (
     sha256_bytes,
     sign_sums,
     skopeo_stub,
+    write_git_identity_stub,
     write_stub,
 )
 from tests.helpers_task_artifact import copy_task_tools, task_manifest, task_members
@@ -77,6 +78,7 @@ def load_tree(tmp_path):
     copy_task_tools(tmp_path)
     skopeo_log = tmp_path / "skopeo-args.log"
     write_stub(tmp_path / "bin" / "skopeo", STUB_SKOPEO)
+    write_git_identity_stub(tmp_path, IMAGE_SHA)
     return tmp_path, skopeo_log
 
 

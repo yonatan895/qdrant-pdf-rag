@@ -318,35 +318,91 @@ check_manifest_sha() {
     fi
 }
 
+# Bundle evidence next to a missing MANIFEST (issue #414). dist/SHA256SUMS is
+# what bootstrap leaves in the workspace, so its presence alone counts. The
+# parent directory is the documented "unpack next to the clone" layout
+# (find_manifest, load.sh), but an unrelated ../SHA256SUMS must not turn
+# connected development into a refusal: ../SHA256SUMS counts only when it
+# names MANIFEST.txt as a member, as every packed bundle's list does.
+# Counting evidence only ever makes the guard refuse, never pass.
+has_bundle_evidence() {
+    [ -f dist/SHA256SUMS ] && return 0
+    [ -f ../SHA256SUMS ] && awk '$2 == "MANIFEST.txt" { f=1 } END { exit !f }' ../SHA256SUMS
+}
+
+# Signature and checksum chain for the MANIFEST the guard is about to trust
+# (issue #414): the guard may not read a bare file. $1 = MANIFEST path; its
+# directory must hold SHA256SUMS, SHA256SUMS.sig and sneakernet-signing.pub.
+# The signature over SHA256SUMS must verify (SNEAKERNET_TRUSTED_PUB, when set,
+# pins the key; otherwise this is TOFU like load.sh), and SHA256SUMS must list
+# MANIFEST.txt exactly once with the file's actual sha256. Image archives are
+# load.sh's job (sha256sum -c); only the cheap MANIFEST link is rechecked
+# here. Fixed messages: no file names or contents.
+check_manifest_chain() {
+    _chain_dir=$(dirname -- "$1")
+    for _chain_f in SHA256SUMS SHA256SUMS.sig sneakernet-signing.pub; do
+        [ -f "$_chain_dir/$_chain_f" ] || \
+            die "packed MANIFEST is not backed by a signed bundle (SHA256SUMS, SHA256SUMS.sig and sneakernet-signing.pub must sit next to it) — rerun bootstrap.sh from the signed bundle; an unsigned MANIFEST never establishes a release"
+    done
+    command -v openssl >/dev/null 2>&1 || die "openssl is required to verify the bundle signature"
+    check_trusted_pub "$_chain_dir"
+    (cd "$_chain_dir" && openssl dgst -sha256 -verify sneakernet-signing.pub -signature SHA256SUMS.sig SHA256SUMS >/dev/null 2>&1) \
+        || die "SHA256SUMS signature verification failed for the packed MANIFEST — do not trust this bundle; rerun bootstrap.sh from the signed bundle"
+    _chain_want=$(awk '$2 == "MANIFEST.txt" { n++; h=$1 } END { if (n == 1) print h }' "$_chain_dir/SHA256SUMS")
+    _chain_have=$(sha256sum "$1" | awk '{print $1}')
+    { [ -n "$_chain_want" ] && [ "$_chain_want" = "$_chain_have" ]; } || \
+        die "packed MANIFEST does not match its signed checksum entry (edited, or not listed exactly once) — rerun bootstrap.sh from the signed bundle"
+    unset _chain_dir _chain_f _chain_want _chain_have
+}
+
 # Executing-checkout identity for deploy/ingest/validate/load (issue #414):
-# when a packed MANIFEST is reachable, the git checkout these scripts run
+# when a packed MANIFEST is reachable, it must verify against its signed
+# checksum list (check_manifest_chain), and the git checkout these scripts run
 # from must resolve to the packed SHA AND carry no tracked staged/unstaged
 # change against it (an edited script or chart at the matching HEAD would
-# otherwise run under the release claim). Untracked files (airgap.env,
-# dist/, generated output) are operator-owned and stay allowed. An explicitly
-# set IMAGE_SHA alone never establishes which code executes. Silent on
-# success. Dry-run (preview mutates nothing), no reachable MANIFEST
-# (connected development) and an unresolvable checkout keep working but say
-# so on stderr: the run is not release-verified. The refusal never prints
-# file names or contents.
+# otherwise run under the release claim). Index flags that hide edits from
+# `git diff` (assume-unchanged, skip-worktree incl. sparse checkout) on any
+# tracked file are refused too. Untracked files (airgap.env, dist/, generated
+# output) are operator-owned and stay allowed. An explicitly set IMAGE_SHA
+# alone never establishes which code executes, so a claimed release fails
+# closed when its identity cannot be established: an unverifiable or sha-less
+# MANIFEST, a checkout git cannot resolve (copied tree, no usable git), or
+# bundle evidence (has_bundle_evidence) whose MANIFEST is missing. Only these
+# keep running with a "not release-verified" notice on stderr: dry-run
+# (preview mutates nothing) and connected development (no MANIFEST and no
+# bundle evidence). The refusals never print file names or contents. Silent
+# on success.
 check_checkout_sha() {
     if [ "${AIRGAP_DRYRUN:-0}" = "1" ]; then
         echo "Notice: dry-run — checkout not release-verified" >&2; return 0
     fi
     if [ -z "${MANIFEST:-}" ] || [ ! -f "$MANIFEST" ]; then
+        if has_bundle_evidence; then
+            die "bundle evidence (SHA256SUMS) is present but no packed MANIFEST.txt is readable — rerun bootstrap.sh from the signed bundle to restore dist/MANIFEST.txt; overriding IMAGE_SHA alone never establishes a release"
+        fi
         echo "Notice: no packed MANIFEST — checkout not release-verified" >&2; return 0
     fi
+    check_manifest_chain "$MANIFEST"
     packed_sha=$(awk '/^sha: /{print $2}' "$MANIFEST")
+    [ -n "$packed_sha" ] || \
+        die "packed MANIFEST ($MANIFEST) names no sha — cannot establish the release; use the signed bundle's MANIFEST.txt"
     checkout_sha=$(git rev-parse HEAD 2>/dev/null) || checkout_sha=""
-    if [ -z "$packed_sha" ] || [ -z "$checkout_sha" ]; then
-        echo "Notice: checkout identity unresolved — checkout not release-verified" >&2; return 0
-    fi
+    [ -n "$checkout_sha" ] || \
+        die "executing checkout identity cannot be resolved (no usable git checkout here) while a packed MANIFEST names sha $packed_sha — run from the approved bundle checkout (see $MANIFEST); overriding IMAGE_SHA alone never changes which code executes"
     [ "$checkout_sha" = "$packed_sha" ] || \
         die "executing checkout HEAD=$checkout_sha does not match the packed MANIFEST sha ($packed_sha) — run from the approved bundle checkout (see $MANIFEST); overriding IMAGE_SHA alone never changes which code executes"
     _diff_rc=0
     git diff --quiet HEAD -- >/dev/null 2>&1 || _diff_rc=$?
     [ "$_diff_rc" -eq 0 ] || \
         die "executing checkout has tracked changes against the packed MANIFEST sha ($packed_sha) — restore them (git diff HEAD lists them; operator settings belong in the untracked airgap.env) before running a release"
+    # `git diff` trusts the index: assume-unchanged / skip-worktree files are
+    # never compared. Tags: H = normal; lowercase = assume-unchanged; S/s =
+    # skip-worktree. Anything but a plain "H " (or an unreadable index) fails.
+    _flags=$(git ls-files -v -- ':/' 2>/dev/null) || \
+        die "executing checkout index cannot be read — cannot prove no tracked file is hidden from the change check"
+    printf '%s\n' "$_flags" | awk 'NF && substr($0, 1, 2) != "H " { bad=1 } END { exit bad }' || \
+        die "executing checkout hides tracked files from change detection (assume-unchanged, skip-worktree or sparse checkout) — clear the flags (git update-index --no-assume-unchanged / --no-skip-worktree; git ls-files -v marks them) before running a release"
+    unset _flags
 }
 
 # oc/kubectl must exist unless previewing (deploy/ingest only; validate and

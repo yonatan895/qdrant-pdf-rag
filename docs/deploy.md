@@ -271,17 +271,45 @@ checksums **after**.
   verify on the pack-pull side *or* the load-push side depending on which
   script reads it.
 - Executing-checkout guard (`common.sh::check_checkout_sha`, run by load,
-  deploy, ingest and validate): with a packed MANIFEST reachable, HEAD must
-  equal the packed SHA and no tracked file may differ from it, staged or
-  unstaged (scripts, charts, Taskfile — the whole tracked tree). Refusal is a
-  fixed message naming neither files nor contents; `git diff HEAD` lists the
-  edits. Untracked files (`airgap.env`, `dist/`, generated output) stay
-  allowed, so site values belong in the untracked `airgap.env`. Nothing is
-  reset or overwritten; after the edit is reverted the next run passes.
-  Dry-run, no reachable MANIFEST and an unresolvable checkout still run but
-  print "not release-verified" on stderr — never a release-verified result.
-  `bootstrap.sh` applies the same tracked-change refusal to an existing
-  workspace before copying artifacts into `dist/`.
+  deploy, ingest and validate). With a packed MANIFEST reachable:
+  1. *MANIFEST authenticity.* The guard never reads a bare file. `SHA256SUMS`,
+     `SHA256SUMS.sig` and `sneakernet-signing.pub` must sit next to it, the
+     signature over `SHA256SUMS` must verify (`SNEAKERNET_TRUSTED_PUB` pins
+     the key when set; otherwise TOFU, as in load), and `SHA256SUMS` must list
+     `MANIFEST.txt` exactly once with the file's real sha256. Image archives
+     stay load.sh's `sha256sum -c`; only this MANIFEST link is rechecked.
+  2. *Identity.* HEAD must equal the packed SHA and no tracked file may differ
+     from it, staged or unstaged (scripts, charts, Taskfile — the whole
+     tracked tree).
+  3. *No hidden edits.* `git diff` trusts the index, so any tracked file
+     flagged assume-unchanged or skip-worktree (`git ls-files -v` tag other
+     than `H`; sparse checkout sets skip-worktree) is refused, with or
+     without an edit. An unreadable index is refused. Clear the flags with
+     `git update-index --no-assume-unchanged/--no-skip-worktree`.
+  Refusals are fixed messages naming neither files nor contents; `git diff
+  HEAD` lists edits. Untracked files (`airgap.env`, `dist/`, generated
+  output) stay allowed, so site values belong in the untracked `airgap.env`.
+  Nothing is reset or overwritten; after the cause is fixed the next run
+  passes. A claimed release also fails closed when its identity cannot be
+  established: an unverifiable MANIFEST or one without a `sha:`, a checkout
+  git cannot resolve (a copied tree without `.git`), or bundle evidence with
+  no readable `MANIFEST.txt` — so launching load/deploy/ingest/validate
+  directly, setting `IMAGE_SHA` to the packed SHA, or deleting/forging
+  `MANIFEST.txt` never bypasses checkout identity; rerun `bootstrap.sh` to
+  restore it. *Bundle evidence* is `dist/SHA256SUMS`, or a `../SHA256SUMS`
+  that names `MANIFEST.txt` (the documented unpack-next-to-the-clone layout
+  that `find_manifest` and load.sh search; every packed bundle's list names
+  it). An unrelated `../SHA256SUMS` that does not name `MANIFEST.txt` is not
+  evidence, so connected development in a directory beside such a file is not
+  refused. Counting evidence can only make the guard refuse, never pass.
+  Only dry-run and connected development (no MANIFEST and no bundle evidence)
+  still run, printing "not release-verified" on stderr — never a
+  release-verified result. `bootstrap.sh` applies the same tracked-change and
+  index-flag refusals to an existing workspace before copying artifacts into
+  `dist/`. Not covered: the guard is not tamper-proofing against an actor who
+  can rewrite the whole bundle directory *and* its pubkey while
+  `SNEAKERNET_TRUSTED_PUB` is unset (TOFU), nor against edits to files the
+  checkout does not track (`airgap.env` is operator config by design).
 - `bootstrap.sh` cannot source `common.sh` (no clone exists yet), so it
   carries an inline twin of the trust check (bundle signature honoring
   `SNEAKERNET_TRUSTED_PUB`, then `SHA256SUMS`). It clones into
@@ -289,6 +317,16 @@ checksums **after**.
   repo already exists, copies (not links) the archives into `dist/`, and
   seeds `airgap.env` from the example only when absent — never overwriting
   operator edits. Artifact discovery searches `dist/` then the parent dir.
+  Artifacts are staged in `dist/.bootstrap-staging`, verified there (signature
+  and every member checksum), and only then moved into `dist/`, with
+  `SHA256SUMS.sig`, `SHA256SUMS` and `MANIFEST.txt` last, so a failed copy or
+  a failed verification leaves `dist/` and `airgap.env` byte-identical and
+  an interruption never yields a mixed bundle that verifies. `dist/` is never
+  swapped wholesale: operator files and earlier releases' archives stay. If
+  the process was killed uncleanly the staging directory remains; the next run
+  refuses it with a fixed message (nothing from it was accepted) and the
+  operator removes it (`rm -rf <workspace>/dist/.bootstrap-staging`) before
+  rerunning. Bootstrap never deletes it on its own initiative after a crash.
   The copy list includes `oauth-proxy-image.tar` when the bundle contains it;
   no manual sidecar-image copy is needed before `airgap:load`.
 

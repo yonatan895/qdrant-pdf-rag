@@ -22,6 +22,8 @@ from tests.helpers_airgap import (
     run_sh,
     set_oauth_proxy_pin,
     sha256_bytes,
+    write_git_identity_stub,
+    write_signed_manifest,
 )
 
 IMAGE_SHA = "a" * 40  # full-sha shaped; deploy.sh only rejects "" / "HEAD"
@@ -185,10 +187,11 @@ def test_storage_size_knob_covers_persistence_and_snapshot(tree):
 def _manifest(tree, chart_sha=None, sha=IMAGE_SHA):
     dist = tree[0] / "dist"
     dist.mkdir(exist_ok=True)
+    write_git_identity_stub(tree[0], sha)  # a claimed release needs a resolvable checkout (#414)
     lines = [f"sha: {sha}"]
     if chart_sha is not None:
         lines.append(f"chart_sha256: {chart_sha}")
-    (dist / "MANIFEST.txt").write_text("\n".join(lines) + "\n")
+    write_signed_manifest(dist, "\n".join(lines) + "\n")
 
 
 def _chart(tree):
