@@ -1168,6 +1168,24 @@ contract (`token*` → exactly one `final`; `error` ends without `final`):
 
 Citation validation runs on the accumulated text exactly as in JSON mode: the citations in the `final` event are byte-identical to the non-streaming response for the same request.
 
+#### Operations CLI (`mainframe-rag-ops`)
+A read-only client of `/healthz`, `/v1/search` and `/v1/answer` for operators
+and scripts; contract, exit codes and secret handling live in
+`agent.md` ([Operations CLI](agent.md#ops-cli)). Credentials come only from the
+environment or a file, never an argument:
+
+```bash
+export MAINFRAME_RAG_URL=https://rag-agent.example.com
+export MAINFRAME_RAG_API_KEY="$(cat /run/secrets/rag-key)"   # optional
+mainframe-rag-ops health --ca-file /etc/gateway-ca/ca-bundle.crt
+mainframe-rag-ops search "IEA500I" --product z/OS --version 3.1 --format json
+mainframe-rag-ops answer "How do I resolve IEA500I?" --stream --format json
+echo $?   # 0 ok, 3 answer not verified, 4 unauthorized, 5 unavailable, 6 bad response
+```
+
+Without an installed console script use `python -m mainframe_rag.ops ...`
+(`PYTHONPATH=src`).
+
 ### 5.3 Common Troubleshooting Scenarios
 
 | Issue | Symptom | Remediation |

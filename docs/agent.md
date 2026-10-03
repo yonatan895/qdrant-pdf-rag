@@ -509,6 +509,85 @@ import-time proxy tracers silently no-op. Non-`stop` finish reasons raise
 an `answer_alert` log (no counters — multi-worker unsafe) that the L2
 harness joins by `request_id`.
 
+<a id="ops-cli"></a>
+## Operations CLI (`mainframe-rag-ops`)
+
+**Status:** implemented with evidence (issue #172). **Authority:** the issue's
+24 September packet, [ADR-0003](adr/0003-zowe-mcp-read.md) (the operator HTTP
+client is a separate consumer of health/search/answer and never exposes live
+tools). **Decision owner:** `mainframe_rag.ops.cli`
+(`mainframe-rag-ops`, or `python -m mainframe_rag.ops`); stdlib `argparse` plus
+the repository's `httpx2` client and `config.bearer_auth_headers`, no new
+dependency. `scripts/query_demo.py` stays an internal demo and is not this
+contract.
+
+**Surface:** `health` (`GET /healthz`), `search` (`POST /v1/search`) and
+`answer` (`POST /v1/answer`, `--stream` for the SSE route). Nothing else is
+reachable: no chat, `/livez`, `/metrics`, `/ui`, MCP/Zowe bridge, Qdrant, local
+embedder or model fallback, and the agent gains no endpoint for it. Search
+never calls an LLM. Filters are `--product`/`--version`; `--limit` (1-40),
+`--temperature` (0-2) mirror the request models.
+
+**Connection and secrets:** the base URL is explicit (`--base-url` or
+`MAINFRAME_RAG_URL`, no default; userinfo, query and fragment are refused).
+TLS verification cannot be disabled: `--ca-file` supplies a complete PEM bundle
+(it replaces the default roots, like `SSL_CERT_FILE`), otherwise the client
+default applies, including `SSL_CERT_FILE` (the gateway-CA convention in
+[deploy](deploy.md#deployment-policy)). The optional bearer key comes only from
+`MAINFRAME_RAG_API_KEY` or `--api-key-file` (there is no key argument, so it
+never reaches shell history), must be printable ASCII without whitespace, is
+sent only over https or to a loopback host, and is never printed or logged.
+The server does not authenticate `/v1/*` itself today (identity is #373); the
+key is for an authenticating proxy or the OAuth route. No retries, no
+redirects. Each request has `--timeout` (1-600 s; defaults health 10, search
+60, answer 180) applied to connect, idle reads and, between chunks, total
+wall-clock; responses are capped at 8 MiB.
+
+**Output** (`--format json|text`, default `text`): JSON is one object on stdout,
+`{"ok", "command", "exit_code", "data"}` or `{"ok": false, ..., "error":
+{"code", "message", "status"?, "server_code"?}, "data"?}`. `data` carries the
+validated server fields: search hits with `cite`, `doc_id`, `title`,
+`heading`, `page_label`, `page_start`/`page_end` (0-based inclusive; text mode
+prints 1-based `pdf_pages`), `chunk_type`, `message_ids`, `product`/`version`,
+scores and full `text`; answers keep `verification_state`,
+`citations_inferred`, `inferred_indices`, `script`, `script_lang` and
+`script_review_required` (text mode labels scripts "REVIEW REQUIRED, NOT
+VALIDATED" and inferred citations "not grounding"); streamed finals add
+`finish_reason`, `query_kind`, `hits`, `ttft_ms`, `usage`. Text mode escapes
+terminal control characters in server text. Error messages are fixed per code;
+server/upstream/exception text and request text are never echoed, and
+`server_code` is echoed only when it is one of the documented section 2 codes.
+
+| Exit | Meaning (`error.code`) |
+|---|---|
+| 0 | success: health `ok`; search (empty hits included); answer with `verification_state: accepted`, nonblank text and, on SSE, `finish_reason: stop` |
+| 2 | usage or configuration (`usage`): bad URL/flags/key/CA file, key over cleartext non-loopback |
+| 3 | `answer_not_accepted`: 200 but `insufficient_evidence`, `unverified_draft`, `generation_incomplete` (or non-`stop` finish); the labelled answer is still printed |
+| 4 | `unauthorized`: 401/403 |
+| 5 | `not_ready` (503 degraded `/healthz`, body shown), `unavailable` (503, connect failure), `server_error` (other 5xx), `timeout` |
+| 6 | `malformed_response`, `unexpected_response` (3xx/other), `empty_answer` (accepted with blank text, #576), `stream_incomplete` (EOF without `final`, truncated frame), `stream_failed` (SSE `error` event) |
+| 7 | `request_rejected`: other 4xx (422 invalid request, 404 wrong base URL) |
+| 8 | `tls_error`: certificate verification failed |
+| 130 | `cancelled`: Ctrl-C |
+
+`/v1/answer` JSON carries no `finish_reason`; use `--stream` when the finish
+reason matters. In stream mode tokens are provisional and never printed:
+only a validated terminal `final` is output, so EOF, an `error` event, a
+malformed frame, data after `final` or cancellation never print a completed
+answer (exit 6/130, `verification_state: generation_incomplete` in the
+envelope).
+
+**Evidence:** `tests/test_ops_cli.py` drives the real `httpx2` client against a
+loopback HTTP(S) server using payloads built from the agent's own
+`HealthzResponse`/`SearchResponse`/`AnswerResponse` and `sse` builders:
+healthy, empty, scoped, degraded, unauthorized, unavailable, timeout,
+malformed, truncated, oversize, redirect, stalled, SSE EOF/error/truncated/
+late-frame/cancelled cases (each followed by a healthy request), the exact set
+of routes reached, credential non-disclosure, cleartext-key refusal and a real
+self-signed TLS verify/`--ca-file` round trip. Not covered: a live agent, a
+live model, real OpenShift Route/OAuth credentials (#373) and expert review of
+presented evidence.
+
 <a id="serving-contract"></a>
 ## Serving generation and reader lifetime
 
