@@ -217,6 +217,20 @@ for citations and filters.
   ancestor, while a same-page parent's intro moves into the child's section.
   Measured: deep-TOC manuals previously stored 31–64% byte-identical
   duplicate chunks; the covered-page union is unchanged.
+- Same-page bookmarks (message manuals bookmark every message, several per
+  page): a page shared by kept entries is cut at each later entry's own
+  title line — the first line, after the previous cut, that equals the
+  bookmark title or starts with it followed by a space (whitespace-collapsed,
+  case-insensitive) — so each entry gets its own sub-page section, heading
+  path and citation. The first piece starts at the page top. A piece folds
+  into the next entry when that entry is deeper (the #577 parent-intro
+  rule above), when it holds only its own title line, or never splits at
+  all when any later title line is missing or out of order, or when two
+  pieces would share a heading path (one chunk key). Without page text
+  (`outline_sections(parsed)`), sections stay page-granular. Every byte of
+  the shared page lands in exactly one piece. Measured before the change:
+  83% of real message chunks defined more than one message under one
+  message's heading.
 - Code regions (`detect_code_region`): JCL-dominant at 0.6 on left-stripped
   lines (PDFs left-pad code), a `DD DATA/*` single-card override, REXX via a
   `/* rexx` header, unbalanced `/*` vs `*/`, or (issue #216) a keyword

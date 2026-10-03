@@ -1283,3 +1283,146 @@ def test_table_associations_round_trip_through_stored_and_queried_payload(tmp_pa
         for name, default, meaning in _TABLE_ROWS:
             assert f"{name} {default} {meaning}" in lines
         assert hit.payload["page_start"] == hit.payload["page_end"] == 0
+
+
+# --- Same-page bookmarks: one section per bookmark --------------------------
+#
+# Message manuals bookmark every message, several per page. Page-granular
+# sections gave all but the last same-page bookmark an empty range, so a
+# page of messages was filed and cited under the last message's heading
+# (83% of real message chunks defined more than one message).
+
+
+def _parsed_doc(toc, page_count, name="widget-messages"):
+    from mainframe_rag.ingest.ibm_pdf import ParsedDoc
+
+    return ParsedDoc(
+        path=__import__("pathlib").Path(f"{name}.pdf"),
+        sha256="7" * 64,
+        doc_id=name,
+        title="Widget Messages",
+        product="Widget",
+        version="1.0",
+        vendor="Example",
+        toc=toc,
+        page_count=page_count,
+    )
+
+
+_MSG_PAGE = (
+    "WID101E\nWIDGET TABLE FULL\nExplanation: The widget table has no free slot.\n"
+    "See message WID103E for the related limit.\n"
+    "WID102E\nWIDGET NAME INVALID\nExplanation: The name has a character outside A-Z.\n"
+    "WID103E\nWIDGET LIMIT REACHED\nExplanation: The configured widget limit was reached.\n"
+)
+
+
+def test_same_page_bookmarks_each_get_their_own_section():
+    toc = [
+        [1, "Widget messages", 1],
+        [2, "WID100E to WID199E", 2],
+        [3, "WID101E", 2],
+        [3, "WID102E", 2],
+        [3, "WID103E", 2],
+        [3, "WID104E", 3],
+    ]
+    pages = ["Overview of widget messages.", "WID100E to WID199E\n" + _MSG_PAGE, "WID104E\nWIDGET OFFLINE\n"]
+    sections = outline_sections(_parsed_doc(toc, 3), pages)
+    prefix = "Widget messages > WID100E to WID199E > "
+    assert [(s.heading_path, s.page_start, s.page_end) for s in sections] == [
+        ("Widget messages", 0, 1),
+        # The range header shares the page with its first child: it folds
+        # into WID101E as before (#577), it is not split off on its own.
+        (prefix + "WID101E", 1, 2),
+        (prefix + "WID102E", 1, 2),
+        (prefix + "WID103E", 1, 2),
+        (prefix + "WID104E", 2, 3),
+    ]
+    # The shared page is cut exactly once per bookmark: no byte lost or repeated.
+    shared = [s for s in sections if s.page_start == 1]
+    assert "".join(pages[1][s.start_char : s.end_char] for s in shared) == pages[1]
+
+    chunks = make_chunks(_parsed_doc(toc, 3), pages, ["1", "2", "3"])
+    by_leaf = {c.heading_path.rsplit(" > ", 1)[-1]: c for c in chunks}
+    for msg in ("WID101E", "WID102E", "WID103E"):
+        chunk = by_leaf[msg]
+        assert chunk.text.splitlines()[0 if msg != "WID101E" else 1] == msg
+        assert chunk.page_label == "2"
+    # Each chunk defines exactly its own message; a cross-reference is not a
+    # definition and does not move the cut.
+    assert "WID102E" not in by_leaf["WID101E"].text
+    assert "See message WID103E" in by_leaf["WID101E"].text
+    assert by_leaf["WID103E"].text.startswith("WID103E\nWIDGET LIMIT REACHED")
+    assert len({c.chunk_id for c in chunks}) == len(chunks)
+    assert [c.chunk_id for c in chunks] == [c.chunk_id for c in make_chunks(_parsed_doc(toc, 3), pages, ["1", "2", "3"])]
+
+
+@pytest.mark.parametrize(
+    "page, why",
+    [
+        ("WID101E\nA.\nWID103E\nC.\n", "a later bookmark's title line is missing"),
+        ("WID101E\nA.\nWID103E\nC.\nWID102E\nB.\n", "title lines out of outline order"),
+    ],
+)
+def test_same_page_bookmarks_fall_back_to_the_whole_page(page, why):
+    toc = [[1, "WID101E", 1], [1, "WID102E", 1], [1, "WID103E", 1]]
+    sections = outline_sections(_parsed_doc(toc, 1), [page])
+    assert [(s.heading_path, s.start_char, s.end_char) for s in sections] == [("WID103E", 0, None)], why
+
+
+def test_same_page_split_needs_page_text_and_distinct_headings():
+    toc = [[1, "WID101E", 1], [1, "WID102E", 1]]
+    page = "WID101E\nA.\nWID102E\nB.\n"
+    # Callers without page text keep the page-granular behavior.
+    assert [s.heading_path for s in outline_sections(_parsed_doc(toc, 1))] == ["WID102E"]
+    # Two identical headings on one page would mint one chunk key twice.
+    dup = [[1, "Notes", 1], [1, "Notes", 1]]
+    assert [s.heading_path for s in outline_sections(_parsed_doc(dup, 1), ["Notes\nA.\nNotes\nB.\n"])] == ["Notes"]
+    # A piece holding only its own title line folds into the next bookmark.
+    bare = outline_sections(_parsed_doc(toc, 1), ["WID101E\nWID102E\nB.\n"])
+    assert [(s.heading_path, s.start_char) for s in bare] == [("WID102E", 0)]
+    split = outline_sections(_parsed_doc(toc, 1), [page])
+    assert [(s.heading_path, page[s.start_char : s.end_char]) for s in split] == [
+        ("WID101E", "WID101E\nA.\n"),
+        ("WID102E", "WID102E\nB.\n"),
+    ]
+
+
+def test_same_page_message_bookmarks_end_to_end(tmp_path):
+    """Producer path on a generated PDF: real outline, real text extraction
+    and chrome stripping. Each message bookmark becomes its own cited chunk."""
+    import pymupdf
+
+    from mainframe_rag.ingest.ibm_pdf import _extract_page_texts
+
+    path = tmp_path / "widget-messages.pdf"
+    doc = pymupdf.open()
+    bodies = [
+        ["Widget messages", "This part lists the widget messages."],
+        ["WID101E", "WIDGET TABLE FULL", "Explanation: The widget table has no free slot.",
+         "WID102E", "WIDGET NAME INVALID", "Explanation: The name has a character outside A-Z.",
+         "WID103E", "WIDGET LIMIT REACHED", "Explanation: The configured widget limit was reached."],
+        ["WID104E", "WIDGET OFFLINE", "Explanation: The widget server stopped responding."],
+    ]
+    for lines in bodies:
+        page = doc.new_page()
+        for i, line in enumerate(lines):
+            page.insert_text((72, 90 + 18 * i), line, fontsize=11)
+    doc.set_toc([[1, "Widget messages", 1], [2, "WID101E", 2], [2, "WID102E", 2], [2, "WID103E", 2], [2, "WID104E", 3]])
+    doc.save(path)
+    doc.close()
+
+    parsed = parse_pdf(path)
+    doc = pymupdf.open(path)
+    try:
+        texts, labels = _extract_page_texts(doc)
+    finally:
+        doc.close()
+    chunks = make_chunks(parsed, strip_chrome(texts), labels)
+    cited = {c.heading_path: c for c in chunks}
+    for msg in ("WID101E", "WID102E", "WID103E", "WID104E"):
+        chunk = cited[f"Widget messages > {msg}"]
+        assert chunk.chunk_type == "message"
+        assert chunk.text.startswith(msg)
+        assert [m for m in chunk.message_ids if m.startswith("WID")] == [msg]
+    assert sum(c.text.count("Explanation:") for c in chunks) == 4

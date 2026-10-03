@@ -275,6 +275,11 @@ class Section:
     heading_path: str
     page_start: int
     page_end: int
+    # Sub-page bounds for bookmarks that share a start page: char offsets
+    # into page_texts[page_start]. end_char is set only on a section that
+    # ends on its own start page (page_end == page_start + 1).
+    start_char: int = 0
+    end_char: int | None = None
 
 
 # Unit-span kinds (issue #368): "atomic" spans (code statements, table
@@ -350,7 +355,60 @@ def _clean_title(title: str) -> str:
     return _WHITESPACE_RE.sub(" ", title).strip()
 
 
-def outline_sections(parsed: ParsedDoc) -> list[Section]:
+def _title_line_offset(text: str, title: str, start: int) -> int | None:
+    """Offset of the first line at or after `start` that opens with the
+    bookmark title (whitespace-collapsed, case-insensitive, whole words)."""
+    want = _WHITESPACE_RE.sub(" ", title).strip().casefold()
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        if offset >= start:
+            have = _WHITESPACE_RE.sub(" ", line).strip().casefold()
+            if have and (have == want or have.startswith(want + " ")):
+                return offset
+        offset += len(line)
+    return None
+
+
+def _shared_page_pieces(
+    group: list[tuple[int, str, str]], page_text: str
+) -> list[tuple[str, int]] | None:
+    """Split one page among the kept bookmarks that start on it.
+
+    `group` holds (level, title, heading_path) in outline order. Returns
+    (heading_path, start_char) per piece, or None to keep the page whole
+    under the last bookmark (the pre-split behavior). Each later bookmark
+    must be found as its own title line, in order, or nothing is split.
+    A piece folds into the next one when the next bookmark is deeper (a
+    same-page parent's intro stays with its first child, issue #577), when
+    it holds nothing but its own title line, or when its heading repeats
+    one already on the page (the chunk key would collide).
+    """
+    starts = [0]
+    for _, title, _ in group[1:]:
+        found = _title_line_offset(page_text, title, starts[-1] + (len(starts) > 1))
+        if found is None:
+            return None
+        starts.append(found)
+    pieces: list[tuple[str, int]] = []
+    for idx, (level, title, path) in enumerate(group):
+        start = pieces.pop()[1] if pieces and pieces[-1][0] == "" else starts[idx]
+        if idx + 1 < len(group):
+            body = page_text[starts[idx] : starts[idx + 1]]
+            own = _WHITESPACE_RE.sub(" ", title).strip().casefold()
+            rest = [
+                ln for ln in body.splitlines()
+                if ln.strip() and _WHITESPACE_RE.sub(" ", ln).strip().casefold() != own
+            ]
+            if group[idx + 1][0] > level or not rest:
+                pieces.append(("", start))
+                continue
+        if any(p == path for p, _ in pieces):
+            return None
+        pieces.append((path, start))
+    return pieces
+
+
+def outline_sections(parsed: ParsedDoc, page_texts: list[str] | None = None) -> list[Section]:
     if not parsed.toc:
         return [Section(heading_path=parsed.title, page_start=0, page_end=parsed.page_count)]
 
@@ -375,6 +433,12 @@ def outline_sections(parsed: ParsedDoc) -> list[Section]:
 
     sections: list[Section] = []
     stack: list[tuple[int, str]] = []
+    # Kept bookmarks starting on the current page, in outline order. Before
+    # sub-page splitting, every one but the last had an empty page range
+    # and was dropped, so a page of several messages was filed under the
+    # last message's heading. With the page text available, the page is
+    # split at each later bookmark's own title line instead.
+    group: list[tuple[int, str, str]] = []
 
     for idx, (level, title, page_1based) in enumerate(kept):
 
@@ -382,6 +446,7 @@ def outline_sections(parsed: ParsedDoc) -> list[Section]:
             stack.pop()
         stack.append((level, title))
         heading_path = " > ".join(t for _, t in stack)
+        group.append((level, title, heading_path))
 
         start = max(0, page_1based - 1)
         end = parsed.page_count
@@ -390,9 +455,19 @@ def outline_sections(parsed: ParsedDoc) -> list[Section]:
             break
 
         if end > start:
-            sections.append(
-                Section(heading_path=heading_path, page_start=start, page_end=end)
-            )
+            pieces = None
+            if len(group) > 1 and page_texts is not None and start < len(page_texts):
+                pieces = _shared_page_pieces(group, page_texts[start])
+            if pieces and len(pieces) > 1:
+                for (path, first), (_, nxt) in pairwise(pieces):
+                    sections.append(Section(path, start, start + 1, first, nxt))
+                path, first = pieces[-1]
+                sections.append(Section(path, start, end, first))
+            else:
+                sections.append(
+                    Section(heading_path=heading_path, page_start=start, page_end=end)
+                )
+            group = []
 
     return sections
 
@@ -849,9 +924,13 @@ def make_chunks(
     labels = page_labels or [None] * parsed.page_count
     chunks: list[Chunk] = []
 
-    sections = outline_sections(parsed) if parsed.toc else fallback_sections(page_texts, parsed.title)
+    sections = (
+        outline_sections(parsed, page_texts) if parsed.toc else fallback_sections(page_texts, parsed.title)
+    )
     for section in sections:
-        body_pages = page_texts[section.page_start : section.page_end]
+        body_pages = list(page_texts[section.page_start : section.page_end])
+        if body_pages and (section.start_char or section.end_char is not None):
+            body_pages[0] = body_pages[0][section.start_char : section.end_char]
         # Issue #591: a wait-state section's bare 3-hex entries canonicalize
         # to the W-form the query parser emits for them, so both sides agree.
         wait_state = bool(_WAITSTATE_HEADING_RE.search(section.heading_path))
