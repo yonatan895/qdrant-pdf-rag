@@ -43,6 +43,7 @@ from mainframe_rag.eval.datasets import (
     QUERY_CLASSES,
     DatasetError,
     VenueError,
+    parse_golden_text,
     read_golden_text,
     read_release_set_text,
     resolve_venue,
@@ -176,6 +177,7 @@ class ReleaseCase(_Strict):
     required_conditions: list[str] = Field(default_factory=list)
     must_not_assert: list[str] = Field(default_factory=list)
     critical_probe: Literal[CRITICAL_KINDS] | None = None  # type: ignore[valid-type]
+    critical_expected_outcome: Literal["answer", "refusal", "interrupted"] | None = None
     provenance: Provenance
     adjudication: Adjudication
 
@@ -183,6 +185,8 @@ class ReleaseCase(_Strict):
 
     @model_validator(mode="after")
     def _shape(self) -> ReleaseCase:
+        if (self.critical_probe is None) != (self.critical_expected_outcome is None):
+            raise ValueError("critical_probe and critical_expected_outcome must be declared together")
         if self.provenance.author.casefold() == self.adjudication.adjudicator.casefold():
             raise ValueError("author and adjudicator must be different people")
         if self.expected_behavior == "answer":
@@ -426,6 +430,7 @@ class Outcome(_Strict):
     appropriate_abstention: bool | None = None
     fabricated_instruction: bool | None = None
     critical_failures: list[Literal[CRITICAL_KINDS]] = Field(default_factory=list)  # type: ignore[valid-type]
+    critical_safe: bool | None = None  # explicit assessment of the case's critical expectation
     failure_stage: Literal[FAILURE_STAGES] = "none"  # type: ignore[valid-type]
 
     v_text = field_validator("case_id", "adjudicator")(_nonblank)
@@ -466,7 +471,7 @@ def _reject_constant(name: str) -> Any:
 
 
 def wilson_bound(successes: float, n: int, confidence: float, side: Literal["lower", "upper"]) -> float:
-    """One-sided Wilson score bound for a proportion (successes may be fractional)."""
+    """Wilson calculation; fractional case-mean inputs are descriptive only."""
     if n <= 0:
         raise ValueError("n must be positive")
     z = NormalDist().inv_cdf(confidence)
@@ -480,16 +485,39 @@ def wilson_bound(successes: float, n: int, confidence: float, side: Literal["low
 def _passed(case: ReleaseCase, o: Outcome | None) -> bool:
     if o is None or o.status != "scored" or not o.completed or o.critical_failures:
         return False
+    if case.critical_probe is not None and _critical_result(case, o) is not True:
+        return False
     if case.expected_behavior == "answer":
         return not o.refused and bool(o.useful and o.supported and o.traceable)
     return bool(o.appropriate_abstention) and o.fabricated_instruction is False
+
+
+def _critical_result(case: ReleaseCase, o: Outcome | None) -> bool | None:
+    """Explicit critical safety assessment, independent of usefulness/completion.
+
+    None means unassessed, never safety success. Observable state must also
+    match the predeclared expectation; an assessment cannot override it.
+    """
+    if o is None or o.status != "scored" or o.critical_safe is None or case.critical_expected_outcome is None:
+        return None
+    if not o.critical_safe or o.critical_failures:
+        return False
+    if case.critical_expected_outcome == "answer":
+        return o.completed and not o.refused
+    if case.critical_expected_outcome == "refusal":
+        return o.completed and o.refused and o.appropriate_abstention is True and o.fabricated_instruction is False
+    return not o.completed and not o.refused
 
 
 def _cell(metric: str, case: ReleaseCase, o: Outcome | None) -> float:
     if metric in ("answer_pass", "abstain_pass"):
         return float(_passed(case, o))
     if metric == "critical_failures":
-        return float(len(o.critical_failures)) if o else 0.0
+        if o is None:
+            return 0.0
+        unlisted_failure = (case.critical_probe is not None and _critical_result(case, o) is False
+                            and case.critical_probe not in o.critical_failures)
+        return float(len(o.critical_failures) + int(unlisted_failure))
     if metric not in ("completion_rate", "false_refusal_rate", "evidence_supplied_rate", "fabrication_count"):
         raise AssertionError(metric)  # pragma: no cover
     if o is None or o.status != "scored":
@@ -512,11 +540,14 @@ def _in_scope(case: ReleaseCase, scope: str) -> bool:
 
 def _check_outcomes(release: ReleaseSet, outcomes: list[Outcome], repeats: int) -> dict[tuple[str, int], Outcome]:
     cases = release.by_id()
+    adjudicators = {a.casefold() for a in release.manifest.adjudicators}
     table: dict[tuple[str, int], Outcome] = {}
     for o in outcomes:
         case = cases.get(o.case_id)
         if case is None:
             raise AcceptanceError(f"outcome for unknown case {o.case_id!r}")
+        if o.adjudicator.casefold() not in adjudicators:
+            raise AcceptanceError(f"outcome {o.case_id!r}: adjudicator is not declared in the manifest")
         if o.repeat > repeats:
             raise AcceptanceError(f"outcome repeat {o.repeat} exceeds the pre-registered {repeats}")
         key = (o.case_id, o.repeat)
@@ -591,6 +622,8 @@ def score(
         raise AcceptanceError("outcomes were recorded against a different release-set hash")
     if run.criteria_sha256 != criteria_sha256:
         raise AcceptanceError("outcomes were recorded against different criteria")
+    if run.profile.kind == "production" and run.profile.corpus_revision != release.manifest.corpus_revision:
+        raise AcceptanceError("run corpus revision differs from the release-set corpus revision")
     if run.repeats != stage.repeats:
         raise AcceptanceError(f"run declares {run.repeats} repeats; criteria pre-register {stage.repeats}")
     binding_ok = release.manifest.criteria_sha256 == criteria_sha256
@@ -607,6 +640,19 @@ def score(
         "status": "pass" if len(table) == expected else "insufficient",
         **({} if len(table) == expected else {"reason": "missing outcomes count as failures, not as omissions"}),
     })
+    critical_slots = [
+        _critical_result(case, table.get((case.id, r)))
+        for case in release.cases if case.critical_probe is not None
+        for r in range(1, stage.repeats + 1)
+    ]
+    assessed = sum(v is not None for v in critical_slots)
+    results.append({
+        "id": "critical_probes_assessed", "metric": "critical_probes_assessed", "scope": "all", "op": ">=",
+        "threshold": len(critical_slots), "statistic": "point", "n": len(critical_slots), "min_n": 0,
+        "value": assessed, "bound": assessed,
+        "status": "insufficient" if assessed != len(critical_slots) else "fail" if False in critical_slots else "pass",
+        "reason": "critical probes require scored explicit safety adjudication matching their declared outcome",
+    })
     statuses = {r["status"] for r in results}
     verdict = "rejected" if "fail" in statuses else "incomplete" if "insufficient" in statuses else "accepted"
 
@@ -617,6 +663,13 @@ def score(
         reasons.append(f"profile {run.profile.kind!r} cannot certify (certifying: {criteria.certifying_profiles})")
     if not binding_ok:
         reasons.append("release set manifest names different criteria than the scored file")
+    repeated_wilson_mean = stage.repeats > 1 and any(
+        c.statistic != "point" and c.metric != "flip_rate" for c in stage.criteria
+    )
+    if stage.statistical_claim and repeated_wilson_mean:
+        reasons.append("repeated-case mean Wilson quantities are descriptive; no inferential statistical unit is registered")
+    if run.profile.corpus_revision != release.manifest.corpus_revision:
+        reasons.append("profile corpus revision does not match the release-set corpus revision")
     certifying = not reasons
 
     return {
@@ -625,7 +678,9 @@ def score(
         "certifying": certifying,
         "non_certifying_reasons": reasons,
         "stage": release.manifest.stage,
-        "statistical_claim": stage.statistical_claim,
+        "statistical_claim": stage.statistical_claim and not repeated_wilson_mean,
+        "requested_statistical_claim": stage.statistical_claim,
+        "rate_unit": "case_mean_across_repeats" if stage.repeats > 1 else "binary_case_outcome",
         "repeats": stage.repeats,
         "criteria": {"id": criteria.criteria_id, "status": criteria.status, "sha256": criteria_sha256},
         "set": {
@@ -691,25 +746,29 @@ def _short(exc: BaseException) -> str:
 # --------------------------------------------------------------------------
 
 
-def _tuning_queries() -> list[str]:
-    """Dev golden always; the frozen holdout only under the RC venue (already required)."""
+def _tuning_queries(root: Path) -> list[str]:
+    """Read all required known comparison sets from one deliberately selected root."""
     queries: list[str] = []
-    for name in ("evals/golden.jsonl", "evals/holdout.jsonl", "evals/paraphrase.jsonl"):
-        path = Path(name)
-        if not path.exists():
-            continue
+    for name in ("golden.jsonl", "holdout.jsonl", "paraphrase.jsonl"):
+        path = root / name
         try:
             text = read_golden_text(path)
-        except DatasetError as exc:
-            raise AcceptanceError(f"cannot read tuning dataset {name} for the overlap check: {exc}") from exc
-        queries += [json.loads(x).get("query", "") for x in text.splitlines() if x.strip() and not x.startswith("#")]
+            entries = parse_golden_text(text)
+        except (DatasetError, OSError, UnicodeError, SystemExit) as exc:
+            raise AcceptanceError(f"required overlap dataset {name} unavailable or invalid") from exc
+        if not entries:
+            raise AcceptanceError(f"required overlap dataset {name} is empty")
+        queries.extend(e.query for e in entries)
     return queries
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, workspace_root: Path | None = None) -> int:
+    root = workspace_root if workspace_root is not None else Path.cwd()
     p = argparse.ArgumentParser(description="Score adjudicated outcomes against pre-registered release criteria (#367)")
     p.add_argument("--set", type=Path, required=True, help="release_set.jsonl (needs adjacent .sha256 and VENUE=rc)")
-    p.add_argument("--criteria", type=Path, default=DEFAULT_CRITERIA_PATH)
+    p.add_argument("--criteria", type=Path, default=root / DEFAULT_CRITERIA_PATH)
+    p.add_argument("--comparison-root", type=Path, default=root / "evals",
+                   help="directory containing required golden, pinned holdout and paraphrase comparison sets")
     p.add_argument("--outcomes", type=Path, help="adjudicated outcomes JSONL; omit with --validate-only")
     p.add_argument("--validate-only", action="store_true", help="validate the set and its overlap with tuning sets only")
     p.add_argument("--out", type=Path, help="write the JSON report here")
@@ -718,7 +777,7 @@ def main(argv: list[str] | None = None) -> int:
         if resolve_venue() != "rc":
             raise VenueError("release acceptance requires VENUE=rc; the release set is never a tuning dataset")
         release, set_sha = load_release_set(args.set)
-        overlaps = find_overlaps(release, _tuning_queries())
+        overlaps = find_overlaps(release, _tuning_queries(args.comparison_root))
         if overlaps:
             raise AcceptanceError(f"release cases overlap tuning datasets: {overlaps}")
         if args.validate_only:

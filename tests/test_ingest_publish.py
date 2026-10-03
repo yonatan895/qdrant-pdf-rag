@@ -62,7 +62,8 @@ class PublishFake:
     def get_collection(self, name):
         return SimpleNamespace(
             config=SimpleNamespace(
-                params=SimpleNamespace(vectors={"dense": SimpleNamespace(size=self.dim)})
+                params=SimpleNamespace(vectors={"dense": SimpleNamespace(size=self.dim)},
+                                       shard_number=1, replication_factor=1)
             ),
             points_count=len(self.collections[name]),
         )
@@ -4436,6 +4437,72 @@ def test_snapshot_clone_single_node_recipe_still_works():
     live = _seed_live_pair(fake)
     clone_collection(fake, _settings(), live, "mainframe_manuals__genNEW")
     assert fake.collections["mainframe_manuals__genNEW"] == fake.collections[live]
+
+
+def test_unknown_topology_repair_permits_next_ordinary_clone():
+    from mainframe_rag.ingest.qdrant_io import DistributedRecoveryUnsupportedError, clone_collection
+
+    fake = _TopologyFake(None, 1)
+    live = _seed_live_pair(fake)
+    with pytest.raises(DistributedRecoveryUnsupportedError):
+        clone_collection(fake, _settings(), live, "mainframe_manuals__genNEW")
+    assert not fake.snapshots
+    fake.layout = (1, 1)
+    clone_collection(fake, _settings(), live, "mainframe_manuals__genNEW")
+    assert fake.collections["mainframe_manuals__genNEW"] == fake.collections[live]
+
+
+@pytest.mark.parametrize("field", ["shard_number", "replication_factor"])
+@pytest.mark.parametrize("value", [None, 0, -1, True, False, "1", "6", 1.0, "missing"])
+@pytest.mark.parametrize("operation", ["clone", "migration"])
+def test_unknown_topology_refuses_clone_and_legacy_migration_before_mutation(
+    tmp_path, monkeypatch, field, value, operation,
+):
+    from mainframe_rag.ingest import run_ingest
+    from mainframe_rag.ingest.qdrant_io import DistributedRecoveryUnsupportedError, clone_collection
+
+    class UnknownTopology(_TopologyFake):
+        def __init__(self):
+            super().__init__()
+            self.mutations = []
+
+        def get_collection(self, name):
+            info = super().get_collection(name)
+            if value == "missing":
+                delattr(info.config.params, field)
+            else:
+                setattr(info.config.params, field, value)
+            return info
+
+        def create_snapshot(self, *args, **kwargs):
+            self.mutations.append("snapshot")
+            return super().create_snapshot(*args, **kwargs)
+
+        def recover_snapshot(self, *args, **kwargs):
+            self.mutations.append("recover")
+            return super().recover_snapshot(*args, **kwargs)
+
+        def delete_collection(self, *args, **kwargs):
+            self.mutations.append("delete")
+            return super().delete_collection(*args, **kwargs)
+
+    fake = UnknownTopology()
+    live = _seed_live_pair(fake, live=ALIAS if operation == "migration" else "mainframe_manuals__genLIVE")
+    if operation == "migration":
+        fake.aliases.clear()
+    before = {name: list(points) for name, points in fake.collections.items()}
+    with pytest.raises(DistributedRecoveryUnsupportedError, match="topology|shard_number|replication_factor"):
+        if operation == "clone":
+            clone_collection(fake, _settings(), live, "mainframe_manuals__genNEW")
+        else:
+            _publish_env(monkeypatch)
+            monkeypatch.setattr(run_ingest, "_get_qdrant", lambda settings: fake)
+            corpus = tmp_path / "corpus"
+            corpus.mkdir()
+            _build_doc(corpus, "SA22-0000-00_first")
+            _run_main(monkeypatch, corpus, tmp_path / "inv.jsonl", "--reingest")
+    assert fake.mutations == [] and fake.snapshots == {}
+    assert fake.collections == before
 
 
 def test_ensure_staging_refuses_distributed_live_and_leaves_it_serving():

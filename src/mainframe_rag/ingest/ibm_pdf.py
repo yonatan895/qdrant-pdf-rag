@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 import pymupdf
@@ -190,9 +191,9 @@ def parse_pdf(
 # extraction_rules_version: a payload-changing extraction rule outside the
 # hashed modules would let resumed ingests silently keep stale payloads.
 
-# A block is "cell-like" (a table column, not prose) when its lines are
-# short: at most this many words on average and per line. Two-column prose
-# runs 8+ words per line, so it never qualifies and keeps stream order.
+# Short lines are only candidates: independent prose columns can be short too.
+# Admission additionally requires aligned table headings and a compact key/value
+# column; ambiguous regions retain content-stream order.
 _CELL_MEAN_WORDS = 5.0
 _CELL_MAX_WORDS = 8
 # A column set is only reassembled into rows when at least this many
@@ -203,17 +204,78 @@ _MIN_TABLE_ROWS = 3
 # many line heights of the set's vertical extent (MuPDF splits a column into
 # several blocks wherever a wrapped row opens a larger gap).
 _MAX_GAP_LINES = 1.5
-_CHANGE_BAR_LINE = "|"
+_TABLE_HEADINGS = frozenset({
+    "parameter", "operand", "default", "meaning", "description", "name", "value", "values",
+    "key", "val", "note", "notes", "code", "condition", "conditions", "type", "setting",
+    "mnemonic", "instruction", "format", "operation", "parameter name", "default value",
+    "return code", "reason code", "operand number",
+})
+_COMPACT_VALUE = re.compile(r"(?:[A-Z][A-Z0-9_./-]*|[+-]?\d+(?:\.\d+)?%?)\Z")
+_COLUMN_TOLERANCE = 3.0
 
 
-def _strip_change_bars(text: str) -> str:
-    """Drop lines that are only an IBM change-bar glyph. Bars are margin
-    marks, never content; a lone ``|`` line only pollutes chunk text and
-    embeddings. A ``|`` inside a longer line is untouched."""
-    if _CHANGE_BAR_LINE not in text:
-        return text
-    kept = [ln for ln in text.split("\n") if ln.strip() != _CHANGE_BAR_LINE]
-    return "\n".join(kept)
+def _margin_bar_lines(
+    page: pymupdf.Page,
+    blocks: list,
+    line_boxes: dict[tuple[int, int], tuple[float, float, float, float]],
+) -> set[tuple[int, int]]:
+    """Only repeated isolated bars outside the text body and at a page margin.
+
+    A run must also accompany nonmonospaced prose sentences. A standalone
+    glyph in code/diagrams, a lone margin glyph, and ambiguous runs remain
+    content. Margin position alone does not establish revision markup.
+    """
+    bars = {
+        (b[5], i) for b in blocks for i, ln in enumerate(b[4].split("\n"))
+        if ln.strip() == "|" and (b[5], i) in line_boxes
+    }
+    if not bars:
+        return set()
+    body = [box for key, box in line_boxes.items() if key not in bars]
+    if not body:
+        return set()
+    monospaced = {
+        (b["number"], i) for b in page.get_text("dict")["blocks"] if b["type"] == 0
+        for i, line in enumerate(b["lines"])
+        if any(span["flags"] & pymupdf.TEXT_FONT_MONOSPACED for span in line["spans"])
+    }
+    prose = {
+        (b[5], i) for b in blocks for i, ln in enumerate(b[4].split("\n"))
+        if len(ln.split()) >= 4 and ln.rstrip().endswith((".", "?", "!"))
+        and (b[5], i) not in monospaced and (b[5], i) in line_boxes
+    }
+    left, right = min(b[0] for b in body), max(b[2] for b in body)
+    candidates = []
+    for key in bars:
+        if key in monospaced:
+            continue
+        x0, y0, x1, y1 = line_boxes[key]
+        height = y1 - y0
+        if ((x1 <= left - height and x1 <= page.rect.x0 + page.rect.width * 0.1)
+                or (x0 >= right + height and x0 >= page.rect.x1 - page.rect.width * 0.1)):
+            candidates.append((key, x0, y0, y1))
+    accepted: set[tuple[int, int]] = set()
+    remaining = {c[0] for c in candidates}
+    geometry = {c[0]: c[1:] for c in candidates}
+    while remaining:
+        pending = [remaining.pop()]
+        run = set(pending)
+        while pending:
+            key = pending.pop()
+            x0, y0, y1 = geometry[key]
+            neighbours = {
+                other for other in remaining
+                if abs(geometry[other][0] - x0) <= 1
+                and abs((geometry[other][1] + geometry[other][2] - y0 - y1) / 2) <= 2 * (y1 - y0)
+            }
+            remaining.difference_update(neighbours)
+            run.update(neighbours)
+            pending.extend(neighbours)
+        paired = sum(any(_same_row((geometry[key][1], geometry[key][2]),
+                                   (line_boxes[p][1], line_boxes[p][3])) for p in prose) for key in run)
+        if len(run) >= 3 and paired >= 3:
+            accepted.update(run)
+    return accepted
 
 
 def _is_cell_block(text: str) -> bool:
@@ -232,11 +294,11 @@ def _same_row(a: tuple[float, float], b: tuple[float, float]) -> bool:
 def _table_rows(
     group: list[tuple[int, str]],
     line_boxes: dict[tuple[int, int], tuple[float, float, float, float]],
-) -> list[str] | None:
+) -> tuple[list[str], set[int]] | None:
     """Rebuild row lines from a set of column blocks, or None when the
     geometry does not describe a table (then the caller keeps stream
     order). group: (block_no, block text) in stream order."""
-    cells: list[tuple[float, float, float, int, str]] = []  # y0, y1, x0, block, text
+    cells: list[tuple[float, float, float, int, str, float]] = []  # y0, y1, x0, block, text, x1
     for block_no, text in group:
         for line_no, ln in enumerate(text.split("\n")):
             if not ln.strip():
@@ -244,18 +306,54 @@ def _table_rows(
             box = line_boxes.get((block_no, line_no))
             if box is None:
                 return None
-            cells.append((box[1], box[3], box[0], block_no, ln.strip()))
+            cells.append((box[1], box[3], box[0], block_no, ln.strip(), box[2]))
     cells.sort(key=lambda c: (c[0], c[2]))
-    rows: list[list[tuple[float, float, float, int, str]]] = []
+    rows: list[list[tuple[float, float, float, int, str, float]]] = []
     for cell in cells:
         if rows and _same_row((rows[-1][0][0], rows[-1][0][1]), (cell[0], cell[1])):
             rows[-1].append(cell)
         else:
             rows.append([cell])
-    multi = sum(1 for r in rows if len(r) >= 2)
-    if multi < _MIN_TABLE_ROWS:
+    headers = [[c for c in r if c[4].casefold() in _TABLE_HEADINGS] for r in rows]
+    header = next((r for r in headers if len(r) >= 2), None)
+    if header is None:
         return None
-    return [" ".join(c[4] for c in sorted(r, key=lambda c: c[2])) for r in rows]
+    data = [c for c in cells if c[0] > header[0][0] and c[4].casefold() not in _TABLE_HEADINGS]
+    # PDF headings are often centered over left/right-aligned data. Infer the
+    # repeated data start beneath each heading's horizontal span rather than
+    # requiring the heading itself to have that start. A compact column still
+    # has to be established independently; headings alone do not admit prose.
+    anchors: list[float] = []
+    compact_column = False
+    for heading in header:
+        beneath = [c for c in data if c[2] <= heading[5] + _COLUMN_TOLERANCE
+                   and c[5] >= heading[2] - _COLUMN_TOLERANCE]
+        starts = [c[2] for c in beneath]
+        if not starts:
+            return None
+        anchor = max(starts, key=lambda x: sum(abs(v - x) <= _COLUMN_TOLERANCE for v in starts))
+        anchors.append(anchor)
+        values = [c[4] for c in data if abs(c[2] - anchor) <= _COLUMN_TOLERANCE]
+        if len(values) >= _MIN_TABLE_ROWS - 1 and all(_COMPACT_VALUE.fullmatch(v) for v in values):
+            compact_column = True
+    if any(right - left <= _COLUMN_TOLERANCE for left, right in pairwise(anchors)):
+        return None
+    if not compact_column:
+        return None
+
+    def aligned(cell: tuple[float, float, float, int, str, float]) -> bool:
+        return cell in header or any(abs(cell[2] - x) <= _COLUMN_TOLERANCE for x in anchors)
+
+    selected = {c[3] for c in cells if c[0] >= header[0][0] - 0.5 and aligned(c)}
+    # Never split/reorder a block that mixes a table column and unrelated prose.
+    if any(c[3] in selected and (c[0] < header[0][0] - 0.5
+           or not aligned(c)) for c in cells):
+        return None
+    table = [[c for c in r if c[3] in selected] for r in rows]
+    table = [r for r in table if r]
+    if sum(len(r) >= 2 for r in table) < _MIN_TABLE_ROWS:
+        return None
+    return [" ".join(c[4] for c in sorted(r, key=lambda c: c[2])) for r in table], selected
 
 
 def extract_page_text(page: pymupdf.Page) -> str:
@@ -268,28 +366,30 @@ def extract_page_text(page: pymupdf.Page) -> str:
     PyMuPDF it simulates layout (padding, blank lines, cross-column lines)
     and interleaves multi-column prose line by line.
 
-    The correction is therefore narrow. Consecutive text blocks that are
-    vertically adjacent or overlapping and *cell-like* (short lines, see
-    _is_cell_block) form a column set; only when at least
-    _MIN_TABLE_ROWS baselines carry two or more cells is the set
-    emitted as one line per baseline (cells joined by a single space). Prose,
-    including multi-column prose, never qualifies and stays byte-identical
-    to plain extraction, as does any page where the rebuilt text would not
-    reproduce plain extraction (checked, not assumed). Bare change-bar lines
-    are dropped (see _strip_change_bars).
+    Short-line blocks are candidates only. Aligned table headings, shared
+    baselines and a consistent compact key/value column must establish the
+    supported table shape; ambiguous columns keep stream order. Isolated
+    bars are removed only with repeated margin geometry. If block text does
+    not exactly reproduce plain extraction, the complete page stays plain.
     """
     plain = page.get_text()
     blocks = [b for b in page.get_text("blocks") if len(b) >= 7 and b[6] == 0]
     if not blocks or "".join(b[4] for b in blocks) != plain:
-        return _strip_change_bars(plain)
+        return plain
+
+    line_boxes: dict[tuple[int, int], tuple[float, float, float, float]] = {}
+    for w in page.get_text("words"):
+        key = (w[5], w[6])
+        x0, y0, x1, y1 = line_boxes.get(key, (w[0], w[1], w[2], w[3]))
+        line_boxes[key] = (min(x0, w[0]), min(y0, w[1]), max(x1, w[2]), max(y1, w[3]))
+    bars = _margin_bar_lines(page, blocks, line_boxes)
 
     # (block_no, bbox, text without change bars, original text); blocks that
     # were nothing but change bars vanish here.
-    entries = [
-        (b[5], (b[0], b[1], b[2], b[3]), stripped, b[4])
-        for b in blocks
-        if (stripped := _strip_change_bars(b[4])).strip()
-    ]
+    entries = []
+    for b in blocks:
+        stripped = "\n".join(ln for i, ln in enumerate(b[4].split("\n")) if (b[5], i) not in bars)
+        entries.append((b[5], (b[0], b[1], b[2], b[3]), stripped, b[4]))
     groups: list[tuple[int, int]] = []  # [start, end) indexes into entries
     i = 0
     while i < len(entries):
@@ -309,13 +409,7 @@ def extract_page_text(page: pymupdf.Page) -> str:
         groups.append((i, j))
         i = max(j, i + 1)
     if not groups:
-        return _strip_change_bars(plain)
-
-    line_boxes: dict[tuple[int, int], tuple[float, float, float, float]] = {}
-    for w in page.get_text("words"):
-        key = (w[5], w[6])
-        x0, y0, x1, y1 = line_boxes.get(key, (w[0], w[1], w[2], w[3]))
-        line_boxes[key] = (min(x0, w[0]), min(y0, w[1]), max(x1, w[2]), max(y1, w[3]))
+        return "".join(e[2] for e in entries)
 
     out: list[str] = []
     cursor = 0
@@ -323,13 +417,20 @@ def extract_page_text(page: pymupdf.Page) -> str:
         out.extend(e[2] for e in entries[cursor:start])
         # Word-based line indexes only line up with unmodified block text, so
         # a block that also carried change-bar lines keeps stream order.
-        rows = None
+        rebuilt = None
         if all(e[2] == e[3] for e in entries[start:end]):
-            rows = _table_rows([(e[0], e[2]) for e in entries[start:end]], line_boxes)
-        if rows is None:
+            rebuilt = _table_rows([(e[0], e[2]) for e in entries[start:end]], line_boxes)
+        if rebuilt is None:
             out.extend(e[2] for e in entries[start:end])
         else:
-            out.append("\n".join(rows) + "\n")
+            rows, selected = rebuilt
+            emitted = False
+            for e in entries[start:end]:
+                if e[0] not in selected:
+                    out.append(e[2])
+                elif not emitted:
+                    out.append("\n".join(rows) + "\n")
+                    emitted = True
         cursor = end
     out.extend(e[2] for e in entries[cursor:])
     return "".join(out)

@@ -96,30 +96,42 @@ collections need a re-ingest.**
   simulates layout (space padding, blank lines, words from different
   columns on one line) and interleaves two-column prose.
 - `extract_page_text` therefore keeps plain extraction and corrects only
-  table-like regions. Consecutive text blocks that are *cell-like* (mean
+  positively supported table regions. Consecutive text blocks that are *cell-like* (mean
   <= 5 and max <= 8 words per line) and vertically adjacent (gap <= 1.5
-  line heights) form a column set. Only when at least 3 baselines in the
-  set carry two or more cells is the set re-emitted as one line per
-  baseline, cells ordered by x and joined by a single space; a wrapped
-  cell's continuation line follows its row. Everything else, including
-  multi-column prose (its lines run 8+ words), is byte-identical to plain
-  extraction. If the blocks do not reproduce the plain text exactly, the
-  page falls back to plain.
-- Bare IBM change-bar lines (a line that is only `|`) are dropped; they
-  are margin marks, not content, and surfaced as runs of `|` inside table
-  chunks. A `|` inside a longer line is untouched.
-- Known limits: a table whose cells are prose-length (more than 8 words per
-  line) is left in stream order; a wrapped cell is zipped line-by-line with
-  its neighbours' baselines, not parsed into cell objects; no ruling-line
-  (`find_tables`) detection. Chunk ids, `chunk_type` and the identity
-  contract are unchanged.
-- Measured on five local manuals (parse + chunk only, counts; z/OS 2.2
+  line heights) form candidates. Admission requires at least two aligned
+  recognized table headings, three shared baselines and a consistently compact
+  key/value column. Centered headings may have different starts from their
+  data: repeated data starts beneath each heading's horizontal span establish
+  distinct ordered column alignment; headings that infer the same data column
+  keep stream order. Only blocks aligned to those columns become row lines,
+  cells ordered by x and joined by a single space; a wrapped continuation
+  follows its row. Captions and adjacent prose retain their original block
+  positions. Short independent procedures alone do not establish a table.
+  Ambiguous regions and pages whose blocks do not exactly reproduce plain text
+  stay in stream order, including whitespace-only blocks.
+- A standalone `|` is removed only as part of a repeated aligned run at a
+  page margin, separated from the text body's horizontal extent and paired
+  with at least three nonmonospaced prose sentences. Monospaced glyphs,
+  bars within the body, short-label diagram walls and lone margin glyphs
+  retain content. These geometry/typography signals are heuristic: they do
+  not establish the author's semantic intent or guarantee every diagram
+  shape. Source-fidelity qualification still needs SME review.
+- Known limits: unrecognized headings, prose-length cells (more
+  than 8 words per line), mixed prose/table blocks or no compact column keep
+  stream order. Wrapped cells use line baselines, not semantic cell objects;
+  ruling lines are not consulted. These conservative controls are not a
+  universal table/prose classifier. Chunk ids and the four-type vocabulary
+  retain their existing contract; the extraction hash changes and re-ingest
+  remains mandatory.
+- Historical census for the original PR rule, before the review correction,
+  on five local manuals (parse + chunk only, counts; z/OS 2.2
   MVS Init & Tuning Reference, Principles of Operation, Program Management,
   Device Validation Support, one CICS book; 3,799 pages): 1,470 pages
   changed by the table rule, 0 pages gained or lost a word (the rebuild
   only reorders), 0 prose lines of 9+ words disturbed, 0 duplicate chunk
   texts before and after, chunk counts 4,144 -> 4,136 and chunk text 10.27M
-  -> 10.25M chars (change bars and merged cell lines).
+  -> 10.25M chars (change bars and merged cell lines). Word retention alone
+  did not establish source associations; this is not current-rule acceptance.
 
 Contract tests: `tests/test_parser_ibm_shape.py`,
 `tests/test_generic_pdf.py`, `tests/test_sanitize.py`.
@@ -988,9 +1000,11 @@ readiness, retrieval, answer/chat/console, recovery tools and evaluation.
   The snapshot clone used to prepare an update staging generation (and the
   legacy-layout migration) is the single-node recipe: a source with more
   than one shard or replica, a selected multi-shard/replica policy, or an
-  unreadable topology is refused before any snapshot/recover/delete
+  unreadable, missing or invalid topology is refused before any snapshot/recover/delete
   (`qdrant_io.require_single_node_recovery`; collection snapshots are
-  node-local, [deploy](deploy.md#distributed-recovery)). A distributed
+  node-local, [deploy](deploy.md#distributed-recovery)). Authorization requires
+  explicit positive non-boolean integer shard/replica values, both exactly 1.
+  A distributed
   generation is rebuilt fresh from the originals.
   Supply the comma-separated non-secret URLs via the operator env file or
   caller environment/Task variable (caller takes precedence). The launcher

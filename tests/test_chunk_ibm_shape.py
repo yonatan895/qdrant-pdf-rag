@@ -1146,3 +1146,140 @@ def test_lone_header_pair_on_one_baseline_is_not_merged(tmp_path):
 
     ((plain, extracted),) = _plain_vs_extracted(_one_page_pdf(tmp_path / "WX10-0018-00_hdr.pdf", draw))
     assert extracted == plain
+
+
+@pytest.mark.parametrize("columns", [
+    (["If the system fails,", "do not restart it.", "First preserve the dump.", "Then call the owner."],
+     ["During normal scheduled work,", "restart is usually permitted.", "Check the approved window.", "Record the completed action."]),
+    (["Emergency procedure", "1. Preserve the dump.", "2. Call the owner.", "3. Await approval."],
+     ["Routine procedure", "1. Check the window.", "2. Restart the system.", "3. Record the result."]),
+])
+def test_short_independent_column_procedures_keep_original_sequence(tmp_path, columns):
+    """F1: identical baselines and short lines do not establish table cells."""
+    import pymupdf
+
+    from mainframe_rag.ingest.ibm_pdf import extract_page_text
+
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        for x, lines in zip((55, 325), columns, strict=True):
+            page.insert_text((x, 90), "\n".join(lines), fontsize=12, lineheight=1.5)
+        assert extract_page_text(page) == page.get_text()
+        path = tmp_path / "independent-procedures.pdf"
+        doc.save(path)
+    joined = "\n".join(c.text for c in _pipeline_chunks(path))
+    for lines in columns:
+        assert "\n".join(lines) in joined
+
+
+def test_short_prose_beside_captioned_table_keeps_associations(tmp_path):
+    """A short sidebar must stay outside an admitted table's row set."""
+    cols = [("Key", ["K1", "K2", "K3"]), ("Value", ["7", "8", "9"])]
+    sidebar = ["If the system fails,", "do not restart it.", "First preserve the dump.", "Then call the owner."]
+
+    def draw(page):
+        page.insert_text((72, 82), "Table 1. Approved limits", fontsize=10)
+        _draw_columns(page, cols, step=60)
+        page.insert_text((325, 100), "\n".join(sidebar), fontsize=10, lineheight=1.4)
+
+    (chunk,) = _pipeline_chunks(_one_page_pdf(tmp_path / "caption-sidebar.pdf", draw))
+    lines = chunk.text.splitlines()
+    assert "Table 1. Approved limits" in lines
+    assert all(row in lines for row in ("Key Value", "K1 7", "K2 8", "K3 9"))
+    assert "\n".join(sidebar) in chunk.text
+    assert lines.index("Table 1. Approved limits") < lines.index("Key Value")
+
+
+def test_centered_multiword_headings_keep_wrapped_row_associations(tmp_path):
+    """Real PDF shape: headings and their data have different horizontal starts."""
+    columns = [
+        (84, 72, "Parameter name", ["MAXJOBS", "RESVBUF", "DYNALLOC"]),
+        (234, 250, "Default value", ["200", "64", "32"]),
+        (370, 350, "Description", ["Maximum queued jobs.", "Reserved buffers|continues here.", "Allocation slots."]),
+    ]
+
+    def draw(page):
+        page.insert_text((72, 70), "Table 1. Original example", fontsize=10)
+        for heading_x, data_x, heading, values in columns:
+            page.insert_text((heading_x, 100), heading, fontsize=10)
+            for row, value in enumerate(values):
+                y = 114 + 14 * (row + int(row > 1))
+                for continuation, line in enumerate(value.split("|")):
+                    page.insert_text((data_x, y + 14 * continuation), line, fontsize=10)
+        for row, line in enumerate(["Keep this note.", "Read before use.", "Then proceed."]):
+            page.insert_text((510, 114 + 14 * row), line, fontsize=10)
+
+    (chunk,) = _pipeline_chunks(_one_page_pdf(tmp_path / "centered-heading-table.pdf", draw))
+    lines = chunk.text.splitlines()
+    for expected in ["MAXJOBS 200 Maximum queued jobs.", "RESVBUF 64 Reserved buffers", "DYNALLOC 32 Allocation slots."]:
+        assert expected in lines
+    assert lines.index("continues here.") == lines.index("RESVBUF 64 Reserved buffers") + 1
+    assert chunk.text.index("Table 1. Original example") < chunk.text.index("MAXJOBS 200")
+    assert "Keep this note.\nRead before use.\nThen proceed." in chunk.text
+
+
+def test_overlapping_headings_cannot_share_one_inferred_data_column(tmp_path):
+    def draw(page):
+        for x, heading in [(84, "Parameter"), (110, "Value"), (350, "Description")]:
+            page.insert_text((x, 100), heading, fontsize=10)
+        for x, values in [(116, ["K1", "K2", "K3"]), (250, ["200", "64", "32"]),
+                          (350, ["First limit", "Second limit", "Third limit"])]:
+            for row, value in enumerate(values):
+                page.insert_text((x, 114 + 14 * row), value, fontsize=10)
+
+    ((plain, extracted),) = _plain_vs_extracted(_one_page_pdf(tmp_path / "ambiguous-headings.pdf", draw))
+    assert extracted == plain
+
+
+def test_standalone_diagram_bar_in_body_is_preserved(tmp_path):
+    def draw(page):
+        for y, text in ((100, "Input"), (114, "|"), (128, "Output")):
+            page.insert_text((220, y), text, fontsize=10)
+        page.insert_text((50, 114), "|", fontsize=10)  # one glyph alone is not a change-bar run
+
+    ((plain, extracted),) = _plain_vs_extracted(_one_page_pdf(tmp_path / "diagram.pdf", draw))
+    assert extracted == plain
+    (chunk,) = _pipeline_chunks(tmp_path / "diagram.pdf")
+    assert "Input\n|\nOutput" in chunk.text and chunk.text.splitlines().count("|") == 2
+
+
+@pytest.mark.parametrize(("font", "labels"), [
+    ("cour", ["branch alpha", "branch beta", "branch gamma"]),
+    ("helv", ["branch alpha", "branch beta", "branch gamma"]),
+    ("cour", ["Branch alpha remains active.", "Branch beta remains idle.", "Branch gamma remains closed."]),
+])
+def test_margin_positioned_diagram_wall_keeps_its_bars(tmp_path, font, labels):
+    def draw(page):
+        for y, label in zip((90, 106, 122), labels, strict=True):
+            page.insert_text((40, y), "|", fontsize=12, fontname=font)
+            page.insert_text((80, y), label, fontsize=12, fontname=font)
+
+    ((plain, extracted),) = _plain_vs_extracted(_one_page_pdf(tmp_path / "margin-wall.pdf", draw))
+    assert extracted == plain and extracted.splitlines().count("|") == 3
+
+
+def test_table_associations_round_trip_through_stored_and_queried_payload(tmp_path):
+    from contextlib import closing
+
+    from qdrant_client import QdrantClient, models
+
+    from mainframe_rag.config import Settings
+    from mainframe_rag.ingest.qdrant_io import upsert_chunks
+
+    path = _table_pdf(tmp_path / "original-table.pdf")
+    chunks = _pipeline_chunks(path)
+    settings = Settings(qdrant_collection="fidelity", dense_dim=2, _env_file=None)
+    with closing(QdrantClient(":memory:")) as client:
+        client.create_collection("fidelity", vectors_config={"dense": models.VectorParams(size=2, distance=models.Distance.COSINE)},
+                                 sparse_vectors_config={"bm25": models.SparseVectorParams()})
+        upsert_chunks(client, settings, parse_pdf(path), chunks,
+                      [([1.0, 0.0], ([1], [1.0])) for _ in chunks])
+        stored = client.retrieve("fidelity", ids=[chunks[0].chunk_id], with_payload=True)[0]
+        hit = client.query_points("fidelity", using="dense", query=[1.0, 0.0], with_payload=True).points[0]
+        assert stored.id == hit.id == chunks[0].chunk_id
+        assert stored.payload == hit.payload
+        lines = hit.payload["text"].splitlines()
+        assert "Parameter Default Meaning" in lines
+        for name, default, meaning in _TABLE_ROWS:
+            assert f"{name} {default} {meaning}" in lines
+        assert hit.payload["page_start"] == hit.payload["page_end"] == 0

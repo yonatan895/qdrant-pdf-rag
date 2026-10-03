@@ -354,7 +354,9 @@ def distributed_topology_reason(
         return f"{collection!r} topology unreadable ({type(exc).__name__})"
     for attr in ("shard_number", "replication_factor"):
         value = getattr(params, attr, None)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 1:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            return f"{collection!r} topology has no valid positive integer {attr}"
+        if value != 1:
             return f"{collection!r} has {attr}={value}"
     return None
 

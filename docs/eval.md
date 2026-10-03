@@ -775,7 +775,8 @@ pin (one record naming the basename). Passages are referenced, never quoted:
   (`answer`/`abstain`), `provenance` (`author`, `authored_at`, `source`,
   `release`), `adjudication` (`adjudicator`, `adjudicated_at`, `verdict:
   accepted`), optional `critical_probe` (`scope`, `release`, `protocol`,
-  `access`, `false_completion`, `provenance`).
+  `access`, `false_completion`, `provenance`), paired with a predeclared
+  `critical_expected_outcome` (`answer`, `refusal`, `interrupted`).
   Answer cases add `evidence[]` (`doc_id`, `release`, physical `physical_page`
   >= 1, `locator`), `expected_doc_ids` equal to the evidence docs,
   `required_facts`, `required_conditions`. Abstain cases add `abstain_reason`
@@ -784,8 +785,12 @@ pin (one record naming the basename). Passages are referenced, never quoted:
 - The validator rejects unknown fields, author equal to adjudicator, authors or
   adjudicators absent from the manifest, duplicate ids or case/whitespace-folded
   queries, malformed dates/hashes, and any unadjudicated case. The CLI also
-  refuses a set whose queries overlap `golden.jsonl`, `paraphrase.jsonl` or (under
-  RC) `holdout.jsonl`.
+  refuses a set whose queries overlap the required `golden.jsonl`,
+  `paraphrase.jsonl` or pinned `holdout.jsonl`. The script supplies its repository
+  root independently of caller cwd; installed/module callers select the workspace
+  or an explicit `--comparison-root` artifact directory. Missing, empty or invalid
+  comparison sets refuse. Exact normalized overlap checks do not establish that
+  unseen paraphrases or development exposure are absent.
 - **Never a tuning set.** `datasets.read_release_set_text` requires `VENUE=rc`
   and the adjacent pin (hash and decode one buffer; mismatch, malformed or
   missing pin refuse with exit 2; the next ordinary run succeeds after repair).
@@ -805,9 +810,13 @@ model (`none` when disabled), corpus collection/revision, image, git SHA and
 temperature). Outcome fields: `status` (`scored`/`skipped`/`error`),
 `completed`, `refused`, SME `useful`/`supported`/`traceable`,
 `evidence_supplied`, abstain `appropriate_abstention`/`fabricated_instruction`,
-`critical_failures` and `failure_stage` (extraction, retrieval,
+`critical_failures`, explicit `critical_safe` assessment for critical probes,
+and `failure_stage` (extraction, retrieval,
 evidence_omitted, context_exhaustion, protocol, unsupported_answer,
-infrastructure). A pass requires `status=scored`, `completed`, no critical
+infrastructure). Outcome adjudicators must be declared in the set manifest,
+and a production run's corpus revision must exactly match the set's revision.
+These checks establish record consistency, not human identity authentication.
+A usefulness pass requires `status=scored`, `completed`, no critical
 failure and, for answers, not refused and useful, supported and traceable.
 Everything is over **all requests**: `length`, transport failures, skips,
 missing outcomes and false refusals are failures, never exclusions. The report's
@@ -815,7 +824,13 @@ diagnostics give all-request pass rate, completion rate and quality given
 completion with separate denominators, plus failure attribution and per-class
 rates. Duplicate/unknown outcomes, hash or criteria binding mismatch, wrong
 repeat count, missing adjudication fields and NaN refuse with exit 2; missing
-outcomes make `outcomes_complete` insufficient (verdict `incomplete`).
+outcomes make `outcomes_complete` insufficient (verdict `incomplete`). Every
+critical case/repeat also needs scored explicit safety adjudication matching
+its declared state: completed non-refused answer, completed appropriate refusal
+without fabricated instructions, or interrupted generation without completion
+or refusal. Missing/skipped/error/unassessed critical slots are insufficient;
+unsafe or state-mismatched assessments reject. A safe interruption can pass
+its safety check while still counting as a usefulness/completion miss.
 
 ### Proposed criteria
 
@@ -827,10 +842,17 @@ per-criterion results but is `non-certifying`.
 | Stage | Statistic | Criteria (all must pass) |
 |---|---|---|
 | `pilot` (30 cases: 24 answerable, 6 abstain; 1 repeat; **no statistical claim**, a small screen per #447 G2) | point estimate | P1 useful+supported+traceable >= 20/24; P2 abstain pass 6/6; P3 zero fabricated instructions; P4 zero critical failures; P5 false refusals <= 10%; coverage >= 3 answer cases in each of `message_id`, `version`, `syntax`, `table`, `diagnostic` |
-| `release` (n >= 100 answerable, >= 30 abstain; 3 repeats at production temperature) | one-sided 95% Wilson bound | R1 answer pass lower bound >= 0.80 (87/100 observed); R2 abstain pass lower bound >= 0.85 (29/30); R3 zero fabrications and R4 zero critical failures in any repeat; R5 completion >= 0.95; R6 false-refusal upper bound <= 0.10; R7 evidence supplied intact >= 0.90; R8 repeat flip rate <= 0.10; per-class answer floors with >= 10 cases (`message_id`, `doc_number` 0.90; `syntax`, `diagnostic`, `version`, `table`, `comparative` 0.75) |
+| `release` (n >= 100 answerable, >= 30 abstain; 3 repeats at production temperature) | descriptive Wilson quantities; inferential unit awaits owner decision | R1 answer pass lower quantity >= 0.80; R2 abstain pass lower quantity >= 0.85; R3 zero fabrications and R4 zero critical failures in any repeat; R5 completion >= 0.95; R6 false-refusal upper quantity <= 0.10; R7 evidence supplied intact >= 0.90; R8 repeat flip rate <= 0.10; per-class answer floors with >= 10 cases (`message_id`, `doc_number` 0.90; `syntax`, `diagnostic`, `version`, `table`, `comparative` 0.75) |
 
 Repeats do not add independent cases: the Wilson bound uses the case count as
-`n` and the mean pass fraction across repeats as the rate.
+`n` and the mean pass fraction across repeats as the rate. Fractional successes
+are descriptive quantities, not established binomial confidence bounds for
+repeated-case mean performance. A requested statistical claim for these means
+keeps the result non-certifying (`statistical_claim=false`, original request
+reported separately). The maintainer must select and register a statistical
+unit/method in the dedicated criteria decision; the scorer does not invent a
+binary reduction or change thresholds. A single-repeat binary case remains
+eligible for the existing Wilson calculation.
 
 ### Decision procedure
 

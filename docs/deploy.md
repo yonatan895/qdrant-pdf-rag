@@ -513,9 +513,11 @@ of a 6/3/2 collection was captured or restored. `qdrant_io.clone_collection`
 (update publications) and the legacy-layout migration in `run_ingest` now
 call `require_single_node_recovery` first: a source with `shard_number` > 1 or
 `replication_factor` > 1, an explicit multi-shard/replica policy selected for
-the run, or an unreadable topology raises
+the run, or unreadable/missing/invalid topology raises
 `DistributedRecoveryUnsupportedError` before any snapshot, recover, or
-delete. Live data and the alias are untouched. Supported distributed
+delete. Only explicit positive non-boolean integer live shard/replica values
+of 1/1 permit this recipe; a successful but incomplete response is unknown.
+Live data and the alias are untouched. Supported distributed
 recovery today is a fresh complete generation rebuilt from the protected
 originals (accepted downtime). Node-addressed restore, replacement-peer
 join and replica repair stay unqualified until site evidence exists. The

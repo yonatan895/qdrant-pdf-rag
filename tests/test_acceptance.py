@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -107,6 +110,10 @@ def _outcomes(release: acc.ReleaseSet, set_sha: str, crit_sha: str, kind: str = 
                     o["failure_stage"] = "unsupported_answer"
             else:
                 o.update(refused=True, appropriate_abstention=good, fabricated_instruction=not good)
+            if case.critical_probe is not None:
+                o["critical_safe"] = True
+                if case.critical_expected_outcome == "interrupted":
+                    o.update(completed=False, failure_stage="protocol")
             lines.append(o)
     return "\n".join(json.dumps(x) for x in lines)
 
@@ -367,6 +374,101 @@ def test_bindings_are_enforced(pilot):
         acc.score(release2, ssha, criteria, csha, run, outs)
 
 
+def test_run_corpus_and_outcome_reviewers_are_bound_to_set(pilot):
+    release, ssha, criteria, csha = pilot
+    run, outs = acc.parse_outcomes(_outcomes(release, ssha, csha))
+    run.profile.corpus_revision = "another-corpus"
+    with pytest.raises(acc.AcceptanceError, match="corpus revision"):
+        acc.score(release, ssha, criteria, csha, run, outs)
+    run.profile.corpus_revision = release.manifest.corpus_revision
+    outs[0].adjudicator = "undeclared-reviewer"
+    with pytest.raises(acc.AcceptanceError, match="adjudicator.*manifest"):
+        acc.score(release, ssha, criteria, csha, run, outs)
+    outs[0].adjudicator = "bOB"
+    assert acc.score(release, ssha, criteria, csha, run, outs)["verdict"] == "accepted"
+
+
+def _critical_fixture(tmp_path, pilot, expected):
+    rows = _pilot_rows(pilot[3])
+    index = 24 if expected == "refusal" else 0
+    rows[index + 1].update(critical_probe="access" if expected == "refusal" else "protocol",
+                           critical_expected_outcome=expected)
+    release, ssha = acc.load_release_set(_write_set(tmp_path, rows))
+    return (release, ssha, pilot[2], pilot[3]), index
+
+
+@pytest.mark.parametrize("status", ["skipped", "error"])
+def test_unexecuted_critical_probe_cannot_certify(pilot, tmp_path, status):
+    pilot, index = _critical_fixture(tmp_path, pilot, "answer")
+    release, ssha, criteria, csha = pilot
+    run, outs = acc.parse_outcomes(_outcomes(release, ssha, csha))
+    assert acc.exit_code(acc.score(release, ssha, criteria, csha, run, outs)) == 0
+    outs[index].status = status
+    report = acc.score(release, ssha, criteria, csha, run, outs)
+    assert report["verdict"] == "incomplete" and acc.exit_code(report) != 0
+    assert next(r for r in report["criteria_results"] if r["id"] == "critical_probes_assessed")["status"] == "insufficient"
+
+
+def test_critical_case_requires_predeclared_expected_safe_outcome():
+    rows = _pilot_rows("0" * 64)
+    rows[1]["critical_probe"] = "protocol"
+    with pytest.raises(acc.AcceptanceError, match="critical_expected_outcome"):
+        acc.parse_release_set("\n".join(json.dumps(r) for r in rows))
+    rows[1]["critical_expected_outcome"] = "interrupted"
+    assert acc.parse_release_set("\n".join(json.dumps(r) for r in rows)).cases[0].critical_expected_outcome == "interrupted"
+
+
+@pytest.mark.parametrize("safe", [None, False])
+def test_critical_probe_needs_explicit_assessment(pilot, tmp_path, safe):
+    pilot, index = _critical_fixture(tmp_path, pilot, "answer")
+    release, ssha, criteria, csha = pilot
+    run, outs = acc.parse_outcomes(_outcomes(release, ssha, csha))
+    assert acc.exit_code(acc.score(release, ssha, criteria, csha, run, outs)) == 0
+    outs[index].critical_safe = safe
+    report = acc.score(release, ssha, criteria, csha, run, outs)
+    assert report["verdict"] == ("incomplete" if safe is None else "rejected")
+    assert acc.exit_code(report) != 0
+    if safe is False:
+        assert next(r for r in report["criteria_results"] if r["id"] == "P4")["status"] == "fail"
+
+
+@pytest.mark.parametrize("expected", ["answer", "refusal", "interrupted"])
+def test_critical_probe_passes_only_its_declared_expected_state(pilot, tmp_path, expected):
+    pilot, index = _critical_fixture(tmp_path, pilot, expected)
+    release, ssha, criteria, csha = pilot
+    run, outs = acc.parse_outcomes(_outcomes(release, ssha, csha))
+    report = acc.score(release, ssha, criteria, csha, run, outs)
+    assert report["verdict"] == "accepted" and acc.exit_code(report) == 0
+    assert next(r for r in report["criteria_results"] if r["id"] == "critical_probes_assessed")["status"] == "pass"
+    # The adjudicator's true flag cannot override an inconsistent observed state.
+    if expected == "answer":
+        outs[index].refused = True
+    elif expected == "refusal":
+        outs[index].refused = False
+    else:
+        outs[index].completed = True
+    assert acc.score(release, ssha, criteria, csha, run, outs)["verdict"] == "rejected"
+
+
+def test_missing_critical_outcome_is_unassessed(pilot, tmp_path):
+    pilot, index = _critical_fixture(tmp_path, pilot, "answer")
+    release, ssha, criteria, csha = pilot
+    run, outs = acc.parse_outcomes(_outcomes(release, ssha, csha))
+    outs.pop(index)
+    report = acc.score(release, ssha, criteria, csha, run, outs)
+    assert report["verdict"] == "incomplete" and acc.exit_code(report) == 1
+    assert next(r for r in report["criteria_results"] if r["id"] == "critical_probes_assessed")["status"] == "insufficient"
+
+
+def test_noncritical_miss_stays_within_declared_pilot_tolerance(pilot):
+    release, ssha, criteria, csha = pilot
+    run, outs = acc.parse_outcomes(_outcomes(release, ssha, csha))
+    outs[0].status = "skipped"
+    report = acc.score(release, ssha, criteria, csha, run, outs)
+    assert report["verdict"] == "accepted" and acc.exit_code(report) == 0
+    assert report["diagnostics"]["answer_failure_attribution"] == {"skipped_or_error": 1}
+
+
 def test_structural_outcome_defects_refuse(pilot):
     release, ssha, criteria, csha = pilot
     text = _outcomes(release, ssha, csha)
@@ -406,6 +508,15 @@ def test_wilson_bound_matches_reference_values():
     assert acc.wilson_bound(0, 100, 0.95, "upper") == pytest.approx(0.0263, abs=1e-3)
 
 
+def test_single_repeat_binary_wilson_claim_remains_supported(pilot):
+    stage = pilot[2].stages["pilot"]
+    stage.statistical_claim = True
+    stage.criteria[0].statistic = "wilson_lower"
+    report = _score(pilot)
+    assert report["certifying"] and report["statistical_claim"]
+    assert report["rate_unit"] == "binary_case_outcome" and acc.exit_code(report) == 0
+
+
 def test_release_stage_uses_wilson_bound_not_point_estimate(tmp_path, rc):
     fx = _release_fixture(tmp_path)
     ids = [c.id for c in fx[0].cases if c.expected_behavior == "answer"]
@@ -415,7 +526,9 @@ def test_release_stage_uses_wilson_bound_not_point_estimate(tmp_path, rc):
     assert r1["value"] == 0.88 and r1["bound"] < 0.88 and r1["status"] == "pass"
     report = _score(fx, repeats=3, fail_ids=tuple(ids[:16]))  # 84% -> bound below 0.80
     assert next(r for r in report["criteria_results"] if r["id"] == "R1")["status"] == "fail"
-    assert report["statistical_claim"] and report["repeats"] == 3
+    assert not report["statistical_claim"] and report["requested_statistical_claim"]
+    assert report["rate_unit"] == "case_mean_across_repeats" and not report["certifying"]
+    assert acc.exit_code(report) == 2 and report["repeats"] == 3
 
 
 def test_release_stage_below_minimum_n_is_insufficient(tmp_path, rc):
@@ -423,7 +536,7 @@ def test_release_stage_below_minimum_n_is_insufficient(tmp_path, rc):
     report = _score(fx, repeats=3)
     status = {r["id"]: r["status"] for r in report["criteria_results"]}
     assert status["R1"] == status["R2"] == "insufficient"
-    assert report["verdict"] == "incomplete" and acc.exit_code(report) == 1
+    assert report["verdict"] == "incomplete" and acc.exit_code(report) == 2
 
 
 def test_flip_rate_detects_unstable_cases(tmp_path, rc):
@@ -458,14 +571,27 @@ def _cli_files(tmp_path):
     return cpath, spath, opath
 
 
+def _comparison_sets(tmp_path):
+    root = tmp_path / "comparison"
+    root.mkdir()
+    for name in ("golden.jsonl", "holdout.jsonl", "paraphrase.jsonl"):
+        data = (json.dumps({"query": f"independent comparison {name}", "expected_doc_ids": ["D"]}) + "\n").encode()
+        (root / name).write_bytes(data)
+        if name == "holdout.jsonl":
+            (root / (name + ".sha256")).write_text(f"{hashlib.sha256(data).hexdigest()}  {name}\n")
+    return root
+
+
 def test_cli_scores_and_writes_report(tmp_path, rc, monkeypatch, capsys):
-    monkeypatch.chdir(tmp_path)  # no evals/ here: nothing to overlap with
+    monkeypatch.chdir(tmp_path)
     cpath, spath, opath = _cli_files(tmp_path)
+    comparison = _comparison_sets(tmp_path)
     out = tmp_path / "report.json"
-    code = acc.main(["--set", str(spath), "--criteria", str(cpath), "--outcomes", str(opath), "--out", str(out)])
+    code = acc.main(["--set", str(spath), "--criteria", str(cpath), "--outcomes", str(opath), "--out", str(out),
+                     "--comparison-root", str(comparison)])
     assert code == 0 and "accepted" in capsys.readouterr().out
     assert json.loads(out.read_text())["verdict"] == "accepted"
-    assert acc.main(["--set", str(spath), "--validate-only"]) == 0
+    assert acc.main(["--set", str(spath), "--validate-only", "--comparison-root", str(comparison)]) == 0
 
 
 def test_cli_refuses_in_dev_and_on_tuning_overlap(tmp_path, monkeypatch, capsys):
@@ -476,8 +602,43 @@ def test_cli_refuses_in_dev_and_on_tuning_overlap(tmp_path, monkeypatch, capsys)
     assert acc.main(["--set", str(spath), "--criteria", str(cpath), "--outcomes", str(opath)]) == 2
     assert "VENUE=rc" in capsys.readouterr().err
     monkeypatch.setenv("VENUE", "rc")
-    (tmp_path / "evals").mkdir()
-    (tmp_path / "evals" / "golden.jsonl").write_text(
+    comparison = _comparison_sets(tmp_path)
+    (comparison / "golden.jsonl").write_text(
         json.dumps({"query": "synthetic question number 3 about widget 3", "expected_doc_ids": ["D"]}) + "\n")
-    assert acc.main(["--set", str(spath), "--validate-only"]) == 2
+    assert acc.main(["--set", str(spath), "--validate-only", "--comparison-root", str(comparison)]) == 2
     assert "overlap" in capsys.readouterr().err
+
+
+def test_real_acceptance_script_outside_repo_still_detects_known_query(tmp_path, rc):
+    cpath, spath, opath = _cli_files(tmp_path)
+    script = CRITERIA_PATH.parents[1] / "scripts" / "eval_acceptance.py"
+    args = [sys.executable, str(script), "--set", str(spath), "--criteria", str(cpath), "--outcomes", str(opath)]
+    valid = subprocess.run(args, cwd=tmp_path, capture_output=True, text=True, env=os.environ.copy(), check=False)
+    assert valid.returncode == 0, valid.stderr
+    rows = _pilot_rows(hashlib.sha256(cpath.read_bytes()).hexdigest())
+    known = next(json.loads(line)["query"] for line in (CRITERIA_PATH.parent / "golden.jsonl").read_text().splitlines()
+                 if line.strip() and not line.startswith("#"))
+    rows[1]["query"] = known
+    _write_set(tmp_path, rows)
+    overlap = subprocess.run(args[:4] + ["--validate-only"], cwd=tmp_path, capture_output=True, text=True, check=False)
+    assert overlap.returncode == 2 and "overlap" in overlap.stderr
+
+
+@pytest.mark.parametrize("name", ["golden.jsonl", "holdout.jsonl", "paraphrase.jsonl"])
+@pytest.mark.parametrize("defect", ["missing", "empty", "invalid"])
+def test_real_acceptance_script_refuses_unavailable_required_comparison(tmp_path, rc, name, defect):
+    _, spath, _ = _cli_files(tmp_path)
+    comparison = _comparison_sets(tmp_path)
+    script = CRITERIA_PATH.parents[1] / "scripts" / "eval_acceptance.py"
+    args = [sys.executable, str(script), "--set", str(spath), "--validate-only", "--comparison-root", str(comparison)]
+    good = subprocess.run(args, cwd=tmp_path, capture_output=True, text=True, check=False)
+    assert good.returncode == 0, good.stderr
+    path = comparison / name
+    if defect == "missing":
+        path.unlink()
+    else:
+        path.write_text("" if defect == "empty" else "not-json\n")
+        if name == "holdout.jsonl":
+            (comparison / (name + ".sha256")).write_text(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {name}\n")
+    bad = subprocess.run(args, cwd=tmp_path, capture_output=True, text=True, check=False)
+    assert bad.returncode == 2 and f"required overlap dataset {name}" in bad.stderr
